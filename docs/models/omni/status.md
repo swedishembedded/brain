@@ -874,27 +874,171 @@ than "wiring" suggests.
   setup was out of scope for wiring one example in. `examples/omni/README.md`
   (new) documents all three transports plus the scope boundary.
 
+## M9b — KV-cache decode + real multimodal input (2026-08-07)
+
+(M15/M16/M17 in the plan file are still NPU wiring / profiling / testdata
+audit, unaffected by this entry's numbering — this is a follow-up to M9's
+own generation-loop scope, not a renumbering of the later milestones.)
+
+Two pieces of `crate::generate`'s documented "not yet built" scope closed
+this round, both explicitly requested ("continue wiring in everything
+including kv cache" / "I want all input paths as well, not just text"):
+
+**KV-cache.** Hoisted `qwen::Qwen`'s incremental-decode attention pattern
+(`kcache`/`vcache` + `kv_append`/`attn_decode_scores`/`decode_softmax`/
+`attn_decode_apply`) into `model::block` as `GqaDecodeIds`/`gqa_decode_step`/
+`kv_cache_fill` — the "hoist, migrate existing users" rule's second user
+(`qwen::Qwen` itself was NOT migrated this round; that is real follow-up
+work, tracked below). Proven algebraically identical to the existing O(T²)
+`gqa_fwd` at every position by a new CPU-backend test
+(`decode_step_matches_causal_batched_attention_at_every_position`: calling
+`gqa_decode_step` once per position must reproduce `gqa_fwd`'s causal-masked
+row exactly, since `gqa_scores.wgsl` already masks `j > i` — passed, `< 1e-4`
+elementwise). `thinker::layer_fwd` gained an additive `Option<&ThinkerLayerCache>`
+param (bulk-fills the cache from a batched prefill pass, via `kv_cache_fill`'s
+single flat-copy dispatch — no per-row loop needed, since the cache and the
+batched K/V share the same per-row stride) and a new sibling
+`layer_decode_step` (single-token decode, `model::block::rope2d_fwd` fed a
+1-row M-RoPE table instead of qwen's separate `ROPE_AT` kernel — Thinker's
+RoPE path was already table-driven, so no second RoPE kernel was needed for
+decode, unlike qwen's `step()`). The MoE FFN tail (`moe_sublayer`) is shared,
+unchanged, between both attention shapes.
+
+`crate::generate::generate_greedy` now `prefill`s the whole prompt once
+(populating every layer's cache) and `decode_step`s one new token at a time
+against the cache — O(cached length) attention per step, not O(cached
+length)². Weight I/O is UNCHANGED (every layer's weights are still streamed
+fresh from `reader` per step; the cache changes the attention math's
+complexity, not the disk-streaming pattern — full GPU-resident weights across
+steps remains the separate, not-yet-built M1-adjacent work). New
+`generate_greedy_positioned`/`generate_greedy_multimodal` entries generalize
+the loop to caller-supplied embeddings + real M-RoPE positions (see below).
+
+**Real multimodal input.** New `crates/omni/src/mm.rs`: `encode_audio`
+streams `thinker.audio_tower.*` from the `WeightReader` (same qkv-fuse remap
+`tests/audio_parity.rs` already validated to cosine 1.000000) and runs
+`qwen_asr::encoder::AudioEncoder::encode` unchanged on a raw 16kHz clip
+(padded to a whole `chunk_len` — 16000 samples = 1 second, since
+`chunk_len(100) x hop(160) == 16000` exactly, so no search is needed).
+`encode_image` streams `thinker.visual.*`, real bilinear resize
+(`imaging::host::resize_bilinear_hwc` — NOT a crop/pad, since
+`smart_resize_default` picks patch-multiple dimensions close to but never
+equal to the source's) + `qwenvl::encoder::VisionEncoder` + `PatchMerger`
+(same remap `tests/vision_parity.rs` validated). `encode_video_frames` reuses
+the single-frame image path per already-decoded frame (frame extraction
+itself is out of scope for this crate, same line the M14 plan drew — brain-py
+would own `av`/ffmpeg extraction; not built). `build_multimodal_prompt`
+assembles media blocks (wrapped in their real start/end tokens from the real
+checkpoint's `config.json`) followed by the user's text, splices embeddings
+host-side (`splice_host` — a plain slice copy, since `generate.rs`'s prefill
+already builds the whole prompt as one host `Vec<f32>` before a single
+upload; `model::vlm::splice_fwd`'s on-device kernel is for callers whose
+residual buffer is already GPU-resident first, e.g. `qwen::Qwen`'s baked
+graph — not this shape).
+
+Real M-RoPE positions for a mixed sequence needed `qwenvl::mrope::get_rope_index`
+generalized to MULTIPLE placeholder token types in one scan (it only ever
+took one `image_token_id`) — done as `get_rope_index_multi(tokens,
+placeholders: &[(token_id, grids)])`, with `get_rope_index` rewritten as a
+one-entry wrapper (proven identical to the original by a new
+`multi_single_type_matches_get_rope_index_exactly` test, plus all of
+`get_rope_index`'s existing tests still passing unchanged). Audio's "grid" is
+`(n_audio, 1, 1)` — the meshgrid already degenerates to "T axis advances,
+H/W pinned" for `h=w=1`, matching Omni's audio M-RoPE shape modulo one
+documented approximation: the post-run anchor advance was generalized from
+`max(h,w)` to `max(t,h,w)` (identical for every existing `t=1` image case,
+newly correct for audio/video's `t>1`), but real HF Omni additionally scales
+audio's T axis by wall-clock seconds (`position_id_per_seconds`) — this port
+uses frame-ordinal T advance instead, not the exact reference formula. New
+tests: `multi_text_audio_text_advances_by_audio_duration`,
+`multi_image_and_audio_interleave_independently`,
+`multi_video_run_is_a_t_h_w_meshgrid_like_a_multiframe_image` — all passing.
+
+**Wired into serving**: `generate_spec()` gained optional `audio`/`image`
+blob inputs (`Media::Audio`/`Media::Image` — additive, doesn't touch the
+`.streaming()`/param shape M11/M12 already validated against `api_caps`).
+Both `omni::caps::GenerateAction::run` (the `Provider` path) and
+`cli::resident_omni::OmniInstance::run` (the REAL path `brain serve`
+dispatches D-Bus/HTTP requests through) extract `audio` via
+`audio::asr_caps::wav_from_blob` (the same raw-16kHz-PCM wire convention
+`transcribe_spec` already documents) and `image` via
+`capability::blob::decode_image` (the engine's one HWC-f32 image wire
+format), routing to `OmniInner::generate_multimodal` when either is present.
+D-Bus carries these generically (M10's "zero new code" finding holds again —
+`brain_py.dbus.BrainDBus.run`/`subscribe` already accepted `blobs=`/`meta=`
+kwargs for other models; `BrainBase.generate`/`chat` just needed the same
+kwargs threaded through). `BrainOpenAI`/`BrainAnthropic` now raise a clear
+`NotImplementedError` on blob input instead of silently dropping it — their
+content-part wiring is the same pre-existing, still-open gap M11/M12 already
+documented (`openai.rs`/`anthropic.rs` drop image/audio content parts
+server-side).
+
+`examples/omni.py`'s `--in-speech` (16kHz mono 16-bit PCM WAV, stdlib `wave`)
+and `--in-image` (binary PPM via `brain_py.image.load_ppm`, the same
+zero-dependency path `examples/imagegen` uses) are now real over `--dbus`.
+`--in-mic`/`--in-video` still `skip()` — live capture and video-frame
+extraction need dependencies this example deliberately doesn't take on; the
+engine-side video path (`encode_video_frames`) exists but nothing decodes an
+actual video FILE into frames yet, and `generate_spec()` has no wire shape
+for a list of frame blobs from one `Invocation` (video input is real at the
+`crate::mm` level, not yet reachable through the `generate` action's wire
+contract — documented explicitly in `caps.rs`'s module doc).
+
+**Verification**: `cargo test -p brain-model -p brain-omni -p brain-qwenvl
+-p brain-kernels -p brain-cli` — all green (91/91 in `brain-model` incl. the
+2 new KV-cache tests, 42/42 in `brain-qwenvl` incl. the 4 new `mrope::multi_*`
+tests, `brain-omni`'s 14 unit + `caps_conformance`'s 5 tests, `brain-cli`'s
+63). The full workspace `make test` hit the SAME pre-existing GPU-state hang
+`roofline.rs`'s `caps_expose_the_roofs_only_after_something_measured_them`
+already recorded in this file's M6a entry (orphaned VRAM from earlier killed
+processes, unrelated to any file this round touched) — targeted tests are
+the real check, same judgment call as M6a. `make clippy`: 201 warnings vs. a
+183 baseline (+18), but every one of the 18 is in a file this round never
+touched (`crates/npu/tests/*`, `crates/cli/{forecast,npu,resident_asr,
+resident_forecast,resident_llm,resident_mock,splat,supply,wm}_cli.rs` —
+confirmed by grepping the full clippy report for every file this round
+edited: zero matches) — pre-existing debt, not a regression, same pattern
+M6a's entry already documented for this same gate. Real-weight parity
+(`thinker_layer_parity`, `talker_layer_parity`, `vision_parity`,
+`audio_parity`, etc.) is unaffected — none of that math changed, only the
+attention dispatch shape and a new host-side assembly path around it — and
+those tests remain `#[ignore]`d pending the checkpoint download (in progress
+throughout this work: 51 GB / 70.5 GB, 43 GB free on the 93 GB tmpfs as of
+this entry).
+
+**Not started, still**: `qwen::Qwen` itself was not migrated onto the hoisted
+`model::block` decode primitives (only `omni::thinker` uses them so far —
+qwen's own inline copy still works, gated by its own existing tests, but now
+diverges from the hoisted version rather than being its single source);
+real wall-clock audio-timestamp M-RoPE scaling (documented approximation
+above); video FILE decoding in brain-py/examples; a wire shape for
+multi-frame video input on the `generate` action; int8/GPU-sharded resident
+weights across generation steps (the cache fixed the attention complexity,
+not the weight-I/O pattern).
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M8's `chunked_decode` streaming path, M9's
-KV-cache/int8/GPU-sharded production residency, `converse`/`transcribe`/
-`speak` actions (need Talker+MTP+Code2Wav chained with `accept_hidden_layer`
-+ codec sampling), `qwenvl` registration (deferred above, its own generation
-loop), the pre-existing multimodal-content-part-drop bug in
-`openai.rs`/`anthropic.rs` and the `/v1/audio/*` endpoints (M11/M12's
-original scope, orthogonal to what's implemented), OpenAI/Anthropic
-transports in the automated e2e harness (M13/M14's own note above), M15
-through M17. See the plan file. M6 through M14 are now believed complete for
-what is actually implemented (Thinker/Talker decoders, real M-RoPE, composed
-loops, splice seam, code predictor, Code2Wav vocoder, Thinker text
-generation exposed over D-Bus/OpenAI/Anthropic with a working Python example
-— all validated against real weights, the real HTTP classification logic, or
-a live end-to-end run, single-shot/streaming forward only, no KV-cache). The
-two loader-side checkpoint-naming gaps (code predictor, code2wav —
-documented in M7b/M8 above) remain open; they do not block Thinker-only
-generation (`OmniResident` reads straight from the HF directory, not the
-unified checkpoint those gaps affect).
+deferred), M8's `chunked_decode` streaming path, `qwen::Qwen`'s migration
+onto the hoisted KV-cache decode primitives (see M9b above), int8/GPU-sharded
+production residency (M9b above), `converse`/`transcribe`/`speak` actions
+(need Talker+MTP+Code2Wav chained with `accept_hidden_layer` + codec
+sampling), `qwenvl` registration (deferred above, its own generation loop),
+the pre-existing multimodal-content-part-drop bug in `openai.rs`/`anthropic.rs`
+and the `/v1/audio/*` endpoints (M11/M12's original scope, orthogonal to what
+'s implemented), OpenAI/Anthropic transports in the automated e2e harness
+(M13/M14's own note above), video-file decoding + a multi-frame wire shape
+(M9b above), M15 through M17. See the plan file. M6 through M9b are now
+believed complete for what is actually implemented (Thinker/Talker decoders,
+real M-RoPE incl. real audio/image/video splice, KV-cache decode, composed
+loops, splice seam, code predictor, Code2Wav vocoder, Thinker text generation
+with optional real speech/image input exposed over D-Bus/OpenAI/Anthropic
+with a working Python example — all validated against real weights, the real
+HTTP classification logic, or a live end-to-end run). The two loader-side
+checkpoint-naming gaps (code predictor, code2wav — documented in M7b/M8
+above) remain open; they do not block Thinker-only generation (`OmniResident`
+reads straight from the HF directory, not the unified checkpoint those gaps
+affect).
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern
