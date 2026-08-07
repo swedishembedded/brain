@@ -1405,6 +1405,27 @@ impl WgpuBackend {
         self.poll_wait_bounded("poll_wait");
     }
 
+    /// [`Self::poll_wait`], but give up after `timeout` instead of blocking
+    /// forever. `wgpu::PollType::Wait`'s own `timeout` field does the actual
+    /// bounding — this is safe to call (unlike a hypothetical bounded wait on
+    /// the Vulkan backend) because a `PollError::Timeout` here does not
+    /// invalidate anything: wgpu still owns and tracks every resource's real
+    /// completion state internally regardless of whether this call waited
+    /// long enough to observe it, so nothing needs to be "recycled" by the
+    /// caller the way `backend-vulkan`'s transient uniforms/descriptor sets
+    /// do. See [`backend_api::Backend::poll_wait_timeout`]'s doc for the
+    /// caller contract (still treat `false` as "don't trust precise timing
+    /// from this call," even though reuse itself remains safe).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
+        self.flush();
+        match self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) }) {
+            Ok(_) => true,
+            Err(wgpu::PollError::Timeout) => false,
+            Err(e) => panic!("device.poll failed: {e}"),
+        }
+    }
+
     /// Copy a device buffer into a MAP_READ staging buffer and return its
     /// contents as f32. Native only: it blocks on `device.poll(wait)` + an mpsc
     /// recv, which is impossible in a browser. Wasm uses `read_async`.
@@ -1593,6 +1614,10 @@ impl Backend for WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_wait(&self) {
         WgpuBackend::poll_wait(self)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
+        WgpuBackend::poll_wait_timeout(self, timeout)
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn flush(&self) {

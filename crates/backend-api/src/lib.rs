@@ -562,6 +562,42 @@ pub trait Backend: Send + Sync {
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32>;
     /// Block until all submitted device work has completed.
     fn poll_wait(&self);
+    /// Wait for all submitted device work to complete, but give up after
+    /// `timeout` rather than blocking forever. Returns `true` if everything
+    /// completed within the budget, `false` on timeout.
+    ///
+    /// Exists because `poll_wait` has no way to bound a stall: a device that
+    /// stops responding mid-dispatch (observed on an Intel Arc iGPU under
+    /// severe, unpredictable thermal/power throttling — the same code
+    /// produced a clean 2.6s pass and a 120s+ stall back to back, see
+    /// `docs/performance/arc.md` gap A1) hangs the calling thread
+    /// indefinitely with no recourse. A self-calibrating loop like
+    /// `gpu_core::roof`'s can use this to abandon a stalled measurement and
+    /// report "unmeasurable" instead of hanging the whole process.
+    ///
+    /// **On `false` (timeout), the backend's completion state for the timed-
+    /// out work is UNKNOWN — it may finish later, on its own schedule.** A
+    /// caller MUST NOT reuse buffers, descriptor sets, or any other resource
+    /// that timed-out work might still be writing to; treat the whole
+    /// device/backend handle as unsafe to continue timing precisely and
+    /// either drop it or fall back to the unbounded `poll_wait` before doing
+    /// anything else with it. This is why the default implementation below
+    /// (inherited by any backend that does not override it) simply calls the
+    /// normal blocking `poll_wait` and always returns `true` — that is
+    /// exactly as safe as today's behaviour, at the cost of not actually
+    /// bounding anything. Only override this where the backend's own API can
+    /// honestly report "timed out, nothing was disturbed" (see
+    /// `backend-wgpu`, which uses `wgpu::PollType::Wait`'s native timeout).
+    /// `backend-vulkan` does NOT override this: its resource recycling is
+    /// only sound once a fence wait has *actually* proven the work idle
+    /// (`crates/backend-vulkan/src/lib.rs`'s `recycle_transients` doc), and a
+    /// timed-out `vkWaitForFences` leaves that unproven — threading a bound
+    /// through it safely needs a real design pass, filed as a follow-up
+    /// rather than risked here.
+    fn poll_wait_timeout(&self, _timeout: std::time::Duration) -> bool {
+        self.poll_wait();
+        true
+    }
     /// Send recorded-but-unsubmitted work to the device WITHOUT waiting for
     /// completion — the frame-pipelining hook: start the device on frame n,
     /// overlap the host's preprocessing of frame n+1, synchronise at the next

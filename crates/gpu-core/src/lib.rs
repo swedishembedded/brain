@@ -621,6 +621,14 @@ mod native_facade {
         pub fn poll_wait(&self) {
             self.inner.poll_wait()
         }
+        /// [`Self::poll_wait`], bounded: `false` on timeout instead of blocking
+        /// forever. See `backend_api::Backend::poll_wait_timeout`'s doc for the
+        /// full contract, including which backends actually bound anything
+        /// (currently only `backend-wgpu`) versus inheriting the
+        /// always-blocking default.
+        pub fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
+            self.inner.poll_wait_timeout(timeout)
+        }
         /// Largest single storage-buffer binding this device allows, in bytes —
         /// the hardware ceiling a kernel's biggest buffer must fit under. Used to
         /// pick attention backends per-card instead of assuming a fixed limit.

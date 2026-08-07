@@ -311,22 +311,42 @@ pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     Some(Roofs { gflops, gbs, cache_gbs, int8_gops })
 }
 
-/// Time one submit of `steps`, best of `reps`, `poll_wait`-bracketed.
+/// A single `submit`+`poll_wait` in this probe must complete within this
+/// budget or the whole measurement is abandoned (`best_of` returns `None`).
+/// Generous relative to a healthy measurement (clean rounds in this probe
+/// take well under a second even on a slow iGPU) but far below the
+/// multi-minute stalls this exists to bound — see `poll_wait_timeout`'s doc
+/// and the incident note in `docs/performance/arc.md` gap A1. Only bounds
+/// anything on backends that actually implement `poll_wait_timeout`
+/// (currently `backend-wgpu`); on others this is a no-op budget the default
+/// trait method ignores.
+const PER_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Time one submit of `steps`, best of `reps`, `poll_wait`-bracketed. `None`
+/// if any single submit (including the warmup) does not complete within
+/// `PER_DISPATCH_TIMEOUT` — the caller must not keep using `gpu` for further
+/// timed measurements after that (see `poll_wait_timeout`'s doc: a timeout
+/// leaves completion state unknown on backends where reuse would not be
+/// safe), so every caller here treats `None` as "abandon this probe."
 ///
 /// The bracketing is the whole point: `submit` only appends to the pending list
 /// on the wgpu backend, so an unbracketed loop times host-side recording and
 /// reports a rate above the hardware roof (§E.0).
-fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize) -> f64 {
+fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize) -> Option<f64> {
     gpu.submit(&[], steps);
-    gpu.poll_wait();
+    if !gpu.poll_wait_timeout(PER_DISPATCH_TIMEOUT) {
+        return None;
+    }
     let mut best = f64::INFINITY;
     for _ in 0..reps {
         let t0 = Instant::now();
         gpu.submit(&[], steps);
-        gpu.poll_wait();
+        if !gpu.poll_wait_timeout(PER_DISPATCH_TIMEOUT) {
+            return None;
+        }
         best = best.min(t0.elapsed().as_secs_f64());
     }
-    best
+    Some(best)
 }
 
 fn measure_compute(gpu: &Gpu) -> Option<f32> {
@@ -346,7 +366,7 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
             return None;
         }
         let step = gpu.step(K_FMA, &[&inp, &out], &[FMA_THREADS, iters, c, d], FMA_THREADS);
-        let secs = best_of(gpu, std::slice::from_ref(&step), 3);
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3)?;
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
             let flops = FMA_THREADS as u64 * iters as u64 * FMA_FLOPS_PER_ITER;
             return Some((flops as f64 / secs / 1e9) as f32);
@@ -375,7 +395,7 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
             return None;
         }
         let step = gpu.step(K_DP4A, &[&inp, &out], &[FMA_THREADS, iters, a, b], FMA_THREADS);
-        let secs = best_of(gpu, std::slice::from_ref(&step), 3);
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3)?;
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
             let ops = FMA_THREADS as u64 * iters as u64 * DP4A_OPS_PER_ITER;
             return Some((ops as f64 / secs / 1e9) as f32);
@@ -410,7 +430,7 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
                 )
             })
             .collect();
-        let secs = best_of(gpu, &steps, 3);
+        let secs = best_of(gpu, &steps, 3)?;
         if secs >= MIN_PROBE_SECONDS || passes >= MAX_BW_PASSES {
             let bytes = elems * BW_BYTES_PER_ELEM * passes as u64;
             return Some((bytes as f64 / secs / 1e9) as f32);
