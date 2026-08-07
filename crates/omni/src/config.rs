@@ -203,6 +203,15 @@ impl MoeTextConfig {
 
     /// `talker_config.text_config` — 20L, hidden 1024, GQA 16/2, shared
     /// expert 768, vocab 3072 (codec ids), theta 1e6.
+    ///
+    /// `use_qk_norm: true` despite `talker_config.text_config` never setting
+    /// a `use_qk_norm` JSON key (so `gb(t, "use_qk_norm", ...)` would fall
+    /// through to this default either way): the Talker's decoder layer
+    /// reuses `Qwen3OmniMoeThinkerTextAttention` verbatim, whose `q_norm`/
+    /// `k_norm` are unconditional -- no config flag gates them at all, and
+    /// the real checkpoint carries `talker.model.layers.*.self_attn.
+    /// {q,k}_norm.weight` for every layer. `false` here would silently skip
+    /// a real, weighted normalization step.
     pub fn talker_defaults() -> MoeTextConfig {
         MoeTextConfig {
             n_layers: 20,
@@ -215,7 +224,7 @@ impl MoeTextConfig {
             n_experts: 128,
             top_k: 6,
             norm_topk_prob: true,
-            use_qk_norm: false,
+            use_qk_norm: true,
             vocab: 3072,
             rope_theta: 1_000_000.0,
             rms_norm_eps: 1e-6,
@@ -552,6 +561,10 @@ mod tests {
         assert_eq!(c.talker.text.top_k, 6);
         assert!(c.talker.text.has_shared_expert());
         assert_eq!(c.talker.text.shared_expert_intermediate, 768);
+        // Reuses Qwen3OmniMoeThinkerTextAttention verbatim, whose q_norm/
+        // k_norm are unconditional -- real weights confirm this (see
+        // talker_defaults()'s doc comment).
+        assert!(c.talker.text.use_qk_norm);
         assert_eq!(c.talker.accept_hidden_layer, 24);
         assert_eq!(c.talker.speaker_id.get("chelsie"), Some(&2301));
         assert_eq!(c.talker.speaker_id.get("ethan"), Some(&2302));
