@@ -38,6 +38,31 @@ impl AudioEncoderConfig {
         }
     }
 
+    /// Qwen3-Omni's Thinker audio tower (`thinker_config.audio_config`) — the
+    /// SAME Whisper/Qwen-omni-style conv-stem + windowed-transformer shape
+    /// [`qwen3_asr`] already models, just wider/deeper: `num_mel_bins`,
+    /// `downsample_hidden`, `output_dim`, `n_window`, `n_window_infer` and
+    /// `max_pos` are identical between the two models (confirmed against the
+    /// released `Qwen/Qwen3-Omni-30B-A3B-Instruct` config — see
+    /// `docs/models/omni/status.md` "Facts"); only `d_model`/`n_heads`/
+    /// `ffn_dim`/`n_layers` differ. `crates/omni` reuses [`crate::encoder::AudioEncoder`]
+    /// unchanged with this preset — no new encoder code, only a config.
+    pub fn qwen3_omni() -> AudioEncoderConfig {
+        AudioEncoderConfig {
+            num_mel_bins: 128,
+            d_model: 1280,
+            n_heads: 20,
+            ffn_dim: 5120,
+            n_layers: 32,
+            downsample_hidden: 480,
+            output_dim: 2048,
+            n_window: 50,
+            n_window_infer: 800,
+            max_pos: 13,
+            eps: 1e-5,
+        }
+    }
+
     /// Mel frames per conv chunk (`2 * n_window`).
     pub fn chunk_len(&self) -> u32 {
         2 * self.n_window

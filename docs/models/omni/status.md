@@ -269,10 +269,30 @@ covers).
   `esrgan` entries) — `make fetch/testdata` now restores
   `testdata/golden/omni/` for anyone, not just this box.
 
+- **M4 — audio tower (AuT), EXACT parity** (2026-08-07). Confirmed the
+  reuse the plan called for is complete as-is, with zero new encoder code:
+  `qwen_asr::config::AudioEncoderConfig::qwen3_omni()` (a new preset —
+  `num_mel_bins`/`downsample_hidden`/`output_dim`/`n_window`/`n_window_infer`/
+  `max_pos` are IDENTICAL between Qwen3-ASR and Omni's audio tower, confirmed
+  against the real config; only `d_model`/`n_heads`/`ffn_dim`/`n_layers`
+  differ) plugged directly into the existing, unmodified
+  `qwen_asr::encoder::AudioEncoder`. Real weights (shard 1) streamed via
+  `checkpoint::mmap::MmapSafetensors` (selective single-shard reads — the
+  full 15-shard `WeightReader::open_hf_dir` can't open with only 4 of 15
+  shards on disk) through the same `hf_to_brain`/qkv-fuse path `import_as`
+  uses, run through `AudioEncoder::encode` on the SAME `golden_mel` input
+  formula the Python dumper used, compared against the real golden's
+  `hidden` (the audio embeds, post-projector) —
+  `crates/omni/tests/audio_parity.rs`:
+  **cosine 1.000000 / max_abs 0.000002 (wgpu), cosine 1.000000 / max_abs
+  0.000001 (CPU JIT)** — real bit-level parity, not a synthetic shape check.
+  `qwen_asr`'s own test suite stayed green (the new preset added no risk to
+  the existing Qwen3-ASR path).
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M4 through M17. See the plan file.
+deferred), M5 through M17. See the plan file.
 
 ## Honesty notes
 
