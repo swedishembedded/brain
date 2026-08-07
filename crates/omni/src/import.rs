@@ -163,24 +163,40 @@ pub fn map_vision(hf: &str) -> Option<String> {
     }
     if let Some(rest) = s.strip_prefix("merger_list.") {
         let (i, leaf) = rest.split_once('.')?;
-        return Some(format!("vision.deepstack_merger.{i}.{}", leaf_or_none(leaf)?));
+        return Some(format!("vision.deepstack_merger.{i}.{}", merger_leaf(leaf)?));
     }
     if let Some(leaf) = s.strip_prefix("merger.") {
-        return Some(format!("vision.merger.{}", leaf_or_none(leaf)?));
+        return Some(format!("vision.merger.{}", merger_leaf(leaf)?));
     }
+    // Both names drop a segment to match qwenvl::encoder::VisionEncoder's
+    // exact expected keys (qwenvl::import::map_vision does the identical
+    // strip for Qwen3-VL-4B's own patch_embed.proj.*/pos_embed.weight): the
+    // encoder isn't being changed, so its keys are the contract, not HF's.
     match s {
-        "patch_embed.proj.weight" => Some("vision.patch_embed.proj.weight".into()),
-        "patch_embed.proj.bias" => Some("vision.patch_embed.proj.bias".into()),
-        "pos_embed.weight" => Some("vision.pos_embed.weight".into()),
+        "patch_embed.proj.weight" => Some("vision.patch_embed.weight".into()),
+        "patch_embed.proj.bias" => Some("vision.patch_embed.bias".into()),
+        "pos_embed.weight" => Some("vision.pos_embed".into()),
         _ => None,
     }
 }
 
-/// `ln_q.{weight,bias}` and `mlp.{i}.{weight,bias}` pass through unchanged —
-/// both merger variants already use names brain's own convention is fine
-/// with (no HF `nn.Sequential`-index awkwardness to rename away).
-fn leaf_or_none(leaf: &str) -> Option<String> {
-    Some(leaf.to_string())
+/// HF Omni merger leaf -> `qwenvl::encoder::PatchMerger`'s expected key.
+/// Omni's own HF naming (`ln_q`, `mlp.0`/`mlp.2` — an `nn.Sequential(Linear,
+/// GELU, Linear)`, so index 1 is the weightless activation) differs from
+/// Qwen3-VL-4B's (`norm`, `linear_fc1`/`linear_fc2`,
+/// `qwenvl::import::merger_leaf`), but both mergers are the SAME
+/// LayerNorm->Linear->GELU->Linear shape, so both map onto the one target
+/// key set `PatchMerger` actually reads: `ln`/`fc1`/`fc2`.
+fn merger_leaf(leaf: &str) -> Option<&'static str> {
+    Some(match leaf {
+        "ln_q.weight" => "ln.weight",
+        "ln_q.bias" => "ln.bias",
+        "mlp.0.weight" => "fc1.weight",
+        "mlp.0.bias" => "fc1.bias",
+        "mlp.2.weight" => "fc2.weight",
+        "mlp.2.bias" => "fc2.bias",
+        _ => return None,
+    })
 }
 
 // ------------------------------------------------------------- MoE decoders
@@ -670,13 +686,19 @@ mod tests {
 
     #[test]
     fn vision_tower_names() {
-        assert_eq!(map_vision("thinker.visual.patch_embed.proj.weight").unwrap(), "vision.patch_embed.proj.weight");
-        assert_eq!(map_vision("thinker.visual.pos_embed.weight").unwrap(), "vision.pos_embed.weight");
+        // Both strip a segment to match VisionEncoder's own expected keys.
+        assert_eq!(map_vision("thinker.visual.patch_embed.proj.weight").unwrap(), "vision.patch_embed.weight");
+        assert_eq!(map_vision("thinker.visual.pos_embed.weight").unwrap(), "vision.pos_embed");
         assert_eq!(map_vision("thinker.visual.blocks.8.attn.qkv.weight").unwrap(), "vision.blocks.8.qkv.weight");
         assert_eq!(map_vision("thinker.visual.blocks.26.mlp.linear_fc2.bias").unwrap(), "vision.blocks.26.fc2.bias");
-        assert_eq!(map_vision("thinker.visual.merger.ln_q.weight").unwrap(), "vision.merger.ln_q.weight");
-        assert_eq!(map_vision("thinker.visual.merger.mlp.0.weight").unwrap(), "vision.merger.mlp.0.weight");
-        assert_eq!(map_vision("thinker.visual.merger_list.2.ln_q.bias").unwrap(), "vision.deepstack_merger.2.ln_q.bias");
+        // ln_q/mlp.{0,2} rename to PatchMerger's ln/fc1/fc2 -- see merger_leaf's doc.
+        assert_eq!(map_vision("thinker.visual.merger.ln_q.weight").unwrap(), "vision.merger.ln.weight");
+        assert_eq!(map_vision("thinker.visual.merger.mlp.0.weight").unwrap(), "vision.merger.fc1.weight");
+        assert_eq!(map_vision("thinker.visual.merger.mlp.2.bias").unwrap(), "vision.merger.fc2.bias");
+        assert_eq!(map_vision("thinker.visual.merger_list.2.ln_q.bias").unwrap(), "vision.deepstack_merger.2.ln.bias");
+        assert_eq!(map_vision("thinker.visual.merger_list.1.mlp.2.weight").unwrap(), "vision.deepstack_merger.1.fc2.weight");
+        // mlp.1 is the weightless GELU in the nn.Sequential -- never mapped.
+        assert_eq!(map_vision("thinker.visual.merger.mlp.1.weight"), None);
     }
 
     #[test]

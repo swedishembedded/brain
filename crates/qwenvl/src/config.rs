@@ -54,6 +54,32 @@ impl VisionConfig {
     pub fn patch_vec_dim(&self) -> u32 {
         self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
     }
+
+    /// Qwen3-Omni's Thinker vision tower (`thinker_config.vision_config`) —
+    /// the SAME ViT + PatchMerger + DeepStack shape [`Qwen3VlConfig::qwen3_vl_4b`]
+    /// already models (`gelu_pytorch_tanh` — this crate's `vision_pipelines`
+    /// already carries the tanh GELU, not the erf one), just deeper/wider.
+    /// `num_position_embeddings` isn't a literal field in Omni's released
+    /// config (it expresses `image_size: 768` / `patch_size: 16` instead) but
+    /// derives to the identical `(768/16)² = 2304` — confirmed against the
+    /// real checkpoint's `thinker.visual.pos_embed.weight` shape `[2304, 1152]`.
+    /// Standalone (not a full [`Qwen3VlConfig`]): Omni's decoder is the MoE
+    /// Thinker, not this crate's own spliced dense Qwen3 text config.
+    pub fn qwen3_omni() -> VisionConfig {
+        VisionConfig {
+            depth: 27,
+            hidden: 1152,
+            num_heads: 16,
+            intermediate: 4304,
+            patch_size: 16,
+            temporal_patch_size: 2,
+            spatial_merge_size: 2,
+            num_position_embeddings: 2304,
+            out_hidden_size: 2048,
+            in_channels: 3,
+            deepstack_indexes: vec![8, 16, 24],
+        }
+    }
 }
 
 /// Full Qwen3-VL configuration: vision encoder + Qwen3 text decoder + interleaved

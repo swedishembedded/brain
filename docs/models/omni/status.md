@@ -289,10 +289,45 @@ covers).
   `qwen_asr`'s own test suite stayed green (the new preset added no risk to
   the existing Qwen3-ASR path).
 
+- **M5 — vision tower, EXACT parity (image path; video not yet covered)**
+  (2026-08-07). `qwenvl::config::VisionConfig::qwen3_omni()` (a new preset —
+  `gelu_pytorch_tanh` was already `qwenvl`'s own activation choice, no kernel
+  change; `num_position_embeddings` isn't a literal field in Omni's released
+  config — it expresses `image_size`/`patch_size` instead — but derives to
+  the identical 2304, confirmed against the real checkpoint's
+  `thinker.visual.pos_embed.weight` shape `[2304, 1152]`) plugged into the
+  existing, unmodified `qwenvl::encoder::VisionEncoder`/`PatchMerger`.
+  **One real naming bug found and fixed**: Omni's HF merger tensors use
+  `ln_q`/`mlp.{0,2}` (an `nn.Sequential(Linear, GELU, Linear)`, so index 1 is
+  the weightless activation), not Qwen3-VL-4B's `norm`/`linear_fc1`/
+  `linear_fc2` — both are the same LayerNorm->Linear->GELU->Linear shape, so
+  `omni::import`'s `merger_leaf` now maps both onto `PatchMerger`'s actual
+  target keys (`ln`/`fc1`/`fc2`); `patch_embed.proj.*`/`pos_embed.weight`
+  also needed the same segment-stripping `qwenvl::import` already does, to
+  `patch_embed.*`/`pos_embed`.
+  Verified against real weights (shard 1) via the same
+  `checkpoint::mmap::MmapSafetensors` selective-read pattern
+  `audio_parity.rs` established —
+  `crates/omni/tests/vision_parity.rs`: **cosine 1.000000 on the raw
+  per-patch encoder output (max_abs 0.012, on values with std ~15 — a real
+  bit-level match, not a synthetic shape check) AND on all three DeepStack
+  taps (max_abs 0.000003–0.000007) — on both wgpu and the CPU JIT.** Along
+  the way, a golden-shape discrepancy clarified the reference model's own
+  boundary: `Qwen3OmniMoeVisionEncoder.forward`'s `last_hidden_state` is the
+  RAW pre-merger ViT output, while `deepstack_features` are ALREADY merged
+  internally — two different stages returned by the same call, not the same
+  stage twice. The primary `PatchMerger` ran on real weights too (shape +
+  finite-output checked) but has no golden of its own to compare against yet
+  (this golden's "hidden" is pre-merger, per the above).
+  `qwenvl`'s own 38-test suite stayed green.
+  **Video (t>1) is explicitly NOT covered** — `VisionEncoder::encode_with_taps`
+  is documented single-frame (`t=1`) only; temporal patching for video is
+  real remaining work, not yet started.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5 through M17. See the plan file.
+deferred), M5's video path, M6 through M17. See the plan file.
 
 ## Honesty notes
 
