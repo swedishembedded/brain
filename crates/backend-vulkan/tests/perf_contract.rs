@@ -109,14 +109,23 @@ fn transient_uniforms_are_recycled_across_flushes() {
 /// every buffer, regardless of the memory type actually bound — so on a
 /// unified-memory device (an integrated GPU with no separate VRAM, where the
 /// `DEVICE_LOCAL` heap is *also* `HOST_VISIBLE | HOST_COHERENT`) every
-/// `storage_init`/`read` paid a staging-buffer + `run_cmd` (a full
-/// submit+fence) for memory a direct `memcpy` could have reached. This does
-/// not assert the box is unified memory (a discrete-GPU CI runner is a
-/// legitimate `host_visible: false` outcome) — it asserts the two are
-/// consistent: IF this device reports `unified_memory` (via `DeviceCaps`,
-/// queried the same way the rest of the engine does), THEN a
-/// `storage_init` + `read` round trip must cost zero queue submits, matching
-/// `uniform_dynamic`'s existing zero-submit contract.
+/// `storage_init` paid a staging-buffer + `run_cmd` (a full submit+fence) for
+/// memory a direct `memcpy` could have reached. This does not assert the box
+/// is unified memory (a discrete-GPU CI runner is a legitimate
+/// `host_visible: false` outcome) — it asserts the two are consistent: IF
+/// this device reports `unified_memory` (via `DeviceCaps`, queried the same
+/// way the rest of the engine does), THEN `storage_init` (a host write) must
+/// cost zero queue submits, matching `uniform_dynamic`'s existing zero-submit
+/// contract.
+///
+/// `read` (a host read of GPU-written data) deliberately does NOT get the
+/// same claim — `VkContext::download` always stages, even on a host-visible
+/// buffer, because a direct-map readback was measured live on this box
+/// (Intel Arc MTL / Mesa ANV 25.0.7) to race with the driver's cache
+/// write-back: a dispatch's writes were sometimes not yet visible to a host
+/// read performed immediately after `vkWaitForFences` returned. See
+/// `VkContext::download`'s doc for the full investigation. So `read` costs
+/// exactly one submit (the staging copy) here, same as everywhere else.
 #[test]
 fn storage_buffers_skip_staging_on_a_unified_memory_device() {
     let Some(be) = backend() else { return };
@@ -126,12 +135,19 @@ fn storage_buffers_skip_staging_on_a_unified_memory_device() {
     }
     let base = be.queue_submits();
     let buf = be.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        be.queue_submits() - base,
+        0,
+        "storage_init on a unified-memory device cost a queue submit — \
+         alloc_raw is not deriving host_visible from the memory type actually bound"
+    );
     let got = be.read(&buf, 4);
     assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
     assert_eq!(
         be.queue_submits() - base,
-        0,
-        "storage_init + read on a unified-memory device cost a queue submit — \
-         alloc_raw is not deriving host_visible from the memory type actually bound"
+        1,
+        "read cost a different number of queue submits than the staging path — \
+         download must always stage (see its doc for why a direct-map readback \
+         is unsafe on this driver), not vary submits by host_visible"
     );
 }

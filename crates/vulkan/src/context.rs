@@ -178,10 +178,14 @@ pub struct PrecisionCaps {
     pub dp4a: bool,
 }
 
-/// A device buffer + its backing memory. Storage buffers are `DEVICE_LOCAL`
-/// (compute reads/writes proper GPU memory; up/download go through a host-visible
-/// staging buffer + GPU copy). `host_visible` is true only for the llvmpipe
-/// fallback (no device-local heap) — then up/download map the buffer directly.
+/// A device buffer + its backing memory. Storage buffers prefer `DEVICE_LOCAL`
+/// (compute reads/writes proper GPU memory). `host_visible` is true when the
+/// bound memory type is ALSO `HOST_VISIBLE | HOST_COHERENT` — the llvmpipe
+/// fallback (no device-local heap) always qualifies, and so does the single
+/// unified heap on an integrated GPU. When true, `upload`/`zero` map the
+/// buffer directly (no staging, no submit); `download` always stages
+/// regardless of `host_visible` — see its doc for the measured driver race
+/// that makes a direct-map readback unsafe.
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
@@ -541,13 +545,16 @@ impl VkContext {
     /// bound, never from caller intent: on a unified-memory device (an
     /// integrated GPU with no separate VRAM) the `DEVICE_LOCAL` heap `storage()`
     /// requests is often *also* `HOST_VISIBLE | HOST_COHERENT`, and hardcoding
-    /// `host_visible: false` there (as this used to) meant every upload/
-    /// download/zero on it paid a staging-buffer + `run_cmd` (a full
-    /// submit+fence) for memory a direct `memcpy` could have reached. Requires
-    /// BOTH bits, not just `HOST_VISIBLE` — `with_mapped` never flushes or
-    /// invalidates, so treating a merely-host-visible-but-not-coherent type as
-    /// mappable-without-a-barrier would be a real correctness bug, not just a
-    /// missed optimisation.
+    /// `host_visible: false` there (as this used to) meant every upload/zero on
+    /// it paid a staging-buffer + `run_cmd` (a full submit+fence) for memory a
+    /// direct `memcpy` could have reached. Requires BOTH bits, not just
+    /// `HOST_VISIBLE` — `with_mapped` never flushes or invalidates, so treating
+    /// a merely-host-visible-but-not-coherent type as mappable-without-a-barrier
+    /// would be a real correctness bug, not just a missed optimisation.
+    ///
+    /// `host_visible` does NOT license a direct-map *readback* — see
+    /// `download`'s doc for a measured Intel-ANV coherency race that a direct
+    /// map after `vkWaitForFences` does not reliably avoid.
     fn alloc_raw(&self, size: vk::DeviceSize, usage: vk::BufferUsageFlags, props: vk::MemoryPropertyFlags) -> Option<VkBuffer> {
         let size = size.max(4);
         unsafe {
@@ -586,12 +593,13 @@ impl VkContext {
     }
 
     /// Allocate a HOST_VISIBLE|HOST_COHERENT buffer (`host_visible = true`, so
-    /// `upload`/`zero`/`download` use a direct map — NO queue submits). For
-    /// small, host-written, GPU-read data: uniform/params buffers. Compute-hot
-    /// storage stays on [`Self::storage`]'s DEVICE_LOCAL path; on an integrated
-    /// GPU host-visible memory is the same physical RAM, so a uniform read
-    /// costs the same — what changes is that writing one stops costing two
-    /// blocking submits (fill + staged copy) per dispatch per frame.
+    /// `upload`/`zero` use a direct map — NO queue submits; `download` still
+    /// stages, see its doc). For small, host-written, GPU-read data:
+    /// uniform/params buffers. Compute-hot storage stays on [`Self::storage`]'s
+    /// DEVICE_LOCAL path; on an integrated GPU host-visible memory is the same
+    /// physical RAM, so a uniform read costs the same — what changes is that
+    /// writing one stops costing two blocking submits (fill + staged copy) per
+    /// dispatch per frame.
     pub fn storage_host(&self, size: vk::DeviceSize, extra_usage: vk::BufferUsageFlags) -> VkBuffer {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_SRC
@@ -702,15 +710,38 @@ impl VkContext {
         self.run_cmd(|cmd| unsafe { self.device.cmd_fill_buffer(cmd, buf.buffer, 0, buf.size, 0) });
     }
 
-    /// Read `len` bytes back from the start of a storage buffer (via staging for
-    /// device-local buffers; direct map for the host-visible fallback).
+    /// Read `len` bytes back from the start of a storage buffer — always via
+    /// staging, even on a `host_visible` buffer.
+    ///
+    /// A direct `with_mapped` read (no staging copy) was measured live on this
+    /// box's Intel Arc (MTL) / Mesa ANV 25.0.7 to be genuinely racy: a
+    /// dispatch's writes are sometimes NOT visible to a host read performed
+    /// immediately after `vkWaitForFences` returns, even though the memory
+    /// type is `HOST_VISIBLE | HOST_COHERENT` — `gpu-core`'s
+    /// `vulkan_dispatch_storage_and_readback` test (a 2-dispatch RAW chain:
+    /// `out = a+b`, then `out2 = out+b`, read back) failed ~85-90% of runs
+    /// with a direct-map readback (all-zero `out2`, i.e. the pre-dispatch
+    /// zero-init value, never the computed one), 20/20 clean once this
+    /// function was changed to always stage, and the failure reproduced
+    /// identically with `BRAIN_VK_SERIAL=1` (per-dispatch submit+fence,
+    /// ruling out the already-documented compute-barrier bug above as the
+    /// cause) and was independent of `backend-vulkan`'s per-kernel timestamp
+    /// feature (bisected out separately). A diagnostic direct-map peek taken
+    /// immediately after the dispatch's own `vkWaitForFences` returned still
+    /// read zero; a *later* read of the same memory (this function's own
+    /// staging copy) saw the correct value — i.e. the fence signal does not,
+    /// on this driver, reliably imply the write is visible to a host
+    /// `vkMapMemory` read yet. The staging path's extra `cmd_copy_buffer` +
+    /// its own submit+fence happens to give the driver's cache write-back
+    /// enough time; per this repo's own rule (never absorb a driver bug by
+    /// loosening a tolerance), that extra round trip is being kept
+    /// deliberately, not treated as a missed optimisation. `upload`/`zero`
+    /// (host write -> device read) are NOT affected — every write in the
+    /// above investigation landed correctly — so they keep the direct-map
+    /// fast path.
     pub fn download(&self, buf: &VkBuffer, len: usize) -> Vec<u8> {
         assert!(len as vk::DeviceSize <= buf.size, "download overflows buffer");
         let mut out = vec![0u8; len];
-        if buf.host_visible {
-            unsafe { self.with_mapped(buf, |ptr| std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), len)) };
-            return out;
-        }
         let n = len as vk::DeviceSize;
         self.with_staging(n, |stg| {
             self.copy_buffer(buf, stg, n);

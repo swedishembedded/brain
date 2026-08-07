@@ -177,6 +177,7 @@ reliability risk described in gap A1.
 | A5 | The autotuner (`backend_api::select::AutoTuner`) runs and persists on this adapter, but every persisted pick is a toy unit-test shape (`16x16x16`-class) — no real model shape has ever been tuned here | open |
 | A6 | Tile constants (`matmul_reg3`'s `BM=BN=128`, `SPLITK_TARGET_WGS=288`, ...) are P40-swept literals, never re-derived for this device's much smaller Xe-core count | open |
 | A7 | Whether `backend-wgpu` is exposed to the documented Meteor-Lake ANV compute-compute barrier bug (the one `backend-vulkan` already works around via `BRAIN_VK_SERIAL`) is unconfirmed | open |
+| A8 | A direct-map (`vkMapMemory`, no staging) readback of a `HOST_VISIBLE \| HOST_COHERENT` storage buffer, performed immediately after `vkWaitForFences` returns, is **not reliably visible on this Mesa ANV driver** — a real correctness bug, found and fixed this session (see below) | **root-caused and fixed this session** |
 
 ### The A1 incident, in detail
 
@@ -246,6 +247,81 @@ data — not as evidence the number is wrong when a *different* run stalls.
 Every "graded against the roof" step in Tracks M and O can proceed using
 §1/§3's numbers, with the explicit caveat that re-measuring on demand may
 require several attempts.
+
+### The A8 incident, in detail
+
+**What shipped, and what it broke.** An earlier pass this session
+(`VkContext::alloc_raw`) fixed `storage()` to derive `host_visible` from the
+memory type actually bound rather than hardcoding `false` — correct in
+principle, since this device's `DEVICE_LOCAL` heap is also `HOST_VISIBLE |
+HOST_COHERENT` (a single unified heap, confirmed via `vulkaninfo`: memory
+type 0 carries all three bits). `upload`/`zero`/`download` were all changed
+to skip the staging buffer and map the buffer directly when `host_visible`.
+This landed with a passing live test (`storage_init` + `read` costing zero
+queue submits) and was committed.
+
+**What actually happened:** `gpu-core`'s `tests::vulkan_dispatch_storage_and_readback`
+— a two-dispatch read-after-write chain (`out = a+b`, then `out2 = out+b`,
+each read back) — started failing nondeterministically, roughly 85-90% of
+runs, with `out2` reading back as all-zero (its pre-dispatch, zero-initialized
+value — never the computed one). This was NOT caught by the live-verified
+test at the time because that test only exercised a single dispatch with no
+intra-batch dependency.
+
+**Bisection.** Reverting the commit fixed it; reverting a different,
+unrelated commit (`backend-vulkan` per-kernel timestamps, landed the same
+session) did not, ruling that out as a cause despite touching the same
+files. A truly clean (fresh `cargo build`, no incremental-cache
+contamination — confirmed by re-testing in fresh `git worktree`s at each
+candidate commit) bisection nailed it to the direct-map `download()` path
+specifically: 13/13 clean runs at the pre-change baseline, 10/10 clean runs
+with only the per-kernel-timestamp commit applied, ~85-90% failure rate with
+only the staging-removal commit applied (isolated via cherry-pick onto the
+pre-timestamp base) — and forcing `BRAIN_VK_SERIAL=1` (every dispatch gets
+its own individual submit+fence, the maximally conservative execution mode,
+already used elsewhere in this file to work around a *different* documented
+Intel ANV barrier bug) did **not** fix it, ruling out an inter-dispatch
+barrier problem.
+
+**The actual mechanism, confirmed via targeted diagnostics.** A `vk::QueryPool`-free
+instrumentation was added: peek the output buffer's memory (a raw
+`vkMapMemory` + read, no staging) *immediately* after each dispatch's own
+`vkWaitForFences` returns. The peek taken right after the writing dispatch's
+fence signaled still read the buffer's stale zero-initialized value; a
+*separate, later* read of the same memory (the real `download()` call, a few
+function calls afterward) saw the correct computed value. In other words:
+**on this driver, a `vkWaitForFences` return does not reliably imply that
+the signaled submission's writes to `HOST_COHERENT` memory are yet visible
+to a host `vkMapMemory` read** — there is a real, measurable race window,
+despite the buffer satisfying the Vulkan-spec-guaranteed memory property
+bits. The staging path's extra `cmd_copy_buffer` + its own independent
+submit+fence happened to give the driver enough time for its cache
+write-back to land, which is why every prior test (staging always used) had
+never surfaced this.
+
+**The fix, and what it deliberately does not touch.** `VkContext::download`
+now **always** stages, even when the source buffer is `host_visible` — per
+this file's own stated engineering rule (§ mirrored from the `BRAIN_VK_SERIAL`
+workaround above: never absorb a driver bug by loosening a tolerance), the
+extra round trip is kept as a real, permanent cost, not treated as a missed
+optimization to eventually claw back. `upload`/`zero` (the host-write ->
+device-read direction) keep the direct-map fast path — every single write in
+this investigation landed correctly; only the *readback* direction raced.
+Verified live: 15/15 clean runs of the previously-failing test after the
+fix, plus the full `gpu-core`/`backend-vulkan` suites (50 and 4 tests
+respectively) passing. `perf_contract.rs`'s
+`storage_buffers_skip_staging_on_a_unified_memory_device` was updated to
+match the corrected contract: `storage_init` (write) still costs zero
+submits; `read` now asserts exactly one (the staging copy), not zero.
+
+**Open question, not chased under this session's scope**: whether a cheaper
+fix exists (e.g. an explicit host-domain memory barrier some driver version
+does honor) that avoids the full staging round trip. Given the failure was
+found via live testing rather than spec reading, and Mesa ANV's compute
+timeline handling on this specific hardware generation is evidently not
+fully spec-compliant in this respect, staging-on-read is the conservative,
+verified-safe default until a cheaper fix is itself verified live with the
+same rigor (dozens of repeated runs, not one green pass).
 
 ---
 
