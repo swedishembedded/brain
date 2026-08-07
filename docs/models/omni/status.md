@@ -324,10 +324,53 @@ covers).
   is documented single-frame (`t=1`) only; temporal patching for video is
   real remaining work, not yet started.
 
+## M6 design note (investigated, not yet implemented)
+
+Before writing any Thinker decoder code, checked how `crates/tts`'s Talker —
+the one other model in brain declaring M-RoPE with `interleaved: true,
+mrope_section: [24,20,20]`, the EXACT same shape as Thinker's — actually
+handles it, since getting this wrong silently would be a very expensive bug
+to chase later. Answer, already proven in production
+(`crates/tts/src/talker.rs`'s own doc comment): for any token stream where
+all three M-RoPE axes (temporal/height/width) carry the SAME position index
+— true for pure text, and true for a pure audio stream — `interleaved`
+M-RoPE with a 3-way section split **collapses exactly to `qwen`'s ordinary
+half-split RoPE** (`rotate_half`, θ = 1e6). No new kernel, no interleaving
+math, for that case. The Talker reuses `qwen::Qwen` (`tie_embeddings=false`,
+`enable_mrope()`) directly and gets this for free. My own M0 `layer0` golden
+is pure text (9 tokens, no image/audio), so `Qwen3OmniMoeThinkerTextModel`'s
+own default position handling (confirmed by reading `forward`'s source: no
+`position_ids` passed → `arange(seq_len)` broadcast to all 4 axes) means
+**this golden's attention needs only plain `qwen`-style RoPE too** — the
+real M-RoPE (temporal/height/width genuinely diverging across an
+image/video/audio span) only has to be built for mixed-modality prompts,
+which is a real but narrower piece of work than "M-RoPE from scratch."
+
+What's genuinely new for M6, given the above: `qwen::Qwen`'s internals
+(sharding, LoRA, int8, KV-cache all interleaved in one large constructor —
+`crates/qwen/src/model.rs`) are not modular enough to swap out just its
+dense SwiGLU MLP for `model::moe`'s sparse one without real surgery, unlike
+`crates/glm`, which already carries an `Mlp::Dense`/`Mlp::Moe` enum seam at
+exactly this point (evaluated densely today, per M2's own status). Two
+honest paths, neither started: (a) give `qwen::Qwen` the same `Mlp` seam
+`glm` has, so Thinker (and TTS's own future MoE Talker, M7) can reuse the
+attention/RoPE/QK-norm/KV-cache machinery that's already correct and tested,
+switching only the FFN call; or (b) a new, leaner decoder in `crates/omni`
+built directly from `model::block`'s shared primitives
+(`rmsnorm_fwd`/`rope_fwd`/`gqa_fwd`) + `model::moe`, forward-only, no
+sharding/LoRA/KV-cache — closer to `qwenvl::parity`'s minimal partial-depth
+test harness than to production `qwen::Qwen`. (a) is more in the spirit of
+"evolve core, don't duplicate" but touches a large, heavily-relied-on file;
+(b) is faster to land correctly but is a second (if leaner) forward
+implementation of the same attention math. Real M-RoPE (the
+image/video/audio-divergent case) and the `model::vlm::splice_fwd`
+multimodal splice are additional, separate pieces on top of either.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M6 through M17. See the plan file.
+deferred), M5's video path, M6 (design investigated above, not yet
+implemented) through M17. See the plan file.
 
 ## Honesty notes
 
