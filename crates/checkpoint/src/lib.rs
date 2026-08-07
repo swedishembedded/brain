@@ -108,6 +108,18 @@ pub fn save(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)])
     st::save_safetensors(path, tensors, &config, None).expect("save safetensors");
 }
 
+/// Same as [`save`], but attaches a [`st::ModelCard`] to the checkpoint's
+/// metadata — the family/id every servable model needs for
+/// `crates/cli/src/model_dir.rs::discover()` to auto-register it. An
+/// additive sibling, not a `save` signature change: `save`'s ~30 existing
+/// call sites (training/research crates that were never meant to be
+/// servable) stay untouched; only a family's real save path that wants to
+/// be auto-discoverable switches to this one.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_carded(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)], card: &st::ModelCard) {
+    st::save_safetensors(path, tensors, &config, Some(card)).expect("save safetensors");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +143,31 @@ mod tests {
         assert_eq!(c.find("a", "").unwrap().len(), 4);
         assert!(c.find("a", "init").is_none()); // role filter works
         std::fs::remove_file(p).ok();
+    }
+
+    /// `save_carded` must round-trip the card through `st::read_card` -- the
+    /// exact reader `model_dir::discover()` uses to find a servable model --
+    /// while `save`'s own plain (uncarded) path must keep reporting `None`,
+    /// so switching one family to `save_carded` cannot accidentally make an
+    /// untouched family's checkpoints look carded.
+    #[test]
+    fn save_carded_roundtrips_the_card_plain_save_does_not() {
+        let dir = std::env::temp_dir();
+        let carded_path = dir.join(format!("checkpoint-carded-test-{}.safetensors", std::process::id()));
+        let plain_path = dir.join(format!("checkpoint-plain-test-{}.safetensors", std::process::id()));
+        let (cp, pp) = (carded_path.to_str().unwrap(), plain_path.to_str().unwrap());
+        let cfg = serde_json::json!({"d_model": 8});
+        let tensors = vec![("w".to_string(), vec![2u64], vec![1.0f32, 2.0])];
+        let card = st::ModelCard::new("brain/toy", "toy");
+
+        save_carded(cp, cfg.clone(), &tensors, &card);
+        let got = st::read_card(cp).unwrap();
+        assert_eq!(got, Some(card), "save_carded must round-trip the exact card written");
+
+        save(pp, cfg, &tensors);
+        assert_eq!(st::read_card(pp).unwrap(), None, "plain save must stay cardless");
+
+        std::fs::remove_file(cp).ok();
+        std::fs::remove_file(pp).ok();
     }
 }

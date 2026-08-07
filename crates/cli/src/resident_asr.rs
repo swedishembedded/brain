@@ -321,9 +321,9 @@ impl Instance for QwenAsrInstance {
     // encoder still amortises within the fixed-window instance).
 }
 
-/// Qwen3-ASR on the NPU: the audio-tower transformer HEAD (24 windowed ViT blocks
-/// + ln_post + projector) runs as an ONNX graph on the Intel NPU; the conv stem +
-/// valid-position packing and the Qwen decoder stay on the device backend.
+/// Qwen3-ASR on the NPU: the audio-tower transformer HEAD (24 windowed ViT blocks,
+/// ln_post, and the projector) runs as an ONNX graph on the Intel NPU; the conv
+/// stem, valid-position packing, and the Qwen decoder stay on the device backend.
 /// Bit-identical to the device path (the head graph is parity-gated to cosine 1.0
 /// vs `qwen_asr::encoder::encode_packed`).
 struct QwenAsrNpuInstance {
