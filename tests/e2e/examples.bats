@@ -128,6 +128,23 @@ run_example() {
   [[ "$output" == *"kind=quantiles"* ]]
 }
 
+# ------------------------------------------------------------- omni/
+#
+# Only the D-Bus path runs here -- the OpenAI/Anthropic HTTP transports are
+# verified by hand against this same BRAIN_MOCK setup (see docs/models/omni/
+# status.md's M13/M14 entry) but the shared harness above does not start an
+# --openai surface or capture either provider's generated API key, and doing
+# so is out of scope for wiring one example's coverage in.
+
+@test "examples/omni/omni.py runs against the mock over D-Bus" {
+  run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
+}
+
+@test "examples/omni/omni.py skips cleanly on unimplemented input/output flags" {
+  run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-image foo.png --in-text ignored --out-stdio
+}
+
 # ------------------------------------------------------------- imagegen/
 
 @test "examples/imagegen/generate.py runs against the mock" {

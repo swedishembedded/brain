@@ -813,6 +813,67 @@ than "wiring" suggests.
   `anthropic.rs`, and the `/v1/audio/speech`/`/v1/audio/transcriptions`
   endpoints. Neither blocks today's text-only `generate`.
 
+- **M13/M14 — brain-py HTTP clients + `examples/omni.py`** (2026-08-07).
+  `brain_py/openai.py` (new): `BrainOpenAI(BrainBase)`, a thin `urllib`
+  client implementing the same `manifests`/`run`/`subscribe` primitives
+  `BrainDBus`/`BrainStdio` do, so `chat()`/`generate()` work identically
+  over this transport — only the `generate` action is supported (a chat
+  REST API has no generic "run any action" concept the way D-Bus does;
+  everything else raises `NotImplementedError` rather than silently doing
+  the wrong thing). `brain_py/anthropic.py` (new): `BrainAnthropic`,
+  same shape, against `/v1/messages`; `manifests()` raises
+  `NotImplementedError` since Anthropic's API has no model-listing
+  endpoint (`examples/omni.py` catches this and skips the pre-check rather
+  than crashing).
+
+  Two real bugs found and fixed while actually running these against a
+  live server (not just unit-testing the request-building logic):
+  1. **`_post`'s `with urlopen(...) as resp: return resp` closes the
+     connection before the caller ever reads it** — `resp.read()` outside
+     the `with` block hit an already-closed connection, silently returning
+     empty. Split into `_post_json` (reads the body INSIDE the `with`
+     block, returns parsed JSON) and `_post_stream` (returns the live
+     connection for the caller's own iteration loop to drain and close,
+     never wrapped in a `with` that would close it early). Would have
+     shipped invisibly: every unit-level check of the request/header
+     construction passed fine; only an actual end-to-end call against a
+     running `brain serve --openai` surfaced it.
+  2. **`BrainAnthropic._build_messages` dropped an embedded system-role
+     message's content instead of promoting it to Anthropic's top-level
+     `system` field** — only reproduced via `base.py`'s `generate(system=...)`
+     path (a separate param) worked; a raw `messages=[{"role":"system",...}]`
+     list built by hand silently lost the system prompt. Fixed to extract
+     and join any system-role message content when a separate `system=`
+     wasn't already given.
+
+  `examples/omni/omni.py` (new): the transport × input/output matrix, honestly
+  scoped — `--dbus`/`--openai URL`/`--anthropic URL` × `--in-text`/`--out-stdio`/
+  `--out-text` are real; `--in-speech`/`--in-mic`/`--in-image`/`--in-video`/
+  `--out-mic`/`--out-audio` are declared (so the interface won't need a
+  breaking change once they're real) but `skip()` with a specific reason
+  naming exactly what's missing. No `--stream`: `BrainBase`'s
+  transport-agnostic `on_progress` carries `(step, total, message)`, not
+  per-token delta text (that's a `BrainDBus.subscribe`-only `on_delta`
+  kwarg, not part of the abstract contract this script needs to work
+  identically over all three transports) — and the real Omni resident
+  doesn't emit true per-token progress either (`crate::resident_omni`'s two
+  `Progress::step` ticks are start/end, not one per generated token). A
+  `--stream` flag that printed the literal string `"token"` N times (the
+  mock's fixed `Progress::token` message field) would have been actively
+  misleading, caught by actually running it rather than assuming the
+  generic progress plumbing would "just work."
+
+  Verified end to end against `BRAIN_MOCK=1` for all three transports by
+  hand (D-Bus, OpenAI with a real `APIKEY`-scraped bearer token, Anthropic
+  with `x-api-key`) — all three round-trip `"You said: <prompt>"` correctly.
+  Registered in `tests/e2e/examples/manifest.tsv` and a new `@test` pair in
+  `tests/e2e/examples.bats` (D-Bus path + the unimplemented-flag skip path);
+  the OpenAI/Anthropic HTTP transports are NOT in the automated e2e suite —
+  the shared harness's server doesn't start an `--openai` surface or
+  capture either provider's generated API key, and extending that shared
+  setup was out of scope for wiring one example in. `examples/omni/README.md`
+  (new) documents all three transports plus the scope boundary.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
@@ -822,12 +883,14 @@ KV-cache/int8/GPU-sharded production residency, `converse`/`transcribe`/
 + codec sampling), `qwenvl` registration (deferred above, its own generation
 loop), the pre-existing multimodal-content-part-drop bug in
 `openai.rs`/`anthropic.rs` and the `/v1/audio/*` endpoints (M11/M12's
-original scope, orthogonal to what's implemented), M13 through M17. See the
-plan file. M6 through M12 are now believed complete for what is actually
-implemented (Thinker/Talker decoders, real M-RoPE, composed loops, splice
-seam, code predictor, Code2Wav vocoder, Thinker text generation exposed over
-D-Bus/OpenAI/Anthropic — all validated against real weights or the real
-classification logic, single-shot/streaming forward only, no KV-cache). The
+original scope, orthogonal to what's implemented), OpenAI/Anthropic
+transports in the automated e2e harness (M13/M14's own note above), M15
+through M17. See the plan file. M6 through M14 are now believed complete for
+what is actually implemented (Thinker/Talker decoders, real M-RoPE, composed
+loops, splice seam, code predictor, Code2Wav vocoder, Thinker text
+generation exposed over D-Bus/OpenAI/Anthropic with a working Python example
+— all validated against real weights, the real HTTP classification logic, or
+a live end-to-end run, single-shot/streaming forward only, no KV-cache). The
 two loader-side checkpoint-naming gaps (code predictor, code2wav —
 documented in M7b/M8 above) remain open; they do not block Thinker-only
 generation (`OmniResident` reads straight from the HF directory, not the
