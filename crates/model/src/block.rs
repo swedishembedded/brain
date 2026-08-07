@@ -101,6 +101,29 @@ pub fn rope_fwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32
     g.step(k.rope, &[buf], &[n, n_heads, head_dim, row_stride, 0, t, f(theta)], n * n_heads * half)
 }
 
+/// Table-driven interleaved M-RoPE (forward), in place on a contiguous q/k
+/// buffer: the same half-split rotation `rope_fwd` applies, but the per-token
+/// angle comes from a precomputed `[rows, head_dim/2]` `cos`/`sin` table
+/// (`qwenvl::mrope::mrope_tables`) instead of a single scalar position — the
+/// seam that lets a caller feed genuinely divergent per-axis (text/image/
+/// video/audio) positions, or the degenerate all-axes-equal case (which
+/// `qwenvl::mrope`'s own test proves collapses to identical output). `qwen::
+/// Qwen::rope2d_step` already dispatches this exact kernel for Qwen3-VL;
+/// hoisted here so a second model (`omni::thinker`) doesn't re-wire it.
+///
+/// `kernel` is `kernels::ROPE2D`'s pipeline index in the caller's own table —
+/// not a [`KernelIds`] field, since it pairs with two extra buffer bindings
+/// (`cos`/`sin`) `rope_fwd` doesn't have; folding it in would grow every
+/// other model's `KernelIds` literal for a kernel most never dispatch (same
+/// reasoning as `model::moe`'s separate `MoeIds`).
+#[allow(clippy::too_many_arguments)]
+pub fn rope2d_fwd(g: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, rows: u32, n_heads: u32, head_dim: u32, row_stride: u32) -> Step {
+    let half = head_dim / 2;
+    // tmod = rows: an exact per-token table, no frame-repeat (Omni's
+    // get_rope_index already assigns one position per token, video included).
+    g.step(kernel, &[buf, cos, sin], &[rows, n_heads, half, row_stride, 0, rows, f(1.0)], rows * n_heads * half)
+}
+
 /// Half-split RoPE backward (in place on the grad buffer).
 pub fn rope_bwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32, head_dim: u32, row_stride: u32, t: u32, theta: f32) -> Step {
     let half = head_dim / 2;
