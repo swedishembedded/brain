@@ -51,6 +51,7 @@ const CONV1D: usize = 10;
 const CONVTR1D: usize = 11;
 const SNAKE: usize = 12;
 const SCALE_CHAN: usize = 13;
+const AXPY: usize = 14;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -67,6 +68,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("convtr1d", kernels::CONVTR1D),
     ("snake_beta", kernels::SNAKE_BETA),
     ("scale_chan", kernels::SCALE_CHAN),
+    ("axpy", kernels::AXPY),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
@@ -328,6 +330,144 @@ impl Codec {
             }
         }
         wav
+    }
+
+    /// Qwen3-Omni's Code2Wav decode: same SEANet decoder/upsample/pre-transformer
+    /// SHAPE as [`Self::decode`] (config-compatible: `hidden_size 1024`,
+    /// `intermediate_size 3072` on this `CodecConfig`, matching the real
+    /// `code2wav_config` -- reused unchanged, not re-derived), but the input path
+    /// is genuinely different, not a config difference:
+    /// `Qwen3OmniMoeCode2Wav.forward`: `hidden = code_embedding(codes +
+    /// code_offset).mean(1)` -- ONE combined `[num_quantizers * codebook_size,
+    /// hidden_size]` embedding table (`code_offset[q] = q * codebook_size`,
+    /// not persisted as a weight), MEANED over the 16 quantizers per frame,
+    /// straight to `hidden_size` -- replacing [`Self::decode`]'s
+    /// `quantizer.decode` (per-group RVQ dequant + `output_proj`) AND
+    /// `pre_conv` entirely; `pre_transformer` has no `input_proj`/`output_proj`
+    /// either (`hidden_size` IS the working width throughout, no separate
+    /// `latent_dim`).
+    ///
+    /// The other genuine (non-config) difference: `Qwen3OmniMoeCausalTransConvNet`
+    /// crops `pad = K - stride` off BOTH sides of the native `ConvTranspose1d`
+    /// output (`Lo = (L-1)*stride - 2*pad + K`), where [`Self::causal_convtr`]
+    /// crops only the right (`pad = 0`, `Lo = L*stride`) per its own doc comment
+    /// -- correct for the standalone Qwen3-TTS codec, but NOT what Omni's
+    /// reference does. For the upsample stages (`K == stride`, so `pad = 0`)
+    /// the two conventions agree and [`Self::causal_convtr`] is reused unchanged;
+    /// the SEANet decoder's own transposed convs (`K = 2*stride`, `pad =
+    /// stride`) need the symmetric crop, so this function calls the
+    /// `audio::conv` primitives directly for those with an explicit `pad`
+    /// (`convtr1d.wgsl`'s `pad` param already matches PyTorch `ConvTranspose1d`'s
+    /// native symmetric `padding` semantics -- confirmed by reading the kernel;
+    /// no new device math). Verified against a real golden
+    /// (`tools/goldens/omni_dump_reference.py`'s `code2wav`): the naive
+    /// `Lo = L*stride` assumption produces the wrong waveform LENGTH (15360 vs
+    /// the golden's 14805 samples for `T=8`), which is what surfaced this.
+    ///
+    /// `codes` is `[T, num_quantizers]` row-major (same convention as
+    /// [`Self::decode`]).
+    pub fn decode_omni(&self, codes: &[u32]) -> Vec<f32> {
+        let nq = self.cfg.num_quantizers as usize;
+        assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
+        let t = (codes.len() / nq) as u32;
+        assert!(t > 0, "empty codes");
+        let hidden = self.cfg.hidden_size; // 1024
+
+        // --- 1. code_embedding(codes + code_offset).mean(1) ---
+        let x = self.code_embedding_mean(codes, t, nq, hidden);
+
+        // --- 2. pre_transformer (no input_proj/output_proj: hidden_size IS the
+        //        working width already) ---
+        let x = self.transformer(&x, t);
+        let mut h = self.transpose(&x, t, hidden); // [hidden, T] NCL
+        let mut l = t;
+
+        // --- 3. upsample stages (K == stride here, so the crop conventions
+        //        agree -- causal_convtr reused unchanged) ---
+        for (u, &factor) in self.cfg.upsampling_ratios.clone().iter().enumerate() {
+            h = self.causal_convtr(&h, &format!("upsample.{u}.0"), hidden, hidden, l, factor, factor);
+            l *= factor;
+            h = self.convnext(&h, &format!("upsample.{u}.1"), hidden, l);
+        }
+
+        // --- 4. SEANet decoder (symmetric-crop transposed conv, see doc) ---
+        let dec_dim = self.cfg.decoder_dim; // 1536
+        h = self.causal_conv(&h, "decoder.0", hidden, dec_dim, l, 7, 1, 1);
+        let rates = self.cfg.upsample_rates.clone();
+        for (i, &rate) in rates.iter().enumerate() {
+            let in_dim = dec_dim >> i;
+            let out_dim = dec_dim >> (i + 1);
+            let bp = format!("decoder.{}", i + 1);
+            h = self.snake(&h, &format!("{bp}.block.0"), in_dim, l);
+            let new_l = (l - 1) * rate; // symmetric crop: Lo = (L-1)*stride, see doc
+            h = self.causal_convtr_sym(&h, &format!("{bp}.block.1"), in_dim, out_dim, l, 2 * rate, rate, rate, new_l);
+            l = new_l;
+            for (j, dil) in [(2u32, 1u32), (3, 3), (4, 9)] {
+                h = self.residual_unit(&h, &format!("{bp}.block.{j}"), out_dim, l, dil);
+            }
+        }
+        let out_dim = dec_dim >> rates.len();
+        h = self.snake(&h, "decoder.5", out_dim, l);
+        h = self.causal_conv(&h, "decoder.6", out_dim, 1, l, 7, 1, 1);
+
+        // --- 5. clamp ---
+        let mut wav = self.gpu.read(&h, l as usize);
+        if wav.len() >= PAR_MIN {
+            par::each_mut(&mut wav, |_, s| *s = s.clamp(-1.0, 1.0));
+        } else {
+            for s in &mut wav {
+                *s = s.clamp(-1.0, 1.0);
+            }
+        }
+        wav
+    }
+
+    /// `hidden[t] = mean_q( code_embedding[ codes[t,q] + q*codebook_size ] )` --
+    /// `codes` is `[T, nq]` row-major; returns token-major `[T, hidden]`.
+    /// `codebook_size` is deliberately the SAME stride for every quantizer
+    /// (including the semantic one, whose true vocab is larger --
+    /// `semantic_codebook_size` -- matching `Qwen3OmniMoeCode2Wav`'s own
+    /// `code_offset = arange(num_quantizers) * config.codebook_size` exactly;
+    /// not a brain-side simplification).
+    fn code_embedding_mean(&self, codes: &[u32], t: u32, nq: usize, hidden: u32) -> DeviceBuffer {
+        let cb = self.cfg.codebook_size;
+        let acc = self.st((t * hidden) as usize);
+        for q in 0..nq {
+            let offset_codes: Vec<u32> = (0..t as usize).map(|ti| codes[ti * nq + q] + q as u32 * cb).collect();
+            let codes_buf = {
+                let b = self.gpu.buffer("codes", (t as u64) * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
+                self.gpu.write(&b, &offset_codes);
+                b
+            };
+            let gathered = self.st((t * hidden) as usize);
+            self.run(self.gpu.step(EMBED, &[&codes_buf, self.w("code_embedding.weight"), &gathered], &[hidden, t], t * hidden));
+            self.run(self.gpu.step(AXPY, &[&acc, &gathered], &[t * hidden, f(1.0 / nq as f32)], t * hidden));
+        }
+        acc
+    }
+
+    /// Causal transposed conv (NCL) with an EXPLICIT symmetric crop `pad` and
+    /// output length `lo` -- unlike [`Self::causal_convtr`] (which always
+    /// assumes `pad = 0`, `lo = l*stride`), this is `Qwen3OmniMoeCausalTransConvNet`'s
+    /// own convention: PyTorch `ConvTranspose1d(padding=pad)` crops `pad`
+    /// samples off BOTH sides of the native output
+    /// (`convtr1d.wgsl`'s `pad` param already matches this -- see
+    /// [`Self::decode_omni`]'s doc for why a new helper, not a change to
+    /// [`Self::causal_convtr`], which stays correct for the standalone
+    /// Qwen3-TTS codec's own (right-only-crop) convention).
+    #[allow(clippy::too_many_arguments)]
+    fn causal_convtr_sym(&self, x: &DeviceBuffer, prefix: &str, cin: u32, cout: u32, l: u32, k: u32, stride: u32, pad: u32, lo: u32) -> DeviceBuffer {
+        let c = audio::conv::Conv1d { n: 1, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
+        let out = self.st((cout * lo) as usize);
+        self.run(audio::conv::convtr1d_fwd(
+            &self.gpu,
+            &audio::conv::ConvKernels { fwd: CONVTR1D, dx: 0, dw: 0 },
+            &c,
+            x,
+            self.w(&format!("{prefix}.conv.weight")),
+            &out,
+        ));
+        self.add_ncl_bias(&out, &format!("{prefix}.conv.bias"), cout, lo)
     }
 
     /// One SEANet residual unit: `x + conv2(snake(conv1(snake(x))))`, conv1 is a
