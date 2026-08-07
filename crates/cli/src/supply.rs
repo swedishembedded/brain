@@ -57,6 +57,12 @@ fn convert(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
         // Writing one is real new-crate work, not "wire the dispatch", so
         // this fails cleanly instead of guessing at a Conv1D-transpose import.
         "gpt" => Err("gpt has no HF import path yet -- fetch and convert manually".to_string()),
+        // omni (Qwen3-Omni) is recognized (family_of_architecture checks it
+        // before "qwen" specifically so it is never silently mis-routed
+        // there) but its importer is not wired into auto-fetch yet -- see
+        // docs/models/omni/status.md M3. Distinct from the `other` arm below
+        // so this is never mistaken for the drift bug that arm detects.
+        "omni" => Err("omni (Qwen3-Omni) auto-fetch import is not wired yet -- see docs/models/omni/status.md".to_string()),
         other => Err(format!("family {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
     result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))

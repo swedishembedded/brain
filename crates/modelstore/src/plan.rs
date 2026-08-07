@@ -216,7 +216,13 @@ pub fn declared_architecture(config: &serde_json::Value) -> Option<String> {
 /// "which families brain can serve today", not two.
 pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
     let lower = arch.to_ascii_lowercase();
-    ["gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
+    // "omni" MUST be checked before "qwen": Qwen3-Omni's HF class name is
+    // `Qwen3OmniMoeForConditionalGeneration`, which contains "qwen" as a
+    // substring too — a plain first-match-wins scan in the other order would
+    // silently route it to the dense qwen importer, which would download the
+    // full 70.5 GB checkpoint and then fail (or worse, partially import) on a
+    // family it cannot represent. See docs/models/omni/status.md M3.
+    ["omni", "gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
 }
 
 fn is_supported_architecture(arch: &str) -> bool {
@@ -266,6 +272,19 @@ mod tests {
             Some(&card),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn omni_architecture_does_not_fall_through_to_qwen() {
+        // Qwen3-Omni's real HF class name contains "qwen" as a substring
+        // ("Qwen3OmniMoeForConditionalGeneration"), so a naive first-match
+        // scan checking "qwen" before "omni" would silently route it to the
+        // dense qwen importer. "omni" must win.
+        assert_eq!(family_of_architecture("Qwen3OmniMoeForConditionalGeneration"), Some("omni"));
+        assert_eq!(family_of_architecture("qwen3_omni_moe"), Some("omni"));
+        // Plain Qwen3 architectures are unaffected.
+        assert_eq!(family_of_architecture("Qwen3ForCausalLM"), Some("qwen"));
+        assert_eq!(family_of_architecture("Qwen3MoeForCausalLM"), Some("qwen"));
     }
 
     #[test]

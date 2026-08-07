@@ -144,6 +144,41 @@ cleanup).
   Added `brain-qwenvl` and `brain-omni` to `[workspace.dependencies]`
   (`qwenvl` had never been depended on by anything before this).
 
+- **M3b (part 1) — the `family_of_architecture` routing landmine, fixed**
+  (2026-08-07). `Qwen3OmniMoeForConditionalGeneration` contains `"qwen"` as a
+  substring, so `modelstore::plan::family_of_architecture`'s naive
+  first-match scan would have silently routed an Omni fetch to the dense
+  `qwen` HF importer (which would then fail, or worse, partially import a
+  family it cannot represent). Fixed by checking `"omni"` before `"qwen"` in
+  the scan order; regression test
+  (`family::tests::omni_architecture_does_not_fall_through_to_qwen`) asserts
+  both the real HF class name and the plain-Qwen3 case it must not affect.
+  `cli::supply::convert` gained an explicit `"omni"` arm (a clear
+  "not wired yet" error, distinct from the drift-detection catch-all it would
+  otherwise have hit) — `cli::model_dir::resident_for`'s existing catch-all
+  was already honest for an unrecognized family, no change needed there.
+
+- **A hard disk-capacity finding that reshapes M3b's remaining scope**
+  (2026-08-07). `checkpoint::weightio::StWriter::write` is f32-only — every
+  existing importer (`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint
+  at f32, then quantizes to int8 transiently at RESIDENCY-LOAD time (one
+  tensor of host f32 at a time, dropped after upload — see `crates/qwen/src/q8.rs`
+  `Q8::build`, `crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16
+  checkpoint, that convention means an on-disk f32 checkpoint of **~141 GB**
+  (measured: `70 519 637 090 * 2`) — which fits on NEITHER of this box's
+  filesystems (93 GB tmpfs, 71 GB free on the 296 GB overlay), and could not
+  fit even with perfect shard-by-shard streaming (deleting each source shard
+  after use still leaves the ~141 GB DESTINATION file needing one filesystem
+  large enough to hold it). This is not fixable by streaming harder — it is
+  fixable only by writing a smaller on-disk format (an int8-native
+  checkpoint, extending `checkpoint::weightio` to accept pre-quantized
+  packed-u32 + f32-scale tensor pairs — a genuine format extension, not
+  wired up for any model yet) or by running the import on a box with more
+  disk. Scoped down for now: the name-mapping / two-way-coverage LOGIC is
+  being built and tested against the real (partial) shards already on this
+  box; a full 70 GB→141 GB end-to-end run is deferred, documented here as an
+  environment limit rather than attempted and left silently incomplete.
+
 ## In progress
 
 - Reference goldens dump (`tools/goldens/omni_dump_reference.py`) — script
