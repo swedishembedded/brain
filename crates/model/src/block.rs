@@ -179,6 +179,82 @@ pub fn gqa_fwd_kmask(
     ]
 }
 
+/// Kernel-pipeline indices for incremental KV-cache decode attention — the
+/// O(cached length) twin of [`gqa_fwd`]'s O(T²) full recompute. Hoisted from
+/// `qwen::Qwen`'s `decode_steps` (`crates/qwen/src/model.rs`) so a second
+/// model (`omni::thinker`, a 48-layer MoE decoder) reuses the exact same
+/// dispatch sequence instead of re-deriving it — the "one implementation,
+/// migrate existing users" rule this crate exists to enforce.
+#[derive(Clone, Copy)]
+pub struct GqaDecodeIds {
+    pub kv_append: usize,
+    pub attn_decode_scores: usize,
+    pub decode_softmax: usize,
+    pub attn_decode_apply: usize,
+}
+
+/// One incremental decode step of GQA attention: appends the new token's
+/// (already QK-normed + RoPE'd) `k_new`/`v_new` into the persistent per-layer
+/// `kcache`/`vcache` at row `pos`, then attends `q` (the same new token) against
+/// all `pos+1` cached positions — O(cached length), not O(cached length)²,
+/// and implicitly causal (only ever reads cache rows `0..=pos`, never later
+/// ones, since none exist yet).
+///
+/// `q` is `[n_heads*head_dim]`; `k_new`/`v_new` are `[n_kv_heads*head_dim]`
+/// (a SINGLE new token's row, batch-of-one — this is a decode primitive, not
+/// a batched one). `kcache`/`vcache` are the persistent `[cap, n_kv_heads*
+/// head_dim]` per-layer buffers the caller sized upfront for the whole
+/// generation (`cap` = max sequence length, prompt + max_new_tokens);
+/// `scores`/`probs` are `[n_heads, cap]`-strided scratch; `ctx` is
+/// `[n_heads*head_dim]`, this step's attention output (feed straight into the
+/// output projection, exactly like [`gqa_fwd`]'s `ctx`).
+///
+/// A batched prefill can reuse the SAME cache buffers without a per-token
+/// loop: after a normal [`gqa_fwd`] pass over the prompt's `n` positions, bulk
+/// -copy the resulting `k`/`v` (`[n, n_kv_heads*head_dim]`, contiguous, same
+/// per-row layout as the cache) into `kcache`/`vcache` rows `0..n` with one
+/// `kv_append` dispatch each (`width = n*n_kv_heads*head_dim, row = 0` — a
+/// flat prefix copy), then decode steps continue from `pos = n`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_decode_step(
+    g: &Gpu,
+    k: &GqaDecodeIds,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    pos: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    kcache: &DeviceBuffer,
+    vcache: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let group = n_heads / n_kv_heads;
+    let hkv = n_kv_heads * head_dim;
+    let t = pos + 1;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    vec![
+        g.step(k.kv_append, &[k_new, kcache], &[hkv, pos], hkv),
+        g.step(k.kv_append, &[v_new, vcache], &[hkv, pos], hkv),
+        g.step(k.attn_decode_scores, &[q, kcache, scores], &[n_heads, group, head_dim, t, cap, hkv, f(scale)], n_heads * t),
+        g.step(k.decode_softmax, &[scores, probs], &[n_heads, t, cap], n_heads),
+        g.step(k.attn_decode_apply, &[probs, vcache, ctx], &[n_heads, group, head_dim, t, cap, hkv], n_heads * head_dim),
+    ]
+}
+
+/// Bulk-fill a KV cache's rows `0..n` from a batched prefill's contiguous
+/// `k`/`v` output — see [`gqa_decode_step`]'s doc for why one `kv_append`
+/// dispatch suffices (a flat prefix copy, since the cache and the batched
+/// buffer share the same per-row `n_kv_heads*head_dim` stride).
+pub fn kv_cache_fill(g: &Gpu, kv_append: usize, src: &DeviceBuffer, cache: &DeviceBuffer, n: u32, n_kv_heads: u32, head_dim: u32) -> Step {
+    let width = n * n_kv_heads * head_dim;
+    g.step(kv_append, &[src, cache], &[width, 0], width)
+}
+
 /// GQA attention backward: produces `d_scores`, `d_v`, `d_q`, `d_k` from the
 /// context grad `d_ctx` and the cached `q`/`k`/`v`/`probs`.
 pub fn gqa_bwd(
@@ -1087,6 +1163,119 @@ pub fn swiglu_bwd(
         g.step(k.silu_da, &[gate, up, d_h, d_gate], &[total], total),
         g.step(k.silu_db, &[gate, d_h, d_up], &[total], total),
     ]
+}
+
+/// [`gqa_decode_step`], called once per position `0..t`, must reproduce
+/// [`gqa_fwd`]'s causal batched output exactly at every row — `gqa_scores.wgsl`
+/// already masks `j > i` to `-inf` (see its header), so [`gqa_fwd`]'s row `i`
+/// already only attends keys `0..=i`, the same set a decode step at `pos = i`
+/// sees from the cache. This is the `model::block` twin of `qwen::Qwen`'s own
+/// `cache_matches_full_recompute` test, proving the hoisted primitive (not
+/// just qwen's original inline copy) is algebraically exact before a second
+/// model (`omni::thinker`) builds on it.
+#[cfg(test)]
+mod kv_cache_tests {
+    use super::*;
+    use gpu_core::Gpu;
+
+    #[test]
+    fn decode_step_matches_causal_batched_attention_at_every_position() {
+        let (t, n_heads, n_kv_heads, head_dim) = (5u32, 4u32, 2u32, 8u32);
+        let (hq, hkv) = (n_heads * head_dim, n_kv_heads * head_dim);
+
+        let gpu = Gpu::new_cpu(&[
+            ("gqa_scores", kernels::GQA_SCORES),
+            ("attn_softmax", kernels::ATTN_SOFTMAX),
+            ("gqa_apply", kernels::GQA_APPLY),
+            ("kv_append", kernels::KV_APPEND),
+            ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+            ("decode_softmax", kernels::DECODE_SOFTMAX),
+            ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+        ]);
+        let ids = KernelIds {
+            rmsnorm: 0,
+            rms_inv: 0,
+            rmsnorm_dx: 0,
+            rmsnorm_dw: 0,
+            rope: 0,
+            rope_bwd: 0,
+            gqa_scores: 0,
+            gqa_apply: 2,
+            attn_softmax: 1,
+            gqa_dscores: 0,
+            gqa_dv: 0,
+            gqa_dq: 0,
+            gqa_dk: 0,
+            silu_mul: 0,
+            silu_da: 0,
+            silu_db: 0,
+        };
+        let decode_ids = GqaDecodeIds { kv_append: 3, attn_decode_scores: 4, decode_softmax: 5, attn_decode_apply: 6 };
+
+        // Deterministic pseudo-random q/k/v -- fixed formula, no RNG (engine convention).
+        let mk = |n: u32, seed: f32| (0..n).map(|i| ((i as f32 * 0.7 + seed).sin())).collect::<Vec<f32>>();
+        let q_host = mk(t * hq, 0.1);
+        let k_host = mk(t * hkv, 0.2);
+        let v_host = mk(t * hkv, 0.3);
+
+        // Full batched causal attention (the reference).
+        let q = gpu.storage_init("q", &q_host);
+        let k = gpu.storage_init("k", &k_host);
+        let v = gpu.storage_init("v", &v_host);
+        let scores_full = gpu.storage((n_heads * t * t) as u64);
+        let probs_full = gpu.storage((n_heads * t * t) as u64);
+        let ctx_full = gpu.storage((t * hq) as u64);
+        let ga = Gqa { b: 1, t, n_heads, n_kv_heads, head_dim };
+        gpu.submit(&[], &gqa_fwd(&gpu, &ids, &ga, &q, &k, &v, &scores_full, &probs_full, &ctx_full));
+        let want = gpu.read(&ctx_full, (t * hq) as usize);
+
+        // Incremental decode: append one position at a time, compare each
+        // step's ctx row against the batched reference's same row.
+        let cap = t;
+        let kcache = gpu.storage((cap * hkv) as u64);
+        let vcache = gpu.storage((cap * hkv) as u64);
+        let scores = gpu.storage((n_heads * cap) as u64);
+        let probs = gpu.storage((n_heads * cap) as u64);
+        for pos in 0..t {
+            let q_row = gpu.storage_init("q_row", &q_host[(pos * hq) as usize..((pos + 1) * hq) as usize]);
+            let k_row = gpu.storage_init("k_row", &k_host[(pos * hkv) as usize..((pos + 1) * hkv) as usize]);
+            let v_row = gpu.storage_init("v_row", &v_host[(pos * hkv) as usize..((pos + 1) * hkv) as usize]);
+            let ctx = gpu.storage(hq as u64);
+            gpu.submit(
+                &[],
+                &gqa_decode_step(&gpu, &decode_ids, n_heads, n_kv_heads, head_dim, pos, cap, &q_row, &k_row, &v_row, &kcache, &vcache, &scores, &probs, &ctx),
+            );
+            let got = gpu.read(&ctx, hq as usize);
+            let want_row = &want[(pos * hq) as usize..((pos + 1) * hq) as usize];
+            for (i, (g, w)) in got.iter().zip(want_row).enumerate() {
+                assert!((g - w).abs() < 1e-4, "pos {pos} elem {i}: got {g}, want {w}");
+            }
+        }
+    }
+
+    /// [`kv_cache_fill`]'s bulk-copy path (batched prefill -> cache) must land
+    /// the exact same bytes a per-row [`gqa_decode_step`] loop would have
+    /// appended -- proven by filling one cache via the bulk path and a second
+    /// via `kv_append` called once per row, then comparing.
+    #[test]
+    fn bulk_fill_matches_per_row_append() {
+        let (n, n_kv_heads, head_dim) = (4u32, 2u32, 8u32);
+        let hkv = n_kv_heads * head_dim;
+        let gpu = Gpu::new_cpu(&[("kv_append", kernels::KV_APPEND)]);
+        let src_host: Vec<f32> = (0..n * hkv).map(|i| i as f32 * 0.5).collect();
+        let src = gpu.storage_init("src", &src_host);
+
+        let bulk = gpu.storage((n * hkv) as u64);
+        gpu.submit(&[], &[kv_cache_fill(&gpu, 0, &src, &bulk, n, n_kv_heads, head_dim)]);
+
+        let per_row = gpu.storage((n * hkv) as u64);
+        for row in 0..n {
+            let row_buf = gpu.storage_init("row", &src_host[(row * hkv) as usize..((row + 1) * hkv) as usize]);
+            gpu.submit(&[], &[gpu.step(0, &[&row_buf, &per_row], &[hkv, row], hkv)]);
+        }
+
+        assert_eq!(gpu.read(&bulk, (n * hkv) as usize), gpu.read(&per_row, (n * hkv) as usize));
+    }
 }
 
 #[cfg(test)]

@@ -120,7 +120,7 @@ fn matches_the_real_thinker_layer0() {
         .collect();
 
     let w = ThinkerLayerWeights { ln1: &ln1, wq: &wq, wk: &wk, wv: &wv, wo: &wo, q_norm: &q_norm, k_norm: &k_norm, ln2: &ln2, router: &router, experts: &experts };
-    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, &cos, &sin, n);
+    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, &cos, &sin, n, None);
 
     // Attention stage: the post-attention, pre-MoE residual state.
     let got_xmid = gpu.read(&xmid, (n * cfg.hidden) as usize);

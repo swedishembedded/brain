@@ -49,7 +49,7 @@
 //! `qwen::Qwen::write_img_embeds`'s contract.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::block::{gqa_fwd, rmsnorm_fwd, rope2d_fwd, Gqa, KernelIds};
+use model::block::{gqa_decode_step, gqa_fwd, kv_cache_fill, rmsnorm_fwd, rope2d_fwd, Gqa, GqaDecodeIds, KernelIds};
 use model::moe::{expert_fwd, router_fwd, ExpertScratch, MoeIds};
 
 use crate::config::MoeTextConfig;
@@ -73,6 +73,10 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("silu_mul", kernels::SILU_MUL),              // 9
         ("scale_add", kernels::SCALE_ADD),            // 10
         ("splice", kernels::SPLICE),                  // 11 -- for a caller wiring multimodal input; see the module doc.
+        ("kv_append", kernels::KV_APPEND),                   // 12 -- KV-cache decode; see `layer_decode_step`'s doc.
+        ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 13
+        ("decode_softmax", kernels::DECODE_SOFTMAX),         // 14
+        ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),   // 15
     ]
 }
 
@@ -101,12 +105,17 @@ fn moe_ids() -> MoeIds {
     MoeIds { router_gate: 7, linear_gated: 8, silu_mul: 9, scale_add: 10 }
 }
 
+fn decode_ids() -> GqaDecodeIds {
+    GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: 13, decode_softmax: 14, attn_decode_apply: 15 }
+}
+
 const MATMUL: usize = 5;
 const ADD2: usize = 6;
 const ROPE2D: usize = 1;
 /// `model::vlm::splice_fwd`'s kernel index — exposed for a caller assembling
 /// a multimodal embedding sequence before [`decode`]; see the module doc.
 pub const SPLICE: usize = 11;
+const KV_APPEND: usize = 12;
 
 /// One decoder layer's weights, keyed exactly as they arrive from
 /// `omni::import` (`thinker.blocks.{l}.*`, prefix already stripped by the
@@ -126,6 +135,16 @@ pub struct ThinkerLayerWeights<'a> {
     pub experts: &'a [(DeviceBuffer, DeviceBuffer, DeviceBuffer)],
 }
 
+/// A layer's persistent incremental-decode KV cache: `[cap, n_kv_heads*
+/// head_dim]` buffers the caller (`crate::generate`) sizes once for the whole
+/// generation (`cap` = prompt length + max new tokens) and owns across every
+/// call — [`layer_fwd`] only ever WRITES into these (a bulk prefill fill, when
+/// given `Some`), never reads them back; [`layer_decode_step`] does both.
+pub struct ThinkerLayerCache<'a> {
+    pub kcache: &'a DeviceBuffer,
+    pub vcache: &'a DeviceBuffer,
+}
+
 /// Runs one Thinker decoder layer forward: `x [n, d] -> [n, d]` (`out`),
 /// alongside three intermediates a parity test needs to localize a
 /// divergence to a specific stage: the router's raw logits `[n, n_experts]`,
@@ -136,6 +155,14 @@ pub struct ThinkerLayerWeights<'a> {
 /// M-RoPE tables (`qwenvl::mrope::mrope_tables`) — see the module doc for why
 /// there is one RoPE path, not a separate "plain" and "M-RoPE" one.
 ///
+/// `cache`, when `Some`, bulk-fills this layer's persistent KV cache with the
+/// `n` positions' post-RoPE key/value rows (`model::block::kv_cache_fill`) as
+/// a side effect — the prefill half of [`crate::generate`]'s KV-cache decode
+/// loop, letting [`layer_decode_step`] continue attending from `pos = n`
+/// onward without recomputing anything this call already did. Purely
+/// additive: `out`/`router_logits`/`xmid`/`gate` are identical whether `cache`
+/// is `Some` or `None`.
+///
 /// Note for callers comparing `out` against a full-model reference dump:
 /// `out` is this ONE layer's raw output. A real decoder stack's top-level
 /// `model.norm` (applied once, after every layer) is not part of this
@@ -143,9 +170,8 @@ pub struct ThinkerLayerWeights<'a> {
 /// `last_hidden_state`-shaped tensor (see `thinker_layer_parity.rs`'s module
 /// doc for the real bug this distinction caught; [`decode`] applies it).
 #[allow(clippy::too_many_arguments)]
-pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, cache: Option<&ThinkerLayerCache>) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let ids = kernel_ids();
-    let mids = moe_ids();
     let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
     let (hq, hkv) = (nh * hd, nkv * hd);
 
@@ -170,24 +196,46 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
     };
     steps.push(rope2d_fwd(g, ROPE2D, &q, cos, sin, n, nh, hd, hq));
     steps.push(rope2d_fwd(g, ROPE2D, &k, cos, sin, n, nkv, hd, hkv));
+    g.submit(&[], &steps);
+
+    if let Some(c) = cache {
+        g.submit(&[], &[kv_cache_fill(g, KV_APPEND, &k, c.kcache, n, nkv, hd), kv_cache_fill(g, KV_APPEND, &v, c.vcache, n, nkv, hd)]);
+    }
 
     let scores = g.storage((nh * n * n) as u64);
     let probs = g.storage((nh * n * n) as u64);
     let ctx = g.storage((n * hq) as u64);
     let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    steps.extend(gqa_fwd(g, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
+    g.submit(&[], &gqa_fwd(g, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
 
     let proj = g.storage((n * d) as u64);
-    steps.push(g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d));
     let xmid = g.storage((n * d) as u64);
-    steps.push(g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d));
+    g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
+    g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
+
+    let (out, router_logits, gate) = moe_sublayer(g, cfg, w, &xmid, n);
+    (out, router_logits, xmid, gate)
+}
+
+/// The MoE FFN sublayer shared by [`layer_fwd`] (full batched forward) and
+/// [`layer_decode_step`] (single-token KV-cache decode) — the two attention
+/// shapes differ, but the post-attention residual `xmid [n, d] -> out [n, d]`
+/// math is identical either way (router -> top-k renorm gate -> per-expert
+/// SwiGLU -> residual add), so it lives once here instead of twice.
+fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    let ids = kernel_ids();
+    let mids = moe_ids();
+    let d = cfg.hidden;
 
     let xn2 = g.storage((n * d) as u64);
-    steps.push(rmsnorm_fwd(g, &ids, &xmid, w.ln2, &xn2, d, n));
-
     let router_logits = g.storage((n * cfg.n_experts) as u64);
-    steps.push(g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts));
-    g.submit(&[], &steps);
+    g.submit(
+        &[],
+        &[
+            rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
+            g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
+        ],
+    );
 
     // Router gate (top-k + renorm) needs its own submit boundary from the
     // per-expert loop below only in the sense that the gate buffer must be
@@ -212,9 +260,69 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
     }
 
     let out = g.storage((n * d) as u64);
-    g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &out], &[n * d], n * d)]);
+    g.submit(&[], &[g.step(ADD2, &[xmid, &moe_out, &out], &[n * d], n * d)]);
 
-    (out, router_logits, xmid, gate)
+    (out, router_logits, gate)
+}
+
+/// One incremental KV-cache decode step: a SINGLE new token's embedding row
+/// `x [1, d]` through this layer, attending against `cache`'s `pos+1` valid
+/// positions (`model::block::gqa_decode_step`) instead of recomputing full
+/// causal attention over a growing sequence — the O(cached length), not O(T²),
+/// twin of [`layer_fwd`]. `cos`/`sin` are the `[1, head_dim/2]` M-RoPE table
+/// for this ONE token's absolute 3-axis position (`qwenvl::mrope::mrope_tables`
+/// called with a single-element `positions` slice) — `rope2d_fwd`'s table-driven
+/// kernel needs no separate "decode" variant, unlike `qwen::Qwen`'s `ROPE_AT`
+/// (see `docs/models/omni/status.md`'s KV-cache entry for why: Thinker's RoPE
+/// path was already row-driven, so a 1-row table IS the decode case). `cap` is
+/// the cache's allocated capacity (must match what [`layer_fwd`]'s prefill
+/// call and every prior decode step against this same cache used).
+///
+/// Returns this token's new hidden row `[1, d]`. The MoE tail is
+/// [`moe_sublayer`], shared unchanged with [`layer_fwd`].
+#[allow(clippy::too_many_arguments)]
+pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, cache: &ThinkerLayerCache, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, pos: u32, cap: u32) -> DeviceBuffer {
+    let ids = kernel_ids();
+    let dids = decode_ids();
+    let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
+    let (hq, hkv) = (nh * hd, nkv * hd);
+    let n = 1u32;
+
+    let xn1 = g.storage(d as u64);
+    let mut steps = vec![rmsnorm_fwd(g, &ids, x, w.ln1, &xn1, d, n)];
+
+    let q_pre = g.storage(hq as u64);
+    let k_pre = g.storage(hkv as u64);
+    let v = g.storage(hkv as u64);
+    steps.push(g.step(MATMUL, &[&xn1, w.wq, &q_pre], &[n, d, hq], n * hq));
+    steps.push(g.step(MATMUL, &[&xn1, w.wk, &k_pre], &[n, d, hkv], n * hkv));
+    steps.push(g.step(MATMUL, &[&xn1, w.wv, &v], &[n, d, hkv], n * hkv));
+
+    let (q, k) = if cfg.use_qk_norm {
+        let q = g.storage(hq as u64);
+        let k = g.storage(hkv as u64);
+        steps.push(rmsnorm_fwd(g, &ids, &q_pre, w.q_norm, &q, hd, nh));
+        steps.push(rmsnorm_fwd(g, &ids, &k_pre, w.k_norm, &k, hd, nkv));
+        (q, k)
+    } else {
+        (q_pre, k_pre)
+    };
+    steps.push(rope2d_fwd(g, ROPE2D, &q, cos, sin, n, nh, hd, hq));
+    steps.push(rope2d_fwd(g, ROPE2D, &k, cos, sin, n, nkv, hd, hkv));
+    g.submit(&[], &steps);
+
+    let scores = g.storage((nh * cap) as u64);
+    let probs = g.storage((nh * cap) as u64);
+    let ctx = g.storage(hq as u64);
+    g.submit(&[], &gqa_decode_step(g, &dids, nh, nkv, hd, pos, cap, &q, &k, &v, cache.kcache, cache.vcache, &scores, &probs, &ctx));
+
+    let proj = g.storage(d as u64);
+    let xmid = g.storage(d as u64);
+    g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
+    g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
+
+    let (out, ..) = moe_sublayer(g, cfg, w, &xmid, n);
+    out
 }
 
 /// All 48 decoder layers plus the top-level final RMSNorm
@@ -238,7 +346,7 @@ pub struct ThinkerWeights<'a> {
 pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let mut h = x.clone(); // DeviceBuffer is Arc-backed; cheap, aliases the same buffer.
     for layer in w.layers {
-        let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n);
+        let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n, None);
         h = out;
     }
     final_norm(g, cfg, w.final_norm, &h, n)
