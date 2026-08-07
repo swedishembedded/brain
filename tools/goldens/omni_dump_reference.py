@@ -272,6 +272,75 @@ def dump_layer0(cfg):
          top_k=tcfg.num_experts_per_tok, hidden_size=tcfg.hidden_size)
 
 
+# ------------------------------------------------------------------- talker layer0
+def dump_talker_layer0(cfg):
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeTalkerModel
+
+    tcfg = cfg.talker_config.text_config
+    tcfg.num_hidden_layers = 1
+    model = Qwen3OmniMoeTalkerModel(tcfg)
+    sd = load_prefixed("talker.model", layer_filter=lambda i: i == 0)
+    fuse_experts(sd, 0, tcfg.num_experts)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    assert not missing, f"talker layer0 missing: {missing[:8]}"
+    assert not unexpected, f"talker layer0 unexpected: {unexpected[:8]}"
+    model.eval()
+
+    # Fixed, valid codec ids (< vocab_size=3072) -- Qwen3OmniMoeTalkerModel has
+    # no self.embed_tokens (real usage always builds inputs_embeds itself: text
+    # projection + codec_embedding + thinker-hidden splice), so this dumper
+    # embeds via the model's own codec_embedding table and calls with
+    # inputs_embeds, matching how a real caller would never pass input_ids here.
+    codec_ids = [17, 401, 2050, 9, 3071, 88, 512, 6, 1200]
+    ids = torch.tensor([codec_ids], dtype=torch.long)
+    with torch.no_grad():
+        embeds = model.codec_embedding(ids)
+
+    router_out = {}
+
+    def hook(_mod, _inp, out):
+        router_out["logits"], router_out["scores"], router_out["indices"] = (t.detach() for t in out)
+
+    gate = getattr(getattr(model.layers[0], "mlp", None), "gate", None)
+    handle = gate.register_forward_hook(hook) if gate is not None else None
+
+    xmid_out = {}
+
+    def xmid_hook(_mod, inp, _out):
+        xmid_out["xmid"] = inp[0].detach()
+
+    xmid_handle = model.layers[0].post_attention_layernorm.register_forward_hook(xmid_hook)
+
+    # Same "hidden is model.norm(layer0_output), not layer0's own raw output"
+    # distinction as dump_layer0 -- see that function's comment.
+    prenorm_out = {}
+
+    def prenorm_hook(_mod, inp, _out):
+        prenorm_out["prenorm"] = inp[0].detach()
+
+    prenorm_handle = model.norm.register_forward_hook(prenorm_hook)
+    with torch.no_grad():
+        out = model(inputs_embeds=embeds)
+    if handle:
+        handle.remove()
+    xmid_handle.remove()
+    prenorm_handle.remove()
+
+    tensors = {
+        "codec_ids": torch.tensor(codec_ids, dtype=torch.int32),
+        "hidden": out.last_hidden_state.squeeze(0).contiguous(),
+        "xmid": xmid_out["xmid"].squeeze(0).contiguous(),
+        "layer_out": prenorm_out["prenorm"].squeeze(0).contiguous(),
+    }
+    if "logits" in router_out:
+        tensors["router_logits"] = router_out["logits"].contiguous()
+        tensors["router_topk_ids"] = router_out["indices"].to(torch.int32).contiguous()
+        tensors["router_topk_weights"] = router_out["scores"].contiguous()
+    save("talker_layer0", tensors, src="talker.model.layers.0", n_experts=tcfg.num_experts,
+         top_k=tcfg.num_experts_per_tok, hidden_size=tcfg.hidden_size,
+         shared_expert_intermediate_size=tcfg.shared_expert_intermediate_size)
+
+
 # ------------------------------------------------------------------------------ rope
 def dump_rope(cfg):
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
@@ -369,6 +438,7 @@ def dump_code2wav(cfg):
 
 COMPONENTS = {
     "audio": dump_audio, "vision": dump_vision, "layer0": dump_layer0,
+    "talker_layer0": dump_talker_layer0,
     "rope": dump_rope, "talkcp": dump_code_predictor, "code2wav": dump_code2wav,
 }
 

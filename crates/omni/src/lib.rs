@@ -15,4 +15,5 @@
 
 pub mod config;
 pub mod import;
+pub mod talker;
 pub mod thinker;

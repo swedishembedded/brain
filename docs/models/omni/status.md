@@ -475,10 +475,59 @@ multimodal splice are additional, separate pieces on top of either.
   the decoder + M-RoPE + splice *seam*, not a full multimodal generation
   driver.
 
+- **M7a — Talker decoder layer, exact parity, real weights** (2026-08-07).
+  `crates/omni/src/talker.rs`: `layer_fwd`/`decode`, [`crate::thinker`]'s
+  sibling (same reasoning for why it is a new module rather than a
+  `tts::talker`/`qwen::Qwen` conversion — see the module doc), plus the one
+  real architectural difference: an always-active shared expert
+  (`model::moe::shared_expert_fwd`, new — dense SwiGLU with its own
+  intermediate width, sigmoid-gated per token, added to the routed-expert
+  combine via a fresh buffer per `add2.wgsl`'s out-of-place convention).
+  Verified standalone against a host-computed oracle
+  (`crates/model/tests/moe_shared_expert.rs`) before real weights, per the
+  porting playbook. `crates/omni/tests/talker_layer_parity.rs` (real
+  weights, layer 0, 9 codec-id prompt) passes on both `--device vulkan` and
+  `--device cpu` at **cosine 1.000000** on all four stages (xmid, router
+  logits, gate, layer output) — first try, no debugging needed, entirely
+  because M6a/M6b's bugs (wrong RoPE kernel, the `router_gate.wgsl` array
+  bound, the `hidden`-vs-`layer_out` golden distinction) were already fixed
+  in shared code this module reuses unchanged.
+  `crates/omni/tests/talker_decode.rs` mirrors `thinker_decode.rs`'s
+  tiny-config composition smoke test.
+
+  One real bug found and fixed in `crates/omni/src/config.rs` before any of
+  the above: `MoeTextConfig::talker_defaults()` had `use_qk_norm: false`.
+  The real `talker_config.text_config` JSON has no `use_qk_norm` key at all
+  (so this default was silently authoritative), but the reference's
+  `Qwen3OmniMoeTalkerDecoderLayer` reuses `Qwen3OmniMoeThinkerTextAttention`
+  verbatim, whose `q_norm`/`k_norm` are unconditional — no config flag gates
+  them, and the real checkpoint carries `q_norm.weight`/`k_norm.weight` for
+  every Talker layer. Caught by reading the actual attention class before
+  writing `talker.rs`, not by a failing test — worth noting as the payoff of
+  checking a config default against the class that actually consumes it,
+  not just against the JSON key's presence.
+
+  `tools/goldens/omni_dump_reference.py`: added `dump_talker_layer0`
+  (registered as `talker_layer0`), same shape as `dump_layer0` but through
+  `Qwen3OmniMoeTalkerModel` with `inputs_embeds=codec_embedding(ids)` --
+  that model has no `self.embed_tokens` (real usage always assembles
+  `inputs_embeds` itself: text projection + codec embedding + Thinker-hidden
+  splice), so `input_ids=` would hit a missing attribute. `fuse_experts` and
+  the `layer_out`-vs-`hidden` golden distinction are reused unchanged from
+  the Thinker dumper.
+
+  Not yet done (M7b, next): the code predictor (`tts::mtp`, expected
+  near-reuse — dense, 5-layer, already 16 code groups per the plan) wired to
+  real Omni weights and validated; `accept_hidden_layer` (Talker consumes
+  Thinker's hidden state at a given layer, not just its own embeddings);
+  `text_projection`/`hidden_projection`; codec-id sampling
+  (suppressed-token set, repetition penalty, temp, top-k).
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M7 through M17. See the plan file. M6 itself is
+deferred), M5's video path, M7b (code predictor + accept_hidden_layer +
+sampling) through M17. See the plan file. M6 itself is
 now believed complete (decoder + real M-RoPE + composed loop + splice seam,
 all validated); the actual splice call site, a KV-cache/decode loop, and a
 real multimodal generation are M9/M14's job per the design note above, not
