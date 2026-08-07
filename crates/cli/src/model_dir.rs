@@ -397,6 +397,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// gpt was already proven by `discovers_each_file_as_a_distinct_catalog_entry`
+    /// above (its `write_st(..., "gpt")` cases) -- this covers the three
+    /// families that joined `resident_for`'s dispatch table alongside gpt's
+    /// checkpoint-save fix (glm, yolo, depth): each constructs with nothing
+    /// but a path + card (no real weight loading happens until `activate()`),
+    /// so a bare `write_st` is enough to prove discovery end to end, exactly
+    /// like the "unknown family" contrast case above proves the negative.
+    #[test]
+    fn discovers_glm_yolo_and_depth_checkpoints() {
+        let dir = tmp_dir("glm-yolo-depth");
+        write_st(&dir, "glm.safetensors", "toy-glm", "glm");
+        write_st(&dir, "yolo.safetensors", "toy-yolo", "yolo");
+        write_st(&dir, "depth.safetensors", "toy-depth", "depth");
+
+        let residents = discover(&dir);
+        let got = ids(&residents);
+        assert!(got.contains(&"toy-glm".to_string()), "glm missing: {got:?}");
+        assert!(got.contains(&"toy-yolo".to_string()), "yolo missing: {got:?}");
+        assert!(got.contains(&"toy-depth".to_string()), "depth missing: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn lfm_skipped_without_sibling_tokenizer() {
         // No tokenizer.json → the encoder cannot construct → skipped (not fatal).
