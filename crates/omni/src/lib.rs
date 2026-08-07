@@ -13,7 +13,9 @@
 //! `qwen-asr`'s audio encoder shape, `qwenvl`'s vision tower + M-RoPE,
 //! `tts`'s MTP code predictor, and `codec`'s SEANet vocoder.
 
+pub mod caps;
 pub mod config;
+pub mod generate;
 pub mod import;
 pub mod talker;
 pub mod thinker;

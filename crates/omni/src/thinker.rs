@@ -241,8 +241,26 @@ pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer
         let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n);
         h = out;
     }
+    final_norm(g, cfg, w.final_norm, &h, n)
+}
+
+/// The top-level final RMSNorm (`thinker.model.norm.weight`) [`layer_fwd`]
+/// deliberately leaves out — factored out of [`decode`] so a caller that
+/// streams layer weights one at a time instead of holding `[ThinkerLayerWeights]`
+/// resident (`crate::generate`, for a real-weight generation loop too large to
+/// keep GPU-resident all at once) can apply it without re-deriving it.
+pub fn final_norm(g: &Gpu, cfg: &MoeTextConfig, norm_w: &DeviceBuffer, h: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let ids = kernel_ids();
     let normed = g.storage((n * cfg.hidden) as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &ids, &h, w.final_norm, &normed, cfg.hidden, n)]);
+    g.submit(&[], &[rmsnorm_fwd(g, &ids, h, norm_w, &normed, cfg.hidden, n)]);
     normed
+}
+
+/// `hidden [n, d] -> logits [n, vocab]` via `thinker.lm_head.weight`
+/// (`[vocab, d]`, untied from the embedding table —
+/// `MoeTextConfig`'s real source config has `tie_word_embeddings: false`).
+pub fn lm_head_fwd(g: &Gpu, lm_head_w: &DeviceBuffer, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
+    let out = g.storage((n * vocab) as u64);
+    g.submit(&[], &[g.step(MATMUL, &[hidden, lm_head_w, &out], &[n, d, vocab], n * vocab)]);
+    out
 }
