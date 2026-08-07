@@ -124,6 +124,35 @@ targets (--target):
   flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
                                      weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
                                      prec = fp32|int8; batches concurrent same-key requests)
+  gpt:<weights>                      dense char-level GPT via the residency executor (unit: token)
+  glm:<weights>                      GLM-5.2-shaped decoder (MLA + sigmoid MoE) via the residency
+                                     executor (unit: token)
+  yolo:<weights>                     YOLOv8-style detector via the residency executor (unit: frame;
+                                     one synthetic 640x640 image per request)
+  depth:<weights>                    ZipDepth monocular depth via the residency executor (unit: frame;
+                                     one synthetic 384x384 image per request)
+  sam2:<weights-dir>[:tiny|large]    SAM 2.1 promptable segmentation via the residency executor
+                                     (unit: mask; one centred point prompt per request)
+  clip:<text-encoder-dir>:<eva.pt>   EVA-CLIP-L/336 image tower via the residency executor
+                                     (unit: embedding; embed_image only -- no tokenizer needed)
+  facenet:<weights-dir>              SCRFD detect + ArcFace embed via the residency executor
+                                     (unit: embedding; align=true on a synthetic image)
+  tts:<weights-dir>:<hf-ckpt-dir>    Qwen3-TTS speaker-free synthesis via the residency executor
+                                     (unit: audio_chunk; --output caps codec frames)
+  zimage[:<W>x<H>x<steps>]           Z-Image (Tongyi S3-DiT) via the residency executor
+                                     (unit: denoise_step; weights from BRAIN_ZIMAGE_* env;
+                                     default 512x512x4; large -- 13-24 GiB VRAM)
+  upscale:<weights>                  Real-ESRGAN RRDBNet super-resolution via the residency
+                                     executor (unit: image; one 256x256 tile, never batched)
+  restore:<weights>                  CodeFormer blind face restoration via the residency executor
+                                     (unit: image; fixed 512x512 graph)
+  vqgan:<weights>                    CodeFormer's VQ encoder via the residency executor
+                                     (unit: image; fixed 512x512 graph)
+  nemotron:<checkpoint-dir>          FastConformer streaming ASR via the residency executor
+                                     (unit: transcript_token, deliberately not 'token' --
+                                     ASR tokens and LLM tokens are not comparable)
+  qwen-asr:<checkpoint-dir>          Whisper-encoder + Qwen3-decoder offline ASR via the
+                                     residency executor (unit: transcript_token)
 ";
 
 pub fn run_perf(args: &[String]) {
@@ -540,12 +569,62 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("flux2:") {
         return build_flux2(rest);
     }
+    if let Some(rest) = spec.strip_prefix("gpt:") {
+        return build_gpt(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("glm:") {
+        return build_glm(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("yolo:") {
+        return build_yolo(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("depth:") {
+        return build_depth(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("sam2:") {
+        return build_sam2(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("clip:") {
+        return build_clip(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("facenet:") {
+        return build_facenet(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("tts:") {
+        return build_tts(rest);
+    }
+    if spec == "zimage" {
+        return build_zimage("");
+    }
+    if let Some(rest) = spec.strip_prefix("zimage:") {
+        return build_zimage(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("upscale:") {
+        return build_upscale(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("restore:") {
+        return build_restore(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("vqgan:") {
+        return build_vqgan(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("nemotron:") {
+        return build_nemotron(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("qwen-asr:") {
+        return build_qwen_asr(rest);
+    }
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
-         'chronos2:<weights>', 'fincast:<weights>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
+         'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
+         'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
+         'sam2:<weights-dir>[:tiny|large]', 'clip:<text-encoder-dir>:<eva-clip.pt>', \
+         'facenet:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
+         'zimage[:<W>x<H>x<steps>]', 'upscale:<weights>', 'restore:<weights>', \
+         'vqgan:<weights>', 'nemotron:<checkpoint-dir>', or 'qwen-asr:<checkpoint-dir>')"
     ))
 }
 
@@ -913,6 +992,365 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         info,
         build,
         std::sync::Arc::new(|p: &capability::Progress| p.message == "denoising"),
+    )))
+}
+
+/// A deterministic, non-degenerate synthetic RGB image: a diagonal gradient
+/// plus a per-pixel pseudo-random speckle (an LCG seeded from the pixel
+/// index, so it's reproducible without pulling in `data::rng` here). Real
+/// enough that a model's forward pass sees varied, non-constant input
+/// (constant input can hide a broadcast bug or trivially fold in a kernel),
+/// while costing nothing to generate and needing no file on disk — exactly
+/// what "random weights is fine" already licenses for the checkpoint side of
+/// this suite, extended to the input side for the vision targets that have
+/// no natural synthetic-shape target the way `qwen-synth:` does.
+fn synth_image_blob(w: u32, h: u32) -> capability::Blob {
+    let mut hwc = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let mut lcg = (y as u64 * 1_000_003 + x as u64).wrapping_mul(2_654_435_761);
+            for c in 0..3u32 {
+                lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let speckle = ((lcg >> 33) as u32 % 32) as f32 / 255.0;
+                let gradient = ((x + y + c) % (w.max(h).max(1))) as f32 / (w.max(h).max(1) as f32);
+                hwc.push((gradient + speckle).min(1.0));
+            }
+        }
+    }
+    capability::blob::image_blob(&hwc, w, h, 3)
+}
+
+/// A deterministic synthetic mono waveform at 16 kHz: a few summed sine
+/// tones (never pure silence, which some VAD/energy-gated front ends treat
+/// as "nothing to transcribe" and short-circuit, which would measure the
+/// short-circuit path rather than the model). `secs` real-time -> exactly
+/// `secs * 16000` samples.
+fn synth_audio_blob(secs: f32) -> capability::Blob {
+    let n = (secs.max(0.1) * 16_000.0) as usize;
+    let pcm: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f32 / 16_000.0;
+            0.2 * (2.0 * std::f32::consts::PI * 220.0 * t).sin() + 0.1 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+        })
+        .collect();
+    let bytes: Vec<u8> = pcm.iter().flat_map(|f| f.to_le_bytes()).collect();
+    capability::Blob::new(capability::Media::Audio, bytes).with_meta(serde_json::json!({"sample_rate": 16000}))
+}
+
+/// `gpt:<weights>` — the dense char-level GPT baseline behind the residency
+/// executor (unit: token). `--input`/`--output` control prompt length and
+/// generated length, same shape as every LLM target in this file.
+fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("gpt weights not found: {weights}"));
+    }
+    // SAFETY: single-threaded CLI startup, no concurrent env access.
+    unsafe { std::env::set_var("BRAIN_GPT_WEIGHTS", weights) };
+    let resident = crate::resident_llm::GptResident::from_env().ok_or("gpt: BRAIN_GPT_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("word ".repeat(req.input_artifacts)))
+            .set("max_new", serde_json::json!(req.output_artifacts))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/gpt", "generate", "token", info, build)))
+}
+
+/// `glm:<weights>` — the GLM-5.2-shaped decoder (MLA + sigmoid-gated MoE)
+/// behind the residency executor (unit: token).
+fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("glm weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_GLM_WEIGHTS", weights) };
+    let resident = crate::resident_llm::GlmResident::from_env().ok_or("glm: BRAIN_GLM_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("word ".repeat(req.input_artifacts)))
+            .set("max_new", serde_json::json!(req.output_artifacts))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/glm", "generate", "token", info, build)))
+}
+
+/// `yolo:<weights>` — YOLOv8-style detection behind the residency executor
+/// (unit: frame). One 640x640 synthetic image per request, matching the
+/// model's native training resolution.
+fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("yolo weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_YOLO", weights) };
+    let resident = crate::resident::YoloResident::from_env().ok_or("yolo: BRAIN_YOLO did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(640, 640))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/yolo", "detect", "frame", info, build)))
+}
+
+/// `depth:<weights>` — ZipDepth monocular depth behind the residency
+/// executor (unit: frame). The checkpoint's native input (0 = auto-detect,
+/// typically 384) is left at its default rather than forced, so the target
+/// measures what `brain depth` actually serves.
+fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("depth weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_DEPTH_WEIGHTS", weights) };
+    let resident = crate::resident_depth::DepthResident::from_env().ok_or("depth: BRAIN_DEPTH_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build =
+        Box::new(|_req: &perf::target::PerfRequest| capability::Invocation::new().blob("image", synth_image_blob(384, 384)));
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/depth", "depth", "frame", info, build)))
+}
+
+/// `sam2:<weights-dir>[:tiny|large]` — SAM 2.1 promptable segmentation behind
+/// the residency executor (unit: mask). One centred point prompt per
+/// request — a degenerate zero-prompt call is a valid API call but not a
+/// representative one.
+fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (dir, variant) = rest.split_once(':').unwrap_or((rest, "tiny"));
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("sam2 weights dir not found: {dir}"));
+    }
+    sam2::caps::variant_config(variant)?;
+    unsafe { std::env::set_var("BRAIN_SAM2_WEIGHTS", dir) };
+    let resident = crate::resident_sam2::Sam2Resident::from_env().ok_or("sam2: BRAIN_SAM2_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![
+        ("weights".to_string(), serde_json::json!(dir)),
+        ("variant".to_string(), serde_json::json!(variant)),
+        ("engine".to_string(), serde_json::json!("residency-executor")),
+    ];
+    let variant = variant.to_string();
+    let build = Box::new(move |_req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .blob("image", synth_image_blob(1024, 1024))
+            .set("variant", serde_json::json!(variant))
+            .set("points", serde_json::json!("512,512"))
+            .set("labels", serde_json::json!("1"))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, sam2::caps::MODEL, "segment", "mask", info, build)))
+}
+
+/// `clip:<sdxl-text-encoder-dir>:<eva-clip.pt>` — the EVA-CLIP-L/336 image
+/// tower behind the residency executor (unit: embedding). Text towers exist
+/// on the same resident but need a real tokenizer to exercise honestly;
+/// `embed_image` needs only a pixel grid.
+fn build_clip(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (text_encoder_dir, eva_path) =
+        rest.split_once(':').ok_or("clip target needs 'clip:<sdxl-text-encoder-dir>:<eva-clip.pt>'")?;
+    if !std::path::Path::new(eva_path).exists() {
+        return Err(format!("clip EVA-CLIP weights not found: {eva_path}"));
+    }
+    unsafe {
+        std::env::set_var("BRAIN_CLIP_TEXT_ENCODER", text_encoder_dir);
+        std::env::set_var("BRAIN_CLIP_EVA", eva_path);
+    }
+    let resident = crate::resident_clip::ClipResident::from_env().ok_or("clip: BRAIN_CLIP_* did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(eva_path)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(336, 336))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, clip::caps::MODEL, "embed_image", "embedding", info, build)))
+}
+
+/// `facenet:<weights-dir>` — SCRFD detect + ArcFace embed behind the
+/// residency executor (unit: embedding). `align=true` (the default) runs
+/// full detect+align+embed on a whole image, so a generic synthetic image
+/// exercises the real served path — it will not *find* a face, but it
+/// measures the same dispatch sequence a real one takes.
+fn build_facenet(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("facenet weights dir not found: {dir}"));
+    }
+    unsafe { std::env::set_var("BRAIN_FACENET_WEIGHTS", dir) };
+    let resident = crate::resident_facenet::FacenetResident::from_env().ok_or("facenet: BRAIN_FACENET_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(640, 480))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, facenet::caps::MODEL, "embed", "embedding", info, build)))
+}
+
+/// `tts:<weights-dir>:<hf-ckpt-dir>` — Qwen3-TTS speaker-free synthesis
+/// behind the residency executor (unit: audio_chunk, streaming). `--output`
+/// caps generated codec frames via `max_frames`.
+fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (weights_dir, ckpt_dir) = rest.split_once(':').ok_or("tts target needs 'tts:<weights-dir>:<hf-ckpt-dir>'")?;
+    if !std::path::Path::new(weights_dir).exists() {
+        return Err(format!("tts weights dir not found: {weights_dir}"));
+    }
+    unsafe { std::env::set_var("BRAIN_TTS_WEIGHTS", weights_dir) };
+    unsafe { std::env::set_var("BRAIN_TTS_CKPT", ckpt_dir) };
+    let resident = crate::resident_tts::TtsResident::from_env().ok_or("tts: BRAIN_TTS_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = TargetInfo::new("tts", "audio_chunk").with("weights", weights_dir.into()).with("engine", "residency-executor".into());
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .set("text", serde_json::json!("word ".repeat(req.input_artifacts)))
+            .set("max_frames", serde_json::json!(req.output_artifacts))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        tts::caps::MODEL,
+        "speak",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.delta.is_some()),
+    )))
+}
+
+/// `zimage[:<W>x<H>x<steps>]` — Z-Image (Tongyi S3-DiT) text-to-image behind
+/// the residency executor (unit: denoise_step). Mirrors `build_flux2`
+/// exactly; large (13-24 GiB VRAM), so check the memory-safety protocol
+/// (`docs/performance/arc.md` §0) before running on a unified-memory box.
+fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (w, h, steps) = if rest.is_empty() {
+        (512u32, 512u32, 4u32)
+    } else {
+        let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
+        if p.len() != 3 || p.contains(&0) {
+            return Err(format!("bad zimage spec {rest:?}, expected <W>x<H>x<steps> (e.g. 512x512x20)"));
+        }
+        (p[0], p[1], p[2])
+    };
+    for var in ["BRAIN_ZIMAGE_DIT", "BRAIN_ZIMAGE_VAE", "BRAIN_ZIMAGE_QWEN", "BRAIN_ZIMAGE_TOKENIZER"] {
+        if std::env::var(var).map(|v| v.is_empty()).unwrap_or(true) {
+            return Err(format!("zimage target needs {var} set"));
+        }
+    }
+    let resident = crate::resident::ZImageResident::from_env()?;
+    let exec = forecast_executor(resident);
+    let info = TargetInfo::new("zimage", "denoise_step")
+        .with("width", w.into())
+        .with("height", h.into())
+        .with("steps", steps.into())
+        .with("engine", "residency-executor".into());
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("a lighthouse on a rocky coast at sunset"))
+            .set("width", serde_json::json!(w))
+            .set("height", serde_json::json!(h))
+            .set("steps", serde_json::json!(steps))
+            .set("seed", serde_json::json!(req.seed))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        zimage::caps::MODEL,
+        "text2image",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.message == "denoising"),
+    )))
+}
+
+/// `upscale:<weights>` — Real-ESRGAN RRDBNet super-resolution behind the
+/// residency executor (unit: image). No batching (activation-dominated —
+/// `resident_upscale.rs`'s own doc explains why); one 256x256 input tile.
+fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("upscale weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_UPSCALE_WEIGHTS", weights) };
+    let resident = crate::resident_upscale::UpscaleResident::from_env().ok_or("upscale: BRAIN_UPSCALE_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(256, 256))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, upscale::caps::MODEL, "upscale", "image", info, build)))
+}
+
+/// `restore:<weights>` — CodeFormer blind face restoration behind the
+/// residency executor (unit: image). Fixed 512x512 graph.
+fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("restore weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_RESTORE_WEIGHTS", weights) };
+    let resident = crate::resident_restore::RestoreResident::from_env().ok_or("restore: BRAIN_RESTORE_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(512, 512)).set("w", serde_json::json!(0.5))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, restore::caps::MODEL, "restore_face", "image", info, build)))
+}
+
+/// `vqgan:<weights>` — the CodeFormer VQ autoencoder's encode half behind the
+/// residency executor (unit: image). Fixed 512x512 graph (the released
+/// checkpoints' training resolution).
+fn build_vqgan(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("vqgan weights not found: {weights}"));
+    }
+    unsafe { std::env::set_var("BRAIN_VQGAN_WEIGHTS", weights) };
+    let resident = crate::resident_restore::VqganResident::from_env().ok_or("vqgan: BRAIN_VQGAN_WEIGHTS did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(512, 512))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, vqgan::caps::MODEL, "encode", "image", info, build)))
+}
+
+/// `nemotron:<checkpoint-dir>` — FastConformer streaming ASR behind the
+/// residency executor (unit: transcript_token — deliberately NOT "token":
+/// ranking ASR tokens against LLM tokens is exactly the meaningless
+/// cross-unit comparison the report's `artifact_unit` guard exists to
+/// prevent). `--input` controls synthetic audio length in whole seconds.
+fn build_nemotron(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("nemotron checkpoint dir not found: {dir}"));
+    }
+    unsafe { std::env::set_var("BRAIN_NEMOTRON", dir) };
+    let resident = crate::resident_asr::NemotronResident::from_env().ok_or("nemotron: BRAIN_NEMOTRON did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info =
+        TargetInfo::new("nemotron", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("audio", synth_audio_blob(req.input_artifacts.max(1) as f32))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        nemotron::caps::MODEL,
+        "transcribe",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.delta.is_some()),
+    )))
+}
+
+/// `qwen-asr:<checkpoint-dir>` — the Whisper-style-encoder + Qwen3 decoder
+/// offline ASR behind the residency executor (unit: transcript_token, same
+/// reasoning as `build_nemotron`).
+fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("qwen-asr checkpoint dir not found: {dir}"));
+    }
+    unsafe { std::env::set_var("BRAIN_QWEN_ASR", dir) };
+    let resident = crate::resident_asr::QwenAsrResident::from_env().ok_or("qwen-asr: BRAIN_QWEN_ASR did not resolve")?;
+    let exec = forecast_executor(resident);
+    let info =
+        TargetInfo::new("qwen-asr", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("audio", synth_audio_blob(req.input_artifacts.max(1) as f32))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        qwen_asr::caps::MODEL,
+        "transcribe",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.delta.is_some()),
     )))
 }
 
