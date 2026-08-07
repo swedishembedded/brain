@@ -366,11 +366,108 @@ implementation of the same attention math. Real M-RoPE (the
 image/video/audio-divergent case) and the `model::vlm::splice_fwd`
 multimodal splice are additional, separate pieces on top of either.
 
+- **M6a — Thinker decoder layer, exact parity, pure-text path** (2026-08-07).
+  `crates/omni/src/thinker.rs`: `layer_fwd`, path (b) from the design note
+  above — a new, leaner forward built directly from `model::block`'s shared
+  primitives + `model::moe`, not a `qwen::Qwen` modification. Real-weight test
+  `crates/omni/tests/thinker_layer_parity.rs` (layer 0, 9-token pure-text
+  prompt) now passes on both `--device vulkan` and `--device cpu`, checked at
+  every stage: `xmid` (post-attention residual), router logits, the dense
+  post-topk-renorm gate, the routed expert-id SET, and the full layer output —
+  **cosine 1.000000, max_abs ≤ 2e-6 on all four**, plus a fully independent
+  host-side (no GPU kernels) recomputation of one row's MoE combine, used as a
+  third witness during debugging.
+
+  Two real, load-bearing bugs found and fixed on the way to that result — both
+  pre-existing before this milestone, exposed because Thinker is the first
+  brain model with `n_experts` in the 65-128 range:
+
+  1. **`crates/omni/src/thinker.rs`'s own pipeline table wired `rope` to
+     `kernels::ROPE`** (`rope.wgsl` — interleaved adjacent-pair rotation,
+     hardcoded base 10000) **instead of `kernels::ROPE_BASE`**
+     (`rope_base.wgsl` — half-split `rotate_half`, host-supplied `theta`) —
+     the kernel `qwen::Qwen` and this module's own doc comment both rely on
+     for the M-RoPE-collapses-to-plain-RoPE case. A copy-paste-shaped mistake
+     local to this new file, not a pre-existing engine bug. Symptom: `xmid`
+     cosine 0.951 (a small-but-real divergence, not a wipeout — still a valid
+     rotation, just the wrong one).
+  2. **`crates/kernels/wgsl/router_gate.wgsl` and `router_gate_train.wgsl`
+     had a stale fixed-size array**: `MAX_EXPERTS` was bumped 64→128 (per this
+     workstream's own earlier commit) but the shader-local `var prob: array<f32,
+     64>` / `var used: array<bool, 64>` were never bumped to match, so every
+     expert index ≥ 64 wrote out of bounds during the softmax/top-k/renorm
+     loop — silently wrong for the top half of a 128-expert router (WGSL has
+     no bounds-checking panic; out-of-bounds writes just corrupt whatever is
+     adjacent). Fixed to `array<f32, 128>` / `array<bool, 128>` in both files,
+     `make kernels-regen && make kernels-table` run after. This is a
+     pre-existing engine-level bug (not new to M6) that would have silently
+     miscomputed routing for **any** ≥65-expert MoE model using
+     `router_gate.wgsl`/`router_gate_train.wgsl` — Thinker/Talker are the only
+     current callers at that scale, and Talker (M7) was not yet exercised, so
+     this is caught before it could affect a shipped result. `crates/glm` is
+     unaffected (uses the separate `router_gate_sigmoid.wgsl`). No existing
+     unit test caught it because `crates/model/tests/moe_sparse_parity.rs`
+     uses a synthetic `n_experts: 8` shape (well under 64).
+
+  A third apparent divergence (after both fixes, `out` cosine 0.76 against
+  the golden's `hidden` tensor) turned out to be a **test/golden bug, not a
+  code bug**: `Qwen3OmniMoeThinkerTextModel.forward` always applies its
+  top-level `self.norm` (the final decoder-stack RMSNorm) after the layer
+  loop, even truncated to 1 layer for the golden dump — so `last_hidden_state`
+  is `model.norm(layer0_output)`, not layer 0's own raw output that a single
+  `layer_fwd` call actually produces. Fixed by adding a `layer_out` tensor to
+  the `layer0` golden (`tools/goldens/omni_dump_reference.py`, a forward hook
+  on `model.norm`'s input) and comparing against that instead — the right
+  fix, since `layer_fwd` deliberately does not include a stack-level final
+  norm (that belongs to the caller composing all 48 layers, not to one layer).
+
+  Debugging method worth recording for the next milestone: three independent
+  witnesses (GPU kernel path, a from-scratch host-side Rust recomputation
+  using the same mmap'd real weights, and the golden itself) agreeing with
+  each other but not with a fourth (the wrong golden tensor) is what
+  localized this to "wrong comparison target," not "wrong math" — worth
+  reaching for before assuming the newest code is the buggy component.
+
+  Not yet done: 3-axis M-RoPE for genuinely divergent image/video/audio
+  positions, and the `model::vlm::splice_fwd` multimodal splice — this
+  milestone validates the pure-text (and, by the design note's argument,
+  pure-audio) collapse case only. The full 48-layer composed loop and a real
+  "describe this image" generation are also not yet built.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M6 (design investigated above, not yet
-implemented) through M17. See the plan file.
+deferred), M5's video path, M6's real M-RoPE + multimodal splice + full
+48-layer composed loop (M6a above covers one layer, pure-text only), M7
+through M17. See the plan file.
+
+**Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
+stay mmap-backed, streaming one tensor at a time, matching the pattern
+already audited end to end for this model and already established engine-wide
+(`crates/qwen/src/model.rs`'s `from_reader_inference`/`_decode`, `docs
+comment: "peak host ≈ one tensor"`) —
+- **Fetch**: shard-incremental (download one shard → convert+quantize →
+  delete shard), already implemented this way in M3's `import_as` per the
+  disk-capacity finding above; never buffer a whole shard, let alone the
+  whole 70.5 GB checkpoint, in RAM.
+- **Process** (M3, done): `crates/omni/src/import.rs::import_as` reads via
+  `checkpoint::weightio::WeightReader`/`checkpoint::mmap::MmapSafetensors`
+  (real `memmap2::Mmap`, OS page cache, header-only parse on open, one
+  tensor's f32 expansion materialized per `tensor_f32` call — confirmed by
+  reading `crates/checkpoint/src/mmap.rs`) and writes via `StWriter`'s
+  `BufWriter<File>` with `seek`-per-tensor (`crates/checkpoint/src/weightio.rs`)
+  — already the minimum-copy shape; the only unavoidable copy per tensor is
+  the dtype conversion itself (bf16 -> f32, or f32 -> packed int8).
+- **Load** (M9, not started): when `OmniResident` is built, open the ~35 GB
+  int8 checkpoint via `WeightReader::open` (mmap) and upload one tensor at a
+  time to GPU-resident buffers, exactly like `Qwen::from_reader_inference`
+  does today — do not `checkpoint::safetensors::read`/`fs::read` the whole
+  file into a `Vec` first. This is the point where thinker/talker/code2wav
+  weight lifetime (`docs/lessons.md §14`'s per-turn build/drop schedule)
+  intersects the mmap discipline: dropping a resident stage's GPU buffers
+  should not require re-reading its source bytes from disk if the OS page
+  cache still holds them, which is a property mmap gives for free and an
+  explicit `fs::read` does not.
 
 ## Honesty notes
 
@@ -379,3 +476,22 @@ implemented) through M17. See the plan file.
 - No number in this file is a projection; everything above is either read
   directly from the released `config.json`/index, or will be a `brain perf`/
   `gpu_core::profile` measurement once code exists.
+- **M6a was verified with targeted tests, not a full green `make test`**
+  (2026-08-07): the fast lane hung at `crates/gpu-core/tests/roofline.rs`'s
+  `caps_expose_the_roofs_only_after_something_measured_them` (reproduced
+  twice, including in isolation — a genuine hang, not a flake). Root cause:
+  `nvidia-smi --query-compute-apps` showed ~10.7 GB of GPU memory owned by
+  PIDs no longer resolvable in this container, almost certainly orphaned
+  Vulkan contexts from cargo-test processes killed earlier this session (one
+  attempt used an out-of-range Bash-tool `timeout`, SIGTERM'd mid-run) — a
+  wedged queue/fence from leaked GPU state, in a file this milestone never
+  touched, not a regression from M6a's code. What M6a's own change *was*
+  verified against, green on both backends: `cargo test -p brain-model -p
+  brain-omni -p brain-kernels` (incl. `moe_sparse_parity`/`moe_sparse_i8_parity`),
+  `thinker_layer_parity` on both `--device vulkan` and `--device cpu`
+  (cosine 1.000000 on xmid/router_logits/gate/out), and `make clippy` shows
+  zero new warnings in every file this milestone touched (net warning count
+  dropped from +18 over baseline to +9, entirely pre-existing `crates/cli`
+  debt from before this session). Re-run the full `make test` once GPU state
+  clears (a fresh boot, or once whatever process is holding that memory
+  exits) before relying on this as a complete regression check.

@@ -228,12 +228,42 @@ def dump_layer0(cfg):
     gate = getattr(getattr(model.layers[0], "mlp", None), "gate", None)
     if gate is not None:
         handle = gate.register_forward_hook(hook)
+    # DIAGNOSTIC: post_attention_layernorm's INPUT is xmid (post-attention,
+    # pre-MoE residual) -- exactly the stage omni::thinker::layer_fwd's xmid
+    # buffer should match, isolating attention-stage correctness from the
+    # MoE FFN stage.
+    xmid_out = {}
+
+    def xmid_hook(_mod, inp, _out):
+        xmid_out["xmid"] = inp[0].detach()
+
+    xmid_handle = model.layers[0].post_attention_layernorm.register_forward_hook(xmid_hook)
+    # `Qwen3OmniMoeThinkerTextModel.forward` always applies its top-level
+    # `self.norm` (the final decoder-stack RMSNorm) after the layer loop, even
+    # truncated to 1 layer -- `out.last_hidden_state` is therefore
+    # `model.norm(layer0_output)`, NOT layer 0's own raw output. Hook
+    # `model.norm`'s INPUT to get the raw one-layer output that
+    # `omni::thinker::layer_fwd` (a single decoder layer, no final norm)
+    # actually produces, so the comparison is apples-to-apples.
+    prenorm_out = {}
+
+    def prenorm_hook(_mod, inp, _out):
+        prenorm_out["prenorm"] = inp[0].detach()
+
+    prenorm_handle = model.norm.register_forward_hook(prenorm_hook)
     with torch.no_grad():
         out = model(input_ids=ids)
     if handle:
         handle.remove()
+    xmid_handle.remove()
+    prenorm_handle.remove()
 
-    tensors = {"tokens": torch.tensor(tokens, dtype=torch.int32), "hidden": out.last_hidden_state.squeeze(0).contiguous()}
+    tensors = {
+        "tokens": torch.tensor(tokens, dtype=torch.int32),
+        "hidden": out.last_hidden_state.squeeze(0).contiguous(),
+        "xmid": xmid_out["xmid"].squeeze(0).contiguous(),
+        "layer_out": prenorm_out["prenorm"].squeeze(0).contiguous(),
+    }
     if "logits" in router_out:
         tensors["router_logits"] = router_out["logits"].contiguous()
         tensors["router_topk_ids"] = router_out["indices"].to(torch.int32).contiguous()
