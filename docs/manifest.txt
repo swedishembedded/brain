@@ -26,6 +26,8 @@ models/world-models/status.md
 models/chronos2/status.md
 models/fincast/status.md
 models/kronos/status.md
+models/omni/readme.md
+models/omni/status.md
 guides/finetune/datasets.md
 guides/finetune/plan.md
 guides/training.md
