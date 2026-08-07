@@ -20,6 +20,7 @@
 //! All tests skip (pass trivially) when no Vulkan device is present, like
 //! `gpu-core`'s `vulkan_dispatch_storage_and_readback`.
 
+use backend_api::Backend;
 use backend_vulkan::VulkanBackend;
 
 fn backend() -> Option<VulkanBackend> {
@@ -101,5 +102,36 @@ fn transient_uniforms_are_recycled_across_flushes() {
         live <= 16,
         "{live} transient uniforms live after 3 flushed frames of 16 dispatches \
          — transients are not being recycled across flushes"
+    );
+}
+
+/// `storage()`/`storage_init()` used to hardcode `host_visible: false` on
+/// every buffer, regardless of the memory type actually bound — so on a
+/// unified-memory device (an integrated GPU with no separate VRAM, where the
+/// `DEVICE_LOCAL` heap is *also* `HOST_VISIBLE | HOST_COHERENT`) every
+/// `storage_init`/`read` paid a staging-buffer + `run_cmd` (a full
+/// submit+fence) for memory a direct `memcpy` could have reached. This does
+/// not assert the box is unified memory (a discrete-GPU CI runner is a
+/// legitimate `host_visible: false` outcome) — it asserts the two are
+/// consistent: IF this device reports `unified_memory` (via `DeviceCaps`,
+/// queried the same way the rest of the engine does), THEN a
+/// `storage_init` + `read` round trip must cost zero queue submits, matching
+/// `uniform_dynamic`'s existing zero-submit contract.
+#[test]
+fn storage_buffers_skip_staging_on_a_unified_memory_device() {
+    let Some(be) = backend() else { return };
+    if !be.caps().unified_memory {
+        eprintln!("skipping: this device is not unified memory (a real staging path is correct here)");
+        return;
+    }
+    let base = be.queue_submits();
+    let buf = be.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
+    let got = be.read(&buf, 4);
+    assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        be.queue_submits() - base,
+        0,
+        "storage_init + read on a unified-memory device cost a queue submit — \
+         alloc_raw is not deriving host_visible from the memory type actually bound"
     );
 }

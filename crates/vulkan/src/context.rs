@@ -536,13 +536,19 @@ impl VkContext {
     /// Allocate a host-visible+coherent buffer usable as a compute storage
     /// buffer and as a transfer src/dst. `size` is in bytes.
     /// Allocate a buffer with the given usage and memory properties.
-    fn alloc_raw(
-        &self,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        props: vk::MemoryPropertyFlags,
-        host_visible: bool,
-    ) -> Option<VkBuffer> {
+    ///
+    /// `VkBuffer::host_visible` is derived from the memory type actually
+    /// bound, never from caller intent: on a unified-memory device (an
+    /// integrated GPU with no separate VRAM) the `DEVICE_LOCAL` heap `storage()`
+    /// requests is often *also* `HOST_VISIBLE | HOST_COHERENT`, and hardcoding
+    /// `host_visible: false` there (as this used to) meant every upload/
+    /// download/zero on it paid a staging-buffer + `run_cmd` (a full
+    /// submit+fence) for memory a direct `memcpy` could have reached. Requires
+    /// BOTH bits, not just `HOST_VISIBLE` — `with_mapped` never flushes or
+    /// invalidates, so treating a merely-host-visible-but-not-coherent type as
+    /// mappable-without-a-barrier would be a real correctness bug, not just a
+    /// missed optimisation.
+    fn alloc_raw(&self, size: vk::DeviceSize, usage: vk::BufferUsageFlags, props: vk::MemoryPropertyFlags) -> Option<VkBuffer> {
         let size = size.max(4);
         unsafe {
             let info = vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -558,6 +564,8 @@ impl VkContext {
             let alloc = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_type);
             let memory = self.device.allocate_memory(&alloc, None).expect("allocate_memory");
             self.device.bind_buffer_memory(buffer, memory, 0).expect("bind_buffer_memory");
+            let mappable = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+            let host_visible = self.mem_props.memory_types[mem_type as usize].property_flags.contains(mappable);
             Some(VkBuffer { buffer, memory, size, host_visible })
         }
     }
@@ -570,14 +578,9 @@ impl VkContext {
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST
             | extra_usage;
-        self.alloc_raw(size, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL, false)
+        self.alloc_raw(size, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL)
             .or_else(|| {
-                self.alloc_raw(
-                    size,
-                    usage,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                    true,
-                )
+                self.alloc_raw(size, usage, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
             })
             .expect("no suitable memory type for storage buffer")
     }
@@ -594,13 +597,8 @@ impl VkContext {
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST
             | extra_usage;
-        self.alloc_raw(
-            size,
-            usage,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            true,
-        )
-        .expect("no host-visible|coherent memory type (spec guarantees one)")
+        self.alloc_raw(size, usage, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+            .expect("no host-visible|coherent memory type (spec guarantees one)")
     }
 
     /// Map a host-visible buffer and run `f` on its pointer.
@@ -648,7 +646,7 @@ impl VkContext {
             }
             let usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
             let s = self
-                .alloc_raw(need, usage, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, true)
+                .alloc_raw(need, usage, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
                 .expect("staging buffer");
             *guard = Some(s);
         }
