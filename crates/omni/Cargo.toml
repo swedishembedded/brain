@@ -26,4 +26,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-apiserve.workspace = true
 safetensors.workspace = true

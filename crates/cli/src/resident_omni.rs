@@ -84,11 +84,11 @@ struct OmniInstance {
 
 impl Instance for OmniInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = inv.get_str("prompt").ok_or("omni generate: missing required param 'prompt'")?;
+        let prompt = omni::caps::last_user_text(inv);
         if prompt.trim().is_empty() {
-            return Err("omni generate: 'prompt' must be non-empty".to_string());
+            return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
-        let max_new = inv.get_i64("max_new_tokens").unwrap_or(32).clamp(1, 4096) as u32;
+        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         progress(Progress::step(0, max_new, "generating"));
         let (text, new_ids) = self.inner.generate(&prompt, max_new);
         progress(Progress::step(max_new, max_new, text.clone()));

@@ -755,6 +755,64 @@ requirement (full download size, RAM needed to load Thinker in Python,
 reader of the plan file understands why M9's actual diff is much larger
 than "wiring" suggests.
 
+- **M10/M11/M12 — D-Bus, OpenAI, and Anthropic surfaces** (2026-08-07). All
+  three turned out to already be (near-)free once `OmniResident` existed
+  (M9a) — none of the plan's listed sub-items (interface-spec changes,
+  new `/v1/audio/*` endpoints, image content-block handling) were needed for
+  what is actually implemented (one text-only `generate` action); those
+  remain real, separate work for whenever multimodal input/speech output
+  are wired.
+
+  **M10 (D-Bus): zero new code.** `crates/dbus` is fully generic —
+  `Manager::serve` holds one `residency::Executor` handle and dispatches
+  `Run`/`Subscribe` by whatever `(model, action)` string the caller sends,
+  with no per-model code anywhere in the crate (`service.rs`'s only string
+  matching is a generic legacy-alias resolver and a manifest-driven
+  `transcribe_stream`-availability check, neither omni-specific).
+  `resident_omni::OmniResident`'s registration in `build_executor` (M9a)
+  was already sufficient. Verified by running the crate's own generic proof
+  of this property, `crates/dbus/tests/roundtrip.rs`'s
+  `run_roundtrips_a_result_over_an_fd` (a throwaway `RevProvider`/
+  `SlowAction` test model wrapped as a `ResidentModel`, driven over a real
+  D-Bus session with zero D-Bus-crate code referencing it) — still green,
+  confirming the mechanism `OmniResident` also relies on.
+
+  **M11/M12 (OpenAI + Anthropic): needed one real fix, in `crates/omni`, not
+  in either HTTP crate.** `apiserve::catalog::api_caps` (the function both
+  `/v1/models` listing and `/v1/chat/completions`/`/v1/messages` exposure
+  gate on) classifies a model as chat-capable only when an action is
+  `.streaming()`, has a `prompt`/`messages`/`text` param, and outputs
+  `Media::Text` — and both handlers always populate `messages` (a flattened
+  JSON-array string), never a bare `prompt`. `crates/omni/src/caps.rs`'s
+  `generate_spec()` originally declared neither: not `.streaming()`, and
+  only a `prompt` param. Fixed to mirror `crate::resident_mock::MockResident
+  ::generate_spec()`'s proven shape exactly — `.streaming()` + `messages`/
+  `prompt`/`system`/`max_new`/`temp`/`top_p`/`top_k`/`seed`/`stop`/`tools`/
+  `tool_choice`/`enable_thinking` params (temp/top_p/top_k/seed/stop/tools
+  accepted but not yet applied — greedy generation is deterministic and
+  ignores sampling knobs; the field-level doc comments on each param say so
+  explicitly, not silently). Added `last_user_text` (identical extraction
+  logic to `resident_mock`'s own, kept in sync deliberately) to pull the
+  last user turn out of `messages`, falling back to `prompt`. Both
+  `omni::caps::GenerateAction::run` and `cli::resident_omni::OmniInstance::run`
+  now call it instead of requiring a bare `prompt`.
+
+  New `crates/omni/tests/caps_conformance.rs` (no real weights needed —
+  pure manifest/spec construction) proves this against the REAL
+  `apiserve::catalog::api_caps` function (added `brain-apiserve` as an omni
+  dev-dependency for exactly this — no risk of the test's own logic
+  silently drifting from the real gate, which a hand-rolled re-check would
+  risk): `omni_manifest_is_chat_exposed` asserts `api_caps(&omni::caps::
+  manifest()).chat == true`, plus `last_user_text` extraction tests and a
+  param-completeness check. All green.
+
+  Genuinely still open for a full M11/M12 per the plan's original text
+  (unrelated to what M9a built, since Omni has no multimodal input/speech
+  output yet either way): the pre-existing `content_text` bug that silently
+  drops `image_url`/`input_audio` content parts in both `openai.rs` and
+  `anthropic.rs`, and the `/v1/audio/speech`/`/v1/audio/transcriptions`
+  endpoints. Neither blocks today's text-only `generate`.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
@@ -762,14 +820,18 @@ deferred), M5's video path, M8's `chunked_decode` streaming path, M9's
 KV-cache/int8/GPU-sharded production residency, `converse`/`transcribe`/
 `speak` actions (need Talker+MTP+Code2Wav chained with `accept_hidden_layer`
 + codec sampling), `qwenvl` registration (deferred above, its own generation
-loop), M10 through M17. See the plan file. M6, M7, M8, and M9a are now
-believed complete (Thinker/Talker decoders, real M-RoPE, composed loops,
-splice seam, code predictor, Code2Wav vocoder, Thinker text generation — all
-validated against real weights, single-shot/streaming forward only, no
-KV-cache). The two loader-side checkpoint-naming gaps (code predictor,
-code2wav — documented in M7b/M8 above) remain open; they do not block
-Thinker-only generation (`OmniResident` reads straight from the HF
-directory, not the unified checkpoint those gaps affect).
+loop), the pre-existing multimodal-content-part-drop bug in
+`openai.rs`/`anthropic.rs` and the `/v1/audio/*` endpoints (M11/M12's
+original scope, orthogonal to what's implemented), M13 through M17. See the
+plan file. M6 through M12 are now believed complete for what is actually
+implemented (Thinker/Talker decoders, real M-RoPE, composed loops, splice
+seam, code predictor, Code2Wav vocoder, Thinker text generation exposed over
+D-Bus/OpenAI/Anthropic — all validated against real weights or the real
+classification logic, single-shot/streaming forward only, no KV-cache). The
+two loader-side checkpoint-naming gaps (code predictor, code2wav —
+documented in M7b/M8 above) remain open; they do not block Thinker-only
+generation (`OmniResident` reads straight from the HF directory, not the
+unified checkpoint those gaps affect).
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern

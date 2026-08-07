@@ -17,16 +17,29 @@
 //! residency (`crate::generate`'s own module doc has the full reasoning) —
 //! every layer's weights are streamed fresh from the checkpoint via
 //! `checkpoint::weightio::WeightReader`, per generated token. Correct, slow.
+//!
+//! **`generate_spec()`'s shape matches `crate::resident_mock::MockResident`'s
+//! `generate` exactly** (`.streaming()` + `messages`/`prompt` + every param
+//! the OpenAI/Anthropic/OpenRouter chat handlers set), not by convention but
+//! by requirement: `apiserve::catalog::api_caps` classifies a model as
+//! chat-capable only when its `generate` action is `streaming` with a
+//! `messages`/`prompt`/`text` param and a `Media::Text` output (M10's
+//! investigation found this — D-Bus dispatches by whatever `(model, action)`
+//! the caller names, generically, but `/v1/chat/completions`/`/v1/messages`
+//! hardcode the action name `"generate"` AND gate exposure on this shape),
+//! and both handlers always populate `messages` (a JSON-array string), never
+//! a bare `prompt` — so a spec that only declared `prompt` would validate
+//! but never actually receive the flattened conversation.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::config::MoeTextConfig;
 use crate::generate::generate_greedy;
@@ -35,11 +48,23 @@ use crate::thinker::thinker_pipelines;
 /// Model name in the manifest.
 pub const MODEL: &str = "brain/omni";
 
-/// The `generate` action schema.
+/// The `generate` action schema — see this module's doc for why it mirrors
+/// `MockResident::generate_spec()`'s param list exactly.
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new("generate", "Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)")
-        .param(ParamSpec::new("prompt", ParamType::Str, "the text prompt (encoded with the real BPE tokenizer; no chat template applied)").required())
-        .param(ParamSpec::new("max_new_tokens", ParamType::Int, "max tokens to generate").default(json!(32)))
+        .streaming()
+        .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
+        .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages; no chat template applied)"))
+        .param(ParamSpec::new("system", ParamType::Str, "system prompt (accepted; folded into the flattened prompt only via messages)"))
+        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(32)))
+        .param(ParamSpec::new("temp", ParamType::Float, "accepted; greedy (argmax) generation ignores it -- see this module's doc"))
+        .param(ParamSpec::new("top_p", ParamType::Float, "accepted; greedy generation ignores it"))
+        .param(ParamSpec::new("top_k", ParamType::Int, "accepted; greedy generation ignores it"))
+        .param(ParamSpec::new("seed", ParamType::Int, "accepted; greedy generation is deterministic already"))
+        .param(ParamSpec::new("stop", ParamType::Str, "accepted; not yet applied (JSON array string)"))
+        .param(ParamSpec::new("tools", ParamType::Str, "accepted, not implemented"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "accepted, ignored"))
+        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
@@ -50,6 +75,31 @@ pub fn manifest() -> Manifest {
         "Qwen3-Omni-30B-A3B Thinker -- text generation only (validation-tier: no KV-cache, no int8/GPU-sharded residency; multimodal input and speech output are not wired into a generation loop yet -- see docs/models/omni/status.md's M9 entry).",
         vec![generate_spec()],
     )
+}
+
+/// The last user turn from a flattened `messages` JSON array
+/// (`[{"role":...,"content":...}, ...]`), or `prompt` if `messages` is
+/// absent/unparseable — identical extraction to `crate::resident_mock`'s
+/// `last_user_text` (kept in sync deliberately: both exist because
+/// OpenAI/Anthropic always send `messages`, never a bare `prompt`, so this
+/// is the ONLY path real HTTP traffic exercises; `prompt` is a convenience
+/// for D-Bus/direct callers).
+pub fn last_user_text(inv: &Invocation) -> String {
+    if let Some(s) = inv.get_str("messages") {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {
+            for m in arr.iter().rev() {
+                if m.get("role").and_then(|v| v.as_str()) == Some("user") {
+                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
+                        return c.to_string();
+                    }
+                }
+            }
+            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    inv.get_str("prompt").unwrap_or_default()
 }
 
 /// A loaded Thinker, ready to generate — real weights streamed on demand
@@ -111,7 +161,8 @@ impl Provider for OmniProvider {
 impl OmniInner {
     /// The shared generate path (also used by the resident adapter,
     /// `crate::resident_omni` — matches `qwen_asr::caps::QwenAsrInner::transcribe`'s
-    /// shared-between-Provider-and-resident shape).
+    /// shared-between-Provider-and-resident shape). `prompt` is already
+    /// resolved (via [`last_user_text`]) by the caller.
     pub fn generate(&self, prompt: &str, max_new: u32) -> (String, Vec<u32>) {
         let prompt_ids = self.tok.encode(prompt);
         let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
@@ -129,9 +180,12 @@ impl Action for GenerateAction {
     fn spec(&self) -> ActionSpec {
         generate_spec()
     }
-    fn run(&self, inv: &capability::Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = inv.get_str("prompt").ok_or("omni generate: missing 'prompt'")?;
-        let max_new = inv.get_i64("max_new_tokens").unwrap_or(32).clamp(1, 4096) as u32;
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let prompt = last_user_text(inv);
+        if prompt.trim().is_empty() {
+            return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         progress(Progress::step(0, max_new, "generating"));
         let (text, new_ids) = self.inner.generate(&prompt, max_new);
         progress(Progress::step(max_new, max_new, text.clone()));
