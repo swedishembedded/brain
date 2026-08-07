@@ -17,5 +17,6 @@ pub mod caps;
 pub mod config;
 pub mod generate;
 pub mod import;
+pub mod mm;
 pub mod talker;
 pub mod thinker;

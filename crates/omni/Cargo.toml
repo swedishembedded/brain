@@ -17,6 +17,7 @@ brain-tts.workspace = true
 brain-codec.workspace = true
 brain-audio.workspace = true
 brain-model.workspace = true
+brain-imaging.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true

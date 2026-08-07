@@ -1126,6 +1126,7 @@ dependencies = [
  "brain-codec",
  "brain-data",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-qwen",

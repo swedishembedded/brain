@@ -71,36 +71,74 @@ pub fn mrope_tables(positions: &[[u32; 3]], mrope_section: [u32; 3], head_dim: u
 /// This is what lets 2-D image layout survive into the 1-D decoder stream.
 /// (Video timestamp handling is deferred — images use `t = 1`; the temporal axis
 /// simply counts frames from the anchor.)
+///
+/// A thin single-placeholder-type wrapper over [`get_rope_index_multi`] — see
+/// that function's doc for the generalization (multiple placeholder token
+/// types, e.g. Qwen3-Omni's image/audio/video, in one scan).
 pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u32)]) -> Vec<[u32; 3]> {
+    get_rope_index_multi(tokens, &[(image_token_id, grids)])
+}
+
+/// [`get_rope_index`] generalized to MULTIPLE placeholder token types in one
+/// scan — Qwen3-Omni's Thinker has three (image, audio, video); a "text" run
+/// is any token that isn't one of them. `placeholders` lists `(token_id,
+/// grids)` pairs; a token stream may freely interleave runs of different
+/// placeholder types, each consuming its own `grids` list (in order of
+/// appearance) exactly as the single-type version does for images.
+///
+/// An audio run's "grid" has no real 2-D spatial extent — model it as
+/// `(n_audio, 1, 1)`: the meshgrid loop already degenerates to advancing only
+/// the T axis (one step per audio embedding row) with H/W pinned at the
+/// anchor when `h = w = 1`. A video run is `(n_frames, h, w)` — the SAME
+/// meshgrid math images use, just with `t > 1` (one real frame per T step,
+/// each frame's own merged patch grid on H/W). This is a documented
+/// approximation of HF's exact reference (which additionally scales audio's T
+/// axis by wall-clock seconds via `position_id_per_seconds`), not a byte-exact
+/// port — see `crate::generate`'s module doc / `docs/models/omni/status.md`'s
+/// multimodal entry.
+///
+/// The post-run anchor advance is `max(t, h, w)` (not `max(h, w)` — the
+/// single-type version's original formula, which only ever saw `t = 1`
+/// images and so never needed to consider it): the running position must
+/// clear whichever axis actually grew, and for audio/video that is `t`, not
+/// `h`/`w`. Identical to the old formula whenever `t = 1`, so every existing
+/// image-only caller is unaffected.
+pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[(u32, &[(u32, u32, u32)])]) -> Vec<[u32; 3]> {
     let mut pos = Vec::with_capacity(tokens.len());
     let mut cp = 0u32; // running anchor ("current_pos")
-    let mut gi = 0usize;
+    let mut gi = vec![0usize; placeholders.len()];
+    let placeholder_index = |tok: u32| placeholders.iter().position(|&(id, _)| id == tok);
     let mut i = 0usize;
     while i < tokens.len() {
-        if tokens[i] != image_token_id {
-            let start = i;
-            while i < tokens.len() && tokens[i] != image_token_id {
-                i += 1;
+        match placeholder_index(tokens[i]) {
+            None => {
+                let start = i;
+                while i < tokens.len() && placeholder_index(tokens[i]).is_none() {
+                    i += 1;
+                }
+                for k in 0..(i - start) as u32 {
+                    pos.push([cp + k, cp + k, cp + k]);
+                }
+                cp += (i - start) as u32;
             }
-            for k in 0..(i - start) as u32 {
-                pos.push([cp + k, cp + k, cp + k]);
-            }
-            cp += (i - start) as u32;
-        } else {
-            // One contiguous image run may cover several images back-to-back.
-            while i < tokens.len() && tokens[i] == image_token_id {
-                let (t, h, w) = grids[gi];
-                gi += 1;
-                let st = cp;
-                for ti in 0..t {
-                    for hi in 0..h {
-                        for wi in 0..w {
-                            pos.push([st + ti, st + hi, st + wi]);
+            Some(pi) => {
+                let tok_id = tokens[i];
+                // One contiguous run may cover several media items of the SAME
+                // placeholder type back-to-back (mirrors the single-type version).
+                while i < tokens.len() && tokens[i] == tok_id {
+                    let (t, h, w) = placeholders[pi].1[gi[pi]];
+                    gi[pi] += 1;
+                    let st = cp;
+                    for ti in 0..t {
+                        for hi in 0..h {
+                            for wi in 0..w {
+                                pos.push([st + ti, st + hi, st + wi]);
+                            }
                         }
                     }
+                    i += (t * h * w) as usize;
+                    cp = st + t.max(h).max(w); // advance past whichever axis actually grew
                 }
-                i += (t * h * w) as usize;
-                cp = st + h.max(w); // advance past the spatial extent
             }
         }
     }
@@ -198,5 +236,70 @@ mod tests {
         // img0 at cp=0: [0,0,0],[0,0,1]; advance cp += max(1,2)=2.
         // img1 at cp=2: [2,2,2],[2,2,3].
         assert_eq!(pos, vec![[0, 0, 0], [0, 0, 1], [2, 2, 2], [2, 2, 3]]);
+    }
+
+    #[test]
+    fn multi_text_audio_text_advances_by_audio_duration() {
+        // 1 text, then a 3-frame audio run (grid (3,1,1): T advances, H/W pinned),
+        // then 1 text. Audio's post-run advance is max(3,1,1)=3, NOT max(1,1)=1 --
+        // the bug the single-type formula (`h.max(w)`) would have hit.
+        const AUDIO: u32 = 500;
+        let tokens = [7, AUDIO, AUDIO, AUDIO, 7];
+        let pos = get_rope_index_multi(&tokens, &[(AUDIO, &[(3, 1, 1)])]);
+        assert_eq!(
+            pos,
+            vec![
+                [0, 0, 0],
+                // audio anchored at cp=1: T advances 1..4, H/W pinned at 1.
+                [1, 1, 1],
+                [2, 1, 1],
+                [3, 1, 1],
+                // next text starts past the full audio duration: cp = 1 + max(3,1,1) = 4
+                [4, 4, 4],
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_image_and_audio_interleave_independently() {
+        // A 1x1x2 image run then a 2-frame audio run, each consuming its OWN
+        // grids list in order -- proves per-placeholder-type `gi` bookkeeping
+        // doesn't cross-contaminate.
+        const IMG: u32 = 999;
+        const AUDIO: u32 = 500;
+        let tokens = [IMG, IMG, AUDIO, AUDIO];
+        let pos = get_rope_index_multi(&tokens, &[(IMG, &[(1, 1, 2)]), (AUDIO, &[(2, 1, 1)])]);
+        assert_eq!(
+            pos,
+            vec![
+                // image at cp=0: [0,0,0],[0,0,1]; advance cp += max(1,1,2)=2.
+                [0, 0, 0],
+                [0, 0, 1],
+                // audio at cp=2: T advances 2..4, H/W pinned at 2.
+                [2, 2, 2],
+                [3, 2, 2],
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_video_run_is_a_t_h_w_meshgrid_like_a_multiframe_image() {
+        // A 2-frame video, each frame a 1x1 merged patch grid: grid (2,1,1) --
+        // same shape as the audio case, proving video needs no separate code
+        // path (it's the existing meshgrid with t>1, matching real frames).
+        const VIDEO: u32 = 600;
+        let tokens = [VIDEO, VIDEO];
+        let pos = get_rope_index_multi(&tokens, &[(VIDEO, &[(2, 1, 1)])]);
+        assert_eq!(pos, vec![[0, 0, 0], [1, 0, 0]]);
+    }
+
+    #[test]
+    fn multi_single_type_matches_get_rope_index_exactly() {
+        // get_rope_index must still be a pure wrapper: identical output to
+        // calling get_rope_index_multi with a one-entry placeholders list.
+        const IMG: u32 = 999;
+        let tokens = [7, 7, IMG, IMG, IMG, IMG, 7];
+        let grids = [(1u32, 2u32, 2u32)];
+        assert_eq!(get_rope_index(&tokens, IMG, &grids), get_rope_index_multi(&tokens, &[(IMG, &grids)]));
     }
 }
