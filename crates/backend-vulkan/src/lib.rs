@@ -115,6 +115,10 @@ struct VkPipelineSet {
     ctx: Arc<VkContext>,
     pipelines: Vec<KernelPipeline>,
     wgsizes: Vec<u32>,
+    /// Kernel names, parallel to `pipelines`/`wgsizes` — carried alongside the
+    /// compiled pipelines so a `share()`'d handle (which has no `kernels` list
+    /// of its own) can still report per-kernel names via `kernel_times()`.
+    names: Vec<String>,
 }
 
 impl Drop for VkPipelineSet {
@@ -141,6 +145,36 @@ struct OpCounters {
     readbacks: AtomicU64,
     bind_groups: AtomicU64,
     uniform_allocs: AtomicU64,
+}
+
+/// The largest batch this backend can timestamp in one flush. Timestamps
+/// bracket every dispatch (`n+1` marks), so this is the query-pool size.
+/// A flush with more steps than this simply skips timing for that batch
+/// (`kernel_times` stays honest about what it did and did not see) rather
+/// than crashing or silently truncating — real model forwards are dozens to
+/// low hundreds of dispatches, far under this.
+const MAX_TIMED_DISPATCHES: usize = 8192;
+
+/// Per-kernel-kind device timing, mirroring `backend-wgpu`'s `GpuProfile`
+/// shape so `gpu_core::profile` gets the same `(name, ms, calls)` contract
+/// from either backend. `None`/`false` everywhere when this device's
+/// compute queue cannot write timestamps at all (`timestamp_valid_bits ==
+/// 0`) — never a substituted host time.
+struct VkProfile {
+    enabled: std::sync::atomic::AtomicBool,
+    /// Per pipeline index: (accumulated ms, calls).
+    acc: Mutex<Vec<(f64, u64)>>,
+    pool: Mutex<Option<vk::QueryPool>>,
+}
+
+impl VkProfile {
+    fn new(n_kernels: usize) -> VkProfile {
+        VkProfile {
+            enabled: std::sync::atomic::AtomicBool::new(std::env::var("BRAIN_PROFILE").is_ok()),
+            acc: Mutex::new(vec![(0.0, 0); n_kernels]),
+            pool: Mutex::new(None),
+        }
+    }
 }
 
 pub struct VulkanBackend {
@@ -195,6 +229,13 @@ pub struct VulkanBackend {
     /// `update_descriptor_sets` is legal; the flush's fence wait is what makes
     /// them idle.
     free_sets: Mutex<std::collections::HashMap<usize, Vec<vk::DescriptorSet>>>,
+    /// Per-kernel-kind device timestamp timing (`BRAIN_PROFILE`). See
+    /// `VkProfile`'s doc — degrades to "unavailable" on a device/queue that
+    /// cannot write timestamps, never substitutes host time.
+    profile: VkProfile,
+    /// Kernel names, parallel to `pipelines`/`wgsizes` — `kernel_times()`
+    /// reports by name, matching the wgpu backend's contract.
+    names: Vec<String>,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
@@ -413,7 +454,8 @@ impl VulkanBackend {
             }
         }
         let wgsizes = backend_api::workgroup_sizes(kernels);
-        Ok(VkPipelineSet { ctx, pipelines, wgsizes })
+        let names = kernels.iter().map(|(n, _)| n.to_string()).collect();
+        Ok(VkPipelineSet { ctx, pipelines, wgsizes, names })
     }
 
     /// Build a `VulkanBackend` handle around an existing `ctx`/`pipelines` —
@@ -428,6 +470,8 @@ impl VulkanBackend {
         max_storage_binding: u64,
     ) -> Result<VulkanBackend, String> {
         let pool = unsafe { new_pool(&ctx.device)? };
+        let profile = VkProfile::new(pipelines.pipelines.len());
+        let names = pipelines.names.clone();
         Ok(VulkanBackend {
             ctx,
             caps,
@@ -440,6 +484,8 @@ impl VulkanBackend {
             inflight_uniforms: Mutex::new(Vec::new()),
             free_uniforms: Mutex::new(std::collections::HashMap::new()),
             free_sets: Mutex::new(std::collections::HashMap::new()),
+            profile,
+            names,
         })
     }
 
@@ -762,21 +808,48 @@ impl VulkanBackend {
         let no_serial = std::env::var("BRAIN_VK_NO_SERIAL").is_ok();
         let vendor_needs_serial = self.ctx.vendor_id == VENDOR_INTEL;
         if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.sliced))) {
+            let time_this = self.timing_active();
             unsafe {
                 for s in &steps {
                     let (cmd, guard) = self.begin_cmd();
+                    let qp = time_this.then(|| self.timestamp_pool());
+                    if let Some(qp) = qp {
+                        dev.cmd_reset_query_pool(cmd, qp, 0, 2);
+                        dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
+                    }
                     let kp = &self.pipelines.pipelines[s.kind];
                     dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
                     dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
                     dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
+                    if let Some(qp) = qp {
+                        dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, 1);
+                    }
                     self.end_and_wait(cmd, guard);
+                    // Each dispatch here already pays its own submit+fence, so
+                    // timing it individually (unlike the batched branch below)
+                    // costs nothing extra and distorts nothing — the isolation
+                    // this branch exists for is already the unit being timed.
+                    if let Some(qp) = qp {
+                        let ts = self.read_timestamps(qp, 2);
+                        self.record_timing(&[s.kind], &ts);
+                    }
                 }
             }
             self.recycle_transients(&steps);
             return;
         }
+        // Only time a batch this backend can actually bracket in one query
+        // pool — an oversized batch silently skips timing rather than
+        // truncating or panicking (`kernel_times` stays honest: it reports
+        // what it measured, not a guess for what it didn't).
+        let time_this_batch = self.timing_active() && steps.len() + 1 <= MAX_TIMED_DISPATCHES;
+        let query_pool = time_this_batch.then(|| unsafe { self.timestamp_pool() });
         unsafe {
             let (cmd, guard) = self.begin_cmd();
+            if let Some(qp) = query_pool {
+                dev.cmd_reset_query_pool(cmd, qp, 0, (steps.len() + 1) as u32);
+                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
+            }
             // Conservative full memory barrier between dependent dispatches: every
             // prior shader write is made available/visible to subsequent shader
             // reads/writes. (A finer per-buffer barrier is a later optimisation.)
@@ -806,8 +879,16 @@ impl VulkanBackend {
                     &[],
                 );
                 dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
+                if let Some(qp) = query_pool {
+                    dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
+                }
             }
             self.end_and_wait(cmd, guard);
+        }
+        if let Some(qp) = query_pool {
+            let ts = unsafe { self.read_timestamps(qp, (steps.len() + 1) as u32) };
+            let kinds: Vec<usize> = steps.iter().map(|s| s.kind).collect();
+            self.record_timing(&kinds, &ts);
         }
         self.recycle_transients(&steps);
     }
@@ -828,6 +909,53 @@ impl VulkanBackend {
             if s.transient && seen.insert(s.set) {
                 free.entry(s.kind).or_default().push(s.set);
             }
+        }
+    }
+
+    /// Whether this flush should record per-dispatch timestamps: profiling is
+    /// on AND this queue family can actually write them.
+    fn timing_active(&self) -> bool {
+        self.profile.enabled.load(std::sync::atomic::Ordering::Relaxed) && self.ctx.timestamp_valid_bits != 0
+    }
+
+    /// The reusable timestamp query pool, created on first use, sized for
+    /// `MAX_TIMED_DISPATCHES + 1` marks (enough to bracket the largest batch
+    /// this backend will time).
+    unsafe fn timestamp_pool(&self) -> vk::QueryPool {
+        let mut slot = self.profile.pool.lock().unwrap();
+        if let Some(p) = *slot {
+            return p;
+        }
+        let info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count((MAX_TIMED_DISPATCHES + 1) as u32);
+        let pool = self.ctx.device.create_query_pool(&info, None).expect("create_query_pool");
+        *slot = Some(pool);
+        pool
+    }
+
+    /// Block for and read back `count` timestamps. Only called after
+    /// `end_and_wait` has already fence-waited the command buffer that wrote
+    /// them, so `WAIT` here is a formality, not an extra stall.
+    unsafe fn read_timestamps(&self, pool: vk::QueryPool, count: u32) -> Vec<u64> {
+        let mut buf = vec![0u64; count as usize];
+        self.ctx
+            .device
+            .get_query_pool_results(pool, 0, &mut buf, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT)
+            .expect("get_query_pool_results");
+        buf
+    }
+
+    /// Fold `n+1` bracketing timestamps for `n` dispatches (`kinds[i]` ran
+    /// between `ts[i]` and `ts[i+1]`) into the per-kernel-kind accumulator.
+    fn record_timing(&self, kinds: &[usize], ts: &[u64]) {
+        let period_ns = self.ctx.timestamp_period_ns;
+        let mut acc = self.profile.acc.lock().unwrap();
+        for (i, &kind) in kinds.iter().enumerate() {
+            let dt_ns = ts[i + 1].saturating_sub(ts[i]) as f64 * period_ns;
+            let entry = &mut acc[kind];
+            entry.0 += dt_ns / 1e6;
+            entry.1 += 1;
         }
     }
 
@@ -904,6 +1032,9 @@ impl Drop for VulkanBackend {
             // `Arc<VkPipelineSet>`, possibly shared with a `share()` sibling
             // still alive. `VkPipelineSet::drop` destroys them exactly once,
             // when the last handle referencing this kernel set drops.
+            if let Some(qp) = self.profile.pool.lock().unwrap().take() {
+                dev.destroy_query_pool(qp, None);
+            }
         }
         // Model storage buffers (host-visible) are reclaimed by the OS on process
         // exit; a one-shot CLI never frees them mid-run.
@@ -1015,6 +1146,54 @@ impl Backend for VulkanBackend {
             bind_groups: self.stats.bind_groups.load(Ordering::Relaxed),
             uniform_allocs: self.stats.uniform_allocs.load(Ordering::Relaxed),
         })
+    }
+
+    /// Per-kernel-kind device timing via `vkCmdWriteTimestamp`, mirroring
+    /// `backend-wgpu`'s contract. Returns `false` (timing NOT enabled) when
+    /// this device's compute queue cannot write timestamps at all — the
+    /// caller then knows to expect `kernel_times() == None`, never a
+    /// silently-substituted host time.
+    fn set_kernel_timing(&self, on: bool) -> bool {
+        if self.ctx.timestamp_valid_bits == 0 {
+            return false;
+        }
+        self.profile.enabled.store(on, Ordering::Relaxed);
+        true
+    }
+
+    fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        if self.ctx.timestamp_valid_bits == 0 {
+            return None;
+        }
+        let acc = self.profile.acc.lock().unwrap();
+        Some(
+            self.names
+                .iter()
+                .zip(acc.iter())
+                .filter(|(_, (_, calls))| *calls > 0)
+                .map(|(name, (ms, calls))| (name.clone(), *ms, *calls))
+                .collect(),
+        )
+    }
+
+    fn reset_kernel_times(&self) {
+        for e in self.profile.acc.lock().unwrap().iter_mut() {
+            *e = (0.0, 0);
+        }
+    }
+
+    fn dump_profile(&self) {
+        let Some(mut rows) = self.kernel_times() else {
+            eprintln!("=== GPU kernel time (BRAIN_PROFILE, vulkan) === unavailable: this queue cannot write timestamps");
+            return;
+        };
+        let total: f64 = rows.iter().map(|(_, ms, _)| ms).sum();
+        rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        eprintln!("=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total {total:.1} ms) ===");
+        for (name, ms, calls) in &rows {
+            let pct = if total > 0.0 { 100.0 * ms / total } else { 0.0 };
+            eprintln!("  {name:<28} {ms:8.1} ms  {calls:6} calls  ({pct:4.1}%)");
+        }
     }
 
     fn caps(&self) -> backend_api::DeviceCaps {

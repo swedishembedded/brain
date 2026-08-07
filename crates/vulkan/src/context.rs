@@ -119,6 +119,16 @@ pub struct VkContext {
     /// PCI vendor id (0x10de NVIDIA, 0x8086 Intel, 0x1002 AMD). Used to gate
     /// vendor-specific workarounds (e.g. the Intel-ANV sliced-binding serialize).
     pub vendor_id: u32,
+    /// Nanoseconds per `vkCmdWriteTimestamp` tick (`VkPhysicalDeviceLimits::
+    /// timestampPeriod`). May be `0.0` on a device that reports no meaningful
+    /// value — `timestamp_valid_bits` is the field that actually gates whether
+    /// timestamps are usable at all.
+    pub timestamp_period_ns: f64,
+    /// Valid bits in a timestamp written by the compute queue family this
+    /// context uses (`VkQueueFamilyProperties::timestampValidBits`). `0` means
+    /// this queue family cannot write timestamps — per-kernel device timing
+    /// must degrade to unavailable, never substitute host time.
+    pub timestamp_valid_bits: u32,
     pub caps: CoopMatCaps,
     /// Which non-fp32 arithmetic the logical device was created able to execute
     /// (queried from the physical device, enabled at `create_device` when
@@ -336,14 +346,18 @@ impl VkContext {
             .to_string_lossy()
             .into_owned();
         let vendor_id = props.vendor_id;
+        // Nanoseconds per timestamp tick — 0.0 on a device with no meaningful
+        // timestamp support (spec allows this; `timestamp_valid_bits` below is
+        // the authoritative "can this queue write timestamps at all" signal).
+        let timestamp_period_ns = props.limits.timestamp_period as f64;
 
         // Pick a queue family with COMPUTE.
-        let queue_family_index = instance
-            .get_physical_device_queue_family_properties(physical_device)
+        let queue_families = instance.get_physical_device_queue_family_properties(physical_device);
+        let (queue_family_index, timestamp_valid_bits) = queue_families
             .iter()
             .enumerate()
             .find(|(_, q)| q.queue_flags.contains(vk::QueueFlags::COMPUTE))
-            .map(|(i, _)| i as u32)
+            .map(|(i, q)| (i as u32, q.timestamp_valid_bits))
             .ok_or_else(|| "no compute queue family".to_string())?;
 
         // ---- capability query ----
@@ -446,6 +460,8 @@ impl VkContext {
             command_pool,
             adapter_name,
             vendor_id,
+            timestamp_period_ns,
+            timestamp_valid_bits,
             caps,
             prec,
             mem_props,
