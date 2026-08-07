@@ -23,6 +23,17 @@
 //! models — and, for back-compat, the original flat single-level directory of
 //! `*.safetensors`/`*.gguf` files. A flat-layout hit logs a one-time-per-process
 //! warning recommending migration to the store layout.
+//!
+//! [`resident_for`] dispatches by `card.family`: `qwen`, `gpt`, `glm`, `lfm`,
+//! `yolo`, `depth` today. Each family's own checkpoint-writing code must
+//! attach a real [`ModelCard`] (`checkpoint::save_carded`, not the plain
+//! `checkpoint::save`, which never carries one) for a checkpoint to be
+//! reachable here at all — a `from_card` resident constructor alone is not
+//! enough (`gpt`/`glm` had working dispatch arms for a while with no carded
+//! checkpoint ever able to reach them). Single-file models only: `z-image`
+//! and `flux2` are each FOUR distinct-role files (DiT/VAE/text-encoder/
+//! tokenizer) with no directory/manifest registration shape here yet — see
+//! `.todo/multi-file-model-store-manifest.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
