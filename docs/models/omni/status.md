@@ -576,16 +576,90 @@ multimodal splice are additional, separate pieces on top of either.
   into an actual generation loop and are M9/M14's job (residency + serving),
   matching M6's own "decoder + seam, not a generation driver" scoping.
 
+- **M8 — Code2Wav vocoder, exact parity, real weights** (2026-08-07).
+  `codec::Codec::decode_omni` (new): reuses the standalone Qwen3-TTS codec's
+  pre-transformer (`transformer`, including its per-residual `LayerScale` —
+  already implemented, unmodified), SEANet decoder (`causal_conv`, `snake`,
+  `residual_unit`), and ConvNeXt upsample block (`convnext`) COMPLETELY
+  UNCHANGED under a `CodecConfig` shape bump (`hidden_size` 512→1024,
+  `intermediate_size` 1024→3072 — the plan's own prediction, confirmed).
+  Two genuine (non-config) differences needed new code:
+  1. **Input path**: `hidden = mean_q(code_embedding[codes[q] +
+     q·codebook_size])` — ONE combined `[num_quantizers·codebook_size,
+     hidden_size]` embedding table (`code_offset` is `torch.arange(...) *
+     codebook_size`, not a saved weight — confirmed by reading
+     `Qwen3OmniMoeCode2Wav.__init__`/`forward`), replacing `decode`'s
+     per-group RVQ dequant (`quantizer.rvq_first`/`rvq_rest` + `output_proj`)
+     AND `pre_conv` entirely; `pre_transformer` also has no `input_proj`/
+     `output_proj` (`hidden_size` is the working width throughout — no
+     separate `latent_dim` split). New `code_embedding_mean` composes the
+     already-existing `EMBED` gather (once per quantizer, host-computed
+     offset) with the existing `AXPY` kernel (`out += (1/nq)·in`, newly added
+     to `codec`'s own pipeline table — the kernel itself is not new, `omni`'s
+     M6a work already established it exists and is trustworthy)
+     accumulating the mean in place, into a zero-initialized `gpu.storage`
+     buffer (confirmed zero-init is a documented cross-backend invariant,
+     `backend-vulkan/src/lib.rs`'s own "zero-init like wgpu/CPU storage"
+     comment).
+  2. **SEANet decoder's transposed-conv crop convention**: reading
+     `Qwen3OmniMoeCausalTransConvNet` directly found it crops `pad = K -
+     stride` off BOTH sides of the native `ConvTranspose1d` output (`Lo =
+     (L-1)·stride - 2·pad + K`), where `codec::Codec::causal_convtr` crops
+     only the right (`pad = 0`, `Lo = L·stride`) — correct for the
+     standalone Qwen3-TTS codec's own reference, genuinely different for
+     Omni's. For the upsample stages (`K == stride`, so `pad = 0`) the two
+     conventions coincide and `causal_convtr` is reused unchanged; the
+     decoder's own transposed convs (`K = 2·stride`, `pad = stride`) need
+     the symmetric crop, added as a new `causal_convtr_sym` helper calling
+     `audio::conv::convtr1d_fwd` directly with an explicit `pad` (the
+     kernel's `pad` param already implements PyTorch's native symmetric
+     `ConvTranspose1d(padding=...)` semantics exactly — read `convtr1d.wgsl`
+     directly to confirm before writing any Rust, no new device math).
+     **This is what the golden caught**: the naive `Lo = L·stride`
+     assumption produces a 15360-sample waveform; the golden (from
+     `tools/goldens/omni_dump_reference.py`'s pre-existing `code2wav`
+     component, M0) is 14805 samples for the same `T=8` input — derived the
+     correct `(L-1)·stride` formula by hand from the reference source, then
+     confirmed it lands on exactly 14805 before writing the Rust, rather
+     than debugging a shape-mismatch panic after the fact.
+
+  `crates/omni/tests/code2wav_parity.rs` (real weights) reproduces the
+  golden's waveform at **cosine 1.000000, exact length match (14805 ==
+  14805)**, first try. `codec::Codec::from_weights` hard-codes the CPU
+  backend (`Gpu::new_cpu`, pre-existing, not an M8 change) — no Vulkan
+  variant exists for this crate to cross-check against, unlike every other
+  milestone's two-backend verification.
+
+  A second loader-side naming gap found (same shape as M7b's code-predictor
+  one, not fixed here for the same reason — needs a loader-design decision):
+  `omni::import::map_code2wav` renames `pre_transformer.layers.N` to
+  `pre_transformer.blocks.N` (matching `thinker`/`talker`'s shared
+  dense-attention convention), but `codec::Codec::transformer`'s `ParamStore`
+  lookups use the unrenamed HF-style `pre_transformer.layers.N.*` directly —
+  neither matches the other, so `Codec::load_inference` cannot yet load
+  Omni's code2wav weights from `omni::import`'s unified checkpoint output
+  either. `code2wav_parity.rs` sidesteps this by reading the raw HF
+  checkpoint directly, same pattern as `code_predictor_parity.rs`.
+
+  Not done: `chunked_decode(chunk_size=300, left_context_size=25)`
+  (streaming decode — `codec::decode_stream`/`streaming.rs` look like the
+  right home per the plan, not attempted this session) and the two
+  loader-side naming gaps (code predictor, code2wav) M9 needs to resolve
+  before `OmniResident` can load either component from the unified
+  checkpoint.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M8 through M17. See the plan file. M6 and M7 are
-now believed complete (Thinker/Talker decoders, real M-RoPE, composed loops,
-splice seam, code predictor — all validated against real weights); the
-actual generation loop (accept_hidden_layer, text/hidden projection, codec
-sampling, KV-cache decode, multimodal splice call site, real multimodal
-generation) is M9/M14's job per the design notes above, not additional M6/M7
-scope.
+deferred), M5's video path, M8's `chunked_decode` streaming path, M9 through
+M17. See the plan file. M6, M7, and M8 are now believed complete (Thinker/
+Talker decoders, real M-RoPE, composed loops, splice seam, code predictor,
+Code2Wav vocoder — all validated against real weights, single-shot forward
+only). The actual generation loop (accept_hidden_layer, text/hidden
+projection, codec sampling, KV-cache decode, multimodal splice call site,
+chunked streaming decode, real multimodal generation) and the two loader-side
+checkpoint-naming gaps (code predictor, code2wav — both documented above) are
+M9/M14's job, not additional M6/M7/M8 scope.
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern
