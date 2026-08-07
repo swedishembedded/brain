@@ -102,6 +102,22 @@ impl Fidelity {
 
     /// Why the run is invalid, for `Artifact::invalidate`.
     pub fn failure_reason(&self) -> String {
+        // `compared == 0` defaults `token_match` to 1.0 (see `greedy`'s own
+        // comment) precisely so an empty comparison never LOOKS like a passing
+        // score -- but that also means the generic "X < Y" phrasing below
+        // would print an identical-looking "1.0000 < 1.0000" for a run that
+        // compared NOTHING (most often: the probe's own requests were
+        // rejected at admission, e.g. an undersized KV pool) as it would for
+        // a genuine below-threshold disagreement. Name the real cause instead
+        // of a numerically-vacuous inequality.
+        if self.compared == 0 {
+            return format!(
+                "{} compared 0 positions (nothing to verify -- check admission/rejection, not the threshold) vs {}{}",
+                self.gate,
+                self.reference,
+                self.detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default()
+            );
+        }
         format!(
             "{} {:.4} < {:.4} vs {}{}",
             self.gate,
@@ -174,6 +190,21 @@ mod tests {
         let reason = Fidelity::greedy("gpu0-batch1", &c, &r, EXACT).failure_reason();
         assert!(reason.contains("greedy_token_match"));
         assert!(reason.contains("gpu0-batch1"));
+    }
+
+    /// REGRESSION: `compared == 0` defaults `token_match` to 1.0 (so an empty
+    /// comparison never LOOKS like a passing score), but the generic "X < Y"
+    /// phrasing then printed an identical-looking "1.0000 < 1.0000" for a run
+    /// that compared NOTHING (e.g. every request rejected at admission) as it
+    /// would for a genuine below-threshold disagreement -- hiding the real
+    /// cause. Found via a real perf run whose KV pool was too small to admit
+    /// the correctness probe's own requests.
+    #[test]
+    fn failure_reason_names_zero_comparisons_not_a_vacuous_inequality() {
+        let f = Fidelity::greedy("cpu", &[], &[], EXACT);
+        let reason = f.failure_reason();
+        assert!(reason.contains("compared 0 positions"), "must name the real cause, not a numeric inequality: {reason}");
+        assert!(!reason.contains("1.0000 < 1.0000"), "must not print a token_match==threshold inequality for zero comparisons: {reason}");
     }
 
     #[test]

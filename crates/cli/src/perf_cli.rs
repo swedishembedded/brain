@@ -1027,8 +1027,16 @@ fn pool_for(workload: &str, input_override: Option<usize>, output_override: Opti
     let w = perf::workload::standard(workload, perf::Arrival::Saturated, 1, 0)
         .ok_or_else(|| format!("unknown workload {workload:?}"))?;
     let r = &w.requests()[0];
-    let max_in = input_override.map(|n| n as u32).unwrap_or(r.input_artifacts as u32);
-    let max_out = output_override.map(|n| n as u32).unwrap_or(r.output_artifacts as u32);
+    // Floored at PagedLlmTarget::fidelity's own fixed probe size: that gate
+    // runs on THIS SAME pool regardless of how small --input/--output shrink
+    // the measured workload (e.g. under --smoke), so a pool sized purely from
+    // a tiny override can be too small to admit the probe's own requests --
+    // rejected at admission, zero positions ever compared, and the gate fails
+    // with a confusing "greedy_token_match 1.0000 < 1.0000" (compared == 0
+    // defaults token_match to 1.0; see Fidelity::greedy) instead of ever
+    // actually running. Found via a real --smoke run on the real checkpoint.
+    let max_in = input_override.map(|n| n as u32).unwrap_or(r.input_artifacts as u32).max(perf::targets::FIDELITY_PROMPT_TOKENS);
+    let max_out = output_override.map(|n| n as u32).unwrap_or(r.output_artifacts as u32).max(perf::targets::FIDELITY_MAX_NEW);
     let block_size = 16u32;
     let max_batch = 32u32;
     let per_seq = (max_in + max_out + 8).div_ceil(block_size);

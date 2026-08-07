@@ -118,6 +118,18 @@ impl PerfTarget for CapabilityTarget {
     }
 }
 
+/// [`PagedLlmTarget::fidelity`]'s fixed correctness-probe prompt length. Any
+/// caller sizing this target's KV pool (`crates/cli/src/perf_cli.rs::pool_for`)
+/// must reserve at least this much per-sequence capacity regardless of the
+/// measured workload's own (possibly much smaller, e.g. under `--smoke`)
+/// `--input`, or the probe's own requests get rejected at admission --
+/// `compared == 0` positions, which reads as a confusing gate failure rather
+/// than the capacity shortfall it actually is.
+pub const FIDELITY_PROMPT_TOKENS: u32 = 24;
+/// [`PagedLlmTarget::fidelity`]'s fixed correctness-probe generation length --
+/// same reasoning as [`FIDELITY_PROMPT_TOKENS`], for `--output`.
+pub const FIDELITY_MAX_NEW: u32 = 12;
+
 // ===================== paged LLM engine =====================
 
 /// Drives `qwen::serve::Scheduler`. One [`PerfTarget::step`] is one scheduler
@@ -261,8 +273,8 @@ impl PerfTarget for PagedLlmTarget {
     /// deterministic, so the gate demands exactness.
     fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
         let prompts: Vec<Vec<u32>> =
-            (0..3u64).map(|i| self.prompt(24, 0x5EED ^ i)).collect();
-        let max_new = 12usize;
+            (0..3u64).map(|i| self.prompt(FIDELITY_PROMPT_TOKENS as usize, 0x5EED ^ i)).collect();
+        let max_new = FIDELITY_MAX_NEW as usize;
 
         // Sequential reference: one request at a time, drained to completion.
         let mut seq_out = Vec::new();
