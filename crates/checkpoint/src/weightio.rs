@@ -251,12 +251,35 @@ fn inval(e: String) -> io::Error {
 
 // ---- incremental safetensors writer ----
 
-/// One planned tensor: name, expected element count, and its absolute byte
-/// offset in the output file (all writes are F32).
+/// A planned tensor's on-disk element type. Both variants are 4 bytes/element
+/// (so byte-range planning is dtype-agnostic — only the header's declared
+/// `dtype` string and which `write*` method may target the slot differ).
+/// `U32` is for int8-native storage: `model::int8::quantize_weight`'s packed
+/// layout (4 int8 packed per u32) stored as-is, no repacking at load time —
+/// see [`StWriter::create_mixed`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dtype {
+    F32,
+    U32,
+}
+
+impl Dtype {
+    fn tag(self) -> &'static str {
+        match self {
+            Dtype::F32 => "F32",
+            Dtype::U32 => "U32",
+        }
+    }
+}
+
+/// One planned tensor: name, expected element count, its absolute byte
+/// offset in the output file, and its declared dtype (byte width is 4 for
+/// both variants today, so offset planning does not need to branch on it).
 struct Planned {
     name: String,
     numel: usize,
     offset: u64,
+    dtype: Dtype,
 }
 
 /// An incremental F32 safetensors writer. Offsets are planned up front from
@@ -289,22 +312,40 @@ impl StWriter {
         config: &Value,
         card: Option<&ModelCard>,
     ) -> io::Result<StWriter> {
-        // Plan contiguous byte ranges (F32 == 4 bytes/element) and build header.
+        let mixed: Vec<(String, Vec<u64>, Dtype)> = plan.iter().map(|(n, s)| (n.clone(), s.clone(), Dtype::F32)).collect();
+        Self::create_mixed(path, &mixed, config, card)
+    }
+
+    /// [`create`](StWriter::create), but each planned tensor declares its own
+    /// [`Dtype`] — the seam an int8-native checkpoint (packed weights stored
+    /// as `Dtype::U32`, matching `model::int8::quantize_weight`'s layout
+    /// exactly, plus an ordinary `Dtype::F32` per-channel scale tensor
+    /// alongside it) needs. `create` is unchanged and still produces
+    /// byte-identical output to before this existed — every current caller
+    /// (`qwen`/`glm`/`lfm`'s importers) is unaffected.
+    pub fn create_mixed(
+        path: &str,
+        plan: &[(String, Vec<u64>, Dtype)],
+        config: &Value,
+        card: Option<&ModelCard>,
+    ) -> io::Result<StWriter> {
+        // Plan contiguous byte ranges (every dtype here is 4 bytes/element)
+        // and build the header.
         let mut header = serde_json::Map::new();
         let mut off: u64 = 0;
         let mut planned = Vec::with_capacity(plan.len());
-        for (name, shape) in plan {
+        for (name, shape, dtype) in plan {
             let numel: u64 = shape.iter().product();
             let nbytes = numel * 4;
             header.insert(
                 name.clone(),
                 serde_json::json!({
-                    "dtype": "F32",
+                    "dtype": dtype.tag(),
                     "shape": shape,
                     "data_offsets": [off, off + nbytes],
                 }),
             );
-            planned.push(Planned { name: name.clone(), numel: numel as usize, offset: off });
+            planned.push(Planned { name: name.clone(), numel: numel as usize, offset: off, dtype: *dtype });
             off += nbytes;
         }
 
@@ -339,23 +380,56 @@ impl StWriter {
     /// so a caller streaming through its source in the source's own order
     /// never needs to buffer or reorder its output.
     pub fn write(&mut self, name: &str, data: &[f32]) -> io::Result<()> {
-        use io::{Seek, SeekFrom};
+        let i = self.check_slot(name, data.len(), Dtype::F32)?;
+        self.seek_to(i)?;
+        // Stream the f32 little-endian bytes without materializing the whole blob.
+        for v in data {
+            self.file.write_all(&v.to_le_bytes())?;
+        }
+        self.mark_written(i);
+        Ok(())
+    }
+
+    /// [`write`](StWriter::write) for a `Dtype::U32`-planned tensor — the
+    /// int8-native path: `data` is `model::int8::quantize_weight`'s packed
+    /// output (4 int8 per u32), written as-is with no repacking.
+    pub fn write_u32(&mut self, name: &str, data: &[u32]) -> io::Result<()> {
+        let i = self.check_slot(name, data.len(), Dtype::U32)?;
+        self.seek_to(i)?;
+        for v in data {
+            self.file.write_all(&v.to_le_bytes())?;
+        }
+        self.mark_written(i);
+        Ok(())
+    }
+
+    fn check_slot(&self, name: &str, len: usize, want: Dtype) -> io::Result<usize> {
         let i = *self.index_by_name.get(name).ok_or_else(|| inval(format!("st: '{name}' is not in the plan")))?;
         if self.written[i] {
             return Err(inval(format!("st: '{name}' written twice")));
         }
         let p = &self.plan[i];
-        if p.numel != data.len() {
-            return Err(inval(format!("st: '{name}' expects {} elems, got {}", p.numel, data.len())));
+        if p.dtype != want {
+            return Err(inval(format!(
+                "st: '{name}' is planned as {:?} but write{} was called",
+                p.dtype,
+                if want == Dtype::U32 { "_u32" } else { "" }
+            )));
         }
-        self.file.seek(SeekFrom::Start(self.blob_start + p.offset))?;
-        // Stream the f32 little-endian bytes without materializing the whole blob.
-        for v in data {
-            self.file.write_all(&v.to_le_bytes())?;
+        if p.numel != len {
+            return Err(inval(format!("st: '{name}' expects {} elems, got {len}", p.numel)));
         }
+        Ok(i)
+    }
+
+    fn seek_to(&mut self, i: usize) -> io::Result<()> {
+        use io::{Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(self.blob_start + self.plan[i].offset)).map(|_| ())
+    }
+
+    fn mark_written(&mut self, i: usize) {
         self.written[i] = true;
         self.written_count += 1;
-        Ok(())
     }
 
     /// Flush and atomically rename tmp → path. Errors if the plan was not fully
@@ -476,6 +550,61 @@ mod tests {
         assert_eq!(seen["a"], a);
         assert_eq!(seen["b"], b);
         assert_eq!(r.tensor("a").unwrap(), a);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn create_mixed_writes_packed_int8_alongside_f32_scale() {
+        // The Qwen3-Omni motivation: a real DP4A packed weight
+        // (model::int8::quantize_weight's exact output shape) plus its
+        // per-channel scale, stored as two entries with different dtypes in
+        // one file, and an ordinary F32 tensor alongside them.
+        let p = scratch("i8-mixed");
+        let cfg = serde_json::json!({"family": "omni"});
+        let card = ModelCard::new("m", "omni");
+        let plan = vec![
+            ("expert.0.gate.weight".to_string(), vec![4u64, 2], Dtype::U32), // [n=4, k/4=2]
+            ("expert.0.gate.scale".to_string(), vec![4u64], Dtype::F32),
+            ("plain.weight".to_string(), vec![3u64], Dtype::F32),
+        ];
+        let packed: Vec<u32> = vec![0x0403_0201, 0xFFFE_FDFC, 0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444, 0x5555_5555, 0x6666_6666];
+        let scale = vec![0.01f32, 0.02, 0.03, 0.04];
+        let plain = vec![9.0f32, 8.0, 7.0];
+
+        let mut w = StWriter::create_mixed(&p, &plan, &cfg, Some(&card)).unwrap();
+        // dtype mismatch is rejected in both directions.
+        assert!(w.write("expert.0.gate.weight", &plain).is_err());
+        assert!(w.write_u32("plain.weight", &packed[..3]).is_err());
+        w.write_u32("expert.0.gate.weight", &packed).unwrap();
+        w.write("expert.0.gate.scale", &scale).unwrap();
+        w.write("plain.weight", &plain).unwrap();
+        w.finish().unwrap();
+
+        // Independent verification via the raw `safetensors` crate (NOT
+        // brain's own reader), so this test cannot pass merely because a
+        // brain-side reader and writer share the same bug.
+        let bytes = std::fs::read(&p).unwrap();
+        let (_header_len, sts) = safetensors::SafeTensors::read_metadata(&bytes).unwrap();
+        assert_eq!(sts.tensors().iter().find(|(n, _)| *n == "expert.0.gate.weight").unwrap().1.dtype, safetensors::Dtype::U32);
+        assert_eq!(sts.tensors().iter().find(|(n, _)| *n == "expert.0.gate.scale").unwrap().1.dtype, safetensors::Dtype::F32);
+        assert_eq!(sts.tensors().iter().find(|(n, _)| *n == "plain.weight").unwrap().1.dtype, safetensors::Dtype::F32);
+
+        let full = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+        let got_packed = full.tensor("expert.0.gate.weight").unwrap();
+        assert_eq!(got_packed.shape(), &[4, 2]);
+        let got_packed_u32: Vec<u32> = got_packed.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+        assert_eq!(got_packed_u32, packed);
+
+        let got_scale = full.tensor("expert.0.gate.scale").unwrap();
+        let got_scale_f32: Vec<f32> = got_scale.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        assert_eq!(got_scale_f32, scale);
+
+        // Brain's own streaming reader still reads the F32 tensor correctly
+        // (int8-native reading is a separate, not-yet-built seam — the plan
+        // record notes this; this file only needs to WRITE the format today).
+        let r = WeightReader::open(&p).unwrap();
+        assert_eq!(r.tensor("plain.weight").unwrap(), plain);
+
         std::fs::remove_file(&p).ok();
     }
 
