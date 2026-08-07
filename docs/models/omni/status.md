@@ -158,45 +158,58 @@ cleanup).
   otherwise have hit) — `cli::model_dir::resident_for`'s existing catch-all
   was already honest for an unrecognized family, no change needed there.
 
-- **A hard disk-capacity finding that reshapes M3b's remaining scope**
-  (2026-08-07). `checkpoint::weightio::StWriter::write` is f32-only — every
-  existing importer (`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint
-  at f32, then quantizes to int8 transiently at RESIDENCY-LOAD time (one
-  tensor of host f32 at a time, dropped after upload — see `crates/qwen/src/q8.rs`
-  `Q8::build`, `crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16
-  checkpoint, that convention means an on-disk f32 checkpoint of **~141 GB**
-  (measured: `70 519 637 090 * 2`) — which fits on NEITHER of this box's
-  filesystems (93 GB tmpfs, 71 GB free on the 296 GB overlay), and could not
-  fit even with perfect shard-by-shard streaming (deleting each source shard
-  after use still leaves the ~141 GB DESTINATION file needing one filesystem
-  large enough to hold it). This is not fixable by streaming harder — it is
-  fixable only by writing a smaller on-disk format (an int8-native
-  checkpoint, extending `checkpoint::weightio` to accept pre-quantized
-  packed-u32 + f32-scale tensor pairs — a genuine format extension, not
-  wired up for any model yet) or by running the import on a box with more
-  disk. Scoped down for now: the name-mapping / two-way-coverage LOGIC is
-  being built and tested against the real (partial) shards already on this
-  box; a full 70 GB→141 GB end-to-end run is deferred, documented here as an
-  environment limit rather than attempted and left silently incomplete.
+- **M3b — HF -> brain name mapper** (2026-08-07). `omni::import`: pure
+  `&str -> Option<String>` mapping functions per component
+  (`map_audio`/`map_vision`/`map_thinker`/`map_talker`/`map_code_predictor`/
+  `map_code2wav`, composed as `hf_to_brain`), following
+  `qwenvl`/`qwen_asr`'s existing naming conventions so M4/M5's shared-encoder
+  hoist is a config bump, not a second copy. `code_predictor` maps by
+  IDENTITY (no rename) since `omni::config::TalkerConfig` already reuses
+  `tts::config::MtpConfig::from_json` unchanged — matching names means M7 can
+  load it with `tts::mtp` directly. Audio's `self_attn.{q,k,v}_proj` fuse
+  into one `qkv` tensor (`fuse_audio_qkv`), matching
+  `qwen_asr::import::map_audio_encoder`'s existing fused layout.
+  Validated three ways: (1) unit tests against real tensor-name samples from
+  the checkpoint; (2) `crates/omni/tests/real_import_coverage.rs`
+  (`BRAIN_OMNI_HF_DIR`-gated) — **every one of the real checkpoint's 28 010
+  tensor names maps successfully with zero brain-name collisions**, checked
+  directly against `model.safetensors.index.json`, not a hand-picked sample;
+  (3) real tensor SHAPES pulled from shard 15 independently confirm the
+  config assumptions — `code2wav.code_embedding.weight` is `[32768, 1024]`
+  = `codebook_size(2048) * num_quantizers(16) x hidden_size(1024)`, exactly
+  as `Code2WavConfig` models it; `pre_transformer` mlp/attn shapes match too.
+  **Not yet done**: the streaming orchestrator (`import_as`, wiring
+  `hf_to_brain` through `checkpoint::weightio::WeightReader`/`StWriter`) —
+  blocked on the disk-capacity finding below, which needs a design decision
+  before more code is worth writing against it.
 
-## In progress
+## Disk-capacity finding (reshapes M3b's remaining scope and M9's design)
 
-- Reference goldens dump (`tools/goldens/omni_dump_reference.py`) — script
-  written (component-scoped: audio tower, vision tower, one MoE decoder layer,
-  M-RoPE position ids, code predictor, code2wav — each streams only its own
-  tensors from the sharded checkpoint via `model.safetensors.index.json`, no
-  full-model load). Weight shards for these components (4 of 15,
-  `model-{00001,00013,00014,00015}-of-00015.safetensors`, ~15.5 GB) finished
-  downloading into the ramdisk
-  (`/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct/`), sizes verified
-  against the index; not yet run against real weights.
-- M3b (shard-incremental HF import + the `family_of_architecture` routing fix)
-  — not started.
+`checkpoint::weightio::StWriter::write` is f32-only — every existing importer
+(`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint at f32, then
+quantizes to int8 transiently at RESIDENCY-LOAD time (one tensor of host f32
+at a time, dropped after upload — see `crates/qwen/src/q8.rs` `Q8::build`,
+`crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16 checkpoint, that
+convention means an on-disk f32 checkpoint of **~141 GB** (measured:
+`70 519 637 090 * 2`) — which fits on NEITHER of this box's filesystems
+(93 GB tmpfs, 71 GB free on the 296 GB overlay), and could not fit even with
+perfect shard-by-shard streaming (deleting each source shard after use still
+leaves the ~141 GB DESTINATION file needing one filesystem large enough to
+hold it). This is not fixable by streaming harder — it is fixable only by
+writing a smaller on-disk format (an int8-native checkpoint, extending
+`checkpoint::weightio` to accept pre-quantized packed-u32 + f32-scale tensor
+pairs — a genuine format extension, not wired up for any model yet) or by
+running the import on a box with more disk. The name-mapping / two-way
+coverage LOGIC (M3b above) is complete and tested against the real (partial)
+shards on this box; the full 70 GB->141 GB (or a future int8-native, ~35 GB)
+end-to-end run is deferred — an environment limit, documented here rather
+than attempted and left silently incomplete.
 
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M3b onward through M17. See the plan file.
+deferred), the `import_as` streaming orchestrator (blocked on the disk
+finding above), M4 through M17. See the plan file.
 
 ## Honesty notes
 
