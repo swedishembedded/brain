@@ -126,6 +126,24 @@ cleanup).
   **Still deferred**: row-compaction/gather-scatter (both tiers), a TILED
   int8 kernel, backward pass (M2c), `crates/glm` migration (M2d).
 
+- **M3a — `crates/omni` config** (2026-08-07). New crate, `omni::config`:
+  `AudioConfig`/`VisionConfig` (same shape as `qwen-asr`/`qwenvl`'s configs,
+  at Omni's scale), `MoeTextConfig` (shared by Thinker `thinker_config.text_config`
+  and Talker `talker_config.text_config` — both plain-softmax top-k, not
+  glm's sigmoid/bias/group-limited router), `ThinkerConfig`, `TalkerConfig`
+  (reuses `tts::config::MtpConfig::from_json` unchanged for
+  `code_predictor_config` — same path, same shape), `Code2WavConfig` (same
+  shape as `codec::config::CodecConfig`, extended for Omni's wider
+  pre-transformer and mean-pooled multi-codebook input), `OmniConfig`.
+  Cross-checked two ways: an inline structurally-faithful sample (unit tests,
+  no checkpoint needed) AND a real-checkpoint test
+  (`crates/omni/tests/real_config.rs`, `BRAIN_OMNI_HF_DIR`-gated, skips
+  cleanly without weights) run against the actual downloaded
+  `config.json` — every field in "Facts" above reproduced exactly from the
+  real file, not a hand-copied sample.
+  Added `brain-qwenvl` and `brain-omni` to `[workspace.dependencies]`
+  (`qwenvl` had never been depended on by anything before this).
+
 ## In progress
 
 - Reference goldens dump (`tools/goldens/omni_dump_reference.py`) — script
@@ -137,11 +155,13 @@ cleanup).
   downloading into the ramdisk
   (`/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct/`), sizes verified
   against the index; not yet run against real weights.
+- M3b (shard-incremental HF import + the `family_of_architecture` routing fix)
+  — not started.
 
 ## Not started
 
-M2c (backward + gradcheck), M2d (glm migration), M3 through M17. See the plan
-file.
+M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
+deferred), M3b onward through M17. See the plan file.
 
 ## Honesty notes
 

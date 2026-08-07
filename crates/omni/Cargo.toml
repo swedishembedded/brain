@@ -1,0 +1,28 @@
+[package]
+name = "brain-omni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3-Omni-30B-A3B: Thinker (MoE, audio+vision in) + Talker (MoE, +MTP) + Code2Wav."
+
+[lib]
+name = "omni"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen.workspace = true
+brain-qwenvl.workspace = true
+brain-qwen-asr.workspace = true
+brain-tts.workspace = true
+brain-codec.workspace = true
+brain-audio.workspace = true
+brain-model.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-capability.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-data.workspace = true
