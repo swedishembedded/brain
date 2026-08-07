@@ -278,13 +278,28 @@ pub fn map_talker(hf: &str) -> Option<String> {
 
 // -------------------------------------------------------------- talker.code_predictor
 /// `talker.code_predictor.*` -> `talker.code_predictor.*`. Deliberately
-/// IDENTICAL to the HF path (no rename): `tts::mtp`'s loader already reads
-/// this exact structure (5-layer Qwen3 block, per-codebook
-/// `codec_embedding.{i}`/`lm_head.{i}`) for the standalone Qwen3-TTS MTP, and
-/// Omni's `code_predictor_config` is the same shape at the same JSON path
-/// (`omni::config::TalkerConfig::from_json` already reuses
-/// `tts::config::MtpConfig::from_json` unchanged for this reason) — matching
-/// names too means M7 can load this with `tts::mtp` directly, not a fork.
+/// IDENTICAL to the HF path (no rename), so this unified checkpoint keeps
+/// the code predictor's weights byte-identical to the source and namespaced
+/// away from Talker's own `talker.blocks.*` (which uses the SAME leaf names
+/// -- `attn.wq.weight` etc -- so a shared unprefixed `blocks.N.*` would
+/// collide).
+///
+/// CORRECTION (M7b, 2026-08-07): the claim this comment used to make here --
+/// "matching names too means M7 can load this with `tts::mtp` directly" --
+/// is false as stated. `tts::import::mtp_hf_to_brain` (which `tts::import::
+/// import_mtp` uses for the standalone Qwen3-TTS MTP) renames e.g.
+/// `talker.code_predictor.model.layers.0.self_attn.q_proj.weight` to the
+/// UNPREFIXED `blocks.0.attn.wq.weight`, and `tts::mtp::MtpModel::
+/// load_inference`'s `ParamStore` lookups use that same unprefixed form --
+/// neither matches what THIS function produces (the untouched HF name,
+/// still carrying the `talker.code_predictor.` prefix). `crates/omni/tests/
+/// code_predictor_parity.rs` validates `MtpModel`'s forward pass is correct
+/// against real Omni weights, but does so by reading the HF checkpoint
+/// directly and applying `mtp_hf_to_brain` itself, NOT by loading from this
+/// importer's unified output -- that loader-side gap (either a
+/// prefix-aware `ParamStore` lookup, or a separate `talker.code_predictor.*`
+/// extraction step reusing `mtp_hf_to_brain`) is still open, tracked in
+/// `docs/models/omni/status.md`'s M7b entry as M9 work, not fixed here.
 pub fn map_code_predictor(hf: &str) -> Option<String> {
     hf.starts_with("talker.code_predictor.").then(|| hf.to_string())
 }

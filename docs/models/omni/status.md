@@ -516,22 +516,76 @@ multimodal splice are additional, separate pieces on top of either.
   the `layer_out`-vs-`hidden` golden distinction are reused unchanged from
   the Thinker dumper.
 
-  Not yet done (M7b, next): the code predictor (`tts::mtp`, expected
-  near-reuse — dense, 5-layer, already 16 code groups per the plan) wired to
-  real Omni weights and validated; `accept_hidden_layer` (Talker consumes
-  Thinker's hidden state at a given layer, not just its own embeddings);
-  `text_projection`/`hidden_projection`; codec-id sampling
-  (suppressed-token set, repetition penalty, temp, top-k).
+- **M7b — code predictor, exact parity, real weights** (2026-08-07).
+  `tts::mtp::MtpModel` (the standalone Qwen3-TTS MTP) reused **completely
+  unchanged in forward-pass code** for Omni's code predictor, confirming the
+  plan's "near-exact reuse" prediction — real Omni `code_predictor_config`
+  (5 layers, 16/8 GQA heads, hidden 1024, head_dim 128, vocab 2048, 16 code
+  groups, dense — no MoE) already parses through
+  `TalkerConfig::from_json`'s existing `tts::config::MtpConfig::from_json`
+  reuse (M3), unmodified. The only code change was a visibility bump
+  (`MtpModel::build_on`: `pub(crate)` → `pub`) so a real-weight test could
+  construct a model directly from mmap'd HF tensors, bypassing `ParamStore`/
+  checkpoint-file I/O, the same pattern every other real-weight test in this
+  workstream uses.
+
+  `crates/omni/tests/code_predictor_parity.rs`: reads
+  `talker.code_predictor.*` straight from the real checkpoint (spans shards
+  14-15), renames with `tts::import::mtp_hf_to_brain` (already exactly
+  correct — no new rename code needed), builds via `MtpModel::build_on`, and
+  reproduces the golden's 2-position "prefill" logits
+  (`tools/goldens/omni_dump_reference.py`'s pre-existing `talkcp` component,
+  from M0) at **cosine 1.000000** on both `--device vulkan` and
+  `--device cpu`.
+
+  One real bug found while writing the test, in the test's own first draft
+  — not in `MtpModel` or the reference: assumed the golden's `logits [2,
+  2048]` had one row per *predicted codebook*; it actually has one row per
+  *input position*, because the reference's `forward` applies a single
+  `self.lm_head[generation_steps]` to the WHOLE hidden-state tensor
+  (`logits = self.lm_head[generation_steps](hidden_states)`, broadcasting
+  over the sequence dim) rather than a different head per position. Row 0
+  (`lm_head[0]` applied to the Talker-hidden conditioning slot) is not a
+  trained prediction target at all; row 1 (`lm_head[0]` applied to
+  codebook-0's embedding) is the actual "predict codebook 1" quantity
+  `MtpModel::logits` computes. Comparing against the wrong row gave cosine
+  0.045 — close enough to look like a real divergence, caught by checking
+  the golden tensor's actual shape (`[2, 2048]`, not `[2048]`) before
+  assuming what it meant.
+
+  A real, still-open gap found and precisely documented (not fixed here —
+  it is loader-side, M9 work, not part of validating the forward pass):
+  `crates/omni/src/import.rs::map_code_predictor`'s doc comment claimed
+  "matching names too means M7 can load this with `tts::mtp` directly" —
+  false. The importer keeps code-predictor tensor names byte-identical to
+  HF (`talker.code_predictor.model.layers.0.self_attn.q_proj.weight`, …),
+  but `tts::mtp::MtpModel::load_inference` expects the UNPREFIXED `blocks.N.*`
+  form `tts::import::mtp_hf_to_brain` produces for standalone Qwen3-TTS —
+  neither matches the other. `code_predictor_parity.rs` sidesteps this
+  entirely by reading the raw HF checkpoint itself and applying
+  `mtp_hf_to_brain` inline, which is why it validates correctly despite the
+  gap. M9 needs either a prefix-aware `ParamStore` lookup or a dedicated
+  `talker.code_predictor.*` sub-extraction (reusing `mtp_hf_to_brain`
+  unchanged) before `OmniResident` can actually load this component from
+  the unified checkpoint. Comment corrected in place; no behavior change.
+
+  Still not done: `accept_hidden_layer` (Talker consumes Thinker's hidden
+  state at a given layer, not just its own embeddings), `text_projection`/
+  `hidden_projection`, and codec-id sampling (suppressed-token set,
+  repetition penalty, temperature, top-k) — these compose Thinker+Talker+MTP
+  into an actual generation loop and are M9/M14's job (residency + serving),
+  matching M6's own "decoder + seam, not a generation driver" scoping.
 
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M7b (code predictor + accept_hidden_layer +
-sampling) through M17. See the plan file. M6 itself is
-now believed complete (decoder + real M-RoPE + composed loop + splice seam,
-all validated); the actual splice call site, a KV-cache/decode loop, and a
-real multimodal generation are M9/M14's job per the design note above, not
-additional M6 scope.
+deferred), M5's video path, M8 through M17. See the plan file. M6 and M7 are
+now believed complete (Thinker/Talker decoders, real M-RoPE, composed loops,
+splice seam, code predictor — all validated against real weights); the
+actual generation loop (accept_hidden_layer, text/hidden projection, codec
+sampling, KV-cache decode, multimodal splice call site, real multimodal
+generation) is M9/M14's job per the design notes above, not additional M6/M7
+scope.
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern
