@@ -58,6 +58,12 @@ Three components chained end to end (`crates/omni`):
   upsample `[2,2]` → SEANet decoder `[8,5,4,3]` + SnakeBeta → 24 kHz waveform.
   `chunked_decode(chunk_size=300, left_context_size=25)` for streaming.
 
+`tools/goldens/omni_dump_reference.py` bakes component-scoped parity goldens
+(audio tower, vision tower, one MoE decoder layer, M-RoPE position ids, code
+predictor, code2wav) from the released checkpoint, run through the real
+transformers reference implementation — each component streams only its own
+tensors, so no dump needs the whole 70.5 GB model resident.
+
 See `docs/models/omni/status.md` for the measured, chronological build ledger.
 
 ## Sparse MoE core

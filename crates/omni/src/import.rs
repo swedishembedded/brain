@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! HF → brain name remap for Qwen3-Omni-30B-A3B-Instruct, streamed via
-//! `checkpoint::weightio` (never the whole 70.5 GB checkpoint in memory at
-//! once — one tensor at a time, same as `qwen`/`glm`/`lfm`'s importers).
+//! HF → brain name remap + streaming import for Qwen3-Omni-30B-A3B-Instruct,
+//! via `checkpoint::weightio` (never the whole 70.5 GB checkpoint in memory
+//! at once — one tensor at a time, same as `qwen`/`glm`/`lfm`'s importers).
 //!
-//! **On-disk size**: `checkpoint::weightio::StWriter` writes f32 only, so a
-//! full import of this checkpoint needs ~141 GB on disk (bf16 doubled) — see
-//! `docs/models/omni/status.md` M3 for the measurement and why streaming
-//! harder cannot fix it (the OUTPUT file itself needs one filesystem that
-//! size). [`import_as`] is written and tested against real (partial) data,
-//! but a full end-to-end run needs more disk than this development box has;
-//! that is an environment limit, recorded, not silently worked around.
+//! **On-disk size**: a plain f32 checkpoint of this model needs ~141 GB
+//! (bf16 doubled) — more than either filesystem on the box this was
+//! developed on, and wasteful even where it fits (141 GB on disk to produce
+//! a ~35 GB int8-resident model on every load). [`import_as`] instead
+//! quantizes every large 2-D weight matrix to int8 AT IMPORT TIME via
+//! `checkpoint::weightio::StWriter::create_mixed`/`write_u32` (a genuine,
+//! additive `checkpoint::weightio` extension — existing f32 models are
+//! untouched) — the on-disk checkpoint is ~35 GB, small enough to fit this
+//! box's 93 GB tmpfs. This is a deliberate departure from every OTHER
+//! model's convention (f32 on disk, quantize transiently at residency-load
+//! time — `crates/qwen/src/q8.rs`, `crates/zimage/src/block.rs`): Omni is
+//! large enough, specifically because of its MoE expert count, that the
+//! disk cost of the old convention is prohibitive rather than merely
+//! wasteful. See `docs/models/omni/status.md` M3 for the measurement.
+//! Norms, biases, layer-scales, and embeddings/heads stay f32 (any tensor
+//! that is not rank-2, or whose last dimension is not a multiple of 4 —
+//! `model::int8::quantize_weight`'s hard requirement — falls back to f32
+//! automatically; [`should_quantize`] is the single decision point).
 //!
 //! Every mapping function here is pure (`&str -> Option<String>`), so it is
 //! unit-tested against real tensor names from the released checkpoint's
@@ -24,6 +35,11 @@
 //! linear_{1,2}`) rather than inventing new ones — M4/M5 hoist the shared
 //! encoder implementations onto Omni's scale, and matching names now is what
 //! makes that hoist "config bump", not "second copy".
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use serde_json::Value;
 
 /// One Qwen3-style decoder attention+norm block, HF leaf -> brain leaf.
 /// Shared by the Thinker/Talker MoE decoders' non-expert tensors and by
@@ -40,6 +56,22 @@ fn dense_attn_leaf(leaf: &str) -> Option<&'static str> {
         "self_attn.k_norm.weight" => "attn.k_norm.weight",
         _ => return None,
     })
+}
+
+/// The six HF leaves [`map_audio`] deliberately does not map (they need
+/// sibling tensors to fuse into one `qkv`, so [`import_as`] buffers and
+/// concatenates them itself instead). Shared with the real-checkpoint
+/// coverage test (`tests/real_import_coverage.rs`), which needs the same
+/// exemption list to know which real tensor names `hf_to_brain` legitimately
+/// rejects.
+pub fn is_qkv_fuse_leaf(name: &str) -> bool {
+    name.starts_with("thinker.audio_tower.layers.")
+        && (name.ends_with("self_attn.q_proj.weight")
+            || name.ends_with("self_attn.k_proj.weight")
+            || name.ends_with("self_attn.v_proj.weight")
+            || name.ends_with("self_attn.q_proj.bias")
+            || name.ends_with("self_attn.k_proj.bias")
+            || name.ends_with("self_attn.v_proj.bias"))
 }
 
 // --------------------------------------------------------------------- audio
@@ -283,10 +315,331 @@ pub fn hf_to_brain(hf: &str) -> Option<String> {
         .or_else(|| map_code2wav(hf))
 }
 
+/// Whether a tensor of this shape should be int8-quantized: rank-2 (a plain
+/// `[n, k]` weight matrix — attention/expert/shared-expert/router
+/// projections, embeddings, heads) with `k` (the last, contraction,
+/// dimension) a multiple of 4 (`model::int8::quantize_weight`'s hard
+/// requirement). Every real 2-D weight in this checkpoint meets that (2048,
+/// 1024, 1152, 768, 384, 4304, 5120, 3072, 1280, 480, 152064, … are all
+/// multiples of 4 — see `docs/models/omni/status.md` "Facts"); convolutions
+/// (rank 3: `[out, in, kernel]`) and every 1-D tensor (norms, biases,
+/// layer-scales) fall through to f32 automatically, not by a special case.
+pub fn should_quantize(shape: &[u64]) -> bool {
+    shape.len() == 2 && shape[1].is_multiple_of(4)
+}
+
+/// Buffers one audio-tower layer's q/k/v weight+bias until all six sibling
+/// tensors have streamed past (they are not necessarily adjacent in the
+/// source's iteration order), then hands the fused pair to the caller.
+#[derive(Default)]
+struct QkvBuf {
+    q_w: Option<Vec<f32>>,
+    k_w: Option<Vec<f32>>,
+    v_w: Option<Vec<f32>>,
+    q_b: Option<Vec<f32>>,
+    k_b: Option<Vec<f32>>,
+    v_b: Option<Vec<f32>>,
+}
+
+/// Stream `<hf_dir>/config.json` + sharded safetensors into an int8-native
+/// brain checkpoint at `out_path`. Peak host memory is one HF tensor's f32
+/// expansion at a time (the audio q/k/v fuse buffers at most 32 layers' worth
+/// of small attention-projection tensors concurrently — a few MB, not a
+/// concern next to a single MoE expert's own ~5 MB).
+///
+/// Fails loudly and writes nothing on error (`StWriter::finish` refuses a
+/// plan with holes) — this streams the SOURCE in the source's own natural
+/// order, not the output plan's order, which is exactly what
+/// `StWriter::write`/`write_u32` support (write any planned name once, in any
+/// order).
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+    let dir = std::path::Path::new(hf_dir);
+    let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
+    // Parsed only as a validity gate -- a malformed config.json must fail
+    // import before any tensor byte streams, not partway through. The
+    // fields aren't otherwise consumed here: name mapping and the
+    // quantize/keep-f32 decision are shape-driven (from the source tensors
+    // themselves), not config-driven.
+    let _cfg = crate::config::OmniConfig::parse(&cfg_json).map_err(|e| format!("parse config.json: {e}"))?;
+
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
+
+    // Pass 1: decide the brain-side name, shape and dtype for every source
+    // tensor (header-only — `shape()` never touches tensor bytes), fusing
+    // the audio qkv triples into one planned entry. This is what
+    // `StWriter::create_mixed` needs up front; pass 2 (below) streams data.
+    enum PlanItem {
+        Direct { brain_name: String, quant: bool },
+        /// One of the six audio q/k/v HF leaves — folded into a single fused
+        /// `audio.blocks.{b}.qkv.{weight,bias}` plan entry the first time any
+        /// sibling of that (layer, weight-or-bias) pair is seen.
+        QkvLeaf,
+    }
+    let mut items: HashMap<String, PlanItem> = HashMap::new();
+    let mut plan: Vec<(String, Vec<u64>, checkpoint::weightio::Dtype)> = Vec::new();
+    let mut fused_qkv_planned: std::collections::HashSet<(u32, bool)> = std::collections::HashSet::new(); // (layer, is_weight)
+    for name in reader.names() {
+        let shape = reader.shape(name).unwrap_or_else(|| panic!("no shape for {name}")).to_vec();
+        if is_qkv_fuse_leaf(name) {
+            let b: u32 = name.strip_prefix("thinker.audio_tower.layers.").unwrap().split_once('.').unwrap().0.parse().unwrap();
+            let is_weight = name.ends_with(".weight");
+            if fused_qkv_planned.insert((b, is_weight)) {
+                let leaf = if is_weight { "qkv.weight" } else { "qkv.bias" };
+                let fused_name = format!("audio.blocks.{b}.{leaf}");
+                // qkv fuse concatenates 3 equal-sized rows/elements along dim 0.
+                let mut fused_shape = shape.clone();
+                fused_shape[0] *= 3;
+                plan.push((fused_name, fused_shape, checkpoint::weightio::Dtype::F32));
+            }
+            items.insert(name.to_string(), PlanItem::QkvLeaf);
+            continue;
+        }
+        let brain_name = hf_to_brain(name).ok_or_else(|| format!("import: no mapping for HF tensor {name:?}"))?;
+        let quant = should_quantize(&shape);
+        if quant {
+            let (n, k) = (shape[0], shape[1]);
+            plan.push((brain_name.clone(), vec![n, k / 4], checkpoint::weightio::Dtype::U32));
+            plan.push((format!("{brain_name}.scale"), vec![n], checkpoint::weightio::Dtype::F32));
+        } else {
+            plan.push((brain_name.clone(), shape, checkpoint::weightio::Dtype::F32));
+        }
+        items.insert(name.to_string(), PlanItem::Direct { brain_name, quant });
+    }
+
+    let param_count: u64 = plan.iter().map(|(_, s, _)| s.iter().product::<u64>()).sum();
+    let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("omni"));
+    let mut card = checkpoint::st::ModelCard::new(id, "omni");
+    card.param_count = Some(param_count);
+    let mut writer = checkpoint::weightio::StWriter::create_mixed(out_path, &plan, &serde_json::to_value(&cfg_json).unwrap_or(Value::Null), Some(&card))
+        .map_err(|e| format!("create {out_path}: {e}"))?;
+
+    // Pass 2: stream tensor DATA through in the source's own order, writing
+    // each planned entry as it completes. qkv triples accumulate in `qkv_buf`
+    // until all three weights (or biases) for a layer have arrived.
+    let mut qkv_buf: HashMap<u32, QkvBuf> = HashMap::new();
+    let mut err: Option<String> = None;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() {
+            return;
+        }
+        match items.get(name) {
+            Some(PlanItem::QkvLeaf) => {
+                let b: u32 = name.strip_prefix("thinker.audio_tower.layers.").unwrap().split_once('.').unwrap().0.parse().unwrap();
+                let buf = qkv_buf.entry(b).or_default();
+                let is_weight = name.ends_with(".weight");
+                let slot = if name.contains(".q_proj.") {
+                    if is_weight { &mut buf.q_w } else { &mut buf.q_b }
+                } else if name.contains(".k_proj.") {
+                    if is_weight { &mut buf.k_w } else { &mut buf.k_b }
+                } else {
+                    if is_weight { &mut buf.v_w } else { &mut buf.v_b }
+                };
+                *slot = Some(data);
+                // `.take()` unconditionally clears the field it's called on,
+                // even inside a tuple whose `if let` pattern ends up not
+                // matching — checking `is_some()` on all three FIRST (never
+                // touching the buffer) is what makes taking them afterward
+                // safe: a partial arrival (e.g. only q_w so far) leaves every
+                // field untouched for the next call to find.
+                if buf.q_w.is_some() && buf.k_w.is_some() && buf.v_w.is_some() {
+                    let mut w = buf.q_w.take().unwrap();
+                    w.extend(buf.k_w.take().unwrap());
+                    w.extend(buf.v_w.take().unwrap());
+                    if let Err(e) = writer.write(&format!("audio.blocks.{b}.qkv.weight"), &w) {
+                        err = Some(e.to_string());
+                    }
+                }
+                if buf.q_b.is_some() && buf.k_b.is_some() && buf.v_b.is_some() {
+                    let mut bias = buf.q_b.take().unwrap();
+                    bias.extend(buf.k_b.take().unwrap());
+                    bias.extend(buf.v_b.take().unwrap());
+                    if let Err(e) = writer.write(&format!("audio.blocks.{b}.qkv.bias"), &bias) {
+                        err = Some(e.to_string());
+                    }
+                }
+            }
+            Some(PlanItem::Direct { brain_name, quant }) => {
+                if *quant {
+                    let shape = reader.shape(name).unwrap();
+                    let (n, k) = (shape[0] as usize, shape[1] as usize);
+                    let (packed, scale) = model::int8::quantize_weight(&data, n, k);
+                    if let Err(e) = writer.write_u32(brain_name, &packed) {
+                        err = Some(e.to_string());
+                    } else if let Err(e) = writer.write(&format!("{brain_name}.scale"), &scale) {
+                        err = Some(e.to_string());
+                    }
+                } else if let Err(e) = writer.write(brain_name, &data) {
+                    err = Some(e.to_string());
+                }
+            }
+            None => err = Some(format!("import: streamed tensor {name:?} was not in the plan (bug: pass 1/pass 2 drifted)")),
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    eprintln!("omni: imported {} planned tensors -> {out_path}", plan.len());
+    Ok(())
+}
+
+#[cfg(test)]
+mod import_as_tests {
+    //! `import_as` end to end against a synthetic HF checkpoint (matching
+    //! `tts::import`'s own precedent — a small but structurally real fixture,
+    //! not the full 70.5 GB checkpoint) — proves the streaming mechanism
+    //! (qkv fuse, the quantize-or-keep-f32 decision, int8-native writing)
+    //! rather than re-proving names (`import.rs`'s other tests already cover
+    //! those against the real checkpoint's actual tensor list).
+    use super::*;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("omni-import-test-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn streams_qkv_fuse_and_quantizes_2d_weights() {
+        let dir = scratch_dir("e2e");
+        // d=8 (multiple of 4, so every 2-D weight below is a real
+        // should_quantize candidate), 2 experts, 1 layer per decoder.
+        let config = serde_json::json!({
+            "thinker_config": {
+                "audio_config": {"num_mel_bins": 8, "d_model": 8, "encoder_attention_heads": 2,
+                    "encoder_ffn_dim": 8, "encoder_layers": 1, "downsample_hidden_size": 8, "output_dim": 8},
+                "vision_config": {"depth": 1, "hidden_size": 8, "num_heads": 2, "intermediate_size": 8,
+                    "patch_size": 4, "temporal_patch_size": 2, "spatial_merge_size": 2, "out_hidden_size": 8},
+                "text_config": {"num_hidden_layers": 1, "hidden_size": 8, "num_attention_heads": 2,
+                    "num_key_value_heads": 2, "head_dim": 4, "moe_intermediate_size": 8,
+                    "shared_expert_intermediate_size": 0, "num_experts": 2, "num_experts_per_tok": 1,
+                    "vocab_size": 8},
+            },
+            "talker_config": {
+                "text_config": {"num_hidden_layers": 1, "hidden_size": 8, "num_attention_heads": 2,
+                    "num_key_value_heads": 2, "head_dim": 4, "moe_intermediate_size": 8,
+                    "shared_expert_intermediate_size": 8, "num_experts": 2, "num_experts_per_tok": 1,
+                    "vocab_size": 8},
+                "code_predictor_config": {"num_hidden_layers": 1, "hidden_size": 8, "head_dim": 4,
+                    "num_attention_heads": 2, "num_key_value_heads": 2, "intermediate_size": 8,
+                    "vocab_size": 8, "num_code_groups": 2},
+            },
+            "code2wav_config": {"hidden_size": 8, "intermediate_size": 8, "num_hidden_layers": 1,
+                "num_attention_heads": 2, "num_key_value_heads": 2, "sliding_window": 4,
+                "upsample_rates": [2], "upsampling_ratios": [2]},
+        });
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+
+        // (hf name, shape) -- deterministic fixed values, never random, per
+        // the engine's test-PRNG convention (a plain counter is enough here:
+        // int8 tolerance is checked, not exact reproduction of a real model).
+        let src_plan: Vec<(&str, Vec<u64>)> = vec![
+            ("thinker.audio_tower.layers.0.self_attn.q_proj.weight", vec![8, 8]),
+            ("thinker.audio_tower.layers.0.self_attn.k_proj.weight", vec![8, 8]),
+            ("thinker.audio_tower.layers.0.self_attn.v_proj.weight", vec![8, 8]),
+            ("thinker.audio_tower.layers.0.self_attn.q_proj.bias", vec![8]),
+            ("thinker.audio_tower.layers.0.self_attn.k_proj.bias", vec![8]),
+            ("thinker.audio_tower.layers.0.self_attn.v_proj.bias", vec![8]),
+            ("thinker.audio_tower.layers.0.self_attn.out_proj.weight", vec![8, 8]), // quantized (2D)
+            ("thinker.audio_tower.layers.0.self_attn_layer_norm.weight", vec![8]), // f32 (1D)
+            ("thinker.model.embed_tokens.weight", vec![8, 8]),
+            ("thinker.model.norm.weight", vec![8]),
+            ("thinker.model.layers.0.input_layernorm.weight", vec![8]),
+            ("thinker.model.layers.0.self_attn.q_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.gate.weight", vec![2, 8]), // router
+            ("thinker.model.layers.0.mlp.experts.0.gate_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.experts.0.up_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.experts.0.down_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.experts.1.gate_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.experts.1.up_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.mlp.experts.1.down_proj.weight", vec![8, 8]),
+            ("talker.model.layers.0.mlp.shared_expert.gate_proj.weight", vec![8, 8]),
+            ("talker.code_predictor.model.layers.0.self_attn.q_proj.weight", vec![8, 8]),
+            ("code2wav.pre_transformer.norm.weight", vec![8]),
+        ];
+        let src_data: HashMap<&str, Vec<f32>> =
+            src_plan.iter().map(|(n, s)| (*n, (0..s.iter().product::<u64>()).map(|i| (i as f32 - 4.0) * 0.37).collect())).collect();
+
+        let src_plan_owned: Vec<(String, Vec<u64>)> = src_plan.iter().map(|(n, s)| (n.to_string(), s.clone())).collect();
+        let mut w = checkpoint::weightio::StWriter::create(
+            dir.join("model.safetensors").to_str().unwrap(),
+            &src_plan_owned,
+            &Value::Null,
+            None,
+        )
+        .unwrap();
+        for (name, _) in &src_plan {
+            w.write(name, &src_data[name]).unwrap();
+        }
+        w.finish().unwrap();
+
+        let out_path = dir.join("model.brain.safetensors");
+        import_as(dir.to_str().unwrap(), out_path.to_str().unwrap(), Some("test/omni-tiny")).unwrap();
+
+        // Independent verification via the raw safetensors crate.
+        let out = std::fs::read(&out_path).unwrap();
+        let sts = safetensors::SafeTensors::deserialize(&out).unwrap();
+
+        // qkv fused correctly: concatenated q|k|v, in that order.
+        let qkv = sts.tensor("audio.blocks.0.qkv.weight").unwrap();
+        assert_eq!(qkv.shape(), &[24, 8]); // 3*8 rows
+        let qkv_f32: Vec<f32> = qkv.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let mut want = src_data["thinker.audio_tower.layers.0.self_attn.q_proj.weight"].clone();
+        want.extend(&src_data["thinker.audio_tower.layers.0.self_attn.k_proj.weight"]);
+        want.extend(&src_data["thinker.audio_tower.layers.0.self_attn.v_proj.weight"]);
+        assert_eq!(qkv_f32, want);
+        let qkv_bias = sts.tensor("audio.blocks.0.qkv.bias").unwrap();
+        assert_eq!(qkv_bias.shape(), &[24]);
+
+        // A 2-D weight was quantized: packed U32 + sibling F32 scale exist,
+        // and dequantizing round-trips within the same tolerance
+        // model::int8::quantize_weight's own test asserts.
+        let (_, meta) = safetensors::SafeTensors::read_metadata(&out).unwrap();
+        let tensor_infos = meta.tensors();
+        assert_eq!(tensor_infos.get("thinker.embed_tokens.weight").unwrap().dtype, safetensors::Dtype::U32);
+        assert_eq!(tensor_infos.get("thinker.embed_tokens.weight.scale").unwrap().dtype, safetensors::Dtype::F32);
+
+        let packed_view = sts.tensor("thinker.embed_tokens.weight").unwrap();
+        let scale_view = sts.tensor("thinker.embed_tokens.weight.scale").unwrap();
+        // The tensor-level byte claim (not a whole-file comparison, which at
+        // this toy 8x8 scale is swamped by per-tensor JSON header overhead --
+        // real savings come from the WEIGHT bytes shrinking 4x, which only
+        // dominates the header at real model row widths): packed u32 +
+        // per-row f32 scale must still be fewer bytes than the f32-equivalent
+        // for this same tensor (8*8*4 = 256 B) even at this tiny size, since
+        // the scale is only 1 f32 per ROW (8), not per element (64).
+        let f32_equivalent_bytes = 8 * 8 * 4;
+        let quantized_bytes = packed_view.data().len() + scale_view.data().len();
+        assert!(quantized_bytes < f32_equivalent_bytes, "quantized {quantized_bytes} B should be less than f32-equivalent {f32_equivalent_bytes} B");
+        let packed_u32: Vec<u32> = packed_view.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+        let scale: Vec<f32> = scale_view.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let original = &src_data["thinker.model.embed_tokens.weight"];
+        for r in 0..8usize {
+            for c in 0..8usize {
+                let word = packed_u32[r * 2 + c / 4];
+                let q = ((word >> (8 * (c % 4))) & 0xff) as u8 as i8;
+                let deq = q as f32 * scale[r];
+                assert!((deq - original[r * 8 + c]).abs() <= scale[r] * 0.5 + 1e-6, "row {r} col {c}: deq={deq} orig={}", original[r * 8 + c]);
+            }
+        }
+
+        // A 1-D tensor was kept exact f32 (no quantization, no scale sibling).
+        let norm = sts.tensor("thinker.norm.weight").unwrap();
+        let norm_f32: Vec<f32> = norm.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        assert_eq!(norm_f32, src_data["thinker.model.norm.weight"]);
+        assert!(meta.tensors().iter().find(|(n, _)| *n == "thinker.norm.weight.scale").is_none(), "a 1-D tensor must not get a scale sibling");
+
+        // code_predictor's identity mapping reached the output untouched in name.
+        assert!(meta.tensors().iter().any(|(n, _)| n == "talker.code_predictor.model.layers.0.self_attn.q_proj.weight"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     // Every assertion below is a REAL tensor name from the released
     // checkpoint's model.safetensors.index.json (dumped 2026-08-07), not an

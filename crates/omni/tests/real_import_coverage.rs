@@ -21,20 +21,6 @@ fn hf_dir() -> Option<PathBuf> {
     d.join("model.safetensors.index.json").exists().then_some(d)
 }
 
-/// The audio-tower q/k/v leaves are consumed by `fuse_audio_qkv`, not
-/// `hf_to_brain` directly (see `import.rs`'s doc) — the only names in the
-/// whole real checkpoint this test expects `hf_to_brain` to legitimately
-/// reject.
-fn is_qkv_fuse_leaf(name: &str) -> bool {
-    name.starts_with("thinker.audio_tower.layers.")
-        && (name.ends_with("self_attn.q_proj.weight")
-            || name.ends_with("self_attn.k_proj.weight")
-            || name.ends_with("self_attn.v_proj.weight")
-            || name.ends_with("self_attn.q_proj.bias")
-            || name.ends_with("self_attn.k_proj.bias")
-            || name.ends_with("self_attn.v_proj.bias"))
-}
-
 #[test]
 #[ignore]
 fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
@@ -51,7 +37,7 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
     let mut seen_brain_names: HashSet<String> = HashSet::new();
     let mut collisions = Vec::new();
     for name in weight_map.keys() {
-        if is_qkv_fuse_leaf(name) {
+        if omni::import::is_qkv_fuse_leaf(name) {
             continue;
         }
         match omni::import::hf_to_brain(name) {

@@ -178,38 +178,63 @@ cleanup).
   config assumptions — `code2wav.code_embedding.weight` is `[32768, 1024]`
   = `codebook_size(2048) * num_quantizers(16) x hidden_size(1024)`, exactly
   as `Code2WavConfig` models it; `pre_transformer` mlp/attn shapes match too.
-  **Not yet done**: the streaming orchestrator (`import_as`, wiring
-  `hf_to_brain` through `checkpoint::weightio::WeightReader`/`StWriter`) —
-  blocked on the disk-capacity finding below, which needs a design decision
-  before more code is worth writing against it.
 
-## Disk-capacity finding (reshapes M3b's remaining scope and M9's design)
+## Disk-capacity finding, and how it was resolved (M3c)
 
-`checkpoint::weightio::StWriter::write` is f32-only — every existing importer
-(`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint at f32, then
-quantizes to int8 transiently at RESIDENCY-LOAD time (one tensor of host f32
-at a time, dropped after upload — see `crates/qwen/src/q8.rs` `Q8::build`,
-`crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16 checkpoint, that
-convention means an on-disk f32 checkpoint of **~141 GB** (measured:
-`70 519 637 090 * 2`) — which fits on NEITHER of this box's filesystems
-(93 GB tmpfs, 71 GB free on the 296 GB overlay), and could not fit even with
-perfect shard-by-shard streaming (deleting each source shard after use still
-leaves the ~141 GB DESTINATION file needing one filesystem large enough to
-hold it). This is not fixable by streaming harder — it is fixable only by
-writing a smaller on-disk format (an int8-native checkpoint, extending
-`checkpoint::weightio` to accept pre-quantized packed-u32 + f32-scale tensor
-pairs — a genuine format extension, not wired up for any model yet) or by
-running the import on a box with more disk. The name-mapping / two-way
-coverage LOGIC (M3b above) is complete and tested against the real (partial)
-shards on this box; the full 70 GB->141 GB (or a future int8-native, ~35 GB)
-end-to-end run is deferred — an environment limit, documented here rather
-than attempted and left silently incomplete.
+`checkpoint::weightio::StWriter::write` was f32-only — every existing
+importer (`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint at f32,
+then quantizes to int8 transiently at RESIDENCY-LOAD time (one tensor of
+host f32 at a time, dropped after upload — see `crates/qwen/src/q8.rs`
+`Q8::build`, `crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16
+checkpoint, that convention would mean an on-disk f32 checkpoint of **~141 GB**
+(measured: `70 519 637 090 * 2`) — fitting on NEITHER of this box's
+filesystems (93 GB tmpfs, 71 GB free on the 296 GB overlay), and not fixable
+by streaming harder (the ~141 GB DESTINATION file itself needs one
+filesystem that size, regardless of how the source is read).
+
+**Resolved by extending `checkpoint::weightio` for int8-native storage**
+(user's explicit choice over building against the old f32 convention and
+deferring the disk problem): `Dtype` enum (`F32`/`U32`), `StWriter::create_mixed`
+(per-tensor dtype in the plan; `create` is now a thin `Dtype::F32`-everywhere
+wrapper, byte-identical to its pre-existing behavior — every current f32
+importer is untouched) and `StWriter::write_u32` (writes
+`model::int8::quantize_weight`'s packed output as-is, no repacking).
+Verified independently via the raw `safetensors` crate (not brain's own
+reader, so the test cannot pass merely because a writer and a reader share a
+bug) — `crates/checkpoint/src/weightio.rs`
+`create_mixed_writes_packed_int8_alongside_f32_scale`. Full checkpoint suite
+(52 tests) and a full workspace rebuild both stayed green.
+
+`omni::import::import_as` now streams the real orchestration: HF -> brain
+name mapping (M3b) + the audio qkv fuse (buffered per-layer across
+out-of-order arrival — a real bug was caught and fixed here: naively calling
+`.take()` inside a tuple pattern unconditionally clears the field even when
+the pattern doesn't match, silently discarding a partial q/k/v arrival) +
+`should_quantize` (every rank-2 weight with a K dimension divisible by 4 —
+attention/expert/router/embedding projections — gets int8; norms, biases,
+layer-scales, and anything not meeting that shape stay f32, automatically,
+not by a per-family special case) + `checkpoint::weightio::StWriter::create_mixed`/
+`write_u32`. Result: **~35 GB on-disk checkpoint**, fits the 93 GB tmpfs.
+Tested end to end against a synthetic HF checkpoint (small but structurally
+real, matching `tts::import`'s own precedent) —
+`crates/omni/src/import.rs` `streams_qkv_fuse_and_quantizes_2d_weights`:
+verifies the qkv fuse concatenation order, that a quantized tensor's packed+
+scale bytes are fewer than its f32-equivalent AND dequantize within
+`quantize_weight`'s own documented tolerance, that a 1-D tensor is kept exact
+f32 with no scale sibling, and that `code_predictor` reaches the output with
+an unchanged name — all via the raw `safetensors` crate, independent of
+`checkpoint::weightio`'s own reader.
+**Not yet done**: a full 70 GB source -> ~35 GB int8-native run against the
+real checkpoint (would need the remaining 11 of 15 shards, ~55 GB more,
+downloaded — not attempted this session; the mechanism is proven on real
+partial data (`real_import_coverage.rs`, all 28 010 real names) and on a
+synthetic full pipeline, which is the honest boundary of what this session
+covers).
 
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), the `import_as` streaming orchestrator (blocked on the disk
-finding above), M4 through M17. See the plan file.
+deferred), M4 through M17. See the plan file.
 
 ## Honesty notes
 
