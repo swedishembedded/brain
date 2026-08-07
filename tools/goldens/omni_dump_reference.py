@@ -170,12 +170,34 @@ def dump_vision(cfg):
     save("vision", {
         "patches": patches, "grid_thw": grid_thw.to(torch.int32),
         "hidden": out.last_hidden_state.contiguous(),
-        **{f"deepstack{i}": t.contiguous() for i, t in enumerate(out.deepstack_feature_lists)},
+        **{f"deepstack{i}": t.contiguous() for i, t in enumerate(out.deepstack_features or [])},
     }, src="thinker.visual", depth=vcfg.depth, hidden=vcfg.hidden_size,
        deepstack_indexes=str(vcfg.deepstack_visual_indexes))
 
 
 # --------------------------------------------------------------------------- layer0
+def fuse_experts(sd, layer, n_experts):
+    """The checkpoint stores one gate_proj/up_proj/down_proj per expert
+    (matching brain's own model::moe, which reads them individually -- no
+    Rust-side change needed here). The transformers module class this dumper
+    runs the reference through instead wants ONE stacked parameter per
+    projection (`Qwen3OmniMoeThinkerTextExperts`/`...TalkerTextExperts`:
+    `gate_up_proj [E, 2*ff, d]` gate and up concatenated along dim 1,
+    `down_proj [E, d, ff]`) -- a transformers-internal loading convention,
+    replicated here by hand since this is a raw state_dict load, not
+    `from_pretrained` (which would apply it automatically via the model's own
+    checkpoint-conversion hook)."""
+    prefix = f"layers.{layer}.mlp.experts."
+    gate_up, down = [], []
+    for e in range(n_experts):
+        gate = sd.pop(f"{prefix}{e}.gate_proj.weight")
+        up = sd.pop(f"{prefix}{e}.up_proj.weight")
+        down.append(sd.pop(f"{prefix}{e}.down_proj.weight"))
+        gate_up.append(torch.cat([gate, up], dim=0))
+    sd[f"{prefix}gate_up_proj"] = torch.stack(gate_up, dim=0)
+    sd[f"{prefix}down_proj"] = torch.stack(down, dim=0)
+
+
 def dump_layer0(cfg):
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextModel
 
@@ -185,6 +207,7 @@ def dump_layer0(cfg):
     tcfg.num_hidden_layers = 1
     model = Qwen3OmniMoeThinkerTextModel(tcfg)
     sd = load_prefixed("thinker.model", layer_filter=lambda i: i == 0)
+    fuse_experts(sd, 0, tcfg.num_experts)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     assert not missing, f"layer0 missing: {missing[:8]}"
     assert not unexpected, f"layer0 unexpected: {unexpected[:8]}"
@@ -192,30 +215,29 @@ def dump_layer0(cfg):
 
     tokens = [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13]  # fixed, valid ids
     ids = torch.tensor([tokens], dtype=torch.long)
-    router_logits = {}
+    router_out = {}
 
     def hook(_mod, _inp, out):
-        # Qwen3MoeSparseMoeBlock-family forward returns (hidden, router_logits) or
-        # just hidden depending on config.output_router_logits; capture either way.
-        if isinstance(out, tuple) and len(out) == 2:
-            router_logits["logits"] = out[1].detach()
+        # Qwen3OmniMoeThinkerTextTopKRouter.forward -> (router_logits,
+        # router_scores [top-k values], router_indices [top-k ids]) -- the
+        # SparseMoeBlock wrapping it returns only the combined hidden state,
+        # so the router itself (`mlp.gate`) is the hook target, not `mlp`.
+        router_out["logits"], router_out["scores"], router_out["indices"] = (t.detach() for t in out)
 
     handle = None
-    mlp = getattr(model.layers[0], "mlp", None)
-    if mlp is not None:
-        handle = mlp.register_forward_hook(hook)
+    gate = getattr(getattr(model.layers[0], "mlp", None), "gate", None)
+    if gate is not None:
+        handle = gate.register_forward_hook(hook)
     with torch.no_grad():
         out = model(input_ids=ids)
     if handle:
         handle.remove()
 
     tensors = {"tokens": torch.tensor(tokens, dtype=torch.int32), "hidden": out.last_hidden_state.squeeze(0).contiguous()}
-    if "logits" in router_logits:
-        rl = router_logits["logits"]
-        topk = torch.topk(torch.softmax(rl.float(), dim=-1), tcfg.num_experts_per_tok, dim=-1)
-        tensors["router_logits"] = rl.contiguous()
-        tensors["router_topk_ids"] = topk.indices.to(torch.int32).contiguous()
-        tensors["router_topk_weights"] = topk.values.contiguous()
+    if "logits" in router_out:
+        tensors["router_logits"] = router_out["logits"].contiguous()
+        tensors["router_topk_ids"] = router_out["indices"].to(torch.int32).contiguous()
+        tensors["router_topk_weights"] = router_out["scores"].contiguous()
     save("layer0", tensors, src="thinker.model.layers.0", n_experts=tcfg.num_experts,
          top_k=tcfg.num_experts_per_tok, hidden_size=tcfg.hidden_size)
 
@@ -229,6 +251,7 @@ def dump_rope(cfg):
     # the object via __new__ to skip allocating the full (huge) module tree.
     thinker = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(Qwen3OmniMoeThinkerForConditionalGeneration)
     thinker.config = tc
+    thinker.spatial_merge_size = tc.vision_config.spatial_merge_size
 
     # A synthetic mixed prompt: system/user text, one image (grid 1x4x4 -> 4
     # merged tokens at merge_size 2), one audio span (2 frames -> 2 tokens after
@@ -258,7 +281,7 @@ def dump_rope(cfg):
         "position_ids": position_ids.squeeze(1).to(torch.int32),  # [3, seq]
         "mrope_deltas": mrope_deltas.to(torch.int32),
     }, src="Qwen3OmniMoeThinkerForConditionalGeneration.get_rope_index",
-       mrope_section=str(tc.rope_scaling["mrope_section"]))
+       mrope_section=str(tc.text_config.rope_scaling["mrope_section"]))
 
 
 # ------------------------------------------------------------------------- talkcp
@@ -274,13 +297,18 @@ def dump_code_predictor(cfg):
     assert not [m for m in missing if "lm_head" not in m], f"code_predictor missing: {missing[:8]}"
     model.eval()
 
-    # inputs_embeds path: one step, hidden_size-wide fixed embedding.
+    # The "prefill" branch (the one that actually consumes inputs_embeds
+    # directly, rather than looking `input_ids` up in a per-step embedding
+    # table) triggers only when inputs_embeds.shape[1] > 1 -- the smallest
+    # real prefill is [1, 2, h]: position 0 is the Talker hidden-state
+    # conditioning, position 1 is codebook-0's embedded token; this call
+    # predicts codebook-1 (generation_steps = shape[1] - 2 = 0).
     h = ccfg.hidden_size
-    embeds = ((torch.arange(h, dtype=torch.float32) % 13) - 6.0) / 6.0
+    embeds = ((torch.arange(2 * h, dtype=torch.float32) % 13) - 6.0) / 6.0
     with torch.no_grad():
-        out = model(inputs_embeds=embeds.view(1, 1, h))
+        out = model(inputs_embeds=embeds.view(1, 2, h))
     save("code_predictor", {
-        "in_embed": embeds.contiguous(), "logits": out.logits.squeeze(0).squeeze(0).contiguous(),
+        "in_embed": embeds.view(2, h).contiguous(), "logits": out.logits.squeeze(0).contiguous(),
     }, src="talker.code_predictor", n_layers=ccfg.num_hidden_layers, n_code_groups=ccfg.num_code_groups)
 
 

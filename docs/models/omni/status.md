@@ -231,6 +231,44 @@ partial data (`real_import_coverage.rs`, all 28 010 real names) and on a
 synthetic full pipeline, which is the honest boundary of what this session
 covers).
 
+- **M0 (finished) — real goldens, all 6 components, against the actual
+  checkpoint** (2026-08-07). `tools/goldens/omni_dump_reference.py` ran end
+  to end against real weights (shard 1 has `audio_tower`+`visual`; shard 15
+  has `code2wav`+`code_predictor`) — every component produced finite,
+  non-NaN activations. Four real bugs found and fixed along the way, each
+  informative about the reference implementation, none affecting brain's own
+  Rust design:
+  - `layer0`: the checkpoint stores one `gate_proj`/`up_proj`/`down_proj` per
+    expert (matching `model::moe`'s own per-expert design exactly — no brain
+    change needed), but the transformers module class wants ONE stacked
+    `gate_up_proj [E, 2*ff, d]` / `down_proj [E, d, ff]` parameter — a
+    transformers-internal loading convention `from_pretrained` applies
+    automatically that a raw `state_dict` load must replicate by hand
+    (`fuse_experts` in the dumper). Router logits/scores/indices come from
+    hooking `mlp.gate` (`Qwen3OmniMoeThinkerTextTopKRouter`), not `mlp`
+    itself — `Qwen3OmniMoeThinkerTextSparseMoeBlock.forward` returns only the
+    combined hidden state. Verified sane: top-8 expert weights sum to 1.0
+    (`norm_topk_prob`).
+  - `vision`: `BaseModelOutputWithDeepstackFeatures`'s real field is
+    `deepstack_features`, not the guessed `deepstack_feature_lists`.
+  - `rope`: the `__new__`-bypass stub (skips allocating the full module tree
+    to compute `get_rope_index` with no weights) also needs
+    `spatial_merge_size` set by hand — `get_rope_index` reads
+    `self.spatial_merge_size` directly, not through `self.config`.
+  - `talkcp`: the code predictor's `forward` only consumes `inputs_embeds`
+    directly on its "prefill" branch, which triggers on
+    `inputs_embeds.shape[1] > 1` — a single-step `[1,1,h]` call falls through
+    to a `generation_steps`-indexed `input_ids` embedding lookup instead
+    (and crashes with `input_ids=None`). Fixed by calling with the smallest
+    real prefill shape, `[1,2,h]` (hidden + codebook-0 embedding, predicting
+    codebook-1).
+  Goldens (756 KB total, 6 files) copied to
+  `/data/workspace/resources/brain-goldens/omni/` (the `BRAIN_GOLDEN_MIRROR`
+  default) and wired into `scripts/data/fetch-testdata.sh` (`golden_tree
+  "omni" "golden/omni"`, alongside the existing `lfm`/`qwen`/`vae`/`zimage`/
+  `esrgan` entries) — `make fetch/testdata` now restores
+  `testdata/golden/omni/` for anyone, not just this box.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,

@@ -183,6 +183,7 @@ golden_tree "qwen"         "golden/qwen"
 golden_tree "vae"          "golden/vae"
 golden_tree "zimage"       "golden/zimage"
 golden_tree "esrgan"       "golden/esrgan"
+golden_tree "omni"         "golden/omni"
 
 # --- SAM 2.1 (promptable segmentation, image path) ---------------------------
 # The reference CHECKPOINTS (+ their hydra yaml) only. The stage goldens
