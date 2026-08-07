@@ -55,6 +55,12 @@ fn tier_name(t: Tier) -> &'static str {
 
 fn accelerator_from_budget(b: &DeviceBudget) -> Accelerator {
     let (kind, index, name) = device_facets(b.device);
+    let mut extra = std::collections::BTreeMap::new();
+    // GPU 0 only — see `gpu_sysfs_extra`'s doc for why a second GPU is left
+    // alone rather than guessed at.
+    if kind == "gpu" && index == 0 {
+        gpu_sysfs_extra(&mut extra);
+    }
     Accelerator {
         id: device_id(b.device),
         kind: kind.to_string(),
@@ -63,9 +69,66 @@ fn accelerator_from_budget(b: &DeviceBudget) -> Accelerator {
         mem_total: b.total,
         mem_used: b.used,
         mem_reserved: b.reserved,
+        // Real occupancy needs the i915 PMU (CAP_PERFMON, not available to
+        // this process by default) or an equivalent vendor counter — nothing
+        // this crate can read unprivileged is honestly "utilization", so
+        // this typed field stays None. What sysfs freq/throttle state IS
+        // readable unprivileged lands in `extra` below, clearly labelled.
         util: None,
-        extra: Default::default(),
+        extra,
     }
+}
+
+/// Best-effort GPU frequency/throttle state from `/sys/class/drm`, landed in
+/// `extra` rather than the typed `util` field — see `accelerator_from_budget`'s
+/// comment for why. Deliberately duplicated from (not imported from)
+/// `crates/perf/src/devicetel.rs`: `brain-stats` is kept dependency-light on
+/// purpose (see this crate's own doc comment) so `braintop`/D-Bus can depend
+/// on it without pulling in the model/backend graph `brain-perf` needs; both
+/// readers are independently small and pure-`std`, so the duplication costs
+/// little and preserves that layering — the same trade this repo already
+/// makes for the PCI/UUID identity query duplicated between `backend-wgpu`
+/// and `backend-vulkan`.
+///
+/// Only ever asked for `gpu0`: correlating a DRM card index with brain's own
+/// `Device::Gpu(i)` indexing (which comes from wgpu/Vulkan adapter
+/// enumeration, not `/sys/class/drm/cardN`) is not attempted here, so a
+/// second budgeted GPU is left with no sysfs fields rather than one
+/// possibly attributed to the wrong card.
+fn gpu_sysfs_extra(extra: &mut std::collections::BTreeMap<String, serde_json::Value>) {
+    let Some(card) = intel_card_dir() else { return };
+    let gt0 = card.join("gt/gt0");
+    let read_u32 = |rel: &str| -> Option<u32> { std::fs::read_to_string(gt0.join(rel)).ok()?.trim().parse().ok() };
+    let read_bool01 = |rel: &str| -> Option<bool> { read_u32(rel).map(|v| v != 0) };
+    if let Some(v) = read_u32("rps_act_freq_mhz") {
+        extra.insert("gpu_freq_mhz".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = read_bool01("throttle_reason_pl1") {
+        extra.insert("gpu_throttled_pl1".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = read_bool01("throttle_reason_thermal") {
+        extra.insert("gpu_throttled_thermal".to_string(), serde_json::json!(v));
+    }
+}
+
+/// Find the first Intel (`vendor == 0x8086`) DRM card directory — discovered,
+/// never hardcoded, so this works whichever index the kernel assigned.
+fn intel_card_dir() -> Option<std::path::PathBuf> {
+    let mut cards: Vec<std::path::PathBuf> = std::fs::read_dir("/sys/class/drm")
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("card") && n[4..].chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+        })
+        .collect();
+    cards.sort();
+    cards.into_iter().find(|c| {
+        std::fs::read_to_string(c.join("device/vendor")).map(|v| v.trim() == "0x8086").unwrap_or(false)
+    })
 }
 
 /// Join the manifest catalog with per-instance placement into `ModelStat`s.
@@ -204,6 +267,29 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    #[test]
+    fn gpu_sysfs_extra_never_panics_and_only_inserts_bools_and_a_u32() {
+        // Environment-dependent (this box happens to have a real Intel GPU,
+        // a CI runner may not) -- the contract under test is "never panics,
+        // and whatever it inserts is honestly typed," not a specific value.
+        let mut extra = std::collections::BTreeMap::new();
+        gpu_sysfs_extra(&mut extra);
+        if let Some(v) = extra.get("gpu_freq_mhz") {
+            assert!(v.is_u64(), "gpu_freq_mhz must be a plain number, got {v:?}");
+        }
+        for k in ["gpu_throttled_pl1", "gpu_throttled_thermal"] {
+            if let Some(v) = extra.get(k) {
+                assert!(v.is_boolean(), "{k} must be a bool, got {v:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_gpu0_gets_sysfs_extra_a_second_gpu_is_left_alone() {
+        let gpu1 = accelerator_from_budget(&DeviceBudget { device: Device::Gpu(1), total: 24 * GB, reserved: 0, used: 0 });
+        assert!(gpu1.extra.is_empty(), "a second GPU must not get gpu0's sysfs data attributed to it");
     }
 
     fn stub_executor() -> Executor {
