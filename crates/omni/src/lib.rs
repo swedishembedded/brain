@@ -14,6 +14,7 @@
 //! `tts`'s MTP code predictor, and `codec`'s SEANet vocoder.
 
 pub mod caps;
+pub mod codec_bridge;
 pub mod config;
 pub mod generate;
 pub mod import;

@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `capability` surface for Qwen3-Omni's Thinker: text generation, with
-//! optional real audio/image input.
+//! `capability` surface for Qwen3-Omni: text generation (with optional real
+//! audio/image input) and now real speech output.
 //!
-//! Deliberately scoped to what is actually implemented: `generate` (text
-//! prompt in, plus an optional speech clip and/or image spliced in via
-//! `crate::mm`, greedy text out — `crate::generate::generate_greedy`/
-//! `generate_greedy_multimodal`). No `converse`/`transcribe`/`speak` actions
-//! are declared here — those need speech OUTPUT (the Talker + code predictor
-//! + Code2Wav chained together, `accept_hidden_layer`/codec-id sampling),
-//! none of which are wired into a serving-shaped loop yet (`docs/models/
-//! omni/status.md`'s M9 entry). Declaring an action whose `run()` can't
-//! actually do what its spec promises is worse than not declaring it. Video
-//! input is NOT wired into this action (it needs already-decoded frames —
+//! `generate` (text prompt in, plus an optional speech clip and/or image
+//! spliced in via `crate::mm`, greedy text out —
+//! `crate::generate::generate_greedy`/`generate_greedy_multimodal`) and
+//! `speak` (text prompt in, response text + a real spoken waveform out —
+//! `OmniInner::speak`, chaining Thinker -> Talker -> MTP -> Code2Wav via
+//! `crate::talker_prompt`/`crate::talker_generate`) are both declared.
+//! `speak`'s own scope: text-only user turn (no audio/image splice on the
+//! Talker side yet — `crate::talker_prompt`'s doc), single-turn (no
+//! multi-turn Talker context). No `converse`/`transcribe` actions —
+//! `converse` would need `speak`'s loop wired onto `generate`'s multimodal
+//! input path together (not done); `transcribe` needs a dedicated ASR-shaped
+//! prompt this crate hasn't built (use `brain/qwen-asr` directly for
+//! transcription today). Declaring an action whose `run()` can't actually do
+//! what its spec promises is worse than not declaring it. Video input is NOT
+//! wired into `generate` (it needs already-decoded frames —
 //! `crate::mm::encode_video_frames`'s doc — and this capability surface has
 //! no way to receive a list of frame blobs from one `Invocation` yet).
 //!
@@ -48,9 +53,11 @@ use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
 use serde_json::{json, Value};
 
-use crate::config::ThinkerConfig;
+use crate::config::OmniConfig;
 use crate::generate::{generate_greedy, generate_greedy_multimodal};
 use crate::mm::build_multimodal_prompt;
+use crate::talker_generate::{self, GenOpts};
+use crate::talker_prompt::build_talker_prompt;
 use crate::thinker::thinker_pipelines;
 
 /// Model name in the manifest.
@@ -78,12 +85,27 @@ pub fn generate_spec() -> ActionSpec {
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
-/// The manifest (one `generate` action).
+/// The `speak` action schema: text in, spoken text + a real waveform out.
+/// Chains Thinker (text) -> Talker + MTP + Code2Wav (`crate::caps::OmniInner
+/// ::speak`, `crate::talker_generate`'s module doc) -- text-only user turn,
+/// no audio/image splice on this path yet (`crate::talker_prompt`'s scope
+/// note).
+pub fn speak_spec() -> ActionSpec {
+    ActionSpec::new("speak", "Qwen3-Omni: text response + spoken waveform (Thinker -> Talker -> MTP -> Code2Wav)")
+        .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
+        .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
+        .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
+        .param(ParamSpec::new("speaker", ParamType::Str, "voice name from TalkerConfig::speaker_id (chelsie/ethan/aiden); falls back to the first configured voice").default(json!("chelsie")))
+        .output(BlobSpec::new("text", Media::Text, "the generated response text"))
+        .output(BlobSpec::new("audio", Media::Audio, "the spoken response: raw mono f32 little-endian PCM at Code2WavConfig::output_sample_rate (24 kHz)"))
+}
+
+/// The manifest (`generate` + `speak`).
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B Thinker -- text generation with optional real audio/image input (validation-tier: streamed weights, no int8/GPU-sharded residency; speech output and video input are not wired into a generation loop yet -- see docs/models/omni/status.md's M9 entry).",
-        vec![generate_spec()],
+        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; video input and the multimodal+speech-output combination are not wired in yet -- see docs/models/omni/status.md's M9b entry).",
+        vec![generate_spec(), speak_spec()],
     )
 }
 
@@ -122,7 +144,7 @@ pub fn last_user_text(inv: &Invocation) -> String {
 pub struct OmniInner {
     reader: WeightReader,
     gpu: Gpu,
-    cfg: ThinkerConfig,
+    cfg: OmniConfig,
     tok: QwenBpe,
     embed_table: Vec<f32>,
     lm_head: Vec<f32>,
@@ -142,7 +164,7 @@ impl OmniProvider {
         let reader = WeightReader::open_hf_dir(Path::new(dir)).map_err(|e| format!("omni: open {dir}: {e}"))?;
         let config_json = std::fs::read_to_string(Path::new(dir).join("config.json")).map_err(|e| format!("omni: read config.json: {e}"))?;
         let root: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| format!("omni: parse config.json: {e}"))?;
-        let cfg = ThinkerConfig::from_json(&root);
+        let cfg = OmniConfig::from_json(&root);
         let tok = QwenBpe::from_dir(dir)?;
         let embed_table = reader.tensor("thinker.model.embed_tokens.weight").ok_or("omni: missing thinker.model.embed_tokens.weight")?;
         let lm_head = reader.tensor("thinker.lm_head.weight").ok_or("omni: missing thinker.lm_head.weight")?;
@@ -164,7 +186,11 @@ impl Provider for OmniProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "generate").then(|| Arc::new(GenerateAction { inner: self.inner.clone() }) as Arc<dyn Action>)
+        match name {
+            "generate" => Some(Arc::new(GenerateAction { inner: self.inner.clone() })),
+            "speak" => Some(Arc::new(SpeakAction { inner: self.inner.clone() })),
+            _ => None,
+        }
     }
 }
 
@@ -176,7 +202,7 @@ impl OmniInner {
     /// splice, plain-sequential M-RoPE positions (`crate::generate`'s doc).
     pub fn generate(&self, prompt: &str, max_new: u32) -> (String, Vec<u32>) {
         let prompt_ids = self.tok.encode(prompt);
-        let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg.text, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
+        let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
         let new_ids = out_ids[prompt_ids.len()..].to_vec();
         let text = self.tok.decode(&new_ids);
         (text, new_ids)
@@ -191,12 +217,44 @@ impl OmniInner {
     /// (`capability::blob::decode_image`'s output shape).
     pub fn generate_multimodal(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, max_new: u32) -> (String, Vec<u32>) {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg, &self.embed_table, &text_ids, audio, image, None);
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, None);
         let n_prompt = mm_prompt.token_ids.len();
-        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
+        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt..].to_vec();
         let text = self.tok.decode(&new_ids);
         (text, new_ids)
+    }
+
+    /// Speech output: [`Self::generate`] for the text, then chains Talker +
+    /// MTP + Code2Wav into a real waveform (`crate::talker_generate`'s
+    /// module doc). Text-only user turn (no audio/image splice on this
+    /// path yet — see `crate::talker_prompt`'s scope note). `speaker` is a
+    /// name from `TalkerConfig::speaker_id` (falls back to the first entry,
+    /// typically `"chelsie"`, if unrecognized). Returns `(text, wav_samples,
+    /// sample_rate)`.
+    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str) -> (String, Vec<f32>, u32) {
+        let (text, new_ids) = self.generate(prompt, max_new);
+        let user_ids = self.tok.encode(prompt);
+
+        let tc = &self.cfg.talker;
+        let text_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "text_projection");
+        let codec_embedding = self.reader.tensor("talker.model.codec_embedding.weight").expect("missing talker.model.codec_embedding.weight");
+        let d = tc.text.hidden as usize;
+        let codec_embed = |id: u32| codec_embedding[id as usize * d..(id as usize + 1) * d].to_vec();
+        let specials = crate::codec_bridge::talker_prompt_specials(&self.cfg);
+        let speaker_id = tc.speaker_id.get(speaker).copied().or_else(|| tc.speaker_id.values().next().copied()).expect("TalkerConfig::speaker_id must have at least one entry");
+
+        let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids);
+
+        let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
+        let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor);
+        let codec_head_w = self.reader.tensor("talker.codec_head.weight").expect("missing talker.codec_head.weight");
+
+        let codes = talker_generate::generate_codes(&self.reader, &self.gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default());
+
+        let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav);
+        let wav = codec.decode_omni(&codes);
+        (text, wav, self.cfg.code2wav.output_sample_rate)
     }
 }
 
@@ -227,5 +285,33 @@ impl Action for GenerateAction {
         };
         progress(Progress::step(max_new, max_new, text.clone()));
         Ok(Outcome::new().set("text", json!(text)).set("tokens", json!(new_ids)).blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+
+struct SpeakAction {
+    inner: Arc<OmniInner>,
+}
+
+impl Action for SpeakAction {
+    fn spec(&self) -> ActionSpec {
+        speak_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let prompt = last_user_text(inv);
+        if prompt.trim().is_empty() {
+            return Err("omni speak: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+        let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
+
+        progress(Progress::step(0, 2, "generating text"));
+        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker);
+        progress(Progress::step(1, 2, "synthesizing speech"));
+        let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
+        progress(Progress::step(2, 2, "done"));
+        Ok(Outcome::new()
+            .set("text", json!(text))
+            .blob("text", Blob::new(Media::Text, text.into_bytes()))
+            .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
     }
 }
