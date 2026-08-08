@@ -128,7 +128,7 @@ fn matches_the_real_talker_layer0() {
         shared_expert: (&shared_gate, &shared_up, &shared_down),
         shared_expert_gate: &shared_expert_gate,
     };
-    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, &cos, &sin, n);
+    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, &cos, &sin, n, None);
 
     let got_xmid = gpu.read(&xmid, (n * cfg.hidden) as usize);
     let want_xmid = golden.tensor_f32("xmid").expect("golden xmid");
