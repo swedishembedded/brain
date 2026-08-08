@@ -1340,6 +1340,67 @@ naming surface — RVQ codebook tables, ConvNeXt upsample, SEANet residual
 units — wasn't built out as a synthetic-weight generator this round; `cost`
 mode's coarse estimate is what exists).
 
+## M17 — testdata audit (2026-08-08)
+
+**Scope actually delivered**: the audit + a real (not theoretical) test of
+the recovery mechanism, per the plan's own safety gate ("anything not
+restorable gets reported, not deleted"). **`testdata/` was NOT cleared** —
+the audit found that clearing it on this box would be real, uncontested data
+loss, not the safe "gitignored + re-fetchable" operation the plan assumed.
+Full write-up: `docs/lessons.md` #36. Short version:
+
+Of the seven mirror roots `scripts/data/fetch-testdata.sh` reads
+(`BRAIN_*_MIRROR` env vars), six are missing on this box; only
+`GOLDEN_MIRROR` exists, and it carries exactly one subdirectory (`omni/`).
+Cross-referenced against `testdata/`'s real 14 GB:
+
+| subtree | size | script coverage | mirror present here | verdict |
+|---|---|---|---|---|
+| `asr` | 4.6 GB | yes (`ASR_MIRROR`) | no | **not restorable here** |
+| `restore` | 3.5 GB | none at all | — | **not restorable here** |
+| `sam2` | 3.0 GB | yes, checkpoints only (`SAM2_MIRROR`) | no | **not restorable here** |
+| `flux1` | 959 MB | none at all | — | **not restorable here** |
+| `face` | 401 MB | yes, 2 files only (`IDENTITY_MIRROR`) | no | **not restorable here** |
+| `t5` | 179 MB | none at all | — | **not restorable here** |
+| `clip` | 177 MB | yes, 2 files only (`UNET_MIRROR`) | no | **not restorable here** |
+| `controlnet` | 118 MB | none at all | — | **not restorable here** |
+| `instantid` | 102 MB | none at all | — | **not restorable here** |
+| `pulid` | 94 MB | none at all | — | **not restorable here** |
+| `flux2` | 82 MB | none at all | — | **not restorable here** |
+| `sdxl` | 77 MB | yes, 2 files only (`UNET_MIRROR`) | no | **not restorable here** |
+| `golden/omni` | 1.0 MB | yes (`GOLDEN_MIRROR`) | **yes** | restorable (verified — see below) |
+| `golden/{lfm,qwen,vae,zimage,esrgan}` | 13.3 MB | yes (`GOLDEN_MIRROR`) | no (mirror lacks these subdirs) | **not restorable here** |
+
+`restore`/`flux1`/`flux2`/`controlnet`/`instantid`/`pulid` are the imaging
+workstream's fixtures — not omni's — and have no script entry at all, mirror
+or otherwise; adding one was out of this milestone's scope (it's that
+workstream's own fixture set to define, not a blind mirror-path guess).
+
+**The one subtree with a real mirror was actually tested, not just reasoned
+about**: `testdata/golden/omni` (8 files, 1.0 MB) was hashed, deleted, and
+`scripts/data/fetch-testdata.sh` was run for real. It restored 7 of 8 files
+byte-identical to their pre-delete hashes (confirmed via `md5sum` diff) and
+correctly reported every other group as missing, exactly matching the audit
+table above — the script itself works as designed, on the one subtree that
+has what it needs. The 8th file, `omni_generate.safetensors` (a same-session
+test golden `generate_e2e.rs` reads, 308 bytes, created after the mirror was
+last populated), was not in the mirror; restored from a pre-test backup, and
+then copied INTO `GOLDEN_MIRROR/omni/` so this specific gap is closed for
+any future clear. No other mirror was touched.
+
+**Cross-cutting finding, also in `docs/lessons.md` #37**: profiling
+`omni_bench` on the CPU backend (for M16, above) found `gpu_core::roof`'s
+roofline probe hangs (reads as a deadlock, not a slow measurement) on that
+backend — a pre-existing bug, newly exposed rather than introduced, with an
+existing `BRAIN_NO_ROOF=1` workaround.
+
+**Recommendation, not executed here** (a decision for whoever owns the
+mirrors, not this session): either populate the six missing `BRAIN_*_MIRROR`
+paths on this box (from wherever they were originally sourced), or point the
+env vars at wherever they now actually live, before ever running `rm -rf
+testdata/` here. Until then, `testdata/` on this box is de facto
+irreplaceable local state despite being gitignored.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
@@ -1351,13 +1412,18 @@ M-RoPE support first, its own generation loop is currently library-only),
 — shipped in M9c above; `converse`, folding real audio/image *input* into
 the SAME turn as speech *output*, has not), OpenAI/Anthropic transports in
 the automated e2e harness (M13/M14's own note above), video-file decoding +
-a multi-frame wire shape for the `generate` action (M9b above), M17
-(testdata audit). `qwen::Qwen`'s KV-cache migration, the OpenAI/Anthropic
-multimodal-content-part-drop fix, M15 (NPU export), and M16 (`omni_bench`
-profiling) are now done — see their own dated sections above; this
-paragraph is the current residual list, not a historical snapshot. See the
-plan file. M6 through M16 are now believed complete for what is actually
-implemented (Thinker/Talker decoders,
+a multi-frame wire shape for the `generate` action (M9b above). Populating
+the six missing `BRAIN_*_MIRROR` paths M17 above found (a decision for
+whoever owns them, not this session) and, separately, adding a
+`fetch-testdata.sh` entry for the imaging workstream's fixtures
+(`restore`/`flux1`/`flux2`/`controlnet`/`instantid`/`pulid` — that
+workstream's own scope, not omni's). `qwen::Qwen`'s KV-cache migration, the
+OpenAI/Anthropic multimodal-content-part-drop fix, M15 (NPU export), M16
+(`omni_bench` profiling), and M17 (testdata audit — audited and safety-gated,
+not a wholesale clear; see its own section) are now done — see their own
+dated sections above; this paragraph is the current residual list, not a
+historical snapshot. See the plan file. M6 through M17 are now believed
+complete for what is actually implemented (Thinker/Talker decoders,
 real M-RoPE incl. real audio/image/video splice, KV-cache decode, composed
 loops, splice seam, code predictor, Code2Wav vocoder, Thinker text generation
 with optional real speech/image input exposed over D-Bus/OpenAI/Anthropic

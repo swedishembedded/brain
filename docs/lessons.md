@@ -899,3 +899,80 @@ oracle test is exactly this class of gap: it proves the sparse and dense
 paths agree with EACH OTHER, which is blind to a bug present identically in
 both — a real-weight/real-golden test is what caught this one, not the
 same-composition oracle.
+
+## 36. `testdata/`'s "restorable from a mirror" claim was never audited against a real box
+
+`scripts/data/fetch-testdata.sh`'s own header states the design goal
+plainly: `testdata/` is disposable, gitignored, and `make fetch/testdata`
+repopulates it from local mirrors (`BRAIN_*_MIRROR` env vars, each defaulting
+to a fixed path under `/data/workspace/resources/...`). Nobody had checked
+whether those default paths actually exist on this box until the M17
+testdata-audit milestone did.
+
+They mostly don't. Of the seven mirror roots the script references
+(`ASR_MIRROR`, `VL_MIRROR`, `TTS_MIRROR`, `GOLDEN_MIRROR`, `SAM2_MIRROR`,
+`IDENTITY_MIRROR`, `UNET_MIRROR`), six are missing entirely on this box; only
+`GOLDEN_MIRROR` (`/data/workspace/resources/brain-goldens`, 1 MB) exists, and
+it carries exactly one subdirectory (`omni/`, matching the omni golden
+fixtures a recent session's own work populated). Cross-referencing against
+`testdata/`'s actual 14 GB contents: **`asr` (4.6 GB), `sam2` (3.0 GB),
+`face` (401 MB), `clip` (177 MB, beyond a 2-file tokenizer subset), `sdxl`
+(77 MB, same tokenizer-only coverage) are all mirror-*referenced* but
+mirror-*absent* here, and `restore` (3.5 GB), `flux1` (959 MB), `flux2`
+(82 MB), `controlnet` (118 MB), `instantid` (102 MB), `pulid` (94 MB) — the
+imaging workstream's fixtures — have NO entry in the script at all**, mirror
+or otherwise. Even the one working mirror has a gap: `testdata/golden/omni`
+carries `omni_generate.safetensors` (a golden a same-session test run
+produced locally) that the mirror doesn't have, so even that "restorable"
+subtree wouldn't come back byte-identical.
+
+Net: on this box, essentially none of `testdata/`'s 14 GB is actually
+recoverable by running the documented recovery command. The tree LOOKS
+disposable (gitignored, a script claims to repopulate it) but functions as
+irreplaceable local state, because the mirrors it depends on were either
+never copied to this machine or were never wired into the script for the
+newer (imaging) fixtures. **`rm -rf testdata/` here would be silent,
+uncontested data loss**, not the "idempotent, re-fetchable" operation the
+script's own doc comment promises.
+
+**The general shape to watch for**: any "regenerate me" claim (a script, a
+doc comment, a design note) that depends on an external resource (a mirror
+directory, a network endpoint, a service) is a claim about a DIFFERENT
+machine's state until it's been exercised on THIS one. `make fetch/testdata`
+had never actually been run start-to-finish against an emptied `testdata/`
+on this box — its correctness was assumed from reading the script, not
+demonstrated. The fix isn't code; it's process: before treating any
+gitignored/"disposable" tree as safe to clear, run the stated recovery path
+for real (or, as here, audit mirror-existence + script-coverage per subtree)
+rather than trusting the tree's own claimed disposability. `docs/models/omni/status.md`'s
+M17 entry has the full per-subtree table; nothing was deleted.
+
+## 37. A roofline probe calibrated for GPU throughput reads as a hang on the CPU backend
+
+`gpu_core::roof::measure_compute`'s self-calibrating loop starts at a small
+iteration count and doubles (or jumps straight to a computed target) until a
+dispatch's wall-clock time clears `MIN_PROBE_SECONDS` (50 ms), capping at
+`1 << 20` iterations over `FMA_THREADS = 1 << 20` parallel lanes. Every
+existing caller of `gpu_core::roof::ensure` (`qwen_bench` and its siblings)
+had only ever been run against a real GPU backend, where that calibration
+converges in a handful of doublings. The first CPU-backend run of it
+(`omni_bench thinker-layer`, built for M16) sat alive for **hours** of
+wall-clock time — 12 MB RSS, 0.3% CPU, 50 s of total CPU time accumulated —
+before being killed. That is not a slow computation (which would show HIGH
+utilization across the 48-thread rayon pool the whole time); it is a
+blocked/deadlocked one. Bisected by killing the process and checking where
+its stdout had stopped: it never got past `banner()`'s first print, i.e. it
+was stuck inside the probe itself, before any real per-layer work began.
+
+The root cause (somewhere in `measure_compute`'s calibration loop,
+`crates/backend-cpu`'s rayon dispatch, or their interaction under this
+kernel set / thread count) was not tracked down — out of scope for the
+bench that found it. `gpu_core::roof` already ships the escape hatch,
+`BRAIN_NO_ROOF=1`, which skips the probe outright and makes callers report
+"roofline unmeasured" instead of guessing; `omni_bench`'s own module doc now
+tells every CPU-backend caller to set it. **Any new bench or profiler that
+calls `gpu_core::roof::ensure` (directly, or via a shared `banner()`-style
+helper copied from `qwen_bench`) and might run on the CPU backend should
+default to skipping the probe there, or at minimum document the escape
+hatch as loudly as `omni_bench` now does** — the existing benches never hit
+this because they only ever ran on GPU.
