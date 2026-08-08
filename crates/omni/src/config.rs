@@ -435,6 +435,14 @@ pub struct OmniConfig {
     pub system_token_id: u32,
     pub user_token_id: u32,
     pub enable_audio_output: bool,
+    /// Top-level (NOT under `talker_config`) — `Qwen3OmniMoeForConditionalGeneration
+    /// .generate`'s own `self.config.tts_{bos,eos,pad}_token_id` (real
+    /// checkpoint values: 151672/151673/151671), the ids whose
+    /// `talker.text_projection`-projected embeddings frame the Talker
+    /// prefill's assistant-text segment (`crate::talker_prompt`'s doc).
+    pub tts_bos_token_id: u32,
+    pub tts_eos_token_id: u32,
+    pub tts_pad_token_id: u32,
 }
 
 impl OmniConfig {
@@ -449,6 +457,9 @@ impl OmniConfig {
             system_token_id: gu(root, "system_token_id", 8948),
             user_token_id: gu(&root["thinker_config"], "user_token_id", 872),
             enable_audio_output: gb(root, "enable_audio_output", true),
+            tts_bos_token_id: gu(root, "tts_bos_token_id", 151672),
+            tts_eos_token_id: gu(root, "tts_eos_token_id", 151673),
+            tts_pad_token_id: gu(root, "tts_pad_token_id", 151671),
         }
     }
 
@@ -469,6 +480,7 @@ mod tests {
         "im_start_token_id": 151644, "im_end_token_id": 151645,
         "assistant_token_id": 77091, "system_token_id": 8948,
         "enable_audio_output": true,
+        "tts_bos_token_id": 151672, "tts_eos_token_id": 151673, "tts_pad_token_id": 151671,
         "code2wav_config": {
             "num_quantizers": 16, "num_semantic_quantizers": 1,
             "codebook_size": 2048, "semantic_codebook_size": 4096,
@@ -538,6 +550,10 @@ mod tests {
     #[test]
     fn parses_the_real_shape() {
         let c = OmniConfig::parse(SAMPLE).expect("parse");
+
+        assert_eq!(c.tts_bos_token_id, 151672);
+        assert_eq!(c.tts_eos_token_id, 151673);
+        assert_eq!(c.tts_pad_token_id, 151671);
 
         assert_eq!(c.thinker.audio.n_layers, 32);
         assert_eq!(c.thinker.audio.d_model, 1280);

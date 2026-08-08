@@ -300,6 +300,36 @@ fn generate_greedy_with_embeds(
     ids
 }
 
+/// Re-run a full KNOWN sequence (prompt + already-generated ids, teacher-
+/// forced -- no sampling) through the Thinker's first `capture_layer + 1`
+/// layers, returning that layer's raw (pre-final-norm) hidden state `[n, d]`
+/// -- what `crate::talker_prompt`'s Thinker->Talker prefill assembly needs
+/// (`TalkerConfig::accept_hidden_layer`). A second pass rather than
+/// capturing during [`generate_greedy`]'s own incremental decode loop: the
+/// capture is needed for EVERY position (prompt and generated alike), while
+/// decode only ever computes one NEW position per step and would need its
+/// own per-step capture plumbing for no benefit -- a full KV-cache-free
+/// batched forward is simpler and exactly as correct (this is a one-shot,
+/// not-performance-critical call: once per `converse`/`speak` turn, not
+/// once per decode step). Early-exits after `capture_layer` -- no need to
+/// run the remaining layers or the final norm when only one intermediate
+/// layer's output is wanted.
+pub fn thinker_hidden_at_layer(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, capture_layer: u32) -> Vec<f32> {
+    assert!(capture_layer < cfg.n_layers, "capture_layer {capture_layer} out of range ({} layers)", cfg.n_layers);
+    let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
+    let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
+    let cos = gpu.storage_init("cos", &cos_tab);
+    let sin = gpu.storage_init("sin", &sin_tab);
+
+    let mut h = gpu.storage_init("x", x_host);
+    for l in 0..=capture_layer {
+        let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
+        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, None);
+        h = out;
+    }
+    gpu.read(&h, (n * cfg.hidden) as usize)
+}
+
 /// The multimodal entry: `prompt.x_host` already has media spliced in
 /// (`crate::mm::build_multimodal_prompt`), so no `embed_table` gather is
 /// needed for the prompt itself — only for tokens generated AFTER it (always
