@@ -14,16 +14,16 @@
 //!
 //! Weights are read straight from the real HF checkpoint via mmap, keeping
 //! their HF-relative names unchanged (`codec::Codec::from_weights` and
-//! `codec::Codec::transformer` already key their `ParamStore` lookups by the
-//! exact HF-style leaf names — `pre_transformer.layers.N.self_attn.q_proj.weight`,
-//! not a renamed `blocks.N.attn.wq.weight`), bypassing
-//! `omni::import::map_code2wav` entirely. That importer currently renames
-//! `pre_transformer.layers.N` to `pre_transformer.blocks.N` (matching the
-//! shared dense-attention naming convention `thinker`/`talker` use) — a real,
-//! separate loader-side naming mismatch from the one found for the code
-//! predictor in M7b, tracked in `docs/models/omni/status.md`'s M8 entry, not
-//! fixed here for the same reason (needs a loader-design decision, not a
-//! quick rename).
+//! `codec::Codec::transformer` key their `ParamStore` lookups by the exact
+//! HF-style leaf names — `pre_transformer.layers.N.self_attn.q_proj.weight`,
+//! not a renamed `blocks.N.attn.wq.weight`), bypassing `omni::import::
+//! map_code2wav` (still true for this test — it reads the shard directly,
+//! same pattern every real-weight test in this crate uses). The loader-side
+//! naming mismatch this comment used to describe (`map_code2wav` renaming
+//! `pre_transformer.layers.N` onto the dense-attention convention, which
+//! `codec::Codec`'s own `ParamStore` lookups never expected) is FIXED as of
+//! the M9b follow-up: `map_code2wav` is now a plain prefix strip, matching
+//! what this test already proves is correct.
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard holding
 //! `code2wav.*` (shard 15 of 15) is absent.

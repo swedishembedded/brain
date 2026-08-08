@@ -19,5 +19,6 @@ pub mod generate;
 pub mod import;
 pub mod mm;
 pub mod talker;
+pub mod talker_generate;
 pub mod talker_prompt;
 pub mod thinker;
