@@ -151,6 +151,15 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     if let Some(stops) = body.get("stop_sequences").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
         inv = inv.set("stop", json!(serde_json::to_string(stops).unwrap_or_default()));
     }
+
+    // image content blocks, previously silently dropped by flatten_message/
+    // content_text (which only ever kept "text" blocks) -- see
+    // crate::media's module doc.
+    let media = crate::media::extract_anthropic(messages).map_err(|e| ApiError::invalid_request(PROVIDER, e))?;
+    if let Some(img) = media.image {
+        inv = inv.blob("image", img);
+    }
+
     Ok((model.to_string(), inv, stream))
 }
 

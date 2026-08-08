@@ -1822,7 +1822,8 @@ impl Instance for FakeToolCallChatInst {
         // `reasoning_content` (itself under test for streaming/non-stream parity).
         let tools_len = inv.get_str("tools").map(|s| s.len()).unwrap_or(0);
         let enable_thinking = inv.get_bool("enable_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
-        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking})");
+        let image_wh = inv.get_blob("image").map(|b| format!("{}x{}", b.meta["w"], b.meta["h"])).unwrap_or_else(|| "none".to_string());
+        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking};image:{image_wh})");
         progress(Progress::event(0, 1, json!({ "kind": "reasoning", "text": reasoning })));
 
         let mut calls: Vec<Value> = Vec::with_capacity(TOOLCALL_SCRIPT.len());
@@ -1970,6 +1971,39 @@ async fn openai_chat_no_tools_means_unset_enable_thinking_in_the_invocation() {
     let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
     assert!(reasoning.contains("tools_len:0"));
     assert!(reasoning.contains("enable_thinking:unset"));
+}
+
+#[tokio::test]
+async fn openai_chat_image_url_content_part_reaches_the_invocation_as_a_blob() {
+    // The regression test for the "image_url/input_audio content parts are
+    // silently dropped" bug -- content_text() used to keep only "text"
+    // parts; apiserve::media now decodes an inline data: image_url into a
+    // real HWC-f32 blob and attaches it to the Invocation under "image".
+    // 1x1 white PPM (P6), same fixture as apiserve::media's own unit tests.
+    const TINY_PPM_B64: &str = "UDYKMSAxCjI1NQr///8=";
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{TINY_PPM_B64}")}},
+        ]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("image:1x1"), "the 1x1 image blob must reach the invocation: {reasoning}");
+}
+
+#[tokio::test]
+async fn openai_chat_external_image_url_is_400_not_a_silent_drop() {
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }
 
 #[tokio::test]

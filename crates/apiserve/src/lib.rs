@@ -24,9 +24,11 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod b64;
 pub mod bridge;
 pub mod catalog;
 pub mod error;
+pub mod media;
 pub mod models;
 pub mod openai;
 pub mod openrouter;

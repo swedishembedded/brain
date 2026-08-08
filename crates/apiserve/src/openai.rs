@@ -334,6 +334,19 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         inv = inv.set("enable_thinking", json!(et));
     }
 
+    // image_url/input_audio content parts, previously silently dropped by
+    // flatten_message/content_text (which only ever kept "text" parts) --
+    // see crate::media's module doc. Attaching the blobs unconditionally is
+    // harmless for a model whose generate action doesn't declare an
+    // "image"/"audio" input (same as any unused blob passed over D-Bus).
+    let media = crate::media::extract_openai(messages).map_err(|e| ApiError::invalid_request(provider, e))?;
+    if let Some(img) = media.image {
+        inv = inv.blob("image", img);
+    }
+    if let Some(a) = media.audio {
+        inv = inv.blob("audio", a);
+    }
+
     Ok((model.to_string(), inv, stream))
 }
 
