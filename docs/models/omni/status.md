@@ -1246,6 +1246,100 @@ real 30B checkpoint in this session (ramdisk/BRAIN_OMNI_HF_DIR not populated
 at the time); the `#[ignore]`d test above is ready whenever that checkpoint
 is available.
 
+## M16 — profiling: `omni_bench` (2026-08-08)
+
+`crates/omni/src/bin/omni_bench.rs`, shaped after `qwen_bench` with one
+structural difference stated up front in its own doc comment: `qwen::Qwen`
+builds one flat, un-submitted `Vec<Step>` per pass that
+`gpu_core::profile::profile` times kernel-group by kernel-group; omni's
+`thinker`/`talker`/tower modules submit eagerly (several `g.submit()` calls
+per layer), so there's no single Step list to hand that profiler. Each mode
+instead wall-clock-times the real call and prints roofline + weight-budget
+context around it (`BRAIN_PROFILE=1` gets the engine's own per-kernel
+breakdown of the same submitted work, no returned Step list needed either).
+
+**Modes**: `cost` (offline param/GFLOP/byte accounting, no device — Thinker
+and Talker at their real `MoeTextConfig::thinker_defaults`/`talker_defaults`
+scale, audio/vision towers at `qwen3_omni()` scale, Code2Wav as a coarse
+order-of-magnitude estimate since its SEANet decoder's irregular per-stage
+channel schedule doesn't fit the same closed-form count); `thinker-layer`/
+`talker-layer` (one real-scale MoE decoder layer — 128 experts, real
+hidden/head dims — built with random weights via `ThinkerLayerWeights`/
+`TalkerLayerWeights` directly, ~2.5 GB / ~0.6 GB fp32, entirely tractable to
+synthesize even though a full 48-layer or 20-layer stack (let alone the
+30B-parameter checkpoint) is not — that needs a real streamed checkpoint,
+out of this bench's scope); `encode-audio`/`encode-vision` (the full
+32-layer / 27-layer towers at real `qwen3_omni()` scale, random weights,
+~2.5 GB / ~1.8 GB fp32).
+
+**cost mode's numbers are a real sanity check, not just arithmetic**:
+Thinker comes out to 29.91B resident params / 2.73B active params per token
+— matching "30B-A3B" (≈3B active) almost exactly, from a config-driven
+formula that has nothing to do with the model's own name. The formula also
+surfaces the actual MoE finding the top-level plan predicted: active bytes
+are only ~9% of resident for both Thinker and Talker, so decode bandwidth
+is bounded by the ACTIVE (top-k-gathered) bytes a token's routing touches,
+not the full resident expert table — a materially different (much cheaper)
+ceiling than a dense-model formula would give, and the reason `print_moe_cost`
+reports both numbers rather than one.
+
+**Found while running this**: `banner()`'s `gpu_core::roof::ensure` roofline
+probe reads as a hang, not a slow measurement, on the CPU backend — a
+real-scale `thinker-layer` run sat at 12 MB RSS / 0.3% CPU for **hours** of
+wall-clock (50 s of actual CPU time total) before being killed, confirmed
+(by bisecting where output stopped) to be stuck inside the probe itself,
+never reaching `layer_fwd`. Near-zero CPU utilization sustained that long is
+a blocked/deadlocked process, not a slow one — a genuinely slow CPU
+computation would show high utilization across the 48-thread rayon pool.
+This is a pre-existing bug somewhere in the CPU-backend roofline-probe path
+(`gpu_core::roof::measure_compute`'s self-calibrating iteration loop,
+`crates/backend-cpu`'s rayon dispatch, or their interaction) — not
+introduced by this bench, just newly exposed by it (existing benches
+profile on GPU; this is apparently the first CPU-backend exercise of a
+roofline probe at this kernel-set/scale). Root-causing the deadlock itself
+is out of scope here; `gpu_core::roof` already ships the fix as an env var,
+`BRAIN_NO_ROOF=1`, which skips the probe and makes `banner()` report
+"roofline unmeasured" instead — documented prominently in `omni_bench`'s own
+module doc, and required for every CPU-backend run below.
+**Separately**, a GPU attempt (`encode-vision`, Vulkan/P40) also hung within
+60 s — this box's known pre-existing GPU VRAM/zombie-process issue
+(`nvidia-smi` showed 5 `[Not Found]` compute-app entries holding 6.2 GB / 4.5
+GB across the two P40s at the time), not a bug in this bench; a restart of
+the box is the real fix and out of scope for this session.
+
+**Validated** (`BRAIN_DEVICE=cpu BRAIN_NO_ROOF=1`, all four device modes ran
+to completion and produced sane, finite numbers):
+```
+cost:            Thinker 29.91B resident / 2.73B active/token (9.1%)
+                 Talker   3.16B resident / 0.29B active/token (9.0%)
+                 Audio tower 0.63B params, Vision tower 0.44B params
+thinker-layer T=64:  490 ms/call  -> 131 tok/s  (single real-scale layer)
+talker-layer  T=64:  197 ms/call  -> 325 tok/s  (single real-scale layer)
+encode-audio  n=100: 3813 ms/call -> 26 tokens/s (32-layer tower)
+encode-vision 16x16: 6419 ms/call -> 40 patches/s (27-layer tower)
+```
+These are CPU/Cranelift-JIT numbers, not GPU ones (the GPU hang above), and
+random weights throughout — **valid for relative cost, meaningless for
+output quality**, same disclaimer every `*_bench` binary in this repo
+carries.
+
+**No `perf/omni` Makefile target, deliberately**: none of this bench's
+direct analogs (`qwen_bench`, `vqgan_bench`, `unet_bench`, `zimage_bench`,
+`flux2_bench`) are wired into the Makefile's `perf/*` targets either — those
+go through `brain perf run`'s residency-executor target resolution, which
+would need omni plugged into production residency first (the int8/
+GPU-sharded item below, not yet built). Likewise no committed-baseline
+regression gate (`qwen-serving-perf-gate.sh`'s pattern) for the same reason.
+Run `omni_bench` directly, same as its siblings.
+
+**Not covered**: GPU-backend numbers (blocked by the known zombie-VRAM issue
+on this box this session, not a code defect); a full 48-layer Thinker /
+20-layer Talker forward (needs a real checkpoint, not random weights — out
+of a cost-profiler's scope); `code2wav` device profiling (Code2Wav's weight
+naming surface — RVQ codebook tables, ConvNeXt upsample, SEANet residual
+units — wasn't built out as a synthetic-weight generator this round; `cost`
+mode's coarse estimate is what exists).
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
@@ -1257,12 +1351,12 @@ M-RoPE support first, its own generation loop is currently library-only),
 — shipped in M9c above; `converse`, folding real audio/image *input* into
 the SAME turn as speech *output*, has not), OpenAI/Anthropic transports in
 the automated e2e harness (M13/M14's own note above), video-file decoding +
-a multi-frame wire shape for the `generate` action (M9b above), M16
-(profiling/`omni_bench`) and M17 (testdata audit). `qwen::Qwen`'s KV-cache
-migration, the OpenAI/Anthropic multimodal-content-part-drop fix, and M15
-(NPU export) are now done — see their own dated sections above; this
+a multi-frame wire shape for the `generate` action (M9b above), M17
+(testdata audit). `qwen::Qwen`'s KV-cache migration, the OpenAI/Anthropic
+multimodal-content-part-drop fix, M15 (NPU export), and M16 (`omni_bench`
+profiling) are now done — see their own dated sections above; this
 paragraph is the current residual list, not a historical snapshot. See the
-plan file. M6 through M15 are now believed complete for what is actually
+plan file. M6 through M16 are now believed complete for what is actually
 implemented (Thinker/Talker decoders,
 real M-RoPE incl. real audio/image/video splice, KV-cache decode, composed
 loops, splice seam, code predictor, Code2Wav vocoder, Thinker text generation
