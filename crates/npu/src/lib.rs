@@ -44,13 +44,15 @@ pub mod mirror_topology;
 pub mod nemotron_topology;
 pub mod nemotron_export;
 pub mod qwen_asr_topology;
+pub mod qwenvl_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
 
 pub use calib::{calibrate, calibrate_from_weights, load_calib_images, RangeCollector};
 pub use codec_export::{
-    build_codec_fp32_bytes, export_codec_back_stream_fp32, export_codec_front_fp32, export_codec_fp32,
+    build_codec_fp32_bytes, build_codec_graph_bytes, export_codec_back_stream_fp32, export_codec_front_fp32,
+    export_codec_fp32,
 };
 pub use decode::{decode_npu_outputs, detect_image, detect_weights_on_npu};
 pub use export::{build_fp32_bytes, config_of, export_fp32, export_int8};
@@ -62,6 +64,7 @@ pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};
 pub use nemotron_topology::{build_nemotron_encoder, build_nemotron_head, build_subsampling, NemotronTopo};
 pub use qwen_asr_topology::{build_qwen_asr_head, QwenAsrTopo};
+pub use qwenvl_topology::{build_vit_head, VitTopo};
 
 /// The one per-model NPU seam (see `docs/npu-residency.md`). A model implements
 /// [`build`](NpuModel::build) — its device-heavy forward, composed from the shared

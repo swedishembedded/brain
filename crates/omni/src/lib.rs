@@ -19,6 +19,7 @@ pub mod config;
 pub mod generate;
 pub mod import;
 pub mod mm;
+pub mod npu_export;
 pub mod talker;
 pub mod talker_generate;
 pub mod talker_prompt;

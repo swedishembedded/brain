@@ -9,10 +9,17 @@
 //!   brain npu run      --onnx M --image <P6|dir> [--device NPU --conf X --iou X --cache-dir D ...]
 //!   brain npu bench    --onnx M [--input S --device NPU --iters N --warmup W --hint latency|throughput ...]
 //!   brain npu sim      --weights F --calib <dir> --data <dir>   # fp32 vs INT8 mAP, no NPU
+//!   brain npu omni     --hf-dir DIR [--out-dir out/omni] [--n-audio N --grid-h H --grid-w W --code-len T]
 //!
 //! `export`/`quantize`/`sim` are pure Rust and run anywhere. `run`/`bench`/`check`
 //! (compile) need OpenVINO + an Intel NPU at run time; on a machine without them
-//! they print a clear diagnostic. Output of `run` matches `brain yolo detect`.
+//! they print a clear diagnostic.
+//!
+//! `omni` exports omni's three NPU-eligible pieces (audio tower, vision tower,
+//! Code2Wav vocoder — NOT the 30B-parameter MoE Thinker decoder, not an NPU
+//! target) as fp32 ONNX and runs the same structural + (where available)
+//! OpenVINO-compile check `check` does on each. See `omni::npu_export`'s
+//! module doc for the exact scope (single-merger vision path, no DeepStack). Output of `run` matches `brain yolo detect`.
 
 use std::path::Path;
 use std::time::Instant;
@@ -35,8 +42,9 @@ pub fn run_npu(args: &[String]) {
         Some("chronos2") => chronos2(&args[1..]),
         Some("kronos") => kronos(&args[1..]),
         Some("fincast") => fincast(&args[1..]),
+        Some("omni") => omni(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast|omni> ...  (got {other:?})"
         ),
     }
 }
@@ -363,6 +371,97 @@ fn chronos2(args: &[String]) {
         let maxdiff = out.iter().zip(&cpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let scale = cpu.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
         println!("  vs device core: max abs diff {maxdiff:.5} (rel {:.2e})", maxdiff / scale);
+    }
+}
+
+/// `brain npu omni` — export omni's audio tower, vision tower and Code2Wav
+/// vocoder as fp32 ONNX graphs and run the same structural (+ where an
+/// OpenVINO device is present, compile) check `check` does on each. Pure
+/// Rust export, runs anywhere; the compile step needs OpenVINO. No NPU
+/// device run is attempted here — none is available on this box (see
+/// `omni::npu_export`'s module doc).
+fn omni(args: &[String]) {
+    let mut hf_dir = String::new();
+    let mut out_dir = "out/omni".to_string();
+    let mut n_audio = 100u32;
+    let mut grid_h = 16u32;
+    let mut grid_w = 16u32;
+    let mut code_len = 32usize;
+    let mut opts = NpuOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        if opts.parse_flag(args, &mut i) {
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--hf-dir" => hf_dir = val(args, &mut i, "--hf-dir"),
+            "--out-dir" => out_dir = val(args, &mut i, "--out-dir"),
+            "--n-audio" => n_audio = val(args, &mut i, "--n-audio").parse().unwrap_or(n_audio),
+            "--grid-h" => grid_h = val(args, &mut i, "--grid-h").parse().unwrap_or(grid_h),
+            "--grid-w" => grid_w = val(args, &mut i, "--grid-w").parse().unwrap_or(grid_w),
+            "--code-len" => code_len = val(args, &mut i, "--code-len").parse().unwrap_or(code_len),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if hf_dir.is_empty() {
+        eprintln!(
+            "usage: brain npu omni --hf-dir DIR [--out-dir out/omni] [--n-audio 100] \
+             [--grid-h 16 --grid-w 16] [--code-len 32] [--device NPU]"
+        );
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("brain npu omni: create {out_dir}: {e}");
+        std::process::exit(1);
+    }
+    let reader = match checkpoint::weightio::WeightReader::open_hf_dir(Path::new(&hf_dir)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("brain npu omni: open {hf_dir}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let config_json = match std::fs::read_to_string(Path::new(&hf_dir).join("config.json")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain npu omni: read config.json: {e}");
+            std::process::exit(1);
+        }
+    };
+    let root: serde_json::Value = match serde_json::from_str(&config_json) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("brain npu omni: parse config.json: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = omni::config::OmniConfig::from_json(&root);
+
+    let audio_path = format!("{out_dir}/audio_tower.onnx");
+    match omni::npu_export::export_audio_onnx(&reader, &audio_path, n_audio) {
+        Ok(()) => {
+            println!("== audio tower -> {audio_path} (n_audio={n_audio}) ==");
+            structural_check(&audio_path, &opts);
+        }
+        Err(e) => eprintln!("audio tower export failed: {e}"),
+    }
+    let vision_path = format!("{out_dir}/vision_tower.onnx");
+    match omni::npu_export::export_vision_onnx(&reader, &vision_path, grid_h, grid_w) {
+        Ok(()) => {
+            println!("== vision tower -> {vision_path} (grid {grid_h}x{grid_w}) ==");
+            structural_check(&vision_path, &opts);
+        }
+        Err(e) => eprintln!("vision tower export failed: {e}"),
+    }
+    let codec_path = format!("{out_dir}/codec_decoder.onnx");
+    match omni::npu_export::export_codec_onnx(&reader, &cfg.code2wav, &codec_path, code_len) {
+        Ok(()) => {
+            println!("== codec decoder -> {codec_path} (code_len={code_len}) ==");
+            structural_check(&codec_path, &opts);
+        }
+        Err(e) => eprintln!("codec decoder export failed: {e}"),
     }
 }
 
@@ -831,12 +930,20 @@ fn check(args: &[String]) {
         eprintln!("usage: brain npu check --onnx M [--device NPU]");
         return;
     }
-    // Structural check (always available): decode + op histogram.
-    let bytes = match std::fs::read(&onnx_path) {
+    structural_check(&onnx_path, &opts);
+}
+
+/// Structural ONNX validation (always available: decode + op histogram) plus
+/// — where an OpenVINO device is present — an attempted compile. Pure
+/// diagnostic printing, no process exit on failure (callers that export
+/// several graphs in one run, e.g. `brain npu omni`, want to see every
+/// graph's result, not abort at the first).
+fn structural_check(onnx_path: &str, opts: &NpuOpts) {
+    let bytes = match std::fs::read(onnx_path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("brain npu check: reading {onnx_path}: {e}");
-            std::process::exit(1);
+            return;
         }
     };
     match onnx::decode_model(&bytes) {
@@ -855,7 +962,7 @@ fn check(args: &[String]) {
         }
         Err(e) => {
             eprintln!("brain npu check: malformed ONNX: {e}");
-            std::process::exit(1);
+            return;
         }
     }
     // Device compile check (needs OpenVINO): probe devices, try to compile.
@@ -865,7 +972,7 @@ fn check(args: &[String]) {
         }
         Ok(devs) => {
             println!("openvino devices: {devs:?}");
-            match NpuSession::load(Path::new(&onnx_path), &opts.to_config()) {
+            match NpuSession::load(Path::new(onnx_path), &opts.to_config()) {
                 Ok(s) => println!("compiled OK on {} (input {:?})", s.device(), s.input_shape()),
                 Err(e) => eprintln!("compile failed: {e}"),
             }

@@ -57,7 +57,8 @@ fn window_mask_host(spans: &[(u32, u32)], n: u32) -> Vec<f32> {
 }
 
 /// `x @ W^T + b`, returning the output name (weight `[out, in]`, bias `[out]`).
-fn linear_bias(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str, bname: &str, out: u32, inn: u32, tag: &str) -> String {
+/// `pub(crate)`: also reused by [`crate::qwenvl_topology`] (same ViT-block dialect).
+pub(crate) fn linear_bias(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str, bname: &str, out: u32, inn: u32, tag: &str) -> String {
     let mm = linear_nb(g, w, x, wname, out, inn, tag);
     let bn = format!("{tag}.b");
     g.init_f32(&bn, &[out as i64], w.get(bname));
@@ -67,7 +68,8 @@ fn linear_bias(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str,
 }
 
 /// erf-GELU: `0.5·x·(1 + erf(x/√2))` (torch `F.gelu`, exact — not the tanh approx).
-fn gelu_erf(g: &mut GraphBuilder, x: &str, tag: &str) -> String {
+/// `pub(crate)`: also reused by [`crate::qwenvl_topology`]'s PatchMerger (erf-GELU).
+pub(crate) fn gelu_erf(g: &mut GraphBuilder, x: &str, tag: &str) -> String {
     let inv = format!("{tag}.inv");
     g.init_f32(&inv, &[1], vec![std::f32::consts::FRAC_1_SQRT_2]);
     let xs = format!("{tag}.xs");
@@ -88,7 +90,8 @@ fn gelu_erf(g: &mut GraphBuilder, x: &str, tag: &str) -> String {
 }
 
 /// Slice columns `[lo, hi)` of a `[n, *]` tensor (axis 1).
-fn slice_cols(g: &mut GraphBuilder, x: &str, lo: u32, hi: u32, tag: &str) -> String {
+/// `pub(crate)`: also reused by [`crate::qwenvl_topology`] (fused-QKV splitting).
+pub(crate) fn slice_cols(g: &mut GraphBuilder, x: &str, lo: u32, hi: u32, tag: &str) -> String {
     let (s, e, a) = (format!("{tag}.s"), format!("{tag}.e"), format!("{tag}.a"));
     g.init_i64(&s, &[1], vec![lo as i64]);
     g.init_i64(&e, &[1], vec![hi as i64]);

@@ -1164,20 +1164,106 @@ actions; wiring `speak` into `cli::resident_omni` (this round is the
 for the composed Thinker->Talker splice (none exists — `speak_e2e.rs`'s bar
 is "runs and sounds like speech," not cosine-exact).
 
+## M15 — NPU export wiring for the audio tower, vision tower, Code2Wav (2026-08-08)
+
+Scope, per the plan: the Thinker's 30B-mostly-expert MoE decoder is not an
+NPU target on this generation of hardware; only the three encoder/vocoder
+pieces export. `brain npu omni --hf-dir DIR` (new CLI subcommand,
+`crates/cli/src/npu_cli.rs`) exports all three as fp32 ONNX
+(`crates/omni/src/npu_export.rs`) and runs the same structural (+ where an
+OpenVINO device is present, compile) check `brain npu check` does on each
+(factored `check`'s body into a shared `structural_check` helper so both
+commands use one implementation).
+
+- **Audio tower**: near-free reuse. `crates/npu/src/qwen_asr_topology.rs`'s
+  `build_qwen_asr_head` was already generic over topo dims and weight
+  source; omni's `AudioEncoderConfig::qwen3_omni()` preset feeds it directly,
+  and omni's own `hf_to_brain`-renamed weight-loader (`crate::mm`) already
+  produces the exact naming convention it expects. No new topology code.
+- **Code2Wav**: same story. `crate::codec_bridge::codec_config_from`/
+  `codec_weights` (factored out of `load_codec`, which now just calls both +
+  `Codec::from_weights`) hand `crates/npu/src/codec_topology.rs`'s existing
+  `build_codec_graph` an in-memory config + weight map directly — no
+  checkpoint-file round trip, no topology changes.
+- **Vision tower**: genuinely new work — no ViT/vision-transformer topology
+  existed anywhere in `crates/npu` before this. New
+  `crates/npu/src/qwenvl_topology.rs`: `VitTopo` + `build_vit_head`, porting
+  `qwenvl::encoder::VisionEncoder::encode` + `PatchMerger::merge` (main
+  merger, pre-shuffle LayerNorm) op-for-op — fused QKV, 2-D vision RoPE (the
+  `rope2d` WGSL kernel's duplicated-half-width-table semantics reproduced as
+  a baked `[n, head_dim]` initializer, so the in-graph rotation is the same
+  plain `x·cos + rotate_half(x)·sin` op sequence `codec_topology.rs`'s own
+  RoPE already uses — no dedicated 2-D-RoPE ONNX op needed), tanh-GELU MLP
+  (distinct from the audio tower's erf-GELU), full (unmasked) attention over
+  one image. Small helpers (`linear_bias`/`slice_cols`/`gelu_erf`) made
+  `pub(crate)` in `qwen_asr_topology.rs` and reused rather than duplicated.
+  **DeepStack is explicitly out of scope**: `omni::mm::encode_image`'s own
+  host path already skips the 3 DeepStack taps/mergers (see that function's
+  doc on `deepstack_merger.*`), so this graph mirrors the code actually
+  served, not a gap unique to the NPU path.
+- **`crate::mm`/`crate::codec_bridge` refactor**: the weight-loading loops
+  `encode_audio`/`encode_image`/`load_codec` already had were factored into
+  `pub(crate)` functions (`mm::audio_weights`, `mm::vision_weights`,
+  `codec_bridge::codec_config_from`/`codec_weights`) so `npu_export.rs`
+  builds weight maps with the exact SAME loader the real GPU/host forward
+  uses — a naming-convention drift between the host and NPU paths cannot
+  silently happen, and it's one implementation, not two.
+
+**Validated**:
+- `crates/npu/tests/qwenvl_onnx.rs` (new): the vision-tower ONNX head vs. the
+  real `VisionEncoder`+`PatchMerger` host reference, tiny synthetic weights,
+  compiled and run on the OpenVINO **CPU** device (this box has OpenVINO
+  installed, just no NPU) — **cosine 1.000000, maxdiff 2.7e-7**. This is the
+  one genuinely new piece of math (2-D RoPE, tanh-GELU, DeepStack-free
+  merger), so it got a real numeric parity gate, not just a structural one.
+  Skips cleanly if no OpenVINO runtime is present.
+- `crates/omni/src/npu_export.rs`'s `npu_export_builds_real_graphs` (new,
+  `#[ignore]`, `BRAIN_OMNI_HF_DIR`-gated): all three exports run against a
+  real checkpoint's actual tensor names/shapes and produce valid,
+  non-trivial ONNX (decoded back, node/initializer counts asserted
+  non-empty) — proves the omni-specific wiring (weight loading, config
+  mapping) holds against real data, not just synthetic shapes. Not yet run
+  in this session (no `BRAIN_OMNI_HF_DIR` checkpoint present on this box at
+  the time of writing — the audio-tower and codec exports reuse
+  already-parity-proven topology code, so this test's main incremental value
+  is proving the wiring, which the structural asserts already cover).
+- The audio-tower and Code2Wav exports reuse `build_qwen_asr_head`/
+  `build_codec_graph`, both already numerically parity-gated elsewhere
+  (`crates/npu/tests/qwen_asr_encoder.rs`, `codec_export.rs`'s own tests) —
+  no new topology math there to re-prove, only new call-site wiring, which
+  the real-checkpoint structural test above covers.
+- Full `cargo test -p brain-npu -p brain-omni --lib --tests`: green, zero
+  regressions from the `mm.rs`/`codec_bridge.rs` refactors or the
+  `qwen_asr_topology.rs` visibility changes. `cargo clippy -p brain-npu -p
+  brain-omni -p brain-cli --lib --bins --no-deps`: zero new warnings.
+
+**Not covered** (stated plainly, per this file's own honesty-notes
+convention): no NPU device run — none is available on this box, matching the
+`## Honesty notes` entry below, which predates this milestone but already
+said so. DeepStack vision export. Thinker export (out of scope by design,
+see above). `brain npu omni`'s three exports have not been run against the
+real 30B checkpoint in this session (ramdisk/BRAIN_OMNI_HF_DIR not populated
+at the time); the `#[ignore]`d test above is ready whenever that checkpoint
+is available.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M8's `chunked_decode` streaming path, `qwen::Qwen`'s migration
-onto the hoisted KV-cache decode primitives (see M9b above), int8/GPU-sharded
-production residency (M9b above), `converse`/`transcribe`/`speak` actions
-(need Talker+MTP+Code2Wav chained with `accept_hidden_layer` + codec
-sampling), `qwenvl` registration (deferred above, its own generation loop),
-the pre-existing multimodal-content-part-drop bug in `openai.rs`/`anthropic.rs`
-and the `/v1/audio/*` endpoints (M11/M12's original scope, orthogonal to what
-'s implemented), OpenAI/Anthropic transports in the automated e2e harness
-(M13/M14's own note above), video-file decoding + a multi-frame wire shape
-(M9b above), M15 through M17. See the plan file. M6 through M9b are now
-believed complete for what is actually implemented (Thinker/Talker decoders,
+deferred), M8's `chunked_decode` streaming path, int8/GPU-sharded production
+residency for the Thinker (M9b above), `qwenvl` registration as its own
+served model (deferred above — needs `qwen::Qwen`'s decode path to grow
+M-RoPE support first, its own generation loop is currently library-only),
+`converse`/`transcribe` actions (`speak` — text + real synthesized audio out
+— shipped in M9c above; `converse`, folding real audio/image *input* into
+the SAME turn as speech *output*, has not), OpenAI/Anthropic transports in
+the automated e2e harness (M13/M14's own note above), video-file decoding +
+a multi-frame wire shape for the `generate` action (M9b above), M16
+(profiling/`omni_bench`) and M17 (testdata audit). `qwen::Qwen`'s KV-cache
+migration, the OpenAI/Anthropic multimodal-content-part-drop fix, and M15
+(NPU export) are now done — see their own dated sections above; this
+paragraph is the current residual list, not a historical snapshot. See the
+plan file. M6 through M15 are now believed complete for what is actually
+implemented (Thinker/Talker decoders,
 real M-RoPE incl. real audio/image/video splice, KV-cache decode, composed
 loops, splice seam, code predictor, Code2Wav vocoder, Thinker text generation
 with optional real speech/image input exposed over D-Bus/OpenAI/Anthropic

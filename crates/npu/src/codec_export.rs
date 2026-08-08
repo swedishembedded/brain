@@ -8,6 +8,21 @@
 use codec::CodecConfig;
 use onnx::builder::GraphBuilder;
 
+use crate::topology::WeightSource;
+
+/// Build the fp32 ONNX codec decoder directly from an in-memory config +
+/// weight source (no checkpoint file to open) and return the raw ONNX bytes.
+/// For callers that already have both loaded (e.g. `omni::npu_export`, whose
+/// `Code2WavConfig` maps 1:1 onto `CodecConfig` and whose weights come from an
+/// already-open `WeightReader`) — mirrors [`build_codec_fp32_bytes`] minus the
+/// file-open + `CodecConfig::from_json` step; the graph topology itself
+/// (`codec_topology::build_codec_graph`) is unchanged either way.
+pub fn build_codec_graph_bytes(cfg: &CodecConfig, w: &dyn WeightSource, code_len: usize) -> Vec<u8> {
+    let mut g = GraphBuilder::new("qwen3tts_codec_decoder");
+    crate::codec_topology::build_codec_graph(cfg, w, code_len, &mut g);
+    g.finish()
+}
+
 /// Build the fp32 ONNX codec decoder for `code_len` frames and return
 /// `(bytes, config)`. Input `codes:[num_quantizers, code_len]` (int64,
 /// codebook-major), output `waveform:[1,1,L]` (f32).

@@ -46,12 +46,10 @@ pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &tts::config::MtpConfig) -
     MtpModel::build_on(gpu, cfg.clone(), decoder, codec_embedding, lm_head)
 }
 
-/// Build a [`Codec`] from `code2wav.*` real HF tensors, prefix-stripped
-/// (matching `crate::import::map_code2wav`'s now-fixed convention — see its
-/// doc) and built with `Codec::from_weights` — same pattern
-/// `code2wav_parity.rs` uses.
-pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Codec {
-    let cfg = CodecConfig {
+/// `oc` -> `codec::CodecConfig`, the 1:1 field mapping `load_codec` and
+/// `crate::npu_export`'s Code2Wav export both need.
+pub(crate) fn codec_config_from(oc: &Code2WavConfig) -> CodecConfig {
+    CodecConfig {
         num_quantizers: oc.num_quantizers,
         num_semantic_quantizers: oc.num_semantic_quantizers,
         codebook_size: oc.codebook_size,
@@ -75,15 +73,30 @@ pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Codec {
         output_sample_rate: oc.output_sample_rate,
         decode_upsample_rate: oc.total_upsample(),
         enc: Default::default(),
-    };
+    }
+}
 
+/// Every `code2wav.*` real HF tensor, prefix-stripped (matching
+/// `crate::import::map_code2wav`'s now-fixed convention — see its doc) — the
+/// loader half of [`load_codec`], factored out so [`crate::npu_export`] can
+/// build the SAME weight map for ONNX export without also building a
+/// `gpu_core`-backed `Codec`.
+pub(crate) fn codec_weights(reader: &WeightReader) -> HashMap<String, Vec<f32>> {
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for name in reader.names() {
         if let Some(rest) = name.strip_prefix("code2wav.") {
             init.insert(rest.to_string(), reader.tensor(name).unwrap());
         }
     }
-    Codec::from_weights(cfg, init)
+    init
+}
+
+/// Build a [`Codec`] from `code2wav.*` real HF tensors, prefix-stripped
+/// (matching `crate::import::map_code2wav`'s now-fixed convention — see its
+/// doc) and built with `Codec::from_weights` — same pattern
+/// `code2wav_parity.rs` uses.
+pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Codec {
+    Codec::from_weights(codec_config_from(oc), codec_weights(reader))
 }
 
 /// `talker.text_projection`/`talker.hidden_projection` as `tts::talker::

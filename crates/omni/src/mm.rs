@@ -83,9 +83,6 @@ pub struct ImageSplice {
 /// `hop`-based frame formula `audio::asr_frontend::qwen_logmel` uses
 /// internally (`target_samples / hop`, dropping the last STFT frame).
 pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioSplice {
-    use std::collections::HashMap;
-    type FusedQkv = (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>);
-
     const HOP: usize = 160;
     const CHUNK_SAMPLES: usize = 16000; // chunk_len(100) * hop(160), for n_window=50
     let target_samples = samples.len().max(1).div_ceil(CHUNK_SAMPLES) * CHUNK_SAMPLES;
@@ -93,6 +90,24 @@ pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioS
     let valid_frames = (samples.len() / HOP) as u32;
 
     let cfg = AudioEncoderConfig::qwen3_omni();
+    let weights = audio_weights(reader);
+    let gpu_local = gpu.new_like(audio_pipelines());
+    let output_dim = cfg.output_dim;
+    let enc = AudioEncoder::new(&gpu_local, cfg, &weights);
+    let (_encoder_out, embeds) = enc.encode(&mel, valid_frames);
+    let n_rows = embeds.len() as u32 / output_dim;
+    AudioSplice { embeds, n_rows }
+}
+
+/// Stream + remap every `thinker.audio_tower.*` tensor from `reader` into the
+/// `AudioEncoder` weight-map convention (fused q/k/v, `hf_to_brain`-renamed
+/// leaves) — the loader half of [`encode_audio`], factored out so
+/// [`crate::npu_export`] can build the SAME weight map for ONNX export
+/// without also running a GPU encode.
+pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<String, Vec<f32>> {
+    use std::collections::HashMap;
+    type FusedQkv = (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>);
+
     let mut fused: HashMap<u32, FusedQkv> = HashMap::new();
     let mut weights: HashMap<String, Vec<f32>> = HashMap::new();
     for name in reader.names() {
@@ -130,25 +145,18 @@ pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioS
         weights.insert(format!("blocks.{b}.qkv.weight"), w);
         weights.insert(format!("blocks.{b}.qkv.bias"), bias);
     }
-
-    let gpu_local = gpu.new_like(audio_pipelines());
-    let output_dim = cfg.output_dim;
-    let enc = AudioEncoder::new(&gpu_local, cfg, &weights);
-    let (_encoder_out, embeds) = enc.encode(&mel, valid_frames);
-    let n_rows = embeds.len() as u32 / output_dim;
-    AudioSplice { embeds, n_rows }
+    weights
 }
 
-/// Stream every `thinker.visual.*` tensor from `reader` into the
+/// Stream + remap every `thinker.visual.*` tensor from `reader` into the
 /// `VisionEncoder` + primary `PatchMerger` weight maps (same remap
-/// `crate::import`/`tests/vision_parity.rs` use) and encode one already
-/// RGB-decoded, `[0,1]`-normalized image into splice-ready embeddings.
-/// `rgb_hwc` is interleaved HWC (the engine's one image wire format,
-/// `capability::blob::decode_image`'s output shape).
-pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h: u32) -> ImageSplice {
+/// `crate::import`/`tests/vision_parity.rs` use) — the loader half of
+/// [`encode_image`], factored out so [`crate::npu_export`] can build the SAME
+/// weight maps for ONNX export without also running a GPU encode.
+/// DeepStack merger weights are skipped (see [`encode_image`]'s doc for why
+/// the plain single-merger path is what's actually served).
+pub(crate) fn vision_weights(reader: &WeightReader) -> (std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>) {
     use std::collections::HashMap;
-    let cfg = VisionConfig::qwen3_omni();
-
     let mut encoder_w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut main_merger_w: HashMap<String, Vec<f32>> = HashMap::new();
     for name in reader.names() {
@@ -166,6 +174,18 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
             encoder_w.insert(rest.to_string(), data);
         }
     }
+    (encoder_w, main_merger_w)
+}
+
+/// Stream every `thinker.visual.*` tensor from `reader` into the
+/// `VisionEncoder` + primary `PatchMerger` weight maps (same remap
+/// `crate::import`/`tests/vision_parity.rs` use) and encode one already
+/// RGB-decoded, `[0,1]`-normalized image into splice-ready embeddings.
+/// `rgb_hwc` is interleaved HWC (the engine's one image wire format,
+/// `capability::blob::decode_image`'s output shape).
+pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h: u32) -> ImageSplice {
+    let cfg = VisionConfig::qwen3_omni();
+    let (encoder_w, main_merger_w) = vision_weights(reader);
 
     // Real bilinear resize to the smart-resized (patch-multiple) extent --
     // NOT a crop/pad: `smart_resize_default` picks dimensions close to but

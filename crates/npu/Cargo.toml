@@ -52,3 +52,4 @@ brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
 brain-nemotron.workspace = true
 brain-qwen-asr.workspace = true
+brain-qwenvl.workspace = true
