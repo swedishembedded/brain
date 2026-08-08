@@ -277,60 +277,50 @@ pub fn map_talker(hf: &str) -> Option<String> {
 }
 
 // -------------------------------------------------------------- talker.code_predictor
-/// `talker.code_predictor.*` -> `talker.code_predictor.*`. Deliberately
-/// IDENTICAL to the HF path (no rename), so this unified checkpoint keeps
-/// the code predictor's weights byte-identical to the source and namespaced
-/// away from Talker's own `talker.blocks.*` (which uses the SAME leaf names
-/// -- `attn.wq.weight` etc -- so a shared unprefixed `blocks.N.*` would
-/// collide).
+/// `talker.code_predictor.*` -> `tts::import::mtp_hf_to_brain`'s UNPREFIXED
+/// `blocks.N.*`/`norm.weight`/`codec_embedding.N.weight`/`lm_head.N.weight`
+/// convention -- exactly what `tts::mtp::MtpModel::load_inference`'s
+/// `ParamStore` lookups expect, so a real served speech-output action can
+/// load the code predictor straight out of this unified checkpoint, the
+/// same way it loads everything else.
 ///
-/// CORRECTION (M7b, 2026-08-07): the claim this comment used to make here --
-/// "matching names too means M7 can load this with `tts::mtp` directly" --
-/// is false as stated. `tts::import::mtp_hf_to_brain` (which `tts::import::
-/// import_mtp` uses for the standalone Qwen3-TTS MTP) renames e.g.
-/// `talker.code_predictor.model.layers.0.self_attn.q_proj.weight` to the
-/// UNPREFIXED `blocks.0.attn.wq.weight`, and `tts::mtp::MtpModel::
-/// load_inference`'s `ParamStore` lookups use that same unprefixed form --
-/// neither matches what THIS function produces (the untouched HF name,
-/// still carrying the `talker.code_predictor.` prefix). `crates/omni/tests/
-/// code_predictor_parity.rs` validates `MtpModel`'s forward pass is correct
-/// against real Omni weights, but does so by reading the HF checkpoint
-/// directly and applying `mtp_hf_to_brain` itself, NOT by loading from this
-/// importer's unified output -- that loader-side gap (either a
-/// prefix-aware `ParamStore` lookup, or a separate `talker.code_predictor.*`
-/// extraction step reusing `mtp_hf_to_brain`) is still open, tracked in
-/// `docs/models/omni/status.md`'s M7b entry as M9 work, not fixed here.
+/// FIXED (M9b follow-up, 2026-08-08): this used to be pure identity (kept
+/// the `talker.code_predictor.` prefix, doc comment explained it was
+/// "namespaced away from Talker's own `talker.blocks.*`") -- but Talker's
+/// own attention/MLP tensors map to `talker.blocks.N.*` (a `talker.`
+/// prefix, via `map_moe_attn`/`map_moe_mlp`'s `brain_prefix` argument), so
+/// `mtp_hf_to_brain`'s bare `blocks.N.*` never actually collides with
+/// anything else in this flat unified namespace; the "namespace collision"
+/// concern the old comment raised didn't hold. Reusing `mtp_hf_to_brain`
+/// (rather than re-deriving the same rename here) is the "one
+/// implementation" answer -- `tts::import::import_mtp` already validated it
+/// for the standalone Qwen3-TTS MTP, and `crates/omni/tests/
+/// code_predictor_parity.rs` already validated `MtpModel`'s forward pass
+/// against real Omni weights renamed this exact way.
 pub fn map_code_predictor(hf: &str) -> Option<String> {
-    hf.starts_with("talker.code_predictor.").then(|| hf.to_string())
+    tts::import::mtp_hf_to_brain(hf)
 }
 
 // ----------------------------------------------------------------- code2wav
-/// `code2wav.*` -> `code2wav.*`, mostly identity (the SEANet decoder's own
-/// names — `alpha`/`beta`/`conv.weight`/`conv.bias` — need no brain-side
-/// rename; only the pre-transformer's attention block follows the shared
-/// dense-attention convention).
+/// `code2wav.*` -> a plain PREFIX STRIP, identity otherwise — exactly what
+/// `codec::Codec::transformer`/`decode_omni`'s `self.w(name)`/`self.host[name]`
+/// lookups expect: raw HF leaf names (`pre_transformer.layers.{l}.self_attn.
+/// q_proj.weight`, `input_layernorm.weight`, `mlp.gate_proj.weight`,
+/// `self_attn_layer_scale.scale`, …), `layers` not `blocks`, no dense-attn
+/// leaf rename at all.
+///
+/// FIXED (M9b follow-up, 2026-08-08): this used to rename `pre_transformer.
+/// layers.N.*` onto the shared dense-attention convention (`blocks.N.attn.
+/// wq.weight` etc., via `dense_attn_leaf`) to match Thinker/Talker's own
+/// style — but `codec::Codec` (read directly from `crates/codec/src/
+/// model.rs`'s `transformer()`, lines 507-552) was never given that
+/// convention; it reads the untouched HF leaf names straight off its
+/// `ParamStore`. The rename made this unified checkpoint's code2wav tensors
+/// unloadable by their own consumer. `crates/omni/tests/code2wav_parity.rs`
+/// already validated `Codec`'s forward pass against real Omni weights read
+/// this exact (prefix-stripped, otherwise untouched) way.
 pub fn map_code2wav(hf: &str) -> Option<String> {
-    let s = hf.strip_prefix("code2wav.")?;
-    if let Some(rest) = s.strip_prefix("pre_transformer.layers.") {
-        let (n, leaf) = rest.split_once('.')?;
-        if let Some(mapped) = dense_attn_leaf(leaf) {
-            return Some(format!("code2wav.pre_transformer.blocks.{n}.{mapped}"));
-        }
-        let mapped = match leaf {
-            "mlp.gate_proj.weight" => "mlp.gate.weight",
-            "mlp.up_proj.weight" => "mlp.up.weight",
-            "mlp.down_proj.weight" => "mlp.down.weight",
-            "mlp_layer_scale.scale" => "mlp_layer_scale.scale",
-            "self_attn_layer_scale.scale" => "self_attn_layer_scale.scale",
-            _ => return None,
-        };
-        return Some(format!("code2wav.pre_transformer.blocks.{n}.{mapped}"));
-    }
-    if s == "pre_transformer.norm.weight" {
-        return Some("code2wav.pre_transformer.norm.weight".into());
-    }
-    // decoder.*, upsample.*, code_embedding.weight: identity (see doc above).
-    Some(format!("code2wav.{s}"))
+    hf.strip_prefix("code2wav.").map(str::to_string)
 }
 
 /// The single dispatch every top-level tensor in the checkpoint goes through.
@@ -661,8 +651,9 @@ mod import_as_tests {
         assert_eq!(norm_f32, src_data["thinker.model.norm.weight"]);
         assert!(meta.tensors().iter().find(|(n, _)| *n == "thinker.norm.weight.scale").is_none(), "a 1-D tensor must not get a scale sibling");
 
-        // code_predictor's identity mapping reached the output untouched in name.
-        assert!(meta.tensors().iter().any(|(n, _)| n == "talker.code_predictor.model.layers.0.self_attn.q_proj.weight"));
+        // code_predictor's rename (tts::import::mtp_hf_to_brain) reached the
+        // output under its unprefixed MtpModel-loader-compatible name.
+        assert!(meta.tensors().iter().any(|(n, _)| n == "blocks.0.attn.wq.weight"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -771,32 +762,30 @@ mod tests {
     }
 
     #[test]
-    fn code_predictor_is_identity() {
+    fn code_predictor_matches_tts_mtp_hf_to_brain() {
+        // Delegates to tts::import::mtp_hf_to_brain -- MtpModel::load_inference's
+        // ParamStore-compatible, unprefixed naming, not an identity mapping.
         assert_eq!(
             map_code_predictor("talker.code_predictor.model.layers.0.self_attn.q_proj.weight").unwrap(),
-            "talker.code_predictor.model.layers.0.self_attn.q_proj.weight"
+            "blocks.0.attn.wq.weight"
         );
-        assert_eq!(
-            map_code_predictor("talker.code_predictor.model.codec_embedding.3.weight").unwrap(),
-            "talker.code_predictor.model.codec_embedding.3.weight"
-        );
+        assert_eq!(map_code_predictor("talker.code_predictor.model.codec_embedding.3.weight").unwrap(), "codec_embedding.3.weight");
+        assert_eq!(map_code_predictor("talker.code_predictor.model.norm.weight").unwrap(), "norm.weight");
+        assert_eq!(map_code_predictor("talker.code_predictor.lm_head.2.weight").unwrap(), "lm_head.2.weight");
         assert_eq!(map_code_predictor("talker.model.norm.weight"), None);
     }
 
     #[test]
     fn code2wav_names() {
-        assert_eq!(map_code2wav("code2wav.code_embedding.weight").unwrap(), "code2wav.code_embedding.weight");
-        assert_eq!(map_code2wav("code2wav.decoder.2.block.1.conv1.conv.weight").unwrap(), "code2wav.decoder.2.block.1.conv1.conv.weight");
-        assert_eq!(map_code2wav("code2wav.upsample.0.1.gamma").unwrap(), "code2wav.upsample.0.1.gamma");
-        assert_eq!(
-            map_code2wav("code2wav.pre_transformer.layers.3.self_attn.q_proj.weight").unwrap(),
-            "code2wav.pre_transformer.blocks.3.attn.wq.weight"
-        );
-        assert_eq!(
-            map_code2wav("code2wav.pre_transformer.layers.0.mlp_layer_scale.scale").unwrap(),
-            "code2wav.pre_transformer.blocks.0.mlp_layer_scale.scale"
-        );
-        assert_eq!(map_code2wav("code2wav.pre_transformer.norm.weight").unwrap(), "code2wav.pre_transformer.norm.weight");
+        // A plain prefix strip -- codec::Codec's own ParamStore lookups (see
+        // map_code2wav's doc) read raw HF leaf names, "layers" not "blocks".
+        assert_eq!(map_code2wav("code2wav.code_embedding.weight").unwrap(), "code_embedding.weight");
+        assert_eq!(map_code2wav("code2wav.decoder.2.block.1.conv1.conv.weight").unwrap(), "decoder.2.block.1.conv1.conv.weight");
+        assert_eq!(map_code2wav("code2wav.upsample.0.1.gamma").unwrap(), "upsample.0.1.gamma");
+        assert_eq!(map_code2wav("code2wav.pre_transformer.layers.3.self_attn.q_proj.weight").unwrap(), "pre_transformer.layers.3.self_attn.q_proj.weight");
+        assert_eq!(map_code2wav("code2wav.pre_transformer.layers.0.mlp_layer_scale.scale").unwrap(), "pre_transformer.layers.0.mlp_layer_scale.scale");
+        assert_eq!(map_code2wav("code2wav.pre_transformer.norm.weight").unwrap(), "pre_transformer.norm.weight");
+        assert_eq!(map_code2wav("thinker.model.norm.weight"), None);
     }
 
     #[test]
@@ -996,7 +985,13 @@ mod tests {
 
     /// The inverse check: every tensor `hf_to_brain` accepts must land on a
     /// name under the right top-level component, so two components can never
-    /// silently collide on the same brain-side key.
+    /// silently collide on the same brain-side key. `talker.code_predictor.*`
+    /// and `code2wav.*` are the two deliberate exceptions (see
+    /// `map_code_predictor`/`map_code2wav`'s docs): both map to their
+    /// consumer's own unprefixed `ParamStore` convention
+    /// (`tts::mtp::MtpModel`, `codec::Codec`), verified not to collide with
+    /// anything else in this flat namespace by
+    /// `unprefixed_components_dont_collide_with_anything` below.
     #[test]
     fn every_mapped_name_is_prefixed_by_its_own_component() {
         let cases: &[(&str, &str)] = &[
@@ -1004,12 +999,27 @@ mod tests {
             ("thinker.visual.pos_embed.weight", "vision."),
             ("thinker.model.norm.weight", "thinker."),
             ("talker.model.norm.weight", "talker."),
-            ("talker.code_predictor.model.norm.weight", "talker.code_predictor."),
-            ("code2wav.code_embedding.weight", "code2wav."),
         ];
         for (hf, want_prefix) in cases {
             let got = hf_to_brain(hf).unwrap();
             assert!(got.starts_with(want_prefix), "{hf} -> {got}, expected prefix {want_prefix}");
+        }
+    }
+
+    #[test]
+    fn unprefixed_components_dont_collide_with_anything() {
+        // code_predictor's and code2wav's unprefixed names must not equal
+        // any OTHER component's own mapped name for an analogous tensor, nor
+        // each other's.
+        let cp = map_code_predictor("talker.code_predictor.model.layers.0.self_attn.q_proj.weight").unwrap();
+        let c2w = map_code2wav("code2wav.pre_transformer.layers.0.self_attn.q_proj.weight").unwrap();
+        let talker = map_talker("talker.model.layers.0.self_attn.q_proj.weight").unwrap();
+        let thinker = map_thinker("thinker.model.layers.0.self_attn.q_proj.weight").unwrap();
+        let names = [&cp, &c2w, &talker, &thinker];
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                assert_ne!(a, b, "unexpected name collision between mapped components");
+            }
         }
     }
 
