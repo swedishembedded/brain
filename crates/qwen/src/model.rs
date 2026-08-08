@@ -782,6 +782,15 @@ impl Qwen {
         }
     }
 
+    /// Kernel-index map for [`block::gqa_decode_step`] — the hoisted twin of
+    /// this struct's own original inline KV-cache decode dispatch (`decode_steps`
+    /// below), migrated onto `model::block` so `omni::thinker` (the primitive's
+    /// second user) and this, its original owner, share one implementation
+    /// instead of two copies that can drift apart.
+    fn decode_ids() -> block::GqaDecodeIds {
+        block::GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY }
+    }
+
     /// RMSNorm, choosing the workgroup-per-row kernel wherever the device runs
     /// workgroup reductions. `rmsnorm.wgsl` gives thread *t* row *t*, so a
     /// warp's 32 loads are `dim` floats apart and each 32-byte sector fetched
@@ -1627,13 +1636,11 @@ impl Qwen {
         let hkv = c.kv_dim();
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
-        let group = nh / nkv;
         let half = hd / 2;
         let cap = self.t; // scores/probs row stride (== max cached length)
-        let t = pos + 1; // cached length after appending this token
-        let scale = 1.0f32 / (hd as f32).sqrt();
         let theta = c.rope_theta;
         let ids = Self::ids();
+        let decode_ids = Self::decode_ids();
         let g = &self.gpu;
         let w = |name: &str| self.ps.w(name);
         // KV decode is m=1 by construction — the decode regime. Use the
@@ -1712,11 +1719,10 @@ impl Qwen {
             };
             s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
             s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
-            s.push(g.step(KV_APPEND, &[k_buf, &self.kcache[l]], &[hkv, pos], hkv));
-            s.push(g.step(KV_APPEND, &[&lb.v, &self.vcache[l]], &[hkv, pos], hkv));
-            s.push(g.step(ATTN_DECODE_SCORES, &[q_buf, &self.kcache[l], &self.scores], &[nh, group, hd, t, cap, hkv, f(scale)], nh * t));
-            s.push(g.step(DECODE_SOFTMAX, &[&self.scores, &lb.probs], &[nh, t, cap], nh));
-            s.push(g.step(ATTN_DECODE_APPLY, &[&lb.probs, &self.vcache[l], &lb.ctx], &[nh, group, hd, t, cap, hkv], nh * hd));
+            // Hoisted to model::block (see Self::decode_ids's doc) -- same
+            // append+decode-attend dispatch this function always did, now
+            // shared with omni::thinker instead of duplicated.
+            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &self.kcache[l], &self.vcache[l], &self.scores, &lb.probs, &lb.ctx));
             if let Some((q8, lay)) = q8l {
                 mm8(&mut s, q8, &lay.wo, &lb.ctx, &self.proj, hq);
             } else {
