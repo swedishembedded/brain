@@ -250,7 +250,15 @@ impl OmniInner {
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor);
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").expect("missing talker.codec_head.weight");
 
-        let codes = talker_generate::generate_codes(&self.reader, &self.gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default());
+        // Talker's own kernel-index scheme (crate::talker::talker_pipelines,
+        // 18 entries) is NOT the same table as self.gpu's (built from
+        // thinker_pipelines, 16 entries) -- dispatching Talker's decode-cache
+        // kernels (indices 15-17) against self.gpu's table read out of bounds.
+        // A real bug this test's own real-weight run caught (`index 16, len
+        // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
+        // device, with Talker's own pipeline table, is required here.
+        let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default());
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav);
         let wav = codec.decode_omni(&codes);

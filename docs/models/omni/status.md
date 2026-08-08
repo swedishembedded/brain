@@ -1061,15 +1061,108 @@ the tokenizer round-trip — is nonetheless validated by the exact 12-token
 prefix match across a real 48-layer/128-expert forward, including the
 KV-cache boundary crossing at token 9→10 correctly.
 
-**Not started, still**: `qwen::Qwen` itself was not migrated onto the hoisted
-`model::block` decode primitives (only `omni::thinker` uses them so far —
-qwen's own inline copy still works, gated by its own existing tests, but now
-diverges from the hoisted version rather than being its single source);
-real wall-clock audio-timestamp M-RoPE scaling (documented approximation
-above); video FILE decoding in brain-py/examples; a wire shape for
-multi-frame video input on the `generate` action; int8/GPU-sharded resident
-weights across generation steps (the cache fixed the attention complexity,
-not the weight-I/O pattern).
+**Not started, still**: real wall-clock audio-timestamp M-RoPE scaling
+(documented approximation above); video FILE decoding in brain-py/examples;
+a wire shape for multi-frame video input on the `generate` action; int8/
+GPU-sharded resident weights across generation steps (the cache fixed the
+attention complexity, not the weight-I/O pattern). (`qwen::Qwen`'s own
+migration onto the hoisted `model::block` decode primitives, listed here as
+not-started when this entry was first written, is now done — see the M9c
+entry below.)
+
+## M9c — real speech output: Talker + MTP + Code2Wav chained (2026-08-08)
+
+Closes the biggest remaining gap from the original 17-milestone plan: Omni
+could only talk back in text. `speak` is now a real, second served action,
+chaining every already-validated component into one loop with no stubs.
+
+**`qwen::Qwen` migrated onto the hoisted KV-cache primitives** (M9b left this
+open): `Self::decode_ids()` builds a `model::block::GqaDecodeIds` from qwen's
+own registered kernel constants; the 5-line inline `kv_append`/
+`attn_decode_scores`/`decode_softmax`/`attn_decode_apply` dispatch in
+`decode_steps` becomes one `gqa_decode_step` call. Verified byte-identical to
+the pre-migration dispatch by qwen's own `kv_step_matches_full_recompute`/
+`prefill_matches_step_by_step`/`step_embed_matches_step`/
+`generate_kv_matches_recompute_greedy` tests (all still green).
+
+**Both loader-side naming gaps fixed** (M7b/M8 had left them open,
+documented but unfixed): `map_code_predictor` now delegates to `tts::import::
+mtp_hf_to_brain` (already correct — `code_predictor_parity.rs` already used
+it directly — just never wired into the importer). `map_code2wav` is now a
+plain prefix strip instead of a rename onto the shared dense-attention
+convention `codec::Codec`'s own `ParamStore` lookups never expected — the
+rename had made Code2Wav's own weights unloadable by its own consumer. Fixed
+by grepping the full name space for collisions first (`unprefixed_components_
+dont_collide_with_anything`, a new test): the "identity mapping avoids
+colliding with Talker's own names" rationale the old code_predictor comment
+gave didn't actually hold once checked (Talker's own tensors are prefixed
+`talker.blocks.*`, a different string).
+
+**Talker's own KV-cache decode** (`crate::talker`): the same `layer_fwd(cache:
+Option<&TalkerLayerCache>)` / `layer_decode_step` pair Thinker has, MoE tail
+(routed experts + always-active shared expert) factored into a shared
+`moe_sublayer` helper untouched by the attention-side change. New
+`talker_kv_cache.rs` proves the MoE+shared-expert composition through
+incremental decode matches batched attention exactly, on both backends —
+the one thing `model::block`'s own attention-only test doesn't reach.
+
+**Thinker->Talker prefill assembly** (`crate::talker_prompt`): no golden or
+doc in this repo specified the exact row-by-row construction, so it was
+transcribed directly from the installed `transformers` source
+(`_get_talker_user_parts`/`_get_talker_assistant_parts` in
+`modeling_qwen3_omni_moe.py`) rather than inferred — the assistant segment's
+fixed 9-row template (`[assistant_hidden[0..3], tts_pad×4, tts_bos,
+assistant_hidden[3..4]]` summed elementwise with `[zeros×3, codec_embed(
+nothink, think_bos, think_eos, speaker, pad, bos)]`) is copied bit for bit.
+Scoped to text-only user turns and single-turn conversations (documented in
+the module doc) — the multimodal-user-turn branch (`hidden_projection` for
+audio/image/video positions) is real, deferred work.
+`omni::config::OmniConfig` gained `tts_bos_token_id`/`tts_eos_token_id`/
+`tts_pad_token_id` (top-level fields the real checkpoint has, confirmed
+151672/151673/151671, that this struct hadn't parsed yet).
+
+**The codec-id sampling loop** (`crate::talker_generate::generate_codes`):
+mirrors `tts::pipeline::generate_codes`'s already-working shape exactly (same
+`sample_cb0` suppressed-token-set + EOS-gate logic, same feedback-sum-then-
+decode-step pattern), composed from Talker's own KV-cache decode,
+`tts::mtp::MtpModel::generate_residuals` (already built and validated
+against real Omni weights, M7b, reused completely unchanged), and
+`crate::thinker::lm_head_fwd`/`final_norm` (both already generic, reused
+directly rather than re-derived for Talker).
+
+**Wired into serving** (`crate::caps`): `OmniInner::speak` chains all of the
+above plus `codec::Codec::decode_omni`; new `speak_spec()`/`SpeakAction`
+register a second action alongside `generate`. `OmniInner.cfg` widened from
+`ThinkerConfig` to the full `OmniConfig` (needed for `TalkerConfig` + the new
+top-level `tts_*` ids); `codec_bridge.rs` lifts the `MtpModel`/`Codec`/
+`TextProjection` loading recipes out of the two parity tests so `caps.rs` can
+build the same models for real serving.
+
+**Real end-to-end validation, on real weights (2026-08-08)**: new
+`crates/omni/tests/speak_e2e.rs` calls `OmniProvider::load` +
+`OmniInner::speak` against the real checkpoint — no golden (none exists for
+the composed splice), the bar is "runs to completion and produces a real,
+non-silent, finite waveform." First run FAILED with a real bug: `index out
+of bounds: the len is 16 but the index is 16` inside `wgsl-cpu`'s kernel
+dispatcher — `OmniInner::speak` had passed `self.gpu` (built from
+`thinker_pipelines()`, 16 kernel entries) into `talker_generate::
+generate_codes`, but Talker's own kernel-index scheme
+(`talker_pipelines()`, 18 entries) dispatches decode-cache kernels at
+indices 15-17 — out of range against the wrong table. Fixed by building a
+dedicated `talker_gpu = self.gpu.new_like(talker_pipelines())` for the
+Talker call. Re-run **passed**: `Say hello.` (8 max new text tokens) ->
+text `" I am a 20 year old"` -> a REAL 297,045-sample (12.38 s) waveform at
+24 kHz, RMS 0.0408 (well clear of the 1e-4 silence floor, in the same range
+`tts::pipeline`'s own doc cites for real sampled speech, ~0.07, vs ~0.004
+for near-silence) — 1727 s on the CPU backend (`BRAIN_DEVICE=cpu`, same
+validation-tier weight-streaming cost the text-only path already has).
+
+**Not started, still**: multimodal-user-turn + speech-output combined in one
+call; multi-turn Talker conversation context; `transcribe`/`converse`
+actions; wiring `speak` into `cli::resident_omni` (this round is the
+`Provider`-side wiring only) and `examples/omni.py`; a numeric parity golden
+for the composed Thinker->Talker splice (none exists — `speak_e2e.rs`'s bar
+is "runs and sounds like speech," not cosine-exact).
 
 ## Not started
 
