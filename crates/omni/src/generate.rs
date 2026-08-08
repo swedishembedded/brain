@@ -173,6 +173,23 @@ fn argmax(row: &[f32]) -> u32 {
     row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab")
 }
 
+/// Opt-in (`BRAIN_OMNI_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
+/// — diagnoses exactly the failure mode `crates/omni/tests/generate_e2e.rs`
+/// found on the real checkpoint: a reference comparison (HF's bf16 compute
+/// vs. this engine's fp32) diverging at a token whose top candidates are
+/// closely spaced, distinguishing "a near-tied logit flipped by accumulated
+/// rounding" (small margin between the top few candidates, the wanted token
+/// still nearby) from "an actual bug" (a wildly wrong, confidently-argmaxed
+/// token). Costs nothing when unset.
+fn debug_log_top_candidates(cache_row: u32, logits: &[f32]) {
+    if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_err() {
+        return;
+    }
+    let mut sorted: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("decode step cache_row={cache_row}: top3 (token_id, logit) = {:?}", &sorted[..3.min(sorted.len())]);
+}
+
 /// Greedy (argmax) text generation: [`prefill`]s `prompt_ids` once (populating
 /// a KV cache sized `prompt_ids.len() + max_new_tokens`), samples the first
 /// new token from the prefill's last logit row, then [`decode_step`]s one
@@ -271,6 +288,7 @@ fn generate_greedy_with_embeds(
             let logits = lm_head_fwd(gpu, &lm_head, &hidden, 1, cfg.hidden, cfg.vocab);
             let row = gpu.read(&logits, cfg.vocab as usize);
             next = argmax(&row);
+            debug_log_top_candidates(cache_row, &row);
             ids.push(next);
             cache_row += 1;
             mrope_pos = mrope_pos.map(|p| p + 1);

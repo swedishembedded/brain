@@ -1006,6 +1006,61 @@ those tests remain `#[ignore]`d pending the checkpoint download (in progress
 throughout this work: 51 GB / 70.5 GB, 43 GB free on the 93 GB tmpfs as of
 this entry).
 
+**Real end-to-end generation, once the checkpoint finished downloading
+(2026-08-08)**: the checkpoint download completed (66 GB, 15/15 shards, no
+`.incomplete` files). `tools/goldens/omni_dump_generate.py` ran against it
+successfully — `Qwen3OmniMoeThinkerForConditionalGeneration.from_pretrained`
+(bf16, ~60 GB resident), 5-token greedy `generate()` on the same 9-token
+plain-text prompt M6a's layer0 golden uses. New `crates/omni/tests/
+generate_e2e.rs` runs the FULL real 48-layer/128-expert `generate_greedy`
+(prefill + 4 real KV-cache decode steps) against that golden.
+
+First attempt (default GPU device) hit `wgpu error: Out of Memory` — NOT
+this round's code: `nvidia-smi` showed the same orphaned zombie-process VRAM
+this file's M6a entry already recorded (~6 GB and ~4.5 GB pinned on the two
+P40s by PIDs unrelated to this session), on top of the real ~2.4 GB/layer
+128-expert weight set this loop legitimately uploads and drops one layer at
+a time. Re-run with `BRAIN_DEVICE=cpu` (host RAM has no such constraint)
+completed in ~4 minutes and produced a result worth recording precisely:
+
+```
+want: [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 198, 151644]
+got:  [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 311, 151645]
+```
+
+The prompt (9 tokens) plus the first 3 generated tokens match EXACTLY —
+including token 9 landing on `151645` (`<|im_end|>`) without early-stopping,
+which only happens correctly if `eos_ids` is empty for this comparison (the
+bare `Thinker` class the golden was dumped from carries no bundled
+`generation_config.eos_token_id`, so HF's own `generate()` ran all 5 steps
+unconditionally — confirmed by the golden itself containing 151645
+mid-sequence, not just at the tail; `generate_e2e.rs` passes `eos_ids=&[]`
+to match). Divergence starts at the 4th generated token. `BRAIN_OMNI_DEBUG_LOGITS=1`
+(new opt-in diagnostic in `crate::generate`, alongside `argmax`) showed the
+top-3 candidates at that step: `[(311, 14.48), (905, 14.31), (198, 13.14)]` —
+the golden's actual pick (`198`) sits in 3rd place, ~1.3 logits back, and the
+top-2 are only 0.17 logits apart. A closely-contested position, not a
+confidently-wrong one: the SAME `decode_step` code path had already run
+correctly 3 times immediately before this, and every primitive it composes
+(RMSNorm, GQA, the KV-cache decode kernels, the MoE FFN) is independently
+cosine-1.000000-exact against these same real weights. The most likely
+explanation is accumulated bf16 (HF's reference — `torch_dtype=bfloat16`)
+vs. fp32 (this engine's arithmetic, per `docs/lessons.md`'s "fp32 only"
+convention — never claimed bit-identical to a bf16 reference) rounding
+reaching a near-tie, not a loop-control bug.
+
+`generate_e2e.rs`'s assertion is left as a STRICT exact match (weakening it
+would hide a real future regression) — it currently FAILS on this specific
+5-token/CPU-backend run, and that failure is recorded here rather than
+hidden: this is a genuine, environment-specific open question (does a
+longer generation, a different prompt, or the GPU path once the zombie VRAM
+is reclaimed diverge the same way, sooner, or not at all?), not a "test
+passes" claim. The loop-control risk this whole rung of the parity ladder
+exists to catch — prefill/decode sequencing, cache indexing, the EOS check,
+the tokenizer round-trip — is nonetheless validated by the exact 12-token
+prefix match across a real 48-layer/128-expert forward, including the
+KV-cache boundary crossing at token 9→10 correctly.
+
 **Not started, still**: `qwen::Qwen` itself was not migrated onto the hoisted
 `model::block` decode primitives (only `omni::thinker` uses them so far —
 qwen's own inline copy still works, gated by its own existing tests, but now
