@@ -506,6 +506,8 @@ pub const MOE_LINEAR_GATED_DW: &str = include_str!("../wgsl/moe_linear_gated_dw.
 pub const MOE_LINEAR_GATED_DX: &str = include_str!("../wgsl/moe_linear_gated_dx.wgsl");
 /// `wgsl/moe_linear_gated_i8.wgsl`
 pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.wgsl");
+/// `wgsl/moe_scatter_scaled_add.wgsl`
+pub const MOE_SCATTER_SCALED_ADD: &str = include_str!("../wgsl/moe_scatter_scaled_add.wgsl");
 /// `wgsl/mse_grad.wgsl`
 pub const MSE_GRAD: &str = include_str!("../wgsl/mse_grad.wgsl");
 /// `wgsl/mse_grad_w.wgsl`
@@ -996,6 +998,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),
     ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
+    ("moe_scatter_scaled_add", MOE_SCATTER_SCALED_ADD),
     ("mse_grad", MSE_GRAD),
     ("mse_grad_w", MSE_GRAD_W),
     ("mse_value", MSE_VALUE),

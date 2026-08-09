@@ -650,3 +650,159 @@ pub fn shared_expert_fwd(
     steps
 }
 
+// ---- row-compacted sparse expert forward (tiled, not naive) ---------------
+//
+// `expert_fwd` above removes the redundant FLOPs of evaluating every expert
+// densely, but stays naive-tier (one thread per output element, no tiling) --
+// measured 6.51x SLOWER than GLM's existing dense TILED path at GLM-5.2's
+// real shape (`docs/models/glm/status.md`, `crates/glm/examples/
+// moe_migration_bench.rs`), because the naive kernel's per-FLOP inefficiency
+// at ~64 rows/expert swamps the 32x FLOP-count win sparsity promises. This
+// section is the real fix `.todo/moe-tiled-gated-kernel.md` asked for: gather
+// each expert's routed rows into a dense sub-batch, run the SAME
+// `model::block::pick_gemm`-selected tiled GEMM the dense path already uses
+// (unchanged, no new GEMM kernel), scatter the scaled result back.
+
+/// Kernel indices [`expert_fwd_compact`] dispatches, resolved by the calling
+/// model against its own registered pipeline list.
+#[derive(Clone, Copy)]
+pub struct CompactExpertFwdIds {
+    /// `embed.wgsl`, reused unchanged as a generic row-gather-by-index
+    /// kernel: `x_compact[i, :] = x[idx[i], :]` is exactly
+    /// `emb_row[t, :] = emb[token[t], :]` with `idx` standing in for
+    /// `token`.
+    pub gather: usize,
+    /// The naive reference GEMM (`matmul.wgsl`'s `{x,w,out}`/`{m,k,n}`
+    /// contract) -- [`model::block::pick_gemm`] falls back to this for a
+    /// compacted batch too small to fill a tile (a lightly-routed expert).
+    pub gemm_naive: usize,
+    /// The tiled GEMM (`matmul_reg3.wgsl`, SAME contract as `gemm_naive`) --
+    /// `pick_gemm` selects this once the compacted row count clears its
+    /// tiling threshold.
+    pub gemm_tiled: usize,
+    pub silu_mul: usize,
+    /// `moe_scatter_scaled_add.wgsl`.
+    pub scatter: usize,
+}
+
+/// Per-expert scratch for [`expert_fwd_compact`], sized ONCE by the caller
+/// for `capacity` rows and reused across every expert in a layer (fully
+/// overwritten each call — the tail past this call's `count` is simply
+/// unused, never read, so leftover data from a larger previous expert is
+/// harmless). `capacity_for` returns the only value that makes
+/// [`expert_fwd_compact`]'s capacity panic unreachable: every row could in
+/// principle route to one expert.
+pub struct CompactExpertScratch {
+    capacity: u32,
+    idx: DeviceBuffer,
+    x_compact: DeviceBuffer,
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    expert_out: DeviceBuffer,
+}
+
+impl CompactExpertScratch {
+    /// `capacity` rows' worth of scratch — pass `shape.rows` for the
+    /// unconditionally-safe bound, or a smaller measured high-watermark if
+    /// the caller already knows routing is more balanced than that.
+    pub fn new(g: &Gpu, shape: &MoeShape, capacity: u32) -> CompactExpertScratch {
+        let (d, ff) = (shape.d_model as u64, shape.moe_ff as u64);
+        let cap = capacity as u64;
+        CompactExpertScratch {
+            capacity,
+            idx: g.storage(cap),
+            x_compact: g.storage(cap * d),
+            gate_pre: g.storage(cap * ff),
+            up: g.storage(cap * ff),
+            h: g.storage(cap * ff),
+            expert_out: g.storage(cap * d),
+        }
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+}
+
+/// Row-compacted sparse expert forward — see this section's header doc.
+///
+/// `host_gate` MUST be the CURRENT contents of `gate` (`[shape.rows,
+/// shape.n_experts]`), already read back by the caller (`Gpu::read`). This
+/// function does NOT perform that readback itself, so the caller controls
+/// exactly when the host/device round trip happens — once per LAYER (read
+/// `gate` once, call this once per expert against the same `host_gate`), not
+/// once per expert. Consequently this is NOT a pure step-builder like
+/// [`expert_fwd`]: each expert's compacted row count is a value only the
+/// HOST can know (discovered from `host_gate`), so this function builds AND
+/// submits its own steps rather than returning a `Vec<Step>` for the caller
+/// to batch — every other step-list builder in this engine always knows its
+/// dispatch shapes before building a `Step`, which a data-dependent row
+/// count breaks by construction. This is therefore a real synchronisation
+/// point per expert (the `submit` below), acceptable for a BATCHED forward
+/// (training/eval), not intended for a per-token decode loop.
+///
+/// Panics if expert `e_idx` routes more rows than `scratch`'s capacity —
+/// size `scratch` via [`CompactExpertScratch::new`] with `shape.rows` to
+/// make this impossible, rather than silently truncating which rows this
+/// expert's output reaches.
+///
+/// Returns how many rows were routed to this expert, for the caller's own
+/// diagnostics (e.g. confirming a benchmark's routing landed near its
+/// expected average).
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_compact(
+    g: &Gpu,
+    ids: &CompactExpertFwdIds,
+    shape: &MoeShape,
+    host_gate: &[f32],
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_w: &DeviceBuffer,
+    up_w: &DeviceBuffer,
+    down_w: &DeviceBuffer,
+    scratch: &CompactExpertScratch,
+    acc: &DeviceBuffer,
+    e_idx: u32,
+    accumulate: bool,
+) -> usize {
+    let (d, ff, e) = (shape.d_model, shape.moe_ff, shape.n_experts);
+    let rows: Vec<u32> = (0..shape.rows).filter(|&r| host_gate[(r * e + e_idx) as usize] > 0.0).collect();
+    let count = rows.len() as u32;
+    if count == 0 {
+        // Nothing routed to this expert this call — still honour
+        // `accumulate`'s set-vs-add contract: a zero-row expert must not
+        // silently skip zeroing `acc` if it happens to be the first expert
+        // in the layer's loop.
+        if !accumulate {
+            g.submit(&[acc], &[]);
+        }
+        return 0;
+    }
+    assert!(
+        count <= scratch.capacity,
+        "expert_fwd_compact: expert {e_idx} routed {count} rows, exceeding scratch capacity {} -- \
+         size CompactExpertScratch::new with shape.rows to make this impossible",
+        scratch.capacity
+    );
+    g.write(&scratch.idx, &rows);
+    let lin = |x_in: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
+        let (kid, threads) = crate::block::pick_gemm(count as usize, n as usize, ids.gemm_naive, ids.gemm_tiled, false);
+        g.step(kid, &[x_in, w, out], &[count, k, n], threads)
+    };
+    let steps = vec![
+        g.step(ids.gather, &[&scratch.idx, x, &scratch.x_compact], &[d, count], count * d),
+        lin(&scratch.x_compact, gate_w, &scratch.gate_pre, d, ff),
+        lin(&scratch.x_compact, up_w, &scratch.up, d, ff),
+        g.step(ids.silu_mul, &[&scratch.gate_pre, &scratch.up, &scratch.h], &[count * ff], count * ff),
+        lin(&scratch.h, down_w, &scratch.expert_out, ff, d),
+        g.step(
+            ids.scatter,
+            &[&scratch.idx, gate, &scratch.expert_out, acc],
+            &[count, d, e, e_idx, accumulate as u32],
+            count * d,
+        ),
+    ];
+    g.submit(&[], &steps);
+    count as usize
+}
