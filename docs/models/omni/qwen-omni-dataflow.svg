@@ -1,0 +1,332 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1640" height="2820" viewBox="0 0 1640 2820" font-family="'Helvetica Neue',Helvetica,Arial,'DejaVu Sans',sans-serif">
+  <desc>Signal flow through brain's Qwen3-Omni-30B-A3B implementation: text/audio/image/video-frames in, through the audio and vision towers, multimodal splice with M-RoPE, the Thinker MoE decoder, the Talker MoE decoder, the MTP code predictor and the Code2Wav vocoder, to generated text and a 24 kHz waveform. Solid = implemented and parity-validated; dashed = documented gap.</desc>
+
+  <defs>
+    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#52514e"/>
+    </marker>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/>
+    </marker>
+    <marker id="arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d95926"/>
+    </marker>
+    <marker id="arrDash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a897f"/>
+    </marker>
+  </defs>
+
+  <style>
+    .title  { font-size: 30px; font-weight: 700; fill: #0b0b0b; }
+    .sub    { font-size: 14px; fill: #52514e; }
+    .h      { font-size: 17px; font-weight: 700; }
+    .h2     { font-size: 13.5px; font-weight: 700; fill: #1c1c1a; }
+    .t      { font-size: 12.5px; fill: #1c1c1a; }
+    .m      { font-size: 11px; fill: #52514e; font-family: 'DejaVu Sans Mono','Menlo',monospace; }
+    .s      { font-size: 11px; fill: #6f6e67; }
+    .lab    { font-size: 11px; fill: #6f6e67; }
+    .badge  { font-size: 11px; font-style: italic; }
+    .gap    { font-size: 11px; fill: #6f6e67; }
+    .gapi   { font-size: 11.5px; font-style: italic; fill: #6f6e67; }
+    .outh   { font-size: 16px; font-weight: 700; fill: #ffffff; }
+    .outt   { font-size: 12px; fill: #ffffff; }
+    .outs   { font-size: 11px; fill: #c9d4e4; }
+    .flow   { stroke: #52514e; stroke-width: 2.2; fill: none; marker-end: url(#arrGray); }
+    .flowd  { stroke: #8a897f; stroke-width: 2; fill: none; stroke-dasharray: 6 5; marker-end: url(#arrDash); }
+    .gapbox { fill: #fafaf8; stroke: #8a897f; stroke-width: 1.6; stroke-dasharray: 6 5; }
+  </style>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1640" height="2820" fill="#fcfcfb"/>
+
+  <!-- ======================= title ======================= -->
+  <text class="title" x="60" y="64">Qwen3-Omni-30B-A3B — signal flow through brain&#8217;s implementation</text>
+  <text class="sub" x="60" y="92">brain&#8217;s from-scratch Rust + WGSL re-implementation of Qwen/Qwen3-Omni-30B-A3B-Instruct (35.25&#8201;B params total, ~3&#8201;B active per token, fp32 engine)</text>
+  <text class="sub" x="60" y="110">text / audio / image / video-frames in &#8594; generated text and 24&#8201;kHz synthesized speech out — every box is a real module, every number from the shipped config or a measured run</text>
+
+  <!-- legend -->
+  <rect x="1230" y="30" width="376" height="68" rx="8" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.2"/>
+  <line x1="1248" y1="52" x2="1290" y2="52" stroke="#0b0b0b" stroke-width="2.4"/>
+  <text class="t" x="1300" y="56">implemented &#183; parity-validated on real weights</text>
+  <line x1="1248" y1="80" x2="1290" y2="80" stroke="#8a897f" stroke-width="2" stroke-dasharray="6 5"/>
+  <text class="t" x="1300" y="84">documented gap / not yet built</text>
+
+  <!-- ======================= inputs ======================= -->
+  <g>
+    <rect x="140" y="150" width="340" height="46" rx="10" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="310" y="179" text-anchor="middle">TEXT — chat messages / prompt</text>
+
+    <rect x="520" y="150" width="420" height="46" rx="10" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="730" y="179" text-anchor="middle">AUDIO — 16&#8201;kHz mono PCM</text>
+
+    <rect x="980" y="150" width="190" height="46" rx="10" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="1075" y="179" text-anchor="middle">IMAGE — RGB</text>
+
+    <rect x="1190" y="150" width="210" height="46" rx="10" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="1295" y="172" text-anchor="middle">VIDEO — decoded</text>
+    <text class="h2" x="1295" y="188" text-anchor="middle">frames in</text>
+
+    <!-- ghost: video file, no decoder in brain -->
+    <rect x="1436" y="150" width="150" height="46" rx="10" class="gapbox"/>
+    <text class="gapi" x="1511" y="172" text-anchor="middle">video file</text>
+    <text class="gapi" x="1511" y="188" text-anchor="middle">(not decoded here)</text>
+    <line x1="1436" y1="173" x2="1404" y2="173" class="flowd"/>
+    <text class="gap" x="1408" y="216">no video-FILE decoder in brain —</text>
+    <text class="gap" x="1408" y="230">client extracts frames (e.g. PyAV)</text>
+  </g>
+
+  <!-- input -> preproc arrows -->
+  <line x1="310" y1="196" x2="310" y2="238" class="flow"/>
+  <line x1="730" y1="196" x2="730" y2="238" class="flow"/>
+  <line x1="1075" y1="196" x2="1075" y2="238" class="flow"/>
+  <line x1="1295" y1="196" x2="1295" y2="238" class="flow"/>
+
+  <!-- ======================= preprocessing ======================= -->
+  <g>
+    <rect x="140" y="242" width="340" height="88" rx="8" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="156" y="266">Tokenize + chat template</text>
+    <text class="m"  x="156" y="286">data::qwen_tokenizer::QwenBpe</text>
+    <text class="t"  x="156" y="308">BPE vocab 152&#8201;064 &#183; media placeholder tokens</text>
+
+    <rect x="520" y="242" width="420" height="88" rx="8" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="536" y="266">Whisper-style mel spectrogram</text>
+    <text class="t"  x="536" y="288">128 mel bins &#183; n_fft 400 &#183; hop 160 &#183; 16&#8201;kHz</text>
+    <text class="t"  x="536" y="308">padded to whole 1&#8201;s chunks (chunk_len 100 &#215; hop 160)</text>
+
+    <rect x="980" y="242" width="420" height="88" rx="8" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="996" y="266">smart_resize + bilinear resize &#8594; patches</text>
+    <text class="t"  x="996" y="288">patch 16 &#183; temporal_patch 2 &#183; merge_size 2</text>
+    <text class="t"  x="996" y="308">mean / std 0.5 &#183; min 3&#8201;136 / max 12&#8201;845&#8201;056 px</text>
+  </g>
+
+  <!-- preproc -> tower arrows -->
+  <line x1="310" y1="330" x2="310" y2="426" class="flow"/>
+  <line x1="730" y1="330" x2="730" y2="372" class="flow"/>
+  <line x1="1190" y1="330" x2="1190" y2="372" class="flow"/>
+
+  <!-- ======================= text embedding lane ======================= -->
+  <g>
+    <rect x="140" y="430" width="340" height="84" rx="8" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h2" x="156" y="454">Token embedding (row gather)</text>
+    <text class="m"  x="156" y="474">thinker.embed_tokens [152&#8201;064 &#215; 2048]</text>
+    <text class="s"  x="156" y="496">becomes the text rows of the spliced sequence</text>
+  </g>
+
+  <!-- ======================= audio tower ======================= -->
+  <g>
+    <rect x="520" y="376" width="420" height="224" rx="10" fill="#e3f4ec" stroke="#148f64" stroke-width="2"/>
+    <text class="h" x="536" y="402" fill="#0c5c40">AUDIO TOWER (AuT)</text>
+    <text class="m" x="536" y="424">qwen_asr::encoder::AudioEncoder::encode</text>
+    <text class="m" x="536" y="440">cfg: AudioEncoderConfig::qwen3_omni()</text>
+    <text class="t" x="536" y="464">32 layers &#183; d_model 1280 &#183; 20 heads &#183; ffn 5120</text>
+    <text class="t" x="536" y="484">conv stem + windowed attention, n_window_infer 800</text>
+    <text class="t" x="536" y="504">128 mel bins in &#8594; projector &#8594; hidden 2048</text>
+    <text class="t" x="536" y="524">output: audio embeds [T&#8336;, 2048]</text>
+    <text class="badge" x="536" y="548" fill="#0c5c40">validated: cosine 1.000000 vs HF golden (M4)</text>
+    <text class="s" x="536" y="570">host entry: omni::mm::encode_audio</text>
+  </g>
+
+  <!-- ======================= vision tower ======================= -->
+  <g>
+    <rect x="980" y="376" width="420" height="252" rx="10" fill="#edebfa" stroke="#4a3aa7" stroke-width="2"/>
+    <text class="h" x="996" y="402" fill="#37307c">VISION TOWER (ViT)</text>
+    <text class="m" x="996" y="424">qwenvl::encoder::VisionEncoder + PatchMerger</text>
+    <text class="m" x="996" y="440">cfg: VisionConfig::qwen3_omni()</text>
+    <text class="t" x="996" y="464">depth 27 &#183; hidden 1152 &#183; 16 heads &#183; inter 4304</text>
+    <text class="t" x="996" y="484">patch 16 &#183; temporal_patch 2 &#183; gelu_pytorch_tanh</text>
+    <text class="t" x="996" y="504">spatial_merge_size 2 &#183; PatchMerger:</text>
+    <text class="t" x="996" y="522">LayerNorm &#8594; Linear &#8594; GELU &#8594; Linear &#8594; 2048</text>
+    <text class="badge" x="996" y="546" fill="#37307c">validated: cosine 1.000000, incl. 3 DeepStack taps (M5)</text>
+    <rect x="992" y="556" width="396" height="38" rx="6" class="gapbox"/>
+    <text class="gap" x="1002" y="571">DeepStack taps [8, 16, 24] — encoded, but skipped by the</text>
+    <text class="gap" x="1002" y="585">served mm::encode_image path (same cut in NPU export, M15)</text>
+    <text class="s" x="996" y="614">host entry: omni::mm::encode_image / encode_video_frames</text>
+  </g>
+
+  <!-- lanes -> splice arrows -->
+  <line x1="310" y1="514" x2="310" y2="672" class="flow"/>
+  <text class="lab" x="322" y="600">text embeds</text>
+  <line x1="730" y1="600" x2="730" y2="672" class="flow"/>
+  <text class="lab" x="742" y="644">audio embeds [T&#8336;, 2048]</text>
+  <line x1="1190" y1="628" x2="1190" y2="672" class="flow"/>
+  <text class="lab" x="1202" y="658">vision embeds [T&#7525;, 2048]</text>
+
+  <!-- ======================= multimodal splice + M-RoPE ======================= -->
+  <g>
+    <rect x="140" y="676" width="1440" height="170" rx="10" fill="#fdf2da" stroke="#c98500" stroke-width="2"/>
+    <text class="h" x="156" y="702" fill="#8a5c00">MULTIMODAL SPLICE + M-RoPE POSITIONS</text>
+    <text class="m" x="156" y="724">omni::mm — build_multimodal_prompt &#183; splice_host &#183; encode_audio :82 &#183; encode_image :183 &#183; encode_video_frames :221 &#8226; positions: qwenvl::mrope::get_rope_index_multi</text>
+    <text class="t" x="156" y="750">text-token + audio + vision embeddings assembled into ONE [T, 2048] sequence — media embeds overwrite their placeholder-token rows (wrapped in the real start / end tokens)</text>
+    <text class="t" x="156" y="770">3-axis interleaved M-RoPE over temporal / height / width &#183; mrope_section [24, 20, 20] &#183; theta 1e6 — collapses exactly to plain half-split RoPE for pure-text / pure-audio spans</text>
+    <text class="t" x="156" y="790">genuinely 3-axis only for mixed image / video / audio spans (one rope2d_fwd table path serves all cases)</text>
+    <text class="gapi" x="156" y="816">documented approximation: the audio T-axis advances by frame ordinal, not HF&#8217;s wall-clock position_id_per_seconds scaling (M9b)</text>
+  </g>
+
+  <!-- splice -> thinker -->
+  <line x1="670" y1="846" x2="670" y2="902" class="flow"/>
+  <text class="lab" x="684" y="880">[T, 2048] spliced sequence + [T, 3] M-RoPE position ids</text>
+
+  <!-- ======================= Thinker ======================= -->
+  <g>
+    <rect x="300" y="906" width="740" height="300" rx="12" fill="#e7f0fc" stroke="#2a78d6" stroke-width="2.5"/>
+    <text class="h" x="320" y="934" fill="#1c5cab">THINKER — MoE text decoder</text>
+    <text class="m" x="320" y="956">omni::thinker — layer_fwd &#183; layer_decode_step &#183; decode &#183; final_norm &#183; lm_head_fwd</text>
+    <text class="m" x="320" y="972">sparse MoE core: model::moe — router_fwd &#183; expert_fwd / expert_fwd_compact / expert_fwd_i8</text>
+    <text class="t" x="320" y="998">48 layers &#183; hidden 2048 &#183; GQA 32 query / 4 KV heads &#183; use_qk_norm</text>
+    <text class="t" x="320" y="1018">MoE: 128 experts, top-8 routed, NO shared expert &#183; moe_inter 768 &#183; softmax top-k router</text>
+    <text class="t" x="320" y="1038">vocab 152&#8201;064 &#183; untied lm_head &#183; 29.91&#8201;B resident params &#183; 2.73&#8201;B active / token (omni_bench cost, M16)</text>
+    <text class="m" x="320" y="1064">decode loop: omni::generate — generate_greedy / _positioned / _multimodal (KV-cached)</text>
+    <text class="t" x="320" y="1090">int8 dual-GPU resident: ThinkerInt8Store / Int8ThinkerResident — layer-range shard across 2&#8201;&#215;&#8201;P40 (M20/M21)</text>
+    <text class="badge" x="320" y="1116" fill="#1c5cab">validated: layer cosine 1.000000 (M6a/M6b) &#183; e2e greedy: exact 12-token prefix, then an fp32-vs-bf16 near-tied logit diverged (M9b)</text>
+  </g>
+
+  <!-- thinker autoregressive loop (left) -->
+  <path d="M 300 1156 L 240 1156 L 240 966 L 296 966" fill="none" stroke="#2a78d6" stroke-width="2.2" marker-end="url(#arrBlue)"/>
+  <text class="lab" x="62" y="1030">autoregressive text</text>
+  <text class="lab" x="62" y="1046">decode loop:</text>
+  <text class="lab" x="62" y="1062">argmax &#8594; append &#8594;</text>
+  <text class="lab" x="62" y="1078">re-embed &#8594; next step</text>
+  <text class="lab" x="62" y="1094">(KV-cached, M9b)</text>
+
+  <!-- thinker -> text output -->
+  <line x1="1040" y1="1020" x2="1156" y2="1020" class="flow"/>
+  <text class="lab" x="1098" y="998" text-anchor="middle">final_norm &#8594; lm_head</text>
+  <text class="lab" x="1098" y="1012" text-anchor="middle">[2048 &#215; 152&#8201;064]</text>
+  <g>
+    <rect x="1160" y="970" width="400" height="100" rx="12" fill="#0d366b"/>
+    <text class="outh" x="1180" y="1002">OUTPUT 1 — GENERATED TEXT</text>
+    <text class="outt" x="1180" y="1026">greedy argmax ids &#8594; detokenized text</text>
+    <text class="outs" x="1180" y="1048">returned by both actions: generate &#183; speak</text>
+  </g>
+
+  <!-- thinker -> handoff -->
+  <line x1="670" y1="1206" x2="670" y2="1262" class="flow"/>
+  <text class="lab" x="684" y="1240">hidden states @ layer 24 (accept_hidden_layer) + generated text tokens</text>
+
+  <!-- ======================= Thinker -> Talker handoff ======================= -->
+  <g>
+    <rect x="300" y="1266" width="740" height="148" rx="10" fill="#fdeade" stroke="#d95926" stroke-width="2"/>
+    <text class="h" x="320" y="1292" fill="#a03c12" font-size="15">Thinker &#8594; Talker prompt assembly</text>
+    <text class="m" x="320" y="1314">omni::talker_prompt::build_talker_prompt — from HF _get_talker_user_parts / _assistant_parts</text>
+    <text class="t" x="320" y="1338">consumes the Thinker&#8217;s HIDDEN STATE at accept_hidden_layer = 24 (not just token embeddings) + text_projection</text>
+    <text class="t" x="320" y="1358">per-speaker codec embedding: chelsie 2301 &#183; ethan 2302 &#183; aiden 2303 &#8226; tts bos / eos / pad = 151&#8201;672 / 151&#8201;673 / 151&#8201;671</text>
+    <rect x="316" y="1372" width="708" height="30" rx="6" class="gapbox"/>
+    <text class="gap" x="326" y="1391">speak accepts TEXT user turns only — the multimodal-user-turn hidden_projection branch is real, deferred work (M9c)</text>
+  </g>
+
+  <!-- handoff -> talker -->
+  <line x1="670" y1="1414" x2="670" y2="1470" class="flow"/>
+  <text class="lab" x="684" y="1448">Talker prefill embeddings (user rows + fixed 9-row assistant template)</text>
+
+  <!-- ======================= Talker ======================= -->
+  <g>
+    <rect x="300" y="1474" width="740" height="240" rx="12" fill="#fdeade" stroke="#d95926" stroke-width="2.5"/>
+    <text class="h" x="320" y="1502" fill="#a03c12">TALKER — MoE speech decoder</text>
+    <text class="m" x="320" y="1524">omni::talker — layer_fwd &#183; layer_decode_step &#183; decode</text>
+    <text class="m" x="320" y="1540">sampling loop: omni::talker_generate::generate_codes</text>
+    <text class="t" x="320" y="1566">20 layers &#183; hidden 1024 &#183; GQA 16 query / 2 KV heads &#183; use_qk_norm</text>
+    <text class="t" x="320" y="1586">MoE: 128 experts, top-6 routed + ALWAYS-ACTIVE shared expert — width 768, sigmoid-gated</text>
+    <text class="t" x="320" y="1606">(the shared expert is the one real architectural difference vs the Thinker&#8217;s MoE)</text>
+    <text class="t" x="320" y="1626">vocab 3072 (codec ids) &#183; 3.16&#8201;B resident / 0.29&#8201;B active per token (M16) &#183; emits codebook-0 tokens at 12.5&#8201;Hz</text>
+    <text class="badge" x="320" y="1652" fill="#a03c12">validated: layer cosine 1.000000 (M7a) &#183; speak e2e: real 12.38&#8201;s waveform, RMS 0.041 (M9c)</text>
+  </g>
+
+  <!-- talker codec sampling loop (left) -->
+  <path d="M 300 1674 L 240 1674 L 240 1534 L 296 1534" fill="none" stroke="#d95926" stroke-width="2.2" marker-end="url(#arrOrange)"/>
+  <text class="lab" x="62" y="1568">codec sampling loop:</text>
+  <text class="lab" x="62" y="1584">prev codebook-0 token</text>
+  <text class="lab" x="62" y="1600">summed &amp; fed back</text>
+  <text class="lab" x="62" y="1616">each frame (KV-cached;</text>
+  <text class="lab" x="62" y="1632">suppressed-token set,</text>
+  <text class="lab" x="62" y="1648">EOS gate)</text>
+
+  <!-- talker -> mtp -->
+  <line x1="670" y1="1714" x2="670" y2="1770" class="flow"/>
+  <text class="lab" x="684" y="1748">codebook-0 tokens @ 12.5&#8201;Hz + per-frame Talker hidden state</text>
+
+  <!-- ======================= MTP code predictor ======================= -->
+  <g>
+    <rect x="300" y="1774" width="740" height="142" rx="12" fill="#fbe8f0" stroke="#d55181" stroke-width="2.5"/>
+    <text class="h" x="320" y="1802" fill="#99315a">MTP CODE PREDICTOR</text>
+    <text class="m" x="320" y="1824">tts::mtp::MtpModel — reused byte-identical from Qwen3-TTS &#183; loaded via omni::codec_bridge::load_mtp</text>
+    <text class="t" x="320" y="1850">5 layers &#183; hidden 1024 &#183; GQA 16 / 8 heads &#183; head_dim 128 &#183; vocab 2048 &#183; dense (no MoE)</text>
+    <text class="t" x="320" y="1870">predicts residual codebooks 1..15 from codebook-0, per frame &#8594; 16 codebooks total</text>
+    <text class="badge" x="320" y="1896" fill="#99315a">validated: cosine 1.000000 vs HF golden (M7b)</text>
+  </g>
+
+  <!-- mtp -> code2wav -->
+  <line x1="670" y1="1916" x2="670" y2="1972" class="flow"/>
+  <text class="lab" x="684" y="1950">[T, 16] codec codes (16 codebook streams)</text>
+
+  <!-- ======================= Code2Wav ======================= -->
+  <g>
+    <rect x="220" y="1976" width="1280" height="252" rx="12" fill="#e7f2e7" stroke="#008300" stroke-width="2.5"/>
+    <text class="h" x="240" y="2004" fill="#005c00">CODE2WAV VOCODER</text>
+    <text class="m" x="240" y="2026">codec::Codec::decode_omni — loaded via omni::codec_bridge::load_codec &#183; RVQ 16 quantizers (1 semantic @ 4096 + 15 acoustic @ 2048)</text>
+
+    <!-- internal chip pipeline -->
+    <rect x="236" y="2042" width="270" height="64" rx="8" fill="#fcfcfb" stroke="#008300" stroke-width="1.5"/>
+    <text class="t" x="250" y="2068">code_embedding mean-pool</text>
+    <text class="s" x="250" y="2088">16 streams &#183; table [32&#8201;768 &#215; 1024]</text>
+
+    <line x1="506" y1="2074" x2="526" y2="2074" class="flow"/>
+
+    <rect x="530" y="2042" width="330" height="64" rx="8" fill="#fcfcfb" stroke="#008300" stroke-width="1.5"/>
+    <text class="t" x="544" y="2068">pre-transformer: 8&#8201;L sliding-window(72) GQA</text>
+    <text class="s" x="544" y="2088">hidden 1024 &#183; inter 3072 &#183; LayerScale</text>
+
+    <line x1="860" y1="2074" x2="880" y2="2074" class="flow"/>
+
+    <rect x="884" y="2042" width="200" height="64" rx="8" fill="#fcfcfb" stroke="#008300" stroke-width="1.5"/>
+    <text class="t" x="898" y="2068">ConvNeXt upsample</text>
+    <text class="s" x="898" y="2088">[2, 2]</text>
+
+    <line x1="1084" y1="2074" x2="1104" y2="2074" class="flow"/>
+
+    <rect x="1108" y="2042" width="280" height="64" rx="8" fill="#fcfcfb" stroke="#008300" stroke-width="1.5"/>
+    <text class="t" x="1122" y="2068">SEANet decoder [8, 5, 4, 3]</text>
+    <text class="s" x="1122" y="2088">Snake / SnakeBeta activations</text>
+
+    <text class="t" x="240" y="2132">total upsample 1920&#8201;&#215; : 12.5&#8201;Hz code rate &#8594; 24&#8201;000&#8201;Hz waveform</text>
+    <text class="badge" x="240" y="2152" fill="#005c00">validated: cosine 1.000000, exact length 14&#8201;805 == 14&#8201;805 (M8)</text>
+
+    <rect x="236" y="2166" width="1248" height="32" rx="6" class="gapbox"/>
+    <text class="gap" x="248" y="2186">chunked_decode(chunk_size 300, left_context_size 25) streaming — implemented in the standalone codec crate, NOT used by Omni: the whole waveform is decoded in one shot</text>
+  </g>
+
+  <!-- code2wav -> waveform out -->
+  <line x1="860" y1="2228" x2="860" y2="2280" class="flow"/>
+
+  <g>
+    <rect x="640" y="2284" width="440" height="68" rx="12" fill="#1a5632"/>
+    <text class="outh" x="660" y="2314">OUTPUT 2 — SYNTHESIZED SPEECH</text>
+    <text class="outt" x="660" y="2338">24&#8201;kHz mono waveform — speak action only</text>
+  </g>
+
+  <!-- ======================= serving ======================= -->
+  <g>
+    <rect x="140" y="2408" width="1440" height="140" rx="10" fill="#f4f3f0" stroke="#b9b8b1" stroke-width="1.4"/>
+    <text class="h" x="156" y="2434" fill="#1c1c1a" font-size="15">SERVING — three surfaces, two actions (crates/omni/src/caps.rs)</text>
+    <text class="t" x="156" y="2458">D-Bus (Run / Subscribe, typed audio&#8201;&#183;&#8201;image&#8201;&#183;&#8201;video blobs)&#160;&#160;&#183;&#160;&#160;OpenAI-compatible HTTP (/v1/chat/completions)&#160;&#160;&#183;&#160;&#160;Anthropic-compatible HTTP (/v1/messages)</text>
+    <text class="t" x="156" y="2482">generate &#8594; text out; optional audio / image / video INPUT&#160;&#160;(generate_spec :68, OmniInner::generate :204 / generate_multimodal :223)</text>
+    <text class="t" x="156" y="2502">speak &#8594; text in; text + 24&#8201;kHz speech OUT&#160;&#160;(speak_spec :94, OmniInner::speak :247)</text>
+    <text class="gapi" x="156" y="2528">gaps: the HTTP surfaces drop image_url / input_audio content parts server-side today (only D-Bus carries multimodal blobs) &#183; there is NO converse action (audio / image in + speech out in one call)</text>
+  </g>
+
+  <!-- ======================= honesty strip ======================= -->
+  <g>
+    <rect x="140" y="2578" width="1440" height="150" rx="10" class="gapbox"/>
+    <text class="h" x="156" y="2604" fill="#52514e" font-size="14">DOCUMENTED GAPS (drawn dashed above) — per status.md &#8220;Not started&#8221; + honesty notes; none of these are implemented</text>
+    <text class="t" x="160" y="2630">&#8226; video FILE decoding — encode_video_frames takes pre-decoded frames only</text>
+    <text class="t" x="160" y="2654">&#8226; converse action (audio / image in + speech out in one turn) — does not exist</text>
+    <text class="t" x="160" y="2678">&#8226; streaming chunked Code2Wav decode inside Omni — one-shot decode only</text>
+    <text class="t" x="880" y="2630">&#8226; OpenAI / Anthropic multimodal content parts — dropped server-side</text>
+    <text class="t" x="880" y="2654">&#8226; DeepStack taps in served encode_image + NPU export — skipped (M15)</text>
+    <text class="t" x="880" y="2678">&#8226; NPU: ONNX export + CPU-side OpenVINO parity only — no on-device run</text>
+    <text class="t" x="160" y="2706">&#8226; precision: the engine runs fp32 throughout vs HF&#8217;s bf16 reference — NOT bit-identical (M9b: exact 12-token greedy prefix, then a near-tied logit diverged)</text>
+  </g>
+
+  <!-- ======================= footer ======================= -->
+  <text class="s" x="140" y="2762">brain (applications/edgeai/brain) — Qwen3-Omni-30B-A3B-Instruct, from-scratch Rust + WGSL implementation. Sources: docs/models/omni/status.md (build ledger M0&#8211;M21, 2026-08-07 &#8594; 2026-08-09), docs/models/omni/readme.md,</text>
+  <text class="s" x="140" y="2780">crates/{omni, qwen-asr, qwenvl, tts, codec, model}. All numbers from the released config.json / measured runs as recorded in status.md &#8220;Facts&#8221;. Solid = parity-validated vs real weights &#183; dashed = documented gap. Drawn 2026-08-09.</text>
+</svg>
