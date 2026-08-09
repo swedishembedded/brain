@@ -20,6 +20,7 @@ pub mod gguf_write;
 pub mod mmap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weightio;
+pub mod remap;
 pub mod torchpt;
 pub mod zipread;
 
