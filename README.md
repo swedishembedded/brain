@@ -54,7 +54,6 @@ brain splat       3D Gaussian Splatting: info | render | view | fit
 brain wm          playable world models (DIAMOND): play | replay | bench | finetune
 brain forecast    Chronos-2 / Kronos / FinCast forecasting: compare | serve | import | finetune
 brain npu         OpenVINO/NPU: export | quantize | check | run | bench | sim
-brain fetch       download a known checkpoint by name (`brain fetch --list`)
 brain federated   sharded MoE: split | verify | merge | assemble | train-expert
 brain pid         PID control transformer
 brain bench       architecture-evaluation harness (+ eval | scale | advise | compare)

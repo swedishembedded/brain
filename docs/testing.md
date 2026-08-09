@@ -61,8 +61,9 @@ plus an extra exclusion list for trees whose mirror is a whole upstream checkout
 
 **Real upstream checkpoints (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
 `qwen-asr`'s parity/import tests) live in the model store, not `testdata/`** — the
-same `<models-dir>/<vendor>/<repo>/` tree `brain fetch` writes and
-`crates/modelstore` scans (see `docs/models/naming.md`). Tests resolve one with
+same `<models-dir>/<vendor>/<repo>/` tree `brain serve`'s auto-fetch (and
+`crates/modelstore::execute`) writes and scans (see `docs/models/naming.md`).
+Tests resolve one with
 `brain_testutil::model_dir("<vendor>/<repo>")`, which wraps
 `brain_modelstore::default_root()` (`$BRAIN_MODELS_DIR`, else
 `$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models`) — `None` when
