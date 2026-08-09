@@ -28,6 +28,17 @@ ledger — what landed, the parity gates, what remains.
 - **NPU INT8 export + NPU infer** — `glm_export.rs::build_glm_int8_bytes` /
   `export_glm_int8`; `glm_decode.rs::generate`; `--int8` + the `--device npu`
   CLI path; `glm_onnx_int8_runs` (gated).
+- **Row-compacted MoE forward for inference** (2026-08-09) —
+  `Glm::logits_all_compact`/`forward_compact` (`model.rs`), a parallel
+  inference-only forward using `model::moe::expert_fwd_compact` instead of
+  the dense per-expert loop; `sample::generate` now calls it. Bit-identical
+  to `logits_all` (`compact_forward_tests::
+  logits_all_compact_matches_logits_all`, mutation-verified at a tight
+  `1e-5` tolerance — a real staleness bug this test caught along the way is
+  documented in `.todo/glm-model-rs-compact-moe-wiring.md`), on both CPU
+  and real Vulkan/P40 hardware. `build_forward`/`build_backward` (the
+  training graph) are untouched — see the "Remaining" section below for
+  exactly what this does and does not close.
 
 ## Parity ladder
 
@@ -62,6 +73,63 @@ ledger — what landed, the parity gates, what remains.
 - **Full-size `glm5_2()`** (78 layers, 256 experts, 154880 vocab) is **not
   runnable locally** — `config.rs` marks it for import shape validation and
   reference only; tests/training use `tiny()` and small presets.
+- **Migrating GLM's dense MoE path onto `model::moe`'s sparse dispatch:
+  measured, NOT done — do not migrate as-is.** `model::moe`'s new backward
+  surface (this session's addition, see `docs/models/omni/status.md`) makes
+  a real migration *possible* for the first time, but `crates/glm/src/
+  model.rs:637-641`'s own measured naive-vs-tiled gap (1.5x-34x, worse at
+  larger `m`) meant this needed measuring before touching code, not assuming
+  from FLOP-counting. Measured for real on a P40 (`BRAIN_DEVICE=vulkan
+  cargo run --release -p brain-glm --example moe_migration_bench`) at GLM-5.2's
+  actual shape (`d_model=6144, moe_ff=2048, n_experts=256, top_k=8,
+  seq_len=2048` → 64 rows/expert average): sparse-naive is **6.51x SLOWER**
+  in aggregate across all 256 experts (120.98s vs 18.58s per MoE layer,
+  synthetic weights) — the 32x FLOP-count win the sparse dispatch promises at
+  this expert count is completely swamped by the naive kernel's per-FLOP
+  inefficiency at `m=64`, landing near the bad end of that measured 1.5x-34x
+  range rather than the good end. The dense path (`Mlp::Moe`'s `pick_gemm`
+  -selected `matmul_reg3`) stays as the correct, faster choice **for GLM's
+  shape specifically** — `crates/model/tests/moe_sparse_parity.rs` keeps
+  using it as its numerical oracle, unaffected, since nothing about the
+  dense path changed. The real fix is a TILED gated expert kernel (removing
+  BOTH the FLOP waste and the naive-tiling gap at once) — genuinely new
+  kernel work, not a migration; filed as its own follow-up
+  (`.todo/moe-tiled-gated-kernel.md`), not attempted here. Until that lands,
+  any future migration attempt for a DIFFERENT MoE config should re-measure
+  at ITS OWN shape with `moe_migration_bench` rather than reuse this result
+  — the crossover depends on `m` (rows/expert), which depends on
+  `n_experts`/`top_k`/batch size, all of which vary per model.
+
+  **Update (2026-08-09): the tiled gated kernel landed, and the decision
+  flips.** `model::moe::expert_fwd_compact` (gather routed rows into a dense
+  sub-batch host-side, run the SAME `pick_gemm`-selected `matmul_reg3` the
+  dense path already uses on the compacted batch, scatter the scaled result
+  back) is the "real fix" the paragraph above deferred — see
+  `crates/model/src/moe.rs`'s "row-compacted sparse expert forward" section
+  and `.todo/moe-tiled-gated-kernel.md` (now resolved). Re-run at the SAME
+  real shape, same P40, `moe_migration_bench` extended with a third
+  `sparse-compact` arm: **sparse-compact is 7.01x FASTER than dense-tiled**
+  (2.65s vs 18.58s per MoE layer, aggregate across 256 experts) and 46.26x
+  faster than sparse-naive. Migrating GLM's MoE path onto `model::moe` is now
+  the measured-correct choice — see this file's own migration entry below
+  (or its own dated section) for whether/how far that migration has actually
+  landed as code, since a flipped BENCHMARK conclusion and a completed
+  MIGRATION are two different claims.
+
+  **Update (2026-08-09): option (a) landed — inference only.** See the
+  "Done" list above (`Glm::logits_all_compact`). This is deliberately the
+  MINIMAL-RISK half of `.todo/glm-model-rs-compact-moe-wiring.md`'s two
+  options: a parallel forward-only function used by `sample::generate`,
+  touching ZERO training code. `build_forward`/`build_backward`/
+  `gradcheck::check_glm` are byte-for-byte unchanged — training still runs
+  the dense path, still fully gradient-checked, nothing above regressed.
+  **Option (b) (migrating `build_forward`/`build_backward` themselves, so
+  TRAINING also gets the 7.01x win) is still not attempted** — it needs a
+  correctly-designed row-compacted BACKWARD (dx-scatter-add semantics,
+  explicitly flagged in the original `.todo` as the real design work, not
+  just a mechanical port) before it can land, and should not be attempted
+  without `gradcheck::check_glm` green before AND after plus its own
+  mutation-verify pass, per that file's own risk framing.
 
 ## See also
 

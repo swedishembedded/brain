@@ -278,6 +278,30 @@ fast and scalable kernel — not a naive one.
       Qwen3-1.7B decoder (reuses `crates/qwen`); offline, fixed audio window.
     Shared audio-in/text-out contract in `audio::asr_caps`. See
     `docs/models/asr/status.md`.
+13c. **Qwen3-Omni-30B** (`crates/omni`) — Thinker (dense-then-MoE Qwen3
+    decoder, real M-RoPE incl. audio/image/video splice) + Talker
+    (sigmoid-gated MoE) + 5-layer MTP code predictor → Code2Wav vocoder,
+    composed end to end: text/speech/image/video in, text + real synthesized
+    speech out, served over D-Bus/OpenAI/Anthropic (`brain caps`/`brain do`,
+    `examples/omni/omni.py`). int8-native checkpoint import exists and has
+    been run for real (70GB→36GB, 54,764 tensors, exact two-way name
+    coverage). A layer-sharded int8 dual-GPU Thinker (`crates/omni/src/
+    int8_resident.rs`, `int8_thinker_resident.rs`) is built and validated on
+    two real P40s (`residency::MultiDeviceResidentModel`/`claim_multi`, real
+    streamed int8 expert weights, real cross-device residual handoff) but is
+    NOT yet production-servable: non-expert weights are synthetic in that
+    validation (no real-checkpoint loader for them yet), it is not wired
+    into `residency::Executor`'s async D-Bus/HTTP dispatch loop, and there is
+    no real `generate()` loop around it — see `docs/models/omni/status.md`'s
+    M20 entry and `.todo/omni-int8-dual-gpu-residency.md` (if still present
+    under `.todo/`) for the precise remainder. **Qwen3-VL** (`crates/qwenvl`) is a
+    separate served model, `brain/qwenvl` — reuses `crates/qwen`'s decoder
+    (KV-cache decode path carries real M-RoPE + DeepStack support), image +
+    text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
+    caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP), and
+    real-checkpoint validation is still unexercised in-repo; see
+    `.todo/qwenvl-caps-serving.md` (if still present) for the remainder.
+    Full ledger: `docs/models/omni/status.md`.
 
 ### Forecasting
 
@@ -436,6 +460,8 @@ front-end to depend on.
 | Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |
 | Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/engine/devices.md`; `crates/gpu-core/src/devices.rs` |
 | Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
+| Roofline probe (compute/bandwidth ceiling used for "% of roof") | `gpu_core::roof`; bounded by `BRAIN_ROOF_BUDGET_S` (default 10s); off by default on the CPU device class, force-run there with `BRAIN_NO_ROOF=0` |
+| GPU backend wait bound (Vulkan fence wait, wgpu `poll`) | `BRAIN_GPU_WAIT_S` (default 30s) — a wedged submit now panics with which call site timed out instead of hanging the process forever; see `docs/lessons.md` #38 |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |

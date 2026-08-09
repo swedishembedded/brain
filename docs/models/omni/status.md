@@ -404,10 +404,23 @@ multimodal splice are additional, separate pieces on top of either.
      miscomputed routing for **any** ≥65-expert MoE model using
      `router_gate.wgsl`/`router_gate_train.wgsl` — Thinker/Talker are the only
      current callers at that scale, and Talker (M7) was not yet exercised, so
-     this is caught before it could affect a shipped result. `crates/glm` is
-     unaffected (uses the separate `router_gate_sigmoid.wgsl`). No existing
-     unit test caught it because `crates/model/tests/moe_sparse_parity.rs`
-     uses a synthetic `n_experts: 8` shape (well under 64).
+     this is caught before it could affect a shipped result. **Correction
+     (post-M17 pickup work): the claim that `crates/glm` is unaffected because
+     it "uses the separate `router_gate_sigmoid.wgsl`" was wrong** —
+     `router_gate_sigmoid.wgsl` has its own independent hard cap at
+     `MAX_E = 64u` (six `array<f32, 64>` locals), never bumped when this
+     fix landed here, and `GlmConfig::glm5_2()` declares 256 routed experts.
+     The person who checked concluded the other router was safe without
+     checking ITS cap against glm's own published config — exactly this
+     section's failure shape, recurring in the file it name-checked as safe.
+     Fixed with a loud `assert!(n_routed_experts <= 64, ...)` in `Glm::new`
+     (a same-day-safe stopgap; the real fix is an array-free top-k, filed
+     separately, not a literal bump). `router_bwd.wgsl` had the same
+     `array<f32,64>` shape and was rewritten array-free (no cap at all,
+     mirroring `router_bwd_sigmoid.wgsl`'s pre-existing unbounded style).
+     No existing unit test caught either gap because `crates/model/tests/
+     moe_sparse_parity.rs`, `check_moe`, and `check_glm` all use tiny
+     synthetic configs (3-8 experts, well under 64).
 
   A third apparent divergence (after both fixes, `out` cosine 0.76 against
   the golden's `hidden` tensor) turned out to be a **test/golden bug, not a
@@ -1401,34 +1414,486 @@ env vars at wherever they now actually live, before ever running `rm -rf
 testdata/` here. Until then, `testdata/` on this box is de facto
 irreplaceable local state despite being gitignored.
 
+## M18 — post-plan pickup: GPU hang fixes, router cap fix, MoE backward,
+qwenvl M-RoPE decode + generate(), submit-storm fix, the first real full
+int8 import (2026-08-08)
+
+Clears every item `.todo/remaining-work.md` tracked (#31 partially — see
+below, #32, #34 partially, #35, #36, #37), plus the M17-adjacent GPU-hang
+root cause `docs/lessons.md` #37 left untracked. Each sub-item's own real
+validation gate is recorded here; the honest per-sub-item status is what
+governs `.todo/` cleanup at the end of this section, not a blanket "done."
+
+- **GPU hang, root-caused for real (`docs/lessons.md` #38)**: two
+  independent, unrelated defects, neither the zombie-VRAM theory
+  `remaining-work.md`'s own environment note speculated about. (1)
+  `gpu_core::roof`'s three calibration loops had no wall-clock ceiling at
+  all — fixed with a deadline (`BRAIN_ROOF_BUDGET_S`) that returns
+  "unmeasured" on expiry (the SAME contract every caller already renders as
+  `-`), and the probe now defaults OFF on the CPU device class specifically.
+  (2) Both GPU backends' waits were LITERALLY unbounded
+  (`wait_for_fences(..., u64::MAX)` in Vulkan; five
+  `poll(PollType::wait_indefinitely())` sites in wgpu) — now bounded
+  (`BRAIN_GPU_WAIT_S`, default 30s) with device-lost surfaced separately
+  from a plain timeout, reporting which submit wedged rather than retrying.
+  Validated on the real production path: the full gradcheck suite (130+
+  tests) passed clean on real Vulkan/P40 hardware after the fix, zero hangs,
+  and every CPU-backend test suite this session ran (qwen: 61 tests both
+  backends; model: full suite; omni: full suite) stayed green throughout.
+  **A separate, still-open defect surfaced while validating this fix**: real
+  Vulkan hardware hangs (`futex_do_wait`, 0% GPU util) when a process creates
+  MULTIPLE devices (`roofline.rs`'s own full test battery; `omni_bench`),
+  reproducing `gpu_core::testgpu`'s own documented "~50% of runs" concurrent-
+  device-creation deadlock — confirmed present on a fully clean checkout, NOT
+  fixed by the bounded-wait work above (a 5s `BRAIN_GPU_WAIT_S` did not
+  resolve it, meaning the block is upstream of any fence wait). Filed as
+  `.todo/vulkan-concurrent-device-creation-hang.md`.
+
+- **#35 recurrence, found auditing this repo's OWN fix for #35
+  (`docs/lessons.md` #35's new addendum)**: the original #35 fix bumped
+  `router_gate.wgsl`/`router_gate_train.wgsl`'s `MAX_EXPERTS` 64→128 but
+  never reached `router_gate_sigmoid.wgsl` (its own independent `MAX_E =
+  64u` cap) or `router_bwd.wgsl` (its own independent `array<f32,64>`
+  scratch) — and this doc's own M6a-era note claiming "`crates/glm` is
+  unaffected (uses the separate `router_gate_sigmoid.wgsl`)" was WRONG: true
+  that GLM uses a different file, false that the different file was safe.
+  `GlmConfig::glm5_2()` declares 256 routed experts against a kernel hard-
+  capped at 64. Fixed: `router_bwd.wgsl` rewritten array-free (mirroring
+  `router_bwd_sigmoid.wgsl`'s already-unbounded style — that file was never
+  actually capped despite its own header comment claiming "E <= 64", now
+  corrected); a loud `assert!(n_routed_experts <= 64, ...)` added to
+  `Glm::new` for the `router_gate_sigmoid.wgsl` forward path (a real
+  array-free top-k rewrite there is new kernel work, deliberately NOT
+  attempted as a second literal bump — filed as `.todo/moe-tiled-gated-
+  kernel.md`'s sibling concern, noted inline). **Mutation-verified, not just
+  asserted**: temporarily restoring the pre-fix `array<f32,64>` kernel and
+  rerunning the new tests at n_experts=65/128 produces a real SIGSEGV (a
+  hard memory-safety crash from the stack-array overrun), not merely a wrong
+  number — the strongest possible confirmation the defect was real. New
+  tests (`crates/model/tests/router_bwd_expert_cap.rs`, n_experts 8/65/128)
+  pass on both CPU and real Vulkan.
+
+- **#36 — `model::moe` backward + gradcheck. DONE, fully real.** Hoisted
+  (not re-derived) from the two existing gradient-checked implementations
+  (`crates/moe/src/train.rs`'s softmax-router loop, `crates/glm/src/
+  model.rs`'s sigmoid `noaux_tc` router MLP arm) into a shared, parameterised
+  API: `RouterKind` (`Softmax`/`SigmoidNoAuxTc`), `router_fwd_kind`/
+  `router_bwd`, `MoeActs` (owned per-expert saved activations), `expert_dgate`
+  /`expert_bwd`, and `moe_layer_bwd` (the phase-ordering wrapper: every
+  expert's `d_gate` column BEFORE router backward BEFORE every expert's
+  SwiGLU backward — router backward needs the WHOLE `d_gate` row). Two new
+  gated backward kernels (`moe_linear_gated_dx.wgsl`/`_dw.wgsl`), added only
+  after confirming the existing gated forward's non-routed rows are already
+  exactly `0.0`, so a gated backward is bit-identical to dense, not an
+  approximation. Gates, all real:
+  - `crates/model/tests/moe_block_gradcheck.rs`: host central-FD via
+    `gradcheck::elementwise_check`, 5 cases (both `RouterKind` arms, both
+    `top_k < n_experts` and `top_k == n_experts`) — `top_k < n_experts` is
+    the shape neither `check_moe` nor `check_glm`'s tiny configs ever
+    exercise, so this is the first real proof the sparse/gated branch's
+    backward is correct, not just the dense-equivalent one. Passes with
+    worst rel_err ~2e-4 on the expert weights and SigmoidNoAuxTc's router;
+    Softmax's router shows isolated tiny-magnitude (~1e-4) outliers,
+    confirmed (by direct inspection, not assumed) to be the well-known hard
+    top-k selection-boundary FD artifact — never on an expert weight, never
+    large in absolute terms.
+  - `crates/model/tests/moe_sparse_bwd_parity.rs`: gated vs dense dW is
+    BIT-IDENTICAL on every backend; gated vs dense dX is bit-identical on
+    real Vulkan and within a documented single-float32-ULP tolerance on the
+    CPU (Cranelift JIT) backend specifically — root-caused (not
+    hand-waved) via a standalone per-expert diagnostic dump: dW and the
+    down-projection's dX (`d_h`) are bit-identical even on CPU; only the
+    up/gate-projection's FINAL dX accumulation differs by exactly one ULP,
+    for ROUTED rows where both kernel families run the textually-IDENTICAL
+    reduction loop — a compiler-codegen (FMA-fusion/scheduling) sensitivity
+    to the gated kernel's extra early-return branch, not a math difference.
+    **Mutation-verified**: flipping the gate comparison in
+    `moe_linear_gated_dx.wgsl` produces a real, large (0.095) dW mismatch on
+    real Vulkan hardware, confirming the test's own teeth.
+  - `crates/model/tests/moe_shared_expert.rs`: extended for
+    `shared_expert_fwd`'s new `shared_gate_w: Option<&DeviceBuffer>` (the
+    plan's own design note — `None` = GLM's unweighted routed+shared add,
+    `Some` = Talker's sigmoid-gated combine, two REAL architectures, not a
+    degenerate case of one). One call site updated (`omni::talker.rs`).
+  - Full `brain-model`/`brain-omni`/`brain-glm` suites green on both
+    backends throughout; `brain-model`'s new `[dev-dependencies]` on
+    `brain-gradcheck` is the well-supported "tests depend on a crate that
+    depends on the package" shape (not a real build-graph cycle — dev-deps
+    are not part of the library-target graph).
+
+- **#37 — migrate `crates/glm` onto `model::moe`. MEASURED, decision:
+  do NOT migrate.** The plan's own risk note ("it may invert the whole
+  item") held. `crates/glm/examples/moe_migration_bench.rs`: real P40, GLM-
+  5.2's actual shape (`d_model=6144, moe_ff=2048, n_experts=256, top_k=8,
+  seq_len=2048` → 64 rows/expert average). Sparse-naive (`model::moe`'s
+  `moe_linear_gated`, no tiling) is **6.51x SLOWER** in aggregate across 256
+  experts (120.98s vs 18.58s per MoE layer, synthetic weights) than GLM's
+  existing dense `pick_gemm`-selected tiled path — the 32x FLOP-count win
+  the sparse dispatch promises at this expert count is completely swamped by
+  the naive kernel's per-FLOP inefficiency at `m=64`. GLM's dense path is
+  UNCHANGED; `moe_sparse_parity.rs` keeps using it as its numerical oracle,
+  unaffected. The real fix (a tiled+gated expert kernel, or row compaction
+  ahead of the existing tiled GEMM) is real new kernel work, filed as
+  `.todo/moe-tiled-gated-kernel.md` — see `docs/models/glm/status.md`'s own
+  "Remaining" section for the full write-up.
+
+- **#34 — register `qwenvl` as its own served model. PARTIALLY done.** 7a
+  (the risky half, "do it carefully" per the plan): `qwen::Qwen::
+  decode_steps` gained REAL M-RoPE support (`step_mrope`/`step_embed_mrope`,
+  a per-step 1-row `rope2d` table — mirrors `omni::thinker::
+  layer_decode_step`'s existing pattern exactly), additive-only (a new
+  `mrope: Option<(&DeviceBuffer, &DeviceBuffer)>` parameter on
+  `decode_steps`/`decode_at`/`decode_submit`; every existing caller passes
+  `None` and is bit-for-bit unchanged — `qwen::Qwen` stays agnostic to how a
+  3-axis position was derived, avoiding a `qwen -> qwenvl` dependency cycle
+  since `qwenvl` already depends on `qwen`). New test
+  `mrope_step_matches_full_recompute` mirrors `kv_step_matches_full_
+  recompute` exactly (whole-sequence `enable_mrope` reference leg vs
+  per-step 1-row incremental leg): worst maxabs ~1.3e-7 (CPU), ~1.6e-7 (real
+  Vulkan/P40) — essentially exact. All three existing bit-exact/near-exact
+  siblings (`kv_step_matches_full_recompute`, `step_embed_matches_step`,
+  `prefill_matches_step_by_step`) stayed green throughout; full `brain-qwen`
+  suite 61/61 (now 62/62) on both backends. Also done: `Qwen3Vl::generate()`
+  — real greedy KV-cache generation over `step_mrope`/`step_embed_mrope`
+  (image rows via `step_embed_mrope`, text via `step_mrope`, continuing the
+  position sequence past the prompt as plain text), tested for determinism
+  and `eos_ids` early-stop on a tiny synthetic model. **NOT done**: `crates/
+  qwenvl/src/caps.rs` (manifest + `Provider`/`Action`), the `brain-qwenvl`
+  CLI dependency, and `catalog.rs` registration — deliberately deferred
+  (needs a real design decision on per-request image placement that
+  `Qwen3Vl::new` currently bakes in at construction time, plus image-
+  preprocessing glue this environment's Qwen3-VL-4B weights were never
+  confirmed present to validate against). Filed as `.todo/qwenvl-caps-
+  serving.md` with the exact remaining scope.
+
+- **#35 — OpenAI/Anthropic transports in the automated e2e harness. DONE.**
+  `tests/e2e/examples.bats`'s shared server now starts `--openai` alongside
+  the existing `--dbus`/`--anthropic`, waits on the `--ready-file` (covering
+  all three surfaces in one wait, per `run_cli.rs`'s own "ORDER IS THE
+  CONTRACT" guarantee) instead of polling D-Bus alone, and captures real
+  per-provider keys via `--api-keys-out`. Two new `examples/omni/omni.py`
+  cases (OpenAI, Anthropic transports) pass against the real mock server —
+  the OpenAI case exercises the real `served-model precheck` path
+  (`brain.models()` is real on that transport); the Anthropic case exercises
+  the real `NotImplementedError`-caught-and-skipped precheck path
+  (`BrainAnthropic.manifests()` has none, matching Anthropic's own API
+  having no `/v1/models` equivalent) — both still real `generate()` calls,
+  not just transport-connectivity smoke. `manifest.tsv`'s stale
+  "not in this harness's shared server" note corrected. Full
+  `tests/e2e/examples.bats` and `tests/e2e/api_conformance.bats` green.
+
+- **#32 — video wire shape + frame extraction. DONE (wire shape); frame
+  extraction follows the documented skip-cleanly pattern.** New
+  `capability::blob::decode_video_hwc` — N concatenated HWC-f32 RGB frames
+  in ONE `Media::Bytes` blob (meta `{frames,w,h,c}`), chosen over a repeated
+  blob because `Invocation::blobs` is a `BTreeMap<String, Blob>`, not a list
+  (extending that would ripple into the D-Bus fd-map and every HTTP
+  transport for one input kind). Wired into `omni::caps::generate_spec()`
+  (a new `video` `BlobSpec`) and BOTH real dispatch call sites
+  (`omni::caps::GenerateAction::run`, `cli::resident_omni::OmniInstance::
+  run` — documented as intentionally duplicated, kept in sync). **Validated
+  end to end against the real 30B checkpoint**: a new `#[ignore]`d test
+  (`crates/omni/tests/video_generate_e2e.rs`) sends a real 2-frame video
+  blob through the full stack (decode → `crate::mm::encode_video_frames` →
+  real M-RoPE positions → real 48-layer/128-expert generation) and gets a
+  real, non-empty completion — 164.65s real wall time, first run. Client
+  side: `examples/omni/omni.py --in-video` now real (PyAV-based frame
+  extraction via `load_video_blob`), `skip()`s cleanly (exit 77) when PyAV
+  is absent — matching the documented "frame extraction genuinely needs a
+  decoder, unlike zero-dependency speech/image" scope decision from the
+  original plan's own resolved open question. `brain_py.image.from_pil_rgb`
+  added as the one shared PIL→HWC-f32 conversion (mirrors the existing
+  `to_pil` the other direction).
+
+- **#31 (part A) — unblock the int8 checkpoint (U32 read-back). DONE.**
+  `MmapSafetensors::tensor_u32`/`WeightReader::tensor_u32`/`WeightReader::
+  dtype` — `decode()`'s old `_ => Vec::new()` silent-empty fallback for an
+  unknown dtype now PANICS instead (the exact defect this sub-item existed
+  to fix: a packed U32 tensor decoded to an empty vector, silently,
+  through `tensor_f32`). Round-trip tested; the wrong-accessor case tested
+  BOTH directions (F32 tensor through `tensor_u32`, U32 tensor through
+  `tensor_f32`) to confirm each panics rather than silently
+  corrupting/truncating. **Then executed the first real full 70 GB → ~35 GB
+  import** (`crates/omni/tests/real_import_coverage.rs`, extended with a
+  new `#[ignore]`d test) — this repo's own record (above, "Standing
+  constraint for M9") had this as explicitly not-yet-run, mechanism proven
+  on synthetic and partial (4-of-15-shard) data only. Real run, all 15
+  shards: 54 764 tensors, 36.0 GB output (within the ~35 GB estimate),
+  405–700s wall time depending on concurrent box load. Two-way name
+  coverage EXACT (27 882 tensors: every real HF tensor name's mapped brain
+  name present in the output, and vice versa — caught and fixed two real
+  test bugs along the way, not import bugs: a `.scale`-suffix filter that
+  incorrectly excluded Code2Wav's real `*_layer_scale.scale` tensors, and a
+  `k`-vs-`k/4` mix-up in the dequant spot-check reading the written
+  `[n, k/4]` shape as `[n, k]`). `thinker.embed_tokens.weight`'s int8
+  dequant vs the real HF source: rel_err 0.39%, comfortably inside the
+  expected int8 accuracy floor.
+
+- **#31 (part of the larger residency item) — the submit storm. FIXED,
+  validated on the real checkpoint.** `omni::thinker::moe_sublayer` called
+  `g.submit()` once PER EXPERT (128/layer, 6144/token across 48 layers) —
+  now accumulates the whole layer's steps (router + all 128 experts +
+  residual add) into ONE `Vec<Step>`, one submit. This was the reason
+  `omni_bench` could not use `gpu_core::profile` at all (its own module doc:
+  "submits eagerly... so there is no single Step list to hand that
+  profiler") — fixed for that reason as much as the submit-count win itself.
+  Verified two ways: the full synthetic-weight test suite (unchanged) and
+  the SAME real-checkpoint `video_generate_e2e.rs` test from the #32 entry
+  above, rerun after this change — identical output, ~163s both times.
+
+- **#31 (the rest) — MoE-aware int8 resident weight store, an int8 branch in
+  `omni::thinker`, and multi-GPU placement in `crates/residency`. NOT
+  attempted.** Deliberately deferred, not rushed: the multi-GPU placement
+  piece is a real API change to the shared scheduling core EVERY other
+  resident model (qwen/glm/yolo/z-image/tts/asr/forecast...) also runs
+  through — a much larger blast radius than anything else this session
+  touched (which stayed inside `crates/qwen`, `crates/omni`, `crates/model`,
+  `crates/checkpoint`, `crates/kernels`, none of them shared scheduling
+  code). Filed as `.todo/omni-int8-dual-gpu-residency.md` with the full
+  three-sub-item breakdown, the recommended design (a per-device `MemCost`
+  map, per the plan's own "(a) minimal honest version"), and a suggested
+  build order (single-GPU int8 first, since `expert_fwd_i8` is already
+  proven at rel-L2 0.0084; multi-GPU residency second, reviewed on its own
+  rather than folded into the omni-specific plumbing).
+
+**Environment, confirmed clean at the start of this session and used
+throughout**: `brain devices` — two P40s, canonical PCI order; `nvidia-smi
+--query-compute-apps` — empty (no zombie VRAM, contra `remaining-work.md`'s
+own speculative note); the 66 GB weight cache present and used for every
+real-checkpoint test above. The GPU genuinely works — the earlier "GPU
+hangs" reports were the two-then-three specific, now-mostly-fixed defects
+above, not a generically broken card.
+
+## M19 — "finish everything": Vulkan bug hunt, a real 7x MoE speedup,
+qwenvl fully served, multi-GPU residency's foundation (2026-08-09)
+
+Picked up all four `.todo/` follow-ups M18 filed, per an explicit "finish
+everything" instruction. Each item's real, validated disposition:
+
+- **The Vulkan "concurrent device creation hang" — root-caused for real,
+  not just re-diagnosed.** Using gdb (launched as its own child process,
+  the one way to sidestep this sandbox's `ptrace_scope=1` attach
+  restriction), found the ACTUAL hang was a plain single-threaded
+  self-deadlock in `gpu_core::roof::ensure` (held `CACHE`'s lock across a
+  call to `measure()`, which re-locks the same mutex via `Gpu::caps()`) —
+  M18's own "concurrent devices" diagnosis was wrong, though its `wchan`
+  evidence correctly ruled out the bounded-wait class. Fixed
+  (`crates/gpu-core/src/roof.rs`). Fixing it then surfaced two REAL bugs:
+  `VulkanBackend` never implemented `share`/`new_like`/`downgrade` (every
+  "shared device" call silently built a whole new one instead), and once
+  sharing actually worked, concurrent submission to a shared queue/command
+  pool with no synchronization reproduced a genuine `ERROR_DEVICE_LOST` on
+  the P40 within seconds — fixed with `VkContext::queue_lock`
+  (`crates/backend-vulkan/src/lib.rs`, `crates/vulkan/src/context.rs`),
+  validated 5/5 clean runs afterward. A separate, still-open, pre-existing
+  driver-level finding: rapid sequential Vulkan device churn (build→drop→
+  build, unrelated to any of the above) loses ICD visibility of a card —
+  reproducible even fresh after a real `nvidia-smi -r` reset (performed
+  this session, with the user's explicit approval, after the sandbox's own
+  `sudo` lacked the capability). See `.todo/vulkan-concurrent-device-
+  creation-hang.md` (status: mostly-resolved — the 3 real bugs are fixed;
+  the churn finding is recorded, not fixed).
+- **`model::moe`'s naive sparse dispatch measured 6.51x slower than dense
+  (M18) → a REAL tiled+gated path measured 7.01x FASTER.** Row-compaction
+  (`model::moe::expert_fwd_compact`: gather routed rows host-side, run the
+  SAME `pick_gemm`-selected tiled GEMM the dense path already uses on the
+  compacted batch, scatter back) — reused two existing proven kernels
+  (`embed.wgsl`, `matmul_reg3.wgsl`) plus one new one
+  (`moe_scatter_scaled_add.wgsl`). Validated: 4 parity/mutation tests
+  (`crates/model/tests/moe_compact_parity.rs`, both backends) against the
+  same dense oracle `moe_sparse_parity.rs` already trusts, plus a
+  re-measured `moe_migration_bench.rs` at GLM-5.2's real shape on the real
+  P40. The actual `crates/glm/src/model.rs` wiring (forward AND a
+  correctly-designed backward, needed together or gradcheck would
+  differentiate through stale ops) is real, separate follow-up work — see
+  `.todo/glm-model-rs-compact-moe-wiring.md`.
+- **`qwenvl` is now a real served model, `brain/qwenvl`** (`brain caps`/
+  `brain do`, `crates/qwenvl/src/caps.rs`) — real smart-resize + bilinear
+  preprocessing (not the "caller pre-aligns" minimum a stale note had
+  proposed), real `<|vision_start|>[IMG]*n<|vision_end|>` prompt assembly,
+  a capacity-based resident sizing scheme (build once at a configurable
+  `max_pixels` budget; per-request images that exceed it error loudly, never
+  silently overflow). Along the way, found and fixed a REAL silent
+  correctness bug: `qwen::Qwen`'s incremental KV-cache decode never applied
+  DeepStack's residual add (only the batched training graph did) — wrong
+  for any DeepStack-enabled checkpoint, which the real Qwen3-VL-4B config
+  is. Fixed (`decode_steps`' new `deepstack_row` parameter, additive), validated
+  to ~2.5e-7 maxabs against a whole-sequence reference on real Vulkan/P40
+  hardware, plus a mutation-verify test. No residency adapter yet (`brain
+  caps`/`brain do` only); real-checkpoint validation still unexercised in
+  this environment. See `.todo/completed/qwenvl-caps-serving.md` and
+  `.todo/completed/qwenvl-deepstack-incremental-decode.md`.
+- **Multi-GPU residency: the foundational data model landed, the
+  manager-integration wiring did not.** `crates/residency/src/multi.rs`
+  (new) — `MultiDeviceCost` (every device an instance touches, named with
+  its own real byte count, never double-counted, never folded into the
+  wrong pool — the honest alternative to `manager.rs`'s own previously-
+  documented lying workaround) and `pick_devices` (all-or-nothing multi-
+  device placement), both pure and unit-tested (7 new tests,
+  `cargo test -p brain-residency`, zero behavioural change to any existing
+  single-device model). `ResidencyManager::claim`/eviction/
+  `InstancePlacement` still only account ONE device per instance — wiring
+  a real `claim_multi` is the genuine remaining work, and sub-items 1/2 of
+  `.todo/omni-int8-dual-gpu-residency.md` (an int8 resident weight store,
+  an int8 branch in `omni::thinker`) have nothing to activate onto until it
+  lands, so neither was attempted this session.
+
+**Environment**: GPU0's Vulkan-ICD visibility, lost during this session's
+own `ERROR_DEVICE_LOST` reproduction (before the queue_lock fix), was
+restored by a real `nvidia-smi -r -i 0` reset (user-approved, run outside
+the sandbox since the container's own `sudo` lacked the reset capability) —
+confirmed clean immediately after (`the_measured_roofs_are_physically_
+plausible` found GPU0 by PCI identity and measured real numbers).
+
+## M20 — the int8 dual-GPU Thinker: real weight streaming, a real int8
+forward branch, and real cross-device residency (2026-08-09)
+
+M19's `multi.rs`/`ResidencyManager::claim_multi` foundation had nothing
+using it yet. This session built and validated all three remaining pieces
+`.todo/omni-int8-dual-gpu-residency.md` tracked, wired together end to end
+on two REAL, physically separate P40s — not each piece in isolation.
+
+- **`crates/omni/src/int8_resident.rs`** (new): `ThinkerInt8Store` streams a
+  layer range's routed-expert weights (`gate`/`up`/`down`, ~27.6 GiB of the
+  real ~36 GB checkpoint at the real `48L/128E/d_model=2048/moe_ff=768`
+  shape) straight from the checkpoint's already-int8-quantized `U32`/
+  `.scale` tensors — no `quantize_weight` call at load time, unlike
+  `qwen::q8::Q8`, which quantizes an fp32 source on load. `expert_bytes`
+  computes real per-device byte totals from declared shapes alone (no GPU),
+  what `MultiDeviceResidentModel::estimate_multi` needs before placement.
+- **`omni::thinker`'s forward gained a real int8 branch**: `moe_sublayer`/
+  `layer_fwd`/`layer_decode_step` took an additive `int8_experts:
+  Option<&ThinkerLayerExperts8>` parameter (every existing fp32 caller
+  passes `None`, bit-for-bit unchanged) — `Some` dispatches every routed
+  expert through `model::moe::expert_fwd_i8`, quantizing the shared
+  activation ONCE per layer rather than once per expert. Attention/router/
+  norms stay fp32 (a deliberate scope cut — those total only ~5-6 GiB next
+  to the experts' ~27.6 GiB; see `int8_resident.rs`'s own doc for the
+  arithmetic).
+- **`crates/omni/src/int8_thinker_resident.rs`** (new): `Int8ThinkerResident`
+  implements `residency::MultiDeviceResidentModel` for real — `activate_multi`
+  builds a genuine `Gpu` per device (`Gpu::new_on_index`) and streams that
+  device's real weight shard onto it (a layer-RANGE split, not expert-split
+  — an expert-split cut would break `expert_fwd_i8`'s "quantize the input
+  once" contract). `Int8ThinkerInstance::forward` runs every owned layer in
+  order across however many device shards exist, with a HOST ROUND TRIP
+  handing the residual stream across each device boundary (`gpu_a.read` →
+  `gpu_b.write` — negligible bytes, `n · d_model` floats per hop).
+
+**Validated on real hardware, not just structurally**: `crates/omni/tests/
+int8_thinker_multi_gpu.rs`'s `sharded_two_gpu_forward_matches_unsharded_
+single_gpu_forward` runs a REAL `claim_multi` → `activate_multi` →
+`run("forward")` round trip across `Gpu(0)`/`Gpu(1)` on this box's two P40s,
+comparing against the SAME weights run UNSHARDED on one device — worst abs
+diff < 1e-4 (3/3 clean runs), isolating "does sharding + host-mediated
+handoff change the answer" (proven: no) from "is int8 close enough to fp32"
+(proven separately: `crates/omni/tests/thinker_int8_parity.rs`, rel_l2 <
+0.05 through a full attention+int8-MoE layer, both `layer_fwd` and
+`layer_decode_step`, on CPU and real Vulkan/P40).
+
+**Real, honestly-scoped remainder** (see `.todo/omni-int8-dual-gpu-
+residency.md`'s own closing section for the suggested pickup order — two of
+the four items below were closed the next session, M21): no real checkpoint
+exists in this environment to validate the above against (M18's own real
+import's cache is no longer present on this box); not wired into
+`residency::Executor`'s async dispatch loop (D-Bus/HTTP servability
+specifically). The other two — non-expert weights being synthetic, and no
+real `generate()`-shaped API — are now done, see M21.
+
+## M21 — the int8 dual-GPU Thinker: real non-expert weights, real generate()
+(2026-08-09)
+
+Closed 2 of the 4 remaining items M20 above left open.
+
+- **Real non-expert weight loader.** `int8_thinker_resident::load_layer_bufs`
+  streams attention/norm/router weights for real from the checkpoint
+  (brain-native names, `thinker.blocks.{l}.{ln1,attn.*,ln2,mlp.router}
+  .weight`), replacing the synthetic stand-in `activate_multi` used before.
+  A real checkpoint quantizes these too (`omni::import::should_quantize`
+  applies to ANY rank-2 tensor with `k % 4 == 0`, not just the MoE
+  experts), so the loader dequantizes on load via a new
+  `model::int8::dequantize_weight` (the exact host-side inverse of
+  `quantize_weight`, mutation-verified: an intentionally-wrong unsigned
+  byte reinterpretation is confirmed to actually diverge, not just asserted
+  correct by construction) when the checkpoint stored a tensor that way,
+  and passes it through unchanged otherwise — `thinker::layer_fwd` has no
+  int8 dispatch path for attention/router, only for the experts, so these
+  always come back out as plain f32 either way.
+- **Real `generate()`.** `Int8ThinkerInstance::generate(prompt_ids,
+  max_new_tokens, eos_ids) -> Vec<u32>` — real greedy sampling, real EOS
+  handling, no tokenization (matches `qwenvl::Qwen3Vl::generate`'s own
+  contract: token ids in, GENERATED token ids out, prompt excluded).
+  `activate_multi` now also loads `thinker.embed_tokens.weight`
+  (host-resident only — a row gather never needs a GEMM or GPU memory) and
+  `thinker.norm.weight`/`thinker.lm_head.weight` (on the LAST shard's
+  `Gpu`, where `forward`'s own host round-trip already lands the final
+  hidden state). Wired as a new `Instance::run("generate", ...)` action
+  alongside the existing `"forward"`. Deliberately the simple O(T²)
+  recompute shape (each step re-embeds the whole window and re-runs
+  `forward`), not a KV-cache decode loop — closes the "no generate() at
+  all" gap, not a performance claim; a KV-cache version remains real,
+  separable follow-up (each layer's cache would live entirely on the one
+  shard that owns that layer, confirmed while scoping this — not a
+  cross-device complication, just unbuilt).
+
+**Validated real, not just structurally**: two new tests in
+`int8_thinker_multi_gpu.rs`. `sharded_generate_matches_unsharded_generate`
+compares `generate()` through the real `Instance::run` action, 2-device vs
+1-device `activate_multi`, exact GENERATED-TOKEN-SEQUENCE equality (not
+just raw logits) — both sides now built via the same real loaders and the
+same real generate() path. `generate_first_token_matches_independently_
+assembled_reference` guards against the blind spot that test alone has (a
+bug shared by both sides would pass it undetected): checks `generate()`'s
+first token against a from-scratch embed/final_norm/lm_head/argmax built
+directly from newly-`pub` loaders (`load_mat_host`/`load_vec`/`load_mat`),
+sharing no code path with `generate()`'s own implementation. Both green on
+real Vulkan/P40 hardware (two physically separate cards) and the full CPU
+suite.
+
+Also fixed along the way, unrelated to omni specifically but discovered
+while regression-testing this work: `crates/wgsl-cpu`'s Cranelift-JIT
+work-group-kernel compiler was silently dropping a local variable's
+assignment when a later statement in the SAME pre-barrier segment read it
+back (`carried`'s pre-materialisation pass was evaluating that later
+statement's expressions too early, before the assignment had run, and
+caching the stale pre-assignment value) — this is exactly the shape of
+`omni::thinker`'s own reduction-style kernels (the CPU int8 activation-
+quant path's `max_abs_rows.wgsl` was the one that surfaced it). Root-caused
+via targeted kernel micro-probes and Cranelift IR inspection, fixed, and
+mutation-verified (reverting the fix reproduces the exact original
+failure). See `.todo/max-abs-row-cpu-backend-mismatch.md` for the full
+writeup — filed separately since it is a `wgsl-cpu` compiler bug, not an
+omni-specific one, but every one of this session's CPU-backend int8 tests
+above (re-)validates it stayed fixed.
+
 ## Not started
 
-M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M8's `chunked_decode` streaming path, int8/GPU-sharded production
-residency for the Thinker (M9b above), `qwenvl` registration as its own
-served model (deferred above — needs `qwen::Qwen`'s decode path to grow
-M-RoPE support first, its own generation loop is currently library-only),
-`converse`/`transcribe` actions (`speak` — text + real synthesized audio out
-— shipped in M9c above; `converse`, folding real audio/image *input* into
-the SAME turn as speech *output*, has not), OpenAI/Anthropic transports in
-the automated e2e harness (M13/M14's own note above), video-file decoding +
-a multi-frame wire shape for the `generate` action (M9b above). Populating
-the six missing `BRAIN_*_MIRROR` paths M17 above found (a decision for
-whoever owns them, not this session) and, separately, adding a
-`fetch-testdata.sh` entry for the imaging workstream's fixtures
-(`restore`/`flux1`/`flux2`/`controlnet`/`instantid`/`pulid` — that
-workstream's own scope, not omni's). `qwen::Qwen`'s KV-cache migration, the
-OpenAI/Anthropic multimodal-content-part-drop fix, M15 (NPU export), M16
-(`omni_bench` profiling), and M17 (testdata audit — audited and safety-gated,
-not a wholesale clear; see its own section) are now done — see their own
-dated sections above; this paragraph is the current residual list, not a
-historical snapshot. See the plan file. M6 through M17 are now believed
-complete for what is actually implemented (Thinker/Talker decoders,
-real M-RoPE incl. real audio/image/video splice, KV-cache decode, composed
-loops, splice seam, code predictor, Code2Wav vocoder, Thinker text generation
-with optional real speech/image input exposed over D-Bus/OpenAI/Anthropic
-with a working Python example — all validated against real weights, the real
-HTTP classification logic, or a live end-to-end run). The two loader-side
+M8's `chunked_decode` streaming path, `converse`/`transcribe` actions
+(`speak` — text + real synthesized audio out — shipped in M9c above;
+`converse`, folding real audio/image *input* into the SAME turn as speech
+*output*, has not). Populating the six missing `BRAIN_*_MIRROR` paths M17
+above found (a decision for whoever owns them, not this session) and,
+separately, adding a `fetch-testdata.sh` entry for the imaging workstream's
+fixtures (`restore`/`flux1`/`flux2`/`controlnet`/`instantid`/`pulid` — that
+workstream's own scope, not omni's). `qwenvl` caps.rs serving wiring, the
+MoE-aware int8 resident store + int8 thinker branch + multi-GPU residency,
+a tiled+gated MoE expert kernel, and the concurrent-Vulkan-device-creation
+hang — all filed as their own `.todo/` items per M18 above, not silently
+dropped. `qwen::Qwen`'s KV-cache migration, the OpenAI/Anthropic
+multimodal-content-part-drop fix, M15 (NPU export), M16 (`omni_bench`
+profiling), M17 (testdata audit), and M18 (this session — GPU hangs,
+router cap, MoE backward, glm migration decision, qwenvl M-RoPE decode +
+generate(), submit-storm fix, the real full int8 import) are now done — see
+their own dated sections above; this paragraph is the current residual
+list, not a historical snapshot. See the plan file. M6 through M18 are now
+believed complete for what is actually implemented (Thinker/Talker
+decoders, real M-RoPE incl. real audio/image/video splice, KV-cache decode,
+composed loops, splice seam, code predictor, Code2Wav vocoder, Thinker text
+generation with optional real speech/image/video input exposed over
+D-Bus/OpenAI/Anthropic with a working Python example, a full gradient-
+checked MoE backward, the first real full int8 checkpoint import — all
+validated against real weights, the real HTTP classification logic, real
+GPU hardware, or a live end-to-end run). The two loader-side
 checkpoint-naming gaps (code predictor, code2wav — documented in M7b/M8
 above) remain open; they do not block Thinker-only generation (`OmniResident`
 reads straight from the HF directory, not the unified checkpoint those gaps

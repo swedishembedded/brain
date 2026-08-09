@@ -900,6 +900,39 @@ paths agree with EACH OTHER, which is blind to a bug present identically in
 both — a real-weight/real-golden test is what caught this one, not the
 same-composition oracle.
 
+**Recurrence, found by a later session auditing this lesson's own fix**: the
+fix above touched `router_gate.wgsl`/`router_gate_train.wgsl` (`MAX_EXPERTS`
+64→128) but never reached `router_gate_sigmoid.wgsl` — a THIRD kernel with
+its OWN independent `const MAX_E: u32 = 64u;` and six of its own
+`array<f32, 64>` scratch locals, never bumped. Worse: `docs/models/omni/
+status.md`'s own written record of the fix above stated `crates/glm` was
+"unaffected (uses the separate `router_gate_sigmoid.wgsl`)" — true as far as
+it went, but the person who wrote that line checked that GLM used a
+DIFFERENT file, not that the different file had its OWN safe cap. GLM-5.2's
+published config (`GlmConfig::glm5_2()`) declares 256 routed experts, so
+this sat as a live, undetected out-of-bounds write behind a status doc that
+actively said the opposite. Same root cause as this lesson's own
+`router_bwd.wgsl` (a SEPARATE kernel from the pair above, `array<f32, 64>`
+`pr`/`dp` scratch, hard-capped at exactly the same 64): every kernel that
+copy-pasted this softmax/top-k scratch-array shape needed its own
+audit — fixing the first two instances did not imply the third and fourth
+were safe, and the written record repeating "unaffected" without re-deriving
+it made this LESS likely to be caught, not more. Fixed by rewriting
+`router_bwd.wgsl` array-free (mirroring `router_bwd_sigmoid.wgsl`'s
+already-unbounded style — that one was NEVER capped, its own header comment
+claiming "E <= 64" was simply stale/wrong) and adding a loud
+`assert!(n_routed_experts <= 64, ...)` in `Glm::new` for the
+`router_gate_sigmoid.wgsl` forward path specifically, since an array-free
+top-k rewrite there is real kernel work (needs `top_k` passes over `E`), not
+a literal bump — deliberately NOT re-bumping the constant a second time,
+which is this lesson's own failure mode repeated. **The sharper general
+shape this recurrence adds**: when a status/lessons doc records "X is
+unaffected because it uses Y instead," that claim is only as strong as
+whoever wrote it having ALSO checked Y's own limit — a written record that
+sounds like verification but is actually just "different code path, assumed
+safe" is worse than no record at all, because it stops the next reader from
+re-deriving what was never actually checked.
+
 ## 36. `testdata/`'s "restorable from a mirror" claim was never audited against a real box
 
 `scripts/data/fetch-testdata.sh`'s own header states the design goal
@@ -976,3 +1009,155 @@ helper copied from `qwen_bench`) and might run on the CPU backend should
 default to skipping the probe there, or at minimum document the escape
 hatch as loudly as `omni_bench` now does** — the existing benches never hit
 this because they only ever ran on GPU.
+
+## 38. Two unrelated unbounded waits, not one bug, were behind "the GPU hangs"
+
+Lesson #37 above named the CPU-side symptom (a roofline probe stuck for
+hours) but explicitly left the root cause untracked. Revisiting it: the
+kernel itself was innocent (`roof_fma.wgsl` takes its iteration count
+through a *uniform*, not a specialization constant, so there is no per-rung
+recompile; the first rung is only 4.3 GFLOP, trivially fast on any real
+device) — the "hours at 12 MB RSS / 0.3% CPU" was always a BLOCK, not slow
+arithmetic, confirming #37's own reasoning without yet finding what was
+blocking.
+
+Reading `gpu_core::roof`'s three calibration loops
+(`measure_compute`/`measure_int8`/`measure_bandwidth`) and both GPU
+backends' wait implementations side by side surfaced **two independent
+defects**, neither the "zombie VRAM" this box's own environment notes had
+speculatively blamed:
+
+1. **The calibration loop itself had no ceiling of any kind** — no
+   wall-clock deadline, no total-work budget, only the opt-in
+   `BRAIN_NO_ROOF=1` escape hatch #37 already documented. A backend that
+   stalls on ANY single dispatch inside that loop (for any reason) blocks
+   forever, because nothing bounds how long the loop is willing to wait
+   before giving up and reporting "unmeasured."
+2. **Both GPU backends' waits were LITERALLY unbounded** —
+   `backend-vulkan`'s `wait_for_fences(&[fence], true, u64::MAX)` and
+   `backend-wgpu`'s five `poll(PollType::wait_indefinitely())` call sites
+   had no timeout and no device-lost handling. A wedged queue therefore
+   blocks the calling thread forever BY CONSTRUCTION — this is why past
+   hangs (M16's `encode-vision` on Vulkan/P40, `gpu_core::roofline`'s CPU
+   case) presented as unkillable-without-SIGKILL rather than as a reported
+   error the caller could catch and act on.
+
+Fix: a wall-clock deadline on every calibration loop (`BRAIN_ROOF_BUDGET_S`,
+returning "unmeasured" on expiry — the SAME contract `ensure`'s doc already
+promised for an unprobeable device, so no caller needed to change); the
+probe now defaults OFF on the CPU device class specifically, since #37's own
+root cause was never fully bisected and CPU is the one backend that
+reproduced it; both backends' waits now have a finite deadline
+(`BRAIN_GPU_WAIT_S`) and report which submit wedged rather than retrying
+silently. **Validated on the real production path, not just the probe**:
+the full gradcheck suite (130+ tests) ran clean on real Vulkan/P40 hardware
+after the fix, zero hangs.
+
+**A SEPARATE, related finding surfaced by the same session while validating
+this fix — and CORRECTED by a later session that actually attached a
+debugger** (see below): running `crates/gpu-core/tests/roofline.rs`'s full
+battery (or `omni_bench`) hung, and was assumed at the time to be the
+"~50% of runs, every thread in futex_do_wait" concurrent-device-creation
+deadlock `gpu_core::testgpu`'s own module doc warns about — plausible given
+`gpu.new_like(PROBE_KERNELS)` runs per `measure()` call, `/proc/<pid>/task/
+*/wchan` showed `futex_do_wait`, and `BRAIN_GPU_WAIT_S=5` did not resolve it.
+That diagnosis was WRONG. **The general shape held — "the GPU hangs" is not
+always one bug, and `wchan` inspection correctly ruled OUT the bounded-wait
+class — but `wchan` alone was not enough to find the real cause**, because
+a `Mutex::lock()` self-deadlock and a driver worker thread both park in
+`futex_do_wait`; distinguishing them needs an actual backtrace.
+
+**Correction, found by a later session with gdb access** (2026-08-08,
+`.todo/vulkan-concurrent-device-creation-hang.md`): this sandbox's
+`ptrace_scope=1` blocks attaching to an ALREADY-RUNNING process, which is
+why the original session's `/proc/<pid>/task/*/wchan`-only investigation
+could not go further — but `ptrace_scope` only gates non-parent attach;
+launching gdb itself as the process's parent (`gdb ./binary`, piping
+commands through a fifo, sending `SIGINT` to the child mid-hang to force a
+prompt) sidesteps the restriction entirely and was available the whole time.
+`thread apply all bt` on the actually-wedged thread showed:
+
+```
+#3 Mutex::lock (self=... <gpu_core::roof::CACHE>)
+#5 gpu_core::roof::known () at crates/gpu-core/src/roof.rs:277
+#6 gpu_core::native_facade::Gpu::caps () at crates/gpu-core/src/lib.rs:457
+#7 gpu_core::roof::measure () at crates/gpu-core/src/roof.rs:293
+#8 gpu_core::roof::ensure () at crates/gpu-core/src/roof.rs:265   <- lock held here
+```
+
+`roof::ensure` held `CACHE`'s lock across a call to `measure(gpu)`, and
+`measure()` unconditionally calls `gpu.caps()` (to gate the int8 probe),
+which locks the SAME `CACHE` via `roof::known()` — `std::sync::Mutex` is not
+reentrant, so this is a guaranteed, deterministic, single-threaded deadlock
+with **zero dependency on concurrency, device count, or the Vulkan driver at
+all**. It reproduced specifically on `caps_expose_the_roofs_only_after_
+something_measured_them` because that was the first test in the file to
+call `ensure()` (not `measure()` directly) against a cold cache — and it is
+masked in almost all ordinary use because the on-disk persist store
+(`~/.cache/brain/roof-*.txt`) is normally already warm from a prior run, so
+`ensure()` returns before ever reaching the self-deadlocking branch. Fixed:
+`ensure()` now takes and releases `CACHE`'s lock at each access point,
+never across `measure()`.
+
+The SAME later session, while re-validating Vulkan device sharing now that
+the deadlock no longer masked it, found a REAL, separate, third defect:
+`VulkanBackend` had never implemented `Backend::share`/`new_like`/
+`downgrade` (all default to `None`/no-op), so `gpu_core::testgpu::dev`'s
+"one shared device per process" pool never actually shared anything on
+Vulkan — every call silently built a whole new device. Fixing that (proper
+`Arc`-shared `VkContext`/`VkPipelineSet`, see `crates/backend-vulkan/src/
+lib.rs`) then surfaced a FOURTH defect one layer down: `VulkanBackend`'s
+command-buffer recording and `VkContext::run_cmd`/`dispatch` all touch a
+SHARED `command_pool`/`queue` with no synchronization, and the Vulkan spec
+requires host access to both to be externally synchronized — two threads
+sharing a device via the newly-working `share()` reproduced a REAL
+`ERROR_DEVICE_LOST` within seconds (`crates/gpu-core/tests/
+device_sharing.rs::concurrent_shared_handles_do_not_deadlock`, 0/1 clean
+before a fix, 5/5 clean after adding `VkContext::queue_lock`, held across
+every allocate-record-submit-wait-free sequence).
+
+**The lesson under the lesson**: `wchan`-only triage can correctly rule OUT
+one hypothesis (here, the bounded-wait class) while still pointing at the
+WRONG mechanism for what remains — a self-deadlock and a driver stall
+produce the identical `futex_do_wait` signature. When a debugger is even
+partially available (here: blocked for attach, but not for launch-as-child),
+use it before writing down a driver-level conclusion; a wrong "it's the
+driver's fault, needs a kernel-level fix" diagnosis can stand undisturbed
+for an entire session if nothing pushes back on it.
+
+## 39. A `write_*` call with no matching read on that code path is a silent no-op, not a bug the type system catches
+
+`qwenvl::Qwen3Vl::generate()` (KV-cache generation, added the session before
+this one) called `self.decoder.write_deepstack(level, &data)` during prefill
+— a real function, on a real buffer, compiling cleanly, doing exactly what
+its name says. The bug: `qwen::Qwen`'s incremental decode path
+(`decode_steps`/`step`/`step_mrope`) never READS `deepstack_bufs` — the one
+dispatch that adds them into the residual (`SPLICE_ADD`) lives only inside
+`forward_steps()`, the BATCHED training-graph builder, which `generate()`
+never calls. So the write happened, the data sat in a real GPU buffer,
+correctly, and was never consulted by anything — for any checkpoint enabling
+DeepStack (`VisionConfig::deepstack_indexes` non-empty, which the REAL
+Qwen3-VL-4B config is), every generated token was silently missing a real
+architectural contribution. No panic, no wrong-shape error, no type error:
+`write_deepstack` and `decode_steps` are both individually correct functions
+that simply never talk to each other on this path. The existing test
+(`generate_is_deterministic_and_respects_eos`) passed throughout, because it
+only checks determinism and EOS-stopping, never a numerical value that would
+reveal a missing contribution — the same shape of gap `docs/lessons.md`'s
+own cataloged "gates that lie" pattern describes, just for a hand-written
+test instead of an automated gate.
+
+Found by asking a narrow, specific question while wiring an UNRELATED
+follow-up (`qwenvl` serving registration): "does the fast (incremental)
+path apply the same architectural pieces as the slow (batched) reference
+path?" — not by a test failing. `grep -n deepstack` across the file in
+question is what actually answered it (every reference was setup or the
+one batched-only consumption site). **The general shape**: when a model has
+TWO forward implementations for the same architecture (a batched
+training/reference path and an incremental/decode fast path — extremely
+common for any KV-cache-capable model), a feature added to one must be
+independently verified to exist in the other, not assumed from "the setter
+function got called." A parity test between the two paths (this session
+added `deepstack_step_matches_full_recompute`, mirroring the pattern
+`docs/models/omni/status.md`'s own M-RoPE decode entry established) is the
+gate that would have caught this before it shipped, not after.
