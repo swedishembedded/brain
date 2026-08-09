@@ -36,6 +36,37 @@ pub trait TensorSource {
     /// decodes into a temporary that is dropped on return (streaming), a
     /// `HashMap` lends its stored vec (no copy).
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool;
+
+    /// Zero-copy path: `name`'s bytes AS ALREADY-STORED `u32` words, borrowed
+    /// straight from wherever the source keeps them — no allocation, no
+    /// decode. Only `Some` when the on-disk (or in-memory) representation is
+    /// already exactly what the device binds (`F32`/packed-int8 `U32`) and,
+    /// for an mmap-backed source, the byte range is 4-byte aligned. `None`
+    /// means "not zero-copyable here" — the caller falls back to
+    /// [`with_tensor_chunks`](Self::with_tensor_chunks) or
+    /// [`with_tensor`](Self::with_tensor). Default: never zero-copyable (safe
+    /// for any implementor that doesn't override it).
+    fn raw_words(&self, _name: &str) -> Option<&[u32]> {
+        None
+    }
+
+    /// Ordered chunks of at most `max_elems` f32, each decoded into a SINGLE
+    /// reused scratch buffer owned by this call — so peak *extra* host
+    /// allocation is `O(max_elems)`, never `O(tensor)`. Returns whether the
+    /// tensor was found (`f` is never called if not). Default: materializes
+    /// the whole tensor via [`with_tensor`](Self::with_tensor) and hands it
+    /// over as one chunk at offset 0 — i.e. reproduces exactly what every
+    /// implementor already does today. An mmap-backed source overrides this
+    /// to decode incrementally instead.
+    fn with_tensor_chunks(&self, name: &str, _max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        self.with_tensor(name, &mut |d| f(0, d))
+    }
+
+    /// Element count of `name`, if cheaply known without decoding. Default:
+    /// unknown (`None`) — callers that need it fall back to `with_tensor`.
+    fn numel(&self, _name: &str) -> Option<usize> {
+        None
+    }
 }
 
 impl TensorSource for HashMap<String, Vec<f32>> {
@@ -47,6 +78,13 @@ impl TensorSource for HashMap<String, Vec<f32>> {
             }
             None => false,
         }
+    }
+    /// Already f32 in host memory — a bit-cast view, not a new allocation.
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        self.get(name).map(|v| bytemuck::cast_slice::<f32, u32>(v))
+    }
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.get(name).map(|v| v.len())
     }
 }
 

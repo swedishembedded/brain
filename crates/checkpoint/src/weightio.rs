@@ -242,6 +242,42 @@ impl crate::TensorSource for WeightReader {
             None => false,
         }
     }
+
+    /// Zero-copy for safetensors when the dtype already matches (`F32`/`U32`,
+    /// 4-byte aligned); `None` for GGUF (every tensor is quantized on disk, so
+    /// there is nothing to bind as-is without dequantizing).
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        match &self.inner {
+            Inner::St(m) => m.raw_words(name),
+            Inner::Gguf(_) => None,
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].raw_words(name),
+        }
+    }
+
+    /// Bounded chunked decode for safetensors (the real win — a BF16 tensor
+    /// converts one chunk at a time into a reused scratch instead of once as
+    /// a whole `Vec<f32>`). GGUF inherits the trait default (materialize via
+    /// `with_tensor`, one chunk) — its quant-block dequant does not yet have
+    /// a chunked path; that is a named follow-up, not a silent regression,
+    /// since the default's cost is identical to today's behaviour.
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        match &self.inner {
+            Inner::St(m) => m.with_tensor_chunks(name, max_elems, f),
+            Inner::Gguf(_) => self.with_tensor(name, &mut |d| f(0, d)),
+            Inner::StSharded(readers, owner) => match owner.get(name) {
+                Some(&si) => readers[si].with_tensor_chunks(name, max_elems, f),
+                None => false,
+            },
+        }
+    }
+
+    fn numel(&self, name: &str) -> Option<usize> {
+        match &self.inner {
+            Inner::St(m) => m.numel(name),
+            Inner::Gguf(_) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].numel(name),
+        }
+    }
 }
 
 fn usize_to_u64(s: &[usize]) -> Vec<u64> {

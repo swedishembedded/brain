@@ -131,7 +131,58 @@ impl MmapSafetensors {
     pub fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
         let m = self.index.get(name)?;
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
-        Some(decode(name, &m.dtype, raw))
+        let mut out = Vec::new();
+        decode_into(name, &m.dtype, raw, &mut out);
+        Some(out)
+    }
+
+    /// Element count of `name`, without decoding — the declared dtype's byte
+    /// width divides the byte range exactly (safetensors invariant).
+    pub fn numel(&self, name: &str) -> Option<usize> {
+        let m = self.index.get(name)?;
+        Some((m.end - m.start) / dtype_width(&m.dtype))
+    }
+
+    /// Zero-copy: `name`'s on-disk bytes reinterpreted as `u32` words,
+    /// borrowed straight from the mapping — no allocation. `None` unless the
+    /// dtype is already `F32` or `U32` (what the device binds) AND the byte
+    /// range is 4-byte aligned relative to the mapping's base (safetensors
+    /// does not guarantee this — an odd header length, or a dtype narrower
+    /// than 4 bytes earlier in the file, can misalign a later tensor).
+    /// `bytemuck::try_cast_slice` is the alignment check: never an `unsafe`
+    /// transmute, and a real misalignment or the wrong dtype both cleanly
+    /// fall through to `None` rather than panicking or misreading bytes.
+    pub fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        let m = self.index.get(name)?;
+        if !matches!(m.dtype.as_str(), "F32" | "U32") {
+            return None;
+        }
+        let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
+        bytemuck::try_cast_slice::<u8, u32>(raw).ok()
+    }
+
+    /// Ordered chunks of at most `max_elems` f32, each decoded into ONE
+    /// reused scratch buffer this call owns — so peak *extra* host
+    /// allocation is `O(max_elems)`, never `O(tensor)` (relevant tensors run
+    /// up to ~1.5 GB as f32). `max_elems == 0` decodes the whole tensor as
+    /// one chunk (degrades to [`Self::tensor_f32`]'s behaviour). Returns
+    /// whether the tensor was found.
+    pub fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        let Some(m) = self.index.get(name) else { return false };
+        let width = dtype_width(&m.dtype);
+        let numel = (m.end - m.start) / width;
+        let chunk = if max_elems == 0 { numel.max(1) } else { max_elems };
+        let mut scratch: Vec<f32> = Vec::with_capacity(chunk.min(numel.max(1)));
+        let mut off = 0usize;
+        while off < numel {
+            let n = chunk.min(numel - off);
+            let start = self.blob_start + m.start + off * width;
+            let end = start + n * width;
+            decode_into(name, &m.dtype, &self.mmap[start..end], &mut scratch);
+            f(off as u64, &scratch);
+            off += n;
+        }
+        true
     }
 
     /// Materialize one tensor as packed `u32` words (little-endian), decoding
@@ -168,16 +219,45 @@ impl MmapSafetensors {
         // SAFETY: read-only file mapping ⇒ MADV_DONTNEED loses no data.
         let _ = unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
     }
+
+    /// [`Self::advise_dontneed`] for one tensor's byte range only — per-group
+    /// demotion (dropping the pages a specific slice no longer needs) without
+    /// discarding the whole mapping's page-cache footprint.
+    pub fn advise_dontneed_tensor(&self, name: &str) {
+        let Some(m) = self.index.get(name) else { return };
+        let start = self.blob_start + m.start;
+        let len = m.end - m.start;
+        // SAFETY: read-only file mapping ⇒ MADV_DONTNEED loses no data.
+        let _ = unsafe { self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, len) };
+    }
 }
 
-fn decode(name: &str, dtype: &str, raw: &[u8]) -> Vec<f32> {
+/// On-disk byte width of one element for a safetensors dtype string. Only the
+/// dtypes [`decode_into`] knows how to decode as f32 (`tensor_u32`'s `U32` is
+/// handled separately — packed, not a per-element f32 decode).
+fn dtype_width(dtype: &str) -> usize {
     match dtype {
-        "F32" => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
-        "F16" => raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
-        "BF16" => raw.chunks_exact(2).map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
-        "I64" => raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
-        "I32" => raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32).collect(),
-        "U8" => raw.iter().map(|&b| b as f32).collect(),
+        "F32" | "I32" | "U32" => 4,
+        "F16" | "BF16" => 2,
+        "I64" => 8,
+        "U8" => 1,
+        other => panic!("'{other}': unknown element width"),
+    }
+}
+
+/// Decode `raw` (a whole tensor's bytes, or one chunk of them) as `dtype`,
+/// clearing and extending `out` in place — the one implementation both the
+/// whole-tensor [`MmapSafetensors::tensor_f32`] and the chunked
+/// [`MmapSafetensors::with_tensor_chunks`] share, so they cannot drift.
+fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
+    out.clear();
+    match dtype {
+        "F32" => out.extend(raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
+        "F16" => out.extend(raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))),
+        "BF16" => out.extend(raw.chunks_exact(2).map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))),
+        "I64" => out.extend(raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)),
+        "I32" => out.extend(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)),
+        "U8" => out.extend(raw.iter().map(|&b| b as f32)),
         // Previously fell through to `Vec::new()` -- a packed U32 tensor (or
         // any future dtype this decoder doesn't know) would silently read as
         // an empty, valid-looking vector instead of failing. Loud is correct
@@ -217,6 +297,106 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mmap_st_{}.safetensors", std::process::id()));
         std::fs::write(&path, &file).unwrap();
         (path, a, b_vals)
+    }
+
+    /// Build a one-tensor safetensors file from raw little-endian bytes, with
+    /// the header padded (via a `__metadata__` filler string, which `open()`
+    /// stores separately and never treats as a tensor) so the tensor's byte
+    /// offset relative to the mapping base is `blob_start % 4 == want_mod4`.
+    /// This is what lets the alignment tests below construct BOTH the
+    /// aligned and the misaligned case deterministically, rather than hoping
+    /// serde_json's header length happens to land one way or the other.
+    fn make_file_at_alignment(dtype: &str, raw: &[u8], want_mod4: usize) -> std::path::PathBuf {
+        for pad in 0..4 {
+            let header = serde_json::json!({
+                "t": {"dtype": dtype, "shape": [raw.len() / dtype_width(dtype)], "data_offsets": [0, raw.len()]},
+                "__metadata__": {"pad": "x".repeat(pad)},
+            });
+            let hbytes = serde_json::to_vec(&header).unwrap();
+            let blob_start = 8 + hbytes.len();
+            if blob_start % 4 == want_mod4 {
+                let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+                file.extend_from_slice(&hbytes);
+                file.extend_from_slice(raw);
+                let path = std::env::temp_dir().join(format!("mmap_st_align_{want_mod4}_{}_{}.safetensors", dtype, std::process::id()));
+                std::fs::write(&path, &file).unwrap();
+                return path;
+            }
+        }
+        unreachable!("pad 0..4 covers every residue mod 4");
+    }
+
+    #[test]
+    fn raw_words_is_zero_copy_for_f32_and_none_for_bf16() {
+        let a: Vec<f32> = vec![1.0, -2.5, 3.25, 0.0];
+        let raw: Vec<u8> = a.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let path = make_file_at_alignment("F32", &raw, 0);
+        let mm = MmapSafetensors::open(&path).expect("open");
+        let words = mm.raw_words("t").expect("F32, 4-byte aligned, must be zero-copyable");
+        let want: Vec<u32> = a.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(words, want.as_slice());
+        std::fs::remove_file(&path).ok();
+
+        // BF16 never zero-copies -- the device never binds BF16 directly, so
+        // raw_words must say "not zero-copyable" regardless of alignment.
+        let bf_raw: Vec<u8> = [0.5f32, -1.0, 2.0].iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let bf_path = make_file_at_alignment("BF16", &bf_raw, 0);
+        let bf = MmapSafetensors::open(&bf_path).expect("open");
+        assert!(bf.raw_words("t").is_none(), "BF16 must never be zero-copied as u32 words");
+        // ...but it still decodes correctly through the normal path.
+        assert_eq!(bf.tensor_f32("t").unwrap(), vec![0.5, -1.0, 2.0]);
+        std::fs::remove_file(&bf_path).ok();
+    }
+
+    #[test]
+    fn misaligned_tensor_is_not_cast_but_still_decodes() {
+        let a: Vec<f32> = vec![1.0, -2.5, 3.25, 0.0];
+        let raw: Vec<u8> = a.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // Force the tensor's absolute byte offset to be 2 (mod 4) -- an F32
+        // tensor that a naive `bytemuck::cast_slice` would misread, and that
+        // `raw_words` must refuse rather than transmute.
+        let path = make_file_at_alignment("F32", &raw, 2);
+        let mm = MmapSafetensors::open(&path).expect("open");
+        assert!(mm.raw_words("t").is_none(), "a misaligned F32 tensor must not be zero-copied");
+        // The chunked and whole-tensor decode paths are unaffected -- they
+        // read through `decode_into`, which has no alignment requirement.
+        assert_eq!(mm.tensor_f32("t").unwrap(), a);
+        let mut chunks = Vec::new();
+        mm.with_tensor_chunks("t", 2, &mut |off, d| chunks.push((off, d.to_vec())));
+        assert_eq!(chunks, vec![(0, vec![1.0, -2.5]), (2, vec![3.25, 0.0])]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn chunked_decode_bounds_host_peak_below_one_tensor() {
+        // A BF16 tensor big enough that "decode the whole thing at once"
+        // and "decode 4 KiB at a time" are easily distinguishable in bytes
+        // retained, without needing a global-allocator harness (that lives
+        // in weightio.rs and is exercised there for the end-to-end claim;
+        // this test pins the mmap-level chunk boundary contract itself).
+        let n = 200_000usize; // 400 KB as f32, 400 KB as BF16 raw
+        let vals: Vec<f32> = (0..n).map(|i| (i % 997) as f32 * 0.125).collect();
+        let raw: Vec<u8> = vals.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let path = make_file_at_alignment("BF16", &raw, 0);
+        let mm = MmapSafetensors::open(&path).expect("open");
+
+        let max_elems = 4096usize;
+        let mut max_chunk_len = 0usize;
+        let mut reassembled = Vec::with_capacity(n);
+        let mut n_chunks = 0usize;
+        mm.with_tensor_chunks("t", max_elems, &mut |off, d| {
+            assert_eq!(off as usize, reassembled.len(), "chunks must arrive in order, contiguous");
+            max_chunk_len = max_chunk_len.max(d.len());
+            reassembled.extend_from_slice(d);
+            n_chunks += 1;
+        });
+        assert!(n_chunks > 1, "the tensor must actually be split across multiple chunks");
+        assert!(max_chunk_len <= max_elems, "no chunk may exceed max_elems ({max_chunk_len} > {max_elems})");
+        // BF16 rounds each value's low 16 mantissa bits to zero -- expect the
+        // rounded values, not the exact inputs (same rounding `tensor_f32`
+        // already applies; this is what makes the equality below exact).
+        assert_eq!(reassembled, mm.tensor_f32("t").unwrap(), "chunked reassembly must equal the whole-tensor decode exactly");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

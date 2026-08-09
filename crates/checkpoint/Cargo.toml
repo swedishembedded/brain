@@ -13,6 +13,7 @@ path = "src/lib.rs"
 serde.workspace = true
 serde_json.workspace = true
 half.workspace = true
+bytemuck.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # On-demand, memory-mapped weight reads (the residency layer's cold tier). Native
