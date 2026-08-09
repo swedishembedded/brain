@@ -285,6 +285,15 @@ pub struct Glm {
     sh_out: DeviceBuffer,
     mlp_out: DeviceBuffer,
 
+    // `forward_compact`'s row-compacted MoE scratch — sized ONCE here to the
+    // model's full configured capacity `b * t` (same convention every other
+    // buffer in this struct follows), not reallocated per `logits_all_compact`
+    // call. A follow-up closed this the same day it was found: it used to be
+    // built fresh (sized to that call's `t_use`) inside `forward_compact`
+    // itself, so `sample::generate`'s autoregressive loop paid a GPU
+    // allocation per step.
+    compact_scratch: model::moe::CompactExpertScratch,
+
     // DSA indexer forward temporaries (used only when `cfg.has_indexer()`).
     // `idx_mask` persists across IndexShare `Shared` layers; the rest are
     // recomputed at each `Full` layer.
@@ -517,6 +526,23 @@ impl Glm {
         // widest per-expert feed-forward width (dense vs moe) for the shared d_h.
         let ff_max = dense_ff.max(moe_ff).max(shared_ff);
 
+        // `logits_all_compact`/`forward_compact` always run at `b_use = 1` (the
+        // former asserts it), so `t` alone bounds every call's row count — but
+        // size to the full `b * t` anyway, matching every other buffer above,
+        // since it costs nothing extra when `b == 1` and stays correct if that
+        // assert is ever relaxed.
+        let compact_scratch = model::moe::CompactExpertScratch::new(
+            &gpu,
+            &model::moe::MoeShape {
+                rows: (b * t),
+                d_model: cfg.d_model,
+                moe_ff: cfg.moe_intermediate_size,
+                n_experts: cfg.n_routed_experts,
+                top_k: cfg.num_experts_per_tok,
+            },
+            b * t,
+        );
+
         // Incremental-decode KV cache: one set of buffers per layer, sized to the
         // configured context `t` (= cap). Stores the materialised per-head k_pass,
         // the shared MQA k_rot, and per-head v (see field docs).
@@ -550,6 +576,7 @@ impl Glm {
             moe_acc: st(n * d),
             sh_out: st(n * d),
             mlp_out: st(n * d),
+            compact_scratch,
             q_idx: st(n * idx_dim),
             k_idx_pre: st(n * idh),
             k_idx: st(n * idh),
@@ -1098,13 +1125,11 @@ impl Glm {
         );
         let compact_ids = model::moe::CompactExpertFwdIds { gather: EMBED, gemm_naive: MATMUL, gemm_tiled: MATMUL_REG3, silu_mul: SILU_MUL, scatter };
         let shape = model::moe::MoeShape { rows: n, d_model: d, moe_ff, n_experts: e, top_k: c.num_experts_per_tok };
-        // Sized to `shape.rows` every call -- the unconditionally-safe bound
-        // (every row could in principle route to one expert), reallocated per
-        // `logits_all_compact` call since `t_use` varies with the sliding
-        // generation window. Correct and simple; a persistent field sized once
-        // to `self.t` would avoid the reallocation but is a pure perf
-        // follow-up, not needed for this path's correctness.
-        let scratch = model::moe::CompactExpertScratch::new(&self.gpu, &shape, n);
+        // `self.compact_scratch` is sized once (at construction) to the model's
+        // full `b * t` capacity, so every call's `n <= self.compact_scratch.capacity()`
+        // by construction (`logits_all_compact` asserts `t_use <= self.t` and
+        // `self.b == 1`) -- no per-call allocation.
+        let scratch = &self.compact_scratch;
 
         let mut s: Vec<Step> = Vec::new();
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
@@ -1191,7 +1216,7 @@ impl Glm {
                             self.w(&ep("gate.weight")),
                             self.w(&ep("up.weight")),
                             self.w(&ep("down.weight")),
-                            &scratch,
+                            scratch,
                             &self.moe_acc,
                             ei as u32,
                             true,

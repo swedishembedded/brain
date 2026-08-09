@@ -118,18 +118,35 @@ ledger — what landed, the parity gates, what remains.
 
   **Update (2026-08-09): option (a) landed — inference only.** See the
   "Done" list above (`Glm::logits_all_compact`). This is deliberately the
-  MINIMAL-RISK half of `.todo/glm-model-rs-compact-moe-wiring.md`'s two
-  options: a parallel forward-only function used by `sample::generate`,
+  MINIMAL-RISK half of the two options identified for migrating GLM's MoE
+  path onto `model::moe`: a parallel forward-only function used by
+  `sample::generate`,
   touching ZERO training code. `build_forward`/`build_backward`/
   `gradcheck::check_glm` are byte-for-byte unchanged — training still runs
   the dense path, still fully gradient-checked, nothing above regressed.
   **Option (b) (migrating `build_forward`/`build_backward` themselves, so
   TRAINING also gets the 7.01x win) is still not attempted** — it needs a
   correctly-designed row-compacted BACKWARD (dx-scatter-add semantics,
-  explicitly flagged in the original `.todo` as the real design work, not
+  explicitly flagged from the start as the real design work, not
   just a mechanical port) before it can land, and should not be attempted
   without `gradcheck::check_glm` green before AND after plus its own
-  mutation-verify pass, per that file's own risk framing.
+  mutation-verify pass, per that file's own risk framing. **Unmeasured against
+  real GLM-5.2 weights, and stays that way**: no GLM checkpoint is available in
+  this environment and the model has no serving contract yet, so the 7.01x
+  figure above is real but is from a synthetic microbenchmark at GLM-5.2's
+  shape, not from `logits_all_compact` against real weights/routing.
+
+  **Update (2026-08-09): the scratch-reallocation follow-up is closed.**
+  `Glm::compact_scratch` is now a persistent struct field, allocated once at
+  construction sized to the model's full `b * t` capacity (the same convention
+  every other buffer in `Glm` follows), instead of being rebuilt inside
+  `forward_compact` on every `logits_all_compact` call. `sample::generate`'s
+  autoregressive loop no longer pays a GPU allocation per decode step. Verified
+  bit-identical (unchanged `maxabs == 0.0` vs `logits_all`) on both
+  `BRAIN_DEVICE=cpu` and real Vulkan/P40 hardware —
+  `model::compact_forward_tests::logits_all_compact_matches_logits_all` and
+  `sample::kv_gen_tests::generate_kv_matches_recompute_greedy`, plus the full
+  `brain-glm` suite, green on both. That follow-up is now closed.
 
 ## See also
 
