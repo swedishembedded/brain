@@ -501,6 +501,93 @@ fn api_caps_derives_from_manifest_shape() {
     assert!(chat.chat && !chat.embeddings && !chat.image);
     let embed = apiserve::api_caps(&embed_manifest());
     assert!(embed.embeddings && !embed.chat && !embed.image);
+    let image = apiserve::api_caps(&image_manifest());
+    assert!(image.image && !image.chat && !image.embeddings);
+}
+
+/// A FastVLM-shaped model: a streaming `caption` action taking `prompt` and
+/// emitting `Text` — same shape as `chat_manifest` except the action name. The
+/// chat handlers always dispatch the literal action `"generate"`
+/// (`openai.rs`/`anthropic.rs`), so a model whose only prompt-shaped action is
+/// named something else must NOT be advertised as chat: it would be listed by
+/// `/v1/models` and then fail `ActionSpec::validate` on `messages`/`temp` (unknown
+/// params) and the missing required `image` input this fake omits for brevity.
+fn caption_manifest() -> Manifest {
+    Manifest::new(
+        "brain-caption",
+        "an image captioning model",
+        vec![ActionSpec::new("caption", "caption an image")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+            .output(BlobSpec::new("text", Media::Text, "the caption"))],
+    )
+}
+
+/// A CodeFormer/Real-ESRGAN/VQGAN-shaped model: an action emitting an `Image`
+/// output but requiring a source image input and taking no `prompt` — image
+/// *editing*, not text-to-image. `/images/generations` only ever dispatches a
+/// pure text-to-image action ([`text2image_action`]'s contract), so this must
+/// NOT be advertised as `image`: it would be listed and then 404 on that route.
+fn image_edit_manifest() -> Manifest {
+    Manifest::new(
+        "brain-restore",
+        "a face restoration model",
+        vec![ActionSpec::new("restore_face", "restore a degraded face")
+            .input(BlobSpec::new("image", Media::Image, "the degraded face").required())
+            .output(BlobSpec::new("image", Media::Image, "the restored face"))],
+    )
+}
+
+/// A FaceNet-shaped model: an action literally named `embed`, right name, but it
+/// takes a required `image` input and NO `text` param — `/v1/embeddings`
+/// (`openai.rs::handle_embeddings`) always dispatches `embed` with a `text` param
+/// and never a blob, so this would 400 on the missing required input if advertised.
+fn image_embed_manifest() -> Manifest {
+    Manifest::new(
+        "brain-facenet",
+        "a face embedding model",
+        vec![ActionSpec::new("embed", "512-d face identity embedding")
+            .input(BlobSpec::new("image", Media::Image, "the face").required())
+            .output(BlobSpec::new("embedding", Media::Bytes, "the embedding"))],
+    )
+}
+
+/// A CLIP-shaped model: an action shaped like an embedder (a `Bytes` output whose
+/// name contains "embed") but NOT literally named `embed` — `/v1/embeddings`
+/// always dispatches the literal action `"embed"`, so this would fail with "no
+/// action 'embed'" if advertised on the output-blob-name-alone rule the classifier
+/// used to have.
+fn misnamed_embed_manifest() -> Manifest {
+    Manifest::new(
+        "brain-clip",
+        "a text embedding model with the wrong action name",
+        vec![ActionSpec::new("embed_text", "embed a string")
+            .param(ParamSpec::new("text", ParamType::Str, "input text").required())
+            .output(BlobSpec::new("embedding", Media::Bytes, "the embedding"))],
+    )
+}
+
+#[test]
+fn api_caps_rejects_shape_matches_that_are_not_actually_dispatchable() {
+    // Prompt-shaped + streaming + Text output, but the wrong action name: not chat.
+    let caption = apiserve::api_caps(&caption_manifest());
+    assert!(!caption.chat, "a non-\"generate\" action must not be advertised as chat");
+    assert!(!caption.image && !caption.embeddings);
+
+    // Emits an Image output, but it's an edit (required input, no `prompt`): not image.
+    let edit = apiserve::api_caps(&image_edit_manifest());
+    assert!(!edit.image, "an image-editing action (required input blob) must not be advertised as text-to-image");
+    assert!(!edit.chat && !edit.embeddings);
+
+    // Named "embed", but it wants an image, not text: not embeddings.
+    let face = apiserve::api_caps(&image_embed_manifest());
+    assert!(!face.embeddings, "an 'embed' action with no 'text' param must not be advertised as embeddings");
+    assert!(!face.chat && !face.image);
+
+    // Embedding-shaped output, but the action isn't named "embed": not embeddings.
+    let clip = apiserve::api_caps(&misnamed_embed_manifest());
+    assert!(!clip.embeddings, "an action not literally named 'embed' must not be advertised as embeddings, however embedding-shaped its output");
+    assert!(!clip.chat && !clip.image);
 }
 
 // ---------------------------------------------------------------- chat helpers

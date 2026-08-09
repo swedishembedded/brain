@@ -6,10 +6,29 @@
 //!
 //! `api_caps` reads the *shape* of a model's actions — nothing is hard-coded per
 //! model — so a new model shows up in the right `/models` list automatically:
-//! - **Chat**: a streaming action taking a `prompt`/`messages`/`text` param and
-//!   emitting a `Text` output.
-//! - **Embeddings**: an `embed` action, or an output blob that is embedding bytes.
-//! - **ImageGen**: any action emitting an `Image` output.
+//! - **Chat**: a streaming action **named `generate`** taking a `prompt`/`messages`/
+//!   `text` param and emitting a `Text` output. Named, not just shaped, because the
+//!   chat handlers always dispatch the literal action `"generate"`
+//!   (`openai.rs`/`anthropic.rs`) — a differently-shaped-but-similar action (e.g.
+//!   FastVLM's streaming `caption`, which also takes a `prompt` and emits `Text`)
+//!   would be listed but then fail `ActionSpec::validate` on the chat params it
+//!   doesn't declare. See `docs/serving-contract.md`.
+//! - **Embeddings**: an action **named `embed`** that also takes a `text` param.
+//!   Named AND shaped, for two independent reasons `/v1/embeddings`
+//!   (`openai.rs::handle_embeddings`) breaks on otherwise-plausible matches: it
+//!   always dispatches the literal action `"embed"` with a `text` param — never a
+//!   blob — and always reads the result back from an `outputs.mean` scalar. That
+//!   rules out two real models that used to slip through a looser "any embedding-
+//!   shaped output" check: CLIP's `embed_text`/`embed_image` (right shape, wrong
+//!   name — dispatch would 500 with "no action 'embed'") and FaceNet's `embed`
+//!   (right name, but it takes a required `image` blob and no `text` param at all
+//!   — dispatch would 400 on the missing input). LFM's `embed` (a `text` param,
+//!   falling back to a `text` blob for long documents, and it actually populates
+//!   `outputs.mean`) is the shape this rule is built to admit.
+//! - **ImageGen**: a pure text-to-image action — see [`text2image_action`]. Not just
+//!   "emits an `Image`", because `/images/generations` only ever dispatches that one
+//!   action; image-*editing* models (restore/upscale/vqgan) emit `Image` too but have
+//!   no such action and would otherwise be advertised on a route that 404s them.
 //!
 //! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen; Anthropic exposes Chat.
 
@@ -37,14 +56,13 @@ impl CapSet {
 /// Derive the [`CapSet`] from a manifest's action shapes.
 pub fn api_caps(m: &Manifest) -> CapSet {
     let chat = m.actions.iter().any(|a| {
-        a.streaming
+        a.name == "generate"
+            && a.streaming
             && a.params.iter().any(|p| matches!(p.name.as_str(), "prompt" | "messages" | "text"))
             && a.outputs.iter().any(|o| o.media == Media::Text)
     });
-    let embeddings = m.actions.iter().any(|a| {
-        a.name == "embed" || a.outputs.iter().any(|o| o.media == Media::Bytes && o.name.contains("embed"))
-    });
-    let image = m.actions.iter().any(|a| a.outputs.iter().any(|o| o.media == Media::Image));
+    let embeddings = m.actions.iter().any(|a| a.name == "embed" && a.params.iter().any(|p| p.name == "text"));
+    let image = text2image_action(m).is_some();
     CapSet { chat, embeddings, image }
 }
 

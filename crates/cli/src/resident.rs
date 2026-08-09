@@ -129,6 +129,18 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     // stateless resident — invoking it with no checkpoint on disk is a clean
     // per-call error, not a registration failure.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(fastvlm::caps::FastVlmProvider::new()))));
+    // brain/imgpipe: the pipeline holds no weights of its own (each stage
+    // resolves its own via BRAIN_* env vars, same as when called through
+    // `brain do`), so it is stateless from the scheduler's point of view too.
+    // Built via `catalog::provider`, not a fresh `PipelineProvider`, so this
+    // resident is guaranteed to compose the SAME stage registry `brain caps`/
+    // `brain do` see — the earlier bug (`ai-forever/Real-ESRGAN` unreachable
+    // over D-Bus/HTTP despite a working `brain do`) was exactly two lists
+    // drifting apart. `provider()` never fails for imgpipe (its ctor is
+    // `always!`-shaped), so this push is unconditional.
+    if let Ok(p) = crate::catalog::provider(imgpipe::caps::MODEL) {
+        models.push(Arc::new(ProviderResident::stateless(p)));
+    }
 
     // Global model directory: append every discovered file as its own catalog
     // entry (keyed by model-card id), deduped against the env-gated residents
