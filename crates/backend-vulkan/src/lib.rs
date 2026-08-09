@@ -25,13 +25,28 @@
 //! correct and simple; a perf pass can add a staged device-local path later.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use vulkan::context::{VkBuffer, VkContext};
 use vulkan::shader;
 
 use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
+
+/// Ceiling for one `wait_for_fences` call, nanoseconds. Generous — a legitimate
+/// prefill dispatch is slow — but finite: `u64::MAX` (the previous value) made a
+/// wedged queue block the process forever rather than error, which is why past
+/// hangs (M16's `encode-vision`, `gpu_core::roofline`) presented as unkillable
+/// instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+fn gpu_wait_timeout_ns() -> u64 {
+    const DEFAULT_S: f64 = 30.0;
+    let secs = std::env::var("BRAIN_GPU_WAIT_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(DEFAULT_S);
+    (secs * 1e9) as u64
+}
 
 /// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y). All
 /// fields are `Copy`, so `VkStep` is `Clone` like the wgpu backend's.
@@ -81,6 +96,41 @@ struct KernelPipeline {
     bindings: Vec<(u32, bool)>,
 }
 
+/// One kernel set's compiled pipelines, plus the `Arc<VkContext>` that keeps
+/// their owning device/instance alive for at least as long as they do.
+///
+/// This is the unit [`VulkanBackend::share`]/[`VulkanBackend::new_like`] pass
+/// around: `share()` clones the `Arc` (same pipelines, same device — a second
+/// handle with its own command stream); `new_like()` compiles a FRESH set
+/// against the SAME `ctx` (new pipelines, same device). Before this type
+/// existed, `VulkanBackend` had no way to hand out a second handle onto its
+/// device at all, so `Backend::share`/`Backend::new_like` fell through to the
+/// trait's `None` default and every caller asking this backend to share
+/// (`gpu_core::testgpu::dev`, `gpu_core::roof::measure`'s internal probe
+/// device) silently built a WHOLE NEW Vulkan device instead — the exact
+/// "many concurrent devices on one card" shape `device_sharing.rs` documents
+/// as deadlocking the NVIDIA driver roughly half the time. See
+/// `docs/lessons.md`'s Vulkan-device-sharing entry.
+struct VkPipelineSet {
+    ctx: Arc<VkContext>,
+    pipelines: Vec<KernelPipeline>,
+    wgsizes: Vec<u32>,
+}
+
+impl Drop for VkPipelineSet {
+    fn drop(&mut self) {
+        let dev = &self.ctx.device;
+        unsafe {
+            for kp in &self.pipelines {
+                dev.destroy_pipeline(kp.pipeline, None);
+                dev.destroy_pipeline_layout(kp.layout, None);
+                dev.destroy_descriptor_set_layout(kp.set_layout, None);
+                dev.destroy_shader_module(kp.module, None);
+            }
+        }
+    }
+}
+
 /// The Vulkan compute device.
 /// Relaxed device-op counters, mirroring what the wgpu backend records so the
 /// two are directly comparable.
@@ -94,7 +144,11 @@ struct OpCounters {
 }
 
 pub struct VulkanBackend {
-    ctx: VkContext,
+    /// The device/instance/queue. `Arc`-shared: `share()` clones this handle,
+    /// `new_like()` clones it too (same device, fresh pipelines) — the device
+    /// is destroyed exactly once, when the last `VulkanBackend`/`WeakVulkan`
+    /// referencing it drops.
+    ctx: Arc<VkContext>,
     /// What this device can do — queried once at construction from the
     /// physical device (see `backend_api::DeviceCaps`).
     caps: backend_api::DeviceCaps,
@@ -102,12 +156,11 @@ pub struct VulkanBackend {
     /// ~2 GiB default, which over-reports on devices with a smaller range
     /// (an oversized binding fails at dispatch, not allocation).
     max_storage_binding: u64,
-    pipelines: Vec<KernelPipeline>,
-    /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`), so the
-    /// grid is laid out with the size the kernel itself reconstructs its flat
-    /// invocation id from — 64 for almost everything, 256 for the register-tiled
-    /// GEMMs.
-    wgsizes: Vec<u32>,
+    /// This handle's compiled kernel set. `Arc`-shared with every `share()`
+    /// sibling; a fresh `Arc` (refcount 1) for every `new_like()` result, so
+    /// each kernel set's pipelines are destroyed independently of the others'
+    /// lifetime — see [`VkPipelineSet`].
+    pipelines: Arc<VkPipelineSet>,
     /// Device-op counters, always maintained (relaxed atomics are negligible
     /// next to a dispatch) — the same contract `backend-wgpu` and
     /// `backend-cpu` implement. Without them `Backend::stats()` fell through to
@@ -294,8 +347,23 @@ impl VulkanBackend {
             })?,
         };
         log_adapter(&ctx.adapter_name);
-        let dev = &ctx.device;
+        let ctx = Arc::new(ctx);
+        let pipelines = Self::compile_pipeline_set(ctx.clone(), kernels)?;
+        let caps = Self::query_caps(&ctx);
+        let max_storage_binding = unsafe {
+            ctx.instance.get_physical_device_properties(ctx.physical_device)
+        }
+        .limits
+        .max_storage_buffer_range as u64;
+        Self::from_shared(ctx, Arc::new(pipelines), caps, max_storage_binding)
+    }
 
+    /// Compile `kernels` into a [`VkPipelineSet`] against an already-built
+    /// `ctx` — the shared core of both initial construction and
+    /// [`VulkanBackend::new_like`] (a fresh pipeline set on an EXISTING
+    /// device, never a new `VkContext`).
+    fn compile_pipeline_set(ctx: Arc<VkContext>, kernels: &[(&str, &str)]) -> Result<VkPipelineSet, String> {
+        let dev = &ctx.device;
         let mut pipelines = Vec::with_capacity(kernels.len());
         for (name, src) in kernels {
             let spirv = shader::wgsl_to_spirv(src).map_err(|e| format!("{name}: {e}"))?;
@@ -344,20 +412,27 @@ impl VulkanBackend {
                 pipelines.push(KernelPipeline { module, set_layout, layout, pipeline, bindings });
             }
         }
+        let wgsizes = backend_api::workgroup_sizes(kernels);
+        Ok(VkPipelineSet { ctx, pipelines, wgsizes })
+    }
 
-        let pool = unsafe { new_pool(dev)? };
-        let caps = Self::query_caps(&ctx);
-        let max_storage_binding = unsafe {
-            ctx.instance.get_physical_device_properties(ctx.physical_device)
-        }
-        .limits
-        .max_storage_buffer_range as u64;
+    /// Build a `VulkanBackend` handle around an existing `ctx`/`pipelines` —
+    /// the common tail of fresh construction, [`VulkanBackend::share`] and
+    /// [`VulkanBackend::new_like`]. Every handle gets its OWN descriptor pool
+    /// and command-stream state (`pending`/`uniforms`/`free_sets`/...): those
+    /// must never be shared, or two handles' batches would interleave.
+    fn from_shared(
+        ctx: Arc<VkContext>,
+        pipelines: Arc<VkPipelineSet>,
+        caps: backend_api::DeviceCaps,
+        max_storage_binding: u64,
+    ) -> Result<VulkanBackend, String> {
+        let pool = unsafe { new_pool(&ctx.device)? };
         Ok(VulkanBackend {
             ctx,
             caps,
             max_storage_binding,
             pipelines,
-            wgsizes: backend_api::workgroup_sizes(kernels),
             stats: OpCounters::default(),
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
@@ -579,7 +654,7 @@ impl VulkanBackend {
         threads: u32,
         transient: bool,
     ) -> VkStep {
-        let kp = &self.pipelines[kind];
+        let kp = &self.pipelines.pipelines[kind];
         let dev = &self.ctx.device;
         // Transient sets recycle through `free_sets` (same pipeline => same
         // layout; the flush's fence wait made them idle, so rewriting below via
@@ -629,7 +704,7 @@ impl VulkanBackend {
             })
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
-        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
+        let (gx, gy) = backend_api::grid_ws(threads, self.pipelines.wgsizes[kind]);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
         VkStep { kind, set, gx, gy, sliced, transient }
     }
@@ -654,11 +729,11 @@ impl VulkanBackend {
     fn run_clears(&self, clears: &[&VkOwnedBuffer]) {
         let dev = &self.ctx.device;
         unsafe {
-            let cmd = self.begin_cmd();
+            let (cmd, guard) = self.begin_cmd();
             for c in clears {
                 dev.cmd_fill_buffer(cmd, c.inner.buffer, 0, c.inner.size, 0);
             }
-            self.end_and_wait(cmd);
+            self.end_and_wait(cmd, guard);
         }
     }
 
@@ -689,19 +764,19 @@ impl VulkanBackend {
         if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.sliced))) {
             unsafe {
                 for s in &steps {
-                    let cmd = self.begin_cmd();
-                    let kp = &self.pipelines[s.kind];
+                    let (cmd, guard) = self.begin_cmd();
+                    let kp = &self.pipelines.pipelines[s.kind];
                     dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
                     dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
                     dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
-                    self.end_and_wait(cmd);
+                    self.end_and_wait(cmd, guard);
                 }
             }
             self.recycle_transients(&steps);
             return;
         }
         unsafe {
-            let cmd = self.begin_cmd();
+            let (cmd, guard) = self.begin_cmd();
             // Conservative full memory barrier between dependent dispatches: every
             // prior shader write is made available/visible to subsequent shader
             // reads/writes. (A finer per-buffer barrier is a later optimisation.)
@@ -720,7 +795,7 @@ impl VulkanBackend {
                         &[],
                     );
                 }
-                let kp = &self.pipelines[s.kind];
+                let kp = &self.pipelines.pipelines[s.kind];
                 dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
                 dev.cmd_bind_descriptor_sets(
                     cmd,
@@ -732,7 +807,7 @@ impl VulkanBackend {
                 );
                 dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
             }
-            self.end_and_wait(cmd);
+            self.end_and_wait(cmd, guard);
         }
         self.recycle_transients(&steps);
     }
@@ -756,7 +831,14 @@ impl VulkanBackend {
         }
     }
 
-    unsafe fn begin_cmd(&self) -> vk::CommandBuffer {
+    /// Begins recording and returns the lock guarding `ctx.queue`/
+    /// `ctx.command_pool` for the whole record-submit-wait-free sequence —
+    /// held from here until [`VulkanBackend::end_and_wait`] drops it. Both
+    /// are shared, non-thread-safe Vulkan objects once `share()`/`new_like()`
+    /// hand out a second live handle onto the same `ctx` (see
+    /// `VkContext::queue_lock`'s doc comment).
+    unsafe fn begin_cmd(&self) -> (vk::CommandBuffer, std::sync::MutexGuard<'_, ()>) {
+        let guard = self.ctx.queue_guard();
         let dev = &self.ctx.device;
         let alloc = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.ctx.command_pool)
@@ -768,10 +850,10 @@ impl VulkanBackend {
             &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )
         .expect("begin cmd");
-        cmd
+        (cmd, guard)
     }
 
-    unsafe fn end_and_wait(&self, cmd: vk::CommandBuffer) {
+    unsafe fn end_and_wait(&self, cmd: vk::CommandBuffer, _guard: std::sync::MutexGuard<'_, ()>) {
         self.ctx.submits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dev = &self.ctx.device;
         dev.end_command_buffer(cmd).expect("end cmd");
@@ -779,7 +861,21 @@ impl VulkanBackend {
         let cmds = [cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&cmds);
         dev.queue_submit(self.ctx.queue, &[submit], fence).expect("queue_submit");
-        dev.wait_for_fences(&[fence], true, u64::MAX).expect("wait_for_fences");
+        let timeout_ns = gpu_wait_timeout_ns();
+        match dev.wait_for_fences(&[fence], true, timeout_ns) {
+            Ok(()) => {}
+            // Do NOT silently retry -- report which submit wedged rather than
+            // masking it with another indefinite wait.
+            Err(vk::Result::TIMEOUT) => panic!(
+                "GPU submit did not complete within {:.1}s (BRAIN_GPU_WAIT_S) -- \
+                 device likely wedged",
+                timeout_ns as f64 / 1e9
+            ),
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                panic!("GPU device lost while waiting for a submit to complete")
+            }
+            Err(e) => panic!("wait_for_fences: {e:?}"),
+        }
         dev.destroy_fence(fence, None);
         dev.free_command_buffers(self.ctx.command_pool, &cmds);
     }
@@ -804,12 +900,10 @@ impl Drop for VulkanBackend {
             for &pool in self.pools.lock().unwrap().iter() {
                 dev.destroy_descriptor_pool(pool, None);
             }
-            for kp in &self.pipelines {
-                dev.destroy_pipeline(kp.pipeline, None);
-                dev.destroy_pipeline_layout(kp.layout, None);
-                dev.destroy_descriptor_set_layout(kp.set_layout, None);
-                dev.destroy_shader_module(kp.module, None);
-            }
+            // Pipelines are NOT destroyed here: `self.pipelines` is an
+            // `Arc<VkPipelineSet>`, possibly shared with a `share()` sibling
+            // still alive. `VkPipelineSet::drop` destroys them exactly once,
+            // when the last handle referencing this kernel set drops.
         }
         // Model storage buffers (host-visible) are reclaimed by the OS on process
         // exit; a one-shot CLI never frees them mid-run.
@@ -840,11 +934,75 @@ fn log_adapter(name: &str) {
     LOGGED.call_once(|| eprintln!("adapter: {name} (Vulkan compute, ash + naga WGSL->SPIR-V)"));
 }
 
+/// A weak handle onto a Vulkan device's shared state (`ctx` via the kernel
+/// set's own `Arc`, plus the kernel set itself): keeps neither alive.
+/// `upgrade()` reconstructs a real, fully-functional handle sharing both, iff
+/// something else still holds them live — the same "the device dies with its
+/// last real handle, never at process exit" contract `WeakWgpu` implements
+/// for the wgpu backend, so `gpu_core::testgpu::dev`'s pool can track a
+/// Vulkan device without itself keeping it alive.
+struct WeakVulkan {
+    pipelines: std::sync::Weak<VkPipelineSet>,
+    caps: backend_api::DeviceCaps,
+    max_storage_binding: u64,
+}
+
+// SAFETY: mirrors `VulkanBackend`'s own `unsafe impl Send/Sync` just below —
+// the ash handles reachable through `Weak<VkPipelineSet>` are themselves
+// Send+Sync (thin wrappers over a function-pointer table + handle), and this
+// type holds no interior-mutable state of its own to race on.
+unsafe impl Send for WeakVulkan {}
+unsafe impl Sync for WeakVulkan {}
+
+impl backend_api::WeakBackend for WeakVulkan {
+    fn upgrade(&self) -> Option<Box<dyn Backend>> {
+        let pipelines = self.pipelines.upgrade()?;
+        let ctx = pipelines.ctx.clone();
+        let backend = VulkanBackend::from_shared(ctx, pipelines, self.caps.clone(), self.max_storage_binding)
+            .unwrap_or_else(|e| panic!("vulkan: upgrading a shared device handle: {e}"));
+        Some(Box::new(backend))
+    }
+}
+
 /// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
 /// `VkOwnedBuffer`/[`VkStep`] and delegate to the inherent methods.
 impl Backend for VulkanBackend {
     fn kind(&self) -> &'static str {
         "vulkan"
+    }
+    /// A second handle onto the SAME device (instance/device/queue) and the
+    /// SAME compiled pipelines, with its own command stream — the Vulkan
+    /// sibling of `WgpuBackend::share_device`. Before this existed, this
+    /// method fell through to the trait's `None` default and every caller of
+    /// `Gpu::share`/`gpu_core::testgpu::dev` on the Vulkan backend silently
+    /// built a whole new device instead of truly sharing one (see
+    /// [`VkPipelineSet`]'s doc comment).
+    fn share(&self) -> Option<Box<dyn Backend>> {
+        let backend = Self::from_shared(self.ctx.clone(), self.pipelines.clone(), self.caps.clone(), self.max_storage_binding)
+            .unwrap_or_else(|e| panic!("vulkan share: {e}"));
+        Some(Box::new(backend))
+    }
+    /// A handle for a DIFFERENT kernel set on the SAME device — compiles
+    /// fresh pipelines against the existing `ctx` rather than building a new
+    /// `VkContext` (new instance + device + queue). This is the fix for the
+    /// "many concurrent Vulkan devices deadlock the driver" class: before
+    /// this existed, `new_like` fell through to the trait's `None` default,
+    /// and `Gpu::new_like` (the caller's contract on that `None`) built an
+    /// entirely separate device as a "fallback" that was actually the
+    /// dangerous path, not a safe one.
+    fn new_like(&self, kernels: &[(&str, &str)]) -> Option<Box<dyn Backend>> {
+        let pipelines = Self::compile_pipeline_set(self.ctx.clone(), kernels)
+            .unwrap_or_else(|e| panic!("vulkan new_like: {e}"));
+        let backend = Self::from_shared(self.ctx.clone(), Arc::new(pipelines), self.caps.clone(), self.max_storage_binding)
+            .unwrap_or_else(|e| panic!("vulkan new_like: {e}"));
+        Some(Box::new(backend))
+    }
+    fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {
+        Some(Box::new(WeakVulkan {
+            pipelines: Arc::downgrade(&self.pipelines),
+            caps: self.caps.clone(),
+            max_storage_binding: self.max_storage_binding,
+        }))
     }
     /// Device-op accounting — the same counters the other two backends report,
     /// so "how many submits/readbacks did this run cost" has a real answer on

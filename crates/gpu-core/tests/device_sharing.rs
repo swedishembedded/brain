@@ -13,9 +13,16 @@
 //! second handle onto the same device (same queue and compiled pipelines, its
 //! own command stream). These tests pin that a shared handle really is the same
 //! device doing correct work, including from many threads at once.
+//!
+//! Runs on both `wgpu` and `vulkan`: `VulkanBackend::share`/`new_like` used to
+//! silently fall through to the `Backend` trait's `None` default (no Vulkan
+//! implementation existed), so `Gpu::share` on this backend built a WHOLE NEW
+//! device instead of truly sharing one — the exact "many concurrent devices on
+//! one card" shape this file exists to rule out, just never exercised here.
+//! See `docs/lessons.md`'s Vulkan-device-sharing entry.
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || gpu_core::backend_name() != "wgpu"
+    std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || !matches!(gpu_core::backend_name(), "wgpu" | "vulkan")
 }
 
 const K: &[(&str, &str)] = &[("add2", kernels::ADD2)];

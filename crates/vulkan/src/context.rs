@@ -133,6 +133,25 @@ pub struct VkContext {
     /// submit + fence wait). Perf observability: inference must keep this O(1)
     /// per frame, not O(dispatches) — see `backend-vulkan/tests/perf_contract.rs`.
     pub submits: std::sync::atomic::AtomicU64,
+    /// Guards every use of `queue` and `command_pool`: the Vulkan spec requires
+    /// host access to a `VkQueue` (`vkQueueSubmit`) AND to a `VkCommandPool`
+    /// (`vkAllocateCommandBuffers`/recording/`vkFreeCommandBuffers`) to be
+    /// EXTERNALLY synchronized — concurrent calls from two threads are
+    /// undefined behaviour, not merely a data race Rust's type system would
+    /// catch (both are `Copy` handles, so nothing stops two threads compiling
+    /// cleanly). `VulkanBackend::share`/`new_like` (backend-vulkan) hand out
+    /// exactly this shape — several live handles onto one `ctx`, each with its
+    /// own command-stream STATE but the SAME underlying queue/pool — so every
+    /// call site that touches `queue` or `command_pool` must hold this lock
+    /// for its whole allocate-record-submit-wait-free sequence. Confirmed load-
+    /// bearing, not theoretical: omitting it reproduced a real
+    /// `ERROR_DEVICE_LOST` on P40 hardware within seconds of 8 threads sharing
+    /// one device (`crates/gpu-core/tests/device_sharing.rs`'s
+    /// `concurrent_shared_handles_do_not_deadlock`). GPU *execution* stays
+    /// exactly as serial as before this lock existed (every submit here is
+    /// already synchronous submit+fence-wait, never pipelined), so this only
+    /// serializes the HOST-side race, not real device throughput.
+    pub queue_lock: std::sync::Mutex<()>,
 }
 
 /// Non-fp32 arithmetic the device exposes and this context enabled. fp32 is
@@ -432,7 +451,14 @@ impl VkContext {
             mem_props,
             staging: std::sync::Mutex::new(None),
             submits: std::sync::atomic::AtomicU64::new(0),
+            queue_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Acquire the lock guarding `queue`/`command_pool` for the caller's whole
+    /// allocate-record-submit-wait-free sequence — see [`VkContext::queue_lock`].
+    pub fn queue_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.queue_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Enumerate cooperative-matrix shapes + read the feature bit.
@@ -575,6 +601,7 @@ impl VkContext {
     /// Run `f` to record a one-off command buffer, then submit + fence-wait.
     fn run_cmd(&self, f: impl FnOnce(vk::CommandBuffer)) {
         self.submits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _guard = self.queue_guard();
         unsafe {
             let alloc = vk::CommandBufferAllocateInfo::default()
                 .command_pool(self.command_pool)
@@ -699,6 +726,7 @@ impl VkContext {
         descriptor_set: vk::DescriptorSet,
         groups: (u32, u32, u32),
     ) {
+        let _guard = self.queue_guard();
         unsafe {
             let alloc = vk::CommandBufferAllocateInfo::default()
                 .command_pool(self.command_pool)
