@@ -121,10 +121,31 @@ impl MmapSafetensors {
 
     /// Materialize one tensor to f32, decoding on access from the mmap. Byte-identical
     /// to [`crate::safetensors::parse`] for the same tensor.
+    ///
+    /// Panics (does not silently return an empty/wrong vector) if the tensor's
+    /// dtype has no f32 decoding — `U32` is the case that matters in practice
+    /// (brain's own int8-native packed-weight tensors, `crate::weightio::
+    /// Dtype::U32`): those are not meaningfully convertible to f32 at all, so
+    /// a caller that reaches for `tensor_f32` on one has the wrong accessor,
+    /// not a value worth defaulting to `[]` for. Use [`Self::tensor_u32`].
     pub fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
         let m = self.index.get(name)?;
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
-        Some(decode(&m.dtype, raw))
+        Some(decode(name, &m.dtype, raw))
+    }
+
+    /// Materialize one tensor as packed `u32` words (little-endian), decoding
+    /// on access from the mmap — the read side of [`crate::weightio::
+    /// StWriter::write_u32`]'s int8-native packed layout (4 int8 lanes per
+    /// u32, written as-is with no repacking). Panics if the tensor's declared
+    /// dtype is not `"U32"` — reading a float tensor through this accessor
+    /// would silently reinterpret its bits as something else entirely, which
+    /// is worse than refusing.
+    pub fn tensor_u32(&self, name: &str) -> Option<Vec<u32>> {
+        let m = self.index.get(name)?;
+        assert_eq!(m.dtype, "U32", "tensor_u32: '{name}' has dtype {}, not U32", m.dtype);
+        let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
+        Some(raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
     }
 
     /// One tensor as an [`StTensor`] (shape + f32 data).
@@ -149,7 +170,7 @@ impl MmapSafetensors {
     }
 }
 
-fn decode(dtype: &str, raw: &[u8]) -> Vec<f32> {
+fn decode(name: &str, dtype: &str, raw: &[u8]) -> Vec<f32> {
     match dtype {
         "F32" => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
         "F16" => raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
@@ -157,7 +178,13 @@ fn decode(dtype: &str, raw: &[u8]) -> Vec<f32> {
         "I64" => raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
         "I32" => raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32).collect(),
         "U8" => raw.iter().map(|&b| b as f32).collect(),
-        _ => Vec::new(),
+        // Previously fell through to `Vec::new()` -- a packed U32 tensor (or
+        // any future dtype this decoder doesn't know) would silently read as
+        // an empty, valid-looking vector instead of failing. Loud is correct
+        // here: `tensor_f32` promises an f32 decoding exists; if it doesn't,
+        // the caller has the wrong accessor (U32 -> `tensor_u32`), not a
+        // value worth defaulting to `[]` for.
+        other => panic!("'{name}': no f32 decoding for dtype {other} (packed dtypes need their own accessor, e.g. tensor_u32)"),
     }
 }
 

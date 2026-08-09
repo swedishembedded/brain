@@ -148,6 +148,21 @@ impl WeightReader {
         self.shapes.get(name).map(|s| s.as_slice())
     }
 
+    /// A tensor's declared safetensors dtype string (`"F32"`/`"U32"`/…), if
+    /// present -- the safe way to check whether a tensor is packed (`U32`,
+    /// [`Self::tensor_u32`]'s domain) before reaching for [`Self::tensor`]
+    /// or [`Self::tensor_u32`], both of which panic on the wrong accessor
+    /// rather than silently return an empty/reinterpreted value. `None` for
+    /// GGUF -- brain's int8-native packed-weight convention is
+    /// safetensors-only ([`Self::tensor_u32`]'s own doc).
+    pub fn dtype(&self, name: &str) -> Option<&str> {
+        match &self.inner {
+            Inner::St(m) => m.dtype(name),
+            Inner::Gguf(_) => None,
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].dtype(name),
+        }
+    }
+
     /// The model config: `brain.config` for safetensors, the KV map for GGUF.
     pub fn config(&self) -> Value {
         match &self.inner {
@@ -185,6 +200,22 @@ impl WeightReader {
             Inner::St(m) => m.tensor_f32(name),
             Inner::Gguf(m) => m.tensor(name).map(|r| r.expect("gguf dequant")),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_f32(name),
+        }
+    }
+
+    /// Decode exactly one tensor as packed `u32` words -- the read side of
+    /// [`StWriter::write_u32`]'s int8-native packed layout
+    /// (`model::int8::quantize_weight`'s 4-int8-per-u32 packing, stored
+    /// as-is). `None` if the name is unknown. Panics if the tensor's declared
+    /// dtype is not `U32` (safetensors: [`MmapSafetensors::tensor_u32`]'s own
+    /// panic), or unconditionally for GGUF -- brain writes int8-native
+    /// checkpoints only as safetensors, so a GGUF caller reaching for this
+    /// has the wrong reader, not a value worth defaulting past.
+    pub fn tensor_u32(&self, name: &str) -> Option<Vec<u32>> {
+        match &self.inner {
+            Inner::St(m) => m.tensor_u32(name),
+            Inner::Gguf(_) => panic!("tensor_u32: '{name}': GGUF has no U32 packed-weight convention -- this is a safetensors-only accessor"),
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_u32(name),
         }
     }
 
@@ -599,13 +630,57 @@ mod tests {
         let got_scale_f32: Vec<f32> = got_scale.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
         assert_eq!(got_scale_f32, scale);
 
-        // Brain's own streaming reader still reads the F32 tensor correctly
-        // (int8-native reading is a separate, not-yet-built seam — the plan
-        // record notes this; this file only needs to WRITE the format today).
+        // Brain's own streaming reader reads both the F32 tensors AND the
+        // packed U32 tensor -- bit-identical round trip through tensor_u32,
+        // read back independently of the raw-safetensors check above.
         let r = WeightReader::open(&p).unwrap();
         assert_eq!(r.tensor("plain.weight").unwrap(), plain);
+        assert_eq!(r.tensor("expert.0.gate.scale").unwrap(), scale);
+        assert_eq!(r.tensor_u32("expert.0.gate.weight").unwrap(), packed);
+        // tensor_f32 on a U32 tensor must error loudly, not silently return
+        // an empty/reinterpreted vector -- reaching for the wrong accessor is
+        // a caller bug, not a value worth papering over.
+        let f32_on_u32 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.tensor("expert.0.gate.weight")));
+        assert!(f32_on_u32.is_err(), "tensor() (f32 decode) on a U32 tensor should panic, not return a value");
 
         std::fs::remove_file(&p).ok();
+    }
+
+    /// The round-trip gate Phase 4 asks for, in isolation from the mixed-file
+    /// test above: a packed tensor written via `write_u32` reads back
+    /// bit-identical via `tensor_u32`, and an unknown/wrong-accessor dtype
+    /// errors (panics) rather than silently yielding `[]` -- the defect
+    /// `decode`'s old `_ => Vec::new()` catch-all had.
+    #[test]
+    fn u32_round_trips_and_wrong_accessor_errors_loudly() {
+        let p = scratch("u32-roundtrip");
+        let plan = vec![("packed".to_string(), vec![3u64], Dtype::U32)];
+        let data: Vec<u32> = vec![0xDEAD_BEEF, 0x0000_0001, 0xFFFF_FFFF];
+
+        let mut w = StWriter::create_mixed(&p, &plan, &Value::Null, None).unwrap();
+        w.write_u32("packed", &data).unwrap();
+        w.finish().unwrap();
+
+        let r = WeightReader::open(&p).unwrap();
+        assert_eq!(r.tensor_u32("packed").unwrap(), data);
+
+        // Wrong accessor on a real U32 tensor: loud, not empty.
+        let via_f32 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.tensor("packed")));
+        assert!(via_f32.is_err(), "tensor_f32 on a U32 tensor must panic rather than return []");
+
+        // Wrong accessor the other direction: tensor_u32 on a real F32
+        // tensor must also refuse rather than reinterpret the bits.
+        let plan2 = vec![("float".to_string(), vec![2u64])];
+        let p2 = scratch("u32-roundtrip-f32");
+        let mut w2 = StWriter::create(&p2, &plan2, &Value::Null, None).unwrap();
+        w2.write("float", &[1.5, 2.5]).unwrap();
+        w2.finish().unwrap();
+        let r2 = WeightReader::open(&p2).unwrap();
+        let u32_via_f32 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r2.tensor_u32("float")));
+        assert!(u32_via_f32.is_err(), "tensor_u32 on an F32 tensor must panic rather than reinterpret its bits");
+
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(&p2).ok();
     }
 
     #[test]
