@@ -247,6 +247,48 @@ browser demo (`make web/dev`).
 brain pid …                           # see `brain pid` for the subcommands
 ```
 
+### The rest of the catalog
+
+The six above get a full walkthrough because they're the models most people start
+with; brain has grown a much larger family since, all sharing this same engine and
+gradient-check discipline. Full detail — architecture notes, parity numbers,
+serving status — lives in [`AGENTS.md`](AGENTS.md)'s "Models (today)" section and
+each model's own `docs/models/<name>/` (or `docs/imaging/plan.md` for the imaging
+pipeline models below).
+
+| Model | Crate | What it is |
+|---|---|---|
+| GLM-5.2 | `glm` | MLA + MoE + DSA indexer + MTP decoder |
+| Qwen3-Omni-30B Thinker | `omni` | dense-then-MoE Qwen3-based omni-modal decoder, served over multi-GPU residency |
+| Qwen3-VL-4B | `qwenvl` | Qwen3 decoder + vision encoder, image-conditioned generation |
+| FastVLM-0.5B | `fastvlm` | Apple's FastViTHD vision encoder + LLaVA-style splice into a Qwen2 decoder |
+| Moondream 3 | `moondream` | vision encoder + parallel-block decoder VLM |
+| Seq2seq | `seq2seq` | encoder-decoder Transformer |
+| LFM2.5-Encoder | `lfm` | LiquidAI's bidirectional conv/attention hybrid, MLM |
+| Bottleneck autoencoder | `autoencoder` | sequence → single-vector bottleneck → sequence |
+| ASR (streaming) | `qwen-asr` | Whisper-style + Nemotron FastConformer streaming transducer |
+| Z-Image | `zimage` | Tongyi S³-DiT text-to-image |
+| FLUX.1 / Kontext | `flux1` | BFL's 12B MMDiT text-to-image + edit path |
+| FLUX.2 Klein | `flux2` | BFL's 4B/9B MMDiT text-to-image |
+| T5-XXL encoder | `t5` | text conditioning encoder for FLUX.1 |
+| SDXL UNet2DConditionModel | `unet` | SDXL diffusion UNet + discrete samplers |
+| ControlNet | `controlnet` | backbone-agnostic spatial control seam for SDXL |
+| PuLID-FLUX | `pulid` | ArcFace-conditioned identity injection into FLUX.1 |
+| VQGAN / CodeFormer autoencoder | `vqgan` | VQ autoencoder shared by CodeFormer and the imaging pipeline |
+| CodeFormer restoration | `restore` | code-Transformer face restoration over `vqgan` |
+| Real-ESRGAN | `upscale` | RRDBNet super-resolution, the imaging pipeline's upscale tail |
+| CLIP | `clip` | CLIP-L / OpenCLIP-bigG / EVA-CLIP text + image towers |
+| SAM 2.1 | `sam2` | promptable segmentation (image path: Hiera trunk, FPN neck, two-way mask decoder) |
+| ZipDepth | `depth` | 6.1M-param monocular depth network |
+| Face recognition | `facenet` | SCRFD detector + alignment + ArcFace embedding |
+| WorldMirror-2 | `mirror` | multi-view 3D reconstruction |
+| 3D Gaussian Splatting | `splat` | from-scratch tiled 3DGS rasterizer + fit + viewer |
+| Chronos-2 | `chronos2` | encoder-only T5-style patch transformer forecaster |
+| Kronos | `kronos` | BSQ-tokenized OHLCV forecaster |
+| FinCast | `fincast` | TimesFM-style patched decoder forecaster |
+| DIAMOND | `wm-diamond` | EDM diffusion world model (Atari-100k) |
+| GenieRedux-G | `wm-genie` | CoinRun ST-transformer world model |
+
 ---
 
 ## Architecture-evaluation harness (`brain bench`)
