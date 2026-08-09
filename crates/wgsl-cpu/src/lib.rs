@@ -623,11 +623,22 @@ fn compile_one_wg(
     }
 
     // Expressions materialised (Emit'd) before the barrier but used after it must
-    // be re-materialised at the TOP of each segment's invocation body — otherwise
-    // the after-segment lazily evaluates them on first use (often deep in a nested
-    // loop) and reuses them in a shallower block, breaking SSA dominance. These
-    // top-level pre-barrier lets depend only on builtins/uniforms (not loop vars),
-    // so evaluating them at the segment top is always valid.
+    // be re-materialised at the TOP of the AFTER-segment's invocation body —
+    // otherwise the after-segment lazily evaluates them on first use (often deep
+    // in a nested loop) and reuses them in a shallower block, breaking SSA
+    // dominance. This must NOT also run before the BEFORE-segment's own
+    // translation: `carried` sweeps every top-level `Emit` in `seg_before`,
+    // including ones that syntactically follow a `Store` to a local variable
+    // earlier in that same segment (e.g. `var a = x[row]; partial[t] = a;` emits
+    // `Load(a)` as part of the second statement's top-level Emit). Pre-evaluating
+    // that Emit before `seg_before` has even run its own `Store` reads the
+    // variable's zero-initialised value and caches it, so the segment's real,
+    // correctly-ordered evaluation later finds the (wrong) value already cached
+    // and never re-evaluates it — silently dropping the local's assignment. Only
+    // `seg_after`'s Tr instance needs the pre-materialised values (it starts with
+    // an empty cache and no other way to see seg_before's results); `seg_before`
+    // always sees its own expressions translated in true program order, so it
+    // must not be pre-fed a stale carried list.
     let mut carried: Vec<Handle<Expression>> = Vec::new();
     for s in seg_before.iter() {
         if let Statement::Emit(range) = s {
@@ -636,6 +647,7 @@ fn compile_one_wg(
             }
         }
     }
+    let no_carried: Vec<Handle<Expression>> = Vec::new();
 
     // Workgroup loop bounds: [start/wgsize, end/wgsize).
     let wgsz = builder.ins().iconst(types::I64, wgsize);
@@ -659,9 +671,9 @@ fn compile_one_wg(
     // `wg` (the loop-header param) so every operand is block-local — avoids
     // cross-block dominance issues for values shared by both segment loops.
     let bx = WgBuiltins { wg, gx, gy, wgsize: wgsize as i32 };
-    for seg in [&seg_before, &seg_after] {
+    for (seg, c) in [(&seg_before, &no_carried), (&seg_after, &carried)] {
         emit_invocation_loop(
-            &mut builder, nmod, func, seg, &carried, &ba, &wg_mem, &buf_base, uniform_ptr,
+            &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, uniform_ptr,
             uniform_binding, &unary_refs, powf_ref, &bx,
         )?;
     }
