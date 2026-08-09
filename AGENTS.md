@@ -161,6 +161,22 @@ fast and scalable kernel — not a naive one.
     (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. *(Backward/
     gradcheck are deferred; `run_batch` is the serial default and says why.)*
 
+12c-ter. **Real-ESRGAN super-resolution** (`crates/upscale`) — the imaging
+    pipeline's upscale tail: `RRDBNet`, a residual-in-residual dense block
+    trunk mapping `[3,H,W]` to `[3,scale*H,scale*W]`. The reference
+    discriminator is training-only and is not ported. No new kernels — the
+    whole net is conv + LeakyReLU + channel concat + nearest-2x upsample,
+    composed from `vae::blocks::Builder` (the same shared conv-block builder
+    the VQGAN family uses) plus `leaky_relu`/`concat2`/`scale_add`. Feeds RGB
+    in `[0,1]`, brain's own wire format, so import needs no affine, only the
+    HWC-blob-to-CHW-model permutation. A real tiling path with the halo the
+    released net needs is implemented; blending the tile overlap measured
+    WORSE than cropping it, so cropping is what ships. **Serving contract
+    met**: `upscale::caps` (`upscale`, env-gated on `BRAIN_ESRGAN_WEIGHTS`),
+    `resident_upscale::UpscaleResident`, D-Bus `Run`, and wired into
+    `imgpipe` as the pipeline's `UPSCALE_MODEL` stage. *(No backward/
+    gradcheck yet — forward-only, matching its siblings in this cluster.)*
+
 12c-bis. **CodeFormer face restoration** (`crates/restore`) — what turns the
     VQ autoencoder above into a blind face restorer: the **code-prediction
     Transformer** (9 pre-LN `TransformerSALayer`s over the flattened encoder
@@ -303,6 +319,31 @@ fast and scalable kernel — not a naive one.
     real-checkpoint validation is still unexercised in-repo.
     Full ledger: `docs/models/omni/status.md`.
 
+13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream`) —
+    the other two vision-language architectures alongside Qwen3-VL above; all
+    three share one shape (vision encoder → connector/projector →
+    autoregressive text decoder, image embeddings spliced into the decoder's
+    stream) and one validation ladder, documented together in
+    `docs/models/vlm/VALIDATION.md`. **FastVLM** (Apple): FastViTHD hybrid
+    conv/attention vision encoder + `mlp2x_gelu` projector in front of a Qwen2
+    decoder (LLaVA-style splice, image token id `-200`). Real-weight
+    validated end to end — decoder logits at mean|Δ|≈3e-6 vs `transformers`,
+    the full in-brain pipeline (its own vision tower → projector → decoder)
+    reproduces HF's caption token-for-token on a real image, and a 300-step
+    finetune smoke test collapses loss from ~ln(vocab) to 0.01. **Serving
+    contract met**: `fastvlm::caps` (stateless `FastVlmProvider`), `brain
+    caps`/`brain do` — no residency adapter yet, matching Qwen3-VL's own
+    state. **Moondream 3**: a vision encoder (SigLIP-style, overlap
+    multi-crop) + a parallel-block decoder with MoE expert sharding.
+    Decoder gradient-checked and import-covered (662 tensors); full-model
+    real-weight parity does not fit this box's memory (a 28 GB checkpoint),
+    so its decoder is instead streamed and parity-checked per-block — a real
+    bug (a missing fused-qkv bias the checkpoint carries but the block
+    didn't apply) was caught this way after gradchecks alone had missed it.
+    Region/point/detect heads are recognized on import but not built.
+    *(Not yet wired into the capability system — no `caps.rs` — so it is
+    validated but not servable via `brain caps`/`brain do` yet.)*
+
 ### Forecasting
 
 14. **Chronos-2** (`crates/chronos2`) — encoder-only T5-style patch transformer,
@@ -428,9 +469,14 @@ front-end to depend on.
 | `yolo` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `depth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `mirror` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
+| `facenet` / `sam2` / `clip` | SCRFD + ArcFace face recognition; SAM 2.1 promptable segmentation (image path); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `zimage` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
+| `flux1` / `flux2` / `t5` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL text-conditioning encoder |
 | `unet` / `controlnet` / `pulid` / `instantid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1; InstantID's IP-Adapter-FaceID shapes (**forward not implemented** — see `crates/instantid/src/lib.rs`) |
+| `vqgan` / `restore` / `upscale` | VQGAN/CodeFormer VQ autoencoder; CodeFormer face restoration; Real-ESRGAN super-resolution — the imaging pipeline's code/restore/upscale tail |
 | `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
+| `qwen-asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
+| `omni` / `qwenvl` / `fastvlm` / `moondream` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 — see `docs/models/vlm/VALIDATION.md` for the latter three |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
 | `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
 

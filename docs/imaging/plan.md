@@ -839,8 +839,12 @@ because that is what the next person needs.
    serving contract for those or `t5`.
 6. **The depth INT8 scale delta is unmeasured.** The calibration preprocessing
    was fixed, but no checkpoint exists on the dev box to quantify the change.
-7. **BiRefNet matting and Real-ESRGAN upscale are downloaded but not ported** —
-   `imgpipe` has hooks, not stages.
+7. **BiRefNet matting is downloaded but not ported** — no weights on this box
+   (nor `resources/pipeline/` at all) and no torch to dump a golden against,
+   so `imgpipe` has a hook, not a stage. **Real-ESRGAN upscale is ported and
+   is a real `imgpipe` stage** (`crates/upscale`, `UPSCALE_MODEL`, tail-only
+   by construction since it changes the image size) — this line used to
+   group the two together; that stopped being true once `upscale` landed.
 8. **190 clippy warnings**, ratcheted by `make clippy`. 69 are doc-list
    indentation needing per-site judgment.
 9. **NPU topologies** for the new models are not written; nothing here has run
