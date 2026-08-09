@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Router backward: gradient w.r.t
-// @how   one thread per output element, 7 nested serial reductions
+// @how   one thread per output element, 5 nested serial reductions, array-free
 // @opt   1
 // @cpu   yes
 // @gpu   yes
@@ -10,7 +10,12 @@
 // @quant none
 //
 // Router backward: gradient w.r.t. the router logits, combining three paths.
-// One invocation per token row. E <= 64.
+// One invocation per token row. No cap on E — `pr[e]`/`dp[e]` are recomputed
+// from `logits`/`gate`/`d_gate` in each pass instead of cached in a
+// fixed-size local array, mirroring `router_bwd_sigmoid.wgsl`'s style. This
+// kernel used to hard-cap at `E <= 64` via `array<f32,64>` scratch — silent
+// out-of-bounds writes above that (docs/lessons.md #35's failure shape,
+// recurring here because #35's fix never reached this file).
 //
 //   p = softmax(logits)             (full distribution)
 //   S = selected (top-k) experts,   gate_e = p_e / Z  for e in S,  Z = sum_{S} p
@@ -50,43 +55,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let base = t * E;
     let nrows = f32(p.n_rows);
 
-    var pr: array<f32, 64>;
-    var dp: array<f32, 64>;
-
+    // Pass 1+2: softmax normalisation constants (max, then sum of exp).
     var mx = -3.4e38;
     for (var e: u32 = 0u; e < E; e = e + 1u) { mx = max(mx, logits[base + e]); }
     var sum = 0.0;
     for (var e: u32 = 0u; e < E; e = e + 1u) { sum = sum + exp(logits[base + e] - mx); }
     let lse = mx + log(sum);
-    for (var e: u32 = 0u; e < E; e = e + 1u) {
-        pr[e] = exp(logits[base + e] - mx) / sum;
-        dp[e] = 0.0;
-    }
 
-    // Z and sdp over the selected (gate>0) experts
+    // Pass 3: Z and sdp over the selected (gate>0) experts. `pr_e` recomputed,
+    // not cached -- `mx`/`sum` already fix it, so re-deriving is one exp+div.
     var z = 0.0;
     var sdp = 0.0;
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         if (gate[base + e] > 0.0) {
-            z = z + pr[e];
-            sdp = sdp + d_gate[base + e] * pr[e];
+            let pr_e = exp(logits[base + e] - mx) / sum;
+            z = z + pr_e;
+            sdp = sdp + d_gate[base + e] * pr_e;
         }
     }
     let zz = max(z, 1e-9);
 
-    // (1) combine path  +  (2) aux path
+    // Pass 4: gpdot = sum_e pr_e * dp_e. dp_e = (1) combine path (selected
+    // only) + (2) aux path (all e), recomputed per e rather than cached.
+    var gpdot = 0.0;
     for (var e: u32 = 0u; e < E; e = e + 1u) {
+        let pr_e = exp(logits[base + e] - mx) / sum;
+        var dp_e = 0.0;
         if (gate[base + e] > 0.0) {
-            dp[e] = d_gate[base + e] / zz - sdp / (zz * zz);
+            dp_e = d_gate[base + e] / zz - sdp / (zz * zz);
         }
-        dp[e] = dp[e] + p.aux_coef * f32(E) * fe[e] / nrows;
+        dp_e = dp_e + p.aux_coef * f32(E) * fe[e] / nrows;
+        gpdot = gpdot + pr_e * dp_e;
     }
 
-    // (3) softmax backward  +  (4) z-loss
-    var gpdot = 0.0;
-    for (var e: u32 = 0u; e < E; e = e + 1u) { gpdot = gpdot + pr[e] * dp[e]; }
+    // Pass 5: (3) softmax backward + (4) z-loss, emitted per output element.
     let zterm = p.z_coef * 2.0 * lse / nrows;
     for (var i: u32 = 0u; i < E; i = i + 1u) {
-        dlogits[base + i] = pr[i] * (dp[i] - gpdot) + zterm * pr[i];
+        let pr_i = exp(logits[base + i] - mx) / sum;
+        var dp_i = 0.0;
+        if (gate[base + i] > 0.0) {
+            dp_i = d_gate[base + i] / zz - sdp / (zz * zz);
+        }
+        dp_i = dp_i + p.aux_coef * f32(E) * fe[i] / nrows;
+        dlogits[base + i] = pr_i * (dp_i - gpdot) + zterm * pr_i;
     }
 }

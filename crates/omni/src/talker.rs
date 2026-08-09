@@ -238,7 +238,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
     let moe_out = g.storage((n * d) as u64);
     g.submit(
         &[],
-        &shared_expert_fwd(g, &se_ids, n, d, se_ff, &xn2, sgw, suw, sdw, w.shared_expert_gate, &se_scratch, &routed_out, &moe_out),
+        &shared_expert_fwd(g, &se_ids, n, d, se_ff, &xn2, sgw, suw, sdw, Some(w.shared_expert_gate), &se_scratch, &routed_out, &moe_out),
     );
 
     let out = g.storage((n * d) as u64);

@@ -11,7 +11,11 @@
 //
 // GLM/DeepSeek-V3 "noaux_tc" MoE router (backward). Grad w.r.t. the router
 // logits through the sigmoid combine weights (NO aux/z-loss; the selection bias
-// is not trained by backprop). One invocation per token row. E <= 64.
+// is not trained by backprop). One invocation per token row. No cap on E: every
+// binding here is `array<f32>` (dynamic storage) and `s` is recomputed per `e`
+// rather than cached in a fixed-size local array -- this file was never capped,
+// unlike `router_bwd.wgsl`'s former `array<f32,64>` scratch (see that file's
+// header for the #35-recurrence this comment used to misreport as a limit).
 //
 //   s_e = sigmoid(logit_e) ; selected set S = { e : gate_e > 0 }
 //   no-norm:  w_e = scale * s_e

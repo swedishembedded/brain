@@ -65,7 +65,7 @@ fn shared_expert_matches_host_oracle() {
         scaled: &g.storage((rows * d) as u64),
     };
     let out = g.storage((rows * d) as u64);
-    let steps = shared_expert_fwd(&g, &ids, rows as u32, d as u32, ff as u32, &x, &gw, &uw, &dw, &sgw, &scratch, &acc, &out);
+    let steps = shared_expert_fwd(&g, &ids, rows as u32, d as u32, ff as u32, &x, &gw, &uw, &dw, Some(&sgw), &scratch, &acc, &out);
     g.submit(&[], &steps);
     let got = g.read(&out, rows * d);
 
@@ -82,6 +82,53 @@ fn shared_expert_matches_host_oracle() {
             want[r * d + c] = acc_h[r * d + c] + s * mlp_out[r * d + c];
         }
     }
+
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() < 1e-4, "index {i}: got {g} want {w}");
+    }
+}
+
+/// `shared_gate_w: None` -- `crates/glm`'s (GLM-5.2/DeepSeek-V3's) shared
+/// expert: routed + shared added UNWEIGHTED, no sigmoid gate at all. A
+/// distinct real architecture, not a degenerate case of the gated one.
+#[test]
+fn shared_expert_unweighted_matches_host_oracle() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    let ids = SharedExpertIds { matmul: idx(&g, "matmul"), silu_mul: idx(&g, "silu_mul"), sigmoid: idx(&g, "sigmoid"), scale_row: idx(&g, "scale_row"), add2: idx(&g, "add2") };
+
+    let (rows, d, ff) = (5usize, 6usize, 4usize);
+    let mut rng = Lcg::new(4242);
+    let x_h = rng.vec_scaled(rows * d, 1.0);
+    let gw_h = rng.vec_scaled(ff * d, 0.5);
+    let uw_h = rng.vec_scaled(ff * d, 0.5);
+    let dw_h = rng.vec_scaled(d * ff, 0.5);
+    let acc_h = rng.vec_scaled(rows * d, 1.0);
+
+    let x = g.storage_init("x", &x_h);
+    let gw = g.storage_init("gw", &gw_h);
+    let uw = g.storage_init("uw", &uw_h);
+    let dw = g.storage_init("dw", &dw_h);
+    let acc = g.storage_init("acc", &acc_h);
+
+    let scratch = SharedExpertScratch {
+        gate_pre: &g.storage((rows * ff) as u64),
+        up: &g.storage((rows * ff) as u64),
+        h: &g.storage((rows * ff) as u64),
+        mlp_out: &g.storage((rows * d) as u64),
+        gate_logits: &g.storage(rows as u64),
+        gate_scalar: &g.storage(rows as u64),
+        scaled: &g.storage((rows * d) as u64),
+    };
+    let out = g.storage((rows * d) as u64);
+    let steps = shared_expert_fwd(&g, &ids, rows as u32, d as u32, ff as u32, &x, &gw, &uw, &dw, None, &scratch, &acc, &out);
+    g.submit(&[], &steps);
+    let got = g.read(&out, rows * d);
+
+    let gate_pre = host_matmul(&x_h, &gw_h, rows, d, ff);
+    let up = host_matmul(&x_h, &uw_h, rows, d, ff);
+    let h: Vec<f32> = gate_pre.iter().zip(&up).map(|(&a, &b)| (a / (1.0 + (-a).exp())) * b).collect();
+    let mlp_out = host_matmul(&h, &dw_h, rows, ff, d);
+    let want: Vec<f32> = acc_h.iter().zip(&mlp_out).map(|(&a, &m)| a + m).collect();
 
     for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
         assert!((g - w).abs() < 1e-4, "index {i}: got {g} want {w}");

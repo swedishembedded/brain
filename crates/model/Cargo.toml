@@ -23,3 +23,11 @@ serde_json.workspace = true
 # are the multi-GPU / offload paths that never run in a browser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 brain-backend-cpu = { workspace = true }
+
+# brain-gradcheck depends on brain-model (its CheckModel impl for the
+# architecture-agnostic Model trait) -- this is the well-supported "tests
+# depend on a crate that depends on the package itself" shape: dev-deps are
+# not part of the library-target build graph, only the test-target one, so
+# this is not a real cycle.
+[dev-dependencies]
+brain-gradcheck.workspace = true
