@@ -974,11 +974,22 @@ per-scenario table and the findings so far.
   `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`, plus the
   imaging workstream's `check_sam2`, `check_arcface`, `check_vqgan`,
   `check_clip`, `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
-  and `check_codeformer` (+ `_one_layer`). Genuinely **absent**:
-  `check_flux1`, `check_unet`, `check_controlnet`, `check_pulid`,
-  `check_instantid`. SSA-style forward (each stage writes a
-  fresh buffer that doubles as the backprop activation cache) — preserve it when
-  adding stages.
+  and `check_codeformer` (+ `_one_layer`). SSA-style forward (each stage
+  writes a fresh buffer that doubles as the backprop activation cache) —
+  preserve it when adding stages.
+
+  **Full backward + a `gradcheck` entry point is the default expectation for
+  every new model, not an opt-out.** Forward-only is the exception, and it
+  requires the same explicit justification the models that already ship that
+  way recorded when they did: `check_flux1`, `check_unet`,
+  `check_controlnet`, `check_pulid`, `check_instantid` are genuinely absent
+  because those ports prioritized reaching a working forward pass on
+  hardware-constrained checkpoints first, each documented in its own
+  `docs/models/<model>/status.md` — that list is a record of what shipped
+  under real constraints, not a template to reach for on a new port. Do not
+  cite "some models ship forward-only" as a reason to skip backward on a new
+  model; if a genuine constraint forces that tradeoff, name it and record it
+  the same way, in the same change.
 
   **`directional_check` alone does NOT catch a partially-wrong gradient.** It
   contracts a tensor onto one ±1 direction and keeps the *best-agreeing* of
@@ -994,7 +1005,9 @@ per-scenario table and the findings so far.
   `chronos2`, `kronos`, `fincast`, `depth`, `wm-diamond` are imported 1:1 from a
   reference checkpoint and verified stage-by-stage against dumped goldens
   (`scripts/parity-dump/`, `tools/goldens/*_dump_reference.py`). `make parity` is the
-  cross-backend gate (CPU == Vulkan == NPU).
+  cross-backend gate (CPU == Vulkan == NPU). Parity proves the *forward* pass
+  matches the reference; it is not a substitute for `gradcheck` on a model
+  that trains — see the "full backward is the default" note above.
 - **Adding a capability ≠ adding a subcommand.** Implement `capability::Action`
   and list it in a `Provider`; `brain do` and the event API pick it up.
 - **Every new model ships the full serving contract — code is not "done" until it
