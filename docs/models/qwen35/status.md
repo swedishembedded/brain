@@ -140,35 +140,72 @@ fetching an already-quantized GGUF directly.
   unused by Qwen3.5) is untouched, still behind its documented
   `assert!(<=64)` guard.
 
-## In progress
-
-- **P5 — Gated DeltaNet recurrence kernels**: the chunked delta-rule
-  recurrence (`torch_chunk_gated_delta_rule` in the reference) — a new
-  kernel family (`bmm`/`bmm_acc` general batched matmul, chunk-local cumsum/
-  decay-mask/UT-transform sequential-dispatch kernels, gated RMSNorm,
-  unscaled L2-norm, conv state cache for decode) plus `crates/model/src/
-  gdn.rs` step-builders, gradchecked against an f64 host oracle at a tiny
-  hybrid shape on both backends. This is the architecturally novel core of
-  the port; being built now.
+- **P5 — Gated DeltaNet chunked-recurrence FORWARD** (`crates/model/src/
+  gdn.rs`, new `bmm`/`bmm_acc` general batched matmul primitive + 8 GDN-
+  specific kernels + `exp.wgsl`/`sub.wgsl`, all shared-library level):
+  `torch_chunk_gated_delta_rule` transcribed step-for-step. `bmm`/`bmm_acc`
+  fill a real gap (no batched matmul — both operands varying per batch —
+  existed anywhere in this engine before). The sequential per-chunk cumsum
+  and the UT-transform's forward substitution are each one host dispatch per
+  row (CPU JIT allows one `workgroupBarrier()` per kernel, so a true
+  parallel scan can't fit in one dispatch); `gdn_ut_step.wgsl` keeps the
+  frozen `attn0` and evolving `t_mat` as separate buffers specifically to
+  avoid a same-buffer read/write race across threads in one dispatch, which
+  WGSL's lack of cross-invocation ordering makes real (PyTorch's in-place
+  single-tensor update is safe only because Python statement sequencing has
+  no WGSL equivalent). Requires the caller to produce every per-token buffer
+  **chunk-major** (`[n_chunks,B,H,C,D]`, chunk outermost) rather than the
+  reference's `[B,H,T,D]` — documented at length in `gdn.rs`'s module doc;
+  `qwen35::model`'s wiring (P8) must honor this. Verified against an
+  independently re-derived f64 host oracle (plain nested loops, natural
+  `[b,h,t,d]` indexing) at a tiny two-chunk shape with pairwise-distinct
+  dims, on both backends: worst |delta| 8.99e-8 (GPU) / 1.61e-7 (CPU JIT).
+  The oracle explicitly encodes a real, easy-to-miss reference detail
+  confirmed against the live source: HF's `value = attn @ v_beta` (step 8)
+  REASSIGNS the function's own `value` parameter, so every later `v_i` in
+  the reference's per-chunk loop means that reassigned tensor, never the
+  raw input value.
 - **P6 — INT4 (q4) weight quantization at the shared `model::int8`-sibling
   level** (`crates/model/src/int4.rs`, `matmul_q4_dyn.wgsl`/
   `matmul_q4_gemv.wgsl`/`moe_linear_gated_q4.wgsl`): per-channel symmetric
   4-bit packing (8 nibbles/`u32`, range `[-7,7]` to stay exactly symmetric
-  around zero, mirroring int8's `[-127,127]`), a naive-not-register-tiled
-  GEMM (correctness-first per `docs/porting-playbook.md` §10, register
-  tiling left as a documented follow-on), added at the shared `model`/
-  `kernels` level so every model gets it, not just Qwen3.5. Being built now.
+  around zero, mirroring int8's `[-127,127]`), W4A8 (activations stay on the
+  existing int8 dynamic-quant path unchanged — the only new device math is
+  the 4-bit weight unpack), a naive-not-register-tiled GEMM (correctness-
+  first per `docs/porting-playbook.md` §10). Notable finding: this engine's
+  CPU-JIT (`crates/wgsl-cpu`) supports neither the WGSL `extractBits`
+  builtin nor calling a user-defined WGSL function at all — both would have
+  silently broken `BRAIN_DEVICE=cpu`; sign-extension is inlined via
+  shift-up/arithmetic-shift-down directly in each kernel body instead
+  (mirroring `dot4I8Packed`'s own CPU lowering). Verified bit-identical
+  between the GPU and CPU-JIT backends (integer accumulation); measured
+  tolerance at tiny synthetic shapes: cosine 0.998–0.999, rel-L2 4.8–5.8%.
+
+## In progress
+
+(nothing actively in flight right now — see "Not started" for the next
+pieces, gated on P8's forward pass existing.)
 
 ## Not started
 
+- **P2b — Gated DeltaNet BACKWARD**: `crates/model/tests/gdn_chunk_bwd.rs`
+  is a documented `#[ignore]`d stub, not a silent gap. Needs a reverse sweep
+  through the UT-transform (`i` from `chunk-1` down to `1`, mirroring
+  `gdn_ut_step.wgsl`'s forward sweep) plus backward for every other step
+  (mostly more `bmm`/`bmm_acc` calls with permuted operands), gradchecked at
+  the same tiny shape `gdn_chunk_fwd.rs` uses, both backends. Required per
+  this session's own AGENTS.md policy update (full backward is the default,
+  not an opt-out) — blocks P9 and P12 below.
 - **Attention output gate wiring**: `q_proj`'s doubled width (value + sigmoid
   gate) composes from existing `sigmoid.wgsl`+`mul.wgsl` — no new kernel
   needed, just wiring in the forward pass (P8 below).
-- **P7 — device-side sparse MoE decode dispatch**: `model::moe::
-  expert_fwd_compact`'s host-readback-per-expert-per-layer shape (256×40 =
-  10,240 submits/token at this scale) is too slow for decode; needs the
-  device-side sort/scan dispatch (`sort_hist`/`sort_scatter`/`scan_block`/
-  `scan_add` primitives already exist, the MoE-specific wiring doesn't).
+- **P7 — device-side sparse MoE decode dispatch**: deliberately deferred to
+  the performance-optimization phase (after P8 exists), per
+  `docs/porting-playbook.md` §10 "correct-then-freeze" — `model::moe::
+  expert_fwd`/`expert_fwd_compact` are correct for decode today, just not
+  optimally fast at 256 experts (256×5=1280 dispatches/layer). Designing the
+  dispatch redesign before the real forward pass exists risks building the
+  wrong shape; revisit once P11 (serving) needs real decode throughput.
 - **P8 — forward pass** (`crates/qwen35/src/model.rs`): GDN layer, GQA
   layer, MoE layer, vision splice — the SSA activation-cache convention,
   `Mixer::{Gdn,Gqa}` enum per layer (GLM's `Mlp::Dense`/`Mlp::Moe` precedent).
