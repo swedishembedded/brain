@@ -320,6 +320,22 @@ impl PlCache {
 /// single card deadlocked the test suite roughly half the time (all threads in
 /// futex wait) and made every model activation pay a full device init. One
 /// process now builds this once per distinct kernel set and shares it.
+/// Ceiling for one bounded GPU wait. Generous — a legitimate prefill dispatch
+/// is slow — but finite: `wait_indefinitely()` (the previous value everywhere)
+/// made a wedged queue block the process forever rather than error, which is
+/// why past hangs (M16's `encode-vision`, `gpu_core::roofline`) presented as
+/// unkillable instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_wait_timeout() -> std::time::Duration {
+    const DEFAULT_S: f64 = 30.0;
+    let secs = std::env::var("BRAIN_GPU_WAIT_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(DEFAULT_S);
+    std::time::Duration::from_secs_f64(secs)
+}
+
 struct DeviceShared {
     // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
     // pipelines, queue, device — is destroyed inside `drop` under the same lock
@@ -358,6 +374,11 @@ struct DeviceShared {
     /// Pure observability — the non-profiling flush path is untouched.
     #[cfg(not(target_arch = "wasm32"))]
     gpu_profile: Option<GpuProfile>,
+    /// Set by `device.set_device_lost_callback` — read by the bounded wait
+    /// helper so a timeout can be reported as "device lost" instead of a bare
+    /// "wedged submit" when the driver actually dropped the device out from
+    /// under us.
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DeviceShared {
@@ -374,6 +395,14 @@ impl DeviceShared {
         caps: backend_api::DeviceCaps,
         plcache: Option<std::sync::Arc<PlCache>>,
     ) -> DeviceShared {
+        let device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = device_lost.clone();
+            device.set_device_lost_callback(move |reason, msg| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("brain: wgpu device lost ({reason:?}): {msg}");
+            });
+        }
         // BRAIN_GPU_CHECKED=1 restores wgpu's runtime bounds checks for kernel
         // debugging; the default trusts the kernels — no clamp instruction on
         // every buffer load/store — matching the CPU backend, whose Cranelift
@@ -448,6 +477,7 @@ impl DeviceShared {
             plcache,
             #[cfg(not(target_arch = "wasm32"))]
             gpu_profile,
+            device_lost,
         }
     }
 }
@@ -462,7 +492,18 @@ impl Drop for DeviceShared {
         // device-level calls — observed as intermittent SIGSEGV in
         // "[vkps] Update" while the test suite ran concurrently.
         let _guard = init_lock();
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // Bounded, not `wait_indefinitely()`: teardown must not join a wedged
+        // queue forever. Best-effort only -- `drop` cannot propagate an error,
+        // so a timeout here is logged and teardown proceeds regardless (the
+        // driver-level segfault this drain guards against is a bigger risk
+        // than leaking a few pipelines on an already-wedged device).
+        match self
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(gpu_wait_timeout()) })
+        {
+            Ok(_) => {}
+            Err(e) => eprintln!("brain: DeviceShared::drop: poll did not complete cleanly: {e}"),
+        }
         self.pipelines.clear();
         // SAFETY: drop() runs exactly once; the fields are never used again.
         unsafe {
@@ -524,6 +565,29 @@ impl WgpuBackend {
     fn pipelines(&self) -> &[wgpu::ComputePipeline] { &self.shared.pipelines }
     #[inline]
     fn wgsizes(&self) -> &[u32] { &self.shared.wgsizes }
+
+    /// Bounded equivalent of `device.poll(PollType::wait_indefinitely())`.
+    /// wgpu 29 supports a native timeout on `Wait`, so this needs no manual
+    /// deadline loop. `what` names the operation in the panic message —
+    /// "report which submit wedged", not a bare assertion failure. Does NOT
+    /// retry: a caller that wants another attempt asks for one explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_wait_bounded(&self, what: &str) {
+        let timeout = gpu_wait_timeout();
+        match self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) }) {
+            Ok(_) => {}
+            Err(wgpu::PollError::Timeout) => {
+                if self.shared.device_lost.load(std::sync::atomic::Ordering::SeqCst) {
+                    panic!("{what}: GPU device lost while waiting for a submit to complete");
+                }
+                panic!(
+                    "{what}: GPU submit did not complete within {timeout:?} \
+                     (BRAIN_GPU_WAIT_S) -- device likely wedged"
+                );
+            }
+            Err(e) => panic!("{what}: {e}"),
+        }
+    }
 }
 
 /// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
@@ -1063,8 +1127,10 @@ impl WgpuBackend {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
+        self.poll_wait_bounded("timestamp readback");
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("timestamp readback: map_async callback did not fire after a completed poll"))
+            .unwrap();
         let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
         staging.unmap();
 
@@ -1132,8 +1198,10 @@ impl WgpuBackend {
             let slice = staging.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-            self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            rx.recv().unwrap().unwrap();
+            self.poll_wait_bounded("profile readback");
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("profile readback: map_async callback did not fire after a completed poll"))
+                .unwrap();
             let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
             staging.unmap();
 
@@ -1334,7 +1402,7 @@ impl WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_wait(&self) {
         self.flush();
-        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.poll_wait_bounded("poll_wait");
     }
 
     /// Copy a device buffer into a MAP_READ staging buffer and return its
@@ -1349,8 +1417,10 @@ impl WgpuBackend {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
+        self.poll_wait_bounded("buffer read");
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("buffer read: map_async callback did not fire after a completed poll"))
+            .unwrap();
         let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
         staging.unmap();
         out
