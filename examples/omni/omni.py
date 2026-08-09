@@ -4,25 +4,31 @@
 
 """Talk to Qwen3-Omni's Thinker over any of brain's three transports.
 
-**Scope, honestly**: text in/out, speech in (`--in-speech`), and image in
-(`--in-image`) are real end to end over `--dbus` (`docs/models/omni/status.md`'s
-multimodal-input entry: real audio/vision tower encode + host-side embedding
-splice + real M-RoPE positions, `crate::mm`). `--openai`/`--anthropic` reject
-blob inputs with a clear `NotImplementedError` (their content-part wiring is a
-separate, not-yet-done change server-side -- `--dbus` is the one transport
-that carries blobs generically today). `--in-mic`/`--in-video` and
-`--out-mic`/`--out-audio` are still `skip()`s -- live capture and video-frame
-extraction need extra dependencies this script deliberately doesn't take on,
-and speech OUTPUT needs Talker+Code2Wav, not wired into a generation loop yet.
-Generation is still validation-tier for weight I/O (`crate::generate`'s own
-doc): the KV-cache makes attention O(cached length), but every layer's
-weights are still streamed fresh from the checkpoint per generated token.
+**Scope, honestly**: text in/out, speech in (`--in-speech`), image in
+(`--in-image`), and video in (`--in-video`) are all real end to end over
+`--dbus` (`docs/models/omni/status.md`'s multimodal-input entry: real
+audio/vision tower encode + host-side embedding splice + real M-RoPE
+positions, `crate::mm`). `--in-video` needs PyAV (`pip install av`) to
+extract frames -- unlike speech/image, which stay zero-dependency by design,
+real video demuxing genuinely needs a decoder, so this `skip()`s cleanly
+(exit 77) rather than adding a hard requirement. `--openai`/`--anthropic`
+reject ALL blob inputs (audio/image/video alike) with a clear
+`NotImplementedError` (their content-part wiring is a separate, not-yet-done
+change server-side -- `--dbus` is the one transport that carries blobs
+generically today). `--in-mic` and `--out-mic`/`--out-audio` are still
+`skip()`s -- live capture needs extra dependencies this script deliberately
+doesn't take on, and speech OUTPUT needs Talker+Code2Wav, not wired into a
+generation loop yet. Generation is still validation-tier for weight I/O
+(`crate::generate`'s own doc): the KV-cache makes attention O(cached length),
+but every layer's weights are still streamed fresh from the checkpoint per
+generated token.
 
 Examples:
   # D-Bus (needs `BRAIN_OMNI_HF_DIR=... brain serve --dbus` running):
   python3 examples/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
   python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
   python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
+  python3 examples/omni/omni.py --dbus --in-video clip.mp4 --in-text "What happens in this clip?" --out-stdio
 
   # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running,
   # with BRAIN_OMNI_HF_DIR set for that process):
@@ -48,7 +54,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
 from brain_py.base import BrainBase, skip  # noqa: E402
-from brain_py.image import load_ppm  # noqa: E402
+from brain_py.image import from_pil_rgb, load_ppm  # noqa: E402
 
 
 def load_speech_blob(path: str) -> bytes:
@@ -81,6 +87,45 @@ def load_image_blob(path: str) -> tuple[bytes, dict]:
     return data, {"media": "image", "w": w, "h": h, "c": 3}
 
 
+def load_video_blob(path: str, max_frames: int = 8) -> tuple[bytes, dict]:
+    """Extract up to `max_frames` evenly-spaced frames from a video file via
+    PyAV, each converted to interleaved-HWC f32 RGB and concatenated into ONE
+    payload -- the wire shape `capability::blob::decode_video_hwc` expects
+    (`Media::Bytes` + meta `{"frames","w","h","c"}`; see that function's own
+    doc for why one concatenated blob rather than a repeated one).
+
+    Requires `av` (`pip install av`) -- unlike `--in-image`/`--in-speech`
+    (zero-dependency by design), real frame extraction genuinely needs a
+    demuxer/decoder, so this follows the documented pattern instead: skip
+    cleanly (exit 77) when the dependency is missing rather than adding a
+    hard requirement to this script's default install."""
+    try:
+        import av
+    except ImportError:
+        skip("--in-video needs PyAV (`pip install av`) for frame extraction -- not installed")
+
+    container = av.open(path)
+    stream = container.streams.video[0]
+    total = stream.frames or 0
+    wanted = set(range(0, total, max(1, total // max_frames))) if total > 0 else None
+
+    frames: list[bytes] = []
+    w = h = 0
+    for i, frame in enumerate(container.decode(stream)):
+        if wanted is not None and i not in wanted:
+            continue
+        img = frame.to_image()
+        w, h = img.size
+        frames.append(from_pil_rgb(img))
+        if len(frames) >= max_frames:
+            break
+    container.close()
+
+    if not frames:
+        raise SystemExit(f"{path}: no frames decoded")
+    return b"".join(frames), {"media": "bytes", "frames": len(frames), "w": w, "h": h, "c": 3}
+
+
 def build_transport(args: argparse.Namespace) -> BrainBase:
     selected = [t for t in (args.dbus, args.openai, args.anthropic) if t]
     if len(selected) != 1:
@@ -99,20 +144,21 @@ def build_transport(args: argparse.Namespace) -> BrainBase:
 
 
 def check_scope(args: argparse.Namespace) -> None:
-    """`--in-mic`/`--in-video` and both speech-output flags still `skip()`
-    with a specific reason (see the module doc for why); `--in-speech`/
-    `--in-image` are real now and handled in `main()`."""
+    """`--in-mic` and both speech-output flags still `skip()` with a specific
+    reason (see the module doc for why); `--in-speech`/`--in-image`/
+    `--in-video` are all real now and handled in `main()` (`--in-video`
+    itself `skip()`s separately, inside `load_video_blob`, only when PyAV is
+    missing -- not unconditionally like the flags below)."""
     unimplemented = {
         "in_mic": "microphone capture needs sounddevice (or similar), not a dependency this example takes on -- pass --in-speech with a pre-recorded WAV instead",
-        "in_video": "video needs frame extraction (av/ffmpeg) not wired into this example yet -- the engine-side path exists (crate::mm::encode_video_frames) but nothing decodes a video file into frames here",
         "out_mic": "speech output needs Talker + code predictor + Code2Wav chained together (not built yet)",
         "out_audio": "speech output needs Talker + code predictor + Code2Wav chained together (not built yet)",
     }
     for flag, reason in unimplemented.items():
         if getattr(args, flag):
             skip(f"--{flag.replace('_', '-')}: {reason}")
-    if not args.in_text and not args.in_speech and not args.in_image:
-        skip("at least one of --in-text / --in-speech / --in-image is required")
+    if not args.in_text and not args.in_speech and not args.in_image and not args.in_video:
+        skip("at least one of --in-text / --in-speech / --in-image / --in-video is required")
 
 
 def main() -> None:
@@ -123,12 +169,12 @@ def main() -> None:
     transport.add_argument("--anthropic", metavar="URL", help="use the Anthropic-compatible HTTP transport (e.g. localhost:8787)")
     transport.add_argument("--api-key", help="API key for --openai/--anthropic (brain serve prints 'APIKEY <provider> <key>' at startup, or see --api-keys-out)")
 
-    inputs = ap.add_argument_group("input (--in-text/--in-speech/--in-image are real; --dbus only for the latter two)")
+    inputs = ap.add_argument_group("input (--in-text/--in-speech/--in-image/--in-video are real; --dbus only for the latter three)")
     inputs.add_argument("--in-text", metavar="TEXT", help="the text prompt")
     inputs.add_argument("--in-speech", metavar="WAV", help="16kHz mono 16-bit PCM WAV -- spliced into the prompt as real audio-tower embeddings (--dbus only)")
     inputs.add_argument("--in-mic", action="store_true", help="not yet implemented -- see this module's doc")
     inputs.add_argument("--in-image", metavar="PPM", help="binary PPM (P6) image -- spliced into the prompt as real vision-tower embeddings (--dbus only)")
-    inputs.add_argument("--in-video", metavar="PATH", help="not yet implemented -- see this module's doc")
+    inputs.add_argument("--in-video", metavar="PATH", help="video file -- up to 8 evenly-spaced frames extracted via PyAV and spliced into the prompt as real vision-tower embeddings (--dbus only; needs `pip install av`)")
 
     outputs = ap.add_argument_group("output (--out-stdio is the only one implemented)")
     outputs.add_argument("--out-stdio", action="store_true", help="print the generated text to stdout (default)")
@@ -165,6 +211,8 @@ def main() -> None:
         meta["audio"] = {"media": "audio", "sample_rate": 16000}
     if args.in_image:
         blobs["image"], meta["image"] = load_image_blob(args.in_image)
+    if args.in_video:
+        blobs["video"], meta["video"] = load_video_blob(args.in_video)
     if blobs:
         kwargs["blobs"] = blobs
         kwargs["meta"] = meta
@@ -173,7 +221,7 @@ def main() -> None:
     # SOME text -- omni's generate errors on a wholly empty prompt), so this
     # falls back to a generic instruction rather than requiring the caller to
     # always spell out "describe this" by hand.
-    prompt = args.in_text or ("Describe this." if args.in_image else "Transcribe or describe this audio.")
+    prompt = args.in_text or ("Describe this." if (args.in_image or args.in_video) else "Transcribe or describe this audio.")
 
     # No --stream: BrainBase's transport-agnostic on_progress carries
     # (step, total, message), not per-token delta text (that's a

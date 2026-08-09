@@ -17,10 +17,13 @@
 //! input path together (not done); `transcribe` needs a dedicated ASR-shaped
 //! prompt this crate hasn't built (use `brain/qwen-asr` directly for
 //! transcription today). Declaring an action whose `run()` can't actually do
-//! what its spec promises is worse than not declaring it. Video input is NOT
-//! wired into `generate` (it needs already-decoded frames —
-//! `crate::mm::encode_video_frames`'s doc — and this capability surface has
-//! no way to receive a list of frame blobs from one `Invocation` yet).
+//! what its spec promises is worse than not declaring it. Video input IS
+//! wired into `generate` now: a `video` blob (`Media::Bytes`, N concatenated
+//! HWC-f32 RGB frames + `{frames,w,h,c}` meta —
+//! `capability::blob::decode_video_hwc`) decodes to the already-decoded-frame
+//! list `crate::mm::encode_video_frames` takes. Frame EXTRACTION (demuxing an
+//! actual video file into frames) stays out of scope for this crate, same as
+//! before — the caller (`brain-py`) supplies frames it already has.
 //!
 //! `generate` is itself validation-tier, not production: weights are still
 //! streamed fresh from the checkpoint via `checkpoint::weightio::WeightReader`
@@ -45,7 +48,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use capability::blob::decode_image;
+use capability::blob::{decode_image, decode_video_hwc};
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
@@ -82,6 +85,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
         .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
+        .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
@@ -104,7 +108,7 @@ pub fn speak_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; video input and the multimodal+speech-output combination are not wired in yet -- see docs/models/omni/status.md's M9b entry).",
+        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; the multimodal+speech-output combination is not wired in yet -- see docs/models/omni/status.md's M9b entry).",
         vec![generate_spec(), speak_spec()],
     )
 }
@@ -208,16 +212,27 @@ impl OmniInner {
         (text, new_ids)
     }
 
-    /// [`Self::generate`], with real audio and/or image input spliced into
-    /// the prompt (`crate::mm::build_multimodal_prompt`) — real embeddings
-    /// (`qwen_asr`'s audio tower / `qwenvl`'s vision tower, both already
-    /// parity-validated against this checkpoint) and real per-axis M-RoPE
-    /// positions, not the plain-sequential text-only path [`Self::generate`]
-    /// takes. `audio` is raw 16kHz mono PCM; `image` is `(hwc, w, h)`
-    /// (`capability::blob::decode_image`'s output shape).
-    pub fn generate_multimodal(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, max_new: u32) -> (String, Vec<u32>) {
+    /// [`Self::generate`], with real audio and/or image and/or video input
+    /// spliced into the prompt (`crate::mm::build_multimodal_prompt`) — real
+    /// embeddings (`qwen_asr`'s audio tower / `qwenvl`'s vision tower, both
+    /// already parity-validated against this checkpoint) and real per-axis
+    /// M-RoPE positions, not the plain-sequential text-only path
+    /// [`Self::generate`] takes. `audio` is raw 16kHz mono PCM; `image` is
+    /// `(hwc, w, h)` (`capability::blob::decode_image`'s output shape);
+    /// `video` is per-frame `(hwc, w, h)` in order
+    /// (`capability::blob::decode_video_hwc`'s output shape) — each frame
+    /// runs through `crate::mm::encode_video_frames`'s single-frame-path
+    /// approximation, per that function's own doc.
+    pub fn generate_multimodal(
+        &self,
+        prompt: &str,
+        audio: Option<&[f32]>,
+        image: Option<(&[f32], u32, u32)>,
+        video: Option<&[(Vec<f32>, u32, u32)]>,
+        max_new: u32,
+    ) -> (String, Vec<u32>) {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, None);
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video);
         let n_prompt = mm_prompt.token_ids.len();
         let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt..].to_vec();
@@ -283,11 +298,12 @@ impl Action for GenerateAction {
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
 
         progress(Progress::step(0, max_new, "generating"));
-        let (text, new_ids) = if audio.is_some() || image.is_some() {
+        let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, max_new)
+            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)
         } else {
             self.inner.generate(&prompt, max_new)
         };

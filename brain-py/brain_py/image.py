@@ -28,6 +28,15 @@ def to_pil(data: bytes, w: int, h: int, c: int = 3):
     return Image.frombytes("RGB", (w, h), buf)
 
 
+def from_pil_rgb(img) -> bytes:
+    """Convert a PIL ``Image`` to an HWC-f32 RGB blob — the inverse of
+    :func:`to_pil`. Requires pillow (already imported by the caller if it
+    has a PIL `Image` to pass in)."""
+    rgb = img.convert("RGB")
+    px = array.array("f", (b / 255.0 for b in rgb.tobytes()))
+    return px.tobytes()
+
+
 def _u8(value: float) -> int:
     return max(0, min(255, int(value * 255 + 0.5)))
 

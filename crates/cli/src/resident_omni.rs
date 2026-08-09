@@ -90,16 +90,17 @@ impl Instance for OmniInstance {
         }
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
 
-        // Same optional audio/image extraction `omni::caps::GenerateAction::run`
+        // Same optional audio/image/video extraction `omni::caps::GenerateAction::run`
         // does -- this resident (not that Provider) is the path `brain serve`
         // actually dispatches D-Bus/HTTP requests through.
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| capability::blob::decode_image(inv, "image")).transpose()?;
+        let video = inv.get_blob("video").map(|_| capability::blob::decode_video_hwc(inv, "video")).transpose()?;
 
         progress(Progress::step(0, max_new, "generating"));
-        let (text, new_ids) = if audio.is_some() || image.is_some() {
+        let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, max_new)
+            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)
         } else {
             self.inner.generate(&prompt, max_new)
         };
