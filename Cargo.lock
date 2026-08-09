@@ -1263,6 +1263,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-qwen35"
+version = "0.1.1"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-qwen",
+ "brain-testutil",
+ "bytemuck",
+ "pollster",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
 name = "brain-qwenvl"
 version = "0.1.1"
 dependencies = [
