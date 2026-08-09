@@ -1268,7 +1268,7 @@ mod kv_cache_tests {
         let decode_ids = GqaDecodeIds { kv_append: 3, attn_decode_scores: 4, decode_softmax: 5, attn_decode_apply: 6 };
 
         // Deterministic pseudo-random q/k/v -- fixed formula, no RNG (engine convention).
-        let mk = |n: u32, seed: f32| (0..n).map(|i| ((i as f32 * 0.7 + seed).sin())).collect::<Vec<f32>>();
+        let mk = |n: u32, seed: f32| (0..n).map(|i| (i as f32 * 0.7 + seed).sin()).collect::<Vec<f32>>();
         let q_host = mk(t * hq, 0.1);
         let k_host = mk(t * hkv, 0.2);
         let v_host = mk(t * hkv, 0.3);

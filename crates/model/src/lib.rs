@@ -27,6 +27,7 @@ pub mod serve;
 pub mod distributed;
 pub mod grid;
 pub mod hostmath;
+pub mod int4;
 pub mod int8;
 pub mod moe;
 pub mod netcollective;

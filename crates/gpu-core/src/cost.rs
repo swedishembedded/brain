@@ -253,6 +253,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, kg, n) = (p(0)?, p(1)?, p(2)?);
             c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n))
         }
+        // q4 W4A8 GEMMs (int8 activation, int4 weight): params [m, k, n] with
+        // `k` the LOGICAL (un-divided) K, unlike the int8 family's `kg` --
+        // x and w pack a different number of values per u32 for the same K
+        // (4 vs 8), so one shared "kg" would be ambiguous about which operand
+        // it counts. The MACs are the same K per output as int8 (a nibble
+        // multiply-add costs the same logical MAC as a byte one in this
+        // roofline accounting); bytes reflect x's [m, k/4] u32 footprint and
+        // w's HALF-that [n, k/8] u32 footprint.
+        "matmul_q4_dyn" | "matmul_q4_gemv" => {
+            let (m, k, n) = (p(0)?, p(1)?, p(2)?);
+            c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m + n))
+        }
         // Activation quantization: params [m, k]; q = clamp(round(x/sx)).
         "quant_pack" => {
             let (m, k) = (p(0)?, p(1)?);
@@ -835,6 +847,21 @@ mod tests {
         assert_eq!(c.flops, 12);
         let g = cost("matmul_i8_gemv", &[2, 8, 3], 3 * 64);
         assert_eq!(g.int_ops, 384);
+    }
+
+    #[test]
+    fn q4_gemm_is_int_ops() {
+        // [m=2, k=32 (LOGICAL, not kg), n=3]: 2*3 outputs x 32 int MACs x 2 =
+        // 384 int ops -- same MAC count as int8_gemm_is_int_ops's [2,8,3]
+        // (kg=8 there means K=32 too), because a q4 kernel still contracts
+        // every logical K element once, just via a nibble instead of a byte.
+        let c = cost("matmul_q4_dyn", &[2, 32, 3], 6);
+        assert_eq!(c.int_ops, 384);
+        assert_eq!(c.flops, 12);
+        let g = cost("matmul_q4_gemv", &[2, 32, 3], 3 * 64);
+        assert_eq!(g.int_ops, 384);
+        // Bytes: x is [m, k/4] u32 (int8), w is HALF that density, [n, k/8].
+        assert_eq!(c.bytes, 4 * (2 * 8 + 3 * 4 + 2 * 3 + 2 + 3));
     }
 
     #[test]

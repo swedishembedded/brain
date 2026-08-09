@@ -128,4 +128,10 @@ def npu(name):
 
 
 def quant(name, st):
+    # q4 (int4 weight, W4A8) kernels have no builtin to detect the way
+    # `dot4I8Packed` marks int8 — they unpack nibbles by hand — so the name
+    # marker is the signal, same convention `QUANT_MARKERS` already uses for
+    # int8's non-dp4a members.
+    if "q4" in name:
+        return "q4"
     return "int8" if (st["dp4a"] or any(k in name for k in QUANT_MARKERS)) else "none"

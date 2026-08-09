@@ -64,7 +64,7 @@ LEVELS = {
 CPU_CELL = {"yes": "✓", "no": "✗", "native": "native", "native-only": "native only"}
 GPU_CELL = {"yes": "✓", "yes-wg256": "✓ (256)", "no": "✗"}
 NPU_CELL = {"yes": "✓", "no": "—"}
-QUANT_CELL = {"int8": "int8", "none": "—"}
+QUANT_CELL = {"int8": "int8", "q4": "q4", "none": "—"}
 
 
 def parse_meta(text):
@@ -105,6 +105,16 @@ def cross_check(name, text, meta):
     if st["dp4a"] and meta["quant"] != "int8":
         errs.append("@quant is not int8 but the kernel uses dot4I8Packed")
 
+    # q4 (int4 weight) kernels unpack nibbles by hand (shl + arithmetic shr —
+    # `extractBits` has no CPU-JIT lowering, see `matmul_q4_dyn.wgsl`'s
+    # header), so there is no single builtin to grep for the way `dot4I8Packed`
+    # marks int8. The name is the cheap, safe signature instead: every kernel
+    # this repo declares `@quant q4` on is named with a `q4` marker, and no
+    # kernel that predates this tier has one, so this cannot false-positive on
+    # anything already in the tree.
+    if meta["quant"] == "q4" and "q4" not in name:
+        errs.append("@quant q4 declared but the kernel name has no 'q4' marker")
+
     if meta["opt"] == "5" and not (st["dp4a"] or "splitk" in name or st["regblock"]):
         errs.append("@opt 5 but no register block, DP4A or split-K is present")
 
@@ -133,7 +143,7 @@ def esc(s):
 
 def build_table():
     rows, problems = [], []
-    counts = {"lvl": {}, "cpu_no": 0, "native": 0, "quant": 0, "npu": 0}
+    counts = {"lvl": {}, "cpu_no": 0, "native": 0, "quant": 0, "quant_q4": 0, "npu": 0}
 
     for f in sorted(WGSL.glob("*.wgsl")):
         name, text = f.stem, f.read_text()
@@ -156,6 +166,7 @@ def build_table():
         counts["cpu_no"] += meta["cpu"] == "no"
         counts["native"] += str(meta["cpu"]).startswith("native")
         counts["quant"] += meta["quant"] == "int8"
+        counts["quant_q4"] += meta["quant"] == "q4"
         counts["npu"] += meta["npu"] == "yes"
 
     n, lvl = len(rows), counts["lvl"]
@@ -192,7 +203,8 @@ def build_table():
         "**npu** — the Intel NPU never runs WGSL: it is a whole-graph OpenVINO path fed by an",
         "exported ONNX graph, so `✓` means `crates/npu`'s topology DSL can emit an equivalent",
         f"op ({counts['npu']} kernels), not that this file runs there.",
-        f"**quant** — part of the INT8 path ({counts['quant']} kernels).",
+        f"**quant** — part of the INT8 path ({counts['quant']} kernels) or the "
+        f"int4-weight/int8-activation (W4A8) q4 path ({counts['quant_q4']} kernels).",
         "",
         "| kernel | what it does | how | opt | cpu | gpu | npu | quant |",
         "|---|---|---|---|---|---|---|---|",
