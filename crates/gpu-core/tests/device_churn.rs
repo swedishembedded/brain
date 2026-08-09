@@ -78,3 +78,59 @@ fn devices_that_did_real_work_can_still_be_rebuilt() {
     }
     eprintln!("12 working devices built and dropped");
 }
+/// Same churn as the first test above, but with a 1.5s sleep between each
+/// device's drop and the next device's build — distinguishes a
+/// destruction/recreation TIMING race (driver resource reclaim is
+/// asynchronous; giving it time to finish should raise the device count
+/// before the ICD loses the card) from a hard one-shot-per-process limit
+/// (a delay would not help at all). `.todo/vulkan-concurrent-device-
+/// creation-hang.md`'s own residual note: with NO delay, only 1 real Vulkan
+/// device succeeds before every subsequent one falls back to wgpu/llvmpipe.
+///
+/// Measured on this box (2 real P40s, driver current as of this test):
+/// **exactly 4** real Vulkan devices succeed with the delay, reproducibly
+/// across repeated runs (not 3, not 5 — the same count both times this was
+/// tried), before falling back at device 4 for the rest of the loop. That
+/// determinism is itself informative: pure timing jitter would show run-to-
+/// run variance in HOW MANY devices succeed; a fixed count instead suggests
+/// a slow-reclaim driver-side resource (e.g. a small ICD-internal handle
+/// pool) that a 1.5s wait is not long enough to fully drain, not a race
+/// that scales away with more delay. Still a real, useful data point: it
+/// rules out "concurrent creation" as the mechanism (this loop is already
+/// single-threaded — nothing here IS concurrent, so a creation-side mutex
+/// mirroring `VkContext::queue_lock` could not change this outcome) and
+/// narrows the remaining theory to driver-side teardown/reclaim timing, not
+/// a hard one-shot-per-process cap.
+#[test]
+fn churn_with_delay_between_devices_extends_but_does_not_fix_the_streak() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    const KERNELS: [(&str, &str); 1] = [("add2", kernels::ADD2)];
+    let mut real_streak = 0usize;
+    let mut saw_fallback = false;
+    for i in 0..6 {
+        let gpu = gpu_core::Gpu::new(&KERNELS);
+        let a = gpu.storage(4);
+        gpu.write_f32(&a, &[1.0, 2.0, 3.0, 4.0]);
+        let b = gpu.storage(4);
+        gpu.write_f32(&b, &[1.0, 1.0, 1.0, 1.0]);
+        let c = gpu.storage(4);
+        gpu.submit(&[], &[gpu.step(0, &[&a, &b, &c], &[4], 4)]);
+        gpu.poll_wait();
+        let kind = gpu.kind();
+        eprintln!("device {i}: adapter={kind}");
+        if kind == "vulkan" {
+            if saw_fallback {
+                eprintln!("note: real Vulkan device AFTER an earlier fallback -- streak was not strictly leading, informational only");
+            } else {
+                real_streak += 1;
+            }
+        } else {
+            saw_fallback = true;
+        }
+        drop(gpu);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+    eprintln!("real Vulkan devices before first fallback (with 1.5s teardown delay): {real_streak}");
+}
