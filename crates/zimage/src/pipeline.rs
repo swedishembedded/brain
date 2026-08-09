@@ -130,6 +130,23 @@ impl DitEngine {
 /// handle from build time, so [`generate`](Self::generate) just runs forwards.
 /// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
 /// any prompt (padding repeats the last token, keeping features in-distribution).
+/// `BRAIN_ZIMAGE_ENCODER_RESIDENT=1`: opt back into a resident encoder even
+/// when it shares the DiT's card (a box with room for both). Pure function
+/// of the environment so [`encoder_on_demand`]'s decision stays testable.
+fn resident_override() -> bool {
+    std::env::var("BRAIN_ZIMAGE_ENCODER_RESIDENT").ok().as_deref() == Some("1")
+}
+
+/// Whether the int8 GPU encoder should be built on-demand (never resident
+/// alongside the DiT) rather than resident for the pipeline's whole life.
+/// True exactly when the encoder was asked to share the DiT's own card --
+/// the only case where residency would make the two compete for one card's
+/// budget at once (~9.5 GB encoder + ~13 GB DiT) -- and the caller hasn't
+/// opted back into the old both-resident behaviour.
+fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
+    bulk == dit_gpu && !resident_override
+}
+
 /// Where/how the Qwen-4B text encoder runs.
 enum Encoder {
     /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
@@ -147,12 +164,25 @@ enum Encoder {
     /// on the spare card. Encode runs on-GPU (~1-2 s) with one small host-staged
     /// residual at the cut.
     Split { s0: Qwen, s1: Qwen, cap_len: u32 },
+    /// The single-GPU case: the int8 encoder (~9.5 GB) and the int8 DiT (~13 GB)
+    /// would together exceed a 24 GB card's usable budget (and comfortably
+    /// exceed a unified-memory box's smaller one) if both stayed resident at
+    /// once, so this variant is never resident between calls — `encode` builds
+    /// it fresh from `qreader_path`, runs the one forward it needs, and drops it
+    /// before returning, exactly mirroring the SDXL fix (`docs/lessons.md` #14):
+    /// build, use once, drop, THEN run the part that stays resident (here, the
+    /// DiT sampling loop). Costs a rebuild (~1-2 s: open + int8 quantize +
+    /// upload) every `generate()` call instead of once at `build()` time — the
+    /// deliberate trade for never holding both models on the card together.
+    /// `BRAIN_ZIMAGE_ENCODER_RESIDENT=1` opts back into [`Encoder::Gpu8`] on a
+    /// box with enough VRAM to hold both (a 24 GB+ discrete card).
+    OnDemand { qreader_path: String, qcfg: QwenConfig, cap_len: u32, gpu: u32 },
 }
 
 impl Encoder {
-    fn encode(&self, tokens: &[u32]) -> Vec<f32> {
+    fn encode(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
         match self {
-            Encoder::Cpu(q) | Encoder::Gpu8(q) => q.encode(tokens),
+            Encoder::Cpu(q) | Encoder::Gpu8(q) => Ok(q.encode(tokens)),
             Encoder::Split { s0, s1, cap_len } => {
                 // Targets are unused (we read a hidden state, not a loss).
                 let ign = vec![IGNORE; *cap_len as usize];
@@ -161,7 +191,18 @@ impl Encoder {
                 let boundary = s0.read_out_res(); // res[cut] (host)
                 s1.write_in_res(&boundary); // res[cut] on the DiT card
                 s1.run_forward(); // layers cut..n_layers-1
-                s1.read_out_res() // res[n_layers-1] == penultimate hidden (== Qwen::encode)
+                Ok(s1.read_out_res()) // res[n_layers-1] == penultimate hidden (== Qwen::encode)
+            }
+            Encoder::OnDemand { qreader_path, qcfg, cap_len, gpu } => {
+                let reader = open_component(qreader_path).map_err(|e| format!("open qwen: {e}"))?;
+                let src = qwen::import::hf_source(&reader, qcfg)?;
+                let n = qcfg.n_layers as usize;
+                let cap = gpu_core::devices::with_gpu(*gpu, || {
+                    let e = Qwen::new_shard_i8(qcfg.clone(), 1, *cap_len, &src, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: *gpu as usize });
+                    e.encode(tokens)
+                    // `e` drops here -- the encoder never outlives this call.
+                })?;
+                Ok(cap)
             }
         }
     }
@@ -264,11 +305,26 @@ impl HotPipeline {
                 split = Some((s0, cut, n, dit_gpu));
                 None // tail (and thus Encoder::Split) assembled after the DiT below
             }
+            (Some(bulk), false) if encoder_on_demand(bulk, dit_gpu, resident_override()) => {
+                // Same card as the DiT: the int8 encoder (~9.5 GB) and the
+                // int8 DiT (~13 GB) together would exceed most single cards'
+                // usable budget (and comfortably exceed a unified-memory
+                // box's), so neither is built here -- `Encoder::OnDemand`
+                // builds, encodes, and drops the encoder inside every
+                // `generate()` call instead, so it and the DiT are never
+                // resident at once (docs/lessons.md #14). Opt back into the
+                // old both-resident behaviour with
+                // `BRAIN_ZIMAGE_ENCODER_RESIDENT=1` on a card with room for
+                // both (a real 24 GB+ discrete GPU).
+                progress(&format!("using on-demand Qwen-4B encoder (int8 DP4A, GPU {bulk} shared with the DiT)"));
+                Some(Encoder::OnDemand { qreader_path: paths.qwen.clone(), qcfg: qcfg.clone(), cap_len, gpu: bulk })
+            }
             (Some(bulk), false) => {
-                // Default on-GPU encoder: whole Qwen-4B in int8 (DP4A) on ONE card.
-                // ~9.5 GB resident — fits a single 24 GB P40, leaving the DiT its own
-                // card. `end: n-1` skips the unused last layer (encode reads the
-                // penultimate hidden). This is the robust superfast path.
+                // A genuinely separate card from the DiT's (or
+                // BRAIN_ZIMAGE_ENCODER_RESIDENT=1 opting back in): whole
+                // Qwen-4B in int8 (DP4A), built once, resident for the
+                // pipeline's whole life. ~9.5 GB resident. `end: n-1` skips
+                // the unused last layer (encode reads the penultimate hidden).
                 let n = qcfg.n_layers as usize;
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
@@ -366,7 +422,7 @@ impl HotPipeline {
             let pad = *tokens.last().unwrap_or(&0);
             tokens.resize(cl, pad);
         }
-        let cap = self.enc.encode(&tokens); // [cap_len · 2560]
+        let cap = self.enc.encode(&tokens)?; // [cap_len · 2560]
 
         // 2. seeded latent + scheduler.
         let n = (16 * self.lh * self.lw) as usize;
@@ -750,5 +806,22 @@ mod component_tensor_tests {
         assert_eq!(got.unwrap(), vec![3.0, 4.0]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod encoder_scheduling_tests {
+    use super::*;
+
+    /// The scheduling decision the OOM fix hinges on: on-demand exactly when
+    /// the encoder shares the DiT's own card, never when it has a card of
+    /// its own, and never when the caller explicitly opted back into the
+    /// old both-resident behaviour.
+    #[test]
+    fn on_demand_exactly_when_sharing_the_dits_card() {
+        assert!(encoder_on_demand(0, 0, false), "same card as the DiT -> on-demand");
+        assert!(!encoder_on_demand(1, 0, false), "a separate card -> resident (no conflict to avoid)");
+        assert!(!encoder_on_demand(0, 0, true), "BRAIN_ZIMAGE_ENCODER_RESIDENT=1 -> resident even on the same card");
+        assert!(!encoder_on_demand(1, 0, true), "override + separate card -> still resident");
     }
 }

@@ -615,6 +615,11 @@ struct ImageRequest {
     size_label: String,
     seed: i64,
     stream: bool,
+    /// Non-standard, like `seed`: `"int8"` (default) or `"fp32"` — see
+    /// `zimage::caps`'s `precision` param (`Opts::hifi`). `None` when the
+    /// caller omitted it, so the resident model's own default applies
+    /// unchanged rather than this endpoint silently pinning one.
+    precision: Option<String>,
 }
 
 /// Current Unix time (seconds) — the `created`/`created_at` the image responses carry.
@@ -627,7 +632,10 @@ fn now_unix() -> i64 {
 /// [`IMAGE_SIZES`]; `response_format` is `b64_json` (default) or `url` — brain has no
 /// object store, so a `url` request is still answered with `b64_json` (documented);
 /// any other value is a 400. `quality`/`style`/`background` etc. are accepted and
-/// ignored. An optional `seed` (non-standard, honoured when present) seeds generation.
+/// ignored. An optional `seed` (non-standard, honoured when present) seeds
+/// generation; an optional `precision` (non-standard, `"int8"`|`"fp32"`) selects
+/// the DiT precision on a model that supports it (zimage) — omitted, the
+/// resident model's own default applies.
 fn parse_image_request(provider: Provider, body: &Value) -> Result<ImageRequest, ApiError> {
     let prompt = body
         .get("prompt")
@@ -672,19 +680,31 @@ fn parse_image_request(provider: Provider, body: &Value) -> Result<ImageRequest,
         Some(_) => return Err(ApiError::invalid_request(provider, "'response_format' must be \"b64_json\" or \"url\"")),
     }
 
+    // precision: same shape as response_format above -- an unrecognized value is
+    // a 400, not a silent fall-through to whatever the model defaults to.
+    let precision = match body.get("precision") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s == "int8" || s == "fp32" => Some(s.clone()),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'precision' must be \"int8\" or \"fp32\"")),
+    };
+
     let seed = body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0);
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    Ok(ImageRequest { model, prompt, n, width, height, size_label, seed, stream })
+    Ok(ImageRequest { model, prompt, n, width, height, size_label, seed, stream, precision })
 }
 
 /// The image-action [`Invocation`] for the `i`-th requested image: prompt + size +
 /// a per-image seed (so `n>1` yields distinct images from a seed-driven model).
 fn image_invocation(req: &ImageRequest, i: u32) -> Invocation {
-    Invocation::new()
+    let mut inv = Invocation::new()
         .set("prompt", json!(req.prompt))
         .set("width", json!(req.width))
         .set("height", json!(req.height))
-        .set("seed", json!(req.seed.wrapping_add(i as i64)))
+        .set("seed", json!(req.seed.wrapping_add(i as i64)));
+    if let Some(p) = &req.precision {
+        inv = inv.set("precision", json!(p));
+    }
+    inv
 }
 
 /// Read the generated image from an [`capability::Outcome`] and return it as
