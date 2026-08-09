@@ -33,8 +33,11 @@ from pathlib import Path
 
 # Utility/demo entries that are real catalog models but not "a model" for the
 # support table's purposes (no ML weights, nothing to document a support
-# matrix for).
-IGNORE = {"brain/mock", "brain/demo", "brain/imageops"}
+# matrix for). `brain/qwenvl` is a real, weighted VLM but forward-only (no
+# serving action beyond raw forward) — README.md's own prose right above the
+# table says it (and moondream, not yet in `brain caps`) is documented below
+# the table instead of given a row; this mirrors that deliberate exclusion.
+IGNORE = {"brain/mock", "brain/demo", "brain/imageops", "brain/qwenvl"}
 
 # `brain caps` is a WEIGHTS-FREE static listing: it reports each catalog
 # entry's crate-level `caps::MODEL` constant (`brain/qwen`, `brain/lfm`), which
