@@ -21,6 +21,7 @@
 setup_file() {
   command -v dbus-daemon >/dev/null 2>&1 || skip "dbus-daemon not installed"
   command -v curl >/dev/null 2>&1 || skip "curl not installed"
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   export REPO
   BRAIN="${BRAIN_BIN:-$REPO/target/debug/brain}"
@@ -46,19 +47,33 @@ setup_file() {
 
   ANTHROPIC_PORT="${ANTHROPIC_PORT:-8991}"
   export ANTHROPIC_PORT
+  OPENAI_PORT="${OPENAI_PORT:-8992}"
+  export OPENAI_PORT
+  KEYS="$CONF_DIR/keys.json"
+  export KEYS
+  READY="$CONF_DIR/ready"
+  export READY
   # BRAIN_MOCK_DELAY_MS is a SERVER-side knob (crates/cli/src/resident_mock.rs
   # reads it once per request from ITS OWN environment) — it must be set on this
   # launch, not on a client invocation later, or the cancellation test below
   # races every step to completion before Cancel can land. 300ms split across
   # text2image's 4 steps is unnoticeable for every other test here.
-  BRAIN_MOCK=1 BRAIN_MOCK_DELAY_MS=300 BRAIN_DEVICE=cpu "$BRAIN" serve --dbus --anthropic "$ANTHROPIC_PORT" >"$CONF_DIR/server.log" 2>&1 &
+  BRAIN_MOCK=1 BRAIN_MOCK_DELAY_MS=300 BRAIN_DEVICE=cpu "$BRAIN" serve \
+    --dbus --anthropic "$ANTHROPIC_PORT" --openai "$OPENAI_PORT" \
+    --api-keys-out "$KEYS" --ready-file "$READY" \
+    >"$CONF_DIR/server.log" 2>&1 &
   SERVER_PID=$!
   export SERVER_PID
   echo "$SERVER_PID" > "$CONF_DIR/pid"
 
+  # Wait on the ready file rather than polling D-Bus directly: run_cli.rs's
+  # "ORDER IS THE CONTRACT" guarantee means the ready file is touched only
+  # once every requested surface (D-Bus included) is bound AND strictly after
+  # --api-keys-out is written, so a single wait covers all three -- no retry
+  # loop needed for the key read below.
   local ready=0
   for _ in $(seq 1 60); do
-    busctl --address="$DBUS_SESSION_BUS_ADDRESS" list 2>/dev/null | grep -q com.swedishembedded.Brain1 && { ready=1; break; }
+    [ -e "$READY" ] && { ready=1; break; }
     kill -0 "$SERVER_PID" 2>/dev/null || break
     sleep 0.3
   done
@@ -67,6 +82,11 @@ setup_file() {
     cat "$CONF_DIR/server.log" >&3 || true
     skip "brain serve did not become ready"
   fi
+
+  OPENAI_KEY="$(jq -r .openai "$KEYS" 2>/dev/null)"
+  export OPENAI_KEY
+  ANTHROPIC_KEY="$(jq -r .anthropic "$KEYS" 2>/dev/null)"
+  export ANTHROPIC_KEY
 }
 
 teardown_file() {
@@ -129,12 +149,6 @@ run_example() {
 }
 
 # ------------------------------------------------------------- omni/
-#
-# Only the D-Bus path runs here -- the OpenAI/Anthropic HTTP transports are
-# verified by hand against this same BRAIN_MOCK setup (see docs/models/omni/
-# status.md's M13/M14 entry) but the shared harness above does not start an
-# --openai surface or capture either provider's generated API key, and doing
-# so is out of scope for wiring one example's coverage in.
 
 @test "examples/omni/omni.py runs against the mock over D-Bus" {
   run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-text "hi" --out-stdio
@@ -143,6 +157,29 @@ run_example() {
 
 @test "examples/omni/omni.py skips cleanly on unimplemented input/output flags" {
   run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-image foo.png --in-text ignored --out-stdio
+}
+
+@test "examples/omni/omni.py runs against the mock over OpenAI-compatible HTTP" {
+  # brain.models() is real on this transport, so the served-model precheck
+  # (omni.py:144-153) runs before the generate call -- brain/mock is served,
+  # so this exercises the full precheck-then-generate path, not just generate.
+  run_example "$REPO/examples/omni/omni.py" \
+    --openai "127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" \
+    --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
+}
+
+@test "examples/omni/omni.py runs against the mock over Anthropic-compatible HTTP" {
+  # BrainAnthropic.manifests() raises NotImplementedError (Anthropic's API has
+  # no /v1/models equivalent), so omni.py:148-151 catches it and skips the
+  # served-model precheck entirely on this transport -- an unserved model
+  # would fail at generate time, not as a skip(). brain/mock IS served here,
+  # so this is still the real generate path, just without the precheck step
+  # the OpenAI-transport test above exercises.
+  run_example "$REPO/examples/omni/omni.py" \
+    --anthropic "127.0.0.1:$ANTHROPIC_PORT" --api-key "$ANTHROPIC_KEY" \
+    --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
 }
 
 # ------------------------------------------------------------- imagegen/
