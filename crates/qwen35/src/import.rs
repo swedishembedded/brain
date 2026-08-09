@@ -568,4 +568,65 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// Integration check against the REAL checkpoint: set
+    /// `BRAIN_QWEN35_GGUF` to a **fully downloaded** `Qwen3.5-35B-A3B*.gguf`
+    /// (any quant level — only the header + embedded tokenizer are read,
+    /// tensor data is never dequantized here, but `MmapGguf::open` validates
+    /// every tensor's byte range against the file length up front, so a
+    /// still-downloading/truncated file fails this test with an "out of
+    /// range" error rather than silently passing on partial data). Self-skips
+    /// loudly when unset (`docs/testing.md`'s convention) rather than failing
+    /// a box that hasn't fetched the multi-GB file.
+    #[test]
+    fn config_and_tokenizer_extract_from_the_real_checkpoint() {
+        let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
+            eprintln!("SKIP: BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
+            return;
+        };
+        let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+        let cfg = config_from_gguf(&mg).expect("config_from_gguf on the real checkpoint");
+
+        // Cross-checked against the real config.json fetched separately
+        // (/data/workspace/resources/qwen3.5/config.json) and the checkpoint
+        // header parsed by hand (this file's own module doc).
+        assert_eq!(cfg.n_layers, 40);
+        assert_eq!(cfg.d_model, 2048);
+        assert_eq!(cfg.n_heads, 16);
+        assert_eq!(cfg.n_kv_heads, 2);
+        assert_eq!(cfg.head_dim, 256);
+        assert_eq!(cfg.full_attention_interval, 4);
+        assert_eq!(cfg.n_experts, 256);
+        assert_eq!(cfg.top_k, 8);
+        assert_eq!(cfg.moe_intermediate_size, 512);
+        assert_eq!(cfg.shared_expert_intermediate_size, 512);
+        assert_eq!(cfg.linear_num_key_heads, 16);
+        assert_eq!(cfg.linear_num_value_heads, 32);
+        assert_eq!(cfg.linear_key_head_dim, 128);
+        assert_eq!(cfg.linear_value_head_dim, 128);
+        assert_eq!(cfg.linear_conv_kernel_dim, 4);
+        assert_eq!(cfg.vocab, 248320);
+        assert!(!cfg.tie_embeddings);
+        assert_eq!((cfg.rotary_dim() as f32 / cfg.head_dim as f32 - 0.25).abs() < 1e-6, true);
+
+        let full_idx: Vec<usize> = cfg
+            .layer_types()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == LayerType::Full)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(full_idx, vec![3, 7, 11, 15, 19, 23, 27, 31, 35, 39]);
+
+        // Tokenizer: extract from the GGUF-embedded KV and encode/decode a
+        // real string round-trip through data::qwen_tokenizer::QwenBpe.
+        let gguf_tok = mg.tokenizer().expect("tokenizer.ggml.* KV must be present");
+        let bpe = data::qwen_tokenizer::QwenBpe::from_gguf(&gguf_tok).expect("QwenBpe::from_gguf");
+        use data::tokenizer::Tokenizer;
+        let text = "Hello, world! This is Qwen3.5.";
+        let ids = bpe.encode(text);
+        assert!(!ids.is_empty(), "encoding a real sentence must produce tokens");
+        let back = bpe.decode(&ids);
+        assert_eq!(back, text, "encode/decode must round-trip a plain ASCII sentence exactly");
+    }
 }
