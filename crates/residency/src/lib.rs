@@ -25,6 +25,7 @@ pub mod jobs;
 pub mod lru;
 pub mod manager;
 pub mod model;
+pub mod multi;
 pub mod place;
 pub mod scheduler;
 pub mod supply;
@@ -32,6 +33,7 @@ pub mod supply;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
 pub use model::{Instance, ResidentModel};
+pub use multi::{MultiDeviceCost, MultiDeviceResidentModel};
 pub use scheduler::Policy;
 pub use supply::{ModelSupplier, Supply};
 

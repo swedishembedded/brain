@@ -138,7 +138,16 @@ impl ExecutorSource {
 impl StatsSource for ExecutorSource {
     fn contribute(&self, snap: &mut StatsSnapshot) {
         let stats = self.exec.stats();
-        let ResidencyReport { placements, budgets } = self.exec.residency();
+        // multi_placements (multi-device resident instances) is not yet
+        // rendered here -- `ModelStat`/`Instance`'s stats schema is
+        // single-device by construction (one `device` field), same as
+        // `InstancePlacement`; showing a multi-device instance for real
+        // needs a schema change (a device LIST per instance), not just
+        // reading this field. No multi-device model exists in production
+        // yet (`crates/residency/src/multi.rs` is this session's new
+        // foundation), so "not shown yet" is an honest, low-urgency gap, not
+        // a silently wrong number. See `.todo/omni-int8-dual-gpu-residency.md`.
+        let ResidencyReport { placements, budgets, multi_placements: _ } = self.exec.residency();
         snap.executor = executor_stat(&stats);
         // Accelerators come straight from the device budgets — one row per
         // budgeted device, so the set adapts to any machine (0..N GPUs/NPUs).

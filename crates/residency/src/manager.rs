@@ -8,10 +8,33 @@
 //! memory automatically" core; the scheduler (next) drives concurrency and batching
 //! on top of it.
 //!
-//! Single-device instances are handled directly. A model that spans multiple devices
-//! (e.g. z-image's encoder + DiT on two cards) reports the extra footprint via
-//! [`ResidentModel::estimate`]'s `ram`/secondary accounting and pins its own cards;
-//! the manager still tracks the primary-device budget.
+//! Single-device instances are handled directly (`claim`/`run`/`evict`, tracked
+//! in [`crate::lru::Residents`]). A model that spans multiple devices AT ONCE
+//! (e.g. an int8 MoE model layer-sharded across two GPUs) registers separately
+//! via [`ResidencyManager::register_multi`] and is placed by
+//! [`ResidencyManager::claim_multi`] — real, honest per-device accounting via
+//! [`crate::multi::MultiDeviceCost`]/[`crate::multi::pick_devices`] against the
+//! SAME [`Budgets`] every single-device instance shares (so a multi-device
+//! instance's bytes are never invisible to a single-device claim's budget
+//! check, and vice versa).
+//!
+//! **What the multi-device path does NOT do (a deliberate, documented scope
+//! limit, not an oversight)**: multi-device instances are NOT tracked in
+//! [`crate::lru::Residents`] (whose `Entry` is single-device by construction)
+//! and are therefore never chosen as LRU/cost-aware eviction VICTIMS — once
+//! claimed, a multi-device instance stays resident until explicitly
+//! `release_multi`'d/evicted by its own caller, not auto-evicted to make room
+//! for something else. `claim_multi`'s OWN eviction fallback still works (it
+//! can evict single-device LRU victims per needed device to make room for
+//! itself), so a multi-device claim is not stuck behind stale single-device
+//! residents — the gap is one-directional: nothing evicts a multi-device
+//! instance automatically. Acceptable for the intended shape (one big model
+//! held resident for the process lifetime, e.g. an int8-sharded Thinker), and
+//! precisely the honest boundary this crate's own "gates that lie" discipline
+//! prefers over silently pretending full LRU parity exists. Extending
+//! `Residents` to a multi-device `Entry` (so eviction scoring can consider
+//! multi-device victims too) is real, separate follow-up work if a future
+//! caller genuinely needs it — see `.todo/omni-int8-dual-gpu-residency.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -20,8 +43,9 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 
 use crate::budget::Budgets;
 use crate::lru::Residents;
+use crate::multi::{pick_devices, MultiDeviceCost, MultiDeviceResidentModel};
 use crate::place::{no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
-use crate::{Device, Instance, InstanceKey, ResidentModel, Tier};
+use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
 /// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
@@ -66,6 +90,15 @@ pub enum Claimed {
     Build(Arc<dyn ResidentModel>),
 }
 
+/// [`Claimed`]'s multi-device sibling — carries a [`MultiDeviceResidentModel`]
+/// (whose `activate_multi` takes a device SET) instead of a `ResidentModel`,
+/// since [`ResidencyManager::claim_multi`] needs a different build contract,
+/// not just a different placement.
+pub enum ClaimedMulti {
+    Hot(InstanceHandle),
+    Build(Arc<dyn MultiDeviceResidentModel>),
+}
+
 /// One resident instance's placement — the per-model residency the stats
 /// subsystem renders (which model is Hot, on which device, at what memory cost).
 #[derive(Clone, Debug)]
@@ -87,6 +120,18 @@ pub struct DeviceBudget {
     pub used: u64,
 }
 
+/// One multi-device resident instance's placement — [`InstancePlacement`]'s
+/// sibling for an instance that spans several devices instead of one.
+#[derive(Clone, Debug)]
+pub struct MultiInstancePlacement {
+    pub key: InstanceKey,
+    /// `(device, bytes on that device)` — every device this instance
+    /// occupies, each with its own real byte count (never summed into one
+    /// figure that could be mistaken for a single-device cost).
+    pub devices: Vec<(Device, u64)>,
+    pub tier: Tier,
+}
+
 /// A point-in-time residency + budget snapshot: every placed instance plus every
 /// device's budget. Produced by [`ResidencyManager::report`] and surfaced through
 /// the [`Executor`](crate::Executor) residency accessor so callers outside the
@@ -95,6 +140,14 @@ pub struct DeviceBudget {
 #[derive(Clone, Debug, Default)]
 pub struct ResidencyReport {
     pub placements: Vec<InstancePlacement>,
+    /// Multi-device placements — kept SEPARATE from `placements` rather than
+    /// folded in (an `InstancePlacement` has exactly one `device: Device`
+    /// field, singular by construction; forcing a multi-device instance into
+    /// that shape would mean picking one device to report and hiding the
+    /// rest, exactly the kind of lying figure this crate's `multi` module
+    /// exists to avoid). A renderer that ignores this field simply doesn't
+    /// show multi-device instances, which is honest (empty), not wrong.
+    pub multi_placements: Vec<MultiInstancePlacement>,
     pub budgets: Vec<DeviceBudget>,
 }
 
@@ -112,8 +165,20 @@ fn device_order(d: Device) -> (u8, u32) {
 /// itself — the scheduler owns one behind its worker(s).
 pub struct ResidencyManager {
     models: HashMap<String, Arc<dyn ResidentModel>>,
+    /// Models placeable across several devices at once — a SEPARATE registry
+    /// from `models` (see this file's own module doc): `claim_multi` looks
+    /// here, `claim` never does. A model may be registered in both maps
+    /// under the same name if it wants to be reachable either way (not
+    /// required by anything here).
+    multi_models: HashMap<String, Arc<dyn MultiDeviceResidentModel>>,
     budgets: Budgets,
     residents: Residents,
+    /// Multi-device residents' bookkeeping — parallel to `residents` but
+    /// keyed on the same `InstanceKey` space (a name must not be claimed
+    /// both ways at once; `claim_multi` checks `residents` too before
+    /// treating a key as cold, and vice versa is the caller's own
+    /// responsibility since `models`/`multi_models` are separate registries).
+    multi_residents: HashMap<InstanceKey, MultiEntry>,
     instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     pub events: Vec<String>,
@@ -129,12 +194,24 @@ pub struct ResidencyManager {
     eviction: Box<dyn EvictionPolicy>,
 }
 
+/// One multi-device resident instance's bookkeeping — parallel to
+/// [`crate::lru::Entry`], but spanning several devices and (see this file's
+/// module doc) deliberately NOT part of the LRU/cost-aware eviction pool.
+struct MultiEntry {
+    cost: MultiDeviceCost,
+    devices: Vec<Device>,
+    /// True while a job is actively running — must not be evicted/dropped.
+    pinned: bool,
+}
+
 impl ResidencyManager {
     pub fn new(budgets: Budgets) -> ResidencyManager {
         ResidencyManager {
             models: HashMap::new(),
+            multi_models: HashMap::new(),
             budgets,
             residents: Residents::new(),
+            multi_residents: HashMap::new(),
             instances: HashMap::new(),
             events: Vec::new(),
             builds: 0,
@@ -174,6 +251,12 @@ impl ResidencyManager {
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {
         self.models.insert(model.manifest().model.clone(), model);
+    }
+
+    /// Register a model reachable via [`Self::claim_multi`] — a SEPARATE
+    /// registry from [`Self::register`] (see this file's own module doc).
+    pub fn register_multi(&mut self, model: Arc<dyn MultiDeviceResidentModel>) {
+        self.multi_models.insert(model.manifest().model.clone(), model);
     }
 
     pub fn manifests(&self) -> Vec<Manifest> {
@@ -226,13 +309,23 @@ impl ResidencyManager {
             .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: Tier::Hot, mem: e.cost.on(e.device) })
             .collect();
         placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)).cmp(&(b.key.model.clone(), b.key.config.clone(), device_order(b.device))));
+        let mut multi_placements: Vec<MultiInstancePlacement> = self
+            .multi_residents
+            .iter()
+            .map(|(k, e)| MultiInstancePlacement {
+                key: k.clone(),
+                devices: e.devices.iter().map(|&d| (d, e.cost.on(d))).collect(),
+                tier: Tier::Hot,
+            })
+            .collect();
+        multi_placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone()).cmp(&(b.key.model.clone(), b.key.config.clone())));
         let mut budgets: Vec<DeviceBudget> = self
             .budgets
             .devices()
             .filter_map(|d| self.budgets.get(d).map(|b| DeviceBudget { device: d, total: b.total, reserved: b.reserved, used: b.used }))
             .collect();
         budgets.sort_by_key(|b| device_order(b.device));
-        ResidencyReport { placements, budgets }
+        ResidencyReport { placements, multi_placements, budgets }
     }
 
     pub fn budgets(&self) -> &Budgets {
@@ -343,6 +436,135 @@ impl ResidencyManager {
     pub fn release(&mut self, key: &InstanceKey) {
         self.residents.set_pinned(key, false);
         self.residents.touch(key);
+    }
+
+    /// [`Self::claim`]'s multi-device sibling — places (or finds hot) an
+    /// instance of a [`MultiDeviceResidentModel`] registered via
+    /// [`Self::register_multi`]. See this file's own module doc for what the
+    /// eviction fallback here does and does not cover.
+    pub fn claim_multi(
+        &mut self,
+        model: &str,
+        action: &str,
+        inv: &Invocation,
+        exclude: &HashSet<Device>,
+    ) -> Result<(ClaimedMulti, Vec<Device>, InstanceKey), ClaimError> {
+        let m = self
+            .multi_models
+            .get(model)
+            .ok_or_else(|| ClaimError::Activate(format!("no multi-device model '{model}'")))?
+            .clone();
+        let key = m.instance_key(action, inv);
+        if self.instances.contains_key(&key) {
+            if let Some(entry) = self.multi_residents.get_mut(&key) {
+                entry.pinned = true;
+            }
+            let handle = self.instances.get(&key).expect("hot").clone();
+            let devices = self.multi_residents.get(&key).expect("multi-resident").devices.clone();
+            return Ok((ClaimedMulti::Hot(handle), devices, key));
+        }
+        let cost = m.estimate_multi(&key);
+        let wanted: Vec<Device> = cost.devices().collect();
+        if wanted.is_empty() {
+            return Err(ClaimError::Activate(format!("{key}: estimate_multi named zero devices")));
+        }
+        let devices = match pick_devices(&cost, &self.budgets, exclude) {
+            Some(d) => d,
+            None => {
+                // Per-device eviction fallback: for EACH device this instance
+                // needs, evict single-device LRU victims on THAT device
+                // specifically to make room — never touching another
+                // multi-device resident (this manager's own module doc names
+                // that as the deliberate scope limit). Reuses the existing
+                // single-device eviction planner per device by excluding
+                // every other device, so it cannot "succeed" by picking a
+                // different one than the one actually needed.
+                let every_device: HashSet<Device> = self.budgets.devices().collect();
+                for &d in &wanted {
+                    if exclude.contains(&d) {
+                        return Err(ClaimError::NoCapacity(format!("{key}: device {d:?} is excluded")));
+                    }
+                    let need = cost.on(d);
+                    let b = self
+                        .budgets
+                        .get(d)
+                        .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: device {d:?} has no budget")))?;
+                    if b.usable() < need {
+                        return Err(ClaimError::NoCapacity(format!(
+                            "{key} ({} MiB on {d:?}) is too large for that device's usable budget",
+                            need >> 20
+                        )));
+                    }
+                    if b.fits(need) {
+                        continue; // already fits on this device, nothing to evict here
+                    }
+                    let mut only_d = every_device.clone();
+                    only_d.remove(&d);
+                    let synth = match d {
+                        Device::Gpu(_) => MemCost { vram: need, ram: 0, npu: 0 },
+                        Device::Npu(_) => MemCost { vram: 0, ram: 0, npu: need },
+                        Device::Cpu => MemCost { vram: 0, ram: need, npu: 0 },
+                    };
+                    let plan = plan_eviction_with(&*self.eviction, &synth, &self.budgets, &self.residents, &[], &only_d)
+                        .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
+                    for victim in &plan.victims {
+                        self.evict(victim);
+                    }
+                }
+                pick_devices(&cost, &self.budgets, exclude)
+                    .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: does not fit even after eviction")))?
+            }
+        };
+        for &d in &devices {
+            self.budgets.alloc(d, cost.on(d));
+        }
+        self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true });
+        self.events.push(format!("promote {key} -> {devices:?} (building, multi-device)"));
+        Ok((ClaimedMulti::Build(m), devices, key))
+    }
+
+    /// [`Self::adopt`]'s multi-device sibling.
+    pub fn adopt_multi(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
+        self.instances.insert(key.clone(), handle.clone());
+        self.builds += 1;
+        self.events.push(format!("built {key} (multi-device)"));
+        handle
+    }
+
+    /// [`Self::build_failed`]'s multi-device sibling: unwinds the
+    /// pre-accounted budget on EVERY device this claim reserved.
+    pub fn build_failed_multi(&mut self, key: &InstanceKey) {
+        if let Some(entry) = self.multi_residents.remove(key) {
+            for &d in &entry.devices {
+                self.budgets.release(d, entry.cost.on(d));
+            }
+        }
+        self.instances.remove(key);
+        self.events.push(format!("build-failed {key} (multi-device)"));
+    }
+
+    /// [`Self::release`]'s multi-device sibling.
+    pub fn release_multi(&mut self, key: &InstanceKey) {
+        if let Some(entry) = self.multi_residents.get_mut(key) {
+            entry.pinned = false;
+        }
+    }
+
+    /// Demote (drop) a multi-device instance, freeing its memory on EVERY
+    /// device it occupied. Public (unlike the single-device [`Self::evict`]):
+    /// nothing auto-evicts a multi-device resident (this file's own module
+    /// doc explains why), so a caller that genuinely wants one gone —
+    /// swapping to a different checkpoint, a shutdown path — calls this
+    /// directly.
+    pub fn evict_multi(&mut self, key: &InstanceKey) {
+        if let Some(entry) = self.multi_residents.remove(key) {
+            for &d in &entry.devices {
+                self.budgets.release(d, entry.cost.on(d));
+            }
+            self.instances.remove(key);
+            self.evictions += 1;
+            self.events.push(format!("evict {key} <- {:?} (multi-device)", entry.devices));
+        }
     }
 
     /// Run several same-key invocations of one action on a single hot instance —
@@ -459,5 +681,154 @@ mod tests {
         let devs: Vec<Device> = mgr.residency().into_iter().map(|(_, d, _)| d).collect();
         assert!(devs.contains(&Device::Gpu(0)) && devs.contains(&Device::Gpu(1)));
         assert_eq!(live.load(Ordering::SeqCst), 2);
+    }
+
+    /// A fake model that spans BOTH gpu0 and gpu1 at once — occupies real,
+    /// distinct bytes on each, the shape `MultiDeviceCost` exists for.
+    struct MultiFake {
+        name: String,
+        per_gpu: u64,
+        live: Arc<AtomicU32>,
+    }
+    impl ResidentModel for MultiFake {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "fake multi", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0) // not the path claim_multi uses; never consulted there
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("MultiFake: single-device activate is not this model's contract".to_string())
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for MultiFake {
+        fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), self.per_gpu), (Device::Gpu(1), self.per_gpu)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            assert_eq!(devices, [Device::Gpu(0), Device::Gpu(1)], "activate_multi must see exactly the devices estimate_multi named");
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
+    }
+
+    fn claim_multi_built(mgr: &mut ResidencyManager, model: &str) -> Result<(InstanceHandle, InstanceKey), String> {
+        let (claimed, devices, key) = mgr.claim_multi(model, "run", &Invocation::new(), &HashSet::new()).map_err(String::from)?;
+        let handle = match claimed {
+            ClaimedMulti::Hot(h) => h,
+            ClaimedMulti::Build(m) => match m.activate_multi(&key, &devices) {
+                Ok(inst) => mgr.adopt_multi(&key, Arc::new(Mutex::new(inst))),
+                Err(e) => {
+                    mgr.build_failed_multi(&key);
+                    return Err(e);
+                }
+            },
+        };
+        Ok((handle, key))
+    }
+
+    #[test]
+    fn multi_device_claim_reserves_real_bytes_on_every_named_device() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 15 * GB, live: live.clone() }));
+
+        let (handle, key) = claim_multi_built(&mut mgr, "int8thinker").unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert!(handle.lock().unwrap().run("run", &Invocation::new(), &mut |_| {}).is_ok());
+
+        // Real per-device accounting: 15 GB used on EACH card, not double
+        // counted, not folded into one figure.
+        assert_eq!(mgr.budgets().get(Device::Gpu(0)).unwrap().used, 15 * GB);
+        assert_eq!(mgr.budgets().get(Device::Gpu(1)).unwrap().used, 15 * GB);
+
+        let report = mgr.report();
+        assert_eq!(report.multi_placements.len(), 1);
+        assert_eq!(report.multi_placements[0].key, key);
+        let mut devs = report.multi_placements[0].devices.clone();
+        devs.sort_by_key(|&(d, _)| match d {
+            Device::Gpu(i) => i,
+            _ => u32::MAX,
+        });
+        assert_eq!(devs, vec![(Device::Gpu(0), 15 * GB), (Device::Gpu(1), 15 * GB)]);
+        assert!(report.placements.is_empty(), "a multi-device instance must not also appear in the single-device placements list");
+
+        mgr.release_multi(&key);
+        drop(handle); // drop this test's OWN strong ref -- evict_multi's removal from `instances` is not the last one otherwise
+        mgr.evict_multi(&key);
+        assert_eq!(live.load(Ordering::SeqCst), 0, "evict_multi must free every device");
+        assert_eq!(mgr.budgets().get(Device::Gpu(0)).unwrap().used, 0);
+        assert_eq!(mgr.budgets().get(Device::Gpu(1)).unwrap().used, 0);
+    }
+
+    #[test]
+    fn multi_device_claim_evicts_single_device_lru_victims_to_make_room() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        // Fill both cards with ordinary single-device residents first.
+        for n in ["a", "b"] {
+            mgr.register(Arc::new(Fake { name: n.into(), vram: 20 * GB, live: live.clone() }));
+        }
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap(); // -> gpu0
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap(); // -> gpu1
+        assert_eq!(live.load(Ordering::SeqCst), 2);
+
+        // A 15 GB-per-card multi-device model needs room neither card has
+        // free right now (24 - 20 = 4 GB each) -- must evict on BOTH.
+        mgr.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 15 * GB, live: live.clone() }));
+        let (_handle, _key) = claim_multi_built(&mut mgr, "int8thinker").unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1, "both single-device residents evicted, one multi-device instance now live");
+        assert!(mgr.events.iter().any(|e| e.contains("evict a")), "events: {:?}", mgr.events);
+        assert!(mgr.events.iter().any(|e| e.contains("evict b")), "events: {:?}", mgr.events);
+    }
+
+    #[test]
+    fn multi_device_cost_too_large_for_one_device_is_a_clean_error_not_silent_partial_placement() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        // 30 GB on gpu1 alone can never fit a 24 GB card, however much gets evicted.
+        mgr.register_multi(Arc::new(MultiFakeUneven { live: live.clone() }));
+        let err = match claim_multi_built(&mut mgr, "uneven") {
+            Ok(_) => panic!("expected a capacity error"),
+            Err(e) => e,
+        };
+        assert!(err.contains("too large"), "{err}");
+        assert_eq!(live.load(Ordering::SeqCst), 0, "a failed claim must not have activated anything");
+    }
+
+    struct MultiFakeUneven {
+        live: Arc<AtomicU32>,
+    }
+    impl ResidentModel for MultiFakeUneven {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("uneven", "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("uneven", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("not this model's contract".to_string())
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for MultiFakeUneven {
+        fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(1), 30 * GB)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
     }
 }
