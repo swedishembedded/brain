@@ -38,6 +38,16 @@ pub const GRADNORM_ELEMS_PER_WG: usize = 8192;
 /// fold; 512 workgroups = 32 768 threads, ~8.5× a P40's core count.
 pub const GRADNORM_MAX_WG: usize = 512;
 
+/// Per-tensor upload chunk size, in elements (4 MiB as f32/u32 words). Bounds
+/// the HOST-side scratch a weight upload ever materializes to this many
+/// elements, never a whole tensor (relevant tensors run up to ~1.5 GB as
+/// f32) — see [`ParamStore::new_with_roles_src`]. This is a distinct fix
+/// from wgpu's own per-buffer device-side staging overhead (lesson #35,
+/// `crates/gpu-core/tests/vram_overhead.rs`): that one is backend-level and
+/// chunking write CALLS does not change it; this constant only bounds what
+/// this crate allocates on the host to produce those calls.
+pub const UPLOAD_CHUNK_WORDS: usize = 1 << 20;
+
 /// Workgroups — equivalently, partial sums — `gradnorm_part` uses for a tensor
 /// of `numel` elements. The single place this policy is written down; the
 /// buffer sizing (`ParamStore::norms`) and the dispatch (`optim::Optim`) both
@@ -120,19 +130,38 @@ impl ParamStore {
             // tightly — the difference between the Qwen encoder fitting a 24 GB card
             // or not. (Same fix as zimage's BlockWeights::upload.)
             let wbuf = gpu.storage(*numel as u64);
-            // Pull exactly this tensor from the source, upload it, and let the host
-            // f32 (a streaming WeightReader's per-tensor decode) drop on return —
-            // never a whole-model host map. Numerics are byte-identical to before.
-            let mut found = false;
-            source.with_tensor(name, &mut |data| {
-                assert_eq!(data.len(), *numel, "size mismatch for {name}");
-                let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
-                gpu.write(&wbuf, &bits);
-                found = true;
-            });
+            // Pull exactly this tensor from the source and upload it, in one of two
+            // ways, neither of which ever materializes the whole tensor as a second
+            // host copy on top of what the source itself may already hold:
+            //   - `raw_words`: the source's bytes ALREADY are u32/f32 words (a
+            //     resident HashMap, or an mmap tensor whose dtype matches and is
+            //     4-byte aligned) — lend them straight to `write_at`, zero copies.
+            //   - `with_tensor_chunks`: anything else (BF16 on disk, a GGUF quant
+            //     block) needs converting, so it's converted `UPLOAD_CHUNK_WORDS`
+            //     elements at a time into a scratch the source reuses across
+            //     chunks — peak extra host allocation is one chunk, never one
+            //     tensor (relevant tensors run up to ~1.5 GB as f32).
+            // Both are bit-identical to the old single `with_tensor` + `Vec<u32>`
+            // reinterpret this replaces (see paramstore_upload_peak_is_one_chunk_*
+            // and *_prefers_raw_words_* below).
+            let mut total_written = 0usize;
+            let found = if let Some(words) = source.raw_words(name) {
+                assert_eq!(words.len(), *numel, "size mismatch for {name}");
+                for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
+                    gpu.write_at(&wbuf, (i * UPLOAD_CHUNK_WORDS) as u64, part);
+                    total_written += part.len();
+                }
+                true
+            } else {
+                source.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
+                    gpu.write_f32_at(&wbuf, off, chunk);
+                    total_written += chunk.len();
+                })
+            };
             if !found {
                 panic!("missing init weight {name}");
             }
+            assert_eq!(total_written, *numel, "size mismatch for {name}");
             // Reclaim the write_buffer staging NOW, before the next weight — else it
             // accrues (wgpu only frees it on poll_wait), so a 16.8 GB model uploads
             // ~16.8 GB of extra staging on top of the weights and OOMs a 24 GB card.
@@ -243,5 +272,109 @@ mod tests {
         assert_eq!(ps.read_grad(&gpu, "w"), vec![9.0, 9.0, 9.0]);
         ps.zero_grads(&gpu);
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
+    }
+
+    /// A `TensorSource` test double that records, for one upload, the largest
+    /// slice ever handed to a callback and whether the unbounded `with_tensor`
+    /// path was ever invoked for the tensor under test — the two facts that
+    /// distinguish "materialized the whole tensor" from "streamed it in
+    /// bounded chunks" without depending on any backend's allocator.
+    struct Probe {
+        data: HashMap<String, Vec<f32>>,
+        raw: HashMap<String, Vec<u32>>,
+        max_chunk_seen: std::cell::Cell<usize>,
+        with_tensor_called_for: std::cell::RefCell<Vec<String>>,
+        raw_words_called_for: std::cell::RefCell<Vec<String>>,
+    }
+    impl checkpoint::TensorSource for Probe {
+        fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+            self.with_tensor_called_for.borrow_mut().push(name.to_string());
+            match self.data.get(name) {
+                Some(v) => {
+                    self.max_chunk_seen.set(self.max_chunk_seen.get().max(v.len()));
+                    f(v);
+                    true
+                }
+                None => false,
+            }
+        }
+        fn raw_words(&self, name: &str) -> Option<&[u32]> {
+            self.raw_words_called_for.borrow_mut().push(name.to_string());
+            self.raw.get(name).map(|v| v.as_slice())
+        }
+        fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+            match self.data.get(name) {
+                Some(v) => {
+                    let chunk = if max_elems == 0 { v.len().max(1) } else { max_elems };
+                    for (i, part) in v.chunks(chunk).enumerate() {
+                        self.max_chunk_seen.set(self.max_chunk_seen.get().max(part.len()));
+                        f((i * chunk) as u64, part);
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    /// The loader-fix claim, measured rather than read off the code (lesson
+    /// #34): a tensor far larger than `UPLOAD_CHUNK_WORDS` must never be
+    /// handed to the store as one unbounded slice. Red before the upload
+    /// loop is changed to call `with_tensor_chunks` (today it calls
+    /// `with_tensor` once per tensor, which this test catches directly via
+    /// `with_tensor_called_for`).
+    #[test]
+    fn param_store_upload_peak_is_one_chunk_not_one_tensor() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let n = UPLOAD_CHUNK_WORDS * 5 + 37; // deliberately not a multiple of the chunk
+        let vals: Vec<f32> = (0..n).map(|i| (i % 251) as f32 * 0.25 - 3.0).collect();
+        let probe = Probe {
+            data: HashMap::from([("big".to_string(), vals.clone())]),
+            raw: HashMap::new(),
+            max_chunk_seen: std::cell::Cell::new(0),
+            with_tensor_called_for: std::cell::RefCell::new(Vec::new()),
+            raw_words_called_for: std::cell::RefCell::new(Vec::new()),
+        };
+        let ps = ParamStore::new_with_roles_src(&gpu, vec![("big".to_string(), n, Role::Frozen)], &probe);
+        assert!(
+            probe.with_tensor_called_for.borrow().is_empty(),
+            "the unbounded with_tensor path must not be used when with_tensor_chunks is available"
+        );
+        assert!(
+            probe.max_chunk_seen.get() <= UPLOAD_CHUNK_WORDS,
+            "a chunk of {} elements exceeds the {}-element bound",
+            probe.max_chunk_seen.get(),
+            UPLOAD_CHUNK_WORDS
+        );
+        assert_eq!(ps.read_weight(&gpu, "big"), vals, "chunked upload must be bit-identical to the source");
+    }
+
+    /// When a source can lend already-device-shaped bytes (`raw_words`), the
+    /// store must take that path instead of `with_tensor_chunks` — no
+    /// intermediate f32->u32 conversion buffer at all for the common
+    /// already-f32 case.
+    #[test]
+    fn param_store_prefers_raw_words_when_available() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let vals = vec![1.0f32, -2.0, 3.5, 0.0];
+        let words: Vec<u32> = vals.iter().map(|v| v.to_bits()).collect();
+        let probe = Probe {
+            data: HashMap::new(), // with_tensor/with_tensor_chunks deliberately have nothing to give
+            raw: HashMap::from([("w".to_string(), words)]),
+            max_chunk_seen: std::cell::Cell::new(0),
+            with_tensor_called_for: std::cell::RefCell::new(Vec::new()),
+            raw_words_called_for: std::cell::RefCell::new(Vec::new()),
+        };
+        let ps = ParamStore::new_with_roles_src(&gpu, vec![("w".to_string(), 4, Role::Frozen)], &probe);
+        assert_eq!(probe.raw_words_called_for.borrow().as_slice(), ["w".to_string()]);
+        assert_eq!(ps.read_weight(&gpu, "w"), vals);
     }
 }
