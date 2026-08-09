@@ -27,6 +27,7 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 
 use events::Envelope;
+use memauth::PoolProbe;
 use runtime::{
     Controller, DetectModel, Emit, FakeDetectModel, FakeInferModel, GenConfig, GptInfer, Registry,
     YoloDetect,
@@ -358,19 +359,25 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     // have no dedicated VRAM — they share system RAM — so size the budget like the
     // NPU (a modest fraction of RAM). This is what makes `--device gpu` (and the
     // all-devices default) actually schedule onto the iGPU on such boxes.
+    // Devices this fallback creates ALWAYS share physical RAM with the CPU
+    // (that is the case it exists for) — tracked so they can be declared into
+    // the same memauth pool as Device::Cpu below, instead of budgeted as an
+    // independent-but-physically-identical pool of bytes.
+    let mut fallback_unified_gpus: Vec<u32> = Vec::new();
     if all_gpus.is_empty() {
         // Not `discrete_gpu_count` (that's 0 by definition on an integrated-only
         // box): `visible_gpu_count` counts the iGPU too, which is exactly the
         // case this fallback exists for.
         let n = gpu_core::visible_gpu_count();
         if n > 0 {
-            let ram = query_ram_bytes();
-            let vram = (8u64 << 30).min(ram / 2).max(1 << 30);
-            all_gpus = (0..n as u32).map(|i| (i, vram)).collect();
-            eprintln!(
-                "brain serve: no NVIDIA GPU; budgeting {n} integrated GPU(s) at {} GB shared RAM (schedulable)",
-                vram >> 30
-            );
+            // The real ceiling is the shared RAM pool declared below, not a
+            // fraction reserved here — this device budget only needs to be AT
+            // LEAST the pool's total so the pool (not a smaller guessed
+            // fraction) is always the binding constraint.
+            let ram = host_ram_available();
+            all_gpus = (0..n as u32).map(|i| (i, ram)).collect();
+            fallback_unified_gpus = (0..n as u32).collect();
+            eprintln!("brain serve: no NVIDIA GPU; budgeting {n} integrated GPU(s), sharing the {} GB RAM pool (schedulable)", ram >> 30);
         }
     }
     let set = crate::compute_set();
@@ -379,13 +386,30 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         None => all_gpus.clone(),
     };
     let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
+    // Devices whose bytes physically ARE the CPU's RAM: this fallback's
+    // synthesized GPUs, plus any real GPU the device registry classifies as
+    // integrated (an Arc/Xe iGPU reporting real VRAM via query_gpu_mem — the
+    // common case on this box — never goes through the fallback above, so it
+    // needs its own check here). A discrete GPU with dedicated VRAM is not
+    // included. See `memauth`'s module doc for why declaring this matters:
+    // without it, a GPU-side allocation and a CPU-side one are budgeted as
+    // if they came from two separate pools of memory, when they are the same
+    // physical bytes.
+    let unified_gpus: Vec<u32> = gpus
+        .iter()
+        .map(|&(i, _)| i)
+        .filter(|i| {
+            fallback_unified_gpus.contains(i)
+                || gpu_core::devices::gpus().iter().any(|d| d.index == *i && d.identity.class == backend_api::DeviceClass::IntegratedGpu)
+        })
+        .collect();
 
     if gpus.is_empty() && !all_gpus.is_empty() {
         eprintln!("brain serve: --device excluded every GPU; scheduling on CPU only");
     } else if all_gpus.is_empty() {
         eprintln!("brain serve: no GPUs detected (nvidia-smi); serving with CPU-only budget");
     }
-    let ram = query_ram_bytes();
+    let ram = host_ram_available();
     let reserved = reserve_gb << 30;
     // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
     // compute — `--device gpu` bounds where work runs, not where bytes may rest.
@@ -399,8 +423,11 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         None if npu::openvino::npu_present() => vec![0],
         None => vec![],
     };
-    let npu_budget = (8u64 << 30).min(ram / 2).max(1 << 30);
-    let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, npu_budget)).collect();
+    // NPUs always share system RAM (see the comment above); their device
+    // budget only needs to be at least the pool's total, same reasoning as
+    // the iGPU fallback — `resident::build_executor` declares them into the
+    // shared pool alongside `unified_gpus` and Device::Cpu.
+    let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, ram)).collect();
     eprintln!(
         "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
         set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
@@ -422,9 +449,17 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    let executor =
-        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::from_env());
+    let executor = crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::from_env());
     executor
+}
+
+/// Live host RAM this process could actually get right now: `MemAvailable`
+/// intersected with any cgroup v2 limit — see `memauth::HostProbe`, whose
+/// doc carries the `MemAvailable`-over-`MemTotal` rationale this used to
+/// duplicate locally. `query_ram_bytes` (the old name, kept public within
+/// the crate since `perf_cli.rs` calls it by that name) is now a thin alias.
+pub(crate) fn host_ram_available() -> u64 {
+    memauth::HostProbe::new(memauth::HOST_POOL).available(memauth::HOST_POOL)
 }
 
 /// Which serving surfaces to bring up and their config (see `run_apis`).
@@ -638,29 +673,14 @@ pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
     mem
 }
 
-/// RAM to budget the scheduler against, in bytes (from `/proc/meminfo`; falls
-/// back to 16 GB).
-///
-/// Prefers `MemAvailable` over `MemTotal`: on a unified-memory box (an
-/// integrated GPU/NPU sharing system RAM, or just a box with something else
-/// already resident) `MemTotal` includes bytes this process can never
-/// actually get, so a budget sized from it books a placement that "fits"
-/// against physical memory that is already committed elsewhere — a swap
-/// cliff, not a valid placement. `MemAvailable` (present on any kernel since
-/// 3.14) already accounts for reclaimable cache, which `MemTotal - used`
-/// does not. Falls back to `MemTotal` only on a kernel old enough to lack
-/// the field.
+/// Old name for [`host_ram_available`], kept as a thin alias — `perf_cli.rs`
+/// still calls it by this name and there is no reason to touch those four
+/// call sites in the same change that fixes the unified-memory double-count.
+/// The `/proc/meminfo`-only parsing this used to do locally now lives in
+/// `memauth::HostProbe`, which additionally intersects a cgroup v2 limit —
+/// tighter and more correct, never looser, than the old behaviour.
 pub(crate) fn query_ram_bytes() -> u64 {
-    let Some(text) = std::fs::read_to_string("/proc/meminfo").ok() else {
-        return 16 << 30;
-    };
-    let field = |name: &str| {
-        text.lines()
-            .find(|l| l.starts_with(name))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|kb| kb.parse::<u64>().ok())
-    };
-    field("MemAvailable:").or_else(|| field("MemTotal:")).map(|kb| kb << 10).unwrap_or(16 << 30)
+    host_ram_available()
 }
 
 #[cfg(test)]

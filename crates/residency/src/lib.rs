@@ -37,20 +37,14 @@ pub use multi::{MultiDeviceCost, MultiDeviceResidentModel};
 pub use scheduler::Policy;
 pub use supply::{ModelSupplier, Supply};
 
-/// A device that can hold a hot model instance.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Device {
-    /// A GPU by canonical index — the physical card `gpu<i>` names in the
-    /// device registry (`gpu_core::devices`, PCI-bus order).
-    Gpu(u32),
-    /// RAM-resident, CPU-executed (e.g. the CPU encoder path). Bounded by the RAM budget.
-    Cpu,
-    /// An Intel NPU by index. A whole-graph (OpenVINO) device: an instance is a
-    /// compiled blob, not `gpu_core` buffers; its budget models the NPU's
-    /// shared-memory footprint. No NPU lane is created unless a budget is set
-    /// (boxes without the device never schedule onto it).
-    Npu(u32),
-}
+/// A device that can hold a hot model instance. Canonical definition lives in
+/// `memauth` (the process-wide memory authority both this crate and
+/// `weightset`'s within-instance weight window depend on) — re-exported here
+/// so every existing `residency::Device` path keeps compiling unchanged.
+/// `Gpu(u32)` is the physical card `gpu<i>` names in the device registry
+/// (`gpu_core::devices`, PCI-bus order); `Cpu` is RAM-resident/CPU-executed;
+/// `Npu(u32)` is a whole-graph (OpenVINO) device.
+pub use memauth::Device;
 
 /// The memory footprint of a model instance when it is **Hot**.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

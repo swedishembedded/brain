@@ -529,11 +529,14 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let (outcome, ckey) = match claim_result {
             Ok(x) => x,
             Err(ClaimError::NoCapacity(_)) => break, // wait for a lane to free a device
-            Err(ClaimError::Activate(e)) => {
-                // Permanent for this group: FAIL its queued jobs now and keep
-                // scheduling the others. (The old code broke out of the whole
-                // round here — the jobs waited forever and every other group
-                // starved behind them.)
+            Err(ClaimError::TooLarge(e)) | Err(ClaimError::Activate(e)) => {
+                // Both permanent for this group: FAIL its queued jobs now and
+                // keep scheduling the others. (The old code broke out of the
+                // whole round here — the jobs waited forever and every other
+                // group starved behind them.) TooLarge specifically will
+                // never resolve itself by waiting (no eviction, however
+                // aggressive, could ever make room), so it must not be
+                // treated as `NoCapacity`'s "wait for a lane to free a device".
                 let msg = format!("{model}/{action}: {e}");
                 let mut i = 0;
                 while i < queue.len() {

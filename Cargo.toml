@@ -87,6 +87,7 @@ default-members = [
     "crates/server",
     "crates/cli",
     "crates/dbus",
+    "crates/memauth",
     "crates/residency",
     "crates/stats",
     "crates/shutdown",
@@ -148,6 +149,7 @@ brain-testutil = { path = "crates/testutil" }
 brain-modelref = { path = "crates/modelref" }
 brain-modelstore = { path = "crates/modelstore" }
 brain-capability = { path = "crates/capability" }
+brain-memauth = { path = "crates/memauth" }
 brain-residency = { path = "crates/residency" }
 brain-stats = { path = "crates/stats" }
 brain-dbus = { path = "crates/dbus" }

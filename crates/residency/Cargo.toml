@@ -11,4 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-capability.workspace = true
+brain-memauth.workspace = true
 serde_json.workspace = true

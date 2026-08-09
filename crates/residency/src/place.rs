@@ -97,12 +97,10 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
             if exclude.contains(&d) {
                 continue;
             }
-            if let Some(b) = budgets.get(d) {
-                if b.fits(need) {
-                    let free = b.free();
-                    if best.is_none_or(|(_, f)| free > f) {
-                        best = Some((d, free));
-                    }
+            if budgets.get(d).is_some() && budgets.fits_on(d, need) {
+                let free = budgets.free_on(d);
+                if best.is_none_or(|(_, f)| free > f) {
+                    best = Some((d, free));
                 }
             }
         }
@@ -119,12 +117,8 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
         .ram
         .max(if budgets.gpus().is_empty() { cost.vram } else { 0 })
         .max(if budgets.npus().is_empty() { cost.npu } else { 0 });
-    if cpu_need > 0 && !exclude.contains(&Device::Cpu) {
-        if let Some(b) = budgets.get(Device::Cpu) {
-            if b.fits(cpu_need) {
-                return Some(Device::Cpu);
-            }
-        }
+    if cpu_need > 0 && !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() && budgets.fits_on(Device::Cpu, cpu_need) {
+        return Some(Device::Cpu);
     }
     // Zero-cost (stateless) instance: fits anywhere by definition. Prefer the
     // CPU so it never ties up an accelerator lane; fall back to any free
@@ -142,6 +136,38 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
         }
     }
     None
+}
+
+/// True if SOME device's usable budget could ever hold `cost`, evaluated
+/// against each device's usable ceiling alone (no current occupancy). This is
+/// the permanent/"never fits" check — `ResidencyManager::claim` calls it
+/// BEFORE planning any eviction to tell `ClaimError::TooLarge` (this returns
+/// `false`: no eviction, however aggressive, could ever succeed) apart from
+/// `ClaimError::NoCapacity` (some device COULD hold it, just not with what is
+/// evictable right now). Mirrors [`pick_device`]'s class-preference and CPU-
+/// fallback structure exactly, substituting `usable_on` for `fits_on` so it
+/// answers "ever", not "right now".
+pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
+    if cost.vram == 0 && cost.ram == 0 && cost.npu == 0 {
+        return true; // stateless: placeable anywhere a budget exists at all.
+    }
+    for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram)] {
+        if need == 0 {
+            continue;
+        }
+        if devices.iter().any(|&d| budgets.usable_on(d) >= need) {
+            return true;
+        }
+    }
+    // Same CPU-fallback shape as pick_device: a weight-holding model spills to
+    // CPU only when the accelerator class it needs doesn't exist on this host
+    // at all — an EXISTING but merely-full accelerator is not an invitation
+    // to spill to RAM, it is exactly the eviction case the caller must try.
+    let cpu_need = cost
+        .ram
+        .max(if budgets.gpus().is_empty() { cost.vram } else { 0 })
+        .max(if budgets.npus().is_empty() { cost.npu } else { 0 });
+    cpu_need > 0 && budgets.usable_on(Device::Cpu) >= cpu_need
 }
 
 /// The victims to evict from a device to fit `needed` bytes, and where to place the
@@ -179,19 +205,18 @@ pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: 
             if exclude.contains(&d) {
                 continue;
             }
-            let b = match budgets.get(d) {
-                Some(b) => b,
-                None => continue,
-            };
-            if b.usable() < need {
-                continue; // can never fit here, even empty
+            if budgets.get(d).is_none() {
+                continue;
             }
-            if b.fits(need) {
+            if budgets.usable_on(d) < need {
+                continue; // can never fit here, even empty (device- or pool-limited)
+            }
+            if budgets.fits_on(d, need) {
                 // Already fits with no eviction.
                 return Some(EvictionPlan { device: d, victims: Vec::new(), freed: 0 });
             }
-            // Evict lowest-score-first until free() would cover `need`.
-            let mut deficit = need - b.free();
+            // Evict lowest-score-first until free_on() would cover `need`.
+            let mut deficit = need - budgets.free_on(d);
             let mut victims = Vec::new();
             let mut freed = 0u64;
             let now = residents.now();
@@ -370,6 +395,37 @@ mod tests {
         let b = two_gpus(); // usable = 22 GB each
         let r = Residents::new();
         assert!(plan_eviction(&vram(23), &b, &r, &[], &no_exclude()).is_none());
+    }
+
+    #[test]
+    fn could_ever_fit_distinguishes_permanent_from_transient() {
+        let b = two_gpus(); // usable = 22 GB each, 24 GB total each.
+        // Fits an EMPTY card -> could ever fit, even though nothing is free
+        // right now in this test (budgets start empty here, so it's also
+        // immediately placeable -- the "ever" question is what matters).
+        assert!(could_ever_fit(&vram(22), &b));
+        // Bigger than the largest card's usable budget, even fully empty.
+        assert!(!could_ever_fit(&vram(23), &b));
+        // Stateless (all-zero cost) is always "ever fits".
+        assert!(could_ever_fit(&MemCost::new(0, 0), &b));
+    }
+
+    #[test]
+    fn could_ever_fit_does_not_offer_cpu_spill_when_the_gpu_class_exists() {
+        // A GPU-having host: a vram-costed model that's too big for the GPU
+        // must NOT be rescued by a CPU fallback (pick_device's own rule --
+        // spill to CPU only on a host with no accelerator of that class).
+        let mut b = two_gpus();
+        b.set(Device::Cpu, 512 * GB, 0);
+        assert!(!could_ever_fit(&vram(23), &b));
+    }
+
+    #[test]
+    fn could_ever_fit_allows_cpu_spill_on_a_gpu_less_host() {
+        let mut cpu_only = Budgets::new();
+        cpu_only.set(Device::Cpu, 32 * GB, 2 * GB);
+        assert!(could_ever_fit(&vram(20), &cpu_only), "a weight-holding model must be able to spill to CPU with no GPU present");
+        assert!(!could_ever_fit(&vram(40), &cpu_only));
     }
 
     #[test]

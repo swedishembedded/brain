@@ -530,6 +530,7 @@ dependencies = [
  "axum",
  "brain-apiserve",
  "brain-audio",
+ "brain-backend-api",
  "brain-bench",
  "brain-capability",
  "brain-capture",
@@ -557,6 +558,7 @@ dependencies = [
  "brain-imgpipe",
  "brain-kronos",
  "brain-lfm",
+ "brain-memauth",
  "brain-mirror",
  "brain-model",
  "brain-modelref",
@@ -995,6 +997,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-memauth"
+version = "0.1.1"
+
+[[package]]
 name = "brain-mirror"
 version = "0.1.1"
 dependencies = [
@@ -1309,6 +1315,7 @@ name = "brain-residency"
 version = "0.1.1"
 dependencies = [
  "brain-capability",
+ "brain-memauth",
  "serde_json",
 ]
 

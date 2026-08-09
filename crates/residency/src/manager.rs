@@ -47,7 +47,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use crate::budget::Budgets;
 use crate::lru::Residents;
 use crate::multi::{pick_devices, MultiDeviceCost, MultiDeviceResidentModel};
-use crate::place::{no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
+use crate::place::{could_ever_fit, no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
@@ -56,12 +56,19 @@ pub type InstanceHandle = Arc<Mutex<Box<dyn Instance>>>;
 
 /// Why a claim could not produce a runnable instance. The executor MUST treat
 /// these differently: `NoCapacity` is transient (retry when a lane frees a
-/// device); `Activate` is permanent for the key — the queued jobs must be
-/// failed, or they wait forever and wedge the group.
+/// device); `TooLarge` and `Activate` are permanent for the key — the queued
+/// jobs must be failed, or they wait forever and wedge the group.
 #[derive(Debug)]
 pub enum ClaimError {
-    /// No free device can host the instance right now.
+    /// No free device can host the instance right now (SOME device's usable
+    /// budget could hold it, but not without evicting more than is
+    /// currently evictable — try again once something frees).
     NoCapacity(String),
+    /// The instance exceeds EVERY device's usable budget even fully empty —
+    /// no eviction, however aggressive, could ever make room. Checked
+    /// BEFORE planning any eviction, so a claim that can never succeed never
+    /// costs anything else its residency (see `place::could_ever_fit`).
+    TooLarge(String),
     /// The model/instance itself is unusable (unknown model, activation error).
     Activate(String),
 }
@@ -69,7 +76,7 @@ pub enum ClaimError {
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaimError::NoCapacity(e) | ClaimError::Activate(e) => write!(f, "{e}"),
+            ClaimError::NoCapacity(e) | ClaimError::TooLarge(e) | ClaimError::Activate(e) => write!(f, "{e}"),
         }
     }
 }
@@ -493,11 +500,20 @@ impl ResidencyManager {
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
+                // Checked BEFORE planning any eviction: a claim that could never
+                // fit on any device even fully empty must fail cleanly right now,
+                // not after evicting everything else and still not fitting.
+                if !could_ever_fit(&cost, &self.budgets) {
+                    return Err(ClaimError::TooLarge(format!(
+                        "{key} ({} MiB) exceeds every device's usable budget even fully empty",
+                        cost.vram.max(cost.ram).max(cost.npu) >> 20
+                    )));
+                }
                 let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
                     .ok_or_else(|| {
                         ClaimError::NoCapacity(format!(
-                            "{key} ({} MiB) is too large for any available device",
-                            cost.vram >> 20
+                            "{key} ({} MiB) has no room right now — nothing currently evictable frees enough",
+                            cost.vram.max(cost.ram).max(cost.npu) >> 20
                         ))
                     })?;
                 for victim in &plan.victims {
@@ -789,6 +805,34 @@ mod tests {
         let before = live.load(Ordering::SeqCst);
         mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(live.load(Ordering::SeqCst), before);
+    }
+
+    /// A model bigger than every device's usable budget, even fully empty,
+    /// must fail cleanly with `ClaimError::TooLarge` and cost NOTHING else
+    /// its residency — no eviction plan is even attempted, because none
+    /// could ever succeed (the "larger than every tier" scenario).
+    #[test]
+    fn too_large_for_any_device_fails_cleanly_without_evicting_anything() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable, ever.
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "small".into(), vram: 10 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "huge".into(), vram: 100 * GB, live: live.clone() }));
+
+        // A resident already occupies the card -- if TooLarge were mistakenly
+        // planned as an eviction, this would be the (wrong) victim.
+        mgr.run("small", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+
+        let err = mgr.claim("huge", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
+
+        // Nothing was evicted or touched to serve a claim that could never succeed.
+        assert_eq!(mgr.evictions, 0);
+        assert_eq!(live.load(Ordering::SeqCst), 1, "the existing resident must be untouched");
+        let hot: Vec<String> = mgr.residency().into_iter().map(|(k, _, _)| k.model).collect();
+        assert_eq!(hot, vec!["small".to_string()]);
     }
 
     #[test]

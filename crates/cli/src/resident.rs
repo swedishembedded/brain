@@ -21,9 +21,14 @@ use zimage::pipeline::{HotPipeline, Image, Paths};
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
-/// on each. The RAM pool bounds CPU-resident models. Falls back gracefully if a heavy
-/// model's weights are not configured (it is simply not registered).
-pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, ram_total: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Executor {
+/// on each. `unified_gpus` names the indices among `gpus` that physically share RAM
+/// with the CPU (an integrated GPU, or the no-discrete-GPU fallback) — every NPU
+/// always shares RAM too (`docs/models/*`'s Meteor-Lake NPU note) — so those,
+/// plus `Device::Cpu`, are declared into ONE `memauth` pool sized to `ram_total`;
+/// a discrete GPU keeps its own independent budget, unaffected. Falls back
+/// gracefully if a heavy model's weights are not configured (it is simply not
+/// registered).
+pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, ram_total: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Executor {
     let mut budgets = residency::budget::Budgets::new();
     for &(i, total) in gpus {
         budgets.set(Device::Gpu(i), total, reserved);
@@ -34,6 +39,17 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
         budgets.set(Device::Npu(i), total, 0);
     }
     budgets.set(Device::Cpu, ram_total, 0);
+    // The unified-memory fix (see memauth's module doc): declare every device
+    // that physically shares this RAM into ONE pool, so a charge on any of
+    // them correctly reduces what all the others have free — instead of two
+    // (or more) independent budgets that together claim more bytes than the
+    // machine has.
+    let mut shared: Vec<Device> = vec![Device::Cpu];
+    shared.extend(unified_gpus.iter().map(|&i| Device::Gpu(i)));
+    shared.extend(npus.iter().map(|&(i, _)| Device::Npu(i)));
+    if shared.len() > 1 {
+        budgets.set_pool(memauth::HOST_POOL, &shared, ram_total, 0);
+    }
 
     let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
     // z-image if its weights are configured (BRAIN_ZIMAGE_*).
