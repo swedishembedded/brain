@@ -13,6 +13,7 @@
 //! This crate is being built incrementally (config → M-RoPE → ViT → merger →
 //! DeepStack → import). Today: configuration.
 
+pub mod caps;
 pub mod config;
 pub mod encoder;
 pub mod import;

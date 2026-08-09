@@ -145,7 +145,7 @@ fn main() {
             // Profile the step at the END of the context, where the attention
             // reduction is longest — the honest worst case for a decode step,
             // and the one a served request spends most of its tokens near.
-            let steps = m.decode_steps(Some(1), ctx - 1);
+            let steps = m.decode_steps(Some(1), ctx - 1, None, None);
             let secs = report(&gpu, &format!("DECODE @pos {}", ctx - 1), &steps, reps, roofs);
             println!(
                 "\none decode step: {:.3} ms  ->  {:.1} tok/s (single stream, no LM head — \

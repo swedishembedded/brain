@@ -107,6 +107,11 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
+            manifest: qwenvl::caps::manifest,
+            provider: always!(qwenvl::caps::QwenVlProvider::new()),
+            resident: None, // no residency adapter yet -- brain caps/brain do only, matching fastvlm's own state
+        },
+        ModelEntry {
             manifest: yolo::caps::manifest,
             provider: always!(yolo::caps::YoloProvider::new()),
             resident: None,

@@ -570,6 +570,7 @@ dependencies = [
  "brain-pid",
  "brain-qwen",
  "brain-qwen-asr",
+ "brain-qwenvl",
  "brain-residency",
  "brain-restore",
  "brain-runtime",
@@ -1264,6 +1265,7 @@ dependencies = [
 name = "brain-qwenvl"
 version = "0.1.1"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

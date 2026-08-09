@@ -298,6 +298,19 @@ pub struct Qwen {
     mrope_cos: DeviceBuffer,
     mrope_sin: DeviceBuffer,
 
+    // Decode-path M-RoPE: a single-row `[1, head_dim/2]` cos/sin table, reused
+    // (overwritten) every `step_mrope`/`step_embed_mrope` call rather than
+    // sliced from `mrope_cos`/`mrope_sin` above -- those are sized for the
+    // batched forward's whole KNOWN sequence, but decode generates tokens
+    // beyond it one at a time, so each new token needs its OWN freshly
+    // written table (mirrors `omni::thinker::layer_decode_step`'s pattern:
+    // a 1-row table needs no separate "decode" kernel, just `rope2d`'s
+    // existing `tmod`-driven table indexing at `rows = tmod = 1`). Always
+    // allocated (cheap: `head_dim/2` floats) so `step_mrope` needs no
+    // separate `enable_*` call, unlike the batched path's `mrope_cos`/`sin`.
+    decode_mrope_cos: DeviceBuffer,
+    decode_mrope_sin: DeviceBuffer,
+
     // DeepStack (Qwen3-VL): `(row0, n_rows, n_levels)` and one `[n_rows·d]` buffer
     // per level. When set, level `l`'s features are added into the residual at the
     // image rows right after decoder layer `l` (for `l < n_levels`). Write each
@@ -655,6 +668,8 @@ impl Qwen {
             vcache.push(st(t as u64 * hkv));
         }
 
+        let decode_mrope_cos = st((cfg.head_dim / 2) as u64);
+        let decode_mrope_sin = st((cfg.head_dim / 2) as u64);
         let mut m = Qwen {
             cfg,
             b,
@@ -674,6 +689,8 @@ impl Qwen {
             mrope: Cell::new(false),
             mrope_cos: st(1),
             mrope_sin: st(1),
+            decode_mrope_cos,
+            decode_mrope_sin,
             deepstack: Cell::new(None),
             deepstack_bufs: Vec::new(),
             proj: st(n * d),
@@ -1538,9 +1555,36 @@ impl Qwen {
     /// head to the returned hidden to get logits — `logits[v] = tok.weight[v]·hidden`.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         let pos = self.dec_pos.get();
-        let hidden = self.decode_at(Some(token_id), pos);
+        let hidden = self.decode_at(Some(token_id), pos, None, None);
         self.dec_pos.set(pos + 1);
         hidden
+    }
+
+    /// [`Self::step`], with the q/k rotation from a caller-supplied M-RoPE
+    /// table instead of the analytic `rope_at` position -- the decode-path
+    /// twin of [`Self::enable_mrope`]/[`Self::write_mrope_tables`], for a
+    /// multimodal front-end generating past a spliced prompt (`qwenvl`'s own
+    /// `mrope::mrope_tables`, called with a single-element `positions` slice
+    /// for this token's real 3-axis position). `cos`/`sin` are `[head_dim/2]`
+    /// -- one row, this token only; `qwen::Qwen` stays agnostic to how the
+    /// 3-axis position was derived (that is `qwenvl`'s job, avoiding a
+    /// `qwen -> qwenvl` dependency cycle, since `qwenvl` already depends on
+    /// `qwen`).
+    pub fn step_mrope(&self, token_id: u32, cos: &[f32], sin: &[f32]) -> Vec<f32> {
+        let pos = self.dec_pos.get();
+        self.write_decode_mrope_table(cos, sin);
+        let hidden = self.decode_at(Some(token_id), pos, Some((&self.decode_mrope_cos, &self.decode_mrope_sin)), None);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// Write this step's 1-row M-RoPE table -- see [`Self::step_mrope`]'s doc.
+    fn write_decode_mrope_table(&self, cos: &[f32], sin: &[f32]) {
+        let half = (self.cfg.head_dim / 2) as usize;
+        assert_eq!(cos.len(), half, "decode M-RoPE cos table must be [head_dim/2]");
+        assert_eq!(sin.len(), half, "decode M-RoPE sin table must be [head_dim/2]");
+        self.gpu.write(&self.decode_mrope_cos, bytemuck::cast_slice(cos));
+        self.gpu.write(&self.decode_mrope_sin, bytemuck::cast_slice(sin));
     }
 
     /// Prefill many positions with ONE readback: tokens and raw-embedding rows
@@ -1554,12 +1598,12 @@ impl Qwen {
             let pos = self.dec_pos.get();
             match input {
                 PrefillInput::Token(t) => {
-                    self.decode_submit(Some(*t), pos);
+                    self.decode_submit(Some(*t), pos, None, None);
                 }
                 PrefillInput::Embed(e) => {
                     assert_eq!(e.len(), self.cfg.d_model as usize, "prefill wants d_model rows");
                     self.gpu.write(&self.res[0], bytemuck::cast_slice(e));
-                    self.decode_submit(None, pos);
+                    self.decode_submit(None, pos, None, None);
                 }
             }
             self.dec_pos.set(pos + 1);
@@ -1576,7 +1620,22 @@ impl Qwen {
         let pos = self.dec_pos.get();
         // The embedding lands where EMBED would have written it (res[0] row 0).
         self.gpu.write(&self.res[0], bytemuck::cast_slice(embed));
-        let hidden = self.decode_at(None, pos);
+        let hidden = self.decode_at(None, pos, None, None);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// [`Self::step_embed`] with M-RoPE -- see [`Self::step_mrope`]'s doc for
+    /// the `cos`/`sin` convention. `deepstack_row`: see [`Self::decode_steps`]'s
+    /// doc -- `Some(local_row)` when this embedding is image row `local_row`
+    /// on a DeepStack-enabled checkpoint, `None` otherwise (every caller
+    /// before this parameter existed, unchanged).
+    pub fn step_embed_mrope(&self, embed: &[f32], cos: &[f32], sin: &[f32], deepstack_row: Option<u32>) -> Vec<f32> {
+        assert_eq!(embed.len(), self.cfg.d_model as usize, "step_embed_mrope wants one d_model row");
+        let pos = self.dec_pos.get();
+        self.gpu.write(&self.res[0], bytemuck::cast_slice(embed));
+        self.write_decode_mrope_table(cos, sin);
+        let hidden = self.decode_at(None, pos, Some((&self.decode_mrope_cos, &self.decode_mrope_sin)), deepstack_row);
         self.dec_pos.set(pos + 1);
         hidden
     }
@@ -1584,14 +1643,18 @@ impl Qwen {
     /// Record + run the incremental decode tape for one token at absolute `pos`.
     /// Mirrors [`Self::forward_steps`] at `n = 1` (row 0 of the sized scratch),
     /// swapping the batched GQA core for the decode kernels + persistent KV cache.
-    fn decode_at(&self, token_id: Option<u32>, pos: u32) -> Vec<f32> {
-        self.decode_submit(token_id, pos);
+    /// `mrope`: `Some((cos, sin))` (a 1-row `[1, head_dim/2]` table, e.g. from
+    /// [`Self::write_decode_mrope_table`]) switches q/k to the table-driven
+    /// `rope2d` path for this step only; `None` keeps the analytic `rope_at`
+    /// path every existing caller already uses.
+    fn decode_at(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) -> Vec<f32> {
+        self.decode_submit(token_id, pos, mrope, deepstack_row);
         self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
     }
 
     /// Record + submit one incremental decode step WITHOUT reading back.
-    fn decode_submit(&self, token_id: Option<u32>, pos: u32) {
-        let s = self.decode_steps(token_id, pos);
+    fn decode_submit(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) {
+        let s = self.decode_steps(token_id, pos, mrope, deepstack_row);
         self.gpu.submit(&[], &s);
     }
 
@@ -1603,7 +1666,16 @@ impl Qwen {
     /// the decode tape is rebuilt per token rather than recorded once like
     /// `fwd_steps`, so there was nothing to hand it. Behaviour is unchanged:
     /// `decode_submit` records exactly this and submits it.
-    pub fn decode_steps(&self, token_id: Option<u32>, pos: u32) -> Vec<Step> {
+    ///
+    /// `mrope`: see [`Self::decode_at`]'s doc. `None` reproduces this
+    /// function's behaviour before M-RoPE decode support existed, bit-for-bit
+    /// (the analytic `rope_at` dispatch is untouched in that branch).
+    /// `deepstack_row`: `Some(local_row)` when this step decodes image row
+    /// `local_row` (0-based within the spliced image) on a checkpoint with
+    /// `enable_deepstack` on — applies that row's per-level residual add.
+    /// `None` (every existing caller before this parameter existed, and
+    /// every non-image-row step) is a no-op, bit-for-bit unchanged.
+    pub fn decode_steps(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) -> Vec<Step> {
         assert!(
             self.shard.is_whole(self.cfg.n_layers as usize),
             "KV-cache decode requires a whole (single-device) model"
@@ -1717,8 +1789,21 @@ impl Qwen {
             } else {
                 (&lb.q_pre, &lb.k_pre)
             };
-            s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
-            s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
+            // M-RoPE decode: table-driven rope2d over a 1-row table this
+            // step's caller already wrote (write_decode_mrope_table),
+            // mirroring omni::thinker::layer_decode_step's pattern -- a
+            // 1-row table needs no separate "decode" kernel. `None` (every
+            // existing caller) is bit-for-bit the prior ROPE_AT dispatch.
+            match mrope {
+                Some((cos, sin)) => {
+                    s.push(block::rope2d_fwd(g, ROPE2D, q_buf, cos, sin, 1, nh, hd, hq));
+                    s.push(block::rope2d_fwd(g, ROPE2D, k_buf, cos, sin, 1, nkv, hd, hkv));
+                }
+                None => {
+                    s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
+                    s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
+                }
+            }
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
             // shared with omni::thinker instead of duplicated.
@@ -1743,6 +1828,34 @@ impl Qwen {
                 mm(&mut s, &lb.h, w(&p("mlp.down.weight")), &self.mlp_out, ff, d);
             }
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
+            // DeepStack decode: this step's row IS one of the image rows
+            // (`deepstack_row = Some(local_row)`, the row's 0-based offset
+            // within the image) -- add level `l`'s merged vision feature for
+            // THAT row into `res[l+1]`, for `l < n_levels`. Mirrors
+            // `forward_steps`' whole-range `SPLICE_ADD` (line ~1084) at
+            // `n_rows=1`: a `step_sliced` read of `deepstack_bufs[l]` at
+            // element offset `local_row * d` (this step's own `res[l+1]` is
+            // already a single `[d]`-sized row, so the destination needs no
+            // offset). `None` (every caller except `step_embed_mrope` on an
+            // image row) is a pure no-op, bit-for-bit unchanged from before
+            // this parameter existed.
+            if let Some(local_row) = deepstack_row {
+                if let Some((_row0, n_rows, nl)) = self.deepstack.get() {
+                    if (l as u32) < nl {
+                        assert!(
+                            local_row < n_rows,
+                            "decode_steps: deepstack_row {local_row} out of range for n_rows {n_rows}"
+                        );
+                        s.push(g.step_sliced(
+                            SPLICE_ADD,
+                            &[&self.deepstack_bufs[l], &self.res[l + 1]],
+                            &[(local_row as u64 * d as u64, d as u64), (0, 0)],
+                            &[d, 0],
+                            d,
+                        ));
+                    }
+                }
+            }
         }
         let last = c.n_layers as usize;
         rms(&mut s, &self.res[last], w("norm.weight"), &self.xn_final, d, 1);
@@ -2352,5 +2465,271 @@ mod kv_tests {
             assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
         }
         println!("kv_step_matches_full_recompute: worst maxabs over {seq} prefixes = {worst:e}");
+    }
+
+    /// [`kv_step_matches_full_recompute`], but M-RoPE: `step_mrope`'s
+    /// per-step 1-row table must reproduce `enable_mrope`'s whole-sequence
+    /// batched forward for every prefix, exactly as the plain (analytic)
+    /// case above does. Positions are a synthetic multimodal-splice-shaped
+    /// sequence (T=H=W plain text, THEN a block with varying H/W simulating
+    /// an image, THEN more plain text) -- NOT computed via
+    /// `qwenvl::mrope::get_rope_index_multi`/`mrope_tables` (this crate does
+    /// not depend on `qwenvl` -- `qwenvl` depends on `qwen`, the other
+    /// direction), but via the identical formula, inlined: `qwen::Qwen`'s
+    /// M-RoPE API (`enable_mrope`/`write_mrope_tables`/`step_mrope`) only
+    /// ever consumes cos/sin tables, never derives positions itself, so this
+    /// test only needs to prove that consumption is correct, not re-test
+    /// `mrope_tables`' own formula (covered by `qwenvl`'s own tests).
+    #[test]
+    fn mrope_step_matches_full_recompute() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let d = cfg.d_model as usize;
+        let v = cfg.vocab as usize;
+        let half = (cfg.head_dim / 2) as usize;
+        let theta = cfg.rope_theta;
+        let max_t = 8u32;
+        let seq = 6usize;
+        let mut rng = Rng::new(5678);
+
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            let val = if name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, val);
+        }
+        let mut model = Qwen::new(cfg, 1, max_t, &map);
+        model.enable_mrope();
+
+        let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
+
+        // Synthetic 3-axis positions: rows 0-1 plain text (T=H=W), rows 2-3
+        // an "image" (T pinned, H/W vary -- the shape a real vision splice
+        // produces), rows 4-5 plain text again, continuing the T axis past
+        // the image block -- mirrors get_rope_index_multi's own documented
+        // shape without importing it.
+        let positions: Vec<[u32; 3]> = vec![[0, 0, 0], [1, 1, 1], [2, 0, 0], [2, 1, 1], [3, 3, 3], [4, 4, 4]];
+        assert_eq!(positions.len(), seq);
+
+        // mrope_section = [half/2, half/4, half/4]-ish split (T/H/W channel
+        // counts summing to `half`) -- any real split works; this is the
+        // same axis_map qwenvl::mrope::axis_map builds, inlined.
+        let section = [half / 2, half / 4, half - half / 2 - half / 4];
+        let axis_of = |d: usize| -> usize {
+            if d < section[0] {
+                0
+            } else if d < section[0] + section[1] {
+                1
+            } else {
+                2
+            }
+        };
+        let head_dim = model.cfg.head_dim;
+        let table_row = |pos: [u32; 3]| -> (Vec<f32>, Vec<f32>) {
+            let mut cos = vec![0f32; half];
+            let mut sin = vec![0f32; half];
+            for dd in 0..half {
+                let inv_freq = theta.powf(-2.0 * dd as f32 / head_dim as f32);
+                let angle = pos[axis_of(dd)] as f32 * inv_freq;
+                cos[dd] = angle.cos();
+                sin[dd] = angle.sin();
+            }
+            (cos, sin)
+        };
+
+        // Reference: whole-sequence table, one batched forward.
+        let (mut whole_cos, mut whole_sin) = (Vec::with_capacity(seq * half), Vec::with_capacity(seq * half));
+        for &p in &positions {
+            let (c, s) = table_row(p);
+            whole_cos.extend(c);
+            whole_sin.extend(s);
+        }
+        model.write_mrope_tables(&whole_cos, &whole_sin);
+        let full = model.logits_all(&tokens);
+
+        // Incremental: one step_mrope call per token, per-step 1-row table.
+        model.reset_cache();
+        let tok_w = model.read_weight("tok.weight");
+        let mut worst = 0.0f32;
+        for (i, &tid) in tokens.iter().enumerate() {
+            let (cos, sin) = table_row(positions[i]);
+            let hidden = model.step_mrope(tid, &cos, &sin);
+            let inc_logits: Vec<f32> = (0..v)
+                .map(|row| {
+                    let wr = &tok_w[row * d..(row + 1) * d];
+                    wr.iter().zip(&hidden).map(|(a, b)| a * b).sum::<f32>()
+                })
+                .collect();
+            let ref_row = &full[i * v..(i + 1) * v];
+            let err = maxabs(&inc_logits, ref_row);
+            worst = worst.max(err);
+            assert!(err < 2e-3, "position {i} ({:?}): M-RoPE step vs full recompute maxabs={err}", positions[i]);
+        }
+        println!("mrope_step_matches_full_recompute: worst maxabs over {seq} positions = {worst:e}");
+    }
+
+    /// [`mrope_step_matches_full_recompute`], but for DeepStack too:
+    /// `decode_steps`'s `deepstack_row` parameter (this session's addition —
+    /// before it existed, `qwenvl::Qwen3Vl::generate()` called
+    /// `write_deepstack` into buffers the incremental path never read, a
+    /// real silent bug, see `.todo/qwenvl-deepstack-incremental-decode.md`)
+    /// must reproduce `enable_deepstack`'s whole-sequence `SPLICE_ADD` in
+    /// `forward_steps` exactly, position by position, the same way M-RoPE's
+    /// decode table already does.
+    #[test]
+    fn deepstack_step_matches_full_recompute() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny(); // n_layers=2
+        let d = cfg.d_model as usize;
+        let v = cfg.vocab as usize;
+        let half = (cfg.head_dim / 2) as usize;
+        let theta = cfg.rope_theta;
+        let max_t = 8u32;
+        let seq = 6usize;
+        let mut rng = Rng::new(9012);
+
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            let val = if name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, val);
+        }
+        let mut model = Qwen::new(cfg.clone(), 1, max_t, &map);
+        model.enable_mrope();
+        // Rows 2-3 are the "image" (row0=2, n_rows=2), same shape
+        // `mrope_step_matches_full_recompute`'s positions already use.
+        let (row0, n_rows) = (2u32, 2u32);
+        model.enable_mm_splice(row0, n_rows);
+        let n_levels = cfg.n_layers.min(2); // tiny() has 2 layers
+        model.enable_deepstack(row0, n_rows, n_levels);
+
+        let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
+        let positions: Vec<[u32; 3]> = vec![[0, 0, 0], [1, 1, 1], [2, 0, 0], [2, 1, 1], [3, 3, 3], [4, 4, 4]];
+        assert_eq!(positions.len(), seq);
+        let section = [half / 2, half / 4, half - half / 2 - half / 4];
+        let axis_of = |dd: usize| -> usize {
+            if dd < section[0] { 0 } else if dd < section[0] + section[1] { 1 } else { 2 }
+        };
+        let head_dim = model.cfg.head_dim;
+        let table_row = |pos: [u32; 3]| -> (Vec<f32>, Vec<f32>) {
+            let mut cos = vec![0f32; half];
+            let mut sin = vec![0f32; half];
+            for dd in 0..half {
+                let inv_freq = theta.powf(-2.0 * dd as f32 / head_dim as f32);
+                let angle = pos[axis_of(dd)] as f32 * inv_freq;
+                cos[dd] = angle.cos();
+                sin[dd] = angle.sin();
+            }
+            (cos, sin)
+        };
+
+        // Random "visual" embeds for the 2 image rows, and one DeepStack
+        // level buffer (also [n_rows, d]) per level.
+        let visual: Vec<f32> = (0..(n_rows as usize * d)).map(|_| rng.next_gaussian() as f32 * 0.1).collect();
+        let ds_levels: Vec<Vec<f32>> = (0..n_levels as usize)
+            .map(|_| (0..(n_rows as usize * d)).map(|_| rng.next_gaussian() as f32 * 0.1).collect())
+            .collect();
+
+        // Reference: whole-sequence table + spliced embeds + DeepStack, one
+        // batched forward. Token ids at the image rows are irrelevant (the
+        // splice overwrites res[0] there).
+        let (mut whole_cos, mut whole_sin) = (Vec::with_capacity(seq * half), Vec::with_capacity(seq * half));
+        for &p in &positions {
+            let (c, s) = table_row(p);
+            whole_cos.extend(c);
+            whole_sin.extend(s);
+        }
+        model.write_mrope_tables(&whole_cos, &whole_sin);
+        model.write_img_embeds(&visual);
+        for (level, data) in ds_levels.iter().enumerate() {
+            model.write_deepstack(level, data);
+        }
+        let full = model.logits_all(&tokens);
+
+        // Incremental: step_mrope for text rows, step_embed_mrope(...,
+        // Some(local_row)) for the image rows.
+        model.reset_cache();
+        let tok_w = model.read_weight("tok.weight");
+        let mut worst = 0.0f32;
+        let mut local_row = 0usize;
+        for (i, &tid) in tokens.iter().enumerate() {
+            let (cos, sin) = table_row(positions[i]);
+            let hidden = if i as u32 >= row0 && (i as u32) < row0 + n_rows {
+                let row = &visual[local_row * d..(local_row + 1) * d];
+                let h = model.step_embed_mrope(row, &cos, &sin, Some(local_row as u32));
+                local_row += 1;
+                h
+            } else {
+                model.step_mrope(tid, &cos, &sin)
+            };
+            let inc_logits: Vec<f32> = (0..v)
+                .map(|row| {
+                    let wr = &tok_w[row * d..(row + 1) * d];
+                    wr.iter().zip(&hidden).map(|(a, b)| a * b).sum::<f32>()
+                })
+                .collect();
+            let ref_row = &full[i * v..(i + 1) * v];
+            let err = maxabs(&inc_logits, ref_row);
+            worst = worst.max(err);
+            assert!(err < 2e-3, "position {i} ({:?}): DeepStack step vs full recompute maxabs={err}", positions[i]);
+        }
+        println!("deepstack_step_matches_full_recompute: worst maxabs over {seq} positions = {worst:e}");
+    }
+
+    /// Mutation-verify: a WRONG `deepstack_row` (off by one) must actually
+    /// change the output vs the correct one — proving
+    /// `deepstack_step_matches_full_recompute`'s tolerance isn't so loose it
+    /// would pass even with the feature silently disabled/misindexed.
+    #[test]
+    fn deepstack_row_index_is_load_bearing() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let d = cfg.d_model as usize;
+        let max_t = 8u32;
+        let mut rng = Rng::new(3344);
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            let val = if name == "norm.weight" || name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name.ends_with("q_norm.weight") || name.ends_with("k_norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, val);
+        }
+        let mut model = Qwen::new(cfg.clone(), 1, max_t, &map);
+        model.enable_mrope();
+        model.enable_mm_splice(0, 2);
+        let n_levels = cfg.n_layers.min(2);
+        model.enable_deepstack(0, 2, n_levels);
+        // DeepStack buffers start zero-initialised: row 0 and row 1 would be
+        // indistinguishable (both add zero) unless real, DISTINCT data is
+        // written first -- the actual point under test.
+        for level in 0..n_levels as usize {
+            let data: Vec<f32> = (0..(2 * d)).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
+            model.write_deepstack(level, &data);
+        }
+        let half = (cfg.head_dim / 2) as usize;
+        let cos = vec![1.0f32; half];
+        let sin = vec![0.0f32; half];
+        let row: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32 * 0.1).collect();
+
+        model.reset_cache();
+        let correct = model.step_embed_mrope(&row, &cos, &sin, Some(0));
+        model.reset_cache();
+        let wrong = model.step_embed_mrope(&row, &cos, &sin, Some(1));
+        let diff = maxabs(&correct, &wrong);
+        assert!(diff > 1e-6, "deepstack_row=0 vs deepstack_row=1 produced identical output (diff={diff:e}) -- the index is not load-bearing");
     }
 }
