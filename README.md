@@ -724,9 +724,9 @@ op (153 kernels), not that this file runs there.
 | [`rope_train_bwd`](crates/kernels/wgsl/rope_train_bwd.wgsl) | RoPE backward: gradient is the inverse (transpose) rotation, i.e | one thread per output element | 3/5 | ✓ | ✓ | — | — |
 | [`router_bwd`](crates/kernels/wgsl/router_bwd.wgsl) | Router backward: gradient w.r.t | one thread per output element, 5 nested serial reductions, array-free | 1/5 | ✓ | ✓ | — | — |
 | [`router_bwd_sigmoid`](crates/kernels/wgsl/router_bwd_sigmoid.wgsl) | GLM/DeepSeek-V3 "noaux_tc" MoE router (backward) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | — |
-| [`router_gate`](crates/kernels/wgsl/router_gate.wgsl) | Router gating: softmax over experts -> keep top_k -> renormalise | one thread per output element, 6 nested serial reductions | 1/5 | ✓ | ✓ | — | — |
+| [`router_gate`](crates/kernels/wgsl/router_gate.wgsl) | Router gating: softmax over experts -> keep top_k -> renormalise | one thread per token, array-free (no expert-count cap) | 1/5 | ✓ | ✓ | — | — |
 | [`router_gate_sigmoid`](crates/kernels/wgsl/router_gate_sigmoid.wgsl) | GLM/DeepSeek-V3 "noaux_tc" MoE router (forward) | one thread per output element, 6 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | — |
-| [`router_gate_train`](crates/kernels/wgsl/router_gate_train.wgsl) | Router gating (training variant) | one thread per output element, 6 nested serial reductions | 1/5 | ✓ | ✓ | — | — |
+| [`router_gate_train`](crates/kernels/wgsl/router_gate_train.wgsl) | Router gating (training variant): softmax + full probs + top_k gate | one thread per token, array-free (no expert-count cap) | 1/5 | ✓ | ✓ | — | — |
 | [`row_scatter`](crates/kernels/wgsl/row_scatter.wgsl) | Row scatter by index — the inverse of the `embed` row-gather for UNIQUE indices | one thread per output element | 3/5 | ✓ | ✓ | — | — |
 | [`scale_add`](crates/kernels/wgsl/scale_add.wgsl) | MoE combine for one expert | one thread per output element | 3/5 | ✓ | ✓ | ✓ | — |
 | [`scale_add_dexp`](crates/kernels/wgsl/scale_add_dexp.wgsl) | MoE combine backward, part 1 — gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | — |

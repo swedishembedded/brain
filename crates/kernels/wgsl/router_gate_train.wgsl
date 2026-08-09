@@ -1,26 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Router gating (training variant)
-// @how   one thread per output element, 6 nested serial reductions
+// @what  Router gating (training variant): softmax + full probs + top_k gate
+// @how   one thread per token, array-free (no expert-count cap)
 // @opt   1
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
 //
-// Router gating (training variant): like router_gate.wgsl but also writes the
-// full softmax probabilities (needed by the backward pass). One invocation per
-// token row. n_experts <= MAX_EXPERTS. 128 covers every released
-// top-k-softmax MoE brain imports today (Qwen3-Omni thinker/talker: 128 each).
-
-const MAX_EXPERTS: u32 = 128u;
+// Router gating (training variant): like `router_gate.wgsl` but also writes
+// the full softmax probabilities (needed by the backward pass). One
+// invocation per token row.
+//
+// Same fix as `router_gate.wgsl` (see its header for the full rationale) —
+// removed the `n_experts`-capped `array<f32,128>`/`array<bool,128>` scratch.
+// Here the softmax itself is computed straight into the `probs` OUTPUT buffer
+// (unnormalised numerator, then normalised in place in a second pass) instead
+// of a local cache, since `probs` is exactly `[n_rows, n_experts]` already.
+// The only remaining `var<function>` array is `sel_idx`, bounded by
+// `MAX_TOP_K`, never by `n_experts`.
 
 struct Params {
     n_rows: u32,
     n_experts: u32,
     top_k: u32,
 };
+
+const MAX_TOP_K: u32 = 32u; // bounds ONLY the top-k bookkeeping, never n_experts
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       logits: array<f32>;
@@ -36,38 +43,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (t >= p.n_rows) { return; }
     let E = p.n_experts;
     let base = t * E;
+    let k = min(p.top_k, MAX_TOP_K);
 
-    var pr: array<f32, 128>;
-    var used: array<bool, 128>;
-
+    // Pass 1: row max.
     var mx = -3.4e38;
     for (var e: u32 = 0u; e < E; e = e + 1u) { mx = max(mx, logits[base + e]); }
+
+    // Pass 2: unnormalised numerator into `probs` (scratch reuse) + its sum.
     var sm = 0.0;
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         let pe = exp(logits[base + e] - mx);
-        pr[e] = pe;
-        used[e] = false;
+        probs[base + e] = pe;
         sm = sm + pe;
     }
-    for (var e: u32 = 0u; e < E; e = e + 1u) {
-        pr[e] = pr[e] / sm;
-        probs[base + e] = pr[e];
-    }
+    // Pass 2b: normalise `probs` in place — it is now the real softmax.
+    for (var e: u32 = 0u; e < E; e = e + 1u) { probs[base + e] = probs[base + e] / sm; }
 
+    // Pass 3: greedy top-k over the now-normalised `probs`.
+    var sel_idx: array<u32, 32>;
     var sel_sum = 0.0;
-    for (var kk: u32 = 0u; kk < p.top_k; kk = kk + 1u) {
+    for (var kk: u32 = 0u; kk < k; kk = kk + 1u) {
         var best = 0u;
         var best_v = -1.0;
         for (var e: u32 = 0u; e < E; e = e + 1u) {
-            if (!used[e] && pr[e] > best_v) { best_v = pr[e]; best = e; }
+            var already = false;
+            for (var s: u32 = 0u; s < kk; s = s + 1u) {
+                if (sel_idx[s] == e) { already = true; break; }
+            }
+            if (!already && probs[base + e] > best_v) { best_v = probs[base + e]; best = e; }
         }
-        used[best] = true;
-        sel_sum = sel_sum + pr[best];
+        sel_idx[kk] = best;
+        sel_sum = sel_sum + best_v;
     }
 
+    // Pass 4: finalise `gate` — renormalise the kept experts, zero the rest.
     let inv = 1.0 / max(sel_sum, 1e-9);
     for (var e: u32 = 0u; e < E; e = e + 1u) {
-        if (used[e]) { gate[base + e] = pr[e] * inv; }
-        else         { gate[base + e] = 0.0; }
+        var selected = false;
+        for (var s: u32 = 0u; s < k; s = s + 1u) {
+            if (sel_idx[s] == e) { selected = true; break; }
+        }
+        if (selected) {
+            gate[base + e] = probs[base + e] * inv;
+        } else {
+            gate[base + e] = 0.0;
+        }
     }
 }
