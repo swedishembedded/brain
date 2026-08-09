@@ -850,6 +850,31 @@ impl MmapGguf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::TensorSource for MmapGguf {
+    /// Streaming source: dequantize exactly one tensor from the mmap, lend it
+    /// to `f`, drop it on return — the same peak-host-≈-one-tensor contract
+    /// [`crate::weightio::WeightReader`]'s impl gives for safetensors, so a
+    /// GGUF-backed import can share the identical streaming builder code
+    /// (`ParamStore::new_with_roles_src` and friends) unchanged.
+    ///
+    /// A quant-type dequant failure (IQ/TQ/MXFP4 codebooks, `Some(Err(..))`)
+    /// panics rather than returning `false` — per this repo's "validate at the
+    /// boundary, fail loudly" rule (`AGENTS.md`), silently reporting "not
+    /// found" here would surface as a two-way-coverage "missing tensor" error
+    /// at the caller, masking a real dequant failure as a naming bug.
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.tensor(name) {
+            Some(Ok(v)) => {
+                f(&v);
+                true
+            }
+            Some(Err(e)) => panic!("gguf: {name}: dequant failed: {e}"),
+            None => false,
+        }
+    }
+}
+
 /// Convert one GGUF metadata value to `serde_json::Value` (arrays recurse).
 #[cfg(not(target_arch = "wasm32"))]
 fn gval_json(v: &GgufValue) -> serde_json::Value {
@@ -1318,6 +1343,38 @@ mod tests {
         assert_eq!(b.shape, vec![4]);
         assert_eq!(b.data, [9.0, -1.5, 0.0, 2.5]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `MmapGguf`'s `TensorSource` impl must stream the same values `tensor()`
+    /// returns directly, and report absent names as `false` (not panic) so a
+    /// two-way-coverage import check gets a real "missing" signal.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mmap_gguf_tensor_source_streams_present_tensors_and_reports_absent_ones() {
+        use crate::gguf_write::{write, TensorOut};
+        use crate::TensorSource;
+
+        let path = std::env::temp_dir()
+            .join(format!("gguf-tensorsource-test-{}.gguf", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let data: Vec<u8> = (0..6).flat_map(|i| (i as f32 * 1.5 - 2.0).to_le_bytes()).collect();
+        let tensors = vec![TensorOut { name: "w".to_string(), shape: vec![2, 3], ty: T_F32, data }];
+        write(&path, &[], &tensors, 32).unwrap();
+
+        let mg = MmapGguf::open(&path).unwrap();
+
+        let mut seen = None;
+        let found = mg.with_tensor("w", &mut |d| seen = Some(d.to_vec()));
+        assert!(found, "with_tensor must find a present tensor");
+        assert_eq!(seen, Some(vec![-2.0, -0.5, 1.0, 2.5, 4.0, 5.5]));
+
+        let mut never_called = true;
+        let found_missing = mg.with_tensor("does_not_exist", &mut |_| never_called = false);
+        assert!(!found_missing, "with_tensor must report an absent name as false, not panic");
+        assert!(never_called, "the closure must never run for an absent name");
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// Optional integration test: set BRAIN_GGUF_TESTFILE to a small quantized
