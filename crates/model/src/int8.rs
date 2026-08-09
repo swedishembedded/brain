@@ -42,6 +42,34 @@ pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     (packed, sw)
 }
 
+/// The exact host-side inverse of [`quantize_weight`]: unpack `[n, k/4]` u32
+/// words back to `[n, k]` f32 via `sw[r]` (the same per-row scale
+/// `quantize_weight` wrote). Used where a real checkpoint quantized a weight
+/// (`omni::import::should_quantize`) that the consuming forward pass still
+/// wants as plain f32 — e.g. attention/router projections, which meet the
+/// same rank-2/`k%4==0` shape test as the MoE experts but have no int8
+/// dispatch path of their own (only the experts do, `model::moe::
+/// expert_fwd_i8`). `k` must be a multiple of 4 (mirrors `quantize_weight`'s
+/// own requirement, since the packing is 4 lanes per u32).
+pub fn dequantize_weight(packed: &[u32], sw: &[f32], n: usize, k: usize) -> Vec<f32> {
+    assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
+    let kg = k / 4;
+    assert_eq!(packed.len(), n * kg, "packed len {} != n*(k/4) {}", packed.len(), n * kg);
+    assert_eq!(sw.len(), n, "scale len {} != n {}", sw.len(), n);
+    let mut w = vec![0f32; n * k];
+    for r in 0..n {
+        let s = sw[r];
+        for g in 0..kg {
+            let word = packed[r * kg + g];
+            for b in 0..4 {
+                let q = ((word >> (8 * b)) as u8) as i8;
+                w[r * k + g * 4 + b] = q as f32 * s;
+            }
+        }
+    }
+    w
+}
+
 /// The buffers and kernel slots one dynamic activation quantization needs —
 /// the same "bundle the ids so the call stays readable" shape as
 /// [`crate::block::FlashIds`].
@@ -109,5 +137,60 @@ mod tests {
                 assert!((deq - w[r * k + c]).abs() <= sw[r] * 0.5 + 1e-6, "r{r} c{c}");
             }
         }
+    }
+
+    /// [`dequantize_weight`] must agree with the round-trip math
+    /// [`round_trips_within_one_step`] checks inline, per-element, over
+    /// multiple rows (distinct per-row scales) and a `k` that isn't a
+    /// multiple of the packing group in a suspicious way (12, not 4 or 8) —
+    /// the real caller of this function (`omni::int8_thinker_resident::
+    /// load_mat`) needs it for arbitrary real weight shapes, not just the
+    /// one `quantize_weight`'s own test happens to use.
+    #[test]
+    fn dequantize_weight_matches_quantize_weight_within_one_step() {
+        let (n, k) = (5, 12);
+        let w: Vec<f32> = (0..n * k).map(|i| ((i as f32) * 0.11 - 6.0) * (1 + i % 3) as f32).collect();
+        let (packed, sw) = quantize_weight(&w, n, k);
+        let deq = dequantize_weight(&packed, &sw, n, k);
+        assert_eq!(deq.len(), n * k);
+        for r in 0..n {
+            for c in 0..k {
+                let d = deq[r * k + c];
+                let orig = w[r * k + c];
+                assert!((d - orig).abs() <= sw[r] * 0.5 + 1e-6, "r{r} c{c}: deq={d} orig={orig} scale={}", sw[r]);
+            }
+        }
+    }
+
+    /// Mutation-verify: an intentionally wrong sign-extension (`as u8`
+    /// dropped, reading the byte as unsigned) must break the round-trip
+    /// tolerance above -- confirms the test actually exercises the sign
+    /// handling, not just magnitude.
+    #[test]
+    fn dequantize_weight_sign_handling_is_load_bearing() {
+        let (n, k) = (2, 4);
+        let w = vec![-100.0f32, 50.0, -1.0, 90.0, 10.0, -80.0, 60.0, -40.0];
+        let (packed, sw) = quantize_weight(&w, n, k);
+        let correct = dequantize_weight(&packed, &sw, n, k);
+        // Deliberately wrong: treat each packed byte as UNSIGNED, dropping
+        // the `as i8` reinterpretation `dequantize_weight` relies on.
+        let mut wrong = vec![0f32; n * k];
+        for r in 0..n {
+            let s = sw[r];
+            for g in 0..k / 4 {
+                let word = packed[r * (k / 4) + g];
+                for b in 0..4 {
+                    let q_unsigned = (word >> (8 * b)) as u8;
+                    wrong[r * k + g * 4 + b] = q_unsigned as f32 * s;
+                }
+            }
+        }
+        let mut any_diverged = false;
+        for i in 0..w.len() {
+            if (correct[i] - wrong[i]).abs() > 1e-3 {
+                any_diverged = true;
+            }
+        }
+        assert!(any_diverged, "unsigned-vs-signed byte reinterpretation should diverge for at least one negative-quantized element");
     }
 }

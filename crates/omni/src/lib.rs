@@ -18,6 +18,8 @@ pub mod codec_bridge;
 pub mod config;
 pub mod generate;
 pub mod import;
+pub mod int8_resident;
+pub mod int8_thinker_resident;
 pub mod mm;
 pub mod npu_export;
 pub mod talker;

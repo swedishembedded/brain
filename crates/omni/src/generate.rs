@@ -136,7 +136,7 @@ fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32]
     for l in 0..cfg.n_layers {
         let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
         let lc = cache.layer(l as usize);
-        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc));
+        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc), None);
         h = out;
     }
     let norm_w = gpu.storage_init("w", &reader.tensor("thinker.model.norm.weight").expect("missing thinker.model.norm.weight"));
@@ -163,7 +163,7 @@ fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[
     for l in 0..cfg.n_layers {
         let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
         let lc = cache.layer(l as usize);
-        h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, cache_row, cache.cap);
+        h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, cache_row, cache.cap, None);
     }
     let norm_w = gpu.storage_init("w", &reader.tensor("thinker.model.norm.weight").expect("missing thinker.model.norm.weight"));
     final_norm(gpu, cfg, &norm_w, &h, 1)
@@ -324,7 +324,7 @@ pub fn thinker_hidden_at_layer(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextCo
     let mut h = gpu.storage_init("x", x_host);
     for l in 0..=capture_layer {
         let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
-        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, None);
+        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, None, None);
         h = out;
     }
     gpu.read(&h, (n * cfg.hidden) as usize)

@@ -1138,6 +1138,7 @@ dependencies = [
  "brain-qwen",
  "brain-qwen-asr",
  "brain-qwenvl",
+ "brain-residency",
  "brain-testutil",
  "brain-tts",
  "safetensors",

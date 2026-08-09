@@ -50,9 +50,11 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{gqa_decode_step, gqa_fwd, kv_cache_fill, rmsnorm_fwd, rope2d_fwd, Gqa, GqaDecodeIds, KernelIds};
-use model::moe::{expert_fwd, router_fwd, ExpertScratch, MoeIds};
+use model::int8::{quant_rows_steps, QuantRows};
+use model::moe::{expert_fwd, expert_fwd_i8, router_fwd, ExpertScratch, ExpertScratch8, MoeIds, MoeIds8};
 
 use crate::config::MoeTextConfig;
+use crate::int8_resident::ThinkerLayerExperts8;
 
 /// Kernel pipeline this module dispatches. Forward-only: the backward slots
 /// `KernelIds` carries (`rms_inv`/`rmsnorm_dx`/`rmsnorm_dw`/`rope_bwd`/
@@ -77,6 +79,13 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 13
         ("decode_softmax", kernels::DECODE_SOFTMAX),         // 14
         ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),   // 15
+        // int8 MoE expert dispatch -- see `moe_sublayer`'s `int8_experts`
+        // parameter and `crate::int8_resident`. Registered unconditionally
+        // (harmless, matching every other kernel here, whether or not a
+        // given resident instance ever passes `Some`).
+        ("max_abs_row", kernels::MAX_ABS_ROW),               // 16
+        ("quant_pack", kernels::QUANT_PACK),                 // 17
+        ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 18
     ]
 }
 
@@ -103,6 +112,10 @@ fn kernel_ids() -> KernelIds {
 
 fn moe_ids() -> MoeIds {
     MoeIds { router_gate: 7, linear_gated: 8, silu_mul: 9, scale_add: 10 }
+}
+
+fn moe_ids8() -> MoeIds8 {
+    MoeIds8 { linear_gated_i8: 18, silu_mul: 9, scale_add: 10, quant: [16, 17] }
 }
 
 fn decode_ids() -> GqaDecodeIds {
@@ -169,8 +182,12 @@ pub struct ThinkerLayerCache<'a> {
 /// function and must be applied separately if the comparison target is a
 /// `last_hidden_state`-shaped tensor (see `thinker_layer_parity.rs`'s module
 /// doc for the real bug this distinction caught; [`decode`] applies it).
+///
+/// `int8_experts`: see [`moe_sublayer`]'s doc — `Some` swaps only the
+/// routed-expert dispatch to int8; `None` (every caller before this
+/// parameter existed) is the original fp32 path, unchanged.
 #[allow(clippy::too_many_arguments)]
-pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, cache: Option<&ThinkerLayerCache>) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, cache: Option<&ThinkerLayerCache>, int8_experts: Option<&ThinkerLayerExperts8>) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let ids = kernel_ids();
     let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
     let (hq, hkv) = (nh * hd, nkv * hd);
@@ -213,7 +230,7 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
     g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
     g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
 
-    let (out, router_logits, gate) = moe_sublayer(g, cfg, w, &xmid, n);
+    let (out, router_logits, gate) = moe_sublayer(g, cfg, w, &xmid, n, int8_experts);
     (out, router_logits, xmid, gate)
 }
 
@@ -222,45 +239,83 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
 /// shapes differ, but the post-attention residual `xmid [n, d] -> out [n, d]`
 /// math is identical either way (router -> top-k renorm gate -> per-expert
 /// SwiGLU -> residual add), so it lives once here instead of twice.
-fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+///
+/// `int8_experts`: `Some(store)` dispatches every routed expert through
+/// [`model::moe::expert_fwd_i8`] against `store`'s resident packed weights
+/// (`crate::int8_resident::ThinkerInt8Store`) instead of `w.experts`' fp32
+/// ones — `w.experts` is simply UNUSED in that branch (attention/router/
+/// norms still come from `w`, unchanged; only the expert linears are
+/// swapped). `None` (every caller before this parameter existed) is the
+/// original fp32 path, bit-for-bit unchanged.
+fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &DeviceBuffer, n: u32, int8_experts: Option<&ThinkerLayerExperts8>) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let ids = kernel_ids();
     let mids = moe_ids();
     let d = cfg.hidden;
 
     let xn2 = g.storage((n * d) as u64);
     let router_logits = g.storage((n * cfg.n_experts) as u64);
-    g.submit(
-        &[],
-        &[
-            rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
-            g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
-        ],
-    );
 
-    // Router gate (top-k + renorm) needs its own submit boundary from the
-    // per-expert loop below only in the sense that the gate buffer must be
-    // fully written first -- `router_fwd` -> one more submit, then the
-    // expert loop reads it. Kept as a second pass for clarity; cheap either
-    // way (router is a single small kernel).
+    // ONE accumulated batch, ONE submit -- was one submit PER EXPERT (128 at
+    // Thinker's scale, 6144 across 48 layers per token), each a real
+    // encode+queue-submit+pipeline-barrier round trip. `expert_fwd`'s own
+    // 5-step sequences already rely on multi-step ordering being preserved
+    // within a single submit (the same guarantee `forward_steps()` batches an
+    // entire model's forward into one submit on) -- accumulating every
+    // expert's steps here is that same, already-relied-on contract, not a
+    // new one. This is what `omni_bench`'s own module doc names as the
+    // reason it cannot use `gpu_core::profile` at all ("submits eagerly...
+    // so there is no single Step list to hand that profiler") -- fixing it
+    // here unblocks that profiler for every subsequent optimisation pass on
+    // this model, not just the submit-count win itself.
+    let mut steps = vec![
+        rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
+        g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
+    ];
+
     let shape = cfg.moe_shape(n);
     let gate = g.storage((n * cfg.n_experts) as u64);
-    g.submit(&[], &[router_fwd(g, &mids, &shape, &router_logits, &gate)]);
+    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate));
 
     let moe_ff = cfg.moe_intermediate;
-    let scratch = ExpertScratch {
-        gate_pre: &g.storage((n * moe_ff) as u64),
-        up: &g.storage((n * moe_ff) as u64),
-        h: &g.storage((n * moe_ff) as u64),
-        expert_out: &g.storage((n * d) as u64),
-    };
     let moe_out = g.storage((n * d) as u64);
-    for (e, (gw, uw, dw)) in w.experts.iter().enumerate() {
-        let steps = expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &moe_out, e as u32, e != 0);
-        g.submit(&[], &steps);
+    match int8_experts {
+        None => {
+            let scratch = ExpertScratch {
+                gate_pre: &g.storage((n * moe_ff) as u64),
+                up: &g.storage((n * moe_ff) as u64),
+                h: &g.storage((n * moe_ff) as u64),
+                expert_out: &g.storage((n * d) as u64),
+            };
+            for (e, (gw, uw, dw)) in w.experts.iter().enumerate() {
+                steps.extend(expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &moe_out, e as u32, e != 0));
+            }
+        }
+        Some(store) => {
+            let mids8 = moe_ids8();
+            // xn2 quantized ONCE, shared by every expert -- expert_fwd_i8's
+            // own doc: "every expert reads the same quantized activation, so
+            // quantizing it 128 times would be pure waste."
+            let xq = g.storage((n * d / 4) as u64);
+            let sx = g.storage(n as u64);
+            steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq }, 0, n, d));
+            let scratch8 = ExpertScratch8 {
+                gate_pre: &g.storage((n * moe_ff) as u64),
+                up: &g.storage((n * moe_ff) as u64),
+                h: &g.storage((n * moe_ff) as u64),
+                hq: &g.storage((n * moe_ff / 4) as u64),
+                sh: &g.storage(n as u64),
+                expert_out: &g.storage((n * d) as u64),
+            };
+            for e in 0..cfg.n_experts as usize {
+                let (gw, uw, dw) = store.lin8_at(e);
+                steps.extend(expert_fwd_i8(g, &mids8, &shape, &xq, &sx, &gate, gw, uw, dw, &scratch8, &moe_out, e as u32, e != 0));
+            }
+        }
     }
 
     let out = g.storage((n * d) as u64);
-    g.submit(&[], &[g.step(ADD2, &[xmid, &moe_out, &out], &[n * d], n * d)]);
+    steps.push(g.step(ADD2, &[xmid, &moe_out, &out], &[n * d], n * d));
+    g.submit(&[], &steps);
 
     (out, router_logits, gate)
 }
@@ -279,9 +334,10 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
 /// call and every prior decode step against this same cache used).
 ///
 /// Returns this token's new hidden row `[1, d]`. The MoE tail is
-/// [`moe_sublayer`], shared unchanged with [`layer_fwd`].
+/// [`moe_sublayer`], shared unchanged with [`layer_fwd`]. `int8_experts`:
+/// see [`moe_sublayer`]'s doc.
 #[allow(clippy::too_many_arguments)]
-pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, cache: &ThinkerLayerCache, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, pos: u32, cap: u32) -> DeviceBuffer {
+pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, cache: &ThinkerLayerCache, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, pos: u32, cap: u32, int8_experts: Option<&ThinkerLayerExperts8>) -> DeviceBuffer {
     let ids = kernel_ids();
     let dids = decode_ids();
     let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
@@ -321,7 +377,7 @@ pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, 
     g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
     g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
 
-    let (out, ..) = moe_sublayer(g, cfg, w, &xmid, n);
+    let (out, ..) = moe_sublayer(g, cfg, w, &xmid, n, int8_experts);
     out
 }
 
@@ -346,7 +402,7 @@ pub struct ThinkerWeights<'a> {
 pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let mut h = x.clone(); // DeviceBuffer is Arc-backed; cheap, aliases the same buffer.
     for layer in w.layers {
-        let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n, None);
+        let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n, None, None);
         h = out;
     }
     final_norm(g, cfg, w.final_norm, &h, n)
