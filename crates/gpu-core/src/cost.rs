@@ -413,8 +413,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, h, hd) = (p(0)?, p(1)?, p(2)?);
             f(5 * rows * h * hd, 8 * rows * h * hd)
         }
-        // params [rows, heads, half, ...].
-        "rope2d" => {
+        // params [rows, heads, half, ...]. rope2d_partial is the same per-pair
+        // cost over fewer pairs (half = rot_dim/2 < head_dim/2).
+        "rope2d" | "rope2d_partial" => {
             let (rows, h, half) = (p(0)?, p(1)?, p(2)?);
             f(7 * rows * h * half, 24 * rows * h * half)
         }

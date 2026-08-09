@@ -124,6 +124,61 @@ pub fn rope2d_fwd(g: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer
     g.step(kernel, &[buf, cos, sin], &[rows, n_heads, half, row_stride, 0, rows, f(1.0)], rows * n_heads * half)
 }
 
+/// Table-driven interleaved M-RoPE (forward), **partial**: rotates only the
+/// first `rot_dim = 2*half` channels of each `head_dim`-wide head, leaving
+/// `head_dim - rot_dim` channels untouched (Qwen3.5's
+/// `partial_rotary_factor`). Dispatches `kernels::ROPE2D_PARTIAL`
+/// (`rope2d_partial.wgsl`) — unlike `rope2d_fwd`, the per-head stride in the
+/// buffer is the FULL `head_dim`, not `2*half`, so the two kernels are not
+/// interchangeable at a partial rotary factor (see the kernel's header for
+/// why a plain `rope2d` dispatch would corrupt every head after the first).
+/// `half` is the table width (`rot_dim/2`), built by
+/// `qwenvl::mrope::mrope_tables` called with `head_dim = rot_dim`.
+#[allow(clippy::too_many_arguments)]
+pub fn rope2d_partial_fwd(
+    g: &Gpu,
+    kernel: usize,
+    buf: &DeviceBuffer,
+    cos: &DeviceBuffer,
+    sin: &DeviceBuffer,
+    rows: u32,
+    n_heads: u32,
+    half: u32,
+    row_stride: u32,
+    off: u32,
+    head_dim: u32,
+) -> Step {
+    g.step(
+        kernel,
+        &[buf, cos, sin],
+        &[rows, n_heads, half, row_stride, off, rows, f(1.0), head_dim],
+        rows * n_heads * half,
+    )
+}
+
+/// The exact inverse of [`rope2d_partial_fwd`] (`sign = -1`), for backward.
+#[allow(clippy::too_many_arguments)]
+pub fn rope2d_partial_bwd(
+    g: &Gpu,
+    kernel: usize,
+    buf: &DeviceBuffer,
+    cos: &DeviceBuffer,
+    sin: &DeviceBuffer,
+    rows: u32,
+    n_heads: u32,
+    half: u32,
+    row_stride: u32,
+    off: u32,
+    head_dim: u32,
+) -> Step {
+    g.step(
+        kernel,
+        &[buf, cos, sin],
+        &[rows, n_heads, half, row_stride, off, rows, f(-1.0), head_dim],
+        rows * n_heads * half,
+    )
+}
+
 /// Half-split RoPE backward (in place on the grad buffer).
 pub fn rope_bwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32, head_dim: u32, row_stride: u32, t: u32, theta: f32) -> Step {
     let half = head_dim / 2;

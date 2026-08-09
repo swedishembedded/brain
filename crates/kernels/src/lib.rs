@@ -614,6 +614,8 @@ pub const ROOF_FMA: &str = include_str!("../wgsl/roof_fma.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
 pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
+/// `wgsl/rope2d_partial.wgsl`
+pub const ROPE2D_PARTIAL: &str = include_str!("../wgsl/rope2d_partial.wgsl");
 /// `wgsl/rope_at.wgsl`
 pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
 /// `wgsl/rope_base.wgsl`
@@ -1052,6 +1054,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("roof_fma", ROOF_FMA),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
+    ("rope2d_partial", ROPE2D_PARTIAL),
     ("rope_at", ROPE_AT),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
