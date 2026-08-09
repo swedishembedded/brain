@@ -13,21 +13,40 @@ JIT-compiled to native code by the Cranelift backend; `Gpu::new_cpu`,
 ## Getting weights — auto-fetch, no manual setup
 
 `brain` fetches and converts `Ultralytics/YOLOv8` (the `n` variant) itself on
-first use — no manual `.pt` export, no `BRAIN_YOLO` env var:
+first use — no manual `.pt` export, no `BRAIN_YOLO` env var. Detection has no
+OpenAI/Anthropic REST equivalent (neither dialect has an object-detection
+route), so it's reached over D-Bus — `brain serve`'s other user-facing surface
+alongside the HTTP dialects (see `brain-py`):
 
 ```bash
-brain serve --openai 8788                               # or --dbus / --anthropic
-brain do Ultralytics/YOLOv8 detect --in image=dog.ppm
+brain serve --dbus
+python3 -c "
+from brain_py.dbus import BrainDBus
+from PIL import Image
+import numpy as np
+
+im = Image.open('dog.jpg').convert('RGB')
+hwc = (np.asarray(im, dtype=np.float32) / 255.0).tobytes()
+w, h = im.size
+out = BrainDBus().run('Ultralytics/YOLOv8', 'detect', {'conf': 0.25},
+                       blobs={'image': hwc}, meta={'image': {'media': 'image', 'w': w, 'h': h, 'c': 3}})
+print(out.outputs['detections'])
+"
 ```
 
-The first request downloads `yolov8n.pt` from the Ultralytics HF repo and
+The first call downloads `yolov8n.pt` from the Ultralytics HF repo and
 converts it in-process with brain's own Rust `.pt` importer
 (`crates/yolo/src/import.rs`, over `crates/checkpoint/src/torchpt.rs`'s
 pure-Rust pickle+zip reader — no torch, no Python) into
-`model.brain.safetensors`; every request after is instant. See
-[Auto-fetch](#auto-fetch) below for how this composes with the `BRAIN_YOLO`
-power-user path and the manual Python export, both of which still work
-unchanged.
+`model.brain.safetensors`; every call after is instant (confirmed live:
+first call ~2.8s including the network fetch, second call ~0.9s). `brain do
+Ultralytics/YOLOv8 detect …` does **not** do this — `brain do` builds its own
+static, in-process registry and never talks to a running `brain serve`, so it
+only reaches models already wired into the catalog by name, never an
+auto-fetchable ref; use it only against local checkpoints already registered
+under a `brain/…` id. See [Auto-fetch](#auto-fetch) below for how this
+composes with the `BRAIN_YOLO` power-user path and the manual Python export,
+both of which still work unchanged.
 
 Contents:
 
