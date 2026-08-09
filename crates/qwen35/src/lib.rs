@@ -11,5 +11,6 @@
 //! `/data/workspace/resources/qwen3.5/` for the reference sources).
 
 pub mod config;
+pub mod import;
 
 pub use config::{LayerType, Qwen35Config};
