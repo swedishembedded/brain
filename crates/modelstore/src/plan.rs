@@ -24,9 +24,14 @@ pub enum Step {
     /// Fetch `file` from `vendor/repo@revision` into the store, under
     /// `dest_name` inside that ref's repo directory.
     Download { vendor: String, repo: String, revision: String, file: String, dest_name: String },
-    /// Convert the just-downloaded upstream checkpoint (foreign safetensors,
-    /// possibly sharded) into `model.brain.safetensors` for `vendor/repo`.
-    Convert { vendor: String, repo: String },
+    /// Make the just-downloaded upstream checkpoint servable for
+    /// `vendor/repo` -- a tensor-format rewrite into `model.brain.safetensors`
+    /// for a single-file family, a manifest write for a compound one, etc.
+    /// `recipe` is the [`crate::recipe::ArtifactRecipe::id`] that planned
+    /// this repo's artifacts, so the finish-side dispatcher
+    /// (`crates/cli/src/supply.rs::convert`) knows which family it's
+    /// finishing without re-deriving it from disk a second time.
+    Convert { vendor: String, repo: String, recipe: &'static str },
     /// Locally quantize `base` (already on disk after its own plan) to `quant`.
     Quantize { base: ModelRef, quant: Quant },
 }
@@ -66,7 +71,7 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
-const REVISION: &str = "main";
+pub(crate) const REVISION: &str = "main";
 
 /// Decide how to materialize `reference`: on disk (serve), an existing
 /// upstream quantized artifact (download), or the base checkpoint plus a
@@ -135,46 +140,16 @@ fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan,
     }
     let vendor = reference.vendor();
     let repo = reference.repo();
-    let files = hub.list_files(vendor, repo, REVISION).map_err(PlanError::Hub)?;
+    let listing = hub.list_files(vendor, repo, REVISION).map_err(PlanError::Hub)?;
 
-    // Cheap metadata before expensive bytes: fetch config.json (~KBs) and
-    // gate on architecture before a single weight byte is requested.
-    if !files.iter().any(|f| f == "config.json") {
-        return Err(PlanError::NoUpstreamArtifact(reference.clone(), "no config.json in repo".to_string()));
-    }
-    let config_bytes = hub.read_file(vendor, repo, REVISION, "config.json").map_err(PlanError::Hub)?;
-    let config: serde_json::Value =
-        serde_json::from_slice(&config_bytes).map_err(|e| PlanError::NoUpstreamArtifact(reference.clone(), format!("unparseable config.json: {e}")))?;
-    let arch = declared_architecture(&config).ok_or_else(|| PlanError::NoUpstreamArtifact(reference.clone(), "config.json has no architecture".to_string()))?;
-    if !is_supported_architecture(&arch) {
-        return Err(PlanError::UnsupportedArchitecture(reference.clone(), arch));
-    }
+    let recipe = crate::recipe::recipes()
+        .into_iter()
+        .find(|r| r.matches_listing(&listing))
+        .expect("the last recipe in the registry is a catch-all and always matches");
+    let artifacts = recipe.artifacts(reference, &listing, hub).map_err(|e| *e)?;
 
-    let mut steps = vec![download_step(vendor, repo, "config.json", "config.json")];
-    if files.iter().any(|f| f == "tokenizer.json") {
-        steps.push(download_step(vendor, repo, "tokenizer.json", "tokenizer.json"));
-    }
-    if files.iter().any(|f| f == "tokenizer_config.json") {
-        steps.push(download_step(vendor, repo, "tokenizer_config.json", "tokenizer_config.json"));
-    }
-
-    if files.iter().any(|f| f == "model.safetensors") {
-        steps.push(download_step(vendor, repo, "model.safetensors", "model.safetensors"));
-    } else {
-        let mut shards: Vec<&String> = files.iter().filter(|f| f.starts_with("model-") && f.ends_with(".safetensors")).collect();
-        if shards.is_empty() {
-            return Err(PlanError::NoUpstreamArtifact(reference.clone(), "no safetensors weights found (single file or shard set)".to_string()));
-        }
-        shards.sort();
-        if files.iter().any(|f| f == "model.safetensors.index.json") {
-            steps.push(download_step(vendor, repo, "model.safetensors.index.json", "model.safetensors.index.json"));
-        }
-        for shard in shards {
-            steps.push(download_step(vendor, repo, shard, shard));
-        }
-    }
-
-    steps.push(Step::Convert { vendor: vendor.to_string(), repo: repo.to_string() });
+    let mut steps: Vec<Step> = artifacts.into_iter().map(|a| download_step(vendor, repo, &a.file, &a.dest_name)).collect();
+    steps.push(Step::Convert { vendor: vendor.to_string(), repo: repo.to_string(), recipe: recipe.id() });
     Ok(Plan { reference: reference.clone(), steps })
 }
 
@@ -225,7 +200,7 @@ pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
     ["omni", "gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
 }
 
-fn is_supported_architecture(arch: &str) -> bool {
+pub(crate) fn is_supported_architecture(arch: &str) -> bool {
     family_of_architecture(arch).is_some()
 }
 
@@ -334,7 +309,7 @@ mod tests {
                 download_step("Qwen", "Qwen3-0.6B", "config.json", "config.json"),
                 download_step("Qwen", "Qwen3-0.6B", "tokenizer.json", "tokenizer.json"),
                 download_step("Qwen", "Qwen3-0.6B", "model.safetensors", "model.safetensors"),
-                Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string() },
+                Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string(), recipe: "transformers" },
             ]
         );
     }
@@ -435,7 +410,7 @@ mod tests {
         let mut progressed = Vec::new();
         let deferred = execute(&st, &hub, &p, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
 
-        assert_eq!(deferred, vec![Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string() }, Step::Quantize {
+        assert_eq!(deferred, vec![Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string(), recipe: "transformers" }, Step::Quantize {
             base: ModelRef::new("Qwen", "Qwen3-0.6B", None),
             quant: Quant::Q4KM,
         }]);

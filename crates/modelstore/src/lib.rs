@@ -26,6 +26,7 @@
 pub mod fetch;
 pub mod hub;
 pub mod plan;
+pub mod recipe;
 
 use std::path::{Path, PathBuf};
 

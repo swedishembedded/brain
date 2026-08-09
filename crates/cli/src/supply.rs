@@ -27,16 +27,29 @@ use brain_modelref::ModelRef;
 use brain_modelstore::{Hub, Step, Store};
 use residency::{Executor, ModelSupplier, Supply};
 
-/// Dispatch a `Step::Convert { vendor, repo }` to the matching family's
-/// streaming importer (`crates/{glm,qwen,lfm}/src/import.rs`), reading
-/// `<dir>/config.json` to pick the family the exact same way `modelstore::
-/// plan` already gated the download on (`family_of_architecture`) -- one
-/// implementation of "which families brain can serve", not a second guess
-/// that could drift from the first. The produced card's `id` is overridden to
-/// `vendor/repo` (each importer otherwise derives it from the output
-/// filename) so the resident registers under the fully-qualified reference
-/// the client actually asked for, not `"model.brain"`.
-fn convert(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+/// Dispatch a `Step::Convert { vendor, repo, recipe }` to the matching
+/// family's finish logic. `recipe` is the `ArtifactRecipe::id` `modelstore::
+/// plan` already picked (`brain_modelstore::recipe`) -- routing on it directly
+/// rather than re-deriving the family from disk a second time, one
+/// implementation of "which family this repo is", not a second guess that
+/// could drift from the first.
+fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), String> {
+    match recipe {
+        "transformers" => convert_transformers(store, vendor, repo),
+        other => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
+    }
+}
+
+/// The original (and still only) family: an HF `transformers`-shaped repo.
+/// Reads `<dir>/config.json` to pick the specific qwen/glm/lfm/gpt importer
+/// the same way `modelstore::plan`'s `TransformersRecipe` already gated the
+/// download on (`family_of_architecture`) -- one implementation of "which
+/// families brain can serve", not a second guess that could drift from the
+/// first. The produced card's `id` is overridden to `vendor/repo` (each
+/// importer otherwise derives it from the output filename) so the resident
+/// registers under the fully-qualified reference the client actually asked
+/// for, not `"model.brain"`.
+fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
     let config_bytes = std::fs::read(dir.join("config.json")).map_err(|e| format!("{vendor}/{repo}: read config.json: {e}"))?;
     let config: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(|e| format!("{vendor}/{repo}: config.json: {e}"))?;
@@ -113,7 +126,7 @@ impl StoreSupplier {
         let mut still_missing = Vec::new();
         for step in &deferred {
             match step {
-                Step::Convert { vendor, repo } => convert(&self.store, vendor, repo).map_err(|e| format!("{model}: {e}"))?,
+                Step::Convert { vendor, repo, recipe } => convert(&self.store, vendor, repo, recipe).map_err(|e| format!("{model}: {e}"))?,
                 other => still_missing.push(other.clone()),
             }
         }
