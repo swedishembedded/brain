@@ -315,6 +315,47 @@ mod tests {
     }
 
     #[test]
+    fn base_ref_for_a_diffusers_pipeline_repo_routes_to_the_zimage_recipe() {
+        // A Z-Image-shaped repo has no root config.json, so it must NOT fall
+        // through to TransformersRecipe's "no config.json in repo" error --
+        // it needs no extra Hub::read_file call either (unlike transformers'
+        // config.json gate), so an empty FakeHub with only list_files
+        // registered (via add_file's directory side effect) is enough.
+        let st = store("modelstore-plan-test-zimage-base");
+        let mut hub = FakeHub::new();
+        for f in [
+            "model_index.json",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors",
+            "tokenizer/tokenizer.json",
+        ] {
+            hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", f, b"stub".to_vec());
+        }
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        let p = plan(&r, &st, &hub).unwrap();
+        let last = p.steps.last().unwrap();
+        assert_eq!(last, &Step::Convert { vendor: "Tongyi-MAI".to_string(), repo: "Z-Image-Turbo".to_string(), recipe: "zimage" });
+        // The manifest itself, plus every role file -- none renamed, so
+        // subdirectory structure survives into the destination.
+        let dest_names: Vec<&str> = p
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Download { dest_name, .. } => Some(dest_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(dest_names.contains(&"model_index.json"));
+        assert!(dest_names.contains(&"transformer/config.json"));
+        assert!(dest_names.contains(&"vae/diffusion_pytorch_model.safetensors"));
+    }
+
+    #[test]
     fn base_ref_with_sharded_weights_plans_index_then_each_shard_sorted() {
         let st = store("modelstore-plan-test-base-sharded");
         let mut hub = FakeHub::new();

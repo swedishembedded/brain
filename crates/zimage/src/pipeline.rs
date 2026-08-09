@@ -46,6 +46,22 @@ impl Paths {
     }
 }
 
+/// Read a component's tensors from `path`: a single safetensors file, or an
+/// HF-style directory (single `model.safetensors` or a sharded
+/// `model.safetensors.index.json` + `model-*.safetensors` set) --
+/// `crates/flux2/src/pipeline.rs` already gives its text-encoder path this
+/// leniency; every Z-Image component gets it too, so a directly-fetched HF
+/// `Tongyi-MAI/Z-Image-Turbo` tree (each component its own subdirectory,
+/// `transformer/`/`text_encoder/` sharded) loads with no repacking.
+fn read_component_tensors(path: &str) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        checkpoint::safetensors::read_model_dir(p)
+    } else {
+        checkpoint::safetensors::read(path)
+    }
+}
+
 /// Generation options.
 pub struct Opts {
     pub steps: u32,
@@ -178,7 +194,7 @@ impl HotPipeline {
         // does, and the encode then runs on-GPU (~1-2 s) instead of ~38 s on the
         // CPU. Unset ⇒ CPU. Card-agnostic: you choose the bulk-card index.
         let qcfg = QwenConfig::qwen3_4b();
-        let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
+        let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
         // User env input, parsed to canonical card indices at this edge; all
         // placement below goes through the device registry (explicit Shard
@@ -239,7 +255,7 @@ impl HotPipeline {
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
         let zcfg = ZImageConfig::turbo();
-        let mut weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+        let mut weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
         if let Some(ap) = adapter {
             progress(&format!("folding LoRA adapter {ap}"));
             let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
@@ -273,7 +289,7 @@ impl HotPipeline {
         };
         progress(&format!("building VAE decoder (GPU {vae_card})"));
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-        let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+        let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
         let vae = gpu_core::devices::with_gpu(vae_card, || {
             VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
         })?;
@@ -509,7 +525,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // "CPU only as a fallback for the piece that doesn't fit" split.
     progress(1, total, "encoding prompt (Qwen-4B, CPU/AVX2)");
     let qcfg = QwenConfig::qwen3_4b();
-    let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
+    let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
     let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
     let cap = {
         gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU (AVX2)
@@ -554,7 +570,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
                     }
                 }
             }
-            let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+            let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
             let mean = {
                 let enc = VaeEncoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("gpu"));
                 enc.encode_mean(&chw_in, lh, lw)
@@ -579,7 +595,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // int8 on one P40 (default), or full-precision fp32 sharded across both P40s
     // when `hifi` — no quantisation error, at the cost of a second card.
     let zcfg = ZImageConfig::turbo();
-    let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+    let weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
     {
         let dit = if opts.hifi {
             DitEngine::Shard(ZImageDitShard::build(zcfg, weights, 1, lh, lw, cap_len))
@@ -620,7 +636,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // the latent dims keeps every buffer small (well under the P40's 2 GiB binding
     // limit), so this runs on-device alongside the DiT.
     progress(total, total, "decoding (VAE)");
-    let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+    let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
     let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"));
     let dec_in: Vec<f32> = lat.iter().map(|&x| x / VAE_SCALE + VAE_SHIFT).collect();
     let chw = vae.decode(&dec_in); // [3 · H · W] in [-1, 1]
@@ -636,4 +652,39 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
         }
     }
     Ok(Image { hwc, w, h })
+}
+
+#[cfg(test)]
+mod component_tensor_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_single_file_and_an_hf_style_directory_the_same_way() {
+        let dir = std::env::temp_dir().join(format!("zimage-read-component-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Single-file path (unchanged behavior).
+        let file = dir.join("dit.safetensors");
+        checkpoint::st::save_safetensors(file.to_str().unwrap(), &[("w".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::Value::Null, None).unwrap();
+        let from_file = read_component_tensors(file.to_str().unwrap()).unwrap();
+        assert_eq!(from_file.len(), 1);
+        assert_eq!(from_file[0].name, "w");
+
+        // Directory path: an HF-style component dir holding one `model.safetensors`
+        // (no index) -- the shape a fetched Z-Image `vae/` role uses.
+        let subdir = dir.join("component");
+        std::fs::create_dir_all(&subdir).unwrap();
+        checkpoint::st::save_safetensors(
+            subdir.join("model.safetensors").to_str().unwrap(),
+            &[("w".to_string(), vec![2], vec![3.0, 4.0])],
+            &serde_json::Value::Null,
+            None,
+        )
+        .unwrap();
+        let from_dir = read_component_tensors(subdir.to_str().unwrap()).unwrap();
+        assert_eq!(from_dir.len(), 1);
+        assert_eq!(from_dir[0].data, vec![3.0, 4.0]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

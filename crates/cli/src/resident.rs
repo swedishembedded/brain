@@ -305,19 +305,35 @@ impl Instance for YoloInstance {
 /// image-editing actions build fresh per call (they take a variable-size input) via a
 /// held provider, so the full manifest still works over the bus.
 pub struct ZImageResident {
+    id: String,
     paths: Paths,
     provider: Arc<zimage::caps::ZImageProvider>,
 }
 
 impl ZImageResident {
     pub fn from_env() -> Result<ZImageResident, String> {
-        Ok(ZImageResident { paths: Paths::from_env()?, provider: Arc::new(zimage::caps::ZImageProvider::load()?) })
+        Self::from_paths(zimage::caps::MODEL, Paths::from_env()?)
+    }
+
+    /// Built from an already-resolved [`Paths`] rather than the environment,
+    /// under `id` rather than the compiled-in `zimage::caps::MODEL` -- what
+    /// `crate::model_dir::resident_for_local` uses for a compound
+    /// (multi-file) model found on disk or just auto-fetched, whose four
+    /// component paths come from a `brain.manifest.json`'s roles and whose id
+    /// is the fully-qualified ref it was fetched as (e.g.
+    /// `Tongyi-MAI/Z-Image-Turbo`) -- registering under the compiled-in
+    /// constant instead would silently strand the request that triggered the
+    /// fetch (it named the fetched ref, not `brain/z-image`).
+    pub fn from_paths(id: impl Into<String>, paths: Paths) -> Result<ZImageResident, String> {
+        Ok(ZImageResident { id: id.into(), paths, provider: Arc::new(zimage::caps::ZImageProvider::load()?) })
     }
 }
 
 impl ResidentModel for ZImageResident {
     fn manifest(&self) -> Manifest {
-        zimage::caps::manifest()
+        let mut m = zimage::caps::manifest();
+        m.model = self.id.clone();
+        m
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -326,10 +342,10 @@ impl ResidentModel for ZImageResident {
             let h = inv.get_i64("height").unwrap_or(1024);
             let prec = if inv.get_str("precision").as_deref() == Some("fp32") { "fp32" } else { "int8" };
             let adapter = inv.get_str("adapter").unwrap_or_default();
-            InstanceKey::new(zimage::caps::MODEL, format!("{w}x{h}:{prec}:{adapter}"))
+            InstanceKey::new(&self.id, format!("{w}x{h}:{prec}:{adapter}"))
         } else {
             // Editing/training actions build fresh per call — one transient instance.
-            InstanceKey::new(zimage::caps::MODEL, format!("edit:{action}"))
+            InstanceKey::new(&self.id, format!("edit:{action}"))
         }
     }
 

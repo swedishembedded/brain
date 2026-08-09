@@ -251,12 +251,51 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 /// family dispatch [`discover`] uses for the store's scan, reused by the
 /// auto-fetch supplier (`crate::supply`) so there is exactly one
 /// "weights file -> resident" mapping regardless of how the file was found.
+/// A compound (multi-file, `local.roles.is_some()`) model has no single
+/// weights path, so it dispatches separately, by family, before the
+/// single-path case below even applies.
 pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel) -> Option<Arc<dyn ResidentModel>> {
     let card = local.card.as_ref()?;
+    if let Some(roles) = &local.roles {
+        return resident_for_compound(card, roles);
+    }
     let weights = local.weights.to_str()?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
     let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
     resident_for(weights, card, tokenizer, adapter)
+}
+
+/// The compound-model counterpart of [`resident_for`]: family dispatch keyed
+/// on named roles (a directory or file each) rather than one weights path.
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>) -> Option<Arc<dyn ResidentModel>> {
+    match brain_family(&card.family) {
+        "zimage" => match zimage_paths_from_roles(roles) {
+            Ok(paths) => match crate::resident::ZImageResident::from_paths(card.id.clone(), paths) {
+                Ok(z) => Some(Arc::new(z)),
+                Err(e) => {
+                    eprintln!("brain: skip {} ({e})", card.id);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
+        other => {
+            eprintln!("brain: skip {} (compound family '{other}' not servable from the model dir yet)", card.id);
+            None
+        }
+    }
+}
+
+/// Build a `zimage::pipeline::Paths` from a compound manifest's roles --
+/// reads the SAME role names `brain_modelstore::recipe::ZimageRecipe::ROLES`
+/// writes, from a `brain.manifest.json` this crate's `supply::convert`
+/// (`"zimage"` arm) produced.
+fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<zimage::pipeline::Paths, String> {
+    let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
+    Ok(zimage::pipeline::Paths { dit: get("dit")?, vae: get("vae")?, qwen: get("text_encoder")?, tokenizer: get("tokenizer")? })
 }
 
 #[cfg(test)]

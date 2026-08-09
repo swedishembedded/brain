@@ -20,11 +20,12 @@
 //! with which steps are missing rather than silently producing a wrong
 //! checkpoint.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 
 use brain_modelref::ModelRef;
-use brain_modelstore::{Hub, Step, Store};
+use brain_modelstore::recipe::ZimageRecipe;
+use brain_modelstore::{CompoundManifest, Hub, Step, Store, MANIFEST_FILE};
 use residency::{Executor, ModelSupplier, Supply};
 
 /// Dispatch a `Step::Convert { vendor, repo, recipe }` to the matching
@@ -36,8 +37,29 @@ use residency::{Executor, ModelSupplier, Supply};
 fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), String> {
     match recipe {
         "transformers" => convert_transformers(store, vendor, repo),
+        "zimage" => convert_zimage(store, vendor, repo),
         other => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
     }
+}
+
+/// The zimage recipe: no tensor rewrite is needed (`zimage::import::
+/// import_comfy` already remaps names in memory at load time), so "finish"
+/// is just writing the `brain.manifest.json` `Store::local` reads back --
+/// naming the SAME four role paths `ZimageRecipe::artifacts` just downloaded,
+/// from `ZimageRecipe::ROLES` (one source of truth for z-image's role
+/// layout, not a second guess of what landed on disk).
+fn convert_zimage(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let mut roles = BTreeMap::new();
+    for (role, rel) in ZimageRecipe::ROLES {
+        if !dir.join(rel).exists() {
+            return Err(format!("{vendor}/{repo}: convert: role {role:?} ({rel}) did not download"));
+        }
+        roles.insert(role.to_string(), rel.to_string());
+    }
+    let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: "zimage".to_string(), roles };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
+    std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
@@ -352,6 +374,46 @@ mod tests {
         assert!(progressed);
         let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
+    }
+
+    #[test]
+    fn ensure_completes_a_diffusers_pipeline_plan_and_registers_a_zimage_resident() {
+        // A Z-Image-shaped repo (no root config.json, four role subdirs) must
+        // route to the zimage recipe end to end: plan -> download every role
+        // file (subdirectory structure preserved) -> convert_zimage writes
+        // brain.manifest.json -> resident_for_local builds a real
+        // ZImageResident from the manifest's roles, no BRAIN_ZIMAGE_* env
+        // vars involved anywhere in this path.
+        let mut hub = FakeHub::new();
+        for f in [
+            "model_index.json",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors",
+            "tokenizer/tokenizer.json",
+        ] {
+            hub.add_file("Tongyi-MAI", "Z-Image-Turbo", "main", f, b"stub".to_vec());
+        }
+        let dir = store("supply-test-zimage-compound").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("Tongyi-MAI/Z-Image-Turbo", &e, &mut |_, _, _| {}).unwrap();
+
+        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        assert_eq!(names, vec!["Tongyi-MAI/Z-Image-Turbo".to_string()], "must register under the fetched ref, not the compiled-in brain/z-image constant, or the request that triggered the fetch would find nothing");
+
+        // The manifest landed with the exact roles ZimageRecipe declares, and
+        // a second ensure() for the same ref needs no network at all.
+        let manifest_bytes = std::fs::read(dir.join("Tongyi-MAI").join("Z-Image-Turbo").join(brain_modelstore::MANIFEST_FILE)).unwrap();
+        let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.id, "Tongyi-MAI/Z-Image-Turbo");
+        assert_eq!(manifest.family, "zimage");
+        assert_eq!(manifest.roles.len(), 4);
+        let base = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        assert!(Store::new(dir).local(&base).is_some());
     }
 
     #[test]

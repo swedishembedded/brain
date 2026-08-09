@@ -1035,6 +1035,7 @@ version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
  "brain-modelref",
+ "serde",
  "serde_json",
  "sha2",
  "ureq",

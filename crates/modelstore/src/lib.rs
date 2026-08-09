@@ -28,11 +28,13 @@ pub mod hub;
 pub mod plan;
 pub mod recipe;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use checkpoint::st::ModelCard;
 use checkpoint::weightio::WeightReader;
 use brain_modelref::{AdapterRef, ModelRef, Quant};
+use serde::{Deserialize, Serialize};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
 pub use plan::{declared_architecture, execute, family_of_architecture, plan, Plan, PlanError, Step};
@@ -42,6 +44,10 @@ pub use plan::{declared_architecture, execute, family_of_architecture, plan, Pla
 pub enum Format {
     Safetensors,
     Gguf,
+    /// A [`CompoundManifest`]-described model: several distinct-role files
+    /// (not shards of one tensor set) rather than a single weights file --
+    /// see [`LocalModel::roles`].
+    Compound,
 }
 
 /// One servable model found on disk: a fully-qualified [`ModelRef`], the file
@@ -49,6 +55,12 @@ pub enum Format {
 pub struct LocalModel {
     pub reference: ModelRef,
     pub dir: PathBuf,
+    /// For [`Format::Compound`], the manifest file itself (there is no single
+    /// weights file) -- real consumers of a compound model use [`roles`]
+    /// instead. Present regardless of format so every `LocalModel` has SOME
+    /// on-disk anchor to point at (logging, discovery).
+    ///
+    /// [`roles`]: LocalModel::roles
     pub weights: PathBuf,
     pub tokenizer: Option<PathBuf>,
     pub card: Option<ModelCard>,
@@ -58,7 +70,32 @@ pub struct LocalModel {
     /// folds this into those weights at load; see `qwen::lora::fold_adapter_into`).
     /// Always `None` for a plain base/quant reference.
     pub adapter: Option<PathBuf>,
+    /// For [`Format::Compound`] only: role name (`"dit"`, `"vae"`, ...) to its
+    /// absolute path (a file or a directory -- whatever the role's loader
+    /// accepts) inside [`dir`](LocalModel::dir). `None` for every other format.
+    pub roles: Option<BTreeMap<String, PathBuf>>,
 }
+
+/// The on-disk description of a compound (multi-file) model: several
+/// distinct-role files that together make one servable model, rather than
+/// shards of a single tensor set. Written by a [`recipe::ArtifactRecipe`]'s
+/// finish step (`crates/cli/src/supply.rs::convert`) after the recipe's
+/// artifacts have downloaded; read back by [`Store::local`]/[`Store::scan`].
+/// See `.todo/multi-file-model-store-manifest.md` for the design this
+/// implements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompoundManifest {
+    /// The fully-qualified id this model registers under (`vendor/repo`).
+    pub id: String,
+    /// The `resident_for`-style family dispatch key (`"zimage"`, ...).
+    pub family: String,
+    /// Role name -> path RELATIVE to the repo directory (a file or a
+    /// directory, whichever that role's loader accepts).
+    pub roles: BTreeMap<String, String>,
+}
+
+/// The manifest file name inside a compound model's repo directory.
+pub const MANIFEST_FILE: &str = "brain.manifest.json";
 
 /// A models directory on disk, laid out `<vendor>/<base-repo>/...`.
 pub struct Store {
@@ -138,8 +175,46 @@ impl Store {
     }
 
     fn local_base(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
+        if let Some(m) = self.local_compound(reference, dir) {
+            return Some(m);
+        }
         let weights = dir.join(BASE_WEIGHTS_FILE);
         open_local(reference.clone(), dir.to_path_buf(), weights, Format::Safetensors)
+    }
+
+    /// A [`CompoundManifest`]-described model: tried before the single-file
+    /// case (same class -- no quant, no adapter), since a repo dir carrying
+    /// `brain.manifest.json` has no `model.brain.safetensors` to fall back
+    /// to. `None` (not a partial `LocalModel`) if the manifest is missing,
+    /// unparseable, or any role's path doesn't exist -- an incomplete
+    /// compound model is "not found", the same policy [`open_local`] already
+    /// applies to a missing single weights file.
+    fn local_compound(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
+        let manifest_path = dir.join(MANIFEST_FILE);
+        if !manifest_path.is_file() {
+            return None;
+        }
+        let bytes = std::fs::read(&manifest_path).ok()?;
+        let manifest: CompoundManifest = serde_json::from_slice(&bytes).ok()?;
+        let mut roles = BTreeMap::new();
+        for (role, rel) in &manifest.roles {
+            let p = dir.join(rel);
+            if !p.exists() {
+                return None;
+            }
+            roles.insert(role.clone(), p);
+        }
+        let card = ModelCard::for_ref(&manifest.id, reference.vendor(), reference.repo(), None, &manifest.family);
+        Some(LocalModel {
+            reference: reference.clone(),
+            dir: dir.to_path_buf(),
+            weights: manifest_path,
+            tokenizer: None,
+            card: Some(card),
+            format: Format::Compound,
+            adapter: None,
+            roles: Some(roles),
+        })
     }
 
     fn local_quant(&self, reference: &ModelRef, dir: &Path, quant: Quant) -> Option<LocalModel> {
@@ -178,6 +253,7 @@ impl Store {
             card: reader.card(),
             format,
             adapter: Some(adapter_path),
+            roles: None,
         })
     }
 
@@ -283,7 +359,7 @@ fn open_local(reference: ModelRef, dir: PathBuf, weights: PathBuf, format: Forma
         let t = dir.join(TOKENIZER_FILE);
         t.is_file().then_some(t)
     };
-    Some(LocalModel { reference, dir, weights, tokenizer, card: reader.card(), format, adapter: None })
+    Some(LocalModel { reference, dir, weights, tokenizer, card: reader.card(), format, adapter: None, roles: None })
 }
 
 #[cfg(test)]
@@ -332,6 +408,66 @@ mod tests {
         assert!(local.tokenizer.is_some());
         let card = local.card.expect("save_safetensors wrote a card");
         assert_eq!(card.id, "Qwen/Qwen3-0.6B");
+    }
+
+    fn write_compound_fixture(store: &Store, vendor: &str, repo: &str) {
+        let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+        std::fs::create_dir_all(dir.join("transformer")).unwrap();
+        std::fs::create_dir_all(dir.join("vae")).unwrap();
+        std::fs::write(dir.join("transformer").join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("vae").join("diffusion_pytorch_model.safetensors"), b"stub").unwrap();
+        let manifest = CompoundManifest {
+            id: format!("{vendor}/{repo}"),
+            family: "zimage".to_string(),
+            roles: BTreeMap::from([
+                ("dit".to_string(), "transformer".to_string()),
+                ("vae".to_string(), "vae/diffusion_pytorch_model.safetensors".to_string()),
+            ]),
+        };
+        std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn local_finds_a_compound_model_via_its_manifest_and_resolves_every_role() {
+        let store = scratch_store("modelstore-lib-test-compound-local");
+        write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        let local = store.local(&r).expect("compound fixture should be found");
+        assert_eq!(local.format, Format::Compound);
+        assert!(local.tokenizer.is_none());
+        let card = local.card.expect("local_compound synthesizes a card");
+        assert_eq!(card.id, "Tongyi-MAI/Z-Image-Turbo");
+        assert_eq!(card.family, "zimage");
+        let roles = local.roles.expect("compound model must carry roles");
+        assert_eq!(roles.len(), 2);
+        assert!(roles["dit"].ends_with("transformer"));
+        assert!(roles["vae"].ends_with("diffusion_pytorch_model.safetensors"));
+    }
+
+    #[test]
+    fn local_compound_is_none_when_a_role_path_is_missing_incomplete_fetch() {
+        let store = scratch_store("modelstore-lib-test-compound-incomplete");
+        write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
+        // Simulate an interrupted fetch: the manifest is there, but one of its
+        // role paths never landed.
+        std::fs::remove_dir_all(store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None)).join("transformer")).unwrap();
+
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        assert!(store.local(&r).is_none(), "an incomplete compound model must not resolve as found");
+    }
+
+    #[test]
+    fn scan_finds_a_compound_model_alongside_a_single_file_one() {
+        let store = scratch_store("modelstore-lib-test-compound-scan");
+        write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
+        write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
+
+        let found = store.scan();
+        let refs: Vec<ModelRef> = found.iter().map(|m| m.reference.clone()).collect();
+        assert!(refs.contains(&ModelRef::new("Qwen", "Qwen3-0.6B", None)));
+        assert!(refs.contains(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None)));
+        assert_eq!(found.len(), 2);
     }
 
     #[test]
