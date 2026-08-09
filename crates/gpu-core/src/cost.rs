@@ -828,6 +828,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let bhc = p(0)?;
             f(bhc, 12 * bhc)
         }
+        // Pure data movement, token-major <-> chunk-major (qwen35's GDN layer
+        // boundary): params [b, h, n_chunks, c, d, to_chunk_major].
+        "gdn_layout_permute" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)? * p(4)?;
+            f(0, 8 * n)
+        }
+        // g[row,h] = -exp(A_log[h]) * softplus(a_proj[row,h]+dt_bias[h]):
+        // params [rows, num_v_heads]; one add, one stable-softplus (max+abs+exp+
+        // log), one exp, one mul per output element.
+        "gdn_decay_gate" => {
+            let n = p(0)? * p(1)?;
+            f(6 * n, 4 * (2 * n + n))
+        }
         // decay_mask[row,i,j] = exp(g_cs[i]-g_cs[j]) for j<=i: params [bhc, c_len].
         // Every element is written; roughly half the exp/sub pairs are live.
         "gdn_decay_mask" => {

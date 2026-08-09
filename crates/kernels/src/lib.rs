@@ -318,10 +318,14 @@ pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
 pub const GDN_ADD_IDENTITY: &str = include_str!("../wgsl/gdn_add_identity.wgsl");
 /// `wgsl/gdn_chunk_cumsum_step.wgsl`
 pub const GDN_CHUNK_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_cumsum_step.wgsl");
+/// `wgsl/gdn_decay_gate.wgsl`
+pub const GDN_DECAY_GATE: &str = include_str!("../wgsl/gdn_decay_gate.wgsl");
 /// `wgsl/gdn_decay_mask.wgsl`
 pub const GDN_DECAY_MASK: &str = include_str!("../wgsl/gdn_decay_mask.wgsl");
 /// `wgsl/gdn_decay_scale.wgsl`
 pub const GDN_DECAY_SCALE: &str = include_str!("../wgsl/gdn_decay_scale.wgsl");
+/// `wgsl/gdn_layout_permute.wgsl`
+pub const GDN_LAYOUT_PERMUTE: &str = include_str!("../wgsl/gdn_layout_permute.wgsl");
 /// `wgsl/gdn_mask_strict_lower.wgsl`
 pub const GDN_MASK_STRICT_LOWER: &str = include_str!("../wgsl/gdn_mask_strict_lower.wgsl");
 /// `wgsl/gdn_row_scale_off.wgsl`
@@ -936,8 +940,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row_dh", GATE_ROW_DH),
     ("gdn_add_identity", GDN_ADD_IDENTITY),
     ("gdn_chunk_cumsum_step", GDN_CHUNK_CUMSUM_STEP),
+    ("gdn_decay_gate", GDN_DECAY_GATE),
     ("gdn_decay_mask", GDN_DECAY_MASK),
     ("gdn_decay_scale", GDN_DECAY_SCALE),
+    ("gdn_layout_permute", GDN_LAYOUT_PERMUTE),
     ("gdn_mask_strict_lower", GDN_MASK_STRICT_LOWER),
     ("gdn_row_scale_off", GDN_ROW_SCALE_OFF),
     ("gdn_state_decay", GDN_STATE_DECAY),
