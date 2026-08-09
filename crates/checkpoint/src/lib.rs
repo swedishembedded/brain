@@ -89,6 +89,32 @@ impl TensorSource for HashMap<String, Vec<f32>> {
     }
 }
 
+/// The shape-carrying eager map several model crates use for a small,
+/// wholly-materialized checkpoint (`zimage::block::Tensors`, `vae`'s import
+/// map) — the same role as `HashMap<String, Vec<f32>>` above, plus a shape
+/// alongside each tensor's data. Defined here, not in each of those crates,
+/// because the orphan rule blocks a foreign crate from implementing a
+/// foreign trait for `HashMap` regardless of its type parameters — this is
+/// the one place that can be done, for every crate that needs it.
+impl TensorSource for HashMap<String, (Vec<usize>, Vec<f32>)> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.get(name) {
+            Some((_, data)) => {
+                f(data);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Already f32 in host memory — a bit-cast view, not a new allocation.
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        self.get(name).map(|(_, data)| bytemuck::cast_slice::<f32, u32>(data))
+    }
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.get(name).map(|(_, data)| data.len())
+    }
+}
+
 /// One tensor read from a container (role is "" if the header omits it).
 pub struct LoadedTensor {
     pub name: String,

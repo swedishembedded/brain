@@ -63,7 +63,17 @@ pub(crate) const KERNELS: [(&str, &str); 15] = [
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
 ];
 
-/// Host tensors by name → `(shape, row-major f32 data)`.
+/// Host tensors by name → `(shape, row-major f32 data)`. Implements
+/// `checkpoint::TensorSource` (the impl lives in `checkpoint` itself — the
+/// orphan rule blocks it here, see that impl's doc). Production builders no
+/// longer construct a whole one of these -- they take a streaming
+/// `&dyn checkpoint::TensorSource` (a mmap'd `WeightReader`, typically
+/// wrapped in a `checkpoint::remap::RemapSource`) so a build's host peak
+/// stays one tensor, never the whole model. `Tensors` survives as the
+/// eager, in-memory shape that seam still needs to serve: test fixtures
+/// (`ZImageBlock`, the golden-parity tests, `zimage_bench`) that already
+/// have a small, wholly-materialized checkpoint in hand and have no reason
+/// to build one.
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 /// Shape parameters of one Z-Image block.
@@ -89,6 +99,67 @@ pub(crate) fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
     gpu.write(buf, &bits);
 }
 
+/// Per-upload chunk size, in elements (4 MiB as f32/u32 words) — mirrors
+/// `paramstore::UPLOAD_CHUNK_WORDS`; not shared directly since paramstore's
+/// upload path is `ParamStore`-shaped (weight/grad/Adam roles) and this one
+/// is a bare device-buffer helper zimage's block builders call directly.
+const UPLOAD_CHUNK_WORDS: usize = 1 << 20;
+
+/// Upload tensor `name` from `src` into a fresh device buffer, bounding host
+/// scratch to one chunk (never one tensor) whenever the source can say its
+/// size without decoding (`numel`) — every real source this crate builds
+/// from (`Tensors`, a `WeightReader`/`RemapSource` pair) can. Falls back to
+/// one unbounded `with_tensor` call only for a source that can't report
+/// `numel` cheaply, reproducing exactly what every caller here did before
+/// this existed. Panics if `name` is missing — every caller here already had
+/// that panic, just spelled `t.get(..).unwrap_or_else(..)`.
+pub(crate) fn upload_named(gpu: &Gpu, src: &dyn checkpoint::TensorSource, name: &str) -> DeviceBuffer {
+    if let Some(words) = src.raw_words(name) {
+        let b = gpu.storage(words.len() as u64);
+        for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
+            gpu.write_at(&b, (i * UPLOAD_CHUNK_WORDS) as u64, part);
+        }
+        return b;
+    }
+    if let Some(numel) = src.numel(name) {
+        let b = gpu.storage(numel as u64);
+        let mut total = 0usize;
+        let found = src.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
+            gpu.write_f32_at(&b, off, chunk);
+            total += chunk.len();
+        });
+        assert!(found, "zimage: missing {name}");
+        assert_eq!(total, numel, "size mismatch for {name}");
+        return b;
+    }
+    let mut buf: Option<DeviceBuffer> = None;
+    let found = src.with_tensor(name, &mut |data| {
+        let b = gpu.storage(data.len() as u64);
+        wf(gpu, &b, data);
+        buf = Some(b);
+    });
+    assert!(found, "zimage: missing {name}");
+    buf.expect("with_tensor found the tensor, so it must have set buf")
+}
+
+/// [`upload_named`], returning the host f32 values too (for the small,
+/// explicitly-retained tensors — norm weights, adaLN projections — that are
+/// read again every forward, not just uploaded once). Bounded the same way;
+/// only ever called on tensors small enough that this is a modest, declared
+/// retention, never the whole model.
+pub(crate) fn read_named(src: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32> {
+    let mut out = Vec::new();
+    let found = src.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
+        let off = off as usize;
+        if out.len() < off + chunk.len() {
+            out.resize(off + chunk.len(), 0.0);
+        }
+        out[off..off + chunk.len()].copy_from_slice(chunk);
+    });
+    assert!(found, "zimage: missing {name}");
+    out
+}
+
 /// Resident (upload-once) static weights of one block.
 pub(crate) struct BlockWeights {
     pub wq: DeviceBuffer,
@@ -103,19 +174,15 @@ pub(crate) struct BlockWeights {
 }
 
 impl BlockWeights {
-    pub fn upload(gpu: &Gpu, t: &Tensors, prefix: &str) -> BlockWeights {
+    pub fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str) -> BlockWeights {
         // Upload via storage()+write() (DEVICE_LOCAL + transient staging), NOT
         // storage_init(): create_buffer_init's mapped-at-creation path forces
         // weight buffers into an inefficient memory type on a non-ReBAR P40,
         // ballooning ~12 GB of weights to ~22 GB (OOM). Plain DEVICE_LOCAL
         // buffers pack tightly (a raw-alloc probe holds 22 GB cleanly).
-        let dev = |n: &str| {
-            let key = format!("{prefix}.{n}");
-            let data = &t.get(&key).unwrap_or_else(|| panic!("zimage: missing {key}")).1;
-            let b = gpu.storage(data.len() as u64);
-            wf(gpu, &b, data);
-            b
-        };
+        // upload_named additionally bounds host scratch to one chunk, never
+        // one tensor, whenever the source can report `numel` cheaply.
+        let dev = |n: &str| upload_named(gpu, t, &format!("{prefix}.{n}"));
         BlockWeights {
             wq: dev("attention.to_q.weight"),
             wk: dev("attention.to_k.weight"),
@@ -148,8 +215,8 @@ pub(crate) struct NormBufs {
 }
 
 impl NormBufs {
-    pub fn new(gpu: &Gpu, t: &Tensors, prefix: &str, dim: u32, modulation: bool) -> NormBufs {
-        let get = |n: &str| t.get(&format!("{prefix}.{n}")).unwrap_or_else(|| panic!("zimage: missing {prefix}.{n}")).1.clone();
+    pub fn new(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, dim: u32, modulation: bool) -> NormBufs {
+        let get = |n: &str| read_named(t, &format!("{prefix}.{n}"));
         NormBufs {
             an1: gpu.storage(dim as u64),
             an2: gpu.storage(dim as u64),
@@ -372,25 +439,26 @@ pub(crate) struct Int8Weights {
 }
 
 impl Int8Weights {
-    pub fn upload(gpu: &Gpu, t: &Tensors, prefix: &str, d: BlockDims) -> Int8Weights {
+    pub fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> Int8Weights {
         let (dim, hid) = (d.dim as usize, d.hidden as usize);
-        let raw = |n: &str| -> &[f32] {
-            &t.get(&format!("{prefix}.{n}")).unwrap_or_else(|| panic!("zimage: missing {prefix}.{n}")).1
-        };
+        // quantize_weight computes a per-row scale over the WHOLE matrix, so
+        // this pulls one tensor at a time (never the whole model) but cannot
+        // itself be chunk-bounded further without a row-block quantizer —
+        // that refinement belongs to the windowed-execution phase, which
+        // needs it anyway for the fp32 stress case; see docs/lessons.md.
         let q = |n: &str, no: usize, k: usize| {
-            let (packed, sw) = crate::int8::quantize_weight(raw(n), no, k);
+            let name = format!("{prefix}.{n}");
+            let mut result: Option<(Vec<u32>, Vec<f32>)> = None;
+            let found = t.with_tensor(&name, &mut |data| result = Some(crate::int8::quantize_weight(data, no, k)));
+            assert!(found, "zimage: missing {name}");
+            let (packed, sw) = result.expect("with_tensor found the tensor, so it must have set result");
             let pb = gpu.storage(packed.len() as u64);
             gpu.write(&pb, &packed);
             let sb = gpu.storage(sw.len() as u64);
             wf(gpu, &sb, &sw);
             (pb, sb)
         };
-        let f32buf = |n: &str| {
-            let data = raw(n);
-            let b = gpu.storage(data.len() as u64);
-            wf(gpu, &b, data);
-            b
-        };
+        let f32buf = |n: &str| upload_named(gpu, t, &format!("{prefix}.{n}"));
         Int8Weights {
             wq: q("attention.to_q.weight", dim, dim),
             wk: q("attention.to_k.weight", dim, dim),

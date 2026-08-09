@@ -14,11 +14,84 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::block::{
-    build_block_steps, build_block_steps_i8, wf, BlockDims, BlockWeights, Int8Scratch, Int8Weights,
-    NormBufs, Scratch, Tensors, KERNELS,
+    build_block_steps, build_block_steps_i8, read_named, wf, BlockDims, BlockWeights, Int8Scratch,
+    Int8Weights, NormBufs, Scratch, Tensors, KERNELS,
 };
-use crate::model::{postprocess, preprocess, timestep_cond};
+use crate::model::{postprocess, preprocess, timestep_cond, HostLookup};
 use crate::ZImageConfig;
+
+/// The 13 tensors `preprocess`/`timestep_cond`/`postprocess` read every
+/// forward — and therefore the ONLY tensors a built DiT retains in host RAM.
+/// Named individually so adding one is a visible, reviewable edit, not an
+/// accident: `ZImageDit`/`ZImageDitI8`/`ZImageDitShard` used to store the
+/// COMPLETE source tensor map (`w: Tensors`) for their whole life, even
+/// though every block's weights are already quantized/uploaded and never
+/// read from that map again — on the int8 DiT alone that was ~24 GB of host
+/// RAM held for nothing. See `docs/lessons.md`: "a builder that takes
+/// `HashMap<String, Vec<f32>>` has already lost — the caller must
+/// materialize everything, and the callee may keep it, and neither is
+/// visible in the type."
+pub(crate) struct HostWeights {
+    xemb_w: Vec<f32>,
+    xemb_b: Vec<f32>,
+    cap0_w: Vec<f32>,
+    cap1_w: Vec<f32>,
+    cap1_b: Vec<f32>,
+    t0_w: Vec<f32>,
+    t0_b: Vec<f32>,
+    t2_w: Vec<f32>,
+    t2_b: Vec<f32>,
+    fadaln_w: Vec<f32>,
+    fadaln_b: Vec<f32>,
+    flin_w: Vec<f32>,
+    flin_b: Vec<f32>,
+}
+
+impl HostWeights {
+    /// Pull exactly these 13 tensors from `src` — one at a time, via
+    /// `read_named` (bounded the same way every device upload here is) —
+    /// and nothing else. If `src` is a streaming `WeightReader`, the other
+    /// ~2000 tensors of a real checkpoint are never materialized on the
+    /// host at all.
+    fn from_source(cfg: &ZImageConfig, src: &dyn checkpoint::TensorSource) -> HostWeights {
+        let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+        let xk = format!("all_x_embedder.{ps}-{pf}");
+        let fk = format!("all_final_layer.{ps}-{pf}");
+        HostWeights {
+            xemb_w: read_named(src, &format!("{xk}.weight")),
+            xemb_b: read_named(src, &format!("{xk}.bias")),
+            cap0_w: read_named(src, "cap_embedder.0.weight"),
+            cap1_w: read_named(src, "cap_embedder.1.weight"),
+            cap1_b: read_named(src, "cap_embedder.1.bias"),
+            t0_w: read_named(src, "t_embedder.mlp.0.weight"),
+            t0_b: read_named(src, "t_embedder.mlp.0.bias"),
+            t2_w: read_named(src, "t_embedder.mlp.2.weight"),
+            t2_b: read_named(src, "t_embedder.mlp.2.bias"),
+            fadaln_w: read_named(src, &format!("{fk}.adaLN_modulation.1.weight")),
+            fadaln_b: read_named(src, &format!("{fk}.adaLN_modulation.1.bias")),
+            flin_w: read_named(src, &format!("{fk}.linear.weight")),
+            flin_b: read_named(src, &format!("{fk}.linear.bias")),
+        }
+    }
+}
+
+impl HostLookup for HostWeights {
+    fn xemb(&self, _cfg: &ZImageConfig) -> (&[f32], &[f32]) {
+        (&self.xemb_w, &self.xemb_b)
+    }
+    fn cap_norm(&self) -> &[f32] {
+        &self.cap0_w
+    }
+    fn cap_embed(&self) -> (&[f32], &[f32]) {
+        (&self.cap1_w, &self.cap1_b)
+    }
+    fn t_embed(&self) -> (&[f32], &[f32], &[f32], &[f32]) {
+        (&self.t0_w, &self.t0_b, &self.t2_w, &self.t2_b)
+    }
+    fn final_layer(&self, _cfg: &ZImageConfig) -> (&[f32], &[f32], &[f32], &[f32]) {
+        (&self.fadaln_w, &self.fadaln_b, &self.flin_w, &self.flin_b)
+    }
+}
 
 /// One stage: a chain of blocks recorded into a single graph with resident
 /// weights, run with one submit. Intermediates come from a single reused
@@ -37,7 +110,7 @@ struct Phase {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool) -> Phase {
+fn build_phase(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool) -> Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
@@ -81,7 +154,7 @@ impl Phase {
 pub struct ZImageDit {
     gpu: Gpu,
     cfg: ZImageConfig,
-    w: Tensors,
+    w: HostWeights,
     f: u32,
     h: u32,
     wd: u32,
@@ -94,7 +167,24 @@ pub struct ZImageDit {
 impl ZImageDit {
     /// Build resident stage graphs for the given latent size `(f,h,wd)` and
     /// caption length. `device`: `Some("cpu")`|`Some("gpu")`|`None`.
+    ///
+    /// Takes an OWNED `Tensors` for callers that already have one in hand
+    /// (small-config tests, `zimage_bench`) — but even here, only the 13
+    /// wrapper tensors ([`HostWeights`]) survive past this call; `weights`
+    /// itself drops when this function returns. A production loader that
+    /// wants to never materialize a whole model on the host at all should
+    /// call [`Self::build_from_source`] directly over a streaming
+    /// `checkpoint::TensorSource` instead of constructing a `Tensors` first.
     pub fn build(cfg: ZImageConfig, weights: Tensors, f: u32, h: u32, wd: u32, cap_len: u32, device: Option<&str>) -> ZImageDit {
+        Self::build_from_source(cfg, &weights, f, h, wd, cap_len, device)
+    }
+
+    /// [`Self::build`] over any streaming `checkpoint::TensorSource` — a
+    /// `Tensors` (coerces, above) or an mmap'd `WeightReader`/`RemapSource`
+    /// pair, which never materializes more than one tensor at a time. Peak
+    /// host allocation for the DiT's weights is then one tensor (up to
+    /// ~157 MB for `feed_forward.w1`), not the whole model.
+    pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32, device: Option<&str>) -> ZImageDit {
         let reg_gemm = device != Some("cpu");
         let gpu = match device {
             Some("cpu") => Gpu::new_cpu(&KERNELS),
@@ -108,10 +198,11 @@ impl ZImageDit {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu, &weights, &np, bd, n_img, true, reg_gemm);
-        let context = build_phase(&gpu, &weights, &cp, bd, cap_len, false, reg_gemm);
-        let main = build_phase(&gpu, &weights, &mp, bd, ntot, true, reg_gemm);
-        ZImageDit { gpu, cfg, w: weights, f, h, wd, cap_len, noise, context, main }
+        let noise = build_phase(&gpu, src, &np, bd, n_img, true, reg_gemm);
+        let context = build_phase(&gpu, src, &cp, bd, cap_len, false, reg_gemm);
+        let main = build_phase(&gpu, src, &mp, bd, ntot, true, reg_gemm);
+        let w = HostWeights::from_source(&cfg, src);
+        ZImageDit { gpu, cfg, w, f, h, wd, cap_len, noise, context, main }
     }
 
     /// One DiT forward for the built size. `latent`: `[C·F·H·W]`; `cap`:
@@ -144,7 +235,7 @@ pub struct ZImageDitShard {
     gpu0: Gpu,
     gpu1: Gpu,
     cfg: ZImageConfig,
-    w: Tensors,
+    w: HostWeights,
     f: u32,
     h: u32,
     wd: u32,
@@ -157,7 +248,14 @@ pub struct ZImageDitShard {
 
 impl ZImageDitShard {
     /// Build across GPUs 0 and 1, cutting the `n_layers` main stack in half.
+    /// See [`ZImageDit::build`]'s doc: only [`HostWeights`] survives past
+    /// this call, whichever entry point is used.
     pub fn build(cfg: ZImageConfig, weights: Tensors, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitShard {
+        Self::build_from_source(cfg, &weights, f, h, wd, cap_len)
+    }
+
+    /// [`Self::build`] over a streaming `checkpoint::TensorSource`.
+    pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitShard {
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -179,11 +277,12 @@ impl ZImageDitShard {
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp0: Vec<String> = (0..cut).map(|l| format!("layers.{l}")).collect();
         let mp1: Vec<String> = (cut..cfg.n_layers as usize).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu0, &weights, &np, bd, n_img, true, true);
-        let context = build_phase(&gpu0, &weights, &cp, bd, cap_len, false, true);
-        let main0 = build_phase(&gpu0, &weights, &mp0, bd, ntot, true, true);
-        let main1 = build_phase(&gpu1, &weights, &mp1, bd, ntot, true, true);
-        ZImageDitShard { gpu0, gpu1, cfg, w: weights, f, h, wd, cap_len, noise, context, main0, main1 }
+        let noise = build_phase(&gpu0, src, &np, bd, n_img, true, true);
+        let context = build_phase(&gpu0, src, &cp, bd, cap_len, false, true);
+        let main0 = build_phase(&gpu0, src, &mp0, bd, ntot, true, true);
+        let main1 = build_phase(&gpu1, src, &mp1, bd, ntot, true, true);
+        let w = HostWeights::from_source(&cfg, src);
+        ZImageDitShard { gpu0, gpu1, cfg, w, f, h, wd, cap_len, noise, context, main0, main1 }
     }
 
     pub fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -224,7 +323,7 @@ struct Int8Phase {
     t: u32,
 }
 
-fn build_phase_i8(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> Int8Phase {
+fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> Int8Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
@@ -265,7 +364,7 @@ impl Int8Phase {
 pub struct ZImageDitI8 {
     gpu: Gpu,
     cfg: ZImageConfig,
-    w: Tensors,
+    w: HostWeights,
     f: u32,
     h: u32,
     wd: u32,
@@ -276,7 +375,15 @@ pub struct ZImageDitI8 {
 }
 
 impl ZImageDitI8 {
+    /// See [`ZImageDit::build`]'s doc: only [`HostWeights`] survives past
+    /// this call — every one of the 32 int8-quantized blocks' fp32 weights
+    /// (already uploaded to device) is dropped, not retained a second time.
     pub fn build(cfg: ZImageConfig, weights: Tensors, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
+        Self::build_from_source(cfg, &weights, f, h, wd, cap_len)
+    }
+
+    /// [`Self::build`] over a streaming `checkpoint::TensorSource`.
+    pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
         let gpu = Gpu::new_wgpu(&KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
@@ -285,10 +392,11 @@ impl ZImageDitI8 {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase_i8(&gpu, &weights, &np, bd, n_img, true);
-        let context = build_phase_i8(&gpu, &weights, &cp, bd, cap_len, false);
-        let main = build_phase_i8(&gpu, &weights, &mp, bd, ntot, true);
-        ZImageDitI8 { gpu, cfg, w: weights, f, h, wd, cap_len, noise, context, main }
+        let noise = build_phase_i8(&gpu, src, &np, bd, n_img, true);
+        let context = build_phase_i8(&gpu, src, &cp, bd, cap_len, false);
+        let main = build_phase_i8(&gpu, src, &mp, bd, ntot, true);
+        let w = HostWeights::from_source(&cfg, src);
+        ZImageDitI8 { gpu, cfg, w, f, h, wd, cap_len, noise, context, main }
     }
 
     pub fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -307,5 +415,117 @@ impl ZImageDitI8 {
         uni_sin.extend_from_slice(&pre.cap_rope.sin);
         let uni_out = self.main.run(&self.gpu, &uni, &cvec, &uni_cos, &uni_sin, dim, cdim);
         postprocess(c, &self.w, &uni_out, &cvec, pre.n_img, self.f, self.h, self.wd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_cfg() -> ZImageConfig {
+        ZImageConfig {
+            dim: 8,
+            n_layers: 2,
+            n_refiner_layers: 1,
+            n_heads: 2,
+            cap_feat_dim: 4,
+            in_channels: 4,
+            patch_size: 2,
+            f_patch_size: 1,
+            axes_dims: vec![2, 2, 2],
+            axes_lens: vec![8, 4, 4],
+            rope_theta: 256.0,
+            t_scale: 1000.0,
+            norm_eps: 1e-5,
+        }
+    }
+
+    /// A synthetic checkpoint's block weights (deliberately far larger than
+    /// the 13 wrapper tensors) must not survive past `build()` — the
+    /// regression test for the retention bug: `ZImageDit`/`ZImageDitI8`/
+    /// `ZImageDitShard` used to store the COMPLETE source map (`w: Tensors`)
+    /// for their whole life, even though every block's weights are already
+    /// uploaded to the device and never read from the host again. On the
+    /// int8 DiT alone that was ~24 GB of host RAM held for nothing.
+    #[test]
+    fn built_dit_retains_only_the_wrapper_tensors() {
+        let cfg = tiny_cfg();
+        let dim = cfg.dim as usize;
+        let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+        let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
+        let cdim = dim.min(256);
+        let mut t: Tensors = Tensors::new();
+        let mut expected = 0usize;
+        let mut insert = |t: &mut Tensors, name: String, n: usize| {
+            t.insert(name, (vec![n], vec![0.1f32; n]));
+            expected += n;
+        };
+
+        // The 13 real wrapper tensors, correctly sized for `tiny_cfg`.
+        let xk = format!("all_x_embedder.{ps}-{pf}");
+        let fk = format!("all_final_layer.{ps}-{pf}");
+        insert(&mut t, format!("{xk}.weight"), dim * patch_dim);
+        insert(&mut t, format!("{xk}.bias"), dim);
+        insert(&mut t, "cap_embedder.0.weight".into(), cfg.cap_feat_dim as usize);
+        insert(&mut t, "cap_embedder.1.weight".into(), dim * cfg.cap_feat_dim as usize);
+        insert(&mut t, "cap_embedder.1.bias".into(), dim);
+        insert(&mut t, "t_embedder.mlp.0.weight".into(), 1024 * 256);
+        insert(&mut t, "t_embedder.mlp.0.bias".into(), 1024);
+        insert(&mut t, "t_embedder.mlp.2.weight".into(), cdim * 1024);
+        insert(&mut t, "t_embedder.mlp.2.bias".into(), cdim);
+        insert(&mut t, format!("{fk}.adaLN_modulation.1.weight"), dim * cdim);
+        insert(&mut t, format!("{fk}.adaLN_modulation.1.bias"), dim);
+        insert(&mut t, format!("{fk}.linear.weight"), patch_dim * dim);
+        insert(&mut t, format!("{fk}.linear.bias"), patch_dim);
+
+        // Every block's weights (never read again on the host after upload) —
+        // deliberately oversized relative to any wrapper tensor above.
+        const HUGE: usize = 100_000;
+        for prefix in ["noise_refiner.0", "context_refiner.0", "layers.0", "layers.1"] {
+            for suffix in [
+                "attention.to_q.weight",
+                "attention.to_k.weight",
+                "attention.to_v.weight",
+                "attention.to_out.0.weight",
+                "attention.norm_q.weight",
+                "attention.norm_k.weight",
+                "feed_forward.w1.weight",
+                "feed_forward.w2.weight",
+                "feed_forward.w3.weight",
+                "attention_norm1.weight",
+                "attention_norm2.weight",
+                "ffn_norm1.weight",
+                "ffn_norm2.weight",
+                "adaLN_modulation.0.weight",
+                "adaLN_modulation.0.bias",
+            ] {
+                t.insert(format!("{prefix}.{suffix}"), (vec![HUGE], vec![0.0f32; HUGE]));
+            }
+        }
+
+        let dit = ZImageDit::build(cfg, t, 1, 4, 4, 4, Some("cpu"));
+        let retained = dit.w.xemb_w.len()
+            + dit.w.xemb_b.len()
+            + dit.w.cap0_w.len()
+            + dit.w.cap1_w.len()
+            + dit.w.cap1_b.len()
+            + dit.w.t0_w.len()
+            + dit.w.t0_b.len()
+            + dit.w.t2_w.len()
+            + dit.w.t2_b.len()
+            + dit.w.fadaln_w.len()
+            + dit.w.fadaln_b.len()
+            + dit.w.flin_w.len()
+            + dit.w.flin_b.len();
+        // Exact equality (not a bound) is the real proof: t_embedder's MLP
+        // alone is 1024*256 = 262,144 elements regardless of `tiny_cfg`'s
+        // tiny `dim` (it's a fixed-size sinusoidal-embedding MLP in the real
+        // model too), so a size THRESHOLD can't distinguish "the 13 wrapper
+        // tensors" from "one wrapper tensor plus a leaked block tensor" here
+        // — only the precise sum can. If HostWeights ever retained even one
+        // `layers.*`/`noise_refiner.*`/`context_refiner.*` key, `retained`
+        // would be at least `expected + HUGE`, off by exactly one block
+        // tensor's size, not off by a little.
+        assert_eq!(retained, expected, "HostWeights must hold EXACTLY the 13 wrapper tensors' elements, nothing from any block");
     }
 }

@@ -28,6 +28,52 @@ pub(crate) fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
     &w.get(name).unwrap_or_else(|| panic!("zimage: missing {name}")).1
 }
 
+/// The wrapper tensors `preprocess`/`timestep_cond`/`postprocess` read every
+/// forward — the ONLY host weights either a device-resident engine
+/// (`crate::dev::HostWeights`, which stores exactly these) or the training
+/// reference (`Tensors`, which stores the whole model) needs to answer.
+/// Semantic accessors, not a generic string lookup, so `HostWeights` never
+/// re-derives or re-matches an on-disk name string at call time — only
+/// `Tensors`'s impl needs `cfg` to resolve the patch-size-qualified names;
+/// `HostWeights` already resolved them once, at build time.
+pub(crate) trait HostLookup {
+    fn xemb(&self, cfg: &ZImageConfig) -> (&[f32], &[f32]);
+    fn cap_norm(&self) -> &[f32];
+    fn cap_embed(&self) -> (&[f32], &[f32]);
+    fn t_embed(&self) -> (&[f32], &[f32], &[f32], &[f32]);
+    fn final_layer(&self, cfg: &ZImageConfig) -> (&[f32], &[f32], &[f32], &[f32]);
+}
+
+impl HostLookup for Tensors {
+    fn xemb(&self, cfg: &ZImageConfig) -> (&[f32], &[f32]) {
+        let xk = format!("all_x_embedder.{}-{}", cfg.patch_size, cfg.f_patch_size);
+        (tget(self, &format!("{xk}.weight")), tget(self, &format!("{xk}.bias")))
+    }
+    fn cap_norm(&self) -> &[f32] {
+        tget(self, "cap_embedder.0.weight")
+    }
+    fn cap_embed(&self) -> (&[f32], &[f32]) {
+        (tget(self, "cap_embedder.1.weight"), tget(self, "cap_embedder.1.bias"))
+    }
+    fn t_embed(&self) -> (&[f32], &[f32], &[f32], &[f32]) {
+        (
+            tget(self, "t_embedder.mlp.0.weight"),
+            tget(self, "t_embedder.mlp.0.bias"),
+            tget(self, "t_embedder.mlp.2.weight"),
+            tget(self, "t_embedder.mlp.2.bias"),
+        )
+    }
+    fn final_layer(&self, cfg: &ZImageConfig) -> (&[f32], &[f32], &[f32], &[f32]) {
+        let fk = format!("all_final_layer.{}-{}", cfg.patch_size, cfg.f_patch_size);
+        (
+            tget(self, &format!("{fk}.adaLN_modulation.1.weight")),
+            tget(self, &format!("{fk}.adaLN_modulation.1.bias")),
+            tget(self, &format!("{fk}.linear.weight")),
+            tget(self, &format!("{fk}.linear.bias")),
+        )
+    }
+}
+
 /// Z-Image transformer config (the fields the forward needs).
 #[derive(Clone, Debug)]
 pub struct ZImageConfig {
@@ -142,7 +188,7 @@ pub(crate) struct Pre {
 /// Everything before the transformer blocks: t-embed, patchify + x-embed,
 /// cap-embed, and RoPE-id construction (caption i → (1+i,0,0); image (f,h,w) →
 /// (cap_len+1+f,h,w)).
-pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32, h: u32, wd: u32, cap: &[f32], cap_len: u32) -> Pre {
+pub(crate) fn preprocess(cfg: &ZImageConfig, w: &dyn HostLookup, latent: &[f32], f: u32, h: u32, wd: u32, cap: &[f32], cap_len: u32) -> Pre {
     let dim = cfg.dim as usize;
     let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
     let (ft, ht, wt) = (f / pf, h / ps, wd / ps);
@@ -151,16 +197,11 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32
     let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
 
     let patches = patchify(latent, cfg.in_channels, f, h, wd, ps, pf);
-    let xk = format!("all_x_embedder.{ps}-{pf}");
-    let img = linear(&patches, n_img, patch_dim, tget(w, &format!("{xk}.weight")), Some(tget(w, &format!("{xk}.bias"))), dim);
-    let cn = hostmath::rmsnorm_rows(
-        cap,
-        tget(w, "cap_embedder.0.weight"),
-        ncap,
-        cfg.cap_feat_dim as usize,
-        cfg.norm_eps,
-    );
-    let capt = linear(&cn, ncap, cfg.cap_feat_dim as usize, tget(w, "cap_embedder.1.weight"), Some(tget(w, "cap_embedder.1.bias")), dim);
+    let (xemb_w, xemb_b) = w.xemb(cfg);
+    let img = linear(&patches, n_img, patch_dim, xemb_w, Some(xemb_b), dim);
+    let cn = hostmath::rmsnorm_rows(cap, w.cap_norm(), ncap, cfg.cap_feat_dim as usize, cfg.norm_eps);
+    let (cap1_w, cap1_b) = w.cap_embed();
+    let capt = linear(&cn, ncap, cfg.cap_feat_dim as usize, cap1_w, Some(cap1_b), dim);
 
     let rope = cfg.rope();
     let mut img_ids = Vec::with_capacity(n_img * 3);
@@ -186,23 +227,24 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32
 }
 
 /// Timestep conditioning `c = t_embedder(t·t_scale)` `[cdim]`.
-pub(crate) fn timestep_cond(cfg: &ZImageConfig, w: &Tensors, t: f32) -> Vec<f32> {
+pub(crate) fn timestep_cond(cfg: &ZImageConfig, w: &dyn HostLookup, t: f32) -> Vec<f32> {
     let cdim = (cfg.dim as usize).min(256);
     let te = timestep_embedding(t * cfg.t_scale, 256, 10000.0);
-    let h0 = hostmath::silu_slice(&linear(&te, 1, 256, tget(w, "t_embedder.mlp.0.weight"), Some(tget(w, "t_embedder.mlp.0.bias")), 1024));
-    linear(&h0, 1, 1024, tget(w, "t_embedder.mlp.2.weight"), Some(tget(w, "t_embedder.mlp.2.bias")), cdim)
+    let (t0_w, t0_b, t2_w, t2_b) = w.t_embed();
+    let h0 = hostmath::silu_slice(&linear(&te, 1, 256, t0_w, Some(t0_b), 1024));
+    linear(&h0, 1, 1024, t2_w, Some(t2_b), cdim)
 }
 
 /// FinalLayer (LayerNorm-no-affine · (1+adaLN(c)) → linear) + unpatchify the
 /// image portion (first `n_img` tokens of the unified sequence).
-pub(crate) fn postprocess(cfg: &ZImageConfig, w: &Tensors, uni: &[f32], cvec: &[f32], n_img: usize, f: u32, h: u32, wd: u32) -> Vec<f32> {
+pub(crate) fn postprocess(cfg: &ZImageConfig, w: &dyn HostLookup, uni: &[f32], cvec: &[f32], n_img: usize, f: u32, h: u32, wd: u32) -> Vec<f32> {
     let dim = cfg.dim as usize;
     let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
     let cdim = dim.min(256);
     let ntot = uni.len() / dim;
     let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
-    let fk = format!("all_final_layer.{ps}-{pf}");
-    let adaln = linear(&hostmath::silu_slice(cvec), 1, cdim, tget(w, &format!("{fk}.adaLN_modulation.1.weight")), Some(tget(w, &format!("{fk}.adaLN_modulation.1.bias"))), dim);
+    let (fadaln_w, fadaln_b, flin_w, flin_b) = w.final_layer(cfg);
+    let adaln = linear(&hostmath::silu_slice(cvec), 1, cdim, fadaln_w, Some(fadaln_b), dim);
     let scale: Vec<f32> = adaln.iter().map(|&v| 1.0 + v).collect();
     let normed = layernorm_noaffine(uni, ntot, dim, LN_EPS);
     let mut scaled = vec![0f32; ntot * dim];
@@ -211,7 +253,7 @@ pub(crate) fn postprocess(cfg: &ZImageConfig, w: &Tensors, uni: &[f32], cvec: &[
             scaled[r * dim + cc] = normed[r * dim + cc] * scale[cc];
         }
     }
-    let final_out = linear(&scaled, ntot, dim, tget(w, &format!("{fk}.linear.weight")), Some(tget(w, &format!("{fk}.linear.bias"))), patch_dim);
+    let final_out = linear(&scaled, ntot, dim, flin_w, Some(flin_b), patch_dim);
     unpatchify(&final_out[..n_img * patch_dim], cfg.in_channels, f, h, wd, ps, pf)
 }
 
