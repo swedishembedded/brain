@@ -10,6 +10,25 @@ The detector runs entirely on brain's **CPU backend** (the WGSL kernels are
 JIT-compiled to native code by the Cranelift backend; `Gpu::new_cpu`,
 `crates/yolo/src/model.rs:262`). The *same* WGSL also runs on wgpu GPUs.
 
+## Getting weights — auto-fetch, no manual setup
+
+`brain` fetches and converts `Ultralytics/YOLOv8` (the `n` variant) itself on
+first use — no manual `.pt` export, no `BRAIN_YOLO` env var:
+
+```bash
+brain serve --openai 8788                               # or --dbus / --anthropic
+brain do Ultralytics/YOLOv8 detect --in image=dog.ppm
+```
+
+The first request downloads `yolov8n.pt` from the Ultralytics HF repo and
+converts it in-process with brain's own Rust `.pt` importer
+(`crates/yolo/src/import.rs`, over `crates/checkpoint/src/torchpt.rs`'s
+pure-Rust pickle+zip reader — no torch, no Python) into
+`model.brain.safetensors`; every request after is instant. See
+[Auto-fetch](#auto-fetch) below for how this composes with the `BRAIN_YOLO`
+power-user path and the manual Python export, both of which still work
+unchanged.
+
 Contents:
 
 1. [Overview](#1-overview)
@@ -22,6 +41,7 @@ Contents:
 8. [Test suite (full spec)](#8-test-suite-full-spec)
 9. [Worked example: real yolov8n on a photo](#9-worked-example-real-yolov8n-on-a-photo)
 10. [How inference is invoked](#10-how-inference-is-invoked)
+11. [Auto-fetch](#11-auto-fetch)
 
 ---
 
@@ -601,6 +621,35 @@ head-logit error against PyTorch).
 * **CLI** (`crates/cli/src/yolo_cli.rs`): `brain yolo detect --weights F --image P [--conf X --iou X]` runs `Yolo::detect` and prints JSON boxes. Sibling subcommands: `train`, `fine-tune`, `eval` (mAP@0.5 / precision / recall).
 * **Event controller** (`crates/runtime`, `crates/events`): the event-driven HSM controller maps a `camera_frame` event → one `object_detected` event by calling the same `detect` through the `DetectModel` seam (`crates/events/src/lib.rs:116-160`; `crates/runtime/src/lib.rs:452`). Run with `brain run --yolo out/yolo.safetensors`.
 * **brain-py harness** (`brain-py/brain_py/examples/detect_image.py`): a Python client that drives `brain run --yolo <weights>` as a subprocess, reads an image with Pillow, and draws the returned boxes — the path used to render the dog example above.
+
+---
+
+## 11. Auto-fetch
+
+`Ultralytics/YOLOv8` auto-fetches through `crates/modelstore`'s `YoloRecipe`
+(`crates/modelstore/src/recipe.rs`): the recipe recognizes the flat,
+no-`config.json` GitHub-release shape (the same `yolov8{n,s,m,l,x}.pt` files
+`scripts/data/fetch-yolov8.sh` already knew how to mirror), downloads the `n`
+variant, and hands it to a real Rust conversion step — `crates/yolo/src/
+import.rs`'s `import_yolov8n`, which reads the raw pickled `nn.Module` graph
+via `crates/checkpoint/src/torchpt.rs` (a pure-Rust pickle+zip reader — no
+torch, no Python subprocess), remaps every Ultralytics tensor name onto
+brain's `full_param_list` names (the same 1:1 string remap
+`tools/yolo_export/export_yolov8.py` performs, ported to Rust and validated
+against `YoloConfig::yolov8n()`'s exact expected tensor set), and writes
+`model.brain.safetensors`. From then on it's a normal single-file
+checkpoint, indistinguishable from a hand-converted one.
+
+Two other paths still work unchanged for power users:
+
+* **`BRAIN_YOLO`** registers a resident directly from a local
+  `model.brain.safetensors` path — bypass the store entirely if you already
+  have a converted checkpoint.
+* **The manual Python export** (§9 above, `tools/yolo_export/
+  export_yolov8.py`) is still there if you want to convert a `.pt` outside
+  of brain, or a variant other than `n` (auto-fetch only pulls `yolov8n.pt`
+  today — larger variants need the manual path or a local `BRAIN_YOLO`
+  checkpoint).
 
 The CLI `detect`, the runtime `camera_frame → object_detected` path, and the
 brain-py harness all funnel through the *single* `Yolo::detect` entry point, so

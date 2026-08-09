@@ -116,7 +116,7 @@ given a row.
 | **tts** | | | | | |
 | [`brain/tts`](docs/models/tts/readme.md) | voice cloning / speech synthesis | ✓ | | ✓ | |
 | **image gen** | | | | | |
-| [`brain/z-image`](docs/models/zimage/readme.md) | text-to-image (S³-DiT diffusion) | ✓ | | ✓ | |
+| [`Tongyi-MAI/Z-Image-Turbo`](docs/models/zimage/readme.md) ⤓ | text-to-image (S³-DiT diffusion) | ✓ | | ✓ | |
 | [`brain/flux2-klein`](docs/models/flux2/readme.md) | text-to-image + reference-image editing | ✓ | | ✓ | |
 | **image edit** | | | | | |
 | [`brain/restore`](docs/models/restore/readme.md) | blind face restoration (CodeFormer) | ✓ | | | |
@@ -124,7 +124,7 @@ given a row.
 | [`brain/vqgan`](docs/models/vqgan/readme.md) | image ↔ codebook indices (VQ encode/decode) | ✓ | | | |
 | [`brain/imgpipe`](docs/models/imgpipe/readme.md) | composed segment → restore → upscale, one call | ✓ | | | |
 | **vision** | | | | | |
-| [`brain/yolo`](docs/models/yolo/readme.md) | anchor-free object detection (YOLOv8-style) | ✓ | ✓ | | |
+| [`Ultralytics/YOLOv8`](docs/models/yolo/readme.md) ⤓ | anchor-free object detection (YOLOv8-style) | ✓ | ✓ | | |
 | [`brain/depth`](docs/models/depth/readme.md) | monocular relative depth (ZipDepth) | ✓ | ✓ | | |
 | [`brain/sam2`](docs/models/sam2/readme.md) | promptable image segmentation (SAM 2.1) | ✓ | | | |
 | **3d** | | | | | |
@@ -139,10 +139,15 @@ given a row.
 | [`brain pid`](docs/models/pid/readme.md) | control policy over CBOR records (PID imitation) | ✓ | ✓ | | |
 
 **⤓** = `brain` fetches and converts the weights itself on first use
-(`crates/modelstore`) — everything else needs a local checkpoint, pointed at by a
-`BRAIN_*` env var named on the model's own page. Auto-fetch only resolves HF repos
-whose declared architecture is `qwen`, `glm` or `lfm`; GLM has no known public
-checkpoint today so it stays a `brain/` id despite the code path existing.
+(`crates/modelstore`, via a per-family recipe — `crates/modelstore/src/recipe.rs`)
+— everything else needs a local checkpoint, pointed at by a `BRAIN_*` env var named
+on the model's own page. Three recipes exist today: HF `transformers`-shaped repos
+(`config.json` + a recognized architecture — `qwen`, `glm`, or `lfm`; GLM has no
+known public checkpoint today so it stays a `brain/` id despite the code path
+existing), Z-Image's diffusers-pipeline shape, and YOLO's flat GitHub-release
+shape — the same downloader underneath every one of them, so a future source
+(e.g. p2p) only has to implement one small `Hub` trait, not a fourth copy of the
+fetch/store/single-flight machinery.
 **QLoRA is not implemented anywhere in brain** — the INT8/GGUF paths are inference
 tiers only (`crates/qwen/src/model.rs` asserts the int8 path is inference-only); the
 column is here so the gap stays visible rather than silently absent.

@@ -9,6 +9,24 @@ shared `dit` / `diffusion` / `vae` / `qwen` crates.
 `docs/models/zimage/status.md` is the workstream ledger. This file is the
 user-facing guide.
 
+## Getting weights — auto-fetch, no manual setup
+
+`brain` fetches and converts `Tongyi-MAI/Z-Image-Turbo` itself on first use — no
+`BRAIN_ZIMAGE_*` env vars, no manual HF clone:
+
+```bash
+brain serve --openai 8788                                  # or --dbus / --anthropic
+curl localhost:8788/v1/images/generations -H "Authorization: Bearer $KEY" \
+     -d '{"model":"Tongyi-MAI/Z-Image-Turbo","prompt":"a red apple on a wooden table"}'
+```
+
+The first request downloads the four diffusers-pipeline components
+(`transformer/`, `vae/`, `text_encoder/`, `tokenizer/` — confirmed live via the
+HF API) into the model store and registers a `brain.manifest.json` naming
+their roles; every request after is instant. See [Auto-fetch](#auto-fetch)
+below for how this composes with the `BRAIN_ZIMAGE_*` power-user path, which
+still works unchanged.
+
 ## Architecture
 
 - **S³-DiT** (single-stream, `crates/zimage/src/model.rs`): patchify the latent
@@ -50,7 +68,26 @@ Actions (`crates/zimage/src/caps.rs`): `text2image`, `image2image`, `inpaint`,
 {`int8`,`fp32`} (default `int8`). The sibling `brain flux2 generate` is the
 FLUX.2 CLI, not Z-Image.
 
-`BRAIN_ZIMAGE_{DIT,VAE,QWEN,TOKENIZER}` point the resident at its weights.
+## Auto-fetch
+
+`Tongyi-MAI/Z-Image-Turbo` (and the slower, non-distilled `Tongyi-MAI/Z-Image`
+base — set `--guidance` > 0 and more `steps` for it) auto-fetch through
+`crates/modelstore`'s `ZimageRecipe`
+(`crates/modelstore/src/recipe.rs`): the recipe recognizes the diffusers
+pipeline shape (`model_index.json` + `transformer/`/`vae/`/`text_encoder/`/
+`tokenizer/`), downloads every file under those four subdirectories, and
+writes a `brain.manifest.json` naming each role's path — no tensor rewrite is
+needed, since `zimage::import::import_comfy` already remaps names in memory
+at load time. `crates/zimage/src/pipeline.rs`'s component loader accepts a
+directory or a single file for every role, so the fetched, sharded HF layout
+loads exactly like a hand-placed one.
+
+Power users can still bypass the store entirely:
+`BRAIN_ZIMAGE_{DIT,VAE,QWEN,TOKENIZER}` register a SEPARATE resident, under the
+reserved `brain/z-image` id, pointed directly at local paths (each accepts a
+single file or a directory) — a distinct servable id from whatever
+`vendor/repo` ref auto-fetch resolves, not an override of it; both can be
+resident at once.
 
 ## What's implemented
 

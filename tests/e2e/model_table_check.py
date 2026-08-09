@@ -45,7 +45,12 @@ IGNORE = {"brain/mock", "brain/demo", "brain/imageops"}
 # are legitimate aliases, not documentation drift — same relationship as
 # `brain_modelref::alias` maps a legacy short name to its canonical id, just
 # in the other direction (a family placeholder to its recommended checkpoint).
-CATALOG_ALIASES = {"brain/qwen": "Qwen/Qwen3-0.6B", "brain/lfm": "LiquidAI/LFM2.5-350M"}
+CATALOG_ALIASES = {
+    "brain/qwen": "Qwen/Qwen3-0.6B",
+    "brain/lfm": "LiquidAI/LFM2.5-350M",
+    "brain/z-image": "Tongyi-MAI/Z-Image-Turbo",
+    "brain/yolo": "Ultralytics/YOLOv8",
+}
 
 ROW_RE = re.compile(r"^\|\s*\[`([^`]+)`\]\(([^)]+)\)")
 
