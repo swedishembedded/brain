@@ -230,6 +230,13 @@ run_example() {
   [[ "$output" == *"OK: authenticated GET /v1/models succeeded"* ]]
 }
 
+@test "examples/api/openai_client.py runs against the mock's --openai surface" {
+  [ -n "$OPENAI_KEY" ]
+  run_example "$REPO/examples/api/openai_client.py" --base-url "http://127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" --model brain/mock --out "$OUT/openai_client.png"
+  [[ "$output" == *"images/generations"* ]]
+  [ -f "$OUT/openai_client.png" ]
+}
+
 # ------------------------------------------------------------- completeness
 
 @test "every tracked example is accounted for in examples/manifest.tsv" {

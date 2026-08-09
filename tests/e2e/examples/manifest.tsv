@@ -1,5 +1,6 @@
 path	mode	notes
 examples/api/claude-with-brain.sh	check	--check against BRAIN_MOCK; real interactive run auto-fetches Qwen/Qwen3-0.6B (needs claude), see tests/e2e/claude_code.bats
+examples/api/openai_client.py	run	--model brain/mock exercises chat (non-stream + SSE), embeddings, and images.generations for real against the shared harness server's --openai surface
 examples/asr/bench_streams.py	skip	needs real ASR weights (nemotron/qwen-asr); mock ASR streaming is a deferred follow-up
 examples/asr/transcribe_mic.py	skip	needs real ASR weights; mock ASR streaming is a deferred follow-up
 examples/dbus/brain_dbus.py	run	imageops path always runs against the mock; the z-image path self-skips without BRAIN_ZIMAGE_*
