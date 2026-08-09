@@ -32,7 +32,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use naga::{
     AddressSpace, BinaryOperator, Block, BuiltIn, Expression, Handle, Literal, MathFunction,
@@ -541,6 +541,47 @@ fn split_at_barrier(body: &Block) -> Result<(Block, Block), String> {
     Ok((Block::from_vec(before), Block::from_vec(after)))
 }
 
+/// Collect every per-invocation `LocalVariable` this block either stores into
+/// (a `Store` whose pointer is directly that local — locals here are always
+/// scalar, so no `Access`/`AccessIndex` indirection to unwrap) or loads from (a
+/// `Load` expression appearing anywhere within one of the block's `Emit`
+/// ranges, at any nesting depth). Recurses into `If`/`Loop`/`Block` bodies so a
+/// store or load guarded by a conditional is still seen.
+fn locals_touched(
+    block: &Block,
+    func: &naga::Function,
+    touched: &mut HashSet<Handle<naga::LocalVariable>>,
+) {
+    for s in block.iter() {
+        match s {
+            Statement::Store { pointer, .. } => {
+                if let Expression::LocalVariable(h) = func.expressions[*pointer] {
+                    touched.insert(h);
+                }
+            }
+            Statement::Emit(range) => {
+                for eh in range.clone() {
+                    if let Expression::Load { pointer } = func.expressions[eh] {
+                        if let Expression::LocalVariable(h) = func.expressions[pointer] {
+                            touched.insert(h);
+                        }
+                    }
+                }
+            }
+            Statement::Block(b) => locals_touched(b, func, touched),
+            Statement::If { accept, reject, .. } => {
+                locals_touched(accept, func, touched);
+                locals_touched(reject, func, touched);
+            }
+            Statement::Loop { body, continuing, .. } => {
+                locals_touched(body, func, touched);
+                locals_touched(continuing, func, touched);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Compile a work-group kernel: process whole workgroups, each running its
 /// `wgsize` invocations cooperatively over per-workgroup scratch (`var<workgroup>`)
 /// with the body split at the barrier into two per-invocation segment loops.
@@ -577,6 +618,38 @@ fn compile_one_wg(
     // NEXT kernel's compile fails with a bogus block-param mismatch (this bit
     // conv_epilogue when it followed matmul_reg2 in a model's kernel list).
     let (seg_before, seg_after) = split_at_barrier(&func.body)?;
+
+    // Per-invocation `var` locals are SSA values re-initialised each `lid`
+    // iteration by `emit_invocation_loop`, called once per segment with its own
+    // fresh set of Cranelift variables — a local written in `seg_before` and
+    // read in `seg_after` would silently read back its zero-initialised value,
+    // the same class of bug `carried`'s ordering above exists to prevent for
+    // pre-barrier expressions. No kernel in this tree does this today (checked
+    // below, not assumed), so catch it before it can miscompile one silently.
+    {
+        let mut before_locals = HashSet::new();
+        locals_touched(&seg_before, func, &mut before_locals);
+        let mut after_locals = HashSet::new();
+        locals_touched(&seg_after, func, &mut after_locals);
+        if let Some(h) = before_locals.intersection(&after_locals).next() {
+            let name = func.local_variables[*h].name.clone().unwrap_or_default();
+            // Deliberately worded without the substring "barrier": `Jit::new`
+            // treats any error containing it as an expected barrier-STRUCTURAL
+            // limitation (a shape the JIT's one-barrier model can't express at
+            // all, e.g. a tiled GEMM with a barrier inside the K-loop) and
+            // falls back to a native/GPU path rather than failing the build.
+            // This is a different, worse kind of error — the barrier structure
+            // is fine, but a value would silently read as stale/zero across
+            // the workgroup synchronisation point — so it must hard-fail like
+            // "array local in a work-group kernel is unsupported" does, not
+            // be swallowed into that fallback.
+            return Err(format!(
+                "local `{name}` is live across the workgroup synchronisation point; the JIT \
+                 re-initialises per-invocation locals for each segment, so a value stored before \
+                 it and read after would silently read back zero"
+            ));
+        }
+    }
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
     let mut unary_refs = HashMap::new();
