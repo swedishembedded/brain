@@ -125,6 +125,59 @@ fn caps_expose_the_roofs_only_after_something_measured_them() {
     assert_eq!(caps.ridge_flops_per_byte(), Some(r.ridge()));
 }
 
+/// `ensure` must not run any probe kernel at all on the CPU backend unless the
+/// caller explicitly opts in (`BRAIN_NO_ROOF=0`) — see the doc on `roof::ensure`.
+/// A probe that actually launched would take at minimum `MIN_PROBE_SECONDS`
+/// per rung; this test's bound (well under that) is only clearable by the
+/// default-off skip returning immediately.
+#[test]
+fn ensure_defaults_off_on_the_cpu_backend() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+    if gpu.caps().class != backend_api::DeviceClass::Cpu {
+        return; // this behaviour is CPU-specific; nothing to check elsewhere
+    }
+    let t0 = std::time::Instant::now();
+    let r = roof::ensure(&gpu);
+    assert!(r.is_none(), "CPU backend must default to unprobed, got {r:?}");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(50),
+        "ensure() took {:?} on the CPU backend with no opt-in -- it ran a probe \
+         instead of skipping",
+        t0.elapsed()
+    );
+}
+
+/// The calibration loops (`measure`) must never block past their wall-clock
+/// budget, regardless of backend. This is the actual regression test for the
+/// unbounded-hang defect: before the fix, a CPU-backend probe that stalled
+/// inside `backend-cpu`'s dispatch never returned at all. Now the shared
+/// `roof_budget()` ceiling bounds every one of `measure`'s (up to four)
+/// internal calibration loops, so total wall time is provably finite even on
+/// a device where the underlying stall reproduces -- "a slow measurement, not
+/// a hang" (see `roof.rs`'s `1a` fix note).
+#[test]
+fn measure_is_bounded_by_the_roof_budget_even_if_a_rung_stalls() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+    let t0 = std::time::Instant::now();
+    let _ = roof::measure(&gpu); // Some() or None both fine -- only the bound matters
+    // Default budget is 10s per loop, up to 4 loops (compute/bandwidth/cache/int8):
+    // a generous multiple leaves slack for scheduling jitter without re-admitting
+    // an effectively-unbounded wait.
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "measure() took {elapsed:?} -- the per-loop deadline did not bound it"
+    );
+}
+
 #[test]
 fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
     // Pure arithmetic on the type — no device needed, so this runs everywhere

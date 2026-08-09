@@ -214,6 +214,24 @@ const MAX_BW_PASSES: usize = 4096;
 /// launch latency and queue drain cannot dominate the measurement.
 const MIN_PROBE_SECONDS: f64 = 0.05;
 
+/// Wall-clock ceiling for ONE calibration loop (compute, int8, or bandwidth).
+/// On expiry the loop returns `None` — "roofline unmeasured", the same
+/// contract `ensure`'s doc already promises callers (render `-`, never a
+/// guess) — rather than blocking indefinitely. Every rung of a healthy probe
+/// clears `MIN_PROBE_SECONDS` in one or two dispatches, so this is a
+/// generous multiple of that, not a tight budget. Override with
+/// `BRAIN_ROOF_BUDGET_S`.
+const DEFAULT_ROOF_BUDGET_S: f64 = 10.0;
+
+fn roof_budget() -> std::time::Duration {
+    let secs = std::env::var("BRAIN_ROOF_BUDGET_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(DEFAULT_ROOF_BUDGET_S);
+    std::time::Duration::from_secs_f64(secs)
+}
+
 static CACHE: Mutex<Option<Roofs>> = Mutex::new(None);
 
 /// The roofs for this process's device, measuring them once if needed.
@@ -221,24 +239,51 @@ static CACHE: Mutex<Option<Roofs>> = Mutex::new(None);
 /// Returns `None` when the device cannot be probed — callers must then print
 /// `-`, never a guess. Set `BRAIN_NO_ROOF=1` to skip probing entirely (useful
 /// when a run must not spend the ~0.2 s, or to reproduce pre-roofline output).
+///
+/// Defaults to skipped (as if `BRAIN_NO_ROOF=1`) on the CPU backend, where the
+/// probe's calibration loop has a known-bad interaction with `backend-cpu`'s
+/// rayon dispatch (docs/lessons.md #37/#38) — a per-call-site opt-out is what
+/// #37 asked every new caller to add by hand; this applies it once at the
+/// source instead. Set `BRAIN_NO_ROOF=0` to force the probe to run anyway,
+/// even on the CPU backend.
 pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
-    if std::env::var("BRAIN_NO_ROOF").map(|v| v != "0").unwrap_or(false) {
-        return None;
+    match std::env::var("BRAIN_NO_ROOF").as_deref() {
+        Ok(v) if v != "0" => return None,
+        Ok("0") => {} // explicit opt-in, overrides the CPU-default-off below
+        _ => {
+            if gpu.caps().class == backend_api::DeviceClass::Cpu {
+                return None;
+            }
+        }
     }
-    let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(r) = *slot {
+    // Each access below takes and releases `CACHE`'s lock separately, NEVER
+    // held across `measure(gpu)`: `measure` reads `gpu.caps()` (to gate the
+    // int8 probe on `numeric.int8_dot`), and `Gpu::caps` overlays `known()`,
+    // which locks this SAME `CACHE` — a `std::sync::Mutex` is not reentrant,
+    // so holding a guard here across that call self-deadlocks the calling
+    // thread forever on any cold-cache (first-ever, or on-disk-store-miss)
+    // call. Confirmed on real hardware: `caps_expose_the_roofs_only_after_
+    // something_measured_them` hung indefinitely (gdb: thread parked in
+    // `Mutex::lock` on `roof::CACHE`, called from `roof::known` <-
+    // `Gpu::caps` <- `roof::measure` <- this function, one level up, on the
+    // SAME thread) — not a GPU/driver issue at all, despite presenting
+    // exactly like the driver hangs this module's `ensure`/wait-bound work
+    // was written to guard against. A benign race remains (two threads both
+    // missing the cache both call `measure`; last write wins) — acceptable,
+    // matching this function's own existing double-checked-init shape.
+    if let Some(r) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
         return Some(r);
     }
     let store = persist::store();
     if let Some(r) = store.as_ref().and_then(|s| s.load()) {
-        *slot = Some(r);
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         return Some(r);
     }
     let r = measure(gpu)?;
     if let Some(s) = store.as_ref() {
         s.save(r);
     }
-    *slot = Some(r);
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
     Some(r)
 }
 
@@ -294,8 +339,12 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
     // hardware, which would understate the roof), no NaNs.
     let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
 
+    let deadline = Instant::now() + roof_budget();
     let mut iters: u32 = 256;
     loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let step = gpu.step(K_FMA, &[&inp, &out], &[FMA_THREADS, iters, c, d], FMA_THREADS);
         let secs = best_of(gpu, std::slice::from_ref(&step), 3);
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
@@ -319,8 +368,12 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
     // Four int8 lanes packed per u32; values chosen so the accumulator cannot
     // overflow i32 across the loop.
     let (a, b) = (0x01010101u32, 0x01010101u32);
+    let deadline = Instant::now() + roof_budget();
     let mut iters: u32 = 256;
     loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let step = gpu.step(K_DP4A, &[&inp, &out], &[FMA_THREADS, iters, a, b], FMA_THREADS);
         let secs = best_of(gpu, std::slice::from_ref(&step), 3);
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
@@ -341,8 +394,12 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
 
     // One pass over 512 MiB is already ~2 ms on a fast card; repeat the same
     // dispatch until the timed region clears the launch floor.
+    let deadline = Instant::now() + roof_budget();
     let mut passes = 1usize;
     loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let steps: Vec<crate::Step> = (0..passes)
             .map(|_| {
                 gpu.step(
