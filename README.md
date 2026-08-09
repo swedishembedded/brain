@@ -34,21 +34,40 @@ make train/gpt/calculator             # -> out/gpt-calculator.safetensors
 make eval/gpt/calculator              # validation perplexity + task exact-match
 ```
 
-Every model is one `brain <model> <verb>` subcommand:
+Every model is one `brain <model> <verb>` subcommand — see the
+[Model support](#model-support) table below for the full, current list of models and
+what each supports; the frequently-used ones:
 
 ```
 brain data        dataset generation + tokenizers
+brain devices     canonical GPU table (index, PCI bus, UUID, VRAM) + ambient selection
 brain gpt         GPT decoder: train | gen | eval
 brain qwen        Qwen3 LLM: import | infer | export | precompile | train | finetune
-brain tts         Qwen3-TTS: import | clone | synth | finetune
+brain glm         GLM-5.2 decoder: train | finetune | infer | eval | import | export
+brain lfm         LFM2.5-Encoder: import | fill-mask | embed | data | finetune | eval
+brain tts         Qwen3-TTS: import | clone | synth | design | serve | sim | finetune
 brain yolo        YOLOv8 detector: train | fine-tune | eval | detect
+brain depth       ZipDepth monocular depth: image | camera | calib | train
+brain flux2       FLUX.2 Klein text-to-image + editing: generate
+brain mirror      WorldMirror-2 3D reconstruction: import | infer | demo
+brain splat       3D Gaussian Splatting: info | render | view | fit
+brain wm          playable world models (DIAMOND): play | replay | bench | finetune
+brain forecast    Chronos-2 / Kronos / FinCast forecasting: compare | serve | import | finetune
 brain npu         OpenVINO/NPU: export | quantize | check | run | bench | sim
+brain fetch       download a known checkpoint by name (`brain fetch --list`)
 brain federated   sharded MoE: split | verify | merge | assemble | train-expert
 brain pid         PID control transformer
 brain bench       architecture-evaluation harness (+ eval | scale | advise | compare)
-brain run         event-driven streaming controller (HFSM over JSONL)
-brain gradcheck   run the gradient checks
+brain perf        performance benchmarking (latency/throughput/serve/sweep, vs a baseline)
+brain flops       offline/online FLOP and int-OPS accounting for a forward/backward
+brain caps        every model's action manifest; `brain do <model> <action>` runs one
+brain run         event-driven streaming controller (HFSM over JSONL); alias: serve
+brain gradcheck   finite-difference backprop correctness gate
 ```
+
+`brain serve [--openai [PORT]] [--anthropic [PORT]] [--openrouter [PORT]] [--dbus]`
+serves the same models over localhost HTTP and/or D-Bus — see `brain serve --help` and
+the Model support table for which surface each model actually answers on.
 
 ## Backends — CPU, GPU, NPU
 
@@ -69,7 +88,70 @@ BRAIN_DEVICE=cpu make test                                        # whole suite,
 
 ---
 
-## Models
+## Model support
+
+Every model `brain` can run today, grouped by task. **Model id** is the exact string
+you pass to `brain`/`brain do`/D-Bus/HTTP; **✓** means the capability is reachable
+through some real command, documented on the linked page — nothing here is
+aspirational. Architecture ports with no serving surface yet (parity-gated components,
+not runnable models — T5-XXL encoder, SDXL UNet, ControlNet, FLUX.1/Kontext, PuLID,
+plus the forward-only `qwenvl`/`moondream` VLMs) are listed below the table instead of
+given a row.
+
+| Model id | Solves | Infer | Train | LoRA | QLoRA |
+|---|---|---|---|---|---|
+| **text** | | | | | |
+| [`Qwen/Qwen3-0.6B`](docs/models/qwen/readme.md) ⤓ | instruct/chat LLM, tool calls, paged-KV serving | ✓ | ✓ | ✓ | |
+| [`brain/gpt`](docs/models/gpt/readme.md) | dense nanoGPT-parity baseline | ✓ | ✓ | | |
+| [`brain/glm`](docs/models/glm/readme.md) | GLM-5.2 decoder (MLA + sigmoid MoE + DSA + MTP) | ✓ | ✓ | | |
+| [`brain train`](docs/models/moe/readme.md) | sparse top-2-of-4 MoE toy next-token rule | ✓ | ✓ | | |
+| **embed** | | | | | |
+| [`LiquidAI/LFM2.5-350M`](docs/models/lfm/readme.md) ⤓ | text embeddings + fill-mask, 8k context | ✓ | ✓ | | |
+| [`brain/clip`](docs/models/clip/readme.md) | CLIP-L / OpenCLIP-bigG / EVA-CLIP embeddings | ✓ | | | |
+| [`brain/facenet`](docs/models/face/readme.md) | face detection + ArcFace identity embedding | ✓ | | | |
+| **vlm** | | | | | |
+| [`brain/fastvlm`](docs/models/vlm/readme.md) | image captioning | ✓ | | | |
+| **asr** | | | | | |
+| [`brain/nemotron`](docs/models/asr/readme.md) | streaming speech-to-text | ✓ | | | |
+| [`brain/qwen-asr`](docs/models/asr/readme.md) | offline speech-to-text | ✓ | | | |
+| **tts** | | | | | |
+| [`brain/tts`](docs/models/tts/readme.md) | voice cloning / speech synthesis | ✓ | | ✓ | |
+| **image gen** | | | | | |
+| [`brain/z-image`](docs/models/zimage/readme.md) | text-to-image (S³-DiT diffusion) | ✓ | | ✓ | |
+| [`brain/flux2-klein`](docs/models/flux2/readme.md) | text-to-image + reference-image editing | ✓ | | ✓ | |
+| **image edit** | | | | | |
+| [`brain/restore`](docs/models/restore/readme.md) | blind face restoration (CodeFormer) | ✓ | | | |
+| [`brain/upscale`](docs/models/upscale/readme.md) | 4x super-resolution (Real-ESRGAN) | ✓ | | | |
+| [`brain/vqgan`](docs/models/vqgan/readme.md) | image ↔ codebook indices (VQ encode/decode) | ✓ | | | |
+| [`brain/imgpipe`](docs/models/imgpipe/readme.md) | composed segment → restore → upscale, one call | ✓ | | | |
+| **vision** | | | | | |
+| [`brain/yolo`](docs/models/yolo/readme.md) | anchor-free object detection (YOLOv8-style) | ✓ | ✓ | | |
+| [`brain/depth`](docs/models/depth/readme.md) | monocular relative depth (ZipDepth) | ✓ | ✓ | | |
+| [`brain/sam2`](docs/models/sam2/readme.md) | promptable image segmentation (SAM 2.1) | ✓ | | | |
+| **3d** | | | | | |
+| [`brain mirror`](docs/models/mirror/readme.md) | multi-view photos → 3D Gaussian Splatting scene | ✓ | | | |
+| [`brain splat`](docs/models/splat/readme.md) | 3DGS render / fly-through / scene fit | ✓ | ✓ | | |
+| **forecast** | | | | | |
+| [`brain/chronos2`](docs/models/chronos2/readme.md) | probabilistic time-series forecasting | ✓ | | | |
+| [`brain/fincast`](docs/models/fincast/readme.md) | probabilistic time-series forecasting | ✓ | | | |
+| [`brain/kronos`](docs/models/kronos/readme.md) | OHLCV bar forecasting | ✓ | ✓ | ✓ | |
+| **world model** | | | | | |
+| [`brain wm`](docs/models/world-models/readme.md) | playable action-conditioned video (DIAMOND) | ✓ | ✓ | | |
+| [`brain pid`](docs/models/pid/readme.md) | control policy over CBOR records (PID imitation) | ✓ | ✓ | | |
+
+**⤓** = `brain` fetches and converts the weights itself on first use
+(`crates/modelstore`) — everything else needs a local checkpoint, pointed at by a
+`BRAIN_*` env var named on the model's own page. Auto-fetch only resolves HF repos
+whose declared architecture is `qwen`, `glm` or `lfm`; GLM has no known public
+checkpoint today so it stays a `brain/` id despite the code path existing.
+**QLoRA is not implemented anywhere in brain** — the INT8/GGUF paths are inference
+tiers only (`crates/qwen/src/model.rs` asserts the int8 path is inference-only); the
+column is here so the gap stays visible rather than silently absent.
+Which of CLI / D-Bus / HTTP a model answers on is stated at the top of its own page —
+it varies per model and is derived from each manifest's action shape
+(`crates/apiserve/src/catalog.rs`), not configured by hand.
+
+## Models — a closer look
 
 ### GPT decoder — the dense baseline
 
