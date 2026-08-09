@@ -38,8 +38,33 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
     match recipe {
         "transformers" => convert_transformers(store, vendor, repo),
         "zimage" => convert_zimage(store, vendor, repo),
+        "yolo" => convert_yolo(store, vendor, repo),
         other => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
     }
+}
+
+/// The yolo recipe: `YoloRecipe::artifacts` downloaded exactly one
+/// `yolov8*.pt` file into the repo dir; run the pure-Rust importer
+/// (`yolo::import::import_yolov8n`, built on `checkpoint::torchpt`) and write
+/// the remapped tensors as `model.brain.safetensors` -- the same single-file
+/// convention every transformers-family model already uses, so no store or
+/// `resident_for` changes were needed for this family.
+fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let pt = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{vendor}/{repo}: convert: {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("yolov8") && n.ends_with(".pt")))
+        .ok_or_else(|| format!("{vendor}/{repo}: convert: no downloaded yolov8*.pt file in {}", dir.display()))?;
+    let pt = pt.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", pt.display()))?;
+
+    let tensors = yolo::import::import_yolov8n(pt)?;
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().map(|(name, shape, data)| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
+    let card = checkpoint::st::ModelCard::for_ref(&format!("{vendor}/{repo}"), vendor, repo, None, "yolo");
+    let out = dir.join("model.brain.safetensors");
+    checkpoint::st::save_safetensors(out.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 store path"))?, &tensors, &yolo::config::YoloConfig::yolov8n().to_json(), Some(&card))
+        .map_err(|e| format!("{vendor}/{repo}: convert: write model.brain.safetensors: {e}"))
 }
 
 /// The zimage recipe: no tensor rewrite is needed (`zimage::import::
@@ -414,6 +439,42 @@ mod tests {
         assert_eq!(manifest.roles.len(), 4);
         let base = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
         assert!(Store::new(dir).local(&base).is_some());
+    }
+
+    /// Opt-in: exercises the full `ensure()` pipeline (plan -> download ->
+    /// `convert_yolo` -> `resident_for_local`) against a REAL, unmodified
+    /// `yolov8n.pt`'s bytes served through a `FakeHub` -- the decisive
+    /// end-to-end proof that `YoloRecipe` + the new importer + this crate's
+    /// finish dispatch compose correctly, complementing
+    /// `crates/yolo/tests/import_real.rs`'s narrower importer-only check.
+    /// Skips cleanly without `YOLO_RAW_PT` (see that file's module docs).
+    #[test]
+    fn ensure_completes_a_flat_release_plan_and_registers_a_yolo_resident() {
+        let path = match std::env::var("YOLO_RAW_PT") {
+            Ok(p) if std::path::Path::new(&p).is_file() => p,
+            _ => {
+                println!("SKIP ensure_completes_a_flat_release_plan_and_registers_a_yolo_resident: set YOLO_RAW_PT to a real yolov8n.pt");
+                return;
+            }
+        };
+        let bytes = std::fs::read(&path).unwrap();
+
+        let mut hub = FakeHub::new();
+        hub.add_file("Ultralytics", "YOLOv8", "main", "yolov8n.pt", bytes);
+        let dir = store("supply-test-yolo-flat-release").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("Ultralytics/YOLOv8", &e, &mut |_, _, _| {}).unwrap();
+
+        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        assert_eq!(names, vec!["Ultralytics/YOLOv8".to_string()]);
+
+        // A real, loadable model.brain.safetensors landed -- and a second
+        // ensure() for the same ref needs no network at all.
+        let base = ModelRef::new("Ultralytics", "YOLOv8", None);
+        let local = Store::new(dir).local(&base).expect("converted checkpoint must be servable");
+        let card = local.card.expect("save_safetensors wrote a card");
+        assert_eq!(card.family, "yolo");
     }
 
     #[test]

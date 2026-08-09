@@ -16,6 +16,7 @@ pub mod boxmath;
 pub mod caps;
 pub mod config;
 pub mod head;
+pub mod import;
 pub mod infer;
 pub mod init;
 pub mod loss;

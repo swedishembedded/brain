@@ -348,7 +348,28 @@ impl<'a> Unpickler<'a> {
                     _ => Err("torchpt: _rebuild_parameter arg 0 is not a tensor".into()),
                 }
             }
-            _ => Err(format!("torchpt: unsupported global {module}.{name} in {ctx}")),
+            _ => {
+                // Any other class (an nn.Module subclass -- Ultralytics' YOLO
+                // checkpoints pickle live module OBJECTS, not a plain
+                // state_dict) has no importable definition here and its
+                // constructor args are irrelevant: a plain Python object with
+                // no custom `__reduce__` unpickles as `cls.__new__(cls)` (or
+                // `REDUCE` with args we don't need) followed by
+                // `obj.__setstate__(obj.__dict__)` via BUILD. Modeling it as
+                // an empty dict lets the EXISTING BUILD/dict-merge logic
+                // above populate it exactly like an OrderedDict: nn.Module's
+                // `__dict__` holds `_parameters`/`_buffers`/`_modules` (all
+                // OrderedDicts, so tensors nest inside them) alongside
+                // `training`/hook dicts/other bookkeeping that `BUILD`
+                // already drops (no tensor inside -> not merged). The
+                // resulting flattened names carry PyTorch's internal
+                // `_modules`/`_parameters` path segments, which is a
+                // Torch-pickling-convention detail an importer normalizes
+                // away (strip those exact segments) rather than something
+                // this reader can know how to skip generically -- it doesn't
+                // know which dict IS a `_modules`-shaped one.
+                Ok(Val::Dict(Rc::new(RefCell::new(Vec::new()))))
+            }
         }
     }
 

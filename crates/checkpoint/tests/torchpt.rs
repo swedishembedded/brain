@@ -586,6 +586,44 @@ fn build_state_metadata_dropped_tensor_kept() {
     assert_eq!(r.skipped_non_tensor, 0); // _metadata version int not counted
 }
 
+/// A `NEWOBJ` of an unrecognized class (an `nn.Module` subclass with no
+/// importable definition here -- exactly what a raw Ultralytics YOLO
+/// checkpoint pickles instead of a plain `state_dict()`) must not error. It
+/// unpickles as an empty placeholder that the following `BUILD` populates
+/// exactly like an `OrderedDict`: a nested tensor is kept and correctly
+/// dotted-flattened through the unknown class, non-tensor state is dropped.
+/// Confirmed against a real `yolov8n.pt` this session (359 raw tensors read,
+/// 297 after `crates/yolo/src/import.rs`'s remap -- exact match against
+/// `YoloConfig::yolov8n().full_param_list()`); this is the from-scratch
+/// regression fixture for that mechanism.
+#[test]
+fn unrecognized_newobj_class_becomes_a_placeholder_build_populates() {
+    let p = P::new()
+        .op(0x7d) // EMPTY_DICT (outer)
+        .op(0x28) // MARK (outer items)
+        .s("obj")
+        .global("ultralytics.nn.modules", "Conv") // an unrecognized class
+        .op(0x29) // EMPTY_TUPLE (NEWOBJ args)
+        .op(0x81) // NEWOBJ -> placeholder instance
+        .op(0x7d) // EMPTY_DICT (state = obj.__dict__)
+        .op(0x28) // MARK (state items)
+        .s("weight")
+        .tensor("FloatStorage", "0", 2, 0, &[2], &[1])
+        .s("training") // pure metadata: no tensor inside -> dropped by BUILD
+        .op(0x88) // NEWTRUE
+        .op(0x75) // SETITEMS (into state dict)
+        .op(0x62) // BUILD -> obj.__dict__ populated (metadata-free)
+        .op(0x75) // SETITEMS (outer["obj"] = obj)
+        .stop();
+
+    let file = pt_archive(&p, &[("0", f32_bytes(&[9.0, -1.0]))]);
+    let r = torchpt::parse(&file).unwrap();
+    assert_eq!(r.tensors.len(), 1, "the tensor nested inside the unrecognized class must survive");
+    assert_eq!(r.tensors[0].name, "obj.weight");
+    assert_eq!(r.tensors[0].data, vec![9.0, -1.0]);
+    assert_eq!(r.skipped_non_tensor, 0, "the dropped 'training' bool is never reached by flatten(), same as _metadata above");
+}
+
 /// A zip without a data.pkl entry is not a torch checkpoint.
 #[test]
 fn missing_data_pkl_errors() {

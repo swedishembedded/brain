@@ -60,7 +60,45 @@ pub trait ArtifactRecipe: Send + Sync {
 /// and always matches (the historical, still-default family) -- more
 /// specific recipes get first refusal, ahead of it.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
-    vec![Box::new(ZimageRecipe), Box::new(TransformersRecipe)]
+    vec![Box::new(ZimageRecipe), Box::new(YoloRecipe), Box::new(TransformersRecipe)]
+}
+
+/// An Ultralytics-shaped release repo (`Ultralytics/YOLOv8`, confirmed live
+/// via the HF API: root-level `yolov8n.pt`…`yolov8x.pt`, no `config.json`) --
+/// the exact same files their GitHub-releases mirror serves. Downloads
+/// exactly one file (the nano variant if present, else whichever `.pt` sorts
+/// first, so a differently-curated repo still resolves to something); the
+/// finish step (`crates/cli/src/supply.rs::convert`, `"yolo"` arm) runs
+/// `yolo::import::import_yolov8n` to produce `model.brain.safetensors` --
+/// this recipe fits the store's existing single-file convention, unlike
+/// [`ZimageRecipe`], so no compound-manifest machinery is needed here.
+pub struct YoloRecipe;
+
+impl YoloRecipe {
+    /// The preferred variant when the repo offers more than one size.
+    const PREFERRED: &'static str = "yolov8n.pt";
+}
+
+impl ArtifactRecipe for YoloRecipe {
+    fn id(&self) -> &'static str {
+        "yolo"
+    }
+
+    fn matches_listing(&self, listing: &[String]) -> bool {
+        !listing.iter().any(|f| f == "config.json" || f == "model_index.json")
+            && listing.iter().any(|f| f.starts_with("yolov8") && f.ends_with(".pt"))
+    }
+
+    fn artifacts(&self, reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        let mut candidates: Vec<&String> = listing.iter().filter(|f| f.starts_with("yolov8") && f.ends_with(".pt")).collect();
+        candidates.sort();
+        let file = candidates
+            .iter()
+            .find(|f| f.as_str() == Self::PREFERRED)
+            .or_else(|| candidates.first())
+            .ok_or_else(|| Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no yolov8*.pt file in repo".to_string())))?;
+        Ok(vec![artifact((*file).clone(), (*file).clone())])
+    }
 }
 
 /// A Z-Image-shaped diffusers pipeline repo (`Tongyi-MAI/Z-Image-Turbo` and
@@ -267,5 +305,45 @@ mod tests {
             let covered = ZimageRecipe::ROLE_DIRS.iter().any(|prefix| rel.starts_with(prefix) || *rel == prefix.trim_end_matches('/'));
             assert!(covered, "role path {rel:?} is not under any of ROLE_DIRS -- the manifest writer and the downloader would disagree");
         }
+    }
+
+    /// The exact `Ultralytics/YOLOv8` file listing, confirmed live via the HF
+    /// API this session -- not a guessed shape.
+    fn ultralytics_yolov8_listing() -> Vec<String> {
+        [".gitattributes", "README.md", "yolov8l.pt", "yolov8m.pt", "yolov8n.pt", "yolov8s.pt", "yolov8x.pt"].into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn yolo_recipe_matches_the_flat_release_repo_ahead_of_transformers_and_zimage() {
+        let listing = ultralytics_yolov8_listing();
+        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        assert_eq!(matched.id(), "yolo");
+    }
+
+    #[test]
+    fn yolo_recipe_does_not_match_transformers_or_zimage_shaped_repos() {
+        assert!(!YoloRecipe.matches_listing(&["config.json".to_string(), "model.safetensors".to_string()]));
+        assert!(!YoloRecipe.matches_listing(&zimage_turbo_listing()));
+    }
+
+    #[test]
+    fn yolo_recipe_downloads_only_the_nano_variant_when_present() {
+        let listing = ultralytics_yolov8_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("Ultralytics", "YOLOv8", None);
+        let artifacts = YoloRecipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].file, "yolov8n.pt");
+        assert_eq!(artifacts[0].dest_name, "yolov8n.pt");
+    }
+
+    #[test]
+    fn yolo_recipe_falls_back_to_the_first_variant_when_nano_is_absent() {
+        let listing = vec!["yolov8x.pt".to_string(), "yolov8l.pt".to_string()];
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("Ultralytics", "YOLOv8", None);
+        let artifacts = YoloRecipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].file, "yolov8l.pt", "sorted first among the available variants");
     }
 }
