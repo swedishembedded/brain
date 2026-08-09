@@ -477,7 +477,11 @@ impl Qwen {
     /// roles (offload/LoRA/frozen) exactly as the whole-model path does.
     /// `shard.gpu_index` names the canonical physical card (device registry);
     /// `Shard::ANY_GPU` keeps the ambient selection.
-    pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
+    /// Takes any `checkpoint::TensorSource` — the eager `&HashMap<String,
+    /// Vec<f32>>` every existing caller passes (coerces, unchanged), or a
+    /// streaming mmap'd `WeightReader`/`RemapSource` pair, which never
+    /// materializes the whole checkpoint on the host.
+    pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard) -> Qwen {
         Qwen::new_impl(cfg, b, t, init, train, shard, false, false)
     }
 
@@ -485,7 +489,8 @@ impl Qwen {
     /// Weights are ~4× smaller than fp32, so the whole Qwen3-4B encoder (~4.8 GB of
     /// weights → ~9.5 GB resident) fits a single 24 GB card — where the fp32
     /// encoder (~30 GB resident on non-ReBAR Pascal) does not. Frozen, no LoRA.
-    pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen {
+    /// See [`Self::new_shard`]'s doc: `init` may be any `TensorSource`.
+    pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen {
         Qwen::new_impl(cfg, b, t, init, false, shard, true, false)
     }
 

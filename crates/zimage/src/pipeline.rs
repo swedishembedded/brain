@@ -62,6 +62,23 @@ fn read_component_tensors(path: &str) -> Result<Vec<checkpoint::safetensors::StT
     }
 }
 
+/// The streaming sibling of [`read_component_tensors`]: open the same single
+/// file or HF-style directory as a header-only mmap
+/// (`checkpoint::weightio::WeightReader`) — no tensor bytes read. Used for the
+/// encoder and the (no-adapter) DiT build, whose weights stream straight to
+/// the device one at a time; [`read_component_tensors`] stays for the VAE
+/// (168 MB, not the acute OOM) and the LoRA-adapter-folding path, which
+/// mutates weights in place and therefore needs them all in host memory
+/// regardless of how they were read.
+fn open_component(path: &str) -> Result<checkpoint::weightio::WeightReader, String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        checkpoint::weightio::WeightReader::open_hf_dir(p).map_err(|e| e.to_string())
+    } else {
+        checkpoint::weightio::WeightReader::open(path).map_err(|e| e.to_string())
+    }
+}
+
 /// Generation options.
 pub struct Opts {
     pub steps: u32,
@@ -84,10 +101,18 @@ enum DitEngine {
 
 impl DitEngine {
     fn build(hifi: bool, cfg: ZImageConfig, weights: crate::block::Tensors, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
+        Self::build_from_source(hifi, cfg, &weights, lh, lw, cap_len)
+    }
+
+    /// [`Self::build`] over a streaming `checkpoint::TensorSource` (a
+    /// `crate::import::comfy_source` over a mmap'd `WeightReader`, in the
+    /// production loader below) — never materializes the whole DiT
+    /// checkpoint on the host.
+    fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
         if hifi {
-            DitEngine::Shard(ZImageDitShard::build(cfg, weights, 1, lh, lw, cap_len))
+            DitEngine::Shard(ZImageDitShard::build_from_source(cfg, src, 1, lh, lw, cap_len))
         } else {
-            DitEngine::I8(ZImageDitI8::build(cfg, weights, 1, lh, lw, cap_len))
+            DitEngine::I8(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len))
         }
     }
     fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -194,8 +219,15 @@ impl HotPipeline {
         // does, and the encode then runs on-GPU (~1-2 s) instead of ~38 s on the
         // CPU. Unset ⇒ CPU. Card-agnostic: you choose the bulk-card index.
         let qcfg = QwenConfig::qwen3_4b();
-        let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
-        let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
+        // Streaming: `qreader` mmaps the checkpoint's header only, and `qsrc`
+        // resolves brain's parameter names against it with no tensor bytes
+        // read yet -- `Qwen::new_shard{,_i8}` below pull one tensor at a time
+        // straight to the device. This replaces the old
+        // read_component_tensors -> brain_init_from_hf pair, which built two
+        // full ~16 GB host copies of the Qwen3-4B encoder (the file read, then
+        // the renamed map) before a single device byte was ever allocated.
+        let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
+        let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
         // User env input, parsed to canonical card indices at this edge; all
         // placement below goes through the device registry (explicit Shard
         // indices / scoped `with_gpu`), never env mutation.
@@ -228,7 +260,7 @@ impl HotPipeline {
                 progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bulk as usize });
+                let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bulk as usize });
                 split = Some((s0, cut, n, dit_gpu));
                 None // tail (and thus Encoder::Split) assembled after the DiT below
             }
@@ -240,13 +272,13 @@ impl HotPipeline {
                 let n = qcfg.n_layers as usize;
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qinit, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
+                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
                 Some(Encoder::Gpu8(e))
             }
             _ => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
                 gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard::whole(qcfg.n_layers as usize));
+                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 Some(Encoder::Cpu(e))
             }
@@ -255,14 +287,31 @@ impl HotPipeline {
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
         let zcfg = ZImageConfig::turbo();
-        let mut weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
-        if let Some(ap) = adapter {
+        // The DiT/VAE build lands on the DiT card regardless of the branch above.
+        let dit = if let Some(ap) = adapter {
+            // LoRA folding mutates weights element-wise in place, so it needs
+            // an owned, complete map regardless of how the checkpoint is
+            // read -- eager here is the adapter path's actual requirement,
+            // not a leftover the loader fix missed. Still gets the retention
+            // fix: `weights` drops at the end of this block, and the built
+            // engine (ZImageDitI8/Shard) only ever keeps its 13-tensor
+            // HostWeights (see crate::dev's doc).
+            let mut weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
             progress(&format!("folding LoRA adapter {ap}"));
             let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
             crate::finetune::load_adapter_folded(ap, &tcfg, &mut weights)?;
-        }
-        // The DiT/VAE build lands on the DiT card regardless of the branch above.
-        let dit = gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len))?;
+            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build(hifi, zcfg.clone(), weights, lh, lw, cap_len))?
+        } else {
+            // Streaming: one tensor at a time, straight to the device (via
+            // block::upload_named's chunk-bounded path). Peak host
+            // allocation for the DiT's weights is then one tensor (~157 MB
+            // for feed_forward.w1 once BF16 is converted), never the whole
+            // ~24 GB model this replaces (import_comfy(read_component_
+            // tensors(..)) materializing the entire checkpoint up front).
+            let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
+            let dsrc = crate::import::comfy_source(&dreader, &zcfg);
+            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, lh, lw, cap_len))?
+        };
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
         // encoder tail on top of it (GPU `dit_gpu`), then assemble Encoder::Split.
@@ -270,12 +319,13 @@ impl HotPipeline {
             (Some(e), _) => e,
             (None, Some((s0, cut, n, di))) => {
                 progress(&format!("building Qwen-4B encoder tail (layers {cut}..{})", n - 1));
-                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di as usize });
+                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di as usize });
                 Encoder::Split { s0, s1, cap_len }
             }
             (None, None) => unreachable!("encoder neither CPU nor split"),
         };
-        drop(qinit);
+        drop(qsrc);
+        drop(qreader);
 
         // VAE placement: with the int8 GPU encoder, the encoder card is idle during
         // decode (encode is step 1, decode is the last step — never concurrent), so
@@ -525,16 +575,19 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // "CPU only as a fallback for the piece that doesn't fit" split.
     progress(1, total, "encoding prompt (Qwen-4B, CPU/AVX2)");
     let qcfg = QwenConfig::qwen3_4b();
-    let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
-    let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
+    // Streaming: peak host allocation for the encoder is one tensor, not the
+    // whole ~16 GB model (see `build_adapted`'s identical fix, above).
+    let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
+    let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
     let cap = {
         gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU (AVX2)
-        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen3::Shard::whole(qcfg.n_layers as usize));
+        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, qwen3::Shard::whole(qcfg.n_layers as usize));
         let c = enc.encode(&tokens); // [cap_len · 2560]
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
         c
     };
-    drop(qinit);
+    drop(qsrc);
+    drop(qreader);
 
     // 3. scheduler (dynamic-shifted sigmas; brain applies shift=1 so we pre-shift).
     // `sig_full` is the N+1 sigmas (N shifted step sigmas + terminal 0).
@@ -595,13 +648,12 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // int8 on one P40 (default), or full-precision fp32 sharded across both P40s
     // when `hifi` — no quantisation error, at the cost of a second card.
     let zcfg = ZImageConfig::turbo();
-    let weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+    // Streaming: peak host allocation for the DiT is one tensor, not the
+    // whole ~24 GB checkpoint (see `build_adapted`'s identical fix, above).
+    let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
+    let dsrc = crate::import::comfy_source(&dreader, &zcfg);
     {
-        let dit = if opts.hifi {
-            DitEngine::Shard(ZImageDitShard::build(zcfg, weights, 1, lh, lw, cap_len))
-        } else {
-            DitEngine::I8(ZImageDitI8::build(zcfg, weights, 1, lh, lw, cap_len))
-        };
+        let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, lh, lw, cap_len);
         for i in start_step..opts.steps as usize {
             progress(2 + i as u32, total, if opts.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
@@ -684,6 +736,18 @@ mod component_tensor_tests {
         let from_dir = read_component_tensors(subdir.to_str().unwrap()).unwrap();
         assert_eq!(from_dir.len(), 1);
         assert_eq!(from_dir[0].data, vec![3.0, 4.0]);
+
+        // The streaming sibling must read the identical bytes from both shapes.
+        use checkpoint::TensorSource;
+        let streamed_file = open_component(file.to_str().unwrap()).unwrap();
+        let mut got = None;
+        assert!(streamed_file.with_tensor("w", &mut |d| got = Some(d.to_vec())));
+        assert_eq!(got.unwrap(), vec![1.0, 2.0]);
+
+        let streamed_dir = open_component(subdir.to_str().unwrap()).unwrap();
+        let mut got = None;
+        assert!(streamed_dir.with_tensor("w", &mut |d| got = Some(d.to_vec())));
+        assert_eq!(got.unwrap(), vec![3.0, 4.0]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

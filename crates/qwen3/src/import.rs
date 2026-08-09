@@ -114,6 +114,32 @@ pub fn brain_init_from_hf(
     Ok(init)
 }
 
+/// The streaming sibling of [`brain_init_from_hf`]: a
+/// `checkpoint::remap::RemapSource` over `r` that resolves every brain
+/// parameter name to its HF tensor via [`hf_to_brain`]'s same map, validated
+/// the same way (every brain param produced exactly once, right element
+/// count; every mapped HF tensor recognized) — but reading no tensor data.
+/// `Qwen::new_shard`/`new_shard_i8` accept the result directly, so an
+/// encoder built from this never materializes the whole checkpoint on the
+/// host: peak allocation is one tensor, at upload time.
+pub fn hf_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    let want = cfg.param_list();
+    let want_names: std::collections::HashSet<&str> = want.iter().map(|(n, _)| n.as_str()).collect();
+    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+    for name in r.names() {
+        let Some(bn) = hf_to_brain(name, cfg.tie_embeddings) else { continue };
+        if !want_names.contains(bn.as_str()) {
+            return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
+        }
+        if plan.insert(bn.clone(), checkpoint::remap::Fetch::Whole(name.to_string())).is_some() {
+            return Err(format!("duplicate mapping to {bn}"));
+        }
+    }
+    let src = checkpoint::remap::RemapSource::new(r, plan);
+    src.validate(&want)?;
+    Ok(src)
+}
+
 /// Import `<hf_dir>/config.json` + `model.safetensors` (single **or** sharded via
 /// `model.safetensors.index.json`) into the brain checkpoint `out_path`.
 /// Validates that every brain parameter is produced exactly once with the right
@@ -228,8 +254,15 @@ mod tests {
     /// Tiny 1-layer tied-embedding checkpoint dir. Ships a redundant
     /// `lm_head.weight` (as real tied Qwen3 checkpoints sometimes do) to exercise
     /// the "tied -> drop" branch of `hf_to_brain` under streaming.
+    ///
+    /// Every call gets its OWN directory (pid + a monotonic counter, not pid
+    /// alone) — multiple tests in this file call this concurrently, and a
+    /// pid-only path let one test's `remove_dir_all` cleanup delete the
+    /// directory out from under another still-running test.
     fn build_tiny_hf_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-qwen-import-streaming-{}", std::process::id()));
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("brain-qwen-import-streaming-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let json = r#"{"vocab_size":5,"hidden_size":6,"num_hidden_layers":1,
             "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,
@@ -285,5 +318,55 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&out).ok();
+    }
+
+    /// [`hf_source`] must be byte-for-byte identical to the eager
+    /// [`brain_init_from_hf`] for every brain parameter — the numeric-parity
+    /// guarantee a streaming-loader switch relies on (equal weights in ⇒
+    /// identical device weights ⇒ identical numerics).
+    #[test]
+    fn hf_source_streaming_matches_eager_brain_init_from_hf() {
+        use checkpoint::TensorSource;
+
+        let dir = build_tiny_hf_dir();
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+
+        let eager_tensors = checkpoint::safetensors::read_model_dir(&dir).unwrap();
+        let eager = brain_init_from_hf(eager_tensors, &cfg).unwrap();
+
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let src = hf_source(&reader, &cfg).unwrap();
+
+        for (name, numel) in cfg.param_list() {
+            let mut got = None;
+            assert!(src.with_tensor(&name, &mut |d| got = Some(d.to_vec())), "missing {name}");
+            let got = got.unwrap();
+            assert_eq!(got.len(), numel, "{name}");
+            assert_eq!(&got, &eager[&name], "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A checkpoint missing a required tensor must be refused by `validate`
+    /// (called inside `hf_source`) before any data is read, not discovered
+    /// partway through a multi-GB build.
+    #[test]
+    fn hf_source_refuses_a_checkpoint_missing_a_required_tensor() {
+        let dir = build_tiny_hf_dir();
+        // Drop a required tensor by rewriting the checkpoint without it.
+        let full = checkpoint::safetensors::read_model_dir(&dir).unwrap();
+        let trimmed: Vec<_> = full.into_iter().filter(|t| t.name != "model.layers.0.self_attn.q_proj.weight").collect();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = trimmed.into_iter().map(|t| (t.name, t.shape.iter().map(|&s| s as u64).collect(), t.data)).collect();
+        std::fs::remove_file(dir.join("model.safetensors")).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let err = match hf_source(&reader, &cfg) {
+            Ok(_) => panic!("a checkpoint missing a required tensor must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("blocks.0.attn.wq.weight"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

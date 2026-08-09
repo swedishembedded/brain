@@ -16,6 +16,8 @@
 //!   - `x_embedder.` → `all_x_embedder.{ps}-{pf}.`;
 //!   - `final_layer.` → `all_final_layer.{ps}-{pf}.`.
 
+use std::collections::HashMap;
+
 use checkpoint::safetensors::StTensor;
 
 use crate::block::Tensors;
@@ -52,6 +54,45 @@ pub fn import_comfy(tensors: Vec<StTensor>, cfg: &ZImageConfig) -> Tensors {
         out.insert(k, (t.shape, t.data));
     }
     out
+}
+
+/// The streaming sibling of [`import_comfy`]: a `checkpoint::remap::RemapSource`
+/// over `r` resolving every brain (diffusers-named) tensor to its Comfy source
+/// via the SAME rename/qkv-split rules — reading no tensor data up front. A
+/// `qkv.weight` still resolves to three zero-copy [`checkpoint::remap::Fetch::Slice`]s
+/// (slicing a borrow is still a borrow); every renamed tensor is a
+/// [`checkpoint::remap::Fetch::Whole`] pass-through. `ZImageDit{,I8,Shard}::
+/// build_from_source` accept the result directly, so a build from this never
+/// materializes the whole DiT checkpoint on the host — peak allocation is one
+/// tensor (up to ~157 MB for `feed_forward.w1`, once converted from BF16), not
+/// the whole ~24 GB model.
+pub fn comfy_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &ZImageConfig) -> checkpoint::remap::RemapSource<'a> {
+    let xk = format!("all_x_embedder.{}-{}.", cfg.patch_size, cfg.f_patch_size);
+    let fk = format!("all_final_layer.{}-{}.", cfg.patch_size, cfg.f_patch_size);
+    let dim = cfg.dim as usize;
+    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+    for name in r.names() {
+        if let Some(base) = name.strip_suffix("qkv.weight") {
+            // base = "…attention."; split [3·dim, dim] into q|k|v row-blocks —
+            // three Slice fetches over the SAME source tensor, zero-copy.
+            let dd = dim * dim;
+            plan.insert(format!("{base}to_q.weight"), checkpoint::remap::Fetch::Slice { name: name.to_string(), start: 0, len: dd });
+            plan.insert(format!("{base}to_k.weight"), checkpoint::remap::Fetch::Slice { name: name.to_string(), start: dd, len: dd });
+            plan.insert(format!("{base}to_v.weight"), checkpoint::remap::Fetch::Slice { name: name.to_string(), start: 2 * dd, len: dd });
+            continue;
+        }
+        let mut k = name.to_string();
+        k = k.replace(".attention.out.", ".attention.to_out.0.");
+        k = k.replace(".attention.k_norm.weight", ".attention.norm_k.weight");
+        k = k.replace(".attention.q_norm.weight", ".attention.norm_q.weight");
+        if let Some(rest) = k.strip_prefix("x_embedder.") {
+            k = format!("{xk}{rest}");
+        } else if let Some(rest) = k.strip_prefix("final_layer.") {
+            k = format!("{fk}{rest}");
+        }
+        plan.insert(k, checkpoint::remap::Fetch::Whole(name.to_string()));
+    }
+    checkpoint::remap::RemapSource::new(r, plan)
 }
 
 /// Bridge the (already-`import_comfy`'d) inference tensor map into the **training**
@@ -214,5 +255,47 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("layers.1.feed_forward.w2.weight"), "unhelpful error: {err}");
+    }
+
+    /// [`comfy_source`] must be byte-for-byte identical to the eager
+    /// [`import_comfy`] for every renamed AND every qkv-split tensor — the
+    /// same tiny fixture `remap_and_qkv_split` above uses, round-tripped
+    /// through a real safetensors file so `comfy_source` reads it via a
+    /// genuine `WeightReader`, not an in-memory shortcut.
+    #[test]
+    fn comfy_source_streaming_matches_eager_import_comfy() {
+        use checkpoint::TensorSource;
+
+        let mut cfg = ZImageConfig::turbo();
+        cfg.dim = 2; // tiny: qkv = [6, 2] = 12 elems, split into 3x [2,2]=4.
+        let qkv: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let named: Vec<(&str, Vec<f32>)> = vec![
+            ("layers.0.attention.qkv.weight", qkv),
+            ("layers.0.attention.out.weight", vec![9.0; 4]),
+            ("layers.0.attention.q_norm.weight", vec![1.0; 2]),
+            ("layers.0.attention.k_norm.weight", vec![1.5; 2]),
+            ("x_embedder.weight", vec![2.0; 8]),
+            ("final_layer.linear.bias", vec![3.0; 4]),
+            ("cap_embedder.0.weight", vec![4.0; 2]),
+        ];
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = named.iter().map(|(n, d)| (n.to_string(), vec![d.len() as u64], d.clone())).collect();
+        let path = std::env::temp_dir().join(format!("brain-zimage-comfy-streaming-{}.safetensors", std::process::id()));
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+
+        // Eager reference, over the exact same source tensors.
+        let eager = import_comfy(named.into_iter().map(|(n, d)| st(n, d)).collect(), &cfg);
+
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let streamed = comfy_source(&reader, &cfg);
+
+        // Same tensors `remap_and_qkv_split` checks explicitly, so a rename or
+        // a qkv-split slice-boundary regression fails here identically.
+        for name in eager.keys() {
+            let mut got = None;
+            assert!(streamed.with_tensor(name, &mut |d| got = Some(d.to_vec())), "missing {name}");
+            assert_eq!(got.unwrap(), eager[name].1, "{name}");
+        }
+
+        std::fs::remove_file(&path).ok();
     }
 }
