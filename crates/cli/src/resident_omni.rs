@@ -111,3 +111,36 @@ impl Instance for OmniInstance {
             .blob("text", capability::Blob::new(capability::Media::Text, text.into_bytes())))
     }
 }
+
+/// The int8 dual-GPU Thinker (`omni::int8_thinker_resident::Int8ThinkerResident`)
+/// — layer-sharded across every budgeted GPU, streamed straight from a
+/// pre-quantized brain-native checkpoint. Reachable ONLY via
+/// `Executor::register_multi` (never `register` — see that type's own doc on
+/// why a multi-device-only model must stay out of the plain single-device
+/// registry). A SEPARATE resident from [`OmniResident`] above: that one is
+/// the validation-tier, single-device, no-KV-cache HF-checkpoint path; this
+/// is the sharded int8 path `docs/models/omni/status.md`'s M18/M20 entries
+/// describe, and the two are not interchangeable.
+///
+/// Config is env-only:
+///   * `BRAIN_OMNI_INT8_CHECKPOINT` — a brain-native int8-quantized checkpoint
+///     (the output of `omni::import`'s int8-native path). Unset ⇒ not served.
+///
+/// `gpus` is `build_executor`'s own budgeted GPU list — the shard count
+/// tracks whatever the box actually has (never hardcoded), which is exactly
+/// the gap the int8 dual-GPU residency work closed in
+/// `Int8ThinkerResident::estimate_multi` itself: hardcoding `[Gpu(0), Gpu(1)]`
+/// would silently hang on a 1-GPU box and waste a card on a 3+-GPU one.
+pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)]) -> Option<omni::int8_thinker_resident::Int8ThinkerResident> {
+    let checkpoint_path = std::env::var("BRAIN_OMNI_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
+    if gpus.is_empty() {
+        eprintln!("brain: omni-int8-thinker-multi not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)");
+        return None;
+    }
+    let devices: Vec<Device> = gpus.iter().map(|&(i, _)| Device::Gpu(i)).collect();
+    // Real numbers confirmed against the real checkpoint's config (not
+    // assumed) -- validated end to end on two physically separate GPUs
+    // during the int8 dual-GPU residency work.
+    let cfg = omni::config::MoeTextConfig::thinker_defaults();
+    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices))
+}

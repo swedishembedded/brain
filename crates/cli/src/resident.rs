@@ -158,7 +158,17 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
         }
     }
 
-    Executor::start(models, budgets, policy)
+    let exec = Executor::start(models, budgets, policy);
+    // The int8 dual-GPU Thinker is multi-device-only, so it is registered
+    // AFTER `start` via `register_multi`, never folded into `models` above
+    // (see `resident_omni::int8_thinker_multi_from_env`'s own doc for why a
+    // plain `register` would be structurally wrong for it).
+    if let Some(t) = crate::resident_omni::int8_thinker_multi_from_env(gpus) {
+        exec.register_multi(Arc::new(t));
+    } else {
+        eprintln!("brain: omni-int8-thinker-multi not served over the scheduler (set BRAIN_OMNI_INT8_CHECKPOINT)");
+    }
+    exec
 }
 
 // ---------------------------------------------------------------- yolo

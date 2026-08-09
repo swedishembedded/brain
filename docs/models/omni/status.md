@@ -51,7 +51,7 @@ cleanup).
 ## Done
 
 - **M0 — facts + docs skeleton** (2026-08-07). This ledger, `readme.md`,
-  `.todo/qwen3-omni.md`, `docs/manifest.txt` entry. Config dumped and cross-checked
+  `docs/manifest.txt` entry. Config dumped and cross-checked
   against the transformers reference implementation
   (`transformers/models/qwen3_omni_moe/{modular,modeling}_qwen3_omni_moe.py`,
   installed version 5.14.1) — `Qwen3OmniMoeCode2Wav.forward`/`chunked_decode`
@@ -1418,11 +1418,11 @@ irreplaceable local state despite being gitignored.
 qwenvl M-RoPE decode + generate(), submit-storm fix, the first real full
 int8 import (2026-08-08)
 
-Clears every item `.todo/remaining-work.md` tracked (#31 partially — see
+Clears every item tracked as remaining work (#31 partially — see
 below, #32, #34 partially, #35, #36, #37), plus the M17-adjacent GPU-hang
 root cause `docs/lessons.md` #37 left untracked. Each sub-item's own real
 validation gate is recorded here; the honest per-sub-item status is what
-governs `.todo/` cleanup at the end of this section, not a blanket "done."
+governs completion at the end of this section, not a blanket "done."
 
 - **GPU hang, root-caused for real (`docs/lessons.md` #38)**: two
   independent, unrelated defects, neither the zombie-VRAM theory
@@ -1446,8 +1446,8 @@ governs `.todo/` cleanup at the end of this section, not a blanket "done."
   reproducing `gpu_core::testgpu`'s own documented "~50% of runs" concurrent-
   device-creation deadlock — confirmed present on a fully clean checkout, NOT
   fixed by the bounded-wait work above (a 5s `BRAIN_GPU_WAIT_S` did not
-  resolve it, meaning the block is upstream of any fence wait). Filed as
-  `.todo/vulkan-concurrent-device-creation-hang.md`.
+  resolve it, meaning the block is upstream of any fence wait). Tracked as
+  a follow-up (the Vulkan concurrent-device-creation hang).
 
 - **#35 recurrence, found auditing this repo's OWN fix for #35
   (`docs/lessons.md` #35's new addendum)**: the original #35 fix bumped
@@ -1464,8 +1464,9 @@ governs `.todo/` cleanup at the end of this section, not a blanket "done."
   corrected); a loud `assert!(n_routed_experts <= 64, ...)` added to
   `Glm::new` for the `router_gate_sigmoid.wgsl` forward path (a real
   array-free top-k rewrite there is new kernel work, deliberately NOT
-  attempted as a second literal bump — filed as `.todo/moe-tiled-gated-
-  kernel.md`'s sibling concern, noted inline). **Mutation-verified, not just
+  attempted as a second literal bump — tracked as a sibling concern
+  alongside the tiled+gated MoE kernel follow-up, noted inline).
+  **Mutation-verified, not just
   asserted**: temporarily restoring the pre-fix `array<f32,64>` kernel and
   rerunning the new tests at n_experts=65/128 produces a real SIGSEGV (a
   hard memory-safety crash from the stack-array overrun), not merely a wrong
@@ -1533,8 +1534,8 @@ governs `.todo/` cleanup at the end of this section, not a blanket "done."
   the naive kernel's per-FLOP inefficiency at `m=64`. GLM's dense path is
   UNCHANGED; `moe_sparse_parity.rs` keeps using it as its numerical oracle,
   unaffected. The real fix (a tiled+gated expert kernel, or row compaction
-  ahead of the existing tiled GEMM) is real new kernel work, filed as
-  `.todo/moe-tiled-gated-kernel.md` — see `docs/models/glm/status.md`'s own
+  ahead of the existing tiled GEMM) is real new kernel work, tracked as a
+  follow-up — see `docs/models/glm/status.md`'s own
   "Remaining" section for the full write-up.
 
 - **#34 — register `qwenvl` as its own served model. PARTIALLY done.** 7a
@@ -1563,8 +1564,8 @@ governs `.todo/` cleanup at the end of this section, not a blanket "done."
   (needs a real design decision on per-request image placement that
   `Qwen3Vl::new` currently bakes in at construction time, plus image-
   preprocessing glue this environment's Qwen3-VL-4B weights were never
-  confirmed present to validate against). Filed as `.todo/qwenvl-caps-
-  serving.md` with the exact remaining scope.
+  confirmed present to validate against) — tracked as a follow-up with the
+  exact remaining scope.
 
 - **#35 — OpenAI/Anthropic transports in the automated e2e harness. DONE.**
   `tests/e2e/examples.bats`'s shared server now starts `--openai` alongside
@@ -1649,7 +1650,7 @@ governs `.todo/` cleanup at the end of this section, not a blanket "done."
   through — a much larger blast radius than anything else this session
   touched (which stayed inside `crates/qwen`, `crates/omni`, `crates/model`,
   `crates/checkpoint`, `crates/kernels`, none of them shared scheduling
-  code). Filed as `.todo/omni-int8-dual-gpu-residency.md` with the full
+  code). Tracked as a follow-up with the full
   three-sub-item breakdown, the recommended design (a per-device `MemCost`
   map, per the plan's own "(a) minimal honest version"), and a suggested
   build order (single-GPU int8 first, since `expert_fwd_i8` is already
@@ -1667,7 +1668,7 @@ above, not a generically broken card.
 ## M19 — "finish everything": Vulkan bug hunt, a real 7x MoE speedup,
 qwenvl fully served, multi-GPU residency's foundation (2026-08-09)
 
-Picked up all four `.todo/` follow-ups M18 filed, per an explicit "finish
+Picked up all four follow-up items M18 tracked, per an explicit "finish
 everything" instruction. Each item's real, validated disposition:
 
 - **The Vulkan "concurrent device creation hang" — root-caused for real,
@@ -1690,9 +1691,8 @@ everything" instruction. Each item's real, validated disposition:
   build, unrelated to any of the above) loses ICD visibility of a card —
   reproducible even fresh after a real `nvidia-smi -r` reset (performed
   this session, with the user's explicit approval, after the sandbox's own
-  `sudo` lacked the capability). See `.todo/vulkan-concurrent-device-
-  creation-hang.md` (status: mostly-resolved — the 3 real bugs are fixed;
-  the churn finding is recorded, not fixed).
+  `sudo` lacked the capability). Status: mostly-resolved — the 3 real bugs
+  are fixed; the churn finding is recorded, not fixed.
 - **`model::moe`'s naive sparse dispatch measured 6.51x slower than dense
   (M18) → a REAL tiled+gated path measured 7.01x FASTER.** Row-compaction
   (`model::moe::expert_fwd_compact`: gather routed rows host-side, run the
@@ -1705,8 +1705,8 @@ everything" instruction. Each item's real, validated disposition:
   re-measured `moe_migration_bench.rs` at GLM-5.2's real shape on the real
   P40. The actual `crates/glm/src/model.rs` wiring (forward AND a
   correctly-designed backward, needed together or gradcheck would
-  differentiate through stale ops) is real, separate follow-up work — see
-  `.todo/glm-model-rs-compact-moe-wiring.md`.
+  differentiate through stale ops) is real, separate follow-up work,
+  tracked separately.
 - **`qwenvl` is now a real served model, `brain/qwenvl`** (`brain caps`/
   `brain do`, `crates/qwenvl/src/caps.rs`) — real smart-resize + bilinear
   preprocessing (not the "caller pre-aligns" minimum a stale note had
@@ -1721,8 +1721,8 @@ everything" instruction. Each item's real, validated disposition:
   to ~2.5e-7 maxabs against a whole-sequence reference on real Vulkan/P40
   hardware, plus a mutation-verify test. No residency adapter yet (`brain
   caps`/`brain do` only); real-checkpoint validation still unexercised in
-  this environment. See `.todo/completed/qwenvl-caps-serving.md` and
-  `.todo/completed/qwenvl-deepstack-incremental-decode.md`.
+  this environment. Both the qwenvl caps-serving item and the DeepStack
+  incremental-decode fix tracked from M18 are now closed.
 - **Multi-GPU residency: the foundational data model landed, the
   manager-integration wiring did not.** `crates/residency/src/multi.rs`
   (new) — `MultiDeviceCost` (every device an instance touches, named with
@@ -1733,8 +1733,8 @@ everything" instruction. Each item's real, validated disposition:
   `cargo test -p brain-residency`, zero behavioural change to any existing
   single-device model). `ResidencyManager::claim`/eviction/
   `InstancePlacement` still only account ONE device per instance — wiring
-  a real `claim_multi` is the genuine remaining work, and sub-items 1/2 of
-  `.todo/omni-int8-dual-gpu-residency.md` (an int8 resident weight store,
+  a real `claim_multi` is the genuine remaining work, and the tracked
+  follow-up's sub-items 1/2 (an int8 resident weight store,
   an int8 branch in `omni::thinker`) have nothing to activate onto until it
   lands, so neither was attempted this session.
 
@@ -1750,7 +1750,7 @@ forward branch, and real cross-device residency (2026-08-09)
 
 M19's `multi.rs`/`ResidencyManager::claim_multi` foundation had nothing
 using it yet. This session built and validated all three remaining pieces
-`.todo/omni-int8-dual-gpu-residency.md` tracked, wired together end to end
+the tracked follow-up called for, wired together end to end
 on two REAL, physically separate P40s — not each piece in isolation.
 
 - **`crates/omni/src/int8_resident.rs`** (new): `ThinkerInt8Store` streams a
@@ -1791,8 +1791,7 @@ handoff change the answer" (proven: no) from "is int8 close enough to fp32"
 0.05 through a full attention+int8-MoE layer, both `layer_fwd` and
 `layer_decode_step`, on CPU and real Vulkan/P40).
 
-**Real, honestly-scoped remainder** (see `.todo/omni-int8-dual-gpu-
-residency.md`'s own closing section for the suggested pickup order — two of
+**Real, honestly-scoped remainder** (two of
 the four items below were closed the next session, M21): no real checkpoint
 exists in this environment to validate the above against (M18's own real
 import's cache is no longer present on this box); not wired into
@@ -1861,10 +1860,73 @@ caching the stale pre-assignment value) — this is exactly the shape of
 quant path's `max_abs_rows.wgsl` was the one that surfaced it). Root-caused
 via targeted kernel micro-probes and Cranelift IR inspection, fixed, and
 mutation-verified (reverting the fix reproduces the exact original
-failure). See `.todo/max-abs-row-cpu-backend-mismatch.md` for the full
-writeup — filed separately since it is a `wgsl-cpu` compiler bug, not an
+failure). Tracked separately since it is a `wgsl-cpu` compiler bug, not an
 omni-specific one, but every one of this session's CPU-backend int8 tests
 above (re-)validates it stayed fixed.
+
+## M22 — the int8 dual-GPU Thinker: reachable through `residency::Executor`
+(2026-08-09)
+
+Closes M20's last open item (`residency::Executor`'s async dispatch loop) —
+the int8 dual-GPU residency follow-up tracked since M18 is now fully
+closed.
+
+`crates/residency` gained a real, additive multi-device dispatch seam:
+`Executor::register_multi`/`evict_multi`, `Msg::{RegisterMulti, BuiltMulti,
+DoneMulti, EvictMulti}`, `RunTarget::{Single, Multi}` replacing `RunReq`'s
+single `Claimed`/`Device` pair, and busy-tracking that occupies EVERY device
+a multi-device group spans (not just its "home" lane's device) — see
+`crates/residency/src/executor.rs`'s and `multi.rs`'s own doc comments for
+the full shape. Every existing single-device `Executor`/`ResidencyManager`
+test stays green byte-for-byte (47 → 54 tests in `brain-residency`, the 7
+new ones all multi-device-specific).
+
+`Int8ThinkerResident` gained a `devices: Vec<Device>` field + `new(path, cfg,
+devices)` constructor (the previously-hardcoded `layer_ranges(2)` was inert
+under direct `ResidencyManager` calls but would have silently hung a 1-GPU
+box or wasted a card on a 3+-GPU one once `estimate_multi`'s device set
+became the actual Executor placement decision) and a `OnceLock`-memoized,
+panic-free `estimate_multi` (the dispatcher-thread contract:
+`MultiDeviceResidentModel::estimate_multi` runs on that thread every
+scheduling round, so it must be cheap and must never panic — a panic there
+kills every OTHER model on the server, not just this one). Registered in
+`crates/cli/src/resident.rs::build_executor` via
+`resident_omni::int8_thinker_multi_from_env` (env `BRAIN_OMNI_INT8_CHECKPOINT`,
+device list derived from the box's actual budgeted GPUs, never hardcoded).
+
+**Validated on real hardware** (two physical P40s, real Vulkan):
+`crates/omni/tests/int8_thinker_executor.rs` (new) — `generate` through the
+FULL `Executor` dispatcher/lane path matches a direct `activate_multi`
+reference EXACTLY (token sequence, not a tolerance); `Executor::residency()`
+reports real non-zero per-device bytes; an unrelated single-device model
+still schedules beside the resident Thinker; a second `generate` call reuses
+the hot instance (`builds == 1`). `crates/omni/tests/int8_thinker_multi_gpu.rs`
+(unchanged behaviour, now via `Int8ThinkerResident::new`) still green, 3/3.
+
+**One real bug found and fixed during this work**: the dispatcher's
+placeable FILTER was never updated to branch on `is_multi` in the first
+pass — only the CLAIM branch was — so a model registered solely via
+`register_multi` was never in `self.models`, `placeable` always returned
+`false` for it, and its jobs sat queued forever with no error. Caught by
+the first Executor-level multi-device test, fixed, mutation-verified.
+
+**One real, separate finding, tracked rather than absorbed silently**: real
+Vulkan device handles inside `Executor`'s never-joined background threads
+can intermittently SIGSEGV the TEST PROCESS at exit (every test's own
+assertions always report `ok` first — never a wrong answer, purely a
+teardown race, `nvidia-smi` shows both cards healthy throughout). Mitigated
+(drop + a bounded sleep) but not fixed in `int8_thinker_executor.rs`'s own
+module doc; the real fix (a joinable `Executor` shutdown path) remains
+tracked as a follow-up.
+
+Two more items tracked rather than lost in the closure: braintop/stats
+still can't show a multi-device resident (schema is single-device by
+construction), and the deliberate O(T²) recompute in `generate()`, now
+precisely scoped as its own follow-up.
+
+**Still open, unchanged from M20**: no real checkpoint exists in this
+environment to validate any of the above against real Qwen3-Omni weights —
+every test validates the MECHANISM on synthetic data.
 
 ## Not started
 
@@ -1878,7 +1940,7 @@ fixtures (`restore`/`flux1`/`flux2`/`controlnet`/`instantid`/`pulid` — that
 workstream's own scope, not omni's). `qwenvl` caps.rs serving wiring, the
 MoE-aware int8 resident store + int8 thinker branch + multi-GPU residency,
 a tiled+gated MoE expert kernel, and the concurrent-Vulkan-device-creation
-hang — all filed as their own `.todo/` items per M18 above, not silently
+hang — all tracked as their own follow-up items per M18 above, not silently
 dropped. `qwen::Qwen`'s KV-cache migration, the OpenAI/Anthropic
 multimodal-content-part-drop fix, M15 (NPU export), M16 (`omni_bench`
 profiling), M17 (testdata audit), and M18 (this session — GPU hangs,

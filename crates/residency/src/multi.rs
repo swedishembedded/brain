@@ -30,19 +30,24 @@
 //! # What this does NOT do yet
 //!
 //! [`pick_devices`] is a pure function, exactly like [`crate::place::
-//! pick_device`]. `crate::manager::ResidencyManager::claim_multi` (added the
-//! same session as this module) is the real integration: it reserves on
-//! every named device, evicts single-device LRU victims per-device to make
-//! room when needed, and unwinds every device's reservation on a failed
-//! `activate_multi` — see that method's own doc, and `manager.rs`'s own
-//! module doc for the ONE deliberate scope limit that integration still has
-//! (multi-device residents are not themselves auto-evicted). What is
-//! genuinely NOT wired yet: `crates/stats`' `ModelStat`/`Instance` schema is
-//! single-device by construction, so a multi-device resident does not show
-//! up in `braintop`/the stats JSON (a real schema change, not a bug); and no
-//! caller anywhere actually registers a `MultiDeviceResidentModel` yet — see
-//! `.todo/omni-int8-dual-gpu-residency.md` for the omni int8 Thinker that
-//! would be the first one.
+//! pick_device`]. `crate::manager::ResidencyManager::claim_multi` is the
+//! synchronous integration: it reserves on every named device, evicts
+//! single-device LRU victims per-device to make room when needed, and
+//! unwinds every device's reservation on a failed `activate_multi` — see
+//! that method's own doc, and `manager.rs`'s own module doc for the ONE
+//! deliberate scope limit that integration still has (multi-device
+//! residents are not themselves auto-evicted). `crate::executor::Executor`
+//! layers the ASYNC dispatcher/lane integration on top (`register_multi`,
+//! busy-tracking across every device a group spans, home-lane dispatch) —
+//! see `executor.rs`'s own module doc. What is genuinely NOT wired yet:
+//! `crates/stats`' `ModelStat`/`Instance` schema is single-device by
+//! construction, so a multi-device resident does not show up in
+//! `braintop`/the stats JSON: rendering it would need a real schema change
+//! (something like a `devices: Vec<(Device, u64)>`-shaped field), not a bug
+//! fix, and that is real, separable follow-up work, not done here. The
+//! first (and so far only) real `MultiDeviceResidentModel`: the int8
+//! dual-GPU Thinker,
+//! `crates/omni/src/int8_thinker_resident.rs`.
 
 use std::collections::HashSet;
 
@@ -122,6 +127,22 @@ pub trait MultiDeviceResidentModel: ResidentModel {
     /// The multi-device footprint for `key` — parallel to
     /// [`ResidentModel::estimate`], but naming every device this instance
     /// would occupy instead of assuming one.
+    ///
+    /// **The `Executor` dispatcher-thread contract** (does not apply to a
+    /// caller that only ever drives this through `ResidencyManager` directly,
+    /// e.g. a synchronous test — but every registered-with-`Executor` model
+    /// must honour it): once registered via `Executor::register_multi`, this
+    /// is called **on the dispatcher thread, on every scheduling round, for
+    /// every queued group of this model** (`ResidencyManager::placeable_multi`
+    /// calls it to decide whether a group can even be considered this round).
+    /// It therefore MUST be cheap — memoize the result rather than
+    /// recomputing it (e.g. re-opening a checkpoint) on every call — and MUST
+    /// NOT panic: a panic on the dispatcher thread kills the dispatcher, and
+    /// every OTHER model on the server starts returning "executor worker
+    /// gone", not just this one. Report an unavailable model (a bad
+    /// checkpoint path, a config that can't be read) by returning a cost
+    /// naming **zero devices** — `ResidencyManager::claim_multi` turns that
+    /// into a clean, per-job [`crate::manager::ClaimError::Activate`] instead.
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost;
 
     /// Build the instance across EXACTLY the devices `estimate_multi`

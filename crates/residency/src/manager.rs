@@ -34,7 +34,10 @@
 //! prefers over silently pretending full LRU parity exists. Extending
 //! `Residents` to a multi-device `Entry` (so eviction scoring can consider
 //! multi-device victims too) is real, separate follow-up work if a future
-//! caller genuinely needs it — see `.todo/omni-int8-dual-gpu-residency.md`.
+//! caller genuinely needs it — not attempted here, since the original
+//! dual-GPU residency work this integration grew out of is now closed;
+//! `crate::executor` layers the async `Executor` dispatch this module's
+//! synchronous `claim_multi` needed on top.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -151,6 +154,22 @@ pub struct ResidencyReport {
     pub budgets: Vec<DeviceBudget>,
 }
 
+/// A single-device [`MemCost`] naming `need` bytes on exactly `d`'s class
+/// (VRAM for a GPU, NPU bytes for an NPU, host RAM for the CPU) and nothing
+/// else — what [`plan_eviction_with`] needs to evaluate ONE specific device
+/// of a multi-device cost in isolation. Shared by [`ResidencyManager::
+/// claim_multi`] (which actually evicts) and [`ResidencyManager::
+/// placeable_multi`] (which only checks feasibility) so the two stay in
+/// lock-step by construction rather than by two independently-maintained
+/// `match`es.
+fn synth_cost_for(d: Device, need: u64) -> MemCost {
+    match d {
+        Device::Gpu(_) => MemCost { vram: need, ram: 0, npu: 0 },
+        Device::Npu(_) => MemCost { vram: 0, ram: 0, npu: need },
+        Device::Cpu => MemCost { vram: 0, ram: need, npu: 0 },
+    }
+}
+
 /// Total order over devices for deterministic reporting: CPU, then GPUs by index,
 /// then NPUs by index (HashMap iteration order is otherwise unstable).
 fn device_order(d: Device) -> (u8, u32) {
@@ -263,9 +282,31 @@ impl ResidencyManager {
         self.models.values().map(|m| m.manifest()).collect()
     }
 
-    /// The instance key for `(model, action, inv)`, or `None` if the model is unknown.
+    /// The instance key for `(model, action, inv)`, or `None` if the model is
+    /// unknown under EITHER registry. Falls back to `multi_models` only when
+    /// `models` doesn't have it — strictly additive: every model reachable
+    /// before this fallback existed resolves exactly as it did (the single-
+    /// device registry is always checked first), and this only adds names
+    /// that previously produced `None` here (and, downstream, the executor's
+    /// `Msg::Submit` handler's `no model 'x'` reply).
     pub fn instance_key_for(&self, model: &str, action: &str, inv: &Invocation) -> Option<InstanceKey> {
-        self.models.get(model).map(|m| m.instance_key(action, inv))
+        self.models
+            .get(model)
+            .map(|m| m.instance_key(action, inv))
+            .or_else(|| self.multi_models.get(model).map(|m| m.instance_key(action, inv)))
+    }
+
+    /// Whether `model` is registered as a [`MultiDeviceResidentModel`] — the
+    /// executor's `assign` uses this to pick between the `claim`/`placeable`
+    /// and `claim_multi`/`placeable_multi` branches for a queued group.
+    pub fn is_multi(&self, model: &str) -> bool {
+        self.multi_models.contains_key(model)
+    }
+
+    /// Number of resident multi-device instances (parallel to
+    /// [`Self::resident_count`], which only counts single-device ones).
+    pub fn resident_multi_count(&self) -> usize {
+        self.multi_residents.len()
     }
 
     /// Could `key` run **now** on a device not in `exclude`? A resident instance is
@@ -283,6 +324,64 @@ impl ResidencyManager {
         let cost = m.estimate(key);
         pick_device(&cost, &self.budgets, exclude).is_some()
             || plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
+    }
+
+    /// [`Self::placeable`]'s multi-device sibling — the executor's scheduling
+    /// filter for a [`MultiDeviceResidentModel`] group, mirroring exactly what
+    /// [`Self::claim_multi`] can achieve (direct fit OR its own per-device LRU
+    /// eviction fallback) WITHOUT mutating anything, the same relationship
+    /// `placeable`/`claim` already have.
+    ///
+    /// Returns `true` — deliberately, though it reads like the wrong answer —
+    /// when `estimate_multi` names ZERO devices. An empty cost is that
+    /// method's documented "this model is unavailable right now" signal (see
+    /// its own doc); filtering the group out HERE would mean it is never
+    /// `placeable` on any future round either (the cost won't change), so its
+    /// jobs would sit in the queue forever with no error and no explanation.
+    /// Returning `true` instead lets the group reach [`Self::claim_multi`],
+    /// which turns the same empty cost into a real, per-job
+    /// [`ClaimError::Activate`] — a clean failure instead of a silent hang.
+    pub fn placeable_multi(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
+        if let Some(e) = self.multi_residents.get(key) {
+            return e.devices.iter().all(|d| !exclude.contains(d));
+        }
+        let m = match self.multi_models.get(model) {
+            Some(m) => m,
+            None => return false,
+        };
+        let cost = m.estimate_multi(key);
+        let wanted: Vec<Device> = cost.devices().collect();
+        if wanted.is_empty() {
+            return true; // unavailable model -- see doc above
+        }
+        if pick_devices(&cost, &self.budgets, exclude).is_some() {
+            return true;
+        }
+        // Mirror claim_multi's per-device eviction fallback, read-only: every
+        // named device must independently either already fit or be evictable
+        // (single-device LRU victims on THAT device alone -- `only_d` excludes
+        // every other device so `plan_eviction_with` cannot "succeed" by
+        // picking a different card than the one actually needed).
+        let every_device: HashSet<Device> = self.budgets.devices().collect();
+        wanted.iter().all(|&d| {
+            if exclude.contains(&d) {
+                return false;
+            }
+            let need = cost.on(d);
+            let b = match self.budgets.get(d) {
+                Some(b) => b,
+                None => return false,
+            };
+            if b.usable() < need {
+                return false;
+            }
+            if b.fits(need) {
+                return true;
+            }
+            let mut only_d = every_device.clone();
+            only_d.remove(&d);
+            plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d).is_some()
+        })
     }
 
     pub fn models(&self) -> Vec<String> {
@@ -463,6 +562,19 @@ impl ResidencyManager {
             let devices = self.multi_residents.get(&key).expect("multi-resident").devices.clone();
             return Ok((ClaimedMulti::Hot(handle), devices, key));
         }
+        // A build for this key is already reserved (present in `multi_residents`,
+        // budget already allocated on every device) but not yet adopted (absent
+        // from `instances`) -- i.e. between a PRIOR `claim_multi`'s `Build` result
+        // and its caller's `adopt_multi`. Re-running the placement logic below
+        // would allocate budget a SECOND time on every device for the same
+        // instance. The `Executor` never triggers this in practice (its `running`
+        // set keeps a key out of `group_rows` for exactly this window), but
+        // `ResidencyManager` itself has no other guard against a caller that
+        // isn't protected that way, so make the double-claim impossible here
+        // rather than relying on every future caller getting it right.
+        if self.multi_residents.contains_key(&key) {
+            return Err(ClaimError::NoCapacity(format!("{key}: build already in flight")));
+        }
         let cost = m.estimate_multi(&key);
         let wanted: Vec<Device> = cost.devices().collect();
         if wanted.is_empty() {
@@ -500,12 +612,7 @@ impl ResidencyManager {
                     }
                     let mut only_d = every_device.clone();
                     only_d.remove(&d);
-                    let synth = match d {
-                        Device::Gpu(_) => MemCost { vram: need, ram: 0, npu: 0 },
-                        Device::Npu(_) => MemCost { vram: 0, ram: 0, npu: need },
-                        Device::Cpu => MemCost { vram: 0, ram: need, npu: 0 },
-                    };
-                    let plan = plan_eviction_with(&*self.eviction, &synth, &self.budgets, &self.residents, &[], &only_d)
+                    let plan = plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d)
                         .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
                     for victim in &plan.victims {
                         self.evict(victim);
@@ -556,14 +663,32 @@ impl ResidencyManager {
     /// doc explains why), so a caller that genuinely wants one gone —
     /// swapping to a different checkpoint, a shutdown path — calls this
     /// directly.
-    pub fn evict_multi(&mut self, key: &InstanceKey) {
-        if let Some(entry) = self.multi_residents.remove(key) {
-            for &d in &entry.devices {
-                self.budgets.release(d, entry.cost.on(d));
+    ///
+    /// Refuses (returns `false`, evicts nothing) while the instance is
+    /// PINNED — a lane is actively running a job against it (`claim_multi`
+    /// pins on every claim; `release_multi` unpins after). Evicting out from
+    /// under a running job would drop the `Instance` (freeing its GPU memory)
+    /// while a lane still holds a strong `Arc` to it and is mid-call — the
+    /// budget would say the memory is free while the lane is still using it,
+    /// exactly the kind of lying figure this crate's `multi` module exists to
+    /// avoid. Returns `true` if an unpinned entry was found and evicted;
+    /// `true` is also NOT returned for a key that was never resident (no-op,
+    /// same as `false`) — check separately if the caller needs to
+    /// distinguish "refused" from "nothing to evict".
+    pub fn evict_multi(&mut self, key: &InstanceKey) -> bool {
+        match self.multi_residents.get(key) {
+            None => false,
+            Some(entry) if entry.pinned => false,
+            Some(_) => {
+                let entry = self.multi_residents.remove(key).expect("checked Some above");
+                for &d in &entry.devices {
+                    self.budgets.release(d, entry.cost.on(d));
+                }
+                self.instances.remove(key);
+                self.evictions += 1;
+                self.events.push(format!("evict {key} <- {:?} (multi-device)", entry.devices));
+                true
             }
-            self.instances.remove(key);
-            self.evictions += 1;
-            self.events.push(format!("evict {key} <- {:?} (multi-device)", entry.devices));
         }
     }
 

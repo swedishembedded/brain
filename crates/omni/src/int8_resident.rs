@@ -6,8 +6,8 @@
 //! ~27.6 GiB of the ~36 GB total at the real Thinker shape), and the reason
 //! a single 24 GB P40 cannot hold the Thinker at all without quantization
 //! and cannot hold it ALONE even quantized, motivating the two-card split
-//! this module's [`crate::caps::Int8ThinkerResident`] (see that module)
-//! places across.
+//! this module's [`crate::int8_thinker_resident::Int8ThinkerResident`] (see
+//! that module) places across.
 //!
 //! **Scope, deliberately narrower than "the whole Thinker in int8"**: only
 //! the routed-expert linears (`gate`/`up`/`down`, 128 experts x 3 x 48
@@ -134,7 +134,7 @@ fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
 
 /// Real per-device byte total for `layers`' routed-expert weights, computed
 /// from the checkpoint's DECLARED shapes (`WeightReader::shape`) — no GPU,
-/// no upload, so a caller can call this for [`crate::caps::
+/// no upload, so a caller can call this for [`crate::int8_thinker_resident::
 /// Int8ThinkerResident`]'s `estimate_multi` BEFORE deciding placement,
 /// exactly the "know the cost before building" contract
 /// `residency::MultiDeviceResidentModel::estimate_multi` requires.

@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A layer-sharded, int8-MoE-expert resident Thinker spanning TWO real GPUs —
-//! the real wiring `.todo/omni-int8-dual-gpu-residency.md` asked for, built
-//! on `crates/residency/src/multi.rs`'s `MultiDeviceResidentModel`/
-//! `claim_multi` (that session's own addition) and `crate::int8_resident::
-//! ThinkerInt8Store` (this one's).
+//! the real wiring the original dual-GPU residency work asked for, built on
+//! `crates/residency/src/multi.rs`'s
+//! `MultiDeviceResidentModel`/`claim_multi` and `crate::int8_resident::
+//! ThinkerInt8Store`.
 //!
 //! **Scope, honestly bounded**: this validates the CROSS-DEVICE MECHANISM
 //! for real — real per-device `MultiDeviceCost` accounting from a real
@@ -22,18 +22,22 @@
 //! forward pass that hands the residual stream between shards via a host
 //! round-trip (`gpu_a.read` → `gpu_b.write`, negligible bytes: `n * d_model`
 //! floats per hop, `<10 KiB` at any realistic decode batch). What it still
-//! does NOT do: `embed_tokens`/`lm_head` are out of scope (this is the
-//! MoE-bearing-layers validation action, not a full `generate()` — see
-//! [`Int8ThinkerInstance::forward`]'s own doc), and `synth_layer_bufs` /
-//! `seed_for_layer` remain available (unused by `activate_multi` now) for
-//! tests that want deterministic weights without a checkpoint on disk.
+//! does NOT do: `embed_tokens`/`lm_head` are out of scope for [`Int8ThinkerInstance::forward`]
+//! specifically (that is the MoE-bearing-layers validation action, not a full
+//! `generate()` — see its own doc); [`Int8ThinkerInstance::generate`] covers
+//! them for real.
+//!
+//! Reachable through `residency::Executor` via `Executor::register_multi`
+//! (never `register` — [`Int8ThinkerResident::estimate`]/[`activate`](
+//! ResidentModel::activate) are deliberately unusable stand-ins, since a
+//! multi-device-only model has no meaningful single-device footprint; see
+//! `crates/cli/src/resident_omni.rs::int8_thinker_multi_from_env`).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::OnceLock;
 
-use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
+use capability::{ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
-use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -47,18 +51,6 @@ pub const MODEL: &str = "brain/omni-int8-thinker-multi";
 /// A contiguous layer range `[start, end)` assigned to one device.
 type LayerRange = std::ops::Range<usize>;
 
-/// A layer's synthetic (deterministic, seeded by absolute layer index)
-/// non-expert weights — kept for tests that want deterministic weights
-/// without a checkpoint on disk; [`activate_multi`](Int8ThinkerResident::
-/// activate_multi) now uses [`load_layer_bufs`], the real loader, instead
-/// (see that function's doc for why this existed in the first place).
-/// `seed_for_layer` is the ONLY thing that needs to agree between two
-/// independent builders for them to reconstruct bit-identical weights
-/// without sharing any state.
-pub fn seed_for_layer(l: usize) -> u64 {
-    100_000 + l as u64
-}
-
 pub struct LayerBufs {
     ln1: DeviceBuffer,
     wq: DeviceBuffer,
@@ -69,26 +61,6 @@ pub struct LayerBufs {
     k_norm: DeviceBuffer,
     ln2: DeviceBuffer,
     router: DeviceBuffer,
-}
-
-/// Build layer `l`'s synthetic non-expert weights on `gpu`, deterministically
-/// from `seed_for_layer(l)` — see this module's own doc.
-pub fn synth_layer_bufs(gpu: &Gpu, cfg: &MoeTextConfig, l: usize) -> LayerBufs {
-    let mut rng = Lcg::new(seed_for_layer(l));
-    let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
-    let (hq, hkv) = (nh * hd, nkv * hd);
-    let init = |rng: &mut Lcg, n: usize| gpu.storage_init("w", &rng.vec_scaled(n, 0.3));
-    LayerBufs {
-        ln1: init(&mut rng, d as usize),
-        wq: init(&mut rng, (hq * d) as usize),
-        wk: init(&mut rng, (hkv * d) as usize),
-        wv: init(&mut rng, (hkv * d) as usize),
-        wo: init(&mut rng, (d * hq) as usize),
-        q_norm: init(&mut rng, hd as usize),
-        k_norm: init(&mut rng, hd as usize),
-        ln2: init(&mut rng, d as usize),
-        router: init(&mut rng, (cfg.n_experts * d) as usize),
-    }
 }
 
 /// One tensor, real, host-resident: plain f32 if the checkpoint stored it
@@ -125,8 +97,8 @@ pub fn load_vec(reader: &WeightReader, gpu: &Gpu, name: &str) -> DeviceBuffer {
 }
 
 /// Build layer `l`'s REAL non-expert weights on `gpu`, streamed from
-/// `reader` — the real counterpart to [`synth_layer_bufs`]. Brain-native
-/// names (`omni::import::map_thinker`'s output, prefix `thinker.blocks.{l}.`
+/// `reader`. Brain-native names (`omni::import::map_thinker`'s output,
+/// prefix `thinker.blocks.{l}.`
 /// already applied by [`ThinkerLayerWeights`]'s own convention), matching
 /// exactly what `crate::int8_resident::ThinkerInt8Store::build` reads for
 /// the same layer's expert weights from the same checkpoint.
@@ -238,8 +210,10 @@ impl Int8ThinkerInstance {
     /// cache would live entirely on the ONE shard that owns that layer —
     /// not a cross-device complication, just unbuilt), not attempted here:
     /// this validates the sharded MECHANISM end-to-end with real sampling,
-    /// which is the actual gap `.todo/omni-int8-dual-gpu-residency.md`
-    /// named, not a performance claim.
+    /// not a performance claim — switching to incremental KV-cache decode
+    /// (threading `layer_decode_step`'s per-layer cache across the shard
+    /// boundary) is real, precisely-scoped follow-up work, not attempted
+    /// here.
     pub fn generate(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
         let d = self.cfg.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
@@ -326,12 +300,36 @@ impl Instance for Int8ThinkerInstance {
 pub struct Int8ThinkerResident {
     pub checkpoint_path: String,
     pub cfg: MoeTextConfig,
+    /// The device SET this instance would occupy. Through `residency::Executor`,
+    /// `estimate_multi`'s returned cost IS the placement decision —
+    /// `ResidencyManager::claim_multi` reserves on exactly these devices and
+    /// hands exactly these to `activate_multi` — so this must be supplied
+    /// explicitly rather than derived from a hardcoded device count: a
+    /// hardcoded `[Gpu(0), Gpu(1)]` would name a device with no budget on a
+    /// 1-GPU box (the claim then sits queued forever with no error — see
+    /// `ResidencyManager::placeable_multi`'s own doc on why an unplaceable
+    /// cost must not silently starve) and would waste every card past the
+    /// second on a 3+-GPU box. Set via [`Self::new`]; not `pub` so every
+    /// construction goes through it rather than a struct literal that could
+    /// forget to size `cost` correctly.
+    devices: Vec<Device>,
+    /// Memoizes `estimate_multi`. Required once this model is reachable
+    /// through `Executor`: `estimate_multi` runs on the DISPATCHER thread,
+    /// once per scheduling round, for every queued group of this model (see
+    /// `MultiDeviceResidentModel::estimate_multi`'s own doc) — it must not
+    /// re-open and re-parse a 54k-tensor checkpoint header on every call, and
+    /// must never panic there (a panic on the dispatcher thread takes every
+    /// OTHER model on the server down with it, not just this one).
+    cost: OnceLock<MultiDeviceCost>,
 }
 
 impl Int8ThinkerResident {
-    /// Contiguous layer ranges for `n_devices` shards — layer-RANGE
-    /// (never expert-split — see `.todo/omni-int8-dual-gpu-residency.md`'s
-    /// own reasoning: an expert-split cut would move a per-expert partial
+    pub fn new(checkpoint_path: String, cfg: MoeTextConfig, devices: Vec<Device>) -> Int8ThinkerResident {
+        Int8ThinkerResident { checkpoint_path, cfg, devices, cost: OnceLock::new() }
+    }
+
+    /// Contiguous layer ranges for `n_devices` shards — layer-RANGE (never
+    /// expert-split: an expert-split cut would move a per-expert partial
     /// output every layer and break `expert_fwd_i8`'s "quantize the shared
     /// input once" contract), as even as `n_layers` allows.
     fn layer_ranges(&self, n_devices: usize) -> Vec<LayerRange> {
@@ -346,6 +344,27 @@ impl Int8ThinkerResident {
             start += len;
         }
         ranges
+    }
+
+    /// `estimate_multi`'s real work, uncached — see [`Self::cost`]'s doc for
+    /// why the caller memoizes this. Returns a cost naming ZERO devices (never
+    /// panics) when `self.devices` is empty or the checkpoint can't be
+    /// opened — [`MultiDeviceResidentModel::estimate_multi`]'s documented
+    /// "this model is unavailable" signal, which `ResidencyManager::
+    /// claim_multi` turns into a clean per-job error instead of a dispatcher
+    /// crash or a silently-stuck queue.
+    fn estimate_multi_uncached(&self) -> MultiDeviceCost {
+        if self.devices.is_empty() {
+            return MultiDeviceCost::new(vec![], 0);
+        }
+        let reader = match WeightReader::open(&self.checkpoint_path) {
+            Ok(r) => r,
+            Err(_) => return MultiDeviceCost::new(vec![], 0),
+        };
+        let ranges = self.layer_ranges(self.devices.len());
+        let per_device: Vec<(Device, u64)> =
+            self.devices.iter().zip(ranges.iter()).map(|(&d, r)| (d, expert_bytes(&reader, r.clone(), &self.cfg))).collect();
+        MultiDeviceCost::new(per_device, 0)
     }
 }
 
@@ -373,14 +392,16 @@ impl ResidentModel for Int8ThinkerResident {
 
 impl MultiDeviceResidentModel for Int8ThinkerResident {
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
-        let reader = WeightReader::open(&self.checkpoint_path).unwrap_or_else(|e| panic!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path));
-        let ranges = self.layer_ranges(2);
-        let per_device: Vec<(Device, u64)> = ranges
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (Device::Gpu(i as u32), expert_bytes(&reader, r.clone(), &self.cfg)))
-            .collect();
-        MultiDeviceCost::new(per_device, 0)
+        if let Some(c) = self.cost.get() {
+            return c.clone();
+        }
+        let computed = self.estimate_multi_uncached();
+        // A losing racer's freshly-computed value is simply dropped -- every
+        // caller ends up seeing the SAME value (whichever `set` won), which is
+        // all correctness here depends on; `estimate_multi_uncached` is a pure
+        // function of `self`, so which racer wins does not matter.
+        let _ = self.cost.set(computed.clone());
+        computed
     }
 
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
@@ -408,46 +429,5 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
         let final_norm_w = load_vec(&reader, &last.gpu, "thinker.norm.weight");
         let lm_head_w = load_mat(&reader, &last.gpu, "thinker.lm_head.weight", vocab, hidden);
         Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, embed_table_host, final_norm_w, lm_head_w }))
-    }
-}
-
-/// A weights-free `Provider` wrapper so `Int8ThinkerResident` can also be
-/// listed/dispatched the ordinary `capability` way (`brain caps`/`brain do`)
-/// in addition to `residency::claim_multi` — mirrors every other model in
-/// this codebase carrying both a `Provider` (discovery/direct dispatch) and
-/// a `ResidentModel` (automatic scheduling) face over the SAME logic.
-pub struct Int8ThinkerProvider {
-    resident: Arc<Int8ThinkerResident>,
-}
-
-impl Int8ThinkerProvider {
-    pub fn new(checkpoint_path: String, cfg: MoeTextConfig) -> Int8ThinkerProvider {
-        Int8ThinkerProvider { resident: Arc::new(Int8ThinkerResident { checkpoint_path, cfg }) }
-    }
-}
-
-impl Provider for Int8ThinkerProvider {
-    fn manifest(&self) -> Manifest {
-        self.resident.manifest()
-    }
-    fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        matches!(name, "forward" | "generate").then(|| Arc::new(NotDirectlyDispatchable(name.to_string())) as Arc<dyn Action>)
-    }
-}
-
-/// `Provider::action` must return something, but this model can only run
-/// via `residency::claim_multi` (it needs two live GPU handles the plain
-/// `capability::Action::run(&self, ...)` contract has no way to hand in) —
-/// a clear, honest error instead of a `None` that would look like the
-/// action does not exist at all. Carries the requested action's name so
-/// [`Action::spec`] reports the SAME name it was looked up under (both
-/// `forward` and `generate` share this one stub).
-struct NotDirectlyDispatchable(String);
-impl Action for NotDirectlyDispatchable {
-    fn spec(&self) -> ActionSpec {
-        ActionSpec::new(&self.0, "multi-device only -- see Int8ThinkerResident's own doc")
-    }
-    fn run(&self, _inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        Err(format!("{MODEL}: this model is multi-device only -- dispatch it via residency::ResidencyManager::claim_multi, not a direct Action::run"))
     }
 }

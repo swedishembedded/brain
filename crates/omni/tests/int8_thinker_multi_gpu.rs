@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `omni::int8_thinker_resident::Int8ThinkerResident` on REAL, physically
-//! separate GPUs — proves the cross-device mechanism `.todo/omni-int8-dual-
-//! gpu-residency.md` asked for actually works: real `estimate_multi`/
+//! separate GPUs — proves the cross-device mechanism the dual-GPU residency
+//! work asked for actually works: real `estimate_multi`/
 //! `claim_multi`/`activate_multi` through `residency::ResidencyManager`,
 //! two real `Gpu` handles (`Gpu::new_on_index`, one per physical card), a
 //! real `ThinkerInt8Store` shard streamed onto each, and a real forward pass
@@ -26,117 +26,18 @@
 //! shapes), so this also exercises `load_layer_bufs`'s dequantize-on-load
 //! path, not just its plain-f32 path.
 
-use checkpoint::weightio::{Dtype, StWriter};
 use data::rng::Lcg;
-use model::int8::quantize_weight;
-use omni::config::MoeTextConfig;
 use omni::int8_resident::ThinkerInt8Store;
 use omni::int8_thinker_resident::{load_layer_bufs, weights, Int8ThinkerResident};
 use omni::thinker::{layer_fwd, thinker_pipelines};
 use residency::budget::Budgets;
 use residency::manager::ClaimedMulti;
 use residency::{Device, Instance, InstanceKey, MultiDeviceResidentModel, ResidencyManager};
-use std::collections::HashMap;
 use std::sync::Arc;
 
-fn tiny_cfg(n_layers: u32) -> MoeTextConfig {
-    MoeTextConfig {
-        n_layers,
-        hidden: 16,
-        n_heads: 2,
-        n_kv_heads: 1,
-        head_dim: 8,
-        moe_intermediate: 12,
-        shared_expert_intermediate: 0,
-        n_experts: 4,
-        top_k: 2,
-        norm_topk_prob: true,
-        use_qk_norm: true,
-        vocab: 32,
-        rope_theta: 1_000_000.0,
-        rms_norm_eps: 1e-6,
-        mrope_section: vec![2, 1, 1],
-        max_position_embeddings: 64,
-    }
-}
-
-fn expert_name(l: usize, e: usize, leaf: &str) -> String {
-    format!("thinker.blocks.{l}.mlp.experts.{e}.{leaf}.weight")
-}
-
-/// A tiny synthetic int8 checkpoint, real `omni::import` naming/dtypes for
-/// BOTH the routed-expert tensors `ThinkerInt8Store` reads AND the
-/// attention/norm/router tensors `int8_thinker_resident::load_layer_bufs`
-/// reads — everything `Int8ThinkerInstance::forward` actually needs, so the
-/// sharded and unsharded paths in this test both load from the same
-/// checkpoint via the same real loaders, not a mix of real and synthetic.
-fn write_synthetic_checkpoint(path: &str, cfg: &MoeTextConfig, seed: u64) {
-    let mut rng = Lcg::new(seed);
-    let (d, ff) = (cfg.hidden as usize, cfg.moe_intermediate as usize);
-    let (hd, nh, nkv, ne) = (cfg.head_dim as usize, cfg.n_heads as usize, cfg.n_kv_heads as usize, cfg.n_experts as usize);
-    let (hq, hkv) = (nh * hd, nkv * hd);
-    let mut plan: Vec<(String, Vec<u64>, Dtype)> = Vec::new();
-    let mut f32_by_name: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut packed_by_name: HashMap<String, (Vec<u32>, Vec<f32>)> = HashMap::new();
-
-    // omni::import::should_quantize's own rule: rank-2, last dim a multiple
-    // of 4 -- true for every 2-D tensor at this test's shapes, so every one
-    // of these ends up quantized, exactly like a real import would (this is
-    // what makes the reference path exercise `load_layer_bufs`'s dequant
-    // branch, not just its plain-f32 branch).
-    fn plan_mat(
-        rng: &mut Lcg,
-        plan: &mut Vec<(String, Vec<u64>, Dtype)>,
-        packed_by_name: &mut HashMap<String, (Vec<u32>, Vec<f32>)>,
-        name: String,
-        n: usize,
-        k: usize,
-    ) {
-        let w = rng.vec_scaled(n * k, 0.5);
-        let (packed, scale) = quantize_weight(&w, n, k);
-        plan.push((name.clone(), vec![n as u64, (k / 4) as u64], Dtype::U32));
-        plan.push((format!("{name}.scale"), vec![n as u64], Dtype::F32));
-        packed_by_name.insert(name, (packed, scale));
-    }
-    fn plan_vec(rng: &mut Lcg, plan: &mut Vec<(String, Vec<u64>, Dtype)>, f32_by_name: &mut HashMap<String, Vec<f32>>, name: String, n: usize) {
-        plan.push((name.clone(), vec![n as u64], Dtype::F32));
-        f32_by_name.insert(name, rng.vec_scaled(n, 0.5));
-    }
-
-    for l in 0..cfg.n_layers as usize {
-        for e in 0..cfg.n_experts as usize {
-            for (leaf, n, k) in [("gate", ff, d), ("up", ff, d), ("down", d, ff)] {
-                plan_mat(&mut rng, &mut plan, &mut packed_by_name, expert_name(l, e, leaf), n, k);
-            }
-        }
-        let p = |leaf: &str| format!("thinker.blocks.{l}.{leaf}");
-        plan_vec(&mut rng, &mut plan, &mut f32_by_name, p("ln1.weight"), d);
-        plan_mat(&mut rng, &mut plan, &mut packed_by_name, p("attn.wq.weight"), hq, d);
-        plan_mat(&mut rng, &mut plan, &mut packed_by_name, p("attn.wk.weight"), hkv, d);
-        plan_mat(&mut rng, &mut plan, &mut packed_by_name, p("attn.wv.weight"), hkv, d);
-        plan_mat(&mut rng, &mut plan, &mut packed_by_name, p("attn.wo.weight"), d, hq);
-        plan_vec(&mut rng, &mut plan, &mut f32_by_name, p("attn.q_norm.weight"), hd);
-        plan_vec(&mut rng, &mut plan, &mut f32_by_name, p("attn.k_norm.weight"), hd);
-        plan_vec(&mut rng, &mut plan, &mut f32_by_name, p("ln2.weight"), d);
-        plan_mat(&mut rng, &mut plan, &mut packed_by_name, p("mlp.router.weight"), ne, d);
-    }
-    let vocab = cfg.vocab as usize;
-    plan_mat(&mut rng, &mut plan, &mut packed_by_name, "thinker.embed_tokens.weight".to_string(), vocab, d);
-    plan_vec(&mut rng, &mut plan, &mut f32_by_name, "thinker.norm.weight".to_string(), d);
-    plan_mat(&mut rng, &mut plan, &mut packed_by_name, "thinker.lm_head.weight".to_string(), vocab, d);
-
-    let mut writer = StWriter::create_mixed(path, &plan, &serde_json::Value::Null, None).expect("create synthetic checkpoint");
-    for (name, _, dtype) in &plan {
-        if let Some(base) = name.strip_suffix(".scale") {
-            writer.write(name, &packed_by_name[base].1).expect("write scale");
-        } else if *dtype == Dtype::U32 {
-            writer.write_u32(name, &packed_by_name[name].0).expect("write packed");
-        } else {
-            writer.write(name, &f32_by_name[name]).expect("write f32");
-        }
-    }
-    writer.finish().expect("finish synthetic checkpoint");
-}
+#[path = "common/int8_thinker_fixture.rs"]
+mod fixture;
+use fixture::{tiny_cfg, write_synthetic_checkpoint};
 
 #[test]
 fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
@@ -158,7 +59,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let mut mgr = ResidencyManager::new(budgets);
-    let resident = Arc::new(Int8ThinkerResident { checkpoint_path: path.to_str().unwrap().to_string(), cfg: cfg.clone() });
+    let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]));
     mgr.register_multi(resident);
 
     let (claimed, devices, key) = mgr.claim_multi(omni::int8_thinker_resident::MODEL, "forward", &capability::Invocation::new(), &Default::default()).expect("claim_multi");
@@ -234,7 +135,7 @@ fn sharded_generate_matches_unsharded_generate() {
     let path = dir.join("thinker.safetensors");
     write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, 777777);
 
-    let resident = Int8ThinkerResident { checkpoint_path: path.to_str().unwrap().to_string(), cfg: cfg.clone() };
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
 
     let prompt_ids: Vec<u32> = vec![2, 9, 4];
@@ -293,7 +194,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
     let path = dir.join("thinker.safetensors");
     write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, 313131);
 
-    let resident = Int8ThinkerResident { checkpoint_path: path.to_str().unwrap().to_string(), cfg: cfg.clone() };
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0)]);
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
     let prompt_ids: Vec<u32> = vec![3, 7, 1];
 
@@ -320,7 +221,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
         x_host.extend_from_slice(&embed_table[t as usize * d..(t as usize + 1) * d]);
     }
 
-    let resident2 = Int8ThinkerResident { checkpoint_path: path.to_str().unwrap().to_string(), cfg: cfg.clone() };
+    let resident2 = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0)]);
     let mut instance2 = resident2.activate_multi(&key, &[Device::Gpu(0)]).expect("activate_multi (reference)");
     let bytes2: Vec<u8> = x_host.iter().flat_map(|f| f.to_le_bytes()).collect();
     let inv2 = capability::Invocation::new().blob("x", capability::Blob::new(capability::Media::Bytes, bytes2).with_meta(serde_json::json!({"n": prompt_ids.len() as u32})));

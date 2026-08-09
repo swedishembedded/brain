@@ -23,9 +23,9 @@ use std::time::Instant;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
-use crate::manager::{ClaimError, Claimed, InstanceHandle};
+use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
-use crate::{Device, InstanceKey, ResidencyManager, ResidentModel};
+use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
 
 /// One unit of work. `on_progress`/`reply`/`on_admit` are callbacks (no async
 /// dependency here). Build with [`Job::new`] + the `.on_*`/`.reply` setters so new
@@ -111,8 +111,15 @@ pub struct Stats {
     pub jobs: u64,
     pub max_batch: usize,
     pub resident: usize,
+    /// Resident MULTI-DEVICE instances (parallel to `resident`, which only
+    /// counts single-device ones — an instance is never counted in both).
+    pub resident_multi: usize,
     pub queue_peak: usize,
-    /// Deepest observed number of lanes running at once (device-level parallelism).
+    /// Deepest observed number of DEVICES occupied at once — for a pure
+    /// single-device workload this is identical to "lanes running at once"
+    /// (the reading this field used to have exclusively); a multi-device
+    /// group occupies every device it spans, so it can raise this count while
+    /// only one lane is actually executing.
     pub max_parallel: usize,
     /// Cumulative count of jobs admitted onto a lane (claimed a device, `on_admit`
     /// fired) — as distinct from `jobs`, which only counts a job once ITS group's
@@ -142,8 +149,20 @@ enum Msg {
     /// registration immediately even though scheduling eligibility lands
     /// here, one hop later, on the dispatcher thread.
     Register(Arc<dyn ResidentModel>),
+    /// [`Msg::Register`]'s multi-device sibling — see
+    /// [`Executor::register_multi`].
+    RegisterMulti(Arc<dyn MultiDeviceResidentModel>),
     Built { key: InstanceKey, handle: InstanceHandle },
+    /// [`Msg::Built`]'s multi-device sibling. A SEPARATE variant (rather than
+    /// reusing `Built`) purely so `ResidencyManager::adopt_multi` runs instead
+    /// of `adopt` — the audit log then says "built ... (multi-device)", not a
+    /// false single-device event.
+    BuiltMulti { key: InstanceKey, handle: InstanceHandle },
     Done { key: InstanceKey, device: Device, batch: usize, failed: bool },
+    /// [`Msg::Done`]'s multi-device sibling — `devices` is every device the
+    /// group occupied (in the same order `estimate_multi` named them), all of
+    /// which must be freed from `busy` here.
+    DoneMulti { key: InstanceKey, devices: Vec<Device>, batch: usize, failed: bool },
     /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
     /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
     /// exposed, but read straight from the manager rather than the counters.
@@ -152,19 +171,30 @@ enum Msg {
     /// currently queued OR running. Handled like [`Msg::Report`] — read from the
     /// dispatcher's own live queue + running set, so it is scheduling-consistent.
     InFlight(Sender<Vec<InFlightJob>>),
+    /// Demote a resident multi-device instance — see [`Executor::evict_multi`].
+    EvictMulti { key: InstanceKey, reply: Sender<bool> },
 }
 
-/// A group of same-key jobs handed to a device lane to run. `work` is either a
-/// hot handle or a deferred build the LANE performs — activation (weight load,
-/// NPU graph compile) can take seconds or hang, and on the dispatcher thread
-/// that froze every model on the server; on the lane it can only stall its own
-/// device.
+/// What a [`RunReq`] runs — either a single-device claim (today's shape,
+/// unchanged) or a multi-device one spanning several devices at once. Kept as
+/// an enum (not two `Option` fields) so a `RunReq` can never claim to be both
+/// or neither.
+enum RunTarget {
+    Single { work: Claimed, device: Device },
+    Multi { work: ClaimedMulti, devices: Vec<Device> },
+}
+
+/// A group of same-key jobs handed to a device lane to run. `target` is
+/// either a hot handle or a deferred build the LANE performs — activation
+/// (weight load, NPU graph compile) can take seconds or hang, and on the
+/// dispatcher thread that froze every model on the server; on the lane it can
+/// only stall its own device (or, for a multi-device target, its own HOME
+/// lane — see `assign`'s doc on how that is chosen).
 struct RunReq {
-    work: Claimed,
+    target: RunTarget,
     action: String,
     jobs: Vec<Pending>,
     key: InstanceKey,
-    device: Device,
 }
 
 /// Cheap-to-clone submission handle (many front-ends can submit concurrently).
@@ -226,6 +256,40 @@ impl Executor {
         let manifest = model.manifest();
         self.manifests.write().unwrap().push(manifest);
         let _ = self.tx.send(Msg::Register(model));
+    }
+
+    /// [`Self::register`]'s multi-device sibling — registers a
+    /// [`MultiDeviceResidentModel`] (e.g. a checkpoint layer-sharded across
+    /// several GPUs, too large for any one of them alone). Register a model
+    /// ONLY this way, never also via [`Self::register`]: a model whose plain
+    /// [`ResidentModel::estimate`] reports a zero/placeholder cost (as a
+    /// multi-device-only model's does, by necessity — it has no meaningful
+    /// single-device footprint) would otherwise be reachable through the
+    /// ordinary single-device claim path too, where a zero cost is placed on
+    /// the CPU lane and its `activate` — which such a model correctly hard-
+    /// errors on, since it can only run via `activate_multi` — fails every
+    /// time. Keeping it out of the single-device registry makes that path
+    /// structurally unreachable rather than relying on every caller to know
+    /// not to take it.
+    pub fn register_multi(&self, model: Arc<dyn MultiDeviceResidentModel>) {
+        let manifest = model.manifest();
+        self.manifests.write().unwrap().push(manifest);
+        let _ = self.tx.send(Msg::RegisterMulti(model));
+    }
+
+    /// Demote (drop) a resident multi-device instance, freeing its memory on
+    /// every device it occupies. Returns `false` (refuses, evicts nothing)
+    /// while a job is actively running against it, or if it isn't resident at
+    /// all — see [`crate::manager::ResidencyManager::evict_multi`]'s doc for
+    /// why pinned refuses rather than evicting out from under a running lane.
+    /// Round-trips through the dispatcher like [`Self::residency`]/
+    /// [`Self::in_flight`]; returns `false` if the dispatcher is gone.
+    pub fn evict_multi(&self, key: InstanceKey) -> bool {
+        let (tx, rx) = channel();
+        if self.tx.send(Msg::EvictMulti { key, reply: tx }).is_err() {
+            return false;
+        }
+        rx.recv().unwrap_or(false)
     }
 
     /// Submit and block for the result (the CLI's synchronous path).
@@ -333,8 +397,14 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         Msg::Register(model) => {
             mgr.register(model);
         }
+        Msg::RegisterMulti(model) => {
+            mgr.register_multi(model);
+        }
         Msg::Built { key, handle } => {
             mgr.adopt(&key, handle);
+        }
+        Msg::BuiltMulti { key, handle } => {
+            mgr.adopt_multi(&key, handle);
         }
         Msg::Report(tx) => {
             let _ = tx.send(mgr.report());
@@ -380,6 +450,34 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             s.evictions = mgr.evictions;
             s.resident = mgr.resident_count();
         }
+        Msg::DoneMulti { key, devices, batch, failed } => {
+            if failed {
+                mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
+            } else {
+                mgr.release_multi(&key);
+            }
+            running.remove(&key);
+            running_jobs.retain(|r| r.key != key);
+            for d in devices {
+                busy.remove(&d);
+            }
+            let mut s = stats.lock().unwrap();
+            s.batches += 1;
+            s.jobs += batch as u64;
+            s.max_batch = s.max_batch.max(batch);
+            s.builds = mgr.builds;
+            s.evictions = mgr.evictions;
+            s.resident = mgr.resident_count();
+            s.resident_multi = mgr.resident_multi_count();
+        }
+        Msg::EvictMulti { key, reply } => {
+            let ok = mgr.evict_multi(&key);
+            if let Ok(mut s) = stats.lock() {
+                s.evictions = mgr.evictions;
+                s.resident_multi = mgr.resident_multi_count();
+            }
+            let _ = reply.send(ok);
+        }
     }
 }
 
@@ -391,9 +489,13 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // non-busy device (the scheduler policy then picks among them).
         let now = Instant::now();
         let rows = group_rows(queue, now, running);
+        // Multi-device groups need `placeable_multi` (checks EVERY named device),
+        // never plain `placeable` — a model registered ONLY via `register_multi`
+        // is never in `self.models` at all, so `placeable` would always return
+        // `false` for it and its jobs would sit in the queue forever, silently.
         let placeable: Vec<Group> = rows
             .iter()
-            .filter(|r| mgr.placeable(&r.key, &r.model, busy))
+            .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, busy) } else { mgr.placeable(&r.key, &r.model, busy) })
             .map(|r| r.summary.clone())
             .collect();
         let (gid, batch) = match choose_next(&placeable, policy) {
@@ -408,14 +510,24 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let chosen = gid; // == the row index in `rows`
         let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
 
-        // Claim (promote/evict, pin) on a non-busy device.
+        // Claim (promote/evict, pin) on non-busy device(s). Multi-device models
+        // (registered via `register_multi`, never also via `register` — see
+        // `Executor::register_multi`'s doc) go through `claim_multi` instead of
+        // `claim`; both `ClaimError` variants mean the same thing either way, so
+        // the handling below is shared.
         let first = queue.iter().find(|p| p.key == key && p.action == action).map(|p| p.inv.clone());
         let inv = match first {
             Some(i) => i,
             None => break,
         };
-        let (work, device, ckey) = match mgr.claim(&model, &action, &inv, busy) {
-            Ok(c) => c,
+        let is_multi = mgr.is_multi(&model);
+        let claim_result = if is_multi {
+            mgr.claim_multi(&model, &action, &inv, busy).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
+        } else {
+            mgr.claim(&model, &action, &inv, busy).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
+        };
+        let (outcome, ckey) = match claim_result {
+            Ok(x) => x,
             Err(ClaimError::NoCapacity(_)) => break, // wait for a lane to free a device
             Err(ClaimError::Activate(e)) => {
                 // Permanent for this group: FAIL its queued jobs now and keep
@@ -435,8 +547,53 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
                 continue;
             }
         };
+
+        // The HOME lane a multi-device group runs its ONE lane loop on: the
+        // first device `estimate_multi` named (`pick_devices` preserves
+        // declaration order). `busy` still gets every device the group
+        // occupies below — the home lane only decides which thread runs
+        // `run_group`, not which devices are considered occupied.
+        let home: Device = match &outcome {
+            ClaimOutcome::Single(_, device) => *device,
+            ClaimOutcome::Multi(_, devices) => devices[0],
+        };
+        // Structurally shouldn't happen (`pick_device`/`pick_devices` only ever
+        // name budgeted devices, and `Executor::start` spawns one lane per
+        // budgeted device) — but a missing lane must fail this group's jobs
+        // cleanly, never panic the one thread every model depends on.
+        if !lanes.contains_key(&home) {
+            match outcome {
+                ClaimOutcome::Single(Claimed::Hot(_), _) => mgr.release(&ckey),
+                ClaimOutcome::Single(Claimed::Build(_), _) => mgr.build_failed(&ckey),
+                ClaimOutcome::Multi(ClaimedMulti::Hot(_), _) => mgr.release_multi(&ckey),
+                ClaimOutcome::Multi(ClaimedMulti::Build(_), _) => mgr.build_failed_multi(&ckey),
+            }
+            let msg = format!("{model}/{action}: no lane for device {home:?}");
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].key == key && queue[i].action == action {
+                    let p = queue.remove(i);
+                    (p.reply)(Err(msg.clone()));
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
         running.insert(ckey.clone());
-        busy.insert(device);
+        let target = match outcome {
+            ClaimOutcome::Single(work, device) => {
+                busy.insert(device);
+                RunTarget::Single { work, device }
+            }
+            ClaimOutcome::Multi(work, devices) => {
+                for &d in &devices {
+                    busy.insert(d);
+                }
+                RunTarget::Multi { work, devices }
+            }
+        };
 
         // Pull the group's oldest `batch` jobs.
         let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| p.key == ckey && p.action == action).map(|(i, _)| i).collect();
@@ -466,13 +623,23 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             s.builds = mgr.builds;
             s.evictions = mgr.evictions;
             s.resident = mgr.resident_count();
+            s.resident_multi = mgr.resident_multi_count();
             s.max_parallel = s.max_parallel.max(busy.len());
             s.admitted += jobs.len() as u64;
             s.queue_depth = queue.len();
         }
-        // Hand to the device's lane (which builds the instance first when cold).
-        let _ = lanes[&device].send(RunReq { work, action, jobs, key: ckey, device });
+        // Hand to the home lane (which builds the instance first when cold).
+        let _ = lanes[&home].send(RunReq { target, action, jobs, key: ckey });
     }
+}
+
+/// The two shapes [`ResidencyManager::claim`]/[`ResidencyManager::claim_multi`]
+/// can hand back, unified so `assign`'s post-claim tail (pull jobs, fire
+/// `on_admit`, track `running_jobs`, sync stats, pick the lane) runs ONCE
+/// instead of being duplicated per shape.
+enum ClaimOutcome {
+    Single(Claimed, Device),
+    Multi(ClaimedMulti, Vec<Device>),
 }
 
 struct GroupRow {
@@ -509,33 +676,71 @@ fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -
 
 // ---------------------------------------------------------------- lane
 
+/// What a [`lane_loop`] iteration ran, carried alongside the handle out of
+/// the big match below purely so the FINAL `Done`/`DoneMulti` send (after
+/// `run_group`) knows which shape to send without re-deriving it from
+/// anything guessable (e.g. `devices.len() == 1`, which a genuine
+/// single-device multi-device instance would make ambiguous).
+enum Ran {
+    Single(Device),
+    Multi(Vec<Device>),
+}
+
 fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
     while let Ok(req) = rx.recv() {
         let batch = req.jobs.len();
-        let handle = match req.work {
-            Claimed::Hot(h) => h,
+        let RunReq { target, action, jobs, key } = req;
+        let (handle, ran): (InstanceHandle, Ran) = match target {
+            RunTarget::Single { work: Claimed::Hot(h), device } => (h, Ran::Single(device)),
             // Deferred activation happens HERE, on the device's own lane: a slow
             // or wedged build stalls this device only, never the dispatcher.
-            Claimed::Build(m) => match m.activate(&req.key, req.device) {
+            RunTarget::Single { work: Claimed::Build(m), device } => match m.activate(&key, device) {
                 Ok(inst) => {
                     let h: InstanceHandle = Arc::new(Mutex::new(inst));
-                    let _ = done.send(Msg::Built { key: req.key.clone(), handle: h.clone() });
-                    h
+                    let _ = done.send(Msg::Built { key: key.clone(), handle: h.clone() });
+                    (h, Ran::Single(device))
                 }
                 Err(e) => {
                     // Activation failed: every job in the group gets the error
                     // (never silence), and the dispatcher unwinds the claim.
-                    let msg = format!("activate {}: {e}", req.key);
-                    for p in req.jobs {
+                    let msg = format!("activate {key}: {e}");
+                    for p in jobs {
                         (p.reply)(Err(msg.clone()));
                     }
-                    let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: true });
+                    let _ = done.send(Msg::Done { key, device, batch, failed: true });
+                    continue;
+                }
+            },
+            RunTarget::Multi { work: ClaimedMulti::Hot(h), devices } => (h, Ran::Multi(devices)),
+            // Same deferred-to-the-lane discipline as the single-device case
+            // above, and more load-bearing here: a multi-device weight stream
+            // (tens of GiB across several GPUs) is exactly the "can take
+            // seconds" case that rule exists for.
+            RunTarget::Multi { work: ClaimedMulti::Build(m), devices } => match m.activate_multi(&key, &devices) {
+                Ok(inst) => {
+                    let h: InstanceHandle = Arc::new(Mutex::new(inst));
+                    let _ = done.send(Msg::BuiltMulti { key: key.clone(), handle: h.clone() });
+                    (h, Ran::Multi(devices))
+                }
+                Err(e) => {
+                    let msg = format!("activate_multi {key}: {e}");
+                    for p in jobs {
+                        (p.reply)(Err(msg.clone()));
+                    }
+                    let _ = done.send(Msg::DoneMulti { key, devices, batch, failed: true });
                     continue;
                 }
             },
         };
-        run_group(&handle, &req.action, req.jobs);
-        let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: false });
+        // `run_group` is one implementation shared by both shapes above — a
+        // multi-device instance is just an `Instance` whose forward happens to
+        // span devices internally; nothing here needs to know that.
+        run_group(&handle, &action, jobs);
+        let done_msg = match ran {
+            Ran::Single(device) => Msg::Done { key, device, batch, failed: false },
+            Ran::Multi(devices) => Msg::DoneMulti { key, devices, batch, failed: false },
+        };
+        let _ = done.send(done_msg);
     }
 }
 
@@ -574,7 +779,7 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>) {
 mod tests {
     use super::*;
     use crate::budget::Budgets;
-    use crate::{Instance, MemCost};
+    use crate::{Instance, MemCost, MultiDeviceCost};
     use capability::{ActionResult, ActionSpec, Blob, Manifest, Media, Outcome};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
@@ -999,5 +1204,333 @@ mod tests {
         let elapsed = submit_wait(&exec, &["late"]);
         assert!(elapsed < Duration::from_secs(2), "registered model never ran in time: {elapsed:?}");
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    // ------------------------------------------------------------ multi-device
+
+    /// A fake model spanning BOTH gpu0 and gpu1 at once — the `Executor`-level
+    /// twin of `manager.rs`'s `MultiFake`, driven through the FULL dispatcher +
+    /// lane machinery instead of `ResidencyManager` directly. Its plain
+    /// `ResidentModel::estimate`/`activate` are deliberately unusable (zero
+    /// cost, hard error) — exactly `Int8ThinkerResident`'s real shape — so any
+    /// test that succeeds here proves the model ran via `claim_multi`, never
+    /// `claim`.
+    struct MultiFake {
+        name: String,
+        per_gpu: u64,
+        live: Arc<AtomicU32>,
+    }
+    struct MultiFakeInst {
+        live: Arc<AtomicU32>,
+    }
+    impl Drop for MultiFakeInst {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl ResidentModel for MultiFake {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "fake multi", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0) // never consulted -- registered ONLY via register_multi
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Err("MultiFake: single-device activate is not this model's contract".to_string())
+        }
+    }
+    impl MultiDeviceResidentModel for MultiFake {
+        fn estimate_multi(&self, _k: &InstanceKey) -> MultiDeviceCost {
+            MultiDeviceCost::new(vec![(Device::Gpu(0), self.per_gpu), (Device::Gpu(1), self.per_gpu)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+            assert_eq!(devices, [Device::Gpu(0), Device::Gpu(1)], "activate_multi must see exactly the devices estimate_multi named");
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(MultiFakeInst { live: self.live.clone() }))
+        }
+    }
+    impl Instance for MultiFakeInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+        }
+    }
+
+    #[test]
+    fn multi_device_model_runs_through_the_executor_and_occupies_every_device() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 15 * GB, live: live.clone() }));
+
+        let r = exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {});
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+
+        let report = exec.residency();
+        assert_eq!(report.multi_placements.len(), 1);
+        assert!(report.placements.is_empty(), "a multi-device instance must not also appear in the single-device placements list");
+        let mut devs = report.multi_placements[0].devices.clone();
+        devs.sort_by_key(|&(d, _)| match d {
+            Device::Gpu(i) => i,
+            _ => u32::MAX,
+        });
+        assert_eq!(devs, vec![(Device::Gpu(0), 15 * GB), (Device::Gpu(1), 15 * GB)]);
+        let gpu0 = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu0 budget");
+        let gpu1 = report.budgets.iter().find(|b| b.device == Device::Gpu(1)).expect("gpu1 budget");
+        assert!(gpu0.used >= 15 * GB, "gpu0.used={}", gpu0.used);
+        assert!(gpu1.used >= 15 * GB, "gpu1.used={}", gpu1.used);
+    }
+
+    /// A multi-only model (zero-cost `estimate`, hard-erroring `activate`) must
+    /// run via `claim_multi` even when a CPU budget is ALSO present — the case
+    /// that would silently break if `register_multi` ever also called
+    /// `register` (a zero-cost model's PLAIN `estimate` places it on the CPU
+    /// lane preferentially, per `place::pick_device`'s zero-cost branch, where
+    /// `MultiFake::activate` deliberately errors).
+    #[test]
+    fn a_multi_only_model_is_never_claimed_on_the_single_device_path() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0).set(Device::Cpu, 128 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live: live.clone() }));
+        let r = exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {});
+        assert!(r.is_ok(), "must run via claim_multi, not land on the CPU lane's single-device activate: {r:?}");
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_hot_multi_device_instance_is_reused_not_rebuilt() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live: live.clone() }));
+        assert!(exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {}).is_ok());
+        assert!(exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {}).is_ok());
+        assert_eq!(exec.stats().builds, 1, "second run must reuse the hot instance, not rebuild");
+        assert_eq!(exec.stats().resident_multi, 1);
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_unknown_model_name_still_replies_no_model_even_with_multi_models_registered() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live }));
+        assert!(exec.run_blocking("totally-unknown", "run", Invocation::new(), |_| {}).is_err());
+    }
+
+    /// A model whose `activate_multi` always fails.
+    struct MultiBadActivate;
+    impl ResidentModel for MultiBadActivate {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("badmulti", "always fails multi activate", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("badmulti", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Err("not this model's contract".to_string())
+        }
+    }
+    impl MultiDeviceResidentModel for MultiBadActivate {
+        fn estimate_multi(&self, _k: &InstanceKey) -> MultiDeviceCost {
+            MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(1), 1 * GB)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+            Err("checkpoint not found: /nope-multi.safetensors".to_string())
+        }
+    }
+
+    /// Mirrors `activation_failure_replies_errors_and_does_not_wedge_the_executor`
+    /// for the multi-device path: every queued job gets the error, BOTH
+    /// devices' budgets are unwound (not just one — this is what distinguishes
+    /// `build_failed_multi` from `build_failed`), and the executor stays alive.
+    #[test]
+    fn multi_device_activation_failure_replies_errors_and_unwinds_both_budgets() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiBadActivate));
+
+        let (tx, rx) = channel();
+        for _ in 0..3 {
+            let tx = tx.clone();
+            exec.submit(Job::new("badmulti", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
+        }
+        for _ in 0..3 {
+            let r = rx.recv_timeout(Duration::from_secs(5)).expect("reply must arrive, not hang");
+            let e = r.expect_err("activation failure must surface");
+            assert!(e.contains("checkpoint not found"), "err: {e}");
+        }
+
+        let report = exec.residency();
+        assert!(report.multi_placements.is_empty(), "failed multi-device claim must leave nothing resident");
+        let gpu0 = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu0 budget");
+        let gpu1 = report.budgets.iter().find(|b| b.device == Device::Gpu(1)).expect("gpu1 budget");
+        assert_eq!(gpu0.used, 0, "budget must be unwound on EVERY device, not just one");
+        assert_eq!(gpu1.used, 0, "budget must be unwound on EVERY device, not just one");
+
+        // the executor is still alive: an ordinary model runs fine afterwards
+        exec.register(Arc::new(Slow { name: "good".into(), vram: GB, ms: 5, builds: Arc::new(AtomicU32::new(0)) }));
+        assert!(exec.run_blocking("good", "run", Invocation::new(), |_| {}).is_ok());
+    }
+
+    /// A multi-device model whose `run` blocks until a shared gate is
+    /// released — the multi-device twin of `Gated`/`GatedInst`, so a job can
+    /// be held mid-flight while the test inspects `busy`/`in_flight`.
+    struct MultiGated {
+        name: String,
+        per_gpu: u64,
+        entered: Arc<AtomicU32>,
+        release: Arc<AtomicBool>,
+    }
+    struct MultiGatedInst {
+        entered: Arc<AtomicU32>,
+        release: Arc<AtomicBool>,
+    }
+    impl ResidentModel for MultiGated {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "gated multi", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Err("MultiGated: single-device activate is not this model's contract".to_string())
+        }
+    }
+    impl MultiDeviceResidentModel for MultiGated {
+        fn estimate_multi(&self, _k: &InstanceKey) -> MultiDeviceCost {
+            MultiDeviceCost::new(vec![(Device::Gpu(0), self.per_gpu), (Device::Gpu(1), self.per_gpu)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(MultiGatedInst { entered: self.entered.clone(), release: self.release.clone() }))
+        }
+    }
+    impl Instance for MultiGatedInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let start = Instant::now();
+            while !self.release.load(Ordering::SeqCst) {
+                if start.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+        }
+    }
+
+    /// THE busy-tracking test: while a multi-device group genuinely holds
+    /// BOTH gpu0 and gpu1, a single-device model that would otherwise fit
+    /// trivially (1 GB on a 24 GB card) must not even be CLAIMED, let alone
+    /// run — proving `busy` really gained every device the group claimed, not
+    /// just its home lane's device.
+    ///
+    /// Uses a SECOND `Gated` instance (not `Slow`) for the single-device job
+    /// so the check is deterministic rather than a timing race: if `busy`
+    /// only tracked the home device (the bug this pins), the single-device
+    /// job would be claimed onto the OTHER, still-idle card and its own
+    /// `entered2` counter would flip within microseconds — polling
+    /// `exec.in_flight()` for a `"queued"` snapshot cannot reliably observe
+    /// that (a fast wrongly-scheduled job can start AND finish inside one
+    /// poll interval, so the racy version of this test silently passed
+    /// against the very bug it was written to catch — confirmed once by
+    /// deliberately reintroducing that bug and rerunning this exact test).
+    /// Blocking `single` on its own gate makes a wrongly-early start
+    /// observable no matter how fast the dispatcher reacts.
+    #[test]
+    fn a_running_multi_device_group_makes_every_device_it_uses_busy() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let entered = Arc::new(AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let entered2 = Arc::new(AtomicU32::new(0));
+        let release2 = Arc::new(AtomicBool::new(false));
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiGated { name: "thinker".into(), per_gpu: 1 * GB, entered: entered.clone(), release: release.clone() }));
+        exec.register(Arc::new(Gated { name: "single".into(), vram: 1 * GB, entered: entered2.clone(), release: release2.clone() }));
+
+        let (tx, rx) = channel();
+        exec.submit(Job::new("thinker", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "gated multi-device run never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let (stx, srx) = channel();
+        exec.submit(Job::new("single", "run", Invocation::new()).reply(move |r| { let _ = stx.send(r); }));
+
+        // Deterministic negative check over a generous window (in-process
+        // scheduling reacts in microseconds either way, so 300ms is ample
+        // margin, not a tight race): `single` must never enter while `thinker`
+        // still holds both cards.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(300) {
+            assert_eq!(entered2.load(Ordering::SeqCst), 0, "single-device job started while both cards are held by the multi-device group");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let single_job = exec.in_flight().into_iter().find(|j| j.model == "single").expect("single job still in flight");
+        assert_eq!(single_job.phase, "queued");
+
+        release.store(true, Ordering::SeqCst);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+        release2.store(true, Ordering::SeqCst);
+        assert!(srx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn evict_multi_frees_every_device_and_refuses_while_pinned() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let entered = Arc::new(AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiGated { name: "thinker".into(), per_gpu: 5 * GB, entered: entered.clone(), release: release.clone() }));
+
+        let (tx, rx) = channel();
+        exec.submit(Job::new("thinker", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "gated run never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let report = exec.residency();
+        let key = report.multi_placements[0].key.clone();
+        assert!(!exec.evict_multi(key.clone()), "must refuse to evict a PINNED (actively running) instance");
+
+        release.store(true, Ordering::SeqCst);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+
+        // Poll until the group's Done has actually landed (unpinned) before
+        // expecting a real eviction to succeed.
+        let start = Instant::now();
+        loop {
+            if exec.evict_multi(key.clone()) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "evict_multi never succeeded once unpinned");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let report = exec.residency();
+        assert!(report.multi_placements.is_empty());
+        let gpu0 = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu0 budget");
+        assert_eq!(gpu0.used, 0);
     }
 }
