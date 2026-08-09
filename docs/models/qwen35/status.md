@@ -181,10 +181,55 @@ fetching an already-quantized GGUF directly.
   between the GPU and CPU-JIT backends (integer accumulation); measured
   tolerance at tiny synthetic shapes: cosine 0.998–0.999, rel-L2 4.8–5.8%.
 
+- **P8 — forward pass, TEXT ONLY** (`crates/qwen35/src/model.rs`,
+  `crates/qwen35/src/init.rs`): assembles this session's already-verified
+  primitives (`model::gdn`, `model::moe`, `model::block`'s GQA/
+  `rope2d_partial`) into the full 40-layer hybrid decoder — no new math
+  derived here, pure wiring, following GLM's per-layer-enum/SSA-cache
+  precedent (with the enum axis inverted: GDN-vs-GQA on the attention
+  sublayer, MoE universal every layer, opposite of GLM's dense-vs-MoE MLP
+  axis). Two new small kernels: `gdn_decay_gate.wgsl` (the decay gate,
+  numerically-stable `softplus`) and `gdn_layout_permute.wgsl` (the
+  token-major ↔ chunk-major permute at the GDN layer boundary — a genuine
+  5-index permute neither existing layout kernel covers; its flat-index
+  arithmetic checked by hand against `model::gdn`'s own documented
+  convention). Everything else reuses existing kernels, notably
+  `concat_split.wgsl` for both the GDN qkv split (whole-row) and the GQA
+  q_proj value/gate split (per-head interleaved, confirmed against the real
+  reference's `torch.chunk(...,dim=-1)` semantics).
+
+  **Resolved empirically, not by guessing**: the reference's
+  `Qwen3_5MoeRMSNorm` computes `output*(1+weight)` with `weight`
+  zero-initialized — but reading real F32 norm-weight tensors directly out
+  of the (by then fully downloaded) real GGUF checkpoint
+  (`blk.{0,1}.attn_norm.weight`, `output_norm.weight`) shows them centered
+  around 1.0–2.6, not 0.0 — confirming llama.cpp's GGUF conversion already
+  bakes the `+1` in. This engine's shared `rmsnorm.wgsl` (plain multiply,
+  used by every model) is therefore exactly correct for our GGUF import
+  path as-is, no fix needed. Recorded here so it is never "corrected" later
+  by someone who reads only the reference source and not the actual
+  checkpoint data.
+
+  Implements the full `model::Model` trait; `backward`/`zero_grads`/
+  `adamw_step` panic with a named message pointing at `model::gdn`'s missing
+  backward (P2b below) rather than silently no-op'ing.
+
+  Verified: existing config/import tests unaffected; a tiny-config smoke
+  test (both layer types, 6-expert MoE, a genuine 3-chunk GDN recurrence)
+  passes on both `BRAIN_DEVICE=cpu` and the default GPU backend — finite,
+  deterministic across repeated `forward()` calls. Zero warnings; kernel
+  table current (384 kernels).
+
+  **Honest scope note, unchanged**: true numerical parity against the real
+  HF reference is not achievable in this environment (no `torch`/
+  `transformers` installed) — only structural correctness is claimed.
+  **Vision splice is explicitly NOT in this pass** — text-only, tracked
+  separately as its own task.
+
 ## In progress
 
 (nothing actively in flight right now — see "Not started" for the next
-pieces, gated on P8's forward pass existing.)
+pieces.)
 
 ## Not started
 
@@ -196,25 +241,33 @@ pieces, gated on P8's forward pass existing.)
   the same tiny shape `gdn_chunk_fwd.rs` uses, both backends. Required per
   this session's own AGENTS.md policy update (full backward is the default,
   not an opt-out) — blocks P9 and P12 below.
-- **Attention output gate wiring**: `q_proj`'s doubled width (value + sigmoid
-  gate) composes from existing `sigmoid.wgsl`+`mul.wgsl` — no new kernel
-  needed, just wiring in the forward pass (P8 below).
+- **P8b — vision splice**: image/video token embedding into the decoder's
+  input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
+  position helpers as-is (verified numerically identical vision config to
+  `VisionConfig::qwen3_omni()`, P2's finding — no fork needed), plus real
+  3D M-RoPE position derivation from image grids (today's `model.rs` only
+  handles the degenerate text-only all-axes-equal case).
 - **P7 — device-side sparse MoE decode dispatch**: deliberately deferred to
-  the performance-optimization phase (after P8 exists), per
-  `docs/porting-playbook.md` §10 "correct-then-freeze" — `model::moe::
-  expert_fwd`/`expert_fwd_compact` are correct for decode today, just not
-  optimally fast at 256 experts (256×5=1280 dispatches/layer). Designing the
-  dispatch redesign before the real forward pass exists risks building the
-  wrong shape; revisit once P11 (serving) needs real decode throughput.
-- **P8 — forward pass** (`crates/qwen35/src/model.rs`): GDN layer, GQA
-  layer, MoE layer, vision splice — the SSA activation-cache convention,
-  `Mixer::{Gdn,Gqa}` enum per layer (GLM's `Mlp::Dense`/`Mlp::Moe` precedent).
-  Stage parity → single-forward parity → composed-loop parity against a
-  golden dump. **Environment gap**: `tools/goldens/qwen35_dump_reference.py`
-  needs `torch`+`transformers`, neither installed in this environment — the
-  dumper can be written and documented but must be *run* on a machine with
-  those deps; flag explicitly rather than silently skipping stage-parity
-  when this is reached.
+  the performance-optimization phase, per `docs/porting-playbook.md` §10
+  "correct-then-freeze" — `model::moe::expert_fwd`/`expert_fwd_compact` are
+  correct for decode today, just not optimally fast at 256 experts
+  (256×5=1280 dispatches/layer). Revisit once P11 (serving) needs real
+  decode throughput.
+- **⚠ Storage constraint discovered while validating against the real
+  checkpoint**: brain's native checkpoint format stores every tensor as
+  plain F32 (`StWriter::create`'s `Dtype::F32` plan) — a full import of this
+  35B-parameter model would be **~140 GB** (`35e9 × 4 bytes`), which fits in
+  neither this box's 93 GB tmpfs (used for the GGUF downloads) nor
+  comfortably in `/data/workspace`'s remaining free space alongside
+  everything else. **A full-precision `.brain.safetensors` import of this
+  model is not a viable step on this hardware, and should not be attempted
+  as an intermediate stage.** P10/P11's resident-loading path MUST construct
+  INT8/INT4 device buffers directly from the GGUF import (streaming,
+  `checkpoint::gguf::MmapGguf`'s per-tensor `TensorSource`, one tensor
+  dequantized-then-immediately-quantized-and-uploaded at a time — never
+  materializing a whole-model F32 intermediate on disk or in host RAM) —
+  matching the original plan's "prefer the direct mmap-streaming GGUF path"
+  intent, now with a concrete number behind why it is not optional.
 - **P9 — backward + `gradcheck::check_qwen35`**: full backward for GDN,
   gated GQA, MoE, vision; f64 FD oracle at a tiny hybrid config on both
   backends. Per the (approved, revised) project policy, this is required —
