@@ -28,7 +28,7 @@ pub fn generate(
 
     for _ in 0..max_new {
         let window: Vec<u32> = if ctx.len() > cap { ctx[ctx.len() - cap..].to_vec() } else { ctx.clone() };
-        let logits = model.logits_all(&window);
+        let logits = model.logits_all_compact(&window);
         let last = &logits[logits.len() - vocab..];
         let next = sample_logits(last, temperature, top_k, rng);
         if Some(next) == eos {

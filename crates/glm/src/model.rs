@@ -211,6 +211,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // Row-compacted MoE forward (inference-only path, `logits_all_compact`):
+    // `model::moe::expert_fwd_compact` resolves this BY NAME (`Gpu::kernel_index`),
+    // so appending it here (and only here) is the whole opt-in — see that
+    // function's call site below for why it isn't a named `usize` const like the
+    // other kernels (its scatter target is looked up once, not per dispatch site).
+    ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -400,6 +406,23 @@ impl Glm {
     }
 
     fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Glm {
+        // `router_gate_sigmoid.wgsl`'s forward router (this model's
+        // `RouterKind::SigmoidNoAuxTc` path) hard-caps at `MAX_E = 64u` via
+        // fixed-size `array<f32,64>` locals -- silently out-of-bounds above
+        // that, the same failure shape docs/lessons.md #35 already named once.
+        // `GlmConfig::glm5_2()` declares 256 routed experts, so without this
+        // assert that config would corrupt silently rather than fail loudly.
+        // A proper fix (an array-free top-k, mirroring `router_bwd.wgsl`'s
+        // rewrite) is real kernel work, not a literal bump -- tracked
+        // separately; bumping the constant again would just recreate #35.
+        assert!(
+            cfg.n_routed_experts <= 64,
+            "GLM config has {} routed experts, but router_gate_sigmoid.wgsl's \
+             forward router hard-caps at 64 (fixed-size array scratch) -- \
+             running this would silently write out of bounds, not error. See \
+             docs/models/omni/status.md's router-cap section.",
+            cfg.n_routed_experts
+        );
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
         // router selection bias (`e_score_correction_bias`), which is never
         // updated by backprop (matches the reference — a load-balance heuristic
@@ -1031,6 +1054,166 @@ impl Glm {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
+    /// Per-position logits for one sequence (B must be 1, len <= t) — the
+    /// row-compacted-MoE inference twin of [`Self::logits_all`], used ONLY by
+    /// `sample::generate`'s O(T²) recompute loop. Forward-only: duplicates
+    /// `build_forward`'s non-MoE plumbing (attention, norms) per layer but
+    /// replaces the dense per-expert loop with `model::moe::expert_fwd_compact`
+    /// (~7x faster at GLM's real MoE shape, see
+    /// `.todo/glm-model-rs-compact-moe-wiring.md`). Skips the MTP head
+    /// entirely (`generate` never reads it). Never touches `build_backward` /
+    /// `gradcheck::check_glm` — this is a parallel path, not a training-graph
+    /// change, so it cannot regress gradient correctness.
+    pub fn logits_all_compact(&self, tokens: &[u32]) -> Vec<f32> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
+        let ignore = vec![IGNORE; t_use as usize];
+        self.set_batch(tokens, &ignore);
+        self.forward_compact(1, t_use);
+        self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
+    }
+
+    /// Inference-only forward, row-compacted MoE — see [`Self::logits_all_compact`].
+    fn forward_compact(&self, b_use: u32, t_use: u32) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let v = c.vocab;
+        let e = c.n_routed_experts;
+        let ql = c.q_lora_rank;
+        let kvl = c.kv_lora_rank;
+        let nope = c.nope_dim();
+        let qrope = c.q_rope_dim();
+        let rope1 = c.qk_rope_head_dim;
+        let vd = c.v_dim();
+        let nh = c.n_heads;
+        let vhd = c.v_head_dim;
+        let moe_ff = c.moe_intermediate_size;
+        let shared_ff = c.shared_ff();
+        let half_rope = rope1 / 2;
+
+        let scatter = self.gpu.kernel_index("moe_scatter_scaled_add").expect(
+            "moe_scatter_scaled_add not registered in glm::model::PIPELINES -- see the \
+             comment next to its entry there",
+        );
+        let compact_ids = model::moe::CompactExpertFwdIds { gather: EMBED, gemm_naive: MATMUL, gemm_tiled: MATMUL_REG3, silu_mul: SILU_MUL, scatter };
+        let shape = model::moe::MoeShape { rows: n, d_model: d, moe_ff, n_experts: e, top_k: c.num_experts_per_tok };
+        // Sized to `shape.rows` every call -- the unconditionally-safe bound
+        // (every row could in principle route to one expert), reallocated per
+        // `logits_all_compact` call since `t_use` varies with the sliding
+        // generation window. Correct and simple; a persistent field sized once
+        // to `self.t` would avoid the reallocation but is a pure perf
+        // follow-up, not needed for this path's correctness.
+        let scratch = model::moe::CompactExpertScratch::new(&self.gpu, &shape, n);
+
+        let mut s: Vec<Step> = Vec::new();
+        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+
+        for l in 0..c.n_layers as usize {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ---- MLA attention (identical to build_forward) ----
+            self.norm_fwd(&mut s, &self.res[l], &p("input_ln.weight"), &lb.xn1, d, n);
+            self.mm(&mut s, &lb.xn1, &p("attn.q_a.weight"), &lb.q_c, n, d, ql);
+            self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
+            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
+            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
+            s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
+            match c.idx_mode(l as u32) {
+                IdxMode::Full => {
+                    self.indexer_fwd(&mut s, lb, l, b_use, t_use);
+                    self.add_index_mask(&mut s, b_use, nh, t_use);
+                }
+                IdxMode::Shared => self.add_index_mask(&mut s, b_use, nh, t_use),
+                IdxMode::None => {}
+            }
+            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
+            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
+            self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, n, vd, d);
+            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+
+            // ---- MLP: dense unchanged; MoE via row-compacted expert_fwd_compact ----
+            self.norm_fwd(&mut s, &lb.xmid, &p("post_ln.weight"), &lb.xn2, d, n);
+            match &lb.mlp {
+                Mlp::Dense { gate_pre, up, h } => {
+                    let dense_ff = c.intermediate_size;
+                    self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
+                    self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[n * dense_ff], n * dense_ff));
+                    self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+                }
+                Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => {
+                    self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, n, d, e);
+                    s.push(self.gpu.step(
+                        ROUTER_SIG,
+                        &[router_logits, self.w(&p("moe.router.bias")), gate, probs],
+                        &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
+                        n,
+                    ));
+                    // `expert_fwd_compact` needs `gate` on the HOST (each
+                    // expert's routed row count is data-dependent) -- flush
+                    // everything built so far (through the router) and block.
+                    self.gpu.submit(&[], &s);
+                    s = Vec::new();
+                    self.gpu.poll_wait();
+                    let host_gate = self.gpu.read(gate, (n * e) as usize);
+
+                    // `expert_fwd_compact`'s scatter only writes the rows IT
+                    // routes -- unlike the dense `SCALE_ADD` path, which is a
+                    // dense per-element kernel that overwrites EVERY row
+                    // (including gate-zero ones) on `ei == 0`, so it always
+                    // starts every row from a clean slate. A row whose top-k
+                    // experts happen to exclude expert 0 would never get
+                    // `moe_acc` zeroed here and would accumulate onto
+                    // whatever this persistent buffer held from the PREVIOUS
+                    // call -- so every expert must accumulate (`+=`) onto an
+                    // explicitly pre-zeroed buffer instead of relying on
+                    // expert 0's call to double as the zero-init.
+                    self.gpu.submit(&[&self.moe_acc], &[]);
+                    for ei in 0..e as usize {
+                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                        model::moe::expert_fwd_compact(
+                            &self.gpu,
+                            &compact_ids,
+                            &shape,
+                            &host_gate,
+                            &lb.xn2,
+                            gate,
+                            self.w(&ep("gate.weight")),
+                            self.w(&ep("up.weight")),
+                            self.w(&ep("down.weight")),
+                            &scratch,
+                            &self.moe_acc,
+                            ei as u32,
+                            true,
+                        );
+                    }
+
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[sh_gate, sh_up, sh_h], &[n * shared_ff], n * shared_ff));
+                    self.mm(&mut s, sh_h, &p("moe.shared.down.weight"), &self.sh_out, n, shared_ff, d);
+                    s.push(self.gpu.step(ADD2, &[&self.moe_acc, &self.sh_out, &self.mlp_out], &[n * d], n * d));
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+                }
+            }
+        }
+
+        let last = c.n_layers as usize;
+        self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, n);
+        self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
+        self.gpu.submit(&[], &s);
+    }
+
     /// Per-position **final-norm hidden** states for one sequence (`[len, d_model]`),
     /// the recompute twin of [`Self::step`]'s output — used to validate the KV
     /// decode. (B must be 1, len <= t.)
@@ -1456,5 +1639,53 @@ mod kv_step_tests {
         println!("kv_step_matches_full_recompute: hidden maxabs={worst_h:.3e}  logits maxabs={worst_l:.3e}");
         assert!(worst_h < 3e-3, "KV decode hidden diverges from recompute: maxabs={worst_h}");
         assert!(worst_l < 3e-3, "KV decode logits diverge from recompute: maxabs={worst_l}");
+    }
+}
+
+#[cfg(test)]
+mod compact_forward_tests {
+    use super::*;
+    use crate::config::GlmConfig;
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// `logits_all_compact` (row-compacted MoE, `expert_fwd_compact`) must agree
+    /// with `logits_all` (the dense-per-expert path build_forward's training
+    /// graph also uses) — bit-identically in practice (`max` is exact, GEMM
+    /// summation order does not change here because every row's routed
+    /// experts contribute the exact same terms either way once `moe_acc` is
+    /// explicitly pre-zeroed; see the comment at that `submit` call in
+    /// `forward_compact`, added after this test caught its absence: without
+    /// it, a row whose top-k experts excluded expert 0 accumulated onto
+    /// whatever `moe_acc` held from the previous call, and this test failed
+    /// at a tight tolerance but not at a loose one, which is why the
+    /// tolerance is tight rather than "close enough for float noise").
+    /// `GlmConfig::tiny()` has a dense layer (0) AND a MoE layer (1,
+    /// `first_k_dense_replace: 1`), so this exercises both the unchanged
+    /// dense-MLP arm and the new compact-MoE arm of `forward_compact` in one
+    /// pass. Several token sequences/lengths, including one short enough that
+    /// some experts route zero rows (`expert_fwd_compact`'s `count == 0` path).
+    #[test]
+    fn logits_all_compact_matches_logits_all() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = GlmConfig::tiny();
+        let t = 8u32;
+        let init = crate::init::init_weights(&cfg, 11);
+        let m = Glm::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, t, &init);
+
+        let mut worst = 0.0f32;
+        for seq in [1usize, 2, 5, 8] {
+            let tokens: Vec<u32> = (0..seq).map(|i| ((i * 7 + 2) as u32) % cfg.vocab).collect();
+            let dense = m.logits_all(&tokens);
+            let compact = m.logits_all_compact(&tokens);
+            let d = maxabs(&dense, &compact);
+            worst = worst.max(d);
+            assert!(d < 1e-5, "logits_all_compact diverged from logits_all at seq_len={seq}: maxabs={d}");
+        }
+        println!("logits_all_compact_matches_logits_all: worst maxabs={worst:.3e}");
     }
 }
