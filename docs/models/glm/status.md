@@ -34,9 +34,8 @@ ledger — what landed, the parity gates, what remains.
   the dense per-expert loop; `sample::generate` now calls it. Bit-identical
   to `logits_all` (`compact_forward_tests::
   logits_all_compact_matches_logits_all`, mutation-verified at a tight
-  `1e-5` tolerance — a real staleness bug this test caught along the way is
-  documented in `.todo/glm-model-rs-compact-moe-wiring.md`), on both CPU
-  and real Vulkan/P40 hardware. `build_forward`/`build_backward` (the
+  `1e-5` tolerance — a real staleness bug this test caught along the way),
+  on both CPU and real Vulkan/P40 hardware. `build_forward`/`build_backward` (the
   training graph) are untouched — see the "Remaining" section below for
   exactly what this does and does not close.
 
@@ -93,8 +92,8 @@ ledger — what landed, the parity gates, what remains.
   using it as its numerical oracle, unaffected, since nothing about the
   dense path changed. The real fix is a TILED gated expert kernel (removing
   BOTH the FLOP waste and the naive-tiling gap at once) — genuinely new
-  kernel work, not a migration; filed as its own follow-up
-  (`.todo/moe-tiled-gated-kernel.md`), not attempted here. Until that lands,
+  kernel work, not a migration; tracked as its own follow-up, not attempted
+  here. Until that lands,
   any future migration attempt for a DIFFERENT MoE config should re-measure
   at ITS OWN shape with `moe_migration_bench` rather than reuse this result
   — the crossover depends on `m` (rows/expert), which depends on
@@ -106,7 +105,7 @@ ledger — what landed, the parity gates, what remains.
   dense path already uses on the compacted batch, scatter the scaled result
   back) is the "real fix" the paragraph above deferred — see
   `crates/model/src/moe.rs`'s "row-compacted sparse expert forward" section
-  and `.todo/moe-tiled-gated-kernel.md` (now resolved). Re-run at the SAME
+  (that follow-up is now resolved). Re-run at the SAME
   real shape, same P40, `moe_migration_bench` extended with a third
   `sparse-compact` arm: **sparse-compact is 7.01x FASTER than dense-tiled**
   (2.65s vs 18.58s per MoE layer, aggregate across 256 experts) and 46.26x

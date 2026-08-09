@@ -19,8 +19,8 @@
 //! expert's compute is independent and would run sequentially in the real
 //! model regardless of whether all 256 are resident at once.
 //!
-//! A third arm was added later (`.todo/moe-tiled-gated-kernel.md`'s "real
-//! fix"): sparse-COMPACT, `model::moe::expert_fwd_compact`'s real dispatch
+//! A third arm was added later, as the real fix for sparse-naive losing to
+//! dense-tiled: sparse-COMPACT, `model::moe::expert_fwd_compact`'s real dispatch
 //! shape -- gather this expert's routed rows into a dense sub-batch, run the
 //! SAME `pick_gemm`-selected GEMM the dense-tiled arm uses (at m=rows/expert,
 //! not the full batch), scatter back. This measures whether combining

@@ -24,7 +24,8 @@
 #     and never a model checkpoint — those go to the model store (see
 #     `model_tree` below), addressed by fully-qualified `<vendor>/<repo>` name,
 #     the same place `brain fetch` writes and `brain_testutil::model_dir`
-#     resolves. See .todo/cleanup-testdata.md for the audit that motivated this.
+#     resolves — this separation is what an earlier testdata-layout audit
+#     of this script recommended.
 #
 # Layout produced (a proper tree, mirroring each model's asset namespace):
 #   testdata/asr/golden/{nemotron,qwen_encoder,qwen_decode,frontend}/…  dumped goldens

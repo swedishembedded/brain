@@ -475,9 +475,8 @@ fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathB
 
 /// `OWNER/NAME[:TAG]` -> `(owner, name, tag)`, `tag` defaulting to `"latest"`
 /// (Docker-style mutable tags -- retraining with the same `--adapter`
-/// overwrites that tag; see `.todo/model-hashing-and-tags.md` for a
-/// content-addressed tag scheme beyond `latest`, deliberately out of scope
-/// here).
+/// overwrites that tag; a content-addressed tag scheme beyond `latest` is
+/// deliberately out of scope here).
 fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
     let (owner_name, tag) = match spec.split_once(':') {
         Some((a, b)) => (a, b.to_string()),

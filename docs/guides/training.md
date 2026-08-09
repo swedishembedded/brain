@@ -1,7 +1,8 @@
 # Chat-template-driven SFT training — status and known gaps
 
 This is the workstream ledger for named LoRA adapters trained from bench's
-exported SFT data (`.todo/bench-training.md`), in the house `status.md` style.
+exported SFT data (tracked at the time in a now-unrecoverable working note),
+in the house `status.md` style.
 
 ## Done
 
@@ -167,8 +168,9 @@ exported SFT data (`.todo/bench-training.md`), in the house `status.md` style.
     it — `brain qwen finetune` today does a full finetune by omission
     (`--lora` unset), not through this explicit mode.
   - **Continued pretraining**: no dataset contract, no CLI entry point.
-- **Model-hash-based tags** (beyond `:latest`): tracked separately in
-  `.todo/model-hashing-and-tags.md`.
+- **Model-hash-based tags** (beyond `:latest`): tracked separately at the time
+  in a now-unrecoverable working note; still an open item as far as this doc
+  knows.
 
 ## Seams that make each planned item cheap
 

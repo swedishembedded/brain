@@ -1471,8 +1471,8 @@ fn batching_executor(ms: u64, max_batch_seen: Arc<AtomicUsize>) -> Executor {
     Executor::start(models, budgets, Policy::default())
 }
 
-/// REGRESSION for `.todo/concurrent-request-batching.md`'s core claim, at the
-/// layer that had NEVER been exercised before this workstream: the real HTTP
+/// REGRESSION for the concurrent-request-batching investigation's core claim,
+/// at the layer that had NEVER been exercised before this workstream: the real HTTP
 /// router. `residency::executor`'s own `same_model_batches_and_evicts` already
 /// proves the dispatcher groups same-key queued jobs into one claim
 /// (`Stats::max_batch`); this proves that grouping is actually REACHABLE by N

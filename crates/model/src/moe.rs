@@ -658,8 +658,8 @@ pub fn shared_expert_fwd(
 // real shape (`docs/models/glm/status.md`, `crates/glm/examples/
 // moe_migration_bench.rs`), because the naive kernel's per-FLOP inefficiency
 // at ~64 rows/expert swamps the 32x FLOP-count win sparsity promises. This
-// section is the real fix `.todo/moe-tiled-gated-kernel.md` asked for: gather
-// each expert's routed rows into a dense sub-batch, run the SAME
+// section is the real fix: gather each expert's routed rows into a dense
+// sub-batch, run the SAME
 // `model::block::pick_gemm`-selected tiled GEMM the dense path already uses
 // (unchanged, no new GEMM kernel), scatter the scaled result back.
 

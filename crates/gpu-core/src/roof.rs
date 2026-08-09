@@ -150,10 +150,10 @@ pub enum Bound {
 }
 
 impl Bound {
-    /// The band this workstream holds each class to (`.todo/saturate-the-gpu.md`).
-    /// A well-tuned fp32 GEMM on old silicon lands 60-80% of peak, so 99% is not
-    /// the target for either class and stating one per class is what makes the
-    /// goal falsifiable.
+    /// The band this workstream holds each class to. A well-tuned fp32 GEMM
+    /// on old silicon lands 60-80% of peak, so 99% is not the target for
+    /// either class and stating one per class is what makes the goal
+    /// falsifiable.
     pub fn target_pct(self) -> f32 {
         match self {
             Bound::Compute => 60.0,

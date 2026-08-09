@@ -106,8 +106,8 @@ impl KernelRow {
         self.gbs().and_then(|g| roofs.memory_roof(g)).map(|(_, c)| c).unwrap_or(false)
     }
 
-    /// Percent of *its own class's* roof. This is the number the target bands
-    /// in `.todo/saturate-the-gpu.md` are stated against — reporting a
+    /// Percent of *its own class's* roof. This is the number this
+    /// workstream's per-class target bands are stated against — reporting a
     /// memory-bound kernel as a fraction of a FLOP peak is meaningless.
     pub fn utilisation(&self, roofs: Roofs) -> Option<f32> {
         (self.covered && self.secs > 0.0)

@@ -470,7 +470,9 @@ mod tests {
 
     #[test]
     fn bf16_is_part_of_the_repo_name_not_a_quant() {
-        // The exact example from .todo/cleanup-examples.md.
+        // The exact real-world repo name that motivated this case: `BF16` here
+        // is part of the repo name, not a trailing quant suffix, so parsing
+        // must not mistake it for one.
         let r = ModelRef::parse("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-Q8_0").unwrap();
         assert_eq!(r.vendor(), "nvidia");
         assert_eq!(r.repo(), "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16");

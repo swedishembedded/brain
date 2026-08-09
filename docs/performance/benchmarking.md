@@ -154,8 +154,9 @@ quality, since the generated tokens are meaningless. Artifacts record
   in-process via `tower::Service::oneshot` (no socket) — auth, the edge
   concurrency limiter, the admission race, chat-template rendering,
   tokenization, generation, all the way down to `residency::Executor` and the
-  resident model. This is the ONLY target that would have shown
-  `.todo/serving-performance-audit.md`'s 600s regression: every target above
+  resident model. This is the ONLY target that would have shown a 600s
+  regression recorded in a since-archived audit trail (that record is no
+  longer recoverable): every target above
   measures a scheduler/engine/executor directly, which stayed fast the whole
   time the actual served path (`crates/cli/src/resident_llm.rs`) never reached
   any of it (`docs/lessons.md` #24). Selected as

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! End-to-end test of `brain qwen finetune --lora ...`: the "simple command
-//! to fully retrain and overwrite the lora checkpoint" from
-//! `.todo/bench-training.md`'s Definition of Done. Runs the actual compiled
+//! to fully retrain and overwrite the lora checkpoint" from the training
+//! benchmark's Definition of Done. Runs the actual compiled
 //! `brain` binary against a real Qwen3-0.6B checkpoint symlinked into a
 //! scratch model store, and asserts the named adapter lands exactly where
 //! `brain_modelstore::Store` expects to find it -- proving the CLI, the

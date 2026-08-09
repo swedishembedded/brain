@@ -15,7 +15,7 @@
 #      Makefile target, a bats test, a Rust doc comment citing it as a golden
 #      generator, another script that calls it, or a doc. A file nothing
 #      references is exactly the "nobody remembers why this exists, does it
-#      even still work" rot .todo/unify-scripts-and-tools.md described.
+#      even still work" rot an unreferenced-scripts audit of this repo found.
 #   3. ABSOLUTE PATHS — no non-overridable absolute machine path
 #      (`/data/…`, `/home/…`, `/tmp/…`, …), mirroring the existing
 #      `crates/**` grep gate in AGENTS.md. The one sanctioned exception is a

@@ -50,8 +50,9 @@ observable through `stats`. For an autoregressive decoder LM, `run_batch`
 drives every invocation the dispatcher grouped into that call on a shared
 `model::serve::Scheduler` (real continuous batching for ONE dispatcher round —
 joining a batch that is already mid-flight is a separate, not-yet-built seam,
-see `.todo/continuous-batching-executor-seam.md`) instead of one sequential
-decode loop per request.
+tracked as a follow-up at the time in a note that is no longer recoverable,
+but the gap it named is real: joining an in-flight batch is still not built)
+instead of one sequential decode loop per request.
 
 ## The contract — `crates/capability`
 

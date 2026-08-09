@@ -16,8 +16,8 @@
 //! * [`HttpTarget`] — wraps the REAL served path: `apiserve::router()`, called
 //!   in-process via `tower::Service::oneshot`. The only adapter here that
 //!   exercises JSON parsing, the edge concurrency limiter, and the admission
-//!   race in `apiserve::bridge` — the layer `.todo/serving-performance-audit.md`'s
-//!   600s regression actually lived in, and that `ExecutorTarget`/`PagedLlmTarget`
+//!   race in `apiserve::bridge` — the layer a serving-performance audit's 600s
+//!   regression actually lived in, and that `ExecutorTarget`/`PagedLlmTarget`
 //!   skip by construction (they drive the executor/engine directly).
 //!
 //! As `qwen`, `yolo`, `depth` and `tts` adopt `capability::Provider`, they
@@ -681,9 +681,9 @@ mod tests {
 /// admission race in `apiserve::bridge`, chat-template rendering,
 /// tokenization, and generation, all the way down to `residency::Executor`
 /// and the resident model. This is the target the serving-performance audit's
-/// 600s regression (`.todo/serving-performance-audit.md`) would have shown up
-/// in, and the synthetic in-process targets above (measuring the executor or
-/// engine directly) do not — they skip exactly the layer the bug lived in.
+/// 600s regression would have shown up in, and the synthetic in-process
+/// targets above (measuring the executor or engine directly) do not — they
+/// skip exactly the layer the bug lived in.
 ///
 /// Requests are OpenAI-dialect **streaming** chat completions (`stream:
 /// true`), so the artifact timeline comes from real SSE `delta.content`

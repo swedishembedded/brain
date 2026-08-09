@@ -2712,7 +2712,7 @@ mod tests {
         assert_eq!(out[&id2], refs[2], "mid-flight req2 != reference");
     }
 
-    /// REGRESSION (.todo/completed/attention-scratch-dispatch-width.md): the
+    /// REGRESSION (attention-scratch dispatch width): the
     /// on-device decode-WINDOW path (`Engine::forward_batched_greedy_window`,
     /// `Input::Resident` sub-steps 1..k) had ZERO test coverage before this —
     /// every other test here keeps the scheduler in single-step (`k=1`)
@@ -2981,7 +2981,7 @@ mod tests {
         }
     }
 
-    /// REGRESSION GATE for the class of defect `.todo/serving-performance-audit.md`
+    /// REGRESSION GATE for a class of defect the serving-performance audit
     /// named directly: a "batched prefill" that batches the READBACK but still
     /// dispatches once per TOKEN (the old `Qwen::prefill`'s per-position
     /// `decode_submit` loop at `m=1`). The paged `Engine::prefill` must cost device

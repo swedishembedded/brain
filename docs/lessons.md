@@ -466,13 +466,15 @@ only the readback (one `map`/fence at the end) while still issuing one
 GPU submit per token underneath. It measured faster than the naive
 `step()`-per-token loop (fewer host↔device round trips), so it read as
 progress, but it was still `O(T)` submits for a `T`-token prompt — the same
-defect class in a lighter disguise. `.todo/serving-performance-audit.md`'s
-own audit trail and this workstream's `prefill_submits_scale_with_chunks_
+defect class in a lighter disguise. An earlier audit trail (recorded at the
+time, no longer recoverable) and this workstream's `prefill_submits_scale_with_chunks_
 not_with_token_count` gate exist because "faster than before" and "actually
 O(1) [per chunk]" are different claims, and a wall-clock-only benchmark
 cannot tell them apart — only a device-op COUNT (`gpu_core::DeviceStats.
 submits`) can, because it is insensitive to how fast any individual submit
-happens to run on this box today.
+happens to run on this box today. The gate this lesson names,
+`prefill_submits_scale_with_chunks_not_with_token_count`, is what survives.
+
 ## 26. A barrier kernel on `backend-cpu` corrupts memory; it does not refuse
 
 `DeviceCaps::workgroup_reductions` is false on the CPU JIT because it cannot
@@ -865,7 +867,20 @@ docs** — cite this lesson and, if it matters for that model's memory budget,
 measure with `vram_overhead.rs` on the backend that model actually plans to
 run.
 
-## 35. A `const` bump without its array literal is a silent out-of-bounds write
+## 35b. A `const` bump without its array literal is a silent out-of-bounds write
+
+*(Numbered `35b`, not `36`: this file had two entries both titled "## 35."
+— a genuine duplicate-numbering bug, found 2026-08-09. Renumbering this one
+to `36` would have required cascading every later entry (`36`→`37` … `39`→`40`)
+and updating every cross-reference to those numbers throughout the codebase
+(`docs/lessons.md #38`, `#39`, etc. are cited from multiple crates) — riskier
+than the duplicate itself. `35b` keeps this entry uniquely addressable without
+that cascade. External references to plain "`docs/lessons.md` #35" predating
+this fix are ambiguous between the two — `crates/qwen/src/q8.rs`'s citation
+(alongside `vram_overhead.rs`) means the ORIGINAL #35 above; `crates/glm/src/
+model.rs`'s and `crates/model/tests/router_bwd_expert_cap.rs`'s "failure
+shape" citations, and `docs/models/omni/status.md`'s "#35 recurrence... #35's
+new addendum" section, mean THIS one, `35b`.)*
 
 `crates/kernels/wgsl/router_gate.wgsl` and `router_gate_train.wgsl` declare
 `const MAX_EXPERTS: u32 = 128u;` — bumped up from 64 in an earlier commit,
@@ -1067,8 +1082,7 @@ class — but `wchan` alone was not enough to find the real cause**, because
 a `Mutex::lock()` self-deadlock and a driver worker thread both park in
 `futex_do_wait`; distinguishing them needs an actual backtrace.
 
-**Correction, found by a later session with gdb access** (2026-08-08,
-`.todo/vulkan-concurrent-device-creation-hang.md`): this sandbox's
+**Correction, found by a later session with gdb access** (2026-08-08): this sandbox's
 `ptrace_scope=1` blocks attaching to an ALREADY-RUNNING process, which is
 why the original session's `/proc/<pid>/task/*/wchan`-only investigation
 could not go further — but `ptrace_scope` only gates non-parent attach;

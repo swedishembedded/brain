@@ -114,12 +114,22 @@ brain's existing LoRA and INT8 paths.
 
 ### Two substitutions still worth making
 
-- **Florence-2 over GroundingDINO** for text→box. GroundingDINO needs
+- **Florence-2 over GroundingDINO** for text→box — **RE-OPENED (2026-08-09),
+  pending a measured comparison, not settled.** GroundingDINO needs
   multi-scale **deformable attention** (a bilinear-gather attention kernel with
   no relative in brain, plus its backward). Florence-2 is a DaViT vision encoder
   + a BART-style encoder-decoder — and brain already has `crates/seq2seq`
   (bidirectional encoder + causal/cross-attention decoder, gradient-checked).
-  Weights for both were downloaded; Florence-2 is the lower-risk path.
+  Weights for both were downloaded on a prior box, but neither is present on
+  this one, and this box has no torch install available to fetch or convert
+  them, so a measured comparison is currently blocked. An earlier
+  working note from that investigation independently recommends evaluating
+  **OWLv2** first instead: it is the only candidate whose backbone
+  (`model::vit`) AND text tower (`crates/clip`) are BOTH already in-tree, so
+  the port could be mostly a head + box-decode rather than a whole new
+  backbone. That note and this one disagreed until now — resolve by measured
+  grounding quality on a fixture set once weights are available again, not by
+  re-asserting either preference.
 - **Defer LaMa.** Its Fast Fourier Convolution needs a full FFT kernel family
   (forward + backward) that nothing else in brain wants. Object removal can be
   served first by FLUX.1 inpainting through the mask SAM 2 produces. Revisit FFT
@@ -775,7 +785,8 @@ it — it needs `data::clip_bpe` wired in and EVA image preprocessing.)*
 1. ~~InstantID dropped in favour of PuLID-FLUX~~ — **resolved: build both.**
    Measuring the UNet family showed it needs no new kernels (§2), so InstantID
    stays and brain gains a UNet diffusion backbone + a generic ControlNet seam.
-2. **Florence-2 over GroundingDINO**, **LaMa deferred** (§2).
+2. **Florence-2 over GroundingDINO — RE-OPENED (§2), pending a measured
+   comparison against OWLv2**. **LaMa deferred** (§2, unaffected).
 3. SAM 2 **video** (memory attention + memory encoder) is out of scope for
    phase 1; the image path is what image editing needs. The config and code are
    downloaded, so it is additive later.
@@ -852,7 +863,7 @@ because that is what the next person needs.
 
 ## Matting (BiRefNet): scoped, not started
 
-Scoped as a standalone task in **`.todo/birefnet-matting.md`** — the architecture
+Scoped as a standalone task in a separate working note — the architecture
 read off the checkpoint, what is already reusable in-tree
 (`model::vit::WindowPlan`, `t5::hostbias`'s gather shape,
 `vae::blocks::Builder` for the decoder), and the one genuinely new operator

@@ -3,8 +3,8 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 # qwen-serving-perf-gate.sh — the concurrent-serving-performance regression
-# gate `.todo/serving-performance-audit.md`/`.todo/concurrent-request-batching.md`
-# asked for (pattern: forecast-perf-gate.sh): drives the REAL served path
+# gate a serving-performance audit and a concurrent-request-batching
+# investigation both asked for (pattern: forecast-perf-gate.sh): drives the REAL served path
 # (`apiserve::router()`, `http:qwen-synth:` target — random weights, real
 # kernels/batching/admission, no checkpoint needed) through `brain perf run
 # serve` at a fixed concurrency and checks the report against the committed
@@ -46,8 +46,8 @@ cand="$(mktemp)"
 # NOT --smoke: `brain perf gate` REFUSES a smoke-run candidate outright
 # ("not a measurement") — `--requests`/`--warmup` set explicitly instead, to
 # stay fast without tripping that refusal. Concurrency 2, not 1: the exact
-# shape `.todo/concurrent-request-batching.md` cared about (does a second
-# concurrent request cost far less than a second solo run).
+# shape the concurrent-request-batching investigation cared about (does a
+# second concurrent request cost far less than a second solo run).
 if ! "$BIN" perf run serve --target "http:qwen-synth:${SHAPE}:${QWEN_TOKENIZER}" \
     --workload chat --input 24 --output 12 --requests 2 --warmup 1 --concurrency 2 --out "$cand" >/dev/null 2>&1; then
   echo "FAIL $name (perf run itself failed)"; rm -f "$cand"; exit 1

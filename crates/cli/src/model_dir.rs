@@ -32,8 +32,7 @@
 //! enough (`gpt`/`glm` had working dispatch arms for a while with no carded
 //! checkpoint ever able to reach them). Single-file models only: `z-image`
 //! and `flux2` are each FOUR distinct-role files (DiT/VAE/text-encoder/
-//! tokenizer) with no directory/manifest registration shape here yet — see
-//! `.todo/multi-file-model-store-manifest.md`.
+//! tokenizer) with no directory/manifest registration shape here yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

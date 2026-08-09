@@ -114,7 +114,7 @@ targets (--target):
                                      `brain serve`, since this measures the REAL served default.
   http:qwen:<weights.brain>:<tokenizer.json>
                                      the REAL served path over a real checkpoint -- this is what
-                                     .todo/serving-performance-audit.md's 600s regression measures
+                                     the serving-performance audit's 600s regression measures
   lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
   kronos:<tokenizer-dir>:<decoder-dir>  Kronos OHLCV forecaster via the residency executor
                                      (unit: forecast; input_artifacts = context bars; horizon/
@@ -633,8 +633,8 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
 /// the REAL served path: a real `residency::Executor` holding a real
 /// `QwenResident`, behind the real `apiserve::router()`, driven over HTTP
 /// in-process (`perf::targets::HttpTarget`). This is the target the serving-
-/// performance audit's 600s regression (`.todo/serving-performance-audit.md`)
-/// would have shown up in; the `qwen-synth:`/`qwen:` targets above measure the
+/// performance audit's 600s regression would have shown up in; the
+/// `qwen-synth:`/`qwen:` targets above measure the
 /// paged engine directly and skip the whole HTTP/bridge/residency layer the
 /// bug actually lived in. The tokenizer suffix is required (unlike the
 /// engine-direct targets, which synthesize token ids and never tokenize) — a

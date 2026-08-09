@@ -5,9 +5,9 @@
 //! flags must be a hard error (not the old warn-and-continue), and `--help`
 //! must actually print usage instead of falling into the blocking stdio loop.
 //!
-//! Regression coverage for the incident in `.todo/completed/bench-integration-
-//! friction.md`: `brain serve --listen HOST:PORT` (a flag that never existed)
-//! used to be silently ignored, exit 0, and never open a listener.
+//! Regression coverage for an incident where `brain serve --listen HOST:PORT`
+//! (a flag that never existed) used to be silently ignored, exit 0, and
+//! never open a listener.
 //!
 //! IMPORTANT: every test here passes `.stdin(Stdio::null())`. Without it, a
 //! regression back to warn-and-continue falls into the blocking stdio JSONL

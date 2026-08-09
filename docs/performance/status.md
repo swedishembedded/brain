@@ -463,9 +463,9 @@ Every scenario above drives `qwen::serve::Scheduler` or `residency::Executor`
 directly. Nothing had ever driven the actual thing a client talks to:
 `apiserve::router()`, over real HTTP framing, through the real admission race in
 `apiserve::bridge`, into the real `QwenResident`/`QwenInstance` chat path
-(`crates/cli/src/resident_llm.rs`) — the gap
-`.todo/serving-performance-audit.md` names directly: a synthetic in-process
-benchmark reporting healthy numbers while a real agentic client saw 600+ s.
+(`crates/cli/src/resident_llm.rs`) — the gap an earlier detailed audit (no
+longer available) named directly: a synthetic in-process benchmark reporting
+healthy numbers while a real agentic client saw 600+ s.
 
 **`perf::targets::HttpTarget`** (`crates/perf/src/targets.rs`) closes that gap:
 it calls `apiserve::router()` in-process via `tower::Service::oneshot` (no
@@ -485,9 +485,9 @@ or `http:qwen:<weights>:<tok>` (`crates/cli/src/perf_cli.rs`).
 | 2 | 36 469 ms | 79.0 ms | ~30.3 s |
 
 TTFA p99 **2.76×** for **2×** the concurrent load — the audit's "no batching
-across concurrent requests" finding (`.todo/concurrent-request-batching.md`),
-now measured through the real served path with real weights, not inferred from
-reading the code. `ial` (per-token gap, once decode is running) stays flat —
+across concurrent requests" finding, now measured through the real served
+path with real weights, not inferred from reading the code. `ial` (per-token
+gap, once decode is running) stays flat —
 consistent with concurrent requests **serializing** on one lane rather than
 sharing a batched forward: decode-once-running is unaffected by a second
 request, but a second request cannot even START until the first's entire
@@ -510,10 +510,11 @@ single-sequence decode path (`Qwen::from_reader_decode` + `generate_kv_stream`
 + `decode_submit`) — a real memory-safety bug in `backend-cpu`'s rayon-parallel
 JIT kernel dispatch, reproducible with the plain pre-existing `brain qwen infer`
 CLI, nothing to do with `HttpTarget`. The paged `qwen::serve::Engine` path did
-not reproduce it in the same checks. Filed in full at
-`.todo/cpu-backend-jit-dispatch-segfault.md` rather than patched blind — a
-crash of this kind needs a dedicated root-cause pass, not a fix grafted onto a
-measurement workstream.
+not reproduce it in the same checks. Filed in full at the time rather than
+patched blind — a crash of this kind needs a dedicated root-cause pass, not a
+fix grafted onto a measurement workstream. Whether it was subsequently
+root-caused is not recorded here; check a `docs/lessons.md` entry before
+assuming it is still open.
 
 ### What this baseline is for
 
@@ -566,8 +567,8 @@ scope). `QwenInstance::run_batch` submits every invocation the dispatcher
 handed it into the SAME scheduler and drives them to completion together,
 streaming each sequence's own delta text via `Scheduler::tokens_of` — real
 continuous batching for whatever the dispatcher grouped into one call (not
-yet across separate calls arriving over time — see
-`.todo/continuous-batching-executor-seam.md`).
+yet across separate calls arriving over time; the gap itself is real and,
+per `docs/serving.md`'s own note, still open).
 
 **Re-measured against the exact M0 baseline workload, real Qwen3-0.6B, same
 box:**
@@ -684,7 +685,7 @@ same-session A/B, not just architecturally sound.
 
 ### W7's attention-dispatch-width question — measured, not just re-read
 
-`.todo/attention-scratch-dispatch-width.md` flagged that
+An earlier audit flagged that
 `paged_decode_scores_batched`/`decode_softmax_batched`/`paged_decode_apply_batched`
 dispatch at the engine's full max-context width regardless of a sequence's
 real length. `BRAIN_PROFILE=1` against two `qwen-synth` shapes settles
@@ -721,8 +722,8 @@ row's target dispatches decode-shaped work almost entirely through
 So: the ratio effect is real and roughly triples the trio's share (4.7% →
 12.4%) even at a fairly aggressive cap:seqlen mismatch — but `matmul_gemv`
 alone still outweighs it more than 6-to-1. Two structural facts sharpen the
-conclusion further (`.todo/completed/attention-scratch-dispatch-width.md` has
-the full detail): only `paged_decode_scores_batched`/`_i8` actually dispatch
+conclusion further (that same archived file had the full detail, no longer
+recoverable): only `paged_decode_scores_batched`/`_i8` actually dispatch
 at `cap` width — `decode_softmax_batched` and `paged_decode_apply_*` dispatch
 independent of `cap` and already loop to exactly `seq_lens[b]`, so the
 file's originally-scoped "fix all four kernels plus softmax" was ~2.5x wider
@@ -796,9 +797,10 @@ with this whole session's builds).
 
 **Verdict: no kernel fix required before defaulting to int8 KV.** No DP4A
 variant exists for the attention kernels either, unlike the int8 weight
-GEMMs — filed as a follow-up (`.todo/int8-kv-dp4a-scores.md`) motivated by
-the measured-but-real ~4pp relative-share increase, not by this gate, which
-it did not fail.
+GEMMs — filed at the time as a follow-up, motivated by the
+measured-but-real ~4pp relative-share increase, not by this gate, which it
+did not fail. Whoever revisits int8 attention scores should re-derive the
+scope from scratch rather than assume this note still describes it.
 
 Caveats, for whoever revisits this: `--requests 2-3`, single concurrency,
 CPU-only, one box under variable background load (a `--workload` preset's

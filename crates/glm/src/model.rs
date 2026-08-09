@@ -1086,8 +1086,7 @@ impl Glm {
     /// `sample::generate`'s O(T²) recompute loop. Forward-only: duplicates
     /// `build_forward`'s non-MoE plumbing (attention, norms) per layer but
     /// replaces the dense per-expert loop with `model::moe::expert_fwd_compact`
-    /// (~7x faster at GLM's real MoE shape, see
-    /// `.todo/glm-model-rs-compact-moe-wiring.md`). Skips the MTP head
+    /// (~7x faster at GLM's real MoE shape). Skips the MTP head
     /// entirely (`generate` never reads it). Never touches `build_backward` /
     /// `gradcheck::check_glm` — this is a parallel path, not a training-graph
     /// change, so it cannot regress gradient correctness.

@@ -1691,7 +1691,7 @@ impl Qwen {
         // buffer) this reliably segfaults; on GPU the same OOB read is just
         // silently wrong. Fail loudly here instead, at the one point every
         // decode caller (`step`, `step_embed`'s sibling, `prefill`) funnels
-        // through — see .todo/completed/cpu-backend-jit-dispatch-segfault.md.
+        // through.
         if let Some(tid) = token_id {
             assert!(
                 (tid as usize) < self.cfg.vocab as usize,
@@ -2155,7 +2155,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// REGRESSION (.todo/completed/cpu-backend-jit-dispatch-segfault.md): a
+    /// REGRESSION (CPU-backend JIT dispatch segfault): a
     /// decode token id the checkpoint's embedding table doesn't cover (a
     /// checkpoint/tokenizer vocab mismatch — e.g. a real BPE tokenizer's
     /// `<|im_start|>`-class special token fed to a tiny synthetic checkpoint)
@@ -2577,7 +2577,7 @@ mod kv_tests {
     /// `decode_steps`'s `deepstack_row` parameter (this session's addition —
     /// before it existed, `qwenvl::Qwen3Vl::generate()` called
     /// `write_deepstack` into buffers the incremental path never read, a
-    /// real silent bug, see `.todo/qwenvl-deepstack-incremental-decode.md`)
+    /// real silent bug, fixed by adding `deepstack_row`)
     /// must reproduce `enable_deepstack`'s whole-sequence `SPLICE_ADD` in
     /// `forward_steps` exactly, position by position, the same way M-RoPE's
     /// decode table already does.

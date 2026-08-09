@@ -10,8 +10,8 @@
 //! exact shape (see `omni::caps`'s own doc for the full reasoning), and both
 //! HTTP handlers always populate `messages`, never a bare `prompt`.
 //!
-//! Real, working, but validation-tier — the honest scope, matching
-//! `.todo/qwenvl-caps-serving.md`'s own analysis before this file existed:
+//! Real, working, but validation-tier — the honest scope of what serving
+//! wiring for `Qwen3Vl::generate()` turned out to need:
 //!
 //! - **Image placement is per-request, not baked into the resident model.**
 //!   `Qwen3Vl::generate()`'s incremental KV-cache decode derives image
@@ -33,9 +33,10 @@
 //!   shape as `fastvlm::caps::pad_resize_chw` but without the square-pad —
 //!   Qwen3-VL's own preprocessor does not pad).
 //! - **DeepStack is real** (this session's `qwen::Qwen::decode_steps`
-//!   `deepstack_row` fix — see `.todo/qwenvl-deepstack-incremental-decode.md`,
-//!   resolved), so real Qwen3-VL-4B checkpoints (`deepstack_indexes: [5, 11,
-//!   17]`) work here, not just DeepStack-free configs.
+//!   `deepstack_row` fix, which threads each level's per-row residual add
+//!   into the incremental decode path), so real Qwen3-VL-4B checkpoints
+//!   (`deepstack_indexes: [5, 11, 17]`) work here, not just DeepStack-free
+//!   configs.
 
 use std::sync::Mutex;
 

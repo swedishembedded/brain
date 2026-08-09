@@ -268,8 +268,8 @@ mod paged_scoring_tests {
     /// template) — self-skips loudly when unset, per `docs/testing.md`. The
     /// checkpoint's vocab matches the real tokenizer's full range so the
     /// rendered special tokens (`<|im_start|>` etc.) never index outside the
-    /// embedding table (the exact class of bug
-    /// `.todo/completed/cpu-backend-jit-dispatch-segfault.md` root-caused).
+    /// embedding table (the exact class of bug root-caused as a CPU-backend
+    /// JIT dispatch segfault in `decode_steps`).
     #[test]
     fn paged_fp32_scoring_matches_the_legacy_backend() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {

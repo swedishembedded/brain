@@ -206,10 +206,11 @@ impl StatsSource for ExecutorSource {
         // single-device by construction (one `device` field), same as
         // `InstancePlacement`; showing a multi-device instance for real
         // needs a schema change (a device LIST per instance), not just
-        // reading this field. No multi-device model exists in production
-        // yet (`crates/residency/src/multi.rs` is this session's new
-        // foundation), so "not shown yet" is an honest, low-urgency gap, not
-        // a silently wrong number. See `.todo/omni-int8-dual-gpu-residency.md`.
+        // reading this field. A multi-device model IS now reachable through
+        // `Executor` (the int8 dual-GPU Thinker, `crates/omni/src/
+        // int8_thinker_resident.rs`), so this is a real, live gap, not a
+        // hypothetical one -- this is an honest, documented observability
+        // gap (not a correctness issue), still open.
         let ResidencyReport { placements, budgets, multi_placements: _ } = self.exec.residency();
         snap.executor = executor_stat(&stats);
         // Accelerators come straight from the device budgets — one row per

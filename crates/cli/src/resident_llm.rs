@@ -464,8 +464,7 @@ impl ResidentModel for QwenResident {
                 // Read the (tied-embedding) LM head ONCE here, not per request:
                 // the fix `generate_kv_stream_with_head`'s doc comment asks for
                 // (594 MiB device->host re-read at real vocab/d_model, otherwise
-                // paid on every single chat request --
-                // `.todo/serving-performance-audit.md`).
+                // paid on every single chat request).
                 let head = model.read_weight(model.cfg.head_weight());
                 return Ok(QwenEngineKind::Legacy { model: Box::new(model), head });
             }
@@ -563,9 +562,9 @@ impl Instance for QwenInstance {
     /// persistent `Scheduler` (built once at `activate`, so the paged KV pool
     /// and prefix cache are shared and reused across calls, not rebuilt) and
     /// driven to completion together — real continuous batching for
-    /// whatever the dispatcher grouped into this one call (see
-    /// `.todo/continuous-batching-executor-seam.md` for admitting MORE work
-    /// into an ALREADY-running call, which this does not yet do).
+    /// whatever the dispatcher grouped into this one call (admitting MORE
+    /// work into an ALREADY-running call is a separate, known gap this does
+    /// not yet do).
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         match &mut self.engine {
             QwenEngineKind::Legacy { model, head } => invs
@@ -924,9 +923,10 @@ mod tests {
         path
     }
 
-    /// REGRESSION for `.todo/serving-performance-audit.md`'s "no prefix/KV-
-    /// cache reuse across HTTP requests" finding, at the layer that had never
-    /// been observable before this workstream: through the real HTTP router.
+    /// REGRESSION coverage for the "no prefix/KV-cache reuse across HTTP
+    /// requests" finding from the serving-performance audit, at the layer
+    /// that had never been observable before this workstream: through the
+    /// real HTTP router.
     /// `qwen::serve::Engine`'s `PrefixCache` was already gated in isolation
     /// (`serve.rs::random_shared_prefixes_stay_exact`) but nothing surfaced
     /// its hit rate through a served request until `Instance::metrics` +

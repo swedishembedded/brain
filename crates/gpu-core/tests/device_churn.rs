@@ -83,8 +83,8 @@ fn devices_that_did_real_work_can_still_be_rebuilt() {
 /// destruction/recreation TIMING race (driver resource reclaim is
 /// asynchronous; giving it time to finish should raise the device count
 /// before the ICD loses the card) from a hard one-shot-per-process limit
-/// (a delay would not help at all). `.todo/vulkan-concurrent-device-
-/// creation-hang.md`'s own residual note: with NO delay, only 1 real Vulkan
+/// (a delay would not help at all). The residual finding from the earlier
+/// investigation that first hit this: with NO delay, only 1 real Vulkan
 /// device succeeds before every subsequent one falls back to wgpu/llvmpipe.
 ///
 /// Measured on this box (2 real P40s, driver current as of this test):

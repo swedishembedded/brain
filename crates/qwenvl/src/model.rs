@@ -187,8 +187,9 @@ impl Qwen3Vl {
     /// contribution during the incremental step that embeds that row (was
     /// missing before this session — `qwen::Qwen::enable_deepstack`'s
     /// `SPLICE_ADD` used to be wired ONLY into the batched `forward_steps()`
-    /// graph; see `.todo/qwenvl-deepstack-incremental-decode.md`, now
-    /// resolved, and `crates/qwen/tests/deepstack_decode_parity.rs`).
+    /// graph, now also threaded into incremental decode via `decode_steps`'s
+    /// `deepstack_row` parameter; see also
+    /// `crates/qwen/tests/deepstack_decode_parity.rs`).
     pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32]) -> Vec<u32> {
         let (gh, gw) = grid;
         let n = gh * gw;

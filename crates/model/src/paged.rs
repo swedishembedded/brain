@@ -622,8 +622,8 @@ mod batched_tests {
         let batch = lens.len() as u32;
         let bs = 4u32;
         let num_blocks = 64u32;
-        // REGRESSION (.todo/completed/attention-scratch-dispatch-width.md):
-        // `max_bt` deliberately exceeds `ceil(max(lens)/bs)` (5) so `cap` is
+        // REGRESSION guard for a dispatch-width bug in attention scratch
+        // sizing: `max_bt` deliberately exceeds `ceil(max(lens)/bs)` (5) so `cap` is
         // strictly greater than every sequence's real length -- exactly the
         // shape (a buffer sized for the engine's `BRAIN_QWEN_CTX`, actual
         // sequences much shorter) the dispatch-width question was about.

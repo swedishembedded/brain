@@ -287,20 +287,20 @@ fast and scalable kernel — not a naive one.
     been run for real (70GB→36GB, 54,764 tensors, exact two-way name
     coverage). A layer-sharded int8 dual-GPU Thinker (`crates/omni/src/
     int8_resident.rs`, `int8_thinker_resident.rs`) is built and validated on
-    two real P40s (`residency::MultiDeviceResidentModel`/`claim_multi`, real
-    streamed int8 expert weights, real cross-device residual handoff) but is
-    NOT yet production-servable: non-expert weights are synthetic in that
-    validation (no real-checkpoint loader for them yet), it is not wired
-    into `residency::Executor`'s async D-Bus/HTTP dispatch loop, and there is
-    no real `generate()` loop around it — see `docs/models/omni/status.md`'s
-    M20 entry and `.todo/omni-int8-dual-gpu-residency.md` (if still present
-    under `.todo/`) for the precise remainder. **Qwen3-VL** (`crates/qwenvl`) is a
-    separate served model, `brain/qwenvl` — reuses `crates/qwen`'s decoder
+    two real P40s: real streamed int8 expert AND non-expert weights, real
+    cross-device residual handoff, a real greedy `generate()`, and — as of
+    M22 — reachable through `residency::Executor` for real
+    (`Executor::register_multi`, `crates/cli/src/resident_omni.rs::
+    int8_thinker_multi_from_env`, env `BRAIN_OMNI_INT8_CHECKPOINT`). Still
+    NOT fully production-ready: no real Qwen3-Omni checkpoint exists in this
+    environment to validate any of it against (every test uses a synthetic
+    checkpoint), and decode is O(T²) recompute, not KV-cached — see
+    `docs/models/omni/status.md`'s M22 entry for the precise remainder.
+    **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
     caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP), and
-    real-checkpoint validation is still unexercised in-repo; see
-    `.todo/qwenvl-caps-serving.md` (if still present) for the remainder.
+    real-checkpoint validation is still unexercised in-repo.
     Full ledger: `docs/models/omni/status.md`.
 
 ### Forecasting
@@ -1108,19 +1108,19 @@ per-scenario table and the findings so far.
 
 ## Local Task Management Protocol
 
-You are authorized to manage and execute tasks located in the local `.todo/`
-folder. Each file in that directory represents a distinct task using a Markdown
-+ Frontmatter format. Each task can contain items and checkbox lists. You may
-remove completed tasks from `.todo` but only after ALL of the items have been
-completed.
+You are authorized to manage and execute tasks located in a local, gitignored
+task-tracking folder outside version control. Each file in that folder
+represents a distinct task using a Markdown + Frontmatter format. Each task can
+contain items and checkbox lists. You may remove completed tasks from that
+folder but only after ALL of the items have been completed.
 
 ### How to Pick Up a Task
 
 When the user asks you to "pick up <some description> task" (or a specific task
 ID/name):
 
-1. Read the contents of the target file inside `.todo/`. If no specific task is
-named, look for the oldest file that matches the description.
+1. Read the contents of the target file inside that folder. If no specific task
+is named, look for the oldest file that matches the description.
 2. Immediately modify that file's frontmatter to change `status: pending` to
 `status: in_progress`.
 3. Read the "Objective" and "In-Scope" definitions in that file. Do not wander
@@ -1131,10 +1131,10 @@ outside the defined scope.
 
 Once each task milestone is fully built, tested, and verified:
 1. Commit the changes to git as a series of self-contained, independent commits.
-2. Move the task file to `.todo/completed/` (`git mv .todo/<name>.md
-.todo/completed/<name>.md`, creating that directory the first time). No
-deletion, no confirmation prompt — moving is not destructive, the file's history
-and content are preserved, and the user can always delete it later themselves.
+2. Move the task file into a `completed/` subfolder within that same
+task-tracking folder (creating that subfolder the first time). No deletion, no
+confirmation prompt — moving is not destructive, the file's history and content
+are preserved, and the user can always delete it later themselves.
 3. If the task was only partially completed, do not move it — update its
-frontmatter/body to record what is done vs. remaining and leave it in `.todo/`.
+frontmatter/body to record what is done vs. remaining and leave it where it is.
 
