@@ -25,6 +25,7 @@ pub mod rowemit;
 pub mod serve;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
+pub mod gdn;
 pub mod grid;
 pub mod hostmath;
 pub mod int4;

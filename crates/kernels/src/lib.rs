@@ -142,6 +142,10 @@ pub const BCE_LOGITS_GRAD: &str = include_str!("../wgsl/bce_logits_grad.wgsl");
 pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 /// `wgsl/bias_grad.wgsl`
 pub const BIAS_GRAD: &str = include_str!("../wgsl/bias_grad.wgsl");
+/// `wgsl/bmm.wgsl`
+pub const BMM: &str = include_str!("../wgsl/bmm.wgsl");
+/// `wgsl/bmm_acc.wgsl`
+pub const BMM_ACC: &str = include_str!("../wgsl/bmm_acc.wgsl");
 /// `wgsl/bn_dbeta.wgsl`
 pub const BN_DBETA: &str = include_str!("../wgsl/bn_dbeta.wgsl");
 /// `wgsl/bn_dgamma.wgsl`
@@ -280,6 +284,8 @@ pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 pub const EMBED: &str = include_str!("../wgsl/embed.wgsl");
 /// `wgsl/embed_tile.wgsl`
 pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
+/// `wgsl/exp.wgsl`
+pub const EXP: &str = include_str!("../wgsl/exp.wgsl");
 /// `wgsl/expert_counts.wgsl`
 pub const EXPERT_COUNTS: &str = include_str!("../wgsl/expert_counts.wgsl");
 /// `wgsl/film_chan.wgsl`
@@ -308,6 +314,22 @@ pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 pub const GATE_ROW_DG: &str = include_str!("../wgsl/gate_row_dg.wgsl");
 /// `wgsl/gate_row_dh.wgsl`
 pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
+/// `wgsl/gdn_add_identity.wgsl`
+pub const GDN_ADD_IDENTITY: &str = include_str!("../wgsl/gdn_add_identity.wgsl");
+/// `wgsl/gdn_chunk_cumsum_step.wgsl`
+pub const GDN_CHUNK_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_cumsum_step.wgsl");
+/// `wgsl/gdn_decay_mask.wgsl`
+pub const GDN_DECAY_MASK: &str = include_str!("../wgsl/gdn_decay_mask.wgsl");
+/// `wgsl/gdn_decay_scale.wgsl`
+pub const GDN_DECAY_SCALE: &str = include_str!("../wgsl/gdn_decay_scale.wgsl");
+/// `wgsl/gdn_mask_strict_lower.wgsl`
+pub const GDN_MASK_STRICT_LOWER: &str = include_str!("../wgsl/gdn_mask_strict_lower.wgsl");
+/// `wgsl/gdn_row_scale_off.wgsl`
+pub const GDN_ROW_SCALE_OFF: &str = include_str!("../wgsl/gdn_row_scale_off.wgsl");
+/// `wgsl/gdn_state_decay.wgsl`
+pub const GDN_STATE_DECAY: &str = include_str!("../wgsl/gdn_state_decay.wgsl");
+/// `wgsl/gdn_ut_step.wgsl`
+pub const GDN_UT_STEP: &str = include_str!("../wgsl/gdn_ut_step.wgsl");
 /// `wgsl/geglu_shift.wgsl`
 pub const GEGLU_SHIFT: &str = include_str!("../wgsl/geglu_shift.wgsl");
 /// `wgsl/geglu_shift_da.wgsl`
@@ -732,6 +754,8 @@ pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
 pub const SPLICE_ADD: &str = include_str!("../wgsl/splice_add.wgsl");
 /// `wgsl/splice_bwd.wgsl`
 pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
+/// `wgsl/sub.wgsl`
+pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -824,6 +848,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
+    ("bmm", BMM),
+    ("bmm_acc", BMM_ACC),
     ("bn_dbeta", BN_DBETA),
     ("bn_dgamma", BN_DGAMMA),
     ("bn_dstats", BN_DSTATS),
@@ -893,6 +919,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("emb_bwd", EMB_BWD),
     ("embed", EMBED),
     ("embed_tile", EMBED_TILE),
+    ("exp", EXP),
     ("expert_counts", EXPERT_COUNTS),
     ("film_chan", FILM_CHAN),
     ("film_chan_dsb", FILM_CHAN_DSB),
@@ -907,6 +934,14 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
+    ("gdn_add_identity", GDN_ADD_IDENTITY),
+    ("gdn_chunk_cumsum_step", GDN_CHUNK_CUMSUM_STEP),
+    ("gdn_decay_mask", GDN_DECAY_MASK),
+    ("gdn_decay_scale", GDN_DECAY_SCALE),
+    ("gdn_mask_strict_lower", GDN_MASK_STRICT_LOWER),
+    ("gdn_row_scale_off", GDN_ROW_SCALE_OFF),
+    ("gdn_state_decay", GDN_STATE_DECAY),
+    ("gdn_ut_step", GDN_UT_STEP),
     ("geglu_shift", GEGLU_SHIFT),
     ("geglu_shift_da", GEGLU_SHIFT_DA),
     ("geglu_shift_db", GEGLU_SHIFT_DB),
@@ -1119,6 +1154,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splice", SPLICE),
     ("splice_add", SPLICE_ADD),
     ("splice_bwd", SPLICE_BWD),
+    ("sub", SUB),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),

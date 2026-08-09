@@ -808,6 +808,65 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(2 * cout * cin_g * k * n * lo, 4 * (n * cout * lo + n * cin * l + 2 * cout * cin_g * k))
         }
 
+        // ---- bmm/bmm_acc: batched matmul, both operands vary per batch.
+        // Params [batch, m, k, n, trans_a, trans_b, alpha, a_off, b_off, out_off].
+        // Same contraction-MAC accounting as the GEMM family above, times `batch`.
+        "bmm" | "bmm_acc" => {
+            let (batch, m, k, n) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(2 * batch * m * k * n, 4 * batch * (m * k + n * k + m * n))
+        }
+
+        // ---- Gated DeltaNet (GDN) chunk recurrence -------------------------
+        // `exp`/`sub`: plain elementwise, `total` is params[0] (or `n0()` for
+        // `sub`, whose extra offset params don't shift its position).
+        "exp" => f(n0(), 8 * n0()),
+        "sub" => f(n0(), 12 * n0()),
+        // One row of the per-chunk cumsum: params [bhc, c_len, i]; one add per
+        // row, dispatch width is `bhc` (params[0]), NOT threads (`i` grows
+        // per host-loop call so `threads` alone would undercount the row width).
+        "gdn_chunk_cumsum_step" => {
+            let bhc = p(0)?;
+            f(bhc, 12 * bhc)
+        }
+        // decay_mask[row,i,j] = exp(g_cs[i]-g_cs[j]) for j<=i: params [bhc, c_len].
+        // Every element is written; roughly half the exp/sub pairs are live.
+        "gdn_decay_mask" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            let n = bhc * c * c;
+            f(2 * n, 4 * (2 * n))
+        }
+        // Elementwise mask+multiply over the same [bhc,c,c] shape.
+        "gdn_mask_strict_lower" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            let n = bhc * c * c;
+            f(n, 4 * (3 * n))
+        }
+        // One row `i` of the UT-transform forward substitution: params
+        // [bhc, c_len, i]; threads = bhc*i, and each thread's serial reduction
+        // is at most `i` MACs (exact per this row's dispatch width).
+        "gdn_ut_step" => {
+            let (bhc, i) = (p(0)?, p(2)?);
+            f(2 * bhc * i * i, 4 * (2 * bhc * i * i))
+        }
+        "gdn_add_identity" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            f(bhc * c, 8 * bhc * c)
+        }
+        // params [total, m, x_off, s_off, alpha]; one mul + one scale-mul.
+        "gdn_row_scale_off" => f(2 * n0(), 12 * n0()),
+        // params [bh, c_len, g_cs_off]; one sub + one exp per row.
+        "gdn_decay_scale" => {
+            let (bh, c) = (p(0)?, p(1)?);
+            f(2 * bh * c, 4 * (2 * bh * c))
+        }
+        // params [bh, dk, dv, c_len, g_cs_off]; one exp (amortised over dk*dv
+        // threads, but every thread still costs one mul) + one mul per element.
+        "gdn_state_decay" => {
+            let (bh, dk, dv) = (p(0)?, p(1)?, p(2)?);
+            let n = bh * dk * dv;
+            f(2 * n, 8 * n)
+        }
+
         _ => None,
     }
 }
