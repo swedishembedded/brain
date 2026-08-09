@@ -1572,3 +1572,63 @@ Device timing is what makes that statement possible: the launch-and-fence floor
 that used to inflate exactly these small kernels (up to 29×, `docs/lessons.md`
 #31) is precisely what made fusion look worthwhile before. **The next lever is
 the int8 GEMM at 8.5% of the int8 roof**, worth ~20 ms of a 75 ms pass.
+
+## Cross-model finding: the int8 GEMMs never inherited the fp32 family's bank-conflict fix
+
+`matmul_i8_dyn`/`matmul_i8` turned out to be layout clones of `matmul_reg2`,
+not `matmul_reg3` — the same 4-way B-tile-read and 8-way shared-store bank
+conflicts `matmul_reg3.wgsl`'s own header diagnosed and fixed for fp32 were
+still present in both int8 kernels, unfixed, because they were written before
+that fix landed and nobody ported it across. This is the **fourth** instance
+of the same meta-rule this file already has three of: a fix that lands on one
+kernel doesn't automatically reach a sibling written later from the same
+template.
+
+**D0 — confirm occupancy before touching WGSL** (`qwen_bench gemm8-sweep`, one
+P40, `k=1024 n=2048`, pre-fix):
+
+| m | 8 | 32 | 128 | 256 | 512 | 1024 | 2048 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GOP/s | 204 | 771 | 2716 | 3516 | 5120 | 6346 | 7789 |
+| % of DP4A roof | 0.5% | 1.8% | 6.2% | 8.1% | 11.8% | 14.6% | 17.9% |
+
+Monotonic climb with `m`, confirming the tile grid is occupancy-starved at
+small `m` — at the served shape (`m=128`), every dispatch launches only 8–24
+workgroups on a 30-SM card. `max|Δ|=0` at every point (exact even pre-fix —
+the contraction is integer, so a wrong LAYOUT doesn't change the SUM, only
+the throughput).
+
+**D1 — port `matmul_reg3`'s two fixes** (`SP=129` padded shared stride +
+stride-16 interleaved register tiling) into both kernels' bodies, bit-for-bit
+mechanical, **bit-identical by construction** (K order unchanged, integer
+accumulation) — `max|Δ|=0` held at every shape after the port too, and
+`flux2::tests::batch_parity::int8_batched_forward_is_bit_identical` /
+`zimage::tests::int8_matmul::int8_gemm_matches_fp32` (cosine gate) both stayed
+green, as did every `qwen::serve` token-for-token test on both backends.
+
+Real, modest wins (`qwen_bench gemm8`, one P40):
+
+| m | before (GOP/s) | after (GOP/s) | kernel gain |
+|---|---:|---:|---:|
+| 128 (served shape) | 2716 | 3035–3048 | 1.12–1.13× |
+| 2048 | 7789 | 10 049 | 1.29× |
+
+**Whole served-pass number** (`qwen_bench serve 128 --i8w`, 3 runs each):
+74.87 ms → ~72.5 ms (≈1.03×) — smaller than the kernel-level gain because
+`matmul_i8_dyn` is ~41% of the pass and D1 alone only moved the kernel ~12%
+at this shape; still real and reproducible, not the §E "kernel win, pass
+didn't move" failure mode (`bias_grad`, `matmul_gemv`) — it DID move, just by
+less than the kernel's own percentage.
+
+Where the fix landed: the kernel BODIES only (`matmul_i8_dyn.wgsl`,
+`matmul_i8.wgsl`), not a new sibling — every caller (`qwen::q8`,
+`qwen::serve`, `zimage::int8`, `flux1`, `flux2`, `model::moe::expert_fwd_i8`)
+inherits with zero code change, the strongest possible outcome of this
+repo's own "check for an already-faster sibling" step (§F.3).
+
+**Still open, at the top of the GPU-saturation follow-up list**: even after D1 the
+kernel is only ~7–8% of the int8 roof at the served shape (`m=128`) — the
+occupancy fix (D2: shrink the N tile to 64, more resident warps) and,
+conditionally, split-K (D2b — only if D2a leaves room; the fp32 split-K
+precedent's own fold-tax arithmetic says a naive port of `SPLITK_TARGET_WGS`
+across would NOT pay here) are the next steps.

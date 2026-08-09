@@ -19,26 +19,24 @@
 //!   covered pass silently *under*-reported its rate instead of declaring
 //!   itself incomplete. Here an uncovered pass says so.
 //!
-//! ## KNOWN DEFECT: the time source (`docs/lessons.md` #31)
+//! ## RESOLVED: the time source (`docs/lessons.md` #31)
 //!
-//! Group times here are HOST wall-clock around a `poll_wait`-bracketed submit of
-//! that slice, so they measure **launch + execute + fence**. The floor of that is
-//! roughly constant, which inflates small kernels in inverse proportion to their
-//! size — measured against the backend's GPU timestamp queries on one
-//! `qwen_bench serve` run: `matmul_reg3` 1.5x, `rmsnorm_rows` **19.7x**,
-//! `paged_decode_scores_batched` **17x**, `paged_decode_apply_batched` **29x**.
+//! [`profile`] now uses DEVICE time wherever the backend can give it:
+//! `Gpu::set_kernel_timing(true)` + one timed submit of the WHOLE pass (the same
+//! single compute pass production runs — no group slicing, no per-group drain,
+//! no launch+fence floor folded into a kernel's number) yields per-kernel device
+//! totals directly via `kernel_times()`. `PassProfile::device_timed` records
+//! which path a given profile actually took. Validated: kernel device time
+//! against the whole-pass number agree to within 0.7% (80.28 ms vs 80.85 ms),
+//! where the old host-bracketed-slice method was off by up to 29x on small
+//! kernels and inverted the ranking (see `docs/lessons.md` #31 for the full
+//! before/after and the `docs/performance/overview.md` finds that followed once
+//! ranking was trustworthy).
 //!
-//! The resulting RANKING is wrong, not merely imprecise: by device time
-//! `matmul_reg3` is 94.8% of that pass, where this table said 53.8% and promoted
-//! two sub-2% kernels to "DEFECT" rows. **Do not attribute time between kernels
-//! from this table for small kernels** — cross-check with `BRAIN_PROFILE=1`.
-//! [`PassProfile::total_secs`] is unaffected, and remains the number a change is
-//! judged by.
-//!
-//! The fix is timestamp queries inside the production single-pass flush, so
-//! attribution and the whole-pass number come from the same execution;
-//! `BRAIN_PROFILE` today only times dispatches in a one-pass-per-dispatch mode
-//! whose absolute times are not production times either.
+//! Only backends without a device-timestamp path fall back to the OLD
+//! host-wall-clock-per-group method below, which still carries the launch+fence
+//! floor this section used to warn about — check `device_timed` before trusting
+//! a per-kernel share as more than a rough guide on such a run.
 //!
 //! Two numbers come out of every profile and they are not interchangeable.
 //! [`PassProfile::total_secs`] is ONE submit of the whole list — the number that

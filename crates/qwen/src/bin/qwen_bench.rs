@@ -31,6 +31,11 @@
 //!                                    # `i8w` = int8 weights, `kv8` = int8 KV
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
+//!   qwen_bench gemm8   [m k n] [reps]      # A/B `matmul_i8_dyn` at one shape
+//!   qwen_bench gemm8-sweep [k n] [reps]    # `matmul_i8_dyn` GOP/s across an
+//!                                          # `m` sweep at fixed k,n — the D0
+//!                                          # occupancy-hypothesis check
+//!                                          # (§F.2) before touching any WGSL
 
 use std::time::Instant;
 
@@ -125,6 +130,21 @@ fn main() {
         let m = Qwen::new(cfg.clone(), 1, t, &init);
         let c = m.cost_fwd();
         println!("{c}");
+        return;
+    }
+    if mode == "gemm8" {
+        let m: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);
+        let k: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
+        let n: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2048);
+        let reps: usize = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(5);
+        gemm8_ab(m, k, n, reps);
+        return;
+    }
+    if mode == "gemm8-sweep" {
+        let k: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1024);
+        let n: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2048);
+        let reps: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
+        gemm8_sweep(k, n, reps);
         return;
     }
 
@@ -260,5 +280,99 @@ fn main() {
                 t as f64 / secs
             );
         }
+    }
+}
+
+/// Pack signed bytes 4-per-`u32`, little-endian — the exact layout
+/// `dot4I8Packed` expects and `model::int8::quantize_weight`/`quant_pack`
+/// produce. `as u8` preserves the two's-complement bit pattern (a sign
+/// EXTEND here, rather than this truncating cast, would corrupt every
+/// negative value — the trap `dot4i8packed_matches_host_reference` in
+/// `crates/wgsl-cpu/src/lib.rs` exists to catch for the GEMV sibling).
+fn pack_i8(v: &[i8]) -> Vec<u32> {
+    v.chunks(4).map(|c| (c[0] as u8 as u32) | ((c[1] as u8 as u32) << 8) | ((c[2] as u8 as u32) << 16) | ((c[3] as u8 as u32) << 24)).collect()
+}
+
+/// Exact i32 host reference for an int8×int8 GEMM. The contraction is
+/// integer, hence exact — no tolerance needed, unlike an fp32 GEMM oracle.
+fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    for mi in 0..m {
+        for ni in 0..n {
+            let mut acc: i32 = 0;
+            for ki in 0..k {
+                acc += x_i8[mi * k + ki] as i32 * w_i8[ni * k + ki] as i32;
+            }
+            out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+        }
+    }
+    out
+}
+
+/// A/B `matmul_i8_dyn` at one shape: exact correctness vs the host i32
+/// reference above, plus GOP/s against the measured DP4A roof (never the
+/// fp32 roof — `Roofs::compute_roof`/`utilisation_of` pick the DP4A one
+/// automatically when `int_ops > flops`, the fix for the 4.15x-flattering
+/// bug `docs/performance/overview.md`'s "int8 weights on the served path"
+/// section records).
+///
+/// `qwen_bench gemm8 [m k n] [reps]` — defaults to the qkv-projection shape
+/// at Qwen3-0.6B's 128-row served prefill (`d_model=1024, q_dim=2048`).
+pub fn gemm8_ab(m: u32, k: u32, n: u32, reps: usize) {
+    assert_eq!(k % 4, 0, "k must be a multiple of 4 (int8 packing)");
+    let kg = k / 4;
+    let gpu = Gpu::new(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);
+    let ki = gpu.kernel_index("matmul_i8_dyn").expect("matmul_i8_dyn registered above");
+    let mut rng = data::rng::Rng::new(11);
+    let rand_i8 = |rng: &mut data::rng::Rng, len: usize| -> Vec<i8> { (0..len).map(|_| ((rng.next_f32() * 254.0) as i32 - 127) as i8).collect() };
+    let x_i8 = rand_i8(&mut rng, (m * k) as usize);
+    let w_i8 = rand_i8(&mut rng, (n * k) as usize);
+    let sx: Vec<f32> = (0..m).map(|_| rng.next_f32() * 0.1 + 0.01).collect();
+    let sw: Vec<f32> = (0..n).map(|_| rng.next_f32() * 0.1 + 0.01).collect();
+
+    let xq = pack_i8(&x_i8);
+    let wq = pack_i8(&w_i8);
+    let xb = gpu.storage(xq.len() as u64);
+    gpu.write(&xb, &xq);
+    let wb = gpu.storage(wq.len() as u64);
+    gpu.write(&wb, &wq);
+    let sxb = gpu.storage_init("sx", &sx);
+    let swb = gpu.storage_init("sw", &sw);
+    let out = gpu.storage((m * n) as u64);
+
+    let tiles = m.div_ceil(128) * n.div_ceil(128) * 256;
+    let st = vec![gpu.step(ki, &[&xb, &wb, &sxb, &swb, &out], &[m, kg, n], tiles)];
+    let t = gpu_core::profile::best_of(&gpu, &st, reps);
+    let got = gpu.read(&out, (m * n) as usize);
+
+    let want = host_i8_gemm(&x_i8, &w_i8, &sx, &sw, m as usize, k as usize, n as usize);
+    let max_abs = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let max_rel = got.iter().zip(&want).map(|(a, b)| (a - b).abs() / b.abs().max(1.0)).fold(0.0f32, f32::max);
+
+    let roofs = gpu_core::roof::ensure(&gpu);
+    let int_ops = 8u64 * m as u64 * kg as u64 * n as u64;
+    let gops = int_ops as f64 / t / 1e9;
+    let pct = roofs.and_then(|r| r.utilisation_of(0, int_ops, 0, t));
+    println!(
+        "matmul_i8_dyn [m={m:>5} k={k:>5} n={n:>5}]  {:>8.3} ms  {:>9.1} GOP/s  {:<20}  max|Δ|={:.3e} max_rel={:.3e}  wgs={tiles}",
+        t * 1e3,
+        gops,
+        pct.map(|p| format!("{p:.1}% of int8 roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        max_abs,
+        max_rel,
+    );
+}
+
+/// D0 — the occupancy-hypothesis check (§F.2), run BEFORE touching any WGSL:
+/// sweep `m` at fixed `k,n` and watch whether GOP/s climbs with it. Climbing
+/// confirms the tile grid is occupancy-starved at small `m` for `matmul_i8_dyn`
+/// (mirroring `matmul_reg3_splitk.wgsl`'s own header table for the fp32
+/// sibling); flat means it doesn't, and that fix plan is wrong.
+///
+/// `qwen_bench gemm8-sweep [k n] [reps]`.
+pub fn gemm8_sweep(k: u32, n: u32, reps: usize) {
+    println!("D0 occupancy sweep: matmul_i8_dyn at k={k} n={n}, m swept\n");
+    for &m in &[8u32, 32, 128, 256, 512, 1024, 2048] {
+        gemm8_ab(m, k, n, reps);
     }
 }

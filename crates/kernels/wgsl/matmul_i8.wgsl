@@ -20,12 +20,23 @@
 // which is the 47-TOPS hardware the peak bench demonstrated. int8 weights also
 // move 1/4 the bytes of fp32, so the memory side wins too.
 //
-// Structure mirrors matmul_reg2: 128x128 output tile, 256 threads, 8x8 register
-// micro-tile, software-pipelined (prefetch the next K-chunk into registers to
-// hide global-load latency). The only differences from the fp32 kernel: staged
-// values are u32 (int8x4), the inner op is `acc += dot4I8Packed(a, b)` (WGSL has
-// no fused-accumulate dot, so a 32-bit add follows each dot), accumulators are
-// i32, and the epilogue multiplies by the per-tensor scales sx*sw.
+// Layout mirrors matmul_reg3, NOT matmul_reg2 (this kernel used to be a reg2
+// clone — see git history — carrying the same two shared-memory bank-conflict
+// patterns matmul_reg3.wgsl's own header diagnoses and fixes for fp32, at
+// higher cost here: DP4A packs 4x the math behind the same shared word, so a
+// conflict here taxes 4x the throughput it would in the fp32 kernel):
+//
+//  1. INTERLEAVED register tiling: thread ty/tx owns rows/cols
+//     {ty, ty+16, ty+32, …} instead of {8*ty … 8*ty+7}, so the 16 threads of a
+//     tx-group read 16 CONSECUTIVE shared words — one per bank, no conflict —
+//     and the epilogue's global stores become 16 consecutive elements per
+//     instruction instead of a stride-8 scatter.
+//  2. PADDED tile stride 129 instead of 128 (`SP`), so the staging store's
+//     bank index becomes (kk + r) mod 32 rather than r mod 32.
+//
+// Both fixes are layout-only — the accumulation ORDER is unchanged, and it is
+// INTEGER, so the result is bit-identical to the pre-fix kernel, not merely
+// close.
 //
 // K must be a multiple of 4 (packing). Per-tensor scales here; per-row (x) /
 // per-column (w) scales are the production refinement — same kernel, scales
@@ -44,24 +55,24 @@ struct Params { m: u32, kg: u32, n: u32, sx: f32, sw: f32 };  // kg = K/4
 const BM: u32 = 128u;
 const BN: u32 = 128u;
 const BKG: u32 = 8u;   // packed K-groups per chunk (= 32 int8 along K)
+const SP: u32 = 129u;  // padded shared stride (BM + 1 / BN + 1)
 const WG: u32 = 256u;
+const LN: u32 = 16u;   // lane grid: 16 x 16 threads, stride-16 interleave
 
-var<workgroup> As: array<u32, 1024>;  // BKG*BM
-var<workgroup> Bs: array<u32, 1024>;  // BKG*BN
+var<workgroup> As: array<u32, 1032>;  // BKG*SP, k-major: As[kk*SP + r]
+var<workgroup> Bs: array<u32, 1032>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let tid = lid.x;
-    let ty = tid / 16u;
-    let tx = tid % 16u;
+    let ty = tid / LN;
+    let tx = tid % LN;
     let wg = wgid.y * nwg.x + wgid.x;
     let tiles_n = (p.n + BN - 1u) / BN;
     let row0 = (wg / tiles_n) * BM;
     let col0 = (wg % tiles_n) * BN;
-    let arow = ty * 8u;
-    let bcol = tx * 8u;
 
     var sr: array<u32, 4>;
     var skk: array<u32, 4>;
@@ -94,10 +105,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     // Prime chunk 0.
     for (var e = 0u; e < 4u; e = e + 1u) {
         let gk = skk[e];
-        if (arow_g[e] < p.m && gk < p.kg) { As[skk[e] * BM + sr[e]] = x[arow_g[e] * p.kg + gk]; }
-        else                              { As[skk[e] * BM + sr[e]] = 0u; }
-        if (brow_g[e] < p.n && gk < p.kg) { Bs[skk[e] * BN + sr[e]] = w[brow_g[e] * p.kg + gk]; }
-        else                              { Bs[skk[e] * BN + sr[e]] = 0u; }
+        if (arow_g[e] < p.m && gk < p.kg) { As[skk[e] * SP + sr[e]] = x[arow_g[e] * p.kg + gk]; }
+        else                              { As[skk[e] * SP + sr[e]] = 0u; }
+        if (brow_g[e] < p.n && gk < p.kg) { Bs[skk[e] * SP + sr[e]] = w[brow_g[e] * p.kg + gk]; }
+        else                              { Bs[skk[e] * SP + sr[e]] = 0u; }
     }
     workgroupBarrier();
 
@@ -112,10 +123,24 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             }
         }
         for (var kk = 0u; kk < BKG; kk = kk + 1u) {
-            let ao = kk * BM + arow;
-            let bo = kk * BN + bcol;
-            let a0 = As[ao + 0u]; let a1 = As[ao + 1u]; let a2 = As[ao + 2u]; let a3 = As[ao + 3u]; let a4 = As[ao + 4u]; let a5 = As[ao + 5u]; let a6 = As[ao + 6u]; let a7 = As[ao + 7u];
-            let b0 = Bs[bo + 0u]; let b1 = Bs[bo + 1u]; let b2 = Bs[bo + 2u]; let b3 = Bs[bo + 3u]; let b4 = Bs[bo + 4u]; let b5 = Bs[bo + 5u]; let b6 = Bs[bo + 6u]; let b7 = Bs[bo + 7u];
+            let ao = kk * SP + ty;
+            let bo = kk * SP + tx;
+            let a0 = As[ao + 0u];
+            let a1 = As[ao + 16u];
+            let a2 = As[ao + 32u];
+            let a3 = As[ao + 48u];
+            let a4 = As[ao + 64u];
+            let a5 = As[ao + 80u];
+            let a6 = As[ao + 96u];
+            let a7 = As[ao + 112u];
+            let b0 = Bs[bo + 0u];
+            let b1 = Bs[bo + 16u];
+            let b2 = Bs[bo + 32u];
+            let b3 = Bs[bo + 48u];
+            let b4 = Bs[bo + 64u];
+            let b5 = Bs[bo + 80u];
+            let b6 = Bs[bo + 96u];
+            let b7 = Bs[bo + 112u];
             c00 += dot4I8Packed(a0, b0); c01 += dot4I8Packed(a0, b1); c02 += dot4I8Packed(a0, b2); c03 += dot4I8Packed(a0, b3); c04 += dot4I8Packed(a0, b4); c05 += dot4I8Packed(a0, b5); c06 += dot4I8Packed(a0, b6); c07 += dot4I8Packed(a0, b7);
             c10 += dot4I8Packed(a1, b0); c11 += dot4I8Packed(a1, b1); c12 += dot4I8Packed(a1, b2); c13 += dot4I8Packed(a1, b3); c14 += dot4I8Packed(a1, b4); c15 += dot4I8Packed(a1, b5); c16 += dot4I8Packed(a1, b6); c17 += dot4I8Packed(a1, b7);
             c20 += dot4I8Packed(a2, b0); c21 += dot4I8Packed(a2, b1); c22 += dot4I8Packed(a2, b2); c23 += dot4I8Packed(a2, b3); c24 += dot4I8Packed(a2, b4); c25 += dot4I8Packed(a2, b5); c26 += dot4I8Packed(a2, b6); c27 += dot4I8Packed(a2, b7);
@@ -128,109 +153,109 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         workgroupBarrier();
         if (has_next) {
             for (var e = 0u; e < 4u; e = e + 1u) {
-                As[skk[e] * BM + sr[e]] = rA[e];
-                Bs[skk[e] * BN + sr[e]] = rB[e];
+                As[skk[e] * SP + sr[e]] = rA[e];
+                Bs[skk[e] * SP + sr[e]] = rB[e];
             }
         }
         workgroupBarrier();
     }
 
     let sc = p.sx * p.sw;
-    let m0 = row0 + arow + 0u;
-    let m1 = row0 + arow + 1u;
-    let m2 = row0 + arow + 2u;
-    let m3 = row0 + arow + 3u;
-    let m4 = row0 + arow + 4u;
-    let m5 = row0 + arow + 5u;
-    let m6 = row0 + arow + 6u;
-    let m7 = row0 + arow + 7u;
+    let m0 = row0 + ty + 0u;
+    let m1 = row0 + ty + 16u;
+    let m2 = row0 + ty + 32u;
+    let m3 = row0 + ty + 48u;
+    let m4 = row0 + ty + 64u;
+    let m5 = row0 + ty + 80u;
+    let m6 = row0 + ty + 96u;
+    let m7 = row0 + ty + 112u;
 
     if (m0 < p.m) {
-        let r0 = m0 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r0 + 0u] = f32(c00) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r0 + 1u] = f32(c01) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r0 + 2u] = f32(c02) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r0 + 3u] = f32(c03) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r0 + 4u] = f32(c04) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r0 + 5u] = f32(c05) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r0 + 6u] = f32(c06) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r0 + 7u] = f32(c07) * sc; }
+        let r0 = m0 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r0 + 0u]   = f32(c00) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r0 + 16u]  = f32(c01) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r0 + 32u]  = f32(c02) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r0 + 48u]  = f32(c03) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r0 + 64u]  = f32(c04) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r0 + 80u]  = f32(c05) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r0 + 96u]  = f32(c06) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = f32(c07) * sc; }
     }
     if (m1 < p.m) {
-        let r1 = m1 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r1 + 0u] = f32(c10) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r1 + 1u] = f32(c11) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r1 + 2u] = f32(c12) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r1 + 3u] = f32(c13) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r1 + 4u] = f32(c14) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r1 + 5u] = f32(c15) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r1 + 6u] = f32(c16) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r1 + 7u] = f32(c17) * sc; }
+        let r1 = m1 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r1 + 0u]   = f32(c10) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r1 + 16u]  = f32(c11) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r1 + 32u]  = f32(c12) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r1 + 48u]  = f32(c13) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r1 + 64u]  = f32(c14) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r1 + 80u]  = f32(c15) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r1 + 96u]  = f32(c16) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = f32(c17) * sc; }
     }
     if (m2 < p.m) {
-        let r2 = m2 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r2 + 0u] = f32(c20) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r2 + 1u] = f32(c21) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r2 + 2u] = f32(c22) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r2 + 3u] = f32(c23) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r2 + 4u] = f32(c24) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r2 + 5u] = f32(c25) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r2 + 6u] = f32(c26) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r2 + 7u] = f32(c27) * sc; }
+        let r2 = m2 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r2 + 0u]   = f32(c20) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r2 + 16u]  = f32(c21) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r2 + 32u]  = f32(c22) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r2 + 48u]  = f32(c23) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r2 + 64u]  = f32(c24) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r2 + 80u]  = f32(c25) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r2 + 96u]  = f32(c26) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = f32(c27) * sc; }
     }
     if (m3 < p.m) {
-        let r3 = m3 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r3 + 0u] = f32(c30) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r3 + 1u] = f32(c31) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r3 + 2u] = f32(c32) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r3 + 3u] = f32(c33) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r3 + 4u] = f32(c34) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r3 + 5u] = f32(c35) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r3 + 6u] = f32(c36) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r3 + 7u] = f32(c37) * sc; }
+        let r3 = m3 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r3 + 0u]   = f32(c30) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r3 + 16u]  = f32(c31) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r3 + 32u]  = f32(c32) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r3 + 48u]  = f32(c33) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r3 + 64u]  = f32(c34) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r3 + 80u]  = f32(c35) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r3 + 96u]  = f32(c36) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = f32(c37) * sc; }
     }
     if (m4 < p.m) {
-        let r4 = m4 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r4 + 0u] = f32(c40) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r4 + 1u] = f32(c41) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r4 + 2u] = f32(c42) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r4 + 3u] = f32(c43) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r4 + 4u] = f32(c44) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r4 + 5u] = f32(c45) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r4 + 6u] = f32(c46) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r4 + 7u] = f32(c47) * sc; }
+        let r4 = m4 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r4 + 0u]   = f32(c40) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r4 + 16u]  = f32(c41) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r4 + 32u]  = f32(c42) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r4 + 48u]  = f32(c43) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r4 + 64u]  = f32(c44) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r4 + 80u]  = f32(c45) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r4 + 96u]  = f32(c46) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = f32(c47) * sc; }
     }
     if (m5 < p.m) {
-        let r5 = m5 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r5 + 0u] = f32(c50) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r5 + 1u] = f32(c51) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r5 + 2u] = f32(c52) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r5 + 3u] = f32(c53) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r5 + 4u] = f32(c54) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r5 + 5u] = f32(c55) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r5 + 6u] = f32(c56) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r5 + 7u] = f32(c57) * sc; }
+        let r5 = m5 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r5 + 0u]   = f32(c50) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r5 + 16u]  = f32(c51) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r5 + 32u]  = f32(c52) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r5 + 48u]  = f32(c53) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r5 + 64u]  = f32(c54) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r5 + 80u]  = f32(c55) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r5 + 96u]  = f32(c56) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = f32(c57) * sc; }
     }
     if (m6 < p.m) {
-        let r6 = m6 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r6 + 0u] = f32(c60) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r6 + 1u] = f32(c61) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r6 + 2u] = f32(c62) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r6 + 3u] = f32(c63) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r6 + 4u] = f32(c64) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r6 + 5u] = f32(c65) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r6 + 6u] = f32(c66) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r6 + 7u] = f32(c67) * sc; }
+        let r6 = m6 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r6 + 0u]   = f32(c60) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r6 + 16u]  = f32(c61) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r6 + 32u]  = f32(c62) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r6 + 48u]  = f32(c63) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r6 + 64u]  = f32(c64) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r6 + 80u]  = f32(c65) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r6 + 96u]  = f32(c66) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = f32(c67) * sc; }
     }
     if (m7 < p.m) {
-        let r7 = m7 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r7 + 0u] = f32(c70) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r7 + 1u] = f32(c71) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r7 + 2u] = f32(c72) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r7 + 3u] = f32(c73) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r7 + 4u] = f32(c74) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r7 + 5u] = f32(c75) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r7 + 6u] = f32(c76) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r7 + 7u] = f32(c77) * sc; }
+        let r7 = m7 * p.n + col0 + tx;
+        if (col0 + tx + 0u < p.n)   { out[r7 + 0u]   = f32(c70) * sc; }
+        if (col0 + tx + 16u < p.n) { out[r7 + 16u]  = f32(c71) * sc; }
+        if (col0 + tx + 32u < p.n) { out[r7 + 32u]  = f32(c72) * sc; }
+        if (col0 + tx + 48u < p.n) { out[r7 + 48u]  = f32(c73) * sc; }
+        if (col0 + tx + 64u < p.n) { out[r7 + 64u]  = f32(c74) * sc; }
+        if (col0 + tx + 80u < p.n) { out[r7 + 80u]  = f32(c75) * sc; }
+        if (col0 + tx + 96u < p.n) { out[r7 + 96u]  = f32(c76) * sc; }
+        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = f32(c77) * sc; }
     }
 }
