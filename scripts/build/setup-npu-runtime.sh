@@ -132,7 +132,26 @@ elif echo "$verify_out" | grep -q "^VERSION:"; then
     log "OpenVINO installed and loadable, but did NOT report NPU in its device list."
     log "The device node and driver are present (checked above), so this is not a missing-package problem. Checking the next most likely cause:"
     if [ ! -d /lib/firmware/intel/vpu ] && [ ! -d /usr/lib/firmware/intel/vpu ]; then
-        log "  /lib/firmware/intel/vpu is ABSENT (and /lib/firmware doesn't exist at all in this filesystem)."
+        log "  /lib/firmware/intel/vpu is ABSENT in THIS filesystem view."
+        # request_firmware() is served by the kernel via
+        # kernel_read_file_from_path_initns() -- by design it ALWAYS reads
+        # from the host's initial mount namespace, never the namespace of
+        # whatever container/process triggered the device probe (deliberate
+        # hardening: a container must not be able to feed the host kernel
+        # arbitrary "firmware" bytes). So inside a container, this directory
+        # check can only ever see what THIS container's filesystem exposes at
+        # that path -- if /lib/firmware isn't bind-mounted in from the host
+        # (the common case; it usually isn't), "ABSENT here" says nothing
+        # about whether the host itself has it. Don't let an "absent" result
+        # from inside a container be read as proof the host is missing it.
+        if [ -f /.dockerenv ] || grep -qE '(docker|containerd|kubepods)' /proc/1/cgroup 2>/dev/null; then
+            log "  This looks like a container. This check is inconclusive here -- verify"
+            log "  directly ON THE HOST instead (outside any container):"
+            log "    ls -la /lib/firmware/intel/vpu/"
+            log "    sudo modprobe -r intel_vpu && sudo modprobe intel_vpu && sudo dmesg | tail -40 | grep -iE 'vpu|firmware'"
+            log "  If the host copy is present and correctly named, the kernel finds it regardless"
+            log "  of any container -- a container cannot make already-correct host firmware invisible."
+        fi
         log "  The intel_vpu kernel driver can bind and create /dev/accel/accelN without its firmware blob,"
         log "  but the NPU has no usable compute until the HOST kernel loads it via request_firmware()."
         log "  Firmware loading happens in the HOST kernel's namespace, not this container's -- installing"

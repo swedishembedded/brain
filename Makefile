@@ -50,7 +50,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -283,6 +283,17 @@ environment: requirements
 # NPU detection/driver setup without re-installing the whole Python stack.
 environment/openvino:
 	scripts/build/setup-npu-runtime.sh
+
+# Read-only diagnosis, NOT install: runs every NPU check this repo has hit
+# (device node/driver binding/kernel version, firmware, kernel debugfs
+# reset/fault counters, the userspace libze_intel_vpu.so.1 compat symlink,
+# OpenVINO's own device enumeration run twice to catch flaky/wedged
+# behavior, and brain's own crates/npu test) and prints one clear verdict.
+# Use this to answer "is the NPU actually accessible right now", `environment`/
+# `environment/openvino` above to install/fix. See scripts/build/
+# npu-diagnose.sh's header for exit codes.
+npu-diagnose:
+	scripts/build/npu-diagnose.sh $(if $(VERBOSE),--verbose)
 
 gradcheck: release
 	$(BRAIN) gradcheck

@@ -56,9 +56,13 @@ fn ensure_openvino_on_path() {
             .map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().starts_with("libopenvino_c.so")))
             .unwrap_or(false)
     };
-    // Already reachable on LD_LIBRARY_PATH? Then nothing to do.
+    // Already reachable on LD_LIBRARY_PATH? A prefix match isn't enough here — the
+    // pip wheel ships only the versioned file, so a dir containing just
+    // `libopenvino_c.so.2630` would (wrongly) satisfy a `starts_with` check and skip
+    // the symlink creation below, leaving the unversioned dlopen to fail later.
+    let has_unversioned_c = |dir: &Path| dir.join("libopenvino_c.so").is_file();
     if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
-        if std::env::split_paths(&p).any(|d| has_c(&d)) {
+        if std::env::split_paths(&p).any(|d| has_unversioned_c(&d)) {
             return;
         }
     }
