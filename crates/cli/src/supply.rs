@@ -21,6 +21,7 @@
 //! checkpoint.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
 use brain_modelref::ModelRef;
@@ -57,14 +58,20 @@ fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
         .map(|e| e.path())
         .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("yolov8") && n.ends_with(".pt")))
         .ok_or_else(|| format!("{vendor}/{repo}: convert: no downloaded yolov8*.pt file in {}", dir.display()))?;
-    let pt = pt.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", pt.display()))?;
+    let pt_str = pt.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", pt.display()))?;
 
-    let tensors = yolo::import::import_yolov8n(pt)?;
+    let tensors = yolo::import::import_yolov8n(pt_str)?;
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().map(|(name, shape, data)| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
     let card = checkpoint::st::ModelCard::for_ref(&format!("{vendor}/{repo}"), vendor, repo, None, "yolo");
     let out = dir.join("model.brain.safetensors");
     checkpoint::st::save_safetensors(out.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 store path"))?, &tensors, &yolo::config::YoloConfig::yolov8n().to_json(), Some(&card))
-        .map_err(|e| format!("{vendor}/{repo}: convert: write model.brain.safetensors: {e}"))
+        .map_err(|e| format!("{vendor}/{repo}: convert: write model.brain.safetensors: {e}"))?;
+    // The upstream .pt is never read again -- Store::local/scan only ever load
+    // model.brain.safetensors (see modelstore::BASE_WEIGHTS_FILE) -- so keeping
+    // it around is pure disk waste. Best-effort: a failed cleanup must not fail
+    // an otherwise-successful convert.
+    std::fs::remove_file(&pt).ok();
+    Ok(())
 }
 
 /// The zimage recipe: no tensor rewrite is needed (`zimage::import::
@@ -129,7 +136,35 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         "omni" => omni::import::import_as(hf_dir, out, Some(&id)),
         other => Err(format!("family {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
-    result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))
+    result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))?;
+    // The upstream weights (single model.safetensors, or a model-*-of-*.safetensors
+    // shard set + its index) are never read again once model.brain.safetensors
+    // exists -- Store::local/scan only ever load BASE_WEIGHTS_FILE -- so keeping
+    // them is pure disk waste (often larger than the converted file itself, e.g.
+    // a bf16 upstream vs. brain's fp32-only format). Best-effort: a failed
+    // cleanup must not fail an otherwise-successful convert.
+    remove_upstream_weights(&dir);
+    Ok(())
+}
+
+/// See [`convert_transformers`]'s cleanup note. Handles both shapes
+/// `TransformersRecipe::artifacts` can have downloaded: a single
+/// `model.safetensors`, or a `model.safetensors.index.json` + its
+/// `model-NNNNN-of-NNNNN.safetensors` shard set.
+fn remove_upstream_weights(dir: &Path) {
+    let single = dir.join("model.safetensors");
+    if single.exists() {
+        std::fs::remove_file(&single).ok();
+        return;
+    }
+    std::fs::remove_file(dir.join("model.safetensors.index.json")).ok();
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for name in entries.filter_map(|e| e.ok()).map(|e| e.file_name()) {
+        let name = name.to_string_lossy();
+        if name.starts_with("model-") && name.ends_with(".safetensors") {
+            std::fs::remove_file(dir.join(&*name)).ok();
+        }
+    }
 }
 
 /// Constructed by `run_cli.rs::build_auto_fetch_supplier` and threaded into
@@ -344,6 +379,26 @@ mod tests {
         // exists to fix.
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Qwen/Qwen3-0.6B".to_string()]);
+    }
+
+    #[test]
+    fn ensure_deletes_the_upstream_safetensors_once_converted() {
+        // model.safetensors is the download input to convert_transformers;
+        // once model.brain.safetensors exists, Store::local never reads it
+        // again (see remove_upstream_weights's doc comment) -- it must not
+        // survive a successful ensure().
+        let (config, weights) = tiny_qwen3_hf_files();
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
+        let dir = store("supply-test-deletes-upstream").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}).unwrap();
+
+        let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
+        assert!(!repo_dir.join("model.safetensors").exists(), "upstream model.safetensors must be cleaned up after a successful convert");
+        assert!(repo_dir.join("model.brain.safetensors").exists(), "the converted checkpoint must still be there");
     }
 
     #[test]
