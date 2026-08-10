@@ -13,7 +13,8 @@
 //! wrong (`maxpool2d`'s `stride` sits BEFORE `pad`; `convtr2d`'s weight has the
 //! INPUT channel outermost and always binds at the wrong layout).
 //!
-//! The correctness tests all run on the CPU backend (`Gpu::new_cpu`), so no GPU
+//! The correctness tests run on the shared test device (`testgpu::dev`,
+//! CPU by default under `BRAIN_DEVICE=cpu`), so no GPU
 //! is required. `layernorm2d_composition_cost` is the one exception — it is a
 //! MEASUREMENT and uses the pooled test device, because a CPU-backend timing
 //! would say nothing about the coalescing question it exists to settle.
@@ -81,7 +82,9 @@ fn ids() -> &'static ConvKernelIds {
 }
 
 fn dev() -> Gpu {
-    Gpu::new_cpu(PIPELINES)
+    // The shared per-binary test device (honors BRAIN_DEVICE), not a
+    // hard-pinned CPU handle -- audit F15.
+    gpu_core::testgpu::dev(PIPELINES)
 }
 
 fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {

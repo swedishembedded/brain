@@ -597,7 +597,6 @@ mod tests {
     use std::collections::HashMap;
 
     use data::rng::Lcg;
-    use gpu_core::Gpu;
 
     use crate::config::NemotronConfig;
     use crate::encoder::{encoder_pipelines, Encoder};
@@ -700,7 +699,7 @@ mod tests {
     fn streaming_matches_offline() {
         let cfg = tiny_cfg();
         let w = tiny_weights(&cfg);
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
         let nm = cfg.num_mel_bins as usize;
         let dh = cfg.decoder_hidden as usize;
@@ -752,7 +751,7 @@ mod tests {
     fn batched_streaming_matches_single() {
         let cfg = tiny_cfg();
         let w = tiny_weights(&cfg);
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
         let nm = cfg.num_mel_bins as usize;
 
@@ -803,7 +802,7 @@ mod tests {
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         let wav = audio::wav::read(&wav_path).expect("wav");
         let w = crate::import::load_tensors(Path::new(&ckpt)).expect("load");
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
 
         let offline = enc.transcribe(&wav.samples, 0);

@@ -112,7 +112,7 @@ mod tests {
     /// device training path using the real gradient kernels (matmul_dx/dw, silu_bwd).
     #[test]
     fn device_ff_backward_matches_finite_diff() {
-        let g = Gpu::new_cpu(ff_bwd_pipelines());
+        let g = gpu_core::testgpu::dev(ff_bwd_pipelines());
         let (t, c, ffn) = (4u32, 6u32, 10u32);
         let mut rng = Rng::new(13);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn glu_forward_and_backward_match_finite_diff() {
-        let g = Gpu::new_cpu(nemotron_pipelines());
+        let g = gpu_core::testgpu::dev(nemotron_pipelines());
         let (outer, d, inner) = (2u32, 3u32, 4u32);
         let nx = (outer * 2 * d * inner) as usize;
         let ny = (outer * d * inner) as usize;
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn rel_shift_matches_oracle_and_backward_is_transpose() {
-        let g = Gpu::new_cpu(nemotron_pipelines());
+        let g = gpu_core::testgpu::dev(nemotron_pipelines());
         let (rows, q, p) = (2u32, 4u32, 7u32); // p = 2*L-1 style
         let n = (rows * q * p) as usize;
         let mut rng = Rng::new(5);
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn lstm_gates_forward_and_backward_match_finite_diff() {
-        let g = Gpu::new_cpu(nemotron_pipelines());
+        let g = gpu_core::testgpu::dev(nemotron_pipelines());
         let (rows, h) = (2u32, 3u32);
         let npre = (rows * 4 * h) as usize;
         let nc = (rows * h) as usize;

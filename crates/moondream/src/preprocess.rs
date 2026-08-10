@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn connector_input_shape_and_global_copy() {
-        let gpu = Gpu::new_cpu(vision_pipelines());
+        let gpu = gpu_core::testgpu::dev(vision_pipelines());
         let (ht, wt, grid, dim, m) = (2u32, 2u32, 4u32, 3u32, 1u32);
         let ppc = (grid * grid) as usize;
         let d = dim as usize;

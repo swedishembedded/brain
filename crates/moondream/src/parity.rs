@@ -24,7 +24,6 @@ fn repo_path(rel: &str) -> String {
 }
     use std::collections::HashMap;
 
-    use gpu_core::Gpu;
 
     use crate::config::MoondreamConfig;
     use crate::decoder::{pipelines, MoondreamBlock, MoondreamDecoder};
@@ -73,7 +72,7 @@ fn repo_path(rel: &str) -> String {
 
         // Build the 4-layer dense decoder (tau on, causal via prefix_attn=1, no image).
         let (t, d, v) = (tokens.len() as u32, cfg.dim, cfg.vocab);
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let blocks: Vec<MoondreamBlock> = (0..N)
             .map(|l| {
                 let bw: HashMap<String, Vec<f32>> = w.iter().filter_map(|(k, val)| k.strip_prefix(&format!("blocks.{l}.")).map(|s| (s.to_string(), val.clone()))).collect();

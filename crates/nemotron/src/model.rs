@@ -67,7 +67,7 @@ mod tests {
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         let wav = audio::wav::read(&wav_path).expect("wav");
-        let model = NemotronAsr::from_hf_on(&ckpt, cfg, Gpu::new_cpu(encoder_pipelines())).expect("load");
+        let model = NemotronAsr::from_hf_on(&ckpt, cfg, gpu_core::testgpu::dev(encoder_pipelines())).expect("load");
 
         let t0 = std::time::Instant::now();
         let toks = model.transcribe(&wav.samples, 0); // prompt 0 = en

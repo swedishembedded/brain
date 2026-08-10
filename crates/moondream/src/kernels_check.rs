@@ -14,7 +14,7 @@ mod tests {
 
     // Pipeline: 0 = geglu_shift, 1 = geglu_shift_da, 2 = geglu_shift_db.
     fn gpu() -> Gpu {
-        Gpu::new_cpu(&[("geglu_shift", GEGLU_SHIFT), ("geglu_shift_da", GEGLU_SHIFT_DA), ("geglu_shift_db", GEGLU_SHIFT_DB)])
+        gpu_core::testgpu::dev(&[("geglu_shift", GEGLU_SHIFT), ("geglu_shift_da", GEGLU_SHIFT_DA), ("geglu_shift_db", GEGLU_SHIFT_DB)])
     }
 
     fn geglu(g: &Gpu, h: &[f32], gg: &[f32]) -> Vec<f32> {
@@ -47,7 +47,7 @@ mod tests {
     fn rope_partial_inverse_and_grad() {
         use gpu_core::f;
         use kernels::{ROPE_PARTIAL, ROPE_PARTIAL_BWD};
-        let g = Gpu::new_cpu(&[("rope_partial", ROPE_PARTIAL), ("rope_partial_bwd", ROPE_PARTIAL_BWD)]);
+        let g = gpu_core::testgpu::dev(&[("rope_partial", ROPE_PARTIAL), ("rope_partial_bwd", ROPE_PARTIAL_BWD)]);
         // 4 rows (T=4), 1 head, head_dim 8, rot_dim 4 → rotate first 4 channels.
         let (rows, heads, hd, rot) = (4u32, 1u32, 8u32, 4u32);
         let n = (rows * heads * hd) as usize;
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn attn_prefix_mask_pattern() {
         use kernels::ATTN_PREFIX_MASK;
-        let g = Gpu::new_cpu(&[("attn_prefix_mask", ATTN_PREFIX_MASK)]);
+        let g = gpu_core::testgpu::dev(&[("attn_prefix_mask", ATTN_PREFIX_MASK)]);
         // T=4, prefix P=2, 1 head. allow = (i<2 && j<2) || (j<=i).
         let (bsz, heads, t, p) = (1u32, 1u32, 4u32, 2u32);
         let n = (bsz * heads * t * t) as usize;
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn adaptive_avgpool2d_grads_match_finite_differences() {
         use kernels::{ADAPTIVE_AVGPOOL2D, ADAPTIVE_AVGPOOL2D_DX};
-        let g = Gpu::new_cpu(&[("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D), ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX)]);
+        let g = gpu_core::testgpu::dev(&[("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D), ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX)]);
         // 4×4 → 3×3: non-integer ratio → overlapping bins (the general case).
         let (nn, cc, h, w, oh, ow) = (1u32, 1u32, 4u32, 4u32, 3u32, 3u32);
         let nx = (nn * cc * h * w) as usize;
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn tau_scale_grads_match_finite_differences() {
         use kernels::{TAU_SCALE, TAU_SCALE_DS};
-        let g = Gpu::new_cpu(&[("tau_scale", TAU_SCALE), ("tau_scale_ds", TAU_SCALE_DS)]);
+        let g = gpu_core::testgpu::dev(&[("tau_scale", TAU_SCALE), ("tau_scale_ds", TAU_SCALE_DS)]);
         let (rows, heads, hd) = (4u32, 2u32, 8u32);
         let n = (rows * heads * hd) as usize;
         let ns = (heads * rows) as usize;

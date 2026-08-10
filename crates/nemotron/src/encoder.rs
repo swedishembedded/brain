@@ -670,7 +670,7 @@ mod tests {
         let refsub = read_f32(&format!("{GOLD}/subsampling.f32")); // [T', 1024]
 
         let weights = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &weights);
         let (sub, tt) = enc.subsampling(&mel, t, valid);
         eprintln!("subsampling out [{tt}, {}] vs golden {}", sub.len() / tt as usize, refsub.len());
@@ -729,7 +729,7 @@ mod tests {
         let dh = cfg.decoder_hidden as usize;
 
         let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
         let t0 = std::time::Instant::now();
         let (pool, valid) = enc.encode(&mel, t, mel_valid, 0);
@@ -762,7 +762,7 @@ mod tests {
         let mel_valid = (0..t as usize).filter(|&i| mel[i * nmel..(i + 1) * nmel].iter().any(|&v| v != 0.0)).count() as u32;
 
         let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
-        let g = Gpu::new_cpu(encoder_pipelines());
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
         let (single, vsingle) = enc.encode(&mel, t, mel_valid, 0);
 

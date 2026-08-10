@@ -472,7 +472,7 @@ mod tests {
         // Gradcheck the SigLIP ViT training fwd/bwd (first in-tree consumer of the
         // shared vit_block_fwd_cached/vit_block_bwd): input-patch grad exercises the
         // whole tower; patch_emb/pos_emb/block-fc1 grads cover the rest.
-        let gpu = Gpu::new_cpu(vision_pipelines());
+        let gpu = gpu_core::testgpu::dev(vision_pipelines());
         let cfg = VisionConfig { dim: 16, patch: 2, n_layers: 2, ff_dim: 32, n_heads: 2, crop_size: 6, max_crops: 4, overlap_margin: 1 };
         let (c, pv, ppc) = (cfg.dim as usize, cfg.patch_vec() as usize, cfg.patches_per_crop() as usize);
         let mut rng = Rng::new(5);
@@ -532,7 +532,7 @@ mod tests {
     fn siglip_encodes_crops() {
         let _ = MoondreamConfig::preview; // config linkage
         let cfg = tiny();
-        let gpu = Gpu::new_cpu(vision_pipelines());
+        let gpu = gpu_core::testgpu::dev(vision_pipelines());
         let (c, pv, ppc) = (cfg.dim as usize, cfg.patch_vec() as usize, cfg.patches_per_crop() as usize);
         let mut rng = Rng::new(3);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn connector_projects() {
-        let gpu = Gpu::new_cpu(vision_pipelines());
+        let gpu = gpu_core::testgpu::dev(vision_pipelines());
         let (in_dim, inner, out_dim, rows) = (48u32, 96u32, 32u32, 9u32);
         let mut rng = Rng::new(4);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();

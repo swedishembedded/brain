@@ -243,7 +243,7 @@ mod tests {
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
         let wav = audio::wav::read(&wav_path).expect("wav");
         let w = crate::import::load_tensors(Path::new(&ckpt)).expect("load");
-        let enc = Encoder::new(gpu_core::Gpu::new_cpu(encoder_pipelines()), cfg, &w);
+        let enc = Encoder::new(gpu_core::testgpu::dev(encoder_pipelines()), cfg, &w);
         let detok = Detokenizer::from_hf(&ckpt).expect("detok");
 
         let offline_text = detok.decode(&enc.transcribe(&wav.samples, 0));

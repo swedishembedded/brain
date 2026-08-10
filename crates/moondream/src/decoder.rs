@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn parallel_block_runs() {
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
         let mut rng = Rng::new(6);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
@@ -856,7 +856,7 @@ mod tests {
     fn tau_temperature_changes_block_output() {
         // A block with attn.tau.* present applies per-head temperature to q,v and
         // must differ from the same weights without tau.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
         let mut rng = Rng::new(11);
         let base = block_weights(d, ff, &mut rng);
@@ -886,7 +886,7 @@ mod tests {
     fn qkv_bias_block_backward_matches_finite_diff() {
         // With the real checkpoint's fused-qkv bias present, the block applies it
         // (before tau/RoPE) and its grad = Σ_rows d_qkv_raw. Gradcheck the bias grad.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
         let mut rng = Rng::new(23);
         let mut w = block_weights(d, ff, &mut rng);
@@ -923,7 +923,7 @@ mod tests {
         // Directional finite-diff gradcheck of the dense parallel-block backward:
         // the input grad exercises the whole reverse chain (residual → MLP+attn →
         // shared-LN accumulation → LN dx); a weight grad covers the accumulating path.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
         let mut rng = Rng::new(7);
         let w = block_weights(d, ff, &mut rng);
@@ -972,7 +972,7 @@ mod tests {
     fn tau_block_backward_matches_finite_diff() {
         // Gradcheck the tau path: input grad exercises the full tau chain (tau_scale
         // in-grad + tok_feat/wq/wv/alpha); the alpha and wq grads cover the tau head.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
         let mut rng = Rng::new(21);
         let mut w = block_weights(d, ff, &mut rng);
@@ -1034,7 +1034,7 @@ mod tests {
         // Gradcheck the MoE FFN branch backward inside the parallel block: input grad
         // exercises experts (geglu_shift + w_h/w_g/w_down) + router; an expert weight
         // and a router weight cover those paths.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
         let (inner, e, top_k) = (6u32, 3u32, 2u32);
         let mut rng = Rng::new(31);
@@ -1104,7 +1104,7 @@ mod tests {
         // End-to-end gradcheck of the dense decoder backward: loss = mean masked CE.
         // The image-embed grad exercises splice_bwd → the full block chain → head;
         // lm_head.bias and tok.weight grads cover the head + embedding-scatter paths.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta, nl) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32, 2u32);
         let mut rng = Rng::new(15);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.3).collect::<Vec<f32>>();
@@ -1182,7 +1182,7 @@ mod tests {
         // End-to-end gradcheck of the REAL architecture: layer 0 = tau + dense FFN,
         // layer 1 = tau + MoE FFN. Proves the decoder backward composes the tau and
         // MoE block backwards through the residual-stream chain + splice + head.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32);
         let (inner, e, top_k) = (6u32, 3u32, 2u32);
         let mut rng = Rng::new(41);
@@ -1295,7 +1295,7 @@ mod tests {
     #[test]
     fn full_decoder_forward_is_finite() {
         // t=8 stream: bos + 4 image + 3 text (prefix=5). 2 dense layers.
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, vocab, n_img, prefix, rot) = (8u32, 16u32, 2u32, 8u32, 32u32, 23u32, 4u32, 5u32, 4u32);
         let mut rng = Rng::new(9);
         let bw0 = block_weights(d, ff, &mut rng);
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[test]
     fn parallel_block_with_moe_runs() {
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
         let (inner, e, top_k) = (4u32, 3u32, 2u32);
         let mut rng = Rng::new(8);
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn moe_ffn_geglu_runs() {
-        let gpu = Gpu::new_cpu(pipelines());
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
         let mut rng = Rng::new(5);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
