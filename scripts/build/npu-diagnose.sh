@@ -217,10 +217,11 @@ except Exception as e:
 print(f"DEVICES:{devices}")
 '
 run_check() {
-  python3 -c "$PYCHECK" 2>/tmp/npu-diagnose-stderr.$$
+  local errfile="${TMPDIR:-/tmp}/npu-diagnose-stderr.$$"
+  python3 -c "$PYCHECK" 2>"$errfile"
   local rc=$?
-  cat /tmp/npu-diagnose-stderr.$$ >&2 2>/dev/null || true
-  rm -f /tmp/npu-diagnose-stderr.$$
+  cat "$errfile" >&2 2>/dev/null || true
+  rm -f "$errfile"
   return $rc
 }
 attempt1_out="$(run_check)"; attempt1_rc=$?

@@ -18,6 +18,7 @@ Outputs (little-endian):
   parity/fastvlm_cap_gen.bin     [G] i32 the greedy caption tokens
 """
 import os
+import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -26,9 +27,9 @@ import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-CKPT = os.environ.get("BRAIN_FASTVLM_CKPT", "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B")
-IMG = os.environ.get("BRAIN_FASTVLM_TEST_IMG", "/data/workspace/resources/emulation/dosbox-x/DOSBox-Logo-2-680x350.png")
-OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
+CKPT = os.environ.get("BRAIN_FASTVLM_CKPT") or sys.exit("set BRAIN_FASTVLM_CKPT=<FastVLM-0.5B hf checkpoint dir> (no baked-in default: this path is machine-specific)")
+IMG = os.environ.get("BRAIN_FASTVLM_TEST_IMG") or sys.exit("set BRAIN_FASTVLM_TEST_IMG=<test image path> (no baked-in default: this path is machine-specific)")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT") or sys.exit("set BRAIN_VL_PARITY_OUT=<parity output dir> (no baked-in default: this path is machine-specific)")
 os.makedirs(OUT, exist_ok=True)
 GEN = 20
 

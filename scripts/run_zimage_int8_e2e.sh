@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 set -u
-cd /data/workspace/applications/edgeai/brain
+cd "$(dirname "$0")/.."
 export BRAIN_ZIMAGE_DIT="$PWD/out/models/Tongyi-MAI/Z-Image-Turbo/transformer"
 export BRAIN_ZIMAGE_VAE="$PWD/out/models/Tongyi-MAI/Z-Image-Turbo/vae/diffusion_pytorch_model.safetensors"
 export BRAIN_ZIMAGE_QWEN="$PWD/out/models/Tongyi-MAI/Z-Image-Turbo/text_encoder"

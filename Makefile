@@ -52,10 +52,13 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
 
 .PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
-        data/shakespeare_char data/gpt data/detect \
+        data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
-        web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata
+        web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
+        clippy check/scripts qwen/serving-perf-gate \
+        test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
+        perf/lfm perf/flux2 flux2/generate flux2/edit zimage/int8-e2e
 
 help:
 	@echo "brain targets:"
@@ -68,8 +71,20 @@ help:
 	@echo "  make test/slow               #[ignore]d long-running tests"
 	@echo "  make test/full               test + test/doc + test/slow"
 	@echo "  make test/times              rank test binaries by wall time"
-	@echo "  make gradcheck               numerical backprop correctness gate (GPT)"
+	@echo "  make test/e2e                every fast end-to-end bats suite (api-conformance|"
+	@echo "                               shutdown|examples|ready; test/e2e/<name> runs one;"
+	@echo "                               claude-code + scheduler are heavier, opt-in)"
+	@echo "  make clippy                  the clippy ratchet gate (exit 0 + no new warnings)"
+	@echo "  make check/scripts           scripts/tools self-validation + env-var doc gate"
+	@echo "  make gradcheck               the FULL numerical backprop gate (every model check"
+	@echo "                               + kernel FD suite in crates/gradcheck)"
+	@echo "  make parity                  cross-backend parity gate: CPU == Vulkan == NPU"
+	@echo "  make forecast/parity         forecasting fp32-exactness gate"
+	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
+	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
+	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
 	@echo "  make kernels-table           regenerate README.md's kernel catalogue from the .wgsl"
+	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
 	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.safetensors"
@@ -92,6 +107,15 @@ help:
 	@echo "  make perf/<scenario>         one scenario (perf/sweep, perf/serve, ...)"
 	@echo "  make perf/compare            leaderboard over results/perf-*.json"
 	@echo "  make perf/smoke              CI-sized run of every perf scenario"
+	@echo "  make perf/lfm                LFM2.5 8k-context concurrency benchmark (LFM_WEIGHTS/"
+	@echo "                               LFM_TOKENIZER select the model)"
+	@echo "  make perf/flux2              FLUX.2 Klein denoise-step benchmark (BRAIN_FLUX2_* env)"
+	@echo "  make train/qwen/lora         LoRA-finetune a Qwen checkpoint (DATASET=<dir> ADAPTER=<ref>)"
+	@echo "  make flux2/generate          generate one image with FLUX.2 Klein (BRAIN_FLUX2_* env)"
+	@echo "  make flux2/edit              reference-image edit with FLUX.2 Klein (FLUX2_REF=...)"
+	@echo "  make zimage/int8-e2e         real z-image int8 e2e generation (no-OOM regression)"
+	@echo "  make data/tts                synthetic TTS text->codes dataset (Talker SFT smokes)"
+	@echo "  make docs                    build the full docs bundle (pandoc + xelatex)"
 	@echo "  make wm/play                  play the fake world model in an SDL window (WASD)"
 	@echo "  make wm-fixtures             regenerate DIAMOND parity fixtures (needs torch)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
@@ -298,8 +322,11 @@ environment/openvino:
 npu-diagnose:
 	scripts/build/npu-diagnose.sh $(if $(VERBOSE),--verbose)
 
-gradcheck: release
-	$(BRAIN) gradcheck
+# The documented backprop gate must BE the real gate: `brain gradcheck` runs
+# exactly one model (GPT), while the ~20 model checks + kernel FD suites live
+# in crates/gradcheck's tests. Point the target at those (audit F17).
+gradcheck:
+	$(CARGO_TEST) -p brain-gradcheck
 
 # Regenerate the kernel const block + ALL registry in crates/kernels/src/lib.rs
 # from the contents of crates/kernels/wgsl/. Run after adding/removing a .wgsl
@@ -674,10 +701,13 @@ perf/%: release
 # LFM2.5-Encoder concurrency benchmark, standalone: the residency-executor
 # target (real scheduler + budgets + lanes + equal-length batching) at 8k
 # context. LFM_WEIGHTS/LFM_TOKENIZER select the model (230m/350m).
+# LFM_TOKENIZER has NO default: the tokenizer lives outside the repo, and a
+# baked-in absolute path is one dev box's layout (same @test -n guard as the
+# depth/mirror/splat targets).
 LFM_WEIGHTS ?= out/lfm-230m.safetensors
-LFM_TOKENIZER ?= /data/workspace/resources/lfm/LFM2.5-Encoder-230M/tokenizer.json
 LFM_INPUT ?= 8192
 perf/lfm: release
+	@test -n "$(LFM_TOKENIZER)" || (echo "set LFM_TOKENIZER=<path to LFM2.5-Encoder tokenizer.json>"; exit 2)
 	@set -e; for s in latency sweep; do \
 		$(BRAIN) perf run $$s --target lfm:$(LFM_WEIGHTS):$(LFM_TOKENIZER) \
 			--input $(LFM_INPUT) --output 1 --ladder $(PERF_LADDER) --seed $(SEED); \
@@ -717,6 +747,12 @@ perf/smoke: release
 .PHONY: docs
 docs:
 	python3 docs/pandoc/build-docs.py
+
+# Real end-to-end z-image int8 generation (256x256) against the fetched
+# checkpoint under out/models/ — the no-OOM regression run from fa7b576.
+# Heavy: real weights + a GPU; writes results/zimage-int8-e2e.log.
+zimage/int8-e2e:
+	bash scripts/run_zimage_int8_e2e.sh
 
 # ---- FLUX.2 Klein (crates/flux2; weights via BRAIN_FLUX2_* env) ----
 flux2/generate: release

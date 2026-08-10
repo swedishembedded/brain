@@ -32,8 +32,8 @@ import torch
 
 
 # Overridable machine paths (scripts/gates/check-scripts.sh 3/3).
-CKPT = os.environ.get("BRAIN_INSTANTID_CKPT", "/data/workspace/resources/identity/weights/instantid/ip-adapter.bin")
-CODE = os.environ.get("BRAIN_INSTANTID_CODE", "/data/workspace/resources/identity/code/InstantID")
+CKPT = os.environ.get("BRAIN_INSTANTID_CKPT") or sys.exit("set BRAIN_INSTANTID_CKPT=<instantid ip-adapter.bin> (no baked-in default: this path is machine-specific)")
+CODE = os.environ.get("BRAIN_INSTANTID_CODE") or sys.exit("set BRAIN_INSTANTID_CODE=<InstantID reference repo checkout> (no baked-in default: this path is machine-specific)")
 
 def load_reference(code_root):
     """Import the upstream Resampler / IPAttnProcessor rather than reimplementing them."""

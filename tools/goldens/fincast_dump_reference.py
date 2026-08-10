@@ -36,7 +36,7 @@ import sys
 import numpy as np
 import torch
 
-REF = os.environ.get("BRAIN_FINCAST_REPO", "/data/workspace/resources/time-series/repos/FinCast")
+REF = os.environ.get("BRAIN_FINCAST_REPO") or sys.exit("set BRAIN_FINCAST_REPO=<FinCast reference repo checkout> (no baked-in default: this path is machine-specific)")
 
 
 def load_ppd():

@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import pathlib
 
 import torch
@@ -30,7 +31,7 @@ from safetensors.torch import load_file, save_file
 
 # Overridable machine path (scripts/gates/check-scripts.sh 3/3); the same
 # BRAIN_GOLDEN_MIRROR that scripts/data/fetch-testdata.sh links goldens from.
-GOLDEN_MIRROR = os.environ.get("BRAIN_GOLDEN_MIRROR", "/data/workspace/resources/brain-goldens")
+GOLDEN_MIRROR = os.environ.get("BRAIN_GOLDEN_MIRROR") or sys.exit("set BRAIN_GOLDEN_MIRROR=<goldens mirror dir> (no baked-in default: this path is machine-specific)")
 
 def main() -> None:
     ap = argparse.ArgumentParser()

@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import os
+import sys
 import pathlib
 
 import torch
@@ -30,7 +31,7 @@ import torch.nn.functional as F
 from safetensors.torch import save_file
 
 # Overridable machine path (scripts/gates/check-scripts.sh 3/3).
-GOLDEN_MIRROR = os.environ.get("BRAIN_GOLDEN_MIRROR", "/data/workspace/resources/brain-goldens")
+GOLDEN_MIRROR = os.environ.get("BRAIN_GOLDEN_MIRROR") or sys.exit("set BRAIN_GOLDEN_MIRROR=<goldens mirror dir> (no baked-in default: this path is machine-specific)")
 
 
 class ResidualDenseBlock(nn.Module):

@@ -16,6 +16,7 @@ Outputs (little-endian):
 """
 import glob
 import os
+import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -24,8 +25,8 @@ import torch
 from safetensors import safe_open
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-CKPT = os.environ.get("BRAIN_QWENVL_CKPT", "/data/workspace/resources/vl/qwen3-vl/Qwen3-VL-4B-Instruct")
-OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
+CKPT = os.environ.get("BRAIN_QWENVL_CKPT") or sys.exit("set BRAIN_QWENVL_CKPT=<Qwen3-VL-4B-Instruct hf checkpoint dir> (no baked-in default: this path is machine-specific)")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT") or sys.exit("set BRAIN_VL_PARITY_OUT=<parity output dir> (no baked-in default: this path is machine-specific)")
 os.makedirs(OUT, exist_ok=True)
 N = 4  # blocks to validate
 

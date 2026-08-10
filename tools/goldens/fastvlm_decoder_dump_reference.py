@@ -14,14 +14,15 @@ vision tower + projector + image-token splice), so we load the `model.layers.*`
 """
 import json
 import os
+import sys
 
 import numpy as np
 import torch
 from safetensors.torch import load_file
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-CKPT = os.environ.get("BRAIN_FASTVLM_CKPT", "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B")
-OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
+CKPT = os.environ.get("BRAIN_FASTVLM_CKPT") or sys.exit("set BRAIN_FASTVLM_CKPT=<FastVLM-0.5B hf checkpoint dir> (no baked-in default: this path is machine-specific)")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT") or sys.exit("set BRAIN_VL_PARITY_OUT=<parity output dir> (no baked-in default: this path is machine-specific)")
 os.makedirs(OUT, exist_ok=True)
 
 cfg = json.load(open(f"{CKPT}/config.json"))
