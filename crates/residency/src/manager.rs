@@ -216,7 +216,10 @@ pub struct ResidencyManager {
     multi_residents: HashMap<InstanceKey, MultiEntry>,
     instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
-    pub events: Vec<String>,
+    /// BOUNDED (a ring of the last [`Self::MAX_EVENTS`]): a long-lived server
+    /// churning instances used to grow this Vec forever — an unbounded audit
+    /// log with no production reader is a slow leak, not observability.
+    pub events: std::collections::VecDeque<String>,
     /// Cumulative counters (never reset) — instance builds and evictions.
     pub builds: u64,
     pub evictions: u64,
@@ -248,11 +251,21 @@ impl ResidencyManager {
             residents: Residents::new(),
             multi_residents: HashMap::new(),
             instances: HashMap::new(),
-            events: Vec::new(),
+            events: std::collections::VecDeque::new(),
             builds: 0,
             evictions: 0,
             eviction: Box::new(CostAware),
         }
+    }
+
+    /// The audit ring's bound — see `events`.
+    const MAX_EVENTS: usize = 256;
+
+    fn event(&mut self, e: String) {
+        if self.events.len() >= Self::MAX_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(e);
     }
 
     /// Override the eviction policy (builder-style) -- e.g. `Lru` for an A/B
@@ -566,12 +579,25 @@ impl ResidencyManager {
             self.budgets.alloc(device, hot_cost.on(device));
             self.residents.retier(&key, hot_cost, device, Tier::Hot);
             self.residents.set_pinned(&key, true);
-            self.events.push(format!("promote {key} -> {device:?} (warm->hot)"));
+            self.event(format!("promote {key} -> {device:?} (warm->hot)"));
             return Ok((Claimed::Promote(handle), device, key));
         }
         // Cold: place + pre-account + pin NOW (so nothing steals the budget or
         // evicts the slot), but defer the potentially slow/hanging activate() to
         // the caller's thread.
+        //
+        // A key can be in `residents` WITHOUT being in `instances` while such
+        // a deferred build is in flight (insert happens here, adopt happens on
+        // the lane). Re-claiming it then would double-charge the budget and
+        // overwrite the LRU entry without releasing the old cost — previously
+        // documented as a "no-op-ish re-place" (it wasn't) and unreachable
+        // only because the Executor's `running` set happens to serialize
+        // same-key groups. The manager now enforces its own invariant.
+        if self.residents.get(&key).is_some() {
+            return Err(ClaimError::NoCapacity(format!(
+                "{key}: a deferred build for this key is already in flight — retry when it adopts or fails"
+            )));
+        }
         let cost = m.estimate(&key);
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
@@ -601,7 +627,7 @@ impl ResidencyManager {
         self.budgets.alloc(device, cost.on(device));
         self.residents.insert(key.clone(), cost, device);
         self.residents.set_pinned(&key, true);
-        self.events.push(format!("promote {key} -> {device:?} (building)"));
+        self.event(format!("promote {key} -> {device:?} (building)"));
         Ok((Claimed::Build(m), device, key))
     }
 
@@ -609,7 +635,7 @@ impl ResidencyManager {
     pub fn adopt(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
         self.instances.insert(key.clone(), handle.clone());
         self.builds += 1;
-        self.events.push(format!("built {key}"));
+        self.event(format!("built {key}"));
         handle
     }
 
@@ -620,7 +646,7 @@ impl ResidencyManager {
             self.budgets.release(entry.device, entry.cost.on(entry.device));
         }
         self.instances.remove(key);
-        self.events.push(format!("build-failed {key}"));
+        self.event(format!("build-failed {key}"));
     }
 
     /// Unpin an instance after a run and mark it most-recently-used.
@@ -725,7 +751,7 @@ impl ResidencyManager {
             self.budgets.alloc(d, cost.on(d));
         }
         self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true });
-        self.events.push(format!("promote {key} -> {devices:?} (building, multi-device)"));
+        self.event(format!("promote {key} -> {devices:?} (building, multi-device)"));
         Ok((ClaimedMulti::Build(m), devices, key))
     }
 
@@ -733,7 +759,7 @@ impl ResidencyManager {
     pub fn adopt_multi(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
         self.instances.insert(key.clone(), handle.clone());
         self.builds += 1;
-        self.events.push(format!("built {key} (multi-device)"));
+        self.event(format!("built {key} (multi-device)"));
         handle
     }
 
@@ -746,7 +772,7 @@ impl ResidencyManager {
             }
         }
         self.instances.remove(key);
-        self.events.push(format!("build-failed {key} (multi-device)"));
+        self.event(format!("build-failed {key} (multi-device)"));
     }
 
     /// [`Self::release`]'s multi-device sibling.
@@ -785,7 +811,7 @@ impl ResidencyManager {
                 }
                 self.instances.remove(key);
                 self.evictions += 1;
-                self.events.push(format!("evict {key} <- {:?} (multi-device)", entry.devices));
+                self.event(format!("evict {key} <- {:?} (multi-device)", entry.devices));
                 true
             }
         }
@@ -834,7 +860,7 @@ impl ResidencyManager {
                         self.budgets.release(entry.device, entry.cost.on(entry.device));
                         self.budgets.alloc(Device::Cpu, warm_cost.on(Device::Cpu));
                         self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
-                        self.events.push(format!("demote {key} <- {:?} (warm)", entry.device));
+                        self.event(format!("demote {key} <- {:?} (warm)", entry.device));
                         return;
                     }
                 }
@@ -847,7 +873,7 @@ impl ResidencyManager {
             self.budgets.release(entry.device, entry.cost.on(entry.device));
             self.instances.remove(key); // drops the Instance → frees the GPU
             self.evictions += 1;
-            self.events.push(format!("evict {key} <- {:?}", entry.device));
+            self.event(format!("evict {key} <- {:?}", entry.device));
         }
     }
 }

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Batched decode softmax: per (sequence b, head h), max-subtracted softmax over its seq_lens[b] scores in a [batch, n_heads, cap]-strided buffer
-// @how   one thread per output element
-// @opt   3
+// @how   one thread per (seq, head) row, 3 serial passes over seq_len
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes

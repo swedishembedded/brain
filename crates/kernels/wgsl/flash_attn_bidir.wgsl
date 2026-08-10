@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Flash attention (bidirectional self-attention), TILED with shared-memory K/V reuse + online softmax — Pascal-friendly (sm_61
-// @how   64-thread workgroup tile, 3 barriers
+// @how   64-thread workgroup tile, 2 barriers
 // @opt   4
 // @cpu   no
 // @gpu   yes

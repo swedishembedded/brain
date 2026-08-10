@@ -118,6 +118,21 @@ def cross_check(name, text, meta):
     if meta["opt"] == "5" and not (st["dp4a"] or "splitk" in name or st["regblock"]):
         errs.append("@opt 5 but no register block, DP4A or split-K is present")
 
+    # A barrier count stated in @how must match the CODE. The pre-4fbd112
+    # comment-counting seeder left ~8 kernels declaring barriers (and @opt 4
+    # "workgroup-cooperative") that their code does not have — a naive CPU
+    # fallback advertised as identical to its cooperative twin, which makes
+    # the §F.3 "is there a faster sibling?" lookup lie (audit F41/F6).
+    m = re.search(r"(\d+)\s+barriers?\b", meta["how"] or "")
+    if m and int(m.group(1)) != st["barriers"]:
+        errs.append(
+            f"@how claims {m.group(1)} barrier(s) but the code has {st['barriers']}"
+        )
+    if meta["opt"] == "4" and not st["shared"]:
+        errs.append("@opt 4 (workgroup-cooperative) but the code has no var<workgroup>")
+    if meta["opt"] in {"1", "2", "3"} and st["shared"]:
+        errs.append(f"@opt {meta['opt']} but the code stages through var<workgroup> — cooperative kernels are 4+")
+
     if meta["npu"] not in NPU_CELL:
         errs.append(f"@npu {meta['npu']!r} is not one of {sorted(NPU_CELL)}")
     if meta["quant"] not in QUANT_CELL:

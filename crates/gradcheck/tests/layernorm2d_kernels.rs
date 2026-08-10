@@ -30,14 +30,10 @@ const K_LN_ROWS: usize = 1;
 const K_NLC_NCHW: usize = 2;
 const K_LN2D: usize = 3;
 
+/// `data::rng::Lcg` is the sanctioned test/fixture RNG (b3aa5cc) — this file
+/// used to carry its own copy of the same constants (audit F40).
 fn rnd(n: usize, seed: u64) -> Vec<f32> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((s >> 32) as f32 / u32::MAX as f32) * 2.0 - 1.0
-        })
-        .collect()
+    data::rng::Lcg::new(seed).vec_scaled(n, 1.0)
 }
 
 /// The reference: LayerNorm over the channel axis, on the host.

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  GroupNorm affine gradients, STAGE 2 of 2 — fold the partials and ACCUMULATE
-// @how   one thread per output element, serial inner reduction
-// @opt   4
+// @how   one thread per output element, serial fold over P partials
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes

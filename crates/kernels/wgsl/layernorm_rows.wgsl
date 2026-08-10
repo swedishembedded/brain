@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  LayerNorm forward, one WORKGROUP per row — the coalesced variant
-// @how   64-thread workgroup tile, 2 barriers
+// @how   64-thread workgroup tile, 1 barrier
 // @opt   4
 // @cpu   yes
 // @gpu   yes

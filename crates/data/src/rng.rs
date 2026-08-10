@@ -72,7 +72,12 @@ impl Rng {
 }
 
 /// The deterministic LCG that fixtures, parity probes and kernel tests use to
-/// fill buffers without pulling in `rand`.
+/// fill buffers without pulling in `rand` — and the sanctioned home for
+/// PRODUCTION deterministic init too (e.g. seeding a LoRA/adapter weight):
+/// audit F40 found post-unification hand-rolled copies growing back precisely
+/// because this doc used to scope the type to tests only, leaving production
+/// init with no named home. If a stream must be *statistically stronger* than
+/// an LCG, use [`Rng`] (SplitMix64) — never a fresh local copy of either.
 ///
 /// It is a **separate type from [`Rng`] on purpose**: [`Rng`] is SplitMix64 and
 /// defines the on-disk datasets, so its stream must never move. This one exists

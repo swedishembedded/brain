@@ -13,6 +13,13 @@
 // Llama-HF): within a head the rotated pair is (j, j + head_dim/2), NOT the
 // interleaved (2j, 2j+1) of `rope.wgsl`. Applied in place to a q or k region.
 //
+// SEAM NOTE (audit F42): `rope_partial.wgsl` strictly SUBSUMES this kernel —
+// at `rot_dim == head_dim`, `tcols == seq_len` the two are element-identical.
+// This file stays only because kronos/chronos2 still dispatch it; a NEW model
+// should reach for `rope_partial` (one kernel, both shapes) rather than pick
+// between two files at random. Retiring this behind the selection seam is the
+// recorded follow-up.
+//
 // q'[j]      = q[j]*cos(a) - q[j+half]*sin(a)
 // q'[j+half] = q[j+half]*cos(a) + q[j]*sin(a)
 // with a = t * theta^(-2j/head_dim), half = head_dim/2, j in 0..half.

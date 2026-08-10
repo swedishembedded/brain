@@ -354,6 +354,12 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     let mut running_jobs: Vec<RunningJob> = Vec::new();
     // Monotonic job-id source; each submitted job gets the next value.
     let mut next_id: u64 = 0;
+    // Best-effort observability refreshes on a TICK, not per message: rebuilding
+    // a fresh HashMap of cloned keys/metrics under the stats lock after EVERY
+    // dispatcher round was pure overhead on the scheduling thread (the D-Bus
+    // stats stream itself only samples at ~2 Hz).
+    const METRICS_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
+    let mut last_metrics: Option<Instant> = None;
 
     loop {
         // Block for at least one message, then drain everything pending.
@@ -365,8 +371,11 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
             on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
         }
         assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
-        if let Ok(mut s) = stats.lock() {
-            s.metrics = mgr.all_metrics();
+        if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
+            if let Ok(mut s) = stats.lock() {
+                s.metrics = mgr.all_metrics();
+            }
+            last_metrics = Some(Instant::now());
         }
     }
 }

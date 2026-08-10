@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  GroupNorm affine gradients, STAGE 1 of 2 — partial sums for BOTH dgamma and dbeta in one pass over `dy`
-// @how   one thread per output element, serial inner reduction
-// @opt   4
+// @how   one thread per partial, strided serial reduction (no barrier)
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes

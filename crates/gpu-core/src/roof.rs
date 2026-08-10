@@ -531,13 +531,8 @@ mod persist {
         if let Some(d) = DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Some(d);
         }
-        if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
-            return Some(d.into());
-        }
-        if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
-            return Some(std::path::Path::new(&d).join("brain"));
-        }
-        std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+        // ONE resolution, shared with the tune store (this was a verbatim copy).
+        crate::tune::cache_dir()
     }
 
     impl RoofStore {

@@ -21,6 +21,13 @@
 // f32::MAX` (the "no calibration" sentinel `KvCalib`'s uncalibrated/disabled
 // case uploads) degrades this to bit-identical behaviour vs the uncalibrated
 // kernel, which is what makes the A/B clean.
+//
+// DUPLICATION NOTE (audit F42): given that MAX-sentinel degradation is
+// bit-identical, `paged_kv_append_i8_batched.wgsl` is this file minus one
+// `min()` — a 42-line copy holding a second pipeline slot. The intended
+// collapse is to delete the UNCLIPPED twin and feed a MAX-filled clip buffer
+// from the uncalibrated path; that lands with its `qwen::serve` call-site
+// change (the serving batch), not as a kernels-only edit.
 //   src   : [batch, kv_stride] f32   (kv_stride = n_kv * head_dim)
 //   clip  : [n_kv] f32               (per-kv-head calibrated ceiling)
 //   pool  : int8 packed as u32 words  ([num_blocks*block_size*kv_stride / 4])

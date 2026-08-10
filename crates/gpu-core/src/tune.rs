@@ -32,7 +32,10 @@ pub fn source_fingerprint(sources: &[&str]) -> u64 {
     h
 }
 
-fn cache_dir() -> Option<PathBuf> {
+/// The one cache-directory resolution (`BRAIN_PIPELINE_CACHE_DIR` >
+/// `XDG_CACHE_HOME/brain` > `~/.cache/brain`) — shared with `roof`'s persist
+/// layer, which used to carry a verbatim copy.
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
         return Some(d.into());
     }
@@ -66,12 +69,35 @@ impl FileTuneStore {
 
 impl TuneStore for FileTuneStore {
     fn load(&self, key: &str) -> Option<String> {
-        self.map.lock().unwrap().get(key).cloned()
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
     }
+    /// Merge-on-save, I/O OUTSIDE the lock: the old shape held the mutex
+    /// across create_dir_all + write + rename (an autotune sweep like
+    /// `qwen::serve::tune_i8` saves up to ~48 times, each a whole-file
+    /// rewrite under the lock), and wrote only THIS process's map — two
+    /// stores in one process (or two processes) silently dropped each
+    /// other's entries. Now: update the in-memory map under the lock, snap a
+    /// copy, then merge with whatever is on disk before the atomic rename —
+    /// last-writer-wins per KEY instead of per FILE. (`unwrap_or_else
+    /// (into_inner)` is the crate-wide poison policy; bare `unwrap` here was
+    /// the one divergence.)
     fn save(&self, key: &str, value: &str) {
-        let mut map = self.map.lock().unwrap();
-        map.insert(key.to_string(), value.to_string());
-        let body: String = map.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+        let snapshot: HashMap<String, String> = {
+            let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+            map.insert(key.to_string(), value.to_string());
+            map.clone()
+        };
+        // Merge with concurrent writers' on-disk entries (keys we don't hold).
+        let mut merged: HashMap<String, String> = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(&self.path) {
+            for line in text.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    merged.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        merged.extend(snapshot);
+        let body: String = merged.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

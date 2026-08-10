@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Raw WGSL compute kernels — the single source of truth for brain's GPU
-//! engine. fp32-only, core-compute-only (single bind group, <=4 storage
-//! buffers/kernel, no atomics/subgroups/f16) so the same text runs on old
-//! desktop GPUs and on WebGPU in the browser.
+//! engine. fp32-only, core-compute-only (single bind group, <=8 storage
+//! buffers/kernel per docs/kernel-checklist.md — the largest today binds 7,
+//! this header used to claim <=4 — no atomics/subgroups/f16) so the same
+//! text runs on old desktop GPUs and on WebGPU in the browser.
 //!
 //! Workgroup size is `@workgroup_size(64)` everywhere except the register-tiled
 //! GEMMs (`matmul_reg*`), which need 256 invocations to hold a 128x128 output
@@ -524,10 +525,6 @@ pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 /// `wgsl/matmul_tiled.wgsl`
 pub const MATMUL_TILED: &str = include_str!("../wgsl/matmul_tiled.wgsl");
-/// `wgsl/max_abs_final.wgsl`
-pub const MAX_ABS_FINAL: &str = include_str!("../wgsl/max_abs_final.wgsl");
-/// `wgsl/max_abs_part.wgsl`
-pub const MAX_ABS_PART: &str = include_str!("../wgsl/max_abs_part.wgsl");
 /// `wgsl/max_abs_row.wgsl`
 pub const MAX_ABS_ROW: &str = include_str!("../wgsl/max_abs_row.wgsl");
 /// `wgsl/max_abs_rows.wgsl`
@@ -786,8 +783,6 @@ pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
-/// `wgsl/tanh_act_bwd.wgsl`
-pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
 /// `wgsl/tau_scale.wgsl`
 pub const TAU_SCALE: &str = include_str!("../wgsl/tau_scale.wgsl");
 /// `wgsl/tau_scale_ds.wgsl`
@@ -1067,8 +1062,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("matmul_tiled", MATMUL_TILED),
-    ("max_abs_final", MAX_ABS_FINAL),
-    ("max_abs_part", MAX_ABS_PART),
     ("max_abs_row", MAX_ABS_ROW),
     ("max_abs_rows", MAX_ABS_ROWS),
     ("maxpool2d", MAXPOOL2D),
@@ -1198,7 +1191,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("splice_bwd", SPLICE_BWD),
     ("sub", SUB),
     ("tanh_act", TANH_ACT),
-    ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),
     ("tau_scale_ds", TAU_SCALE_DS),
     ("topk_extract_step", TOPK_EXTRACT_STEP),

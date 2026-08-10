@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Row-blocked matmul, same contract as matmul.wgsl
-// @how   one thread per output element, serial inner reduction
-// @opt   4
+// @how   one thread per 8-row output block, serial contraction (register row-block, no workgroup memory)
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
