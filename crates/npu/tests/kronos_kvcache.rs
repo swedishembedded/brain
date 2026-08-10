@@ -26,17 +26,13 @@ fn cpu() -> NpuConfig {
 }
 
 fn rand_weights(cfg: &KronosConfig) -> W {
-    let mut seed = 0x1234_5678u64;
+    // The unified deterministic LCG (audit F39/F40).
+    let mut lcg = data::rng::Lcg::new(0x1234_5678);
     cfg.param_list()
         .into_iter()
         .map(|(k, s)| {
             let n: usize = s.iter().product();
-            let v = (0..n)
-                .map(|_| {
-                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.05
-                })
-                .collect();
+            let v = (0..n).map(|_| lcg.scaled(0.05)).collect();
             (k, v)
         })
         .collect()

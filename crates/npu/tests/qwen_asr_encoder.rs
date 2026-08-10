@@ -19,13 +19,10 @@ use qwen_asr::config::AudioEncoderConfig;
 use qwen_asr::encoder::{audio_pipelines, AudioEncoder};
 
 fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (((s >> 40) as f32) / (1u64 << 24) as f32 - 0.5) * 2.0 * scale
-        })
-        .collect()
+    // The unified deterministic LCG (audit F39/F40) — one premix keeps
+    // distinct seeds decorrelated, as the old local copy did.
+    let mut l = data::rng::Lcg::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+    (0..n).map(|_| l.scaled(scale)).collect()
 }
 
 fn tiny() -> (AudioEncoderConfig, QwenAsrTopo) {

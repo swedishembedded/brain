@@ -20,15 +20,11 @@ fn tmp(name: &str) -> String {
         .into_owned()
 }
 
-/// Deterministic pseudo-random CHW image in [0,1).
-fn rand_chw(side: usize, mut seed: u64) -> Vec<f32> {
-    let n = 3 * side * side;
-    let mut v = Vec::with_capacity(n);
-    for _ in 0..n {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        v.push((seed >> 40) as u32 as f32 / (1u64 << 24) as f32);
-    }
-    v
+/// Deterministic pseudo-random CHW image in [0,1) — the unified LCG
+/// (audit F39/F40).
+fn rand_chw(side: usize, seed: u64) -> Vec<f32> {
+    let mut l = data::rng::Lcg::new(seed);
+    (0..3 * side * side).map(|_| l.unit()).collect()
 }
 
 #[test]

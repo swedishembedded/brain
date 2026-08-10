@@ -220,15 +220,8 @@ fn finetune_step_batch_scaling() {
 
     // Deterministic small random weights (reference names: fusion is the fused
     // [d,2d] `fusion_proj.weight`, split inside the constructor).
-    let mut seed = 0x1234_5678u64;
-    let mut rnd = |n: usize| -> Vec<f32> {
-        (0..n)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.06
-            })
-            .collect()
-    };
+    let mut lcg = data::rng::Lcg::new(0x1234_5678); // the unified LCG (audit F39/F40)
+    let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.03)).collect() };
     let mut init: HashMap<String, Vec<f32>> = param_list_c(&cfg)
         .into_iter()
         .filter(|(n, _)| n != "embedding.fusion_l" && n != "embedding.fusion_r")

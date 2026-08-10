@@ -389,14 +389,14 @@ impl KronosTrain {
         init2.insert("embedding.fusion_r".into(), fr);
         let ps = if let Some(lc) = &lora {
             // seed adapters + build role list (base Frozen, adapters Trainable).
-            let mut seed = 0x51A7_u64;
+            let mut lcg = data::rng::Lcg::new(0x51A7); // the unified LCG (audit F40) -- the sanctioned home for production deterministic init
             let mut roles: Vec<(String, usize, paramstore::Role)> = Vec::new();
             for (name, numel) in param_list_c(&cfg) {
                 roles.push((name.clone(), numel, paramstore::Role::Frozen));
                 if lc.hits(&name) {
                     let (r, k, nout) = (lc.rank, d, numel / d); // targeted projections are d×k
                     init2.entry(format!("{name}.lora_a")).or_insert_with(|| {
-                        (0..r * k).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02 }).collect()
+                        (0..r * k).map(|_| lcg.scaled(0.01)).collect()
                     });
                     init2.entry(format!("{name}.lora_b")).or_insert_with(|| vec![0.0f32; nout * r]);
                     roles.push((format!("{name}.lora_a"), r * k, paramstore::Role::Trainable));

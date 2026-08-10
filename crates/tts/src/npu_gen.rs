@@ -1373,13 +1373,9 @@ mod stream_codec_tests {
 
         let nq = 16usize;
         let t = 24usize;
-        let mut seed = 11u64;
-        let codes: Vec<u32> = (0..t * nq)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((seed >> 40) % 64) as u32
-            })
-            .collect();
+        // The unified deterministic LCG (audit F39/F40).
+        let mut lcg = data::rng::Lcg::new(11);
+        let codes: Vec<u32> = (0..t * nq).map(|_| lcg.next_u32() % 64).collect();
 
         let mut npu_wav = Vec::new();
         npu.decode(&codes, &mut |pcm, _| npu_wav.extend_from_slice(pcm)).unwrap();

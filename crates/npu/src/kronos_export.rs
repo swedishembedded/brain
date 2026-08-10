@@ -108,15 +108,9 @@ mod tests {
         let cfg = KronosConfig::tiny();
         let t = 8usize;
         let (vs1, vs2) = (cfg.s1_vocab(), cfg.s2_vocab());
-        let mut seed = 0x0DE_u64;
-        let mut rnd = |n: usize| -> Vec<f32> {
-            (0..n)
-                .map(|_| {
-                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.1
-                })
-                .collect()
-        };
+        // The unified deterministic LCG (audit F39/F40).
+        let mut lcg = data::rng::Lcg::new(0x0DE);
+        let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.05)).collect() };
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
         let dec = KronosDecoder::from_weights(cfg.clone(), &weights).unwrap();

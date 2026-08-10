@@ -127,15 +127,9 @@ mod tests {
     fn tiny_model() -> (KronosModel, HashMap<String, Vec<f32>>) {
         let tc = KronosTokenizerConfig::tiny();
         let dc = KronosConfig::tiny();
-        let mut seed = 1u64;
-        let mut rnd = |n: usize| -> Vec<f32> {
-            (0..n)
-                .map(|_| {
-                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.1
-                })
-                .collect()
-        };
+        // The unified deterministic LCG (audit F39/F40).
+        let mut lcg = data::rng::Lcg::new(1);
+        let mut rnd = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg.scaled(0.05)).collect() };
         let tw: HashMap<String, Vec<f32>> = tc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
         let dw: HashMap<String, Vec<f32>> = dc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
         (KronosModel::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), tc, &tw, dc, &dw).unwrap(), dw)

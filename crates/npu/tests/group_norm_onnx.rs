@@ -77,11 +77,9 @@ const W: usize = 7;
 const G: usize = 4;
 
 fn fixture() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut s = 12345u64;
-    let mut next = || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((s >> 32) as f32 / u32::MAX as f32) * 2.0 - 1.0
-    };
+    // The unified deterministic LCG (audit F39/F40).
+    let mut l = data::rng::Lcg::new(12345);
+    let mut next = || l.signed();
     let x: Vec<f32> = (0..N * C * H * W).map(|_| next()).collect();
     let gamma: Vec<f32> = (0..C).map(|_| 1.0 + 0.3 * next()).collect();
     let beta: Vec<f32> = (0..C).map(|_| 0.2 * next()).collect();
