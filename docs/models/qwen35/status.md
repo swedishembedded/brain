@@ -634,6 +634,38 @@ fetching an already-quantized GGUF directly.
     active at a time — confirmed via `nvidia-smi`, matching `qwen3`'s own
     smoke-test-style usage, not asked for here).
 
+- **P7 — device-side sparse MoE decode dispatch** (done, commit `08ea29fa`):
+  `moe_sublayer`'s dense per-expert loop calls `model::moe::expert_fwd` for
+  all 256 experts unconditionally at decode (`n=1`), 5 GPU dispatches
+  each — correct (a non-selected expert's gate weight is 0, so
+  `moe_linear_gated.wgsl` already writes exactly 0 for it), but the FIXED
+  per-dispatch overhead of 256 experts dwarfs the ~`top_k`=8 actually
+  selected per token. `router_gate.wgsl` already computes each row's top-k
+  selection internally but never exposes it (only the dense `[rows,
+  n_experts]` gate weights) — rather than changing that kernel's own
+  signature (shared by `omni`, `moondream`, and the toy `moe` crate; a
+  breaking change to all of them for a decode-only qwen35moe need), a new
+  ADDITIVE sibling kernel, `router_topk_compact.wgsl`, turns the dense gate
+  row into a compact `[top_k]` list of the selected expert ids — small
+  enough (`top_k` u32s, not `n_experts` f32s) to read back every decode step
+  regardless of `n_experts`. `Qwen35::moe_sublayer_decode_sparse` (`n==1`
+  only; the `n>1` batched/prefill path is completely unchanged) dispatches
+  the router as before, runs the compaction kernel, reads back and dedups
+  the tiny id list host-side, then calls the existing, unmodified
+  `expert_fwd` once per distinct real expert instead of looping all 256.
+  **Bit-identical against the dense loop it replaces**, verified directly
+  (not just close) on both backends. **Measured, not just claimed**: 1291 →
+  52 GPU dispatches per MoE layer at the real 256-expert/top-8 shape (24.8×
+  fewer), and 21.2 ms → 6.8 ms wall-clock for one `moe_sublayer` call at
+  real MoE dimensions (`d_model=2048`, `moe_intermediate_size=512`) on this
+  box's real Tesla P40 (3.1×). No indirect-dispatch primitive exists
+  anywhere in this engine (checked, none found in `backend-api`/`gpu-core`/
+  `backend-wgpu`), so the host still decides dispatch count/experts ahead of
+  time from the small readback — this is not a fully device-driven dispatch,
+  but it removes the 256-vs-8 mismatch that made decode slow. The `q8`
+  (int8) decode tier is untouched (`Qwen35::step` already restricts itself
+  to fp32 decode only, pre-existing out of scope).
+
 ## In progress
 
 - **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
@@ -699,12 +731,6 @@ fetching an already-quantized GGUF directly.
     chunked prefill, int8/int4 paged KV, speculative decode, and multi-GPU
     layer-range sharding across both P40s — P11c's own "Deliberately
     deferred" list, in priority order for whoever picks this up next.
-- **P7 — device-side sparse MoE decode dispatch**: deliberately deferred to
-  the performance-optimization phase, per `docs/porting-playbook.md` §10
-  "correct-then-freeze" — `model::moe::expert_fwd`/`expert_fwd_compact` are
-  correct for decode today, just not optimally fast at 256 experts
-  (256×5=1280 dispatches/layer). Revisit once P11 (serving) needs real
-  decode throughput.
 - **⚠ Storage constraint discovered while validating against the real
   checkpoint**: brain's native checkpoint format stores every tensor as
   plain F32 (`StWriter::create`'s `Dtype::F32` plan) — a full import of this
