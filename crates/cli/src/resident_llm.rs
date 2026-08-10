@@ -16,8 +16,10 @@
 //!
 //! Config is env-only: `BRAIN_GPT_WEIGHTS`, `BRAIN_GLM_WEIGHTS`,
 //! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (and an optional
-//! `BRAIN_QWEN_CTX`, default 2048, sizing Qwen's built context length). Each
-//! `from_env` returns `None` when its primary weights var is unset/empty.
+//! `BRAIN_QWEN_CTX` sizing Qwen's built context length — default in `QwenResident::ctx`,
+//! currently 24576). Each `from_env` returns `None` when its primary weights
+//! var is unset/empty. The operator-facing reference for every serving env
+//! var is `docs/serving.md` § Configuration.
 
 use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
 use checkpoint::st::ModelCard;
@@ -236,7 +238,9 @@ impl Instance for GlmInstance {
 
 /// The Qwen3 BPE decoder behind the scheduler (`BRAIN_QWEN_WEIGHTS` +
 /// `BRAIN_QWEN_TOKENIZER`). Runs the CPU/GPU forward `generate` path (never the
-/// NPU branch). `BRAIN_QWEN_CTX` (default 2048) sizes the built context length.
+/// NPU branch). `BRAIN_QWEN_CTX` sizes the built context length (default in
+/// `QwenResident::ctx`, currently 24576 — do not restate the number here,
+/// it drifted once already).
 pub struct QwenResident {
     id: String,
     path: String,

@@ -116,6 +116,12 @@ STDIO CONTROLLER  (the default, with no surface flag)
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
 
+MODEL CONFIGURATION (env-only — there is no config file)
+  Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
+  vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM, BRAIN_NEMOTRON, ...): a model whose
+  weights var is unset is simply not served. The full reference table for
+  every serving variable is docs/serving.md, section 'Configuration'.
+
 GLOBAL
   --device cpu|gpu|npu|gpu0|cpu0-7|gpu,cpu   consumed before this subcommand
                                              (see brain --help); $BRAIN_DEVICE
@@ -143,6 +149,20 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
             std::process::exit(2);
         }
     }
+}
+
+/// The parsed value that must follow a value-taking numeric flag. Same policy
+/// as [`val`], extended to the parse: an UNPARSEABLE value is a typo, not a
+/// request for the default — `--reserve-gb 2G` used to silently serve with
+/// the default 2 (a coincidence), and `--temp 0,8` silently sampled at the
+/// default temperature. Exit 2 names the flag and the rejected value.
+fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T {
+    let v = val(args, i, flag);
+    v.parse().unwrap_or_else(|_| {
+        eprintln!("brain serve: {flag} {v:?} is not a valid value\n");
+        eprint!("{HELP}");
+        std::process::exit(2);
+    })
 }
 
 pub fn run_serve(args: &[String]) {
@@ -183,37 +203,21 @@ pub fn run_serve(args: &[String]) {
         match args[i].as_str() {
             "--gpt" => gpt_path = Some(val(args, &mut i, "--gpt")),
             "--yolo" => yolo_path = Some(val(args, &mut i, "--yolo")),
-            "--max-new" => {
-                let v = val(args, &mut i, "--max-new");
-                cfg.max_new = v.parse().unwrap_or(cfg.max_new);
-            }
+            "--max-new" => cfg.max_new = parsed(args, &mut i, "--max-new"),
             "--temp" | "--temperature" => {
                 let flag = args[i].clone();
-                let v = val(args, &mut i, &flag);
-                cfg.temperature = v.parse().unwrap_or(cfg.temperature);
+                cfg.temperature = parsed(args, &mut i, &flag);
             }
-            "--top-k" => {
-                let v = val(args, &mut i, "--top-k");
-                cfg.top_k = v.parse().unwrap_or(cfg.top_k);
-            }
-            "--seed" => {
-                let v = val(args, &mut i, "--seed");
-                cfg.seed = v.parse().unwrap_or(cfg.seed);
-            }
-            "--conf" => {
-                let v = val(args, &mut i, "--conf");
-                conf = v.parse().ok().or(conf);
-            }
+            "--top-k" => cfg.top_k = parsed(args, &mut i, "--top-k"),
+            "--seed" => cfg.seed = parsed(args, &mut i, "--seed"),
+            "--conf" => conf = Some(parsed(args, &mut i, "--conf")),
             "--dbus" => dbus = true,
             "--dbus-system" => {
                 dbus = true;
                 dbus_system = true;
             }
             "--dbus-name" => dbus_name = Some(val(args, &mut i, "--dbus-name")),
-            "--reserve-gb" => {
-                let v = val(args, &mut i, "--reserve-gb");
-                dbus_reserve_gb = v.parse().unwrap_or(dbus_reserve_gb);
-            }
+            "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--anthropic" => anthropic = Some(take_port(args, &mut i, 8787)),
             "--openai" => openai = Some(take_port(args, &mut i, 8788)),

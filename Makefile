@@ -182,9 +182,12 @@ test/slow:
 # Self-validation for scripts/ and tools/: every one parses, every one is named
 # somewhere else in the repo (Makefile target / bats test / crate doc comment /
 # doc — an orphan gate), and no non-overridable absolute machine path. See
-# scripts/gates/check-scripts.sh for the full rationale.
+# scripts/gates/check-scripts.sh for the full rationale. check-env-docs.sh
+# additionally requires every serving-crate BRAIN_* env var to be documented
+# in docs/serving.md § Configuration (env-only config MUST have a reference).
 check/scripts:
 	bash scripts/gates/check-scripts.sh
+	bash scripts/gates/check-env-docs.sh
 
 # Everything, for a release gate.
 test/full: test test/doc test/slow test/e2e check/scripts kernels-table/check

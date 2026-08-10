@@ -128,8 +128,11 @@ defaults to 64.
   `bytes_to_fd`.
 - **Stream frames** (`stream.rs`) — `SOCK_SEQPACKET` `socketpair` (preserves
   message boundaries, no length-prefix): `progress` / `segment` / `blob` (with
-  an out-of-band memfd via `SCM_RIGHTS`) / `done` / `error`; non-blocking
-  (EAGAIN→dropped, EPIPE→disconnected).
+  an out-of-band memfd via `SCM_RIGHTS`) / `done` / `error`. Droppable frames
+  (`progress`/`segment`) are non-blocking (EAGAIN→dropped); terminal frames
+  (`blob`/`done`/`error`) get a bounded writability wait so a briefly-stalled
+  subscriber never silently loses its completion (EPIPE→disconnected either
+  way).
 
 Each D-Bus method only validates + translates: it builds an `Invocation` from
 the params + in_fds, arms a `CancelToken`, submits a `residency::Job`, and
@@ -206,6 +209,80 @@ only (it depends on `brain-residency` + `brain-capability`, no engine code), so
 it stays light enough for any front-end to depend on. It is surfaced over D-Bus
 as `stats_snapshot()` (one-shot pull) and the `StatsStream` signal at ≥2 Hz
 (`STATS_INTERVAL = 500 ms`), which `braintop` subscribes to instead of polling.
+
+## Configuration — the `BRAIN_*` environment
+
+Which models a `brain serve` actually serves is **entirely env-driven**: each
+resident adapter's `from_env` returns `None` (model simply not served) when its
+weights variable is unset. There is no config file. This table is the operator
+reference; `scripts/gates/check-env-docs.sh` (run by `make check/scripts`)
+greps the serving crates' `env::var("BRAIN_…")` reads against this document so
+a new variable cannot ship undocumented.
+
+### Which models serve (gating — unset ⇒ not served)
+
+| Variable | Serves | Value |
+| --- | --- | --- |
+| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
+| `BRAIN_GPT_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
+| `BRAIN_GLM_WEIGHTS` | GLM decoder | checkpoint (char-level) |
+| `BRAIN_LFM` + `BRAIN_LFM_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
+| `BRAIN_FLUX2_DIT` / `_VAE` / `_TE` / `_TOKENIZER` | FLUX.2 Klein text2image/edit | the four component paths (all required) |
+| `BRAIN_ZIMAGE_DIT` / `_VAE` / `_QWEN` / `_TOKENIZER` | Z-Image text2image/edit | the four component paths (all required) |
+| `BRAIN_YOLO` | YOLOv8 detection | checkpoint |
+| `BRAIN_DEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
+| `BRAIN_SAM2_WEIGHTS` | SAM 2.1 segmentation | `sam2.1_hiera_*.pt` checkpoint |
+| `BRAIN_FACENET_DIR` | antelopev2 face detect/embed | dir holding `glintr100.onnx` + `scrfd_10g_bnkps.onnx` |
+| `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
+| `BRAIN_RESTORE_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
+| `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
+| `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
+| `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
+| `BRAIN_FINCAST` | FinCast forecasting | weights |
+| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting | the two checkpoint dirs |
+| `BRAIN_TTS_WEIGHTS` (+ `BRAIN_TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF ckpt dir for config/tokenizer) |
+| `BRAIN_NEMOTRON` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
+| `BRAIN_QWEN_ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
+| `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker (validation tier) | HF checkpoint dir |
+| `BRAIN_MOCK` | deterministic weight-free mock model | any non-empty value |
+
+### Per-model tuning (optional; defaults in the reader)
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_QWEN_CTX` | Qwen built context length | 24576 (`resident_llm.rs::QwenResident::ctx`) |
+| `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
+| `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |
+| `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen calib` | unset |
+| `BRAIN_LFM_BATCH` | LFM batched-forward slots per instance | 2 |
+| `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
+| `BRAIN_YOLO_BATCH` | YOLO true-batch forward width | 1 |
+| `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |
+| `BRAIN_ZIMAGE_RETAIN_INT8_CACHE` | `1` retains the DiT int8 cache for demote/promote (multi-GB host RAM) | off |
+| `BRAIN_TTS_LANG` / `BRAIN_TTS_REF` / `BRAIN_TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
+| `BRAIN_CODEC_WEIGHTS` | TTS codec weights override | derived from `BRAIN_TTS_WEIGHTS` |
+| `BRAIN_QWEN_ASR_WINDOW` / `BRAIN_QWEN_ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
+| `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count (perf targets + defaults) | 64 / 1 |
+| `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
+| `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache dir (ASR/NPU) | `$TMPDIR/brain_ov_cache` |
+| `BRAIN_TTS_RES` | resources base for `brain tts serve`'s default engine paths | unset (flags supply paths) |
+| `BRAIN_TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
+
+### Server & scheduler knobs
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_DEVICE` | schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …) | all devices |
+| `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
+| `BRAIN_AUTO_FETCH` | `0`/`false`/`off` disables transparent auto-fetch | enabled |
+| `BRAIN_ADMIT_DEADLINE_MS` | bound on waiting for a lane before a request is shed | `residency::admission` default |
+| `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
+| `BRAIN_GPT` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
+
+`brain serve --help` points here; deeper per-model knobs (e.g.
+`BRAIN_ZIMAGE_ENCODER_GPU`, `BRAIN_FLUX2_TE_DEVICE`, `BRAIN_TTS_STREAM_CHUNK`)
+are documented in their model's `docs/models/*` ledger and read inside the
+model crates, not the serving layer.
 
 ## How the docs divide
 
