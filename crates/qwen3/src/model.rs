@@ -1507,6 +1507,30 @@ impl Qwen {
         content_len: usize,
         layers: &[usize],
     ) -> Vec<Vec<f32>> {
+        self.arm_pad_kmask(tokens, content_len);
+        let out = self.encode_hiddens(tokens, layers);
+        self.disarm_kmask();
+        out
+    }
+
+    /// [`Self::encode`] over a **right-padded** sequence — the penultimate
+    /// hidden with the same HF-`attention_mask` semantics as
+    /// [`Self::encode_hiddens_padded`] (pads excluded as keys). What a
+    /// fixed-`cap_len` caption encoder (Z-Image's resident pipeline) needs
+    /// for a short prompt to be sound.
+    pub fn encode_padded(&self, tokens: &[u32], content_len: usize) -> Vec<f32> {
+        self.arm_pad_kmask(tokens, content_len);
+        let out = self.encode(tokens);
+        self.disarm_kmask();
+        out
+    }
+
+    /// Arm the per-key pad mask (`tokens[content_len..]` excluded as keys)
+    /// for the next forward(s) — public so a SPLIT encoder (two `Qwen`
+    /// shards run back to back, e.g. `zimage::pipeline::Encoder::Split`) can
+    /// arm both halves around its manual `run_forward` sequence. Pair with
+    /// [`Self::disarm_kmask`].
+    pub fn arm_pad_kmask(&self, tokens: &[u32], content_len: usize) {
         assert!(content_len <= tokens.len());
         let mut mask = vec![0.0f32; self.t as usize];
         for m in mask[content_len..tokens.len()].iter_mut() {
@@ -1514,9 +1538,11 @@ impl Qwen {
         }
         self.gpu.write(&self.kmask, bytemuck::cast_slice(&mask));
         self.kmask_on.set(true);
-        let out = self.encode_hiddens(tokens, layers);
+    }
+
+    /// Disarm the pad mask — see [`Self::arm_pad_kmask`].
+    pub fn disarm_kmask(&self) {
         self.kmask_on.set(false);
-        out
     }
 
     /// Several hidden-state taps from **one** forward, each row-major

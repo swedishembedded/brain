@@ -31,6 +31,10 @@ use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 
 /// Filesystem locations of the four Z-Image components (never hard-coded — from
 /// the environment, mirroring the crate's tests).
+/// Qwen `<|endoftext|>` — the pad id the masked caption-encoder path uses
+/// (same id `flux2::pipeline::PAD_TOKEN` uses for the same tokenizer family).
+const PAD_TOKEN: u32 = 151643;
+
 #[derive(Clone)]
 pub struct Paths {
     pub dit: String,
@@ -296,7 +300,8 @@ fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u
 /// generations — no ~20 GB reload per image. Each model keeps its own device
 /// handle from build time, so [`generate`](Self::generate) just runs forwards.
 /// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
-/// any prompt (padding repeats the last token, keeping features in-distribution).
+/// any prompt (masked pad: `<|endoftext|>` pad tokens, excluded as attention
+/// keys past the true content length — HF attention_mask semantics).
 /// `BRAIN_ZIMAGE_ENCODER_RESIDENT=1`: opt back into a resident encoder even
 /// when it shares the DiT's card (a box with room for both). Pure function
 /// of the environment so [`encoder_on_demand`]'s decision stays testable.
@@ -361,18 +366,33 @@ enum Encoder {
 }
 
 impl Encoder {
-    fn encode(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+    /// Encode `tokens` (a right-padded `cap_len` sequence) with the pads
+    /// EXCLUDED as attention keys past `content_len` — the HF
+    /// `attention_mask` semantics (`Qwen::encode_padded`). An exact-length
+    /// prompt (`content_len == tokens.len()`) takes the original unmasked
+    /// path unchanged.
+    fn encode(&self, tokens: &[u32], content_len: usize) -> Result<Vec<f32>, String> {
+        let padded = content_len < tokens.len();
         match self {
-            Encoder::Cpu(q) | Encoder::Gpu8(q) => Ok(q.encode(tokens)),
+            Encoder::Cpu(q) | Encoder::Gpu8(q) => Ok(if padded { q.encode_padded(tokens, content_len) } else { q.encode(tokens) }),
             Encoder::Split { s0, s1, cap_len } => {
                 // Targets are unused (we read a hidden state, not a loss).
                 let ign = vec![IGNORE; *cap_len as usize];
+                if padded {
+                    s0.arm_pad_kmask(tokens, content_len);
+                    s1.arm_pad_kmask(tokens, content_len);
+                }
                 s0.set_batch(tokens, &ign);
                 s0.run_forward(); // embed + layers 0..cut
                 let boundary = s0.read_out_res(); // res[cut] (host)
                 s1.write_in_res(&boundary); // res[cut] on the DiT card
                 s1.run_forward(); // layers cut..n_layers-1
-                Ok(s1.read_out_res()) // res[n_layers-1] == penultimate hidden (== Qwen::encode)
+                let out = s1.read_out_res(); // res[n_layers-1] == penultimate hidden (== Qwen::encode)
+                if padded {
+                    s0.disarm_kmask();
+                    s1.disarm_kmask();
+                }
+                Ok(out)
             }
             Encoder::OnDemand { qreader_path, qcfg, cap_len, gpu } => {
                 let reader = open_component(qreader_path).map_err(|e| format!("open qwen: {e}"))?;
@@ -380,7 +400,7 @@ impl Encoder {
                 let n = qcfg.n_layers as usize;
                 let cap = gpu_core::devices::with_gpu(*gpu, || {
                     let e = Qwen::new_shard_i8(qcfg.clone(), 1, *cap_len, &src, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: *gpu as usize });
-                    e.encode(tokens)
+                    if padded { e.encode_padded(tokens, content_len) } else { e.encode(tokens) }
                     // `e` drops here -- the encoder never outlives this call.
                 })?;
                 Ok(cap)
@@ -706,11 +726,17 @@ impl HotPipeline {
             eprintln!("zimage: {msg}");
             progress(1, total, &msg);
             tokens.truncate(cl);
-        } else if tokens.len() < cl {
-            let pad = *tokens.last().unwrap_or(&0);
-            tokens.resize(cl, pad);
         }
-        let cap = self.enc.encode(&tokens)?; // [cap_len · 2560]
+        let content = tokens.len().min(cl);
+        // Masked-pad, like flux2's encoder path: a dedicated PAD token,
+        // excluded as an attention KEY past the true content length (HF
+        // attention_mask semantics). The old scheme repeated the LAST token
+        // with no mask, so the caption features -- all cap_len rows of which
+        // the S3-DiT attends unmasked -- depended on how many copies of the
+        // final token the encoder saw (the unsoundness class the LFM ledger
+        // documents; audit F17).
+        tokens.resize(cl, PAD_TOKEN);
+        let cap = self.enc.encode(&tokens, content)?; // [cap_len · 2560]
 
         // 2. seeded latent + scheduler.
         let n = (16 * self.lh * self.lw) as usize;

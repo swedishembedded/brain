@@ -221,6 +221,21 @@ weights, a much larger and separately-scoped undertaking, not attempted here.
 - **Continuous-CI coverage** of the real 6B path is opt-in (weight /
   `BRAIN_ZIMAGE_*` gated).
 
+## Resident-pipeline prompt padding — masked pad (2026-08-10)
+
+The resident `HotPipeline` pads short prompts to its built `cap_len`. The
+original scheme repeated the LAST prompt token with no attention mask, so
+the caption features — all `cap_len` rows of which the S³-DiT attends
+unmasked — depended on how many copies of the final token the encoder saw
+(the unsoundness class the LFM ledger documents; audit F17). Now: a
+dedicated `<|endoftext|>` pad token, excluded as an attention KEY past the
+true content length (`Qwen::encode_padded`, the same kmask machinery
+FLUX.2's `encode_hiddens_padded` parity-validated against HF's
+`attention_mask` semantics). Exact-length prompts take the original
+unmasked path bit-unchanged. A short-prompt parity case against the Tongyi
+reference remains open (no `zimage_dump_reference.py` exists yet); the HF
+pipeline's tokenizer-mask convention is the basis for the choice.
+
 ## See also
 
 - `docs/models/zimage/readme.md` — architecture, CLI, parity.
