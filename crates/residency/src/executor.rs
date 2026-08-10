@@ -75,17 +75,21 @@ struct Pending {
 }
 
 /// One job the executor currently holds — either still in the pending `queue`
-/// (`phase == "queued"`) or handed to a device lane and running (`phase ==
-/// "running"`). A live snapshot from [`Executor::in_flight`]; `id` is the stable
-/// submit-order id and `since_ms` is the elapsed time since the job was enqueued.
+/// (`phase == "queued"`), claimed onto a device lane but still deferred-
+/// activating/promoting (`phase == "building"`), or claimed AND running on an
+/// already-adopted instance (`phase == "running"`). A live snapshot from
+/// [`Executor::in_flight`]; `id` is the stable submit-order id and `since_ms`
+/// is the elapsed time since the job was enqueued.
 #[derive(Clone, Debug)]
 pub struct InFlightJob {
     pub id: u64,
     pub model: String,
     pub action: String,
-    /// Coarse phase: `"queued"` (waiting in the pending queue) or `"running"`
-    /// (claimed onto a device lane). Group-granular — a whole same-key group is
-    /// admitted together, so all of its jobs flip to `running` at once.
+    /// `"queued"`, `"building"`, or `"running"` — see this struct's doc.
+    /// Group-granular — a whole same-key group is admitted together, so all
+    /// of its jobs flip together; `"building"` -> `"running"` flips the
+    /// instant [`Msg::Built`] arrives (activate/promote finished), which can
+    /// be seconds to well over a minute after admission for a real cold model.
     pub phase: String,
     pub since_ms: u64,
 }
@@ -99,6 +103,10 @@ struct RunningJob {
     action: String,
     key: InstanceKey,
     enqueued: Instant,
+    /// True from the moment this group is claimed until its [`Msg::Built`]
+    /// arrives (deferred activate/promote still in progress on the lane) —
+    /// see [`InFlightJob::phase`].
+    building: bool,
 }
 
 /// Live scheduler counters — proof that batching and eviction happen, and the
@@ -428,6 +436,14 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         }
         Msg::Built { key, handle } => {
             mgr.adopt(&key, handle);
+            // Deferred activate()/promote() finished -- this group is no longer
+            // "building" (see InFlightJob::phase's doc), even though it may keep
+            // running for a while yet.
+            for r in running_jobs.iter_mut() {
+                if r.key == key {
+                    r.building = false;
+                }
+            }
         }
         Msg::BuiltMulti { key, handle } => {
             mgr.adopt_multi(&key, handle);
@@ -452,7 +468,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                     id: r.id,
                     model: r.model.clone(),
                     action: r.action.clone(),
-                    phase: "running".to_string(),
+                    phase: if r.building { "building" } else { "running" }.to_string(),
                     since_ms: now.saturating_duration_since(r.enqueued).as_millis() as u64,
                 });
             }
@@ -643,9 +659,13 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         }
 
         // Track these jobs as running so the in-flight query keeps reporting them
-        // (they've left `queue`); cleared on this group's `Done`.
+        // (they've left `queue`); cleared on this group's `Done`. `building` starts
+        // true for anything but an already-hot handle -- a deferred Build/Promote
+        // still has to run activate()/promote() on the lane before Msg::Built flips
+        // it to false (see on_msg's Msg::Built arm).
+        let building = !matches!(work, Claimed::Hot(_));
         for j in jobs.iter() {
-            running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued });
+            running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
         }
 
         // Sync residency counters immediately — a claim may have built/evicted, and

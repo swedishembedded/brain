@@ -159,19 +159,64 @@ pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
     }
 }
 
+/// The admission race every submit/stream path below runs: wait for `admit_rx`
+/// to fire (the job got claimed onto a lane), gated by a two-tier deadline
+/// rather than one flat `admit_deadline`. Up to `admit_deadline`, this is a
+/// plain wait — the common case, where admission is near-instant even for a
+/// cold model (claiming a lane happens BEFORE the slow part,
+/// `ResidentModel::activate`, ever runs). Only once that short deadline has
+/// already elapsed does it pay for `residency::admission::model_is_cold_building`
+/// (one blocking round-trip to the dispatcher, so run off the async runtime via
+/// `spawn_blocking`): if `model` itself is already running elsewhere (same-key
+/// jobs serialize onto one lane — this is almost always that model's own
+/// first-ever cold activation), the wait extends to `cold_build_admit_deadline`
+/// instead of shedding — a legitimate cold start is not overload. Any OTHER
+/// reason admission is still pending (every lane genuinely busy with unrelated
+/// models, nothing evictable) keeps shedding at the short deadline, unchanged.
+/// Returns `true` if admitted before whichever deadline applies, `false` if shed.
+/// Takes the executor/deadlines by value/reference rather than `&AppState` so
+/// [`stream_with_autofetch`]'s `'static` background task can call it too.
+async fn wait_for_admission(
+    exec: &residency::Executor,
+    admit_deadline: std::time::Duration,
+    cold_build_admit_deadline: std::time::Duration,
+    model: &str,
+    admit_rx: &mut oneshot::Receiver<()>,
+) -> bool {
+    let start = std::time::Instant::now();
+    let tick = std::time::Duration::from_millis(250).min(admit_deadline).max(std::time::Duration::from_millis(1));
+    loop {
+        tokio::select! {
+            _ = &mut *admit_rx => return true,
+            _ = tokio::time::sleep(tick) => {}
+        }
+        let elapsed = start.elapsed();
+        if elapsed < admit_deadline {
+            continue;
+        }
+        let exec_owned = exec.clone();
+        let model_owned = model.to_string();
+        let building = tokio::task::spawn_blocking(move || residency::admission::model_is_cold_building(&exec_owned, &model_owned)).await.unwrap_or(false);
+        let limit = if building { cold_build_admit_deadline } else { admit_deadline };
+        if elapsed >= limit {
+            return false;
+        }
+    }
+}
+
 /// Submit one `generate` job and block (async) for its single reply. Arms a fresh
-/// cancel token, registers it, then runs the **admission race**: a bounded wait
-/// (`state.admit_deadline`) for the job to be ADMITTED (claimed onto a lane — its
-/// `on_admit` signal fires). If it is not admitted in time the job is cancelled
-/// (dropped from the queue so it never runs wastefully), unregistered, and the
-/// caller gets a 429. Once admitted, the wait for the (possibly long) reply is
-/// UNBOUNDED — only the wait-to-start is deadlined.
+/// cancel token, registers it, then runs the **admission race** ([`wait_for_admission`]):
+/// a bounded wait for the job to be ADMITTED (claimed onto a lane — its `on_admit`
+/// signal fires). If it is not admitted in time the job is cancelled (dropped from
+/// the queue so it never runs wastefully), unregistered, and the caller gets a 429.
+/// Once admitted, the wait for the (possibly long) reply is UNBOUNDED — only the
+/// wait-to-start is deadlined.
 pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
     let provider = state.provider;
     let (id, token) = state.register();
     inv.cancel = token.clone();
     let (tx, rx) = oneshot::channel();
-    let (admit_tx, admit_rx) = oneshot::channel::<()>();
+    let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
     let job = Job::new(model.to_string(), action.to_string(), inv)
         .on_progress(|_| {})
         .on_admit(move || {
@@ -182,14 +227,10 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
         });
     state.exec.submit(job);
 
-    // Admission race: work started on a lane vs. the deadline elapsing.
-    tokio::select! {
-        _ = admit_rx => {}
-        _ = tokio::time::sleep(state.admit_deadline) => {
-            token.cancel();
-            state.finish(&id);
-            return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
-        }
+    if !wait_for_admission(&state.exec, state.admit_deadline, state.cold_build_admit_deadline, model, &mut admit_rx).await {
+        token.cancel();
+        state.finish(&id);
+        return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
     }
 
     // Admitted — await the reply (unbounded; a running job may take long).
@@ -312,7 +353,7 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
     let (id, token) = state.register();
     inv.cancel = token.clone();
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
-    let (admit_tx, admit_rx) = oneshot::channel::<()>();
+    let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
     let tx_progress = tx.clone();
     let job = Job::new(model.to_string(), action.to_string(), inv)
         .on_progress(move |p| {
@@ -338,13 +379,10 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 
     // Admission race BEFORE returning the SSE body: a shed request yields a plain
     // 429, never an event-stream that immediately errors.
-    tokio::select! {
-        _ = admit_rx => {}
-        _ = tokio::time::sleep(state.admit_deadline) => {
-            token.cancel();
-            state.finish(&id);
-            return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
-        }
+    if !wait_for_admission(&state.exec, state.admit_deadline, state.cold_build_admit_deadline, model, &mut admit_rx).await {
+        token.cancel();
+        state.finish(&id);
+        return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
     }
 
     Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } })
@@ -373,6 +411,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
     let exec = state.exec.clone();
     let jobs = state.jobs.clone();
     let admit_deadline = state.admit_deadline;
+    let cold_build_admit_deadline = state.cold_build_admit_deadline;
     let model_owned = model.to_string();
     let action_owned = action.to_string();
     let mut inv = inv;
@@ -416,9 +455,10 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         // two are moved into the job's closures and won't be available if
         // admission times out before either ever fires.
         let tx_timeout = tx.clone();
-        let (admit_tx, admit_rx) = oneshot::channel::<()>();
+        let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
         let tx_progress = tx.clone();
         let tx_reply = tx;
+        let model_for_admit = model_owned.clone();
         let job = Job::new(model_owned.clone(), action_owned, inv)
             .on_progress(move |p| {
                 if let Some(piece) = p.delta {
@@ -441,13 +481,10 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             });
         exec.submit(job);
 
-        tokio::select! {
-            _ = admit_rx => {}
-            _ = tokio::time::sleep(admit_deadline) => {
-                token.cancel();
-                jobs.remove(&id);
-                let _ = tx_timeout.send(StreamMsg::Err(ApiError::overloaded(provider, "request could not be admitted within the deadline")));
-            }
+        if !wait_for_admission(&exec, admit_deadline, cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
+            token.cancel();
+            jobs.remove(&id);
+            let _ = tx_timeout.send(StreamMsg::Err(ApiError::overloaded(provider, "request could not be admitted within the deadline")));
         }
     });
 

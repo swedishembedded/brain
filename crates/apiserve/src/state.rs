@@ -22,7 +22,7 @@ use crate::surface::Provider;
 
 /// Default admission deadline — see `residency::admission`'s doc (shared with
 /// `crates/dbus` so both transports gate identically).
-pub use residency::admission::DEFAULT_ADMIT_DEADLINE;
+pub use residency::admission::{DEFAULT_ADMIT_DEADLINE, DEFAULT_COLD_BUILD_ADMIT_DEADLINE};
 
 /// Armed cancel tokens for in-flight requests, keyed by a per-request UUID —
 /// `residency::jobs::JobRegistry`, the SAME shared type `crates/dbus`'s
@@ -39,6 +39,12 @@ pub struct AppState {
     /// Bounded wait for a request to be ADMITTED (work started on a lane) before it
     /// is shed with a 429. Overridable so tests can use a short deadline.
     pub admit_deadline: Duration,
+    /// Bounded wait applied INSTEAD of `admit_deadline` once a request has been
+    /// queued past it AND `residency::admission::model_is_cold_building` says its
+    /// own model is already running (its first cold activation, almost always) —
+    /// see that function's doc. Genuine cross-model contention still sheds at
+    /// `admit_deadline`.
+    pub cold_build_admit_deadline: Duration,
     /// Classifies/fetches a `model` string that isn't already resident (transparent
     /// auto-fetch). `None` — the default, and every test's `AppState::new` — means
     /// an unresolved model is a plain 404 with zero I/O, exactly today's behavior.
@@ -48,13 +54,28 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(exec: Executor, key: impl Into<String>, provider: Provider) -> AppState {
-        AppState { exec, jobs: JobRegistry::new(), key: key.into(), provider, admit_deadline: DEFAULT_ADMIT_DEADLINE, supplier: None }
+        AppState {
+            exec,
+            jobs: JobRegistry::new(),
+            key: key.into(),
+            provider,
+            admit_deadline: DEFAULT_ADMIT_DEADLINE,
+            cold_build_admit_deadline: DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
+            supplier: None,
+        }
     }
 
     /// Override the admission deadline (builder-style). Used by tests to force fast
     /// shedding without slow real-time waits.
     pub fn with_admit_deadline(mut self, deadline: Duration) -> AppState {
         self.admit_deadline = deadline;
+        self
+    }
+
+    /// Override the cold-build admission deadline (builder-style) — see the field's
+    /// doc. Used by tests to force fast shedding without slow real-time waits.
+    pub fn with_cold_build_admit_deadline(mut self, deadline: Duration) -> AppState {
+        self.cold_build_admit_deadline = deadline;
         self
     }
 

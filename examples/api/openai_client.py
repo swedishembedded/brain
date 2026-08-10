@@ -131,7 +131,15 @@ def request(base_url: str, api_key: str, path: str, body: Optional[dict] = None,
         headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=30)
+        # A real model's FIRST request pays for its cold activation (WGSL pipeline
+        # compile + weight upload) on top of the actual generation -- measured over
+        # a minute on modest hardware for a small model. This must stay comfortably
+        # above the server's own cold-build admission deadline
+        # (BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS, default 180s -- see
+        # crates/residency/src/admission.rs) or this demo would time out here
+        # instead of getting the server's real (occasionally slower, still
+        # honest) answer.
+        resp = urllib.request.urlopen(req, timeout=240)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
         if e.code == 404:

@@ -275,7 +275,8 @@ a new variable cannot ship undocumented.
 | `BRAIN_DEVICE` | schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …) | all devices |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_AUTO_FETCH` | `0`/`false`/`off` disables transparent auto-fetch | enabled |
-| `BRAIN_ADMIT_DEADLINE_MS` | bound on waiting for a lane before a request is shed | `residency::admission` default |
+| `BRAIN_ADMIT_DEADLINE_MS` | bound on waiting for a lane before a request is shed | `residency::admission` default (10s) |
+| `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` | longer bound applied instead, only while the request's own model is still cold-building (first activation) | `residency::admission` default (180s) |
 | `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
 | `BRAIN_GPT` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
 

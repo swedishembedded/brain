@@ -60,6 +60,11 @@ pub struct Manager {
     /// it is shed -- `residency::admission::admit_deadline_from_env()`,
     /// mirroring `apiserve::AppState::admit_deadline`.
     admit_deadline: std::time::Duration,
+    /// Bounded wait applied instead of `admit_deadline` once a request is
+    /// queued behind its OWN model's already-running job (its first cold
+    /// activation, almost always) -- see `wait_for_admission`'s doc, mirroring
+    /// `apiserve::AppState::cold_build_admit_deadline`.
+    cold_build_admit_deadline: std::time::Duration,
 }
 
 impl Manager {
@@ -72,6 +77,7 @@ impl Manager {
             supplier: None,
             edge_permits: Arc::new(tokio::sync::Semaphore::new(residency::admission::EDGE_CONCURRENCY)),
             admit_deadline: residency::admission::admit_deadline_from_env(),
+            cold_build_admit_deadline: residency::admission::cold_build_admit_deadline_from_env(),
         }
     }
 
@@ -87,6 +93,13 @@ impl Manager {
     /// short, deterministic deadline instead of the env-derived default.
     pub fn with_admit_deadline(mut self, deadline: std::time::Duration) -> Manager {
         self.admit_deadline = deadline;
+        self
+    }
+
+    /// Override the cold-build admission deadline (builder-style) -- see the
+    /// field's doc. Tests use this for a short, deterministic deadline.
+    pub fn with_cold_build_admit_deadline(mut self, deadline: std::time::Duration) -> Manager {
+        self.cold_build_admit_deadline = deadline;
         self
     }
 
@@ -268,6 +281,46 @@ fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<Strin
     Ok((out_fds, Value::Object(meta)))
 }
 
+/// The admission race every entry point below runs: wait for `admit_rx` to
+/// fire (the job got claimed onto a lane), gated by a two-tier deadline
+/// rather than one flat `admit_deadline` -- exactly mirrors
+/// `apiserve::bridge::wait_for_admission` (see that function's doc for the
+/// full rationale), duplicated here because `residency` itself stays
+/// tokio-free. Up to `admit_deadline` this is a plain wait; only past it does
+/// it pay for `residency::admission::model_is_cold_building` (one blocking
+/// round-trip to the dispatcher, off the async runtime via `spawn_blocking`)
+/// to tell "my own model's first cold activation is still in flight" (extend
+/// to `cold_build_admit_deadline`) apart from genuine cross-model contention
+/// (keep shedding at `admit_deadline`). Returns `true` if admitted before
+/// whichever deadline applies, `false` if shed.
+async fn wait_for_admission(
+    exec: &Executor,
+    admit_deadline: std::time::Duration,
+    cold_build_admit_deadline: std::time::Duration,
+    model: &str,
+    admit_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> bool {
+    let start = std::time::Instant::now();
+    let tick = std::time::Duration::from_millis(250).min(admit_deadline).max(std::time::Duration::from_millis(1));
+    loop {
+        tokio::select! {
+            _ = &mut *admit_rx => return true,
+            _ = tokio::time::sleep(tick) => {}
+        }
+        let elapsed = start.elapsed();
+        if elapsed < admit_deadline {
+            continue;
+        }
+        let exec_owned = exec.clone();
+        let model_owned = model.to_string();
+        let building = tokio::task::spawn_blocking(move || residency::admission::model_is_cold_building(&exec_owned, &model_owned)).await.unwrap_or(false);
+        let limit = if building { cold_build_admit_deadline } else { admit_deadline };
+        if elapsed >= limit {
+            return false;
+        }
+    }
+}
+
 /// Submit `Job::new(model, action, inv)`, forwarding its progress/blobs/result
 /// into `stream` -- the tail shared by `subscribe`'s already-resident fast path
 /// and its post-fetch continuation, so there is exactly one place that turns a
@@ -276,11 +329,12 @@ fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<Strin
 /// every item in that block as a candidate D-Bus method, so a private helper
 /// must live outside it.
 /// `admit_deadline`/`token` implement the SAME admission race `run` does
-/// (`apiserve::bridge::submit`'s shape): if the job hasn't started on a lane
-/// within the deadline, cancel it and tell the subscriber via an `error`
-/// frame rather than leaving them waiting silently. `permit` is the edge
-/// concurrency slot `subscribe` acquired -- held for the job's whole life,
-/// released only when its reply fires (whichever way it resolves).
+/// (`apiserve::bridge::submit`'s shape, via [`wait_for_admission`]): if the
+/// job hasn't started on a lane within the deadline, cancel it and tell the
+/// subscriber via an `error` frame rather than leaving them waiting silently.
+/// `permit` is the edge concurrency slot `subscribe` acquired -- held for the
+/// job's whole life, released only when its reply fires (whichever way it
+/// resolves).
 #[allow(clippy::too_many_arguments)]
 fn submit_subscribed_job(
     exec: Executor,
@@ -291,12 +345,15 @@ fn submit_subscribed_job(
     action: String,
     inv: Invocation,
     admit_deadline: std::time::Duration,
+    cold_build_admit_deadline: std::time::Duration,
     token: CancelToken,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let (sp, sr) = (stream.clone(), stream.clone());
-    let (admit_tx, admit_rx) = tokio::sync::oneshot::channel::<()>();
+    let (admit_tx, mut admit_rx) = tokio::sync::oneshot::channel::<()>();
     let mut admit_tx = Some(admit_tx);
+    let model_for_admit = model.clone();
+    let exec_for_admit = exec.clone();
     exec.submit(
         Job::new(model, action, inv)
             .on_admit(move || {
@@ -335,7 +392,7 @@ fn submit_subscribed_job(
     // timeout as an `error` frame on the SAME stream instead. If admission
     // wins the race first, this task is a no-op and exits immediately.
     tokio::spawn(async move {
-        if tokio::time::timeout(admit_deadline, admit_rx).await.is_err() {
+        if !wait_for_admission(&exec_for_admit, admit_deadline, cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
             token.cancel();
             if let Ok(mut s) = stream.lock() {
                 s.error("request could not be admitted within the deadline");
@@ -384,7 +441,8 @@ impl Manager {
         let (job, token) = self.register_job(&mut inv);
         let jobs = self.jobs.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let (admit_tx, admit_rx) = tokio::sync::oneshot::channel::<()>();
+        let (admit_tx, mut admit_rx) = tokio::sync::oneshot::channel::<()>();
+        let model_for_admit = model.clone();
         self.executor.submit(
             Job::new(model, action, inv)
                 .on_admit(move || {
@@ -398,15 +456,13 @@ impl Manager {
         );
 
         // Admission race: work started on a lane vs. the deadline elapsing --
-        // mirrors `apiserve::bridge::submit` exactly, so both transports shed a
-        // request that couldn't start in time identically.
-        tokio::select! {
-            _ = admit_rx => {}
-            _ = tokio::time::sleep(self.admit_deadline) => {
-                token.cancel();
-                finish_job(&self.jobs, job);
-                return Err(fdo::Error::Failed("request could not be admitted within the deadline".into()));
-            }
+        // mirrors `apiserve::bridge::submit` exactly (via `wait_for_admission`),
+        // so both transports shed a request that couldn't start in time
+        // identically.
+        if !wait_for_admission(&self.executor, self.admit_deadline, self.cold_build_admit_deadline, &model_for_admit, &mut admit_rx).await {
+            token.cancel();
+            finish_job(&self.jobs, job);
+            return Err(fdo::Error::Failed("request could not be admitted within the deadline".into()));
         }
 
         let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(fdo::Error::Failed)?;
@@ -447,9 +503,10 @@ impl Manager {
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
         let admit_deadline = self.admit_deadline;
+        let cold_build_admit_deadline = self.cold_build_admit_deadline;
 
         if self.executor.manifests().iter().any(|m| m.model == model) {
-            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv, admit_deadline, token, permit);
+            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
             return Ok((job, client.into()));
         }
 
@@ -499,7 +556,7 @@ impl Manager {
                     return;
                 }
             }
-            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, token, permit);
+            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
         });
 
         Ok((job, client.into()))

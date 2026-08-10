@@ -112,6 +112,11 @@ fn admit_deadline_from_env() -> std::time::Duration {
     residency::admission::admit_deadline_from_env()
 }
 
+/// The cold-build admission deadline for live servers — see `residency::admission`'s doc.
+fn cold_build_admit_deadline_from_env() -> std::time::Duration {
+    residency::admission::cold_build_admit_deadline_from_env()
+}
+
 /// The shared 404 for any unrouted path, in the surface's dialect.
 async fn fallback(State(state): State<AppState>) -> ApiError {
     ApiError::not_found(state.provider, "no such route")
@@ -186,11 +191,15 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
     // letting a live server be driven with a short deadline (e.g. the conformance
     // harness sets 500ms to force fast 429 shedding).
     let admit_deadline = admit_deadline_from_env();
+    let cold_build_admit_deadline = cold_build_admit_deadline_from_env();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
-            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider).with_admit_deadline(admit_deadline).with_supplier(supplier.clone());
+            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider)
+                .with_admit_deadline(admit_deadline)
+                .with_cold_build_admit_deadline(cold_build_admit_deadline)
+                .with_supplier(supplier.clone());
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
             let sd = shutdown.clone();

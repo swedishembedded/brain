@@ -41,8 +41,12 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   OpenRouter emit `chat.completion.chunk`s ending in `data: [DONE]`. Client disconnect
   cancels the running job (frees the lane).
 - **Admission / backpressure:** if a request can't start on a lane within
-  `BRAIN_ADMIT_DEADLINE_MS` (default 10 s) → **429** (`Retry-After`); the edge concurrency
-  limit sheds overflow as **503**.
+  `BRAIN_ADMIT_DEADLINE_MS` (default 10 s) → **429** (`Retry-After`) — UNLESS the request's
+  own model is still cold-building (its first-ever activation: WGSL pipeline compile +
+  weight upload, which can take well over a minute for a real model), in which case it
+  gets `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` (default 180 s) instead — a legitimate cold
+  start is not overload. Genuine cross-model contention still sheds at the short default.
+  The edge concurrency limit sheds overflow as **503**.
 - **OpenRouter** reuses the OpenAI handlers, strips a `provider/` model prefix
   (`anything/qwen3-4b` → `qwen3-4b`), honors a `models[]` fallback list, tolerates its
   extra fields, and adds `native_finish_reason`.
