@@ -23,14 +23,13 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use omni::caps::OmniProvider;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
-use serde_json::json;
 use std::sync::Arc;
 
-/// Qwen3-Omni Thinker text generation behind the scheduler. Loads directly
-/// from a real HF checkpoint directory (`BRAIN_OMNI_HF_DIR`) — no brain-
-/// native import step involved yet (`docs/models/omni/status.md`'s M9 entry
-/// on the two open loader-side naming gaps for Talker/Code2Wav; Thinker-only
-/// generation does not touch either). One action, `generate`.
+/// Qwen3-Omni behind the scheduler. Loads directly from a real HF checkpoint
+/// directory (`BRAIN_OMNI_HF_DIR`) — no brain-native import step involved yet
+/// (`docs/models/omni/status.md`'s M9 entry on the two open loader-side
+/// naming gaps for Talker/Code2Wav). Dispatches both declared actions
+/// (`generate`, `speak`) through `omni::caps::run_action`.
 pub struct OmniResident {
     hf_dir: String,
 }
@@ -83,32 +82,14 @@ struct OmniInstance {
 }
 
 impl Instance for OmniInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = omni::caps::last_user_text(inv);
-        if prompt.trim().is_empty() {
-            return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
-        }
-        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
-
-        // Same optional audio/image/video extraction `omni::caps::GenerateAction::run`
-        // does -- this resident (not that Provider) is the path `brain serve`
-        // actually dispatches D-Bus/HTTP requests through.
-        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
-        let image = inv.get_blob("image").map(|_| capability::blob::decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| capability::blob::decode_video_hwc(inv, "video")).transpose()?;
-
-        progress(Progress::step(0, max_new, "generating"));
-        let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
-            let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)
-        } else {
-            self.inner.generate(&prompt, max_new)
-        };
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(capability::Outcome::new()
-            .set("text", json!(text))
-            .set("tokens", json!(new_ids))
-            .blob("text", capability::Blob::new(capability::Media::Text, text.into_bytes())))
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Single dispatch path shared with `omni::caps::OmniProvider` -- this
+        // resident (not that Provider) is what `brain serve` actually routes
+        // D-Bus/HTTP requests through, and it previously IGNORED the action
+        // name: an advertised `speak` silently ran `generate` (text out, no
+        // audio, no error). `run_action` matches on the action and errors on
+        // anything the manifest doesn't declare.
+        omni::caps::run_action(&self.inner, action, inv, progress)
     }
 }
 

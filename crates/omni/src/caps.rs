@@ -190,11 +190,43 @@ impl Provider for OmniProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        match name {
-            "generate" => Some(Arc::new(GenerateAction { inner: self.inner.clone() })),
-            "speak" => Some(Arc::new(SpeakAction { inner: self.inner.clone() })),
-            _ => None,
+        match resolve_action(name).ok()? {
+            OmniActionKind::Generate => Some(Arc::new(GenerateAction { inner: self.inner.clone() })),
+            OmniActionKind::Speak => Some(Arc::new(SpeakAction { inner: self.inner.clone() })),
         }
+    }
+}
+
+/// Which handler an action name dispatches to. Every name [`manifest`]
+/// declares MUST resolve here (spec-tested below): an advertised action that
+/// silently fell through to a different handler is exactly the served-wrong-
+/// result bug `cli::resident_omni` shipped before this dispatcher existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmniActionKind {
+    /// Thinker text generation ([`GenerateAction`] path — text out).
+    Generate,
+    /// Thinker -> Talker -> MTP -> Code2Wav ([`SpeakAction`] path — text + audio out).
+    Speak,
+}
+
+/// Resolve an action name to its handler, or an error naming the declared
+/// set. Unknown actions are a hard error, never a fallthrough.
+pub fn resolve_action(name: &str) -> Result<OmniActionKind, String> {
+    match name {
+        "generate" => Ok(OmniActionKind::Generate),
+        "speak" => Ok(OmniActionKind::Speak),
+        other => Err(format!("omni: unsupported action '{other}' (this model declares: generate, speak)")),
+    }
+}
+
+/// Run a named action against a loaded [`OmniInner`] — the single dispatch
+/// path shared by [`OmniProvider::action`] callers and the residency adapter
+/// (`cli::resident_omni::OmniInstance::run`), so the two serving surfaces
+/// cannot disagree about what an action name does.
+pub fn run_action(inner: &Arc<OmniInner>, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    match resolve_action(action)? {
+        OmniActionKind::Generate => GenerateAction { inner: inner.clone() }.run(inv, progress),
+        OmniActionKind::Speak => SpeakAction { inner: inner.clone() }.run(inv, progress),
     }
 }
 
@@ -337,5 +369,38 @@ impl Action for SpeakAction {
             .set("text", json!(text))
             .blob("text", Blob::new(Media::Text, text.into_bytes()))
             .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec: `speak` and `generate` dispatch to DIFFERENT handlers — a
+    /// served `speak` must never take the text-only generate path (the P0
+    /// this dispatcher fixed: `cli::resident_omni` ignored the action name
+    /// and always ran generate, returning text with no audio and no error).
+    #[test]
+    fn speak_and_generate_resolve_to_distinct_paths() {
+        let g = resolve_action("generate").expect("generate must resolve");
+        let s = resolve_action("speak").expect("speak must resolve");
+        assert_eq!(g, OmniActionKind::Generate);
+        assert_eq!(s, OmniActionKind::Speak);
+        assert_ne!(g, s, "speak must not alias the generate path");
+        // The output contracts really differ: speak declares an audio blob.
+        let has_audio = |spec: &ActionSpec| spec.outputs.iter().any(|b| b.media == Media::Audio);
+        assert!(has_audio(&speak_spec()), "speak_spec must declare an audio output");
+        assert!(!has_audio(&generate_spec()), "generate_spec must not declare an audio output");
+    }
+
+    /// Spec: every action the manifest advertises resolves to a handler, and
+    /// an unknown action is a hard error (never a silent fallthrough).
+    #[test]
+    fn every_advertised_action_resolves_and_unknown_errors() {
+        for spec in manifest().actions {
+            resolve_action(&spec.name).unwrap_or_else(|e| panic!("manifest advertises '{}' but dispatch rejects it: {e}", spec.name));
+        }
+        let err = resolve_action("transcribe").expect_err("undeclared action must error");
+        assert!(err.contains("unsupported action"), "error must name the failure: {err}");
     }
 }

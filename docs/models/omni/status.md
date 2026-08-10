@@ -1172,10 +1172,16 @@ validation-tier weight-streaming cost the text-only path already has).
 
 **Not started, still**: multimodal-user-turn + speech-output combined in one
 call; multi-turn Talker conversation context; `transcribe`/`converse`
-actions; wiring `speak` into `cli::resident_omni` (this round is the
-`Provider`-side wiring only) and `examples/omni.py`; a numeric parity golden
+actions; `speak` in `examples/omni.py`; a numeric parity golden
 for the composed Thinker->Talker splice (none exists — `speak_e2e.rs`'s bar
 is "runs and sounds like speech," not cosine-exact).
+
+**Closed later (2026-08-10)**: `speak` IS now wired into `cli::resident_omni`
+— `OmniInstance::run` previously ignored the action name entirely, so a
+served `speak` silently ran `generate` (text out, no audio, no error).
+`omni::caps::run_action` is now the single dispatch path shared by the
+Provider and the resident: `speak` takes the Talker path, unknown actions
+are a hard error, and `caps::tests` spec-tests the distinct routing.
 
 ## M15 — NPU export wiring for the audio tower, vision tower, Code2Wav (2026-08-08)
 
