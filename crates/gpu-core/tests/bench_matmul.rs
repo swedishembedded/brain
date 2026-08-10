@@ -194,6 +194,15 @@ fn bench_matmul() {
             dr2_abs,
             dr2_rel
         );
+        println!(
+            "{:<30} ms: cpu {:>8.3}  gpu naive {:>8.3}  gpu tiled {:>8.3}  gpu reg {:>8.3}  gpu reg2 {:>8.3}",
+            "",
+            t_cpu * 1e3,
+            t_gn * 1e3,
+            t_gt * 1e3,
+            t_gr * 1e3,
+            t_gr2 * 1e3
+        );
         assert!(dr_rel < TOL, "{}: gpu reg diverges from cpu (rel {dr_rel:.3e})", s.label);
         assert!(dr2_rel < TOL, "{}: gpu reg2 diverges from cpu (rel {dr2_rel:.3e})", s.label);
 
@@ -213,10 +222,12 @@ fn bench_matmul() {
             let (_, dvn_rel) = diff(&want, &v_naive);
             let (dv_abs, dv_rel) = diff(&want, &v_tiled);
             println!(
-                "{:<34} vulkan: naive {:.1} tiled {:.1} GFLOP/s, tiled max-abs {:.2e} rel {:.2e}",
+                "{:<34} vulkan: naive {:.1} tiled {:.1} GFLOP/s ({:.3}/{:.3} ms), tiled max-abs {:.2e} rel {:.2e}",
                 "",
                 gfs(t_vn),
                 gfs(t_vt),
+                t_vn * 1e3,
+                t_vt * 1e3,
                 dv_abs,
                 dv_rel
             );
@@ -224,4 +235,236 @@ fn bench_matmul() {
             assert!(dv_rel < TOL, "{}: vulkan tiled diverges from cpu (rel {dv_rel:.3e})", s.label);
         }
     }
+}
+
+/// int8 (DP4A) and int4 (W4A8) GEMM throughput, on the same shapes as
+/// [`bench_matmul`] above but split into its own test because the quantized
+/// kernels don't share one shape across backends the way the fp32 tier does:
+/// `matmul_i8_dyn` (the fast, 128x128-tiled DP4A GEMM used at prefill) is
+/// `@cpu no` — no CPU-JIT lowering exists for it, so brain has NO CPU int8
+/// path at prefill scale — while `matmul_i8_gemv`/`matmul_q4_gemv` (the
+/// decode-regime GEMMs, one workgroup per output column) are `@cpu yes` but
+/// `REQUIRES m <= 32`. Reporting that gap honestly (rather than picking one
+/// shape and hiding the other kernel) is the point of a second table.
+///
+/// ```text
+/// DISPLAY= cargo test --release -p brain-gpu-core -- --ignored --nocapture bench_matmul_quant
+/// ```
+#[test]
+#[ignore]
+fn bench_matmul_quant() {
+    let reps: usize = std::env::var("BRAIN_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+
+    // matmul_i8_dyn (DP4A, 128x128 tile, GPU only, any M), matmul_i8_gemv
+    // (DP4A, 64-thread/column, CPU+GPU, M<=32), matmul_q4_dyn (W4A8 naive,
+    // CPU+GPU, any M), matmul_q4_gemv (W4A8, 64-thread/column, CPU+GPU, M<=32).
+    let ks: Vec<(&str, &str)> = vec![
+        ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+        ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+        ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+        ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+    ];
+
+    let cpu = Gpu::new_cpu(&ks);
+    let wgpu = Gpu::new_wgpu(&ks);
+
+    /// Per-row symmetric quantization (scale = max|row|/qmax), matching
+    /// `model::int8::quantize_weight` / `model::int4::quantize_weight_q4`'s
+    /// math exactly but duplicated here (gpu-core has no dependency on
+    /// `brain-model`) — returns packed `[rows, k/per_word]` u32, per-row
+    /// scale, and the UNPACKED signed values (kept for the exact-integer host
+    /// reference below; round-tripping through f32 dequant would launder a
+    /// packing bug).
+    fn quant_rows(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
+        let kg = k / per_word;
+        let bits = 32 / per_word;
+        let mut packed = vec![0u32; rows * kg];
+        let mut scale = vec![0f32; rows];
+        let mut q = vec![0i8; rows * k];
+        for r in 0..rows {
+            let row = &x[r * k..r * k + k];
+            let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
+            let s = amax.max(1e-8) / qmax;
+            scale[r] = s;
+            for c in 0..k {
+                q[r * k + c] = (row[c] / s).round().clamp(-qmax, qmax) as i8;
+            }
+            for g in 0..kg {
+                let mut word = 0u32;
+                for b in 0..per_word {
+                    word |= ((q[r * k + g * per_word + b] as u8 as u32) & ((1 << bits) - 1)) << (bits * b);
+                }
+                packed[r * kg + g] = word;
+            }
+        }
+        (packed, scale, q)
+    }
+
+    /// Exact integer reference: `out[m,n] = (sum_k xq*wq) * sx[m] * sw[n]`,
+    /// bit-for-bit what every kernel below computes (int32 accumulation is
+    /// exact, so this is not merely "close" — see `matmul_i8_dyn.wgsl`'s own
+    /// header for the same claim about its DP4A reordering).
+    fn host_int_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let mut acc = 0i32;
+                for ki in 0..k {
+                    acc += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
+                }
+                out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+            }
+        }
+        out
+    }
+
+    fn diff(want: &[f32], got: &[f32]) -> (f32, f32) {
+        let maxd = want.iter().zip(got).fold(0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        let scale = want.iter().fold(1e-6f32, |acc, v| acc.max(v.abs()));
+        (maxd, maxd / scale)
+    }
+
+    /// One dispatch, `reps` timed resubmits — the int8/int4 sibling of
+    /// `time_variant` above, generalized to N buffers since these kernels
+    /// take 5 (x, w, sx, sw, out) instead of `time_variant`'s fixed 3.
+    fn time_kernel(
+        gpu: &Gpu,
+        kind: usize,
+        in_bufs: &[&gpu_core::DeviceBuffer],
+        params: &[u32],
+        threads: u32,
+        out: &gpu_core::DeviceBuffer,
+        out_len: usize,
+        reps: usize,
+    ) -> (Vec<f32>, f64) {
+        // `out` is itself a bind-group entry (the kernel's last storage
+        // binding) — appended here rather than left for the caller to
+        // remember, since forgetting it is a silent bind-group-count
+        // mismatch, not a compile error.
+        let mut bufs: Vec<&gpu_core::DeviceBuffer> = in_bufs.to_vec();
+        bufs.push(out);
+        let s = gpu.step(kind, &bufs, params, threads);
+        gpu.submit(&[], &[s]);
+        gpu.poll_wait();
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t0 = std::time::Instant::now();
+            let s = gpu.step(kind, &bufs, params, threads);
+            gpu.submit(&[], &[s]);
+            gpu.poll_wait();
+            best = best.min(t0.elapsed().as_secs_f64());
+        }
+        (gpu.read(out, out_len), best)
+    }
+
+    /// Runs int8 (`matmul_i8_dyn`, GPU only — `@cpu no`) at `(m, k, n)`.
+    fn run_i8_dyn(wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
+        let x = fill(m * k, 1);
+        let w = fill(n * k, 2);
+        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0);
+        let (wq, sw, wi) = quant_rows(&w, n, k, 4, 127.0);
+        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+
+        let xb = wgpu.storage(xq.len() as u64);
+        wgpu.write(&xb, &xq);
+        let wb = wgpu.storage(wq.len() as u64);
+        wgpu.write(&wb, &wq);
+        let sxb = wgpu.storage_init("sx", &sx);
+        let swb = wgpu.storage_init("sw", &sw);
+        let ob = wgpu.storage((m * n) as u64);
+        let tiles = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
+        let ki = wgpu.kernel_index("matmul_i8_dyn").expect("registered above");
+        let (got, t) = time_kernel(wgpu, ki, &[&xb, &wb, &sxb, &swb], &[m as u32, (k / 4) as u32, n as u32], tiles, &ob, m * n, reps);
+        let (dabs, drel) = diff(&want, &got);
+        let gops = 2.0 * m as f64 * k as f64 * n as f64 / t / 1e9;
+        println!(
+            "int8 dyn (DP4A)  m={m:<5} k={k:<5} n={n:<5}  gpu {:>8.3} ms  {:>8.0} GOP/s  max-abs/rel {:.2e}/{:.2e}  (no CPU-capable kernel at this M)",
+            t * 1e3, gops, dabs, drel
+        );
+        assert!(drel < 1e-6, "matmul_i8_dyn diverges (rel {drel:.3e})");
+    }
+
+    /// Runs int4/W4A8 (`matmul_q4_dyn`, CPU+GPU — naive, `docs/porting-playbook.md`
+    /// §10 "correct, then freeze") at `(m, k, n)` on both backends.
+    fn run_q4_dyn(cpu: &Gpu, wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
+        let x = fill(m * k, 3);
+        let w = fill(n * k, 4);
+        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0); // W4A8: activations stay int8
+        let (wq, sw, wi) = quant_rows(&w, n, k, 8, 7.0); // weights are int4
+        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+        let threads = (m * n) as u32;
+
+        for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
+            let xb = g.storage(xq.len() as u64);
+            g.write(&xb, &xq);
+            let wb = g.storage(wq.len() as u64);
+            g.write(&wb, &wq);
+            let sxb = g.storage_init("sx", &sx);
+            let swb = g.storage_init("sw", &sw);
+            let ob = g.storage((m * n) as u64);
+            let ki = g.kernel_index("matmul_q4_dyn").expect("registered above");
+            let (got, t) = time_kernel(g, ki, &[&xb, &wb, &sxb, &swb], &[m as u32, k as u32, n as u32], threads, &ob, m * n, reps);
+            let (dabs, drel) = diff(&want, &got);
+            let gops = 2.0 * m as f64 * k as f64 * n as f64 / t / 1e9;
+            println!(
+                "int4 dyn (W4A8)  m={m:<5} k={k:<5} n={n:<5}  {label:<3} {:>8.3} ms  {:>8.0} GOP/s  max-abs/rel {:.2e}/{:.2e}",
+                t * 1e3, gops, dabs, drel
+            );
+            assert!(drel < 1e-6, "matmul_q4_dyn diverges on {label} (rel {drel:.3e})");
+        }
+    }
+
+    /// Runs the decode-regime (`m <= 32`) int8 and int4 GEMV kernels on both
+    /// backends — the ONLY shape where brain has a CPU int8 GEMM at all.
+    fn run_decode_gemv(cpu: &Gpu, wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
+        let x = fill(m * k, 5);
+        let w8 = fill(n * k, 6);
+        let w4 = fill(n * k, 7);
+        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0);
+        let (wq8, sw8, wi8) = quant_rows(&w8, n, k, 4, 127.0);
+        let (wq4, sw4, wi4) = quant_rows(&w4, n, k, 8, 7.0);
+        let want8 = host_int_gemm(&xi, &wi8, &sx, &sw8, m, k, n);
+        let want4 = host_int_gemm(&xi, &wi4, &sx, &sw4, m, k, n);
+        let threads = (n * 64) as u32;
+
+        for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
+            let xb = g.storage(xq.len() as u64);
+            g.write(&xb, &xq);
+            let sxb = g.storage_init("sx", &sx);
+
+            let wb8 = g.storage(wq8.len() as u64);
+            g.write(&wb8, &wq8);
+            let swb8 = g.storage_init("sw8", &sw8);
+            let ob8 = g.storage((m * n) as u64);
+            let ki8 = g.kernel_index("matmul_i8_gemv").expect("registered above");
+            let (got8, t8) =
+                time_kernel(g, ki8, &[&xb, &wb8, &sxb, &swb8], &[m as u32, (k / 4) as u32, n as u32], threads, &ob8, m * n, reps);
+            let (d8abs, d8rel) = diff(&want8, &got8);
+
+            let wb4 = g.storage(wq4.len() as u64);
+            g.write(&wb4, &wq4);
+            let swb4 = g.storage_init("sw4", &sw4);
+            let ob4 = g.storage((m * n) as u64);
+            let ki4 = g.kernel_index("matmul_q4_gemv").expect("registered above");
+            let (got4, t4) = time_kernel(g, ki4, &[&xb, &wb4, &sxb, &swb4], &[m as u32, k as u32, n as u32], threads, &ob4, m * n, reps);
+            let (d4abs, d4rel) = diff(&want4, &got4);
+
+            println!(
+                "decode gemv      m={m:<5} k={k:<5} n={n:<5}  {label:<3} int8 {:>7.3} ms  int4 {:>7.3} ms  \
+                 parity int8 {:.2e}/{:.2e}  int4 {:.2e}/{:.2e}",
+                t8 * 1e3, t4 * 1e3, d8abs, d8rel, d4abs, d4rel
+            );
+            assert!(d8rel < 1e-6, "matmul_i8_gemv diverges on {label} (rel {d8rel:.3e})");
+            assert!(d4rel < 1e-6, "matmul_q4_gemv diverges on {label} (rel {d4rel:.3e})");
+        }
+    }
+
+    println!("\n-- prefill-shape (int8 DP4A is GPU-only; int4 W4A8 is CPU+GPU, naive) --");
+    for &(m, k, n) in &[(1024usize, 1024usize, 1024usize), (2048, 2048, 2048)] {
+        run_i8_dyn(&wgpu, m, k, n, reps);
+        run_q4_dyn(&cpu, &wgpu, m, k, n, reps);
+    }
+
+    println!("\n-- decode-shape (m<=32; the only shape with a CPU-capable int8 kernel) --");
+    run_decode_gemv(&cpu, &wgpu, 8, 1024, 1024, reps);
 }
