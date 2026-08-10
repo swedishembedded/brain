@@ -26,7 +26,7 @@
 //! `tts::mtp`) are a caller's job, layered on top of [`decode`].
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::block::{gqa_decode_step, gqa_fwd, kv_cache_fill, rmsnorm_fwd, rope2d_fwd, Gqa, GqaDecodeIds, KernelIds};
+use model::block::{gqa_attn_sublayer_decode_step, gqa_attn_sublayer_fwd, rmsnorm_fwd, GqaAttnDims, GqaAttnIds, GqaAttnWeights, GqaDecodeIds, KernelIds};
 use model::moe::{expert_fwd, router_fwd, shared_expert_fwd, ExpertScratch, MoeIds, SharedExpertIds, SharedExpertScratch};
 
 use crate::config::MoeTextConfig;
@@ -90,6 +90,20 @@ fn decode_ids() -> GqaDecodeIds {
     GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: 15, decode_softmax: 16, attn_decode_apply: 17 }
 }
 
+/// The hoisted attention sublayer's kernel indices, resolved against
+/// [`talker_pipelines`]'s ordering — see `model::block::GqaAttnIds`.
+fn attn_ids() -> GqaAttnIds {
+    GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids() }
+}
+
+fn attn_dims(cfg: &MoeTextConfig) -> GqaAttnDims {
+    GqaAttnDims { hidden: cfg.hidden, head_dim: cfg.head_dim, n_heads: cfg.n_heads, n_kv_heads: cfg.n_kv_heads, use_qk_norm: cfg.use_qk_norm }
+}
+
+fn attn_weights<'a>(w: &TalkerLayerWeights<'a>) -> GqaAttnWeights<'a> {
+    GqaAttnWeights { ln1: w.ln1, wq: w.wq, wk: w.wk, wv: w.wv, wo: w.wo, q_norm: w.q_norm, k_norm: w.k_norm }
+}
+
 const MATMUL: usize = 5;
 const ADD2: usize = 6;
 const ROPE2D: usize = 1;
@@ -139,48 +153,7 @@ pub struct TalkerLayerCache<'a> {
 /// `crate::thinker::layer_fwd`'s doc for why this is additive and cheap.
 #[allow(clippy::too_many_arguments)]
 pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, cache: Option<&TalkerLayerCache>) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
-    let ids = kernel_ids();
-    let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
-    let (hq, hkv) = (nh * hd, nkv * hd);
-
-    let xn1 = g.storage((n * d) as u64);
-    let mut steps = vec![rmsnorm_fwd(g, &ids, x, w.ln1, &xn1, d, n)];
-
-    let q_pre = g.storage((n * hq) as u64);
-    let k_pre = g.storage((n * hkv) as u64);
-    let v = g.storage((n * hkv) as u64);
-    steps.push(g.step(MATMUL, &[&xn1, w.wq, &q_pre], &[n, d, hq], n * hq));
-    steps.push(g.step(MATMUL, &[&xn1, w.wk, &k_pre], &[n, d, hkv], n * hkv));
-    steps.push(g.step(MATMUL, &[&xn1, w.wv, &v], &[n, d, hkv], n * hkv));
-
-    let (q, k) = if cfg.use_qk_norm {
-        let q = g.storage((n * hq) as u64);
-        let k = g.storage((n * hkv) as u64);
-        steps.push(rmsnorm_fwd(g, &ids, &q_pre, w.q_norm, &q, hd, n * nh));
-        steps.push(rmsnorm_fwd(g, &ids, &k_pre, w.k_norm, &k, hd, n * nkv));
-        (q, k)
-    } else {
-        (q_pre, k_pre)
-    };
-    steps.push(rope2d_fwd(g, ROPE2D, &q, cos, sin, n, nh, hd, hq));
-    steps.push(rope2d_fwd(g, ROPE2D, &k, cos, sin, n, nkv, hd, hkv));
-    g.submit(&[], &steps);
-
-    if let Some(c) = cache {
-        g.submit(&[], &[kv_cache_fill(g, KV_APPEND, &k, c.kcache, n, nkv, hd), kv_cache_fill(g, KV_APPEND, &v, c.vcache, n, nkv, hd)]);
-    }
-
-    let scores = g.storage((nh * n * n) as u64);
-    let probs = g.storage((nh * n * n) as u64);
-    let ctx = g.storage((n * hq) as u64);
-    let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    g.submit(&[], &gqa_fwd(g, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
-
-    let proj = g.storage((n * d) as u64);
-    let xmid = g.storage((n * d) as u64);
-    g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
-    g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
-
+    let xmid = gqa_attn_sublayer_fwd(g, &attn_ids(), &attn_dims(cfg), &attn_weights(w), x, cos, sin, n, cache.map(|c| (c.kcache, c.vcache)));
     let (out, router_logits, gate) = moe_sublayer(g, cfg, w, &xmid, n);
     (out, router_logits, xmid, gate)
 }
@@ -195,17 +168,22 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
 
     let xn2 = g.storage((n * d) as u64);
     let router_logits = g.storage((n * cfg.n_experts) as u64);
-    g.submit(
-        &[],
-        &[
-            rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
-            g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
-        ],
-    );
+
+    // ONE accumulated batch, ONE submit -- the same fix Thinker's
+    // moe_sublayer got (ae72d8f: one submit PER EXPERT was 128 real
+    // encode+queue-submit+pipeline-barrier round trips per layer; at
+    // Talker's scale ~2,560 per codec token across 20 layers). This copy
+    // MISSED that fix -- exactly the re-divergence risk that motivated
+    // hoisting the attention sublayer into model::block; the MoE tail stays
+    // model-local only because the shared expert genuinely differs.
+    let mut steps = vec![
+        rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
+        g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
+    ];
 
     let shape = cfg.moe_shape(n);
     let gate = g.storage((n * cfg.n_experts) as u64);
-    g.submit(&[], &[router_fwd(g, &mids, &shape, &router_logits, &gate)]);
+    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate));
 
     let moe_ff = cfg.moe_intermediate;
     let scratch = ExpertScratch {
@@ -216,8 +194,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
     };
     let routed_out = g.storage((n * d) as u64);
     for (e, (gw, uw, dw)) in w.experts.iter().enumerate() {
-        let steps = expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &routed_out, e as u32, e != 0);
-        g.submit(&[], &steps);
+        steps.extend(expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &routed_out, e as u32, e != 0));
     }
 
     // Shared expert: always active (no gating), reads the SAME xn2 the
@@ -236,13 +213,11 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
     };
     let (sgw, suw, sdw) = w.shared_expert;
     let moe_out = g.storage((n * d) as u64);
-    g.submit(
-        &[],
-        &shared_expert_fwd(g, &se_ids, n, d, se_ff, &xn2, sgw, suw, sdw, Some(w.shared_expert_gate), &se_scratch, &routed_out, &moe_out),
-    );
+    steps.extend(shared_expert_fwd(g, &se_ids, n, d, se_ff, &xn2, sgw, suw, sdw, Some(w.shared_expert_gate), &se_scratch, &routed_out, &moe_out));
 
     let out = g.storage((n * d) as u64);
-    g.submit(&[], &[g.step(ADD2, &[xmid, &moe_out, &out], &[n * d], n * d)]);
+    steps.push(g.step(ADD2, &[xmid, &moe_out, &out], &[n * d], n * d));
+    g.submit(&[], &steps);
 
     (out, router_logits, gate)
 }
@@ -254,46 +229,8 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
 /// Returns this token's new hidden row `[1, d]`.
 #[allow(clippy::too_many_arguments)]
 pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, cache: &TalkerLayerCache, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, pos: u32, cap: u32) -> DeviceBuffer {
-    let ids = kernel_ids();
-    let dids = decode_ids();
-    let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
-    let (hq, hkv) = (nh * hd, nkv * hd);
-    let n = 1u32;
-
-    let xn1 = g.storage(d as u64);
-    let mut steps = vec![rmsnorm_fwd(g, &ids, x, w.ln1, &xn1, d, n)];
-
-    let q_pre = g.storage(hq as u64);
-    let k_pre = g.storage(hkv as u64);
-    let v = g.storage(hkv as u64);
-    steps.push(g.step(MATMUL, &[&xn1, w.wq, &q_pre], &[n, d, hq], n * hq));
-    steps.push(g.step(MATMUL, &[&xn1, w.wk, &k_pre], &[n, d, hkv], n * hkv));
-    steps.push(g.step(MATMUL, &[&xn1, w.wv, &v], &[n, d, hkv], n * hkv));
-
-    let (q, k) = if cfg.use_qk_norm {
-        let q = g.storage(hq as u64);
-        let k = g.storage(hkv as u64);
-        steps.push(rmsnorm_fwd(g, &ids, &q_pre, w.q_norm, &q, hd, nh));
-        steps.push(rmsnorm_fwd(g, &ids, &k_pre, w.k_norm, &k, hd, nkv));
-        (q, k)
-    } else {
-        (q_pre, k_pre)
-    };
-    steps.push(rope2d_fwd(g, ROPE2D, &q, cos, sin, n, nh, hd, hq));
-    steps.push(rope2d_fwd(g, ROPE2D, &k, cos, sin, n, nkv, hd, hkv));
-    g.submit(&[], &steps);
-
-    let scores = g.storage((nh * cap) as u64);
-    let probs = g.storage((nh * cap) as u64);
-    let ctx = g.storage(hq as u64);
-    g.submit(&[], &gqa_decode_step(g, &dids, nh, nkv, hd, pos, cap, &q, &k, &v, cache.kcache, cache.vcache, &scores, &probs, &ctx));
-
-    let proj = g.storage(d as u64);
-    let xmid = g.storage(d as u64);
-    g.submit(&[], &[g.step(MATMUL, &[&ctx, w.wo, &proj], &[n, hq, d], n * d)]);
-    g.submit(&[], &[g.step(ADD2, &[x, &proj, &xmid], &[n * d], n * d)]);
-
-    let (out, ..) = moe_sublayer(g, cfg, w, &xmid, n);
+    let xmid = gqa_attn_sublayer_decode_step(g, &attn_ids(), &attn_dims(cfg), &attn_weights(w), (cache.kcache, cache.vcache), x, cos, sin, pos, cap);
+    let (out, ..) = moe_sublayer(g, cfg, w, &xmid, 1);
     out
 }
 

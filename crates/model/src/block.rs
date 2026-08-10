@@ -310,6 +310,144 @@ pub fn kv_cache_fill(g: &Gpu, kv_append: usize, src: &DeviceBuffer, cache: &Devi
     g.step(kv_append, &[src, cache], &[width, 0], width)
 }
 
+// ---- the full GQA attention SUBLAYER (norm -> QKV -> QK-norm -> RoPE ->
+// attend -> out-proj -> residual), hoisted from omni::thinker/omni::talker ---
+//
+// The two omni decoders carried byte-identical copies of this whole sequence
+// (batched AND decode-step variants), and the copy already cost a real
+// regression: the Thinker copy got the accumulated-single-submit MoE fix
+// while the Talker copy kept submitting per expert. Per the hoist-and-migrate
+// policy, the sublayer lives here ONCE; a model that wants it supplies its
+// kernel indices via [`GqaAttnIds`] and its dims via [`GqaAttnDims`].
+
+/// Kernel indices for [`gqa_attn_sublayer_fwd`]/[`gqa_attn_sublayer_decode_step`],
+/// resolved by the calling model against its own registered pipeline list.
+#[derive(Clone, Copy)]
+pub struct GqaAttnIds {
+    /// The shared forward ids (`rmsnorm`, `gqa_scores`/`attn_softmax`/
+    /// `gqa_apply`); backward slots are never dispatched by the sublayer.
+    pub kernels: KernelIds,
+    /// Naive matmul (`matmul.wgsl`'s `{x,w,out}`/`{m,k,n}` contract).
+    pub matmul: usize,
+    pub add2: usize,
+    /// Table-driven M-RoPE (`rope2d.wgsl`) — see `rope2d_fwd`.
+    pub rope2d: usize,
+    /// `kv_append` for [`kv_cache_fill`] (prefill) and [`GqaDecodeIds`] (decode).
+    pub kv_append: usize,
+    /// The decode-step ids ([`gqa_decode_step`]).
+    pub decode: GqaDecodeIds,
+}
+
+/// The attention sublayer's shape parameters.
+#[derive(Clone, Copy)]
+pub struct GqaAttnDims {
+    pub hidden: u32,
+    pub head_dim: u32,
+    pub n_heads: u32,
+    pub n_kv_heads: u32,
+    /// Qwen3-style per-head RMSNorm on Q/K after the projections.
+    pub use_qk_norm: bool,
+}
+
+/// The sublayer's weights: pre-attention RMSNorm, QKV/out projections, and
+/// (when `use_qk_norm`) the per-head Q/K norm weights.
+pub struct GqaAttnWeights<'a> {
+    pub ln1: &'a DeviceBuffer,
+    pub wq: &'a DeviceBuffer,
+    pub wk: &'a DeviceBuffer,
+    pub wv: &'a DeviceBuffer,
+    pub wo: &'a DeviceBuffer,
+    pub q_norm: &'a DeviceBuffer,
+    pub k_norm: &'a DeviceBuffer,
+}
+
+/// Shared head of both sublayer variants: RMSNorm -> QKV projections ->
+/// optional per-head QK-norm -> RoPE, submitted as one batch. Returns the
+/// post-RoPE `(q, k, v)` buffers (`[n, n_heads*head_dim]` /
+/// `[n, n_kv_heads*head_dim]`).
+fn gqa_attn_qkv(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    let (d, hd, nh, nkv) = (dims.hidden, dims.head_dim, dims.n_heads, dims.n_kv_heads);
+    let (hq, hkv) = (nh * hd, nkv * hd);
+
+    let xn1 = g.storage((n * d) as u64);
+    let mut steps = vec![rmsnorm_fwd(g, &ids.kernels, x, w.ln1, &xn1, d, n)];
+
+    let q_pre = g.storage((n * hq) as u64);
+    let k_pre = g.storage((n * hkv) as u64);
+    let v = g.storage((n * hkv) as u64);
+    steps.push(g.step(ids.matmul, &[&xn1, w.wq, &q_pre], &[n, d, hq], n * hq));
+    steps.push(g.step(ids.matmul, &[&xn1, w.wk, &k_pre], &[n, d, hkv], n * hkv));
+    steps.push(g.step(ids.matmul, &[&xn1, w.wv, &v], &[n, d, hkv], n * hkv));
+
+    let (q, k) = if dims.use_qk_norm {
+        let q = g.storage((n * hq) as u64);
+        let k = g.storage((n * hkv) as u64);
+        steps.push(rmsnorm_fwd(g, &ids.kernels, &q_pre, w.q_norm, &q, hd, n * nh));
+        steps.push(rmsnorm_fwd(g, &ids.kernels, &k_pre, w.k_norm, &k, hd, n * nkv));
+        (q, k)
+    } else {
+        (q_pre, k_pre)
+    };
+    steps.push(rope2d_fwd(g, ids.rope2d, &q, cos, sin, n, nh, hd, hq));
+    steps.push(rope2d_fwd(g, ids.rope2d, &k, cos, sin, n, nkv, hd, hkv));
+    g.submit(&[], &steps);
+    (q, k, v)
+}
+
+/// Shared tail of both sublayer variants: output projection + residual add.
+/// Returns `xmid = x + ctx @ wo` (`[n, d]`).
+fn gqa_attn_out(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeights, x: &DeviceBuffer, ctx: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    let (d, hq) = (dims.hidden, dims.n_heads * dims.head_dim);
+    let proj = g.storage((n * d) as u64);
+    let xmid = g.storage((n * d) as u64);
+    g.submit(&[], &[g.step(ids.matmul, &[ctx, w.wo, &proj], &[n, hq, d], n * d)]);
+    g.submit(&[], &[g.step(ids.add2, &[x, &proj, &xmid], &[n * d], n * d)]);
+    xmid
+}
+
+/// The full batched GQA attention sublayer: `x [n, d] -> xmid [n, d]`
+/// (post-attention residual, ready for the caller's FFN/MoE sublayer).
+/// `cos`/`sin` are the `[n, head_dim/2]` RoPE tables. `kv_cache`, when
+/// `Some((kcache, vcache))`, bulk-fills the persistent per-layer cache with
+/// the `n` post-RoPE key/value rows ([`kv_cache_fill`]) — purely additive,
+/// `xmid` is identical either way.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, kv_cache: Option<(&DeviceBuffer, &DeviceBuffer)>) -> DeviceBuffer {
+    let (hd, nh, nkv) = (dims.head_dim, dims.n_heads, dims.n_kv_heads);
+    let (q, k, v) = gqa_attn_qkv(g, ids, dims, w, x, cos, sin, n);
+
+    if let Some((kcache, vcache)) = kv_cache {
+        g.submit(&[], &[kv_cache_fill(g, ids.kv_append, &k, kcache, n, nkv, hd), kv_cache_fill(g, ids.kv_append, &v, vcache, n, nkv, hd)]);
+    }
+
+    let scores = g.storage((nh * n * n) as u64);
+    let probs = g.storage((nh * n * n) as u64);
+    let ctx = g.storage((n * nh * hd) as u64);
+    let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+    g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &q, &k, &v, &scores, &probs, &ctx));
+
+    gqa_attn_out(g, ids, dims, w, x, &ctx, n)
+}
+
+/// The single-token incremental-decode twin of [`gqa_attn_sublayer_fwd`]:
+/// one new token's row `x [1, d]` -> `xmid [1, d]`, attending against
+/// `(kcache, vcache)`'s `pos+1` valid positions via [`gqa_decode_step`].
+/// `cos`/`sin` are the 1-row RoPE table for this token's absolute position;
+/// `cap` is the cache's allocated capacity.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attn_sublayer_decode_step(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeights, kv_cache: (&DeviceBuffer, &DeviceBuffer), x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, pos: u32, cap: u32) -> DeviceBuffer {
+    let (hd, nh, nkv) = (dims.head_dim, dims.n_heads, dims.n_kv_heads);
+    let (q, k, v) = gqa_attn_qkv(g, ids, dims, w, x, cos, sin, 1);
+
+    let scores = g.storage((nh * cap) as u64);
+    let probs = g.storage((nh * cap) as u64);
+    let ctx = g.storage((nh * hd) as u64);
+    let (kcache, vcache) = kv_cache;
+    g.submit(&[], &gqa_decode_step(g, &ids.decode, nh, nkv, hd, pos, cap, &q, &k, &v, kcache, vcache, &scores, &probs, &ctx));
+
+    gqa_attn_out(g, ids, dims, w, x, &ctx, 1)
+}
+
 /// GQA attention backward: produces `d_scores`, `d_v`, `d_q`, `d_k` from the
 /// context grad `d_ctx` and the cached `q`/`k`/`v`/`probs`.
 pub fn gqa_bwd(
