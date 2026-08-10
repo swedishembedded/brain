@@ -33,11 +33,12 @@ from pathlib import Path
 
 # Utility/demo entries that are real catalog models but not "a model" for the
 # support table's purposes (no ML weights, nothing to document a support
-# matrix for). `brain/qwenvl` is a real, weighted VLM but forward-only (no
-# serving action beyond raw forward) — README.md's own prose right above the
-# table says it (and moondream, not yet in `brain caps`) is documented below
-# the table instead of given a row; this mirrors that deliberate exclusion.
-IGNORE = {"brain/mock", "brain/demo", "brain/imageops", "brain/qwenvl"}
+# matrix for). Weighted models NEVER belong here: `brain/qwenvl` was once
+# whitelisted with a "forward-only" rationale that was already false when it
+# was written (commit 6b4e44a had landed a real served `generate` action) —
+# exactly the drift this guard exists to catch. If a new model trips this
+# check, give it a table row, don't extend this set.
+IGNORE = {"brain/mock", "brain/demo", "brain/imageops"}
 
 # `brain caps` is a WEIGHTS-FREE static listing: it reports each catalog
 # entry's crate-level `caps::MODEL` constant (`brain/qwen`, `brain/lfm`), which

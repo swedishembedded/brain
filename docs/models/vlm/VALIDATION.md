@@ -83,9 +83,11 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 
 ## Known gaps ("all capabilities" caveats)
 
-- **Generation loop.** Done for FastVLM: greedy decode via `logits_all` + `enable_mm_splice`
-  drives the full image→caption above (matching HF). Qwen3-VL/Moondream composites still
-  expose only the training `forward`; wiring the same greedy loop onto them is mechanical.
+- **Generation loop.** Done for FastVLM (greedy decode via `logits_all` + `enable_mm_splice`,
+  matching HF) and for Qwen3-VL (`Qwen3Vl::generate`: KV-cache greedy decode with
+  M-RoPE/DeepStack, served as `brain/qwenvl`'s `generate` action — validation-tier, no
+  token-level HF golden for the incremental path yet). The Moondream composite still
+  exposes only the training `forward`; wiring the same greedy loop onto it is mechanical.
 - **Moondream spatial heads.** The region/point/detect heads (grounding, pointing, object
   detection) were deferred; the importer *recognizes* their tensors but they are not built.
   Moondream's caption + visual-query paths are complete.

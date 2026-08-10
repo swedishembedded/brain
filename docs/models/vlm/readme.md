@@ -1,8 +1,9 @@
 # Vision-language models (`crates/fastvlm`, `crates/qwenvl`, `crates/moondream`)
 
-FastVLM is the only VLM in brain with a working generation loop. Qwen3-VL-4B and
-Moondream 3 also live under `crates/` and share the same vision→projector→decoder
-shape, but are forward-only today — see the note at the bottom.
+Two VLMs in brain have a working generation loop: FastVLM (`brain/fastvlm`,
+captioning) and Qwen3-VL-4B (`brain/qwenvl`, image + text → text — see its
+section below). Moondream 3 shares the same vision→projector→decoder shape but
+is forward-only today — see the note at the bottom.
 
 ## Model id and weights
 
@@ -72,16 +73,32 @@ no command to give.
 
 `training` (verb), `finetune`, `LoRA`, `QLoRA`, `batch > 1`, `HTTP`.
 
-## Qwen3-VL-4B and Moondream 3 — not yet runnable
+## Qwen3-VL-4B (`brain/qwenvl`) — servable, validation-tier
 
-`crates/qwenvl` and `crates/moondream` implement the same vision-encoder →
-projector → decoder shape, gradient-checked and import-covered, but neither has
-ever emitted a generated token: each exposes only a training `forward()` that
-returns a scalar loss (`crates/qwenvl/src/model.rs:128`,
-`crates/moondream/src/model.rs:71`/`:88`), with no `generate`/`greedy`/`max_new`/
-KV-decode function anywhere in either crate — and `qwenvl` is not even a
-dependency of `crates/cli`. See `crates/qwenvl` and `crates/moondream` directly,
-and the capability matrix in `docs/models/vlm/VALIDATION.md`.
+`crates/qwenvl` serves a real `generate` action (registered in
+`crates/cli/src/catalog.rs`): smart-resize preprocessing, image splice, and a
+KV-cache greedy decode with M-RoPE/DeepStack (`Qwen3Vl::generate`). fp32,
+greedy argmax only, one request at a time.
+
+- **Weights:** `BRAIN_QWENVL_WEIGHTS` — a checkpoint directory (`config.json` +
+  `model.safetensors[.index.json]` + `tokenizer.json`); overridable per call via
+  the `weights` param.
+- **Surfaces:** `brain caps`/`brain do` only — no residency adapter yet, so no
+  D-Bus/HTTP (the same state fastvlm started in):
+
+```bash
+brain do brain/qwenvl generate --prompt "Describe this image." --max_new 64 \
+    --in image=photo.ppm --out text=answer.txt
+```
+
+## Moondream 3 — not yet runnable
+
+`crates/moondream` implements the same vision-encoder → projector → decoder
+shape, gradient-checked and import-covered, but has never emitted a generated
+token: it exposes only a training `forward()` that returns a scalar loss
+(`crates/moondream/src/model.rs:71`/`:88`), with no `generate`/`greedy`/
+`max_new`/KV-decode function anywhere in the crate. See `crates/moondream`
+directly, and the capability matrix in `docs/models/vlm/VALIDATION.md`.
 
 ## See also
 

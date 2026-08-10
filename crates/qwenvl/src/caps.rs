@@ -308,6 +308,31 @@ mod tests {
         assert!(a.outputs.iter().any(|b| b.name == "text" && b.media == Media::Text));
     }
 
+    /// Served-path smoke on the real checkpoint (skip-if-absent, like the
+    /// fastvlm caption parity tests): exercises the FULL `GenerateAction`
+    /// path — smart-resize preprocessing, image splice, and
+    /// `Qwen3Vl::generate`'s M-RoPE/DeepStack KV-cache incremental decode —
+    /// which `parity.rs` (batched 4-layer decoder only) never touches.
+    /// Bar is "runs end-to-end and produces text", not token parity (no HF
+    /// golden for the incremental path yet — see VALIDATION.md).
+    #[test]
+    fn served_generate_path_runs_on_real_weights() {
+        let dir = default_weights();
+        if dir.is_empty() || !std::path::Path::new(&dir).join("config.json").exists() {
+            eprintln!("skip: BRAIN_QWENVL_WEIGHTS not set / checkpoint absent");
+            return;
+        }
+        let (w, h) = (64u32, 64u32);
+        let hwc: Vec<f32> = (0..w * h * 3).map(|i| (i % 251) as f32 / 250.0).collect();
+        let bytes: Vec<u8> = hwc.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let inv = Invocation::new()
+            .set("prompt", json!("Describe this image."))
+            .set("max_new", json!(4))
+            .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h})));
+        let out = GenerateAction.run(&inv, &mut |_| {}).expect("served generate path failed on real weights");
+        assert!(out.blobs.contains_key("text"), "generate must emit its declared text blob");
+    }
+
     #[test]
     fn missing_weights_is_a_clean_error() {
         let inv = Invocation::new()

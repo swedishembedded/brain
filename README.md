@@ -89,13 +89,14 @@ BRAIN_DEVICE=cpu make test                                        # whole suite,
 
 ## Model support
 
-Every model `brain` can run today, grouped by task. **Model id** is the exact string
-you pass to `brain`/`brain do`/D-Bus/HTTP; **✓** means the capability is reachable
-through some real command, documented on the linked page — nothing here is
-aspirational. Architecture ports with no serving surface yet (parity-gated components,
-not runnable models — T5-XXL encoder, SDXL UNet, ControlNet, FLUX.1/Kontext, PuLID,
-plus the forward-only `qwenvl`/`moondream` VLMs) are listed below the table instead of
-given a row.
+Every model `brain` can run today, grouped by task. **Model id** is the string you
+pass to `brain do`/D-Bus/HTTP (HF-ref ids like `Qwen/Qwen3-0.6B` resolve on the
+serving surfaces and auto-fetch; `brain do` also accepts the `brain/<family>` id
+each linked page names); **✓** means the capability is reachable through some real
+command, documented on the linked page — nothing here is aspirational. Architecture
+ports with no serving surface yet (parity-gated components, not runnable models —
+T5-XXL encoder, SDXL UNet, ControlNet, FLUX.1/Kontext, PuLID, plus the forward-only
+`moondream` VLM) are listed below the table instead of given a row.
 
 | Model id | Solves | Infer | Train | LoRA | QLoRA |
 |---|---|---|---|---|---|
@@ -110,6 +111,7 @@ given a row.
 | [`brain/facenet`](docs/models/face/readme.md) | face detection + ArcFace identity embedding | ✓ | | | |
 | **vlm** | | | | | |
 | [`brain/fastvlm`](docs/models/vlm/readme.md) | image captioning | ✓ | | | |
+| [`brain/qwenvl`](docs/models/vlm/readme.md) | image + text → text (Qwen3-VL, validation-tier) | ✓ | | | |
 | **asr** | | | | | |
 | [`brain/nemotron`](docs/models/asr/readme.md) | streaming speech-to-text | ✓ | | | |
 | [`brain/qwen-asr`](docs/models/asr/readme.md) | offline speech-to-text | ✓ | | | |
@@ -137,6 +139,16 @@ given a row.
 | **world model** | | | | | |
 | [`brain wm`](docs/models/world-models/readme.md) | playable action-conditioned video (DIAMOND) | ✓ | ✓ | | |
 | [`brain pid`](docs/models/pid/readme.md) | control policy over CBOR records (PID imitation) | ✓ | ✓ | | |
+
+Architecture ports with no serving surface yet — parity-gated components you can
+build against, each tracked by its own status ledger:
+
+- [T5-XXL encoder](docs/models/t5/status.md) — FLUX.2's text conditioner (forward + backward)
+- [SDXL UNet](docs/models/unet/status.md)
+- [ControlNet](docs/models/controlnet/status.md)
+- [FLUX.1/Kontext](docs/models/flux1/status.md)
+- [PuLID](docs/models/pulid/status.md)
+- Moondream 3 (`crates/moondream`) — forward-only VLM, see [the VLM page](docs/models/vlm/readme.md)
 
 **⤓** = `brain` fetches and converts the weights itself on first use
 (`crates/modelstore`, via a per-family recipe — `crates/modelstore/src/recipe.rs`)
