@@ -121,6 +121,17 @@ def api_key_from_file(path: str) -> str:
 
 # ------------------------------------------------------------------- HTTP core
 
+
+class ModelNotServedHere(Exception):
+    """`path` 404'd because `--model` isn't exposed on that route -- e.g. a
+    chat-only model (like Qwen3-0.6B) hit against /v1/embeddings or
+    /v1/images/generations, since every demo below reuses the SAME --model
+    for all four API families on purpose (this is a generic smoke test, not
+    a model-aware one). Distinct from a hard `skip()`: a caller exercising
+    several demos back to back (see `main`) can catch this per-demo and keep
+    going instead of the whole process exiting out from under it."""
+
+
 def request(base_url: str, api_key: str, path: str, body: Optional[dict] = None, stream: bool = False):
     """POST (or GET when body is None) `path`, Bearer-authed. Returns the parsed
     JSON body, or (for `stream=True`) the open response for line-by-line SSE."""
@@ -144,7 +155,7 @@ def request(base_url: str, api_key: str, path: str, body: Optional[dict] = None,
         detail = e.read().decode(errors="replace")
         if e.code == 404:
             model = body.get("model") if body else None
-            skip(f"{path}: model {model!r} not served/exposed here: {detail}")
+            raise ModelNotServedHere(f"{path}: model {model!r} not served/exposed here: {detail}") from e
         raise RuntimeError(f"{path}: HTTP {e.code}: {detail}") from e
     if stream:
         return resp
@@ -175,14 +186,39 @@ def demo_models(base_url: str, api_key: str) -> None:
 
 
 def demo_chat(base_url: str, api_key: str, model: str) -> None:
-    body = {"model": model, "messages": [{"role": "user", "content": "Say hello in five words."}], "max_tokens": 32}
+    # 160, not 32: a reasoning model (Qwen3's whole family) spends tokens on a
+    # hidden <think>...</think> block BEFORE any visible answer -- outputs.text
+    # is visible content only (crates/apiserve's own contract), so a budget
+    # too small to get past that block prints as an empty string with
+    # finish_reason=length, which reads as "broken" even though nothing is.
+    body = {"model": model, "messages": [{"role": "user", "content": "Say hello in five words."}], "max_tokens": 160}
     out = request(base_url, api_key, "/v1/chat/completions", body)
-    text = out["choices"][0]["message"]["content"]
+    msg = out["choices"][0]["message"]
+    text, reasoning = msg["content"], msg.get("reasoning_content") or ""
     print(f"POST /v1/chat/completions -> {text!r} (finish_reason={out['choices'][0]['finish_reason']})")
+    if reasoning:
+        # A reasoning model can spend the WHOLE token budget inside
+        # <think>...</think> before ever reaching visible content -- if
+        # `text` came back empty, this is where the tokens actually went, not
+        # evidence the request did nothing.
+        print(f"  reasoning_content -> {reasoning!r}")
 
     resp = request(base_url, api_key, "/v1/chat/completions", {**body, "stream": True}, stream=True)
-    deltas = [e["choices"][0]["delta"].get("content", "") for e in sse_events(resp) if e.get("choices")]
-    print(f"POST /v1/chat/completions (stream) -> {len(deltas)} chunk(s): {''.join(deltas)!r}")
+    # `content` and `reasoning_content` are two SEPARATE delta channels
+    # (crates/apiserve/src/openai.rs's progress_to_delta: a "reasoning" event
+    # becomes delta.reasoning_content, NEVER delta.content) -- reading only
+    # one makes a reasoning-heavy response look empty even when the stream is
+    # working correctly and full of reasoning deltas.
+    content_deltas, reasoning_deltas = [], []
+    for e in sse_events(resp):
+        if not e.get("choices"):
+            continue
+        delta = e["choices"][0]["delta"]
+        content_deltas.append(delta.get("content", ""))
+        reasoning_deltas.append(delta.get("reasoning_content", ""))
+    print(f"POST /v1/chat/completions (stream) -> {len(content_deltas)} chunk(s), content: {''.join(content_deltas)!r}")
+    if any(reasoning_deltas):
+        print(f"  reasoning_content -> {''.join(reasoning_deltas)!r}")
 
 
 def demo_embeddings(base_url: str, api_key: str, model: str) -> None:
@@ -228,9 +264,23 @@ def main() -> None:
 
     try:
         demo_models(base_url, api_key)
-        demo_chat(base_url, api_key, args.model)
-        demo_embeddings(base_url, api_key, args.model)
-        demo_images(base_url, api_key, args.model, args.out)
+        try:
+            demo_chat(base_url, api_key, args.model)
+        except ModelNotServedHere as e:
+            # Unlike embeddings/images below, chat not being served is fatal
+            # to this whole run (it's the demo `--model` is FOR) -- same
+            # hard-skip contract examples/e2e/examples.bats already expects.
+            skip(str(e))
+        # Embeddings/images reuse the SAME --model as the chat demo above, on
+        # purpose (see ModelNotServedHere's doc) -- a chat-only model like
+        # Qwen3-0.6B legitimately doesn't serve either route. That is a
+        # per-demo skip, not a reason for the whole script to stop before
+        # reaching the demo after it.
+        for demo, args_ in ((demo_embeddings, (args.model,)), (demo_images, (args.model, args.out))):
+            try:
+                demo(base_url, api_key, *args_)
+            except ModelNotServedHere as e:
+                print(f"SKIP (model {args.model!r} doesn't serve this route): {e}", file=sys.stderr)
     finally:
         if server is not None:
             server.stop()
