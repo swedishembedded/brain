@@ -179,9 +179,9 @@ pub struct ResidencyReport {
 /// `match`es.
 fn synth_cost_for(d: Device, need: u64) -> MemCost {
     match d {
-        Device::Gpu(_) => MemCost { vram: need, ram: 0, npu: 0 },
-        Device::Npu(_) => MemCost { vram: 0, ram: 0, npu: need },
-        Device::Cpu => MemCost { vram: 0, ram: need, npu: 0 },
+        Device::Gpu(_) => MemCost::new(need, 0),
+        Device::Npu(_) => MemCost::new(0, 0).with_npu(need),
+        Device::Cpu => MemCost::new(0, need),
     }
 }
 
@@ -208,10 +208,11 @@ pub struct ResidencyManager {
     budgets: Budgets,
     residents: Residents,
     /// Multi-device residents' bookkeeping — parallel to `residents` but
-    /// keyed on the same `InstanceKey` space (a name must not be claimed
-    /// both ways at once; `claim_multi` checks `residents` too before
-    /// treating a key as cold, and vice versa is the caller's own
-    /// responsibility since `models`/`multi_models` are separate registries).
+    /// keyed on the same `InstanceKey` space. A name must not be claimed
+    /// both ways at once, and BOTH claim paths enforce it: `claim` refuses a
+    /// key resident here, `claim_multi` refuses a key resident in
+    /// `residents` (each with a clean `ClaimError::Activate`, never a
+    /// dispatcher-killing panic).
     multi_residents: HashMap<InstanceKey, MultiEntry>,
     instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
@@ -504,6 +505,14 @@ impl ResidencyManager {
             .ok_or_else(|| ClaimError::Activate(format!("no model '{model}'")))?
             .clone();
         let key = m.instance_key(action, inv);
+        // Cross-registry guard: a key resident as a MULTI-device instance
+        // must never be claimed through the single-device path — before this
+        // check, the handle lookup below found the shared `instances` entry,
+        // then the `residents` expect() panicked ON THE DISPATCHER THREAD,
+        // killing scheduling for the whole server.
+        if self.multi_residents.contains_key(&key) {
+            return Err(ClaimError::Activate(format!("{key}: resident as a multi-device instance — claim it via claim_multi, not claim")));
+        }
         // The instance object existing is still the real guard (matches the
         // pre-Warm invariant exactly): a cold build's `residents.insert`
         // pre-accounts the slot before `self.instances` gets the handle
@@ -513,7 +522,13 @@ impl ResidencyManager {
         // below (which is itself made a no-op-ish re-place by the budget
         // already being charged), never this branch.
         if let Some(handle) = self.instances.get(&key).cloned() {
-            let entry = *self.residents.get(&key).expect("an adopted instance is always in residents");
+            // Never expect() here: this runs on the dispatcher thread, where a
+            // panic kills scheduling for every model. A handle with no
+            // residency entry is a registry-wiring bug — fail the one claim.
+            let entry = *self
+                .residents
+                .get(&key)
+                .ok_or_else(|| ClaimError::Activate(format!("{key}: instance handle exists but has no single-device residency entry (registry mismatch)")))?;
             if entry.tier == Tier::Hot {
                 self.residents.touch(&key);
                 self.residents.set_pinned(&key, true);
@@ -631,12 +646,19 @@ impl ResidencyManager {
             .ok_or_else(|| ClaimError::Activate(format!("no multi-device model '{model}'")))?
             .clone();
         let key = m.instance_key(action, inv);
-        if self.instances.contains_key(&key) {
-            if let Some(entry) = self.multi_residents.get_mut(&key) {
-                entry.pinned = true;
-            }
-            let handle = self.instances.get(&key).expect("hot").clone();
-            let devices = self.multi_residents.get(&key).expect("multi-resident").devices.clone();
+        // Cross-registry guard, symmetric to `claim`'s: a key resident as a
+        // SINGLE-device instance must not be claimed through the multi path
+        // (the old expect("multi-resident") below panicked the dispatcher).
+        if self.residents.get(&key).is_some() {
+            return Err(ClaimError::Activate(format!("{key}: resident as a single-device instance — claim it via claim, not claim_multi")));
+        }
+        if let Some(handle) = self.instances.get(&key).cloned() {
+            let entry = self
+                .multi_residents
+                .get_mut(&key)
+                .ok_or_else(|| ClaimError::Activate(format!("{key}: instance handle exists but has no multi-device residency entry (registry mismatch)")))?;
+            entry.pinned = true;
+            let devices = entry.devices.clone();
             return Ok((ClaimedMulti::Hot(handle), devices, key));
         }
         // A build for this key is already reserved (present in `multi_residents`,
@@ -795,8 +817,20 @@ impl ResidencyManager {
         if let Some(entry) = self.residents.get(key).copied() {
             if entry.tier == Tier::Hot {
                 if let (Some(handle), Some(model)) = (self.instances.get(key).cloned(), self.models.get(&key.model).cloned()) {
-                    if handle.lock().unwrap().demote(Tier::Warm).is_ok() {
-                        let warm_cost = model.estimate_at(key, Tier::Warm);
+                    let warm_cost = model.estimate_at(key, Tier::Warm);
+                    // The Warm copy is a real host-RAM charge — it must FIT
+                    // (pool-aware: on a unified-memory box the HOST_POOL is
+                    // the same physical bytes the accelerators use). Checked
+                    // BEFORE `demote()` releases anything: repeated multi-GB
+                    // demotions that nothing refuses are exactly the swap
+                    // cliff memauth's doc warns about. When it doesn't fit,
+                    // fall through to the full drop below — freeing the
+                    // device slot is the caller's actual requirement; keeping
+                    // a warm copy is only an optimization. (Conservative for
+                    // a CPU-Hot instance, whose own Hot bytes are not counted
+                    // as freed here; demoting CPU→CPU-warm is not a shape any
+                    // current caller produces.)
+                    if self.budgets.fits_on(Device::Cpu, warm_cost.on(Device::Cpu)) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
                         self.budgets.release(entry.device, entry.cost.on(entry.device));
                         self.budgets.alloc(Device::Cpu, warm_cost.on(Device::Cpu));
                         self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
@@ -1005,6 +1039,60 @@ mod tests {
         assert!(mgr.events.iter().any(|e| e.contains("warm->hot")), "events: {:?}", mgr.events);
         let tiers: HashMap<String, Tier> = mgr.residency().into_iter().map(|(k, _, t)| (k.model, t)).collect();
         assert_eq!(tiers.get("a"), Some(&Tier::Hot));
+    }
+
+    /// SPEC (audit F2): a Warm demotion charges host RAM, so it must CHECK the
+    /// host budget first. When the warm bytes don't fit, eviction falls through
+    /// to a full drop — never an unrefused overcommit (the swap cliff on
+    /// unified-memory boxes).
+    #[test]
+    fn warm_demotion_that_does_not_fit_host_ram_falls_back_to_a_full_drop() {
+        let live = Arc::new(AtomicU32::new(0));
+        let hot = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable
+        budgets.set(Device::Cpu, 4 * GB, 0); // too small for an 8 GB warm cache
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 20 * GB, warm_ram: 8 * GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(Fake { name: "c".into(), vram: 20 * GB, live: live.clone() }));
+
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        // c forces an eviction of a; the 8 GB warm copy exceeds the 4 GB CPU
+        // budget, so a must be fully dropped, not demoted.
+        mgr.run("c", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1, "a must be fully dropped when its warm copy cannot fit host RAM");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "no host charge may be left behind");
+        assert!(mgr.events.iter().any(|e| e.contains("evict a")), "events: {:?}", mgr.events);
+        assert!(!mgr.events.iter().any(|e| e.contains("demote a")), "events: {:?}", mgr.events);
+    }
+
+    /// SPEC (audit F3): one name resident through one registry must be REFUSED
+    /// (clean ClaimError) when claimed through the other — both directions.
+    /// Before the guard existed, each direction panicked the dispatcher thread
+    /// via an expect() on the other registry's bookkeeping.
+    #[test]
+    fn cross_registry_claims_are_refused_cleanly_not_panics() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        // The same name registered BOTH ways (explicitly permitted).
+        mgr.register(Arc::new(Fake { name: "x".into(), vram: GB, live: live.clone() }));
+        mgr.register_multi(Arc::new(MultiFake { name: "x".into(), per_gpu: GB, live: live.clone() }));
+
+        // Resident via the multi path -> the single-device claim must refuse.
+        let (_handle, key) = claim_multi_built(&mut mgr, "x").unwrap();
+        let err = mgr.claim("x", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        assert!(matches!(err, ClaimError::Activate(_)), "expected Activate, got {err:?}");
+        assert!(err.to_string().contains("claim_multi"), "{err}");
+        mgr.release_multi(&key);
+        mgr.evict_multi(&key);
+
+        // Resident via the single path -> the multi claim must refuse.
+        mgr.run("x", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        let err = mgr.claim_multi("x", "run", &Invocation::new(), &HashSet::new()).err().expect("must be refused");
+        assert!(matches!(err, ClaimError::Activate(_)), "expected Activate, got {err:?}");
+        assert!(err.to_string().contains("via claim"), "{err}");
     }
 
     /// A model bigger than every device's usable budget, even fully empty,

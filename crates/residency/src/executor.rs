@@ -139,7 +139,8 @@ pub struct Stats {
 
 /// A message to the dispatcher: a new job, a lane adopting a freshly built
 /// instance, or a lane finishing a group (`failed` = the deferred activate
-/// errored; the lane already replied to the jobs, the manager must unwind).
+/// errored OR the group panicked mid-run; the lane already replied to the
+/// jobs, the manager must unwind the claim).
 enum Msg {
     Submit(Box<Job>),
     /// Register a newly-available model with the manager, so a `Submit`
@@ -566,7 +567,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // cleanly, never panic the one thread every model depends on.
         if !lanes.contains_key(&home) {
             match outcome {
-                ClaimOutcome::Single(Claimed::Hot(_), _) => mgr.release(&ckey),
+                // Promote reuses the existing (Warm) instance, same as Hot --
+                // just unpin it, don't unwind it out of existence.
+                ClaimOutcome::Single(Claimed::Hot(_), _) | ClaimOutcome::Single(Claimed::Promote(_), _) => mgr.release(&ckey),
                 ClaimOutcome::Single(Claimed::Build(_), _) => mgr.build_failed(&ckey),
                 ClaimOutcome::Multi(ClaimedMulti::Hot(_), _) => mgr.release_multi(&ckey),
                 ClaimOutcome::Multi(ClaimedMulti::Build(_), _) => mgr.build_failed_multi(&ckey),
@@ -681,91 +684,160 @@ fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -
 
 /// What a [`lane_loop`] iteration ran, carried alongside the handle out of
 /// the big match below purely so the FINAL `Done`/`DoneMulti` send (after
-/// `run_group`) knows which shape to send without re-deriving it from
-/// anything guessable (e.g. `devices.len() == 1`, which a genuine
-/// single-device multi-device instance would make ambiguous).
+/// `run_group`, or after a panic — see [`park_reply`]) knows which shape to
+/// send without re-deriving it from anything guessable (e.g.
+/// `devices.len() == 1`, which a genuine single-device multi-device instance
+/// would make ambiguous).
 enum Ran {
     Single(Device),
     Multi(Vec<Device>),
 }
 
+/// A job's reply callback, parked where BOTH the normal completion path and the
+/// lane's panic handler can reach it — whichever runs first takes it, so the
+/// reply fires exactly once either way.
+type ReplySlot = Arc<Mutex<Option<Box<dyn FnOnce(ActionResult) + Send>>>>;
+
+/// Move `p`'s reply into a shared slot and leave behind a wrapper that takes
+/// from the slot. The normal path is unchanged (the wrapper delivers the reply);
+/// after a panic the lane drains whatever slots are still full with an error.
+fn park_reply(p: &mut Pending) -> ReplySlot {
+    let slot: ReplySlot = Arc::new(Mutex::new(Some(std::mem::replace(&mut p.reply, Box::new(|_| {})))));
+    let s = slot.clone();
+    p.reply = Box::new(move |r| {
+        if let Some(f) = s.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            f(r);
+        }
+    });
+    slot
+}
+
+/// Best-effort human-readable panic payload.
+fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
 fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
-    while let Ok(req) = rx.recv() {
+    while let Ok(mut req) = rx.recv() {
         let batch = req.jobs.len();
-        let RunReq { target, action, jobs, key } = req;
-        let (handle, ran): (InstanceHandle, Ran) = match target {
-            RunTarget::Single { work: Claimed::Hot(h), device } => (h, Ran::Single(device)),
-            // Deferred activation happens HERE, on the device's own lane: a slow
-            // or wedged build stalls this device only, never the dispatcher.
-            RunTarget::Single { work: Claimed::Build(m), device } => match m.activate(&key, device) {
-                Ok(inst) => {
-                    let h: InstanceHandle = Arc::new(Mutex::new(inst));
+        let key = req.key.clone();
+        // Salvage which `Done`/`DoneMulti` shape this group needs BEFORE `req`
+        // moves into the `catch_unwind` closure below, so a panic can still
+        // report on the right device(s) — matches `run_req`'s own `Ran` return
+        // on the non-panic path.
+        let ran_shape = match &req.target {
+            RunTarget::Single { device, .. } => Ran::Single(*device),
+            RunTarget::Multi { devices, .. } => Ran::Multi(devices.clone()),
+        };
+        // A lane runs model code — activate(), promote(), run_batch() — that
+        // CAN panic in practice (a bug reachable only with real weights, a
+        // driver fault). Without isolation a panic killed this thread with no
+        // `Msg::Done`: the dispatcher never cleared `busy`/`running`, so the
+        // device was never scheduled again and the model never ran again,
+        // silently. Park each job's reply first so the unwind path can still
+        // deliver an error to every waiter (never silence), then treat the
+        // panic exactly like a failed activate: `failed: true` makes the
+        // dispatcher unwind the claim (budget + slot + instance), so the key
+        // is rebuilt fresh on its next claim instead of reusing an instance
+        // whose internal state (and mutex) the panic may have poisoned.
+        let slots: Vec<ReplySlot> = req.jobs.iter_mut().map(park_reply).collect();
+        let (failed, ran) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_req(req, &done))) {
+            Ok(outcome) => outcome,
+            Err(p) => {
+                let what = panic_message(p.as_ref());
+                eprintln!("[residency] lane: panic while running {key}: {what}");
+                let msg = format!("{key}: panicked while running: {what}");
+                for slot in &slots {
+                    if let Some(reply) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        reply(Err(msg.clone()));
+                    }
+                }
+                (true, ran_shape)
+            }
+        };
+        let done_msg = match ran {
+            Ran::Single(device) => Msg::Done { key, device, batch, failed },
+            Ran::Multi(devices) => Msg::DoneMulti { key, devices, batch, failed },
+        };
+        let _ = done.send(done_msg);
+    }
+}
+
+/// One [`RunReq`]'s body: activate/promote as needed (single- or multi-device),
+/// then run the group. Returns whether the claim failed (the dispatcher must
+/// unwind it) alongside the [`Ran`] shape (needed for the `Done`/`DoneMulti`
+/// choice on EVERY path, including a failed activate — `lane_loop`'s
+/// `ran_shape` fallback exists only for the panic path, which never reaches
+/// here). Runs under `lane_loop`'s `catch_unwind`; the `Done`/`DoneMulti` send
+/// stays OUTSIDE, in `lane_loop` itself, so it is delivered on every path
+/// including a panic.
+fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
+    let RunReq { target, action, jobs, key } = req;
+    let (handle, ran): (InstanceHandle, Ran) = match target {
+        RunTarget::Single { work: Claimed::Hot(h), device } => (h, Ran::Single(device)),
+        // Deferred activation happens HERE, on the device's own lane: a slow
+        // or wedged build stalls this device only, never the dispatcher.
+        RunTarget::Single { work: Claimed::Build(m), device } => match m.activate(&key, device) {
+            Ok(inst) => {
+                let h: InstanceHandle = Arc::new(Mutex::new(inst));
+                let _ = done.send(Msg::Built { key: key.clone(), handle: h.clone() });
+                (h, Ran::Single(device))
+            }
+            Err(e) => {
+                // Activation failed: every job in the group gets the error
+                // (never silence), and the dispatcher unwinds the claim.
+                let msg = format!("activate {key}: {e}");
+                for p in jobs {
+                    (p.reply)(Err(msg.clone()));
+                }
+                return (true, Ran::Single(device));
+            }
+        },
+        // Deferred promotion, same reasoning as `Build`'s deferred
+        // activate: rebuilding a demoted instance's device buffers can
+        // be slow, so it happens on this device's own lane, never the
+        // dispatcher thread. The existing `Instance` is reused in place.
+        RunTarget::Single { work: Claimed::Promote(h), device } => {
+            let result = h.lock().unwrap().promote(device);
+            match result {
+                Ok(()) => {
                     let _ = done.send(Msg::Built { key: key.clone(), handle: h.clone() });
                     (h, Ran::Single(device))
                 }
                 Err(e) => {
-                    // Activation failed: every job in the group gets the error
-                    // (never silence), and the dispatcher unwinds the claim.
-                    let msg = format!("activate {key}: {e}");
+                    let msg = format!("promote {key}: {e}");
                     for p in jobs {
                         (p.reply)(Err(msg.clone()));
                     }
-                    let _ = done.send(Msg::Done { key, device, batch, failed: true });
-                    continue;
-                }
-            },
-            RunTarget::Multi { work: ClaimedMulti::Hot(h), devices } => (h, Ran::Multi(devices)),
-            // Same deferred-to-the-lane discipline as the single-device case
-            // above, and more load-bearing here: a multi-device weight stream
-            // (tens of GiB across several GPUs) is exactly the "can take
-            // seconds" case that rule exists for.
-            RunTarget::Multi { work: ClaimedMulti::Build(m), devices } => match m.activate_multi(&key, &devices) {
-                Ok(inst) => {
-                    let h: InstanceHandle = Arc::new(Mutex::new(inst));
-                    let _ = done.send(Msg::BuiltMulti { key: key.clone(), handle: h.clone() });
-                    (h, Ran::Multi(devices))
-                }
-                Err(e) => {
-                    let msg = format!("activate_multi {key}: {e}");
-                    for p in jobs {
-                        (p.reply)(Err(msg.clone()));
-                    }
-                    let _ = done.send(Msg::DoneMulti { key, devices, batch, failed: true });
-                    continue;
-                }
-            },
-            // Deferred promotion, same reasoning as `Build`'s deferred
-            // activate: rebuilding a demoted instance's device buffers can
-            // be slow, so it happens on this device's own lane, never the
-            // dispatcher thread. The existing `Instance` is reused in place.
-            Claimed::Promote(h) => {
-                let result = h.lock().unwrap().promote(req.device);
-                match result {
-                    Ok(()) => {
-                        let _ = done.send(Msg::Built { key: req.key.clone(), handle: h.clone() });
-                        h
-                    }
-                    Err(e) => {
-                        let msg = format!("promote {}: {e}", req.key);
-                        for p in req.jobs {
-                            (p.reply)(Err(msg.clone()));
-                        }
-                        let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: true });
-                        continue;
-                    }
+                    return (true, Ran::Single(device));
                 }
             }
-        };
-        // `run_group` is one implementation shared by both shapes above — a
-        // multi-device instance is just an `Instance` whose forward happens to
-        // span devices internally; nothing here needs to know that.
-        run_group(&handle, &action, jobs);
-        let done_msg = match ran {
-            Ran::Single(device) => Msg::Done { key, device, batch, failed: false },
-            Ran::Multi(devices) => Msg::DoneMulti { key, devices, batch, failed: false },
-        };
-        let _ = done.send(done_msg);
-    }
+        }
+        RunTarget::Multi { work: ClaimedMulti::Hot(h), devices } => (h, Ran::Multi(devices)),
+        // Same deferred-to-the-lane discipline as the single-device case
+        // above, and more load-bearing here: a multi-device weight stream
+        // (tens of GiB across several GPUs) is exactly the "can take
+        // seconds" case that rule exists for.
+        RunTarget::Multi { work: ClaimedMulti::Build(m), devices } => match m.activate_multi(&key, &devices) {
+            Ok(inst) => {
+                let h: InstanceHandle = Arc::new(Mutex::new(inst));
+                let _ = done.send(Msg::BuiltMulti { key: key.clone(), handle: h.clone() });
+                (h, Ran::Multi(devices))
+            }
+            Err(e) => {
+                let msg = format!("activate_multi {key}: {e}");
+                for p in jobs {
+                    (p.reply)(Err(msg.clone()));
+                }
+                return (true, Ran::Multi(devices));
+            }
+        },
+    };
+    // `run_group` is one implementation shared by both shapes above — a
+    // multi-device instance is just an `Instance` whose forward happens to
+    // span devices internally; nothing here needs to know that.
+    run_group(&handle, &action, jobs);
+    (false, ran)
 }
 
 fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>) {
@@ -962,6 +1034,80 @@ mod tests {
         assert_eq!(exec.stats().resident, 1, "only the good instance is resident");
         // budget really freed: `bad` can be retried and fails cleanly again
         assert!(exec.run_blocking("bad", "run", Invocation::new(), |_| {}).is_err());
+    }
+
+    /// A model whose activate() or run() PANICS (not Err) — the shape a truncated
+    /// checkpoint used to produce inside a lane before mmap validation existed,
+    /// and the shape any latent model bug still can.
+    struct Panicky {
+        name: String,
+        panic_in_activate: bool,
+    }
+    struct PanickyInst;
+    impl ResidentModel for Panicky {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "panics", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(GB, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            if self.panic_in_activate {
+                panic!("simulated activation panic (e.g. corrupt checkpoint)");
+            }
+            Ok(Box::new(PanickyInst))
+        }
+    }
+    impl Instance for PanickyInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            panic!("simulated run_batch panic");
+        }
+    }
+
+    /// SPEC (audit F1): a panic in a lane — during activate() or run_batch() —
+    /// must (1) reply an error to every job of the group, never hang the
+    /// waiters, and (2) deliver Msg::Done so the dispatcher clears busy/running
+    /// and the DEVICE AND MODEL both stay schedulable. Before panic isolation
+    /// the lane thread died silently and the device + model were wedged forever.
+    #[test]
+    fn a_panicking_lane_replies_errors_and_the_device_recovers() {
+        for panic_in_activate in [true, false] {
+            let builds = Arc::new(AtomicU32::new(0));
+            let mut budgets = Budgets::new();
+            budgets.set(Device::Gpu(0), 24 * GB, 0); // ONE device: a wedge would block everything
+            let models: Vec<Arc<dyn ResidentModel>> = vec![
+                Arc::new(Panicky { name: "boom".into(), panic_in_activate }),
+                Arc::new(Slow { name: "good".into(), vram: GB, ms: 1, builds: builds.clone() }),
+            ];
+            let exec = Executor::start(models, budgets, Policy::default());
+
+            // Every queued job on the panicking model gets an error reply, not a hang.
+            let (tx, rx) = channel();
+            for _ in 0..3 {
+                let tx = tx.clone();
+                exec.submit(Job::new("boom", "run", Invocation::new()).reply(move |r| {
+                    let _ = tx.send(r);
+                }));
+            }
+            for _ in 0..3 {
+                let r = rx.recv_timeout(Duration::from_secs(5)).expect("reply must arrive, not hang (panic_in_activate={panic_in_activate})");
+                let e = r.expect_err("a panicked group must surface an error");
+                assert!(e.contains("panic"), "err: {e}");
+            }
+
+            // The ONLY device recovered: another model runs on it afterwards.
+            let ok = exec.run_blocking("good", "run", Invocation::new(), |_| {});
+            assert!(ok.is_ok(), "device wedged after a lane panic (panic_in_activate={panic_in_activate}): {ok:?}");
+            // The claim was unwound (nothing from `boom` left resident or charged).
+            assert_eq!(exec.stats().resident, 1, "only the good instance may be resident");
+            // And the panicking model itself stays schedulable — it fails again
+            // cleanly (fresh build each time) instead of being silently dead.
+            assert!(exec.run_blocking("boom", "run", Invocation::new(), |_| {}).is_err());
+            assert!(exec.run_blocking("good", "run", Invocation::new(), |_| {}).is_ok());
+        }
     }
 
     /// The residency accessor (`Executor::residency`) round-trips a query through

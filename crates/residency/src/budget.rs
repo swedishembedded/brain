@@ -107,6 +107,13 @@ impl Budgets {
         g
     }
     pub fn alloc(&mut self, device: Device, bytes: u64) {
+        // A charge to a device with no declared budget would be silently
+        // dropped — accounting that lies. Loud in debug; callers must check
+        // `fits_on` (which reports 0 free for an unbudgeted device) first.
+        debug_assert!(
+            bytes == 0 || self.devices.contains_key(&device),
+            "Budgets::alloc: no budget declared for {device:?} — a {bytes}-byte charge would be silently dropped"
+        );
         if let Some(b) = self.devices.get_mut(&device) {
             b.alloc(bytes);
         }
