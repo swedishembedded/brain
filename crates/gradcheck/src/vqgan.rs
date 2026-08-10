@@ -146,12 +146,57 @@ impl CheckModel for Harness {
     }
 }
 
+/// [`tiny_config`] with the channel count pushed OVER `vae::blocks::grad`'s
+/// GEMM-lowering threshold (`GEMM_CONV_BWD_MIN_COUT = 32`): `tiny_config`'s
+/// max `cout` is 8, so every FD sweep through it exercises only the naive
+/// `conv2d_dw`/`conv2d_dx` path — the `im2col_at` + `matmul_dw_reg`(+split-K)
+/// + `col2im` composition a REAL 128–512-channel training step takes had
+/// zero finite-difference coverage anywhere (audit F14). One level, no
+/// attention, minimal blocks: the point is crossing the threshold, not
+/// re-covering what `tiny_config` already covers.
+pub fn lowered_config() -> VqganConfig {
+    VqganConfig {
+        in_channels: 3,
+        out_channels: 3,
+        nf: 32,
+        ch_mult: vec![1],
+        res_blocks: 1,
+        attn_resolutions: vec![],
+        img_size: 8,
+        codebook_size: 6,
+        emb_dim: 4,
+        beta: 0.25,
+        norm_groups: 2,
+        norm_eps: 1e-6,
+    }
+}
+
 /// Build the tiny VQGAN, install a fixed `(image, target)` pair, freeze the code
 /// assignment, and gradient-check every parameter tensor. Returns the report.
 ///
 /// Gate at the workspace tolerance `(atol, rtol) = (4e-3, 8e-2)`.
 pub fn check_vqgan(seed: u64) -> Report {
-    let cfg = tiny_config();
+    check_config(tiny_config(), seed, 5e-4)
+}
+
+/// [`check_vqgan`] over [`lowered_config`] — the finite-difference gate for
+/// the GEMM-lowered conv backward. Only meaningful on a backend with
+/// `workgroup_reductions` (the lowering is gated on it); on the CPU JIT this
+/// re-runs the naive path, which the caller should skip (see the test).
+///
+/// `eps = 1.25e-4`, a quarter of [`check_vqgan`]'s: the same `eps·sqrt(numel)`
+/// argument the module doc makes — `lowered_config`'s 32×32×3×3 convs have
+/// 16× `tiny_config`'s elements, so the ±1 direction's L2 step is 4× longer
+/// at equal eps. Measured on a P40: at 5e-4 one conv sat at rel 8.8e-2
+/// (right at the 8e-2 gate, curvature not a wrong gradient); at 1.25e-4 the
+/// report's max_rel is 1.24e-2 — the roughly-quadratic shrink
+/// central-difference truncation predicts, which a genuinely wrong gradient
+/// would not show.
+pub fn check_vqgan_lowered(seed: u64) -> Report {
+    check_config(lowered_config(), seed, 1.25e-4)
+}
+
+fn check_config(cfg: VqganConfig, seed: u64, eps: f32) -> Report {
     let tensors = init_weights(&cfg, seed);
     let gpu = gpu_core::testgpu::dev(vqgan::TRAIN_PIPELINES);
     let (h, w) = (cfg.img_size, cfg.img_size);
@@ -168,9 +213,10 @@ pub fn check_vqgan(seed: u64) -> Report {
     m.set_batch(&image, &target);
 
     let h = Harness { m, fwd: Cell::new(false) };
-    // eps 5e-4: see the module docs — the conv tensors here reach 576 elements
-    // and a +/-1 direction at 5e-3 is an L2 step of 0.12 in weight space.
-    directional_check(&h, 5e-4, 3, seed ^ 0x1234)
+    // eps: caller-chosen per config — the `eps·sqrt(numel)` L2-step argument
+    // in the module docs (5e-4 suits tiny_config's 576-element convs;
+    // lowered_config's 16x-larger tensors need a quarter of that).
+    directional_check(&h, eps, 3, seed ^ 0x1234)
 }
 
 #[cfg(test)]
@@ -186,6 +232,32 @@ mod tests {
         r.print();
         let (atol, rtol) = (4e-3, 8e-2);
         println!("check_vqgan: {} tensors, max_rel = {:.3e}", r.checks.len(), r.max_rel());
+        let bad = r.failures(atol, rtol);
+        assert!(bad.is_empty(), "{} tensors outside tolerance: {:?}", bad.len(), bad);
+    }
+
+    /// The GEMM-lowered conv backward under FD (audit F14): `tiny_config`'s
+    /// max cout of 8 never crosses `GEMM_CONV_BWD_MIN_COUT`, so the
+    /// `im2col_at` + `matmul_dw_reg`(+split-K) + `col2im` path real training
+    /// takes was reachable from NO finite-difference gate. Skipped where the
+    /// lowering itself is gated off (`workgroup_reductions == false`, the CPU
+    /// JIT) — there the lowered branch structurally cannot run, and re-running
+    /// the naive path would be a vacuous green.
+    #[test]
+    fn vqgan_lowered_conv_backward_matches_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(vqgan::TRAIN_PIPELINES);
+        if !gpu.caps().workgroup_reductions {
+            eprintln!("skipping: backend has no workgroup_reductions, the GEMM-lowered conv backward cannot be selected here");
+            return;
+        }
+        drop(gpu);
+        let r = super::check_vqgan_lowered(7);
+        r.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        println!("check_vqgan_lowered: {} tensors, max_rel = {:.3e}", r.checks.len(), r.max_rel());
         let bad = r.failures(atol, rtol);
         assert!(bad.is_empty(), "{} tensors outside tolerance: {:?}", bad.len(), bad);
     }

@@ -31,6 +31,22 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
                                        env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck
 
+# brain-model's FD suites (MoE block backward, ViT block backward) use the
+# pooled test device, but lived OUTSIDE this gate's package scope — so the
+# MoE/ViT backward ran on whichever backend the developer's box picked, never
+# provably on both. Same discipline, both backends (docs/lessons.md #5:
+# backend-specific silent-zero gradients are exactly what one-backend FD runs
+# cannot see).
+run "model FD suites (MoE/ViT backward) — CPU backend" \
+    env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
+run "model FD suites (MoE/ViT backward) — Vulkan backend" \
+    env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
+
+# REMAINING (audit F15, models batch): crates/moondream, crates/nemotron and
+# crates/vision pin their FD suites to `Gpu::new_cpu` in the test code itself,
+# so adding them here would not exercise a second backend until those call
+# sites move to `gpu_core::testgpu::dev`.
+
 # int8 paged KV is the serving default (qwen::serve): translation to the CPU
 # JIT is NOT execution (docs/lessons.md #5), and the serving perf gate itself
 # runs on BRAIN_DEVICE=cpu, so this must be green before the default flips.

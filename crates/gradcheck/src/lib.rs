@@ -82,6 +82,18 @@ impl Report {
     pub fn failures(&self, atol: f32, rtol: f32) -> Vec<&Check> {
         self.checks.iter().filter(|c| !c.within(atol, rtol)).collect()
     }
+    /// Checks whose ANALYTIC derivative came back exactly `0.0` while the
+    /// numeric one is clearly not zero — the silently-DEAD-gradient shape the
+    /// `within` atol floor cannot see: with `analytic == 0` and a true
+    /// derivative below `atol + rtol·|numeric|` (≈4.35e-3 at the workspace
+    /// gate), `abs_err == |numeric|` passes. A backend-specific kernel that
+    /// returns all-zero gradients (facenet's `prelu_bwd_wg`-on-CPU bug, the
+    /// measured instance) presents exactly this way at small dims. The
+    /// `1e-3` floor sits above directional-FD noise but inside the atol
+    /// escape window, so a genuinely-zero derivative is not flagged.
+    pub fn dead_gradients(&self) -> Vec<&Check> {
+        self.checks.iter().filter(|c| c.analytic == 0.0 && c.numeric.abs() > 1e-3).collect()
+    }
     pub fn print(&self) {
         for c in &self.checks {
             println!(
@@ -147,6 +159,29 @@ pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
     }
     m.write_weight(name, &w0); // restore
     Report { checks }
+}
+
+/// Structural guard, generalised from facenet's `every_prelu_slope_gradient_
+/// is_nonzero` (written because `prelu_bwd_wg` returned ALL-ZERO slope
+/// gradients on the CPU backend while `dx` stayed correct — a model that
+/// trains to a plausible loss with one parameter family silently frozen):
+/// run one backward and return every parameter whose gradient tensor came
+/// back identically zero. Every entry exactly zero is the signature of a
+/// wrong/missing kernel dispatch, not of a small derivative — directional
+/// magnitudes don't enter, so this catches what the atol floor cannot.
+///
+/// `name_filter` selects which parameters must be live (`|_| true` for all);
+/// callers exempt parameters that are legitimately zero for their batch
+/// (e.g. unused embedding rows checked as a whole tensor).
+pub fn zero_grad_params<M: CheckModel>(m: &M, name_filter: impl Fn(&str) -> bool) -> Vec<String> {
+    m.zero_grads();
+    let _ = m.loss();
+    m.backward();
+    m.param_names()
+        .into_iter()
+        .filter(|n| name_filter(n))
+        .filter(|n| m.read_grad(n).iter().all(|v| v.abs() <= 1e-9))
+        .collect()
 }
 
 /// Directional gradient check over every parameter tensor. `eps` ≈ 5e-3 suits
@@ -829,6 +864,20 @@ pub fn check_autoencoder(seed: u64) -> Report {
 mod tests {
     use super::*;
 
+    /// The one gate every model check asserts: (1) every tensor inside the
+    /// combined workspace tolerance, and (2) no silently-dead gradient
+    /// (analytic exactly 0.0 with a clearly nonzero numeric derivative --
+    /// the shape the atol floor waves through; see Report::dead_gradients).
+    fn assert_grad_gate(report: &Report, what: &str) {
+        assert_grad_gate(&report, "{what}:");
+        let dead = report.dead_gradients();
+        assert!(
+            dead.is_empty(),
+            "{what}: silently-DEAD gradients (analytic exactly 0, numeric nonzero -- a wrong or missing backward kernel, not a small derivative): {:?}",
+            dead.iter().map(|c| (&c.param, c.analytic, c.numeric)).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn gpt_analytic_grads_match_finite_differences() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -836,14 +885,7 @@ mod tests {
         }
         let report = check_gpt(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -853,14 +895,7 @@ mod tests {
         }
         let report = check_lfm(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -870,14 +905,7 @@ mod tests {
         }
         let report = check_qwen(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -887,13 +915,7 @@ mod tests {
         }
         let report = check_qwen_lora(7);
         report.print();
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "LoRA gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "LoRA");
     }
 
     #[test]
@@ -903,13 +925,7 @@ mod tests {
         }
         let report = check_qwen2(7);
         report.print();
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "Qwen2 (qk-norm off, bias on) gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "Qwen2 (qk-norm off, bias on)");
     }
 
     #[test]
@@ -919,13 +935,7 @@ mod tests {
         }
         let report = check_qwen_mrope(7);
         report.print();
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "M-RoPE gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "M-RoPE");
     }
 
     #[test]
@@ -935,13 +945,7 @@ mod tests {
         }
         let report = check_vlm_splice(7);
         report.print();
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "VLM splice gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "VLM splice");
     }
 
     #[test]
@@ -951,14 +955,7 @@ mod tests {
         }
         let report = check_moe(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -968,14 +965,7 @@ mod tests {
         }
         let report = check_glm(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -985,13 +975,7 @@ mod tests {
         }
         let report = check_glm_mtp(7);
         report.print();
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "MTP gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "MTP");
     }
 
     #[test]
@@ -1001,14 +985,7 @@ mod tests {
         }
         let report = check_pid(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -1018,14 +995,7 @@ mod tests {
         }
         let report = check_seq2seq(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 
     #[test]
@@ -1099,13 +1069,6 @@ mod tests {
         }
         let report = check_autoencoder(7);
         report.print();
-        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
-        let (atol, rtol) = (4e-3, 8e-2);
-        let fails = report.failures(atol, rtol);
-        assert!(
-            fails.is_empty(),
-            "gradient check failed for {:?}",
-            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
-        );
+        assert_grad_gate(&report, "model");
     }
 }

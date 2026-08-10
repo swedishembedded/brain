@@ -290,19 +290,16 @@ mod tests {
         let labels: Vec<u32> = (0..cfg.batch).map(|i| i % cfg.classes).collect();
         t.set_batch(&img, &labels);
 
-        t.zero_grads();
-        let _ = t.loss();
-        t.backward();
-        let mut seen = 0;
-        for name in t.param_names().iter().filter(|n| n.ends_with("prelu.weight")) {
-            let g = t.read_grad(name);
-            assert!(
-                g.iter().any(|v| v.abs() > 1e-9),
-                "{name}: every per-channel PReLU slope gradient is zero — the `da` \
-                 reduction ran the wrong kernel for this backend"
-            );
-            seen += 1;
-        }
+        // The guard this test motivated now lives in the checker core
+        // (crate::zero_grad_params) so every model check can apply it.
+        let m = ArcFaceCheck(t);
+        let dead = crate::zero_grad_params(&m, |n| n.ends_with("prelu.weight"));
+        assert!(
+            dead.is_empty(),
+            "{dead:?}: every per-channel PReLU slope gradient is zero — the `da` \
+             reduction ran the wrong kernel for this backend"
+        );
+        let seen = m.param_names().iter().filter(|n| n.ends_with("prelu.weight")).count();
         assert_eq!(seen, 6, "stem + one PReLU per block (tiny() is [2,1,1,1] = 5 blocks)");
     }
 }
