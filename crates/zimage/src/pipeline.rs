@@ -248,9 +248,22 @@ impl DitEngine {
 /// of `build_adapted` verbatim so `rebuild_dit_from_i8_cache` (the promote
 /// path) can share every OTHER piece of `build_adapted` (encoder, VAE) and
 /// differ on only this one, swapping it for `ZImageDitI8::rebuild_from_cache`.
+/// The DiT config for a checkpoint at `dit_dir` — the ONE seam every build
+/// site in this file routes through (audit F44: three sites hardcoded
+/// `ZImageConfig::turbo()` independently, so per-checkpoint support would
+/// have to land three times). Today it still returns the shipped Turbo
+/// config unconditionally: the released Z-Image-Turbo is the only known
+/// checkpoint, and its `transformer/config.json` key map has not been
+/// verified in-repo, so deriving field values here would be guesswork.
+/// When a second checkpoint (or the verified key map) lands, teach THIS
+/// function to read `<dit_dir>/config.json`; no build site needs touching.
+fn dit_config(_dit_dir: &str) -> ZImageConfig {
+    ZImageConfig::turbo()
+}
+
 fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u32, lh: u32, lw: u32, cap_len: u32, progress: &mut dyn FnMut(&str)) -> Result<DitEngine, String> {
     progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
-    let zcfg = ZImageConfig::turbo();
+    let zcfg = dit_config(&paths.dit);
     if let Some(ap) = adapter {
         // LoRA folding mutates weights element-wise in place, so it needs an
         // owned, complete map regardless of how the checkpoint is read --
@@ -645,7 +658,7 @@ impl HotPipeline {
             height,
             cap_len,
             move |dit_gpu, lh, lw| {
-                let zcfg = ZImageConfig::turbo();
+                let zcfg = dit_config(&dit_paths.dit);
                 let dreader = open_component(&dit_paths.dit).map_err(|e| format!("open dit: {e}"))?;
                 let dsrc = crate::import::comfy_source(&dreader, &zcfg);
                 let (dit, cache) = gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::build_from_source_with_cache(zcfg, &dsrc, 1, lh, lw, cap_len))?;
@@ -973,7 +986,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // 5. flow-match sampling over the DiT ------------------------------------
     // int8 on one P40 (default), or full-precision fp32 sharded across both P40s
     // when `hifi` — no quantisation error, at the cost of a second card.
-    let zcfg = ZImageConfig::turbo();
+    let zcfg = dit_config(&paths.dit);
     // Streaming: peak host allocation for the DiT is one tensor, not the
     // whole ~24 GB checkpoint (see `build_adapted`'s identical fix, above).
     let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
