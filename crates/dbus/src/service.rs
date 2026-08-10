@@ -523,6 +523,14 @@ impl Manager {
     /// `model` is `"nemotron"` (the streaming model) or `"qwen-asr"`.
     #[zbus(out_args("job", "event_fd"))]
     async fn stream_transcribe(&self, model: String, params: String, pcm: ZOwnedFd) -> fdo::Result<(u64, ZOwnedFd)> {
+        // Edge concurrency ceiling -- the SAME shed `run`/`subscribe` apply, held
+        // for the stream's whole life (dropped when `stream_reader` returns).
+        // This is also what bounds the per-stream OS threads spawned below at
+        // EDGE_CONCURRENCY: without it, this was the one serving entry point
+        // outside the shared admission design -- N clients could open thousands
+        // of streams, each with its own unbounded thread pumping windows into
+        // the executor with no backpressure signal at all.
+        let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         self.ensure_resident(&model).await?;
         let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(&params).map_err(|e| fdo::Error::Failed(format!("params JSON: {e}")))? };
@@ -530,7 +538,11 @@ impl Manager {
         if sample_rate != 16000 {
             return Err(fdo::Error::Failed(format!("stream_transcribe: sample_rate must be 16000, got {sample_rate}")));
         }
-        let window_ms = p.get("window_ms").and_then(|v| v.as_u64()).unwrap_or(1000).max(50);
+        // Clamped both ways: the floor keeps windows meaningful, the ceiling
+        // bounds what `stream_reader` will buffer per window (the value is
+        // attacker-chosen JSON — unclamped, a huge window_ms both overflows the
+        // u64 multiply below and licenses gigabytes of sample buffering).
+        let window_ms = p.get("window_ms").and_then(|v| v.as_u64()).unwrap_or(1000).clamp(50, 60_000);
         let window_samples = (sample_rate * window_ms / 1000) as usize;
         let prompt_id = p.get("prompt_id").and_then(|v| v.as_i64()).unwrap_or(0);
 
@@ -553,7 +565,12 @@ impl Manager {
         let pcm_ofd: OwnedFd = pcm.into();
         std::thread::Builder::new()
             .name("brain-asr-stream".into())
-            .spawn(move || stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, session, stream))
+            .spawn(move || {
+                // The permit lives exactly as long as the stream's thread: EOF,
+                // subscriber disconnect, or executor loss all release it.
+                let _permit = permit;
+                stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, session, stream)
+            })
             .map_err(|e| fdo::Error::Failed(format!("spawn stream reader: {e}")))?;
 
         // Correlation id only: the stream's windows are internal executor jobs, so
@@ -755,6 +772,53 @@ mod tests {
         let err = mgr.ensure_resident("brain/reserved-or-nonsense").await.unwrap_err();
         assert!(err.to_string().contains("no model"), "{err}");
         assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 0, "classify-only Unknown must never call ensure");
+    }
+
+    /// SPEC (the F2 contract): `StreamTranscribe` must sit behind the SAME
+    /// edge-concurrency ceiling `Run`/`Subscribe` use. Before this fix it
+    /// acquired no permit and spawned an unbounded OS thread per stream — the
+    /// one serving entry point outside the shared admission design, and the
+    /// cheapest DoS on the D-Bus surface.
+    #[tokio::test]
+    async fn stream_transcribe_sheds_when_the_edge_concurrency_ceiling_is_reached() {
+        let mgr = Manager::new(empty_exec());
+        mgr.executor.register(std::sync::Arc::new(StubResident("brain/asr-stub".to_string())));
+        // Saturate the shared ceiling exactly as in-flight Run/Subscribe/streams would.
+        let _held: Vec<_> = (0..residency::admission::EDGE_CONCURRENCY)
+            .map(|_| mgr.edge_permits.clone().try_acquire_owned().expect("drain permits"))
+            .collect();
+        let (_r, w) = nix::unistd::pipe().expect("pipe");
+        let err = mgr
+            .stream_transcribe("brain/asr-stub".to_string(), String::new(), std::os::fd::OwnedFd::from(w).into())
+            .await
+            .expect_err("a saturated server must shed, not spawn another stream thread");
+        assert!(err.to_string().contains("saturated"), "{err}");
+    }
+
+    /// The permit is held for the stream's WHOLE life (that is what bounds the
+    /// per-stream threads at EDGE_CONCURRENCY) and released at EOF.
+    #[tokio::test]
+    async fn stream_transcribe_holds_a_permit_for_the_streams_life_and_releases_it_at_eof() {
+        let mgr = Manager::new(empty_exec());
+        mgr.executor.register(std::sync::Arc::new(StubResident("brain/asr-stub".to_string())));
+        let total = residency::admission::EDGE_CONCURRENCY;
+        assert_eq!(mgr.edge_permits.available_permits(), total);
+
+        let (pcm_read, pcm_write) = nix::unistd::pipe().expect("pipe");
+        // The server takes the READ end; the client holds the write end open.
+        let (_job, _event_fd) = mgr
+            .stream_transcribe("brain/asr-stub".to_string(), String::new(), std::os::fd::OwnedFd::from(pcm_read).into())
+            .await
+            .expect("stream starts");
+        assert_eq!(mgr.edge_permits.available_permits(), total - 1, "a live stream must hold an edge permit");
+
+        // EOF (client closes its write end) ends the stream and releases the permit.
+        drop(pcm_write);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while mgr.edge_permits.available_permits() != total {
+            assert!(std::time::Instant::now() < deadline, "permit was not released after EOF");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

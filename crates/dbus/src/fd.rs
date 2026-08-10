@@ -40,10 +40,26 @@ pub fn memfd_seal(name: &str, bytes: &[u8]) -> anyhow::Result<OwnedFd> {
     Ok(fd)
 }
 
+/// The per-blob ceiling for reading an input fd into memory. The HTTP surface
+/// caps request bodies at `apiserve::MAX_BODY_BYTES` (8 MiB) so "a single huge
+/// body cannot be buffered into an OOM"; the D-Bus surface needs the same
+/// finiteness but a more generous number, because fd blobs carry RAW media (a
+/// 4K image as f32 HWC is ~100 MB) that HTTP would carry compressed/encoded.
+/// 256 MiB admits every real image/audio workload in the examples while a
+/// multi-GiB sparse memfd — trivially craftable by any caller, any local user
+/// with `--dbus-system` — is refused up front instead of buffered whole.
+pub const MAX_FD_BLOB_BYTES: u64 = 256 << 20;
+
 /// Read the whole contents of `fd` into a `Vec` by mmap (offset-independent). Empty
-/// fds return an empty vec. The caller keeps ownership of `fd`.
+/// fds return an empty vec. The caller keeps ownership of `fd`. Refuses fds larger
+/// than [`MAX_FD_BLOB_BYTES`] (checked against `st_size` BEFORE mapping): the size
+/// is attacker-chosen, and the check is what keeps a crafted fd from becoming an
+/// allocation the whole buffer's size.
 pub fn read_fd_to_vec(fd: BorrowedFd) -> anyhow::Result<Vec<u8>> {
     let st = fstat(fd.as_raw_fd())?;
+    if st.st_size as u64 > MAX_FD_BLOB_BYTES {
+        anyhow::bail!("input fd is {} bytes, over the {} MiB per-blob cap", st.st_size, MAX_FD_BLOB_BYTES >> 20);
+    }
     let len = st.st_size as usize;
     if len == 0 {
         return Ok(Vec::new());
