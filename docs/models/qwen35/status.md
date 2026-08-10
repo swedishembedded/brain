@@ -442,6 +442,35 @@ fetching an already-quantized GGUF directly.
   of scope for this integration pass, called out for the eventual
   performance-optimization pass per `docs/porting-playbook.md` §10).
 
+- **CLI entry point** (`crates/cli/src/qwen35moe_cli.rs`, commit `4a7922b8`):
+  `brain qwen35moe import --gguf F --out qwen35.safetensors` (thin wrapper
+  over `import_gguf`) and `brain qwen35moe infer --weights F (--tokenizer T
+  | --gguf G) --prompt "..."` (loads via `checkpoint::load(path).by_role("")`
+  — the same simplest load path every other model crate uses — and generates
+  via the new `qwen35moe::sample::generate_kv`, mirroring `qwen3::sample`'s
+  own structure over `Qwen35::step`). `--gguf` on `infer` re-opens the
+  original checkpoint's embedded tokenizer directly (`import_gguf` only
+  writes tensors, not the tokenizer) so a full `import` -> `infer` round
+  trip needs no separate `tokenizer.json` extraction step.
+
+- **P14 — best-effort NPU export** (done, `crates/npu/src/qwen35moe_{topology,export}.rs`,
+  commit `87fad8ae`): a `gdn_chunk` ONNX emitter (cumsum via `MatMul` against
+  a triangular matrix, the UT-transform's `(I-attn0)^-1` via its exact
+  Neumann series since `attn0` is nilpotent, the cross-chunk recurrence
+  statically unrolled per chunk — no existing linear-attention topology to
+  copy) + a sparse gather-based expert-dispatch emitter (per-layer `[E,in,
+  out]` stacked initializer, `Softmax->TopK->ReduceSum->Div->Gather`, cost
+  scales with `top_k` not `E` — a 256-way dense unroll would be ~30k MatMul
+  nodes). Router-math translation verified against `model::moe`'s real
+  algorithm via a standalone cross-check (2000 random cases, `E` up to 256):
+  worst gate-value diff 5.96e-8, selected-expert sets exact every time.
+  Fixed-`T` cache-free prefill only, text-only, explicitly stopping at
+  "compiles + best-effort OpenVINO compile attempt" without chasing a
+  working NPU run — confirmed the real stopping point on this box (NPU
+  compiler plugins present, no core OpenVINO runtime, probing it hangs
+  rather than failing cleanly) rather than assuming one. `brain qwen35moe
+  export --weights F --out model.onnx --seq T` is the CLI entry point.
+
 ## In progress
 
 - **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
@@ -486,10 +515,27 @@ fetching an already-quantized GGUF directly.
     merely "close by tolerance". No decode-specific MoE function was needed
     (`moe_sublayer` already works correctly at `n=1`, confirmed by the
     passing test).
-  - **Not started**: the actual `PagedDecoder` impl (multi-sequence paging,
-    admission, prefix cache) and multi-GPU layer-range sharding — now that
-    P11b's single-sequence math is proven, per this ledger's own "climb the
-    ladder" convention.
+  - **P11c — `qwen35moe::serve::Engine`, single-GPU** (done,
+    `crates/qwen35moe/src/serve.rs`, commit `92f23669`): `PagedDecoder`
+    impl, single GPU, one truly-active sequence at a time. Solves the "two
+    kinds of per-sequence state" problem without touching the shared
+    `PagedDecoder` trait or `model::paged`: `block_size == max_seq_len`
+    makes a sequence's first (and only) physical block id a stable key into
+    a private `GdnSlot` map the `Engine` owns. Required refactoring
+    `Qwen35::run_decode_step`/`layer_gdn_decode_step`/`layer_gqa_decode_step`
+    to take their per-sequence resources as an explicit `DecodeCaches`
+    parameter instead of reading instance-wide fields — `Qwen35::step`
+    itself unchanged (thin wrapper), confirmed by `decode_step.rs` still
+    passing bit-for-bit. Deliberately deferred (named in the module doc, not
+    silently absorbed): prefix-cache reuse, chunked/batched prefill,
+    multi-sequence GPU batching, int8/int4 paged KV, speculative decode,
+    multi-GPU layer sharding. Validated: admit one request, drive to
+    completion through `Scheduler<Engine>`, compare against
+    `Qwen35::step`-driven generation — exact token match on both backends.
+  - **Not started**: multi-sequence GPU batching, prefix-cache reuse,
+    chunked prefill, int8/int4 paged KV, speculative decode, and multi-GPU
+    layer-range sharding across both P40s — P11c's own "Deliberately
+    deferred" list, in priority order for whoever picks this up next.
 - **P8b — vision splice**: image/video token embedding into the decoder's
   input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
   position helpers as-is (verified numerically identical vision config to
@@ -526,11 +572,6 @@ fetching an already-quantized GGUF directly.
 - **P13 — full serving contract**: `Qwen35Resident`, `caps.rs` (model id
   must be byte-exact `Qwen/Qwen3.5-35B-A3B`), D-Bus verification, OpenAI/
   Anthropic auto-exposure via `catalog::api_caps`, examples + manifest.
-- **P14 — best-effort NPU export**: a `gdn_chunk` ONNX emitter (no existing
-  linear-attention topology to copy) + a sparse gather-based expert-dispatch
-  emitter (256-way dense unroll is impractical, ~30k MatMul nodes); fixed-`T`
-  cache-free prefill only, explicitly stopping at "compiles + best-effort
-  OpenVINO compile attempt" without chasing a working NPU run.
 - **Qwen3.5-27B (dense)**: a second named config once the shared hybrid code
   is proven — the dense sibling is the same code with `n_experts=1`-shaped
   MoE-as-dense and no linear-attention layers, additive not a fork.
