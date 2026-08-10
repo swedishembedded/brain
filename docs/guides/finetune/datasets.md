@@ -86,9 +86,12 @@ Build the release binary once (`make build` / `cargo build --release`), then:
 
 ```bash
 cd applications/edgeai/brain
+# <tok-dir>/<dec-dir>: local clones of the released Kronos checkpoints
+# (NeoQuasar/Kronos-Tokenizer-base and NeoQuasar/Kronos-small on HF) --
+# same placeholders the kronos model card uses.
 ./target/release/brain forecast finetune \
-    --kronos-tokenizer /data/workspace/resources/time-series/checkpoints/kronos-tokenizer-base \
-    --kronos-decoder   /data/workspace/resources/time-series/checkpoints/kronos-small \
+    --kronos-tokenizer <tok-dir> \
+    --kronos-decoder   <dec-dir> \
     --data out/train-csv \
     --context 180 --horizon 5 --epochs 8 --lr 4e-5 \
     --lora 8 \

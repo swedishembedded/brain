@@ -397,8 +397,9 @@ python tools/goldens/pulid_dump_reference.py \
 
 BRAIN_PULID=/path/to/pulid_flux_v0.9.1.safetensors \
 BRAIN_FLUX1_TRANSFORMER=/path/to/FLUX.1-Kontext-dev/transformer \
-CARGO_HOME=/data/resources/cargo-home \
 cargo test --release -p brain-pulid -- --nocapture --test-threads=1
+# (On the original dev box only: prefix CARGO_HOME=/data/resources/cargo-home
+#  -- a machine-local quirk, not part of the command.)
 ```
 
 Every test skips itself (never fails) when its fixture or its weights are absent.

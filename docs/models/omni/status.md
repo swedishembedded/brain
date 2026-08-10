@@ -1455,8 +1455,9 @@ governs completion at the end of this section, not a blanket "done."
   resolve it, meaning the block is upstream of any fence wait). Tracked as
   a follow-up (the Vulkan concurrent-device-creation hang).
 
-- **#35 recurrence, found auditing this repo's OWN fix for #35
-  (`docs/lessons.md` #35's new addendum)**: the original #35 fix bumped
+- **#35b recurrence, found auditing this repo's OWN fix for #35b
+  (`docs/lessons.md` #35b's new addendum; that lesson was renumbered from a
+  duplicate "#35")**: the original #35b fix bumped
   `router_gate.wgsl`/`router_gate_train.wgsl`'s `MAX_EXPERTS` 64→128 but
   never reached `router_gate_sigmoid.wgsl` (its own independent `MAX_E =
   64u` cap) or `router_bwd.wgsl` (its own independent `array<f32,64>`

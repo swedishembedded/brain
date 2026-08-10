@@ -3,8 +3,7 @@
 `crates/lfm` implements the **LFM2.5-Encoder-230M** and **-350M** released
 checkpoints: bidirectional hybrid short-conv/attention encoders with a tied
 masked-LM head, MLM-pretrained (30% masking), usable context 8,192 tokens.
-Reference: <https://huggingface.co/blog/LiquidAI/lfm2-5-encoders>; local
-resources under `/data/workspace/resources/lfm/`.
+Reference: <https://huggingface.co/blog/LiquidAI/lfm2-5-encoders>.
 
 ## Architecture
 
