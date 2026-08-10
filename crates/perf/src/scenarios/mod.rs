@@ -27,6 +27,7 @@ pub mod placement;
 pub mod residency;
 pub mod soak;
 pub mod startup;
+pub mod weights;
 
 use crate::driver;
 use crate::env::Env;
@@ -341,7 +342,7 @@ pub fn render(art: &Artifact) -> String {
         "startup" => render_block(art, &["cold", "warm"]),
         "mixed" => render_mixed(art),
         "overload" | "cancel" | "kvcache" | "residency" | "placement" | "faults" | "frontend"
-        | "soak" => render_json_summary(art),
+        | "soak" | "weights" => render_json_summary(art),
         _ => report::render(art),
     }
 }
@@ -416,6 +417,18 @@ fn render_json_summary(art: &Artifact) -> String {
     if let Some(obj) = art.performance.as_object() {
         for (k, v) in obj {
             match v {
+                // An array of row-shaped objects (e.g. `weights`'s per-policy
+                // runs) renders one line per row instead of hiding every
+                // number behind "[N entries]" -- a plain array of scalars
+                // still falls through to the entry count.
+                serde_json::Value::Array(a) if !a.is_empty() && a.iter().all(|e| e.is_object()) => {
+                    s.push_str(&format!("  {k}:\n"));
+                    for row in a {
+                        let obj = row.as_object().expect("checked is_object above");
+                        let line: Vec<String> = obj.iter().map(|(rk, rv)| format!("{rk}={rv}")).collect();
+                        s.push_str(&format!("    {}\n", line.join(" ")));
+                    }
+                }
                 serde_json::Value::Array(a) => {
                     s.push_str(&format!("  {k:<34} [{} entries]\n", a.len()))
                 }

@@ -300,11 +300,17 @@ fn run(args: &[String]) {
     // before a generic target is built.
     let engine_scenario = matches!(
         scenario.as_str(),
-        "startup" | "cancel" | "kvcache" | "residency" | "faults"
+        "startup" | "cancel" | "kvcache" | "residency" | "faults" | "weights"
     );
     if engine_scenario {
         let art = match scenario.as_str() {
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
+            // Budget (device slots) and passes (denoise steps) are fixed,
+            // realistic defaults -- matching `residency`'s own hardcoded
+            // budget constant -- rather than new scenario-specific flags;
+            // the comparison this scenario exists to make (CyclicScan vs
+            // Lru) doesn't need tuning to land.
+            "weights" => crate::perf_engine::run_weights_with(&opt, 10, 8),
             other => {
                 let shape = target_spec
                     .as_deref()

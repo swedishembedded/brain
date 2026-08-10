@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use perf::scenarios::{cancel, faults, kvcache, placement, residency, startup, Options};
+use perf::scenarios::{cancel, faults, kvcache, placement, residency, startup, weights, Options};
 use perf::schema::Artifact;
 use perf::stats::r3;
 use perf::target::TargetInfo;
@@ -359,6 +359,35 @@ pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str)
          cost is modelled from model size rather than measured. It answers 'is the \
          eviction policy choosing well under a Zipf load that shifts' — wiring it \
          to real ResidentModels would add true load latency."
+            .into(),
+    );
+    Ok(art)
+}
+
+/// `weights` — the within-instance weight window's leaderboard: real
+/// `weightset::WeightSet` code (not a re-simulation, unlike `residency`'s
+/// synthetic catalogue above) driven over Z-Image-Turbo's real block count,
+/// `CyclicScan` vs `Lru` vs `AllResident` on identical seeds (there is no
+/// randomness at all here — the schedule is deterministic).
+pub fn run_weights_with(opt: &Options, budget: u32, passes: u32) -> Result<Artifact, String> {
+    let mut art = Artifact::new("weights", perf::env::Env::capture(&opt.device), TargetInfo::new("zimage-turbo-34-blocks", "cyclic-scan"));
+    art.smoke = opt.smoke;
+
+    let started = Instant::now();
+    let runs = weights::run(budget, passes.max(1));
+    let wall_s = started.elapsed().as_secs_f64().max(1e-6);
+
+    art.performance = weights::to_json(&runs);
+    art.performance["wall_s"] = json!(r3(wall_s));
+    art.notes = Some(
+        "Drives the real weightset::WeightSet/ResidencyPlan code (not a \
+         re-simulation) over Z-Image-Turbo's 34 real blocks, comparing \
+         CyclicScan/Lru/AllResident's reload counts and churn_overhead on \
+         identical seeds -- there is no randomness here at all, the \
+         schedule is fully deterministic. It answers 'does the weight \
+         window's eviction policy actually beat a naive one' with a \
+         measured ratio, not a claim. See docs/models/zimage/status.md for \
+         the real (not simulated) int8 build's own numbers."
             .into(),
     );
     Ok(art)
