@@ -275,6 +275,32 @@ impl Executor {
         let _ = self.tx.send(Msg::Register(model));
     }
 
+    /// [`Self::register`], but a no-op if `model.manifest().model`'s name is
+    /// already registered — atomically: the presence check and the insert
+    /// happen under the SAME `manifests` write-lock acquisition, unlike a
+    /// caller doing `!exec.manifests().iter().any(...)` then `exec.register()`
+    /// as two separate steps (a check-then-act race a supplier's own
+    /// single-flight gate does not close: that gate only serializes callers
+    /// that overlap IN TIME — a straggler that lands after the leader already
+    /// tore its gate down starts a fresh, unguarded episode). Returns `true`
+    /// if this call actually registered the model, `false` if it was already
+    /// present (in which case `model` is dropped, unused).
+    pub fn register_if_absent(&self, model: Arc<dyn ResidentModel>) -> bool {
+        let manifest = model.manifest();
+        let name = manifest.model.clone();
+        {
+            let mut g = self.manifests.write().unwrap();
+            if g.iter().any(|m| m.model == name) {
+                return false;
+            }
+            let mut v = (**g).clone();
+            v.push(manifest);
+            *g = Arc::new(v);
+        }
+        let _ = self.tx.send(Msg::Register(model));
+        true
+    }
+
     /// [`Self::register`]'s multi-device sibling — registers a
     /// [`MultiDeviceResidentModel`] (e.g. a checkpoint layer-sharded across
     /// several GPUs, too large for any one of them alone). Register a model
@@ -1426,6 +1452,37 @@ mod tests {
         let elapsed = submit_wait(&exec, &["late"]);
         assert!(elapsed < Duration::from_secs(2), "registered model never ran in time: {elapsed:?}");
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn register_if_absent_is_atomically_idempotent_under_real_concurrency() {
+        // A supplier's own single-flight gate only serializes callers that
+        // overlap in time (see crates/cli/src/supply.rs's `ensure`) -- a
+        // straggler landing after the gate tears down calls `register`-shaped
+        // code completely unguarded. `register_if_absent` must still produce
+        // exactly ONE manifest entry even when every caller races it with no
+        // gate at all, which is the harder bar `register` alone does not clear
+        // (a plain check-then-`register()` from separate calls is a TOCTOU).
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Cpu, 1 << 30, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+
+        let builds = Arc::new(AtomicU32::new(0));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let exec = exec.clone();
+                let builds = builds.clone();
+                std::thread::spawn(move || {
+                    let model: Arc<dyn ResidentModel> = Arc::new(Slow { name: "racy".into(), vram: 0, ms: 0, builds: builds.clone() });
+                    exec.register_if_absent(model)
+                })
+            })
+            .collect();
+        let newly_registered = handles.into_iter().map(|h| h.join().unwrap()).filter(|&b| b).count();
+
+        assert_eq!(newly_registered, 1, "exactly one of the 16 racing callers must see itself as the first to register");
+        let names: Vec<String> = exec.manifests().iter().map(|m| m.model.clone()).collect();
+        assert_eq!(names, vec!["racy".to_string()], "the manifest list must carry exactly one entry, not one per racing caller");
     }
 
     // ------------------------------------------------------------ multi-device

@@ -219,9 +219,16 @@ impl StoreSupplier {
             ));
         }
 
+        // `exec.register_if_absent`, not `register`: the `inflight` single-flight
+        // gate above only serializes callers that overlap IN TIME -- a straggler
+        // that lands after the leader already finished and tore its gate down
+        // starts a fresh, unguarded episode here. `register_if_absent` closes
+        // that gap atomically (unlike a separate check-then-`register()`, which
+        // is itself a TOCTOU race between episodes), making this call genuinely
+        // idempotent per this trait's own "MUST be idempotent" doc.
         let local = self.store.local(&r).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
         let resident = crate::model_dir::resident_for_local(&local).ok_or_else(|| format!("{model}: family not servable"))?;
-        exec.register(resident);
+        exec.register_if_absent(resident);
         Ok(())
     }
 }
