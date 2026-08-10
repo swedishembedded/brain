@@ -734,6 +734,27 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
                     continue;
                 }
             },
+            // Deferred promotion, same reasoning as `Build`'s deferred
+            // activate: rebuilding a demoted instance's device buffers can
+            // be slow, so it happens on this device's own lane, never the
+            // dispatcher thread. The existing `Instance` is reused in place.
+            Claimed::Promote(h) => {
+                let result = h.lock().unwrap().promote(req.device);
+                match result {
+                    Ok(()) => {
+                        let _ = done.send(Msg::Built { key: req.key.clone(), handle: h.clone() });
+                        h
+                    }
+                    Err(e) => {
+                        let msg = format!("promote {}: {e}", req.key);
+                        for p in req.jobs {
+                            (p.reply)(Err(msg.clone()));
+                        }
+                        let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: true });
+                        continue;
+                    }
+                }
+            }
         };
         // `run_group` is one implementation shared by both shapes above — a
         // multi-device instance is just an `Instance` whose forward happens to

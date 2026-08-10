@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Device, InstanceKey, MemCost};
+use crate::{Device, InstanceKey, MemCost, Tier};
 
 /// One resident instance's bookkeeping.
 #[derive(Clone, Copy, Debug)]
@@ -21,6 +21,13 @@ pub struct Entry {
     pub uses: u64,
     /// True while a job is actively running on this instance — it must not be evicted.
     pub pinned: bool,
+    /// `Hot` (on `device`, ready to run) or `Warm` (demoted: the `Instance`
+    /// itself is still alive, `device` is where it will be promoted back
+    /// to next, `cost` is the *Warm* footprint from
+    /// `ResidentModel::estimate_at`, charged against `Device::Cpu` — see
+    /// `ResidencyManager::evict`/`claim`'s tier handling). `Cold` is not
+    /// produced by anything in this crate yet.
+    pub tier: Tier,
 }
 
 /// Access-ordered table of resident instances. Recency is tracked with a monotonic
@@ -50,7 +57,20 @@ impl Residents {
     /// Record a newly-resident instance (or overwrite an existing one) as most-recent.
     pub fn insert(&mut self, key: InstanceKey, cost: MemCost, device: Device) {
         let last_use = self.next_tick();
-        self.map.insert(key, Entry { cost, device, last_use, uses: 1, pinned: false });
+        self.map.insert(key, Entry { cost, device, last_use, uses: 1, pinned: false, tier: Tier::Hot });
+    }
+
+    /// Move an already-resident entry to a new tier/device/cost in place —
+    /// `ResidencyManager` calls this after a successful `demote`/`promote`,
+    /// which changes where and how much an instance costs without it ever
+    /// leaving residency (unlike `remove`, which drops it entirely). Not a
+    /// touch: this is a placement change, not a use.
+    pub fn retier(&mut self, key: &InstanceKey, cost: MemCost, device: Device, tier: Tier) {
+        if let Some(e) = self.map.get_mut(key) {
+            e.cost = cost;
+            e.device = device;
+            e.tier = tier;
+        }
     }
 
     /// Mark `key` as just-used (most-recent). No-op if absent.
@@ -129,6 +149,23 @@ mod tests {
         r.set_pinned(&k("b"), true);
         let order: Vec<String> = r.lru_on(Device::Gpu(0)).into_iter().map(|(k, _)| k.model).collect();
         assert_eq!(order, vec!["c", "a"]);
+    }
+
+    #[test]
+    fn insert_defaults_to_hot_and_retier_moves_tier_device_and_cost_in_place() {
+        let mut r = Residents::new();
+        r.insert(k("a"), MemCost::new(GB, 0), Device::Gpu(0));
+        assert_eq!(r.get(&k("a")).unwrap().tier, Tier::Hot);
+
+        let warm_cost = MemCost::new(0, GB / 2);
+        r.retier(&k("a"), warm_cost, Device::Cpu, Tier::Warm);
+        let e = r.get(&k("a")).unwrap();
+        assert_eq!(e.tier, Tier::Warm);
+        assert_eq!(e.device, Device::Cpu);
+        assert_eq!(e.cost, warm_cost);
+
+        // retier on an absent key is a no-op, not a panic.
+        r.retier(&k("nope"), warm_cost, Device::Cpu, Tier::Warm);
     }
 
     #[test]

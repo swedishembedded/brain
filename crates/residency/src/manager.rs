@@ -98,6 +98,14 @@ impl From<ClaimError> for String {
 pub enum Claimed {
     Hot(InstanceHandle),
     Build(Arc<dyn ResidentModel>),
+    /// The instance is Warm (a prior eviction called
+    /// [`Instance::demote`] instead of dropping it) — the caller must run
+    /// [`Instance::promote`] on `device` (deferred to its own thread, same
+    /// reason `Build`'s `activate` is: it can be slow) and report
+    /// [`ResidencyManager::adopt`]/[`build_failed`](ResidencyManager::build_failed)
+    /// exactly as for a fresh build. The existing `Instance` is reused, not
+    /// rebuilt from the checkpoint.
+    Promote(InstanceHandle),
 }
 
 /// [`Claimed`]'s multi-device sibling — carries a [`MultiDeviceResidentModel`]
@@ -399,7 +407,7 @@ impl ResidencyManager {
 
     /// Current tier of each resident instance (for `Residency` reporting).
     pub fn residency(&self) -> Vec<(InstanceKey, Device, Tier)> {
-        self.residents.iter().map(|(k, e)| (k.clone(), e.device, Tier::Hot)).collect()
+        self.residents.iter().map(|(k, e)| (k.clone(), e.device, e.tier)).collect()
     }
 
     /// A full residency + budget snapshot for stats/reporting: every placed
@@ -412,7 +420,7 @@ impl ResidencyManager {
         let mut placements: Vec<InstancePlacement> = self
             .residents
             .iter()
-            .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: Tier::Hot, mem: e.cost.on(e.device) })
+            .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: e.tier, mem: e.cost.on(e.device) })
             .collect();
         placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)).cmp(&(b.key.model.clone(), b.key.config.clone(), device_order(b.device))));
         let mut multi_placements: Vec<MultiInstancePlacement> = self
@@ -462,6 +470,16 @@ impl ResidencyManager {
                     return Err(e);
                 }
             },
+            Claimed::Promote(h) => {
+                let result = h.lock().unwrap().promote(device);
+                match result {
+                    Ok(()) => self.adopt(&key, h),
+                    Err(e) => {
+                        self.build_failed(&key);
+                        return Err(e);
+                    }
+                }
+            }
         };
         Ok((handle, key))
     }
@@ -486,12 +504,55 @@ impl ResidencyManager {
             .ok_or_else(|| ClaimError::Activate(format!("no model '{model}'")))?
             .clone();
         let key = m.instance_key(action, inv);
-        if self.instances.contains_key(&key) {
-            self.residents.touch(&key);
+        // The instance object existing is still the real guard (matches the
+        // pre-Warm invariant exactly): a cold build's `residents.insert`
+        // pre-accounts the slot before `self.instances` gets the handle
+        // (via `adopt`, on the caller's thread) — so `residents` can have a
+        // NOT-yet-adopted entry for `key` while a build is in flight, and
+        // that in-flight window must keep falling into the cold-build path
+        // below (which is itself made a no-op-ish re-place by the budget
+        // already being charged), never this branch.
+        if let Some(handle) = self.instances.get(&key).cloned() {
+            let entry = *self.residents.get(&key).expect("an adopted instance is always in residents");
+            if entry.tier == Tier::Hot {
+                self.residents.touch(&key);
+                self.residents.set_pinned(&key, true);
+                return Ok((Claimed::Hot(handle), entry.device, key));
+            }
+            // Warm: place it like a cold build (pick a device, evict if
+            // needed — the entry itself is never a candidate victim of its
+            // own placement, same as a cold build's `keep`), but hand back
+            // `Claimed::Promote` so the caller reuses the existing
+            // `Instance` via `promote()` instead of rebuilding it.
+            let hot_cost = m.estimate(&key);
+            let device = match pick_device(&hot_cost, &self.budgets, exclude) {
+                Some(d) => d,
+                None => {
+                    if !could_ever_fit(&hot_cost, &self.budgets) {
+                        return Err(ClaimError::TooLarge(format!(
+                            "{key} ({} MiB) exceeds every device's usable budget even fully empty",
+                            hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
+                        )));
+                    }
+                    let plan = plan_eviction_with(&*self.eviction, &hot_cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
+                        .ok_or_else(|| {
+                            ClaimError::NoCapacity(format!(
+                                "{key} ({} MiB) has no room right now — nothing currently evictable frees enough",
+                                hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
+                            ))
+                        })?;
+                    for victim in &plan.victims {
+                        self.evict(victim);
+                    }
+                    plan.device
+                }
+            };
+            self.budgets.release(entry.device, entry.cost.on(entry.device));
+            self.budgets.alloc(device, hot_cost.on(device));
+            self.residents.retier(&key, hot_cost, device, Tier::Hot);
             self.residents.set_pinned(&key, true);
-            let handle = self.instances.get(&key).expect("hot").clone();
-            let device = self.residents.get(&key).expect("resident").device;
-            return Ok((Claimed::Hot(handle), device, key));
+            self.events.push(format!("promote {key} -> {device:?} (warm->hot)"));
+            return Ok((Claimed::Promote(handle), device, key));
         }
         // Cold: place + pre-account + pin NOW (so nothing steals the budget or
         // evicts the slot), but defer the potentially slow/hanging activate() to
@@ -721,7 +782,33 @@ impl ResidencyManager {
     }
 
     /// Demote (drop) an instance, freeing its device memory.
+    /// Free `key`'s device slot to make room for something else. Tries a
+    /// soft demotion to `Tier::Warm` first (releases the device buffers,
+    /// keeps the `Instance` and its host bytes alive, so a later claim for
+    /// the same key can [`Instance::promote`] straight back instead of
+    /// rebuilding from the checkpoint) — this is the entire "made real"
+    /// part of `Tier::Warm`: every existing caller of `evict` gets it for
+    /// free, with zero behaviour change for a model that hasn't opted in,
+    /// since `demote` defaults to `Err` and this falls straight through to
+    /// the original full-drop below whenever it does.
     fn evict(&mut self, key: &InstanceKey) {
+        if let Some(entry) = self.residents.get(key).copied() {
+            if entry.tier == Tier::Hot {
+                if let (Some(handle), Some(model)) = (self.instances.get(key).cloned(), self.models.get(&key.model).cloned()) {
+                    if handle.lock().unwrap().demote(Tier::Warm).is_ok() {
+                        let warm_cost = model.estimate_at(key, Tier::Warm);
+                        self.budgets.release(entry.device, entry.cost.on(entry.device));
+                        self.budgets.alloc(Device::Cpu, warm_cost.on(Device::Cpu));
+                        self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
+                        self.events.push(format!("demote {key} <- {:?} (warm)", entry.device));
+                        return;
+                    }
+                }
+            }
+        }
+        // Full drop: today's only behaviour, and the fallback whenever
+        // `demote` isn't supported, the entry was already below Hot, or the
+        // model/instance lookup above came up empty.
         if let Some(entry) = self.residents.remove(key) {
             self.budgets.release(entry.device, entry.cost.on(entry.device));
             self.instances.remove(key); // drops the Instance → frees the GPU
@@ -805,6 +892,119 @@ mod tests {
         let before = live.load(Ordering::SeqCst);
         mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(live.load(Ordering::SeqCst), before);
+    }
+
+    /// A model whose `Instance` implements `demote`/`promote` for real: `live`
+    /// counts the `Instance` object's whole lifetime (activate..Drop); `hot`
+    /// counts device residency specifically (activate/promote add, demote
+    /// subtracts) — the two diverging is exactly the property a Warm
+    /// demotion has that a full evict doesn't.
+    struct DemotableFake {
+        name: String,
+        vram: u64,
+        warm_ram: u64,
+        live: Arc<AtomicU32>,
+        hot: Arc<AtomicU32>,
+    }
+    struct DemotableInst {
+        live: Arc<AtomicU32>,
+        hot: Arc<AtomicU32>,
+    }
+    impl Drop for DemotableInst {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl ResidentModel for DemotableFake {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(self.vram, 0)
+        }
+        fn estimate_at(&self, _k: &InstanceKey, tier: Tier) -> MemCost {
+            match tier {
+                Tier::Hot => MemCost::new(self.vram, 0),
+                Tier::Warm | Tier::Cold => MemCost::new(0, self.warm_ram),
+            }
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            self.hot.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(DemotableInst { live: self.live.clone(), hot: self.hot.clone() }))
+        }
+    }
+    impl crate::Instance for DemotableInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+        }
+        fn demote(&mut self, tier: Tier) -> Result<(), String> {
+            if tier == Tier::Hot {
+                return Err("Hot is not a demotion target".to_string());
+            }
+            self.hot.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn promote(&mut self, _device: Device) -> Result<(), String> {
+            self.hot.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The actual "made real" wiring: evicting a model that opts into
+    /// `demote` releases its device slot WITHOUT dropping the `Instance`
+    /// (`live` unchanged, `hot` drops) — and a later claim for the same key
+    /// promotes it straight back (`hot` rises again, `live` STILL
+    /// unchanged: no second `activate()`/checkpoint reload ever happened).
+    /// A model that hasn't opted in (`Fake`/`FakeInst`) keeps dropping on
+    /// eviction exactly as `three_models_on_one_gpu_swap_by_lru` already
+    /// proves — this test is the other half.
+    #[test]
+    fn evict_demotes_to_warm_when_the_model_opts_in_and_a_later_claim_promotes_it_back() {
+        let live = Arc::new(AtomicU32::new(0));
+        let hot = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable
+        budgets.set(Device::Cpu, 64 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 10 * GB, warm_ram: GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(Fake { name: "b".into(), vram: 10 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "c".into(), vram: 10 * GB, live: live.clone() }));
+
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 2);
+        assert_eq!(hot.load(Ordering::SeqCst), 1);
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0);
+
+        // c needs 10, only 2 GB free -> evict LRU (a) -> demote to Warm,
+        // not a full drop.
+        mgr.run("c", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(hot.load(Ordering::SeqCst), 0, "a's device slot must be released");
+        // a (demoted, still alive) + b (hot) + c (just activated) = 3.
+        assert_eq!(live.load(Ordering::SeqCst), 3, "a's Instance must still be alive -- demoted, not dropped");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, GB, "the Warm RAM charge must be tracked");
+        assert!(mgr.events.iter().any(|e| e.contains("demote a")), "events: {:?}", mgr.events);
+        let tiers: HashMap<String, Tier> = mgr.residency().into_iter().map(|(k, _, t)| (k.model, t)).collect();
+        assert_eq!(tiers.get("a"), Some(&Tier::Warm));
+        assert_eq!(tiers.get("c"), Some(&Tier::Hot));
+
+        // Claiming "a" again promotes it back -- same Instance (live
+        // unchanged: no second activate), device-resident again (hot back
+        // to 1). This itself needs room: c (10) + b (10) = 20 <= 22, so a's
+        // 10 GB forces one more LRU eviction (b, non-demotable -> full drop).
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(hot.load(Ordering::SeqCst), 1, "a must be device-resident again");
+        // b's full drop (3 -> 2) proves the eviction-for-room still happened;
+        // a itself contributed no change to `live` (promote, not activate).
+        assert_eq!(live.load(Ordering::SeqCst), 2, "promoting a reused the existing Instance, no rebuild");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "the Warm RAM charge must be released on promote");
+        assert!(mgr.events.iter().any(|e| e.contains("warm->hot")), "events: {:?}", mgr.events);
+        let tiers: HashMap<String, Tier> = mgr.residency().into_iter().map(|(k, _, t)| (k.model, t)).collect();
+        assert_eq!(tiers.get("a"), Some(&Tier::Hot));
     }
 
     /// A model bigger than every device's usable budget, even fully empty,

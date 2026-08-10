@@ -310,6 +310,7 @@ pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str)
                                 last_use: last_used.get(m).copied().unwrap_or(0),
                                 uses: uses.get(m).copied().unwrap_or(1),
                                 pinned: false,
+                                tier: ::residency::Tier::Hot,
                             };
                             pol.score(&e, clock)
                         };
