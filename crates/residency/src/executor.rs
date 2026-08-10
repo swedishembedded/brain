@@ -413,15 +413,55 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     let mut last_metrics: Option<Instant> = None;
 
     loop {
-        // Block for at least one message, then drain everything pending.
-        match rx.recv() {
-            Ok(msg) => on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id),
-            Err(_) => return, // all senders gone
-        }
+        // Block for at least one message; a closed channel (every sender gone,
+        // i.e. every Executor handle dropped) is real shutdown, not a panic --
+        // stays outside the catch_unwind below so `return` here works normally.
+        let first = match rx.recv() {
+            Ok(msg) => msg,
+            Err(_) => return,
+        };
+        // Drain everything else pending before scheduling, same as before.
+        let mut msgs = vec![first];
         while let Ok(msg) = rx.try_recv() {
-            on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
+            msgs.push(msg);
         }
-        assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
+        // EACH message gets its OWN catch_unwind, for the SAME reason
+        // `lane_loop` isolates each lane: a dropped `InstanceHandle` (e.g.
+        // `ResidencyManager::build_failed` unwinding a failed claim) runs that
+        // model's real Drop impl right here, on the dispatcher thread — and a
+        // GPU backend whose device was already lost (a real, observed wgpu
+        // `Device is lost` fault) can panic again from INSIDE that Drop, deep
+        // in a third-party crate this code never calls directly. Without
+        // this, that second panic kills the ONE thread that owns the entire
+        // `ResidencyManager` and lane routing — every other model on the
+        // server stops being scheduled forever, not just the one that hit the
+        // fault. `build_failed`/`evict` release the budget and resident-slot
+        // bookkeeping BEFORE the risky drop (see their own bodies), so a panic
+        // here still leaves `queue`/`mgr`'s accounting consistent even though
+        // the triggering message's own tail (e.g. its audit-log line) may not
+        // have run. Per-message, not one catch_unwind around the whole batch:
+        // an EARLIER message's panic must never stop a LATER already-drained
+        // message (e.g. an unrelated model's own Submit) from still being
+        // queued this round.
+        for msg in msgs {
+            if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
+            })) {
+                eprintln!("[residency] dispatcher: panic processing a message: {} -- continuing", panic_message(p.as_ref()));
+            }
+        }
+        // MUST run even if a message above panicked -- otherwise anything
+        // that message's on_msg call had already queued (e.g. a DIFFERENT
+        // model's Submit, drained into `msgs` before the panicking one) would
+        // never get claimed: nothing else wakes this thread once `rx.recv()`
+        // goes back to blocking, since no MORE messages are coming just
+        // because scheduling stalled. Own catch_unwind too: `assign`'s
+        // eviction fallback can ALSO drop a Hot instance.
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
+        })) {
+            eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
+        }
         if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
             if let Ok(mut s) = stats.lock() {
                 s.metrics = mgr.all_metrics();
@@ -513,15 +553,27 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             let _ = tx.send(jobs);
         }
         Msg::Done { key, device, batch, failed } => {
+            // Free the dispatcher's OWN bookkeeping (`busy`/`running`) BEFORE
+            // the risky `mgr.build_failed`/`release` call below, which drops
+            // the claim's `InstanceHandle` and can panic a SECOND time (a lost
+            // GPU device's backend panicking again from inside its own Drop —
+            // see dispatch_loop's per-message catch_unwind). If that panic cut
+            // this handler off here instead, `device` would stay marked busy
+            // FOREVER (nothing else ever clears it), silently wedging every
+            // future claim on it — not a hang in this one model, a dead
+            // device. `mgr`'s own state is a separate concern: `build_failed`/
+            // `release` still run next, and their own edits to `residents`/
+            // `budgets`/`instances` happen before THEIR risky drop too (see
+            // their own bodies).
+            running.remove(&key);
+            running_jobs.retain(|r| r.key != key); // group finished — drop its jobs
+            busy.remove(&device);
             if failed {
                 crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
                 mgr.build_failed(&key); // unwind budget + slot; jobs already failed
             } else {
                 mgr.release(&key);
             }
-            running.remove(&key);
-            running_jobs.retain(|r| r.key != key); // group finished — drop its jobs
-            busy.remove(&device);
             let mut s = stats.lock().unwrap();
             s.batches += 1;
             s.jobs += batch as u64;
@@ -531,16 +583,17 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             s.resident = mgr.resident_count();
         }
         Msg::DoneMulti { key, devices, batch, failed } => {
+            // See `Msg::Done`'s identical reordering + doc, above.
+            running.remove(&key);
+            running_jobs.retain(|r| r.key != key);
+            for &d in &devices {
+                busy.remove(&d);
+            }
             if failed {
                 crate::log::warn(&format!("model activation/run failed (multi-device): {key} on {devices:?}"));
                 mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
             } else {
                 mgr.release_multi(&key);
-            }
-            running.remove(&key);
-            running_jobs.retain(|r| r.key != key);
-            for d in devices {
-                busy.remove(&d);
             }
             let mut s = stats.lock().unwrap();
             s.batches += 1;
@@ -1196,6 +1249,83 @@ mod tests {
             assert!(exec.run_blocking("boom", "run", Invocation::new(), |_| {}).is_err());
             assert!(exec.run_blocking("good", "run", Invocation::new(), |_| {}).is_ok());
         }
+    }
+
+    /// An `Instance` whose `run` panics (e.g. "device lost" mid-run — the real
+    /// fault this regression is named for) AND whose `Drop` ALSO panics —
+    /// modeling a third-party GPU backend's own internal teardown panicking a
+    /// SECOND time when it discovers the device is already lost (observed
+    /// verbatim: `wgpu-core`'s device-poll-on-drop hits the same fault its
+    /// caller already panicked on). This second panic fires while
+    /// `ResidencyManager::build_failed` drops the removed `InstanceHandle` --
+    /// on the DISPATCHER thread, not a lane.
+    struct DropPanics;
+    impl Instance for DropPanics {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            panic!("simulated run panic (e.g. device lost mid-run)");
+        }
+    }
+    impl Drop for DropPanics {
+        fn drop(&mut self) {
+            panic!("simulated drop panic (e.g. wgpu-core's own poll-on-drop hitting an already-lost device)");
+        }
+    }
+    struct DropPanicsModel;
+    impl ResidentModel for DropPanicsModel {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("boom", "drop-panics", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("boom", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(GB, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(DropPanics))
+        }
+    }
+
+    /// SPEC: a panic while DROPPING a failed claim's instance -- runs on the
+    /// DISPATCHER thread (inside `on_msg`'s `Msg::Done` handling, via
+    /// `ResidencyManager::build_failed`'s `instances.remove`), not a lane --
+    /// must not kill the dispatcher. Before this fix it did: the dispatcher
+    /// thread owns the whole `ResidencyManager` and every lane's routing, so
+    /// its death silently wedges EVERY OTHER model on the server, not just the
+    /// one that hit the fault (the exact failure mode `a_panicking_lane_
+    /// replies_errors_and_the_device_recovers` already covers for a LANE
+    /// panic; this is its dispatcher-thread sibling).
+    #[test]
+    fn a_panic_while_dropping_a_failed_instance_does_not_wedge_the_dispatcher() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0); // ONE device, same as the lane-panic test
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(DropPanicsModel), Arc::new(Slow { name: "good".into(), vram: GB, ms: 1, builds })];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        // "boom" fails (its run() panics, then its Drop panics AGAIN on the
+        // dispatcher thread while the claim unwinds) -- the caller must still
+        // get a reply, not hang. `run_blocking`'s own recv is unbounded, so
+        // this call itself would hang forever pre-fix -- exactly the failure
+        // this regression exists to catch. Bounded via a plain submit +
+        // recv_timeout (matching `a_panicking_lane_...`'s own pattern) so a
+        // real wedge fails the test instead of hanging the whole suite.
+        let (tx, rx) = channel();
+        exec.submit(Job::new("boom", "run", Invocation::new()).reply(move |r| {
+            let _ = tx.send(r);
+        }));
+        let err = rx.recv_timeout(Duration::from_secs(5)).expect("boom must reply, not hang");
+        assert!(err.is_err(), "a run()-panicking instance must reply an error");
+
+        // The real assertion: the DISPATCHER survived dropping it. A
+        // completely unrelated model, submitted after, must still get
+        // scheduled and run -- bounded the same way, for the same reason.
+        let (tx2, rx2) = channel();
+        exec.submit(Job::new("good", "run", Invocation::new()).reply(move |r| {
+            let _ = tx2.send(r);
+        }));
+        let ok = rx2.recv_timeout(Duration::from_secs(5)).expect("dispatcher wedged after a panic while dropping a failed instance -- 'good' never replied");
+        assert!(ok.is_ok(), "an unrelated model must still run after the dispatcher survives a drop panic: {ok:?}");
     }
 
     /// The residency accessor (`Executor::residency`) round-trips a query through
