@@ -1266,6 +1266,7 @@ dependencies = [
 name = "brain-qwen35"
 version = "0.1.1"
 dependencies = [
+ "brain-audio",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
@@ -1275,6 +1276,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-qwen",
+ "brain-qwenvl",
  "brain-testutil",
  "bytemuck",
  "pollster",

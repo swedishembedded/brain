@@ -118,11 +118,12 @@ use audio::conv::{conv1d_fwd, Conv1d, ConvKernels};
 use model::block::{gqa_fwd, kv_expand_fwd, rmsnorm_fwd, rope2d_partial_fwd, Gqa, KernelIds};
 use model::gdn::{gdn_chunk_fwd, GdnIds, GdnScratch, GdnShape};
 use model::moe::{
-    expert_fwd, router_fwd_kind, shared_expert_fwd, ExpertScratch, MoeIds, MoeShape, RouterKind, SharedExpertIds,
-    SharedExpertScratch,
+    expert_fwd, expert_fwd_i8, router_fwd_kind, shared_expert_fwd, ExpertScratch, ExpertScratch8, MoeIds, MoeIds8,
+    MoeShape, RouterKind, SharedExpertIds, SharedExpertScratch,
 };
 
 use crate::config::{LayerType, Qwen35Config};
+use crate::q8::{Q8Mixer, Qwen35Q8};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 
@@ -165,6 +166,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("sub", kernels::SUB),                                       // 35
     ("region_copy", kernels::REGION_COPY),                       // 36
     ("ce_value", kernels::CE_VALUE_MASKED),                      // 37
+    // -- int8 (DP4A) inference tier -- see `crate::q8`'s own module doc.
+    ("max_abs_row", kernels::MAX_ABS_ROW),                       // 38
+    ("quant_pack", kernels::QUANT_PACK),                         // 39
+    // NOTE: `kernels::MATMUL_I8` (no suffix) is the STATIC per-tensor-scale
+    // variant (`sx`/`sw` baked into the uniform, see its own doc); `Qwen35Q8`
+    // needs the DYNAMIC per-token/per-channel variant (`sx`/`sw` as buffers,
+    // indexed `sx[row]`/`sw[col]`) that `Q8::quant`/`Q8::mm8` actually
+    // produce -- `kernels::MATMUL_I8_DYN`, exactly as `qwen::model.rs`'s own
+    // `Q8` pipeline registers under this same local name (`qwen/src/model.rs:159`).
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),                   // 40
+    ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8),       // 41
 ];
 
 const RMSNORM: usize = 0;
@@ -205,6 +217,10 @@ const EXP: usize = 34;
 const SUB: usize = 35;
 const REGION_COPY: usize = 36;
 const CE_VALUE: usize = 37;
+const MAX_ABS_ROW: usize = 38;
+const QUANT_PACK: usize = 39;
+const MATMUL_I8: usize = 40;
+const MOE_LINEAR_GATED_I8: usize = 41;
 
 /// Forward-only: the backward-only slots [`KernelIds`] carries are never
 /// dispatched, so they point at `rmsnorm` (index 0) — harmless, matching
@@ -252,6 +268,16 @@ fn gdn_ids() -> GdnIds {
 
 fn moe_ids() -> MoeIds {
     MoeIds { router_gate: ROUTER_GATE, linear_gated: MOE_LINEAR_GATED, silu_mul: SILU_MUL, scale_add: SCALE_ADD }
+}
+
+/// int8 counterpart of [`moe_ids`], for [`model::moe::expert_fwd_i8`].
+fn moe_ids8() -> MoeIds8 {
+    MoeIds8 {
+        linear_gated_i8: MOE_LINEAR_GATED_I8,
+        silu_mul: SILU_MUL,
+        scale_add: SCALE_ADD,
+        quant: [MAX_ABS_ROW, QUANT_PACK],
+    }
 }
 
 fn shared_expert_ids() -> SharedExpertIds {
@@ -368,6 +394,12 @@ pub struct Qwen35 {
     pub gpu: Gpu,
     pub cfg: Qwen35Config,
     ps: ParamStore,
+    /// `Some` selects the int8 (DP4A) inference tier for the linears
+    /// `Qwen35Q8::is_i8_linear` names (`ps` excludes those names entirely —
+    /// see [`Qwen35::new_impl_on`]'s role filter); `None` is the plain fp32
+    /// path. See `crate::q8`'s module doc for exactly which linears that is
+    /// and why.
+    q8: Option<Qwen35Q8>,
     b: u32,
     t: u32,
     /// The GDN chunk size this instance was built for — see [`gdn_chunk_size`].
@@ -402,16 +434,31 @@ pub struct Qwen35 {
 
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init)
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
     /// binary — see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false)
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Qwen35 {
+    /// [`Self::new`] with the int8 (DP4A) inference tier: the attention/GDN
+    /// mixer projections and every routed expert's gate/up/down are
+    /// quantized (`crate::q8::Qwen35Q8::is_i8_linear`); the router, shared
+    /// expert, embeddings and norms stay fp32. See `crate::q8`'s module doc
+    /// for the full rationale. Inference-only, same as the fp32 path
+    /// (`Qwen35::backward` panics regardless).
+    pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true)
+    }
+
+    /// [`Self::new_i8`] on an existing device handle — see [`Self::new_on`].
+    pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, true)
+    }
+
+    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool) -> Qwen35 {
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -424,9 +471,21 @@ impl Qwen35 {
 
         // Inference-only pass: every weight is Role::Frozen (no grad/Adam
         // buffers allocated at all -- see paramstore::ParamStore::new_with_roles_src).
-        let roles: Vec<(String, usize, Role)> =
-            cfg.param_list().into_iter().map(|(n, c)| (n, c, Role::Frozen)).collect();
+        // In int8 mode the linears `Qwen35Q8::is_i8_linear` names live in
+        // `q8` (packed int8), NOT the fp32 store -- filter them out here so
+        // no redundant fp32 copy is ever uploaded (mirrors `qwen::model.rs`'s
+        // own `Q8::is_i8_linear` filter, `model.rs:504-507` in that crate).
+        let roles: Vec<(String, usize, Role)> = cfg
+            .param_list()
+            .into_iter()
+            .filter(|(n, _)| !(i8 && Qwen35Q8::is_i8_linear(n)))
+            .map(|(n, c)| (n, c, Role::Frozen))
+            .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+
+        // Quantize+upload the int8 linears from the SAME source, streaming
+        // one tensor at a time (see `Qwen35Q8::build`'s own doc).
+        let q8 = if i8 { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK, MATMUL_I8)) } else { None };
 
         let n = (b * t) as u64;
         let d = cfg.d_model as u64;
@@ -449,7 +508,7 @@ impl Qwen35 {
         let logits = gpu.storage(n * cfg.vocab as u64);
         let ce_buf = gpu.storage(n);
 
-        Qwen35 { gpu, cfg, ps, b, t, chunk, tokens, targets, count: Cell::new(1.0), res, ones_khd, cos, sin, logits, ce_buf }
+        Qwen35 { gpu, cfg, ps, q8, b, t, chunk, tokens, targets, count: Cell::new(1.0), res, ones_khd, cos, sin, logits, ce_buf }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -482,9 +541,24 @@ impl Qwen35 {
         let n_chunks = t / chunk;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
 
+        // int8 linears for this layer, if any -- see `crate::q8`'s module doc.
+        let q8l = self.q8.as_ref().map(|q8| match &q8.mixers[l] {
+            Q8Mixer::Gdn(ql) => (q8, ql),
+            Q8Mixer::Gqa(_) => panic!("qwen35 q8: layer {l} expected a GDN mixer, found GQA (layer_types() drift)"),
+        });
+
         // 1. mixed_qkv = in_proj_qkv(xn1).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)]);
+        if let Some((q8, ql)) = q8l {
+            // xn1 quantized once here; reused unchanged by step 5's in_proj_b/a/z
+            // below (no quant() call happens on any OTHER buffer in between).
+            let mut s = Vec::new();
+            q8.quant(g, &mut s, xn1, d, n);
+            q8.mm8(g, &mut s, &ql.in_proj_qkv, &mixed_qkv, n);
+            g.submit(&[], &s);
+        } else {
+            g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)]);
+        }
 
         // 2. Depthwise causal conv1d + SiLU (activation AFTER the conv --
         // `causal_conv1d_fn(..., activation=self.activation)`, `self.activation
@@ -536,14 +610,24 @@ impl Qwen35 {
         let bproj = g.storage((n * nvh) as u64);
         let aproj = g.storage((n * nvh) as u64);
         let z = g.storage((n * value_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
-            ],
-        );
+        if let Some((q8, ql)) = q8l {
+            // Reuses step 1's xn1 quantization already resident in q8.xq/sx
+            // (no intervening quant() call -- see step 1's own comment).
+            let mut s = Vec::new();
+            q8.mm8(g, &mut s, &ql.in_proj_b, &bproj, n);
+            q8.mm8(g, &mut s, &ql.in_proj_a, &aproj, n);
+            q8.mm8(g, &mut s, &ql.in_proj_z, &z, n);
+            g.submit(&[], &s);
+        } else {
+            g.submit(
+                &[],
+                &[
+                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
+                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
+                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
+                ],
+            );
+        }
         let beta = g.storage((n * nvh) as u64);
         let g_decay = g.storage((n * nvh) as u64);
         g.submit(
@@ -624,7 +708,17 @@ impl Qwen35 {
 
         // 11. out_proj.
         let out = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)]);
+        if let Some((q8, ql)) = q8l {
+            // Fresh quant() call: `gated` is a different activation from
+            // xn1 (steps 1/5 above), safe to overwrite q8.xq/sx now that
+            // every earlier mm8 reading the old contents is already queued.
+            let mut s = Vec::new();
+            q8.quant(g, &mut s, &gated, value_dim, n);
+            q8.mm8(g, &mut s, &ql.out_proj, &out, n);
+            g.submit(&[], &s);
+        } else {
+            g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)]);
+        }
         out
     }
 
@@ -638,17 +732,33 @@ impl Qwen35 {
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
         let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
 
+        // int8 linears for this layer, if any -- see `crate::q8`'s module doc.
+        let q8l = self.q8.as_ref().map(|q8| match &q8.mixers[l] {
+            Q8Mixer::Gqa(ql) => (q8, ql),
+            Q8Mixer::Gdn(_) => panic!("qwen35 q8: layer {l} expected a GQA mixer, found GDN (layer_types() drift)"),
+        });
+
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
-                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
-                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
-            ],
-        );
+        if let Some((q8, ql)) = q8l {
+            // xn1 quantized once, shared by q/k/v (DP4A GEMM per projection).
+            let mut s = Vec::new();
+            q8.quant(g, &mut s, xn1, d, n);
+            q8.mm8(g, &mut s, &ql.q_proj, &q_full, n);
+            q8.mm8(g, &mut s, &ql.k_proj, &k, n);
+            q8.mm8(g, &mut s, &ql.v_proj, &v, n);
+            g.submit(&[], &s);
+        } else {
+            g.submit(
+                &[],
+                &[
+                    g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
+                    g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
+                    g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
+                ],
+            );
+        }
 
         // Per-head de-interleaved split of q_full's [query|gate] halves --
         // NOT a whole-row split (see module doc). Fold n_heads into
@@ -692,14 +802,27 @@ impl Qwen35 {
         let gate = g.storage((n * qd) as u64);
         let ctx_gated = g.storage((n * qd) as u64);
         let out = g.storage((n * d) as u64);
-        g.submit(
-            &[],
-            &[
+        if let Some((q8, ql)) = q8l {
+            let mut s = vec![
                 g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
                 g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
-                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
-            ],
-        );
+            ];
+            // Fresh quant() call: ctx_gated is a different activation from
+            // xn1 above, safe to overwrite q8.xq/sx now that every earlier
+            // mm8 reading the old contents is already queued ahead of it.
+            q8.quant(g, &mut s, &ctx_gated, qd, n);
+            q8.mm8(g, &mut s, &ql.o_proj, &out, n);
+            g.submit(&[], &s);
+        } else {
+            g.submit(
+                &[],
+                &[
+                    g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
+                    g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
+                    g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
+                ],
+            );
+        }
         out
     }
 
@@ -729,28 +852,65 @@ impl Qwen35 {
         steps.push(router_fwd_kind(g, &moe_ids(), RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 }, &shape, &router_logits, None, &gate, None));
 
         let moe_acc = g.storage((n * d) as u64);
-        let scratch = ExpertScratch {
-            gate_pre: &g.storage((n * moe_ff) as u64),
-            up: &g.storage((n * moe_ff) as u64),
-            h: &g.storage((n * moe_ff) as u64),
-            expert_out: &g.storage((n * d) as u64),
-        };
-        for ei in 0..e {
-            let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
-            steps.extend(expert_fwd(
-                g,
-                &moe_ids(),
-                &shape,
-                &xn2,
-                &gate,
-                self.w(&ep("gate.weight")),
-                self.w(&ep("up.weight")),
-                self.w(&ep("down.weight")),
-                &scratch,
-                &moe_acc,
-                ei,
-                ei != 0,
-            ));
+        // Router and gate above are ALWAYS fp32 (see `crate::q8`'s module
+        // doc for why); only the routed experts' gate/up/down switch tier.
+        if let Some(q8) = &self.q8 {
+            // xn2 quantized once, shared by every expert's gate/up (the
+            // down-projection's input `h` is expert-specific and quantized
+            // separately inside `expert_fwd_i8`'s own scratch).
+            q8.quant(g, &mut steps, &xn2, d, n);
+            let ml = &q8.moe[l];
+            let ids8 = moe_ids8();
+            let scratch8 = ExpertScratch8 {
+                gate_pre: &g.storage((n * moe_ff) as u64),
+                up: &g.storage((n * moe_ff) as u64),
+                h: &g.storage((n * moe_ff) as u64),
+                hq: &g.storage((n * moe_ff / 4) as u64),
+                sh: &g.storage(n as u64),
+                expert_out: &g.storage((n * d) as u64),
+            };
+            for ei in 0..e {
+                let ex = &ml.experts[ei as usize];
+                steps.extend(expert_fwd_i8(
+                    g,
+                    &ids8,
+                    &shape,
+                    &q8.xq,
+                    &q8.sx,
+                    &gate,
+                    ex.gate.as_moe(),
+                    ex.up.as_moe(),
+                    ex.down.as_moe(),
+                    &scratch8,
+                    &moe_acc,
+                    ei,
+                    ei != 0,
+                ));
+            }
+        } else {
+            let scratch = ExpertScratch {
+                gate_pre: &g.storage((n * moe_ff) as u64),
+                up: &g.storage((n * moe_ff) as u64),
+                h: &g.storage((n * moe_ff) as u64),
+                expert_out: &g.storage((n * d) as u64),
+            };
+            for ei in 0..e {
+                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                steps.extend(expert_fwd(
+                    g,
+                    &moe_ids(),
+                    &shape,
+                    &xn2,
+                    &gate,
+                    self.w(&ep("gate.weight")),
+                    self.w(&ep("up.weight")),
+                    self.w(&ep("down.weight")),
+                    &scratch,
+                    &moe_acc,
+                    ei,
+                    ei != 0,
+                ));
+            }
         }
 
         let moe_out = g.storage((n * d) as u64);
