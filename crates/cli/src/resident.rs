@@ -107,30 +107,13 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // and providers too — so a model cannot be listed by `brain caps`, runnable
     // by `brain do` and yet missing here (which is exactly how Real-ESRGAN
     // shipped unreachable). Each is still gated on its own weights env var.
+    // ... plus, from the same catalog: TTS (BRAIN_TTS_WEIGHTS), speech-to-text
+    // (BRAIN_NEMOTRON + BRAIN_QWEN_ASR), and the forecasting foundation models
+    // (BRAIN_CHRONOS2 / BRAIN_FINCAST / BRAIN_KRONOS_* — chronos2/fincast
+    // advertise an NPU footprint and auto-place there when budgeted). Folded
+    // into `catalog::models()` so `brain caps`/`brain do` and this executor
+    // can no longer disagree about their existence.
     models.extend(crate::catalog::residents());
-    // Time-series forecasting foundation models — each gated on its weights env
-    // var. chronos2/fincast advertise an NPU footprint (auto-placed on the NPU
-    // when budgeted); kronos serves on CPU/GPU (see resident_forecast.rs).
-    if let Some(c) = crate::resident_forecast::Chronos2Resident::from_env() {
-        models.push(Arc::new(c));
-    }
-    if let Some(f) = crate::resident_forecast::FincastResident::from_env() {
-        models.push(Arc::new(f));
-    }
-    if let Some(k) = crate::resident_forecast::KronosResident::from_env() {
-        models.push(Arc::new(k));
-    }
-    // Text-to-speech (BRAIN_TTS_WEIGHTS).
-    if let Some(t) = crate::resident_tts::TtsResident::from_env() {
-        models.push(Arc::new(t));
-    }
-    // Speech-to-text: Nemotron 3.5 ASR (BRAIN_NEMOTRON) + Qwen3-ASR (BRAIN_QWEN_ASR).
-    if let Some(a) = crate::resident_asr::NemotronResident::from_env() {
-        models.push(Arc::new(a));
-    }
-    if let Some(a) = crate::resident_asr::QwenAsrResident::from_env() {
-        models.push(Arc::new(a));
-    }
     // Qwen3-Omni Thinker text generation, validation-tier (BRAIN_OMNI_HF_DIR)
     // -- see crate::resident_omni's module doc for the scope this covers.
     if let Some(o) = crate::resident_omni::OmniResident::from_env() {

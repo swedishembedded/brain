@@ -123,13 +123,19 @@ impl Chronos2Resident {
     }
 }
 
+/// The static (weights-free) Chronos-2 manifest — the catalog's discovery entry
+/// (`brain caps`), shared with [`ResidentModel::manifest`] so the two cannot drift.
+pub(crate) fn chronos2_manifest() -> Manifest {
+    Manifest::new(
+        CHRONOS2_MODEL,
+        "probabilistic time-series forecasting (Chronos-2); 21 quantile levels",
+        vec![base_forecast_spec("probabilistic forecast; forecast blob is [levels, horizon] quantile-major")],
+    )
+}
+
 impl ResidentModel for Chronos2Resident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(
-            CHRONOS2_MODEL,
-            "probabilistic time-series forecasting (Chronos-2); 21 quantile levels",
-            vec![base_forecast_spec("probabilistic forecast; forecast blob is [levels, horizon] quantile-major")],
-        )
+        chronos2_manifest()
     }
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         // One hot instance per horizon; the NPU session cache inside the instance
@@ -244,9 +250,14 @@ impl FincastResident {
     }
 }
 
+/// The static (weights-free) FinCast manifest — see [`chronos2_manifest`].
+pub(crate) fn fincast_manifest() -> Manifest {
+    Manifest::new(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![FincastResident::spec()])
+}
+
 impl ResidentModel for FincastResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![Self::spec()])
+        fincast_manifest()
     }
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         let freq = inv.get_i64("freq").unwrap_or(0);
@@ -411,9 +422,14 @@ fn decoder_from_key(config: &str) -> &str {
     config.rsplitn(3, '|').nth(2).unwrap_or(config)
 }
 
+/// The static (weights-free) Kronos manifest — see [`chronos2_manifest`].
+pub(crate) fn kronos_manifest() -> Manifest {
+    Manifest::new(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", vec![KronosResident::spec()])
+}
+
 impl ResidentModel for KronosResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", vec![Self::spec()])
+        kronos_manifest()
     }
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         // One hot instance per decoder checkpoint (any horizon); see decoder_key.

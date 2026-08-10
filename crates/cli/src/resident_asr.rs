@@ -288,10 +288,18 @@ impl QwenAsrResident {
     /// tuning knobs (`BRAIN_QWEN_ASR_WINDOW`/`_MAXNEW`) stay env-read here:
     /// they configure HOW the model runs, not WHICH weights serve.
     pub fn new(dir: impl Into<String>) -> QwenAsrResident {
-        let window_secs = std::env::var("BRAIN_QWEN_ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
-        let max_new = std::env::var("BRAIN_QWEN_ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
+        let (window_secs, max_new) = qwen_asr_tuning();
         QwenAsrResident { dir: dir.into(), window_secs, max_new }
     }
+}
+
+/// The Qwen3-ASR tuning knobs (`BRAIN_QWEN_ASR_WINDOW` seconds, default 30;
+/// `BRAIN_QWEN_ASR_MAXNEW` tokens, default 200) — one reader, shared by the
+/// resident adapter and the catalog's direct `brain do` provider.
+pub(crate) fn qwen_asr_tuning() -> (f32, usize) {
+    let window_secs = std::env::var("BRAIN_QWEN_ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
+    let max_new = std::env::var("BRAIN_QWEN_ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
+    (window_secs, max_new)
 }
 
 impl ResidentModel for QwenAsrResident {

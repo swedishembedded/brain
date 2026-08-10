@@ -27,17 +27,97 @@
 //!
 //! # What is deliberately NOT here yet
 //!
-//! `build_executor` still registers text-generation, forecasting, ASR and mock
-//! residents from its own list. Those have no weights-free `caps::manifest()`
-//! to put in an entry, so folding them in is a real change to what `brain caps`
-//! reports rather than a refactor. [`catalog_and_residency_do_not_overlap`]
-//! pins that the two halves stay disjoint, so a model cannot end up registered
-//! twice while that is true.
+//! `build_executor` still registers the text-generation LLMs (gpt/glm/qwen/
+//! lfm), the image-generation stacks (z-image/flux2 — Result-shaped or
+//! multi-var ctors), omni and the mock resident from its own list; the
+//! catalog carries their manifests but not their `resident` ctors. ASR
+//! (nemotron/qwen-asr), forecasting (chronos2/fincast/kronos) and TTS are
+//! folded in as of the F7 cleanup — `brain caps` lists them, `brain do`
+//! reaches the ASR models (lazily loaded), and `brain serve` registers them
+//! through [`residents`]. [`catalog_and_residency_do_not_overlap`] pins that
+//! a model registered here is never also registered from `build_executor`'s
+//! own list.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use capability::{Manifest, Provider};
+use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Progress, Provider};
 use residency::ResidentModel;
+
+/// A provider whose heavy weight load is deferred to the FIRST action run (and
+/// cached for the provider's life). Needed because the catalog contract is that
+/// provider CONSTRUCTION is cheap — [`tests::every_listed_model_is_constructible_by_name`]
+/// constructs every provider, and the imaging providers all hold only a path —
+/// while the ASR crates' providers (`NemotronProvider::load`,
+/// `QwenAsrProvider::load`) load gigabytes eagerly. This wrapper gives them the
+/// same construct-cheap/load-on-run shape without touching the model crates.
+struct LazyProvider {
+    manifest: fn() -> Manifest,
+    inner: Arc<LazyInner>,
+}
+
+struct LazyInner {
+    build: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>,
+    cell: Mutex<Option<Arc<dyn Provider>>>,
+}
+
+impl LazyInner {
+    /// The loaded provider, building (once) on first use.
+    fn loaded(&self) -> Result<Arc<dyn Provider>, String> {
+        let mut g = self.cell.lock().map_err(|_| "lazy provider lock poisoned".to_string())?;
+        if let Some(p) = &*g {
+            return Ok(p.clone());
+        }
+        let p = (self.build)()?;
+        *g = Some(p.clone());
+        Ok(p)
+    }
+}
+
+impl LazyProvider {
+    fn new(manifest: fn() -> Manifest, build: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>) -> LazyProvider {
+        LazyProvider { manifest, inner: Arc::new(LazyInner { build, cell: Mutex::new(None) }) }
+    }
+}
+
+impl Provider for LazyProvider {
+    fn manifest(&self) -> Manifest {
+        (self.manifest)()
+    }
+    fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
+        // The action's SPEC comes from the static manifest (no load); the load
+        // happens inside run(). An action absent from the manifest is None,
+        // exactly as the eager provider would answer.
+        let spec = (self.manifest)().actions.into_iter().find(|a| a.name == name)?;
+        Some(Arc::new(LazyAction { inner: self.inner.clone(), name: name.to_string(), spec }))
+    }
+}
+
+struct LazyAction {
+    inner: Arc<LazyInner>,
+    name: String,
+    spec: ActionSpec,
+}
+
+impl Action for LazyAction {
+    fn spec(&self) -> ActionSpec {
+        self.spec.clone()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let p = self.inner.loaded()?;
+        let act = p.action(&self.name).ok_or_else(|| format!("loaded provider has no action '{}'", self.name))?;
+        act.run(inv, progress)
+    }
+}
+
+/// A required env-var path for a catalog provider closure: `Err` with the
+/// model's own "set BRAIN_…" message when unset, empty, or nonexistent.
+fn env_path(var: &str, what: &str) -> Result<String, String> {
+    let p = std::env::var(var).ok().filter(|p| !p.is_empty()).ok_or_else(|| format!("set {var} to {what}"))?;
+    if !std::path::Path::new(&p).exists() {
+        return Err(format!("{var}={p} does not exist"));
+    }
+    Ok(p)
+}
 
 /// One served model. `provider` and `manifest` describe the SAME model by
 /// construction — that is the whole point of the type.
@@ -191,7 +271,66 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: tts::caps::manifest,
             provider: always!(tts::caps::TtsProvider::new()),
-            resident: None,
+            resident: resident!(crate::resident_tts::TtsResident::from_env),
+        },
+        // Speech-to-text. Discovery is weight-free (the caps manifests); the
+        // direct `brain do` path wraps the model crates' eager providers in
+        // [`LazyProvider`] so construction stays cheap; the residency adapters
+        // are the same ones `brain serve` used to register from its own list.
+        ModelEntry {
+            manifest: nemotron::caps::manifest,
+            provider: || {
+                let dir = env_path("BRAIN_NEMOTRON", "a Nemotron 3.5 ASR checkpoint dir")?;
+                Ok(Arc::new(LazyProvider::new(
+                    nemotron::caps::manifest,
+                    Box::new(move || {
+                        nemotron::caps::NemotronProvider::load(&dir, nemotron::NemotronConfig::nemotron_3_5_asr_0_6b())
+                            .map(|p| Arc::new(p) as Arc<dyn Provider>)
+                    }),
+                )) as Arc<dyn Provider>)
+            },
+            resident: resident!(crate::resident_asr::NemotronResident::from_env),
+        },
+        ModelEntry {
+            manifest: qwen_asr::caps::manifest,
+            provider: || {
+                let dir = env_path("BRAIN_QWEN_ASR", "a Qwen3-ASR checkpoint dir")?;
+                Ok(Arc::new(LazyProvider::new(
+                    qwen_asr::caps::manifest,
+                    Box::new(move || {
+                        let (window_secs, max_new) = crate::resident_asr::qwen_asr_tuning();
+                        qwen_asr::caps::QwenAsrProvider::load(&dir, qwen_asr::config::QwenAsrConfig::qwen3_asr_1_7b(), window_secs, max_new)
+                            .map(|p| Arc::new(p) as Arc<dyn Provider>)
+                    }),
+                )) as Arc<dyn Provider>)
+            },
+            resident: resident!(crate::resident_asr::QwenAsrResident::from_env),
+        },
+        // Time-series forecasting. Discoverable (`brain caps`) and served
+        // (`brain serve`, via the resident ctors) — but with no direct
+        // `brain do` provider yet: the forecast run logic lives in the
+        // residency instances (NPU/device placement included), so the provider
+        // says exactly how to reach the model instead of "unknown model".
+        ModelEntry {
+            manifest: crate::resident_forecast::chronos2_manifest,
+            provider: || {
+                Err("chronos-2 has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set; see docs/serving.md".to_string())
+            },
+            resident: resident!(crate::resident_forecast::Chronos2Resident::from_env),
+        },
+        ModelEntry {
+            manifest: crate::resident_forecast::fincast_manifest,
+            provider: || {
+                Err("fincast has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set; see docs/serving.md".to_string())
+            },
+            resident: resident!(crate::resident_forecast::FincastResident::from_env),
+        },
+        ModelEntry {
+            manifest: crate::resident_forecast::kronos_manifest,
+            provider: || {
+                Err("kronos has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set; see docs/serving.md".to_string())
+            },
+            resident: resident!(crate::resident_forecast::KronosResident::from_env),
         },
         ModelEntry {
             manifest: crate::imageops::manifest,
