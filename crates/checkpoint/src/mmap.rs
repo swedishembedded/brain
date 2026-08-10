@@ -133,6 +133,11 @@ impl MmapSafetensors {
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
         let mut out = Vec::new();
         decode_into(name, &m.dtype, raw, &mut out);
+        // A whole-file streaming scan (32 blocks of a multi-GB checkpoint)
+        // must not accumulate every tensor's page-cache pages in this
+        // process's RSS -- drop this tensor's pages now that it is decoded;
+        // a later re-read simply re-faults from disk. See advise_dontneed_tensor.
+        self.advise_dontneed_tensor(name);
         Some(out)
     }
 
@@ -182,6 +187,10 @@ impl MmapSafetensors {
             f(off as u64, &scratch);
             off += n;
         }
+        // Same rationale as tensor_f32: this tensor is now fully consumed by
+        // the caller, so its pages can be dropped instead of sitting resident
+        // for the rest of a whole-checkpoint streaming scan.
+        self.advise_dontneed_tensor(name);
         true
     }
 
@@ -294,9 +303,45 @@ mod tests {
         let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
         file.extend_from_slice(&hbytes);
         file.extend_from_slice(&blob);
-        let path = std::env::temp_dir().join(format!("mmap_st_{}.safetensors", std::process::id()));
+        // A per-call unique suffix, not just the PID: multiple tests call
+        // make_file() and cargo runs them concurrently in one process, so a
+        // PID-only path lets one test's std::fs::write race another's still-
+        // active mmap (observed as a SIGBUS when the file underneath a live
+        // mapping gets truncated/rewritten mid-test).
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("mmap_st_{}_{n}.safetensors", std::process::id()));
         std::fs::write(&path, &file).unwrap();
         (path, a, b_vals)
+    }
+
+    /// Reading every tensor in turn (auto-dropping each one's pages as it's
+    /// consumed, so host RSS never accumulates across a whole-file scan) must
+    /// not corrupt a later re-read of an earlier tensor: `MADV_DONTNEED` on a
+    /// read-only mapping only means "re-fault from the file if touched
+    /// again", never data loss. This is the property the OOM fix on a
+    /// multi-GB checkpoint depends on.
+    #[test]
+    fn consuming_a_tensor_evicts_its_pages_but_a_later_reread_is_still_correct() {
+        let (path, a, b_vals) = make_file();
+        let m = MmapSafetensors::open(&path).unwrap();
+
+        // Force multiple chunk calls so with_tensor_chunks's own per-chunk
+        // decode path is exercised, not just tensor_f32's whole-tensor path.
+        let mut seen: Vec<f32> = Vec::new();
+        assert!(m.with_tensor_chunks("a", 1, &mut |_, chunk| seen.extend_from_slice(chunk)));
+        assert_eq!(seen, a);
+
+        assert_eq!(m.tensor_f32("b").unwrap(), b_vals);
+
+        // Re-read "a" after "b" was touched (and after "a"'s own pages were
+        // advised away) -- must still decode byte-identically.
+        let mut reread: Vec<f32> = Vec::new();
+        assert!(m.with_tensor_chunks("a", 1, &mut |_, chunk| reread.extend_from_slice(chunk)));
+        assert_eq!(reread, a);
+        assert_eq!(m.tensor_f32("a").unwrap(), a);
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// Build a one-tensor safetensors file from raw little-endian bytes, with

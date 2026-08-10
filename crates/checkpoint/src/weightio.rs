@@ -83,8 +83,13 @@ impl WeightReader {
     /// the source's own `config.json` separately (as every importer already
     /// does) and build a [`ModelCard`] for the *output*.
     pub fn open_hf_dir(dir: &Path) -> io::Result<WeightReader> {
-        let index_path = dir.join("model.safetensors.index.json");
-        if !index_path.exists() {
+        // HF-transformers and diffusers checkpoints name their shard index
+        // differently (mirrors crate::safetensors::index_filename).
+        let index_path = ["model.safetensors.index.json", "diffusion_pytorch_model.safetensors.index.json"]
+            .into_iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.exists());
+        let Some(index_path) = index_path else {
             // No index: exactly one *.safetensors file (mirrors
             // crate::safetensors::read_model_dir's single-file fallback).
             let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
@@ -99,7 +104,7 @@ impl WeightReader {
                 .ok_or_else(|| inval(format!("no .safetensors file in {}", dir.display())))?;
             let path = path.to_str().ok_or_else(|| inval("non-utf8 shard path".to_string()))?;
             return Self::open(path);
-        }
+        };
 
         let idx_bytes = std::fs::read(&index_path)?;
         let idx: Value = serde_json::from_slice(&idx_bytes).map_err(|e| inval(format!("bad index.json: {e}")))?;
@@ -1004,6 +1009,32 @@ mod tests {
             seen.insert(n.to_string(), data);
         });
         assert_eq!(seen, eager_map);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_hf_dir_recognizes_the_diffusers_index_filename() {
+        // Diffusers-style checkpoints (e.g. Z-Image's `transformer/` dir) name
+        // their index `diffusion_pytorch_model.safetensors.index.json`, not
+        // the HF-transformers `model.safetensors.index.json`. A dir with only
+        // the diffusers name must still be read as fully sharded, not
+        // silently fall back to "no index -> just open one file".
+        let dir = scratch_dir("diffusers-sharded");
+        std::fs::write(dir.join("diffusion_pytorch_model-00001-of-00002.safetensors"), one_tensor_bytes("a", &[1.0, 2.0])).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model-00002-of-00002.safetensors"), one_tensor_bytes("b", &[3.0, 4.0, 5.0])).unwrap();
+        let index = serde_json::json!({
+            "metadata": {"total_size": 20},
+            "weight_map": {
+                "a": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                "b": "diffusion_pytorch_model-00002-of-00002.safetensors",
+            },
+        });
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors.index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let streamed = WeightReader::open_hf_dir(&dir).unwrap();
+        assert_eq!(streamed.tensor("a").unwrap(), vec![1.0, 2.0]);
+        assert_eq!(streamed.tensor("b").unwrap(), vec![3.0, 4.0, 5.0]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

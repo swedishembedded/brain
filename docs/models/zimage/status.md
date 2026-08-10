@@ -52,6 +52,77 @@ landed, the parity gates, what remains).
 after the `vae::blocks` hoist, with "zimage suites unaffected (22 suites
 green)".
 
+## Tiered weight residency (streaming, no-OOM) — 2026-08-10
+
+Z-Image's checkpoint (~31 GB: DiT 24.6 GB bf16 sharded ×3, Qwen3-4B encoder
+8.04 GB bf16 sharded ×3, VAE 168 MB, tokenizer 16 MB) does not fit in this
+box's RAM+swap headroom (swap was observed >99% consumed by unrelated
+processes throughout every run below; `MemAvailable` fluctuated 2-20 GiB).
+Brain must never load such a checkpoint whole — weights stream from disk via
+`checkpoint::weightio::WeightReader` (mmap) straight to the device, one
+tensor at a time, through `checkpoint::TensorSource`'s chunked/zero-copy
+accessors (shared by every model that streams through this seam, not a
+zimage-only path).
+
+**Real run** (`brain do brain/z-image text2image`, cold — first call, so this
+includes streaming the whole ~31 GB checkpoint through the quantize/upload
+path): prompt "a red fox in snow, photograph", 256×256, 8 steps, seed 42,
+`--precision int8`.
+
+| | |
+|---|---|
+| Wall-clock | **197 s** (cold: checkpoint stream + int8 quantize-build of both the encoder and DiT + 8-step sampling + VAE decode) |
+| Peak `brain` process RSS | **~1.03 GiB** (`/proc/<pid>/status` `VmRSS`, sampled every 2s) |
+| Peak system cgroup `memory.current` during the run | ~16.8 GiB (shared with other load on the box; not brain-exclusive) |
+| Output | `results/zimage-int8-256.png`, sha256 `56a2261f043b7ea558ae4fd17bca31f11671e1b2d1d4cc0f85b59e387848ea9b` |
+| Result | correct image (a red fox standing in snow), no OOM |
+
+Before the fixes below, the identical command was OOM-killed (`SIGKILL`,
+exit 137) twice, at RSS ≈ 16-19 GiB, on this same box.
+
+### Three bugs found and fixed by this real run (not by unit tests alone)
+
+1. **`checkpoint::weightio::WeightReader::open_hf_dir` / `safetensors::read_model_dir`
+   only recognized the HF-transformers index filename**
+   (`model.safetensors.index.json`). Z-Image's `transformer/` dir ships the
+   diffusers convention (`diffusion_pytorch_model.safetensors.index.json`).
+   Unrecognized, both silently fell back to their "no index → exactly one
+   `*.safetensors` file" path and opened only the alphabetically-first shard
+   — the other two (containing e.g. `layers.9.feed_forward.w3.weight`) were
+   never even opened. Symptom was a late, confusing panic
+   ("missing layers.9.feed_forward.w3.weight") deep in weight upload, not an
+   error at open time. Fixed by recognizing both index filenames; regression
+   tests added in both `weightio.rs` and `safetensors.rs`.
+2. **`MmapSafetensors::advise_dontneed_tensor` had zero callers** (already
+   flagged in the design plan). A whole-checkpoint streaming scan reads every
+   tensor exactly once, but without evicting a tensor's page-cache pages
+   after it's consumed, they accumulate for the rest of the scan — RSS grows
+   toward the full file size even though nothing is ever re-read. Fixed by
+   calling it from `MmapSafetensors::tensor_f32` and `with_tensor_chunks`
+   themselves, right after decoding — every model streaming through
+   `TensorSource` gets this for free, not just zimage.
+3. **The encoder's un-set-env-var default was worse than the on-demand
+   path it was supposed to be an alternative to.** With no
+   `BRAIN_ZIMAGE_ENCODER_GPU`, `HotPipeline::build_adapted` built a
+   permanently-resident CPU fp32 Qwen-4B encoder (~16 GiB, never dropped)
+   *concurrently* with the GPU int8 DiT build — worse in both memory (16 GiB
+   vs. the on-demand int8 path's ~9.5 GiB, dropped before the DiT even
+   builds) and speed (~38 s vs. ~1-2 s) than simply sharing the DiT's own
+   card. On a box with only one GPU there is no real "separate bulk card"
+   choice to defer to the caller, so defaulting to CPU there was pure
+   pessimization. Fixed via `default_bulk_gpu` in `pipeline.rs`: share the
+   DiT's GPU by default when the machine has exactly one; leave the
+   ambiguous multi-GPU default unchanged. This is what makes the memory fix
+   automatic — the caller never has to know to set an env var for it to not
+   OOM.
+
+None of these three would have been caught by a unit test written in
+isolation ahead of time — each is a real-checkpoint-shape or real-machine-
+shape fact (a diffusers index filename, actual page-cache accumulation under
+memory pressure, a single physical GPU) that only the end-to-end run against
+the real ~31 GB checkpoint on this real box could surface. Regression tests
+were added for each afterward so they can't silently regress.
+
 ## Measured (quoted from code/docs)
 
 - int8 6B fits **one 24 GB P40** (~6 GB of weights), no sharding (`int8.rs`,

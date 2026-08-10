@@ -147,6 +147,20 @@ fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
     bulk == dit_gpu && !resident_override
 }
 
+/// The encoder's GPU card, defaulted when the caller gave no explicit
+/// `BRAIN_ZIMAGE_ENCODER_GPU`. On a box with more than one GPU, which card
+/// should host the encoder is a real choice (a second, otherwise-idle card
+/// vs. sharing the DiT's) that only the caller can make — `None` (CPU) stays
+/// the conservative default there, unchanged. On a box with exactly one GPU
+/// there is no second card to choose, so CPU-by-default would only be
+/// trading a smaller, on-demand int8 encoder for a larger, permanently
+/// resident fp32 one — defaulting to sharing the DiT's card is strictly
+/// better and is what makes memory residency automatic rather than a flag
+/// the caller has to know to set.
+fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpu_count: usize) -> Option<u32> {
+    explicit.or(if gpu_count == 1 { Some(dit_gpu) } else { None })
+}
+
 /// Where/how the Qwen-4B text encoder runs.
 enum Encoder {
     /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
@@ -272,7 +286,7 @@ impl HotPipeline {
         // User env input, parsed to canonical card indices at this edge; all
         // placement below goes through the device registry (explicit Shard
         // indices / scoped `with_gpu`), never env mutation.
-        let enc_gpu: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
+        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
             .ok()
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_ZIMAGE_ENCODER_GPU {s:?}")))
@@ -280,6 +294,10 @@ impl HotPipeline {
         // The DiT/VAE card: the ambient selection (`--device gpu<i>`, the
         // residency-assigned scope, or BRAIN_GPU_INDEX), canonical card 0 otherwise.
         let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
+        // See default_bulk_gpu's doc: on a single-GPU box, defaulting to CPU
+        // would only trade a smaller on-demand int8 encoder for a larger,
+        // permanently resident fp32 one -- share the DiT's card instead.
+        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::gpus().len());
 
         // For the 2-card encoder split we interleave the builds: bulk shard on the
         // empty GPU `bulk`, THEN the DiT on GPU `dit_gpu` (while that card is still
@@ -823,5 +841,24 @@ mod encoder_scheduling_tests {
         assert!(!encoder_on_demand(1, 0, false), "a separate card -> resident (no conflict to avoid)");
         assert!(!encoder_on_demand(0, 0, true), "BRAIN_ZIMAGE_ENCODER_RESIDENT=1 -> resident even on the same card");
         assert!(!encoder_on_demand(1, 0, true), "override + separate card -> still resident");
+    }
+
+    /// With no explicit `BRAIN_ZIMAGE_ENCODER_GPU`, the encoder must not
+    /// default to a CPU-resident fp32 build (~16 GB, never dropped) on a box
+    /// with exactly one GPU: there is no "separate bulk card" for CPU to be
+    /// conserving VRAM against, so CPU-by-default is strictly worse than
+    /// sharing the DiT's own card (smaller int8 footprint, on-demand, and
+    /// dropped before the DiT builds) -- this is the "automatic regardless
+    /// of machine shape" requirement, not a magic env var the caller must
+    /// know to set. A box with more than one GPU keeps today's behaviour
+    /// (CPU by default) unchanged: there a real bulk-card choice exists and
+    /// picking one automatically would be guessing.
+    #[test]
+    fn default_bulk_gpu_shares_the_dits_card_when_theres_only_one_gpu() {
+        assert_eq!(default_bulk_gpu(None, 0, 1), Some(0), "one GPU total -> share it with the DiT");
+        assert_eq!(default_bulk_gpu(None, 2, 1), Some(2), "one GPU total -> that GPU is dit_gpu, share it");
+        assert_eq!(default_bulk_gpu(None, 0, 2), None, "two GPUs -> ambiguous, keep the CPU default");
+        assert_eq!(default_bulk_gpu(None, 0, 0), None, "no GPU probed -> nothing to default to");
+        assert_eq!(default_bulk_gpu(Some(1), 0, 1), Some(1), "an explicit choice is never overridden");
     }
 }

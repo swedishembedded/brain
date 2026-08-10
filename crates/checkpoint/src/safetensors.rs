@@ -135,9 +135,19 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
 /// so the exact interleaving does not matter — only that every tensor appears
 /// exactly once.
 #[cfg(not(target_arch = "wasm32"))]
+/// HF-transformers and diffusers checkpoints name their shard index
+/// differently (`model.safetensors.index.json` vs.
+/// `diffusion_pytorch_model.safetensors.index.json`); both must resolve to
+/// the same sharded-read behavior.
+fn index_filename(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    ["model.safetensors.index.json", "diffusion_pytorch_model.safetensors.index.json"]
+        .into_iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.exists())
+}
+
 pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
-    let index = dir.join("model.safetensors.index.json");
-    if index.exists() {
+    if let Some(index) = index_filename(dir) {
         let idx_bytes =
             std::fs::read(&index).map_err(|e| format!("cannot read {}: {e}", index.display()))?;
         let idx: Value = serde_json::from_slice(&idx_bytes)
@@ -244,6 +254,25 @@ mod tests {
             .unwrap();
 
         let ts = read_model_dir(&base).unwrap();
+        assert_eq!(ts.len(), 2);
+        assert_eq!(ts.iter().find(|t| t.name == "a").unwrap().data, vec![1.0, 2.0]);
+        assert_eq!(ts.iter().find(|t| t.name == "b").unwrap().data, vec![3.0]);
+
+        // Diffusers-style index filename (Z-Image's `transformer/` dir ships
+        // this, not `model.safetensors.index.json`) must be recognized too.
+        let diffusers = base.join("diffusers");
+        std::fs::create_dir_all(&diffusers).unwrap();
+        std::fs::write(diffusers.join("diffusion_pytorch_model-00001-of-00002.safetensors"), one_tensor_bytes("a", &[1.0, 2.0])).unwrap();
+        std::fs::write(diffusers.join("diffusion_pytorch_model-00002-of-00002.safetensors"), one_tensor_bytes("b", &[3.0])).unwrap();
+        let diffusers_index = serde_json::json!({
+            "metadata": {"total_size": 12},
+            "weight_map": {
+                "a": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                "b": "diffusion_pytorch_model-00002-of-00002.safetensors",
+            },
+        });
+        std::fs::write(diffusers.join("diffusion_pytorch_model.safetensors.index.json"), serde_json::to_vec(&diffusers_index).unwrap()).unwrap();
+        let ts = read_model_dir(&diffusers).unwrap();
         assert_eq!(ts.len(), 2);
         assert_eq!(ts.iter().find(|t| t.name == "a").unwrap().data, vec![1.0, 2.0]);
         assert_eq!(ts.iter().find(|t| t.name == "b").unwrap().data, vec![3.0]);
