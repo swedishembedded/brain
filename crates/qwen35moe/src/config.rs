@@ -27,6 +27,31 @@ use serde_json::Value;
 
 pub use qwen3::LoraCfg;
 
+/// The 9 LoRA-targetable leaf names for this hybrid decoder: GDN's 5 linear
+/// projections (`in_proj_qkv`, `in_proj_z`, `in_proj_b`, `in_proj_a`,
+/// `out_proj`) and GQA's 4 (`q_proj`, `k_proj`, `v_proj`, `o_proj`). No MoE
+/// expert leaf is ever included here — the 256-expert linears are
+/// deliberately out of scope for LoRA (see `Qwen35Config::param_list`'s own
+/// doc). `LoraCfg` is reused as-is from `qwen3` (a small, model-agnostic
+/// `{rank, alpha, targets}` struct) rather than duplicated — this free
+/// function is the qwen35-specific piece: `qwen3::LoraCfg::attn` targets its
+/// OWN four leaf names (`wq`/`wk`/`wv`/`wo`), which do not exist on this
+/// model, so a qwen35-specific constructor is needed instead of an inherent
+/// method on the foreign `LoraCfg` type (which the orphan rule would not
+/// allow from this crate anyway).
+pub fn lora_targets() -> Vec<String> {
+    ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj", "q_proj", "k_proj", "v_proj", "o_proj"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// [`LoraCfg`] targeting every one of [`lora_targets`] at the given rank/alpha
+/// — the qwen35 analogue of `qwen3::LoraCfg::attn`.
+pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
+    LoraCfg { rank, alpha, targets: lora_targets() }
+}
+
 /// Which token-mixer a decoder layer uses. Generated from
 /// `full_attention_interval` exactly like the reference's `__post_init__`:
 /// layer `i` (0-indexed) is `Full` iff `(i + 1) % interval == 0`.
@@ -314,9 +339,33 @@ impl Qwen35Config {
     /// weights at import" rule `docs/porting-playbook.md` §2 uses for qkv/
     /// gate-up fusions elsewhere), because `model::moe`'s dispatch reads one
     /// 2-D expert weight per call.
+    ///
+    /// With `self.lora` set, a targeted linear (matched by leaf name against
+    /// `LoraCfg::targets`, e.g. `"in_proj_qkv"`/`"q_proj"`) becomes a frozen
+    /// base weight plus trainable `A[r,in]`/`B[out,r]` adapters (mirrors
+    /// `qwen3::config::QwenConfig::param_list`'s own `lin` helper exactly).
+    /// Only the linear PROJECTIONS listed in this module's doc are ever
+    /// targetable this way — the 256-expert MoE linears are deliberately never
+    /// matched (no leaf name below is ever `"gate"`/`"up"`/`"down"` alone, only
+    /// the qualified GDN/GQA projection names), matching the standing LoRA
+    /// task's own scope note.
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let d = self.d_model as usize;
         let v = self.vocab as usize;
+        let r = self.lora.as_ref().map(|l| l.rank as usize);
+        // A linear `[out, in]` either as a plain trainable weight, or (LoRA on
+        // a targeted leaf) as a frozen base + A[r,in] + B[out,r] adapters —
+        // same shape as `qwen3::config::QwenConfig::param_list`'s `lin`.
+        let lin = |out_v: &mut Vec<(String, usize)>, name: String, leaf: &str, o: usize, i: usize| {
+            let lora_here = r.is_some() && self.lora.as_ref().map(|l| l.targets_leaf(leaf)).unwrap_or(false);
+            if let (true, Some(rk)) = (lora_here, r) {
+                out_v.push((name.clone(), o * i)); // frozen base
+                out_v.push((format!("{name}.lora_a"), rk * i));
+                out_v.push((format!("{name}.lora_b"), o * rk));
+            } else {
+                out_v.push((name, o * i));
+            }
+        };
         let mut out: Vec<(String, usize)> = vec![("tok.weight".to_string(), v * d)];
 
         let types = self.layer_types();
@@ -332,15 +381,15 @@ impl Qwen35Config {
                     let k = self.linear_conv_kernel_dim as usize;
                     let nvh = self.linear_num_value_heads as usize;
                     let hvd = self.linear_value_head_dim as usize;
-                    out.push((p("linear_attn.in_proj_qkv.weight"), conv_dim * d));
-                    out.push((p("linear_attn.in_proj_z.weight"), vdim * d));
-                    out.push((p("linear_attn.in_proj_b.weight"), nvh * d));
-                    out.push((p("linear_attn.in_proj_a.weight"), nvh * d));
+                    lin(&mut out, p("linear_attn.in_proj_qkv.weight"), "in_proj_qkv", conv_dim, d);
+                    lin(&mut out, p("linear_attn.in_proj_z.weight"), "in_proj_z", vdim, d);
+                    lin(&mut out, p("linear_attn.in_proj_b.weight"), "in_proj_b", nvh, d);
+                    lin(&mut out, p("linear_attn.in_proj_a.weight"), "in_proj_a", nvh, d);
                     out.push((p("linear_attn.conv1d.weight"), conv_dim * k));
                     out.push((p("linear_attn.A_log"), nvh));
                     out.push((p("linear_attn.dt_bias"), nvh));
                     out.push((p("linear_attn.norm.weight"), hvd));
-                    out.push((p("linear_attn.out_proj.weight"), d * vdim));
+                    lin(&mut out, p("linear_attn.out_proj.weight"), "out_proj", d, vdim);
                     let _ = kdim; // kept for readability of the shape derivation above
                 }
                 LayerType::Full => {
@@ -348,12 +397,12 @@ impl Qwen35Config {
                     let hqp = self.q_proj_dim() as usize;
                     let hkv = self.kv_dim() as usize;
                     let hd = self.head_dim as usize;
-                    out.push((p("self_attn.q_proj.weight"), hqp * d));
-                    out.push((p("self_attn.k_proj.weight"), hkv * d));
-                    out.push((p("self_attn.v_proj.weight"), hkv * d));
+                    lin(&mut out, p("self_attn.q_proj.weight"), "q_proj", hqp, d);
+                    lin(&mut out, p("self_attn.k_proj.weight"), "k_proj", hkv, d);
+                    lin(&mut out, p("self_attn.v_proj.weight"), "v_proj", hkv, d);
                     out.push((p("self_attn.q_norm.weight"), hd));
                     out.push((p("self_attn.k_norm.weight"), hd));
-                    out.push((p("self_attn.o_proj.weight"), d * hq));
+                    lin(&mut out, p("self_attn.o_proj.weight"), "o_proj", d, hq);
                 }
             }
 

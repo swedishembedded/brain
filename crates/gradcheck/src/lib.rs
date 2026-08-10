@@ -752,6 +752,61 @@ pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
     elementwise_check(&model, "blocks.2.linear_attn.A_log", 3e-1)
 }
 
+/// Build a tiny **LoRA** hybrid Qwen3.5-35B-A3B decoder (rank-2 adapters on
+/// every one of the 9 targetable GDN/GQA projections — `qwen35moe::config
+/// ::lora_targets()` — over the same `n_layers: 4, n_experts: 3, top_k: 3`
+/// shape [`check_qwen35`] uses, so BOTH layer types are exercised: layers 0-2
+/// are `Linear` (GDN), layer 3 is `Full` (GQA)) and gradient-check the
+/// adapters. This is the correctness gate for `Qwen35::lora_fwd` (the
+/// two-matmul + `AXPY` fusion) and the LoRA branch of `Qwen35::proj_bwd` (the
+/// frozen-base dX-only path plus the `A`/`B` adapter grads), through BOTH
+/// mixer types in one config — the qwen35 analogue of `check_qwen_lora`.
+///
+/// `directional_check`'s `param_names()` walks only the trainable
+/// `*.lora_a`/`*.lora_b` tensors (`Qwen35::param_names`'s LoRA branch) — the
+/// frozen base (every non-targeted weight too: norms, the 3 routed experts
+/// per layer, the shared expert, the router, embeddings, `A_log`/`dt_bias`,
+/// `conv1d.weight`) never gets a finite-difference probe, which is exactly
+/// the LoRA contract this checker is meant to confirm (a frozen base must
+/// never receive a gradient-buffer write — see `Qwen35::trainable`'s callers
+/// throughout `model.rs`).
+///
+/// A few AdamW steps run first so the zero-initialised `B` adapter (and hence
+/// `A`'s gradient) is non-trivial before the FD comparison — same reasoning
+/// as `check_qwen_lora`'s own doc, and the same `in_proj_qkv.weight`/
+/// `conv1d.weight` wide-init workaround [`qwen35_gradcheck_harness`]'s own
+/// doc explains (this harness hits the identical numerical-conditioning gap
+/// through the same GDN pipeline, LoRA or not).
+pub fn check_qwen35_lora(seed: u64) -> Report {
+    use qwen35moe::config::{lora_cfg, Qwen35Config};
+    use qwen35moe::model::Qwen35;
+    let cfg = Qwen35Config { n_layers: 4, n_experts: 3, top_k: 3, lora: Some(lora_cfg(2, 4.0)), ..Qwen35Config::tiny() };
+    let mut init = <Qwen35 as model::Model>::init_weights(&cfg, seed);
+    let mut conv_rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);
+    for l in 0..cfg.n_layers as usize {
+        for leaf in ["in_proj_qkv.weight", "conv1d.weight"] {
+            if let Some(v) = init.get_mut(&format!("blocks.{l}.linear_attn.{leaf}")) {
+                for x in v.iter_mut() {
+                    *x = conv_rng.scaled(1.0);
+                }
+            }
+        }
+    }
+    let model = Qwen35::new_train(cfg, 1, 12, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
+    model.set_batch(&x, &y);
+    // Move the adapters off the B=0 init so both A and B carry real gradients.
+    for step in 1..=5 {
+        model.zero_grads();
+        model.forward();
+        model.backward();
+        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.poll_wait();
+    }
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny bottleneck autoencoder, set a fixed float batch, and
 /// gradient-check it. This is the correctness gate for the `Regression` head
 /// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
@@ -1017,6 +1072,22 @@ mod tests {
         assert!(
             fails.is_empty(),
             "qwen35 A_log elementwise gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen35_lora_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen35_lora(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "qwen35 LoRA gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

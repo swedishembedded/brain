@@ -123,6 +123,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::Shard;
 use paramstore::{ParamStore, Role};
 
 use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
@@ -253,6 +254,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // anywhere else would silently shift every constant below out of sync.
     ("splice", kernels::SPLICE),                                 // 90
     ("splice_bwd", kernels::SPLICE_BWD),                         // 91
+    // -- LoRA tier -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
+    // Appended at the true end, same convention as the splice tier above.
+    ("axpy", kernels::AXPY),                                     // 92
 ];
 
 const RMSNORM: usize = 0;
@@ -347,6 +351,7 @@ const DECODE_SOFTMAX: usize = 88;
 const ATTN_DECODE_APPLY: usize = 89;
 const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
+const AXPY: usize = 92;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -886,6 +891,13 @@ struct TrainActs {
 pub struct Qwen35 {
     pub gpu: Gpu,
     pub cfg: Qwen35Config,
+    /// Pipeline shard this instance owns (whole model, `embed && head`, by
+    /// default — see [`Shard::whole`]). Layer indices stay ABSOLUTE
+    /// throughout (`res`/`ps`/weight names are all indexed/named by the real
+    /// `0..cfg.n_layers` layer number); only the forward/backward loop bounds
+    /// and the embed/head gates are shard-relative. Mirrors `qwen3::Qwen`'s
+    /// own `shard` field exactly.
+    pub shard: Shard,
     ps: ParamStore,
     /// `Some` selects the int8 (DP4A) inference tier for the linears
     /// `Qwen35Q8::is_i8_linear` names (`ps` excludes those names entirely —
@@ -1003,6 +1015,36 @@ pub struct Qwen35 {
     /// across `step` calls by [`gdn_causal_conv1d_step`]; zeroed by
     /// [`Self::reset_decode_cache`].
     gdn_hist: Vec<DeviceBuffer>,
+
+    // ---- LoRA scratch (persistent, reused across every targeted linear) ----
+    // Sized once at construction for `cfg.lora`'s rank and the widest output
+    // dimension across the 9 targetable leaves (GDN's `in_proj_qkv`/
+    // `in_proj_z`/`in_proj_b`/`in_proj_a`/`out_proj`, GQA's `q_proj`/
+    // `k_proj`/`v_proj`/`o_proj`) — mirrors `qwen3::Qwen`'s own
+    // `lora_a`/`lora_da`/`lora_out` fields exactly (see [`Self::lora_fwd`]/
+    // [`Self::proj_bwd`]'s LoRA branch). Size-1 dummies when `cfg.lora` is
+    // `None` (rank forced to 1 in [`Self::new_impl_on`], never read).
+    /// `[n*r]` : `a = x @ Aᵀ`.
+    lora_a: DeviceBuffer,
+    /// `[n*r]` : grad wrt `a`.
+    lora_da: DeviceBuffer,
+    /// `[n*max_out]` : `delta = a @ Bᵀ`.
+    lora_out: DeviceBuffer,
+
+    // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
+    // Unlike `qwen3::Qwen`, this file carries no persistent per-layer `dres`
+    // array (backward's residual grad is a plain carried local, `d_res_next`
+    // -- see `Self::backward`'s own doc); these two boundary buffers stand in
+    // for `dres[shard.end]` (read in) / `dres[shard.start]` (written out) so
+    // a non-head/non-embed stage still has somewhere stable to receive/expose
+    // its cross-stage gradient. Always allocated at `res_numel()` (cheap: one
+    // `[b·t·d_model]` slab); unused on a whole/head/embed-only build.
+    /// This stage's upstream gradient at `res[shard.end]`, written externally
+    /// by [`Self::write_out_dres`] before a non-head stage's `backward()`.
+    dres_boundary_in: DeviceBuffer,
+    /// This stage's gradient at `res[shard.start]`, refreshed by every
+    /// `backward()` call, read externally by [`Self::read_in_dres`].
+    dres_boundary_out: RefCell<DeviceBuffer>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one
@@ -1040,15 +1082,46 @@ pub(crate) struct DecodeCaches<'a> {
     pub gdn_hist: &'a [DeviceBuffer],
 }
 
+/// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
+/// verbatim (so the single-device store is byte-identical). A partial shard
+/// keeps only its layers' weights, plus `tok.weight` when it embeds and/or
+/// carries the tied head, and `norm.weight`+head when it is the head stage.
+/// Mirrors `qwen3::model::shard_param_list` exactly, adapted for this
+/// config's `"blocks.{l}."`-prefixed naming.
+fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
+    let full = cfg.param_list();
+    if shard.is_whole(cfg.n_layers as usize) {
+        return full;
+    }
+    let head = cfg.head_weight(); // "tok.weight" (tied) or "lm_head.weight"
+    let tied = head == "tok.weight";
+    full.into_iter()
+        .filter(|(name, _)| {
+            if let Some(rest) = name.strip_prefix("blocks.") {
+                let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+                return shard.owns(l);
+            }
+            match name.as_str() {
+                "tok.weight" => shard.embed || (shard.head && tied),
+                "norm.weight" => shard.head,
+                _ if name == head => shard.head, // untied lm_head
+                _ => false,
+            }
+        })
+        .collect()
+}
+
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, false)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, false, shard)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
     /// binary — see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false, shard)
     }
 
     /// [`Self::new`] with the int8 (DP4A) inference tier: the attention/GDN
@@ -1058,12 +1131,14 @@ impl Qwen35 {
     /// for the full rationale. Inference-only, same as the fp32 path
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true, false)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true, false, shard)
     }
 
     /// [`Self::new_i8`] on an existing device handle — see [`Self::new_on`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false, shard)
     }
 
     /// Build a TRAINABLE model: every weight `Role::Trainable` (full-parameter
@@ -1072,15 +1147,43 @@ impl Qwen35 {
     /// int8 and training are mutually exclusive (mirrors `qwen3::Qwen`'s own
     /// `assert!(!(i8 && train))`).
     pub fn new_train(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, true)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, true, shard)
     }
 
     /// [`Self::new_train`] on an existing device handle — see [`Self::new_on`].
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool) -> Qwen35 {
+    /// Build a single pipeline **stage**: only the layers (and endpoint
+    /// weights) in `shard` are allocated on this device, as a TRAINABLE
+    /// build (`Role::Trainable` full-parameter, or — when `cfg.lora` is
+    /// `Some` — frozen base + trainable LoRA adapters). `shard.gpu_index`
+    /// names the canonical physical card (device registry); `Shard::ANY_GPU`
+    /// keeps the ambient selection. Mirrors `qwen3::Qwen::new_shard` exactly
+    /// (see `crate::shard`'s [`model::Shardable`] impl, the only caller this
+    /// is meant for outside tests).
+    pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
+        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+            Gpu::new(PIPELINES)
+        } else {
+            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
+        };
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
+    }
+
+    fn new_impl_on(
+        gpu: Gpu,
+        cfg: Qwen35Config,
+        b: u32,
+        t: u32,
+        src: &dyn checkpoint::TensorSource,
+        i8: bool,
+        train: bool,
+        shard: Shard,
+    ) -> Qwen35 {
         assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train is fp32-only)");
         let chunk = gdn_chunk_size(t);
         assert_eq!(
@@ -1092,19 +1195,38 @@ impl Qwen35 {
              this assert failing would mean a logic error in gdn_chunk_size itself"
         );
 
-        // Inference (`!train`): every weight Role::Frozen (no grad/Adam buffers
-        // allocated at all -- see paramstore::ParamStore::new_with_roles_src).
-        // Training: every weight Role::Trainable (full-parameter backward --
-        // no LoRA-specific subset here, per this task's scope). In int8 mode
-        // the linears `Qwen35Q8::is_i8_linear` names live in `q8` (packed
-        // int8), NOT the fp32 store -- filter them out here so no redundant
-        // fp32 copy is ever uploaded (mirrors `qwen3::model.rs`'s own
-        // `Q8::is_i8_linear` filter, `model.rs:504-507` in that crate).
-        let roles: Vec<(String, usize, Role)> = cfg
-            .param_list()
+        // Role assignment:
+        //  - inference (`!train`): every weight Role::Frozen (no grad/Adam
+        //    buffers allocated at all -- see
+        //    paramstore::ParamStore::new_with_roles_src).
+        //  - LoRA training (`train && cfg.lora.is_some()`): only the
+        //    `.lora_a`/`.lora_b` adapter tensors `Qwen35Config::param_list`
+        //    added for each targeted leaf are Trainable; every other weight
+        //    (including a LoRA-targeted leaf's own frozen base) is Frozen --
+        //    mirrors `qwen3::model.rs`'s own LoRA role-assignment branch
+        //    exactly (`model.rs:516-528` in that crate).
+        //  - full training (`train && cfg.lora.is_none()`): every weight
+        //    Role::Trainable (full-parameter backward).
+        // In int8 mode the linears `Qwen35Q8::is_i8_linear` names live in
+        // `q8` (packed int8), NOT the fp32 store -- filter them out here so
+        // no redundant fp32 copy is ever uploaded (mirrors
+        // `qwen3::model.rs`'s own `Q8::is_i8_linear` filter,
+        // `model.rs:504-507` in that crate). int8 and LoRA/training are
+        // mutually exclusive (the `assert!` above), so `i8` and
+        // `cfg.lora.is_some()` never both hold here.
+        let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(n, _)| !(i8 && Qwen35Q8::is_i8_linear(n)))
-            .map(|(n, c)| (n, c, if train { Role::Trainable } else { Role::Frozen }))
+            .map(|(n, c)| {
+                let role = if !train {
+                    Role::Frozen
+                } else if cfg.lora.is_some() {
+                    if n.ends_with(".lora_a") || n.ends_with(".lora_b") { Role::Trainable } else { Role::Frozen }
+                } else {
+                    Role::Trainable
+                };
+                (n, c, role)
+            })
             .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
@@ -1119,6 +1241,27 @@ impl Qwen35 {
         for _ in 0..=cfg.n_layers {
             res.push(gpu.storage(n * d));
         }
+        // Pipeline-parallel cross-stage boundary gradient buffers -- see the
+        // struct fields' own doc.
+        let dres_boundary_in = gpu.storage(n * d);
+        let dres_boundary_out = RefCell::new(gpu.storage(n * d));
+
+        // LoRA scratch (rank r; max projection output across all 9 targetable
+        // leaves -- GDN's in_proj_qkv/in_proj_z/in_proj_b/in_proj_a/out_proj,
+        // GQA's q_proj/k_proj/v_proj/o_proj -- mirrors `qwen3::model.rs`'s own
+        // sizing exactly). `.max(1)` so a `cfg.lora: None` build still gets a
+        // valid (unused) 1-element rank.
+        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
+        let lora_max_out = cfg
+            .linear_conv_dim()
+            .max(cfg.linear_value_dim())
+            .max(cfg.linear_num_value_heads)
+            .max(d as u32)
+            .max(cfg.q_proj_dim())
+            .max(cfg.kv_dim()) as u64;
+        let lora_a = gpu.storage(n * lora_r);
+        let lora_da = gpu.storage(n * lora_r);
+        let lora_out = gpu.storage(n * lora_max_out);
 
         let ones_khd = gpu.storage_init("qwen35.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
 
@@ -1175,6 +1318,7 @@ impl Qwen35 {
         Qwen35 {
             gpu,
             cfg,
+            shard,
             ps,
             q8,
             b,
@@ -1205,11 +1349,25 @@ impl Qwen35 {
             gqa_vcache,
             gdn_state,
             gdn_hist,
+            lora_a,
+            lora_da,
+            lora_out,
+            dres_boundary_in,
+            dres_boundary_out,
         }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
+    /// parameters (LoRA base, inference) have none, so their weight-gradient
+    /// dispatches must be skipped — only the input-gradient (dX) path runs to
+    /// keep backprop flowing to lower-layer adapters. Mirrors
+    /// `qwen3::model.rs`'s own `trainable` helper exactly.
+    fn trainable(&self, name: &str) -> bool {
+        self.ps.grad.contains_key(name)
     }
 
     /// The gradient buffer for a trainable weight — only valid on a
@@ -1219,26 +1377,75 @@ impl Qwen35 {
         self.ps.g(name)
     }
 
-    /// Backward for a dense linear `y = x @ Wᵀ` (no LoRA — full-parameter
-    /// training only, per this task's scope note): `dW += d_outᵀ·x`,
-    /// `dx = d_out·W` (`acc` selects overwrite vs accumulate on `dx`, mirroring
-    /// `qwen3::model.rs`'s own `proj_bwd` helper this is patterned on — naive
-    /// `matmul_dx`/`matmul_dw` only, no tiled-GEMM selection, matching a
-    /// correctness-first tiny gradcheck config per `docs/porting-playbook.md`
-    /// §10).
-    #[allow(clippy::too_many_arguments)]
-    fn proj_bwd(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+    /// True if a LoRA adapter is configured for the given projection leaf
+    /// (one of the 9 targetable leaf names — never an MoE expert leaf).
+    /// Mirrors `qwen3::model.rs`'s own `lora_for` exactly.
+    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+    }
+
+    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
+    /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output —
+    /// mirrors `qwen3::model.rs`'s own `lora_fwd` exactly (same two-matmul +
+    /// `AXPY` fusion, using this file's own persistent `lora_a`/`lora_out`
+    /// scratch).
+    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
         let g = &self.gpu;
-        steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
-        steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+        s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
+        s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// Backward for a (possibly-LoRA) linear `y = x·Wᵀ`. Accumulates the input
+    /// gradient into `dx` (flag `acc`). For a full weight: `dW += d_outᵀ·x`
+    /// (skipped when `wname` is Frozen — a LoRA-mode base, or an untargeted
+    /// weight under a LoRA build, e.g. `mlp.router.weight`), `dx = d_out·W`.
+    /// For a LoRA-targeted leaf: the base weight is always frozen (dX only, no
+    /// dW), and the adapter grads `gA`/`gB` are produced (scale folded into
+    /// the private `lora_a`/`lora_da` scratch) — naive `matmul_dx`/`matmul_dw`
+    /// only, no tiled-GEMM selection, matching a correctness-first tiny
+    /// gradcheck config per `docs/porting-playbook.md` §10. Mirrors
+    /// `qwen3::model.rs`'s own `proj_bwd` exactly.
+    #[allow(clippy::too_many_arguments)]
+    fn proj_bwd(&self, steps: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+        let g = &self.gpu;
+        match self.lora_for(leaf) {
+            Some((r, scale)) => {
+                // base: dx += d_out·W (frozen weight — no dW).
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                let a = format!("{wname}.lora_a");
+                let bnm = format!("{wname}.lora_b");
+                // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
+                steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+                steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
+                steps.push(g.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
+                // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
+                steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
+                steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+            }
+            None => {
+                if self.trainable(wname) {
+                    steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+                }
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+            }
+        }
     }
 
     /// RMSNorm backward via the shared builder: input grad always, gain grad
-    /// always (every weight `Role::Trainable` on a training build — no frozen
-    /// case here, unlike `qwen3::Qwen`'s LoRA-base-frozen branch).
+    /// only when the gain is trainable (frozen under a LoRA build — no norm
+    /// gain is ever a LoRA target, so this mirrors `qwen3::Qwen`'s own
+    /// LoRA-base-frozen branch, applied here to every norm rather than to a
+    /// projection weight).
     fn rmsnorm_bwd_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let inv = self.gpu.storage(rows as u64);
-        steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, Some(self.g(wname)), dim, rows));
+        let gw = self.trainable(wname).then(|| self.g(wname));
+        steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, gw, dim, rows));
     }
 
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
@@ -1333,7 +1540,9 @@ impl Qwen35 {
             q8.mm8(g, &mut s, &ql.in_proj_qkv, &mixed_qkv, n);
             g.submit(&[], &s);
         } else {
-            g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)]);
+            let mut s = vec![g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)];
+            self.lora_fwd(&mut s, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
+            g.submit(&[], &s);
         }
 
         // 2. Depthwise causal conv1d + SiLU (activation AFTER the conv --
@@ -1395,14 +1604,15 @@ impl Qwen35 {
             q8.mm8(g, &mut s, &ql.in_proj_z, &z, n);
             g.submit(&[], &s);
         } else {
-            g.submit(
-                &[],
-                &[
-                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
-                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
-                    g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
-                ],
-            );
+            let mut s = vec![
+                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
+                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
+                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
+            ];
+            self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
+            self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
+            self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            g.submit(&[], &s);
         }
         let beta = g.storage((n * nvh) as u64);
         let g_decay = g.storage((n * nvh) as u64);
@@ -1518,7 +1728,9 @@ impl Qwen35 {
             q8.mm8(g, &mut s, &ql.out_proj, &out, n);
             g.submit(&[], &s);
         } else {
-            g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)]);
+            let mut s = vec![g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)];
+            self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            g.submit(&[], &s);
         }
 
         let acts = scratch_train.map(|scratch_train| GdnLayerActs {
@@ -1572,14 +1784,15 @@ impl Qwen35 {
             q8.mm8(g, &mut s, &ql.v_proj, &v, n);
             g.submit(&[], &s);
         } else {
-            g.submit(
-                &[],
-                &[
-                    g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
-                    g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
-                    g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
-                ],
-            );
+            let mut s = vec![
+                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
+                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
+                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
+            ];
+            self.lora_fwd(&mut s, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
+            self.lora_fwd(&mut s, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
+            self.lora_fwd(&mut s, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
+            g.submit(&[], &s);
         }
 
         // Per-head de-interleaved split of q_full's [query|gate] halves --
@@ -1636,14 +1849,13 @@ impl Qwen35 {
             q8.mm8(g, &mut s, &ql.o_proj, &out, n);
             g.submit(&[], &s);
         } else {
-            g.submit(
-                &[],
-                &[
-                    g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
-                    g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
-                    g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
-                ],
-            );
+            let mut s = vec![
+                g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
+                g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
+                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
+            ];
+            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, qd, d);
+            g.submit(&[], &s);
         }
 
         let acts = self.is_train.then(|| GqaLayerActs {
@@ -1829,22 +2041,44 @@ impl Qwen35 {
 
     // ---- full stack ----------------------------------------------------------
 
-    fn run_forward(&self) {
+    /// Run this stage's forward graph over its own layer range
+    /// (`self.shard.start..self.shard.end`, ABSOLUTE layer indices — `res`
+    /// stays indexed by the real layer number, only the loop bounds are
+    /// shard-relative). The embedding gather (+ vision splice) runs only on
+    /// the embed stage; the final norm + lm_head/logits only on the head
+    /// stage. A non-embed stage's `res[shard.start]` must already hold the
+    /// previous stage's output (written via [`Self::write_in_res`]) before
+    /// this call; a non-head stage's `res[shard.end]` is this stage's output
+    /// for the next one (read via [`Self::read_out_res`]). Mirrors
+    /// `qwen3::Qwen::forward_steps`'s own shard gating exactly, adapted to
+    /// this file's "build and submit inline" convention (no separate
+    /// step-list rebuild is needed here).
+    pub(crate) fn run_forward(&self) {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
         let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
 
-        g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d)]);
+        if self.shard.embed {
+            g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d)]);
 
-        // Vision-language splice: overwrite the image-placeholder rows of the
-        // freshly-gathered residual stream with the projected image tokens
-        // (see `Self::enable_mm_splice`'s doc). No-op unless enabled.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
-            g.submit(&[], &[model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d)]);
+            // Vision-language splice: overwrite the image-placeholder rows of
+            // the freshly-gathered residual stream with the projected image
+            // tokens (see `Self::enable_mm_splice`'s doc). No-op unless
+            // enabled. Only meaningful on the embed stage (it operates on
+            // `res[0]`, right after the gather above).
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                g.submit(&[], &[model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d)]);
+            }
         }
 
-        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+        let types = self.cfg.layer_types();
+        // `l` is the ABSOLUTE layer index (into `types`/`self.res`/the
+        // `blocks.{l}.*` weight names below), not just a `types` index --
+        // clippy's `needless_range_loop` heuristic only sees the first use.
+        #[allow(clippy::needless_range_loop)]
+        for l in self.shard.start..self.shard.end {
+            let ty = types[l];
             let xres = &self.res[l];
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
@@ -1876,11 +2110,21 @@ impl Qwen35 {
             }
         }
 
-        let xn_final = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &self.res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n)]);
-
-        let v = self.cfg.vocab;
-        g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+        // Head epilogue (final norm + lm_head/logits): only the head stage.
+        // On a non-head stage `xn_final` is never read (`self.shard.head` is
+        // `false` in `Self::forward`'s CE step too — see `Qwen35::forward`'s
+        // own doc), so a size-1 dummy stands in, matching this file's
+        // "size-1 dummy where a value doesn't apply" convention used
+        // elsewhere (`gqa_kcache`/`gdn_state`).
+        let xn_final = if self.shard.head {
+            let xn_final = g.storage((n * d) as u64);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &self.res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n)]);
+            let v = self.cfg.vocab;
+            g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+            xn_final
+        } else {
+            g.storage(1)
+        };
 
         if self.is_train {
             *self.train_acts.borrow_mut() = Some(TrainActs { layers: layer_acts, xn_final });
@@ -1915,7 +2159,7 @@ impl Qwen35 {
         let d_gated = g.storage((n * value_dim) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, d_out, &la.gated, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0);
+            self.proj_bwd(&mut s, "out_proj", d_out, &la.gated, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0);
             g.submit(&[], &s);
         }
 
@@ -2025,16 +2269,23 @@ impl Qwen35 {
                 g.step(GDN_DECAY_GATE_BWD, &[&la.aproj, self.w(&p("A_log")), self.w(&p("dt_bias")), &d_g_decay, &d_aproj], &[n, nvh], n * nvh),
             ];
             // d_A_log[h] = sum_row d_g_decay[row,h]*g_decay[row,h]; d_dt_bias[h] = sum_row d_aproj[row,h].
+            // A_log/dt_bias are never a LoRA target -- Frozen under a LoRA
+            // build, same as any other non-targeted weight -- so skip these
+            // reductions entirely when frozen (no grad buffer to write into).
             let mul_tmp = g.storage((n * nvh) as u64);
             s.push(g.step(MUL, &[&d_g_decay, &la.g_decay, &mul_tmp], &[n * nvh], n * nvh));
-            s.push(g.step(BIAS_GRAD, &[&mul_tmp, self.g(&p("A_log"))], &[n, nvh], nvh));
-            s.push(g.step(BIAS_GRAD, &[&d_aproj, self.g(&p("dt_bias"))], &[n, nvh], nvh));
+            if self.trainable(&p("A_log")) {
+                s.push(g.step(BIAS_GRAD, &[&mul_tmp, self.g(&p("A_log"))], &[n, nvh], nvh));
+            }
+            if self.trainable(&p("dt_bias")) {
+                s.push(g.step(BIAS_GRAD, &[&d_aproj, self.g(&p("dt_bias"))], &[n, nvh], nvh));
+            }
             // FIRST touch to d_xn1 in this function (acc=0) -- in_proj_a/z below
             // accumulate on top; in_proj_qkv (step 1, processed last here)
             // accumulates last of all.
-            self.proj_bwd(&mut s, &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
-            self.proj_bwd(&mut s, &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
-            self.proj_bwd(&mut s, &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
+            self.proj_bwd(&mut s, "in_proj_b", &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
+            self.proj_bwd(&mut s, "in_proj_a", &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
+            self.proj_bwd(&mut s, "in_proj_z", &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
             g.submit(&[], &s);
         }
 
@@ -2073,7 +2324,10 @@ impl Qwen35 {
                 g.step(NLC_NCHW, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
                 g.step(SILU_BWD, &[&la.ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
             ];
-            s.extend(conv1d_bwd(g, &conv_kernels(), &conv_shape, &d_ncl_out, &la.ncl_in, self.w(&p("conv1d.weight")), Some(&d_ncl_in), Some(self.g(&p("conv1d.weight")))));
+            // conv1d.weight is never a LoRA target -- Frozen under a LoRA
+            // build, so its dW argument is `None` there (dX is unconditional).
+            let conv_dw = self.trainable(&p("conv1d.weight")).then(|| self.g(&p("conv1d.weight")));
+            s.extend(conv1d_bwd(g, &conv_kernels(), &conv_shape, &d_ncl_out, &la.ncl_in, self.w(&p("conv1d.weight")), Some(&d_ncl_in), conv_dw));
             s.push(g.step(NCHW_NLC, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
             g.submit(&[], &s);
         }
@@ -2081,7 +2335,7 @@ impl Qwen35 {
         // ---- 1. in_proj_qkv backward (last accumulate into d_xn1) ----
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
+            self.proj_bwd(&mut s, "in_proj_qkv", &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
             g.submit(&[], &s);
         }
     }
@@ -2099,7 +2353,7 @@ impl Qwen35 {
         let d_ctx_gated = g.storage((n * qd) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, d_out, &la.ctx_gated, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0);
+            self.proj_bwd(&mut s, "o_proj", d_out, &la.ctx_gated, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0);
             g.submit(&[], &s);
         }
 
@@ -2151,9 +2405,9 @@ impl Qwen35 {
         // ---- 1. q/k/v proj backward ----
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);
-            self.proj_bwd(&mut s, &d_k, xn1, &p("k_proj.weight"), d_xn1, n, d, kvd, 1);
-            self.proj_bwd(&mut s, &d_v, xn1, &p("v_proj.weight"), d_xn1, n, d, kvd, 1);
+            self.proj_bwd(&mut s, "q_proj", &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);
+            self.proj_bwd(&mut s, "k_proj", &d_k, xn1, &p("k_proj.weight"), d_xn1, n, d, kvd, 1);
+            self.proj_bwd(&mut s, "v_proj", &d_v, xn1, &p("v_proj.weight"), d_xn1, n, d, kvd, 1);
             g.submit(&[], &s);
         }
     }
@@ -2188,7 +2442,7 @@ impl Qwen35 {
         let d_gate = g.storage((n * e) as u64);
         let router_weight_bwd_steps = {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_router_logits, &la.xn2, &p("mlp.router.weight"), &d_xn2, n, d, e, 0);
+            self.proj_bwd(&mut s, "router", &d_router_logits, &la.xn2, &p("mlp.router.weight"), &d_xn2, n, d, e, 0);
             s
         };
         let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e)
@@ -2197,13 +2451,16 @@ impl Qwen35 {
                 (self.w(&ep("gate.weight")).clone(), self.w(&ep("up.weight")).clone(), self.w(&ep("down.weight")).clone())
             })
             .collect();
+        // Never a LoRA target (per the standing LoRA task's own scope note:
+        // the 256-expert MoE linears are out of scope) -- Frozen under a LoRA
+        // build, so each field is `None` there (`ExpertGrads`' own contract).
         let expert_grads: Vec<ExpertGrads> = (0..e)
             .map(|ei| {
                 let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
                 ExpertGrads {
-                    gate_w: Some(self.g(&ep("gate.weight"))),
-                    up_w: Some(self.g(&ep("up.weight"))),
-                    down_w: Some(self.g(&ep("down.weight"))),
+                    gate_w: self.trainable(&ep("gate.weight")).then(|| self.g(&ep("gate.weight"))),
+                    up_w: self.trainable(&ep("up.weight")).then(|| self.g(&ep("up.weight"))),
+                    down_w: self.trainable(&ep("down.weight")).then(|| self.g(&ep("down.weight"))),
                 }
             })
             .collect();
@@ -2251,11 +2508,11 @@ impl Qwen35 {
                 g.step(ROW_DOT, &[d_moe_out, &la.sh_mlp_out, &d_gate_scalar], &[n, d, 0, 0, f(1.0)], n),
                 g.step(SIGMOID_BWD, &[&la.sh_gate_logits, &d_gate_scalar, &d_gate_logits], &[n], n),
             ];
-            self.proj_bwd(&mut s, &d_gate_logits, &la.xn2, &p("mlp.shared_expert_gate.weight"), &d_xn2, n, d, 1, 1);
-            self.proj_bwd(&mut s, &d_mlp_out, &la.sh_h, &p("mlp.shared_expert.down.weight"), &d_sh_h, n, shared_ff, d, 0);
+            self.proj_bwd(&mut s, "shared_expert_gate", &d_gate_logits, &la.xn2, &p("mlp.shared_expert_gate.weight"), &d_xn2, n, d, 1, 1);
+            self.proj_bwd(&mut s, "shared_expert_down", &d_mlp_out, &la.sh_h, &p("mlp.shared_expert.down.weight"), &d_sh_h, n, shared_ff, d, 0);
             s.extend(swiglu_bwd(g, &kernel_ids(), &la.sh_gate_pre, &la.sh_up, &d_sh_h, &d_sh_gate_pre, &d_sh_up, n * shared_ff));
-            self.proj_bwd(&mut s, &d_sh_up, &la.xn2, &p("mlp.shared_expert.up.weight"), &d_xn2, n, d, shared_ff, 1);
-            self.proj_bwd(&mut s, &d_sh_gate_pre, &la.xn2, &p("mlp.shared_expert.gate.weight"), &d_xn2, n, d, shared_ff, 1);
+            self.proj_bwd(&mut s, "shared_expert_up", &d_sh_up, &la.xn2, &p("mlp.shared_expert.up.weight"), &d_xn2, n, d, shared_ff, 1);
+            self.proj_bwd(&mut s, "shared_expert_gate_proj", &d_sh_gate_pre, &la.xn2, &p("mlp.shared_expert.gate.weight"), &d_xn2, n, d, shared_ff, 1);
             g.submit(&[], &s);
         }
 
@@ -2267,6 +2524,16 @@ impl Qwen35 {
     /// threads `res[l] -> res[l+1]`. Requires an immediately preceding
     /// `forward()` call on a [`Self::new_train`] instance (see
     /// [`Self::train_acts`]'s own doc).
+    /// Run this stage's backward graph. On the head stage (`self.shard.head`)
+    /// this starts from the CE gradient (as before sharding existed); on any
+    /// other stage it instead starts from the upstream gradient this stage's
+    /// OUTPUT boundary already carries (`self.dres_boundary_in`, written by
+    /// [`Self::write_out_dres`] before this call). At the end of the reversed
+    /// layer loop, this stage's INPUT-boundary gradient (`dres[shard.start]`)
+    /// is stashed in `self.dres_boundary_out` for [`Self::read_in_dres`] to
+    /// read — mirrors `qwen3::Qwen::build_backward_steps`'s own shard gating,
+    /// adapted to this file's "no persistent per-layer `dres` array" design
+    /// (a single carried local, `d_res_next`, plays that role here).
     pub fn backward(&self) {
         assert!(self.is_train, "qwen35: backward() requires a Qwen35::new_train build");
         let ta = self.train_acts.borrow_mut().take().expect(
@@ -2279,29 +2546,36 @@ impl Qwen35 {
         let d = self.cfg.d_model;
         let v = self.cfg.vocab;
 
-        // ---- CE gradient ----
-        g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
-        let d_logits = g.storage((n * v) as u64);
-        g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
+        // ---- head epilogue backward (head stage only): CE-grad, lm_head,
+        // final norm -- a non-head stage starts instead from the externally
+        // supplied gradient at `res[shard.end]` (`Self::write_out_dres`).
+        let mut d_res_next = if self.shard.head {
+            g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
+            let d_logits = g.storage((n * v) as u64);
+            g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
 
-        // ---- lm_head backward ----
-        let d_xn_final = g.storage((n * d) as u64);
-        {
-            let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
-            g.submit(&[], &s);
-        }
+            // ---- lm_head backward ----
+            let d_xn_final = g.storage((n * d) as u64);
+            {
+                let mut s = Vec::new();
+                self.proj_bwd(&mut s, "lm_head", &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
+                g.submit(&[], &s);
+            }
 
-        // ---- final norm backward ----
-        let mut d_res_next = g.storage((n * d) as u64);
-        {
-            let mut s = Vec::new();
-            self.rmsnorm_bwd_step(&mut s, &self.res[self.cfg.n_layers as usize], "norm.weight", &d_xn_final, &d_res_next, d, n);
-            g.submit(&[], &s);
-        }
+            // ---- final norm backward ----
+            let d_res_next = g.storage((n * d) as u64);
+            {
+                let mut s = Vec::new();
+                self.rmsnorm_bwd_step(&mut s, &self.res[self.cfg.n_layers as usize], "norm.weight", &d_xn_final, &d_res_next, d, n);
+                g.submit(&[], &s);
+            }
+            d_res_next
+        } else {
+            self.dres_boundary_in.clone()
+        };
 
-        for (l, _ty) in self.cfg.layer_types().iter().enumerate().rev() {
-            let la = &ta.layers[l];
+        for l in (self.shard.start..self.shard.end).rev() {
+            let la = &ta.layers[l - self.shard.start];
 
             // ---- second residual add backward: res[l+1] = xmid + moe_out ----
             // Both branches receive the FULL upstream gradient (d_res_next):
@@ -2346,18 +2620,34 @@ impl Qwen35 {
             d_res_next = d_res_l;
         }
 
+        // This stage's INPUT-boundary gradient (`dres[shard.start]`), for the
+        // previous stage to read via `Self::read_in_dres`. Stashed
+        // unconditionally (cheap: one buffer handle) -- a whole/embed-stage
+        // build simply never has this read, mirroring the `res_numel`-sized
+        // boundary buffers `qwen3::Qwen` always keeps live too.
+        *self.dres_boundary_out.borrow_mut() = d_res_next.clone();
+
         // ---- vision-language splice backward: route the image rows' grad to
         // `d_img_embeds` and ZERO them in `d_res_next` BEFORE `EMB_BWD`, so the
         // image-placeholder token id never accumulates a spurious `tok.weight`
         // gradient from those rows (mirrors `qwen3::Qwen::backward`'s own
         // `mm_splice` case exactly). No-op unless `enable_mm_splice` was called.
-        if let Some((row0, n_rows)) = self.mm_splice.get() {
-            g.submit(&[], &[model::vlm::splice_bwd(g, SPLICE_BWD, &d_res_next, &self.d_img_embeds, row0 * d, n_rows * d)]);
-        }
+        // Only meaningful on the embed stage (operates on `res[0]`/`dres[0]`).
+        if self.shard.embed {
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                g.submit(&[], &[model::vlm::splice_bwd(g, SPLICE_BWD, &d_res_next, &self.d_img_embeds, row0 * d, n_rows * d)]);
+            }
 
-        // ---- embedding backward (tok.weight; untied per this task's tiny
-        // config -- lm_head.weight already got its own dW above) ----
-        g.submit(&[], &[g.step(EMB_BWD, &[&self.tokens, &d_res_next, self.g("tok.weight")], &[n, d, v], v * d)]);
+            // ---- embedding backward (tok.weight; untied per this task's tiny
+            // config -- lm_head.weight already got its own dW above). tok.weight
+            // is never a LoRA target -- Frozen under a LoRA build, so skip this
+            // dispatch entirely then (no grad buffer to write into; d_res_next's
+            // own gradient has nowhere further to go, which is correct -- the
+            // embedding IS the start of the graph).
+            if self.trainable("tok.weight") {
+                g.submit(&[], &[g.step(EMB_BWD, &[&self.tokens, &d_res_next, self.g("tok.weight")], &[n, d, v], v * d)]);
+            }
+        }
     }
 
     pub fn zero_grads(&self) {
@@ -2372,6 +2662,14 @@ impl Qwen35 {
         self.ps.read_grad(&self.gpu, name)
     }
 
+    /// Run the forward graph and return the scalar loss. Only meaningful on
+    /// a whole (single-device) instance or a pipeline stage that owns the
+    /// head (`self.shard.head`) — `self.logits`/`self.ce_buf` are only
+    /// written on the head stage (see [`Self::run_forward`]'s own gate); a
+    /// non-head stage's forward step is driven through
+    /// [`Self::run_forward`] directly by [`model::Shardable::run_forward_stage`]
+    /// instead of this method, exactly mirroring `qwen3::Qwen::forward`'s own
+    /// contract.
     pub fn forward(&self) -> f32 {
         self.run_forward();
         let n = self.b * self.t;
@@ -2769,8 +3067,53 @@ impl Qwen35 {
         self.gpu.poll_wait();
     }
 
+    // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
+
+    /// Residual-stream element count at a stage boundary (`b·t·d_model`).
+    /// Mirrors `qwen3::Qwen::res_numel` exactly.
+    fn res_numel(&self) -> usize {
+        (self.b * self.t) as usize * self.cfg.d_model as usize
+    }
+    /// Read this stage's OUTPUT residual `res[shard.end]` (input to the next
+    /// stage's [`Self::write_in_res`]).
+    pub fn read_out_res(&self) -> Vec<f32> {
+        self.gpu.read(&self.res[self.shard.end], self.res_numel())
+    }
+    /// Write this stage's INPUT residual `res[shard.start]` (from the
+    /// previous stage's [`Self::read_out_res`]).
+    pub fn write_in_res(&self, data: &[f32]) {
+        self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
+    }
+    /// Read this stage's INPUT-boundary residual gradient `dres[shard.start]`
+    /// (for the previous stage's [`Self::write_out_dres`]) — populated by the
+    /// preceding `backward()` call (see [`Self::backward`]'s own doc for why
+    /// this is a stashed buffer rather than a `self.dres[..]` array index).
+    pub fn read_in_dres(&self) -> Vec<f32> {
+        self.gpu.read(&self.dres_boundary_out.borrow(), self.res_numel())
+    }
+    /// Write this stage's OUTPUT-boundary residual gradient `dres[shard.end]`
+    /// (from the next stage's [`Self::read_in_dres`]) — consumed by the next
+    /// `backward()` call on a non-head stage.
+    pub fn write_out_dres(&self, data: &[f32]) {
+        self.gpu.write(&self.dres_boundary_in, bytemuck::cast_slice(data));
+    }
+
+    /// Every fp32-store name for an inference or full-training build (`self.ps
+    /// .params`, unchanged behaviour -- see
+    /// `int8_model_excludes_quantized_names_from_the_fp32_param_store`, which
+    /// depends on this listing every Frozen inference weight). A LoRA
+    /// training build (`self.is_train && cfg.lora.is_some()`) instead lists
+    /// only the trainable `.lora_a`/`.lora_b` adapter tensors (`self.ps
+    /// .trainable`) -- the frozen base has no gradient buffer (see
+    /// [`Self::trainable`]), so listing it here would make any `read_grad`
+    /// caller (gradcheck's `directional_check`, `crate::lora::save_adapter`)
+    /// panic. Mirrors `qwen3::model.rs`'s own `param_names` filter.
     pub fn param_names(&self) -> Vec<String> {
-        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        if self.is_train && self.cfg.lora.is_some() {
+            self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+        } else {
+            self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        }
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {

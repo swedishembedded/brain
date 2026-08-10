@@ -380,6 +380,84 @@ pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>) -
     Ok(())
 }
 
+/// A **truncated, in-memory** GGUF import: real weights for layers
+/// `[0, cfg.n_layers)` only, collected straight into a `HashMap` instead of
+/// written to an intermediate safetensors file.
+///
+/// Why this exists (see `docs/models/qwen35/status.md`'s LoRA-smoke-test
+/// entry for the full account): `import_gguf`'s own safetensors output is a
+/// full fp32 re-encoding of the checkpoint — at the real 35B-A3B shape that
+/// is ~140 GB on disk, which does not fit alongside the already-downloaded
+/// ~60 GB of GGUF source files in this box's available disk. Loading directly
+/// into a `HashMap<String, Vec<f32>>` for a **truncated** layer count instead
+/// needs only that truncated slice's own resident size (no disk intermediate
+/// at all, and no cost paid for the layers beyond the cut — `classify`'s own
+/// `l >= n_layers` rule, reused UNCHANGED here with the caller's (possibly
+/// truncated) `cfg.n_layers` standing in for the real depth, drops every
+/// higher-numbered block's tensor name before `mg.tensor()` is ever called on
+/// it, so the expensive per-tensor GGUF dequantization is only ever paid for
+/// the layers actually kept).
+///
+/// `cfg` must already carry the REAL checkpoint's non-layer-count shape
+/// fields (typically `config_from_gguf(&mg)` with `n_layers` overridden down)
+/// — this function does not re-derive them, only classifies and copies.
+/// Fails loudly on any coverage gap in `cfg.param_list()`, same contract as
+/// [`import_gguf`].
+pub fn import_gguf_truncated_to_map(mg: &checkpoint::gguf::MmapGguf, cfg: &Qwen35Config) -> Result<HashMap<String, Vec<f32>>, String> {
+    let expected: HashMap<String, usize> = cfg.param_list().into_iter().collect();
+    let mut out: HashMap<String, Vec<f32>> = HashMap::with_capacity(expected.len());
+
+    let mut insert_one = |name: String, data: Vec<f32>| -> Result<(), String> {
+        let want = *expected.get(&name).ok_or_else(|| format!("qwen35 truncated import: mapped an unexpected tensor {name:?}"))?;
+        if data.len() != want {
+            return Err(format!("qwen35 truncated import: {name}: element count {} != expected {want}", data.len()));
+        }
+        if out.insert(name.clone(), data).is_some() {
+            return Err(format!("qwen35 truncated import: {name} written twice"));
+        }
+        Ok(())
+    };
+
+    for name in mg.names() {
+        match classify(name, cfg.n_layers) {
+            Mapped::Simple(brain_name) => {
+                // Layer-scoped simple tensors (norms, GDN/GQA/shared-expert
+                // leaves) are only classified `Simple` for `l < cfg.n_layers`
+                // (see `classify`'s own `l >= n_layers -> Dropped` rule) — the
+                // top-level tensors (`tok.weight`/`lm_head.weight`/
+                // `norm.weight`) are always wanted regardless of truncation.
+                let data = mg
+                    .tensor(name)
+                    .ok_or_else(|| format!("qwen35 truncated import: {name} vanished between names() and tensor()"))?
+                    .map_err(|e| e)?;
+                insert_one(brain_name, data)?;
+            }
+            Mapped::ExpertStack { layer, leaf } => {
+                let data = mg
+                    .tensor(name)
+                    .ok_or_else(|| format!("qwen35 truncated import: {name} vanished between names() and tensor()"))?
+                    .map_err(|e| e)?;
+                let n_experts = cfg.n_experts as usize;
+                if data.len() % n_experts != 0 {
+                    return Err(format!("qwen35 truncated import: {name}: {} elements not divisible by n_experts={n_experts}", data.len()));
+                }
+                let chunk = data.len() / n_experts;
+                for e in 0..n_experts {
+                    let brain_name = format!("blocks.{layer}.mlp.experts.{e}.{leaf}.weight");
+                    insert_one(brain_name, data[e * chunk..(e + 1) * chunk].to_vec())?;
+                }
+            }
+            Mapped::Dropped => {}
+        }
+    }
+
+    let missing: Vec<&String> = expected.keys().filter(|n| !out.contains_key(n.as_str())).collect();
+    if !missing.is_empty() {
+        return Err(format!("qwen35 truncated import: {} planned tensors never written, e.g. {:?}", missing.len(), &missing[..missing.len().min(5)]));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

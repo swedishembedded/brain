@@ -14,10 +14,12 @@ pub mod caps;
 pub mod config;
 pub mod import;
 pub mod init;
+pub mod lora;
 pub mod model;
 pub mod q8;
 pub mod sample;
 pub mod serve;
+pub mod shard;
 pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};

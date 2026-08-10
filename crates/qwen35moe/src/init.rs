@@ -17,6 +17,11 @@
 //! `dt_bias`/`A_log` mirror the reference's own init exactly
 //! (`Qwen3_5MoePreTrainedModel._init_weights`): `dt_bias` ones, `A_log =
 //! log(Uniform(0,16))`.
+//!
+//! LoRA adapters (`cfg.lora` set — see `config::Qwen35Config::param_list`):
+//! `.lora_a` gets the standard `std=0.02` normal init, `.lora_b` is
+//! zero-initialised so a freshly-built adapter starts as an exact no-op
+//! (`B @ A = 0`) — same convention as `qwen3::init::init_weights`.
 
 use std::collections::HashMap;
 
@@ -38,10 +43,40 @@ pub fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> 
             // A ~ Uniform(0,16), A_log = log(A). Floor A away from 0 so log
             // never returns -inf for a fresh (never-trained) init.
             (0..numel).map(|_| (rng.unit() * 16.0).max(1e-4).ln()).collect()
+        } else if name.ends_with(".lora_b") {
+            vec![0.0f32; numel] // zero-init so the adapter starts as identity
+        } else if name.ends_with(".lora_a") {
+            rng.vec_scaled(numel, std)
         } else {
             rng.vec_scaled(numel, std)
         };
         w.insert(name, v);
+    }
+    w
+}
+
+/// Like [`init_weights`] but produces ONLY the `.lora_a`/`.lora_b` adapter
+/// tensors — every base tensor is skipped entirely (not generated, not
+/// allocated). For a real checkpoint's LoRA smoke test
+/// (`crates/qwen35moe/tests/lora_real_weight_smoke.rs`): merging real weights
+/// into a FULL `init_weights(&lora_cfg, seed)` map would transiently hold two
+/// full-size base copies at once (the freshly random one, and the real one
+/// about to overwrite it) before the merge settles — at the real 35B-A3B
+/// shape that's tens of GB of pure waste for values that are about to be
+/// discarded. This produces only the small adapter tensors, so the caller's
+/// `for (k, v) in real_base { adapters.insert(k, v); }` merge never
+/// allocates a second full-size base copy.
+pub fn init_lora_only(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> {
+    let mut rng = Lcg::new(seed);
+    let std = 0.02f32;
+    let mut w = HashMap::new();
+    for (name, numel) in cfg.param_list() {
+        if name.ends_with(".lora_b") {
+            w.insert(name, vec![0.0f32; numel]);
+        } else if name.ends_with(".lora_a") {
+            w.insert(name, rng.vec_scaled(numel, std));
+        }
+        // else: a base tensor -- the caller supplies the real weight.
     }
     w
 }
