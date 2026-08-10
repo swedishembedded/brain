@@ -188,13 +188,13 @@ impl std::fmt::Display for BuildError {
 pub struct WeightSet {
     slots: Vec<Option<GroupId>>, // len == budget; None = free
     pinned: HashSet<GroupId>,
-    plan: Box<dyn ResidencyPlan>,
+    plan: Box<dyn ResidencyPlan + Send + Sync>,
     schedule: Schedule,
     reloads: u64,
 }
 
 impl WeightSet {
-    pub fn build(n_groups: u32, budget: u32, schedule: Schedule, plan: Box<dyn ResidencyPlan>) -> Result<WeightSet, BuildError> {
+    pub fn build(n_groups: u32, budget: u32, schedule: Schedule, plan: Box<dyn ResidencyPlan + Send + Sync>) -> Result<WeightSet, BuildError> {
         if budget == 0 {
             return Err(BuildError::ZeroSlots);
         }
@@ -225,6 +225,16 @@ impl WeightSet {
 
     pub fn schedule(&self) -> &Schedule {
         &self.schedule
+    }
+
+    /// Which group (if any) each slot holds right now. `WeightSet` is pure
+    /// bookkeeping — it decides slot *assignment*, never touches device
+    /// memory — so the caller must actually load a slot's data whenever this
+    /// changes: immediately after `build` (for the plan's initial pins,
+    /// which never register as an `advance` miss since they start already
+    /// "resident" by definition) and on every `advance` miss thereafter.
+    pub fn slot_contents(&self) -> &[Option<GroupId>] {
+        &self.slots
     }
 
     fn slot_of(&self, g: GroupId) -> Option<usize> {

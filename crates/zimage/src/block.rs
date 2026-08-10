@@ -142,6 +142,27 @@ pub(crate) fn upload_named(gpu: &Gpu, src: &dyn checkpoint::TensorSource, name: 
     buf.expect("with_tensor found the tensor, so it must have set buf")
 }
 
+/// [`upload_named`], but into an already-allocated buffer instead of a fresh
+/// one — the windowed engine's fixed slot pool calls this on every miss to
+/// refresh a reused device buffer with a different block's data, so a
+/// window's device footprint never grows past its build-time allocation no
+/// matter how many distinct blocks rotate through it over a run.
+pub(crate) fn upload_named_into(gpu: &Gpu, buf: &DeviceBuffer, src: &dyn checkpoint::TensorSource, name: &str) {
+    if let Some(words) = src.raw_words(name) {
+        for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
+            gpu.write_at(buf, (i * UPLOAD_CHUNK_WORDS) as u64, part);
+        }
+        return;
+    }
+    let mut total = 0usize;
+    let found = src.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
+        gpu.write_f32_at(buf, off, chunk);
+        total += chunk.len();
+    });
+    assert!(found, "zimage: missing {name}");
+    assert!(total > 0, "zimage: {name} decoded to zero elements");
+}
+
 /// [`upload_named`], returning the host f32 values too (for the small,
 /// explicitly-retained tensors — norm weights, adaLN projections — that are
 /// read again every forward, not just uploaded once). Bounded the same way;
@@ -195,6 +216,46 @@ impl BlockWeights {
             w3: dev("feed_forward.w3.weight"),
         }
     }
+
+    /// Allocate one block's device buffers at `d`'s shape, with no tensor
+    /// data loaded yet — the windowed engine's fixed slot pool calls this
+    /// exactly `budget` times at build, then reuses the same buffers for
+    /// every block that slot ever holds via [`Self::load_into`]. Same sizes
+    /// [`Self::upload`] would produce for a real checkpoint at this shape
+    /// (`quantize_weight`'s row/col convention: `to_*`/`to_out` are
+    /// `dim×dim`, `w1`/`w3` are `hidden×dim`, `w2` is `dim×hidden` — see
+    /// `Int8Weights::upload`'s identical `(no, k)` sizing).
+    pub fn alloc(gpu: &Gpu, d: BlockDims) -> BlockWeights {
+        let (dim, hid, hd) = (d.dim as u64, d.hidden as u64, d.head_dim as u64);
+        BlockWeights {
+            wq: gpu.storage(dim * dim),
+            wk: gpu.storage(dim * dim),
+            wv: gpu.storage(dim * dim),
+            wo: gpu.storage(dim * dim),
+            nq: gpu.storage(hd),
+            nk: gpu.storage(hd),
+            w1: gpu.storage(hid * dim),
+            w2: gpu.storage(dim * hid),
+            w3: gpu.storage(hid * dim),
+        }
+    }
+
+    /// Overwrite this slot's buffers with `prefix`'s block weights — reuses
+    /// the allocation from [`Self::alloc`]; no new device buffer is ever
+    /// created after build, which is what keeps a window's device footprint
+    /// fixed regardless of how many distinct blocks rotate through it.
+    pub fn load_into(&self, gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str) {
+        let dev = |buf: &DeviceBuffer, n: &str| upload_named_into(gpu, buf, t, &format!("{prefix}.{n}"));
+        dev(&self.wq, "attention.to_q.weight");
+        dev(&self.wk, "attention.to_k.weight");
+        dev(&self.wv, "attention.to_v.weight");
+        dev(&self.wo, "attention.to_out.0.weight");
+        dev(&self.nq, "attention.norm_q.weight");
+        dev(&self.nk, "attention.norm_k.weight");
+        dev(&self.w1, "feed_forward.w1.weight");
+        dev(&self.w2, "feed_forward.w2.weight");
+        dev(&self.w3, "feed_forward.w3.weight");
+    }
 }
 
 /// The four per-forward folded-norm buffers (rewritten each forward from the
@@ -239,6 +300,45 @@ impl NormBufs {
         wf(gpu, &self.an2, &an2);
         wf(gpu, &self.fn1, &fn1);
         wf(gpu, &self.fn2, &fn2);
+    }
+
+    /// Allocate one slot's fixed `an1`/`an2`/`fn1`/`fn2` device buffers with
+    /// no host norm weights loaded yet — the windowed engine's fixed slot
+    /// pool calls this once per slot; [`Self::reload_host`] refreshes the
+    /// host arrays on a miss, reusing these same device buffers (they are
+    /// rewritten every forward anyway, via [`Self::upload_folded`], so they
+    /// need no reload themselves — only the host raw/adaLN arrays do).
+    pub fn alloc(gpu: &Gpu, dim: u32, modulation: bool) -> NormBufs {
+        NormBufs {
+            an1: gpu.storage(dim as u64),
+            an2: gpu.storage(dim as u64),
+            fn1: gpu.storage(dim as u64),
+            fn2: gpu.storage(dim as u64),
+            raw_an1: Vec::new(),
+            raw_an2: Vec::new(),
+            raw_fn1: Vec::new(),
+            raw_fn2: Vec::new(),
+            adaln_w: Vec::new(),
+            adaln_b: Vec::new(),
+            modulation,
+        }
+    }
+
+    /// Refresh the host-side norm/adaLN arrays for a new block identity —
+    /// the counterpart to [`BlockWeights::load_into`] for the tiny host
+    /// tensors [`fold_adaln`] reads every forward. The four device buffers
+    /// are untouched here; they get rewritten by the next
+    /// [`Self::upload_folded`] regardless of which block occupies the slot.
+    pub fn reload_host(&mut self, t: &dyn checkpoint::TensorSource, prefix: &str) {
+        let get = |n: &str| read_named(t, &format!("{prefix}.{n}"));
+        self.raw_an1 = get("attention_norm1.weight");
+        self.raw_an2 = get("attention_norm2.weight");
+        self.raw_fn1 = get("ffn_norm1.weight");
+        self.raw_fn2 = get("ffn_norm2.weight");
+        if self.modulation {
+            self.adaln_w = get("adaLN_modulation.0.weight");
+            self.adaln_b = get("adaLN_modulation.0.bias");
+        }
     }
 }
 

@@ -27,7 +27,7 @@ use qwen3::{Qwen, QwenConfig, Shard, IGNORE};
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
 use crate::import::import_comfy;
-use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard};
+use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 
 /// Filesystem locations of the four Z-Image components (never hard-coded — from
 /// the environment, mirroring the crate's tests).
@@ -92,33 +92,83 @@ pub struct Opts {
     pub hifi: bool,
 }
 
-/// The denoiser backend chosen by [`Opts::hifi`]. Both expose the same
+/// The denoiser backend chosen by [`Opts::hifi`]. All three expose the same
 /// `forward(latent, cap, t)`; the sampler is identical either way.
 enum DitEngine {
     I8(ZImageDitI8),
     Shard(ZImageDitShard),
+    /// fp32 on a box with fewer than 2 GPUs: `ZImageDitShard` is
+    /// unconditionally 2-GPU and fails outright there ("need 2 discrete
+    /// GPUs, found 0"), so the single-GPU path streams the main layer stack
+    /// through a weight window instead of sharding it. `dit_path`/`cfg` are
+    /// kept so `forward` can hand the window a *fresh* streaming source
+    /// every call — the same checkpoint `build_from_source` opened, since a
+    /// rotating slot's miss must be able to re-read it an unbounded number
+    /// of calls later.
+    Windowed { dit: ZImageDitWindowed, dit_path: String, cfg: ZImageConfig },
+}
+
+/// The fp32 ("hifi") DiT needs 2 GPUs to shard (`ZImageDitShard`) OR a
+/// weight window on 1 (`ZImageDitWindowed`) — a real machine-shape fact
+/// (how many GPUs actually exist), never a size heuristic, mirroring
+/// `pipeline::default_bulk_gpu`'s identical reasoning for the encoder.
+fn hifi_needs_window(gpu_count: usize) -> bool {
+    gpu_count < 2
+}
+
+/// How many of the main stack's blocks stay resident in the fp32 single-GPU
+/// window. `BRAIN_ZIMAGE_WINDOW_BLOCKS` overrides; the default (2) keeps the
+/// window's own device footprint small (~1.4 GB at Z-Image-Turbo's real
+/// shape — dim 3840, hidden 10240) regardless of model size, at the cost of
+/// reloading every other block once per denoise step (see
+/// docs/models/zimage/status.md for the measured churn/latency).
+fn window_blocks_from_env() -> u32 {
+    std::env::var("BRAIN_ZIMAGE_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
 }
 
 impl DitEngine {
     fn build(hifi: bool, cfg: ZImageConfig, weights: crate::block::Tensors, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
-        Self::build_from_source(hifi, cfg, &weights, lh, lw, cap_len)
+        // The adapter/LoRA-folding path (the only caller of `build`) has no
+        // on-disk checkpoint to reopen — the weights it holds are an
+        // in-memory map already mutated by the fold, never written back to
+        // disk — so `Windowed` (which must reopen a real file on every
+        // miss) is not reachable from here; `hifi` still gets `Shard`
+        // unconditionally, the pre-existing (documented) 2-GPU requirement
+        // for fp32 + a LoRA adapter together.
+        if hifi {
+            DitEngine::Shard(ZImageDitShard::build(cfg, weights, 1, lh, lw, cap_len))
+        } else {
+            DitEngine::I8(ZImageDitI8::build(cfg, weights, 1, lh, lw, cap_len))
+        }
     }
 
     /// [`Self::build`] over a streaming `checkpoint::TensorSource` (a
     /// `crate::import::comfy_source` over a mmap'd `WeightReader`, in the
     /// production loader below) — never materializes the whole DiT
-    /// checkpoint on the host.
-    fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
-        if hifi {
-            DitEngine::Shard(ZImageDitShard::build_from_source(cfg, src, 1, lh, lw, cap_len))
+    /// checkpoint on the host. `dit_path` is only used by the `Windowed`
+    /// case (hifi, fewer than 2 GPUs) to reopen the checkpoint fresh on
+    /// every later `forward` call.
+    fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, dit_path: &str, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
+        if !hifi {
+            return DitEngine::I8(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len));
+        }
+        if hifi_needs_window(gpu_core::devices::gpus().len()) {
+            let window = window_blocks_from_env();
+            let dit = ZImageDitWindowed::build_from_source(cfg.clone(), src, window, 1, lh, lw, cap_len, Some("gpu"));
+            DitEngine::Windowed { dit, dit_path: dit_path.to_string(), cfg }
         } else {
-            DitEngine::I8(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len))
+            DitEngine::Shard(ZImageDitShard::build_from_source(cfg, src, 1, lh, lw, cap_len))
         }
     }
     fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
         match self {
             DitEngine::I8(d) => d.forward(latent, cap, t),
             DitEngine::Shard(d) => d.forward(latent, cap, t),
+            DitEngine::Windowed { dit, dit_path, cfg } => {
+                let reader = open_component(dit_path).unwrap_or_else(|e| panic!("re-opening the DiT checkpoint for a windowed forward: {e}"));
+                let src = crate::import::comfy_source(&reader, cfg);
+                dit.forward(&src, latent, cap, t)
+            }
         }
     }
 }
@@ -384,7 +434,7 @@ impl HotPipeline {
             // tensors(..)) materializing the entire checkpoint up front).
             let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
             let dsrc = crate::import::comfy_source(&dreader, &zcfg);
-            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, lh, lw, cap_len))?
+            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, &paths.dit, lh, lw, cap_len))?
         };
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
@@ -727,7 +777,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
     let dsrc = crate::import::comfy_source(&dreader, &zcfg);
     {
-        let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, lh, lw, cap_len);
+        let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, &paths.dit, lh, lw, cap_len);
         for i in start_step..opts.steps as usize {
             progress(2 + i as u32, total, if opts.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;

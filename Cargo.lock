@@ -1680,6 +1680,7 @@ dependencies = [
  "brain-qwen3",
  "brain-testutil",
  "brain-vae",
+ "brain-weightset",
  "serde_json",
 ]
 
