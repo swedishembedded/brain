@@ -203,7 +203,22 @@ impl Action for GenerateAction {
 
         progress(Progress::step(0, max_new, "generating"));
         let (gh, gw) = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
-        let out_ids = hot.model.generate(&tokens, (gh, gw), &pixels, max_new, &eos);
+        // Real per-token streaming deltas (the spec declares `.streaming()`):
+        // re-decode the running id list each token and emit the UTF-8-safe
+        // suffix, exactly like qwen::chat's streaming path.
+        let mut ids: Vec<u32> = Vec::new();
+        let mut printed = String::new();
+        let mut step = 0u32;
+        let out_ids = hot.model.generate_cb(&tokens, (gh, gw), &pixels, max_new, &eos, |tok_id| {
+            ids.push(tok_id);
+            step += 1;
+            let full = hot.tok.decode(&ids);
+            let (delta, np) = qwen::chat::stream_delta(&printed, &full);
+            printed = np;
+            if !delta.is_empty() {
+                progress(Progress::token(step, max_new, delta));
+            }
+        });
         let text = hot.tok.decode(&out_ids);
         progress(Progress::step(max_new, max_new, text.clone()));
         Ok(Outcome::new()

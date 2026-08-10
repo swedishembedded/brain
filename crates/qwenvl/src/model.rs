@@ -191,6 +191,14 @@ impl Qwen3Vl {
     /// `deepstack_row` parameter; see also
     /// `crates/qwen3/tests/deepstack_decode_parity.rs`).
     pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32]) -> Vec<u32> {
+        self.generate_cb(tokens, grid, pixels, max_new, eos_ids, |_| {})
+    }
+
+    /// [`Self::generate`] with a per-token callback — the seam the served
+    /// caps path uses to emit REAL streaming deltas (its ActionSpec declares
+    /// `.streaming()`, which used to be satisfied by exactly two Progress
+    /// emissions around the whole decode; audit F11).
+    pub fn generate_cb(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], mut on_token: impl FnMut(u32)) -> Vec<u32> {
         let (gh, gw) = grid;
         let n = gh * gw;
         let m2 = self.merge * self.merge;
@@ -245,6 +253,7 @@ impl Qwen3Vl {
                 break;
             }
             out.push(next);
+            on_token(next);
             let (cos, sin) = mrope_tables(&[[next_pos; 3]], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
             hidden = self.decoder.step_mrope(next, &cos, &sin);
             next_pos += 1;
