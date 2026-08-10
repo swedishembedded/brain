@@ -19,4 +19,4 @@ serde_json.workspace = true
 anyhow.workspace = true
 zbus.workspace = true
 tokio.workspace = true
-nix = { version = "0.29", features = ["socket", "mman", "fs", "uio", "ioctl"] }
+nix = { version = "0.29", features = ["socket", "mman", "fs", "uio", "ioctl", "poll"] }
