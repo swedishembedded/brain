@@ -447,6 +447,12 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         }
         Msg::BuiltMulti { key, handle } => {
             mgr.adopt_multi(&key, handle);
+            // See Msg::Built's identical building-flip, above.
+            for r in running_jobs.iter_mut() {
+                if r.key == key {
+                    r.building = false;
+                }
+            }
         }
         Msg::Report(tx) => {
             let _ = tx.send(mgr.report());
@@ -661,9 +667,10 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // Track these jobs as running so the in-flight query keeps reporting them
         // (they've left `queue`); cleared on this group's `Done`. `building` starts
         // true for anything but an already-hot handle -- a deferred Build/Promote
-        // still has to run activate()/promote() on the lane before Msg::Built flips
-        // it to false (see on_msg's Msg::Built arm).
-        let building = !matches!(work, Claimed::Hot(_));
+        // (single-device) or Build (multi-device) still has to run
+        // activate()/promote()/activate_multi() on the lane before Msg::Built/
+        // BuiltMulti flips it to false (see on_msg's Msg::Built/BuiltMulti arms).
+        let building = !matches!(target, RunTarget::Single { work: Claimed::Hot(_), .. } | RunTarget::Multi { work: ClaimedMulti::Hot(_), .. });
         for j in jobs.iter() {
             running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
         }
