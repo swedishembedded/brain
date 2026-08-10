@@ -67,6 +67,7 @@ A trainer exists (`crates/vqgan/src/train.rs`, gradcheck via
 - Crate: [`crates/vqgan`](../../../crates/vqgan)
 - Workstream ledger: [`docs/models/vqgan/status.md`](status.md) — forward
   parity worst case 1-cos 1.63e-10, rel L2 1.80e-5, 0/256 index mismatches;
-  `codebook_feat` bit-exact. Backward/gradcheck deferred.
+  `codebook_feat` bit-exact. Training/backward done (gradcheck-gated,
+  `gradcheck::check_vqgan`).
 - Built on by: [`../restore/readme.md`](../restore/readme.md) (CodeFormer face
   restoration)

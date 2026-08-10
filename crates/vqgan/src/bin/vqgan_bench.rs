@@ -366,6 +366,7 @@ fn dwtn_ab(reps: usize) {
             let got = gpu.read(&ob, (n * k) as usize);
             let err = got.iter().zip(&want).map(|(a, b)| (*a as f64 - b).abs()).fold(0.0f64, f64::max);
             println!("  oracle [{m},{k},{n}]  {name:<18} max|delta| {err:.3e}");
+            assert!(err < 1e-3, "{name} diverges from the f64 host oracle: max|delta| {err:.3e}");
         }
         // split-K, at several slice counts: the reduction must not change what
         // the GEMM means, at any split.
@@ -386,6 +387,10 @@ fn dwtn_ab(reps: usize) {
             let got = gpu.read(&ob, (n * k) as usize);
             let err = got.iter().zip(&want).map(|(a, b)| (*a as f64 - b).abs()).fold(0.0f64, f64::max);
             println!("  oracle [{m},{k},{n}]  splitk s={slices:<3}        max|delta| {err:.3e}");
+            // A real gate, not a printout: a split that changed what the GEMM
+            // means must ABORT the bench, or the speed table below would be
+            // benchmarking a wrong kernel (routed audit item F5).
+            assert!(err < 1e-3, "split-K (s={slices}) diverges from the f64 host oracle: max|delta| {err:.3e}");
         }
     }
 

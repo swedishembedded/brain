@@ -12,8 +12,9 @@ The `basicsr` VQ autoencoder behind **CodeFormer** blind face restoration
 controllable feature transformation + fidelity dial are `crates/restore`; the
 **serving contract is met** (2026-08-04) by `vqgan::caps` (`encode`/`decode`),
 `resident_restore::VqganResident` (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run` and
-`examples/restore/vq_roundtrip.py`. Backward/gradcheck is deliberately deferred
-— see "Deferred" for what it needs.
+`examples/restore/vq_roundtrip.py`. Backward/gradcheck: DONE (was deferred
+when this header was written — see "Training / backward — DONE
+(gradcheck-gated)" below).
 
 ## Deliverables
 
