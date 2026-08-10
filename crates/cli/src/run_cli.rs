@@ -86,7 +86,11 @@ HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
 
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
-  --dbus-system          use the system bus instead (needs a system.d policy)
+  --dbus-system          use the system bus instead. Needs a system.d policy:
+                         the deb installs a vetted one (calls restricted to
+                         root + the 'brain' group); from a checkout, install
+                         scripts/build/com.swedishembedded.Brain1.conf to
+                         /usr/share/dbus-1/system.d/ yourself.
   --dbus-name NAME       request NAME instead of com.swedishembedded.Brain1
 
 SERVING OPTIONS

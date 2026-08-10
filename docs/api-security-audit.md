@@ -23,8 +23,11 @@ binds them, so treat all request input as hostile.
       line goes to stderr only.
 - [ ] Anthropic uses `x-api-key`; OpenAI/OpenRouter use `Authorization: Bearer`. A
       missing/blank/malformed header → 401 with a provider-shaped body, no stack/detail.
-- [ ] D-Bus: the bus name and (system-bus) method access policy are intentional; no
-      method exposes more than the operator intends.
+- [x] D-Bus: the bus name and (system-bus) method access policy are intentional; no
+      method exposes more than the operator intends. A vetted `system.d` policy
+      ships with the deb (`scripts/build/com.swedishembedded.Brain1.conf`):
+      calls restricted to root + the `brain` group, so `--dbus-system` never
+      depends on an operator improvising an allow-everyone policy.
 
 ### 2. Input handling / DoS
 - [ ] Request bodies are size-limited (a max content length) so a huge body can't OOM.

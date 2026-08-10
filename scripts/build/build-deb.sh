@@ -26,8 +26,13 @@ VERSION="$(grep '^version' "${ROOT}/Cargo.toml" | head -n1 | sed -E 's/.*"([^"]+
 PACKAGE="brain_${VERSION}_${ARCH}"
 STAGING="${ROOT}/target/debian-staging/${PACKAGE}"
 rm -rf "${STAGING}"
-install -d "${STAGING}/DEBIAN" "${STAGING}/usr/bin" "${STAGING}/usr/share/doc/brain"
+install -d "${STAGING}/DEBIAN" "${STAGING}/usr/bin" "${STAGING}/usr/share/doc/brain" "${STAGING}/usr/share/dbus-1/system.d"
 install -m 0755 "${BINARY}" "${STAGING}/usr/bin/brain"
+# Vetted system-bus policy for `brain serve --dbus-system`: without a shipped
+# default, operators hand-write the path-of-least-resistance allow-everyone
+# policy, which grants every local user model execution + auto-fetch. This one
+# restricts calls to root and the `brain` group (see the file's own comments).
+install -m 0644 "${SCRIPT_DIR}/com.swedishembedded.Brain1.conf" "${STAGING}/usr/share/dbus-1/system.d/com.swedishembedded.Brain1.conf"
 
 cat >"${STAGING}/DEBIAN/control" <<EOF
 Package: brain
