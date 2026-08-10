@@ -22,6 +22,7 @@ pub mod bridge;
 pub mod budget;
 pub mod executor;
 pub mod jobs;
+pub mod log;
 pub mod lru;
 pub mod manager;
 pub mod model;

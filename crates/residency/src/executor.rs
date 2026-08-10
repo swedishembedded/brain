@@ -222,6 +222,7 @@ impl Executor {
         let devices: Vec<Device> = budgets.devices().collect();
         let mut mgr = ResidencyManager::new(budgets);
         for m in models {
+            crate::log::info(&format!("model registered: {}", m.manifest().model));
             mgr.register(m);
         }
         let stats = Arc::new(Mutex::new(Stats::default()));
@@ -455,12 +456,15 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             None => (job.reply)(Err(format!("no model '{}'", job.model))),
         },
         Msg::Register(model) => {
+            crate::log::info(&format!("model registered: {}", model.manifest().model));
             mgr.register(model);
         }
         Msg::RegisterMulti(model) => {
+            crate::log::info(&format!("model registered (multi-device): {}", model.manifest().model));
             mgr.register_multi(model);
         }
         Msg::Built { key, handle } => {
+            // `mgr.adopt` itself logs "built {key}" (via `ResidencyManager::event`).
             mgr.adopt(&key, handle);
             // Deferred activate()/promote() finished -- this group is no longer
             // "building" (see InFlightJob::phase's doc), even though it may keep
@@ -472,6 +476,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             }
         }
         Msg::BuiltMulti { key, handle } => {
+            // `mgr.adopt_multi` itself logs "built {key} (multi-device)".
             mgr.adopt_multi(&key, handle);
             // See Msg::Built's identical building-flip, above.
             for r in running_jobs.iter_mut() {
@@ -509,6 +514,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         }
         Msg::Done { key, device, batch, failed } => {
             if failed {
+                crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
                 mgr.build_failed(&key); // unwind budget + slot; jobs already failed
             } else {
                 mgr.release(&key);
@@ -526,6 +532,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         }
         Msg::DoneMulti { key, devices, batch, failed } => {
             if failed {
+                crate::log::warn(&format!("model activation/run failed (multi-device): {key} on {devices:?}"));
                 mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
             } else {
                 mgr.release_multi(&key);
@@ -697,6 +704,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // activate()/promote()/activate_multi() on the lane before Msg::Built/
         // BuiltMulti flips it to false (see on_msg's Msg::Built/BuiltMulti arms).
         let building = !matches!(target, RunTarget::Single { work: Claimed::Hot(_), .. } | RunTarget::Multi { work: ClaimedMulti::Hot(_), .. });
+        if building {
+            crate::log::info(&format!("model activating: {ckey}"));
+        }
         for j in jobs.iter() {
             running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
         }

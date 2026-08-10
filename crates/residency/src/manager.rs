@@ -262,6 +262,7 @@ impl ResidencyManager {
     const MAX_EVENTS: usize = 256;
 
     fn event(&mut self, e: String) {
+        crate::log::info(&e);
         if self.events.len() >= Self::MAX_EVENTS {
             self.events.pop_front();
         }
