@@ -1126,7 +1126,17 @@ impl WgpuBackend {
 
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            // A dropped receiver (the caller already unwound past `rx.recv_timeout`,
+            // e.g. because `poll_wait_bounded` just panicked with "device lost")
+            // must never itself become a panic HERE: this closure can be invoked
+            // by wgpu-core synchronously out of `Buffer::unmap`/`drop`, i.e. while
+            // the FIRST panic is still unwinding -- a second panic during an
+            // active unwind is an unconditional process abort (no catch_unwind
+            // can save it), which would silently defeat
+            // `crates/residency/src/executor.rs::lane_loop`'s own panic isolation.
+            let _ = tx.send(r);
+        });
         self.poll_wait_bounded("timestamp readback");
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("timestamp readback: map_async callback did not fire after a completed poll"))
@@ -1197,7 +1207,17 @@ impl WgpuBackend {
 
             let slice = staging.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+            // A dropped receiver (the caller already unwound past `rx.recv_timeout`,
+            // e.g. because `poll_wait_bounded` just panicked with "device lost")
+            // must never itself become a panic HERE: this closure can be invoked
+            // by wgpu-core synchronously out of `Buffer::unmap`/`drop`, i.e. while
+            // the FIRST panic is still unwinding -- a second panic during an
+            // active unwind is an unconditional process abort (no catch_unwind
+            // can save it), which would silently defeat
+            // `crates/residency/src/executor.rs::lane_loop`'s own panic isolation.
+            let _ = tx.send(r);
+        });
             self.poll_wait_bounded("profile readback");
             rx.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap_or_else(|_| panic!("profile readback: map_async callback did not fire after a completed poll"))
@@ -1437,7 +1457,17 @@ impl WgpuBackend {
         let staging = self.read_staging(buf, n);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            // A dropped receiver (the caller already unwound past `rx.recv_timeout`,
+            // e.g. because `poll_wait_bounded` just panicked with "device lost")
+            // must never itself become a panic HERE: this closure can be invoked
+            // by wgpu-core synchronously out of `Buffer::unmap`/`drop`, i.e. while
+            // the FIRST panic is still unwinding -- a second panic during an
+            // active unwind is an unconditional process abort (no catch_unwind
+            // can save it), which would silently defeat
+            // `crates/residency/src/executor.rs::lane_loop`'s own panic isolation.
+            let _ = tx.send(r);
+        });
         self.poll_wait_bounded("buffer read");
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("buffer read: map_async callback did not fire after a completed poll"))
