@@ -112,7 +112,7 @@ enum DitEngine {
 /// weight window on 1 (`ZImageDitWindowed`) — a real machine-shape fact
 /// (how many GPUs actually exist), never a size heuristic, mirroring
 /// `pipeline::default_bulk_gpu`'s identical reasoning for the encoder.
-fn hifi_needs_window(gpu_count: usize) -> bool {
+pub fn hifi_needs_window(gpu_count: usize) -> bool {
     gpu_count < 2
 }
 
@@ -122,8 +122,50 @@ fn hifi_needs_window(gpu_count: usize) -> bool {
 /// shape — dim 3840, hidden 10240) regardless of model size, at the cost of
 /// reloading every other block once per denoise step (see
 /// docs/models/zimage/status.md for the measured churn/latency).
-fn window_blocks_from_env() -> u32 {
+pub fn window_blocks_from_env() -> u32 {
     std::env::var("BRAIN_ZIMAGE_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
+}
+
+/// The real fp32 ("hifi") cost the residency layer should budget against —
+/// `(vram_bytes, ram_bytes)` — computed from the SAME machine-shape decision
+/// (`hifi_needs_window`) and the SAME per-block shape `ZImageDitWindowed`
+/// actually allocates, not a separate hardcoded guess: the number the
+/// scheduler budgets and the number the code allocates must be the same
+/// expression, or a claim like "fp32 needs 24 GB" silently outlives the
+/// windowed engine that made it false on a one-GPU box (see docs/lessons.md).
+///
+/// `ram_bytes` is the CPU-resident fp32 Qwen-4B encoder's footprint (~16 GB,
+/// measured — `pipeline.rs`'s own doc comments quote this figure for the
+/// CPU-resident case throughout): today the hifi path always builds the
+/// encoder on CPU regardless of GPU count (a separate, narrower gap from
+/// the one `hifi_needs_window` closes — the int8 path's analogous default
+/// was fixed by `default_bulk_gpu`, hifi's was not, in this session).
+pub fn hifi_cost_bytes(gpu_count: usize) -> (u64, u64) {
+    const ENCODER_RAM: u64 = 16 << 30;
+    if !hifi_needs_window(gpu_count) {
+        return (24 << 30, ENCODER_RAM); // unchanged: ZImageDitShard, 2 GPUs
+    }
+    (windowed_dit_vram_bytes(&ZImageConfig::turbo(), window_blocks_from_env()), ENCODER_RAM)
+}
+
+/// VRAM for `window` main-stack blocks plus the fully-resident refiners, at
+/// `cfg`'s real block shape — the exact element counts
+/// [`crate::block::BlockWeights::alloc`]/[`crate::block::NormBufs::alloc`]
+/// allocate (`wq`/`wk`/`wv`/`wo`: `dim×dim`; `nq`/`nk`: `head_dim`;
+/// `w1`/`w2`/`w3`: `hidden×dim`; plus `NormBufs`'s four `dim`-sized
+/// buffers), all `f32`. `overhead` is a generous flat allowance for the
+/// residual/cos-sin/Scratch buffers next to the weights at Z-Image-Turbo's
+/// real shape (dim 3840) — not a byte-exact derivation of every kernel's
+/// intermediate buffer.
+fn windowed_dit_vram_bytes(cfg: &ZImageConfig, window: u32) -> u64 {
+    let bd = cfg.block_dims();
+    let (dim, hidden, head_dim) = (bd.dim as u64, bd.hidden as u64, bd.head_dim as u64);
+    let per_block_elems = 4 * dim * dim + 2 * head_dim + 3 * hidden * dim + 4 * dim;
+    let per_block_bytes = per_block_elems * 4;
+    let refiner_blocks = 2 * cfg.n_refiner_layers as u64; // noise + context, fully resident
+    let window = (window as u64).min(cfg.n_layers as u64);
+    let overhead = 256u64 << 20;
+    per_block_bytes * (refiner_blocks + window) + overhead
 }
 
 impl DitEngine {
@@ -169,6 +211,18 @@ impl DitEngine {
                 let src = crate::import::comfy_source(&reader, cfg);
                 dit.forward(&src, latent, cap, t)
             }
+        }
+    }
+
+    /// Observability for the churn claim: `0` for `I8`/`Shard` (nothing to
+    /// stream, every block resident since build), the windowed engine's
+    /// real reload count otherwise — the number that answers "is this
+    /// actually reloading every block every step, or holding the pinned
+    /// prefix as designed" without re-deriving it from timing.
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        match self {
+            DitEngine::I8(_) | DitEngine::Shard(_) => Vec::new(),
+            DitEngine::Windowed { dit, .. } => vec![("dit_window_reloads".to_string(), serde_json::json!(dit.main_reloads()))],
         }
     }
 }
@@ -294,6 +348,13 @@ impl HotPipeline {
     }
     pub fn hifi(&self) -> bool {
         self.hifi
+    }
+
+    /// Model-specific observability (`Instance::metrics`'s contract) — the
+    /// weight-window's reload count when the DiT is streaming
+    /// ([`DitEngine::Windowed`]), nothing otherwise.
+    pub fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        self.dit.metrics()
     }
 
     /// Build the resident models for `width×height`, `cap_len` caption tokens, and
@@ -910,5 +971,47 @@ mod encoder_scheduling_tests {
         assert_eq!(default_bulk_gpu(None, 0, 2), None, "two GPUs -> ambiguous, keep the CPU default");
         assert_eq!(default_bulk_gpu(None, 0, 0), None, "no GPU probed -> nothing to default to");
         assert_eq!(default_bulk_gpu(Some(1), 0, 1), Some(1), "an explicit choice is never overridden");
+    }
+
+    /// The number the residency layer budgets against must be the number
+    /// `ZImageDitWindowed` actually allocates: exact arithmetic over
+    /// `ZImageConfig::turbo()`'s real shape (dim 3840, hidden 10240,
+    /// head_dim 128), not a rough guess. `window=2` -> 2 main blocks + the
+    /// 4 fully-resident refiner blocks (2 noise + 2 context) = 6 blocks'
+    /// worth of weights + a flat 256 MiB overhead allowance.
+    #[test]
+    fn windowed_dit_vram_bytes_matches_the_real_turbo_shape_exactly() {
+        let cfg = ZImageConfig::turbo();
+        let per_block_bytes: u64 = (4 * 3840 * 3840 + 2 * 128 + 3 * 10240 * 3840 + 4 * 3840) * 4;
+        let want = per_block_bytes * 6 + (256u64 << 20);
+        assert_eq!(windowed_dit_vram_bytes(&cfg, 2), want);
+        assert_eq!(want, 4_515_543_040, "sanity-check the hand-derived constant itself");
+    }
+
+    /// `window >= n_layers` must cost exactly what full residency costs:
+    /// every block (refiners + all 30 main layers) resident, no smaller and
+    /// no larger a number than `ZImageDit`'s own equivalent build allocates.
+    #[test]
+    fn windowed_dit_vram_bytes_with_a_full_window_covers_every_block() {
+        let cfg = ZImageConfig::turbo();
+        let per_block_bytes: u64 = (4 * 3840 * 3840 + 2 * 128 + 3 * 10240 * 3840 + 4 * 3840) * 4;
+        let want = per_block_bytes * (30 + 4) + (256u64 << 20);
+        assert_eq!(windowed_dit_vram_bytes(&cfg, 30), want);
+        // An oversized window clamps to n_layers, not the requested value.
+        assert_eq!(windowed_dit_vram_bytes(&cfg, 999), want);
+    }
+
+    /// `hifi_cost_bytes` picks the windowed estimate on a one-GPU box and
+    /// the unchanged 2-GPU-shard estimate otherwise; the encoder's RAM
+    /// figure is the same either way (the hifi path's encoder is
+    /// CPU-resident regardless of GPU count today).
+    #[test]
+    fn hifi_cost_bytes_switches_on_gpu_count_and_keeps_the_shard_estimate_unchanged() {
+        let (vram_1gpu, ram_1gpu) = hifi_cost_bytes(1);
+        let (vram_2gpu, ram_2gpu) = hifi_cost_bytes(2);
+        assert_eq!(vram_1gpu, windowed_dit_vram_bytes(&ZImageConfig::turbo(), window_blocks_from_env()));
+        assert_eq!(vram_2gpu, 24 << 30);
+        assert_eq!(ram_1gpu, ram_2gpu);
+        assert!(vram_1gpu < vram_2gpu, "the windowed estimate must be dramatically smaller, or the whole fix is pointless");
     }
 }

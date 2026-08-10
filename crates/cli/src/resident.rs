@@ -383,15 +383,20 @@ impl ResidentModel for ZImageResident {
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        // int8 DiT (~13 GB) or fp32 sharded (~24 GB/card); edit builds are transient
-        // and small-footprint (they build + drop within the call).
-        let vram = if key.config.contains(":fp32:") {
-            24u64 << 30
-        } else if key.config.starts_with("edit:") {
-            2u64 << 30
-        } else {
-            14u64 << 30
-        };
+        // int8 DiT (~13 GB); edit builds are transient and small-footprint
+        // (they build + drop within the call). fp32 delegates to
+        // `zimage::pipeline::hifi_cost_bytes`, which picks between the
+        // 2-GPU-shard estimate and the real windowed-engine estimate from
+        // the SAME machine-shape decision (`gpu_core::devices::gpus().len()`)
+        // `DitEngine::build_from_source` itself makes — the number budgeted
+        // here and the number the code actually allocates must be the same
+        // expression, or this estimate silently outlives whichever engine
+        // it was written for (see docs/lessons.md).
+        if key.config.contains(":fp32:") {
+            let (vram, ram) = zimage::pipeline::hifi_cost_bytes(gpu_core::devices::gpus().len());
+            return MemCost::new(vram, ram);
+        }
+        let vram = if key.config.starts_with("edit:") { 2u64 << 30 } else { 14u64 << 30 };
         MemCost::new(vram, 0)
     }
 
@@ -434,6 +439,10 @@ impl Instance for ZImageInstance {
         let act = self.provider.action(action).ok_or_else(|| format!("z-image: unknown action '{action}'"))?;
         let inv = act.spec().validate(inv.clone())?;
         act.run(&inv, progress)
+    }
+
+    fn metrics(&self) -> Vec<(String, Value)> {
+        self.pipe.as_ref().map(|p| p.metrics()).unwrap_or_default()
     }
 }
 
