@@ -90,13 +90,13 @@ pub fn plan(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, 
 }
 
 fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) -> Result<Plan, PlanError> {
-    for (repo, file) in quant_candidates(reference, quant) {
-        match hub.list_files(reference.vendor(), &repo, REVISION) {
+    for (vendor, repo, file) in quant_candidates(reference, quant) {
+        match hub.list_files(&vendor, &repo, REVISION) {
             Ok(files) if files.iter().any(|f| f == &file) => {
                 return Ok(Plan {
                     reference: reference.clone(),
                     steps: vec![Step::Download {
-                        vendor: reference.vendor().to_string(),
+                        vendor,
                         repo,
                         revision: REVISION.to_string(),
                         file,
@@ -119,19 +119,50 @@ fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) 
     Ok(base_plan)
 }
 
+/// A `(vendor, repo)` publishing its own GGUF quants of some upstream base
+/// checkpoint under a *different* vendor/repo name -- the same-vendor
+/// conventions in [`quant_candidates`] can't express this, since the
+/// quantizer (e.g. `bartowski`, `unsloth`) is not the model's own org. Add a
+/// row here when a model's own org doesn't ship GGUF and no same-vendor
+/// convention matches; this is the *only* place such overrides live.
+struct GgufVendorOverride {
+    vendor: &'static str,
+    repo: &'static str,
+    gguf_vendor: &'static str,
+    gguf_repo: &'static str,
+}
+
+const GGUF_VENDOR_OVERRIDES: &[GgufVendorOverride] = &[
+    // Qwen3.5-35B-A3B ships no GGUF of its own; bartowski's quants are the
+    // ones this repo has fetched and validated against (see
+    // docs/models/qwen35/status.md).
+    GgufVendorOverride {
+        vendor: "Qwen",
+        repo: "Qwen3.5-35B-A3B",
+        gguf_vendor: "bartowski",
+        gguf_repo: "Qwen_Qwen3.5-35B-A3B-GGUF",
+    },
+];
+
 /// Upstream naming conventions for a pre-quantized artifact, tried in order.
-/// This list is the *only* place those conventions live.
-fn quant_candidates(reference: &ModelRef, quant: Quant) -> Vec<(String, String)> {
+/// This list (plus [`GGUF_VENDOR_OVERRIDES`] for cross-vendor quantizers) is
+/// the *only* place those conventions live.
+fn quant_candidates(reference: &ModelRef, quant: Quant) -> Vec<(String, String, String)> {
     let repo = reference.repo();
     let q = quant.as_str();
-    vec![
+    let mut out = Vec::new();
+    if let Some(o) = GGUF_VENDOR_OVERRIDES.iter().find(|o| o.vendor == reference.vendor() && o.repo == repo) {
+        out.push((o.gguf_vendor.to_string(), o.gguf_repo.to_string(), format!("{repo}-{q}.gguf")));
+    }
+    out.extend([
         // The common `<repo>-GGUF` sibling repo, one file per quant.
-        (format!("{repo}-GGUF"), format!("{repo}-{q}.gguf")),
+        (reference.vendor().to_string(), format!("{repo}-GGUF"), format!("{repo}-{q}.gguf")),
         // Some repos ship a gguf alongside their own safetensors.
-        (repo.to_string(), format!("{repo}-{q}.gguf")),
+        (reference.vendor().to_string(), repo.to_string(), format!("{repo}-{q}.gguf")),
         // A few publish one repo per quant level.
-        (format!("{repo}-{q}"), format!("{repo}-{q}.gguf")),
-    ]
+        (reference.vendor().to_string(), format!("{repo}-{q}"), format!("{repo}-{q}.gguf")),
+    ]);
+    out
 }
 
 fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, PlanError> {
@@ -421,6 +452,34 @@ mod tests {
                 dest_name: "Q8_0.gguf".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn quant_ref_with_cross_vendor_gguf_override_is_preferred() {
+        // Qwen3.5-35B-A3B ships no GGUF under its own vendor; bartowski's
+        // sibling repo is the only place a quant exists, so the override
+        // table must be tried before the same-vendor conventions (which
+        // would otherwise silently fall through to a local-quantize plan
+        // that then OOMs materializing the 35B fp32 base).
+        let st = store("modelstore-plan-test-quant-cross-vendor");
+        let mut hub = FakeHub::new();
+        hub.add_file("bartowski", "Qwen_Qwen3.5-35B-A3B-GGUF", "main", "Qwen3.5-35B-A3B-Q8_0.gguf", vec![0u8; 16]);
+
+        let r = ModelRef::new("Qwen", "Qwen3.5-35B-A3B", Some(Quant::Q8_0));
+        let p = plan(&r, &st, &hub).unwrap();
+        assert_eq!(
+            p.steps,
+            vec![Step::Download {
+                vendor: "bartowski".to_string(),
+                repo: "Qwen_Qwen3.5-35B-A3B-GGUF".to_string(),
+                revision: "main".to_string(),
+                file: "Qwen3.5-35B-A3B-Q8_0.gguf".to_string(),
+                dest_name: "Q8_0.gguf".to_string(),
+            }]
+        );
+        // The plan's own reference stays canonical (`Qwen/...`), even
+        // though the bytes came from a different vendor/repo.
+        assert_eq!(p.reference, r);
     }
 
     #[test]
