@@ -123,15 +123,38 @@ memory pressure, a single physical GPU) that only the end-to-end run against
 the real ~31 GB checkpoint on this real box could surface. Regression tests
 were added for each afterward so they can't silently regress.
 
-**fp32 stress case, same box:** `--precision fp32` fails immediately and
-cleanly — `need 2 discrete GPUs, found 0` (`backend-wgpu`) — because
-`ZImageDitShard` (the fp32 engine) is structurally 2-discrete-GPU-only and
-this box has exactly one *integrated* GPU. This is an honest, gate-worthy
-result, not a bug: it is a real architectural requirement, not a memory-fit
-question the tiering layer could route around, and no attempt was made here
-to add the single-GPU streaming fp32 DiT capability the design plan named as
-a separate, larger follow-up (weight-windowing across a scheduled block
-sequence, `crates/weightset`, not built this session).
+**fp32 stress case, same box — UPDATED, now runs.** The paragraph originally
+here recorded `--precision fp32` failing immediately with `need 2 discrete
+GPUs, found 0`, since `ZImageDitShard` (the only fp32 engine at the time) is
+structurally 2-discrete-GPU-only and this box has one integrated GPU. A
+follow-up in the same workstream built `crates/weightset` (a generic,
+model-agnostic within-instance weight window: `Schedule`/`ResidencyPlan`/
+`WeightSet`, Bélády `CyclicScan` eviction over the known denoise order,
+churn measured exactly) and `zimage::ZImageDitWindowed`, which streams the
+main 32-layer stack through a small fixed window (default 2 blocks resident,
+~1.4 GB at Z-Image-Turbo's real shape) instead of sharding across 2 GPUs.
+`pipeline::DitEngine` now picks it automatically whenever fewer than 2 GPUs
+are available — no flag required.
+
+Real run, same box, same checkpoint: `--precision fp32`, 256×256, 2 steps —
+**144 s total (~72 s/step)**, correct image produced
+(`results/zimage-fp32-256.png`, sha256
+`fbd9935b6e32a09df28c9868b7d040d624821078ea0945b25541af94ceb9bf64`), no OOM.
+This confirms Risk R1's prediction from the original plan almost exactly:
+fp32 streaming on this checkpoint is disk-bound, not compute-bound (~72 s/step
+vs. int8's well-under-1s/step once resident) — the honest deliverable is
+"fp32 streams and is correct, and is slow", not "fp32 is fast". Making it
+fast needs a native bf16 device bind (dequant-in-kernel) so the window reads
+half the bytes per reload, which remains a real, separate follow-up, exactly
+as the original plan named it.
+
+Proof of correctness for the windowing mechanism itself (not just "it didn't
+crash"): `windowed_dit_matches_fully_resident_dit_bit_for_bit_when_window_is_
+narrower_than_the_model` (`crates/zimage/src/dev.rs`) asserts the windowed
+engine's output is bit-for-bit identical (`assert_eq!` on `Vec<f32>`, not a
+cosine bound) to the fully-resident engine at a tiny synthetic config with a
+window narrower than the model — residency is a pure memory placement
+decision here, verified to never be a numerical one.
 
 ## Measured (quoted from code/docs)
 
