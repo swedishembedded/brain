@@ -233,4 +233,27 @@ mod tests {
         bs.alloc(Device::Gpu(0), 10 * GB);
         assert_eq!(bs.free_on(Device::Gpu(1)), 24 * GB, "a pool charge on gpu0 must not affect an undeclared gpu1");
     }
+
+    /// Regression for `crates/cli/src/resident.rs::build_executor`'s real bug:
+    /// `--device gpu` (excluding CPU from compute) zeroes `Device::Cpu`'s OWN
+    /// budget -- correctly, that alone stops CPU being chosen as a placement
+    /// target. The bug was passing that SAME zeroed value as the shared pool's
+    /// `total` too, which clamped a co-declared unified GPU's usable/free to
+    /// `min(real_budget, 0) == 0` as well, making it silently unplaceable. The
+    /// pool's physical capacity must stay real regardless of any one member's
+    /// own (possibly zero) per-device budget.
+    #[test]
+    fn a_zero_budget_pool_member_does_not_zero_the_pool_for_the_others() {
+        use memauth::HOST_POOL;
+        let mut bs = Budgets::new();
+        // Mirrors `--device gpu`: Device::Cpu gets 0 (compute-excluded), the
+        // unified Gpu(0) keeps its real device-level budget, and the pool is
+        // declared with the REAL physical RAM, not the gated CPU value.
+        bs.set(Device::Gpu(0), 21 * GB, 0).set(Device::Cpu, 0, 0);
+        bs.set_pool(HOST_POOL, &[Device::Gpu(0), Device::Cpu], 23 * GB, 0);
+
+        assert_eq!(bs.usable_on(Device::Gpu(0)), 21 * GB, "gpu0's own (smaller) budget should be the binding constraint, not a starved pool");
+        assert_eq!(bs.free_on(Device::Gpu(0)), 21 * GB);
+        assert!(bs.free_on(Device::Gpu(0)) >= 3 * GB, "a small model must still fit on the unified GPU even though CPU compute is excluded");
+    }
 }

@@ -129,6 +129,19 @@ MODEL CONFIGURATION (env-only — there is no config file)
 GLOBAL
   --device cpu|gpu|npu|gpu0|cpu0-7|gpu,cpu   consumed before this subcommand
                                              (see brain --help); $BRAIN_DEVICE
+  -v, --verbose [0-3]    diagnostic detail on stderr (else $BRAIN_VERBOSE):
+                           0  errors only (default) -- unchanged from today
+                           1  + warnings (e.g. a model family not configured)
+                           2  + info (model registered/activating/resident,
+                              evicted/demoted/promoted -- the residency
+                              lifecycle: what's loaded, right now, and why)
+                           3  + debug (finer scheduling detail)
+                         Repeatable short form bumps by one level each time
+                         (-v -v = 2, as separate args -- not bundled -vv);
+                         bare --verbose (no number) also means 1.
+                         Never gates the protocol output every surface always
+                         prints regardless of this flag (the compute/model
+                         summary, APIKEY lines, --ready-file).
   -h, --help                                 this text
 
 EXAMPLES
@@ -192,6 +205,10 @@ pub fn run_serve(args: &[String]) {
         (None, None, None);
     let mut api_keys_out: Option<String> = None;
     let mut ready_file: Option<String> = None;
+    // Diagnostic verbosity (`-v`/`--verbose [0-3]`, else $BRAIN_VERBOSE) -- see
+    // HELP above for what each tier gates. Clamped by `residency::log::set_verbosity`,
+    // not here, so an out-of-range env var doesn't need its own validation.
+    let mut verbose: u8 = std::env::var("BRAIN_VERBOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     // Optional PORT immediately following an API flag (else the provider default).
     let take_port = |args: &[String], i: &mut usize, default: u16| -> u16 {
         if let Some(p) = args.get(*i + 1).and_then(|s| s.parse::<u16>().ok()) {
@@ -228,6 +245,16 @@ pub fn run_serve(args: &[String]) {
             "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
             "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
+            "-v" => verbose = verbose.saturating_add(1),
+            "--verbose" => {
+                verbose = match args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
+                    Some(n) => {
+                        i += 1;
+                        n
+                    }
+                    None => 1, // bare --verbose (no numeric arg) means level 1
+                };
+            }
             "--help" | "-h" => {
                 print!("{HELP}");
                 return;
@@ -245,6 +272,10 @@ pub fn run_serve(args: &[String]) {
         }
         i += 1;
     }
+    // Set BEFORE anything that could log (the executor's own construction
+    // already registers models) -- both the stdio loop and run_apis below
+    // read this same process-global level.
+    residency::log::set_verbosity(verbose);
 
     let surfaces_requested =
         dbus as usize + anthropic.is_some() as usize + openai.is_some() as usize + openrouter.is_some() as usize;
@@ -457,7 +488,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    let executor = crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::from_env());
+    let executor = crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env());
     executor
 }
 
@@ -703,7 +734,7 @@ mod tests {
     fn help_documents_every_flag_the_parser_accepts() {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
-            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file", "-v", "--verbose",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }
