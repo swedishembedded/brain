@@ -226,20 +226,69 @@ fetching an already-quantized GGUF directly.
   **Vision splice is explicitly NOT in this pass** — text-only, tracked
   separately as its own task.
 
+- **P10a — INT8 (DP4A) quantized inference, SINGLE-GPU** (`crates/qwen35/src/
+  q8.rs`): mirrors `qwen::q8::Q8`'s recipe (weights quantized once via
+  `model::int8::quantize_weight`, activations quantized on-device per
+  forward with a dynamic per-token scale), adapted for qwen35's two mixer
+  shapes (GDN vs GQA) and its 256-routed-expert MoE. Quantized: every mixer
+  projection + every routed expert's gate/up/down (the dominant parameter
+  mass — 256×3 tensors/layer vs. 4-5 mixer tensors). Left fp32: the router
+  (a noised logit can flip which experts get selected, a qualitatively
+  worse failure mode than a noised activation, and not a throughput
+  bottleneck), the shared expert (1/256th the mass, no int8 kernel exists
+  for it), embeddings/`lm_head` (embed is a gather not a GEMM; `lm_head`
+  kept fp32 for the same precision-sensitive-logits reason as the router,
+  matching `qwen::q8`'s own choice). Reuses `model::moe`'s existing
+  `Lin8`/`ExpertScratch8`/`expert_fwd_i8` unchanged via a thin adapter.
+
+  Two real findings during integration: (1) initially wired the STATIC
+  per-tensor-scale `matmul_i8` instead of the DYNAMIC `matmul_i8_dyn`
+  `Q8::quant`/`mm8` actually produce — caught by a bind-group-count
+  mismatch; (2) confirmed `matmul_i8_dyn`/`moe_linear_gated_i8` cannot run
+  on the CPU (Cranelift JIT) backend at all (a pre-existing, engine-wide
+  limitation, not a new bug — `qwen::q8`'s own tests never exercise an int8
+  forward on CPU either) — handled by asserting the exact known panic on
+  CPU and running the real dual-backend-parity check
+  (`docs/lessons.md` #5) against fp32 on the GPU backend instead.
+
+  Verified (independently reproduced): int8 vs fp32 forward at a small
+  int8-packable config — **cosine=1.000000000, rel_l2=0.0000066** on real
+  P40 hardware, mutation-verified sensitive to a real regression (scaling
+  one weight's scale by 1.3× moves rel_l2 to 6.9e-4; by 50× drops cosine to
+  0.40). All 21 pre-existing + new tests pass, zero regression.
+
+  **Single-GPU only** — multi-GPU layer sharding and GGUF-direct
+  per-expert-slice streaming (required at the real 35B scale, since even
+  int8 is ~35GB and doesn't fit one 24GB P40) are separate, larger
+  follow-on work (P11 below). A research pass into the existing precedent
+  (`crates/omni/src/int8_thinker_resident.rs`, validated on real 2×P40
+  hardware) found: partitioning is by contiguous LAYER RANGE (never by
+  expert — an expert-split would break the "quantize the shared input once"
+  contract), cross-device handoff is a plain host round-trip (`gpu.read` →
+  `gpu.write`, "negligible bytes... at any realistic decode batch"), and
+  placement goes through `residency::MultiDeviceResidentModel`/
+  `Executor::register_multi` (NOT `model::shard::Shardable`/`Pipeline`,
+  which is training-shaped and requires a whole-model host `HashMap` up
+  front — a real non-starter at 35B). The one genuinely new piece P11 needs
+  beyond that precedent: GGUF has no per-expert tensor names (each layer's
+  256 experts are one stacked `[256,ff,hidden]` tensor), so a quantized
+  loader must read that whole stack once (~1GB transient) and slice+quantize
+  256× before dropping it, rather than the one-`with_tensor`-call-per-name
+  loop `Q8::build`/`Int8ThinkerResident`'s own loaders use today.
+
 ## In progress
 
-(nothing actively in flight right now — see "Not started" for the next
-pieces.)
-
-## Not started
-
-- **P2b — Gated DeltaNet BACKWARD**: `crates/model/tests/gdn_chunk_bwd.rs`
-  is a documented `#[ignore]`d stub, not a silent gap. Needs a reverse sweep
-  through the UT-transform (`i` from `chunk-1` down to `1`, mirroring
-  `gdn_ut_step.wgsl`'s forward sweep) plus backward for every other step
-  (mostly more `bmm`/`bmm_acc` calls with permuted operands), gradchecked at
-  the same tiny shape `gdn_chunk_fwd.rs` uses, both backends. Required per
-  this session's own AGENTS.md policy update (full backward is the default,
+- **P2b — Gated DeltaNet backward**: the full reverse-mode derivation
+  (every one of the 20 backward steps through the chunked recurrence,
+  including the UT-transform's reverse sweep) has been hand-derived and
+  handed off as an implementation spec; `crates/model/tests/gdn_chunk_bwd.rs`
+  is still the `#[ignore]`d stub until it lands (not a silent gap — it needs
+  a reverse sweep through the UT-transform (`i` from `chunk-1` down to `1`,
+  mirroring `gdn_ut_step.wgsl`'s forward sweep) plus backward for every
+  other step (mostly more `bmm`/`bmm_acc` calls with permuted operands),
+  gradchecked at the same tiny shape `gdn_chunk_fwd.rs` uses, both
+  backends). Required per this session's own AGENTS.md policy update (full
+  backward is the default,
   not an opt-out) — blocks P9 and P12 below.
 - **P8b — vision splice**: image/video token embedding into the decoder's
   input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
