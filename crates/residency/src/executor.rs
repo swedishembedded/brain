@@ -202,7 +202,7 @@ struct RunReq {
 #[derive(Clone)]
 pub struct Executor {
     tx: Sender<Msg>,
-    manifests: Arc<RwLock<Vec<Manifest>>>,
+    manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
     stats: Arc<Mutex<Stats>>,
 }
 
@@ -237,7 +237,7 @@ impl Executor {
             .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats))
             .expect("spawn dispatcher");
 
-        Executor { tx, manifests: Arc::new(RwLock::new(manifests)), stats }
+        Executor { tx, manifests: Arc::new(RwLock::new(Arc::new(manifests))), stats }
     }
 
     pub fn submit(&self, job: Job) {
@@ -255,7 +255,15 @@ impl Executor {
     /// with no extra synchronization.
     pub fn register(&self, model: Arc<dyn ResidentModel>) {
         let manifest = model.manifest();
-        self.manifests.write().unwrap().push(manifest);
+        {
+            // Copy-on-write: readers hold cheap Arc snapshots, so a (rare)
+            // registration rebuilds the Vec once instead of every reader
+            // deep-cloning the whole catalog per call.
+            let mut g = self.manifests.write().unwrap();
+            let mut v = (**g).clone();
+            v.push(manifest);
+            *g = Arc::new(v);
+        }
         let _ = self.tx.send(Msg::Register(model));
     }
 
@@ -334,11 +342,13 @@ impl Executor {
     }
 
     /// A snapshot of every currently-registered manifest, in registration
-    /// order. Owned (not a reference) because the underlying set can grow
-    /// after `start` via [`register`](Self::register) -- a snapshot is the
-    /// only thing that can be handed out without holding the lock open
-    /// across the caller's iteration.
-    pub fn manifests(&self) -> Vec<Manifest> {
+    /// order. An `Arc` snapshot (not a reference) because the underlying set
+    /// can grow after `start` via [`register`](Self::register) -- and an Arc
+    /// (not an owned Vec) because this used to DEEP-clone the whole catalog
+    /// (every `ActionSpec`, param and help string) on every call, on every
+    /// HTTP request path that resolves a model id. Registration is
+    /// copy-on-write, so this clone is one refcount bump.
+    pub fn manifests(&self) -> Arc<Vec<Manifest>> {
         self.manifests.read().unwrap().clone()
     }
 }
@@ -1375,7 +1385,7 @@ mod tests {
         // The manifest snapshot reflects the registration synchronously --
         // register() returns only after updating it, before the dispatcher
         // even sees the message.
-        let names: Vec<String> = exec.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = exec.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["late".to_string()]);
 
         // And it is schedulable: a Submit enqueued right after register()

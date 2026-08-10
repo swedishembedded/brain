@@ -342,7 +342,7 @@ mod tests {
         // filename-derived default ("model.brain") each importer falls back
         // to when called standalone -- this is exactly what `id_override`
         // exists to fix.
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Qwen/Qwen3-0.6B".to_string()]);
     }
 
@@ -397,7 +397,7 @@ mod tests {
         let mut progressed = false;
         supplier.ensure("Qwen/Qwen3-0.6B-Q8_0", &e, &mut |_, _, _| progressed = true).unwrap();
         assert!(progressed);
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
     }
 
@@ -427,7 +427,7 @@ mod tests {
         let e = exec();
         supplier.ensure("Tongyi-MAI/Z-Image-Turbo", &e, &mut |_, _, _| {}).unwrap();
 
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Tongyi-MAI/Z-Image-Turbo".to_string()], "must register under the fetched ref, not the compiled-in brain/z-image constant, or the request that triggered the fetch would find nothing");
 
         // The manifest landed with the exact roles ZimageRecipe declares, and
@@ -466,7 +466,7 @@ mod tests {
         let e = exec();
         supplier.ensure("Ultralytics/YOLOv8", &e, &mut |_, _, _| {}).unwrap();
 
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Ultralytics/YOLOv8".to_string()]);
 
         // A real, loadable model.brain.safetensors landed -- and a second
@@ -495,7 +495,7 @@ mod tests {
             h.join().unwrap().unwrap();
         }
         // Registered exactly once despite 8 concurrent callers.
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
     }
 

@@ -146,7 +146,7 @@ mod tests {
         e.ensure_model("fetchable", &supplier, &mut |msg, step, total| events.push((msg.to_string(), step, total))).unwrap();
         assert_eq!(supplier.fetches.load(Ordering::SeqCst), 1);
         assert_eq!(events, vec![("fetching".to_string(), 1, 2), ("registering".to_string(), 2, 2)]);
-        let names: Vec<String> = e.manifests().into_iter().map(|m| m.model).collect();
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["fetchable".to_string()]);
     }
 }
