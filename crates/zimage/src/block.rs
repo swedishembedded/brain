@@ -258,6 +258,24 @@ impl BlockWeights {
     }
 }
 
+/// The host-only fields of [`NormBufs`] — see [`NormBufs::host_cache`].
+#[derive(Clone)]
+pub(crate) struct NormHostCache {
+    raw_an1: Vec<f32>,
+    raw_an2: Vec<f32>,
+    raw_fn1: Vec<f32>,
+    raw_fn2: Vec<f32>,
+    adaln_w: Vec<f32>,
+    adaln_b: Vec<f32>,
+    modulation: bool,
+}
+
+impl NormHostCache {
+    pub(crate) fn host_bytes(&self) -> u64 {
+        4 * (self.raw_an1.len() + self.raw_an2.len() + self.raw_fn1.len() + self.raw_fn2.len() + self.adaln_w.len() + self.adaln_b.len()) as u64
+    }
+}
+
 /// The four per-forward folded-norm buffers (rewritten each forward from the
 /// timestep conditioning; see [`fold_adaln`]).
 pub(crate) struct NormBufs {
@@ -300,6 +318,40 @@ impl NormBufs {
         wf(gpu, &self.an2, &an2);
         wf(gpu, &self.fn1, &fn1);
         wf(gpu, &self.fn2, &fn2);
+    }
+
+    /// The host-only half of this block's norm state — nothing here is a
+    /// checkpoint read away from being rebuilt cheaply, unlike the device
+    /// buffers, which is exactly why a demote/promote cache retains this
+    /// and not the whole `NormBufs`.
+    pub(crate) fn host_cache(&self) -> NormHostCache {
+        NormHostCache {
+            raw_an1: self.raw_an1.clone(),
+            raw_an2: self.raw_an2.clone(),
+            raw_fn1: self.raw_fn1.clone(),
+            raw_fn2: self.raw_fn2.clone(),
+            adaln_w: self.adaln_w.clone(),
+            adaln_b: self.adaln_b.clone(),
+            modulation: self.modulation,
+        }
+    }
+
+    /// Rebuild fresh `an1..fn2` device buffers and plug in `cache`'s host
+    /// arrays — no checkpoint read. The norm-weight half of `promote`.
+    pub(crate) fn from_cache(gpu: &Gpu, dim: u32, cache: NormHostCache) -> NormBufs {
+        NormBufs {
+            an1: gpu.storage(dim as u64),
+            an2: gpu.storage(dim as u64),
+            fn1: gpu.storage(dim as u64),
+            fn2: gpu.storage(dim as u64),
+            raw_an1: cache.raw_an1,
+            raw_an2: cache.raw_an2,
+            raw_fn1: cache.raw_fn1,
+            raw_fn2: cache.raw_fn2,
+            adaln_w: cache.adaln_w,
+            adaln_b: cache.adaln_b,
+            modulation: cache.modulation,
+        }
     }
 
     /// Allocate one slot's fixed `an1`/`an2`/`fn1`/`fn2` device buffers with
@@ -540,36 +592,110 @@ pub(crate) struct Int8Weights {
 
 impl Int8Weights {
     pub fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> Int8Weights {
-        let (dim, hid) = (d.dim as usize, d.hidden as usize);
-        // quantize_weight computes a per-row scale over the WHOLE matrix, so
-        // this pulls one tensor at a time (never the whole model) but cannot
-        // itself be chunk-bounded further without a row-block quantizer —
-        // that refinement belongs to the windowed-execution phase, which
-        // needs it anyway for the fp32 stress case; see docs/lessons.md.
-        let q = |n: &str, no: usize, k: usize| {
-            let name = format!("{prefix}.{n}");
-            let mut result: Option<(Vec<u32>, Vec<f32>)> = None;
-            let found = t.with_tensor(&name, &mut |data| result = Some(crate::int8::quantize_weight(data, no, k)));
-            assert!(found, "zimage: missing {name}");
-            let (packed, sw) = result.expect("with_tensor found the tensor, so it must have set result");
-            let pb = gpu.storage(packed.len() as u64);
-            gpu.write(&pb, &packed);
-            let sb = gpu.storage(sw.len() as u64);
-            wf(gpu, &sb, &sw);
-            (pb, sb)
-        };
-        let f32buf = |n: &str| upload_named(gpu, t, &format!("{prefix}.{n}"));
-        Int8Weights {
-            wq: q("attention.to_q.weight", dim, dim),
-            wk: q("attention.to_k.weight", dim, dim),
-            wv: q("attention.to_v.weight", dim, dim),
-            wo: q("attention.to_out.0.weight", dim, dim),
-            w1: q("feed_forward.w1.weight", hid, dim),
-            w2: q("feed_forward.w2.weight", dim, hid),
-            w3: q("feed_forward.w3.weight", hid, dim),
-            nq: f32buf("attention.norm_q.weight"),
-            nk: f32buf("attention.norm_k.weight"),
-        }
+        upload_packed(gpu, &quantize_block(t, prefix, d))
+    }
+
+    /// [`Self::upload`], but also returns a [`HostInt8Block`] snapshot of
+    /// exactly what was quantized and uploaded — for a caller opting into
+    /// `demote`/`promote` (see `ZImageDitI8::demote`), which retains the
+    /// snapshot so a later `upload_from_cache` skips both the checkpoint
+    /// read and the quantization this call just did.
+    pub fn upload_with_cache(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> (Int8Weights, HostInt8Block) {
+        let host = quantize_block(t, prefix, d);
+        (upload_packed(gpu, &host), host)
+    }
+
+    /// Re-upload from an already-quantized host cache — no checkpoint read,
+    /// no re-quantization. The fast half of `promote`.
+    pub fn upload_from_cache(gpu: &Gpu, c: &HostInt8Block) -> Int8Weights {
+        upload_packed(gpu, c)
+    }
+}
+
+/// Quantize one block's seven linears from `t` plus read its two f32 norm
+/// weights — the checkpoint-read + compute half, shared by [`Int8Weights::
+/// upload`]/[`Int8Weights::upload_with_cache`]. `quantize_weight` computes a
+/// per-row scale over the WHOLE matrix, so this pulls one tensor at a time
+/// (never the whole model) but cannot itself be chunk-bounded further
+/// without a row-block quantizer — that refinement belongs to the windowed-
+/// execution phase, which needs it anyway for the fp32 stress case; see
+/// docs/lessons.md.
+fn quantize_block(t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> HostInt8Block {
+    let (dim, hid) = (d.dim as usize, d.hidden as usize);
+    let q = |n: &str, no: usize, k: usize| {
+        let name = format!("{prefix}.{n}");
+        let mut result: Option<(Vec<u32>, Vec<f32>)> = None;
+        let found = t.with_tensor(&name, &mut |data| result = Some(crate::int8::quantize_weight(data, no, k)));
+        assert!(found, "zimage: missing {name}");
+        result.expect("with_tensor found the tensor, so it must have set result")
+    };
+    HostInt8Block {
+        wq: q("attention.to_q.weight", dim, dim),
+        wk: q("attention.to_k.weight", dim, dim),
+        wv: q("attention.to_v.weight", dim, dim),
+        wo: q("attention.to_out.0.weight", dim, dim),
+        w1: q("feed_forward.w1.weight", hid, dim),
+        w2: q("feed_forward.w2.weight", dim, hid),
+        w3: q("feed_forward.w3.weight", hid, dim),
+        nq: read_named(t, &format!("{prefix}.attention.norm_q.weight")),
+        nk: read_named(t, &format!("{prefix}.attention.norm_k.weight")),
+    }
+}
+
+/// Allocate device buffers and write `host`'s int8+scale pairs and f32 norm
+/// weights into them — the upload half shared by every `Int8Weights`
+/// construction path (fresh quantize or cached reupload); `host` is exactly
+/// as usable freshly-quantized as it is from a retained cache.
+fn upload_packed(gpu: &Gpu, host: &HostInt8Block) -> Int8Weights {
+    let up = |(packed, sw): &(Vec<u32>, Vec<f32>)| {
+        let pb = gpu.storage(packed.len() as u64);
+        gpu.write(&pb, packed);
+        let sb = gpu.storage(sw.len() as u64);
+        wf(gpu, &sb, sw);
+        (pb, sb)
+    };
+    let f32b = |v: &[f32]| {
+        let b = gpu.storage(v.len() as u64);
+        wf(gpu, &b, v);
+        b
+    };
+    Int8Weights {
+        wq: up(&host.wq),
+        wk: up(&host.wk),
+        wv: up(&host.wv),
+        wo: up(&host.wo),
+        w1: up(&host.w1),
+        w2: up(&host.w2),
+        w3: up(&host.w3),
+        nq: f32b(&host.nq),
+        nk: f32b(&host.nk),
+    }
+}
+
+/// Host-side snapshot of one block's ALREADY-quantized weights (packed int8
+/// alongside per-row f32 scales, plus the two small f32 norm weights) —
+/// what [`quantize_block`] computes right before [`upload_packed`] writes
+/// it to the device and (normally) it is dropped. Retained only when a
+/// caller opts into demote/promote; [`Int8Weights::upload_from_cache`]
+/// re-uploads from it with no checkpoint read and no re-quantization.
+pub(crate) struct HostInt8Block {
+    wq: (Vec<u32>, Vec<f32>),
+    wk: (Vec<u32>, Vec<f32>),
+    wv: (Vec<u32>, Vec<f32>),
+    wo: (Vec<u32>, Vec<f32>),
+    w1: (Vec<u32>, Vec<f32>),
+    w2: (Vec<u32>, Vec<f32>),
+    w3: (Vec<u32>, Vec<f32>),
+    nq: Vec<f32>,
+    nk: Vec<f32>,
+}
+
+impl HostInt8Block {
+    /// Total bytes this snapshot holds — the real, measured cost of
+    /// retaining it, not a guess (used to build an honest `estimate_at`).
+    pub(crate) fn host_bytes(&self) -> u64 {
+        let pair = |(p, s): &(Vec<u32>, Vec<f32>)| (p.len() * 4 + s.len() * 4) as u64;
+        pair(&self.wq) + pair(&self.wk) + pair(&self.wv) + pair(&self.wo) + pair(&self.w1) + pair(&self.w2) + pair(&self.w3) + (self.nq.len() * 4 + self.nk.len() * 4) as u64
     }
 }
 

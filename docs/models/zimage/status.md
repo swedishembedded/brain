@@ -156,6 +156,45 @@ cosine bound) to the fully-resident engine at a tiny synthetic config with a
 window narrower than the model — residency is a pure memory placement
 decision here, verified to never be a numerical one.
 
+## Cross-instance Tier::Warm/Cold — a real, measured opt-in
+
+`residency::ResidencyManager`'s eviction path now tries `Instance::demote(Warm)`
+before falling back to a full drop, and `claim()` promotes a Warm instance back
+to Hot instead of always rebuilding from the checkpoint (see
+`crates/residency/src/manager.rs`). Every existing model still gets exactly
+today's behaviour (`demote` defaults to `Err`) — this is opt-in, and for
+Z-Image specifically it is only worth opting into for the plain int8 build
+(`BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`): `ZImageDitI8::build_from_source_with_cache`
+retains every block's already-quantized host weights (packed int8 + scales)
+instead of discarding them after upload, so a later `promote` skips both the
+checkpoint read and the re-quantization — at the cost of ~5 GB of permanently
+retained host RAM for as long as the instance stays registered
+(`zimage::pipeline::int8_cache_bytes_estimate`, reported honestly via
+`estimate_at(Warm)` instead of a false `0`).
+
+Real, measured result against the actual checkpoint
+(`crates/cli/src/resident.rs::tests::zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster`,
+`--ignored`, `BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`): activate → demote → promote →
+generate, on this same box —
+
+| | |
+|---|---|
+| Fresh `activate()` (checkpoint read + quantize + upload) | **94.5 s** |
+| `promote()` from cache (no checkpoint, no re-quantize) | **9.6 s** |
+| Speedup | **~9.8×** |
+
+Correctness proof independent of the real run: `dit_i8_rebuilt_from_cache_
+matches_a_fresh_build_bit_for_bit` (`crates/zimage/src/dev.rs`) asserts a DiT
+rebuilt purely from a `DitI8Cache` produces bit-identical output to a fresh
+build off the checkpoint — the same "residency is a pure memory placement
+decision" property the weight-window test above establishes, now for the
+demote/promote cache too.
+
+fp32 and any LoRA-adapter build never retain a cache (`demote` refuses for
+those, matching every other non-opted-in model) — building one for those
+would need caching an entire fp32/adapter-folded checkpoint's worth of host
+weights, a much larger and separately-scoped undertaking, not attempted here.
+
 ## Measured (quoted from code/docs)
 
 - int8 6B fits **one 24 GB P40** (~6 GB of weights), no sharding (`int8.rs`,

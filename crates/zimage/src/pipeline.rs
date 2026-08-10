@@ -168,6 +168,23 @@ fn windowed_dit_vram_bytes(cfg: &ZImageConfig, window: u32) -> u64 {
     per_block_bytes * (refiner_blocks + window) + overhead
 }
 
+/// The dominant term of a plain-int8 [`crate::DitI8Cache`]'s host bytes at
+/// `cfg`'s shape — the packed int8 weights (`wq`/`wk`/`wv`/`wo`/`w1`/`w2`/`w3`,
+/// 1 byte/element once packed), leaving out the much smaller per-row f32
+/// scales and norm arrays. Not bit-exact like [`windowed_dit_vram_bytes`]
+/// (that one backs a hard device-fit decision; this one backs an
+/// observability/estimate number) — real and order-of-magnitude correct is
+/// the bar: `ResidentModel::estimate_at(Warm)` reporting `0` for an
+/// instance that actually retained ~5 GB would be a worse lie than a
+/// slightly-approximate few-GB figure.
+pub fn int8_cache_bytes_estimate(cfg: &ZImageConfig) -> u64 {
+    let bd = cfg.block_dims();
+    let (dim, hidden) = (bd.dim as u64, bd.hidden as u64);
+    let packed_per_block = 4 * dim * dim + 3 * hidden * dim;
+    let blocks = cfg.n_layers as u64 + 2 * cfg.n_refiner_layers as u64;
+    packed_per_block * blocks
+}
+
 impl DitEngine {
     fn build(hifi: bool, cfg: ZImageConfig, weights: crate::block::Tensors, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
         // The adapter/LoRA-folding path (the only caller of `build`) has no
@@ -224,6 +241,39 @@ impl DitEngine {
             DitEngine::I8(_) | DitEngine::Shard(_) => Vec::new(),
             DitEngine::Windowed { dit, .. } => vec![("dit_window_reloads".to_string(), serde_json::json!(dit.main_reloads()))],
         }
+    }
+}
+
+/// Build the `DitEngine` for `(hifi, adapter)` on `dit_gpu` — extracted out
+/// of `build_adapted` verbatim so `rebuild_dit_from_i8_cache` (the promote
+/// path) can share every OTHER piece of `build_adapted` (encoder, VAE) and
+/// differ on only this one, swapping it for `ZImageDitI8::rebuild_from_cache`.
+fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u32, lh: u32, lw: u32, cap_len: u32, progress: &mut dyn FnMut(&str)) -> Result<DitEngine, String> {
+    progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
+    let zcfg = ZImageConfig::turbo();
+    if let Some(ap) = adapter {
+        // LoRA folding mutates weights element-wise in place, so it needs an
+        // owned, complete map regardless of how the checkpoint is read --
+        // eager here is the adapter path's actual requirement, not a
+        // leftover the loader fix missed. Still gets the retention fix:
+        // `weights` drops at the end of this block, and the built engine
+        // (ZImageDitI8/Shard) only ever keeps its 13-tensor HostWeights
+        // (see crate::dev's doc).
+        let mut weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+        progress(&format!("folding LoRA adapter {ap}"));
+        let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
+        crate::finetune::load_adapter_folded(ap, &tcfg, &mut weights)?;
+        gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build(hifi, zcfg.clone(), weights, lh, lw, cap_len))
+    } else {
+        // Streaming: one tensor at a time, straight to the device (via
+        // block::upload_named's chunk-bounded path). Peak host allocation
+        // for the DiT's weights is then one tensor (~157 MB for
+        // feed_forward.w1 once BF16 is converted), never the whole ~24 GB
+        // model this replaces (import_comfy(read_component_tensors(..))
+        // materializing the entire checkpoint up front).
+        let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
+        let dsrc = crate::import::comfy_source(&dreader, &zcfg);
+        gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, &paths.dit, lh, lw, cap_len))
     }
 }
 
@@ -470,33 +520,7 @@ impl HotPipeline {
         };
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
-        progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
-        let zcfg = ZImageConfig::turbo();
-        // The DiT/VAE build lands on the DiT card regardless of the branch above.
-        let dit = if let Some(ap) = adapter {
-            // LoRA folding mutates weights element-wise in place, so it needs
-            // an owned, complete map regardless of how the checkpoint is
-            // read -- eager here is the adapter path's actual requirement,
-            // not a leftover the loader fix missed. Still gets the retention
-            // fix: `weights` drops at the end of this block, and the built
-            // engine (ZImageDitI8/Shard) only ever keeps its 13-tensor
-            // HostWeights (see crate::dev's doc).
-            let mut weights = import_comfy(read_component_tensors(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
-            progress(&format!("folding LoRA adapter {ap}"));
-            let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
-            crate::finetune::load_adapter_folded(ap, &tcfg, &mut weights)?;
-            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build(hifi, zcfg.clone(), weights, lh, lw, cap_len))?
-        } else {
-            // Streaming: one tensor at a time, straight to the device (via
-            // block::upload_named's chunk-bounded path). Peak host
-            // allocation for the DiT's weights is then one tensor (~157 MB
-            // for feed_forward.w1 once BF16 is converted), never the whole
-            // ~24 GB model this replaces (import_comfy(read_component_
-            // tensors(..)) materializing the entire checkpoint up front).
-            let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
-            let dsrc = crate::import::comfy_source(&dreader, &zcfg);
-            gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, &paths.dit, lh, lw, cap_len))?
-        };
+        let dit = build_dit_engine(paths, hifi, adapter, dit_gpu, lh, lw, cap_len, &mut progress)?;
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
         // encoder tail on top of it (GPU `dit_gpu`), then assemble Encoder::Split.
@@ -530,6 +554,123 @@ impl HotPipeline {
         })?;
 
         Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi })
+    }
+
+    /// The plain-int8 (no adapter, no hifi) tokenizer+encoder+VAE assembly,
+    /// shared by [`Self::build_adapted_with_cache`] and
+    /// [`Self::build_from_dit_cache`] — the two demote/promote entry
+    /// points — so neither re-derives the (already load-bearing, tested
+    /// via `build_adapted`) encoder-selection logic independently.
+    /// `build_dit` receives `(dit_gpu, lh, lw)` and must build+place the
+    /// DiT on `dit_gpu` itself; this function does not touch it beyond
+    /// that. Left OUT of `build_adapted` itself deliberately: that
+    /// function's adapter/hifi generality needs its own, unmodified path,
+    /// never sharing code with a promote-only feature.
+    fn assemble_int8_pipeline(paths: &Paths, width: u32, height: u32, cap_len: u32, build_dit: impl FnOnce(u32, u32, u32) -> Result<DitEngine, String>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
+            return Err("width/height must be multiples of 16".into());
+        }
+        let (lh, lw) = (height / 8, width / 8);
+
+        progress("loading tokenizer");
+        let tok = QwenBpe::from_file(&paths.tokenizer)?;
+
+        let qcfg = QwenConfig::qwen3_4b();
+        let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
+        let qsrc = qwen::import::hf_source(&qreader, &qcfg)?;
+        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_ZIMAGE_ENCODER_GPU {s:?}")))
+            .transpose()?;
+        let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
+        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::gpus().len());
+
+        // Same three arms as build_adapted's !hifi cases (no fp32-split arm
+        // -- that one only ever applies when hifi, which these entry points
+        // never are).
+        let enc = match enc_gpu {
+            Some(bulk) if encoder_on_demand(bulk, dit_gpu, resident_override()) => {
+                progress(&format!("using on-demand Qwen-4B encoder (int8 DP4A, GPU {bulk} shared with the DiT)"));
+                Encoder::OnDemand { qreader_path: paths.qwen.clone(), qcfg: qcfg.clone(), cap_len, gpu: bulk }
+            }
+            Some(bulk) => {
+                let n = qcfg.n_layers as usize;
+                progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
+                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
+                Encoder::Gpu8(e)
+            }
+            None => {
+                progress("building Qwen-4B encoder (CPU/AVX2)");
+                gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
+                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                Encoder::Cpu(e)
+            }
+        };
+        drop(qsrc);
+        drop(qreader);
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+
+        let dit = build_dit(dit_gpu, lh, lw)?;
+
+        let vae_card = match &enc {
+            Encoder::Gpu8(_) => enc_gpu.unwrap_or(dit_gpu),
+            _ => dit_gpu,
+        };
+        progress(&format!("building VAE decoder (GPU {vae_card})"));
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+        let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+        let vae = gpu_core::devices::with_gpu(vae_card, || VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu")))?;
+
+        Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi: false })
+    }
+
+    /// Like [`Self::build`] (plain int8, no adapter), but ALSO returns a
+    /// [`crate::DitI8Cache`] snapshot of the DiT's already-quantized host
+    /// weights — the demote-preparing build. Costs real, permanent host
+    /// RAM for as long as the cache lives (see
+    /// `ZImageDitI8::build_from_source_with_cache`'s doc); an explicit
+    /// choice by the caller (`crates/cli/src/resident.rs`'s
+    /// `ZImageInstance`), never the default [`Self::build`] path.
+    pub fn build_adapted_with_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, progress: impl FnMut(&str)) -> Result<(HotPipeline, crate::DitI8Cache), String> {
+        let paths = paths.clone();
+        let cache_slot: std::rc::Rc<std::cell::RefCell<Option<crate::DitI8Cache>>> = Default::default();
+        let slot = cache_slot.clone();
+        let dit_paths = paths.clone();
+        let pipe = Self::assemble_int8_pipeline(
+            &paths,
+            width,
+            height,
+            cap_len,
+            move |dit_gpu, lh, lw| {
+                let zcfg = ZImageConfig::turbo();
+                let dreader = open_component(&dit_paths.dit).map_err(|e| format!("open dit: {e}"))?;
+                let dsrc = crate::import::comfy_source(&dreader, &zcfg);
+                let (dit, cache) = gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::build_from_source_with_cache(zcfg, &dsrc, 1, lh, lw, cap_len))?;
+                *slot.borrow_mut() = Some(cache);
+                Ok(DitEngine::I8(dit))
+            },
+            progress,
+        )?;
+        let cache = cache_slot.borrow_mut().take().expect("assemble_int8_pipeline only returns Ok after build_dit ran and set this");
+        Ok((pipe, cache))
+    }
+
+    /// [`Self::build_adapted_with_cache`]'s promote sibling: rebuild the
+    /// int8 pipeline WITHOUT touching the DiT checkpoint at all, using
+    /// `cache` instead. `crates/cli/src/resident.rs`'s
+    /// `ZImageInstance::promote` is the caller.
+    pub fn build_from_dit_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, cache: &crate::DitI8Cache, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        Self::assemble_int8_pipeline(
+            paths,
+            width,
+            height,
+            cap_len,
+            |dit_gpu, lh, lw| Ok(DitEngine::I8(gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::rebuild_from_cache(cache, 1, lh, lw, cap_len))?)),
+            progress,
+        )
     }
 
     /// Tokenize `prompt`, pad/truncate to `cap_len`, and run encode → DiT sampling
@@ -1013,5 +1154,16 @@ mod encoder_scheduling_tests {
         assert_eq!(vram_2gpu, 24 << 30);
         assert_eq!(ram_1gpu, ram_2gpu);
         assert!(vram_1gpu < vram_2gpu, "the windowed estimate must be dramatically smaller, or the whole fix is pointless");
+    }
+
+    /// A real, non-zero, roughly-5-GB-at-Turbo's-shape number — not a
+    /// placeholder. `estimate_at(Warm)` reporting `0` for a cache that
+    /// actually holds several GB would defeat the entire point of the
+    /// figure (an OOM the budgeting layer thinks can't happen).
+    #[test]
+    fn int8_cache_bytes_estimate_is_a_real_multi_gigabyte_number_at_turbo_shape() {
+        let bytes = int8_cache_bytes_estimate(&ZImageConfig::turbo());
+        assert!(bytes > 4 << 30, "expected multiple GB, got {} bytes", bytes);
+        assert!(bytes < 8 << 30, "expected the DOMINANT term only, not double-counted, got {} bytes", bytes);
     }
 }

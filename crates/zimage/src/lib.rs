@@ -33,7 +33,7 @@ pub mod modelgrad;
 pub mod shard;
 pub mod train;
 
-pub use dev::{ZImageDit, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
+pub use dev::{DitI8Cache, ZImageDit, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 
 pub use block::{BlockDims, Tensors, ZImageBlock};
 pub use model::{ZImageConfig, ZImageModel};

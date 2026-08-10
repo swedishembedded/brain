@@ -14,8 +14,8 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::block::{
-    build_block_steps, build_block_steps_i8, read_named, wf, BlockDims, BlockWeights, Int8Scratch,
-    Int8Weights, NormBufs, Scratch, Tensors, KERNELS,
+    build_block_steps, build_block_steps_i8, read_named, wf, BlockDims, BlockWeights, HostInt8Block, Int8Scratch,
+    Int8Weights, NormBufs, NormHostCache, Scratch, Tensors, KERNELS,
 };
 use crate::model::{postprocess, preprocess, timestep_cond, HostLookup};
 use crate::ZImageConfig;
@@ -31,6 +31,7 @@ use crate::ZImageConfig;
 /// `HashMap<String, Vec<f32>>` has already lost — the caller must
 /// materialize everything, and the callee may keep it, and neither is
 /// visible in the type."
+#[derive(Clone)]
 pub(crate) struct HostWeights {
     xemb_w: Vec<f32>,
     xemb_b: Vec<f32>,
@@ -346,6 +347,64 @@ fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &
     Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }
 }
 
+/// [`build_phase_i8`], but retaining each block's [`crate::block::HostInt8Block`]/
+/// [`crate::block::NormHostCache`] alongside the built (device-resident)
+/// phase — the checkpoint-read + quantize half of a rebuild, done once and
+/// kept so [`rebuild_phase_i8_from_cache`] never needs to do it again.
+/// Costs real, permanent host RAM for as long as the cache lives (roughly
+/// the model's own int8 size again) — this is why it is its own function,
+/// never the default `build_phase_i8` path: retaining it is an explicit
+/// choice by whoever calls this, not a hidden side effect of building at
+/// all (see `ZImageDitI8::build_from_source_with_cache`'s doc).
+fn build_phase_i8_with_cache(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> (Int8Phase, Vec<(HostInt8Block, NormHostCache)>) {
+    let half = bd.head_dim / 2;
+    let resa = gpu.storage((t * bd.dim) as u64);
+    let resb = gpu.storage((t * bd.dim) as u64);
+    let cos = gpu.storage((t * half) as u64);
+    let sin = gpu.storage((t * half) as u64);
+    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(gpu, bd.n_heads, t));
+    let i8 = Int8Scratch::new(gpu, bd, t);
+    let (mut weights, mut norms, mut steps, mut cache) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
+    for p in prefixes {
+        let (w, host_w) = Int8Weights::upload_with_cache(gpu, tensors, p, bd);
+        let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
+        let host_n = nb.host_cache();
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        weights.push(w);
+        norms.push(nb);
+        cache.push((host_w, host_n));
+        std::mem::swap(&mut cur_in, &mut cur_out);
+        gpu.poll_wait();
+    }
+    (Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }, cache)
+}
+
+/// [`build_phase_i8_with_cache`], rebuilding entirely from `cache` instead
+/// of a `TensorSource` — no checkpoint read, no re-quantization. The fast
+/// half of a `promote`.
+fn rebuild_phase_i8_from_cache(gpu: &Gpu, cache: &[(HostInt8Block, NormHostCache)], bd: BlockDims, t: u32) -> Int8Phase {
+    let half = bd.head_dim / 2;
+    let resa = gpu.storage((t * bd.dim) as u64);
+    let resb = gpu.storage((t * bd.dim) as u64);
+    let cos = gpu.storage((t * half) as u64);
+    let sin = gpu.storage((t * half) as u64);
+    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(gpu, bd.n_heads, t));
+    let i8 = Int8Scratch::new(gpu, bd, t);
+    let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
+    for (host_w, host_n) in cache {
+        let w = Int8Weights::upload_from_cache(gpu, host_w);
+        let nb = NormBufs::from_cache(gpu, bd.dim, host_n.clone());
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        weights.push(w);
+        norms.push(nb);
+        std::mem::swap(&mut cur_in, &mut cur_out);
+        gpu.poll_wait();
+    }
+    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }
+}
+
 impl Int8Phase {
     fn run(&self, gpu: &Gpu, tokens: &[f32], c: &[f32], cos: &[f32], sin: &[f32], dim: usize, cdim: usize) -> Vec<f32> {
         for nb in &self.norms {
@@ -415,6 +474,73 @@ impl ZImageDitI8 {
         uni_sin.extend_from_slice(&pre.cap_rope.sin);
         let uni_out = self.main.run(&self.gpu, &uni, &cvec, &uni_cos, &uni_sin, dim, cdim);
         postprocess(c, &self.w, &uni_out, &cvec, pre.n_img, self.f, self.h, self.wd)
+    }
+
+    /// Build, retaining every block's already-quantized host weights in the
+    /// returned [`DitI8Cache`] instead of discarding them after upload —
+    /// what makes [`Self::rebuild_from_cache`] able to skip the checkpoint
+    /// read AND the quantization on a later `promote`. Costs real,
+    /// permanent host RAM for as long as the cache lives (roughly the
+    /// model's own int8 size again, ~13 GB at Z-Image-Turbo's shape) — an
+    /// explicit choice by whoever calls this, never the default
+    /// [`Self::build_from_source`] path.
+    pub fn build_from_source_with_cache(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> (ZImageDitI8, DitI8Cache) {
+        let gpu = Gpu::new_wgpu(&KERNELS);
+        let bd = cfg.block_dims();
+        let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+        let n_img = (f / pf) * (h / ps) * (wd / ps);
+        let ntot = n_img + cap_len;
+        let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
+        let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
+        let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
+        let (noise, noise_cache) = build_phase_i8_with_cache(&gpu, src, &np, bd, n_img, true);
+        let (context, context_cache) = build_phase_i8_with_cache(&gpu, src, &cp, bd, cap_len, false);
+        let (main, main_cache) = build_phase_i8_with_cache(&gpu, src, &mp, bd, ntot, true);
+        let w = HostWeights::from_source(&cfg, src);
+        let dit = ZImageDitI8 { gpu, cfg: cfg.clone(), w: w.clone(), f, h, wd, cap_len, noise, context, main };
+        let cache = DitI8Cache { cfg, w, noise: noise_cache, context: context_cache, main: main_cache };
+        (dit, cache)
+    }
+
+    /// [`Self::build_from_source_with_cache`]'s inverse: rebuild entirely
+    /// from `cache` — no `TensorSource`, no checkpoint path, no
+    /// re-quantization. The fast half of a `promote`; `cache` is borrowed,
+    /// not consumed, so it stays ready for the NEXT demote/promote cycle
+    /// too.
+    pub fn rebuild_from_cache(cache: &DitI8Cache, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
+        let gpu = Gpu::new_wgpu(&KERNELS);
+        let cfg = cache.cfg.clone();
+        let bd = cfg.block_dims();
+        let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+        let n_img = (f / pf) * (h / ps) * (wd / ps);
+        let ntot = n_img + cap_len;
+        let noise = rebuild_phase_i8_from_cache(&gpu, &cache.noise, bd, n_img);
+        let context = rebuild_phase_i8_from_cache(&gpu, &cache.context, bd, cap_len);
+        let main = rebuild_phase_i8_from_cache(&gpu, &cache.main, bd, ntot);
+        ZImageDitI8 { gpu, cfg, w: cache.w.clone(), f, h, wd, cap_len, noise, context, main }
+    }
+}
+
+/// The host-retained state a `promote` needs to rebuild a [`ZImageDitI8`]
+/// without touching the checkpoint again — every block's already-quantized
+/// weights (see [`ZImageDitI8::build_from_source_with_cache`]) plus the 13
+/// wrapper tensors ([`HostWeights`]) and the config needed to reconstruct
+/// [`BlockDims`]. Deliberately holds no device state: a demoted instance
+/// keeps only this, dropping its `Gpu` and every buffer entirely.
+pub struct DitI8Cache {
+    cfg: ZImageConfig,
+    w: HostWeights,
+    noise: Vec<(HostInt8Block, NormHostCache)>,
+    context: Vec<(HostInt8Block, NormHostCache)>,
+    main: Vec<(HostInt8Block, NormHostCache)>,
+}
+
+impl DitI8Cache {
+    /// Real, measured host bytes this cache holds — what
+    /// `ResidentModel::estimate_at(Warm)` should report, not a guess.
+    pub fn host_bytes(&self) -> u64 {
+        let phase = |p: &[(HostInt8Block, NormHostCache)]| p.iter().map(|(b, n)| b.host_bytes() + n.host_bytes()).sum::<u64>();
+        phase(&self.noise) + phase(&self.context) + phase(&self.main)
     }
 }
 
@@ -845,5 +971,48 @@ mod tests {
             windowed.forward(&t, &latent, &cap, 0.5);
         }
         assert_eq!(windowed.main_reloads(), 0);
+    }
+
+    /// Like `tiny_cfg`, but `dim`/`hidden` are multiples of 4 — DP4A int8
+    /// packs 4 lanes per `u32`, so `ZImageDitI8` (unlike the fp32 engines)
+    /// asserts every quantized matmul's K dimension divides evenly by 4;
+    /// `tiny_cfg`'s `hidden = 8*8/3 = 21` fails that and was never
+    /// exercised against int8 before this test.
+    fn tiny_cfg_int8() -> ZImageConfig {
+        ZImageConfig { dim: 12, n_heads: 2, ..tiny_cfg() }
+    }
+
+    /// The whole point of a demote/promote cache: rebuilding purely from
+    /// it, no checkpoint in sight, must be numerically INDISTINGUISHABLE
+    /// from a fresh build straight off the checkpoint. `assert_eq!` on the
+    /// forward output, not a bound — retention is a pure memory placement
+    /// decision, exactly the same property `ZImageDitWindowed`'s
+    /// bit-identical test establishes for the weight window.
+    #[test]
+    fn dit_i8_rebuilt_from_cache_matches_a_fresh_build_bit_for_bit() {
+        let cfg = tiny_cfg_int8();
+        let t = full_tiny_tensors(&cfg);
+        let (f, h, wd, cap_len) = (1, 4, 4, 4);
+        let latent_n = (cfg.in_channels * f * h * wd) as usize;
+        let latent = filled(9001, latent_n);
+        let cap = filled(9002, cap_len as usize * cfg.cap_feat_dim as usize);
+
+        let fresh = ZImageDitI8::build_from_source(cfg.clone(), &t, f, h, wd, cap_len);
+        let (_built, cache) = ZImageDitI8::build_from_source_with_cache(cfg.clone(), &t, f, h, wd, cap_len);
+        let rebuilt = ZImageDitI8::rebuild_from_cache(&cache, f, h, wd, cap_len);
+
+        let want = fresh.forward(&latent, &cap, 0.5);
+        let got = rebuilt.forward(&latent, &cap, 0.5);
+        assert_eq!(got, want);
+
+        // The cache must actually hold real bytes (a hollow cache that
+        // reports 0 would silently defeat the whole point of estimate_at).
+        assert!(cache.host_bytes() > 0);
+
+        // Borrowed, not consumed: a second rebuild from the SAME cache
+        // (the second demote/promote cycle a long-running server would do)
+        // must also match, proving the cache is reusable, not one-shot.
+        let rebuilt_again = ZImageDitI8::rebuild_from_cache(&cache, f, h, wd, cap_len);
+        assert_eq!(rebuilt_again.forward(&latent, &cap, 0.5), want);
     }
 }

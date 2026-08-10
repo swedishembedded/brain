@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use capability::{ActionResult, Invocation, Manifest, Media, Outcome, Progress};
 use residency::bridge::ProviderResident;
-use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel};
+use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel, Tier};
 use serde_json::{json, Value};
 use zimage::pipeline::{HotPipeline, Image, Paths};
 
@@ -400,28 +400,66 @@ impl ResidentModel for ZImageResident {
         MemCost::new(vram, 0)
     }
 
+    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        match tier {
+            Tier::Hot => self.estimate(key),
+            // Real, not `0`: only the plain int8 build (see
+            // `retains_int8_cache`) ever actually has a Warm state (every
+            // other shape's `demote` refuses, so the manager never
+            // consults this for those) -- but when it does, the retained
+            // `DitI8Cache` genuinely holds several GB, and claiming
+            // otherwise is precisely the kind of budgeting lie this whole
+            // workstream exists to avoid.
+            Tier::Warm | Tier::Cold => MemCost::new(0, zimage::pipeline::int8_cache_bytes_estimate(&zimage::ZImageConfig::turbo())),
+        }
+    }
+
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if key.config.starts_with("edit:") {
             // No persistent pipeline — the provider builds fresh per call.
-            return Ok(Box::new(ZImageInstance { pipe: None, provider: self.provider.clone() }));
+            return Ok(Box::new(ZImageInstance { pipe: None, dit_cache: None, provider: self.provider.clone(), paths: self.paths.clone(), width: 0, height: 0, cap_len: 0 }));
         }
         let (w, h, hifi, adapter) = parse_key(&key.config);
         let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
+        let cap_len = 64;
         // Place the DiT on the assigned card (scoped registry selection); the
         // encoder card is z-image's own (BRAIN_ZIMAGE_ENCODER_GPU) and left as
         // configured.
-        let pipe = crate::resident_llm::on_device(device, || {
-            HotPipeline::build_adapted(&self.paths, w, h, 64, hifi, adapter, |_| {})
-        })??;
-        Ok(Box::new(ZImageInstance { pipe: Some(pipe), provider: self.provider.clone() }))
+        let (pipe, dit_cache) = if retains_int8_cache(hifi, adapter) {
+            let (pipe, cache) = crate::resident_llm::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, w, h, cap_len, |_| {}))??;
+            (pipe, Some(cache))
+        } else {
+            let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_adapted(&self.paths, w, h, cap_len, hifi, adapter, |_| {}))??;
+            (pipe, None)
+        };
+        Ok(Box::new(ZImageInstance { pipe: Some(pipe), dit_cache, provider: self.provider.clone(), paths: self.paths.clone(), width: w, height: h, cap_len }))
     }
 }
 
+/// Whether an `activate` for `(hifi, adapter)` should retain a
+/// [`zimage::DitI8Cache`] alongside the built pipeline — real, permanent
+/// extra host RAM (see [`ZImageDitI8::build_from_source_with_cache`]'s
+/// doc), so opt-in only (`BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`) and only for
+/// the one shape a cache can even be built for: plain int8, no adapter.
+/// fp32 and LoRA-folded builds always return `false` regardless of the env
+/// var — `demote` for those stays the manager's unmodified default
+/// (`Err("unsupported")`, today's full drop-and-rebuild), not a silent lie.
+fn retains_int8_cache(hifi: bool, adapter: Option<&str>) -> bool {
+    !hifi && adapter.is_none() && std::env::var("BRAIN_ZIMAGE_RETAIN_INT8_CACHE").ok().as_deref() == Some("1")
+}
+
 /// A resident z-image instance: `pipe` when a text2image pipeline is built; the
-/// `provider` handles the fresh-build editing/training actions.
+/// `provider` handles the fresh-build editing/training actions. `dit_cache`
+/// is `Some` only for an instance that opted into [`retains_int8_cache`] —
+/// what makes `demote`/`promote` real instead of the default `Err`.
 struct ZImageInstance {
     pipe: Option<HotPipeline>,
+    dit_cache: Option<zimage::DitI8Cache>,
     provider: Arc<zimage::caps::ZImageProvider>,
+    paths: Paths,
+    width: u32,
+    height: u32,
+    cap_len: u32,
 }
 
 impl Instance for ZImageInstance {
@@ -444,6 +482,36 @@ impl Instance for ZImageInstance {
     fn metrics(&self) -> Vec<(String, Value)> {
         self.pipe.as_ref().map(|p| p.metrics()).unwrap_or_default()
     }
+
+    /// Real only when `activate` retained a `dit_cache` (plain int8, no
+    /// adapter, `BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`): drops the whole
+    /// resident pipeline — encoder, DiT, VAE, every device buffer — while
+    /// the cache (already held separately) survives, ready for `promote`.
+    /// Refuses for everything else (fp32, an adapter build, or a plain
+    /// int8 build that didn't opt in), so the manager falls back to its
+    /// default full evict+rebuild exactly as it does for every model that
+    /// never overrides this.
+    fn demote(&mut self, tier: Tier) -> Result<(), String> {
+        if tier == Tier::Hot {
+            return Err("z-image: Hot is not a demotion target".to_string());
+        }
+        if self.dit_cache.is_none() {
+            return Err("z-image: this instance retained no demote/promote cache".to_string());
+        }
+        self.pipe = None;
+        Ok(())
+    }
+
+    /// The inverse: rebuild the pipeline from `dit_cache` on `device` — no
+    /// DiT checkpoint read, no re-quantization (see
+    /// `zimage::ZImageDitI8::rebuild_from_cache`'s doc). Only reachable
+    /// after a successful `demote`, so `dit_cache` is always `Some` here.
+    fn promote(&mut self, device: Device) -> Result<(), String> {
+        let cache = self.dit_cache.as_ref().ok_or("z-image: promote called on an instance with no retained cache")?;
+        let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_from_dit_cache(&self.paths, self.width, self.height, self.cap_len, cache, |_| {}))??;
+        self.pipe = Some(pipe);
+        Ok(())
+    }
 }
 
 /// Parse a `"WxH:precision:adapter"` instance key.
@@ -463,4 +531,48 @@ fn emit_image(img: Image) -> Outcome {
         .set("width", json!(img.w))
         .set("height", json!(img.h))
         .blob("image", capability::blob::image_blob(&img.hwc, img.w as u32, img.h as u32, 3))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real end-to-end proof that demote/promote works against the actual
+    /// ~31 GB Z-Image checkpoint, not a synthetic model: activate (builds
+    /// fresh, retains a DitI8Cache), demote (drops the whole pipeline --
+    /// GPU AND host -- keeping only the cache), promote (rebuilds from the
+    /// cache: no checkpoint read, no re-quantization), then run a real
+    /// generation and confirm it produces a real image. Times both
+    /// activate() and promote() so "promote is faster" is a measured
+    /// number, not an assertion resting on the design alone.
+    #[test]
+    #[ignore = "slow: real checkpoint + GPU; set BRAIN_ZIMAGE_* and run with --ignored"]
+    fn zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster() {
+        std::env::set_var("BRAIN_ZIMAGE_RETAIN_INT8_CACHE", "1");
+        let model = match ZImageResident::from_env() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("SKIP: {e}");
+                return;
+            }
+        };
+        let key = InstanceKey::new(zimage::caps::MODEL, "256x256:int8:");
+
+        let t0 = std::time::Instant::now();
+        let mut inst = model.activate(&key, Device::Gpu(0)).expect("activate");
+        let activate_secs = t0.elapsed().as_secs_f64();
+
+        inst.demote(Tier::Warm).expect("a cache-retaining instance must demote successfully");
+
+        let t1 = std::time::Instant::now();
+        inst.promote(Device::Gpu(0)).expect("promote must rebuild from the cache");
+        let promote_secs = t1.elapsed().as_secs_f64();
+
+        let inv = Invocation::new().set("prompt", json!("a red fox in snow, photograph")).set("seed", json!(42)).set("steps", json!(4));
+        let result = inst.run("text2image", &inv, &mut |_| {}).expect("run after promote must succeed");
+        assert!(result.blobs.contains_key("image"), "a promoted instance must still be able to generate a real image");
+
+        eprintln!("activate: {activate_secs:.1}s, promote: {promote_secs:.1}s");
+        assert!(promote_secs < activate_secs, "promote (cache-based) must be faster than the fresh activate() it followed -- it skips the checkpoint read AND the quantization activate() just did");
+    }
 }
