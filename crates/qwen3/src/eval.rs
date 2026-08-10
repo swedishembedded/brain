@@ -90,10 +90,17 @@ pub fn score_chat(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &Ch
     let mut correct = 0usize;
     let mut skipped = 0usize;
 
-    for s in samples {
-        let Ok((ids, mask)) = s.encode(tok, tmpl) else {
-            skipped += 1;
-            continue;
+    for (i, s) in samples.iter().enumerate() {
+        // A template-encoding failure is a data/config problem, not a
+        // too-long sample -- surfaced loudly (the CLI half of this fix
+        // already reports them), never silently folded into `skipped`.
+        let (ids, mask) = match s.encode(tok, tmpl) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("eval: sample {i}: chat-template encode failed ({e}); skipping");
+                skipped += 1;
+                continue;
+            }
         };
         if ids.len() < 2 || ids.len() > cap {
             skipped += 1;
@@ -213,10 +220,15 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
     let mut correct = 0usize;
     let mut skipped = 0usize;
 
-    for s in samples {
-        let Ok((ids, mask)) = s.encode(tok, tmpl) else {
-            skipped += 1;
-            continue;
+    for (i, s) in samples.iter().enumerate() {
+        // Same loud surfacing as `score_chat` -- see the comment there.
+        let (ids, mask) = match s.encode(tok, tmpl) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("eval: sample {i}: chat-template encode failed ({e}); skipping");
+                skipped += 1;
+                continue;
+            }
         };
         if ids.len() < 2 || ids.len() as u32 > block {
             skipped += 1;
