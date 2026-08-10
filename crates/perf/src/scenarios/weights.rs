@@ -52,7 +52,10 @@ impl Run {
 fn drive(policy_name: &str, plan: Box<dyn weightset::ResidencyPlan + Send + Sync>, n_groups: u32, budget: u32, passes: u32, required_per_pass: u64) -> Run {
     let sched = Schedule::cyclic(n_groups, passes);
     let total = sched.order.len();
-    let mut ws = WeightSet::build(n_groups, budget, sched, plan).expect("budget already validated by the caller");
+    // Unreachable via `run()`, which checks its knobs at the entry point (the
+    // old message here claimed "budget already validated by the caller" when
+    // NO caller validated — run(0, _) panicked right here).
+    let mut ws = WeightSet::build(n_groups, budget, sched, plan).unwrap_or_else(|e| panic!("weights scenario: WeightSet::build({n_groups}, {budget}): {e}"));
     for cursor in 0..total {
         ws.advance(cursor);
     }
@@ -64,6 +67,9 @@ fn drive(policy_name: &str, plan: Box<dyn weightset::ResidencyPlan + Send + Sync
 /// `passes` are the caller's scenario knobs — `budget` is the window size
 /// (device slots), `passes` the number of denoise steps simulated.
 pub fn run(budget: u32, passes: u32) -> Vec<Run> {
+    // The honest precondition, AT the entry point: `WeightSet::build` refuses
+    // a zero budget, and passes = 0 would divide churn_overhead by nothing.
+    assert!(budget >= 1 && passes >= 1, "weights scenario: budget and passes must both be >= 1 (got budget={budget}, passes={passes})");
     let n_groups: u32 = 34;
     let lookahead: u32 = 1;
     let cyclic_pin = if budget >= n_groups { n_groups } else { budget.saturating_sub(lookahead.max(1)) };
@@ -83,8 +89,16 @@ pub fn to_json(runs: &[Run]) -> Value {
 
 pub fn render(runs: &[Run]) -> String {
     let mut s = String::from("\n  policy         budget  reloads  required/pass  churn_overhead\n");
+    let min_budget = runs.iter().map(|r| r.budget).min().unwrap_or(0);
+    let mut budgets_differ = false;
     for r in runs {
+        budgets_differ |= r.budget != min_budget;
         s.push_str(&format!("  {:<13}  {:>6}  {:>7}  {:>13}  {:.3}\n", r.policy, r.budget, r.reloads, r.required_per_pass, r.churn_overhead()));
+    }
+    if budgets_differ {
+        // The control arm (AllResident) runs at a FULL budget by construction
+        // — say so, or the rows read as peers measured at the same window.
+        s.push_str("  (budgets differ: all_resident is the full-budget control arm, not a peer at the window size)\n");
     }
     s
 }

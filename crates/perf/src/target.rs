@@ -32,6 +32,11 @@ pub struct Emission {
     pub id: ReqId,
     pub at: Instant,
     pub kind: EmissionKind,
+    /// WHY, for [`EmissionKind::Failed`] — the engine's error string, carried
+    /// into the artifact (a run where every request failed used to record only
+    /// "N failed" with the reasons discarded at the reply boundary,
+    /// unrecoverable after the fact). `None` for every other kind.
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,10 +215,10 @@ pub(crate) mod testing {
             let mut still = Vec::new();
             for (id, left, req) in std::mem::take(&mut self.pending_prefill) {
                 if left <= 1 {
-                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
-                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted, error: None });
+                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact, error: None });
                     if req.output_artifacts <= 1 {
-                        out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Done });
+                        out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Done, error: None });
                     } else {
                         self.running.push((id, 1, req.output_artifacts));
                     }
@@ -228,9 +233,9 @@ pub(crate) mod testing {
                 let (id, ref mut produced, wanted) = self.running[i];
                 *produced += 1;
                 let done = *produced >= wanted;
-                out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+                out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact, error: None });
                 if done {
-                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Done });
+                    out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Done, error: None });
                     self.running.remove(i);
                 } else {
                     i += 1;

@@ -168,7 +168,12 @@ fn pkg_temp_c_from(hwmon_root: &Path) -> Option<f32> {
     let entries = std::fs::read_dir(hwmon_root).ok()?;
     for e in entries.filter_map(|e| e.ok()) {
         let dir = e.path();
-        let name = std::fs::read_to_string(dir.join("name")).ok()?;
+        // `continue`, never `?`: one unreadable hwmon entry (read_dir order is
+        // arbitrary, and entries can be permission-restricted or vanish) must
+        // not abort the scan before the coretemp directory is found.
+        let Ok(name) = std::fs::read_to_string(dir.join("name")) else {
+            continue;
+        };
         if name.trim() != "coretemp" {
             continue;
         }
@@ -246,8 +251,8 @@ pub fn static_info() -> StaticInfo {
 /// JSON shape, filling only the keys this module can honestly answer.
 ///
 /// Deliberately does **not** report a "mean frequency" — that needs
-/// continuous sampling across the run (a background sampler, mirroring
-/// `energy::PowerSampler`'s shape), which is a separate follow-up. Two point
+/// continuous sampling across the run (a background sampler thread), which
+/// is a separate follow-up. Two point
 /// samples can honestly report where the run started, where it ended, and
 /// the RC6 fraction of the window — nothing more, and every key stays
 /// `null` when its source sample lacks it, never a fabricated `0`.

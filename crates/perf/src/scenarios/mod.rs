@@ -137,6 +137,7 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("frontend", "host-side saturation — cores required per saturated device"),
     ("faults", "fault injection — detection, recovery, silent corruption"),
     ("soak", "long-duration drift — throughput, latency, memory, leaks"),
+    ("weights", "within-instance weight window — CyclicScan vs Lru vs AllResident churn"),
 ];
 
 /// Scenarios implemented as a full run through the driver; the rest report via

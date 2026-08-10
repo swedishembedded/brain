@@ -36,6 +36,8 @@ pub struct ReqRecord {
     pub first: Option<Instant>,
     pub done: Option<Instant>,
     pub failed: bool,
+    /// The engine's error string when `failed` (see `Emission::error`).
+    pub error: Option<String>,
     /// Refused by the engine's admission policy — terminal, never serviced,
     /// and deliberately NOT a failure (see `EmissionKind::Rejected`).
     pub rejected: bool,
@@ -55,6 +57,7 @@ impl ReqRecord {
             first: None,
             done: None,
             failed: false,
+            error: None,
             rejected: false,
             artifacts: Vec::new(),
         }
@@ -144,6 +147,10 @@ pub struct Summary {
     pub e2e: Dist,
     pub queue: Dist,
     pub slo: Slo,
+    /// A sample of DISTINCT failure reasons (first few, in arrival order) —
+    /// the artifact is the deliverable, and "N failed" with the reasons
+    /// discarded is unrecoverable after the fact.
+    pub errors: Vec<String>,
 }
 
 impl Summary {
@@ -207,6 +214,20 @@ impl Summary {
         // SLO attainment is over ADMITTED work: a policy that sheds hopeless
         // requests must not have its refusals scored as SLO misses.
         let n_admitted = n - rejected;
+        // First few DISTINCT failure reasons, so an all-failed run's artifact
+        // says WHY instead of only how many.
+        const MAX_ERROR_SAMPLES: usize = 5;
+        let mut errors: Vec<String> = Vec::new();
+        for r in &measured {
+            if let Some(e) = r.error.as_ref().filter(|_| r.failed) {
+                if !errors.contains(e) {
+                    errors.push(e.clone());
+                    if errors.len() >= MAX_ERROR_SAMPLES {
+                        break;
+                    }
+                }
+            }
+        }
         Summary {
             wall_s,
             requests: n,
@@ -226,6 +247,7 @@ impl Summary {
             e2e,
             queue,
             slo,
+            errors,
         }
     }
 
@@ -235,6 +257,7 @@ impl Summary {
             "requests": self.requests,
             "completed": self.completed,
             "failed": self.failed,
+            "errors": self.errors,
             "rejected": self.rejected,
             "requests_per_s": r3(self.requests_per_s),
             "input_artifacts_per_s": r3(self.input_per_s),

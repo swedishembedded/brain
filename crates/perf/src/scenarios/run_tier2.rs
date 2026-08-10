@@ -192,14 +192,14 @@ pub fn run_soak(
 
     art.workload = w.to_json();
     art.performance = report.to_json();
-    art.resources = json!({
-        "device_util": Value::Null,
-        "host_cpu_util": Value::Null,
-        "host_mem_mb": soak::host_mem_mb().map(|v| Value::from(r3(v))).unwrap_or(Value::Null),
-        "storage_read_mb": Value::Null,
-        "energy_j": Value::Null,
-        "j_per_output_artifact": Value::Null,
-    });
+    // ONE source for the resources block shape (`schema::empty_resources`)
+    // with the fields this scenario measures overlaid — a hand-built literal
+    // here silently forked from the schema when the telemetry keys were
+    // added, making soak artifacts differ from latency/sweep artifacts.
+    art.resources = crate::schema::empty_resources();
+    if let Some(v) = soak::host_mem_mb() {
+        art.resources["host_mem_mb"] = Value::from(r3(v));
+    }
     if !report.trend_valid() {
         art.notes = Some(format!(
             "{} sample(s) over {:.0}s: too short to extrapolate an hourly trend, so the \

@@ -50,7 +50,11 @@ impl Outcome {
 /// (e.g. 0.85 = tolerate a 15% regression before failing).
 pub fn gate(candidate: &Row, baseline: &Row, floor_frac: f64) -> Outcome {
     let mut out = Outcome::default();
-    if !(0.0..=1.0).contains(&floor_frac) {
+    // Strictly positive: the old inclusive-of-0 range let `--floor 0` produce
+    // throughput bounds of 0.0 and latency bounds of +inf — a green PASS that
+    // checked nothing, the exact failure `a_gate_that_checked_nothing_refuses`
+    // was written to prevent (the message always said (0, 1]; the code lied).
+    if !(floor_frac > 0.0 && floor_frac <= 1.0) {
         out.refused = Some(format!("floor fraction {floor_frac} outside (0, 1]"));
         return out;
     }
@@ -208,6 +212,24 @@ mod tests {
         let o = gate(&a, &b, 0.85);
         assert!(!o.passed());
         assert!(o.refused.as_deref().unwrap_or("").contains("nothing was actually gated"));
+    }
+
+    /// SPEC (audit F22): `--floor 0` used to pass VACUOUSLY — every
+    /// throughput bound became 0.0 and every latency bound +inf, a green PASS
+    /// that checked nothing, defeatable with one flag. The message always
+    /// claimed the range is (0, 1]; now the code enforces it.
+    #[test]
+    fn floor_zero_refuses_instead_of_passing_vacuously() {
+        let base = row(100.0, 200.0);
+        let terrible = row(0.001, 1e9);
+        for bad in [0.0, -0.5, 1.5, f64::NAN] {
+            let o = gate(&terrible, &base, bad);
+            assert!(!o.passed(), "floor {bad} must refuse, got {o:?}");
+            assert!(o.refused.as_deref().unwrap_or("").contains("floor fraction"), "{o:?}");
+        }
+        // The boundary itself is legal: floor 1.0 = no regression tolerated.
+        assert!(!gate(&terrible, &base, 1.0).passed());
+        assert!(gate(&row(100.0, 200.0), &base, 1.0).passed());
     }
 
     #[test]

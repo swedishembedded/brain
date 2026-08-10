@@ -108,6 +108,7 @@ pub fn drive(target: &mut dyn PerfTarget, workload: &Workload) -> Run {
                 }
                 EmissionKind::Failed => {
                     rec.failed = true;
+                    rec.error = e.error.clone();
                     rec.done = Some(e.at);
                     in_flight = in_flight.saturating_sub(1);
                     if !rec.warmup {

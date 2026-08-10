@@ -82,11 +82,11 @@ impl PerfTarget for CapabilityTarget {
     fn step(&mut self, out: &mut Vec<Emission>) -> bool {
         let Some((id, req)) = self.queue.pop_front() else { return false };
         let Some(action) = self.provider.action(&self.action) else {
-            out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+            out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Failed, error: Some(format!("provider has no action '{}'", self.action)) });
             return self.busy();
         };
         let inv = (self.build)(&req);
-        out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+        out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted, error: None });
 
         let mut emitted = 0usize;
         let mut progress_times: Vec<Instant> = Vec::new();
@@ -95,7 +95,7 @@ impl PerfTarget for CapabilityTarget {
         };
         let res = action.run(&inv, &mut on_progress);
         for at in progress_times {
-            out.push(Emission { id, at, kind: EmissionKind::Artifact });
+            out.push(Emission { id, at, kind: EmissionKind::Artifact, error: None });
             emitted += 1;
         }
         let now = Instant::now();
@@ -104,11 +104,11 @@ impl PerfTarget for CapabilityTarget {
                 // A one-shot action reports no progress; its single result IS the
                 // artifact, so record one rather than reporting zero output.
                 if emitted == 0 {
-                    out.push(Emission { id, at: now, kind: EmissionKind::Artifact });
+                    out.push(Emission { id, at: now, kind: EmissionKind::Artifact, error: None });
                 }
-                out.push(Emission { id, at: now, kind: EmissionKind::Done });
+                out.push(Emission { id, at: now, kind: EmissionKind::Done, error: None });
             }
-            Err(_) => out.push(Emission { id, at: now, kind: EmissionKind::Failed }),
+            Err(e) => out.push(Emission { id, at: now, kind: EmissionKind::Failed, error: Some(e) }),
         }
         self.busy()
     }
@@ -176,18 +176,18 @@ impl PerfTarget for PagedLlmTarget {
         let report = self.sched.step_report();
         let now = Instant::now();
         for id in report.admitted {
-            out.push(Emission { id, at: now, kind: EmissionKind::Admitted });
+            out.push(Emission { id, at: now, kind: EmissionKind::Admitted, error: None });
         }
         for (id, _reason) in report.rejected {
-            out.push(Emission { id, at: now, kind: EmissionKind::Rejected });
+            out.push(Emission { id, at: now, kind: EmissionKind::Rejected, error: None });
         }
         for (id, n) in report.produced {
             for _ in 0..n {
-                out.push(Emission { id, at: now, kind: EmissionKind::Artifact });
+                out.push(Emission { id, at: now, kind: EmissionKind::Artifact, error: None });
             }
         }
         for id in report.finished {
-            out.push(Emission { id, at: now, kind: EmissionKind::Done });
+            out.push(Emission { id, at: now, kind: EmissionKind::Done, error: None });
         }
         self.busy()
     }
@@ -419,12 +419,12 @@ impl PerfTarget for ExecutorTarget {
                 .on_progress(move |p| {
                     if !admitted {
                         admitted = true;
-                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted, error: None });
                     }
                     if let Some(accept) = &is_artifact {
                         if accept(&p) {
                             streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+                            let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact, error: None });
                         }
                     }
                 })
@@ -433,12 +433,12 @@ impl PerfTarget for ExecutorTarget {
                     match r {
                         Ok(_) => {
                             if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                                let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                                let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact, error: None });
                             }
-                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done, error: None });
                         }
-                        Err(_) => {
-                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
+                        Err(e) => {
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed, error: Some(e) });
                         }
                     }
                 }),
@@ -818,25 +818,25 @@ async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Bo
 
     let resp = match router.oneshot(req).await {
         Ok(r) => r,
-        Err(_) => {
-            let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+        Err(e) => {
+            let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed, error: Some(format!("request error: {e}")) });
             return;
         }
     };
     let status = resp.status();
     if status == axum::http::StatusCode::TOO_MANY_REQUESTS || status == axum::http::StatusCode::SERVICE_UNAVAILABLE {
-        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected });
+        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected, error: None });
         return;
     }
     if !status.is_success() {
-        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed, error: Some(format!("HTTP {status}")) });
         return;
     }
     // By the time headers are back, `apiserve::bridge`'s admission race has
     // already resolved — it runs BEFORE the SSE body is returned (see
     // `bridge::stream_inner`) — so "response received" IS the real admit
     // instant, not an approximation of it.
-    let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+    let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted, error: None });
 
     let mut stream = resp.into_body().into_data_stream();
     let mut buf = String::new();
@@ -844,8 +844,8 @@ async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Bo
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
             Ok(b) => b,
-            Err(_) => {
-                let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+            Err(e) => {
+                let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed, error: Some(format!("body stream error: {e}")) });
                 return;
             }
         };
@@ -870,11 +870,11 @@ async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Bo
                 let delta = &v["choices"][0]["delta"];
                 let has_text = |field: &str| delta[field].as_str().map(|s| !s.is_empty()).unwrap_or(false);
                 if has_text("content") || has_text("reasoning_content") {
-                    let _ = tx.send(Emission { id, at, kind: EmissionKind::Artifact });
+                    let _ = tx.send(Emission { id, at, kind: EmissionKind::Artifact, error: None });
                 }
             }
         }
     }
-    let kind = if saw_done { EmissionKind::Done } else { EmissionKind::Failed };
-    let _ = tx.send(Emission { id, at: Instant::now(), kind });
+    let (kind, error) = if saw_done { (EmissionKind::Done, None) } else { (EmissionKind::Failed, Some("stream ended without [DONE]".to_string())) };
+    let _ = tx.send(Emission { id, at: Instant::now(), kind, error });
 }
