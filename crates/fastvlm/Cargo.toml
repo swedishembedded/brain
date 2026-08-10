@@ -22,6 +22,7 @@ bytemuck.workspace = true
 # The caption provider tokenizes (data) and reads safetensors (checkpoint)
 # at run time, not just in tests.
 brain-data.workspace = true
+brain-imaging.workspace = true
 brain-checkpoint.workspace = true
 
 [dev-dependencies]

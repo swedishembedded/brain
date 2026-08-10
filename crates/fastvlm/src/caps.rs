@@ -309,35 +309,25 @@ fn stage_time(name: &str, since: std::time::Instant) {
 /// `image_aspect_ratio: "pad"`: letterbox to square with the 0.5 grey fill the
 /// HF "pad" processor uses (0.5 grey in [0,1]), then bilinear-resize to `side`,
 /// returning CHW.
+///
+/// The pad here is a plain copy into a pre-filled square; the resample is the
+/// shared `imaging::host::resize_bilinear_hwc` (bit-equivalent to the device
+/// kernel), NOT a local pixel loop — this function used to re-derive the whole
+/// half-pixel bilinear sampler, the exact bug class `crates/imaging` was
+/// created to kill. Pad-then-resize (like HF's processor, which pads the
+/// image before resampling) blends content into the border at the seam,
+/// where the old fused loop snapped anything past the content edge to 0.5.
 fn pad_resize_chw(hwc: &[f32], w: u32, h: u32, side: u32) -> Vec<f32> {
     let sq = w.max(h);
     let (ox, oy) = ((sq - w) / 2, (sq - h) / 2);
-    let sample = |x: f32, y: f32, c: usize| -> f32 {
-        // Position in the padded square → source pixel or the pad fill.
-        let sx = x - ox as f32;
-        let sy = y - oy as f32;
-        if sx < 0.0 || sy < 0.0 || sx > (w - 1) as f32 || sy > (h - 1) as f32 {
-            return 0.5;
-        }
-        let (x0, y0) = (sx.floor() as u32, sy.floor() as u32);
-        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-        let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
-        let at = |x: u32, y: u32| hwc[((y * w + x) * 3) as usize + c];
-        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
-        let bot = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
-        top * (1.0 - fy) + bot * fy
-    };
-    let mut out = vec![0f32; (3 * side * side) as usize];
-    let scale = sq as f32 / side as f32;
-    for c in 0..3usize {
-        for y in 0..side {
-            for x in 0..side {
-                let v = sample((x as f32 + 0.5) * scale - 0.5, (y as f32 + 0.5) * scale - 0.5, c);
-                out[c * (side * side) as usize + (y * side + x) as usize] = v;
-            }
-        }
+    let mut padded = vec![0.5f32; (sq * sq * 3) as usize];
+    for y in 0..h {
+        let dst = (((y + oy) * sq + ox) * 3) as usize;
+        let src = (y * w * 3) as usize;
+        padded[dst..dst + (w * 3) as usize].copy_from_slice(&hwc[src..src + (w * 3) as usize]);
     }
-    out
+    let resized = imaging::host::resize_bilinear_hwc(&padded, 3, sq, sq, side, side);
+    imaging::pixels::hwc_to_chw(&resized, 3, side as usize, side as usize)
 }
 
 #[cfg(test)]

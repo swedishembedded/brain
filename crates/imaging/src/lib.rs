@@ -44,8 +44,7 @@
 //! `zimage::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
 //! metric to gate the ramp against — see [`mask`]),
 //! `zimage::caps::build_outpaint_canvas` (needs `pad2d.wgsl` to grow a
-//! `pad_mode` word before edge-replication can be expressed),
-//! `fastvlm::caps::pad_resize_chw` (pad-then-resize, a different function), and
+//! `pad_mode` word before edge-replication can be expressed), and
 //! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `zimage::finetune` /
 //! `zimage::pipeline` (host per-pixel arithmetic, which this crate deliberately
 //! does not offer a host entry point for — see the table above).

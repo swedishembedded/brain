@@ -246,30 +246,13 @@ fn load_resident(dir: &str, max_pixels: u32) -> Result<Resident, String> {
 /// `(w_bar,h_bar)`, returning CHW (`pack_patches`'s expected layout). Unlike
 /// `fastvlm::caps::pad_resize_chw`, no square padding -- Qwen3-VL's own
 /// preprocessor resizes directly to the smart-resize target, aspect ratio
-/// already accounted for by `smart_resize` itself.
+/// already accounted for by `smart_resize` itself. The resample is the shared
+/// `imaging::host::resize_bilinear_hwc` (same half-pixel formula this
+/// function used to re-derive locally), followed by the shared HWC->CHW
+/// permutation.
 fn hwc_to_chw_resized(hwc: &[f32], w: u32, h: u32, w_bar: u32, h_bar: u32) -> Vec<f32> {
-    let sample = |x: f32, y: f32, c: usize| -> f32 {
-        let sx = x.clamp(0.0, (w - 1) as f32);
-        let sy = y.clamp(0.0, (h - 1) as f32);
-        let (x0, y0) = (sx.floor() as u32, sy.floor() as u32);
-        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-        let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
-        let at = |x: u32, y: u32| hwc[((y * w + x) * 3) as usize + c];
-        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
-        let bot = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
-        top * (1.0 - fy) + bot * fy
-    };
-    let (sx, sy) = (w as f32 / w_bar as f32, h as f32 / h_bar as f32);
-    let mut out = vec![0f32; (3 * h_bar * w_bar) as usize];
-    for c in 0..3usize {
-        for y in 0..h_bar {
-            for x in 0..w_bar {
-                let v = sample((x as f32 + 0.5) * sx - 0.5, (y as f32 + 0.5) * sy - 0.5, c);
-                out[c * (h_bar * w_bar) as usize + (y * w_bar + x) as usize] = v;
-            }
-        }
-    }
-    out
+    let resized = imaging::host::resize_bilinear_hwc(hwc, 3, w, h, w_bar, h_bar);
+    imaging::pixels::hwc_to_chw(&resized, 3, h_bar as usize, w_bar as usize)
 }
 
 #[cfg(test)]
