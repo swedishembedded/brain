@@ -30,6 +30,7 @@ pub mod grid;
 pub mod hostmath;
 pub mod int4;
 pub mod int8;
+pub mod lora;
 pub mod moe;
 // wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no
 // business compiling into the browser build, and its `pub use` below broke

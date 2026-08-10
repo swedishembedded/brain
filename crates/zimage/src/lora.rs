@@ -16,23 +16,12 @@
 
 use crate::grad::WeightsF32;
 use crate::modelgrad::{Cfg, ModelGradsF32, ModelWeightsF32};
-
-/// LoRA hyper-parameters.
-#[derive(Clone, Copy)]
-pub struct LoraCfg {
-    pub rank: usize,
-    pub alpha: f32,
-    pub seed: u64,
-}
-
-impl LoraCfg {
-    pub fn new(rank: usize) -> LoraCfg {
-        LoraCfg { rank, alpha: rank as f32, seed: 0 }
-    }
-    fn scale(&self) -> f32 {
-        self.alpha / self.rank as f32
-    }
-}
+// The generic pair machinery (A/B init, ΔW apply, dW→(dA,dB) projection, Adam
+// moments) is model-agnostic and lives ONCE in `model::lora` — this module
+// keeps only the Z-Image-specific block walk and serialization naming.
+// `LoraCfg` is re-exported for existing callers.
+pub use model::lora::LoraCfg;
+use model::lora::{proj_step, randn, Pair};
 
 /// The seven low-rank pairs for one transformer block.
 #[derive(Clone)]
@@ -44,104 +33,6 @@ struct BlockLora {
     w1: Pair,
     w2: Pair,
     w3: Pair,
-}
-
-/// A single linear's adapter: `A [r×in]`, `B [out×r]`, plus Adam moments.
-#[derive(Clone)]
-struct Pair {
-    out: usize,
-    inn: usize,
-    r: usize,
-    a: Vec<f32>, // [r × in], row-major
-    b: Vec<f32>, // [out × r], row-major
-    ma: Vec<f32>,
-    va: Vec<f32>,
-    mb: Vec<f32>,
-    vb: Vec<f32>,
-}
-
-impl Pair {
-    fn new(out: usize, inn: usize, r: usize, rng: &mut u64) -> Pair {
-        // Standard LoRA init: A ~ small gaussian, B = 0 (so the initial adapter is
-        // a no-op and W_eff == W).
-        let a: Vec<f32> = (0..r * inn).map(|_| (randn(rng) * 0.02) as f32).collect();
-        Pair {
-            out,
-            inn,
-            r,
-            a,
-            b: vec![0.0; out * r],
-            ma: vec![0.0; r * inn],
-            va: vec![0.0; r * inn],
-            mb: vec![0.0; out * r],
-            vb: vec![0.0; out * r],
-        }
-    }
-
-    /// `Δ = scale·B·A` in `W`'s `[out×in]` row-major layout — added onto the base.
-    fn delta(&self, scale: f32, w: &mut [f32]) {
-        // w[o,i] += scale · Σ_k B[o,k]·A[k,i]
-        for o in 0..self.out {
-            let brow = &self.b[o * self.r..o * self.r + self.r];
-            let wrow = &mut w[o * self.inn..o * self.inn + self.inn];
-            for k in 0..self.r {
-                let bok = brow[k] * scale;
-                if bok == 0.0 {
-                    continue;
-                }
-                let arow = &self.a[k * self.inn..k * self.inn + self.inn];
-                for i in 0..self.inn {
-                    wrow[i] += bok * arow[i];
-                }
-            }
-        }
-    }
-
-    /// Project the base-weight grad `dW [out×in]` to `(dA [r×in], dB [out×r])`:
-    /// `dA = scale·Bᵀ·dW`, `dB = scale·dW·Aᵀ`.
-    fn project(&self, dw: &[f32], scale: f32) -> (Vec<f32>, Vec<f32>) {
-        let mut da = vec![0.0f32; self.r * self.inn];
-        let mut db = vec![0.0f32; self.out * self.r];
-        for o in 0..self.out {
-            let dwrow = &dw[o * self.inn..o * self.inn + self.inn];
-            let brow = &self.b[o * self.r..o * self.r + self.r];
-            for k in 0..self.r {
-                // dB[o,k] = scale·Σ_i dW[o,i]·A[k,i]
-                let arow = &self.a[k * self.inn..k * self.inn + self.inn];
-                let mut acc = 0.0f32;
-                for i in 0..self.inn {
-                    acc += dwrow[i] * arow[i];
-                }
-                db[o * self.r + k] = acc * scale;
-                // dA[k,i] += scale·B[o,k]·dW[o,i]
-                let bok = brow[k] * scale;
-                let darow = &mut da[k * self.inn..k * self.inn + self.inn];
-                for i in 0..self.inn {
-                    darow[i] += bok * dwrow[i];
-                }
-            }
-        }
-        (da, db)
-    }
-
-    /// One AdamW-less Adam step on `A` and `B` from their projected grads.
-    fn adam_step(&mut self, da: &[f32], db: &[f32], lr: f32, t: u64) {
-        adam(&mut self.a, &mut self.ma, &mut self.va, da, lr, t);
-        adam(&mut self.b, &mut self.mb, &mut self.vb, db, lr, t);
-    }
-}
-
-fn adam(p: &mut [f32], m: &mut [f32], v: &mut [f32], g: &[f32], lr: f32, t: u64) {
-    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let bc1 = 1.0 - b1.powi(t as i32);
-    let bc2 = 1.0 - b2.powi(t as i32);
-    for i in 0..p.len() {
-        m[i] = b1 * m[i] + (1.0 - b1) * g[i];
-        v[i] = b2 * v[i] + (1.0 - b2) * g[i] * g[i];
-        let mh = m[i] / bc1;
-        let vh = v[i] / bc2;
-        p[i] -= lr * mh / (vh.sqrt() + eps);
-    }
 }
 
 /// A LoRA adapter over all `main` blocks of the DiT.
@@ -159,7 +50,9 @@ impl LoraAdapter {
         let (dim, r) = (cfg.dim, lc.rank);
         let hidden = dim * 8 / 3;
         let mut rng = lc.seed ^ 0x1234_5678_9abc_def0;
-        let mk = |out, inn, rng: &mut u64| Pair::new(out, inn, r, rng);
+        // Same init distribution as before the model::lora hoist (gaussian,
+        // σ 0.02) so existing seeds reproduce bit-identical adapters.
+        let mk = |out, inn, rng: &mut u64| Pair::new(out, inn, r, || (randn(rng) * 0.02) as f32);
         let blocks = (0..cfg.n_layers)
             .map(|_| BlockLora {
                 wq: mk(dim, dim, &mut rng),
@@ -272,23 +165,6 @@ impl LoraAdapter {
         }
         Ok(ad)
     }
-}
-
-fn proj_step(p: &mut Pair, dw: &[f32], scale: f32, lr: f32, t: u64) {
-    let (da, db) = p.project(dw, scale);
-    p.adam_step(&da, &db, lr, t);
-}
-
-/// A cheap deterministic standard-normal (xorshift + Box–Muller half).
-fn randn(s: &mut u64) -> f64 {
-    let mut nx = || {
-        *s ^= *s << 13;
-        *s ^= *s >> 7;
-        *s ^= *s << 17;
-        ((*s >> 11) as f64 / (1u64 << 53) as f64).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON)
-    };
-    let (u1, u2) = (nx(), nx());
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 /// Convenience: are the block linears of `w` the expected shapes for `cfg`?

@@ -28,124 +28,12 @@
 
 use crate::grad::StreamW;
 use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
-
-/// LoRA hyper-parameters.
-#[derive(Clone, Copy)]
-pub struct LoraCfg {
-    pub rank: usize,
-    pub alpha: f32,
-    pub seed: u64,
-}
-
-impl LoraCfg {
-    pub fn new(rank: usize) -> LoraCfg {
-        LoraCfg { rank, alpha: rank as f32, seed: 0 }
-    }
-    fn scale(&self) -> f32 {
-        self.alpha / self.rank as f32
-    }
-}
-
-/// A single linear's adapter: `A [r×in]`, `B [out×r]`, plus Adam moments.
-#[derive(Clone)]
-struct Pair {
-    out: usize,
-    inn: usize,
-    r: usize,
-    a: Vec<f32>,
-    b: Vec<f32>,
-    ma: Vec<f32>,
-    va: Vec<f32>,
-    mb: Vec<f32>,
-    vb: Vec<f32>,
-}
-
-impl Pair {
-    fn new(out: usize, inn: usize, r: usize, rng: &mut data::rng::Rng) -> Pair {
-        // Standard LoRA init: A ~ small gaussian-ish, B = 0 (initial no-op).
-        let a: Vec<f32> = (0..r * inn).map(|_| (rng.next_f64() - 0.5) as f32 * 0.04).collect();
-        Pair {
-            out,
-            inn,
-            r,
-            a,
-            b: vec![0.0; out * r],
-            ma: vec![0.0; r * inn],
-            va: vec![0.0; r * inn],
-            mb: vec![0.0; out * r],
-            vb: vec![0.0; out * r],
-        }
-    }
-
-    /// `w += scale·B·A` in `W`'s `[out×in]` row-major layout.
-    fn delta(&self, scale: f32, w: &mut [f32]) {
-        self.delta_strided(scale, w, 0, self.inn, 0);
-    }
-
-    /// `out_buf[(row0+o)·row_stride + col0 + i] += scale·(B·A)[o,i]` — the
-    /// fused-tensor fold: row slices use `row0`, the linear2 column split uses
-    /// `col0`/`row_stride`.
-    fn delta_strided(&self, scale: f32, out_buf: &mut [f32], row0: usize, row_stride: usize, col0: usize) {
-        for o in 0..self.out {
-            let brow = &self.b[o * self.r..(o + 1) * self.r];
-            let wrow = &mut out_buf[(row0 + o) * row_stride + col0..(row0 + o) * row_stride + col0 + self.inn];
-            for (k, &bk) in brow.iter().enumerate() {
-                let bok = bk * scale;
-                if bok == 0.0 {
-                    continue;
-                }
-                let arow = &self.a[k * self.inn..(k + 1) * self.inn];
-                for i in 0..self.inn {
-                    wrow[i] += bok * arow[i];
-                }
-            }
-        }
-    }
-
-    /// Project the base-weight grad `dW [out×in]` to `(dA, dB)`:
-    /// `dA = scale·Bᵀ·dW`, `dB = scale·dW·Aᵀ`.
-    fn project(&self, dw: &[f32], scale: f32) -> (Vec<f32>, Vec<f32>) {
-        let mut da = vec![0.0f32; self.r * self.inn];
-        let mut db = vec![0.0f32; self.out * self.r];
-        for o in 0..self.out {
-            let dwrow = &dw[o * self.inn..(o + 1) * self.inn];
-            let brow = &self.b[o * self.r..(o + 1) * self.r];
-            for k in 0..self.r {
-                let arow = &self.a[k * self.inn..(k + 1) * self.inn];
-                let mut acc = 0.0f32;
-                for i in 0..self.inn {
-                    acc += dwrow[i] * arow[i];
-                }
-                db[o * self.r + k] = acc * scale;
-                let bok = brow[k] * scale;
-                if bok != 0.0 {
-                    let darow = &mut da[k * self.inn..(k + 1) * self.inn];
-                    for i in 0..self.inn {
-                        darow[i] += bok * dwrow[i];
-                    }
-                }
-            }
-        }
-        (da, db)
-    }
-
-    /// One Adam step on `A,B` (β 0.9/0.999, eps 1e-8, no weight decay).
-    fn adam_step(&mut self, da: &[f32], db: &[f32], lr: f32, t: u64) {
-        adam(&mut self.a, &mut self.ma, &mut self.va, da, lr, t);
-        adam(&mut self.b, &mut self.mb, &mut self.vb, db, lr, t);
-    }
-}
-
-fn adam(p: &mut [f32], m: &mut [f32], v: &mut [f32], g: &[f32], lr: f32, t: u64) {
-    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let bc1 = 1.0 - b1.powi(t as i32);
-    let bc2 = 1.0 - b2.powi(t as i32);
-    for i in 0..p.len() {
-        m[i] = b1 * m[i] + (1.0 - b1) * g[i];
-        v[i] = b2 * v[i] + (1.0 - b2) * g[i] * g[i];
-        p[i] -= lr * (m[i] / bc1) / ((v[i] / bc2).sqrt() + eps);
-    }
-}
+// The generic pair machinery (A/B init, ΔW apply, dW→(dA,dB) projection, Adam
+// moments) is model-agnostic and lives ONCE in `model::lora` — this module
+// keeps only the FLUX.2-specific block walk, fused-tensor offsets and
+// serialization naming. `LoraCfg` is re-exported for existing callers.
+pub use model::lora::LoraCfg;
+use model::lora::{proj_step, Pair};
 
 /// The seven pairs of one double-block stream (qkv slices + proj + mlp slices).
 #[derive(Clone)]
@@ -190,7 +78,9 @@ impl LoraAdapter {
     pub fn new(cfg: &Cfg, lc: LoraCfg) -> LoraAdapter {
         let (d, mlp, r) = (cfg.hidden, cfg.mlp, lc.rank);
         let mut rng = data::rng::Rng::new(lc.seed ^ 0xf1a2_b3c4_d5e6_0789);
-        let mut mk = |out, inn| Pair::new(out, inn, r, &mut rng);
+        // Same init distribution as before the model::lora hoist (uniform,
+        // ±0.02) so existing seeds reproduce bit-identical adapters.
+        let mut mk = |out, inn| Pair::new(out, inn, r, || (rng.next_f64() - 0.5) as f32 * 0.04);
         let stream = |mk: &mut dyn FnMut(usize, usize) -> Pair| StreamLora {
             wq: mk(d, d),
             wk: mk(d, d),
@@ -394,11 +284,6 @@ fn step_stream(l: &mut StreamLora, g: &crate::grad::StreamG<f32>, scale: f32, lr
     proj_step(&mut l.w1, &g.w1, scale, lr, t);
     proj_step(&mut l.w3, &g.w3, scale, lr, t);
     proj_step(&mut l.w2, &g.w2, scale, lr, t);
-}
-
-fn proj_step(p: &mut Pair, dw: &[f32], scale: f32, lr: f32, t: u64) {
-    let (da, db) = p.project(dw, scale);
-    p.adam_step(&da, &db, lr, t);
 }
 
 fn stream_pairs(s: &StreamLora) -> [&Pair; 7] {
