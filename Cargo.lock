@@ -1584,6 +1584,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-weightset"
+version = "0.1.1"
+
+[[package]]
 name = "brain-wgsl-cpu"
 version = "0.1.1"
 dependencies = [

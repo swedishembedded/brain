@@ -1,0 +1,12 @@
+[package]
+name = "brain-weightset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Within-instance weight residency: a fixed-size device slot window over a model's weight groups (transformer blocks), scheduled against the model's own known access order (a cyclic denoise/decode scan) rather than an unpredictable request stream. Sits beside paramstore in the dependency graph; inference paths that stream frozen weights through a bounded window use this instead."
+
+[lib]
+name = "weightset"
+path = "src/lib.rs"
+
+[dependencies]
