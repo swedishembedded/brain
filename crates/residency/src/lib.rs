@@ -58,11 +58,17 @@ pub struct MemCost {
     /// model advertises NPU-eligibility, so a CPU-only model (npu == 0) is never
     /// placed on the NPU even when one is budgeted. `MemCost::new` keeps `npu = 0`.
     pub npu: u64,
+    /// Reclaimable, page-cache-backed bytes (a `Tier::Cold`/mmap footprint) —
+    /// separate from `ram` because the kernel can evict these under memory
+    /// pressure the way it never evicts a live allocation, so a governor
+    /// must not treat them as equally "in use". Zero for every model that
+    /// doesn't override [`Instance::demote`] to a mapped tier.
+    pub mapped: u64,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram, npu: 0 }
+        MemCost { vram, ram, npu: 0, mapped: 0 }
     }
     /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled
     /// blob + I/O live in shared host memory, so this is a host-memory figure — but
@@ -70,6 +76,12 @@ impl MemCost {
     /// model reports `ram > 0, npu == 0` and is never placed on the NPU).
     pub fn with_npu(mut self, npu: u64) -> MemCost {
         self.npu = npu;
+        self
+    }
+    /// Record a `Tier::Cold` mapped-but-not-loaded footprint alongside this
+    /// cost (see [`Self::mapped`]'s doc).
+    pub fn with_mapped(mut self, mapped: u64) -> MemCost {
+        self.mapped = mapped;
         self
     }
     /// The bytes this instance occupies on `device` (VRAM on a GPU, RAM on the CPU,
