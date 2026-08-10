@@ -68,11 +68,31 @@ impl MmapSafetensors {
                 }
                 continue;
             }
-            let dtype = meta["dtype"].as_str().ok_or("safetensors: missing dtype")?.to_string();
-            let shape: Vec<usize> = meta["shape"].as_array().ok_or("safetensors: missing shape")?.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect();
-            let off = meta["data_offsets"].as_array().ok_or("safetensors: missing data_offsets")?;
-            let start = off[0].as_u64().unwrap() as usize;
-            let end = off[1].as_u64().unwrap() as usize;
+            let dtype = meta["dtype"].as_str().ok_or_else(|| format!("safetensors: tensor '{name}': missing dtype"))?.to_string();
+            // Every header field is user-supplied (a downloaded, possibly
+            // truncated or corrupt file) — validate NOW, once, so every later
+            // accessor can slice the mmap without panicking mid-import or
+            // mid-activation. One loud Err naming the tensor.
+            let width = try_dtype_width(&dtype).ok_or_else(|| format!("safetensors: tensor '{name}': unknown dtype '{dtype}'"))?;
+            let mut shape = Vec::new();
+            for v in meta["shape"].as_array().ok_or_else(|| format!("safetensors: tensor '{name}': missing shape"))? {
+                shape.push(v.as_u64().ok_or_else(|| format!("safetensors: tensor '{name}': non-integer shape entry {v}"))? as usize);
+            }
+            let off = meta["data_offsets"].as_array().ok_or_else(|| format!("safetensors: tensor '{name}': missing data_offsets"))?;
+            let start = off.first().and_then(Value::as_u64).ok_or_else(|| format!("safetensors: tensor '{name}': bad data_offsets"))? as usize;
+            let end = off.get(1).and_then(Value::as_u64).ok_or_else(|| format!("safetensors: tensor '{name}': bad data_offsets"))? as usize;
+            if start > end {
+                return Err(format!("safetensors: tensor '{name}': data_offsets start {start} > end {end}"));
+            }
+            if (end - start) % width != 0 {
+                return Err(format!("safetensors: tensor '{name}': byte range {} not a multiple of {dtype}'s element width {width}", end - start));
+            }
+            if end > mmap.len() - hend {
+                return Err(format!(
+                    "safetensors: tensor '{name}': data_offsets end {end} exceeds the tensor blob ({} bytes) — truncated or corrupt file",
+                    mmap.len() - hend
+                ));
+            }
             index.insert(name.clone(), TensorMeta { dtype, shape, start, end });
             order.push(name.clone());
         }
@@ -241,17 +261,25 @@ impl MmapSafetensors {
     }
 }
 
-/// On-disk byte width of one element for a safetensors dtype string. Only the
-/// dtypes [`decode_into`] knows how to decode as f32 (`tensor_u32`'s `U32` is
-/// handled separately — packed, not a per-element f32 decode).
-fn dtype_width(dtype: &str) -> usize {
+/// On-disk byte width of one element for a safetensors dtype string, or `None`
+/// for a dtype this reader does not know. Only the dtypes [`decode_into`] knows
+/// how to decode as f32 (`tensor_u32`'s `U32` is handled separately — packed,
+/// not a per-element f32 decode). `open()` rejects unknown dtypes up front, so
+/// [`dtype_width`] below is infallible for any tensor that made it into the index.
+fn try_dtype_width(dtype: &str) -> Option<usize> {
     match dtype {
-        "F32" | "I32" | "U32" => 4,
-        "F16" | "BF16" => 2,
-        "I64" => 8,
-        "U8" => 1,
-        other => panic!("'{other}': unknown element width"),
+        "F32" | "I32" | "U32" => Some(4),
+        "F16" | "BF16" => Some(2),
+        "I64" => Some(8),
+        "U8" => Some(1),
+        _ => None,
     }
+}
+
+/// [`try_dtype_width`] for a dtype `open()` already validated (every indexed
+/// tensor's dtype is known by construction).
+fn dtype_width(dtype: &str) -> usize {
+    try_dtype_width(dtype).unwrap_or_else(|| panic!("'{dtype}': unknown element width (open() validates dtypes, so this is unreachable for indexed tensors)"))
 }
 
 /// Decode `raw` (a whole tensor's bytes, or one chunk of them) as `dtype`,
@@ -442,6 +470,51 @@ mod tests {
         // already applies; this is what makes the equality below exact).
         assert_eq!(reassembled, mm.tensor_f32("t").unwrap(), "chunked reassembly must equal the whole-tensor decode exactly");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The common corruption in practice: a partially-downloaded multi-GB
+    /// checkpoint whose header is intact but whose tensor blob is truncated.
+    /// `open()` must refuse with a clean error naming the tensor — never
+    /// panic at first tensor access deep inside an import or a serving
+    /// lane's activate().
+    #[test]
+    fn truncated_blob_is_a_clean_open_error_not_a_panic() {
+        let (path, _, _) = make_file();
+        let bytes = std::fs::read(&path).unwrap();
+        // Chop half the blob off (header stays intact).
+        let truncated = &bytes[..bytes.len() - 8];
+        let tpath = std::env::temp_dir().join(format!("mmap_st_trunc_{}.safetensors", std::process::id()));
+        std::fs::write(&tpath, truncated).unwrap();
+        let err = MmapSafetensors::open(&tpath).err().expect("truncated blob must be refused at open()");
+        assert!(err.contains("truncated") || err.contains("exceeds"), "error must say the file is truncated: {err}");
+        assert!(err.contains("tensor '"), "error must name the offending tensor: {err}");
+        std::fs::remove_file(&tpath).ok();
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Malformed header metadata (unknown dtype, inverted offsets, garbage
+    /// data_offsets) — each must be a clean Err from open(), not a later panic.
+    #[test]
+    fn malformed_header_metadata_is_a_clean_open_error() {
+        let cases = [
+            (serde_json::json!({"t": {"dtype": "Q4_K", "shape": [4], "data_offsets": [0, 16]}}), "unknown dtype"),
+            (serde_json::json!({"t": {"dtype": "F32", "shape": [4], "data_offsets": [16, 0]}}), "start"),
+            (serde_json::json!({"t": {"dtype": "F32", "shape": [4], "data_offsets": ["x", 16]}}), "data_offsets"),
+            (serde_json::json!({"t": {"dtype": "F32", "shape": [4], "data_offsets": [0]}}), "data_offsets"),
+            (serde_json::json!({"t": {"dtype": "F32", "shape": ["x"], "data_offsets": [0, 16]}}), "shape"),
+            (serde_json::json!({"t": {"dtype": "F32", "shape": [4], "data_offsets": [0, 15]}}), "element width"),
+        ];
+        for (i, (header, want)) in cases.iter().enumerate() {
+            let hbytes = serde_json::to_vec(header).unwrap();
+            let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+            file.extend_from_slice(&hbytes);
+            file.extend_from_slice(&[0u8; 16]);
+            let path = std::env::temp_dir().join(format!("mmap_st_malformed_{i}_{}.safetensors", std::process::id()));
+            std::fs::write(&path, &file).unwrap();
+            let err = MmapSafetensors::open(&path).err().unwrap_or_else(|| panic!("case {i} must be refused"));
+            assert!(err.contains(want), "case {i}: error {err:?} must mention {want:?}");
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     #[test]

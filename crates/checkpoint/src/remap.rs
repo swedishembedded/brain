@@ -35,18 +35,6 @@ pub enum Fetch {
     Concat(Vec<Fetch>),
 }
 
-impl Fetch {
-    /// Element count, if known without touching the source (`Concat`'s is
-    /// known iff every part's is).
-    fn static_numel(&self) -> Option<usize> {
-        match self {
-            Fetch::Whole(_) => None, // depends on the source; ask it directly.
-            Fetch::Slice { len, .. } => Some(*len),
-            Fetch::Concat(parts) => parts.iter().map(Fetch::static_numel).sum(),
-        }
-    }
-}
-
 /// A [`TensorSource`] that wraps an inner one with a rename/reslice [`Fetch`]
 /// plan. `Whole` and `Slice` fetches are zero-copy through
 /// [`TensorSource::raw_words`] when the inner source is, and stream through
@@ -79,7 +67,7 @@ impl<'a> RemapSource<'a> {
                         problems.push(format!("'{name}': plan yields {n} elements, want {expect_numel}"))
                     }
                     Some(_) => {}
-                    None => problems.push(format!("'{name}': source tensor missing")),
+                    None => problems.push(format!("'{name}': source tensor missing or slice out of range")),
                 },
             }
         }
@@ -92,10 +80,22 @@ impl<'a> RemapSource<'a> {
 
     /// [`Fetch`]'s element count, resolving `Whole` (and `Concat` of `Whole`s)
     /// against the inner source's `numel` — still no tensor data read.
+    ///
+    /// `None` for a missing source tensor AND for a `Slice` whose range does
+    /// not fit inside its source. That single rule is what keeps every access
+    /// path (`with_tensor`, `with_tensor_chunks`, `raw_words`, `numel`,
+    /// `validate`) refusing an out-of-range slice the same way: a clean "not
+    /// available", never a panic and never silently truncated partial data —
+    /// the worst possible failure for an import (a config-vs-checkpoint dim
+    /// mismatch would otherwise yield silently-wrong tail weights).
     fn fetch_numel(&self, fetch: &Fetch) -> Option<usize> {
         match fetch {
             Fetch::Whole(src) => self.inner.numel(src),
-            Fetch::Slice { .. } => fetch.static_numel(),
+            Fetch::Slice { name, start, len } => {
+                let n = self.inner.numel(name)?;
+                let end = start.checked_add(*len)?;
+                (end <= n).then_some(*len)
+            }
             Fetch::Concat(parts) => parts.iter().map(|p| self.fetch_numel(p)).sum(),
         }
     }
@@ -107,9 +107,16 @@ impl TensorSource for RemapSource<'_> {
         match fetch {
             Fetch::Whole(src) => self.inner.with_tensor(src, f),
             Fetch::Slice { name: src, start, len } => {
+                // An out-of-range slice is a refusal (`false`), exactly like
+                // `raw_words`/`with_tensor_chunks`/`numel` — see fetch_numel.
+                if self.fetch_numel(fetch).is_none() {
+                    return false;
+                }
                 let (start, len) = (*start, *len);
                 self.inner.with_tensor(src, &mut |data| {
-                    assert!(start + len <= data.len(), "slice [{start}, {}) out of range for '{src}' ({} elems)", start + len, data.len());
+                    // In range by the fetch_numel check above; a violation here
+                    // means the SOURCE's numel/with_tensor disagree (a source
+                    // impl bug, not user data), which deserves the loud panic.
                     f(&data[start..start + len]);
                 })
             }
@@ -135,7 +142,8 @@ impl TensorSource for RemapSource<'_> {
             Fetch::Whole(src) => self.inner.raw_words(src),
             Fetch::Slice { name: src, start, len } => {
                 let words = self.inner.raw_words(src)?;
-                words.get(*start..*start + *len)
+                let end = start.checked_add(*len)?;
+                words.get(*start..end)
             }
             // A contiguous destination built from several source pieces has
             // no single borrowed slice to hand back.
@@ -148,6 +156,12 @@ impl TensorSource for RemapSource<'_> {
         match fetch {
             Fetch::Whole(src) => self.inner.with_tensor_chunks(src, max_elems, f),
             Fetch::Slice { name: src, start, len } => {
+                // Refuse an out-of-range slice up front. Without this check the
+                // overlap-clip below would deliver only the overlapping PREFIX
+                // and still return `true` — silently-wrong tail weights.
+                if self.fetch_numel(fetch).is_none() {
+                    return false;
+                }
                 let (start, len) = (*start, *len);
                 self.inner.with_tensor_chunks(src, max_elems, &mut |chunk_off, chunk| {
                     let chunk_off = chunk_off as usize;
@@ -179,8 +193,23 @@ impl RemapSource<'_> {
     /// (the caller, `Concat`'s assembly loop, already sized it that way).
     fn fetch_into(&self, fetch: &Fetch, out: &mut [f32]) -> bool {
         match fetch {
-            Fetch::Whole(src) => self.inner.with_tensor(src, &mut |d| out.copy_from_slice(d)),
+            Fetch::Whole(src) => {
+                // `out` was sized from fetch_numel == the source's numel; a
+                // length mismatch means the source's numel/with_tensor
+                // disagree — refuse rather than panic in copy_from_slice.
+                let mut ok = false;
+                let found = self.inner.with_tensor(src, &mut |d| {
+                    if d.len() == out.len() {
+                        out.copy_from_slice(d);
+                        ok = true;
+                    }
+                });
+                found && ok
+            }
             Fetch::Slice { name: src, start, len } => {
+                if self.fetch_numel(fetch).is_none() {
+                    return false; // out of range: same refusal as every other path
+                }
                 let (start, len) = (*start, *len);
                 self.inner.with_tensor(src, &mut |d| out.copy_from_slice(&d[start..start + len]))
             }
@@ -296,6 +325,28 @@ mod tests {
         assert!(err.contains("wrong_size"), "{err}");
         assert!(err.contains("missing"), "{err}");
         assert!(!err.contains("'ok'"), "a correctly-sized entry must not be reported: {err}");
+    }
+
+    /// An out-of-range Slice (the config-vs-checkpoint dim-mismatch case) must
+    /// be refused IDENTICALLY by every access path: `false`/`None`, never a
+    /// panic (the old eager path) and never silently-truncated partial data
+    /// (the old chunked path, which delivered only the overlapping prefix and
+    /// still returned `true`).
+    #[test]
+    fn out_of_range_slice_is_refused_consistently_by_every_access_path() {
+        let inner = src(&[("a", &[1.0, 2.0, 3.0, 4.0])]);
+        let mut plan = HashMap::new();
+        plan.insert("oob".to_string(), Fetch::Slice { name: "a".to_string(), start: 2, len: 5 });
+        plan.insert("cat".to_string(), Fetch::Concat(vec![Fetch::Slice { name: "a".to_string(), start: 2, len: 5 }]));
+        let r = RemapSource::new(&inner, plan);
+
+        assert_eq!(r.numel("oob"), None);
+        assert!(r.raw_words("oob").is_none());
+        assert!(!r.with_tensor("oob", &mut |_| panic!("no data may be delivered for an OOB slice")));
+        assert!(!r.with_tensor_chunks("oob", 2, &mut |_, _| panic!("no partial data may be delivered for an OOB slice")));
+        assert!(!r.with_tensor("cat", &mut |_| panic!("no data may be delivered for an OOB concat part")));
+        let err = r.validate(&[("oob".to_string(), 5)]).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
     }
 
     #[test]

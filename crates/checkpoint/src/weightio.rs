@@ -203,7 +203,7 @@ impl WeightReader {
     pub fn tensor(&self, name: &str) -> Option<Vec<f32>> {
         match &self.inner {
             Inner::St(m) => m.tensor_f32(name),
-            Inner::Gguf(m) => m.tensor(name).map(|r| r.expect("gguf dequant")),
+            Inner::Gguf(m) => m.tensor(name).map(|r| r.unwrap_or_else(|e| panic!("gguf dequant '{name}': {e}"))),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_f32(name),
         }
     }
@@ -940,9 +940,13 @@ mod tests {
         let hb = serde_json::to_vec(&header).unwrap();
         let mut file = (hb.len() as u64).to_le_bytes().to_vec();
         file.extend_from_slice(&hb);
-        // Only a few real bytes of the "blob" — enough to mmap, not the full size.
-        file.extend_from_slice(&[0u8; 64]);
         std::fs::write(&p, &file).unwrap();
+        // Extend to the full declared size as a SPARSE file (no bytes written,
+        // no disk used): open() now validates that every tensor's byte range
+        // fits the blob, so the file must genuinely be that long — but the
+        // point of this test stands: open() must not READ (fault in) the blob.
+        let blob_len = file.len() as u64 + huge * 4;
+        std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_len(blob_len).unwrap();
 
         let (r, peak) = peak_live(|| WeightReader::open(&p).unwrap());
         assert_eq!(r.shape("big"), Some([huge].as_slice()));
