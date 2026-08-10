@@ -384,8 +384,28 @@ impl ResidentModel for ZImageResident {
     }
 
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        // The shape is `ZImageConfig::turbo()` because that IS the only config
+        // the pipeline ever builds (`zimage::pipeline` hardcodes turbo() at
+        // every build site); deriving it per-checkpoint belongs with the model
+        // crate growing a second config, not here.
+        let cache_ram = || zimage::pipeline::int8_cache_bytes_estimate(&zimage::ZImageConfig::turbo());
         match tier {
-            Tier::Hot => self.estimate(key),
+            // A cache-retaining build holds the multi-GB host `DitI8Cache`
+            // ALONGSIDE the hot pipeline — charging Hot only the VRAM left
+            // those bytes invisible to every budget exactly while they
+            // coexist with the device copy (the residency contract this
+            // adapter exists to keep honest). Only the shape that can
+            // actually retain a cache pays it: fp32/adapter/edit builds
+            // keep the plain estimate.
+            Tier::Hot => {
+                let mut cost = self.estimate(key);
+                let (_, _, hifi, adapter) = parse_key(&key.config);
+                let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
+                if !key.config.starts_with("edit:") && retains_int8_cache(hifi, adapter) {
+                    cost.ram += cache_ram();
+                }
+                cost
+            }
             // Real, not `0`: only the plain int8 build (see
             // `retains_int8_cache`) ever actually has a Warm state (every
             // other shape's `demote` refuses, so the manager never
@@ -393,7 +413,7 @@ impl ResidentModel for ZImageResident {
             // `DitI8Cache` genuinely holds several GB, and claiming
             // otherwise is precisely the kind of budgeting lie this whole
             // workstream exists to avoid.
-            Tier::Warm | Tier::Cold => MemCost::new(0, zimage::pipeline::int8_cache_bytes_estimate(&zimage::ZImageConfig::turbo())),
+            Tier::Warm | Tier::Cold => MemCost::new(0, cache_ram()),
         }
     }
 

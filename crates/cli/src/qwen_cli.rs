@@ -1018,20 +1018,37 @@ fn calib(args: &[String]) {
 
     let total = samples.len();
     let mut prompts: Vec<Vec<u32>> = Vec::new();
+    // Keep the first few DISTINCT encode errors: the template engine's
+    // carefully-worded diagnostics ("not prefix-stable … refusing to guess a
+    // loss-mask boundary") used to be swallowed here — only a bare skip count
+    // survived, so the user whose data was dropped never learned why.
+    let mut encode_errors: Vec<String> = Vec::new();
     for s in &samples {
-        if let Ok((ids, _mask)) = s.encode(&tok, &chat_template) {
-            if !ids.is_empty() {
-                prompts.push(ids);
+        match s.encode(&tok, &chat_template) {
+            Ok((ids, _mask)) if !ids.is_empty() => prompts.push(ids),
+            Ok(_) => {}
+            Err(e) => {
+                let e = e.to_string();
+                if encode_errors.len() < 3 && !encode_errors.contains(&e) {
+                    encode_errors.push(e);
+                }
             }
         }
     }
+    let report_errors = |errs: &[String]| {
+        for e in errs {
+            eprintln!("brain qwen calib:   encode error: {e}");
+        }
+    };
     if prompts.is_empty() {
         eprintln!("{jsonl}: no sample encoded to a usable prompt");
+        report_errors(&encode_errors);
         return;
     }
     let skipped = total - prompts.len();
     if skipped > 0 {
-        eprintln!("brain qwen calib: skipped {skipped}/{total} samples that failed to encode");
+        eprintln!("brain qwen calib: skipped {skipped}/{total} samples that failed to encode (first distinct errors below)");
+        report_errors(&encode_errors);
     }
 
     // Every prompt's table must stay resident simultaneously (calibrate_kv
