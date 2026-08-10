@@ -841,6 +841,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let n = p(0)? * p(1)?;
             f(6 * n, 4 * (2 * n + n))
         }
+        // Backward of `gdn_decay_gate` w.r.t. `a_proj`: params [rows,
+        // num_v_heads]; one add (x), one sigmoid (~3 ops), one exp(A_log),
+        // one mul, one negate per output element. Reads a_proj/A_log/
+        // dt_bias/d_g (4 operands, though A_log/dt_bias are only
+        // num_v_heads-wide), writes d_a_proj (1).
+        "gdn_decay_gate_bwd" => {
+            let n = p(0)? * p(1)?;
+            f(7 * n, 4 * (4 * n + n))
+        }
         // decay_mask[row,i,j] = exp(g_cs[i]-g_cs[j]) for j<=i: params [bhc, c_len].
         // Every element is written; roughly half the exp/sub pairs are live.
         "gdn_decay_mask" => {

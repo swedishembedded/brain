@@ -322,6 +322,8 @@ pub const GDN_CHUNK_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_cumsum_s
 pub const GDN_CHUNK_REVERSE_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_reverse_cumsum_step.wgsl");
 /// `wgsl/gdn_decay_gate.wgsl`
 pub const GDN_DECAY_GATE: &str = include_str!("../wgsl/gdn_decay_gate.wgsl");
+/// `wgsl/gdn_decay_gate_bwd.wgsl`
+pub const GDN_DECAY_GATE_BWD: &str = include_str!("../wgsl/gdn_decay_gate_bwd.wgsl");
 /// `wgsl/gdn_decay_mask.wgsl`
 pub const GDN_DECAY_MASK: &str = include_str!("../wgsl/gdn_decay_mask.wgsl");
 /// `wgsl/gdn_decay_mask_bwd.wgsl`
@@ -960,6 +962,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gdn_chunk_cumsum_step", GDN_CHUNK_CUMSUM_STEP),
     ("gdn_chunk_reverse_cumsum_step", GDN_CHUNK_REVERSE_CUMSUM_STEP),
     ("gdn_decay_gate", GDN_DECAY_GATE),
+    ("gdn_decay_gate_bwd", GDN_DECAY_GATE_BWD),
     ("gdn_decay_mask", GDN_DECAY_MASK),
     ("gdn_decay_mask_bwd", GDN_DECAY_MASK_BWD),
     ("gdn_decay_scale", GDN_DECAY_SCALE),
