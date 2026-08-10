@@ -66,27 +66,29 @@ impl OwnedTalkerLayer {
 /// `reader` — same convention `crate::generate::load_thinker_layer` uses:
 /// `reader` is opened on the raw HF checkpoint directory, not the (still
 /// separately loader-naming-gapped, per M7b/M8) unified/imported one.
-fn load_talker_layer(reader: &WeightReader, gpu: &Gpu, l: u32, n_experts: u32) -> OwnedTalkerLayer {
+fn load_talker_layer(reader: &WeightReader, gpu: &Gpu, l: u32, n_experts: u32) -> Result<OwnedTalkerLayer, String> {
+    // Errors, not panics: streamed per generated codec frame inside the
+    // serving daemon -- a missing tensor fails the request, not the process.
     let p = |leaf: &str| format!("talker.model.layers.{l}.{leaf}");
-    let get = |name: &str| gpu.storage_init("w", &reader.tensor(name).unwrap_or_else(|| panic!("missing tensor {name}")));
-    OwnedTalkerLayer {
-        ln1: get(&p("input_layernorm.weight")),
-        wq: get(&p("self_attn.q_proj.weight")),
-        wk: get(&p("self_attn.k_proj.weight")),
-        wv: get(&p("self_attn.v_proj.weight")),
-        wo: get(&p("self_attn.o_proj.weight")),
-        q_norm: get(&p("self_attn.q_norm.weight")),
-        k_norm: get(&p("self_attn.k_norm.weight")),
-        ln2: get(&p("post_attention_layernorm.weight")),
-        router: get(&p("mlp.gate.weight")),
+    let get = |name: &str| Ok::<_, String>(gpu.storage_init("w", &reader.tensor(name).ok_or_else(|| format!("omni: missing tensor {name}"))?));
+    Ok(OwnedTalkerLayer {
+        ln1: get(&p("input_layernorm.weight"))?,
+        wq: get(&p("self_attn.q_proj.weight"))?,
+        wk: get(&p("self_attn.k_proj.weight"))?,
+        wv: get(&p("self_attn.v_proj.weight"))?,
+        wo: get(&p("self_attn.o_proj.weight"))?,
+        q_norm: get(&p("self_attn.q_norm.weight"))?,
+        k_norm: get(&p("self_attn.k_norm.weight"))?,
+        ln2: get(&p("post_attention_layernorm.weight"))?,
+        router: get(&p("mlp.gate.weight"))?,
         experts: (0..n_experts)
-            .map(|e| (get(&p(&format!("mlp.experts.{e}.gate_proj.weight"))), get(&p(&format!("mlp.experts.{e}.up_proj.weight"))), get(&p(&format!("mlp.experts.{e}.down_proj.weight")))))
-            .collect(),
-        shared_gate: get(&p("mlp.shared_expert.gate_proj.weight")),
-        shared_up: get(&p("mlp.shared_expert.up_proj.weight")),
-        shared_down: get(&p("mlp.shared_expert.down_proj.weight")),
-        shared_expert_gate: get(&p("mlp.shared_expert_gate.weight")),
-    }
+            .map(|e| Ok((get(&p(&format!("mlp.experts.{e}.gate_proj.weight")))?, get(&p(&format!("mlp.experts.{e}.up_proj.weight")))?, get(&p(&format!("mlp.experts.{e}.down_proj.weight")))?)))
+            .collect::<Result<Vec<_>, String>>()?,
+        shared_gate: get(&p("mlp.shared_expert.gate_proj.weight"))?,
+        shared_up: get(&p("mlp.shared_expert.up_proj.weight"))?,
+        shared_down: get(&p("mlp.shared_expert.down_proj.weight"))?,
+        shared_expert_gate: get(&p("mlp.shared_expert_gate.weight"))?,
+    })
 }
 
 struct TalkerKvCache {
@@ -109,7 +111,7 @@ impl TalkerKvCache {
 /// causal attention), bulk-filling `cache` — plain-sequential positions
 /// (the text-only prefill this crate builds today, `crate::talker_prompt`'s
 /// scope note). Returns the final-normed hidden state `[n, hidden]`.
-fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], n: u32, cache: &TalkerKvCache) -> DeviceBuffer {
+fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], n: u32, cache: &TalkerKvCache) -> Result<DeviceBuffer, String> {
     let tokens: Vec<u32> = (0..n).collect();
     let positions = get_rope_index(&tokens, u32::MAX, &[]);
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
@@ -119,20 +121,20 @@ fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32]
 
     let mut h = gpu.storage_init("x", x_host);
     for l in 0..cfg.n_layers {
-        let layer = load_talker_layer(reader, gpu, l, cfg.n_experts);
+        let layer = load_talker_layer(reader, gpu, l, cfg.n_experts)?;
         let lc = cache.layer(l as usize);
         let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc));
         h = out;
     }
-    let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").expect("missing talker.model.norm.weight"));
-    final_norm(gpu, cfg, &norm_w, &h, n)
+    let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").ok_or("omni: missing tensor talker.model.norm.weight")?);
+    Ok(final_norm(gpu, cfg, &norm_w, &h, n))
 }
 
 /// One incremental decode step: a single new "frame" embedding row (the
 /// summed codec feedback, see [`generate_codes`]) through every layer,
 /// attending against `cache` at cache row `cache_row` / M-RoPE position
 /// `pos` (plain-sequential — same scope note as [`prefill`]).
-fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], pos: u32, cache: &TalkerKvCache) -> DeviceBuffer {
+fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], pos: u32, cache: &TalkerKvCache) -> Result<DeviceBuffer, String> {
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(&[[pos, pos, pos]], section, cfg.head_dim, cfg.rope_theta);
     let cos = gpu.storage_init("cos", &cos_tab);
@@ -140,12 +142,12 @@ fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[
 
     let mut h = gpu.storage_init("x", x_host);
     for l in 0..cfg.n_layers {
-        let layer = load_talker_layer(reader, gpu, l, cfg.n_experts);
+        let layer = load_talker_layer(reader, gpu, l, cfg.n_experts)?;
         let lc = cache.layer(l as usize);
         h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, pos, cache.cap);
     }
-    let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").expect("missing talker.model.norm.weight"));
-    final_norm(gpu, cfg, &norm_w, &h, 1)
+    let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").ok_or("omni: missing tensor talker.model.norm.weight")?);
+    Ok(final_norm(gpu, cfg, &norm_w, &h, 1))
 }
 
 /// Sampling / length controls — identical defaults to `tts::pipeline::
@@ -229,7 +231,7 @@ fn add_into(a: &mut [f32], b: &[f32]) {
 /// materialized as its own tensor in the real checkpoint, loaded like any
 /// other weight here).
 #[allow(clippy::too_many_arguments)]
-pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, codec_head_w: &[f32], codec_eos_id: u32, mtp: &MtpModel, codec_embed: impl Fn(u32) -> Vec<f32>, prompt: &TalkerPrompt, opts: &GenOpts) -> Vec<u32> {
+pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, codec_head_w: &[f32], codec_eos_id: u32, mtp: &MtpModel, codec_embed: impl Fn(u32) -> Vec<f32>, prompt: &TalkerPrompt, opts: &GenOpts) -> Result<Vec<u32>, String> {
     let d = cfg.hidden as usize;
     let n_prefix = (prompt.embeds.len() / d) as u32;
     let n_trailing = prompt.trailing.len() / d;
@@ -239,7 +241,7 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
     let cache = TalkerKvCache::new(gpu, cfg, cap);
     let codec_head = gpu.storage_init("codec_head", codec_head_w);
 
-    let hidden = prefill(reader, gpu, cfg, &prompt.embeds, n_prefix, &cache);
+    let hidden = prefill(reader, gpu, cfg, &prompt.embeds, n_prefix, &cache)?;
     let logits_all = lm_head_fwd(gpu, &codec_head, &hidden, n_prefix, cfg.hidden, cfg.vocab);
     let last_logits = gpu.read(&logits_all, (n_prefix * cfg.vocab) as usize)[((n_prefix - 1) * cfg.vocab) as usize..].to_vec();
     let mut past_hidden = gpu.read(&hidden, (n_prefix * cfg.hidden) as usize)[((n_prefix - 1) * cfg.hidden) as usize..].to_vec();
@@ -269,13 +271,13 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
             break;
         }
 
-        let hidden = decode_step(reader, gpu, cfg, &feed, cache_row, &cache);
+        let hidden = decode_step(reader, gpu, cfg, &feed, cache_row, &cache)?;
         let logits = lm_head_fwd(gpu, &codec_head, &hidden, 1, cfg.hidden, cfg.vocab);
         past_hidden = gpu.read(&hidden, cfg.hidden as usize);
         cb0 = sample_cb0(gpu.read(&logits, cfg.vocab as usize), codec_eos_id, s >= opts.min_new, opts.temperature, opts.top_k, &mut rng);
         cache_row += 1;
     }
-    frames
+    Ok(frames)
 }
 
 #[cfg(test)]

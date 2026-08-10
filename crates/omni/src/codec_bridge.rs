@@ -27,23 +27,30 @@ use crate::talker_prompt::TalkerPromptSpecials;
 /// same function) and built directly with `MtpModel::build_on` — no
 /// `ParamStore`/checkpoint-file round trip, same pattern
 /// `code_predictor_parity.rs` uses.
-pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &tts::config::MtpConfig) -> MtpModel {
+pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &tts::config::MtpConfig) -> Result<MtpModel, String> {
+    // Errors, not panics: this loader runs at REQUEST time inside the serving
+    // daemon (omni streams weights per request), so a missing/renamed tensor
+    // in a checkpoint must fail the one request, not kill the process.
     let mut decoder: HashMap<String, Vec<f32>> = HashMap::new();
     for l in 0..cfg.n_layers {
         for leaf in ["input_layernorm.weight", "post_attention_layernorm.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"] {
             let hf = format!("talker.code_predictor.model.layers.{l}.{leaf}");
-            let brain_name = mtp_hf_to_brain(&hf).unwrap_or_else(|| panic!("mtp_hf_to_brain rejected {hf}"));
-            decoder.insert(brain_name, reader.tensor(&hf).unwrap_or_else(|| panic!("missing {hf}")));
+            let brain_name = mtp_hf_to_brain(&hf).ok_or_else(|| format!("omni: mtp_hf_to_brain rejected {hf}"))?;
+            decoder.insert(brain_name, reader.tensor(&hf).ok_or_else(|| format!("omni: missing tensor {hf}"))?);
         }
     }
     let norm_hf = "talker.code_predictor.model.norm.weight";
-    decoder.insert(mtp_hf_to_brain(norm_hf).unwrap(), reader.tensor(norm_hf).unwrap_or_else(|| panic!("missing {norm_hf}")));
+    decoder.insert(
+        mtp_hf_to_brain(norm_hf).ok_or_else(|| format!("omni: mtp_hf_to_brain rejected {norm_hf}"))?,
+        reader.tensor(norm_hf).ok_or_else(|| format!("omni: missing tensor {norm_hf}"))?,
+    );
 
     let n_residual = cfg.n_residual() as usize;
-    let codec_embedding: Vec<Vec<f32>> = (0..n_residual).map(|i| reader.tensor(&format!("talker.code_predictor.model.codec_embedding.{i}.weight")).unwrap()).collect();
-    let lm_head: Vec<Vec<f32>> = (0..n_residual).map(|i| reader.tensor(&format!("talker.code_predictor.lm_head.{i}.weight")).unwrap()).collect();
+    let want = |name: String| reader.tensor(&name).ok_or_else(|| format!("omni: missing tensor {name}"));
+    let codec_embedding: Vec<Vec<f32>> = (0..n_residual).map(|i| want(format!("talker.code_predictor.model.codec_embedding.{i}.weight"))).collect::<Result<_, _>>()?;
+    let lm_head: Vec<Vec<f32>> = (0..n_residual).map(|i| want(format!("talker.code_predictor.lm_head.{i}.weight"))).collect::<Result<_, _>>()?;
 
-    MtpModel::build_on(gpu, cfg.clone(), decoder, codec_embedding, lm_head)
+    Ok(MtpModel::build_on(gpu, cfg.clone(), decoder, codec_embedding, lm_head))
 }
 
 /// `oc` -> `codec::CodecConfig`, the 1:1 field mapping `load_codec` and
@@ -81,44 +88,44 @@ pub(crate) fn codec_config_from(oc: &Code2WavConfig) -> CodecConfig {
 /// loader half of [`load_codec`], factored out so [`crate::npu_export`] can
 /// build the SAME weight map for ONNX export without also building a
 /// `gpu_core`-backed `Codec`.
-pub(crate) fn codec_weights(reader: &WeightReader) -> HashMap<String, Vec<f32>> {
+pub(crate) fn codec_weights(reader: &WeightReader) -> Result<HashMap<String, Vec<f32>>, String> {
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for name in reader.names() {
         if let Some(rest) = name.strip_prefix("code2wav.") {
-            init.insert(rest.to_string(), reader.tensor(name).unwrap());
+            init.insert(rest.to_string(), reader.tensor(name).ok_or_else(|| format!("omni: cannot read tensor {name}"))?);
         }
     }
-    init
+    Ok(init)
 }
 
 /// Build a [`Codec`] from `code2wav.*` real HF tensors, prefix-stripped
 /// (matching `crate::import::map_code2wav`'s now-fixed convention — see its
 /// doc) and built with `Codec::from_weights` — same pattern
 /// `code2wav_parity.rs` uses.
-pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Codec {
-    Codec::from_weights(codec_config_from(oc), codec_weights(reader))
+pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Result<Codec, String> {
+    Ok(Codec::from_weights(codec_config_from(oc), codec_weights(reader)?))
 }
 
 /// `talker.text_projection`/`talker.hidden_projection` as `tts::talker::
 /// TextProjection` (reused unchanged, `text_embedding: None` — see
 /// `crate::talker_prompt`'s doc). `which` is `"text_projection"` or
 /// `"hidden_projection"`.
-pub fn load_talker_projection(reader: &WeightReader, cfg: &TalkerConfig, which: &str) -> tts::talker::TextProjection {
+pub fn load_talker_projection(reader: &WeightReader, cfg: &TalkerConfig, which: &str) -> Result<tts::talker::TextProjection, String> {
     let get = |leaf: &str| {
         let name = format!("talker.{which}.{leaf}");
-        reader.tensor(&name).unwrap_or_else(|| panic!("missing {name}"))
+        reader.tensor(&name).ok_or_else(|| format!("omni: missing tensor {name}"))
     };
-    tts::talker::TextProjection {
+    Ok(tts::talker::TextProjection {
         text_embedding: None,
-        fc1_w: get("linear_fc1.weight"),
-        fc1_b: get("linear_fc1.bias"),
-        fc2_w: get("linear_fc2.weight"),
-        fc2_b: get("linear_fc2.bias"),
+        fc1_w: get("linear_fc1.weight")?,
+        fc1_b: get("linear_fc1.bias")?,
+        fc2_w: get("linear_fc2.weight")?,
+        fc2_b: get("linear_fc2.bias")?,
         in_dim: cfg.thinker_hidden_size as usize,
         inter: cfg.text.moe_intermediate as usize,
         out: cfg.text.hidden as usize,
         text_vocab: 0,
-    }
+    })
 }
 
 pub fn talker_prompt_specials(oc: &crate::config::OmniConfig) -> TalkerPromptSpecials {

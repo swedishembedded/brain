@@ -44,7 +44,7 @@ const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 /// Writes `out_path` (+ a `.data` sidecar for weights over 1 MiB).
 pub fn export_audio_onnx(reader: &WeightReader, out_path: &str, n_audio: u32) -> std::io::Result<()> {
     let cfg = AudioEncoderConfig::qwen3_omni();
-    let weights = crate::mm::audio_weights(reader);
+    let weights = crate::mm::audio_weights(reader).map_err(std::io::Error::other)?;
     let topo = QwenAsrTopo {
         d_model: cfg.d_model,
         n_heads: cfg.n_heads,
@@ -67,7 +67,7 @@ pub fn export_audio_onnx(reader: &WeightReader, out_path: &str, n_audio: u32) ->
 /// export). Writes `out_path` (+ `.data` sidecar).
 pub fn export_vision_onnx(reader: &WeightReader, out_path: &str, grid_h: u32, grid_w: u32) -> std::io::Result<()> {
     let cfg = VisionConfig::qwen3_omni();
-    let (encoder_w, merger_w) = crate::mm::vision_weights(reader);
+    let (encoder_w, merger_w) = crate::mm::vision_weights(reader).map_err(std::io::Error::other)?;
     let mut weights = encoder_w;
     for (k, v) in merger_w {
         weights.insert(format!("merger.{k}"), v);
@@ -97,7 +97,7 @@ pub fn export_vision_onnx(reader: &WeightReader, out_path: &str, grid_h: u32, gr
 /// checkpoint-file round trip). Writes `out_path` (+ `.data` sidecar).
 pub fn export_codec_onnx(reader: &WeightReader, oc: &Code2WavConfig, out_path: &str, code_len: usize) -> std::io::Result<()> {
     let cfg = crate::codec_bridge::codec_config_from(oc);
-    let weights = crate::codec_bridge::codec_weights(reader);
+    let weights = crate::codec_bridge::codec_weights(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("omni_codec_decoder");
     npu::codec_topology::build_codec_graph(&cfg, &weights, code_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)

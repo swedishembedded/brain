@@ -82,7 +82,7 @@ pub struct ImageSplice {
 /// needed. `valid_frames` (the real, non-padded portion) follows the same
 /// `hop`-based frame formula `audio::asr_frontend::qwen_logmel` uses
 /// internally (`target_samples / hop`, dropping the last STFT frame).
-pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioSplice {
+pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> Result<AudioSplice, String> {
     const HOP: usize = 160;
     const CHUNK_SAMPLES: usize = 16000; // chunk_len(100) * hop(160), for n_window=50
     let target_samples = samples.len().max(1).div_ceil(CHUNK_SAMPLES) * CHUNK_SAMPLES;
@@ -90,13 +90,13 @@ pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioS
     let valid_frames = (samples.len() / HOP) as u32;
 
     let cfg = AudioEncoderConfig::qwen3_omni();
-    let weights = audio_weights(reader);
+    let weights = audio_weights(reader)?;
     let gpu_local = gpu.new_like(audio_pipelines());
     let output_dim = cfg.output_dim;
     let enc = AudioEncoder::new(&gpu_local, cfg, &weights);
     let (_encoder_out, embeds) = enc.encode(&mel, valid_frames);
     let n_rows = embeds.len() as u32 / output_dim;
-    AudioSplice { embeds, n_rows }
+    Ok(AudioSplice { embeds, n_rows })
 }
 
 /// Stream + remap every `thinker.audio_tower.*` tensor from `reader` into the
@@ -104,10 +104,12 @@ pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> AudioS
 /// leaves) — the loader half of [`encode_audio`], factored out so
 /// [`crate::npu_export`] can build the SAME weight map for ONNX export
 /// without also running a GPU encode.
-pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<String, Vec<f32>> {
+pub(crate) fn audio_weights(reader: &WeightReader) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
     use std::collections::HashMap;
     type FusedQkv = (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>);
 
+    // Errors, not panics: streamed at REQUEST time inside the serving daemon
+    // -- a malformed/partial checkpoint fails the request, not the process.
     let mut fused: HashMap<u32, FusedQkv> = HashMap::new();
     let mut weights: HashMap<String, Vec<f32>> = HashMap::new();
     for name in reader.names() {
@@ -115,8 +117,12 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<
             continue;
         }
         if crate::import::is_qkv_fuse_leaf(name) {
-            let b: u32 = name.strip_prefix("thinker.audio_tower.layers.").unwrap().split_once('.').unwrap().0.parse().unwrap();
-            let data = reader.tensor(name).unwrap();
+            let b: u32 = name
+                .strip_prefix("thinker.audio_tower.layers.")
+                .and_then(|r| r.split_once('.'))
+                .and_then(|(idx, _)| idx.parse().ok())
+                .ok_or_else(|| format!("omni: unparseable audio-tower qkv tensor name {name}"))?;
+            let data = reader.tensor(name).ok_or_else(|| format!("omni: cannot read tensor {name}"))?;
             let slot = fused.entry(b).or_default();
             let is_weight = name.ends_with(".weight");
             if name.contains(".q_proj.") {
@@ -132,10 +138,12 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<
         }
         let Some(brain_name) = hf_to_brain(name) else { continue };
         let Some(key) = brain_name.strip_prefix("audio.") else { continue };
-        weights.insert(key.to_string(), reader.tensor(name).unwrap());
+        weights.insert(key.to_string(), reader.tensor(name).ok_or_else(|| format!("omni: cannot read tensor {name}"))?);
     }
     for (b, (qw, kw, vw, qb, kb, vb)) in fused {
-        let (qw, kw, vw, qb, kb, vb) = (qw.unwrap(), kw.unwrap(), vw.unwrap(), qb.unwrap(), kb.unwrap(), vb.unwrap());
+        let missing = || format!("omni: audio-tower layer {b} is missing part of its q/k/v projection (partial checkpoint?)");
+        let (qw, kw, vw) = (qw.ok_or_else(missing)?, kw.ok_or_else(missing)?, vw.ok_or_else(missing)?);
+        let (qb, kb, vb) = (qb.ok_or_else(missing)?, kb.ok_or_else(missing)?, vb.ok_or_else(missing)?);
         let mut w = qw;
         w.extend(kw);
         w.extend(vw);
@@ -145,7 +153,7 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<
         weights.insert(format!("blocks.{b}.qkv.weight"), w);
         weights.insert(format!("blocks.{b}.qkv.bias"), bias);
     }
-    weights
+    Ok(weights)
 }
 
 /// Stream + remap every `thinker.visual.*` tensor from `reader` into the
@@ -155,7 +163,7 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> std::collections::HashMap<
 /// weight maps for ONNX export without also running a GPU encode.
 /// DeepStack merger weights are skipped (see [`encode_image`]'s doc for why
 /// the plain single-merger path is what's actually served).
-pub(crate) fn vision_weights(reader: &WeightReader) -> (std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>) {
+pub(crate) fn vision_weights(reader: &WeightReader) -> Result<(std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>), String> {
     use std::collections::HashMap;
     let mut encoder_w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut main_merger_w: HashMap<String, Vec<f32>> = HashMap::new();
@@ -164,7 +172,7 @@ pub(crate) fn vision_weights(reader: &WeightReader) -> (std::collections::HashMa
             continue;
         }
         let Some(brain_name) = hf_to_brain(name) else { continue };
-        let data = reader.tensor(name).unwrap();
+        let data = reader.tensor(name).ok_or_else(|| format!("omni: cannot read tensor {name}"))?;
         if let Some(rest) = brain_name.strip_prefix("vision.merger.") {
             main_merger_w.insert(rest.to_string(), data);
         } else if let Some(rest) = brain_name.strip_prefix("vision.") {
@@ -174,7 +182,7 @@ pub(crate) fn vision_weights(reader: &WeightReader) -> (std::collections::HashMa
             encoder_w.insert(rest.to_string(), data);
         }
     }
-    (encoder_w, main_merger_w)
+    Ok((encoder_w, main_merger_w))
 }
 
 /// Stream every `thinker.visual.*` tensor from `reader` into the
@@ -183,9 +191,9 @@ pub(crate) fn vision_weights(reader: &WeightReader) -> (std::collections::HashMa
 /// RGB-decoded, `[0,1]`-normalized image into splice-ready embeddings.
 /// `rgb_hwc` is interleaved HWC (the engine's one image wire format,
 /// `capability::blob::decode_image`'s output shape).
-pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h: u32) -> ImageSplice {
+pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h: u32) -> Result<ImageSplice, String> {
     let cfg = VisionConfig::qwen3_omni();
-    let (encoder_w, main_merger_w) = vision_weights(reader);
+    let (encoder_w, main_merger_w) = vision_weights(reader)?;
 
     // Real bilinear resize to the smart-resized (patch-multiple) extent --
     // NOT a crop/pad: `smart_resize_default` picks dimensions close to but
@@ -207,7 +215,7 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
 
     let merge = cfg.spatial_merge_size;
     let n_rows = image_token_count(hp, wp, cfg.patch_size, merge);
-    ImageSplice { embeds, n_rows, grid: (1, gh / merge, gw / merge) }
+    Ok(ImageSplice { embeds, n_rows, grid: (1, gh / merge, gw / merge) })
 }
 
 /// Encode a short video as a list of ALREADY-DECODED frames (RGB HWC each) —
@@ -221,18 +229,20 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
 /// the meshgrid `qwenvl::mrope::get_rope_index_multi` needs is identical in
 /// shape to a real multi-frame video grid, only the per-frame encode itself
 /// is the (documented) approximation.
-pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>, u32, u32)]) -> ImageSplice {
-    assert!(!frames.is_empty(), "encode_video_frames: at least one frame required");
+pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>, u32, u32)]) -> Result<ImageSplice, String> {
+    if frames.is_empty() {
+        return Err("omni: encode_video_frames: at least one frame required".to_string());
+    }
     let mut embeds = Vec::new();
     let mut n_rows = 0u32;
     let (mut fh, mut fw) = (0u32, 0u32);
     for (rgb, w, h) in frames {
-        let one = encode_image(reader, gpu, rgb, *w, *h);
+        let one = encode_image(reader, gpu, rgb, *w, *h)?;
         embeds.extend(one.embeds);
         n_rows += one.n_rows;
         (fh, fw) = (one.grid.1, one.grid.2);
     }
-    ImageSplice { embeds, n_rows, grid: (frames.len() as u32, fh, fw) }
+    Ok(ImageSplice { embeds, n_rows, grid: (frames.len() as u32, fh, fw) })
 }
 
 /// One resolved multimodal prompt: the full token id sequence (media blocks,
@@ -282,11 +292,11 @@ pub fn build_multimodal_prompt(
     audio: Option<&[f32]>,
     image: Option<(&[f32], u32, u32)>,
     video: Option<&[(Vec<f32>, u32, u32)]>,
-) -> MultimodalPrompt {
+) -> Result<MultimodalPrompt, String> {
     let d = cfg.text.hidden;
     let mut blocks = Vec::new();
     if let Some(samples) = audio {
-        let a = encode_audio(reader, gpu, samples);
+        let a = encode_audio(reader, gpu, samples)?;
         blocks.push(MediaBlock {
             start_token: cfg.audio_start_token_id,
             placeholder_token: cfg.audio_token_id,
@@ -297,7 +307,7 @@ pub fn build_multimodal_prompt(
         });
     }
     if let Some((rgb, w, h)) = image {
-        let im = encode_image(reader, gpu, rgb, w, h);
+        let im = encode_image(reader, gpu, rgb, w, h)?;
         blocks.push(MediaBlock {
             start_token: cfg.vision_start_token_id,
             placeholder_token: cfg.image_token_id,
@@ -308,7 +318,7 @@ pub fn build_multimodal_prompt(
         });
     }
     if let Some(frames) = video {
-        let v = encode_video_frames(reader, gpu, frames);
+        let v = encode_video_frames(reader, gpu, frames)?;
         blocks.push(MediaBlock {
             start_token: cfg.vision_start_token_id,
             placeholder_token: cfg.video_token_id,
@@ -345,7 +355,7 @@ pub fn build_multimodal_prompt(
     let placeholders: Vec<(u32, &[(u32, u32, u32)])> = placeholder_grids.iter().map(|(id, g)| (*id, g.as_slice())).collect();
     let positions = get_rope_index_multi(&token_ids, &placeholders);
 
-    MultimodalPrompt { token_ids, x_host, positions }
+    Ok(MultimodalPrompt { token_ids, x_host, positions })
 }
 
 /// Overwrite `x_host`'s rows `[row0, row0+n_rows)` with `embeds`

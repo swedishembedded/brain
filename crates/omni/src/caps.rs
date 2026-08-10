@@ -242,14 +242,14 @@ impl OmniInner {
         image: Option<(&[f32], u32, u32)>,
         video: Option<&[(Vec<f32>, u32, u32)]>,
         max_new: u32,
-    ) -> (String, Vec<u32>) {
+    ) -> Result<(String, Vec<u32>), String> {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video);
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video)?;
         let n_prompt = mm_prompt.token_ids.len();
         let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt..].to_vec();
         let text = self.tok.decode(&new_ids);
-        (text, new_ids)
+        Ok((text, new_ids))
     }
 
     /// Speech output: [`Self::generate`] for the text, then chains Talker +
@@ -259,23 +259,28 @@ impl OmniInner {
     /// name from `TalkerConfig::speaker_id` (falls back to the first entry,
     /// typically `"chelsie"`, if unrecognized). Returns `(text, wav_samples,
     /// sample_rate)`.
-    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str) -> (String, Vec<f32>, u32) {
+    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str) -> Result<(String, Vec<f32>, u32), String> {
         let (text, new_ids) = self.generate(prompt, max_new);
         let user_ids = self.tok.encode(prompt);
 
         let tc = &self.cfg.talker;
-        let text_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "text_projection");
-        let codec_embedding = self.reader.tensor("talker.model.codec_embedding.weight").expect("missing talker.model.codec_embedding.weight");
+        let text_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "text_projection")?;
+        let codec_embedding = self.reader.tensor("talker.model.codec_embedding.weight").ok_or("omni: missing tensor talker.model.codec_embedding.weight")?;
         let d = tc.text.hidden as usize;
         let codec_embed = |id: u32| codec_embedding[id as usize * d..(id as usize + 1) * d].to_vec();
         let specials = crate::codec_bridge::talker_prompt_specials(&self.cfg);
-        let speaker_id = tc.speaker_id.get(speaker).copied().or_else(|| tc.speaker_id.values().next().copied()).expect("TalkerConfig::speaker_id must have at least one entry");
+        let speaker_id = tc
+            .speaker_id
+            .get(speaker)
+            .copied()
+            .or_else(|| tc.speaker_id.values().next().copied())
+            .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
 
         let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids);
 
         let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
-        let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor);
-        let codec_head_w = self.reader.tensor("talker.codec_head.weight").expect("missing talker.codec_head.weight");
+        let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
+        let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
 
         // Talker's own kernel-index scheme (crate::talker::talker_pipelines,
         // 18 entries) is NOT the same table as self.gpu's (built from
@@ -285,11 +290,11 @@ impl OmniInner {
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.
         let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
-        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default());
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default())?;
 
-        let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav);
+        let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
         let wav = codec.decode_omni(&codes);
-        (text, wav, self.cfg.code2wav.output_sample_rate)
+        Ok((text, wav, self.cfg.code2wav.output_sample_rate))
     }
 }
 
@@ -315,7 +320,7 @@ impl Action for GenerateAction {
         progress(Progress::step(0, max_new, "generating"));
         let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)
+            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)?
         } else {
             self.inner.generate(&prompt, max_new)
         };
@@ -341,7 +346,7 @@ impl Action for SpeakAction {
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
 
         progress(Progress::step(0, 2, "generating text"));
-        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker);
+        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker)?;
         progress(Progress::step(1, 2, "synthesizing speech"));
         let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         progress(Progress::step(2, 2, "done"));

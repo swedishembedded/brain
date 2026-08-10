@@ -38,7 +38,7 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     let inner = provider.inner();
 
     println!("running real Thinker(text) -> Talker -> MTP -> Code2Wav chain -- expect this to take a while (every layer's weights streamed fresh per step)...");
-    let (text, wav, sample_rate) = inner.speak("Say hello.", 8, "chelsie");
+    let (text, wav, sample_rate) = inner.speak("Say hello.", 8, "chelsie").expect("speak failed on real weights");
 
     println!("text: {text:?}");
     println!("wav: {} samples at {sample_rate} Hz ({:.2}s)", wav.len(), wav.len() as f32 / sample_rate as f32);
