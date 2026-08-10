@@ -32,7 +32,8 @@ pub fn run_qwen35moe(args: &[String]) {
     match args.first().map(|s| crate::args::canon_verb(s)) {
         Some("import") => import(&args[1..]),
         Some("infer") => infer(&args[1..]),
-        other => eprintln!("usage: brain qwen35moe <import|infer> ...  (got {other:?})"),
+        Some("export") => export(&args[1..]),
+        other => eprintln!("usage: brain qwen35moe <import|infer|export> ...  (got {other:?})"),
     }
 }
 
@@ -162,4 +163,34 @@ fn infer(args: &[String]) {
     print!("{prompt}");
     print!("{}", tok.decode(&gen));
     println!();
+}
+
+/// `brain qwen35moe export --weights F --out model.onnx --seq T` — best-effort
+/// ONNX decoder graph (`gdn_chunk` emitter + sparse gather-based MoE
+/// dispatch) for OpenVINO / the NPU. See `npu::qwen35moe_topology`'s module
+/// doc for what this does and does not attempt (fixed-`T` cache-free prefill,
+/// text-only, "compiles + best-effort OpenVINO compile attempt" — not a
+/// working NPU run).
+fn export(args: &[String]) {
+    let mut weights = String::new();
+    let mut out = "qwen35.onnx".to_string();
+    let mut seq = 32usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!("usage: brain qwen35moe export --weights F --out model.onnx [--seq T]");
+        return;
+    }
+    match npu::qwen35moe_export::export_qwen35_fp32(&weights, &out, seq) {
+        Ok(()) => println!("ok: wrote {out} (seq_len {seq})"),
+        Err(e) => eprintln!("export failed: {e}"),
+    }
 }

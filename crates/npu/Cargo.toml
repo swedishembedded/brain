@@ -16,6 +16,7 @@ brain-onnx.workspace = true
 brain-checkpoint.workspace = true
 brain-qwen3.workspace = true
 brain-glm.workspace = true
+brain-qwen35moe.workspace = true
 brain-chronos2.workspace = true
 brain-lfm.workspace = true
 brain-kronos.workspace = true
