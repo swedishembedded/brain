@@ -616,6 +616,12 @@ pub struct SharedExpertScratch<'a> {
 /// - `None`: added UNWEIGHTED, no gate at all. Matches `crates/glm`'s shared
 ///   expert (`model.rs:794`, GLM-5.2/DeepSeek-V3's architecture) exactly --
 ///   a distinct real design, not a degenerate case of the gated one.
+///
+/// FORWARD-ONLY (audit F18): there is no `shared_expert_bwd` — the GLM/Omni
+/// MoE trainers will need the adjoint of this exact composition (dense
+/// SwiGLU backward + the sigmoid-gate product rule for the `Some` arm) and
+/// it does not exist yet. Implement it WITH its gradcheck when training
+/// first needs it; do not assume the routed experts' backward covers it.
 #[allow(clippy::too_many_arguments)]
 pub fn shared_expert_fwd(
     g: &Gpu,
