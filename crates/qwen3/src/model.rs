@@ -119,6 +119,11 @@ const SOFTMAX_ROWS: usize = 55;
 // `matmul_reg2` with its shared-memory bank conflicts removed; bit-identical
 // output, so it is a pure speed swap (see `linear_kernel`).
 const MATMUL_REG3: usize = 56;
+// DeepStack decode's own add: `splice_add`'s `base` lands on `dst` only, but
+// decode needs to read `deepstack_bufs[level]` at an offset (`local_row * d`)
+// while writing this step's own zero-offset residual row -- see
+// `decode_steps`'s own call site.
+const SPLICE_ADD_OFFSET_SRC: usize = 59;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -183,6 +188,7 @@ const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    ("splice_add_offset_src", kernels::SPLICE_ADD_OFFSET_SRC),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -1831,14 +1837,26 @@ impl Qwen {
             // DeepStack decode: this step's row IS one of the image rows
             // (`deepstack_row = Some(local_row)`, the row's 0-based offset
             // within the image) -- add level `l`'s merged vision feature for
-            // THAT row into `res[l+1]`, for `l < n_levels`. Mirrors
-            // `forward_steps`' whole-range `SPLICE_ADD` (line ~1084) at
-            // `n_rows=1`: a `step_sliced` read of `deepstack_bufs[l]` at
-            // element offset `local_row * d` (this step's own `res[l+1]` is
-            // already a single `[d]`-sized row, so the destination needs no
-            // offset). `None` (every caller except `step_embed_mrope` on an
-            // image row) is a pure no-op, bit-for-bit unchanged from before
-            // this parameter existed.
+            // THAT row into `res[l+1]`, for `l < n_levels`. Unlike
+            // `forward_steps`' whole-range `SPLICE_ADD` (line ~1084, which
+            // reads the WHOLE compact `deepstack_bufs[l]` from its own index 0
+            // and writes it into the big sequence buffer at `row0*d`), decode
+            // needs the OPPOSITE offset direction: `res[l+1]` here is already
+            // a single `[d]`-sized row needing no offset, while
+            // `deepstack_bufs[l]` (still the full `[n_rows,d]` compact block)
+            // must be READ starting at `local_row * d` to pick out this step's
+            // own row. `splice_add.wgsl`'s `base` param lands on the
+            // DESTINATION only, so it can't express this; `splice_add_offset_src`
+            // (a source-offset sibling, added for exactly this) can. This used
+            // to be a `step_sliced` bind-group offset on the source buffer,
+            // which is semantically right but requires the offset to be a
+            // multiple of `min_storage_buffer_offset_alignment` (256B) --
+            // `local_row * d` has no such guarantee, and that produced a real
+            // wgpu validation failure on hardware enforcing the full 256B
+            // limit (`docs/lessons.md`). A uniform-parameter source offset has
+            // no such constraint. `None` (every caller except
+            // `step_embed_mrope` on an image row) is a pure no-op, bit-for-bit
+            // unchanged from before this parameter existed.
             if let Some(local_row) = deepstack_row {
                 if let Some((_row0, n_rows, nl)) = self.deepstack.get() {
                     if (l as u32) < nl {
@@ -1846,13 +1864,7 @@ impl Qwen {
                             local_row < n_rows,
                             "decode_steps: deepstack_row {local_row} out of range for n_rows {n_rows}"
                         );
-                        s.push(g.step_sliced(
-                            SPLICE_ADD,
-                            &[&self.deepstack_bufs[l], &self.res[l + 1]],
-                            &[(local_row as u64 * d as u64, d as u64), (0, 0)],
-                            &[d, 0],
-                            d,
-                        ));
+                        s.push(g.step(SPLICE_ADD_OFFSET_SRC, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[d, local_row * d, 0], d));
                     }
                 }
             }

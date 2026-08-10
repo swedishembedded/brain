@@ -776,6 +776,8 @@ pub const SPLAT_UNPACK: &str = include_str!("../wgsl/splat_unpack.wgsl");
 pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
 /// `wgsl/splice_add.wgsl`
 pub const SPLICE_ADD: &str = include_str!("../wgsl/splice_add.wgsl");
+/// `wgsl/splice_add_offset_src.wgsl`
+pub const SPLICE_ADD_OFFSET_SRC: &str = include_str!("../wgsl/splice_add_offset_src.wgsl");
 /// `wgsl/splice_bwd.wgsl`
 pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 /// `wgsl/sub.wgsl`
@@ -1189,6 +1191,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_unpack", SPLAT_UNPACK),
     ("splice", SPLICE),
     ("splice_add", SPLICE_ADD),
+    ("splice_add_offset_src", SPLICE_ADD_OFFSET_SRC),
     ("splice_bwd", SPLICE_BWD),
     ("sub", SUB),
     ("tanh_act", TANH_ACT),

@@ -360,6 +360,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "splice" => f(0, 8 * n0()),
         "splice_bwd" => f(0, 12 * n0()),
         "splice_add" => f(n0(), 12 * n0()),
+        // params [n, src_base, dst_base]: same op as splice_add, independent offsets.
+        "splice_add_offset_src" => f(n0(), 12 * n0()),
         // params [width, row]: one cache-row write.
         "kv_append" => f(0, 8 * p(0)?),
         // params [rows, heads_out, group, hd, ...]: replicate kv heads (copy);
