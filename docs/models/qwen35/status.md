@@ -276,20 +276,48 @@ fetching an already-quantized GGUF directly.
   256× before dropping it, rather than the one-`with_tensor`-call-per-name
   loop `Q8::build`/`Int8ThinkerResident`'s own loaders use today.
 
+- **P2b — Gated DeltaNet BACKWARD** (`model::gdn::gdn_chunk_bwd`): full
+  reverse-mode backward through all 11 forward steps, closing the gap P5
+  left open. A complete hand derivation (every one of ~20 backward steps,
+  including the UT-transform's forward-substitution reverse sweep) was
+  worked out first and independently spot-checked kernel-by-kernel against
+  the implementation before merging — the two highest-risk kernels (the
+  UT-transform backward pair, the two-direction decay-mask reduction)
+  matched the derivation exactly on inspection.
+
+  New `gdn_chunk_fwd_train` (a training-mode forward variant, sharing a
+  refactored `gdn_chunk_fwd_prefix` with the unchanged inference
+  `gdn_chunk_fwd`) additionally saves per-chunk history — backward runs the
+  chunk loop in REVERSE and needs every chunk's snapshot of
+  `q_scaled`/`decay_scale`/`decayed_k`/`v_prime`/`v_new` and the full
+  per-chunk recurrent-state history, not just the last one the inference
+  path keeps.
+
+  9 new kernels. The two hardest: `gdn_ut_bwd_dattn0`/`gdn_ut_bwd_dtmat`
+  (one dispatch pair per row, `i` from `chunk-1` down to `1`, mirroring the
+  forward's own per-row shape; frozen forward values and the evolving
+  gradient kept in separate buffers for the same race-avoidance reason the
+  forward kernel does — WGSL invocations within one dispatch have no
+  read-before-write ordering). `gdn_decay_mask_bwd` needs a row-sum AND a
+  column-sum over the same `[bhc,c,c]` tensor (the causal decay mask's
+  `g_cs[i]` and `g_cs[j]` roles) — solved as one kernel dispatched twice
+  with a mode flag (no atomics, so one thread can't cheaply do both
+  directions at once). Plus `gdn_chunk_reverse_cumsum_step` (suffix-sum),
+  `row_dot` (a new generic per-row dot-product primitive needed at five
+  different backward sites), and three smaller elementwise/reduction
+  kernels for the state-decay/decay-scale terms.
+
+  Verified: finite-difference gradcheck at the same tiny two-chunk shape
+  `gdn_chunk_fwd.rs` uses, both backends — worst relative error **2.7e-5
+  (GPU/Vulkan) / 6.0e-5 (CPU/Cranelift JIT)**, both ~15-40× tighter than the
+  1e-3 target. `gdn_chunk_fwd_train`'s forward output matches
+  `gdn_chunk_fwd`'s bit-for-bit (identical error numbers to the pre-existing
+  forward test), confirming the shared-prefix refactor changed no behavior.
+
 ## In progress
 
-- **P2b — Gated DeltaNet backward**: the full reverse-mode derivation
-  (every one of the 20 backward steps through the chunked recurrence,
-  including the UT-transform's reverse sweep) has been hand-derived and
-  handed off as an implementation spec; `crates/model/tests/gdn_chunk_bwd.rs`
-  is still the `#[ignore]`d stub until it lands (not a silent gap — it needs
-  a reverse sweep through the UT-transform (`i` from `chunk-1` down to `1`,
-  mirroring `gdn_ut_step.wgsl`'s forward sweep) plus backward for every
-  other step (mostly more `bmm`/`bmm_acc` calls with permuted operands),
-  gradchecked at the same tiny shape `gdn_chunk_fwd.rs` uses, both
-  backends). Required per this session's own AGENTS.md policy update (full
-  backward is the default,
-  not an opt-out) — blocks P9 and P12 below.
+(nothing actively in flight right now — see "Not started" for the next
+pieces.)
 - **P8b — vision splice**: image/video token embedding into the decoder's
   input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
   position helpers as-is (verified numerically identical vision config to
@@ -317,12 +345,20 @@ fetching an already-quantized GGUF directly.
   materializing a whole-model F32 intermediate on disk or in host RAM) —
   matching the original plan's "prefer the direct mmap-streaming GGUF path"
   intent, now with a concrete number behind why it is not optional.
-- **P9 — backward + `gradcheck::check_qwen35`**: full backward for GDN,
-  gated GQA, MoE, vision; f64 FD oracle at a tiny hybrid config on both
-  backends. Per the (approved, revised) project policy, this is required —
-  not deferred as forward-only.
-- **P10 — INT8/INT4 quantized inference wiring** for qwen35 specifically
-  (`crates/qwen35/src/q8.rs`/`q4.rs`), once P8/P9 land.
+- **P9 — qwen35-level backward + `gradcheck::check_qwen35`**: `model::gdn`'s
+  own backward now exists (P2b) and `model::block::gqa_bwd`/`model::moe`'s
+  MoE backward already existed before this port — what's left is wiring
+  ALL of them together into `qwen35::Qwen35::backward()` (currently a
+  clear panic), plus backward for this model's own glue ops (the sigmoid
+  output gate, the gated-RMSNorm composition, the conv1d/L2-norm/decay-gate
+  chain upstream of `gdn_chunk_bwd`, the chunk-major layout permute), then
+  an f64 FD oracle at a tiny hybrid config on both backends. Per the
+  (approved, revised) project policy, this is required, not deferred as
+  forward-only. Vision backward is out of scope until P8b (vision forward)
+  itself lands.
+- **P10b — INT4 quantized inference** for qwen35 specifically
+  (`crates/qwen35/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
+  `model::int4`), once useful — P10a (int8, single-GPU) already landed.
 - **P11 — `qwen35::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
   paging for the 10 full-attention layers, a small O(1)-in-sequence-length
   per-sequence recurrent-state buffer (not paged) for the 30 GDN layers;
