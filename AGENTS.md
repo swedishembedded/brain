@@ -158,9 +158,11 @@ fast and scalable kernel — not a naive one.
     (B=2, T=128), plus a **checkpoint-free** `tiny_ref` gate at deliberately
     distinct dims (`heads ≠ d_kv`, `heads·d_kv ≠ d_model`) at cosine 1.0000000000
     — because at XXL those three numbers are all equal and a swap would be
-    invisible. See `docs/models/t5/status.md`. *(Forward only: **T=512 — the
-    length FLUX.1 actually uses — is untested**; no tokenizer; backward and the
-    serving contract deferred.)*
+    invisible. See `docs/models/t5/status.md`. **Backward exists**: a full
+    hand-written T5 backward (`crates/t5/src/train.rs`) gated by
+    `gradcheck::check_t5{,_one_block,_tiled}`. *(**T=512 — the length FLUX.1
+    actually uses — is untested**; no tokenizer; the serving contract is
+    deferred.)*
 
 12c. **VQGAN / CodeFormer VQ autoencoder** (`crates/vqgan`) — the VQ
     encoder/codebook/generator that CodeFormer's face restoration is built on:
@@ -172,8 +174,10 @@ fast and scalable kernel — not a naive one.
     code-index disagreements. See `docs/models/vqgan/status.md`. **Serving
     contract met**: `vqgan::caps` (`encode`/`decode` — the codes travel as a
     `Media::Bytes` blob), `resident_restore::VqganResident`
-    (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. *(Backward/
-    gradcheck are deferred; `run_batch` is the serial default and says why.)*
+    (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. **Training /
+    backward done** (`crates/vqgan/src/train.rs`, gated by
+    `gradcheck::check_vqgan`). *(`run_batch` is the serial default and says
+    why.)*
 
 12c-ter. **Real-ESRGAN super-resolution** (`crates/upscale`) — the imaging
     pipeline's upscale tail: `RRDBNet`, a residual-in-residual dense block
@@ -329,9 +333,20 @@ fast and scalable kernel — not a naive one.
     **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen3`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
-    caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP), and
-    real-checkpoint validation is still unexercised in-repo.
+    caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP);
+    real-checkpoint coverage of the served path is a skip-if-absent smoke in
+    `qwenvl::caps::tests` (runs when `BRAIN_QWENVL_WEIGHTS` is set).
     Full ledger: `docs/models/omni/status.md`.
+13d. **FastVLM** (`crates/fastvlm`) — served VLM, `brain/fastvlm`: FastViTHD
+    conv/attention vision tower + `mlp2x_gelu` projector spliced into a Qwen2
+    decoder; one `caption` action (per-token Progress) over `brain do` and
+    D-Bus (stateless resident). fp32/int8 decoder precision; training loop
+    exists (`train_smoke.rs`) but has no CLI verb. **Moondream 3**
+    (`crates/moondream`) — SigLIP ViT + MoE decoder, gradient-checked and
+    import-covered but **forward-only and unserved** (no caps surface, no CLI
+    reference; reachable only from tests — parked). Both documented in
+    `docs/models/vlm/readme.md` + `docs/models/vlm/VALIDATION.md` (that
+    directory's ledger).
 
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream`) —
     the other two vision-language architectures alongside Qwen3-VL above; all
