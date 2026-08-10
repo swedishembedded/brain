@@ -36,8 +36,12 @@ const KV_APPEND_B: usize = 7;
 const SCORES_B: usize = 8;
 const SOFTMAX_B: usize = 9;
 const APPLY_B: usize = 10;
-// int8 paged KV (dequant on read).
-const APPEND_I8: usize = 11;
+// int8 paged KV (dequant on read). The append kernel is the calibrated
+// (clipped) one — the ONLY i8 append since the unclipped twin was deleted
+// (audit F42): with the f32::MAX-sentinel clip table the kernel is
+// bit-identical to that old twin by its own contract, so one kernel serves
+// both the calibrated and the uncalibrated path.
+const APPEND_I8_CLIPPED: usize = 11;
 const SCORES_I8: usize = 12;
 const APPLY_I8: usize = 13;
 // Device-side greedy head: matmul -> row argmax, so decode never ships a
@@ -63,21 +67,16 @@ const DECODE_ADVANCE: usize = 24;
 // ARGMAX_FINAL/ARGMAX_ROW above, so real (non-greedy) sampling reads back
 // `[bsz, TOPK_CAPACITY]` candidates instead of the whole `[bsz, vocab]` row.
 const TOPK_EXTRACT_STEP: usize = 25;
-// Calibrated int8 KV append (W3.3): identical to APPEND_I8 except each
-// kv-head's per-token online absmax is capped at a calibrated ceiling
-// (`KvCalib`) before deriving the scale. Selected in place of APPEND_I8 only
-// when `self.kv_calib.is_some()` — APPEND_I8 itself is untouched.
-const APPEND_I8_CLIPPED: usize = 26;
 // The 128x128 register-tiled fp32 GEMM. It was MISSING from this engine's
 // pipeline table entirely, so `Engine::mm` had only the decode GEMV and the
 // naive kernel to choose between and every chunked-prefill chunk above
 // `DECODE_REGIME_MAX_ROWS` ran one thread per output element — while the
 // batched forward next door dispatched this same kernel at ~80x the rate.
-const MATMUL_REG3: usize = 27;
+const MATMUL_REG3: usize = 26;
 // Coalesced paged scores: one workgroup per score, lanes split the head_dim
 // reduction. Same Params and same output as SCORES_B; selected on the queried
 // `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
-const SCORES_B_WG: usize = 28;
+const SCORES_B_WG: usize = 27;
 /// Scores one `paged_decode_scores_wg` workgroup owns — `64 / LPS` in the
 /// kernel. Must match, or the dispatch covers the wrong number of scores.
 const SCORES_WG_PER_GROUP: u32 = 16;
@@ -86,8 +85,8 @@ const SCORES_WG_PER_GROUP: u32 = 16;
 // with k, so at m=128 it launches 16 workgroups on a 30-SM card (11% of peak,
 // and 47% of a served step). See `matmul_reg3_splitk.wgsl` for the measured
 // occupancy curve and the arithmetic that says splitting pays at THIS shape.
-const MATMUL_REG3_SPLITK: usize = 29;
-const SPLITK_REDUCE: usize = 30;
+const MATMUL_REG3_SPLITK: usize = 28;
+const SPLITK_REDUCE: usize = 29;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -101,7 +100,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-    ("paged_kv_append_i8_batched", kernels::PAGED_KV_APPEND_I8_BATCHED),
+    ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
     ("argmax_row", kernels::ARGMAX_ROW),
@@ -116,7 +115,6 @@ const PIPELINES: &[(&str, &str)] = &[
     ("decode_feed", kernels::DECODE_FEED),
     ("decode_advance", kernels::DECODE_ADVANCE),
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
-    ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("paged_decode_scores_wg", kernels::PAGED_DECODE_SCORES_WG),
     ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
@@ -387,13 +385,13 @@ pub struct Engine {
     /// construction (not re-derived by the accessor) so it can never drift
     /// from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually allocated.
     kv_pool_bytes: u64,
-    /// `Some` selects the calibrated append kernel (`APPEND_I8_CLIPPED`) in
-    /// place of the plain online-absmax one (`APPEND_I8`) — see
-    /// [`Engine::set_kv_calib`]. `None` (the default) leaves the uncalibrated
-    /// path completely untouched, bit-for-bit.
+    /// `Some` uploads real calibrated ceilings into `clip_k`/`clip_v`; `None`
+    /// (the default) keeps the f32::MAX sentinel there, which the append
+    /// kernel's contract documents as bit-identical to the deleted unclipped
+    /// twin (audit F42) — see [`Engine::set_kv_calib`].
     kv_calib: Option<model::kvcalib::KvCalib>,
-    /// Per-layer `[n_kv]` clip-ceiling upload buffers for `kv_calib` — empty
-    /// until `set_kv_calib(Some(_))` allocates and fills them.
+    /// Per-layer `[n_kv]` clip-ceiling upload buffers (allocated whenever
+    /// `kv_int8`; MAX-sentinel-filled until a real calibration is installed).
     clip_k: Vec<DeviceBuffer>,
     clip_v: Vec<DeviceBuffer>,
     /// Int8 WEIGHT path (A0): the 7 per-layer linears quantized per-channel and
@@ -516,12 +514,24 @@ impl Engine {
         let mut pool_v = Vec::new();
         let mut scales_k = Vec::new();
         let mut scales_v = Vec::new();
+        let mut clip_k = Vec::new();
+        let mut clip_v = Vec::new();
+        // The MAX sentinel: the clipped append kernel with this table is
+        // bit-identical to the deleted unclipped twin (audit F42), so the
+        // uncalibrated path allocates it once and never branches.
+        let max_row = vec![f32::MAX; cfg.n_kv_heads as usize];
         for _ in 0..cfg.n_layers {
             pool_k.push(st(pool_words));
             pool_v.push(st(pool_words));
             if kv_int8 {
                 scales_k.push(st(scale_words));
                 scales_v.push(st(scale_words));
+                let ck = st(cfg.n_kv_heads as u64);
+                gpu.write(&ck, bytemuck::cast_slice(&max_row));
+                clip_k.push(ck);
+                let cv = st(cfg.n_kv_heads as u64);
+                gpu.write(&cv, bytemuck::cast_slice(&max_row));
+                clip_v.push(cv);
             }
         }
         let kv_pool_bytes_val = cfg.n_layers as u64 * 2 * (pool_words + scale_words) * 4;
@@ -635,8 +645,8 @@ impl Engine {
             scales_v,
             kv_pool_bytes: kv_pool_bytes_val,
             kv_calib: None,
-            clip_k: Vec::new(),
-            clip_v: Vec::new(),
+            clip_k,
+            clip_v,
             w8,
             head8,
             tuned_i8,
@@ -694,8 +704,13 @@ impl Engine {
             self.clip_k = c.k.iter().map(|row| { let b = g.storage(row.len() as u64); g.write(&b, bytemuck::cast_slice(row)); b }).collect();
             self.clip_v = c.v.iter().map(|row| { let b = g.storage(row.len() as u64); g.write(&b, bytemuck::cast_slice(row)); b }).collect();
         } else {
-            self.clip_k.clear();
-            self.clip_v.clear();
+            // No (or disabled) calibration: refill the resident per-layer clip
+            // tables with the f32::MAX sentinel — bit-identical to the deleted
+            // unclipped twin by the kernel's own contract (audit F42).
+            let max_row = vec![f32::MAX; self.cfg.n_kv_heads as usize];
+            for b in self.clip_k.iter().chain(self.clip_v.iter()) {
+                self.gpu.write(b, bytemuck::cast_slice(&max_row));
+            }
         }
         self.kv_calib = calib;
     }
@@ -732,8 +747,8 @@ impl Engine {
 
     /// Whether the installed KV clip table is a real, binding calibration
     /// that is ACTUALLY DISPATCHED (not `None`, not `KvCalib::disabled`, and
-    /// the engine is int8 — `APPEND_I8_CLIPPED` only ever runs in place of
-    /// `APPEND_I8` on the int8 branch of `run_batched_submit`). A table
+    /// the engine is int8 — the clip binding is only read by the i8 append on
+    /// the int8 branch of `run_batched_submit`). A table
     /// installed on an fp32 engine is `Some` in `self.kv_calib` but never
     /// read by anything, so this must say `false` for it or it would claim a
     /// calibration is binding when it provably is not.
@@ -1088,19 +1103,12 @@ impl Engine {
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
             s.push(g.step(ROPE_PAGED, &[&sc.k, &sc.pos_buf], &[b, nkv, hd, hkv, fb(theta)], b * nkv * half));
             if self.kv_int8 {
-                // The calibrated append kernel is selected here, in place of
-                // APPEND_I8, only when a clip table is actually installed —
-                // APPEND_I8 itself, and every test that pins its behaviour,
-                // is untouched. Same params/thread-count either way; the
-                // clipped variant just takes one extra binding (the clip
-                // ceiling) between offsets and pool.
-                if self.kv_calib.is_some() {
-                    s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
-                    s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
-                } else {
-                    s.push(g.step(APPEND_I8, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
-                    s.push(g.step(APPEND_I8, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
-                }
+                // ONE append kernel for both paths (audit F42): the clip
+                // buffers hold either the calibrated ceilings or the
+                // f32::MAX sentinel, which the kernel's contract documents
+                // as bit-identical to the old unclipped twin.
+                s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
+                s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
                 s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
@@ -1643,7 +1651,7 @@ impl Engine {
     /// Needs an fp32-KV engine (`kv_int8: false`) — calibration wants the
     /// pre-quantization distribution, not a value already thrown away by
     /// today's online absmax. K rows are read POST-RoPE (RoPE runs before
-    /// `KV_APPEND_B`/`APPEND_I8` in `run_batched_submit`), matching exactly
+    /// the KV append in `run_batched_submit`), matching exactly
     /// what a real INT8 KV scale would be quantizing.
     pub fn calibrate_kv(&mut self, prompts: &[Vec<u32>]) -> model::actstats::Collector {
         assert!(!self.kv_int8, "calibrate_kv needs an fp32-KV engine (build with kv_int8: false)");
@@ -2879,10 +2887,10 @@ mod tests {
         assert!(err < 0.01 * mag + 1e-3, "int8 diverges too far: {err} vs mag {mag}");
     }
 
-    /// A [`model::kvcalib::KvCalib::disabled`] table must select the SAME
-    /// kernel path as no calibration at all (`set_kv_calib(None)`) — the
-    /// selector switches on `self.kv_calib.is_some()` post-filtering, so a
-    /// disabled-but-`Some` table must not accidentally take the clipped path.
+    /// A [`model::kvcalib::KvCalib::disabled`] table must be bit-identical
+    /// to no calibration at all (`set_kv_calib(None)`): both leave the
+    /// f32::MAX sentinel in the clip buffers, and the (single) clipped
+    /// append kernel degrades to the old unclipped behaviour under it.
     #[test]
     fn a_disabled_calib_table_is_bit_identical_to_no_calibration() {
         let cfg = QwenConfig::tiny();

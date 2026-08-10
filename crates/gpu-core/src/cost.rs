@@ -323,7 +323,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params: [batch, kv_stride, block_size] — a copy into the paged pool.
         "paged_kv_append_batched" | "paged_kv_append" => f(0, 8 * p(0)? * p(1)?),
-        "paged_kv_append_i8_batched" | "paged_kv_append_i8_clipped_batched" => {
+        "paged_kv_append_i8_clipped_batched" => {
             let (b, kv) = (p(0)?, p(1)?);
             f(2 * b * kv, 5 * b * kv)
         }
@@ -1084,7 +1084,7 @@ mod tests {
             "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
             "paged_kv_append_batched", "decode_softmax_batched", "rope_paged",
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
-            "paged_kv_append_i8_batched", "paged_kv_append_i8_clipped_batched",
+            "paged_kv_append_i8_clipped_batched",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }

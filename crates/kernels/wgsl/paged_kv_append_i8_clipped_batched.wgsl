@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Calibrated twin of paged_kv_append_i8_batched
+// @what  Append a batch of new tokens' K/V into an INT8 paged pool, with a calibrated clip ceiling on the online scale
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
@@ -9,9 +9,9 @@
 // @npu   no
 // @quant int8
 //
-// Calibrated twin of paged_kv_append_i8_batched: append a batch of new tokens'
-// K (or V) into an INT8 paged pool, but cap each kv-head's per-token online
-// absmax scale at a CALIBRATED ceiling before dividing by 127 — a percentile
+// Append a batch of new tokens' K (or V) into an INT8 paged pool, capping
+// each kv-head's per-token online absmax scale at a CALIBRATED ceiling
+// before dividing by 127 — a percentile
 // (e.g. p99.9) of that head's magnitude distribution over a representative
 // prompt set, computed offline (`brain qwen calib`) and uploaded once per
 // engine, not per token. This keeps today's per-token adaptivity (a typical
