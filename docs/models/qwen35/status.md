@@ -566,6 +566,74 @@ fetching an already-quantized GGUF directly.
     crate-private in `serve.rs` by design) — an honest under-count, not a
     silent one.
 
+- **P12 — LoRA + cross-GPU pipeline sharding + memory-bounded real-weight
+  finetune smoke test** (done, commit `fff9de6d`):
+  - **LoRA**: rank-8 adapters on all 9 targetable GDN/GQA linear projections
+    (GDN's `in_proj_qkv`/`in_proj_z`/`in_proj_b`/`in_proj_a`/`out_proj`,
+    GQA's `q_proj`/`k_proj`/`v_proj`/`o_proj`) — the 256-expert MoE linears
+    are deliberately never targeted. `Qwen35Config::param_list` grows a
+    frozen-base plus trainable `.lora_a`/`.lora_b` pair for a targeted leaf
+    under `cfg.lora`, and `Qwen35::lora_fwd`/`proj_bwd` add the two-matmul +
+    `AXPY` forward delta and its backward (frozen-base dX-only, adapter
+    dW) — a line-for-line port of `qwen3::model::Qwen`'s own `lora_fwd`/
+    `proj_bwd`. Every non-targeted weight (MoE experts/router/shared-expert,
+    norms, `A_log`/`dt_bias`, `conv1d.weight`, `tok.weight`) is correctly
+    `Frozen` under a LoRA build via a new `Qwen35::trainable()` gate threaded
+    through every backward dispatch that writes a gradient buffer. Validated
+    by `gradcheck::check_qwen35_lora` (finite differences, both mixer types,
+    both backends) and a "freezes the base" regression
+    (`crates/qwen35moe/tests/lora_freezes_base.rs`: a real training loop must
+    change ONLY `.lora_a`/`.lora_b` and leave every other real parameter
+    bit-identical). `crates/qwen35moe/src/lora.rs` ports `qwen3::lora`'s
+    adapter-only save/load + fold-into-base.
+  - **Cross-GPU pipeline sharding**: `Qwen35` implements
+    `model::shard::Shardable` (`crates/qwen35moe/src/shard.rs`) — the same
+    generic pipeline-parallel seam already proven on `qwen3::Qwen`
+    (`crates/qwen3/src/shard.rs`). `run_forward`/`backward` loop over an
+    absolute `shard.start..shard.end` layer range instead of the whole
+    model, gated by `shard.embed`/`shard.head` for the embedding gather,
+    vision splice, final norm, and lm_head/loss; `res` stays fully indexed
+    `0..=n_layers` on every stage so the cross-stage boundary accessors
+    (`read_out_res`/`write_in_res`/`read_in_dres`/`write_out_dres`) are
+    trivial buffer reads/writes. `crates/qwen35moe/tests/shard_parity.rs`
+    gates this: single-device vs. 2-stage `model::Pipeline<Qwen35>` forward
+    loss and every gradient match **bit-for-bit** (rel error 0.00e0) on both
+    backends. **This was a real course-correction mid-task**: the first
+    attempt at the real-weight smoke test truncated the real checkpoint to
+    fit one 24 GB P40 (OOM at 8 layers/31 GB, wedged even at 4 layers/17.5
+    GB) — flagged as the wrong approach (a large model belongs on this
+    codebase's existing residency-sharding mechanism, not cut down to fit
+    one card) and replaced with this sharding port before the smoke test
+    was accepted as done.
+  - **Real-weight smoke test** (`crates/qwen35moe/tests/
+    lora_real_weight_smoke.rs`, `#[ignore]`d — needs a downloaded
+    Qwen3.5-35B-A3B GGUF and real multi-GPU time): builds a
+    `Pipeline<Qwen35>` across both physical P40s and loads a real (never
+    synthetic) prefix of the checkpoint via `qwen35moe::import::
+    import_gguf_truncated_to_map` — as many of the real 40 layers as fit
+    with real headroom, empirically measured rather than guessed. Landed on
+    **10 real layers**, split 5+5 across both cards: 7,837 real tensors,
+    **37.72 GB fp32** (3.772 GB/layer average) loaded in 56.1s; shards
+    `[0,5)` (embed) on GPU0, `[5,10)` (head) on GPU1; pipeline built in
+    25.7s; peak VRAM **≈21.0/24 GB on GPU0, ≈21.3/24 GB on GPU1** (real
+    headroom on both, not cut at the OOM edge). A real LoRA finetune over
+    that pipeline-sharded real base, on a tiny synthetic 128-token stream,
+    shows a clean monotonic loss descent over 6 real AdamW steps (lr=1e-3):
+    **15.627 → 14.152 → 12.209 → 11.218 → 9.527 → 8.106** (~51s/step on
+    these non-tensor-core P40s — confirmed genuinely slow, not hung, by
+    every step completing well inside a raised `BRAIN_GPU_WAIT_S`; MoE
+    dispatch throughput itself is P7's separately-deferred concern, not
+    reopened here). Full 40-layer depth would need ~140 GB combined VRAM,
+    ~2.9× this box's 2×24 GB — confirms the earlier "not viable on this
+    hardware" finding above, now for the sharded case too.
+  - **Deliberately not attempted this pass**: an INT4/INT8 frozen base with
+    a live backward path (the original plan's "never fp32/bf16" framing) —
+    would need a new dequantizing backward matmul kernel, out of scope here
+    and noted as a follow-on; overlapped (GPipe-style) pipeline execution
+    (the smoke test's `forward()`/`backward()` are plain sequential, one GPU
+    active at a time — confirmed via `nvidia-smi`, matching `qwen3`'s own
+    smoke-test-style usage, not asked for here).
+
 ## In progress
 
 - **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
@@ -655,9 +723,6 @@ fetching an already-quantized GGUF directly.
 - **P10b — INT4 quantized inference** for qwen35 specifically
   (`crates/qwen35moe/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
   `model::int4`), once useful — P10a (int8, single-GPU) already landed.
-- **P12 — LoRA + memory-bounded finetune validation**: base frozen in
-  INT4/INT8 (never fp32/bf16), only LoRA adapters trainable, on real
-  weights, measured loss descent, bounded peak RSS/VRAM.
 - **Qwen3.5-27B (dense)**: a second named config once the shared hybrid code
   is proven — the dense sibling is the same code with `n_experts=1`-shaped
   MoE-as-dense and no linear-attention layers, additive not a fork.
