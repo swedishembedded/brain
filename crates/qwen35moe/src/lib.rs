@@ -17,6 +17,7 @@ pub mod model;
 pub mod q8;
 pub mod sample;
 pub mod serve;
+pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};
 pub use model::Qwen35;

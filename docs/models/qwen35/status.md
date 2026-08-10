@@ -471,6 +471,50 @@ fetching an already-quantized GGUF directly.
   rather than failing cleanly) rather than assuming one. `brain qwen35moe
   export --weights F --out model.onnx --seq T` is the CLI entry point.
 
+- **P8b — vision splice** (`crates/qwen35moe/src/vl.rs`, new; `model.rs`'s
+  `mm_splice`/`write_img_embeds`/`write_mrope_tables` seam): image token
+  embedding into the decoder's input stream, reusing `crates/qwenvl`'s
+  `VisionEncoder`/`PatchMerger`/`get_rope_index`/`mrope_tables` AS-IS (P2's
+  config-level-reuse finding confirmed in practice — no fork, no new device
+  kernel; `Qwen35`'s own `rope2d_partial_{fwd,bwd}` consumption of
+  `self.cos`/`self.sin` needed no change at all, only the construction side
+  became writable). `Qwen35::enable_mm_splice`/`write_img_embeds`/
+  `write_mrope_tables` mirror `qwen3::Qwen`'s own seam field-for-field, minus
+  the fwd/bwd step-list rebuild `qwen3::Qwen` needs (`Qwen35::run_forward`/
+  `backward` already build their step lists fresh every call, confirmed by
+  reading them, so enabling the splice is pure buffer allocation + a flag).
+  `splice`/`splice_bwd` (`kernels::SPLICE`/`SPLICE_BWD`, already shared
+  library-level kernels used unchanged) appended at the true end of
+  `qwen35moe::model::PIPELINES` (indices 90/91) per this file's own
+  position-dependent-index convention. `Qwen35Vl` (new `vl.rs`) wraps a
+  vision `Gpu`+`VisionConfig`+weights and a `Qwen35` decoder, asserting
+  `deepstack_indexes.is_empty()` (Qwen3.5 has none, unlike Qwen3-VL/Omni —
+  no tap-feature encode, no per-level merger); `forward()` derives REAL 3-
+  axis M-RoPE positions from the image grid via `get_rope_index`/
+  `mrope_tables` (replacing today's degenerate all-axes-equal text-only
+  table for the rows actually touched) and calls `Qwen35::forward()`'s
+  existing `set_batch` + scalar-loss contract, mirroring
+  `qwenvl::model::Qwen3Vl::forward` almost exactly. Backward-through-the-
+  splice (optional per this task's scope) WAS implemented — `Qwen35::
+  backward` routes the spliced rows' gradient into `d_img_embeds` and zeros
+  them in the residual grad before `EMB_BWD`, exactly mirroring `qwen3::
+  Qwen::backward`'s own `mm_splice` case — verified nonzero and finite via a
+  dedicated test on both backends. GDN layers are untouched (image tokens
+  flow through the recurrence exactly like text tokens; the recurrence is
+  unaware of token origin). Validated (`crates/qwen35moe/tests/vl.rs`, tiny
+  configs, merger boundary matched): end-to-end forward produces a finite
+  positive loss; the splice is load-bearing (perturbing the image pixels
+  changes the loss, not a silent no-op); M-RoPE positions at the image rows
+  match `get_rope_index`'s own independent computation exactly; splice
+  backward gradient is nonzero and finite — all four on both
+  `BRAIN_DEVICE=cpu` and the default GPU backend (a real P40).
+  **Deferred, not attempted this pass** (genuinely more work, not just this
+  seam): incremental/KV-cache decode-time image splice (`Qwen3Vl::generate`'s
+  own `step_embed_mrope` has no `Qwen35` equivalent yet — would need a raw-
+  embedding-row decode step plus per-position M-RoPE table rewrites,
+  mirroring `Qwen35::step`'s existing pattern) and video (multi-frame) —
+  single image only, matching this task's scope.
+
 ## In progress
 
 - **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
@@ -536,12 +580,6 @@ fetching an already-quantized GGUF directly.
     chunked prefill, int8/int4 paged KV, speculative decode, and multi-GPU
     layer-range sharding across both P40s — P11c's own "Deliberately
     deferred" list, in priority order for whoever picks this up next.
-- **P8b — vision splice**: image/video token embedding into the decoder's
-  input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
-  position helpers as-is (verified numerically identical vision config to
-  `VisionConfig::qwen3_omni()`, P2's finding — no fork needed), plus real
-  3D M-RoPE position derivation from image grids (today's `model.rs` only
-  handles the degenerate text-only all-axes-equal case).
 - **P7 — device-side sparse MoE decode dispatch**: deliberately deferred to
   the performance-optimization phase, per `docs/porting-playbook.md` §10
   "correct-then-freeze" — `model::moe::expert_fwd`/`expert_fwd_compact` are
