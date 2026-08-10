@@ -20,13 +20,7 @@ use zimage::{import::import_comfy, ZImageConfig, ZImageDitI8, ZImageDitShard, ZI
 use brain_testutil::testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
-    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        dot += x as f64 * y as f64;
-        na += x as f64 * x as f64;
-        nb += y as f64 * y as f64;
-    }
-    dot / (na.sqrt() * nb.sqrt())
+    model::hostmath::cosine(a, b) as f64
 }
 
 fn rel_l2(got: &[f32], want: &[f32]) -> f64 {

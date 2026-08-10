@@ -160,17 +160,12 @@ pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -
 
 
 /// Sinusoidal timestep embedding (diffusers `TimestepEmbedder.timestep_embedding`,
-/// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]`, `freq_k = max_period^(-k/half)`.
+/// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]` — the shared
+/// `model::hostmath::timestep_embedding` with `flip_sin_to_cos = false`,
+/// `downscale_freq_shift = 0` (this used to be a local f32 re-derivation;
+/// the shared one accumulates the angle in f64 like the references do).
 pub(crate) fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
-    let half = dim / 2;
-    let mut e = vec![0f32; dim];
-    for k in 0..half {
-        let freq = (-(max_period.ln()) * k as f32 / half as f32).exp();
-        let arg = t * freq;
-        e[k] = arg.cos();
-        e[half + k] = arg.sin();
-    }
-    e
+    model::hostmath::timestep_embedding(t, dim, false, 0.0, max_period as f64)
 }
 
 /// Host pre-block state: timestep conditioning, embedded image/caption tokens,

@@ -20,15 +20,7 @@ fn enabled() -> bool {
     std::env::var("BRAIN_NPU_AVAILABLE").map(|v| !v.is_empty()).unwrap_or(false)
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
-    let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    let nb: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 1.0;
-    }
-    (dot / (na * nb)) as f32
-}
+use model::hostmath::cosine;
 
 fn rand_chw(side: usize, mut seed: u64) -> Vec<f32> {
     let n = 3 * side * side;

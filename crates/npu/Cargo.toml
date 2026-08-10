@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-backend-api.workspace = true
+brain-model.workspace = true
 brain-onnx.workspace = true
 brain-checkpoint.workspace = true
 brain-qwen3.workspace = true

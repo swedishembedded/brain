@@ -19,12 +19,7 @@ fn npu_pth() -> Option<String> {
 }
 
 /// cosine similarity of two equal-length vectors.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    dot / (na * nb + 1e-12)
-}
+use model::hostmath::cosine;
 
 fn export_and_run(device: NpuDevice) {
     let Some(path) = npu_pth() else {

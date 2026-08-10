@@ -95,14 +95,10 @@ fn lfm(args: &[String]) {
 }
 
 fn cosine_f32(a: &[f32], b: &[f32]) -> (f64, f32) {
-    let (mut dot, mut na, mut nb, mut max_abs) = (0f64, 0f64, 0f64, 0f32);
-    for (&x, &y) in a.iter().zip(b) {
-        dot += x as f64 * y as f64;
-        na += x as f64 * x as f64;
-        nb += y as f64 * y as f64;
-        max_abs = max_abs.max((x - y).abs());
-    }
-    (dot / (na.sqrt() * nb.sqrt()), max_abs)
+    // Cosine from the shared model::hostmath (audit F35); only the max|Δ|
+    // companion stays local.
+    let max_abs = a.iter().zip(b).fold(0f32, |m, (&x, &y)| m.max((x - y).abs()));
+    (model::hostmath::cosine(a, b) as f64, max_abs)
 }
 
 /// `brain npu lfm-bench` — export the LFM2.5-Encoder at a fixed sequence bucket,

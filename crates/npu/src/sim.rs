@@ -99,16 +99,11 @@ pub fn simulate_logits(weights_path: &str, chw: &[f32], quant: &Quant) -> (Vec<f
     model.raw_logits()
 }
 
-/// Cosine similarity between two equal-length vectors (1.0 = identical direction).
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
-    let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    let nb: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 1.0;
-    }
-    (dot / (na * nb)) as f32
-}
+/// Cosine similarity between two equal-length vectors (1.0 = identical
+/// direction) — the shared `model::hostmath::cosine`, re-exported for this
+/// module's existing callers. NOTE one behavioural fix vs the old local
+/// copy: a zero vector now scores 0.0 (no direction), not a vacuous 1.0.
+pub use model::hostmath::cosine;
 
 /// Mean-absolute fp32-vs-INT8-sim mAP@0.5 over a brain detection dataset. Returns
 /// `(map_fp32, map_int8_sim)`. Reuses the shared decode tail + `eval::detection`.
