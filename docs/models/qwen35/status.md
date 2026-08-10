@@ -444,8 +444,42 @@ fetching an already-quantized GGUF directly.
 
 ## In progress
 
-(nothing actively in flight right now — see "Not started" for the next
-pieces.)
+- **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
+  paging for the 10 full-attention layers, a small O(1)-in-sequence-length
+  per-sequence recurrent-state buffer (not paged) for the 30 GDN layers;
+  layer-range `Shard`/`Pipeline` across both P40s at INT8/INT4 residency
+  (35B doesn't fit one 24 GB card). Broken into sub-steps since a full paged
+  multi-sequence engine is a lot of surface area to review at once — climbing
+  the same "small proven piece, then integrate" ladder P9 (backward) used.
+  - **P11a — decode-step primitives, shared-library level** (done,
+    `crates/model/src/gdn.rs`, commit `f0cdb28c`): `gdn_recurrent_step` (the
+    single-token GDN state update, derived directly from the reference
+    `torch_recurrent_gated_delta_rule` in `modeling_qwen3_5_moe.py` —
+    decay state, subtract what it already predicts, scale by beta, rank-1
+    update, read back out; composes entirely from EXISTING kernels
+    (`gdn_state_decay`/`bmm`/`bmm_acc`/`sub`/`row_scale`) — no new kernel
+    needed here) and `gdn_causal_conv1d_step` (+ one new kernel,
+    `causal_conv1d_step.wgsl`: the streaming, ring-buffer-state sibling of
+    `conv1d_fwd`'s whole-sequence causal depthwise conv — re-running the
+    whole-sequence kernel every decode step would be `O(T^2)`). Both
+    inference-only (no backward). Validated against already-proven
+    references: `gdn_recurrent_step` vs. `gdn_chunk_fwd` at `chunk=1`
+    (worst delta 1.2e-7 GPU / 8.9e-8 CPU), `gdn_causal_conv1d_step` vs.
+    `conv1d_fwd` over a short sequence (bit-identical, both backends).
+  - **P11b — single-sequence incremental decode wiring** (in progress,
+    `crates/qwen35moe/src/model.rs`): a `Qwen35::step`-style entry point
+    analogous to `qwen3::Qwen::step`/`decode_at` — persistent per-layer
+    state (plain non-paged KV cache for GQA layers via `model::block`'s
+    existing decode helpers, `gdn_recurrent_step`'s `state` +
+    `gdn_causal_conv1d_step`'s `hist` for GDN layers), single sequence,
+    fp32, text-only. Deliberately NOT the paged multi-sequence engine yet —
+    proves the per-layer decode MATH matches prefill (`logits_all`) before
+    building the scheduler-facing `PagedDecoder`/multi-GPU layer-sharding
+    on top.
+  - **Not started**: the actual `PagedDecoder` impl (multi-sequence paging,
+    admission, prefix cache) and multi-GPU layer-range sharding — once
+    P11b's single-sequence math is proven, per this ledger's own "climb the
+    ladder" convention.
 - **P8b — vision splice**: image/video token embedding into the decoder's
   input stream, reusing `crates/qwenvl`'s `VisionEncoder`/`PatchMerger`/
   position helpers as-is (verified numerically identical vision config to
@@ -476,11 +510,6 @@ pieces.)
 - **P10b — INT4 quantized inference** for qwen35 specifically
   (`crates/qwen35moe/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
   `model::int4`), once useful — P10a (int8, single-GPU) already landed.
-- **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
-  paging for the 10 full-attention layers, a small O(1)-in-sequence-length
-  per-sequence recurrent-state buffer (not paged) for the 30 GDN layers;
-  layer-range `Shard`/`Pipeline` across both P40s at INT8/INT4 residency
-  (35B doesn't fit one 24 GB card).
 - **P12 — LoRA + memory-bounded finetune validation**: base frozen in
   INT4/INT8 (never fp32/bf16), only LoRA adapters trainable, on real
   weights, measured loss descent, bounded peak RSS/VRAM.
