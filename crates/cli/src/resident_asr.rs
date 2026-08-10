@@ -333,10 +333,14 @@ impl Instance for QwenAsrInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
+        let truncated = qwen_asr::caps::window_truncation(self.provider.window_samples(), &wav);
+        if let Some((total, window)) = truncated {
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN_ASR_WINDOW)")));
+        }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.provider.transcribe(&wav)?;
         progress(Progress::step(1, 1, text.clone()));
-        Ok(transcription_outcome(text, &tokens))
+        Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
     }
     // run_batch: default sequential loop (offline autoregressive decode; the audio
     // encoder still amortises within the fixed-window instance).

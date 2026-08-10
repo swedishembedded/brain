@@ -700,6 +700,11 @@ impl HotPipeline {
         let mut tokens = self.tok.encode(&templated);
         let cl = self.cap_len as usize;
         if tokens.len() > cl {
+            // Loud, not silent: the image is conditioned on a PREFIX of the
+            // user's prompt (audit F18).
+            let msg = format!("warning: prompt is {} tokens but this resident was built for cap_len {} -- conditioning on the first {} tokens only", tokens.len(), cl, cl);
+            eprintln!("zimage: {msg}");
+            progress(1, total, &msg);
             tokens.truncate(cl);
         } else if tokens.len() < cl {
             let pad = *tokens.last().unwrap_or(&0);

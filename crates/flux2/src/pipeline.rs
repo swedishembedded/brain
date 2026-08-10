@@ -233,6 +233,11 @@ impl Pipeline {
     pub fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
         let templated = self.tok.apply_chat_template_no_think(&[("user", prompt)]);
         let mut ids = self.tok.encode(&templated);
+        if ids.len() > self.cfg.txt_len {
+            // Loud, not silent: the conditioning is computed from a PREFIX of
+            // the user's prompt (audit F18).
+            eprintln!("flux2: prompt is {} tokens but the model's text window is {} -- conditioning on the first {} tokens only", ids.len(), self.cfg.txt_len, self.cfg.txt_len);
+        }
         ids.truncate(self.cfg.txt_len);
         let content = ids.len();
         ids.resize(self.cfg.txt_len, PAD_TOKEN);

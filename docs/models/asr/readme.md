@@ -12,6 +12,11 @@ Streaming 0.6B (FastConformer + RNN-T, frame-synchronous streaming) and Qwen3-AS
   - `BRAIN_NEMOTRON` — Nemotron 3.5 ASR checkpoint directory (HF layout).
   - `BRAIN_QWEN_ASR` — Qwen3-ASR checkpoint directory (HF layout).
   - `BRAIN_QWEN_ASR_WINDOW` — Qwen3-ASR audio window in seconds (default `30`).
+    Audio LONGER than the window is truncated: only the first window is
+    transcribed (the decode graph is sized to the window at load time). The
+    served action warns via Progress and sets `truncated: true` in the
+    outcome; raise the window (and reload) for longer clips, or use
+    `brain/nemotron`'s streaming path.
   - `BRAIN_QWEN_ASR_MAXNEW` — Qwen3-ASR max generated tokens (default `200`).
 
 ## Surfaces

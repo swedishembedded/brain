@@ -55,6 +55,15 @@ pub fn build_input_ids(n_audio: u32) -> Vec<u32> {
     ids
 }
 
+/// `Some((total_secs, window_secs))` when `wav` exceeds the fixed decode
+/// window — everything past the window is DROPPED by [`pad_to_window`] (the
+/// window is a construction-time graph size), so serving callers must
+/// surface this loudly (a Progress warning + `truncated: true` in the
+/// Outcome) instead of silently transcribing a prefix (audit F18).
+pub fn window_truncation(window_samples: usize, wav: &[f32]) -> Option<(f32, f32)> {
+    (wav.len() > window_samples).then(|| (wav.len() as f32 / 16_000.0, window_samples as f32 / 16_000.0))
+}
+
 /// Pad (with silence) or truncate a waveform to exactly `window_samples` — so the
 /// front end reports a full window of valid frames and the encoder yields the fixed
 /// `n_audio` the decoder was assembled for.
@@ -100,6 +109,12 @@ impl QwenAsrProvider {
     /// Transcribe one waveform (padded/truncated to the window) → text + token ids.
     pub fn transcribe(&self, wav: &[f32]) -> Result<(String, Vec<u32>), String> {
         self.inner.transcribe(wav)
+    }
+
+    /// The fixed decode window in samples (16 kHz) — callers use this to
+    /// surface window truncation LOUDLY (see [`window_truncation`]).
+    pub fn window_samples(&self) -> usize {
+        self.inner.window_samples
     }
 
     /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
@@ -173,10 +188,14 @@ impl Action for TranscribeAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
+        let truncated = window_truncation(self.inner.window_samples, &wav);
+        if let Some((total, window)) = truncated {
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN_ASR_WINDOW)")));
+        }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.inner.transcribe(&wav)?;
         progress(Progress::step(1, 1, text.clone()));
-        Ok(transcription_outcome(text, &tokens))
+        Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
     }
 }
 
