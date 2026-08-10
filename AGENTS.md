@@ -27,10 +27,24 @@ fast and scalable kernel — not a naive one.
 1. **GPT decoder** (`crates/gpt`) — dense nanogpt-parity baseline: token+learned
    positional embeddings, pre-LN, causal MHA, GELU MLP, untied `lm_head`, masked
    CE. `brain gpt {train,eval,gen}`.
-2. **Qwen3 decoder** (`crates/qwen`) — dense GQA + QK-norm + RoPE + SwiGLU;
+2. **Qwen3 decoder** (`crates/qwen3`) — dense GQA + QK-norm + RoPE + SwiGLU;
    HF import, LoRA finetune, INT8 (`q8.rs`), tensor/expert sharding, tool-call
    eval, and the **concurrent paged-KV serving engine** (`serve.rs`, see below).
    `brain qwen {import,infer,serve,export,precompile,train,finetune,toolcall}`.
+2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) — 40 layers, 3:1
+   **Gated DeltaNet** (chunked linear-attention, `model::gdn`) : **GQA**
+   (`full_attention_interval=4`), a 256-expert top-8 sigmoid-gated-shared-expert
+   sparse MoE on every layer, a sigmoid attention-output gate + partial RoPE +
+   M-RoPE on the GQA layers, and a spliced vision front-end reusing
+   `crates/qwenvl`'s ViT + PatchMerger as-is (`qwen35moe::vl::Qwen35Vl`, no
+   DeepStack — this model has none). GGUF streaming import (`import_gguf`,
+   never a whole-model fp32 disk intermediate — the real checkpoint is ~140 GB
+   at fp32), INT8 (`q8.rs`), rank-8 LoRA on the 9 targetable GDN/GQA
+   projections (never the MoE experts), and cross-GPU pipeline sharding
+   (`model::shard::Shardable`) for real weights that exceed one card.
+   Gradient-checked (`gradcheck::check_qwen35`, `check_qwen35_lora`).
+   `brain qwen35moe {import,infer,export}`, `brain do qwen35moe generate`.
+   See `docs/models/qwen35/status.md`.
 3. **Sparse MoE Transformer** (`crates/moe`) — RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glm`) — `glm_moe_dsa`: **MLA** (low-rank q/kv with
@@ -291,7 +305,7 @@ fast and scalable kernel — not a naive one.
       rel-pos attention, GLU conv module) + RNN-T transducer; the *streaming* model,
       true batched forward across concurrent windows. Fully trainable/gradchecked.
     * **Qwen3-ASR 1.7B** (`crates/qwen-asr`) — Whisper-style audio encoder + a spliced
-      Qwen3-1.7B decoder (reuses `crates/qwen`); offline, fixed audio window.
+      Qwen3-1.7B decoder (reuses `crates/qwen3`); offline, fixed audio window.
     Shared audio-in/text-out contract in `audio::asr_caps`. See
     `docs/models/asr/status.md`.
 13c. **Qwen3-Omni-30B** (`crates/omni`) — Thinker (dense-then-MoE Qwen3
@@ -312,7 +326,7 @@ fast and scalable kernel — not a naive one.
     environment to validate any of it against (every test uses a synthetic
     checkpoint), and decode is O(T²) recompute, not KV-cached — see
     `docs/models/omni/status.md`'s M22 entry for the precise remainder.
-    **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen`'s decoder
+    **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen3`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
     caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP), and
@@ -463,7 +477,7 @@ front-end to depend on.
 
 | Crate | Model |
 |---|---|
-| `gpt` / `qwen` / `moe` / `glm` / `pid` | decoder LMs (see Models) |
+| `gpt` / `qwen3` / `qwen35moe` / `moe` / `glm` / `pid` | decoder LMs (see Models) |
 | `seq2seq` / `autoencoder` / `timeseries` | encoder-decoder / bottleneck AE / placeholder |
 | `federated` | vertical expert split/assemble, hash-verified manifests, train-scope |
 | `yolo` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
@@ -521,6 +535,8 @@ front-end to depend on.
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
+| Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `docs/models/qwen35/status.md` |
+| Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `examples/llm/` |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain do`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
@@ -970,7 +986,8 @@ per-scenario table and the findings so far.
   modes already paid for; do not rediscover them.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
-  `check_qwen_lora`, `check_moe`, `check_glm`, `check_glm_mtp`, `check_pid`,
+  `check_qwen_lora`, `check_qwen35`, `check_qwen35_lora`, `check_moe`,
+  `check_glm`, `check_glm_mtp`, `check_pid`,
   `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`, plus the
   imaging workstream's `check_sam2`, `check_arcface`, `check_vqgan`,
   `check_clip`, `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
