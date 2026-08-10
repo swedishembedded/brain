@@ -33,7 +33,6 @@ pub struct Qwen3Vl {
     merge: u32,
     image_token_id: u32,
     mrope_section: [u32; 3],
-    image_row0: u32,
 }
 
 impl Qwen3Vl {
@@ -72,7 +71,6 @@ impl Qwen3Vl {
             merge,
             image_token_id,
             mrope_section,
-            image_row0,
         }
     }
 
@@ -157,7 +155,6 @@ impl Qwen3Vl {
         self.decoder.write_mrope_tables(&cos, &sin);
         self.decoder.write_img_embeds(&visual);
         self.decoder.set_batch(tokens, targets);
-        let _ = self.image_row0; // (placement already baked into enable_mm_splice)
         self.decoder.forward()
     }
 

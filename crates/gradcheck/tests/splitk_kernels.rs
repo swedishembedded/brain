@@ -15,7 +15,7 @@
 //!
 //! All four kernels are cooperative wg256/barrier kernels, gated on
 //! `workgroup_reductions` in production (`vae::blocks::grad`,
-//! `qwen::serve::splitk_slices`) — skipped on a backend without it (the CPU
+//! `qwen3::serve::splitk_slices`) — skipped on a backend without it (the CPU
 //! JIT), where they can never be selected.
 
 use data::rng::Lcg;
@@ -165,7 +165,7 @@ fn dw_splitk_plus_reduce_matches_the_oracle_with_a_ragged_tail_slice() {
 }
 
 /// The split-K FORWARD GEMM (`matmul_reg3_splitk` + `dw_splitk_reduce` with
-/// acc=0, exactly as `qwen::serve::mm_into` composes them) against the f64
+/// acc=0, exactly as `qwen3::serve::mm_into` composes them) against the f64
 /// oracle — with a ragged k tail, and a pre-filled output to prove the
 /// acc=0 reduce ASSIGNS rather than accumulating stale data.
 #[test]

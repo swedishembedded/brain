@@ -3,7 +3,7 @@
 
 //! A [`TensorSource`] that renames and reslices an inner source's tensors on
 //! the fly, so a name-mapping/qkv-splitting import (`zimage::import::import_comfy`,
-//! `qwen::import::brain_init_from_hf`) can be expressed as a *plan* over a
+//! `qwen3::import::brain_init_from_hf`) can be expressed as a *plan* over a
 //! streaming source instead of an eager pass that materializes every renamed
 //! tensor into a second, owned `HashMap<String, Vec<f32>>`.
 //!
@@ -52,7 +52,7 @@ impl<'a> RemapSource<'a> {
     }
 
     /// Names-and-shapes-only coverage check, mirroring what
-    /// `qwen::import::brain_init_from_hf` validates today (every destination
+    /// `qwen3::import::brain_init_from_hf` validates today (every destination
     /// name has a source, every size matches) but reading no tensor data —
     /// `numel` alone answers it. Fails loudly, naming every mismatch found
     /// (not just the first), so a broken plan is one error message, not one

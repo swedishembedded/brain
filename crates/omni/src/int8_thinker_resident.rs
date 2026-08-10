@@ -359,7 +359,10 @@ impl Int8ThinkerResident {
         }
         let reader = match WeightReader::open(&self.checkpoint_path) {
             Ok(r) => r,
-            Err(_) => return MultiDeviceCost::new(vec![], 0),
+            Err(e) => {
+                eprintln!("{MODEL}: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.checkpoint_path);
+                return MultiDeviceCost::new(vec![], 0);
+            }
         };
         let ranges = self.layer_ranges(self.devices.len());
         let per_device: Vec<(Device, u64)> =

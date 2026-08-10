@@ -30,7 +30,7 @@ fn qwen3_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(d));
     }
     // The served Qwen3 chat model this cross-check guards (the same
-    // tokenizer_config.json qwen::chat renders from).
+    // tokenizer_config.json qwen3::chat renders from).
     let dir = PathBuf::from(brain_testutil::model_dir("Qwen/Qwen3-0.6B")?);
     dir.join("tokenizer_config.json").exists().then_some(dir)
 }

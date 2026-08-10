@@ -73,7 +73,7 @@ impl TuneStore for FileTuneStore {
     }
     /// Merge-on-save, I/O OUTSIDE the lock: the old shape held the mutex
     /// across create_dir_all + write + rename (an autotune sweep like
-    /// `qwen::serve::tune_i8` saves up to ~48 times, each a whole-file
+    /// `qwen3::serve::tune_i8` saves up to ~48 times, each a whole-file
     /// rewrite under the lock), and wrote only THIS process's map — two
     /// stores in one process (or two processes) silently dropped each
     /// other's entries. Now: update the in-memory map under the lock, snap a

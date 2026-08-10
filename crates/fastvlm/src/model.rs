@@ -82,7 +82,6 @@ pub struct FastVlm {
     enc_weights: HashMap<String, Vec<f32>>,
     projector: Projector,
     decoder: Qwen,
-    image_row0: u32,
     n_visual: u32,
 }
 
@@ -114,7 +113,6 @@ impl FastVlm {
             enc_weights,
             projector,
             decoder,
-            image_row0,
             n_visual,
         }
     }
@@ -133,7 +131,6 @@ impl FastVlm {
 
         self.decoder.write_img_embeds(&img_embeds);
         self.decoder.set_batch(tokens, targets);
-        let _ = self.image_row0;
         self.decoder.forward()
     }
 }

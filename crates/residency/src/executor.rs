@@ -282,7 +282,13 @@ impl Executor {
     /// not to take it.
     pub fn register_multi(&self, model: Arc<dyn MultiDeviceResidentModel>) {
         let manifest = model.manifest();
-        self.manifests.write().unwrap().push(manifest);
+        {
+            // Copy-on-write -- see `register`'s identical dance and its doc.
+            let mut g = self.manifests.write().unwrap();
+            let mut v = (**g).clone();
+            v.push(manifest);
+            *g = Arc::new(v);
+        }
         let _ = self.tx.send(Msg::RegisterMulti(model));
     }
 

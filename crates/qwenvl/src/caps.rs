@@ -205,7 +205,7 @@ impl Action for GenerateAction {
         let (gh, gw) = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
         // Real per-token streaming deltas (the spec declares `.streaming()`):
         // re-decode the running id list each token and emit the UTF-8-safe
-        // suffix, exactly like qwen::chat's streaming path.
+        // suffix, exactly like qwen3::chat's streaming path.
         let mut ids: Vec<u32> = Vec::new();
         let mut printed = String::new();
         let mut step = 0u32;
@@ -213,7 +213,7 @@ impl Action for GenerateAction {
             ids.push(tok_id);
             step += 1;
             let full = hot.tok.decode(&ids);
-            let (delta, np) = qwen::chat::stream_delta(&printed, &full);
+            let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
             printed = np;
             if !delta.is_empty() {
                 progress(Progress::token(step, max_new, delta));

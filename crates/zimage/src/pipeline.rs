@@ -396,7 +396,7 @@ impl Encoder {
             }
             Encoder::OnDemand { qreader_path, qcfg, cap_len, gpu } => {
                 let reader = open_component(qreader_path).map_err(|e| format!("open qwen: {e}"))?;
-                let src = qwen::import::hf_source(&reader, qcfg)?;
+                let src = qwen3::import::hf_source(&reader, qcfg)?;
                 let n = qcfg.n_layers as usize;
                 let cap = gpu_core::devices::with_gpu(*gpu, || {
                     let e = Qwen::new_shard_i8(qcfg.clone(), 1, *cap_len, &src, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: *gpu as usize });
@@ -610,7 +610,7 @@ impl HotPipeline {
 
         let qcfg = QwenConfig::qwen3_4b();
         let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
-        let qsrc = qwen::import::hf_source(&qreader, &qcfg)?;
+        let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
         let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
             .ok()
             .filter(|s| !s.is_empty())
