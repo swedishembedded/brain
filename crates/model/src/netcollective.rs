@@ -34,11 +34,23 @@ fn send_vec(s: &mut TcpStream, v: &[f32]) -> std::io::Result<()> {
     s.flush()
 }
 
+/// Largest accepted message, in f32 elements (1 GiB of payload). The length
+/// prefix arrives off the WIRE: without a bound a corrupt/hostile 4-byte
+/// header could demand a 16 GB allocation before any data is read (and
+/// `n * 4` itself overflows usize on a 32-bit target).
+const MAX_MSG_ELEMS: usize = 1 << 28;
+
 fn recv_vec(s: &mut TcpStream) -> std::io::Result<Vec<f32>> {
     let mut len = [0u8; 4];
     s.read_exact(&mut len)?;
     let n = u32::from_le_bytes(len) as usize;
-    let mut bytes = vec![0u8; n * 4];
+    if n > MAX_MSG_ELEMS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("collective message claims {n} f32 elements (> {MAX_MSG_ELEMS} cap) — corrupt length prefix or a non-brain peer"),
+        ));
+    }
+    let mut bytes = vec![0u8; n.checked_mul(4).expect("bounded by MAX_MSG_ELEMS")];
     s.read_exact(&mut bytes)?;
     Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
@@ -64,6 +76,15 @@ impl NetworkCollective {
             let mut rb = [0u8; 4];
             s.read_exact(&mut rb)?;
             let peer = u32::from_le_bytes(rb) as usize;
+            // The announced rank arrives off the wire — validate it before
+            // using it as an index (an out-of-range or duplicate rank used
+            // to panic the coordinator).
+            if peer == 0 || peer >= world {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("worker announced invalid rank {peer} for world size {world}")));
+            }
+            if conns[peer].is_some() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("two workers announced rank {peer}")));
+            }
             conns[peer] = Some(Mutex::new(s));
         }
         Ok(NetworkCollective { rank: 0, world, conns })
@@ -81,6 +102,19 @@ impl NetworkCollective {
         Ok(NetworkCollective { rank, world, conns })
     }
 
+    /// A wire failure is still a PANIC (the [`Collective`] trait has no error
+    /// channel — widening every op to `Result` is real cross-crate follow-up
+    /// work its doc now records), but it must at least say WHICH peer of
+    /// which world failed, not the bare "coordinator recv" that aborted
+    /// every rank with no way to tell who dropped.
+    fn wire_panic(&self, what: &str, peer: usize, e: std::io::Error) -> ! {
+        panic!(
+            "NetworkCollective rank {}/{}: {what} (peer rank {peer}): {e} — a peer likely dropped; \
+             the Collective trait has no error channel yet, so this aborts the rank",
+            self.rank, self.world
+        )
+    }
+
     /// Coordinator: collect every rank's contribution in rank order (`local` is
     /// rank 0's own), returning `slots[0..world]`.
     fn gather_slots(&self, local: Vec<f32>) -> Vec<Vec<f32>> {
@@ -88,7 +122,7 @@ impl NetworkCollective {
         slots[0] = local;
         for (r, slot) in slots.iter_mut().enumerate().skip(1) {
             let mut s = self.conns[r].as_ref().unwrap().lock().unwrap();
-            *slot = recv_vec(&mut s).expect("coordinator recv");
+            *slot = recv_vec(&mut s).unwrap_or_else(|e| self.wire_panic("recv contribution", r, e));
         }
         slots
     }
@@ -97,15 +131,15 @@ impl NetworkCollective {
     fn scatter(&self, per_rank: impl Fn(usize) -> Vec<f32>) {
         for r in 1..self.world {
             let mut s = self.conns[r].as_ref().unwrap().lock().unwrap();
-            send_vec(&mut s, &per_rank(r)).expect("coordinator send");
+            send_vec(&mut s, &per_rank(r)).unwrap_or_else(|e| self.wire_panic("send result", r, e));
         }
     }
 
     /// Worker: send `local` to the coordinator, receive the op's result.
     fn round_trip(&self, local: &[f32]) -> Vec<f32> {
         let mut s = self.conns[0].as_ref().unwrap().lock().unwrap();
-        send_vec(&mut s, local).expect("worker send");
-        recv_vec(&mut s).expect("worker recv")
+        send_vec(&mut s, local).unwrap_or_else(|e| self.wire_panic("send to coordinator", 0, e));
+        recv_vec(&mut s).unwrap_or_else(|e| self.wire_panic("recv from coordinator", 0, e))
     }
 }
 
@@ -183,7 +217,7 @@ impl Collective for NetworkCollective {
                 local
             } else {
                 let mut s = self.conns[root].as_ref().unwrap().lock().unwrap();
-                recv_vec(&mut s).expect("coordinator recv root")
+                recv_vec(&mut s).unwrap_or_else(|e| self.wire_panic("recv broadcast root", root, e))
             };
             self.scatter(|_| data.clone());
             data
@@ -191,13 +225,13 @@ impl Collective for NetworkCollective {
             // send my data up, then receive the fan-out copy back.
             {
                 let mut s = self.conns[0].as_ref().unwrap().lock().unwrap();
-                send_vec(&mut s, &local).expect("root send up");
+                send_vec(&mut s, &local).unwrap_or_else(|e| self.wire_panic("send broadcast up", 0, e));
             }
             let mut s = self.conns[0].as_ref().unwrap().lock().unwrap();
-            recv_vec(&mut s).expect("root recv back")
+            recv_vec(&mut s).unwrap_or_else(|e| self.wire_panic("recv broadcast back", 0, e))
         } else {
             let mut s = self.conns[0].as_ref().unwrap().lock().unwrap();
-            recv_vec(&mut s).expect("worker recv bcast")
+            recv_vec(&mut s).unwrap_or_else(|e| self.wire_panic("recv broadcast", 0, e))
         }
     }
 }

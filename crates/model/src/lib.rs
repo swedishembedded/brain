@@ -31,6 +31,11 @@ pub mod hostmath;
 pub mod int4;
 pub mod int8;
 pub mod moe;
+// wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no
+// business compiling into the browser build, and its `pub use` below broke
+// the wasm build the crate declares support for (the re-exports referenced
+// modules whose declarations WERE gated).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;
@@ -42,11 +47,15 @@ pub mod vit;
 pub mod vlm;
 
 pub use collective::{Collective, HostCollective};
+#[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{federated_average, DdpOptimizer};
+#[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
 pub use grid::{Coord, Grid, LocalGroups};
+#[cfg(not(target_arch = "wasm32"))]
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
+#[cfg(not(target_arch = "wasm32"))]
 pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
 
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};

@@ -159,7 +159,10 @@ impl<M: Model + Send> DataParallel<M> {
                 .iter_mut()
                 .map(|r| s.spawn(move || names.iter().map(|n| r.read_grad(n)).collect::<Vec<_>>()))
                 .collect();
-            grads = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            // resume_unwind, not unwrap: unwrap on a JoinError re-panics with
+            // an opaque "Any { .. }" that buries the replica thread's real
+            // panic message; resuming the original payload preserves it.
+            grads = handles.into_iter().map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))).collect();
         });
 
         // Phase 2: sum grads across replicas (host, parallel across params).

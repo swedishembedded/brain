@@ -12,10 +12,18 @@
 //!
 //! * threads in one process over several GPUs — [`HostCollective`], which stages
 //!   through host RAM (today's 2×P40 box, no NVLink); or
-//! * processes on different machines over a network — a future `NetworkCollective`
-//!   implementing this same trait (ring/tree all-reduce over sockets). brain's
-//!   sharding code never names the transport, so adding compute-node/cluster
-//!   support is a new `Collective` impl, not a rewrite.
+//! * processes on different machines over a network —
+//!   [`crate::netcollective::NetworkCollective`], the coordinator-star TCP
+//!   transport behind this same trait. brain's sharding code never names the
+//!   transport, so a future ring/tree all-reduce is a new `Collective` impl,
+//!   not a rewrite.
+//!
+//! KNOWN GAP (audit F34): this trait has NO error channel — every op returns
+//! the data directly, so a transport that can fail (TCP) can only panic the
+//! rank on a wire error. Widening the ops to `Result` (and threading that
+//! through `distributed`/`parallel`/`grid` and `crates/federated`) is real
+//! cross-crate follow-up work; until then `NetworkCollective`'s panics carry
+//! rank/peer/op context.
 //!
 //! Ops are the standard set: `all_reduce` (sum, everyone gets the total),
 //! `all_gather` (concat in rank order), `reduce_scatter` (sum then each rank

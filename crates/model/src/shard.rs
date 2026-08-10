@@ -402,13 +402,17 @@ impl<M: Shardable> Pipeline<M> {
                     for mb in 0..m {
                         stage.set_batch(clone_batch(&mbs[mb]));
                         if let Some(rx) = &fin {
-                            let input = rx.recv().unwrap();
+                            // A closed channel here means the NEIGHBOUR stage
+                            // died — a cascade, not the root cause. Say so,
+                            // instead of a bare RecvError unwrap that buries
+                            // the first stage's real panic among p-1 copies.
+                            let input = rx.recv().unwrap_or_else(|_| panic!("stage {s}: upstream stage terminated mid-forward (cascade — see the first stage panic for the root cause)"));
                             stage.write_in_res(&input);
                             stash[mb] = Some(input);
                         }
                         let loss = stage.run_forward_stage();
                         match &fout {
-                            Some(tx) => tx.send(stage.read_out_res()).unwrap(),
+                            Some(tx) => tx.send(stage.read_out_res()).unwrap_or_else(|_| panic!("stage {s}: downstream stage terminated mid-forward (cascade — see the first stage panic for the root cause)")),
                             None => total += loss.expect("head stage returns a loss"),
                         }
                     }
@@ -420,18 +424,29 @@ impl<M: Shardable> Pipeline<M> {
                         }
                         stage.run_forward_stage(); // re-materialise activations
                         if let Some(rx) = &bin {
-                            let d = rx.recv().unwrap();
+                            let d = rx.recv().unwrap_or_else(|_| panic!("stage {s}: downstream stage terminated mid-backward (cascade — see the first stage panic for the root cause)"));
                             stage.write_out_dres(&d);
                         }
                         stage.run_backward_stage();
                         if let Some(tx) = &bout {
-                            tx.send(stage.read_in_dres()).unwrap();
+                            tx.send(stage.read_in_dres()).unwrap_or_else(|_| panic!("stage {s}: upstream stage terminated mid-backward (cascade — see the first stage panic for the root cause)"));
                         }
                     }
                     total
                 }));
             }
-            handles.into_iter().map(|h| h.join().unwrap()).sum::<f32>()
+            // resume_unwind the FIRST failed stage's own payload (stage order)
+            // rather than unwrap's opaque re-panic; the cascade messages above
+            // mark every secondary failure as such.
+            let results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+            let mut total = 0.0f32;
+            for r in results {
+                match r {
+                    Ok(v) => total += v,
+                    Err(p) => std::panic::resume_unwind(p),
+                }
+            }
+            total
         })
     }
 
