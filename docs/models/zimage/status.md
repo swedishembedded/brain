@@ -123,6 +123,16 @@ memory pressure, a single physical GPU) that only the end-to-end run against
 the real ~31 GB checkpoint on this real box could surface. Regression tests
 were added for each afterward so they can't silently regress.
 
+**fp32 stress case, same box:** `--precision fp32` fails immediately and
+cleanly — `need 2 discrete GPUs, found 0` (`backend-wgpu`) — because
+`ZImageDitShard` (the fp32 engine) is structurally 2-discrete-GPU-only and
+this box has exactly one *integrated* GPU. This is an honest, gate-worthy
+result, not a bug: it is a real architectural requirement, not a memory-fit
+question the tiering layer could route around, and no attempt was made here
+to add the single-GPU streaming fp32 DiT capability the design plan named as
+a separate, larger follow-up (weight-windowing across a scheduled block
+sequence, `crates/weightset`, not built this session).
+
 ## Measured (quoted from code/docs)
 
 - int8 6B fits **one 24 GB P40** (~6 GB of weights), no sharding (`int8.rs`,
