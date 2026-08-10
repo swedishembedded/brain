@@ -285,6 +285,13 @@ mod native_facade {
         /// are per model/stage by construction (`share`/`new_like` start fresh
         /// counters), so these are per-device, per-model numbers.
         counters: Mutex<crate::cost::CostReport>,
+        /// Whether `submit` folds steps into `counters` at all. OFF by default:
+        /// the online tally is a mutex lock + a ~110-arm string match PER
+        /// DISPATCH, which a production decode loop must not pay for a ledger
+        /// nothing reads. Armed by [`Gpu::reset_ops_counters`] — the call every
+        /// measuring consumer (flops CLI, flops tests, benches) already makes
+        /// before its measured run, so measurement flows are unchanged.
+        cost_enabled: std::sync::atomic::AtomicBool,
         /// Active transparent kernel upgrades for THIS device:
         /// `(registered slot, faster slot, thread multiplier)`. Usually empty;
         /// see [`crate::upgrade`] for what qualifies and why the seam exists.
@@ -296,7 +303,7 @@ mod native_facade {
             // Per handle, once: the policy is a pure function of names + caps,
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
-            Gpu { inner, names, counters: Mutex::new(Default::default()), upgrades }
+            Gpu { inner, names, counters: Mutex::new(Default::default()), cost_enabled: std::sync::atomic::AtomicBool::new(false), upgrades }
         }
 
         fn kernel_names(kernels: &[(&str, &str)]) -> Arc<Vec<String>> {
@@ -678,7 +685,10 @@ mod native_facade {
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
-            if !steps.is_empty() {
+            // Only when armed (see `cost_enabled`): tallying is a mutex lock
+            // plus a per-dispatch string match — measurement machinery, not a
+            // cost every production decode step should pay.
+            if !steps.is_empty() && self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                 crate::cost::tally(&mut ctr, &self.names, steps);
             }
@@ -696,22 +706,38 @@ mod native_facade {
             r
         }
 
-        /// ONLINE counters: everything submitted through THIS handle since
-        /// creation (or the last [`Gpu::reset_ops_counters`]). One handle is one
+        /// ONLINE counters: everything submitted through THIS handle since the
+        /// last [`Gpu::reset_ops_counters`] — which is also what ARMS the
+        /// tally (it is off by default; see `cost_enabled`). One handle is one
         /// device context, so a sharded pipeline reads per-stage numbers from
         /// each stage's handle.
         pub fn ops_counters(&self) -> crate::cost::CostReport {
             self.counters.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
 
-        /// Reset the online counters (e.g. after warm-up, before a measured run).
+        /// Reset the online counters and ENABLE per-submit tallying on this
+        /// handle (after warm-up, before a measured run — the call every
+        /// measuring consumer already makes first). Tallying starts disabled
+        /// so production serving never pays for a ledger nothing reads.
         pub fn reset_ops_counters(&self) {
+            self.cost_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
             *self.counters.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         }
 
         /// The registered name of pipeline slot `kind` on this handle.
         pub fn kernel_name(&self, kind: usize) -> Option<&str> {
             self.names.get(kind).map(|s| s.as_str())
+        }
+
+        /// The name of the pipeline a dispatch of slot `kind` PHYSICALLY runs
+        /// on this device — the redirected slot's name when a transparent
+        /// [`crate::upgrade`] applies, otherwise `kind`'s own name. Backend
+        /// device-timing maps ([`Gpu::kernel_times`]) are keyed by physical
+        /// names, so profile attribution translates through this; everything
+        /// else keeps seeing the caller's own index space (see `step`'s doc).
+        pub fn physical_kernel_name(&self, kind: usize) -> Option<&str> {
+            let (k, _) = crate::upgrade::apply(&self.upgrades, kind, 1);
+            self.names.get(k).map(|s| s.as_str())
         }
 
         /// The pipeline slot a kernel name occupies on this handle, or `None`
@@ -753,6 +779,9 @@ mod wasm_facade {
         inner: WgpuBackend,
         names: Vec<String>,
         counters: Mutex<crate::cost::CostReport>,
+        /// See the native facade: online tallying is off until
+        /// `reset_ops_counters` arms it.
+        cost_enabled: std::sync::atomic::AtomicBool,
         /// See the native facade / [`crate::upgrade`].
         upgrades: Vec<(usize, usize, u32)>,
     }
@@ -766,7 +795,7 @@ mod wasm_facade {
             let inner = WgpuBackend::new_async(kernels).await;
             let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
             let upgrades = crate::upgrade::resolve(&names, &Backend::caps(&inner));
-            Gpu { inner, names, counters: Mutex::new(Default::default()), upgrades }
+            Gpu { inner, names, counters: Mutex::new(Default::default()), cost_enabled: std::sync::atomic::AtomicBool::new(false), upgrades }
         }
 
         pub fn storage(&self, n: u64) -> DeviceBuffer {
@@ -806,7 +835,8 @@ mod wasm_facade {
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
-            if !steps.is_empty() {
+            // Off until armed — see the native facade's `submit`.
+            if !steps.is_empty() && self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                 crate::cost::tally(&mut ctr, &self.names, steps);
             }
@@ -825,8 +855,9 @@ mod wasm_facade {
             self.counters.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
 
-        /// Reset the online counters.
+        /// Reset the online counters and arm tallying — see the native facade.
         pub fn reset_ops_counters(&self) {
+            self.cost_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
             *self.counters.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         }
 

@@ -389,15 +389,27 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         gpu.set_kernel_timing(false);
         t
     });
-    if let Some(d) = &device_times {
+    // An EMPTY timing map means the backend claimed timing but recorded
+    // nothing — treating it as device-timed would zero every row and render
+    // each share as NaN%. Fall through to the host-timed path instead.
+    if let Some(d) = device_times.as_ref().filter(|d| !d.is_empty()) {
         let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
         for (k, start, len) in &gs {
             accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], 0.0);
         }
         let mut rows = finish_rows(gpu, per);
         // Overwrite the (unused) host times with the measured device ones.
+        // Rows carry the CALLER's kernel name, but the backend's timing map is
+        // keyed by the PHYSICAL pipeline that ran — for an upgrade-redirected
+        // kernel (e.g. max_abs_row -> max_abs_rows) those differ, and the
+        // caller-name lookup silently reported 0 ms for the redirected kernel
+        // while inflating every other row's share. Translate through the
+        // upgrade map first. (If two caller slots redirect to one physical
+        // kernel their combined time lands on each row — a visible
+        // over-attribution rather than an invisible zero.)
         for r in rows.iter_mut() {
-            if let Some((secs, calls)) = d.get(&r.name) {
+            let physical = gpu.kernel_index(&r.name).and_then(|k| gpu.physical_kernel_name(k)).unwrap_or(r.name.as_str());
+            if let Some((secs, calls)) = d.get(physical) {
                 r.secs = *secs;
                 r.calls = *calls as usize;
             } else {
@@ -405,18 +417,22 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
             }
         }
         rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
-        let summed = rows.iter().map(|r| r.secs).sum();
+        let summed: f64 = rows.iter().map(|r| r.secs).sum();
         let fully_covered = rows.iter().all(|r| r.covered);
-        return PassProfile {
-            label: label.to_string(),
-            total_secs: total,
-            dispatches: steps.len(),
-            rows,
-            summed_secs: summed,
-            groups: gs.len(),
-            fully_covered,
-            device_timed: true,
-        };
+        // A timing map that matched NO row would still divide by zero in every
+        // share — treat that, too, as "no device timing" and use host timing.
+        if summed > 0.0 {
+            return PassProfile {
+                label: label.to_string(),
+                total_secs: total,
+                dispatches: steps.len(),
+                rows,
+                summed_secs: summed,
+                groups: gs.len(),
+                fully_covered,
+                device_timed: true,
+            };
+        }
     }
 
     let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();

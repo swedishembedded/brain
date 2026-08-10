@@ -234,6 +234,24 @@ fn roof_budget() -> std::time::Duration {
 
 static CACHE: Mutex<Option<Roofs>> = Mutex::new(None);
 
+/// Serialises the actual measurement (`ensure`'s cache-miss path): two racing
+/// `ensure` calls used to BOTH probe, each measuring a device contended by the
+/// other, and the loser persisted a too-low roof to disk — permanently
+/// poisoning the denominator every later "%-of-roof" claim divides by (the
+/// crate's own `tests/roofline.rs` explains why that race is not benign and
+/// guarded itself with a mutex production lacked). Never held across the
+/// `CACHE` lock (see `ensure`'s reentrancy note).
+static MEASURE: Mutex<()> = Mutex::new(());
+
+/// One failed measurement is remembered for the process lifetime: the probe
+/// allocates 512 MiB and can take the full `roof_budget()` before concluding
+/// "unprobeable", and re-running it on every later `ensure` call repays that
+/// cost for the same answer. (Per-DEVICE keying of this flag, the cache and
+/// the persist file is real remaining work — it needs a canonical device
+/// identity plumbed through `backend_api::Backend`, which no backend exposes
+/// yet; until then all of this module is process-wide, first-device-wins.)
+static MEASURE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The roofs for this process's device, measuring them once if needed.
 ///
 /// Returns `None` when the device cannot be probed — callers must then print
@@ -274,17 +292,40 @@ pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
     if let Some(r) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
         return Some(r);
     }
+    if MEASURE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None; // already concluded unprobeable this process — see MEASURE_FAILED
+    }
+    // Serialise the miss path: only one thread measures; the others wait and
+    // re-check the cache — measuring a device the winner is saturating would
+    // record (and persist) a contended, too-low roof. This guard is NOT held
+    // while taking the CACHE lock's guard beyond a single statement, so the
+    // known()/caps() reentrancy hazard above cannot involve it.
+    let _measuring = MEASURE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+        return Some(r); // the winner filled it while this thread waited
+    }
     let store = persist::store();
     if let Some(r) = store.as_ref().and_then(|s| s.load()) {
         *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         return Some(r);
     }
-    let r = measure(gpu)?;
+    let Some(r) = measure(gpu) else {
+        MEASURE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    };
     if let Some(s) = store.as_ref() {
         s.save(r);
     }
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
     Some(r)
+}
+
+/// Redirect where measured roofs persist (`None` restores the default
+/// `~/.cache/brain` / `BRAIN_PIPELINE_CACHE_DIR` resolution). A TEST seam:
+/// tests that exercise `ensure()` point this at a temp dir so they never
+/// mutate the developer's real cache — see `tests/roofline.rs`.
+pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {
+    persist::set_dir_override(dir);
 }
 
 /// Whatever has already been measured, without measuring. This is what
@@ -329,22 +370,32 @@ const PER_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// leaves completion state unknown on backends where reuse would not be
 /// safe), so every caller here treats `None` as "abandon this probe."
 ///
+/// Stops repping once `deadline` passes (keeping whatever best it already
+/// timed): the calibration loops used to check their budget only BETWEEN
+/// `best_of` calls, so one call issued just under the wire could legally run
+/// `1 + reps` dispatches, each up to `PER_DISPATCH_TIMEOUT`, past the
+/// deadline — an effectively unbounded overshoot the roofline wall-clock test
+/// could only paper over with slack.
+///
 /// The bracketing is the whole point: `submit` only appends to the pending list
 /// on the wgpu backend, so an unbracketed loop times host-side recording and
 /// reports a rate above the hardware roof (§E.0).
-fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize) -> Option<f64> {
+fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize, deadline: Instant) -> Option<f64> {
     gpu.submit(&[], steps);
     if !gpu.poll_wait_timeout(PER_DISPATCH_TIMEOUT) {
         return None;
     }
     let mut best = f64::INFINITY;
-    for _ in 0..reps {
+    for i in 0..reps {
         let t0 = Instant::now();
         gpu.submit(&[], steps);
         if !gpu.poll_wait_timeout(PER_DISPATCH_TIMEOUT) {
             return None;
         }
         best = best.min(t0.elapsed().as_secs_f64());
+        if i + 1 < reps && Instant::now() >= deadline {
+            break; // budget exhausted mid-call: report what was measured
+        }
     }
     Some(best)
 }
@@ -366,7 +417,7 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
             return None;
         }
         let step = gpu.step(K_FMA, &[&inp, &out], &[FMA_THREADS, iters, c, d], FMA_THREADS);
-        let secs = best_of(gpu, std::slice::from_ref(&step), 3)?;
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3, deadline)?;
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
             let flops = FMA_THREADS as u64 * iters as u64 * FMA_FLOPS_PER_ITER;
             return Some((flops as f64 / secs / 1e9) as f32);
@@ -395,7 +446,7 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
             return None;
         }
         let step = gpu.step(K_DP4A, &[&inp, &out], &[FMA_THREADS, iters, a, b], FMA_THREADS);
-        let secs = best_of(gpu, std::slice::from_ref(&step), 3)?;
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3, deadline)?;
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
             let ops = FMA_THREADS as u64 * iters as u64 * DP4A_OPS_PER_ITER;
             return Some((ops as f64 / secs / 1e9) as f32);
@@ -430,7 +481,7 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
                 )
             })
             .collect();
-        let secs = best_of(gpu, &steps, 3)?;
+        let secs = best_of(gpu, &steps, 3, deadline)?;
         if secs >= MIN_PROBE_SECONDS || passes >= MAX_BW_PASSES {
             let bytes = elems * BW_BYTES_PER_ELEM * passes as u64;
             return Some((bytes as f64 / secs / 1e9) as f32);
@@ -448,6 +499,18 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
 mod persist {
     use super::Roofs;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Process-local override of the persist directory. Set via
+    /// [`super::set_cache_dir`] — primarily a TEST seam: without it, any test
+    /// that reaches `ensure()` writes the developer's real `~/.cache/brain/`
+    /// (state outside the repo), and the only alternative was mutating
+    /// process-wide env vars from test threads.
+    static DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub fn set_dir_override(dir: Option<PathBuf>) {
+        *DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+    }
 
     pub struct RoofStore {
         path: PathBuf,
@@ -465,6 +528,9 @@ mod persist {
     }
 
     fn cache_dir() -> Option<PathBuf> {
+        if let Some(d) = DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Some(d);
+        }
         if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
             return Some(d.into());
         }

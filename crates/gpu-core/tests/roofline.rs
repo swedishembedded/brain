@@ -113,10 +113,19 @@ fn caps_expose_the_roofs_only_after_something_measured_them() {
         return;
     }
     let _probe = probe_lock();
+    // `ensure` persists what it measures — point that at a scratch dir so a
+    // TEST never writes the developer's real ~/.cache/brain (state outside
+    // the repo). This is the only test in the file that calls the persisting
+    // path on a probeable device.
+    let scratch = std::env::temp_dir().join(format!("brain-roofline-test-{}", std::process::id()));
+    roof::set_cache_dir(Some(scratch.clone()));
     let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
     // `ensure` is the only thing that may run probe kernels; reading caps must
     // never have that side effect.
-    let Some(r) = roof::ensure(&gpu) else {
+    let r = roof::ensure(&gpu);
+    roof::set_cache_dir(None);
+    std::fs::remove_dir_all(&scratch).ok();
+    let Some(r) = r else {
         return;
     };
     let caps = gpu.caps();
@@ -168,9 +177,12 @@ fn measure_is_bounded_by_the_roof_budget_even_if_a_rung_stalls() {
     let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
     let t0 = std::time::Instant::now();
     let _ = roof::measure(&gpu); // Some() or None both fine -- only the bound matters
-    // Default budget is 10s per loop, up to 4 loops (compute/bandwidth/cache/int8):
-    // a generous multiple leaves slack for scheduling jitter without re-admitting
-    // an effectively-unbounded wait.
+    // Default budget is 10s per loop, up to 4 loops (compute/bandwidth/cache/int8),
+    // and `best_of` itself now stops repping once its loop's deadline passes (it
+    // used to be checked only BETWEEN calls, so one call started just under the
+    // wire could legally run 4 more 15s-bounded dispatches past it). A generous
+    // multiple still leaves slack for scheduling jitter without re-admitting an
+    // effectively-unbounded wait.
     let elapsed = t0.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(60),

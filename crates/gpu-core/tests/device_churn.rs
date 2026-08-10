@@ -38,6 +38,7 @@ fn building_and_dropping_devices_in_sequence_does_not_exhaust_the_driver() {
 /// per grid point; if the answer differs from the sequential case, the fault is
 /// concurrently-live devices rather than churn.
 #[test]
+#[ignore = "diagnostic, assertion-free: builds 12 live devices and only eprintln!s the count -- run by hand when investigating driver exhaustion, not in the default lane"]
 fn building_devices_while_holding_the_previous_ones_does_not_exhaust_the_driver() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
@@ -102,6 +103,7 @@ fn devices_that_did_real_work_can_still_be_rebuilt() {
 /// narrows the remaining theory to driver-side teardown/reclaim timing, not
 /// a hard one-shot-per-process cap.
 #[test]
+#[ignore = "diagnostic, assertion-free: 6x1.5s sleeps to characterise driver teardown timing, records a streak it never asserts on -- a lab-notebook entry (kept for its measured findings above), not a gate"]
 fn churn_with_delay_between_devices_extends_but_does_not_fix_the_streak() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
