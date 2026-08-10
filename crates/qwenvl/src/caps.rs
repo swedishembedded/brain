@@ -98,26 +98,7 @@ pub fn manifest() -> Manifest {
     )
 }
 
-/// Same extraction `omni::caps::last_user_text`/`resident_mock::last_user_text`
-/// use — kept in sync deliberately, all three exist because OpenAI/Anthropic
-/// always send `messages`, never a bare `prompt`.
-fn last_user_text(inv: &Invocation) -> String {
-    if let Some(s) = inv.get_str("messages") {
-        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(&s) {
-            for m in arr.iter().rev() {
-                if m.get("role").and_then(|v| v.as_str()) == Some("user") {
-                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
-                        return c.to_string();
-                    }
-                }
-            }
-            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
-                return c.to_string();
-            }
-        }
-    }
-    inv.get_str("prompt").unwrap_or_default()
-}
+use capability::last_user_text;
 
 struct Resident {
     weights: String,

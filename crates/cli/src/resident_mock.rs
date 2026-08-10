@@ -245,25 +245,10 @@ fn sleep_cancellable(ms: u64, cancel: &capability::CancelToken) -> bool {
     cancel.is_cancelled()
 }
 
-/// The last `user`-role message's text (falling back to the last message's content,
-/// then the `prompt` param) — what the deterministic reply echoes.
-fn last_user_text(inv: &Invocation) -> String {
-    if let Some(s) = inv.get_str("messages") {
-        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {
-            for m in arr.iter().rev() {
-                if m.get("role").and_then(|v| v.as_str()) == Some("user") {
-                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
-                        return c.to_string();
-                    }
-                }
-            }
-            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
-                return c.to_string();
-            }
-        }
-    }
-    inv.get_str("prompt").unwrap_or_default()
-}
+/// The last `user`-role message's text — the shared
+/// `capability::last_user_text` extraction (what the deterministic reply
+/// echoes); this used to be one of three hand-synced copies.
+use capability::last_user_text;
 
 /// The stop sequences (the handler passes them as a JSON-array string), or empty.
 fn parse_stop(inv: &Invocation) -> Vec<String> {

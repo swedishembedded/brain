@@ -54,7 +54,7 @@ use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::config::OmniConfig;
 use crate::generate::{generate_greedy, generate_greedy_multimodal};
@@ -113,30 +113,10 @@ pub fn manifest() -> Manifest {
     )
 }
 
-/// The last user turn from a flattened `messages` JSON array
-/// (`[{"role":...,"content":...}, ...]`), or `prompt` if `messages` is
-/// absent/unparseable — identical extraction to `crate::resident_mock`'s
-/// `last_user_text` (kept in sync deliberately: both exist because
-/// OpenAI/Anthropic always send `messages`, never a bare `prompt`, so this
-/// is the ONLY path real HTTP traffic exercises; `prompt` is a convenience
-/// for D-Bus/direct callers).
-pub fn last_user_text(inv: &Invocation) -> String {
-    if let Some(s) = inv.get_str("messages") {
-        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {
-            for m in arr.iter().rev() {
-                if m.get("role").and_then(|v| v.as_str()) == Some("user") {
-                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
-                        return c.to_string();
-                    }
-                }
-            }
-            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
-                return c.to_string();
-            }
-        }
-    }
-    inv.get_str("prompt").unwrap_or_default()
-}
+/// The shared messages-array → last-user-turn extraction — hoisted to
+/// `capability::last_user_text` (this was one of three hand-synced copies);
+/// re-exported so existing `omni::caps::last_user_text` callers keep working.
+pub use capability::last_user_text;
 
 /// A loaded Thinker, ready to generate — real weights streamed on demand
 /// from `reader`, not resident. `embed_table`/`lm_head` are the two tensors

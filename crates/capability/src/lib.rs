@@ -371,6 +371,35 @@ impl Invocation {
     }
 }
 
+/// The last user turn from a flattened `messages` JSON array
+/// (`[{"role":...,"content":...}, ...]`), falling back to the last message's
+/// content, then the bare `prompt` param.
+///
+/// This is the ONLY path real OpenAI/Anthropic HTTP traffic exercises (both
+/// chat handlers always populate `messages`, never a bare `prompt`; `prompt`
+/// is a convenience for D-Bus/direct callers). It lives here ONCE — it used
+/// to be copy-pasted character-for-character into omni, qwenvl and the mock
+/// resident, each copy annotated "kept in sync deliberately"; per the
+/// hoist-and-migrate policy a shared extraction cannot silently disagree
+/// between models the way three hand-synced copies can.
+pub fn last_user_text(inv: &Invocation) -> String {
+    if let Some(s) = inv.get_str("messages") {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {
+            for m in arr.iter().rev() {
+                if m.get("role").and_then(|v| v.as_str()) == Some("user") {
+                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
+                        return c.to_string();
+                    }
+                }
+            }
+            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    inv.get_str("prompt").unwrap_or_default()
+}
+
 /// The result of one action call.
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
