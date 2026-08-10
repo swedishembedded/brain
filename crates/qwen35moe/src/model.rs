@@ -979,6 +979,41 @@ pub struct Qwen35 {
     gdn_hist: Vec<DeviceBuffer>,
 }
 
+/// Which per-sequence GQA cache / GDN recurrent state one
+/// [`Qwen35::run_decode_step`] call reads and updates -- introduced so that
+/// ONE `run_decode_step` implementation composes with either:
+///   - [`Qwen35::step`]'s own single persistent sequence (`self.gqa_kcache`/
+///     `self.gqa_vcache`/`self.gdn_state`/`self.gdn_hist`, threaded across
+///     calls exactly as before this struct existed), or
+///   - `crate::serve::Engine`'s paged multi-sequence decode, which owns a
+///     SEPARATE GQA cache + GDN slot per admitted request and must be able to
+///     say "run one decode step, but against THIS request's own state, not
+///     whichever one happens to live on the model struct" -- the real design
+///     problem a paged serving engine adds on top of P11b's single-sequence
+///     `step` (see `crate::serve`'s module doc for the full design).
+///
+/// Every field is indexed by absolute layer index `l` (length
+/// `cfg.n_layers`), with a size-1 dummy buffer at the layer indices that
+/// don't apply to that field -- the SAME "every layer index has a plain
+/// buffer, dummy where irrelevant" convention `Qwen35`'s own
+/// `gqa_kcache`/`gdn_state` fields already use (mirroring
+/// `qwen3::Qwen::new_impl`'s `dummy_layer` idea), so a caller building one of
+/// these for a new sequence can reuse that same construction loop.
+pub(crate) struct DecodeCaches<'a> {
+    /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (dummy at GDN
+    /// indices) -- `model::block::gqa_decode_step`'s own `kcache`/`vcache`.
+    pub gqa_kcache: &'a [DeviceBuffer],
+    pub gqa_vcache: &'a [DeviceBuffer],
+    /// Cache row capacity, shared by every GQA layer's cache in this call
+    /// (one per-sequence capacity, not a per-layer one).
+    pub gqa_cap: u32,
+    /// Per-layer Gated-DeltaNet recurrent `state`/conv `hist` for GDN layers
+    /// (dummy at GQA indices) -- `gdn_recurrent_step`'s `state`,
+    /// `gdn_causal_conv1d_step`'s `hist`.
+    pub gdn_state: &'a [DeviceBuffer],
+    pub gdn_hist: &'a [DeviceBuffer],
+}
+
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, false)
@@ -2317,15 +2352,30 @@ impl Qwen35 {
         );
         let pos = self.dec_pos.get();
         assert!(pos < self.dec_cap, "qwen35moe::step: decode position {pos} exceeds capacity {}", self.dec_cap);
-        let hidden = self.run_decode_step(token_id, pos);
+        // This instance's OWN persistent decode state -- see `DecodeCaches`'s
+        // own doc for why `run_decode_step` takes it as an explicit parameter
+        // rather than reading `self.gqa_kcache`/`self.gdn_state` directly.
+        let caches = DecodeCaches {
+            gqa_kcache: &self.gqa_kcache,
+            gqa_vcache: &self.gqa_vcache,
+            gqa_cap: self.dec_cap,
+            gdn_state: &self.gdn_state,
+            gdn_hist: &self.gdn_hist,
+        };
+        let hidden = self.run_decode_step(token_id, pos, &caches);
         self.dec_pos.set(pos + 1);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
     /// One incremental decode step's full layer stack -- the decode-shaped
     /// (`n=1`) sibling of [`Self::run_forward`]. Returns the final-norm
-    /// hidden state buffer (unread).
-    fn run_decode_step(&self, token_id: u32, pos: u32) -> DeviceBuffer {
+    /// hidden state buffer (unread). `caches` selects WHICH sequence's
+    /// per-layer GQA cache / GDN state this call reads and updates -- see
+    /// [`DecodeCaches`]'s own doc. `pub(crate)` (not `pub`) because the only
+    /// caller outside this module is `crate::serve::Engine`, which drives
+    /// this exact function per admitted request against its own paged/GdnSlot
+    /// resources instead of a single instance-wide decode state.
+    pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
 
@@ -2338,8 +2388,8 @@ impl Qwen35 {
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, 1)]);
 
             let attn_out = match ty {
-                LayerType::Linear => self.layer_gdn_decode_step(l, &xn1),
-                LayerType::Full => self.layer_gqa_decode_step(l, &xn1, pos),
+                LayerType::Linear => self.layer_gdn_decode_step(l, &xn1, &caches.gdn_state[l], &caches.gdn_hist[l]),
+                LayerType::Full => self.layer_gqa_decode_step(l, &xn1, pos, &caches.gqa_kcache[l], &caches.gqa_vcache[l], caches.gqa_cap),
             };
 
             let xmid = g.storage(d as u64);
@@ -2373,7 +2423,12 @@ impl Qwen35 {
     /// since `gdn_recurrent_step` takes no chunk axis. `query`/`key` are
     /// passed UNSCALED (`gdn_recurrent_step` applies `1/sqrt(dk)` itself, see
     /// its doc).
-    fn layer_gdn_decode_step(&self, l: usize, xn1: &DeviceBuffer) -> DeviceBuffer {
+    ///
+    /// `state`/`hist` are THIS call's recurrent state / conv history buffers
+    /// (layer `l`'s slice of whichever [`DecodeCaches`] the caller is
+    /// driving) -- not necessarily `self.gdn_state[l]`/`self.gdn_hist[l]`,
+    /// see [`DecodeCaches`]'s own doc for why.
+    fn layer_gdn_decode_step(&self, l: usize, xn1: &DeviceBuffer, state: &DeviceBuffer, hist: &DeviceBuffer) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -2397,7 +2452,7 @@ impl Qwen35 {
         // exactly mixed_qkv's own layout, so no NLC/NCL conversion is needed.
         let conv_out = g.storage(conv_dim as u64);
         let conv_shape = GdnConvShape { n: 1, c: conv_dim, k: kw };
-        g.submit(&[], &[gdn_causal_conv1d_step(g, &gdn_conv_ids(), &conv_shape, &mixed_qkv, self.w(&p("conv1d.weight")), &self.gdn_hist[l], &conv_out)]);
+        g.submit(&[], &[gdn_causal_conv1d_step(g, &gdn_conv_ids(), &conv_shape, &mixed_qkv, self.w(&p("conv1d.weight")), hist, &conv_out)]);
         let mixed_act = g.storage(conv_dim as u64);
         g.submit(&[], &[g.step(SILU, &[&conv_out, &mixed_act], &[conv_dim], conv_dim)]);
 
@@ -2468,7 +2523,7 @@ impl Qwen35 {
         let out_bh = g.storage((nvh * vhd) as u64);
         g.submit(
             &[],
-            &gdn_recurrent_step(g, &gdn_ids(), &shape, &query_w, &key_w, &value, &g_decay, &beta, &self.gdn_state[l], &scratch, &out_bh),
+            &gdn_recurrent_step(g, &gdn_ids(), &shape, &query_w, &key_w, &value, &g_decay, &beta, state, &scratch, &out_bh),
         );
 
         // 8. Gated RMSNorm (norm before gate, same as prefill).
@@ -2512,7 +2567,13 @@ impl Qwen35 {
     /// qwen35moe-internal precedent to copy verbatim (qwen3's `Qwen` has no
     /// GDN layers and qwen35moe's own prefill path never decodes one position
     /// at a time) -- see this change's final report for that call-out.
-    fn layer_gqa_decode_step(&self, l: usize, xn1: &DeviceBuffer, pos: u32) -> DeviceBuffer {
+    ///
+    /// `kcache`/`vcache`/`cap` are THIS call's KV cache buffers and capacity
+    /// (layer `l`'s slice of whichever [`DecodeCaches`] the caller is
+    /// driving, and that same call's shared per-sequence capacity) -- not
+    /// necessarily `self.gqa_kcache[l]`/`self.gqa_vcache[l]`/`self.dec_cap`,
+    /// see [`DecodeCaches`]'s own doc for why.
+    fn layer_gqa_decode_step(&self, l: usize, xn1: &DeviceBuffer, pos: u32, kcache: &DeviceBuffer, vcache: &DeviceBuffer, cap: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -2567,8 +2628,8 @@ impl Qwen35 {
         );
 
         // Append k/v into this layer's persistent cache and attend over 0..=pos.
-        let scores = g.storage((nh * self.dec_cap) as u64);
-        let probs = g.storage((nh * self.dec_cap) as u64);
+        let scores = g.storage((nh * cap) as u64);
+        let probs = g.storage((nh * cap) as u64);
         let ctx = g.storage(qd as u64);
         g.submit(
             &[],
@@ -2579,12 +2640,12 @@ impl Qwen35 {
                 nkv,
                 hd,
                 pos,
-                self.dec_cap,
+                cap,
                 &q_normed,
                 &k_normed,
                 &v,
-                &self.gqa_kcache[l],
-                &self.gqa_vcache[l],
+                kcache,
+                vcache,
                 &scores,
                 &probs,
                 &ctx,
