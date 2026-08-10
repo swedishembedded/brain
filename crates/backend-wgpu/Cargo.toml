@@ -18,8 +18,8 @@ bytemuck.workspace = true
 # PCI bus id / deviceUUID off the raw Vulkan physical device, which
 # `wgpu::AdapterInfo` does not expose.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wgpu = "29"
-pollster = "0.4"
+wgpu.workspace = true
+pollster.workspace = true
 ash.workspace = true
 
 # Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.

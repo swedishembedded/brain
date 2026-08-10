@@ -16,8 +16,8 @@ brain-kernels.workspace = true
 bytemuck.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wgpu = "29"
-pollster = "0.4"
+wgpu.workspace = true
+pollster.workspace = true
 # The CPU scheduler's parallel primitives (host reductions in offload).
 brain-backend-cpu = { workspace = true }
 

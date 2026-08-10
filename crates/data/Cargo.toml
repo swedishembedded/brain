@@ -23,7 +23,7 @@ brain-checkpoint.workspace = true
 # from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly
 # those three codecs are enabled and nothing else. `imageproc` supplies the
 # shape-drawing primitives.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
+image = { workspace = true, features = ["jpeg", "png", "pnm"] }
 imageproc = { version = "0.25", default-features = false }
 
 [dev-dependencies]

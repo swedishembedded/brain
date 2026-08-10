@@ -30,6 +30,20 @@
 //! `crates/residency` (cross-instance placement) and `crates/weightset`
 //! (within-instance weight residency, checked mid-generation) can depend on
 //! it without depending on each other.
+//!
+//! # Wiring status — read before trusting the name (audit F12)
+//!
+//! Despite the title above, [`MemoryAuthority`]/[`Grant`]/[`Topology`] have
+//! **no production consumer yet**: the LIVE accounting every placement
+//! decision actually runs through is `residency::Budgets` (whose
+//! `set_pool` carries the unified-memory fix), and the only production uses
+//! of this crate are [`PoolId`]/[`HOST_POOL`] (as `Budgets`' pool key type)
+//! and one [`HostProbe::available`] call. The authority half is the
+//! *intended* future single owner — wiring it into residency/weightset (or
+//! folding `Budgets`' pool layer into it) is the open follow-up; until that
+//! lands, changes to `Budgets` are what change behaviour, not changes here.
+//! The `request` transaction is race-free (check+charge under one lock), so
+//! wiring it later does not inherit an over-commit bug.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -414,17 +428,31 @@ impl MemoryAuthority {
     /// Ask for `bytes` on `device`. `tag` is a short label for logging/
     /// observability only (not currently surfaced — reserved for the perf
     /// artifact wiring in a later phase).
+    ///
+    /// The check and the charge happen under ONE `charged` lock: the earlier
+    /// shape computed `headroom()` (locking and releasing the ledger), then
+    /// re-locked to add the charge — two concurrent requests could both pass
+    /// the check and jointly exceed the pool, the exact over-commit this
+    /// authority exists to make impossible.
     pub fn request(&self, device: Device, bytes: u64, _tag: &'static str) -> Result<Grant, Denied> {
         let pool = self.0.topo.pool_of(device);
-        let usable = self.usable(device);
+        // Probe BEFORE taking the ledger lock (probed() takes the memo lock;
+        // never nest the two).
+        let (total, avail) = self.probed(pool);
+        let reserved = *self.0.reserved.get(&pool).unwrap_or(&0);
+        let usable = total.saturating_sub(reserved);
         if bytes > usable {
             return Err(Denied::NeverFits { pool, want: bytes, usable });
         }
-        let headroom = self.headroom(device);
+        let mut charged = self.0.charged.lock().unwrap();
+        let cur = *charged.get(&pool).unwrap_or(&0);
+        // Same formula as `headroom()`, against the ledger value this lock
+        // now protects through the charge below.
+        let headroom = avail.min(total.saturating_sub(cur)).saturating_sub(reserved);
         if bytes > headroom {
             return Err(Denied::WouldExceedPool { pool, want: bytes, headroom });
         }
-        *self.0.charged.lock().unwrap().entry(pool).or_insert(0) += bytes;
+        *charged.entry(pool).or_insert(0) += bytes;
         Ok(Grant { pool, bytes, auth: self.0.clone() })
     }
 

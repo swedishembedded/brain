@@ -16,7 +16,7 @@ brain-stats.workspace = true
 brain-shutdown.workspace = true
 brain-modelref.workspace = true
 serde_json.workspace = true
-anyhow = "1"
-zbus = { version = "5", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+anyhow.workspace = true
+zbus.workspace = true
+tokio.workspace = true
 nix = { version = "0.29", features = ["socket", "mman", "fs", "uio", "ioctl"] }

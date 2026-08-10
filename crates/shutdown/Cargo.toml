@@ -10,4 +10,4 @@ name = "brain_shutdown"
 path = "src/lib.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["signal", "sync", "rt", "macros", "time"] }
+tokio.workspace = true

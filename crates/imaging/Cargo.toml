@@ -32,4 +32,4 @@ brain-events.workspace = true
 # `events::decode_pixels`' "PNG is not supported (no decoder)" fixable.
 # `pnm` is deliberately NOT enabled: P6 has exactly one implementation in this
 # workspace and it is `events::ppm`.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { workspace = true, features = ["jpeg", "png"] }

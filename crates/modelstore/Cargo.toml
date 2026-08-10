@@ -14,5 +14,5 @@ brain-modelref.workspace = true
 brain-checkpoint.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+sha2.workspace = true
+ureq = { workspace = true, features = ["json"] }

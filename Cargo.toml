@@ -5,11 +5,19 @@ members = ["crates/*"]
 # acceleration backend. Keep the default `cargo build` pure-wgpu (the core
 # invariant) by excluding it from the default set; build it explicitly with
 # `cargo build -p brain-vulkan` or via the cli's `vulkan-coopmat` feature.
+#
+# `crates/vulkan` is the ONLY deliberate exclusion. This list is
+# hand-maintained, and a crate silently missing from it is built as a
+# DEPENDENCY but its own tests never run under a bare `cargo test` — which is
+# how omni's actively-developed int8 dual-GPU work went untested by default
+# (audit F37). When adding a crate under crates/, add it here too unless you
+# are excluding it on purpose WITH a comment saying why.
 default-members = [
     "crates/backend-api",
     "crates/backend-wgpu",
     "crates/backend-cpu",
     "crates/backend-vulkan",
+    "crates/wgsl-cpu",
     "crates/gpu-core",
     "crates/kernels",
     "crates/checkpoint",
@@ -26,6 +34,7 @@ default-members = [
     "crates/lfm",
     "crates/qwenvl",
     "crates/qwen-asr",
+    "crates/omni",
     "crates/nemotron",
     "crates/fastvlm",
     "crates/moondream",
@@ -71,6 +80,7 @@ default-members = [
     "crates/t5",
     "crates/flux1",
     "crates/restore",
+    "crates/upscale",
     "crates/unet",
     "crates/controlnet",
     "crates/pulid",
@@ -114,7 +124,6 @@ brain-kernels = { path = "crates/kernels" }
 brain-checkpoint = { path = "crates/checkpoint" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
-brain-autodiff = { path = "crates/autodiff" }
 brain-data = { path = "crates/data" }
 brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
@@ -136,7 +145,6 @@ brain-vae = { path = "crates/vae" }
 brain-dit = { path = "crates/dit" }
 brain-zimage = { path = "crates/zimage" }
 brain-flux2 = { path = "crates/flux2" }
-brain-timeseries = { path = "crates/timeseries" }
 brain-codec = { path = "crates/codec" }
 brain-speaker = { path = "crates/speaker" }
 brain-tts = { path = "crates/tts" }
@@ -197,6 +205,20 @@ brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 
 # Third-party. fp32-only, core-compute-only GPU stack — see crates/kernels.
+# wgpu/pollster: ONE workspace pin for the native GPU stack — the version was
+# previously copied into 6+ crate manifests, where one crate bumping alone
+# would split the workspace across two wgpu majors. The wasm-target wgpu
+# entries ([target.'cfg(target_arch = "wasm32")'.dependencies]) stay explicit
+# in their crates: they need `default-features = false`, which a member cannot
+# apply on top of a defaulted workspace entry.
+wgpu = "29"
+pollster = "0.4"
+# Image codecs, default-features off; each consumer adds exactly the codec
+# features it needs (`features = [...]` on top of a workspace dep is additive).
+image = { version = "0.25", default-features = false }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+sha2 = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

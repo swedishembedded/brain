@@ -88,8 +88,8 @@ brain-clip.workspace = true
 brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.
-ureq = { version = "2", default-features = false, features = ["tls"] }
-sha2 = "0.10"
+ureq.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # Drive a real `apiserve::router()` in-process for the HTTP-level serving
