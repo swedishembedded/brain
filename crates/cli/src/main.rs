@@ -33,6 +33,7 @@ mod npu_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
+mod qwen35moe_cli;
 mod qwen_cli;
 mod resident;
 mod resident_asr;
@@ -623,6 +624,7 @@ fn main() {
         Some("devices") => devices_cli::run_devices(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
+        Some("qwen35moe") => qwen35moe_cli::run_qwen35moe(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
         Some("lfm") => lfm_cli::run_lfm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),
