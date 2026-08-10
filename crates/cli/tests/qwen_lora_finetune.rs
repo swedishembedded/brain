@@ -7,7 +7,7 @@
 //! `brain` binary against a real Qwen3-0.6B checkpoint symlinked into a
 //! scratch model store, and asserts the named adapter lands exactly where
 //! `brain_modelstore::Store` expects to find it -- proving the CLI, the
-//! store layout (M6), and the training core (`qwen::finetune`, M1/M2) are
+//! store layout (M6), and the training core (`qwen3::finetune`, M1/M2) are
 //! actually wired together, not just individually correct.
 //!
 //! Gated on `QWEN3_DIR` (a real Qwen3-0.6B checkpoint dir with

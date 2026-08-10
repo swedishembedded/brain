@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpu_core::Gpu;
-use qwen::Qwen;
+use qwen3::Qwen;
 
 use crate::config::QwenAsrConfig;
 use crate::encoder::{audio_pipelines, AudioEncoder};
@@ -46,7 +46,7 @@ impl Qwen3Asr {
         drop(src); // release the ~7 GB source map before uploading the decoder
         // Inference-only decoder (weights only, no grad/moment state) so the 1.7B
         // model fits in RAM; full-training use goes through a trainable builder.
-        let shard = qwen::Shard::whole(cfg.text.n_layers as usize);
+        let shard = qwen3::Shard::whole(cfg.text.n_layers as usize);
         let mut decoder = Qwen::new_shard(cfg.text.clone(), 1, seq_budget, &dweights, false, shard);
         decoder.enable_mm_splice(audio_row0, n_audio);
         Qwen3Asr { agpu: Gpu::new_cpu(audio_pipelines()), cfg, aweights, decoder, audio_row0, n_audio }
@@ -87,7 +87,7 @@ impl Qwen3Asr {
         drop(src);
         let prompt_len = crate::caps::PROMPT_PREFIX.len() as u32 + n_audio + crate::caps::PROMPT_SUFFIX.len() as u32;
         let seq_budget = prompt_len + max_new + 4;
-        let shard = qwen::Shard::whole(cfg.text.n_layers as usize);
+        let shard = qwen3::Shard::whole(cfg.text.n_layers as usize);
         let mut decoder = Qwen::new_shard(cfg.text.clone(), 1, seq_budget, &dweights, false, shard);
         decoder.enable_mm_splice(audio_row0, n_audio);
         Ok((Qwen3Asr { agpu, cfg, aweights, decoder, audio_row0, n_audio }, n_audio))

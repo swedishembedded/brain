@@ -259,9 +259,9 @@ pub fn check_gpt(seed: u64) -> Report {
 /// (group 2) and a decoupled `head_dim` (8, vs d_model/n_heads = 4). Returns the
 /// report.
 pub fn check_qwen(seed: u64) -> Report {
-    use qwen::{Qwen, QwenConfig};
+    use qwen3::{Qwen, QwenConfig};
     let cfg = QwenConfig::tiny();
-    let init = qwen::init_weights(&cfg, seed);
+    let init = qwen3::init_weights(&cfg, seed);
     let model = Qwen::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
@@ -300,9 +300,9 @@ pub fn check_lfm(seed: u64) -> Report {
 /// adapter (and hence `A`'s gradient) is non-trivial before the FD comparison —
 /// this validates the LoRA forward (`axpy` fusion) and the A/B backward path.
 pub fn check_qwen_lora(seed: u64) -> Report {
-    use qwen::{LoraCfg, Qwen, QwenConfig};
+    use qwen3::{LoraCfg, Qwen, QwenConfig};
     let cfg = QwenConfig { lora: Some(LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() };
-    let init = qwen::init_weights(&cfg, seed);
+    let init = qwen3::init_weights(&cfg, seed);
     let model = Qwen::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
@@ -323,9 +323,9 @@ pub fn check_qwen_lora(seed: u64) -> Report {
 /// (`bias_add`) + backward (`bias_grad` row-sum) and the QK-norm-off routing (q/k
 /// flow straight from the biased projection into RoPE/attention). Returns the report.
 pub fn check_qwen2(seed: u64) -> Report {
-    use qwen::{Qwen, QwenConfig};
+    use qwen3::{Qwen, QwenConfig};
     let cfg = QwenConfig { qk_norm: false, attn_bias: true, ..QwenConfig::tiny() };
-    let init = qwen::init_weights(&cfg, seed);
+    let init = qwen3::init_weights(&cfg, seed);
     let model = Qwen::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
@@ -340,12 +340,12 @@ pub fn check_qwen2(seed: u64) -> Report {
 /// here); the check confirms `rope2d`'s forward and its sign=-1 backward are
 /// correctly wired into the decoder's parameter gradients. Returns the report.
 pub fn check_qwen_mrope(seed: u64) -> Report {
-    use qwen::{Qwen, QwenConfig};
+    use qwen3::{Qwen, QwenConfig};
     let cfg = QwenConfig::tiny();
     let (hd, t) = (cfg.head_dim as usize, 6usize);
     let n = 2 * t; // b·t
     let theta = cfg.rope_theta;
-    let init = qwen::init_weights(&cfg, seed);
+    let init = qwen3::init_weights(&cfg, seed);
     let mut model = Qwen::new(cfg, 2, 6, &init);
     model.enable_mrope();
 
@@ -382,10 +382,10 @@ pub fn check_qwen_mrope(seed: u64) -> Report {
 /// non-trivial path exercising the full splice + decoder graph. Returns a
 /// one-entry report ("img_embeds").
 pub fn check_vlm_splice(seed: u64) -> Report {
-    use qwen::{Qwen, QwenConfig, IGNORE};
+    use qwen3::{Qwen, QwenConfig, IGNORE};
     let cfg = QwenConfig::tiny();
     let d = cfg.d_model as usize;
-    let init = qwen::init_weights(&cfg, seed);
+    let init = qwen3::init_weights(&cfg, seed);
     let mut model = Qwen::new(cfg, 2, 6, &init);
     let (row0, n_rows) = (1u32, 2u32);
     model.enable_mm_splice(row0, n_rows);
@@ -648,11 +648,11 @@ pub fn check_flux2(seed: u64) -> Report {
 /// `model::moe::moe_layer_bwd` (routed experts + softmax router) alongside a
 /// HAND-DERIVED sigmoid-gated shared-expert backward (no `model::moe` helper
 /// exists for that composition) — all through the blanket `CheckModel for
-/// model::Model` impl, since [`qwen35::model::Qwen35`] implements that trait
+/// model::Model` impl, since [`qwen35moe::model::Qwen35`] implements that trait
 /// directly (no bespoke test harness needed, unlike a model whose backward
 /// only exists behind a lower-level API).
 ///
-/// Smaller than [`qwen35::config::Qwen35Config::tiny`] (`n_layers: 8, n_experts: 6`)
+/// Smaller than [`qwen35moe::config::Qwen35Config::tiny`] (`n_layers: 8, n_experts: 6`)
 /// on purpose: `directional_check` costs `O(n_dirs)` forward passes PER
 /// PARAMETER TENSOR, and this hybrid config's per-layer tensor count is large
 /// (every routed expert is 3 own-named tensors) — `n_layers: 4` still exercises
@@ -662,7 +662,7 @@ pub fn check_flux2(seed: u64) -> Report {
 /// hard top-k selection boundary finite differences cannot see through — the
 /// same mitigation `check_moe`/`check_glm` already use, not a new pattern.
 /// `t: 12` with `tiny()`'s own `linear_conv_kernel_dim`-derived GDN shape picks
-/// chunk size 4 (`qwen35::model::gdn_chunk_size(12) == 4`), a genuine 3-chunk
+/// chunk size 4 (`qwen35moe::model::gdn_chunk_size(12) == 4`), a genuine 3-chunk
 /// recurrence — smaller than `tiny()`'s own `t: 24` (chunk 8, 3 chunks) at the
 /// same chunk COUNT, for less FD compute. `b: 1` (a single sequence) is enough
 /// to exercise every op; nothing here is batch-shaped in a way `b: 2` would add
@@ -673,7 +673,7 @@ pub fn check_qwen35(seed: u64) -> Report {
 }
 
 /// **Why `in_proj_qkv.weight`/`conv1d.weight` get a bigger init than
-/// [`qwen35::init::init_weights`]'s standard `std=0.02`.** At `tiny()`'s tiny
+/// [`qwen35moe::init::init_weights`]'s standard `std=0.02`.** At `tiny()`'s tiny
 /// `d_model`, the standard init compounds through THREE cascaded small-scale
 /// stages before Gated DeltaNet's L2-norm (`in_proj_qkv`'s matmul, then a
 /// depthwise causal conv1d that only sums `kernel=4` terms per output
@@ -695,7 +695,7 @@ pub fn check_qwen35(seed: u64) -> Report {
 /// itself is confirmed to vary correctly (-0.001 to -157) under the same
 /// perturbations, and the chunked recurrence's own raw output `out_cm` reads
 /// back at ~1e-11 regardless. This is a test-harness numerical-conditioning
-/// gap, not a `model::gdn` or `qwen35::model` wiring bug: the standalone
+/// gap, not a `model::gdn` or `qwen35moe::model` wiring bug: the standalone
 /// `model::gdn` tests (`crates/model/tests/gdn_chunk_{fwd,bwd}.rs`) feed
 /// `q`/`k`/`v`/`g`/`beta` directly at `std=1.0` with no upstream conv chain,
 /// so they never hit this collapse; qwen35's INTEGRATED gradcheck goes
@@ -704,11 +704,11 @@ pub fn check_qwen35(seed: u64) -> Report {
 /// two GDN-specific tensors (everything else keeps the standard init) was
 /// confirmed to restore real, non-degenerate FD sensitivity to `A_log`
 /// (`check_qwen35_a_log_elementwise`) without needing to touch
-/// `qwen35::init`'s production init or `model::gdn`'s `eps`, neither of
+/// `qwen35moe::init`'s production init or `model::gdn`'s `eps`, neither of
 /// which is wrong for the REAL model's much wider `d_model`.
-fn qwen35_gradcheck_harness(seed: u64) -> qwen35::model::Qwen35 {
-    use qwen35::config::Qwen35Config;
-    use qwen35::model::Qwen35;
+fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
+    use qwen35moe::config::Qwen35Config;
+    use qwen35moe::model::Qwen35;
     let cfg = Qwen35Config { n_layers: 4, n_experts: 3, top_k: 3, ..Qwen35Config::tiny() };
     let mut init = <Qwen35 as model::Model>::init_weights(&cfg, seed);
     let mut conv_rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);

@@ -32,7 +32,7 @@ pub fn run_startup(spec: &SynthSpec, runs: usize, opt: &Options) -> Result<Artif
     // The first engine stays alive as the device parent: warm runs build on
     // ITS device (`Engine::from_map_on`), which is the warm-start path a
     // serving process actually uses.
-    let mut parent: Option<qwen::serve::Engine> = None;
+    let mut parent: Option<qwen3::serve::Engine> = None;
     for i in 0..runs.max(1) {
         let mut w = startup::Watch::new();
         // Weight synthesis stands in for reading a checkpoint; it is the same
@@ -87,7 +87,7 @@ pub fn run_cancel(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
 
     let (cfg, weights) = spec.build_weights();
     let eng = spec.build_engine(cfg, &weights);
-    let mut sched = qwen::serve::Scheduler::new(eng, 8);
+    let mut sched = qwen3::serve::Scheduler::new(eng, 8);
 
     let mut report = cancel::Report::default();
     let max_new = opt.output_override.unwrap_or(64).max(8);
@@ -98,11 +98,11 @@ pub fn run_cancel(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     for stage in [cancel::Stage::Queued, cancel::Stage::Prefill, cancel::Stage::Decode] {
         let keep: Vec<u64> = (0..2)
             .map(|_| {
-                sched.submit(qwen::serve::Request { prompt: prompt.clone(), max_new: 4, eos: None })
+                sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new: 4, eos: None })
             })
             .collect();
         let victim =
-            sched.submit(qwen::serve::Request { prompt: prompt.clone(), max_new, eos: None });
+            sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new, eos: None });
 
         // Advance to the stage we want to cancel in.
         let steps = match stage {
@@ -182,7 +182,7 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
     let eng = spec.build_engine(cfg, &weights);
     let pool_blocks = eng.free_blocks_for_perf();
     let eng_cap = eng.max_seq_len();
-    let mut sched = qwen::serve::Scheduler::new(eng, 8);
+    let mut sched = qwen3::serve::Scheduler::new(eng, 8);
 
     let mut acct = kvcache::Accounting { pool_blocks, usable_blocks: pool_blocks, ..Default::default() };
 
@@ -201,7 +201,7 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
         let prompt: Vec<u32> = (0..per_req.saturating_sub(max_new).max(8))
             .map(|k| ((k + i) % 100) as u32 + 1)
             .collect();
-        ids.push(sched.submit(qwen::serve::Request { prompt, max_new, eos: None }));
+        ids.push(sched.submit(qwen3::serve::Request { prompt, max_new, eos: None }));
     }
 
     // Drive to completion, recording every iteration where a request was ready
@@ -230,7 +230,7 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
         ("kv_stalls".into(), json!(acct.kv_stalls)),
     ]);
     art.notes = Some(
-        "The engine DOES have a prefix cache (`qwen::serve::Engine`'s `PrefixCache`, \
+        "The engine DOES have a prefix cache (`qwen3::serve::Engine`'s `PrefixCache`, \
          exercised by `serve.rs`'s own tests and surfaced as kv_prefix_hit_rate/ \
          kv_prefix_cached_blocks via PagedLlmTarget::counters) -- but THIS scenario's \
          synthetic workload submits a flat concurrent burst with no shared prompt \
@@ -467,7 +467,7 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     {
         let t = Instant::now();
         let r = std::panic::catch_unwind(|| {
-            qwen::serve::Engine::load("/nonexistent/brain-fault-inject.safetensors", 16, 32, 2, 8, 16, false, false)
+            qwen3::serve::Engine::load("/nonexistent/brain-fault-inject.safetensors", 16, 32, 2, 8, 16, false, false)
         });
         report.injections.push(faults::Injection {
             fault: faults::Fault::WeightReadFailure.name(),
@@ -489,7 +489,7 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     {
         let (cfg, weights) = spec.build_weights();
         let mut eng = spec.build_engine(cfg, &weights);
-        qwen::serve::fault::arm_kernel_failure();
+        qwen3::serve::fault::arm_kernel_failure();
         let t = Instant::now();
         let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eng.generate_greedy(&[vec![1u32, 2, 3]], 4, None)

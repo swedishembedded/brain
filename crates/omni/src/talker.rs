@@ -11,13 +11,13 @@
 //! `expert_output + sigmoid(shared_expert_gate(x)) * shared_expert(x)`.
 //!
 //! Not built by converting `tts::talker`'s existing `TalkerModel` (the
-//! Qwen3-TTS dense Talker, wrapping [`qwen::Qwen`] with `tie_embeddings =
+//! Qwen3-TTS dense Talker, wrapping [`qwen3::Qwen`] with `tie_embeddings =
 //! false`) to MoE: that model is a genuinely different, already-shipping
-//! architecture, and `qwen::Qwen` has the same missing MoE seam
+//! architecture, and `qwen3::Qwen` has the same missing MoE seam
 //! `crate::thinker`'s module doc explains for the Thinker case. This module
 //! is [`crate::thinker`]'s sibling, composed from the same
 //! `model::block`/`model::moe` primitives, for the same "validate against
-//! real weights now, give `qwen::Qwen` the seam later" reasoning.
+//! real weights now, give `qwen3::Qwen` the seam later" reasoning.
 //!
 //! Not this module's concern (same seam contract as `crate::thinker`):
 //! `accept_hidden_layer` (Talker consumes Thinker's hidden state at a given

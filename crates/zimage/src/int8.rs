@@ -10,7 +10,7 @@
 //! 6B model in int8 is ~6 GB — it fits a single 24 GB P40, no sharding.
 //!
 //! The weight quantizer itself is the engine-wide shared implementation
-//! (`model::int8` — also used by `qwen::q8` and `flux2`); this module re-exports
+//! (`model::int8` — also used by `qwen3::q8` and `flux2`); this module re-exports
 //! it so zimage callers keep their path.
 
 pub use model::int8::quantize_weight;

@@ -6,7 +6,7 @@
 //! needed to produce the file.
 
 use onnx::builder::GraphBuilder;
-use qwen::config::QwenConfig;
+use qwen3::config::QwenConfig;
 
 /// Build the fp32 ONNX decoder for `seq_len` and return `(bytes, config)`.
 pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {

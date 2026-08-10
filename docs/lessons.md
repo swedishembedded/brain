@@ -418,15 +418,15 @@ that never actually closes the save→load round trip is not testing the
 feature.**
 
 The fix is a two-line `Option` round-trip
-(`crates/qwen/src/config.rs`), but the gate that would have caught it needed
+(`crates/qwen3/src/config.rs`), but the gate that would have caught it needed
 three things together, none optional: (1) take a few real optimizer steps so
 `B ≠ 0` (a fresh LoRA init is `B = 0`, making the delta zero regardless of
 whether it loads — see #4 on degenerate test setups hiding a whole bug
 class), (2) **save, then load in a fresh process/struct** rather than
 comparing against the live trained model still sitting in memory, (3) assert
 the reloaded logits *differ from the base* by a real margin, not merely
-"didn't get worse". `crates/qwen/tests/lora_roundtrip.rs` does all three;
-`crates/qwen/tests/lora_learning_gate.rs` (Gate A, `docs/guides/training.md`)
+"didn't get worse". `crates/qwen3/tests/lora_roundtrip.rs` does all three;
+`crates/qwen3/tests/lora_learning_gate.rs` (Gate A, `docs/guides/training.md`)
 goes one further and reintroduces this exact defect on purpose as its own
 verification that the gate has teeth, rather than trusting the story that it
 would have caught it.
@@ -434,7 +434,7 @@ would have caught it.
 ## 24. A benchmark that measures a path no request takes is a healthy number about the wrong thing
 
 Every serving benchmark before `perf::targets::HttpTarget` drove
-`qwen::serve::Scheduler`/`residency::Executor` directly — real kernels, real
+`qwen3::serve::Scheduler`/`residency::Executor` directly — real kernels, real
 batching, genuinely fast. Meanwhile `crates/cli/src/resident_llm.rs`, the
 ONLY code an actual `/v1/chat/completions` request ever reaches, called a
 single-sequence decode loop that touched none of it: no paged KV, no
@@ -822,7 +822,7 @@ many commits this shipped without one.
 
 ## 35. The "2x resident overhead" was real, but it was wgpu's, not the hardware's
 
-§14 and `crates/qwen/src/q8.rs` both stated the fact as a property of
+§14 and `crates/qwen3/src/q8.rs` both stated the fact as a property of
 non-ReBAR Pascal: "each storage buffer carries ~2x resident overhead." That
 was measured correctly but attributed too broadly — it is a property of
 **the wgpu backend's Vulkan HAL on this hardware**, not of the hardware or of
@@ -849,7 +849,7 @@ deltas around known allocations, P40 ×2):
 
 **The fix is `--device vulkan`, not a wgpu-level change**, and it is
 model-agnostic: every model that quantizes to int8 for capacity reasons
-(`crates/qwen/src/q8.rs`, `zimage`, `flux2`) gets roughly double the effective
+(`crates/qwen3/src/q8.rs`, `zimage`, `flux2`) gets roughly double the effective
 VRAM budget for free by preferring the native Vulkan backend over the wgpu
 default on this class of hardware. It does **not** relax the "fp32 arithmetic
 only" invariant or change any kernel — it is purely a device/backend
@@ -876,7 +876,7 @@ and updating every cross-reference to those numbers throughout the codebase
 (`docs/lessons.md #38`, `#39`, etc. are cited from multiple crates) — riskier
 than the duplicate itself. `35b` keeps this entry uniquely addressable without
 that cascade. External references to plain "`docs/lessons.md` #35" predating
-this fix are ambiguous between the two — `crates/qwen/src/q8.rs`'s citation
+this fix are ambiguous between the two — `crates/qwen3/src/q8.rs`'s citation
 (alongside `vram_overhead.rs`) means the ORIGINAL #35 above; `crates/glm/src/
 model.rs`'s and `crates/model/tests/router_bwd_expert_cap.rs`'s "failure
 shape" citations, and `docs/models/omni/status.md`'s "#35 recurrence... #35's
@@ -1187,7 +1187,7 @@ for an entire session if nothing pushes back on it.
 `qwenvl::Qwen3Vl::generate()` (KV-cache generation, added the session before
 this one) called `self.decoder.write_deepstack(level, &data)` during prefill
 — a real function, on a real buffer, compiling cleanly, doing exactly what
-its name says. The bug: `qwen::Qwen`'s incremental decode path
+its name says. The bug: `qwen3::Qwen`'s incremental decode path
 (`decode_steps`/`step`/`step_mrope`) never READS `deepstack_bufs` — the one
 dispatch that adds them into the residual (`SPLICE_ADD`) lives only inside
 `forward_steps()`, the BATCHED training-graph builder, which `generate()`
@@ -1252,7 +1252,7 @@ gate parameter. The standalone `model::gdn` unit tests
 the fold this repo's OWN `directional_check` rustdoc already warns about
 (lesson-adjacent to #35c) never had a chance to manifest there.
 
-Fix: **do not touch `model::gdn`'s `eps` or `qwen35::init`'s production
+Fix: **do not touch `model::gdn`'s `eps` or `qwen35moe::init`'s production
 `std=0.02`** — both are correct for the real model's scale. Instead, the
 gradcheck harness itself (`qwen35_gradcheck_harness` in
 `crates/gradcheck/src/lib.rs`) overrides just `in_proj_qkv.weight`/

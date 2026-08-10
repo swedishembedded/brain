@@ -8,7 +8,7 @@
 //! ```
 //!
 //! The Talker is the TTS bottleneck: a 28-layer Qwen3 GQA decoder that samples
-//! one codec frame at a time (`TalkerModel` wraps `qwen::Qwen`, so it inherits
+//! one codec frame at a time (`TalkerModel` wraps `qwen3::Qwen`, so it inherits
 //! the register-tiled `matmul_reg2` GEMM). This measures the real 0.6B Talker at
 //! two levels:
 //!

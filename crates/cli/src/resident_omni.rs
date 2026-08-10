@@ -11,7 +11,7 @@
 //! as a RAM cost (the mmap footprint the streaming reads touch), not a real
 //! VRAM budget — this resident does not yet participate in the GPU-residency
 //! scheduling `docs/lessons.md §14` describes for a production Omni; that is
-//! `crates/qwen/src/shard.rs`'s int8-sharded-across-2-GPUs pattern, not yet
+//! `crates/qwen3/src/shard.rs`'s int8-sharded-across-2-GPUs pattern, not yet
 //! built for Thinker (`docs/models/omni/status.md`'s M9 entry).
 //!
 //! Config is env-only, mirroring `TtsResident`:

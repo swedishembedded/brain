@@ -23,7 +23,7 @@ if len(sys.argv) < 3:
 ENC_DIR = sys.argv[1]
 WEIGHTS = sys.argv[2]
 # testdata/golden/qwen/... by default -- where
-# crates/qwen/tests/encoder_parity.rs's testdata("golden/qwen/qwen3_4b_encoder.safetensors")
+# crates/qwen3/tests/encoder_parity.rs's testdata("golden/qwen/qwen3_4b_encoder.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = sys.argv[3] if len(sys.argv) > 3 else str(Path(_TESTDATA) / "golden" / "qwen" / "qwen3_4b_encoder.safetensors")

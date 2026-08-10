@@ -107,7 +107,7 @@ pub fn rope_fwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32
 /// (`qwenvl::mrope::mrope_tables`) instead of a single scalar position — the
 /// seam that lets a caller feed genuinely divergent per-axis (text/image/
 /// video/audio) positions, or the degenerate all-axes-equal case (which
-/// `qwenvl::mrope`'s own test proves collapses to identical output). `qwen::
+/// `qwenvl::mrope`'s own test proves collapses to identical output). `qwen3::
 /// Qwen::rope2d_step` already dispatches this exact kernel for Qwen3-VL;
 /// hoisted here so a second model (`omni::thinker`) doesn't re-wire it.
 ///
@@ -236,7 +236,7 @@ pub fn gqa_fwd_kmask(
 
 /// Kernel-pipeline indices for incremental KV-cache decode attention — the
 /// O(cached length) twin of [`gqa_fwd`]'s O(T²) full recompute. Hoisted from
-/// `qwen::Qwen`'s `decode_steps` (`crates/qwen/src/model.rs`) so a second
+/// `qwen3::Qwen`'s `decode_steps` (`crates/qwen3/src/model.rs`) so a second
 /// model (`omni::thinker`, a 48-layer MoE decoder) reuses the exact same
 /// dispatch sequence instead of re-deriving it — the "one implementation,
 /// migrate existing users" rule this crate exists to enforce.
@@ -1224,7 +1224,7 @@ pub fn swiglu_bwd(
 /// [`gqa_fwd`]'s causal batched output exactly at every row — `gqa_scores.wgsl`
 /// already masks `j > i` to `-inf` (see its header), so [`gqa_fwd`]'s row `i`
 /// already only attends keys `0..=i`, the same set a decode step at `pos = i`
-/// sees from the cache. This is the `model::block` twin of `qwen::Qwen`'s own
+/// sees from the cache. This is the `model::block` twin of `qwen3::Qwen`'s own
 /// `cache_matches_full_recompute` test, proving the hoisted primitive (not
 /// just qwen's original inline copy) is algebraically exact before a second
 /// model (`omni::thinker`) builds on it.

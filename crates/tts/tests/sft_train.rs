@@ -58,7 +58,7 @@ fn talker_from_scratch_overfits() {
         ..Default::default()
     };
     let (initial, final_loss) =
-        model::train::fit::<qwen::Qwen>(&dir, qcfg, &opts, Some(&out)).expect("fit");
+        model::train::fit::<qwen3::Qwen>(&dir, qcfg, &opts, Some(&out)).expect("fit");
     eprintln!("from-scratch: initial {initial:.4} -> final {final_loss:.4}");
     assert!(final_loss < initial * 0.6, "loss did not drop enough: {initial:.3} -> {final_loss:.3}");
     assert!(out.exists(), "checkpoint not written");
@@ -88,7 +88,7 @@ fn talker_lora_finetune_decreases_loss() {
         seed: 5,
         ..Default::default()
     };
-    model::train::fit::<qwen::Qwen>(&dir, TalkerConfig::tiny().to_qwen(block), &base_opts, Some(&base))
+    model::train::fit::<qwen3::Qwen>(&dir, TalkerConfig::tiny().to_qwen(block), &base_opts, Some(&base))
         .expect("base fit");
 
     let out = tmp("lora_out").join("talker_lora.safetensors");

@@ -7,7 +7,7 @@
 //! [`KvCalib`] itself names no model: it is a pure `(layer, kv_head, K|V) ->
 //! f32` table plus JSON I/O, built from an `actstats::Collector` any paged-KV
 //! model can populate its own way. `crates/qwen` is the first (and today
-//! only) consumer — see `crates/qwen/src/serve.rs`'s `Engine::calibrate_kv`/
+//! only) consumer — see `crates/qwen3/src/serve.rs`'s `Engine::calibrate_kv`/
 //! `set_kv_calib` for how a concrete `PagedDecoder` implementation wires this
 //! in — but nothing here is Qwen-specific; a second paged-attention model
 //! adopting the same INT8-KV-with-calibration pattern reuses this file and
@@ -73,7 +73,7 @@ impl KvCalib {
     }
 
     /// Build from a [`crate::actstats::Collector`] populated by a model's own
-    /// calibration pass (`crates/qwen/src/serve.rs`'s `Engine::calibrate_kv`
+    /// calibration pass (`crates/qwen3/src/serve.rs`'s `Engine::calibrate_kv`
     /// is the one that exists today; stream names `layer{L:02}.{k|v}.head{H}`
     /// is that caller's convention, not one this function enforces), at
     /// percentile `q` (e.g. `0.999`). A `(layer, head)` the collector never

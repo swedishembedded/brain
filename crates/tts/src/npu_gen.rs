@@ -100,7 +100,7 @@ impl TalkerTables {
     /// [`crate::gen::TalkerGen::load`] reads, minus the decoder upload).
     pub fn load(path: &str) -> TalkerTables {
         let c = checkpoint::load(path);
-        let qcfg = qwen::QwenConfig::from_json(&c.header["config"]);
+        let qcfg = qwen3::QwenConfig::from_json(&c.header["config"]);
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
         let take = |name: &str| {
             c.find(name, "")

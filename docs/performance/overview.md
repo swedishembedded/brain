@@ -467,7 +467,7 @@ The section above found `max_abs_row` while profiling the optimiser and left
 it: it is on the **int8 dynamic-activation-quant** path, so it cannot show up in
 a training profile. It shows up in an inference one. In the FLUX.2 int8
 text-encoder forward it was **43.6 ms of 668 ms (6.5%)**, and it runs once per
-quantized activation in `qwen::q8`, `zimage::int8`/`block`, and the FLUX.2 int8
+quantized activation in `qwen3::q8`, `zimage::int8`/`block`, and the FLUX.2 int8
 DiT — every int8 linear quantizes through `max_abs_row` → `quant_pack` →
 `matmul_i8_dyn`.
 
@@ -644,7 +644,7 @@ still points at the slow one. Two things make the fix stick:
 
 * make the **selection**, not the kernel, the shared thing — a `*_step` helper
   that picks the variant from `DeviceCaps` (`model::block::flash_bidir_step`,
-  `qwen::Qwen::rms_step`, `vae::Builder::coop`), so a new caller gets the fast
+  `qwen3::Qwen::rms_step`, `vae::Builder::coop`), so a new caller gets the fast
   path by construction; and
 * when you profile any model, **grep the profile for the reference kernel
   names** (`gn_stats`, `rmsnorm`, `layernorm`, `attn_softmax*`, `max_abs_row`,
@@ -1081,7 +1081,7 @@ rate**. The cause is not the kernel; it is which kernel got dispatched:
   since the backends stopped defaulting it — nothing consulted it here.
 * So `vocab_tiles` split the tied 151936×1024 head into **7 tiles**, 21× finer
   than the device needs.
-* And `qwen::model`'s head only routes to `matmul_reg3` when the vocab collapses
+* And `qwen3::model`'s head only routes to `matmul_reg3` when the vocab collapses
   to **one** tile — a tiled head *must* use the sliced-binding `matmul_tile`.
 
 One constant, therefore, silently pinned the largest GEMM in the model to the
@@ -1159,7 +1159,7 @@ nothing more.
 
 ## Cross-model finding: the serving engine had no tiled GEMM registered at all
 
-`qwen::serve` — the paged engine behind HTTP and D-Bus — registers its own
+`qwen3::serve` — the paged engine behind HTTP and D-Bus — registers its own
 pipeline table, and `matmul_reg3` was **not in it**. `Engine::mm` selected
 through `backend_api::select`, whose `KernelVariant` set has no register-tiled
 member, so the only two answers available were the decode GEMV
@@ -1262,7 +1262,7 @@ it rather than copying the constant a fifth time.
 
 The entry above called `gqa_scores` "the next target" off the `qwen_bench prefill`
 profile. That profile drives `Qwen::new`'s **batched forward**. The *served*
-prefill does not use that kernel at all: `qwen::serve` shares one paged tape
+prefill does not use that kernel at all: `qwen3::serve` shares one paged tape
 between prefill and decode, so it goes through `paged_decode_scores_batched`
 (4.8% of a 128-row served step). `gqa_scores` is dispatched by the batched
 forward — training, eval, `codec`, `tts`, `kronos` — which makes it a **training**
@@ -1303,7 +1303,7 @@ this path is causal. Checked first per §F.3.
 
 ## Cross-model finding: a profile that reports above the roof is reporting a bug
 
-Adding cost formulas for the paged serving tape (so `qwen::serve`'s step could
+Adding cost formulas for the paged serving tape (so `qwen3::serve`'s step could
 report a rate at all) immediately produced `paged_decode_scores_batched` at
 **2120% of the bandwidth roof**. That is not a fast kernel; it is a broken
 measurement, and printing it as a percentage launders it into a flattering one.
@@ -1604,7 +1604,7 @@ mechanical, **bit-identical by construction** (K order unchanged, integer
 accumulation) — `max|Δ|=0` held at every shape after the port too, and
 `flux2::tests::batch_parity::int8_batched_forward_is_bit_identical` /
 `zimage::tests::int8_matmul::int8_gemm_matches_fp32` (cosine gate) both stayed
-green, as did every `qwen::serve` token-for-token test on both backends.
+green, as did every `qwen3::serve` token-for-token test on both backends.
 
 Real, modest wins (`qwen_bench gemm8`, one P40):
 
@@ -1621,8 +1621,8 @@ didn't move" failure mode (`bias_grad`, `matmul_gemv`) — it DID move, just by
 less than the kernel's own percentage.
 
 Where the fix landed: the kernel BODIES only (`matmul_i8_dyn.wgsl`,
-`matmul_i8.wgsl`), not a new sibling — every caller (`qwen::q8`,
-`qwen::serve`, `zimage::int8`, `flux1`, `flux2`, `model::moe::expert_fwd_i8`)
+`matmul_i8.wgsl`), not a new sibling — every caller (`qwen3::q8`,
+`qwen3::serve`, `zimage::int8`, `flux1`, `flux2`, `model::moe::expert_fwd_i8`)
 inherits with zero code change, the strongest possible outcome of this
 repo's own "check for an already-faster sibling" step (§F.3).
 

@@ -25,7 +25,7 @@ fn repo_path(rel: &str) -> String {
 
     use crate::config::Qwen3VlConfig;
     use crate::import::map_decoder;
-    use qwen::Qwen;
+    use qwen3::Qwen;
 
     const N: u32 = 4; // must match the dump
 

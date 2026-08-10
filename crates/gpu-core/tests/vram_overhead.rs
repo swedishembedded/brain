@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Measures the non-ReBAR Pascal "2x resident per storage buffer" cost cited
-//! by `docs/lessons.md` §14 and `crates/qwen/src/q8.rs` — directly, via
+//! by `docs/lessons.md` §14 and `crates/qwen3/src/q8.rs` — directly, via
 //! `nvidia-smi` memory deltas around known allocations, rather than by
 //! inference from a model's total footprint.
 //!

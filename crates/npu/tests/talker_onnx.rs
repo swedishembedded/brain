@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use qwen::{Qwen, QwenConfig};
+use qwen3::{Qwen, QwenConfig};
 
 /// A tiny *untied* Qwen decoder (the Talker's backbone shape).
 fn untied_tiny() -> QwenConfig {
@@ -24,7 +24,7 @@ fn untied_tiny() -> QwenConfig {
 fn talker_onnx_graph_is_well_formed_untied_head() {
     let cfg = untied_tiny();
     let t = 4u32;
-    let init: HashMap<String, Vec<f32>> = qwen::init_weights(&cfg, 9);
+    let init: HashMap<String, Vec<f32>> = qwen3::init_weights(&cfg, 9);
     let model = Qwen::new(cfg.clone(), 1, t, &init);
 
     let dir = std::env::temp_dir().join(format!("brain_talker_onnx_{}", std::process::id()));
@@ -72,7 +72,7 @@ fn talker_onnx_graph_is_well_formed_untied_head() {
 fn talker_hidden_graph_is_embeds_in_hidden_out() {
     let cfg = untied_tiny();
     let t = 4u32;
-    let init: HashMap<String, Vec<f32>> = qwen::init_weights(&cfg, 11);
+    let init: HashMap<String, Vec<f32>> = qwen3::init_weights(&cfg, 11);
     let model = Qwen::new(cfg.clone(), 1, t, &init);
 
     let dir = std::env::temp_dir().join(format!("brain_talker_hidden_onnx_{}", std::process::id()));

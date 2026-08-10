@@ -6,7 +6,7 @@
 //! `codec_head`, predicting codebook-0 acoustic-token logits.
 //!
 //! ## Reuse
-//! The decoder backbone is byte-for-byte a [`qwen::Qwen`] with `tie_embeddings =
+//! The decoder backbone is byte-for-byte a [`qwen3::Qwen`] with `tie_embeddings =
 //! false`, so the parity-exact Qwen3 forward/backward, LoRA, vocab-tiling and
 //! safetensors loader are reused wholesale. `TalkerModel` wraps an inner `Qwen`
 //! and adds the multi-modal embedding front-end (text projection) that the
@@ -25,7 +25,7 @@
 //! for the non-padded audio stream. (Padding/offset only shifts the shared index
 //! by a constant `rope_delta`, which the per-position RoPE handles automatically.)
 
-use qwen::Qwen;
+use qwen3::Qwen;
 
 use crate::config::TalkerConfig;
 
@@ -106,7 +106,7 @@ impl TalkerModel {
     /// checks). The text-projection front-end is omitted.
     pub fn new_trainable(cfg: TalkerConfig, b: u32, t: u32, seed: u64) -> TalkerModel {
         let qcfg = cfg.to_qwen(t);
-        let init = qwen::init_weights(&qcfg, seed);
+        let init = qwen3::init_weights(&qcfg, seed);
         let inner = Qwen::new(qcfg, b, t, &init);
         TalkerModel {
             inner,
@@ -160,7 +160,7 @@ impl TalkerModel {
     }
 
     /// Set a codec `(input, target)` batch on the inner decoder (for training /
-    /// gradient checks). Targets use `qwen::IGNORE` to mask.
+    /// gradient checks). Targets use `qwen3::IGNORE` to mask.
     pub fn set_codec_batch(&self, x: &[u32], y: &[u32]) {
         self.inner.set_batch(x, y);
     }

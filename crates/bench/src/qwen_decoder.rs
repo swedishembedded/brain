@@ -5,7 +5,7 @@
 //! benchmark battery can score, alongside [`GptDecoder`](crate::GptDecoder) and
 //! [`MoeDecoder`](crate::MoeDecoder).
 //!
-//! `qwen::Qwen` implements the architecture-agnostic [`model::Model`] seam *and*
+//! `qwen3::Qwen` implements the architecture-agnostic [`model::Model`] seam *and*
 //! exposes `logits_all` on the trainer itself, so training routes through the
 //! same generic `model::train::fit`, and scoring loads an inference-only
 //! (frozen, no optimizer state) instance from the saved checkpoint.
@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use model::FitOpts;
-use qwen::config::QwenConfig;
-use qwen::model::Qwen;
+use qwen3::config::QwenConfig;
+use qwen3::model::Qwen;
 
 use crate::model::{DecoderLm, Scorer, TrainConfig};
 

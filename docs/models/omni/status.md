@@ -74,7 +74,7 @@ cleanup).
   `docs/lessons.md` #34.
   **Decision: `--device vulkan` for the Omni residency path.** int8 thinker
   (~30 GB) now fits GPU-resident, sharded across both P40s at true 1x
-  (~15 GB/card via `crates/qwen/src/shard.rs`) — the hybrid CPU-expert fallback
+  (~15 GB/card via `crates/qwen3/src/shard.rs`) — the hybrid CPU-expert fallback
   in the plan of record is not needed. The native Vulkan backend's coop-matrix
   kernel is unavailable on this box (no `glslc`/`glslangValidator`, scalar
   fallback used), so M16 must measure real throughput on `--device vulkan`
@@ -184,7 +184,7 @@ cleanup).
 `checkpoint::weightio::StWriter::write` was f32-only — every existing
 importer (`qwen`, `glm`, `lfm`) writes an on-disk brain checkpoint at f32,
 then quantizes to int8 transiently at RESIDENCY-LOAD time (one tensor of
-host f32 at a time, dropped after upload — see `crates/qwen/src/q8.rs`
+host f32 at a time, dropped after upload — see `crates/qwen3/src/q8.rs`
 `Q8::build`, `crates/zimage/src/block.rs`). For Qwen3-Omni's 70.5 GB bf16
 checkpoint, that convention would mean an on-disk f32 checkpoint of **~141 GB**
 (measured: `70 519 637 090 * 2`) — fitting on NEITHER of this box's
@@ -336,7 +336,7 @@ all three M-RoPE axes (temporal/height/width) carry the SAME position index
 — true for pure text, and true for a pure audio stream — `interleaved`
 M-RoPE with a 3-way section split **collapses exactly to `qwen`'s ordinary
 half-split RoPE** (`rotate_half`, θ = 1e6). No new kernel, no interleaving
-math, for that case. The Talker reuses `qwen::Qwen` (`tie_embeddings=false`,
+math, for that case. The Talker reuses `qwen3::Qwen` (`tie_embeddings=false`,
 `enable_mrope()`) directly and gets this for free. My own M0 `layer0` golden
 is pure text (9 tokens, no image/audio), so `Qwen3OmniMoeThinkerTextModel`'s
 own default position handling (confirmed by reading `forward`'s source: no
@@ -346,20 +346,20 @@ real M-RoPE (temporal/height/width genuinely diverging across an
 image/video/audio span) only has to be built for mixed-modality prompts,
 which is a real but narrower piece of work than "M-RoPE from scratch."
 
-What's genuinely new for M6, given the above: `qwen::Qwen`'s internals
+What's genuinely new for M6, given the above: `qwen3::Qwen`'s internals
 (sharding, LoRA, int8, KV-cache all interleaved in one large constructor —
-`crates/qwen/src/model.rs`) are not modular enough to swap out just its
+`crates/qwen3/src/model.rs`) are not modular enough to swap out just its
 dense SwiGLU MLP for `model::moe`'s sparse one without real surgery, unlike
 `crates/glm`, which already carries an `Mlp::Dense`/`Mlp::Moe` enum seam at
 exactly this point (evaluated densely today, per M2's own status). Two
-honest paths, neither started: (a) give `qwen::Qwen` the same `Mlp` seam
+honest paths, neither started: (a) give `qwen3::Qwen` the same `Mlp` seam
 `glm` has, so Thinker (and TTS's own future MoE Talker, M7) can reuse the
 attention/RoPE/QK-norm/KV-cache machinery that's already correct and tested,
 switching only the FFN call; or (b) a new, leaner decoder in `crates/omni`
 built directly from `model::block`'s shared primitives
 (`rmsnorm_fwd`/`rope_fwd`/`gqa_fwd`) + `model::moe`, forward-only, no
 sharding/LoRA/KV-cache — closer to `qwenvl::parity`'s minimal partial-depth
-test harness than to production `qwen::Qwen`. (a) is more in the spirit of
+test harness than to production `qwen3::Qwen`. (a) is more in the spirit of
 "evolve core, don't duplicate" but touches a large, heavily-relied-on file;
 (b) is faster to land correctly but is a second (if leaner) forward
 implementation of the same attention math. Real M-RoPE (the
@@ -369,7 +369,7 @@ multimodal splice are additional, separate pieces on top of either.
 - **M6a — Thinker decoder layer, exact parity, pure-text path** (2026-08-07).
   `crates/omni/src/thinker.rs`: `layer_fwd`, path (b) from the design note
   above — a new, leaner forward built directly from `model::block`'s shared
-  primitives + `model::moe`, not a `qwen::Qwen` modification. Real-weight test
+  primitives + `model::moe`, not a `qwen3::Qwen` modification. Real-weight test
   `crates/omni/tests/thinker_layer_parity.rs` (layer 0, 9-token pure-text
   prompt) now passes on both `--device vulkan` and `--device cpu`, checked at
   every stage: `xmid` (post-attention residual), router logits, the dense
@@ -386,7 +386,7 @@ multimodal splice are additional, separate pieces on top of either.
      `kernels::ROPE`** (`rope.wgsl` — interleaved adjacent-pair rotation,
      hardcoded base 10000) **instead of `kernels::ROPE_BASE`**
      (`rope_base.wgsl` — half-split `rotate_half`, host-supplied `theta`) —
-     the kernel `qwen::Qwen` and this module's own doc comment both rely on
+     the kernel `qwen3::Qwen` and this module's own doc comment both rely on
      for the M-RoPE-collapses-to-plain-RoPE case. A copy-paste-shaped mistake
      local to this new file, not a pre-existing engine bug. Symptom: `xmid`
      cosine 0.951 (a small-but-real divergence, not a wipeout — still a valid
@@ -462,7 +462,7 @@ multimodal splice are additional, separate pieces on top of either.
   `thinker_layer_parity.rs` re-verified at cosine 1.000000 on all four
   stages with the real table (previously the sequential-position analytic
   path); `model::block::rope2d_fwd` is a thin hoist of the exact dispatch
-  `qwen::Qwen::rope2d_step` already uses for Qwen3-VL (not a new kernel), so
+  `qwen3::Qwen::rope2d_step` already uses for Qwen3-VL (not a new kernel), so
   no new device math was written.
 
   `crates/omni/src/thinker.rs::decode` composes `w.layers.len()` `layer_fwd`
@@ -482,7 +482,7 @@ multimodal splice are additional, separate pieces on top of either.
   `crates/model/src/vlm.rs`) is exposed via `thinker::SPLICE`
   (`thinker_pipelines()`'s kernel index) for a caller to invoke on the
   embedding buffer before calling `decode` — `decode` has no opinion on how
-  its `x` input was assembled, matching `qwen::Qwen::write_img_embeds`'s
+  its `x` input was assembled, matching `qwen3::Qwen::write_img_embeds`'s
   contract. Wiring an actual vision/audio-embedding caller (the audio/vision
   towers from M4/M5 feeding into this) is M9's job, not M6's — M6's scope was
   the decoder + M-RoPE + splice *seam*, not a full multimodal generation
@@ -491,7 +491,7 @@ multimodal splice are additional, separate pieces on top of either.
 - **M7a — Talker decoder layer, exact parity, real weights** (2026-08-07).
   `crates/omni/src/talker.rs`: `layer_fwd`/`decode`, [`crate::thinker`]'s
   sibling (same reasoning for why it is a new module rather than a
-  `tts::talker`/`qwen::Qwen` conversion — see the module doc), plus the one
+  `tts::talker`/`qwen3::Qwen` conversion — see the module doc), plus the one
   real architectural difference: an always-active shared expert
   (`model::moe::shared_expert_fwd`, new — dense SwiGLU with its own
   intermediate width, sigmoid-gated per token, added to the routed-expert
@@ -676,7 +676,7 @@ multimodal splice are additional, separate pieces on top of either.
   repeat until `max_new_tokens` or an EOS id. **Deliberately validation-tier,
   not production**: no KV-cache (every new token re-runs the FULL forward
   from scratch) and no int8/GPU-sharded residency (M1's own finding — int8
-  Thinker at ~30GB needs sharding across both P40s, `crates/qwen/src/
+  Thinker at ~30GB needs sharding across both P40s, `crates/qwen3/src/
   shard.rs`'s pattern, not yet built for Thinker). Correct; slow. Two small
   additions to `crates/omni/src/thinker.rs` to support this: `final_norm`
   (factored out of `decode` so both call it — no duplication) and
@@ -897,11 +897,11 @@ Two pieces of `crate::generate`'s documented "not yet built" scope closed
 this round, both explicitly requested ("continue wiring in everything
 including kv cache" / "I want all input paths as well, not just text"):
 
-**KV-cache.** Hoisted `qwen::Qwen`'s incremental-decode attention pattern
+**KV-cache.** Hoisted `qwen3::Qwen`'s incremental-decode attention pattern
 (`kcache`/`vcache` + `kv_append`/`attn_decode_scores`/`decode_softmax`/
 `attn_decode_apply`) into `model::block` as `GqaDecodeIds`/`gqa_decode_step`/
 `kv_cache_fill` — the "hoist, migrate existing users" rule's second user
-(`qwen::Qwen` itself was NOT migrated this round; that is real follow-up
+(`qwen3::Qwen` itself was NOT migrated this round; that is real follow-up
 work, tracked below). Proven algebraically identical to the existing O(T²)
 `gqa_fwd` at every position by a new CPU-backend test
 (`decode_step_matches_causal_batched_attention_at_every_position`: calling
@@ -946,7 +946,7 @@ checkpoint's `config.json`) followed by the user's text, splices embeddings
 host-side (`splice_host` — a plain slice copy, since `generate.rs`'s prefill
 already builds the whole prompt as one host `Vec<f32>` before a single
 upload; `model::vlm::splice_fwd`'s on-device kernel is for callers whose
-residual buffer is already GPU-resident first, e.g. `qwen::Qwen`'s baked
+residual buffer is already GPU-resident first, e.g. `qwen3::Qwen`'s baked
 graph — not this shape).
 
 Real M-RoPE positions for a mixed sequence needed `qwenvl::mrope::get_rope_index`
@@ -1078,7 +1078,7 @@ KV-cache boundary crossing at token 9→10 correctly.
 (documented approximation above); video FILE decoding in brain-py/examples;
 a wire shape for multi-frame video input on the `generate` action; int8/
 GPU-sharded resident weights across generation steps (the cache fixed the
-attention complexity, not the weight-I/O pattern). (`qwen::Qwen`'s own
+attention complexity, not the weight-I/O pattern). (`qwen3::Qwen`'s own
 migration onto the hoisted `model::block` decode primitives, listed here as
 not-started when this entry was first written, is now done — see the M9c
 entry below.)
@@ -1089,7 +1089,7 @@ Closes the biggest remaining gap from the original 17-milestone plan: Omni
 could only talk back in text. `speak` is now a real, second served action,
 chaining every already-validated component into one loop with no stubs.
 
-**`qwen::Qwen` migrated onto the hoisted KV-cache primitives** (M9b left this
+**`qwen3::Qwen` migrated onto the hoisted KV-cache primitives** (M9b left this
 open): `Self::decode_ids()` builds a `model::block::GqaDecodeIds` from qwen's
 own registered kernel constants; the 5-line inline `kv_append`/
 `attn_decode_scores`/`decode_softmax`/`attn_decode_apply` dispatch in
@@ -1262,7 +1262,7 @@ is available.
 ## M16 — profiling: `omni_bench` (2026-08-08)
 
 `crates/omni/src/bin/omni_bench.rs`, shaped after `qwen_bench` with one
-structural difference stated up front in its own doc comment: `qwen::Qwen`
+structural difference stated up front in its own doc comment: `qwen3::Qwen`
 builds one flat, un-submitted `Vec<Step>` per pass that
 `gpu_core::profile::profile` times kernel-group by kernel-group; omni's
 `thinker`/`talker`/tower modules submit eagerly (several `g.submit()` calls
@@ -1539,13 +1539,13 @@ governs completion at the end of this section, not a blanket "done."
   "Remaining" section for the full write-up.
 
 - **#34 — register `qwenvl` as its own served model. PARTIALLY done.** 7a
-  (the risky half, "do it carefully" per the plan): `qwen::Qwen::
+  (the risky half, "do it carefully" per the plan): `qwen3::Qwen::
   decode_steps` gained REAL M-RoPE support (`step_mrope`/`step_embed_mrope`,
   a per-step 1-row `rope2d` table — mirrors `omni::thinker::
   layer_decode_step`'s existing pattern exactly), additive-only (a new
   `mrope: Option<(&DeviceBuffer, &DeviceBuffer)>` parameter on
   `decode_steps`/`decode_at`/`decode_submit`; every existing caller passes
-  `None` and is bit-for-bit unchanged — `qwen::Qwen` stays agnostic to how a
+  `None` and is bit-for-bit unchanged — `qwen3::Qwen` stays agnostic to how a
   3-axis position was derived, avoiding a `qwen -> qwenvl` dependency cycle
   since `qwenvl` already depends on `qwen`). New test
   `mrope_step_matches_full_recompute` mirrors `kv_step_matches_full_
@@ -1553,7 +1553,7 @@ governs completion at the end of this section, not a blanket "done."
   per-step 1-row incremental leg): worst maxabs ~1.3e-7 (CPU), ~1.6e-7 (real
   Vulkan/P40) — essentially exact. All three existing bit-exact/near-exact
   siblings (`kv_step_matches_full_recompute`, `step_embed_matches_step`,
-  `prefill_matches_step_by_step`) stayed green throughout; full `brain-qwen`
+  `prefill_matches_step_by_step`) stayed green throughout; full `brain-qwen3`
   suite 61/61 (now 62/62) on both backends. Also done: `Qwen3Vl::generate()`
   — real greedy KV-cache generation over `step_mrope`/`step_embed_mrope`
   (image rows via `step_embed_mrope`, text via `step_mrope`, continuing the
@@ -1714,7 +1714,7 @@ everything" instruction. Each item's real, validated disposition:
   a capacity-based resident sizing scheme (build once at a configurable
   `max_pixels` budget; per-request images that exceed it error loudly, never
   silently overflow). Along the way, found and fixed a REAL silent
-  correctness bug: `qwen::Qwen`'s incremental KV-cache decode never applied
+  correctness bug: `qwen3::Qwen`'s incremental KV-cache decode never applied
   DeepStack's residual add (only the batched training graph did) — wrong
   for any DeepStack-enabled checkpoint, which the real Qwen3-VL-4B config
   is. Fixed (`decode_steps`' new `deepstack_row` parameter, additive), validated
@@ -1758,7 +1758,7 @@ on two REAL, physically separate P40s — not each piece in isolation.
   real ~36 GB checkpoint at the real `48L/128E/d_model=2048/moe_ff=768`
   shape) straight from the checkpoint's already-int8-quantized `U32`/
   `.scale` tensors — no `quantize_weight` call at load time, unlike
-  `qwen::q8::Q8`, which quantizes an fp32 source on load. `expert_bytes`
+  `qwen3::q8::Q8`, which quantizes an fp32 source on load. `expert_bytes`
   computes real per-device byte totals from declared shapes alone (no GPU),
   what `MultiDeviceResidentModel::estimate_multi` needs before placement.
 - **`omni::thinker`'s forward gained a real int8 branch**: `moe_sublayer`/
@@ -1941,7 +1941,7 @@ workstream's own scope, not omni's). `qwenvl` caps.rs serving wiring, the
 MoE-aware int8 resident store + int8 thinker branch + multi-GPU residency,
 a tiled+gated MoE expert kernel, and the concurrent-Vulkan-device-creation
 hang — all tracked as their own follow-up items per M18 above, not silently
-dropped. `qwen::Qwen`'s KV-cache migration, the OpenAI/Anthropic
+dropped. `qwen3::Qwen`'s KV-cache migration, the OpenAI/Anthropic
 multimodal-content-part-drop fix, M15 (NPU export), M16 (`omni_bench`
 profiling), M17 (testdata audit), and M18 (this session — GPU hangs,
 router cap, MoE backward, glm migration decision, qwenvl M-RoPE decode +
@@ -1964,7 +1964,7 @@ affect).
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern
 already audited end to end for this model and already established engine-wide
-(`crates/qwen/src/model.rs`'s `from_reader_inference`/`_decode`, `docs
+(`crates/qwen3/src/model.rs`'s `from_reader_inference`/`_decode`, `docs
 comment: "peak host ≈ one tensor"`) —
 - **Fetch**: shard-incremental (download one shard → convert+quantize →
   delete shard), already implemented this way in M3's `import_as` per the

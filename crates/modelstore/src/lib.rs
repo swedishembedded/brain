@@ -67,7 +67,7 @@ pub struct LocalModel {
     pub format: Format,
     /// A named LoRA adapter's own weight file, when `reference.adapter()` is
     /// `Some` -- `weights` above still points at the BASE model (a resident
-    /// folds this into those weights at load; see `qwen::lora::fold_adapter_into`).
+    /// folds this into those weights at load; see `qwen3::lora::fold_adapter_into`).
     /// Always `None` for a plain base/quant reference.
     pub adapter: Option<PathBuf>,
     /// For [`Format::Compound`] only: role name (`"dit"`, `"vae"`, ...) to its
@@ -131,7 +131,7 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 /// Named LoRA adapters live inside their base repo's directory (they share
 /// its tokenizer/config, same reasoning as quants) under
 /// `adapters/<owner>/<name>/<tag>/`, one adapter-only safetensors file each
-/// (`qwen::lora::save_adapter`'s output). Adding this subdirectory is
+/// (`qwen3::lora::save_adapter`'s output). Adding this subdirectory is
 /// backward compatible with `Store::scan`'s existing base/quant walk, which
 /// only ever iterates `is_file()` entries in a repo dir.
 const ADAPTERS_DIR: &str = "adapters";

@@ -552,7 +552,7 @@ pay for a full 128-wide tile 42× over).
 `im2col_at` 274.7, `nlc_bias_nchw` 36.3, the three unlowered convs 15.4.
 
 **4. Text encoder: `rmsnorm_rows` and `softmax_rows`, selected on device caps.**
-No new kernels — dispatch choices, in `qwen::model` so the blast radius is one
+No new kernels — dispatch choices, in `qwen3::model` so the blast radius is one
 crate. `rmsnorm` **71.8 → 6.3 ms (11.4×)**; `attn_softmax` **34.6 → 8.6 ms
 (4.0×)**. `softmax_rows` normalises the whole row while `attn_softmax`
 normalises `j <= i`, and here they are identical because `gqa_scores_kmask`
@@ -673,8 +673,8 @@ The CLI now reports the three phases (`encoding prompt` / `denoising` /
 
 | gate | result |
 |---|---|
-| `brain-qwen --test flux2_text_parity` (GPU, `BRAIN_QWEN_TE_SHARD=1`) | layers 9/18/27 **cosine 1.000000** all / content / pad; ctx concat 1.000000 |
-| `brain-qwen --test flux2_text_parity` (CPU) | same, 1.000000 |
+| `brain-qwen3 --test flux2_text_parity` (GPU, `BRAIN_QWEN_TE_SHARD=1`) | layers 9/18/27 **cosine 1.000000** all / content / pad; ctx concat 1.000000 |
+| `brain-qwen3 --test flux2_text_parity` (CPU) | same, 1.000000 |
 | `brain-vae --test flux2_parity` (`BRAIN_VAE_DEVICE=gpu`) | encode **1.000000**, pack max_abs 0.0, decode **1.000000** |
 | `brain-vae --test flux2_parity` (CPU) | same, 1.000000 |
 | `brain-flux2 --test dit_parity` (GPU) | **cosine 1.000000** on both fixtures (unchanged) |

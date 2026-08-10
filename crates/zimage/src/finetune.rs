@@ -29,7 +29,7 @@ use crate::train::Batch;
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
 use dit::rope::{tables_for_ids, RopeConfig};
-use qwen::{Qwen, QwenConfig, Shard};
+use qwen3::{Qwen, QwenConfig, Shard};
 use vae::VaeEncoder;
 
 /// Latent-space VAE scale/shift (FLUX VAE; must match [`crate::pipeline`]).
@@ -153,7 +153,7 @@ pub fn encode_samples(
     let caps: Vec<Vec<f64>> = {
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
-        let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
+        let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let nl = qcfg.n_layers as usize;
         // `enc_gpu` is user input; the canonical index in the shard is what

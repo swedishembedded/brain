@@ -10,7 +10,7 @@ name = "omni"
 path = "src/lib.rs"
 
 [dependencies]
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 brain-qwenvl.workspace = true
 brain-qwen-asr.workspace = true
 brain-tts.workspace = true

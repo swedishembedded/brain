@@ -149,7 +149,7 @@ shape — the same downloader underneath every one of them, so a future source
 (e.g. p2p) only has to implement one small `Hub` trait, not a fourth copy of the
 fetch/store/single-flight machinery.
 **QLoRA is not implemented anywhere in brain** — the INT8/GGUF paths are inference
-tiers only (`crates/qwen/src/model.rs` asserts the int8 path is inference-only); the
+tiers only (`crates/qwen3/src/model.rs` asserts the int8 path is inference-only); the
 column is here so the gap stays visible rather than silently absent.
 Which of CLI / D-Bus / HTTP a model answers on is stated at the top of its own page —
 it varies per model and is derived from each manifest's action shape

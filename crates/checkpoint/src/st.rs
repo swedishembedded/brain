@@ -30,7 +30,7 @@ pub struct Adapter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
     /// Which base projections this adapter targets (matched by leaf name,
-    /// e.g. `["wq","wk","wv","wo"]`), matching `qwen::LoraCfg::targets`.
+    /// e.g. `["wq","wk","wv","wo"]`), matching `qwen3::LoraCfg::targets`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
     /// The bench dataset this adapter was trained on

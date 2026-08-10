@@ -4,8 +4,8 @@
 //! Omni profiler: where a Thinker/Talker MoE decoder LAYER, the audio tower,
 //! and the vision tower actually spend their time, graded against the
 //! device's measured roofline. Shaped after `qwen_bench`
-//! (`crates/qwen/src/bin/qwen_bench.rs`), with one structural difference
-//! stated up front: `qwen::Qwen` builds one flat, un-submitted `Vec<Step>`
+//! (`crates/qwen3/src/bin/qwen_bench.rs`), with one structural difference
+//! stated up front: `qwen3::Qwen` builds one flat, un-submitted `Vec<Step>`
 //! per pass that `gpu_core::profile::profile` times kernel-group by
 //! kernel-group. Omni's `thinker`/`talker`/tower modules submit eagerly
 //! (several `g.submit()` calls per layer — attention, then the MoE tail),

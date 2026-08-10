@@ -5,9 +5,9 @@
 //! learned ideas from the dataset": `brain qwen eval` against a REAL
 //! Qwen3-0.6B checkpoint and a real bench-shaped `validation.jsonl`, base
 //! score alone and base+adapter side by side. Complements
-//! `crates/qwen/tests/lora_learning_gate.rs` (Gate A: synthetic, no
+//! `crates/qwen3/tests/lora_learning_gate.rs` (Gate A: synthetic, no
 //! checkpoint, always runs) -- this proves the CLI/store/real-model WIRING
-//! (`qwen::eval::score_chat`, `brain qwen eval`'s adapter resolution)
+//! (`qwen3::eval::score_chat`, `brain qwen eval`'s adapter resolution)
 //! rather than re-litigating whether LoRA training converges, which Gate A
 //! and `crates/cli/tests/qwen_lora_finetune.rs` already cover. Trains only a
 //! handful of steps -- enough to prove the adapter changes the reported

@@ -6,7 +6,7 @@
 //! (`[T, d_model]`) — the text/codec/speaker-conditioned prefix the autoregressive
 //! voice synthesis needs — rather than token ids.
 //!
-//! The shared [`qwen::Qwen`] backbone (used for parity/training in [`crate::talker`])
+//! The shared [`qwen3::Qwen`] backbone (used for parity/training in [`crate::talker`])
 //! only embeds *token ids* through its `tok.weight` table and exposes neither an
 //! input-embedding entry point nor the per-position hidden state the MTP needs. So
 //! generation builds its own forward graph from the shared `model::block`
@@ -176,7 +176,7 @@ impl TalkerGen {
     /// process holds ONE device however many components it loads.
     pub fn load_on(gpu: Gpu, path: &str, max_t: u32) -> TalkerGen {
         let c = checkpoint::load(path);
-        let qcfg = qwen::QwenConfig::from_json(&c.header["config"]);
+        let qcfg = qwen3::QwenConfig::from_json(&c.header["config"]);
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
         let take = |name: &str| {
             c.find(name, "")

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{set_default_backend, Backend};
-use qwen::{Qwen, QwenConfig};
+use qwen3::{Qwen, QwenConfig};
 
 fn logits_on(backend: Backend, cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>, x: &[u32]) -> Vec<f32> {
     set_default_backend(backend);
@@ -30,7 +30,7 @@ fn cpu_gpu_forward_parity() {
         return;
     }
     let cfg = QwenConfig::tiny();
-    let init = qwen::init_weights(&cfg, 7);
+    let init = qwen3::init_weights(&cfg, 7);
     let x: Vec<u32> = (0..12).map(|i| ((i * 5 + 1) % 23) as u32).collect();
 
     let lc = logits_on(Backend::Cpu, &cfg, &init, &x);

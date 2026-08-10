@@ -5,7 +5,7 @@
 //! two-way coverage** against [`T5Config::tensor_manifest`]: every expected
 //! tensor produced exactly once with the right shape, and no source tensor left
 //! unused. A mismatch is an error naming the tensor — never a silent zero-fill
-//! (the discipline of `qwen::import::brain_init_from_hf` and
+//! (the discipline of `qwen3::import::brain_init_from_hf` and
 //! `flux2::import::validate`).
 //!
 //! The only structural change at the boundary is **fusing q/k/v** into one

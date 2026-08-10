@@ -10,7 +10,7 @@ name = "qwen_asr"
 path = "src/lib.rs"
 
 [dependencies]
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 brain-model.workspace = true
 brain-audio.workspace = true
 brain-gpu-core.workspace = true

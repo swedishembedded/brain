@@ -4,7 +4,7 @@
 //! Golden test: `ChatSample::encode`'s ids and mask, against a real Qwen3
 //! tokenizer AND the real `chat_template` from `tokenizer_config.json`.
 //! Gated on `QWEN3_DIR` — skips loudly rather than failing when unset,
-//! matching `crates/qwen/tests/integration_qwen3.rs`'s convention.
+//! matching `crates/qwen3/tests/integration_qwen3.rs`'s convention.
 //!
 //! The independent oracle for the expected TEXT is `qwen_chat::render` (a
 //! hand-transcribed, already-scrutinized Qwen3-specific port), built from

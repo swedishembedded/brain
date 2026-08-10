@@ -5,7 +5,7 @@
 //! `config.json` (`Qwen/Qwen3-VL-4B-Instruct`); the tests parse an inline copy of
 //! that structure and cross-check the [`Qwen3VlConfig::qwen3_vl_4b`] preset.
 
-use qwen::QwenConfig;
+use qwen3::QwenConfig;
 use serde_json::Value;
 
 /// Qwen3-VL ViT vision-encoder configuration (`vision_config`).

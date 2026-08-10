@@ -5,7 +5,7 @@
 //!
 //! Self-contained (the generic `model::train::fit` is hardwired to the causal
 //! shifted `get_batch`; MLM needs `data::mlm`'s corrupted UNshifted batches —
-//! the same sanctioned escape hatch as `qwen::finetune`). Deterministic for a
+//! the same sanctioned escape hatch as `qwen3::finetune`). Deterministic for a
 //! fixed seed. Loss is masked CE over supervised positions; pseudo-perplexity
 //! = `exp(loss)`.
 

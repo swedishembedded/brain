@@ -9,7 +9,7 @@
 //! (0.5B/1.5B) also ship a `lm_head.weight` duplicating `embed_tokens`; the tied
 //! loader uses `embed_tokens` as `tok.weight` and drops `lm_head`.
 
-/// HF FastVLM decoder name → `qwen::Qwen` (Qwen2 config) parameter key.
+/// HF FastVLM decoder name → `qwen3::Qwen` (Qwen2 config) parameter key.
 pub fn map_decoder(hf: &str) -> Option<String> {
     match hf {
         "model.embed_tokens.weight" => return Some("tok.weight".into()),

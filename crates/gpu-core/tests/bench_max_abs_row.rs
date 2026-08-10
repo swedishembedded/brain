@@ -10,7 +10,7 @@
 //! fetched serves one useful float) *and* the row is a serial chain of `k`
 //! dependent loads. That is trap C2 of `docs/kernel-checklist.md` — the same
 //! shape as `gn_stats` (159x), `rmsnorm` (19.4x) and `layernorm` (2.8-10x) —
-//! sitting on the int8 path every `qwen::q8` / `zimage` / FLUX.2-int8 linear
+//! sitting on the int8 path every `qwen3::q8` / `zimage` / FLUX.2-int8 linear
 //! quantizes its activations through.
 //!
 //! ```text

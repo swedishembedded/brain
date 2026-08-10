@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
-use qwen::{Qwen, QwenConfig};
+use qwen3::{Qwen, QwenConfig};
 
 use crate::encoder::{ctx, Encoder, PIPELINES};
 
@@ -182,13 +182,13 @@ mod tests {
         };
 
         let dcfg = QwenConfig::qwen2(23, 2, hidden as u32, 4, 2, 64, true);
-        let dweights = qwen::init_weights(&dcfg, 3);
+        let dweights = qwen3::init_weights(&dcfg, 3);
 
         // Stream: 1 text, 4 image (-200 placeholders), 1 text; IGNORE at image rows.
         let tokens = vec![1u32, 7, 7, 7, 7, 3];
         let mut targets = vec![7u32, 0, 0, 0, 0, 5];
         for t in targets.iter_mut().take(5).skip(1) {
-            *t = qwen::IGNORE;
+            *t = qwen3::IGNORE;
         }
 
         let model = FastVlm::new(layers, dims, mlp_ratio, cls_ratio, input, enc_weights, projector, dcfg, &dweights, tokens.len() as u32, 1, n_visual);

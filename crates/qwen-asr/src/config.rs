@@ -106,8 +106,8 @@ pub struct QwenAsrConfig {
     pub audio: AudioEncoderConfig,
     pub audio_token_id: u32,     // 151676
     pub timestamp_token_id: u32, // 151705
-    /// The text decoder is a stock Qwen3-1.7B; see `qwen::config::QwenConfig::qwen3_1_7b`.
-    pub text: qwen::config::QwenConfig,
+    /// The text decoder is a stock Qwen3-1.7B; see `qwen3::config::QwenConfig::qwen3_1_7b`.
+    pub text: qwen3::config::QwenConfig,
 }
 
 impl QwenAsrConfig {
@@ -116,7 +116,7 @@ impl QwenAsrConfig {
             audio: AudioEncoderConfig::qwen3_asr(),
             audio_token_id: 151676,
             timestamp_token_id: 151705,
-            text: qwen::config::QwenConfig::qwen3_1_7b(),
+            text: qwen3::config::QwenConfig::qwen3_1_7b(),
         }
     }
 }

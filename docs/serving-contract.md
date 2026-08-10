@@ -72,8 +72,8 @@ decode), batch what you can and say why in a comment.
   prefix reuse, an on-device decode window, cancellation, and the
   `StepReport` timeline `brain perf` measures TTFA/ITL from — generic over a
   `PagedDecoder` impl (`prefill`/`forward_batched_greedy(_window)`/
-  `logits`/block-pool accessors). `qwen::serve::Engine` is the first
-  implementation; `qwen::serve::Scheduler` is `model::serve::Scheduler<Engine>`
+  `logits`/block-pool accessors). `qwen3::serve::Engine` is the first
+  implementation; `qwen3::serve::Scheduler` is `model::serve::Scheduler<Engine>`
   under a type alias, so every existing caller of the qwen-specific names
   needs zero changes. A new decoder LM (glm, gpt, moe) that wants real
   concurrent serving should write its own paged/batched forward (its

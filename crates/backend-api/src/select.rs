@@ -52,7 +52,7 @@ pub enum Op {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Dtype {
     F32,
-    /// Packed int8 (weights quantised per `qwen::q8` / `matmul_i8`).
+    /// Packed int8 (weights quantised per `qwen3::q8` / `matmul_i8`).
     I8,
 }
 
@@ -145,7 +145,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::MatMul => match shape.dtype {
             // Int8 GEMMs only where the packed-dot kernels execute; a device
             // without them gets the fp32 reference (the caller keeps fp32
-            // weights in that case — see qwen::serve). Within int8, the split
+            // weights in that case — see qwen3::serve). Within int8, the split
             // mirrors fp32: the 128x128 tile is mostly idle at decode row
             // counts, but the packed GEMV's workgroup-memory accumulation
             // grows per-row — the measured P40 crossover is m≈8, and refining

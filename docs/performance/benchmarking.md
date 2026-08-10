@@ -145,7 +145,7 @@ quality, since the generated tokens are meaningless. Artifacts record
   This is the strategic path: today `demo`, `imageops` and `zimage` implement
   `Provider`; as `qwen`, `yolo`, `depth` and `tts` adopt it they are covered for
   free.
-- **`PagedLlmTarget`** — wraps `qwen::serve::{Engine, Scheduler}` directly, since
+- **`PagedLlmTarget`** — wraps `qwen3::serve::{Engine, Scheduler}` directly, since
   the paged continuous-batching engine is the thing most worth measuring and does
   not yet sit behind a `Provider`.
 - **`ExecutorTarget`** — wraps a `residency::Executor`, so a resident model's real
@@ -548,7 +548,7 @@ smoke artifacts are marked `smoke: true` and never compared against full runs.
 Engine work this suite depends on, tracked here because the benchmark is what
 makes it observable:
 
-- **Per-step emission reporting in `qwen::serve::Scheduler`.** `step()` currently
+- **Per-step emission reporting in `qwen3::serve::Scheduler`.** `step()` currently
   returns only *completed* requests, so no caller can observe when each token was
   produced — TTFA and IAL are unmeasurable without it. P1 adds a per-step
   emission report.

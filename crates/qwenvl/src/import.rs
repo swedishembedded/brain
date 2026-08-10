@@ -10,7 +10,7 @@
 //! (decoder). The patch-embed is a `Conv3d[hidden, in_ch, temporal, patch, patch]`
 //! whose contiguous flatten is exactly `[hidden, in_ch·temporal·patch²]` in the
 //! `[channel, temporal, patch_h, patch_w]` order our `pack_patches` produces, so
-//! it maps by name only (no transpose). Decoder names mirror `qwen::import` but
+//! it maps by name only (no transpose). Decoder names mirror `qwen3::import` but
 //! under the extra `language_model.` prefix; tied embeddings mean `embed_tokens`
 //! serves as both `tok.weight` and the head.
 
@@ -72,7 +72,7 @@ pub fn map_deepstack(hf: &str) -> Option<(usize, String)> {
     Some((idx, merger_leaf(leaf).map(String::from)?))
 }
 
-/// HF decoder name → `qwen::Qwen` parameter key.
+/// HF decoder name → `qwen3::Qwen` parameter key.
 pub fn map_decoder(hf: &str) -> Option<String> {
     let s = hf.strip_prefix("model.language_model.")?;
     match s {

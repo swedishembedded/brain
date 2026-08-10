@@ -54,7 +54,7 @@
 //! Tesla P40 with ~1.9 GB of activations. It stops fitting at FLUX's real
 //! T=512, where the activations scale to ~7.5 GB (the two shared `[B,64,T,T]`
 //! score slabs alone are 134 MB each) and the total passes 26 GB.
-//! Per-channel symmetric INT8 (`model::int8`, the path `qwen::q8` and
+//! Per-channel symmetric INT8 (`model::int8`, the path `qwen3::q8` and
 //! `zimage::int8` already take) puts the weights at **~4.77 GB** plus ~2.4 MB
 //! of scales — comfortably single-card at T=512, and the reason INT8 is the
 //! first tool here rather than sharding.

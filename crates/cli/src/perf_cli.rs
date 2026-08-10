@@ -463,8 +463,8 @@ impl SynthSpec {
         self.max_prefill.max(8) as usize
     }
 
-    pub fn config(&self) -> qwen::QwenConfig {
-        qwen::QwenConfig {
+    pub fn config(&self) -> qwen3::QwenConfig {
+        qwen3::QwenConfig {
             vocab: self.vocab,
             block_size: 4096,
             n_layers: self.n_layers,
@@ -483,17 +483,17 @@ impl SynthSpec {
         }
     }
 
-    pub fn build_weights(&self) -> (qwen::QwenConfig, std::collections::HashMap<String, Vec<f32>>) {
+    pub fn build_weights(&self) -> (qwen3::QwenConfig, std::collections::HashMap<String, Vec<f32>>) {
         let cfg = self.config();
-        let w = qwen::init_weights(&cfg, 1234);
+        let w = qwen3::init_weights(&cfg, 1234);
         (cfg, w)
     }
 
     pub fn build_engine(
         &self,
-        cfg: qwen::QwenConfig,
+        cfg: qwen3::QwenConfig,
         w: &std::collections::HashMap<String, Vec<f32>>,
-    ) -> qwen::serve::Engine {
+    ) -> qwen3::serve::Engine {
         self.build_engine_with_blocks(cfg, w, self.num_blocks)
     }
 
@@ -501,12 +501,12 @@ impl SynthSpec {
     /// warm-start path `perf startup` measures.
     pub fn build_engine_on(
         &self,
-        parent: &qwen::serve::Engine,
-        cfg: qwen::QwenConfig,
+        parent: &qwen3::serve::Engine,
+        cfg: qwen3::QwenConfig,
         w: &std::collections::HashMap<String, Vec<f32>>,
-    ) -> qwen::serve::Engine {
+    ) -> qwen3::serve::Engine {
         let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
-        qwen::serve::Engine::from_map_on(
+        qwen3::serve::Engine::from_map_on(
             parent.gpu(),
             cfg,
             w,
@@ -522,12 +522,12 @@ impl SynthSpec {
 
     pub fn build_engine_with_blocks(
         &self,
-        cfg: qwen::QwenConfig,
+        cfg: qwen3::QwenConfig,
         w: &std::collections::HashMap<String, Vec<f32>>,
         num_blocks: u32,
-    ) -> qwen::serve::Engine {
+    ) -> qwen3::serve::Engine {
         let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
-        qwen::serve::Engine::from_map(
+        qwen3::serve::Engine::from_map(
             cfg,
             w,
             self.block_size,
@@ -1382,11 +1382,11 @@ fn spec_flags(spec: &str) -> (&str, bool, bool) {
 /// The int8-KV boundary policy (D2), in ONE place: `:kvf32` is an explicit
 /// opt-out (nothing to degrade); absent that, int8 is the default and this
 /// degrades loudly on a shape it cannot support rather than hitting
-/// `from_map_with_gpu`'s hard assert -- see `qwen::serve::kv_int8_supported`'s
+/// `from_map_with_gpu`'s hard assert -- see `qwen3::serve::kv_int8_supported`'s
 /// doc comment. Shared by every perf target builder so the same shape always
 /// gets the same answer, and the degrade warning is worded once.
-fn resolve_kv_int8(cfg: &qwen::QwenConfig, kv_fp32_requested: bool, target_desc: &str) -> bool {
-    let kv_int8 = !kv_fp32_requested && qwen::serve::kv_int8_supported(cfg);
+fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc: &str) -> bool {
+    let kv_int8 = !kv_fp32_requested && qwen3::serve::kv_int8_supported(cfg);
     if !kv_fp32_requested && !kv_int8 {
         eprintln!("perf: {target_desc}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV", cfg.head_dim);
     }
@@ -1443,7 +1443,7 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
         .with("kv_dtype", if eng.kv_int8() { "int8" } else { "fp32" }.into())
         // What actually ran: the int8 request is capability-gated in the engine.
         .with("weights_dtype", if eng.weights_int8() { "int8" } else { "fp32" }.into());
-    let sched = qwen::serve::Scheduler::new(eng, spec.max_batch as usize);
+    let sched = qwen3::serve::Scheduler::new(eng, spec.max_batch as usize);
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, spec.vocab)))
 }
 
@@ -1491,10 +1491,10 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
     // A header-only peek (not a second full checkpoint load) to feed the
     // shared boundary policy -- see resolve_kv_int8.
     let kv_int8 = match checkpoint::weightio::WeightReader::open(weights) {
-        Ok(r) => resolve_kv_int8(&qwen::QwenConfig::from_json(&r.config()), kv_fp32, weights),
+        Ok(r) => resolve_kv_int8(&qwen3::QwenConfig::from_json(&r.config()), kv_fp32, weights),
         Err(_) => !kv_fp32, // let Engine::load raise the real, specific I/O error below
     };
-    let eng = qwen::serve::Engine::load(
+    let eng = qwen3::serve::Engine::load(
         weights,
         block_size,
         num_blocks,
@@ -1507,7 +1507,7 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
     let vocab = eng.vocab() as u32;
     let w8_effective = eng.weights_int8();
     let kv_dtype = if eng.kv_int8() { "int8" } else { "fp32" };
-    let sched = qwen::serve::Scheduler::new(eng, max_batch as usize);
+    let sched = qwen3::serve::Scheduler::new(eng, max_batch as usize);
     let info = TargetInfo::new("qwen", "token")
         .with("weights", weights.into())
         .with("block_size", block_size.into())

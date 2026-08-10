@@ -10,7 +10,7 @@ name = "moondream"
 path = "src/lib.rs"
 
 [dependencies]
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 brain-model.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true

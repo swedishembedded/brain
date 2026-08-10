@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod tests {
     use data::rng::Rng;
-    use qwen::{init_weights, Qwen, QwenConfig, IGNORE};
+    use qwen3::{init_weights, Qwen, QwenConfig, IGNORE};
 
     #[test]
     fn vlm_finetune_overfits_image_caption() {

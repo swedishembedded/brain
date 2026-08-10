@@ -54,7 +54,7 @@ One Python script (`tools/<model>_dump_reference.py`, e.g.
   against the real checkpoint (149/201 tensors — assert the number).
 - Import validates **both directions**: any missing tensor errors *by name*;
   any unused source tensor errors. Never zero-fill, never skip
-  (`qwen::import::brain_init_from_hf` discipline).
+  (`qwen3::import::brain_init_from_hf` discipline).
 - **Split fused weights on the host at import time** (qkv thirds, gate/up MLP
   halves, column-split output projections). Every device matmul then reads a
   whole buffer — no offset-view gymnastics in the hot path, and the trainer

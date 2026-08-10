@@ -116,8 +116,8 @@ impl TalkerConfig {
     /// M-RoPE collapses to Qwen's half-split RoPE for an audio stream (all three
     /// mrope position-id sections share the same index — see `talker.rs`), so the
     /// shared `crate::qwen` backbone is parity-equivalent.
-    pub fn to_qwen(&self, block_size: u32) -> qwen::QwenConfig {
-        qwen::QwenConfig {
+    pub fn to_qwen(&self, block_size: u32) -> qwen3::QwenConfig {
+        qwen3::QwenConfig {
             vocab: self.vocab,
             block_size,
             n_layers: self.n_layers,
@@ -142,7 +142,7 @@ impl TalkerConfig {
     /// by the Qwen config (`num_code_groups`, special ids, mrope) takes the
     /// real-model defaults; `text_hidden_size` is patched by the loader from the
     /// `text_projection` shape when available.
-    pub fn from_qwen(q: &qwen::QwenConfig) -> TalkerConfig {
+    pub fn from_qwen(q: &qwen3::QwenConfig) -> TalkerConfig {
         let mut c = TalkerConfig::from_json(&Value::Null); // all real-model defaults
         c.n_layers = q.n_layers;
         c.d_model = q.d_model;

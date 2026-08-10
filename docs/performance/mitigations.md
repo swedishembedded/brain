@@ -57,7 +57,7 @@ rather than P40-shaped.
 
 And the repo already has the machinery: `matmul_i8` (DP4A, documented as *"the
 P40's fastest inference path"*, 4× the MACs of fp32 FMA and 4× fewer weight
-bytes) and `qwen::q8` (per-channel symmetric int8 weight quantisation, already
+bytes) and `qwen3::q8` (per-channel symmetric int8 weight quantisation, already
 used by the z-image encoder). **`serve.rs` uses int8 for the KV cache only —
 never for weights.** The serving engine runs fp32 weights on a card whose
 fastest path is int8.
@@ -198,7 +198,7 @@ Rules that keep this honest:
 * **Every tier is parity-gated against fp32** by extending `make parity`, which
   already exists to compare CPU/Vulkan/NPU. A tier that cannot demonstrate
   equivalence within a declared tolerance does not ship.
-* **Quantisation is a numeric tier, not a separate feature.** `qwen::q8` and
+* **Quantisation is a numeric tier, not a separate feature.** `qwen3::q8` and
   `matmul_i8` already exist; they belong behind this seam so every model gets
   them, rather than being wired per-model as today.
 
@@ -257,7 +257,7 @@ being a bespoke pipeline.
 
 **A0 (new, first). Int8 weights in the serving path.** The single largest and
 most portable win: 4× fewer weight bytes in a bandwidth-bound regime, plus 4×
-the MACs on any device with `int8_dot`. `matmul_i8` and `qwen::q8` exist; the
+the MACs on any device with `int8_dot`. `matmul_i8` and `qwen3::q8` exist; the
 work is wiring them behind S4's numeric tier and adding a `--weights-int8` (or
 capability-driven default) to the engine. On devices without DP4A the same
 quantisation still halves-or-better the bytes moved, so it wins there too.

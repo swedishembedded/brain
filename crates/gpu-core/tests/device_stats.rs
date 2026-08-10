@@ -9,7 +9,7 @@
 //! answer to "how many submits did this cost" was unavailable, and the one
 //! in-tree consumer papered over it with `.unwrap_or(0)`. That turned "not
 //! counted" into "zero" and made an engine test
-//! (`qwen::serve::tests::prefill_submits_scale_with_chunks_not_with_token_count`)
+//! (`qwen3::serve::tests::prefill_submits_scale_with_chunks_not_with_token_count`)
 //! pass **vacuously** on the CPU backend: its first two assertions compared
 //! 0 == 0 and only the third noticed.
 //!

@@ -35,7 +35,7 @@ use crate::config::MoeTextConfig;
 
 /// One int8-quantized expert linear: packed weight + per-channel scale, read
 /// straight from the checkpoint's ALREADY-quantized `U32`/`F32` `.scale`
-/// pair (`omni::import` quantized at IMPORT time — unlike `qwen::q8::Q8`,
+/// pair (`omni::import` quantized at IMPORT time — unlike `qwen3::q8::Q8`,
 /// which quantizes an fp32 SOURCE checkpoint on load, there is no
 /// `model::int8::quantize_weight` call here at all, just a read + upload).
 pub struct ExpertLin8 {
@@ -127,7 +127,7 @@ fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
     let scale = reader.tensor(&scale_name).unwrap_or_else(|| panic!("ThinkerInt8Store: missing scale sibling '{scale_name}'"));
     let pb = gpu.storage(packed.len() as u64);
     gpu.write(&pb, &packed);
-    gpu.poll_wait(); // reclaim the write's staging buffer before the next weight (qwen::q8's own discipline)
+    gpu.poll_wait(); // reclaim the write's staging buffer before the next weight (qwen3::q8's own discipline)
     let sb = gpu.storage_init(&scale_name, &scale);
     ExpertLin8 { packed: pb, scale: sb }
 }

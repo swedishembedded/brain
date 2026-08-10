@@ -25,7 +25,7 @@ fetching an already-quantized GGUF directly.
 
 ## Done
 
-- **P0 — config + param layout** (`crates/qwen35/src/config.rs`):
+- **P0 — config + param layout** (`crates/qwen35moe/src/config.rs`):
   `Qwen35Config` with the hybrid layer-type schedule (`LayerType::{Linear,
   Full}`, generated from `full_attention_interval` by the exact reference
   formula — verified against the real checkpoint's explicit `layer_types`
@@ -38,8 +38,8 @@ fetching an already-quantized GGUF directly.
   since `model::moe`'s dispatch reads one 2-D expert weight per call. `tiny()`
   keeps every dimension that's distinct in the real config pairwise distinct
   (`docs/lessons.md` #4). JSON round-trip covers every field including LoRA
-  (`docs/lessons.md` #23). Reuses `qwen::LoraCfg` rather than duplicating it.
-- **P1 — GGUF import** (`crates/qwen35/src/import.rs`): streams every
+  (`docs/lessons.md` #23). Reuses `qwen3::LoraCfg` rather than duplicating it.
+- **P1 — GGUF import** (`crates/qwen35moe/src/import.rs`): streams every
   simple tensor one at a time via `checkpoint::gguf::MmapGguf`'s new
   `TensorSource` impl (P1a below); the three per-layer expert-stack tensors
   are read whole (~1 GB fp32 dequantized at the real shape, never the whole
@@ -76,7 +76,7 @@ fetching an already-quantized GGUF directly.
     cross-check assertion against the shape-derived value).
   - `import_gguf` fails loudly on any two-way coverage gap (every planned
     tensor written exactly once, every mapped source tensor consumed) —
-    mirrors `qwen::import::brain_init_from_hf`'s discipline for a streaming
+    mirrors `qwen3::import::brain_init_from_hf`'s discipline for a streaming
     writer.
   - Verified against the REAL checkpoint (`BRAIN_QWEN35_GGUF`-gated test)
     while ~49% downloaded: header (753 tensor infos + all KV) decoded
@@ -156,7 +156,7 @@ fetching an already-quantized GGUF directly.
   no WGSL equivalent). Requires the caller to produce every per-token buffer
   **chunk-major** (`[n_chunks,B,H,C,D]`, chunk outermost) rather than the
   reference's `[B,H,T,D]` — documented at length in `gdn.rs`'s module doc;
-  `qwen35::model`'s wiring (P8) must honor this. Verified against an
+  `qwen35moe::model`'s wiring (P8) must honor this. Verified against an
   independently re-derived f64 host oracle (plain nested loops, natural
   `[b,h,t,d]` indexing) at a tiny two-chunk shape with pairwise-distinct
   dims, on both backends: worst |delta| 8.99e-8 (GPU) / 1.61e-7 (CPU JIT).
@@ -181,8 +181,8 @@ fetching an already-quantized GGUF directly.
   between the GPU and CPU-JIT backends (integer accumulation); measured
   tolerance at tiny synthetic shapes: cosine 0.998–0.999, rel-L2 4.8–5.8%.
 
-- **P8 — forward pass, TEXT ONLY** (`crates/qwen35/src/model.rs`,
-  `crates/qwen35/src/init.rs`): assembles this session's already-verified
+- **P8 — forward pass, TEXT ONLY** (`crates/qwen35moe/src/model.rs`,
+  `crates/qwen35moe/src/init.rs`): assembles this session's already-verified
   primitives (`model::gdn`, `model::moe`, `model::block`'s GQA/
   `rope2d_partial`) into the full 40-layer hybrid decoder — no new math
   derived here, pure wiring, following GLM's per-layer-enum/SSA-cache
@@ -226,8 +226,8 @@ fetching an already-quantized GGUF directly.
   **Vision splice is explicitly NOT in this pass** — text-only, tracked
   separately as its own task.
 
-- **P10a — INT8 (DP4A) quantized inference, SINGLE-GPU** (`crates/qwen35/src/
-  q8.rs`): mirrors `qwen::q8::Q8`'s recipe (weights quantized once via
+- **P10a — INT8 (DP4A) quantized inference, SINGLE-GPU** (`crates/qwen35moe/src/
+  q8.rs`): mirrors `qwen3::q8::Q8`'s recipe (weights quantized once via
   `model::int8::quantize_weight`, activations quantized on-device per
   forward with a dynamic per-token scale), adapted for qwen35's two mixer
   shapes (GDN vs GQA) and its 256-routed-expert MoE. Quantized: every mixer
@@ -238,7 +238,7 @@ fetching an already-quantized GGUF directly.
   bottleneck), the shared expert (1/256th the mass, no int8 kernel exists
   for it), embeddings/`lm_head` (embed is a gather not a GEMM; `lm_head`
   kept fp32 for the same precision-sensitive-logits reason as the router,
-  matching `qwen::q8`'s own choice). Reuses `model::moe`'s existing
+  matching `qwen3::q8`'s own choice). Reuses `model::moe`'s existing
   `Lin8`/`ExpertScratch8`/`expert_fwd_i8` unchanged via a thin adapter.
 
   Two real findings during integration: (1) initially wired the STATIC
@@ -246,7 +246,7 @@ fetching an already-quantized GGUF directly.
   `Q8::quant`/`mm8` actually produce — caught by a bind-group-count
   mismatch; (2) confirmed `matmul_i8_dyn`/`moe_linear_gated_i8` cannot run
   on the CPU (Cranelift JIT) backend at all (a pre-existing, engine-wide
-  limitation, not a new bug — `qwen::q8`'s own tests never exercise an int8
+  limitation, not a new bug — `qwen3::q8`'s own tests never exercise an int8
   forward on CPU either) — handled by asserting the exact known panic on
   CPU and running the real dual-backend-parity check
   (`docs/lessons.md` #5) against fp32 on the GPU backend instead.
@@ -314,7 +314,7 @@ fetching an already-quantized GGUF directly.
   `gdn_chunk_fwd`'s bit-for-bit (identical error numbers to the pre-existing
   forward test), confirming the shared-prefix refactor changed no behavior.
 
-- **P9 — qwen35-level backward + `gradcheck::check_qwen35`** (`crates/qwen35/
+- **P9 — qwen35-level backward + `gradcheck::check_qwen35`** (`crates/qwen35moe/
   src/model.rs`; one new kernel, `gdn_decay_gate_bwd.wgsl`): wires the three
   already-proven primitives (`model::gdn::gdn_chunk_bwd`, `model::block::
   gqa_bwd`, `model::moe::moe_layer_bwd`) together into `Qwen35::backward()`,
@@ -382,7 +382,7 @@ fetching an already-quantized GGUF directly.
 
   **Gradcheck**: went through the generic `gradcheck` crate machinery
   (`gradcheck::check_qwen35`, `crates/gradcheck/src/lib.rs`), NOT a bespoke
-  `crates/qwen35/tests/` harness — `Qwen35` already implements the full
+  `crates/qwen35moe/tests/` harness — `Qwen35` already implements the full
   `model::Model` trait (forward, backward, zero_grads, adamw_step, read_grad,
   read/write_weight), so the blanket `impl<M: model::Model> CheckModel for M`
   makes it checkable with zero new test-harness code, exactly like
@@ -419,7 +419,7 @@ fetching an already-quantized GGUF directly.
   beta/gate parameters. Full writeup: `docs/lessons.md` #40. Fixed in the
   **test harness only** (`qwen35_gradcheck_harness`, `crates/gradcheck/src/
   lib.rs`, overrides `in_proj_qkv.weight`/`conv1d.weight` to `std=1.0` post-
-  init) — neither `qwen35::init`'s production init nor `model::gdn`'s `eps`
+  init) — neither `qwen35moe::init`'s production init nor `model::gdn`'s `eps`
   needed to change. Re-verified after the fix: every GDN-layer parameter
   (`in_proj_qkv.weight`, `conv1d.weight`, `in_proj_z.weight`,
   `out_proj.weight`, `norm.weight`) now shows real, non-floor-dominated
@@ -474,9 +474,9 @@ pieces.)
   matching the original plan's "prefer the direct mmap-streaming GGUF path"
   intent, now with a concrete number behind why it is not optional.
 - **P10b — INT4 quantized inference** for qwen35 specifically
-  (`crates/qwen35/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
+  (`crates/qwen35moe/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
   `model::int4`), once useful — P10a (int8, single-GPU) already landed.
-- **P11 — `qwen35::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
+- **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
   paging for the 10 full-attention layers, a small O(1)-in-sequence-length
   per-sequence recurrent-state buffer (not paged) for the 30 GDN layers;
   layer-range `Shard`/`Pipeline` across both P40s at INT8/INT4 residency

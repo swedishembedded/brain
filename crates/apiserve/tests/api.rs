@@ -1418,7 +1418,7 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
 
 /// A chat model whose `run_batch` pays its (mocked) generation cost ONCE per
 /// batch, not once per invocation — a stand-in for "one shared forward pass
-/// serves every sequence in it", exactly what `qwen::serve::Scheduler` does for
+/// serves every sequence in it", exactly what `qwen3::serve::Scheduler` does for
 /// real (see `docs/performance/status.md`'s M3: TTFA at concurrency 2 measured
 /// LOWER than at concurrency 1 through this same router, with a real model).
 /// The framework always calls `run_batch` (never `run` directly — see

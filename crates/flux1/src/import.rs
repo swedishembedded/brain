@@ -8,7 +8,7 @@
 //! [`Flux1Config::tensor_manifest`]: every expected tensor produced exactly
 //! once with the right shape, and no source tensor left unused — a mismatch is
 //! an error naming the tensor, never a silent zero-fill (the same discipline as
-//! `flux2::import` and `qwen::import::brain_init_from_hf`).
+//! `flux2::import` and `qwen3::import::brain_init_from_hf`).
 //!
 //! Two fusions happen here, so every device matmul later reads a whole buffer:
 //! the double blocks' split `to_q`/`to_k`/`to_v` become one `attn.qkv`, and the

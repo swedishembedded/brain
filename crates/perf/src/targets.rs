@@ -7,7 +7,7 @@
 //!   path: a model that implements the seam becomes benchmarkable with **zero**
 //!   new benchmark code, because `Action::run` already takes a `Progress`
 //!   callback that gives the harness its artifact timeline.
-//! * [`PagedLlmTarget`] — wraps `qwen::serve::{Engine, Scheduler}` directly. The
+//! * [`PagedLlmTarget`] — wraps `qwen3::serve::{Engine, Scheduler}` directly. The
 //!   paged continuous-batching engine is the thing most worth measuring today
 //!   and does not yet sit behind a `Provider`.
 //! * [`ExecutorTarget`] — wraps a [`residency::Executor`] holding a real
@@ -132,11 +132,11 @@ pub const FIDELITY_MAX_NEW: u32 = 12;
 
 // ===================== paged LLM engine =====================
 
-/// Drives `qwen::serve::Scheduler`. One [`PerfTarget::step`] is one scheduler
+/// Drives `qwen3::serve::Scheduler`. One [`PerfTarget::step`] is one scheduler
 /// iteration — admit what fits, one batched decode over the running set, reap
 /// completions — which is exactly the granularity TTFA and IAL are defined at.
 pub struct PagedLlmTarget {
-    sched: qwen::serve::Scheduler,
+    sched: qwen3::serve::Scheduler,
     info: TargetInfo,
     eos: Option<u32>,
     /// Deterministic synthetic prompt vocabulary bound (avoids tokenizer I/O in
@@ -146,7 +146,7 @@ pub struct PagedLlmTarget {
 }
 
 impl PagedLlmTarget {
-    pub fn new(sched: qwen::serve::Scheduler, info: TargetInfo, eos: Option<u32>, vocab: u32) -> PagedLlmTarget {
+    pub fn new(sched: qwen3::serve::Scheduler, info: TargetInfo, eos: Option<u32>, vocab: u32) -> PagedLlmTarget {
         PagedLlmTarget { sched, info, eos, vocab, submitted: 0 }
     }
 
@@ -169,7 +169,7 @@ impl PerfTarget for PagedLlmTarget {
         // `ignore_stop` is expressed by passing no EOS: a synthetic run must
         // produce the full requested length, or the workload silently shortens
         // and the reported rate is inflated.
-        self.sched.submit(qwen::serve::Request { prompt, max_new: req.output_artifacts, eos: self.eos })
+        self.sched.submit(qwen3::serve::Request { prompt, max_new: req.output_artifacts, eos: self.eos })
     }
 
     fn step(&mut self, out: &mut Vec<Emission>) -> bool {
@@ -224,7 +224,7 @@ impl PerfTarget for PagedLlmTarget {
             ),
             // The int8-KV memory claim, measured rather than asserted: an
             // analytic byte count derived from the SAME arithmetic the engine
-            // allocated from (qwen::serve::kv_pool_bytes), not a device
+            // allocated from (qwen3::serve::kv_pool_bytes), not a device
             // counter -- see that function's doc comment for why. `kv_dtype`
             // itself is already reported in the artifact's `target.config`
             // (`build_qwen_synth`/`build_qwen`'s `.with("kv_dtype", ...)`).
@@ -244,7 +244,7 @@ impl PerfTarget for PagedLlmTarget {
 
     /// Map the harness policy names onto the engine's admission seam.
     fn set_admission(&mut self, policy: &str) -> bool {
-        use qwen::serve::{DeadlineAware, MaxQueueDepth, UnboundedQueue};
+        use qwen3::serve::{DeadlineAware, MaxQueueDepth, UnboundedQueue};
         match policy.split_once(':') {
             None if policy == "unbounded" => {
                 self.sched.set_admission(Box::new(UnboundedQueue));
@@ -279,7 +279,7 @@ impl PerfTarget for PagedLlmTarget {
         // Sequential reference: one request at a time, drained to completion.
         let mut seq_out = Vec::new();
         for p in &prompts {
-            let id = self.sched.submit(qwen::serve::Request {
+            let id = self.sched.submit(qwen3::serve::Request {
                 prompt: p.clone(),
                 max_new,
                 eos: None,
@@ -292,7 +292,7 @@ impl PerfTarget for PagedLlmTarget {
         let ids: Vec<u64> = prompts
             .iter()
             .map(|p| {
-                self.sched.submit(qwen::serve::Request { prompt: p.clone(), max_new, eos: None })
+                self.sched.submit(qwen3::serve::Request { prompt: p.clone(), max_new, eos: None })
             })
             .collect();
         let done = self.sched.run();
@@ -699,7 +699,7 @@ mod tests {
 /// through this target: today's `QwenInstance` (`crates/cli/src/
 /// resident_llm.rs`) is built on `Qwen::from_reader_decode`, which has no
 /// `device_stats()`/admission-policy seam to read. Once the LLM residents are
-/// rewired onto `qwen::serve::Engine` (this plan's W5), those numbers become
+/// rewired onto `qwen3::serve::Engine` (this plan's W5), those numbers become
 /// reachable here with no change to this struct's shape — reporting a
 /// fabricated number now would violate the "never a fabricated zero" rule
 /// (`docs/performance/benchmarking.md` §1), so they are simply absent.

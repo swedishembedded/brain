@@ -17,7 +17,7 @@
 //! the exact same arithmetic the WGSL engine runs (RMSNorm eps 1e-6, `y = x·Wᵀ`,
 //! half-split RoPE base θ, GQA score scale `1/√head_dim`, causal max-subtracted
 //! softmax, `SiLU(x)=x·σ(x)`). It does **not** touch the gradient-checked
-//! `qwen::Qwen` / `TalkerGen` forward graphs, which remain the parity reference.
+//! `qwen3::Qwen` / `TalkerGen` forward graphs, which remain the parity reference.
 //! [`CpuTalker::forward_full`] reproduces the full-recompute hidden states (used
 //! to prove the cache is exact and that the CPU math matches the GPU engine), and
 //! [`CpuTalker::step`] is the incremental cached path used by generation.
@@ -372,7 +372,7 @@ impl CpuTalker {
     }
 
     /// Build from a decoder weight map (`blocks.{l}.*` + `norm.weight`). Mirrors
-    /// the names [`crate::gen::TalkerGen`] / [`qwen::Qwen`] use, so the same
+    /// the names [`crate::gen::TalkerGen`] / [`qwen3::Qwen`] use, so the same
     /// frozen weights can drive either path.
     pub fn from_decoder_map(cfg: TalkerConfig, w: &HashMap<String, Vec<f32>>) -> CpuTalker {
         let take = |n: &str| {
@@ -400,7 +400,7 @@ impl CpuTalker {
     /// [`crate::gen::TalkerGen::load`]).
     pub fn load(path: &str) -> CpuTalker {
         let c = checkpoint::load(path);
-        let qcfg = qwen::QwenConfig::from_json(&c.header["config"]);
+        let qcfg = qwen3::QwenConfig::from_json(&c.header["config"]);
         let cfg = TalkerConfig::from_qwen(&qcfg);
         let mut map = HashMap::new();
         for l in 0..cfg.n_layers {

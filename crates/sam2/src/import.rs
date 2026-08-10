@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Checkpoint import with **two-way coverage validation**, in the discipline of
-//! `flux2::import` / `qwen::import::brain_init_from_hf`:
+//! `flux2::import` / `qwen3::import::brain_init_from_hf`:
 //!
 //!   * every tensor [`Sam2Config::tensor_manifest`] expects is produced exactly
 //!     once, with the right shape and element count — a miss is an error NAMING

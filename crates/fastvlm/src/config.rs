@@ -6,7 +6,7 @@
 //! (they live in the vision tower's `mci.py`, not the LLaVA config) and captured
 //! as [`FastVitHdConfig::fastvithd`].
 
-use qwen::QwenConfig;
+use qwen3::QwenConfig;
 use serde_json::Value;
 
 /// FastViTHD hybrid conv/attention encoder configuration (the `mobileclip_l_1024`

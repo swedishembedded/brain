@@ -10,7 +10,7 @@ name = "fastvlm"
 path = "src/lib.rs"
 
 [dependencies]
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 brain-capability.workspace = true
 brain-model.workspace = true
 brain-gpu-core.workspace = true

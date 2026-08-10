@@ -16,7 +16,7 @@
 
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
-use qwen::config::QwenConfig;
+use qwen3::config::QwenConfig;
 
 use crate::topology::WeightSource;
 
@@ -673,8 +673,8 @@ mod tests {
     fn streaming_weight_source_matches_eager_hashmap() {
         let cfg = QwenConfig::tiny();
         let block = cfg.block_size;
-        let init = qwen::init_weights(&cfg, 11);
-        let model = qwen::Qwen::new(cfg.clone(), 1, block, &init);
+        let init = qwen3::init_weights(&cfg, 11);
+        let model = qwen3::Qwen::new(cfg.clone(), 1, block, &init);
         let dir = std::env::temp_dir().join(format!("brain_qwen_topo_parity_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tiny.safetensors");

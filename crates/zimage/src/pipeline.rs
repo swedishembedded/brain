@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
 use diffusion::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler};
-use qwen::{Qwen, QwenConfig, Shard, IGNORE};
+use qwen3::{Qwen, QwenConfig, Shard, IGNORE};
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
 use crate::import::import_comfy;
@@ -195,7 +195,7 @@ impl HotPipeline {
         // CPU. Unset ⇒ CPU. Card-agnostic: you choose the bulk-card index.
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
-        let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
+        let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
         // User env input, parsed to canonical card indices at this edge; all
         // placement below goes through the device registry (explicit Shard
         // indices / scoped `with_gpu`), never env mutation.
@@ -526,10 +526,10 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     progress(1, total, "encoding prompt (Qwen-4B, CPU/AVX2)");
     let qcfg = QwenConfig::qwen3_4b();
     let qtensors = read_component_tensors(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
-    let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
+    let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
     let cap = {
         gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU (AVX2)
-        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
+        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen3::Shard::whole(qcfg.n_layers as usize));
         let c = enc.encode(&tokens); // [cap_len · 2560]
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
         c

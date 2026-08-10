@@ -70,7 +70,7 @@ single-device model:
 
 Both are **bit-exact**, and a sharded overfit run reduces the loss.
 
-`crates/qwen/tests/integration_qwen3.rs::qwen3_shard_real_2gpu` — the real 0.6B:
+`crates/qwen3/tests/integration_qwen3.rs::qwen3_shard_real_2gpu` — the real 0.6B:
 
 ```
 layers split: 2 stages over 28 layers
@@ -106,7 +106,7 @@ activation memory is `O(p · b·t·d)` regardless of the microbatch count — th
 what lets brain's single-activation-buffer stages pipeline at all. Grounded in
 GPipe / PipeDream-Flush (`resources/dp/`).
 
-Bit-exact to sequential grad-accumulation (`crates/qwen/tests/shard_microbatch.rs`:
+Bit-exact to sequential grad-accumulation (`crates/qwen3/tests/shard_microbatch.rs`:
 worst grad rel 1.11e-7). Real 0.6B, 4 microbatches across 2 P40s:
 
 ```

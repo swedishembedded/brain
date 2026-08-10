@@ -14,7 +14,7 @@ path = "src/main.rs"
 # default — the default build stays pure wgpu/WGSL.
 vulkan-coopmat = ["dep:brain-vulkan"]
 # Enable the engine's fault-injection points for `brain perf faults` (G).
-fault-injection = ["brain-qwen/fault-injection"]
+fault-injection = ["brain-qwen3/fault-injection"]
 
 [dependencies]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`
@@ -31,7 +31,7 @@ brain-wm-diamond.workspace = true
 brain-wm-display.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 brain-qwenvl.workspace = true
 brain-fastvlm.workspace = true
 brain-glm.workspace = true

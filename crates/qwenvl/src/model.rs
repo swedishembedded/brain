@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
-use qwen::{Qwen, QwenConfig};
+use qwen3::{Qwen, QwenConfig};
 
 use crate::config::VisionConfig;
 use crate::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
@@ -162,7 +162,7 @@ impl Qwen3Vl {
     }
 
     /// Greedy KV-cache generation for one image + text prompt: real
-    /// `qwen::Qwen` `step`/`step_embed` machinery (via this session's new
+    /// `qwen3::Qwen` `step`/`step_embed` machinery (via this session's new
     /// `step_mrope`/`step_embed_mrope`, Phase 7a), not [`Self::forward`]'s
     /// training-loss-shaped batched path -- the gap `docs/models/omni/
     /// status.md`'s own note names ("`Qwen3Vl::forward()` returns `f32`...
@@ -171,7 +171,7 @@ impl Qwen3Vl {
     /// Prefill splices the image at its token run the same way
     /// [`Self::forward`] does (image-placeholder token ids → step_embed_mrope
     /// with the matching merged visual row; every other token → step_mrope),
-    /// so the KV cache never knows the difference (mirrors `qwen::Qwen::
+    /// so the KV cache never knows the difference (mirrors `qwen3::Qwen::
     /// prefill`'s own doc). Decode continues the position sequence past the
     /// prompt as plain text (T=H=W, +1 per token — the same "media block
     /// then plain text" case `qwenvl::mrope::get_rope_index_multi` documents).
@@ -182,14 +182,14 @@ impl Qwen3Vl {
     /// separate, later concern. Returns the generated token ids (prompt not
     /// included), stopping early at any id in `eos_ids`.
     ///
-    /// **DeepStack IS applied here**: `qwen::Qwen::decode_steps`'s
+    /// **DeepStack IS applied here**: `qwen3::Qwen::decode_steps`'s
     /// `deepstack_row` parameter adds each level's per-row residual
     /// contribution during the incremental step that embeds that row (was
-    /// missing before this session — `qwen::Qwen::enable_deepstack`'s
+    /// missing before this session — `qwen3::Qwen::enable_deepstack`'s
     /// `SPLICE_ADD` used to be wired ONLY into the batched `forward_steps()`
     /// graph, now also threaded into incremental decode via `decode_steps`'s
     /// `deepstack_row` parameter; see also
-    /// `crates/qwen/tests/deepstack_decode_parity.rs`).
+    /// `crates/qwen3/tests/deepstack_decode_parity.rs`).
     pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32]) -> Vec<u32> {
         let (gh, gw) = grid;
         let n = gh * gw;
@@ -254,9 +254,9 @@ impl Qwen3Vl {
 }
 
 /// `argmax_i(head[i] . hidden)` -- the host-side tied/untied head application
-/// every KV-cache decode path in this engine uses (`qwen::sample`'s own doc:
+/// every KV-cache decode path in this engine uses (`qwen3::sample`'s own doc:
 /// "The tied/untied head is applied on the host to the final-norm hidden
-/// state"), inlined rather than imported since `qwen::sample`'s equivalent
+/// state"), inlined rather than imported since `qwen3::sample`'s equivalent
 /// (`sample_logits`) is private and bundled with temperature/top-k/top-p
 /// machinery this validation-tier greedy path does not need.
 fn argmax_tied_head(head: &[f32], hidden: &[f32], vocab: usize, d_model: usize) -> u32 {
@@ -384,13 +384,13 @@ mod tests {
             })
             .collect();
 
-        let dweights = qwen::init_weights(&dcfg, 3);
+        let dweights = qwen3::init_weights(&dcfg, 3);
 
         // Stream: 2 text, 4 image (2×2 grid merged), 1 text. IGNORE at image rows.
         let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
         let mut targets = vec![2u32, 3, 0, 0, 0, 0, 5];
         for t in targets.iter_mut().take(6).skip(2) {
-            *t = qwen::IGNORE;
+            *t = qwen3::IGNORE;
         }
 
         let model =
@@ -506,7 +506,7 @@ mod tests {
             })
             .collect();
 
-        let dweights = qwen::init_weights(&dcfg, 13);
+        let dweights = qwen3::init_weights(&dcfg, 13);
 
         // Prompt: 2 text, 4 image (2×2 grid merged), 1 text -- room left in
         // block_size (16) for generated tokens beyond the 7-token prompt.
@@ -575,7 +575,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            &qwen::init_weights(
+            &qwen3::init_weights(
                 &QwenConfig {
                     vocab: 23,
                     block_size: 16,

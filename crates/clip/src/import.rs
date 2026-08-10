@@ -4,7 +4,7 @@
 //! Checkpoint import with **two-way coverage validation**: every tensor the
 //! config's manifest names is produced exactly once with the right shape, AND
 //! no source tensor is left unused. A mismatch is an error naming the tensor —
-//! never a silent zero-fill (the `flux2::import` / `qwen::import` discipline).
+//! never a silent zero-fill (the `flux2::import` / `qwen3::import` discipline).
 //!
 //! Two source layouts:
 //!   * **HF `CLIPTextModel(WithProjection)`** (`text_model.*`) — q/k/v already

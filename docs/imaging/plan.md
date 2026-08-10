@@ -721,7 +721,7 @@ attention stay fp32.
 
 So INT8 is the **primary** residency mechanism here, not a fallback, and there is
 direct precedent for exactly this shape of model: `zimage::int8` quantizes a DiT
-and `qwen::q8` takes the Qwen3-4B encoder from ~16 GB fp32 to ~4.8 GB so it fits
+and `qwen3::q8` takes the Qwen3-4B encoder from ~16 GB fp32 to ~4.8 GB so it fits
 one P40.
 
 | Model | fp32 weights | INT8 linears | Fits |

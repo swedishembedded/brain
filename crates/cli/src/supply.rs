@@ -109,7 +109,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let id = format!("{vendor}/{repo}");
 
     let result = match family {
-        "qwen" => qwen::import::import_as(hf_dir, out, None, Some(&id)),
+        "qwen" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
         "glm" => glm::import::import_as(hf_dir, out, Some(&id)),
         "lfm" => lfm::import::import_as(hf_dir, out, Some(&id)),
         // gpt is nanogpt-style, trained from scratch -- brain has never had an
@@ -283,7 +283,7 @@ mod tests {
     }
 
     /// A tiny but real 1-layer tied-embedding Qwen3 HF checkpoint -- the same
-    /// shape as `crates/qwen/src/import.rs`'s own `build_tiny_hf_dir` test
+    /// shape as `crates/qwen3/src/import.rs`'s own `build_tiny_hf_dir` test
     /// fixture, reproduced here as raw bytes for a [`FakeHub`] rather than a
     /// directory, since `ensure` must drive the whole plan -> download ->
     /// convert pipeline, not just call the importer directly.

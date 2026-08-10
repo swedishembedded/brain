@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-VL — a ViT vision encoder + PatchMerger + DeepStack in front of a Qwen3
-//! text decoder driven from spliced image embeddings (`qwen::Qwen::enable_mm_splice`).
+//! text decoder driven from spliced image embeddings (`qwen3::Qwen::enable_mm_splice`).
 //!
 //! Assembled from brain's existing building blocks: the shared `model::vit` block
 //! builder for the ViT, the whole `qwen` decoder for the text side (interleaved

@@ -21,8 +21,8 @@ default-members = [
     "crates/model",
     "crates/moe",
     "crates/gpt",
-    "crates/qwen",
-    "crates/qwen35",
+    "crates/qwen3",
+    "crates/qwen35moe",
     "crates/lfm",
     "crates/qwenvl",
     "crates/qwen-asr",
@@ -118,8 +118,8 @@ brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
 brain-moe = { path = "crates/moe" }
 brain-gpt = { path = "crates/gpt" }
-brain-qwen = { path = "crates/qwen" }
-brain-qwen35 = { path = "crates/qwen35" }
+brain-qwen3 = { path = "crates/qwen3" }
+brain-qwen35moe = { path = "crates/qwen35moe" }
 brain-lfm = { path = "crates/lfm" }
 brain-nemotron = { path = "crates/nemotron" }
 brain-qwen-asr = { path = "crates/qwen-asr" }

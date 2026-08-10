@@ -378,9 +378,9 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Piece | Where | What |
 |---|---|---|
 | Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
-| Serving engine | `crates/qwen/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV — the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing — `crates/cli/src/resident_llm.rs`). |
-| Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen::serve::Scheduler` is a type alias over `Engine` — the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
-| Shared Qwen chat serving | `crates/qwen/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation — one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen::caps.rs` (`brain do`), so they cannot diverge |
+| Serving engine | `crates/qwen3/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV — the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing — `crates/cli/src/resident_llm.rs`). |
+| Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen3::serve::Scheduler` is a type alias over `Engine` — the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
+| Shared Qwen chat serving | `crates/qwen3/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation — one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen3::caps.rs` (`brain do`), so they cannot diverge |
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain do`) and the event API dispatch generically — adding a capability = implementing `Action`, no new subcommand or event variant |
 | Transports | `crates/server` | one JSONL protocol over **stdio, TCP, and Unix socket**; thread-per-connection, bounded, panic-isolated |
@@ -509,8 +509,8 @@ front-end to depend on.
 | Roofline probe (compute/bandwidth ceiling used for "% of roof") | `gpu_core::roof`; bounded by `BRAIN_ROOF_BUDGET_S` (default 10s); off by default on the CPU device class, force-run there with `BRAIN_NO_ROOF=0` |
 | GPU backend wait bound (Vulkan fence wait, wgpu `poll`) | `BRAIN_GPU_WAIT_S` (default 30s) — a wedged submit now panics with which call site timed out instead of hanging the process forever; see `docs/lessons.md` #38 |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
-| Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
-| Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
+| Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen3::serve::Engine::prefill` |
+| Int8 serving weights + on-device decode window | `qwen3::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
 | **Profile a forward or a BACKWARD, per kernel kind** | `crates/unet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `docs/kernel-checklist.md` §F.1 |
 | **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
@@ -519,8 +519,8 @@ front-end to depend on.
 | MoE toy task / honest eval methodology | `README.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
-| Qwen model / import / LoRA / INT8 / sharding | `crates/qwen/src/{model,import,finetune,q8,shard,sample}.rs` |
-| **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
+| Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
+| **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain do`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
@@ -911,7 +911,7 @@ per-scenario table and the findings so far.
   (`matmul_i8`, `matmul_i8_dyn`, `matmul_i8_gemv`, ~4× the fp32 rate on Pascal),
   dynamic per-token activation scales (`max_abs_row` → `quant_pack`), and int8
   paged KV. Norms/RoPE/attention stay fp32. Quantizing is the FIRST tool for
-  fitting a large model on a card (`zimage::int8` for a DiT, `qwen::q8` for an
+  fitting a large model on a card (`zimage::int8` for a DiT, `qwen3::q8` for an
   encoder: ~16 GB → ~4.8 GB), ahead of sharding. `@workgroup_size(64)` is the rule;
   the register-tiled matmuls (`matmul_reg*.wgsl`, `matmul_dw_reg.wgsl`,
   `matmul_dx_reg.wgsl`, `matmul_i8*.wgsl`) and `flash_attn_bidir_split.wgsl`

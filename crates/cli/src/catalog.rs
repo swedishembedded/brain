@@ -92,8 +92,8 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
-            manifest: qwen::caps::manifest,
-            provider: always!(qwen::caps::QwenProvider::new()),
+            manifest: qwen3::caps::manifest,
+            provider: always!(qwen3::caps::QwenProvider::new()),
             resident: None,
         },
         ModelEntry {

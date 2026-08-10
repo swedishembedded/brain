@@ -32,7 +32,7 @@
 //!   this module bilinear-resizes to it (`resize_bilinear_chw`, the same
 //!   shape as `fastvlm::caps::pad_resize_chw` but without the square-pad —
 //!   Qwen3-VL's own preprocessor does not pad).
-//! - **DeepStack is real** (this session's `qwen::Qwen::decode_steps`
+//! - **DeepStack is real** (this session's `qwen3::Qwen::decode_steps`
 //!   `deepstack_row` fix, which threads each level's per-row residual add
 //!   into the incremental decode path), so real Qwen3-VL-4B checkpoints
 //!   (`deepstack_indexes: [5, 11, 17]`) work here, not just DeepStack-free

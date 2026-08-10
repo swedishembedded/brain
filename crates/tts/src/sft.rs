@@ -159,7 +159,7 @@ impl Default for FinetuneOpts {
 pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> std::io::Result<(f32, f32)> {
     use data::loader::{BatchConfig, TokenDataset};
     use data::rng::Rng;
-    use qwen::{LoraCfg, Qwen, QwenConfig};
+    use qwen3::{LoraCfg, Qwen, QwenConfig};
 
     // 1. Load the base config + weights, then re-key under a LoRA config so the
     //    parameter list gains `*.lora_a`/`*.lora_b` (base stays frozen).
@@ -170,7 +170,7 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
     let base_weights = ckpt.by_role("");
     // Fresh init provides the adapter tensors (A ~ small random, B = 0); overwrite
     // every base tensor with the pretrained value.
-    let mut init = qwen::init_weights(&cfg, opts.seed);
+    let mut init = qwen3::init_weights(&cfg, opts.seed);
     for (k, v) in base_weights {
         init.insert(k, v);
     }

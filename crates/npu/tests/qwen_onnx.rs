@@ -13,11 +13,11 @@ fn tiny_onnx_matches_brain_cpu() {
         return;
     }
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
-    use qwen::{Qwen, QwenConfig};
+    use qwen3::{Qwen, QwenConfig};
 
     let cfg = QwenConfig::tiny();
     let block = cfg.block_size;
-    let init = qwen::init_weights(&cfg, 7);
+    let init = qwen3::init_weights(&cfg, 7);
     let model = Qwen::new(cfg.clone(), 1, block, &init);
     let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let reference = model.logits_all(&ids); // [6 * vocab]

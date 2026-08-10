@@ -31,7 +31,7 @@ submits, plain `w: HashMap`, host readbacks mid-graph — no ParamStore, no Step
 GPT/Qwen/MoE/GLM (gradcheck-passing, incl. gradcheck-validated Qwen LoRA); the two
 forecasters must be rebuilt as differentiable `model::Model`s.
 
-Blueprint = `crates/qwen/src/model.rs` (ParamStore roles, `forward_steps`/
+Blueprint = `crates/qwen3/src/model.rs` (ParamStore roles, `forward_steps`/
 `build_backward_steps` tape, `lora_fwd`/`proj_bwd`, shared `model::block` builders for
 RMSNorm/RoPE/GQA/SwiGLU fwd+bwd, CE loss+grad kernels, `impl Model`).
 

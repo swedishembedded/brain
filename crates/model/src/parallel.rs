@@ -23,7 +23,7 @@
 //! AdamW update (shared state — all replicas are identical), and broadcasts the
 //! new weights back. Reading grads once and updating once, with both cards'
 //! transfers overlapped, is what turns a slowdown into a speedup (0.75× → 1.34-1.58×,
-//! `qwen::tests::integration_qwen3::qwen3_dataparallel_speedup`).
+//! `qwen3::tests::integration_qwen3::qwen3_dataparallel_speedup`).
 //!
 //! ## Why the grad-norm is on the host too — and why the on-GPU one cannot replace it
 //!

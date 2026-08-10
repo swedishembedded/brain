@@ -109,7 +109,7 @@ pub struct Pipeline {
     pub cfg: Flux2Config,
     model: Flux2Model,
     tok: data::qwen_tokenizer::QwenBpe,
-    te: qwen::Qwen,
+    te: qwen3::Qwen,
     vae_cfg: vae::VaeConfig,
     vae_tensors: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>,
     bn_mean: Vec<f32>,
@@ -158,12 +158,12 @@ impl Pipeline {
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
         let te_cfg = if cfg.context_in_dim == 12288 {
-            qwen::QwenConfig::qwen3_8b()
+            qwen3::QwenConfig::qwen3_8b()
         } else {
-            qwen::QwenConfig::qwen3_4b()
+            qwen3::QwenConfig::qwen3_4b()
         };
         let te_ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
-        let init = qwen::import::brain_init_from_hf(te_ts, &te_cfg)?;
+        let init = qwen3::import::brain_init_from_hf(te_ts, &te_cfg)?;
         // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
         // builds a truncated fp32 shard on that card (layers 0..=deepest tap —
         // res[27] needs no more; drops 9 layers + the head, ~12 GiB resident,
@@ -184,14 +184,14 @@ impl Pipeline {
                     None => (&s[3..], false),
                 };
                 let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
-                let shard = qwen::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
+                let shard = qwen3::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
                 if te_i8 {
-                    qwen::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &init, shard)
+                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &init, shard)
                 } else {
-                    qwen::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &init, false, shard)
+                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &init, false, shard)
                 }
             }
-            _ => qwen::Qwen::new(te_cfg, 1, cfg.txt_len as u32, &init),
+            _ => qwen3::Qwen::new(te_cfg, 1, cfg.txt_len as u32, &init),
         };
 
         let vp = std::path::Path::new(&paths.vae);

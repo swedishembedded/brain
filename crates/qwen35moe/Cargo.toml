@@ -1,0 +1,30 @@
+[package]
+name = "brain-qwen35moe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder Transformer: forward + backprop in WGSL."
+
+[lib]
+name = "qwen35moe"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+brain-data.workspace = true
+brain-qwen3.workspace = true
+brain-qwenvl.workspace = true
+brain-audio.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+wgpu = "29"
+pollster = "0.4"
+
+[dev-dependencies]
+brain-testutil.workspace = true

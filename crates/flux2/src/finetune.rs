@@ -80,13 +80,13 @@ pub fn encode_samples(
     // keep resident while training.
     let ctxs: Vec<Vec<f32>> = {
         let te_cfg = if fc.context_in_dim == 12288 {
-            qwen::QwenConfig::qwen3_8b()
+            qwen3::QwenConfig::qwen3_8b()
         } else {
-            qwen::QwenConfig::qwen3_4b()
+            qwen3::QwenConfig::qwen3_4b()
         };
         let te_ts = checkpoint::safetensors::read_model_dir(Path::new(&paths.te))?;
-        let init = qwen::import::brain_init_from_hf(te_ts, &te_cfg)?;
-        let te = qwen::Qwen::new(te_cfg, 1, fc.txt_len as u32, &init);
+        let init = qwen3::import::brain_init_from_hf(te_ts, &te_cfg)?;
+        let te = qwen3::Qwen::new(te_cfg, 1, fc.txt_len as u32, &init);
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {

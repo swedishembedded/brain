@@ -25,7 +25,7 @@
 //! (`gpu.storage_init`), so the splice is a plain host-side slice copy
 //! ([`splice_host`]) — not `model::vlm::splice_fwd`'s on-device kernel, which
 //! exists for callers whose residual buffer is already GPU-resident before
-//! the vision/audio embeddings are ready (`qwen::Qwen`'s baked forward graph;
+//! the vision/audio embeddings are ready (`qwen3::Qwen`'s baked forward graph;
 //! see that function's own doc). Same seam, cheaper for this caller's shape.
 //!
 //! **M-RoPE**: real per-axis positions for a mixed sequence, not the

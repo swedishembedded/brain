@@ -8,7 +8,7 @@
 //! [`Flux2Config::tensor_manifest`]: every expected tensor produced exactly
 //! once with the right shape, and no source tensor left unused — a mismatch is
 //! an error naming the tensor, never a silent zero-fill (the same discipline as
-//! `qwen::import::brain_init_from_hf`).
+//! `qwen3::import::brain_init_from_hf`).
 
 use std::collections::HashMap;
 

@@ -5,12 +5,12 @@
 //! `model.safetensors`) into brain `.safetensors` containers — one for the Talker
 //! decoder, one for the MTP code-predictor.
 //!
-//! Convention match (identical to `crate::qwen::import`): brain's `matmul.wgsl`
+//! Convention match (identical to `crate::qwen3::import`): brain's `matmul.wgsl`
 //! is `out = x @ Wᵀ` with `W:[out,in]` row-major — exactly HF `nn.Linear.weight`;
 //! the embedding tables are `[vocab, hidden]` row-major in both. So **no tensor
 //! is transposed**; the import is a pure 1:1 name remap + bf16→f32 dequant.
 //!
-//! The Talker decoder is loaded by [`crate::qwen::Qwen`] with `tie_embeddings =
+//! The Talker decoder is loaded by [`crate::qwen3::Qwen`] with `tie_embeddings =
 //! false`: `talker.model.codec_embedding → tok.weight`, `talker.codec_head →
 //! lm_head.weight`. The text-conditioning tensors (`talker.model.text_embedding`,
 //! `talker.text_projection.*`) ride along in the same container under

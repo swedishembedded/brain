@@ -101,7 +101,7 @@ fn synthetic_tokens(n: usize, vocab: u32) -> Vec<u32> {
 }
 
 fn qwen_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, i8: bool, stages: usize, run: bool) {
-    use qwen::{init_weights, Qwen, QwenConfig};
+    use qwen3::{init_weights, Qwen, QwenConfig};
     assert!(!(i8 && train), "the int8 path is inference-only");
     let (cfg, init) = match weights {
         Some(path) => {

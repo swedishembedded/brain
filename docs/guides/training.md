@@ -48,7 +48,7 @@ in the house `status.md` style.
 - **LoRA fine-tuning that actually survives a reload**: `QwenConfig`'s `lora`
   field round-trips through a checkpoint's config JSON (it silently didn't
   before — see `docs/lessons.md`); adapter-only save/load
-  (`crates/qwen/src/lora.rs`) and folding into a base for zero-overhead
+  (`crates/qwen3/src/lora.rs`) and folding into a base for zero-overhead
   serving.
 - **Packed SFT export** (bench `benchlib/datasets/segment.py`
   `extract_packed_sample`): one record per trajectory instead of one record
@@ -66,7 +66,7 @@ in the house `status.md` style.
   qwen_cli.rs`) — resolves `BASE` as either a model-store ref or a direct
   file path, loads a bench-exported `train.jsonl`/`validation.jsonl` through
   `ChatSample` + the base's own real chat template, runs
-  `qwen::finetune::finetune(.., Mode::Lora, ..)`, and saves ONLY the adapter
+  `qwen3::finetune::finetune(.., Mode::Lora, ..)`, and saves ONLY the adapter
   into the store at the resolved `OWNER/NAME/TAG` path — a rerun with the
   same `--adapter` overwrites the tag in place, the literal "fully retrain
   and overwrite" ask. `make train/qwen/lora DATASET=.. ADAPTER=..` wraps it.
@@ -74,7 +74,7 @@ in the house `status.md` style.
   (`crates/cli/tests/qwen_lora_finetune.rs`, `QWEN3_DIR`-gated).
 - **Two learning gates, proving the adapter actually learned from its data,
   from a RELOADED checkpoint** — the DoD's other ask:
-  - **Gate A** (`crates/qwen/tests/lora_learning_gate.rs`): always runs, CPU,
+  - **Gate A** (`crates/qwen3/tests/lora_learning_gate.rs`): always runs, CPU,
     no real checkpoint. Trains two adapters from the same base differing
     only in which token their data supervises for one fixed prompt; asserts
     each adapter's reloaded greedy completion matches its OWN target and the
@@ -87,7 +87,7 @@ in the house `status.md` style.
     step count/width/LR — testing whether a tiny transformer can skip most
     of a "grokking" transition in a few hundred steps, not testing brain's
     machinery.
-  - **Gate B** (`brain qwen eval`, `qwen::eval::score_chat`,
+  - **Gate B** (`brain qwen eval`, `qwen3::eval::score_chat`,
     `crates/cli/tests/qwen_eval.rs`): held-out teacher-forced loss + token
     accuracy against a REAL checkpoint and a REAL bench-shaped
     `validation.jsonl`, base alone or base-vs-adapter side by side with an
@@ -95,7 +95,7 @@ in the house `status.md` style.
     `#[ignore]`d, on demand rather than every `cargo test`.
 - **Serving a named adapter**: `QwenResident::activate`
   (`crates/cli/src/resident_llm.rs`) folds a named adapter into its base at
-  load (`Qwen::from_tensors_decode`, `qwen::lora::fold_adapter_into`) — zero
+  load (`Qwen::from_tensors_decode`, `qwen3::lora::fold_adapter_into`) — zero
   per-token cost once folded. `model_dir::discover` threads
   `Store::scan`'s base/adapter split through to the resident catalog, so
   `brain caps` lists a trained adapter under its own fully-qualified id and
@@ -114,7 +114,7 @@ in the house `status.md` style.
   (`crates/model/src/train.rs`). Found by the real end-to-end `--lora` CLI
   test hitting it on a small bench-shaped dataset — exactly the size real
   bench exports currently are.
-- **`qwen::finetune::finetune`'s returned "final loss" is a single last-step
+- **`qwen3::finetune::finetune`'s returned "final loss" is a single last-step
   batch sample, not a corpus average.** Useful for eyeballing a training run,
   but treating it as a pass/fail signal in Gate A initially produced
   confusing false negatives (a genuinely-learned adapter with a
@@ -163,7 +163,7 @@ in the house `status.md` style.
     `{prompt, completion, label}` rows per pair). Needs an unpaired
     preference loss; no Rust work started.
   - **ORPO / GRPO**: no bench export format, no brain training-loop support.
-  - **Full-parameter finetune**: `qwen::finetune::Mode::FullOffload` already
+  - **Full-parameter finetune**: `qwen3::finetune::Mode::FullOffload` already
     exists (host-resident AdamW moments) but has no CLI entry point calling
     it — `brain qwen finetune` today does a full finetune by omission
     (`--lora` unset), not through this explicit mode.
@@ -174,7 +174,7 @@ in the house `status.md` style.
 
 ## Seams that make each planned item cheap
 
-- `qwen::finetune::Mode` already distinguishes LoRA from full-parameter
+- `qwen3::finetune::Mode` already distinguishes LoRA from full-parameter
   training; a DPO/KTO mode is an enum variant, not a new training loop.
 - `LoraCfg.targets` is already a plain list of leaf projection names, not
   hardcoded per-call-site.

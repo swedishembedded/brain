@@ -20,7 +20,7 @@ in brain.
   `gradcheck::check_qwen_lora` gates the backward. See P11 for the full
   named-adapter workstream (`--lora`, model-store integration, eval, serving)
   this landed into.
-- **P5 — INT8 weight quantization**: `crates/qwen/src/q8.rs` — per-channel
+- **P5 — INT8 weight quantization**: `crates/qwen3/src/q8.rs` — per-channel
   symmetric weights packed 4-per-u32, DP4A GEMMs. ~4× memory reduction with
   bounded accuracy loss.
 - **P6 — sharding**: tensor parallel (`shard.rs`) + data parallel
@@ -54,7 +54,7 @@ in brain.
   `--adapter` overwrites the tag in place. `brain qwen eval --weights BASE
   [--adapter ...] --jsonl FILE` reports held-out teacher-forced loss/token
   accuracy, base alone or base-vs-adapter side by side
-  (`qwen::eval::score_chat`). `QwenResident` folds a named adapter into the
+  (`qwen3::eval::score_chat`). `QwenResident` folds a named adapter into the
   base at `activate` (`Qwen::from_tensors_decode`) so `brain caps`/`brain do`
   serve it as its own catalog entry, zero extra per-token cost once folded.
   See `docs/guides/training.md` for the full ledger (dataset contract, both
@@ -72,7 +72,7 @@ in brain.
   nothing about the type or file format is Qwen-specific; qwen is just the
   first consumer). `brain qwen eval --kv fp32,int8,int8-calib` scores held-out
   loss/accuracy through the SAME paged engine `brain serve` runs
-  (`qwen::eval::score_chat_paged`, gated bit-for-bit-in-spirit against the
+  (`qwen3::eval::score_chat_paged`, gated bit-for-bit-in-spirit against the
   legacy `score_chat` backend at `fp32` — see below), so the calibration
   decision is judged on the number that actually matters, not a proxy.
 
@@ -134,7 +134,7 @@ in brain.
   above, which is what actually cleared it to default (`docs/performance/status.md`
   §"int8 paged KV: decode/prefill A/B").
 
-  **Memory, measured** (`qwen::serve::kv_pool_bytes`, the same formula the
+  **Memory, measured** (`qwen3::serve::kv_pool_bytes`, the same formula the
   allocator itself uses — not a re-derived estimate): at the OLD default
   (`ctx=2048`), the real Qwen3-0.6B KV pool goes from 998,244,352 B (0.93 GiB,
   fp32) to 257,359,872 B (0.24 GiB, int8) — **3.8788× smaller**, exactly
@@ -172,7 +172,7 @@ in brain.
 | P7 | paged-KV decode vs naive | bit-identical per-token |
 | P11 | folded-adapter decode-only generation vs live unfolded trained forward | exact token match (`lora_serve_fold.rs`) |
 | P11 | adapter beats base on held-out inputs, from a RELOADED checkpoint | `lora_learning_gate.rs` (synthetic, CPU) + `qwen_eval.rs` (real Qwen3-0.6B, `#[ignore]`) |
-| W3.5 | int8 paged KV: scale-bug oracle, dtype-parameterized bit-exact self-consistency, CPU-backend execution | G1–G7, `crates/qwen/src/serve.rs` `serve::tests` |
+| W3.5 | int8 paged KV: scale-bug oracle, dtype-parameterized bit-exact self-consistency, CPU-backend execution | G1–G7, `crates/qwen3/src/serve.rs` `serve::tests` |
 
 ## Remaining
 

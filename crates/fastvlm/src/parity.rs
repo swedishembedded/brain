@@ -25,7 +25,7 @@ fn repo_path(rel: &str) -> String {
 
     use crate::config::FastVlmConfig;
     use crate::import::map_decoder;
-    use qwen::Qwen;
+    use qwen3::Qwen;
 
 
     fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {

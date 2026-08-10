@@ -7,9 +7,9 @@
 //! serving engine implements to plug into [`Scheduler`]: admission, batched
 //! decode with an on-device window, cancellation, prefix reuse, and the
 //! `StepReport` timeline `brain perf` measures TTFA/ITL from. None of it
-//! depends on a specific architecture; `crates/qwen/src/serve.rs::Engine` is
+//! depends on a specific architecture; `crates/qwen3/src/serve.rs::Engine` is
 //! the first (and, at time of writing, only) implementation, and
-//! `qwen::serve::Scheduler` is a type alias for `Scheduler<Engine>` so no
+//! `qwen3::serve::Scheduler` is a type alias for `Scheduler<Engine>` so no
 //! caller of the qwen-specific names needs to change.
 //!
 //! Adopting this for another decoder (glm, gpt, moe) means writing that
@@ -24,7 +24,7 @@ use crate::paged::{BlockAllocator, BlockTable};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
 /// one qwen `Engine` method the [`Scheduler`] used to call directly (see
-/// `crates/qwen/src/serve.rs`'s `impl PagedDecoder for Engine`) — this trait
+/// `crates/qwen3/src/serve.rs`'s `impl PagedDecoder for Engine`) — this trait
 /// is the exact set [`Scheduler`] needs and nothing more.
 pub trait PagedDecoder {
     /// Mutable access to the block allocator, for callers (here, [`Scheduler`])
@@ -84,12 +84,12 @@ pub trait PagedDecoder {
     /// every `PagedDecoder` can derive from its own pool geometry, computed
     /// before any device allocation happens (so residency budgeting can use
     /// it as a prediction, not a postmortem) — see
-    /// `qwen::serve::kv_pool_bytes`, the one implementation today.
+    /// `qwen3::serve::kv_pool_bytes`, the one implementation today.
     fn kv_pool_bytes(&self) -> u64;
 
     /// The pool's total theoretical cached-token capacity (`num_blocks *
     /// block_size`), independent of dtype — see
-    /// `qwen::serve::Engine::kv_pool_capacity_tokens`.
+    /// `qwen3::serve::Engine::kv_pool_capacity_tokens`.
     fn kv_pool_capacity_tokens(&self) -> u64;
 
     /// The largest `k` [`forward_batched_greedy_window`](Self::forward_batched_greedy_window)
@@ -117,7 +117,7 @@ pub trait PagedDecoder {
 /// sampling.
 #[derive(Clone, Copy, Debug)]
 pub struct SampleParams {
-    /// `<= 0.0` is greedy (argmax), matching `qwen::sample::sample_logits`.
+    /// `<= 0.0` is greedy (argmax), matching `qwen3::sample::sample_logits`.
     pub temp: f32,
     /// `0` (or `>=` the decoder's candidate list) disables top-k filtering.
     pub top_k: usize,
@@ -144,7 +144,7 @@ impl SampleParams {
 /// candidates — temperature scale, truncate to `top_k` (a no-op re-sort since
 /// the list already arrives sorted), softmax, nucleus-truncate to `top_p`,
 /// then draw via inverse-CDF. A light, self-contained duplicate of
-/// `qwen::sample::sample_logits`'s algorithm (pure math, no qwen dependency)
+/// `qwen3::sample::sample_logits`'s algorithm (pure math, no qwen dependency)
 /// operating over a candidate LIST rather than a full vocab vector — the
 /// candidate list is what makes this cheap enough to run per decode step
 /// without shipping `[bsz, vocab]` back to the host. Candidates beyond
@@ -370,7 +370,7 @@ fn accept_token(r: &mut Running, next: u32) {
 /// Finished sequences return their blocks immediately, so newly submitted requests
 /// can be admitted mid-flight — the batch composition changes each iteration to keep
 /// as much useful work resident as possible. Generic over the model's own
-/// [`PagedDecoder`]; `qwen::serve::Scheduler` is `Scheduler<qwen::serve::Engine>`.
+/// [`PagedDecoder`]; `qwen3::serve::Scheduler` is `Scheduler<qwen3::serve::Engine>`.
 pub struct Scheduler<D: PagedDecoder> {
     dec: D,
     waiting: VecDeque<(u64, Request, SampleParams, u64)>,
@@ -639,7 +639,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let mut rng = data::rng::Rng::new(seed);
             // The admission-time head (`PagedDecoder::logits`) is already a
             // full HOST vector (a naive host matvec, not a device dispatch —
-            // see `qwen::serve::Engine::logits`'s doc), so real sampling here
+            // see `qwen3::serve::Engine::logits`'s doc), so real sampling here
             // costs nothing extra to reach: no on-device top-K extraction is
             // needed for this ONE-TIME-per-request first token, only for the
             // steady-state per-token decode loop below.

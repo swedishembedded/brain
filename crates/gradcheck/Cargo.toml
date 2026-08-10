@@ -12,9 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 brain-model.workspace = true
 brain-gpt.workspace = true
-brain-qwen.workspace = true
+brain-qwen3.workspace = true
 # `check_qwen35` (src/lib.rs) — the Qwen3.5-35B-A3B hybrid GDN/GQA/MoE decoder.
-brain-qwen35.workspace = true
+brain-qwen35moe.workspace = true
 brain-lfm.workspace = true
 brain-glm.workspace = true
 brain-moe.workspace = true

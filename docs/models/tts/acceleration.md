@@ -235,7 +235,7 @@ Cross-backend parity: **`make parity`**.
 ## NVIDIA Tesla P40 (fp32 / INT8) — validated
 
 The sections above are Intel-NPU numbers. On the 2×P40 box the Talker is a
-`qwen::Qwen` decoder, so it inherits the register-tiled + software-pipelined
+`qwen3::Qwen` decoder, so it inherits the register-tiled + software-pipelined
 `matmul_reg2` GEMM (see `docs/P40.md`). Validated by
 `crates/tts/tests/bench_inference.rs` and the TTS shapes in
 `crates/vulkan/tests/int8_gemm.rs` — 0.6B Talker, 256-frame forward (prefill /

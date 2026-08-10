@@ -34,7 +34,7 @@ artifact; measured numbers in `docs/models/flux2/status.md`).
 
 ### Engine changes this required
 
-- **`qwen::serve::Scheduler::step_report`** — `step()` returns only *completed*
+- **`qwen3::serve::Scheduler::step_report`** — `step()` returns only *completed*
   requests, so nothing downstream could observe when a sequence was admitted or
   when each token appeared, making TTFT and ITL uncomputable. `step_report`
   additionally reports admissions and per-sequence token deltas; `step` is now a
@@ -87,7 +87,7 @@ latency grows 15×. A 47M fp32 model at ~36 tok/s is roughly **1% of the
 P40's fp32 peak** — overhead-bound, not compute-bound.
 
 **Cause: the LM head ran on the host, single-threaded.**
-`qwen::serve::Engine::logits` is a scalar Rust matmul over
+`qwen3::serve::Engine::logits` is a scalar Rust matmul over
 `[vocab, d_model]` — 16.4M multiply-accumulates per sequence per token at
 vocab 32k — executed once per sequence per decode step while the GPU sits
 idle. Batch size multiplies that host cost linearly, which is exactly why
@@ -180,7 +180,7 @@ reported `greedy_token_match: 1.0` — the artifacts are marked valid, not
 
 ### Fourth wave: policy seams (landed)
 
-- **AdmissionPolicy** (`qwen::serve`): `UnboundedQueue` (default, historical),
+- **AdmissionPolicy** (`qwen3::serve`): `UnboundedQueue` (default, historical),
   `MaxQueueDepth`, `DeadlineAware` (EWMA-fed). Consulted at submit; typed
   `RejectReason` in `StepReport::rejected`. Policies are pure functions of
   `QueueState` — unit-tested with no engine. Remaining: a `--admission` flag so
@@ -269,7 +269,7 @@ readings, in increasing order of importance:
 2. Decode is **memory-bound, not compute-bound**: at M=8 arithmetic intensity is
    ~0.25 FLOP/byte whatever the tiling, so *tiling cannot fix it*.
 3. Therefore the first-order lever is **bytes moved**, and it is the one lever
-   every device class shares. `matmul_i8` (DP4A, 4×) and `qwen::q8` already
+   every device class shares. `matmul_i8` (DP4A, 4×) and `qwen3::q8` already
    exist — but `serve.rs` uses int8 for the **KV cache only, never for weights**.
 
 The structural blockers are that `Backend` exposes almost no device capability,
@@ -459,7 +459,7 @@ uniform reuse are the next, NOT-simple levers, alongside the GPU tower.
 
 ## The served path, measured for the first time (`HttpTarget`, M0 baseline)
 
-Every scenario above drives `qwen::serve::Scheduler` or `residency::Executor`
+Every scenario above drives `qwen3::serve::Scheduler` or `residency::Executor`
 directly. Nothing had ever driven the actual thing a client talks to:
 `apiserve::router()`, over real HTTP framing, through the real admission race in
 `apiserve::bridge`, into the real `QwenResident`/`QwenInstance` chat path
@@ -505,11 +505,11 @@ this number is reported as what it is (a direct-CLI decode rate, not an
 HTTP-path sweep) rather than extrapolated into one.
 
 **A separate, serious finding surfaced while reproducing this**: `BRAIN_DEVICE=cpu`
-segfaults intermittently (~2 times in 3) in `crates/qwen/src/model.rs`'s
+segfaults intermittently (~2 times in 3) in `crates/qwen3/src/model.rs`'s
 single-sequence decode path (`Qwen::from_reader_decode` + `generate_kv_stream`
 + `decode_submit`) — a real memory-safety bug in `backend-cpu`'s rayon-parallel
 JIT kernel dispatch, reproducible with the plain pre-existing `brain qwen infer`
-CLI, nothing to do with `HttpTarget`. The paged `qwen::serve::Engine` path did
+CLI, nothing to do with `HttpTarget`. The paged `qwen3::serve::Engine` path did
 not reproduce it in the same checks. Filed in full at the time rather than
 patched blind — a crash of this kind needs a dedicated root-cause pass, not a
 fix grafted onto a measurement workstream. Whether it was subsequently
@@ -527,7 +527,7 @@ concurrency.
 ### M1: two unwired fixes (landed, not yet re-measured against M0)
 
 - **The LM head is now read once, at `activate`, not once per request.**
-  `crates/cli/src/resident_llm.rs`'s `QwenInstance` and `crates/qwen/src/
+  `crates/cli/src/resident_llm.rs`'s `QwenInstance` and `crates/qwen3/src/
   caps.rs`'s `Hot` resident both now store the head (`model.read_weight(
   model.cfg.head_weight())`) and call `generate_kv_stream_with_head` instead
   of `generate_kv_stream` — the fix `sample.rs`'s own doc comment already
@@ -559,9 +559,9 @@ against the same resident architecture the fixes were made in.
 ### M3: `QwenResident` rewired onto the paged engine — the M0 regression is reversed
 
 `crates/cli/src/resident_llm.rs::QwenResident` now builds a persistent
-`model::serve::Scheduler<qwen::serve::Engine>` at `activate` for any
+`model::serve::Scheduler<qwen3::serve::Engine>` at `activate` for any
 safetensors checkpoint (the common case — a `.gguf` checkpoint keeps the
-original single-sequence decode path, since `qwen::serve::Engine` only reads
+original single-sequence decode path, since `qwen3::serve::Engine` only reads
 safetensors; a real, pre-existing gap, not one this pass could fix in
 scope). `QwenInstance::run_batch` submits every invocation the dispatcher
 handed it into the SAME scheduler and drives them to completion together,
@@ -601,8 +601,8 @@ out, restored it).
 ### M2: architecture-agnostic paged scheduler + real (non-greedy) sampling
 
 - `crates/model/src/serve.rs` (new): `PagedDecoder` trait + a generic
-  `Scheduler<D>` — moved verbatim from `qwen::serve`, which now re-exports the
-  same names as a type alias (`qwen::serve::Scheduler = model::serve::
+  `Scheduler<D>` — moved verbatim from `qwen3::serve`, which now re-exports the
+  same names as a type alias (`qwen3::serve::Scheduler = model::serve::
   Scheduler<Engine>`). Zero changes needed at any existing call site
   (`perf_cli.rs`, `perf/src/targets.rs`, `perf_engine.rs`). All 22 pre-existing
   `serve.rs` tests pass unchanged — this was a pure extraction, not a rewrite.
@@ -616,18 +616,18 @@ out, restored it).
   made on the host. See the plan's W3 section for the full design and why a
   fully-fused on-device kernel was deliberately not attempted this pass.
   Gated bit-identical (extraction) and reproducible-by-seed (sampling) on both
-  CPU and GPU; see `crates/qwen/src/serve.rs`'s and `crates/model/src/
+  CPU and GPU; see `crates/qwen3/src/serve.rs`'s and `crates/model/src/
   serve.rs`'s test modules.
 
 ### M4: W7 — `Engine::logits` de-serialised at admission; re-measured against M3
 
-The one remaining host-computed head inside `qwen::serve::Engine`:
+The one remaining host-computed head inside `qwen3::serve::Engine`:
 `Engine::logits(&hidden)` — the FIRST token's logits at admission (every
 decode step after that already runs the on-device head, `submit_greedy_head`/
 `forward_batched_topk`) — was a single-threaded scalar loop over
 `[vocab, d_model]` (real Qwen3-0.6B: 151936 × 1024 ≈ 155M multiply-adds on
 ONE core, per request). Replaced with `model::hostmath::matvec_par` — the
-same rayon-over-output-rows + AVX2/FMA-per-row routine `qwen::sample`'s
+same rayon-over-output-rows + AVX2/FMA-per-row routine `qwen3::sample`'s
 decode path already uses for exactly this shape (its own doc comment records
 measuring "hundreds of ms per token" from the scalar version at this size).
 Gated by the existing `serve::tests::device_head_argmax_matches_the_host_head`

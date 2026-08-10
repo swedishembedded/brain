@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
-use qwen::config::QwenConfig;
-use qwen::model::Qwen;
+use qwen3::config::QwenConfig;
+use qwen3::model::Qwen;
 
 pub fn run_qwen(args: &[String]) {
     // Canonical verbs shared with `gpt`/`glm` (`gen`->`infer`, `fine-tune`->`finetune`).
@@ -100,7 +100,7 @@ fn import(args: &[String]) {
         eprintln!("usage: brain qwen import --hf <dir> --out qwen.safetensors");
         return;
     }
-    match qwen::import::import_with_block(&hf, &out, block) {
+    match qwen3::import::import_with_block(&hf, &out, block) {
         Ok(()) => println!("ok: wrote {out}"),
         Err(e) => eprintln!("import failed: {e}"),
     }
@@ -194,12 +194,12 @@ fn serve(args: &[String]) {
     // head_dim rather than hitting `from_map_with_gpu`'s hard assert -- an
     // explicit `--int8` on the command line is, deliberately, still a
     // request by name and would panic instead; this branch only ever
-    // softens the DEFAULT. See `qwen::serve::kv_int8_supported`'s doc
+    // softens the DEFAULT. See `qwen3::serve::kv_int8_supported`'s doc
     // comment.
     let int8 = int8
         && match &header_cfg {
             Some(cfg) => {
-                let supported = qwen::serve::kv_int8_supported(cfg);
+                let supported = qwen3::serve::kv_int8_supported(cfg);
                 if !supported {
                     eprintln!("serve: {weights}: int8 KV requested (the default) but head_dim is not a multiple of 4; falling back to fp32 KV");
                 }
@@ -207,7 +207,7 @@ fn serve(args: &[String]) {
             }
             None => true, // let Engine::load raise the real, specific I/O error below
         };
-    let mut eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
+    let mut eng = qwen3::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
     // --kv-calib: opt IN to a kv_calib.json beside the checkpoint, if the
     // engine is int8 and one exists there with a matching shape --
     // KvCalib::from_model_dir already warns and returns None on a missing
@@ -227,8 +227,8 @@ fn serve(args: &[String]) {
     // and may have fallen back to fp32; --kv-calib may have found nothing.
     let weights_int8 = eng.weights_int8();
     let kv_calibrated = eng.kv_calibrated();
-    let mut sched = qwen::serve::Scheduler::new(eng, n as usize);
-    let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen::serve::Request { prompt: t.clone(), max_new, eos })).collect();
+    let mut sched = qwen3::serve::Scheduler::new(eng, n as usize);
+    let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen3::serve::Request { prompt: t.clone(), max_new, eos })).collect();
 
     let t0 = std::time::Instant::now();
     let out = sched.run();
@@ -320,7 +320,7 @@ fn infer(args: &[String]) {
     let eos = tok.encode("<|im_end|>").first().copied();
     let mut rng = Rng::new(seed);
     let t_gen = std::time::Instant::now();
-    let gen = qwen::sample::generate_kv(&model, &ids, max_new, temp, top_k, 1.0, eos, &mut rng);
+    let gen = qwen3::sample::generate_kv(&model, &ids, max_new, temp, top_k, 1.0, eos, &mut rng);
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
     eprintln!("qwen-timing load_ms={load_ms:.1} gen_ms={gen_ms:.1} tokens={}", gen.len());
     print!("{prompt}");
@@ -420,7 +420,7 @@ fn train(args: &[String], base: Option<&str>) {
 fn finetune(args: &[String]) {
     // `--lora RANK` selects the named-adapter path (finetune_lora) over the
     // legacy full-parameter path below -- a distinct function, not a branch
-    // threaded through `train`/`model::fit`, because qwen::finetune::finetune
+    // threaded through `train`/`model::fit`, because qwen3::finetune::finetune
     // is a self-contained training loop for exactly this reason (seeding a
     // LoRA-extended param set from a base checkpoint is something
     // `model::fit`'s checkpoint-config-wins resume path cannot do; see that
@@ -659,9 +659,9 @@ fn finetune_lora(args: &[String]) {
         align_to_lines: false,
         seed,
     };
-    let mode = qwen::finetune::Mode::Lora { rank, alpha };
+    let mode = qwen3::finetune::Mode::Lora { rank, alpha };
     let full_ckpt_out = scratch.join("full.safetensors");
-    let (l0, l1) = match qwen::finetune::finetune(
+    let (l0, l1) = match qwen3::finetune::finetune(
         base_weights_path.to_str().unwrap_or_default(),
         &scratch,
         &opts,
@@ -677,7 +677,7 @@ fn finetune_lora(args: &[String]) {
     println!("trained: loss {l0:.4} -> {l1:.4}");
 
     let reloaded = Qwen::load_inference(full_ckpt_out.to_str().unwrap_or_default(), 1, block);
-    if let Err(e) = qwen::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &reloaded, &full_ref_str, &base_id, dataset_id.as_deref())
+    if let Err(e) = qwen3::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &reloaded, &full_ref_str, &base_id, dataset_id.as_deref())
     {
         eprintln!("save_adapter: {e}");
         return;
@@ -757,7 +757,7 @@ fn toolcall_eval(args: &[String]) {
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
         Ok(t) => t, Err(e) => { eprintln!("tokenizer: {e}"); return; }
     };
-    let (exact, tacc) = qwen::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
+    let (exact, tacc) = qwen3::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
     println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
 }
 
@@ -766,10 +766,10 @@ fn toolcall_eval(args: &[String]) {
 ///
 /// Gate B of the Definition of Done's "a way to validate that model has
 /// learned ideas from the dataset": teacher-forced held-out loss + token
-/// accuracy (`qwen::eval::score_chat`) against a REAL checkpoint and a REAL
+/// accuracy (`qwen3::eval::score_chat`) against a REAL checkpoint and a REAL
 /// bench-exported `validation.jsonl`/`test.jsonl`. Always reports the base
 /// score; with `--adapter` also folds that named adapter in (the same fold
-/// a resident uses to serve it -- see `qwen::lora::fold_adapter_into`) and
+/// a resident uses to serve it -- see `qwen3::lora::fold_adapter_into`) and
 /// reports it side by side, so the honest question -- does this adapter
 /// actually help on data it never trained on -- has a number attached, not
 /// just a training-loss curve.
@@ -779,7 +779,7 @@ fn eval_chat(args: &[String]) {
     let mut adapter_spec: Option<String> = None;
     let mut block = 1024u32;
     let mut models_dir: Option<String> = None;
-    let mut kv_modes: Vec<qwen::eval::KvMode> = Vec::new();
+    let mut kv_modes: Vec<qwen3::eval::KvMode> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -791,7 +791,7 @@ fn eval_chat(args: &[String]) {
             "--kv" => {
                 let spec = val(args, &mut i, "--kv");
                 for m in spec.split(',') {
-                    match qwen::eval::KvMode::parse(m.trim()) {
+                    match qwen3::eval::KvMode::parse(m.trim()) {
                         Ok(mode) => kv_modes.push(mode),
                         Err(e) => {
                             eprintln!("--kv: {e}");
@@ -847,7 +847,7 @@ fn eval_chat(args: &[String]) {
     };
 
     let base_weights_str = base_weights_path.to_str().unwrap_or_default();
-    let base_score = qwen::eval::score_chat(base_weights_str, None, &tok, &chat_template, &samples, block);
+    let base_score = qwen3::eval::score_chat(base_weights_str, None, &tok, &chat_template, &samples, block);
     println!(
         "base {base_id}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
         base_score.loss,
@@ -857,14 +857,14 @@ fn eval_chat(args: &[String]) {
         base_score.positions
     );
 
-    // --kv scores through the paged serving engine (qwen::serve::Engine) --
+    // --kv scores through the paged serving engine (qwen3::serve::Engine) --
     // the actual engine `brain serve` runs -- at each requested KV
     // representation, side by side. fp32 is included in the requested list
     // itself if the caller wants the paged-vs-legacy cross-check; it is NOT
     // implied automatically, so this stays a strict opt-in addition to the
     // unconditional base_score line above.
     for kv in &kv_modes {
-        let score = qwen::eval::score_chat_paged(base_weights_str, None, &tok, &chat_template, &samples, block, *kv);
+        let score = qwen3::eval::score_chat_paged(base_weights_str, None, &tok, &chat_template, &samples, block, *kv);
         let delta = if base_score.loss.is_finite() { score.loss - base_score.loss } else { f32::NAN };
         println!(
             "base {base_id} [kv={}]: loss {:.4} ({delta:+.4} vs legacy fp32)  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
@@ -906,7 +906,7 @@ fn eval_chat(args: &[String]) {
         eprintln!("{full_ref_str}: resolved but carries no adapter file (bug: parsed with an adapter suffix)");
         return;
     };
-    let adapter_score = qwen::eval::score_chat(base_weights_str, Some(adapter_path.to_str().unwrap_or_default()), &tok, &chat_template, &samples, block);
+    let adapter_score = qwen3::eval::score_chat(base_weights_str, Some(adapter_path.to_str().unwrap_or_default()), &tok, &chat_template, &samples, block);
     println!(
         "{full_ref_str}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
         adapter_score.loss,
@@ -925,7 +925,7 @@ fn eval_chat(args: &[String]) {
 /// The design input for a calibrated INT8 KV scale: runs `PROMPTS` through a
 /// real checkpoint's fp32-KV paged engine and reports, per `(layer, K|V,
 /// kv_head)`, `absmax` / `p99` / `p99.99` / `outlier_ratio` — most
-/// quantization-hostile first (`qwen::serve::Engine::calibrate_kv`,
+/// quantization-hostile first (`qwen3::serve::Engine::calibrate_kv`,
 /// `model::actstats`). `outlier_ratio` near 1 means today's per-token online
 /// absmax is already close to optimal for that stream; a large ratio means a
 /// rare-token outlier is setting the scale and crushing the resolution of
@@ -1047,7 +1047,7 @@ fn calib(args: &[String]) {
 
     eprintln!("brain qwen calib: {base_id}, {} prompts", prompts.len());
     let weights_str = weights_path.to_str().unwrap_or_default();
-    let mut eng = qwen::serve::Engine::load(weights_str, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false);
+    let mut eng = qwen3::serve::Engine::load(weights_str, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false);
     let collector = eng.calibrate_kv(&prompts);
     let rows = collector.report();
 

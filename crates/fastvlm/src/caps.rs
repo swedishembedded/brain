@@ -27,7 +27,7 @@ use capability::{
 use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
-use qwen::model::Qwen;
+use qwen3::model::Qwen;
 
 pub const MODEL: &str = "brain/fastvlm";
 /// Default FastVLM checkpoint directory — from `$BRAIN_FASTVLM_WEIGHTS`, never a
@@ -203,10 +203,10 @@ impl Action for CaptionAction {
         let eos = hot.tok.encode("<|im_end|>").first().copied();
         hot.dec.reset_cache();
         let t_prefill = std::time::Instant::now();
-        let mut inputs: Vec<qwen::model::PrefillInput> = Vec::with_capacity(pre.len() + IMG_TOKENS as usize + post.len());
-        inputs.extend(pre.iter().map(|&t| qwen::model::PrefillInput::Token(t)));
-        inputs.extend((0..IMG_TOKENS as usize).map(|r| qwen::model::PrefillInput::Embed(&embeds[r * d..(r + 1) * d])));
-        inputs.extend(post.iter().map(|&t| qwen::model::PrefillInput::Token(t)));
+        let mut inputs: Vec<qwen3::model::PrefillInput> = Vec::with_capacity(pre.len() + IMG_TOKENS as usize + post.len());
+        inputs.extend(pre.iter().map(|&t| qwen3::model::PrefillInput::Token(t)));
+        inputs.extend((0..IMG_TOKENS as usize).map(|r| qwen3::model::PrefillInput::Embed(&embeds[r * d..(r + 1) * d])));
+        inputs.extend(post.iter().map(|&t| qwen3::model::PrefillInput::Token(t)));
         let mut hidden = hot.dec.prefill(&inputs);
         stage_time("prefill", t_prefill);
         let t_decode = std::time::Instant::now();

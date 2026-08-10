@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-Omni's Thinker text decoder: a Qwen3-style GQA+QK-norm+RoPE
-//! attention stack (identical shape to `qwen::Qwen`'s, and to `tts::talker`'s
+//! attention stack (identical shape to `qwen3::Qwen`'s, and to `tts::talker`'s
 //! reuse of it) over a sparse top-k MoE FFN (`model::moe`, no shared
 //! expert).
 //!
 //! **Why this is a new, dedicated forward rather than an extension of
-//! `qwen::Qwen`**: `qwen::Qwen`'s attention/RoPE/QK-norm/DeepStack-splice
+//! `qwen3::Qwen`**: `qwen3::Qwen`'s attention/RoPE/QK-norm/DeepStack-splice
 //! machinery is already exactly right for Thinker (confirmed by reading
 //! `forward_steps` in full — same RMSNorm, same per-head QK-norm, same
 //! `block::gqa_fwd`, an existing `mrope`/`rope2d_step` path, and DeepStack
@@ -17,17 +17,17 @@
 //! `model::moe`'s sparse one, unlike `crates/glm`, which already carries an
 //! `Mlp::Dense`/`Mlp::Moe` enum at exactly that point (see
 //! `docs/models/omni/status.md`'s M6 design note for the two ways to close
-//! this gap; giving `qwen::Qwen` the same seam `glm` has is the "one
+//! this gap; giving `qwen3::Qwen` the same seam `glm` has is the "one
 //! implementation" answer and the natural following step). This module is
-//! deliberately narrower than `qwen::Qwen` in every other respect
+//! deliberately narrower than `qwen3::Qwen` in every other respect
 //! (forward-only, single device, no sharding/LoRA/int8/KV-cache) so it can
 //! be validated against real weights now — it composes the SAME shared
-//! primitives `qwen::Qwen` itself is built from
+//! primitives `qwen3::Qwen` itself is built from
 //! (`model::block::{rmsnorm_fwd,rope2d_fwd,gqa_fwd}`), not a re-derivation of
 //! the attention math.
 //!
 //! **M-RoPE**: every layer takes the table-driven [`model::block::rope2d_fwd`]
-//! path (the same kernel `qwen::Qwen::rope2d_step` dispatches for Qwen3-VL),
+//! path (the same kernel `qwen3::Qwen::rope2d_step` dispatches for Qwen3-VL),
 //! fed a `[n, head_dim/2]` `cos`/`sin` table the caller builds with
 //! `qwenvl::mrope::{get_rope_index, mrope_tables}`. There is deliberately no
 //! separate "plain RoPE" code path: for a token stream where all three axes
@@ -46,7 +46,7 @@
 //! `model::vlm::splice_fwd` (`splice.wgsl`, in [`thinker_pipelines`]) BEFORE
 //! calling [`decode`] — `decode` and [`layer_fwd`] only ever see an
 //! already-assembled `[n, d]` embedding sequence, exactly like `x` in
-//! `qwen::Qwen::write_img_embeds`'s contract.
+//! `qwen3::Qwen::write_img_embeds`'s contract.
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{gqa_decode_step, gqa_fwd, kv_cache_fill, rmsnorm_fwd, rope2d_fwd, Gqa, GqaDecodeIds, KernelIds};
@@ -327,7 +327,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
 /// twin of [`layer_fwd`]. `cos`/`sin` are the `[1, head_dim/2]` M-RoPE table
 /// for this ONE token's absolute 3-axis position (`qwenvl::mrope::mrope_tables`
 /// called with a single-element `positions` slice) — `rope2d_fwd`'s table-driven
-/// kernel needs no separate "decode" variant, unlike `qwen::Qwen`'s `ROPE_AT`
+/// kernel needs no separate "decode" variant, unlike `qwen3::Qwen`'s `ROPE_AT`
 /// (see `docs/models/omni/status.md`'s KV-cache entry for why: Thinker's RoPE
 /// path was already row-driven, so a 1-row table IS the decode case). `cap` is
 /// the cache's allocated capacity (must match what [`layer_fwd`]'s prefill

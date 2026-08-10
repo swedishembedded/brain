@@ -26,7 +26,7 @@ use serde_json::json;
 
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use qwen::chat::{parse_request, sampling_params, text_outcome, SeqState};
+use qwen3::chat::{parse_request, sampling_params, text_outcome, SeqState};
 
 // ---------------------------------------------------------------- shared
 
@@ -236,7 +236,7 @@ pub struct QwenResident {
     id: String,
     path: String,
     tokenizer: String,
-    /// A named LoRA adapter's own weight file (`qwen::lora::save_adapter`'s
+    /// A named LoRA adapter's own weight file (`qwen3::lora::save_adapter`'s
     /// output), when this resident is the ADAPTER's catalog entry rather than
     /// the base's -- folded into the base tensors at `activate` (see that
     /// method's doc). `None` for a plain base/quant resident.
@@ -383,12 +383,12 @@ impl QwenResident {
     /// which buffer or why). A free function of its inputs (no I/O, no env
     /// read) so a test can drive it directly at whatever `num_blocks` trips
     /// the ceiling, without needing a real multi-GiB allocation to prove it.
-    fn check_fp32_kv_pool_fits(cfg: &qwen::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
-        let pool_bytes = qwen::serve::kv_pool_bytes(cfg, block_size, num_blocks, false);
+    fn check_fp32_kv_pool_fits(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
+        let pool_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, false);
         if pool_bytes <= MAX_FP32_KV_POOL_BYTES {
             return Ok(());
         }
-        let int8_bytes = qwen::serve::kv_pool_bytes(cfg, block_size, num_blocks, true);
+        let int8_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, true);
         Err(format!(
             "qwen: {path}: fp32 KV pool at ctx={ctx} would be {:.2} GiB, over the {:.0} GiB safety ceiling \
              (MAX_FP32_KV_POOL_BYTES) -- lower BRAIN_QWEN_CTX, or drop --kv-fp32/BRAIN_QWEN_KV_INT8=0 \
@@ -427,10 +427,10 @@ impl ResidentModel for QwenResident {
         let Ok(reader) = checkpoint::weightio::WeightReader::open(&self.path) else {
             return cost;
         };
-        let cfg = qwen::config::QwenConfig::from_json(&reader.config());
+        let cfg = qwen3::config::QwenConfig::from_json(&reader.config());
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = Self::pool_sizing(Self::ctx());
-        let kv_int8 = Self::kv_int8() && qwen::serve::kv_int8_supported(&cfg);
-        let kv_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
+        let kv_int8 = Self::kv_int8() && qwen3::serve::kv_int8_supported(&cfg);
+        let kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         MemCost::new(cost.vram + kv_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -449,7 +449,7 @@ impl ResidentModel for QwenResident {
         };
         let eos = tok.encode("<|im_end|>").first().copied();
         let ctx = Self::ctx();
-        // `qwen::serve::Engine` (the paged, continuous-batching serving engine --
+        // `qwen3::serve::Engine` (the paged, continuous-batching serving engine --
         // see this plan's W2/W3/W5) reads checkpoints via `checkpoint::load`,
         // which is SAFETENSORS-ONLY (`checkpoint::parse` -> `st::parse_safetensors`).
         // A `.gguf` checkpoint therefore cannot build an `Engine` today -- this is
@@ -460,7 +460,7 @@ impl ResidentModel for QwenResident {
         let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
         let engine = on_device(device, || -> Result<QwenEngineKind, String> {
             if is_gguf {
-                let model = qwen::model::Qwen::from_reader_decode(&reader, ctx);
+                let model = qwen3::model::Qwen::from_reader_decode(&reader, ctx);
                 // Read the (tied-embedding) LM head ONCE here, not per request:
                 // the fix `generate_kv_stream_with_head`'s doc comment asks for
                 // (594 MiB device->host re-read at real vocab/d_model, otherwise
@@ -480,9 +480,9 @@ impl ResidentModel for QwenResident {
             // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
             // asked this checkpoint's unusual `head_dim` for int8, so a
             // serving-process panic on activation would be the wrong failure
-            // mode -- see `qwen::serve::kv_int8_supported`'s doc comment.
-            let checkpoint_cfg = qwen::config::QwenConfig::from_json(&reader.config());
-            let kv_int8 = QwenResident::kv_int8() && qwen::serve::kv_int8_supported(&checkpoint_cfg);
+            // mode -- see `qwen3::serve::kv_int8_supported`'s doc comment.
+            let checkpoint_cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+            let kv_int8 = QwenResident::kv_int8() && qwen3::serve::kv_int8_supported(&checkpoint_cfg);
             if QwenResident::kv_int8() && !kv_int8 {
                 eprintln!(
                     "serve: {}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV",
@@ -499,17 +499,17 @@ impl ResidentModel for QwenResident {
                 QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, &self.path)?;
             }
             let mut eng = match &self.adapter {
-                None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
+                None => qwen3::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
                 // Fold the adapter's delta into the base tensors first (the same
-                // fold `qwen::eval::score_chat` uses to score one) -- the result
+                // fold `qwen3::eval::score_chat` uses to score one) -- the result
                 // is an ordinary frozen base, zero extra inference cost versus
                 // the base once folded.
                 Some(a) => {
                     let mut tensors = checkpoint::load(&self.path).by_role("");
-                    let mut cfg = qwen::config::QwenConfig::from_json(&reader.config());
-                    qwen::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
+                    let mut cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+                    qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
-                    qwen::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false)
+                    qwen3::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false)
                 }
             };
             // BRAIN_QWEN_KV_CALIB=1: opt IN to a kv_calib.json beside the
@@ -535,13 +535,13 @@ impl ResidentModel for QwenResident {
 enum QwenEngineKind {
     /// The original single-sequence KV-cache decode path (`Qwen::
     /// from_reader_decode` + `generate_kv_stream_with_head`) -- GGUF only.
-    /// `model` boxed: `qwen::model::Qwen` is ~1.6 KB by value, which would
+    /// `model` boxed: `qwen3::model::Qwen` is ~1.6 KB by value, which would
     /// otherwise size every `QwenEngineKind` (even a `Batched` one) to it.
-    Legacy { model: Box<qwen::model::Qwen>, head: Vec<f32> },
+    Legacy { model: Box<qwen3::model::Qwen>, head: Vec<f32> },
     /// The paged, continuous-batching serving engine (this plan's W2/W3) --
     /// every safetensors checkpoint, the common case. Boxed for the same
     /// reason as `Legacy.model`: `Scheduler<Engine>` is large by value too.
-    Batched(Box<model::serve::Scheduler<qwen::serve::Engine>>),
+    Batched(Box<model::serve::Scheduler<qwen3::serve::Engine>>),
 }
 
 struct QwenInstance {
@@ -603,7 +603,7 @@ impl Instance for QwenInstance {
 /// `run_batch`'s sequential loop and the (unlikely, but possible) direct
 /// `run` call share one implementation.
 fn run_one_legacy(
-    model: &qwen::model::Qwen,
+    model: &qwen3::model::Qwen,
     head: &[f32],
     tok: &data::qwen_tokenizer::QwenBpe,
     eos: Option<u32>,
@@ -627,7 +627,7 @@ fn run_one_legacy(
 
     let mut seq = SeqState::new(&req, inv.cancel.clone());
     let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
-    let gen = qwen::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, eos_slice, &mut rng, head, &mut |_i, t| {
+    let gen = qwen3::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, eos_slice, &mut rng, head, &mut |_i, t| {
         ids_out.push(t);
         !seq.advance(tok, &ids_out, progress)
     });
@@ -638,7 +638,7 @@ fn run_one_legacy(
 /// Drive every invocation in `invs` to completion on the SAME persistent
 /// `Scheduler` — see [`QwenInstance::run_batch`]'s doc.
 fn run_batch_scheduled(
-    sched: &mut model::serve::Scheduler<qwen::serve::Engine>,
+    sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
     tok: &data::qwen_tokenizer::QwenBpe,
     eos: Option<u32>,
     invs: &[Invocation],
@@ -758,7 +758,7 @@ mod tests {
     /// costs nothing to test.
     #[test]
     fn fp32_kv_pool_guard_refuses_over_ceiling_and_passes_under_it() {
-        let cfg = qwen::config::QwenConfig::tiny(); // head_dim=8, n_kv_heads=2, hkv=16
+        let cfg = qwen3::config::QwenConfig::tiny(); // head_dim=8, n_kv_heads=2, hkv=16
         // Small, ordinary sizing: comfortably under the ceiling.
         assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 64, 2048, "test.safetensors").is_ok());
         // num_blocks chosen so this TINY config's fp32 pool (256 bytes/slot)
@@ -780,13 +780,13 @@ mod tests {
     /// checkpoint file, so it runs always.
     #[test]
     fn ctx_24576_int8_kv_pool_fits_but_fp32_kv_pool_would_be_refused() {
-        let cfg = qwen::config::QwenConfig::qwen3_0_6b();
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let ctx = 24576u32;
         assert_eq!(QwenResident::ctx(), ctx, "this test's premise is the new default -- update it if the default changes");
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx);
 
-        let int8_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
-        let fp32_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
+        let int8_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        let fp32_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
         eprintln!(
             "ctx={ctx}: int8 KV pool = {:.2} GiB, fp32 KV pool = {:.2} GiB (ceiling {:.0} GiB)",
             int8_bytes as f64 / (1u64 << 30) as f64,
@@ -837,14 +837,14 @@ mod tests {
         // discipline (never build a real-shape engine alongside other tests).
         unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
 
-        let cfg = qwen::config::QwenConfig::qwen3_0_6b();
+        let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let ctx = QwenResident::ctx();
         assert_eq!(ctx, 24576, "this test's premise is the new default");
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx);
-        let expected_pool_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        let expected_pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
 
         let before = perf::scenarios::soak::host_mem_mb();
-        let eng = qwen::serve::Engine::load(path.to_str().unwrap(), block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, true, false);
+        let eng = qwen3::serve::Engine::load(path.to_str().unwrap(), block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, true, false);
         let after = perf::scenarios::soak::host_mem_mb();
 
         assert_eq!(eng.kv_pool_bytes(), expected_pool_bytes, "the engine must allocate exactly what the pure function predicts -- no drift");
@@ -880,14 +880,14 @@ mod tests {
     #[test]
     fn estimate_counts_the_kv_pool_and_shrinks_under_int8() {
         let path = write_tiny_checkpoint(11, "estimate");
-        let cfg = qwen::config::QwenConfig { vocab: 151936, ..qwen::config::QwenConfig::tiny() };
+        let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
         let card = checkpoint::st::ModelCard::new("brain/qwen", "qwen");
         let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
         let key = InstanceKey::new("brain/qwen", "default");
 
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(QwenResident::ctx());
         let kv_int8 = QwenResident::kv_int8();
-        let expected_kv_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
+        let expected_kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         let file_only = est_vram(path.to_str().unwrap()).vram;
 
         let got = resident.estimate(&key);
@@ -895,8 +895,8 @@ mod tests {
         assert!(expected_kv_bytes > 0, "the KV pool must contribute a nonzero amount at these test dims");
 
         // The shrink property itself: pure function, both dtypes, no engine.
-        let fp32_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
-        let int8_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        let fp32_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
+        let int8_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
         assert!(int8_bytes < fp32_bytes, "int8 must cost fewer bytes than fp32 at the same num_blocks");
     }
 
@@ -906,8 +906,8 @@ mod tests {
     /// same reasoning as `rejected_admission_resolves_promptly_instead_of_hanging`),
     /// and write it to a scratch dir. Returns the checkpoint path.
     fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {
-        let cfg = qwen::config::QwenConfig { vocab: 151936, ..qwen::config::QwenConfig::tiny() };
-        let init = qwen::init_weights(&cfg, seed);
+        let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
+        let init = qwen3::init_weights(&cfg, seed);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()
             .into_iter()
@@ -927,7 +927,7 @@ mod tests {
     /// requests" finding from the serving-performance audit, at the layer
     /// that had never been observable before this workstream: through the
     /// real HTTP router.
-    /// `qwen::serve::Engine`'s `PrefixCache` was already gated in isolation
+    /// `qwen3::serve::Engine`'s `PrefixCache` was already gated in isolation
     /// (`serve.rs::random_shared_prefixes_stay_exact`) but nothing surfaced
     /// its hit rate through a served request until `Instance::metrics` +
     /// `Executor::stats().metrics` (this pass) gave it a path out.
@@ -1023,9 +1023,9 @@ mod tests {
         // (~151936) vocabulary, so a `chat: true` render is certain to
         // include at least one id outside this vocab -- the exact class
         // this test guards.
-        let cfg = qwen::config::QwenConfig { vocab: 64, ..qwen::config::QwenConfig::tiny() };
-        let weights = qwen::init_weights(&cfg, 3);
-        let eng = qwen::serve::Engine::from_map(cfg, &weights, 8, 16, 4, 4, 16, false, false);
+        let cfg = qwen3::config::QwenConfig { vocab: 64, ..qwen3::config::QwenConfig::tiny() };
+        let weights = qwen3::init_weights(&cfg, 3);
+        let eng = qwen3::serve::Engine::from_map(cfg, &weights, 8, 16, 4, 4, 16, false, false);
         let mut sched = model::serve::Scheduler::new(eng, 4);
 
         let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(true)).set("max_new", json!(4));
