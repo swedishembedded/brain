@@ -161,7 +161,19 @@ impl TokenDataset {
                 ls[idx]
             }
             _ => {
-                let hi = self.data.len() - cfg.block_size - 1;
+                // checked_sub, never bare `-`: a dataset shorter than one
+                // block (+1 for the shifted target) used to underflow here
+                // and panic with a bare subtract-overflow. Say what is
+                // actually wrong instead.
+                let hi = self.data.len().checked_sub(cfg.block_size + 1).unwrap_or_else(|| {
+                    panic!(
+                        "dataset has {} tokens but block_size {} needs at least {} — \
+                         use a longer dataset or a smaller --block-size",
+                        self.data.len(),
+                        cfg.block_size,
+                        cfg.block_size + 1
+                    )
+                });
                 rng.gen_range_inclusive(0, hi as i64) as usize
             }
         }

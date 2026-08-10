@@ -25,3 +25,11 @@ brain-checkpoint.workspace = true
 # shape-drawing primitives.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
 imageproc = { version = "0.25", default-features = false }
+
+[dev-dependencies]
+# The shared model-store fixture resolution, so the train/serve template
+# cross-check (tests/chat_template_cross_check.rs) finds the real Qwen3
+# tokenizer_config.json on any dev box instead of skipping silently behind a
+# private QWEN3_DIR env var. No cycle: testutil pulls modelref/modelstore
+# only, neither of which depends on brain-data.
+brain-testutil.workspace = true

@@ -197,9 +197,12 @@ impl QwenBpe {
         if let Some(merges) = model["merges"].as_array() {
             for (rank, m) in merges.iter().enumerate() {
                 let (l, r) = if let Some(arr) = m.as_array() {
+                    // `.get`, never `arr[0]`: tokenizer.json is an untrusted
+                    // user file, and a short merge entry must be an Err, not
+                    // a slice-index panic.
                     (
-                        arr[0].as_str().ok_or("merge pair")?.to_string(),
-                        arr[1].as_str().ok_or("merge pair")?.to_string(),
+                        arr.first().and_then(|v| v.as_str()).ok_or("merge pair")?.to_string(),
+                        arr.get(1).and_then(|v| v.as_str()).ok_or("merge pair")?.to_string(),
                     )
                 } else if let Some(s) = m.as_str() {
                     let mut it = s.splitn(2, ' ');
@@ -431,8 +434,15 @@ fn template_prefix_from(post: &serde_json::Value, encoder: &HashMap<String, u32>
     prefix
 }
 
+/// `\p{L}` — NOT `char::is_alphabetic`, which is the Unicode `Alphabetic`
+/// property, a strict superset of `\p{L}` that also contains `Nl` (Roman
+/// numerals, other letter-numbers) and `Other_Alphabetic` marks. The regex
+/// this scanner transcribes says `\p{L}`, so e.g. `Ⅻ` must start a
+/// digit-family token, not a letter run. This is byte-for-byte the mismatch
+/// `clip_bpe.rs`'s `is_letter` fixed (see its 20-line note, incl. the
+/// measured residual gap) — the fix had not been back-ported here.
 fn is_letter(c: char) -> bool {
-    c.is_alphabetic()
+    c.is_alphabetic() && !c.is_numeric()
 }
 fn is_digit(c: char) -> bool {
     c.is_numeric()

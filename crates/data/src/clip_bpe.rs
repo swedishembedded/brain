@@ -101,10 +101,23 @@ pub struct Encoded {
 impl ClipBpe {
     /// Build from the raw contents of `vocab.json` and `merges.txt`.
     ///
-    /// Panics on malformed input: these are checkpoint assets, and a tokenizer
-    /// that silently drops merges produces ids that are wrong but plausible.
+    /// Panics on malformed input with [`Self::try_from_str`]'s error message —
+    /// kept for existing call sites; new code should prefer `try_from_str`,
+    /// which returns the same diagnostics as a clean `Err` (these are
+    /// user-supplied checkpoint assets, and a malformed file is an input
+    /// error, not a bug worth aborting a serving process for).
     pub fn from_str(vocab_json: &str, merges_txt: &str) -> ClipBpe {
-        let raw: HashMap<String, u32> = serde_json::from_str(vocab_json).expect("vocab.json is valid JSON");
+        Self::try_from_str(vocab_json, merges_txt).unwrap_or_else(|e| panic!("ClipBpe: {e}"))
+    }
+
+    /// [`Self::from_str`], returning `Err` on malformed input instead of
+    /// panicking. Also validates UP FRONT the invariant `encode` relies on —
+    /// every byte-map char (± `</w>`) and every merge pair's concatenation is
+    /// in the vocab — so a malformed checkpoint fails HERE, loudly, instead
+    /// of panicking later at ENCODE time on whichever user text first reaches
+    /// the missing entry.
+    pub fn try_from_str(vocab_json: &str, merges_txt: &str) -> Result<ClipBpe, String> {
+        let raw: HashMap<String, u32> = serde_json::from_str(vocab_json).map_err(|e| format!("vocab.json: invalid JSON: {e}"))?;
         let mut encoder: HashMap<String, u32> = HashMap::with_capacity(raw.len());
         let mut decoder: HashMap<u32, String> = HashMap::with_capacity(raw.len());
         for (tok, id) in raw {
@@ -117,13 +130,18 @@ impl ClipBpe {
         // OpenCLIP dumps of the same table do not always carry it.
         let mut bpe_ranks: HashMap<(String, String), u32> = HashMap::new();
         let mut rank = 0u32;
-        for line in merges_txt.lines() {
+        for (lineno, line) in merges_txt.lines().enumerate() {
             if line.is_empty() || line.starts_with("#version") {
                 continue;
             }
             let mut it = line.split(' ');
-            let left = it.next().expect("merge line has a left token").to_string();
-            let right = it.next().expect("merge line has a right token").to_string();
+            let left = it.next().unwrap_or_default().to_string();
+            let right = it.next().ok_or_else(|| format!("merges.txt line {}: expected \"left right\", got {line:?}", lineno + 1))?.to_string();
+            // The merge's product must be a real vocab entry, or `encode`
+            // would later produce an id-less subword mid-request.
+            if !encoder.contains_key(&format!("{left}{right}")) {
+                return Err(format!("merges.txt line {}: merge {left:?}+{right:?} produces a token absent from vocab.json", lineno + 1));
+            }
             bpe_ranks.insert((left, right), rank);
             rank += 1;
         }
@@ -132,20 +150,29 @@ impl ClipBpe {
         let mut byte_decoder = HashMap::with_capacity(256);
         for (b, &c) in byte_encoder.iter().enumerate() {
             byte_decoder.insert(c, b as u8);
+            // Every single byte-map char, bare and word-final, must be
+            // encodable — the base case of encode_piece's "unknown subwords
+            // cannot occur" invariant.
+            for form in [c.to_string(), format!("{c}{WORD_END}")] {
+                if !encoder.contains_key(&form) {
+                    return Err(format!("vocab.json: missing byte-level entry {form:?} — every byte must be encodable"));
+                }
+            }
         }
 
-        let id_of = |t: &str| *encoder.get(t).unwrap_or_else(|| panic!("vocab is missing {t}"));
-        let (bos_id, eos_id) = (id_of(BOS), id_of(EOS));
+        let id_of = |t: &str| encoder.get(t).copied().ok_or_else(|| format!("vocab.json is missing {t}"));
+        let (bos_id, eos_id) = (id_of(BOS)?, id_of(EOS)?);
         let specials = vec![BOS.to_string(), EOS.to_string()];
-        ClipBpe { encoder, decoder, bpe_ranks, byte_encoder, byte_decoder, bos_id, eos_id, pad_id: eos_id, specials }
+        Ok(ClipBpe { encoder, decoder, bpe_ranks, byte_encoder, byte_decoder, bos_id, eos_id, pad_id: eos_id, specials })
     }
 
     /// Build from a HuggingFace tokenizer directory (`vocab.json` +
-    /// `merges.txt`). The path comes from the caller — never a baked-in default.
+    /// `merges.txt`). The path comes from the caller — never a baked-in
+    /// default. Malformed contents are an `InvalidData` error, not a panic.
     pub fn from_dir(dir: &std::path::Path) -> std::io::Result<ClipBpe> {
         let vocab = std::fs::read_to_string(dir.join("vocab.json"))?;
         let merges = std::fs::read_to_string(dir.join("merges.txt"))?;
-        Ok(ClipBpe::from_str(&vocab, &merges))
+        ClipBpe::try_from_str(&vocab, &merges).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", dir.display())))
     }
 
     /// Switch to a different pad token — the whole difference between SDXL's
@@ -330,6 +357,12 @@ fn is_letter(c: char) -> bool {
 fn pre_tokenize(text: &str, specials: &[String]) -> Vec<String> {
     const CONTRACTIONS: [&str; 7] = ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"];
     let chars: Vec<char> = text.chars().collect();
+    // Prefix matches compare CHAR SLICES against these precomputed needles.
+    // The previous shape re-collected the whole remaining text into a fresh
+    // String at every position (and again at every char of a symbol run) —
+    // O(n²) with an allocation per character, on a pub encode path.
+    let specials_c: Vec<Vec<char>> = specials.iter().map(|s| s.chars().collect()).collect();
+    let contractions_c: Vec<Vec<char>> = CONTRACTIONS.iter().map(|s| s.chars().collect()).collect();
     let n = chars.len();
     let mut tokens: Vec<String> = Vec::new();
     let mut i = 0;
@@ -337,16 +370,15 @@ fn pre_tokenize(text: &str, specials: &[String]) -> Vec<String> {
     while i < n {
         // Added tokens first — HF splits on them before the pattern runs, so
         // they must survive `[^\s\p{L}\p{N}]+` swallowing `<|` (and `!`).
-        let rest: String = chars[i..].iter().collect();
-        if let Some(sp) = specials.iter().find(|s| rest.starts_with(s.as_str())) {
-            tokens.push(sp.clone());
-            i += sp.chars().count();
+        if let Some(k) = specials_c.iter().position(|s| chars[i..].starts_with(s)) {
+            tokens.push(specials[k].clone());
+            i += specials_c[k].len();
             continue;
         }
         if chars[i] == '\'' {
-            if let Some(c) = CONTRACTIONS.iter().find(|c| rest.starts_with(*c)) {
-                tokens.push((*c).to_string());
-                i += c.chars().count();
+            if let Some(k) = contractions_c.iter().position(|c| chars[i..].starts_with(c)) {
+                tokens.push(CONTRACTIONS[k].to_string());
+                i += contractions_c[k].len();
                 continue;
             }
         }
@@ -384,11 +416,8 @@ fn pre_tokenize(text: &str, specials: &[String]) -> Vec<String> {
         // `!` split `wow!!`).
         let mut j = i;
         while j < n && !chars[j].is_whitespace() && !is_letter(chars[j]) && !is_number(chars[j]) {
-            if j > i {
-                let tail: String = chars[j..].iter().collect();
-                if specials.iter().any(|s| tail.starts_with(s.as_str())) {
-                    break;
-                }
+            if j > i && specials_c.iter().any(|s| chars[j..].starts_with(s)) {
+                break;
             }
             j += 1;
         }

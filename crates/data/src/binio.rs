@@ -58,6 +58,12 @@ impl Meta {
         // (no per-char table). Char datasets carry the full id->char map.
         let mut itos = Vec::new();
         if let Some(map) = v["itos"].as_object() {
+            // vocab_size comes from an untrusted meta.json and sizes this
+            // allocation; a per-CHAR table beyond 2^20 entries is not a real
+            // char dataset, it is a corrupt or hostile file.
+            if vocab_size > (1 << 20) {
+                return Err(format!("meta: vocab_size {vocab_size} is implausible for a char-level itos table (max {})", 1 << 20));
+            }
             itos = vec!['\0'; vocab_size];
             for (k, val) in map {
                 let id: usize = k.parse().map_err(|_| "meta: itos key")?;
@@ -86,9 +92,12 @@ pub fn write_u16_bin(path: &Path, tokens: &[u16]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// Read a raw little-endian `u16` `.bin` token array.
+/// Read a raw little-endian `u16` `.bin` token array. A trailing partial
+/// element is an `InvalidData` error — a truncated download must fail here,
+/// not silently load one token short and TRAIN on it.
 pub fn read_u16_bin(path: &Path) -> io::Result<Vec<u16>> {
     let bytes = fs::read(path)?;
+    reject_trailing(path, bytes.len(), 2)?;
     Ok(bytes
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -105,9 +114,11 @@ pub fn write_u32_bin(path: &Path, tokens: &[u32]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// Read a raw little-endian `u32` `.bin` token array.
+/// Read a raw little-endian `u32` `.bin` token array. Truncation is an
+/// error — see [`read_u16_bin`].
 pub fn read_u32_bin(path: &Path) -> io::Result<Vec<u32>> {
     let bytes = fs::read(path)?;
+    reject_trailing(path, bytes.len(), 4)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -136,13 +147,32 @@ pub fn write_f32_bin(path: &Path, values: &[f32]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// Read a raw little-endian `.f32` array.
+/// Read a raw little-endian `.f32` array. Truncation is an error — see
+/// [`read_u16_bin`].
 pub fn read_f32_bin(path: &Path) -> io::Result<Vec<f32>> {
     let bytes = fs::read(path)?;
+    reject_trailing(path, bytes.len(), 4)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
+}
+
+/// `chunks_exact` silently DISCARDS a trailing partial element — for a raw
+/// `.bin` a partial tail means the file is truncated or the wrong width, and
+/// the exact "silent truncation" class the repo's validate-everything rule
+/// names. One shared refusal for every raw reader above.
+fn reject_trailing(path: &Path, len: usize, width: usize) -> io::Result<()> {
+    if len % width != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: {len} bytes is not a multiple of the {width}-byte element width — truncated or wrong-format file",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A normalized ground-truth box for object detection: class id + center-xywh in
@@ -183,9 +213,23 @@ pub fn read_detect_boxes(path: &Path, n: usize) -> io::Result<Vec<Vec<DetectBox>
     let rd_u32 = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     let rd_f32 = |b: &[u8], o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     let mut out = Vec::with_capacity(n);
+    let need = |off: usize, n: usize| -> io::Result<()> {
+        if off + n > bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: truncated/corrupt boxes.bin — need {} bytes at offset {off}, file has {}", path.display(), n, bytes.len()),
+            ));
+        }
+        Ok(())
+    };
     for _ in 0..n {
+        need(off, 4)?;
         let num = rd_u32(&bytes, off) as usize;
         off += 4;
+        // The counts are file-supplied: check the whole record fits BEFORE
+        // allocating `num` capacity or indexing into it — a corrupt count
+        // used to drive raw indexing (panic) and an unbounded reserve.
+        need(off, num.saturating_mul(20))?;
         let mut v = Vec::with_capacity(num);
         for _ in 0..num {
             let class = rd_u32(&bytes, off);

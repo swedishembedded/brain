@@ -10,8 +10,13 @@
 //! an independent oracle, and any future model family (GLM, etc.) then only
 //! needs `chat_template`, no new hand-port.
 //!
-//! Gated on `QWEN3_DIR` (skips loudly if unset) -- needs the real Qwen3
-//! `tokenizer_config.json` to source the actual `chat_template` string from.
+//! Needs the real Qwen3 `tokenizer_config.json` to source the actual
+//! `chat_template` string from: resolved through the SAME model-store
+//! convention every other fixture test uses (`brain_testutil::model_dir`),
+//! with `QWEN3_DIR` kept as an explicit override. It used to be gated on
+//! `QWEN3_DIR` alone — a private env var nothing sets in CI — so the ONLY
+//! guard on the train/serve prompt-skew surface skipped silently by default.
+//! Skips loudly when the checkpoint genuinely isn't fetched on this box.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,7 +26,13 @@ use data::qwen_chat::{self, ChatMessage as QcMessage, TemplateOpts, ToolCallMsg}
 use minijinja::Value;
 
 fn qwen3_dir() -> Option<PathBuf> {
-    std::env::var("QWEN3_DIR").ok().map(PathBuf::from)
+    if let Ok(d) = std::env::var("QWEN3_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    // The served Qwen3 chat model this cross-check guards (the same
+    // tokenizer_config.json qwen::chat renders from).
+    let dir = PathBuf::from(brain_testutil::model_dir("Qwen/Qwen3-0.6B")?);
+    dir.join("tokenizer_config.json").exists().then_some(dir)
 }
 
 fn load_template() -> Option<ChatTemplate> {
@@ -35,7 +46,7 @@ fn load_template() -> Option<ChatTemplate> {
 #[test]
 fn matches_qwen_chat_on_a_tool_call_conversation() {
     let Some(tmpl) = load_template() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
         return;
     };
 
@@ -74,7 +85,7 @@ fn matches_qwen_chat_on_a_tool_call_conversation() {
 #[test]
 fn matches_qwen_chat_with_a_tools_schema_and_generation_prompt() {
     let Some(tmpl) = load_template() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
         return;
     };
 
@@ -96,7 +107,7 @@ fn matches_qwen_chat_with_a_tools_schema_and_generation_prompt() {
 #[test]
 fn matches_qwen_chat_with_enable_thinking_false_generation_prompt() {
     let Some(tmpl) = load_template() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
         return;
     };
     let qc_msgs = vec![QcMessage::user("hi")];
