@@ -443,9 +443,16 @@ impl ResidentModel for QwenResident {
         MemCost::new(cost.vram + kv_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        // Coarse stage progress -- NOT per-tensor (the actual weight upload
+        // loop lives in `paramstore`, a lower-level crate that must not
+        // depend on `residency` just for this), a handful of stage markers so
+        // `-v -v` shows SOMETHING moving during a cold activate that can take
+        // over a minute, without turning into a per-layer scroll.
+        residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.id));
         // Stream weights from the mmap (see GptResident::activate). Open first so
         // a GGUF can supply its own embedded tokenizer.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        residency::log::info(&format!("{}: step 2/3 loading tokenizer", self.id));
         // Tokenizer precedence: an explicit sibling `tokenizer.json` (safetensors
         // path, or an override) wins; else a `.gguf` builds from its embedded
         // `tokenizer.ggml.*` KV; else there is nothing to tokenize with.
@@ -457,6 +464,7 @@ impl ResidentModel for QwenResident {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
         let eos = tok.encode("<|im_end|>").first().copied();
+        residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
         let ctx = Self::ctx();
         // `qwen3::serve::Engine` (the paged, continuous-batching serving engine --
         // see this plan's W2/W3/W5) reads checkpoints via `checkpoint::load`,

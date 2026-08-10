@@ -213,6 +213,7 @@ async fn wait_for_admission(
 /// wait-to-start is deadlined.
 pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
     let provider = state.provider;
+    residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
     inv.cancel = token.clone();
     let (tx, rx) = oneshot::channel();
@@ -237,10 +238,46 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     let res = rx.await;
     state.finish(&id);
     match res {
-        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Ok(outcome)) => {
+            log_request_tokens(&state.exec, model, &outcome);
+            Ok(outcome)
+        }
         Ok(Err(e)) => Err(map_reply_err(provider, model, &e)),
         Err(_) => Err(ApiError::overloaded(provider, "executor dropped the reply")),
     }
+}
+
+/// Info-level per-request token accounting: this request's own prompt/
+/// completion counts (from `outcome.outputs`, exact) alongside the model's
+/// CURRENT cumulative prefix-cache counters (`Executor::stats().metrics`,
+/// refreshed on the dispatcher's ~250ms cadence — a snapshot at request-
+/// completion time, not a delta scoped to just this one request; labeled
+/// "cumulative" so that distinction is never implied to be more precise than
+/// it is). Not every model publishes the KV metrics (only the paged-KV
+/// serving engine does), so their absence is silently skipped, not an error.
+/// Takes `&Executor` (not `&AppState`) so streaming's `'static` reply
+/// closures, which only ever clone `state.exec`, can call it too.
+fn log_request_tokens(exec: &residency::Executor, model: &str, outcome: &Outcome) {
+    if residency::log::verbosity() < 2 {
+        return; // skip the stats() round-trip entirely below info level
+    }
+    let prompt = outcome.outputs.get("prompt_tokens").and_then(|v| v.as_i64());
+    let completion = outcome.outputs.get("completion_tokens").and_then(|v| v.as_i64());
+    let mut line = format!("{model}: request done");
+    if let Some(p) = prompt {
+        line += &format!(", prompt_tokens={p}");
+    }
+    if let Some(c) = completion {
+        line += &format!(", completion_tokens={c}");
+    }
+    let metrics = exec.stats().metrics;
+    if let Some((_, m)) = metrics.iter().find(|(k, _)| k.model == model) {
+        let get = |name: &str| m.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+        if let (Some(hit), Some(looked)) = (get("kv_prefix_hit_tokens"), get("kv_prefix_lookup_tokens")) {
+            line += &format!(", kv_cache_hit_tokens={hit} (cumulative), kv_cache_lookup_tokens={looked} (cumulative)");
+        }
+    }
+    residency::log::info(&line);
 }
 
 /// One `StreamMsg::Fetching` tick: a human-readable phase description plus the
@@ -349,12 +386,14 @@ pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: I
 /// (image denoise) or is dropped (chat, which streams only token deltas).
 async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
+    residency::log::info(&format!("{provider:?} request: {action} {model} (stream)"));
     let model_owned = model.to_string();
     let (id, token) = state.register();
     inv.cancel = token.clone();
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
     let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
     let tx_progress = tx.clone();
+    let exec_for_log = state.exec.clone();
     let job = Job::new(model.to_string(), action.to_string(), inv)
         .on_progress(move |p| {
             if let Some(piece) = p.delta {
@@ -370,7 +409,10 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
         })
         .reply(move |r| {
             let msg = match r {
-                Ok(outcome) => StreamMsg::Done(outcome),
+                Ok(outcome) => {
+                    log_request_tokens(&exec_for_log, &model_owned, &outcome);
+                    StreamMsg::Done(outcome)
+                }
                 Err(e) => StreamMsg::Err(map_reply_err(provider, &model_owned, &e)),
             };
             let _ = tx.send(msg);
@@ -406,6 +448,7 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 /// are already committed by the time admission is even attempted.
 pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, inv: Invocation, forward_steps: bool) -> EventStream {
     let provider = state.provider;
+    residency::log::info(&format!("{provider:?} request: {action} {model} (stream, not yet resident -- auto-fetching)"));
     let (id, token) = state.register();
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
     let exec = state.exec.clone();
@@ -459,6 +502,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         let tx_progress = tx.clone();
         let tx_reply = tx;
         let model_for_admit = model_owned.clone();
+        let exec_for_log = exec.clone();
         let job = Job::new(model_owned.clone(), action_owned, inv)
             .on_progress(move |p| {
                 if let Some(piece) = p.delta {
@@ -474,7 +518,10 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             })
             .reply(move |r| {
                 let msg = match r {
-                    Ok(outcome) => StreamMsg::Done(outcome),
+                    Ok(outcome) => {
+                        log_request_tokens(&exec_for_log, &model_owned, &outcome);
+                        StreamMsg::Done(outcome)
+                    }
                     Err(e) => StreamMsg::Err(map_reply_err(provider, &model_owned, &e)),
                 };
                 let _ = tx_reply.send(msg);

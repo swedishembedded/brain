@@ -177,6 +177,23 @@ enum FetchState {
     Done(Result<(), String>),
 }
 
+/// The 10%-bucket to report for one file's download progress (`got`/`total`
+/// bytes), given the last bucket already reported for THIS file (`None` if
+/// never reported yet) -- `Some(bucket)` only when `bucket` is a NEW
+/// threshold this call just crossed, so a caller logs at most once per 10%
+/// rather than once per raw progress tick (the hub's chunk size, not a
+/// number an operator watching `-v -v` would choose to see scroll by).
+/// `total == 0` (genuinely empty file, or a host that never reported a
+/// Content-Length) has no meaningful percentage -- `None`, never a divide.
+/// Pure so it's directly testable without a real download.
+fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) -> Option<u32> {
+    if total == 0 {
+        return None;
+    }
+    let bucket = (got.min(total) * 100 / total / 10 * 10) as u32;
+    last.is_none_or(|l| bucket > l).then_some(bucket)
+}
+
 /// One single-flight gate per model: the fetch's outcome plus the condvar
 /// that wakes every other concurrent `ensure` call waiting on it.
 type FetchGate = Arc<(Mutex<FetchState>, Condvar)>;
@@ -195,7 +212,19 @@ impl StoreSupplier {
     fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
         let r = ModelRef::parse(model).map_err(|e| format!("{model}: {e}"))?;
         let plan = brain_modelstore::plan(&r, &self.store, self.hub.as_ref()).map_err(|e| format!("{model}: {e}"))?;
+        // The last 10%-bucket logged per downloaded file, so a caller watching
+        // `-v -v` sees "downloading X% ... 10% ... 20% ..." instead of either
+        // silence (today's complaint: no visibility that a fetch is even
+        // happening) or one line per raw progress tick (the hub's chunk size,
+        // not a number an operator would choose to watch scroll by).
+        let mut last_pct: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         let deferred = brain_modelstore::execute(&self.store, self.hub.as_ref(), &plan, &mut |name, got, total| {
+            if let Some(total) = total {
+                if let Some(bucket) = next_download_pct_bucket(got, total, last_pct.get(name).copied()) {
+                    residency::log::info(&format!("{model}: downloading {name} {bucket}%"));
+                    last_pct.insert(name.to_string(), bucket);
+                }
+            }
             progress(name, got.min(u32::MAX as u64) as u32, total.unwrap_or(0).min(u32::MAX as u64) as u32);
         })
         .map_err(|e| format!("{model}: {e}"))?;
@@ -304,6 +333,29 @@ mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Cpu, 1 << 30, 0);
         Executor::start(vec![], budgets, Policy::default())
+    }
+
+    #[test]
+    fn next_download_pct_bucket_reports_each_new_10pct_threshold_once() {
+        // Starts with 0%, per spec -- the very first call (nothing seen yet)
+        // at 0 bytes must report Some(0), not silence until the first real
+        // threshold.
+        assert_eq!(next_download_pct_bucket(0, 1000, None), Some(0));
+        // A later call still inside the SAME bucket (0%) reports nothing new.
+        assert_eq!(next_download_pct_bucket(50, 1000, Some(0)), None);
+        // Crossing into a new bucket reports it.
+        assert_eq!(next_download_pct_bucket(105, 1000, Some(0)), Some(10));
+        // A coarse jump (e.g. one big chunk) reports the NEW bucket directly,
+        // not every threshold it skipped over.
+        assert_eq!(next_download_pct_bucket(800, 1000, Some(10)), Some(80));
+        // Completion.
+        assert_eq!(next_download_pct_bucket(1000, 1000, Some(80)), Some(100));
+        // got > total (a defensive clamp -- a host lying about Content-Length,
+        // or a stream that overran it) must not compute over 100% or panic.
+        assert_eq!(next_download_pct_bucket(1500, 1000, Some(80)), Some(100));
+        // total == 0 has no meaningful percentage and must never divide by it.
+        assert_eq!(next_download_pct_bucket(0, 0, None), None);
+        assert_eq!(next_download_pct_bucket(500, 0, None), None);
     }
 
     #[test]
