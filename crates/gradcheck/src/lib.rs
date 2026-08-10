@@ -638,6 +638,120 @@ pub fn check_flux2(seed: u64) -> Report {
     Report { checks }
 }
 
+/// Build a tiny hybrid Qwen3.5-35B-A3B decoder (Gated DeltaNet + GQA + sparse
+/// MoE with a sigmoid-gated shared expert) and gradient-check it. This is the
+/// correctness gate for wiring `model::gdn::gdn_chunk_bwd` (full reverse-mode
+/// GDN backward, including its own chunk-major layout permute adjoint, the
+/// depthwise causal conv1d backward, the L2-norm backward, and the new
+/// `gdn_decay_gate_bwd` kernel), `model::block::gqa_bwd` (plus the partial
+/// M-RoPE backward and the sigmoid output-gate composition), and
+/// `model::moe::moe_layer_bwd` (routed experts + softmax router) alongside a
+/// HAND-DERIVED sigmoid-gated shared-expert backward (no `model::moe` helper
+/// exists for that composition) — all through the blanket `CheckModel for
+/// model::Model` impl, since [`qwen35::model::Qwen35`] implements that trait
+/// directly (no bespoke test harness needed, unlike a model whose backward
+/// only exists behind a lower-level API).
+///
+/// Smaller than [`qwen35::config::Qwen35Config::tiny`] (`n_layers: 8, n_experts: 6`)
+/// on purpose: `directional_check` costs `O(n_dirs)` forward passes PER
+/// PARAMETER TENSOR, and this hybrid config's per-layer tensor count is large
+/// (every routed expert is 3 own-named tensors) — `n_layers: 4` still exercises
+/// BOTH layer types (`full_attention_interval: 4` puts layer 3 at `Full`,
+/// layers 0-2 at `Linear`), `n_experts: 3` keeps the routed-expert weight
+/// count small. `top_k: n_experts` (every expert always selected) removes the
+/// hard top-k selection boundary finite differences cannot see through — the
+/// same mitigation `check_moe`/`check_glm` already use, not a new pattern.
+/// `t: 12` with `tiny()`'s own `linear_conv_kernel_dim`-derived GDN shape picks
+/// chunk size 4 (`qwen35::model::gdn_chunk_size(12) == 4`), a genuine 3-chunk
+/// recurrence — smaller than `tiny()`'s own `t: 24` (chunk 8, 3 chunks) at the
+/// same chunk COUNT, for less FD compute. `b: 1` (a single sequence) is enough
+/// to exercise every op; nothing here is batch-shaped in a way `b: 2` would add
+/// coverage for.
+pub fn check_qwen35(seed: u64) -> Report {
+    let model = qwen35_gradcheck_harness(seed);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
+/// **Why `in_proj_qkv.weight`/`conv1d.weight` get a bigger init than
+/// [`qwen35::init::init_weights`]'s standard `std=0.02`.** At `tiny()`'s tiny
+/// `d_model`, the standard init compounds through THREE cascaded small-scale
+/// stages before Gated DeltaNet's L2-norm (`in_proj_qkv`'s matmul, then a
+/// depthwise causal conv1d that only sums `kernel=4` terms per output
+/// channel -- far less central-limit averaging than a `d_model`-wide matmul,
+/// then SiLU's near-identity attenuation for small inputs) and collapses to
+/// ~1e-6 by the time `query`/`key` reach `l2norm_scale.wgsl`. That kernel's
+/// `eps=1e-6` then DOMINATES the normalization denominator instead of the
+/// vector's own norm, so the "normalized" output is just `x/sqrt(eps)` --
+/// still proportional to the tiny input, not an actual unit vector -- and
+/// the entire chunked recurrence downstream is swamped to ~1e-11, well below
+/// where any decay/beta/gate parameter's effect is resolvable by finite
+/// differences.
+///
+/// Measured directly (`git log` this crate's own history for the
+/// investigation): with the standard `std=0.02` init, perturbing
+/// `A_log`/`dt_bias`/`in_proj_a.weight`/`in_proj_b.weight` by up to ±10 (an
+/// enormous change relative to their own scale) leaves the loss BIT-IDENTICAL
+/// -- not just small, exactly unchanged -- while the raw decay gate `g`
+/// itself is confirmed to vary correctly (-0.001 to -157) under the same
+/// perturbations, and the chunked recurrence's own raw output `out_cm` reads
+/// back at ~1e-11 regardless. This is a test-harness numerical-conditioning
+/// gap, not a `model::gdn` or `qwen35::model` wiring bug: the standalone
+/// `model::gdn` tests (`crates/model/tests/gdn_chunk_{fwd,bwd}.rs`) feed
+/// `q`/`k`/`v`/`g`/`beta` directly at `std=1.0` with no upstream conv chain,
+/// so they never hit this collapse; qwen35's INTEGRATED gradcheck goes
+/// through the real `in_proj_qkv` -> conv1d -> SiLU -> L2-norm pipeline and
+/// therefore needs an init scale that survives it. `std=1.0` for just these
+/// two GDN-specific tensors (everything else keeps the standard init) was
+/// confirmed to restore real, non-degenerate FD sensitivity to `A_log`
+/// (`check_qwen35_a_log_elementwise`) without needing to touch
+/// `qwen35::init`'s production init or `model::gdn`'s `eps`, neither of
+/// which is wrong for the REAL model's much wider `d_model`.
+fn qwen35_gradcheck_harness(seed: u64) -> qwen35::model::Qwen35 {
+    use qwen35::config::Qwen35Config;
+    use qwen35::model::Qwen35;
+    let cfg = Qwen35Config { n_layers: 4, n_experts: 3, top_k: 3, ..Qwen35Config::tiny() };
+    let mut init = <Qwen35 as model::Model>::init_weights(&cfg, seed);
+    let mut conv_rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);
+    for l in 0..cfg.n_layers as usize {
+        for leaf in ["in_proj_qkv.weight", "conv1d.weight"] {
+            if let Some(v) = init.get_mut(&format!("blocks.{l}.linear_attn.{leaf}")) {
+                for x in v.iter_mut() {
+                    *x = conv_rng.scaled(1.0);
+                }
+            }
+        }
+    }
+    let model = Qwen35::new_train(cfg, 1, 12, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
+    model.set_batch(&x, &y);
+    model
+}
+
+/// **The gate that actually covers Gated DeltaNet's cross-chunk fold.**
+/// `A_log` (`blocks.0.linear_attn.A_log`, `[num_v_heads] = 6` entries at the
+/// tiny config) is read by every token at every chunk of the chunked
+/// recurrence, and `gdn_chunk_bwd`'s `d_A_log` is a genuine sum-fold over the
+/// WHOLE sequence (via `mul(d_g,g)` then `bias_grad` over all rows) — exactly
+/// the shape [`directional_check`]'s own rustdoc warns is blind to a partial
+/// fold error (see `check_t5_rel_bias_elementwise`'s measured T5 case).
+///
+/// This is not a hypothetical concern for THIS config: in
+/// [`check_qwen35`], every `blocks.{0,1,2}.linear_attn.*` parameter's
+/// numeric finite difference reads exactly `0.0` (the true per-tensor
+/// directional derivative is far below fp32 resolution at this depth from
+/// the loss, with only one `Full`-attention layer at the end pulling
+/// gradient back through three Gated-DeltaNet layers' own decay gates) — so
+/// `directional_check` cannot exercise this fold at all here, pass or fail.
+/// Per-entry finite differences don't have that problem: the loss
+/// difference is `eps·|∂L/∂wᵢ|` with no `√numel` contraction, so it stays
+/// resolvable even when the tensor-level directional derivative would round
+/// to zero.
+pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
+    let model = qwen35_gradcheck_harness(seed);
+    elementwise_check(&model, "blocks.2.linear_attn.A_log", 3e-1)
+}
+
 /// Build a tiny bottleneck autoencoder, set a fixed float batch, and
 /// gradient-check it. This is the correctness gate for the `Regression` head
 /// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
@@ -870,6 +984,39 @@ mod tests {
         assert!(
             fails.is_empty(),
             "FLUX.2 gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen35_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen35(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "qwen35 gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen35_a_log_elementwise_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen35_a_log_elementwise(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "qwen35 A_log elementwise gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

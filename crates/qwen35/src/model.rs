@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3.5-35B-A3B hybrid decoder forward assembly — device [`Step`]s wired
-//! to the [`model::Model`] trait.
+//! Qwen3.5-35B-A3B hybrid decoder forward AND backward assembly — device
+//! [`Step`]s wired to the [`model::Model`] trait.
 //!
 //! **Scope, strictly**: text-only (no vision splice — that is separate
-//! follow-on work), forward-only/inference-only (frozen weights,
-//! `Role::Frozen` throughout — see [`Qwen35::backward`]'s panic), no
-//! incremental/KV-cache decode (a full-sequence prefill-shaped forward over a
-//! fixed `t` only, matching [`model::gdn`]'s own "chunked/prefill only"
-//! scope), no T-padding (`t` must already be a multiple of the derived GDN
-//! chunk size — asserted loudly in [`Qwen35::new_on`], see
-//! [`gdn_chunk_size`]).
+//! follow-on work), no incremental/KV-cache decode (a full-sequence
+//! prefill-shaped forward over a fixed `t` only, matching [`model::gdn`]'s own
+//! "chunked/prefill only" scope), no T-padding (`t` must already be a
+//! multiple of the derived GDN chunk size — asserted loudly in
+//! [`Qwen35::new_on`], see [`gdn_chunk_size`]). **Two construction paths**:
+//! [`Qwen35::new`]/[`Qwen35::new_i8`] build a frozen (`Role::Frozen`),
+//! forward-only instance (`backward`/`zero_grads`/`adamw_step` all assert and
+//! panic on such an instance — see [`Qwen35::backward`]'s own assert);
+//! [`Qwen35::new_train`] builds a fully trainable (`Role::Trainable`
+//! everywhere, full-parameter — no LoRA-specific subset) instance whose
+//! `forward()` additionally saves the activation cache `backward()` reads
+//! (see [`Qwen35::train_acts`]'s own doc for the exact "one forward, one
+//! backward, then the cache is gone" contract). Int8 and training are
+//! mutually exclusive.
 //!
 //! **Honest scope note on numerical parity**: this environment has no
 //! `torch`/`transformers` installed (see `docs/models/qwen35/status.md`'s
@@ -108,19 +115,27 @@
 //!   equivalently NLC with `N=B,L=T,C=C`). `nlc_nchw`/`nchw_nlc` (existing)
 //!   convert between exactly these two layouts with `hw=T`; no new kernel.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use gpu_core::{f, DeviceBuffer, Gpu};
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
-use audio::conv::{conv1d_fwd, Conv1d, ConvKernels};
-use model::block::{gqa_fwd, kv_expand_fwd, rmsnorm_fwd, rope2d_partial_fwd, Gqa, KernelIds};
-use model::gdn::{gdn_chunk_fwd, GdnIds, GdnScratch, GdnShape};
-use model::moe::{
-    expert_fwd, expert_fwd_i8, router_fwd_kind, shared_expert_fwd, ExpertScratch, ExpertScratch8, MoeIds, MoeIds8,
-    MoeShape, RouterKind, SharedExpertIds, SharedExpertScratch,
+use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
+use model::block::{
+    gqa_bwd, gqa_fwd, kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, swiglu_bwd, Gqa,
+    KernelIds,
 };
+use model::gdn::{
+    gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_train, GdnBwdIds, GdnBwdScratch, GdnIds, GdnScratch, GdnScratchTrain,
+    GdnShape,
+};
+use model::moe::{
+    expert_fwd, expert_fwd_i8, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch, ExpertGrads,
+    ExpertScratch, ExpertScratch8, MoeActs, MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind,
+    SharedExpertIds, SharedExpertScratch,
+};
+use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
 use crate::q8::{Q8Mixer, Qwen35Q8};
@@ -177,6 +192,50 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // `Q8` pipeline registers under this same local name (`qwen/src/model.rs:159`).
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),                   // 40
     ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8),       // 41
+    // -- training (backward + AdamW) tier -- see `Qwen35::new_train`/`backward`.
+    ("rms_inv", kernels::RMS_INV),                               // 42
+    ("rmsnorm_dx", kernels::RMSNORM_DX),                         // 43
+    ("rmsnorm_dw", kernels::RMSNORM_DW),                         // 44
+    ("gqa_bwd_dscores", kernels::GQA_BWD_DSCORES),               // 45
+    ("gqa_bwd_dv", kernels::GQA_BWD_DV),                         // 46
+    ("gqa_bwd_dq", kernels::GQA_BWD_DQ),                         // 47
+    ("gqa_bwd_dk", kernels::GQA_BWD_DK),                         // 48
+    ("silu_bwd_da", kernels::SILU_BWD_DA),                       // 49
+    ("silu_bwd_db", kernels::SILU_BWD_DB),                       // 50
+    ("sigmoid_bwd", kernels::SIGMOID_BWD),                       // 51
+    ("silu_bwd", kernels::SILU_BWD),                             // 52
+    ("concat2", kernels::CONCAT2),                               // 53
+    ("bias_grad", kernels::BIAS_GRAD),                           // 54
+    ("kv_expand_bwd", kernels::KV_EXPAND_BWD),                   // 55
+    ("matmul_dx", kernels::MATMUL_DX),                           // 56
+    ("matmul_dw", kernels::MATMUL_DW),                           // 57
+    ("conv1d_dx", kernels::CONV1D_DX),                           // 58
+    ("conv1d_dw", kernels::CONV1D_DW),                           // 59
+    ("gdn_decay_gate_bwd", kernels::GDN_DECAY_GATE_BWD),         // 60
+    ("splice_add", kernels::SPLICE_ADD),                         // 61
+    ("row_dot", kernels::ROW_DOT),                               // 62
+    ("gdn_chunk_reverse_cumsum_step", kernels::GDN_CHUNK_REVERSE_CUMSUM_STEP), // 63
+    ("gdn_ut_bwd_dattn0", kernels::GDN_UT_BWD_DATTN0),           // 64
+    ("gdn_ut_bwd_dtmat", kernels::GDN_UT_BWD_DTMAT),             // 65
+    ("gdn_mask_strict_lower_bwd", kernels::GDN_MASK_STRICT_LOWER_BWD), // 66
+    ("gdn_decay_mask_bwd", kernels::GDN_DECAY_MASK_BWD),         // 67
+    ("gdn_decay_scale_bwd", kernels::GDN_DECAY_SCALE_BWD),       // 68
+    ("gdn_decay_scale_bwd_last", kernels::GDN_DECAY_SCALE_BWD_LAST), // 69
+    ("gdn_state_decay_bwd_dscale", kernels::GDN_STATE_DECAY_BWD_DSCALE), // 70
+    ("router_bwd", kernels::ROUTER_BWD),                         // 71
+    ("expert_counts", kernels::EXPERT_COUNTS),                   // 72
+    ("scale_add_dexp", kernels::SCALE_ADD_DEXP),                 // 73
+    ("scale_add_dgate", kernels::SCALE_ADD_DGATE),               // 74
+    ("moe_linear_gated_dx", kernels::MOE_LINEAR_GATED_DX),       // 75
+    ("moe_linear_gated_dw", kernels::MOE_LINEAR_GATED_DW),       // 76
+    ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX),               // 77
+    ("adamw", kernels::ADAMW),                                   // 78
+    ("gradnorm_sq", kernels::GRADNORM_SQ),                       // 79
+    ("grad_scale", kernels::GRAD_SCALE),                         // 80
+    ("clip_coef", kernels::CLIP_COEF),                           // 81
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),                 // 82
+    ("emb_bwd", kernels::EMB_BWD),                               // 83
+    ("ce_grad", kernels::CE_GRAD_MASKED),                        // 84
 ];
 
 const RMSNORM: usize = 0;
@@ -221,28 +280,74 @@ const MAX_ABS_ROW: usize = 38;
 const QUANT_PACK: usize = 39;
 const MATMUL_I8: usize = 40;
 const MOE_LINEAR_GATED_I8: usize = 41;
+const RMS_INV: usize = 42;
+const RMSNORM_DX: usize = 43;
+const RMSNORM_DW: usize = 44;
+const GQA_BWD_DSCORES: usize = 45;
+const GQA_BWD_DV: usize = 46;
+const GQA_BWD_DQ: usize = 47;
+const GQA_BWD_DK: usize = 48;
+const SILU_BWD_DA: usize = 49;
+const SILU_BWD_DB: usize = 50;
+const SIGMOID_BWD: usize = 51;
+const SILU_BWD: usize = 52;
+const CONCAT2: usize = 53;
+const BIAS_GRAD: usize = 54;
+const KV_EXPAND_BWD: usize = 55;
+const MATMUL_DX: usize = 56;
+const MATMUL_DW: usize = 57;
+const CONV1D_DX: usize = 58;
+const CONV1D_DW: usize = 59;
+const GDN_DECAY_GATE_BWD: usize = 60;
+const SPLICE_ADD: usize = 61;
+const ROW_DOT: usize = 62;
+const GDN_CHUNK_REVERSE_CUMSUM_STEP: usize = 63;
+const GDN_UT_BWD_DATTN0: usize = 64;
+const GDN_UT_BWD_DTMAT: usize = 65;
+const GDN_MASK_STRICT_LOWER_BWD: usize = 66;
+const GDN_DECAY_MASK_BWD: usize = 67;
+const GDN_DECAY_SCALE_BWD: usize = 68;
+const GDN_DECAY_SCALE_BWD_LAST: usize = 69;
+const GDN_STATE_DECAY_BWD_DSCALE: usize = 70;
+const ROUTER_BWD: usize = 71;
+const EXPERT_COUNTS: usize = 72;
+const SCALE_ADD_DEXP: usize = 73;
+const SCALE_ADD_DGATE: usize = 74;
+const MOE_LINEAR_GATED_DX: usize = 75;
+const MOE_LINEAR_GATED_DW: usize = 76;
+const L2NORM_SCALE_DX: usize = 77;
+const ADAMW: usize = 78;
+const GRADNORM_SQ: usize = 79;
+const GRAD_SCALE: usize = 80;
+const CLIP_COEF: usize = 81;
+const GRAD_SCALE_BUF: usize = 82;
+const EMB_BWD: usize = 83;
+const CE_GRAD: usize = 84;
 
-/// Forward-only: the backward-only slots [`KernelIds`] carries are never
-/// dispatched, so they point at `rmsnorm` (index 0) — harmless, matching
-/// `omni::thinker::kernel_ids`'s own convention.
+/// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
+/// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
+/// dispatches `block::rope_fwd`/`rope_bwd` (it uses the M-RoPE table-driven
+/// `rope2d_partial_{fwd,bwd}` instead, which take their own kernel index, not
+/// a [`KernelIds`] field) — harmless, matching `omni::thinker::kernel_ids`'s
+/// own convention for a slot this model genuinely never dispatches.
 fn kernel_ids() -> KernelIds {
     KernelIds {
         rmsnorm: RMSNORM,
-        rms_inv: RMSNORM,
-        rmsnorm_dx: RMSNORM,
-        rmsnorm_dw: RMSNORM,
+        rms_inv: RMS_INV,
+        rmsnorm_dx: RMSNORM_DX,
+        rmsnorm_dw: RMSNORM_DW,
         rope: RMSNORM,
         rope_bwd: RMSNORM,
         gqa_scores: GQA_SCORES,
         gqa_apply: GQA_APPLY,
         attn_softmax: ATTN_SOFTMAX,
-        gqa_dscores: RMSNORM,
-        gqa_dv: RMSNORM,
-        gqa_dq: RMSNORM,
-        gqa_dk: RMSNORM,
+        gqa_dscores: GQA_BWD_DSCORES,
+        gqa_dv: GQA_BWD_DV,
+        gqa_dq: GQA_BWD_DQ,
+        gqa_dk: GQA_BWD_DK,
         silu_mul: SILU_MUL,
-        silu_da: RMSNORM,
-        silu_db: RMSNORM,
+        silu_da: SILU_BWD_DA,
+        silu_db: SILU_BWD_DB,
     }
 }
 
@@ -284,9 +389,53 @@ fn shared_expert_ids() -> SharedExpertIds {
     SharedExpertIds { matmul: MATMUL, silu_mul: SILU_MUL, sigmoid: SIGMOID, scale_row: SCALE_ROW, add2: ADD2 }
 }
 
+/// `dx`/`dw` are real kernels now (see [`Qwen35::backward`]'s GDN conv1d
+/// backward); an inference-only build never dispatches them.
 fn conv_kernels() -> ConvKernels {
-    // Forward-only: dx/dw are never dispatched, point at fwd (harmless).
-    ConvKernels { fwd: CONV1D, dx: CONV1D, dw: CONV1D }
+    ConvKernels { fwd: CONV1D, dx: CONV1D_DX, dw: CONV1D_DW }
+}
+
+/// Backward-only kernel ids [`model::gdn::gdn_chunk_bwd`]/[`gdn_chunk_fwd_train`]
+/// dispatch, beyond [`gdn_ids`] (shared with the forward path).
+fn gdn_bwd_ids() -> GdnBwdIds {
+    GdnBwdIds {
+        splice_add: SPLICE_ADD,
+        row_dot: ROW_DOT,
+        scale_add: SCALE_ADD,
+        reverse_cumsum_step: GDN_CHUNK_REVERSE_CUMSUM_STEP,
+        ut_bwd_dattn0: GDN_UT_BWD_DATTN0,
+        ut_bwd_dtmat: GDN_UT_BWD_DTMAT,
+        mask_strict_lower_bwd: GDN_MASK_STRICT_LOWER_BWD,
+        decay_mask_bwd: GDN_DECAY_MASK_BWD,
+        decay_scale_bwd: GDN_DECAY_SCALE_BWD,
+        decay_scale_bwd_last: GDN_DECAY_SCALE_BWD_LAST,
+        state_decay_bwd_dscale: GDN_STATE_DECAY_BWD_DSCALE,
+    }
+}
+
+/// [`model::moe::router_bwd`]'s kernel ids — `Softmax` router (qwen35's own,
+/// see `moe_sublayer`'s `RouterKind::Softmax` choice), so `expert_counts` is
+/// required (aux-loss usage fractions), unused by the returned scalar loss
+/// (`aux_coef=0.0`, see `moe_sublayer`'s own comment) but still dispatched —
+/// `router_bwd.wgsl`'s own interface requires the `fe` buffer to exist.
+fn router_bwd_ids() -> RouterBwdIds {
+    RouterBwdIds { router_bwd: ROUTER_BWD, expert_counts: Some(EXPERT_COUNTS) }
+}
+
+/// [`model::moe::expert_dgate`]/[`expert_bwd`]'s kernel ids (composed by
+/// [`moe_layer_bwd`]) — `linear_gated: true` selects the row-skipping
+/// backward kernels, matching `moe_sublayer`'s own gated forward
+/// (`MOE_LINEAR_GATED`).
+fn moe_bwd_ids() -> MoeIdsBwd {
+    MoeIdsBwd {
+        scale_add_dexp: SCALE_ADD_DEXP,
+        scale_add_dgate: SCALE_ADD_DGATE,
+        silu_da: SILU_BWD_DA,
+        silu_db: SILU_BWD_DB,
+        linear_dx: MOE_LINEAR_GATED_DX,
+        linear_dw: MOE_LINEAR_GATED_DW,
+        linear_gated: true,
+    }
 }
 
 /// The Gated DeltaNet chunk size this forward uses. The reference default is
@@ -389,6 +538,310 @@ impl GdnScratchBufs {
     }
 }
 
+/// Owned scratch for one [`gdn_chunk_fwd_train`] call — the training-mode
+/// sibling of [`GdnScratchBufs`] that additionally saves the per-chunk
+/// history [`gdn_chunk_bwd`] reads back (see [`GdnScratchTrain`]'s own doc for
+/// exactly which field is which). `clears()` lists every field
+/// [`gdn_chunk_fwd_train`]'s own doc says MUST be zeroed before submit
+/// (`t_mat`, every `_hist` field, `state_history`).
+struct GdnScratchTrainBufs {
+    g_cs: DeviceBuffer,
+    exp_g_cs: DeviceBuffer,
+    k_beta: DeviceBuffer,
+    v_beta: DeviceBuffer,
+    k_beta_decay: DeviceBuffer,
+    decay_mask: DeviceBuffer,
+    raw_attn0: DeviceBuffer,
+    attn0: DeviceBuffer,
+    t_mat: DeviceBuffer,
+    u: DeviceBuffer,
+    w: DeviceBuffer,
+    raw_intra: DeviceBuffer,
+    intra_scores: DeviceBuffer,
+    q_scaled: DeviceBuffer,
+    decay_scale: DeviceBuffer,
+    decayed_k: DeviceBuffer,
+    v_prime: DeviceBuffer,
+    v_new: DeviceBuffer,
+    q_scaled_hist: DeviceBuffer,
+    decay_scale_hist: DeviceBuffer,
+    decayed_k_hist: DeviceBuffer,
+    v_prime_hist: DeviceBuffer,
+    v_new_hist: DeviceBuffer,
+    state_history: DeviceBuffer,
+}
+
+impl GdnScratchTrainBufs {
+    fn new(g: &Gpu, shape: &GdnShape) -> GdnScratchTrainBufs {
+        let bhc = shape.bhc() as u64;
+        let bh = shape.bh() as u64;
+        let c = shape.chunk as u64;
+        let dk = shape.dk as u64;
+        let dv = shape.dv as u64;
+        let n_chunks = shape.n_chunks() as u64;
+        GdnScratchTrainBufs {
+            g_cs: g.storage(bhc * c),
+            exp_g_cs: g.storage(bhc * c),
+            k_beta: g.storage(bhc * c * dk),
+            v_beta: g.storage(bhc * c * dv),
+            k_beta_decay: g.storage(bhc * c * dk),
+            decay_mask: g.storage(bhc * c * c),
+            raw_attn0: g.storage(bhc * c * c),
+            attn0: g.storage(bhc * c * c),
+            t_mat: g.storage(bhc * c * c),
+            u: g.storage(bhc * c * dv),
+            w: g.storage(bhc * c * dk),
+            raw_intra: g.storage(bhc * c * c),
+            intra_scores: g.storage(bhc * c * c),
+            q_scaled: g.storage(bh * c * dk),
+            decay_scale: g.storage(bh * c),
+            decayed_k: g.storage(bh * c * dk),
+            v_prime: g.storage(bh * c * dv),
+            v_new: g.storage(bh * c * dv),
+            q_scaled_hist: g.storage(bhc * c * dk),
+            decay_scale_hist: g.storage(bhc * c),
+            decayed_k_hist: g.storage(bhc * c * dk),
+            v_prime_hist: g.storage(bhc * c * dv),
+            v_new_hist: g.storage(bhc * c * dv),
+            state_history: g.storage((n_chunks + 1) * bh * dk * dv),
+        }
+    }
+
+    fn as_ref(&self) -> GdnScratchTrain<'_> {
+        GdnScratchTrain {
+            g_cs: &self.g_cs,
+            exp_g_cs: &self.exp_g_cs,
+            k_beta: &self.k_beta,
+            v_beta: &self.v_beta,
+            k_beta_decay: &self.k_beta_decay,
+            decay_mask: &self.decay_mask,
+            raw_attn0: &self.raw_attn0,
+            attn0: &self.attn0,
+            t_mat: &self.t_mat,
+            u: &self.u,
+            w: &self.w,
+            raw_intra: &self.raw_intra,
+            intra_scores: &self.intra_scores,
+            q_scaled: &self.q_scaled,
+            decay_scale: &self.decay_scale,
+            decayed_k: &self.decayed_k,
+            v_prime: &self.v_prime,
+            v_new: &self.v_new,
+            q_scaled_hist: &self.q_scaled_hist,
+            decay_scale_hist: &self.decay_scale_hist,
+            decayed_k_hist: &self.decayed_k_hist,
+            v_prime_hist: &self.v_prime_hist,
+            v_new_hist: &self.v_new_hist,
+            state_history: &self.state_history,
+        }
+    }
+
+    fn clears(&self) -> Vec<&DeviceBuffer> {
+        vec![
+            &self.t_mat,
+            &self.q_scaled_hist,
+            &self.decay_scale_hist,
+            &self.decayed_k_hist,
+            &self.v_prime_hist,
+            &self.v_new_hist,
+            &self.state_history,
+        ]
+    }
+}
+
+/// Owned scratch for one [`gdn_chunk_bwd`] call — see [`GdnBwdScratch`]'s own
+/// doc for what each field holds and which MUST be zeroed (`clears()` below:
+/// `d_g_cs`, `d_exp_g_cs`, `d_u`, `d_decay_mask`).
+struct GdnBwdScratchBufs {
+    d_decayed_k: DeviceBuffer,
+    d_q_scaled: DeviceBuffer,
+    d_v_new: DeviceBuffer,
+    d_decay_scale: DeviceBuffer,
+    d_query_chunk: DeviceBuffer,
+    d_key_chunk: DeviceBuffer,
+    state_a: DeviceBuffer,
+    state_b: DeviceBuffer,
+    d_raw_intra: DeviceBuffer,
+    d_k_beta_decay: DeviceBuffer,
+    d_v_beta: DeviceBuffer,
+    d_raw_attn0: DeviceBuffer,
+    d_attn0: DeviceBuffer,
+    d_g_cs: DeviceBuffer,
+    d_exp_g_cs: DeviceBuffer,
+    d_t_mat: DeviceBuffer,
+    d_u: DeviceBuffer,
+    d_w: DeviceBuffer,
+    d_intra_scores: DeviceBuffer,
+    d_decay_mask: DeviceBuffer,
+    d_k_beta: DeviceBuffer,
+    dot_scratch: DeviceBuffer,
+    mul_scratch: DeviceBuffer,
+    mul_scratch_cc: DeviceBuffer,
+}
+
+impl GdnBwdScratchBufs {
+    fn new(g: &Gpu, shape: &GdnShape) -> GdnBwdScratchBufs {
+        let bhc = shape.bhc() as u64;
+        let bh = shape.bh() as u64;
+        let c = shape.chunk as u64;
+        let dk = shape.dk as u64;
+        let dv = shape.dv as u64;
+        GdnBwdScratchBufs {
+            d_decayed_k: g.storage(bh * c * dk),
+            d_q_scaled: g.storage(bh * c * dk),
+            d_v_new: g.storage(bh * c * dv),
+            d_decay_scale: g.storage(bh * c),
+            d_query_chunk: g.storage(bh * c * dk),
+            d_key_chunk: g.storage(bh * c * dk),
+            state_a: g.storage(bh * dk * dv),
+            state_b: g.storage(bh * dk * dv),
+            d_raw_intra: g.storage(bhc * c * c),
+            d_k_beta_decay: g.storage(bhc * c * dk),
+            d_v_beta: g.storage(bhc * c * dv),
+            d_raw_attn0: g.storage(bhc * c * c),
+            d_attn0: g.storage(bhc * c * c),
+            d_g_cs: g.storage(bhc * c),
+            d_exp_g_cs: g.storage(bhc * c),
+            d_t_mat: g.storage(bhc * c * c),
+            d_u: g.storage(bhc * c * dv),
+            d_w: g.storage(bhc * c * dk),
+            d_intra_scores: g.storage(bhc * c * c),
+            d_decay_mask: g.storage(bhc * c * c),
+            d_k_beta: g.storage(bhc * c * dk),
+            dot_scratch: g.storage(bhc * c),
+            mul_scratch: g.storage(bhc * c),
+            mul_scratch_cc: g.storage(bhc * c * c),
+        }
+    }
+
+    fn as_ref(&self) -> GdnBwdScratch<'_> {
+        GdnBwdScratch {
+            d_decayed_k: &self.d_decayed_k,
+            d_q_scaled: &self.d_q_scaled,
+            d_v_new: &self.d_v_new,
+            d_decay_scale: &self.d_decay_scale,
+            d_query_chunk: &self.d_query_chunk,
+            d_key_chunk: &self.d_key_chunk,
+            state_a: &self.state_a,
+            state_b: &self.state_b,
+            d_raw_intra: &self.d_raw_intra,
+            d_k_beta_decay: &self.d_k_beta_decay,
+            d_v_beta: &self.d_v_beta,
+            d_raw_attn0: &self.d_raw_attn0,
+            d_attn0: &self.d_attn0,
+            d_g_cs: &self.d_g_cs,
+            d_exp_g_cs: &self.d_exp_g_cs,
+            d_t_mat: &self.d_t_mat,
+            d_u: &self.d_u,
+            d_w: &self.d_w,
+            d_intra_scores: &self.d_intra_scores,
+            d_decay_mask: &self.d_decay_mask,
+            d_k_beta: &self.d_k_beta,
+            dot_scratch: &self.dot_scratch,
+            mul_scratch: &self.mul_scratch,
+            mul_scratch_cc: &self.mul_scratch_cc,
+        }
+    }
+
+    fn clears(&self) -> Vec<&DeviceBuffer> {
+        vec![&self.d_g_cs, &self.d_exp_g_cs, &self.d_u, &self.d_decay_mask]
+    }
+}
+
+// ---- backward activation cache (training builds only) ----------------------
+
+/// Everything [`Qwen35::layer_gdn_fwd`]'s training branch saves for
+/// [`Qwen35::backward`]'s GDN mixer arm — the SSA activation-cache convention
+/// this module's doc describes, at the per-buffer granularity backward
+/// actually reads. Field names match the local variable they were assigned
+/// from in `layer_gdn_fwd`'s body.
+struct GdnLayerActs {
+    shape: GdnShape,
+    // step 2: conv1d + SiLU.
+    ncl_in: DeviceBuffer,  // conv1d's own `x` (dw needs it)
+    ncl_out: DeviceBuffer, // conv1d's output, pre-SiLU (silu_bwd needs it)
+    // step 4: L2-norm (needs the PRE-norm query/key).
+    query: DeviceBuffer,
+    key: DeviceBuffer,
+    // step 5: bproj (pre-sigmoid, for sigmoid_bwd), aproj (for
+    // gdn_decay_gate_bwd), g_decay (gdn_decay_gate's OWN output value --
+    // needed for d_A_log = bias_grad(d_g_decay * g_decay), see that
+    // gradient's own derivation in `gdn_decay_gate_bwd.wgsl`'s header).
+    bproj: DeviceBuffer,
+    aproj: DeviceBuffer,
+    g_decay: DeviceBuffer,
+    // step 7: chunk-major inputs gdn_chunk_bwd itself reads.
+    query_cm: DeviceBuffer,
+    key_cm: DeviceBuffer,
+    value_cm: DeviceBuffer,
+    beta_cm: DeviceBuffer,
+    // step 8: gdn_chunk_fwd_train's saved history.
+    scratch_train: GdnScratchTrainBufs,
+    // step 9: token-major output (rmsnorm's `x`).
+    out_tok: DeviceBuffer,
+    // step 10: gated RMSNorm ("norm before gate").
+    normed: DeviceBuffer,
+    z: DeviceBuffer,      // pre-SiLU (silu_bwd)
+    z_silu: DeviceBuffer, // post-SiLU (mul_bwd's other operand)
+    // step 11: out_proj's input.
+    gated: DeviceBuffer,
+}
+
+/// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
+/// [`Qwen35::backward`]'s GQA mixer arm.
+struct GqaLayerActs {
+    q_normed: DeviceBuffer, // post QK-norm AND post-RoPE (rope is in-place; this is gqa_bwd's own `q`)
+    k_normed: DeviceBuffer, // post QK-norm AND post-RoPE (gqa_bwd's own `kbuf`)
+    v: DeviceBuffer,        // raw v projection (gqa_bwd's own `v`)
+    q_value: DeviceBuffer,  // pre q_norm (q_norm's rmsnorm_bwd `x`)
+    k: DeviceBuffer,        // pre k_norm (k_norm's rmsnorm_bwd `x`)
+    q_gate: DeviceBuffer,   // pre-sigmoid
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    gate: DeviceBuffer, // post-sigmoid (mul_bwd's other operand)
+    ctx_gated: DeviceBuffer,
+}
+
+/// Everything [`Qwen35::moe_sublayer`]'s training branch saves — universal
+/// (every layer, both mixer types).
+struct MoeLayerActs {
+    xn2: DeviceBuffer,
+    router_logits: DeviceBuffer,
+    gate: DeviceBuffer,
+    fe: DeviceBuffer,
+    acts: MoeActs,
+    // Note: `moe_acc`'s own VALUE is never read by backward (only its
+    // gradient, `d_moe_out` itself — no `model::moe` backward primitive reads
+    // the pre-shared-expert-add accumulator back), so it is deliberately NOT
+    // saved here despite being a real forward intermediate.
+    // shared expert (sigmoid-gated: Qwen3.5's `shared_expert_gate`).
+    sh_gate_pre: DeviceBuffer,
+    sh_up: DeviceBuffer,
+    sh_h: DeviceBuffer,
+    sh_mlp_out: DeviceBuffer,
+    sh_gate_logits: DeviceBuffer,
+    sh_gate_scalar: DeviceBuffer,
+}
+
+enum MixerActs {
+    Gdn(GdnLayerActs),
+    Gqa(GqaLayerActs),
+}
+
+struct LayerTrainActs {
+    xn1: DeviceBuffer,
+    mixer: MixerActs,
+    xmid: DeviceBuffer,
+    moe: MoeLayerActs,
+}
+
+/// The full backward activation cache for one `forward()` call on a
+/// [`Qwen35::new_train`] instance — see [`Qwen35::train_acts`]'s own doc.
+struct TrainActs {
+    layers: Vec<LayerTrainActs>,
+    xn_final: DeviceBuffer,
+}
+
 /// Qwen3.5-35B-A3B hybrid decoder — forward/inference only (see module doc).
 pub struct Qwen35 {
     pub gpu: Gpu,
@@ -404,6 +857,15 @@ pub struct Qwen35 {
     t: u32,
     /// The GDN chunk size this instance was built for — see [`gdn_chunk_size`].
     chunk: u32,
+    /// `true` for a [`Self::new_train`] build: every weight is `Role::Trainable`
+    /// (see [`Self::new_impl_on`]'s role filter), `forward()` saves the
+    /// activation cache [`Self::backward`] needs (`layer_gdn_fwd`'s
+    /// `gdn_chunk_fwd_train` branch, `layer_gqa_fwd`'s and `moe_sublayer`'s own
+    /// saved buffers), and `backward`/`zero_grads`/`adamw_step` are live instead
+    /// of panicking. `false` (the `new`/`new_i8` paths) keeps today's
+    /// inference-only behaviour byte-for-byte.
+    is_train: bool,
+    opt: Optim,
 
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
@@ -430,17 +892,30 @@ pub struct Qwen35 {
 
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
+
+    /// Backward's activation cache — `Some` only right after a `forward()`
+    /// call on a [`Self::new_train`] instance (populated by `run_forward`'s
+    /// train branch; read by `backward()`). This mirrors the engine-wide
+    /// "forward reallocates fresh buffers every call" convention this file
+    /// already uses everywhere else, so `backward()` MUST run against the
+    /// same `forward()` call whose gradient it computes — exactly the
+    /// `zero_grads(); forward(); backward();` sequencing every caller
+    /// (`gradcheck`, a real training loop) already uses.
+    train_acts: RefCell<Option<TrainActs>>,
+    /// CE-gradient uniform (`[n, vocab, IGNORE, count]`), written once per
+    /// `backward()` call (`count` is only known after `set_batch`).
+    ce_grad_uni: DeviceBuffer,
 }
 
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false)
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, false)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
     /// binary — see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false)
     }
 
     /// [`Self::new`] with the int8 (DP4A) inference tier: the attention/GDN
@@ -450,15 +925,30 @@ impl Qwen35 {
     /// for the full rationale. Inference-only, same as the fp32 path
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true)
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true, false)
     }
 
     /// [`Self::new_i8`] on an existing device handle — see [`Self::new_on`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false)
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool) -> Qwen35 {
+    /// Build a TRAINABLE model: every weight `Role::Trainable` (full-parameter
+    /// backward — no LoRA-specific plumbing here, per this task's scope note),
+    /// `forward()` additionally saves the activation cache `backward()` reads.
+    /// int8 and training are mutually exclusive (mirrors `qwen::Qwen`'s own
+    /// `assert!(!(i8 && train))`).
+    pub fn new_train(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, true)
+    }
+
+    /// [`Self::new_train`] on an existing device handle — see [`Self::new_on`].
+    pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true)
+    }
+
+    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool) -> Qwen35 {
+        assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train is fp32-only)");
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -469,19 +959,22 @@ impl Qwen35 {
              this assert failing would mean a logic error in gdn_chunk_size itself"
         );
 
-        // Inference-only pass: every weight is Role::Frozen (no grad/Adam
-        // buffers allocated at all -- see paramstore::ParamStore::new_with_roles_src).
-        // In int8 mode the linears `Qwen35Q8::is_i8_linear` names live in
-        // `q8` (packed int8), NOT the fp32 store -- filter them out here so
-        // no redundant fp32 copy is ever uploaded (mirrors `qwen::model.rs`'s
-        // own `Q8::is_i8_linear` filter, `model.rs:504-507` in that crate).
+        // Inference (`!train`): every weight Role::Frozen (no grad/Adam buffers
+        // allocated at all -- see paramstore::ParamStore::new_with_roles_src).
+        // Training: every weight Role::Trainable (full-parameter backward --
+        // no LoRA-specific subset here, per this task's scope). In int8 mode
+        // the linears `Qwen35Q8::is_i8_linear` names live in `q8` (packed
+        // int8), NOT the fp32 store -- filter them out here so no redundant
+        // fp32 copy is ever uploaded (mirrors `qwen::model.rs`'s own
+        // `Q8::is_i8_linear` filter, `model.rs:504-507` in that crate).
         let roles: Vec<(String, usize, Role)> = cfg
             .param_list()
             .into_iter()
             .filter(|(n, _)| !(i8 && Qwen35Q8::is_i8_linear(n)))
-            .map(|(n, c)| (n, c, Role::Frozen))
+            .map(|(n, c)| (n, c, if train { Role::Trainable } else { Role::Frozen }))
             .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         // Quantize+upload the int8 linears from the SAME source, streaming
         // one tensor at a time (see `Qwen35Q8::build`'s own doc).
@@ -507,12 +1000,63 @@ impl Qwen35 {
         let targets = gpu.storage(n);
         let logits = gpu.storage(n * cfg.vocab as u64);
         let ce_buf = gpu.storage(n);
+        let ce_grad_uni = gpu.uniform_dynamic(4);
 
-        Qwen35 { gpu, cfg, ps, q8, b, t, chunk, tokens, targets, count: Cell::new(1.0), res, ones_khd, cos, sin, logits, ce_buf }
+        Qwen35 {
+            gpu,
+            cfg,
+            ps,
+            q8,
+            b,
+            t,
+            chunk,
+            is_train: train,
+            opt,
+            tokens,
+            targets,
+            count: Cell::new(1.0),
+            res,
+            ones_khd,
+            cos,
+            sin,
+            logits,
+            ce_buf,
+            train_acts: RefCell::new(None),
+            ce_grad_uni,
+        }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// The gradient buffer for a trainable weight — only valid on a
+    /// [`Self::new_train`] instance (every weight is `Role::Trainable` there,
+    /// see [`Self::new_impl_on`]'s role filter).
+    fn g(&self, name: &str) -> &DeviceBuffer {
+        self.ps.g(name)
+    }
+
+    /// Backward for a dense linear `y = x @ Wᵀ` (no LoRA — full-parameter
+    /// training only, per this task's scope note): `dW += d_outᵀ·x`,
+    /// `dx = d_out·W` (`acc` selects overwrite vs accumulate on `dx`, mirroring
+    /// `qwen::model.rs`'s own `proj_bwd` helper this is patterned on — naive
+    /// `matmul_dx`/`matmul_dw` only, no tiled-GEMM selection, matching a
+    /// correctness-first tiny gradcheck config per `docs/porting-playbook.md`
+    /// §10).
+    #[allow(clippy::too_many_arguments)]
+    fn proj_bwd(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+        let g = &self.gpu;
+        steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+        steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+    }
+
+    /// RMSNorm backward via the shared builder: input grad always, gain grad
+    /// always (every weight `Role::Trainable` on a training build — no frozen
+    /// case here, unlike `qwen::Qwen`'s LoRA-base-frozen branch).
+    fn rmsnorm_bwd_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
+        let inv = self.gpu.storage(rows as u64);
+        steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, Some(self.g(wname)), dim, rows));
     }
 
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
@@ -524,7 +1068,7 @@ impl Qwen35 {
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
 
-    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GdnLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -663,27 +1207,52 @@ impl Qwen35 {
         let g_cm = permute_fwd(&g_decay, 1);
         let beta_cm = permute_fwd(&beta, 1);
 
-        // 8. gdn_chunk_fwd -- the chunked-recurrence forward itself.
+        // 8. gdn_chunk_fwd -- the chunked-recurrence forward itself. Training
+        // builds use `gdn_chunk_fwd_train` instead: bit-identical `out`/
+        // `final_state` (see that function's own doc) but additionally saves
+        // the per-chunk history `gdn_chunk_bwd` needs -- `layer_gdn_fwd`'s own
+        // "is this a training build" branch, mirroring the `q8l` int8 branch
+        // above.
         let bh = shape.bh() as u64;
-        let scratch = GdnScratchBufs::new(g, &shape);
         let initial_state = g.storage(bh * khd as u64 * vhd as u64);
         let final_state = g.storage(bh * khd as u64 * vhd as u64);
         let out_cm = g.storage(shape.bhc() as u64 * chunk as u64 * vhd as u64);
-        let steps = gdn_chunk_fwd(
-            g,
-            &gdn_ids(),
-            &shape,
-            &query_cm,
-            &key_cm,
-            &value_cm,
-            &g_cm,
-            &beta_cm,
-            &initial_state,
-            &scratch.as_ref(),
-            &out_cm,
-            &final_state,
-        );
-        g.submit(&[&scratch.t_mat], &steps);
+        let scratch_train = if self.is_train { Some(GdnScratchTrainBufs::new(g, &shape)) } else { None };
+        if let Some(strain) = &scratch_train {
+            let steps = gdn_chunk_fwd_train(
+                g,
+                &gdn_ids(),
+                &gdn_bwd_ids(),
+                &shape,
+                &query_cm,
+                &key_cm,
+                &value_cm,
+                &g_cm,
+                &beta_cm,
+                &initial_state,
+                &strain.as_ref(),
+                &out_cm,
+                &final_state,
+            );
+            g.submit(&strain.clears(), &steps);
+        } else {
+            let scratch = GdnScratchBufs::new(g, &shape);
+            let steps = gdn_chunk_fwd(
+                g,
+                &gdn_ids(),
+                &shape,
+                &query_cm,
+                &key_cm,
+                &value_cm,
+                &g_cm,
+                &beta_cm,
+                &initial_state,
+                &scratch.as_ref(),
+                &out_cm,
+                &final_state,
+            );
+            g.submit(&[&scratch.t_mat], &steps);
+        }
 
         // 9. Permute back to token-major.
         let out_tok = g.storage((n * value_dim) as u64);
@@ -719,12 +1288,33 @@ impl Qwen35 {
         } else {
             g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)]);
         }
-        out
+
+        let acts = scratch_train.map(|scratch_train| GdnLayerActs {
+            shape,
+            ncl_in,
+            ncl_out,
+            query,
+            key,
+            bproj,
+            aproj,
+            g_decay,
+            query_cm,
+            key_cm,
+            value_cm,
+            beta_cm,
+            scratch_train,
+            out_tok,
+            normed,
+            z,
+            z_silu,
+            gated,
+        });
+        (out, acts)
     }
 
     // ---- one GQA (Full) layer ----------------------------------------------
 
-    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -823,12 +1413,25 @@ impl Qwen35 {
                 ],
             );
         }
-        out
+
+        let acts = self.is_train.then(|| GqaLayerActs {
+            q_normed,
+            k_normed,
+            v,
+            q_value,
+            k,
+            q_gate,
+            probs,
+            ctx,
+            gate,
+            ctx_gated,
+        });
+        (out, acts)
     }
 
     // ---- MoE sublayer, universal for every layer ---------------------------
 
-    fn moe_sublayer(&self, l: usize, xmid: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    fn moe_sublayer(&self, l: usize, xmid: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MoeLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -854,7 +1457,13 @@ impl Qwen35 {
         let moe_acc = g.storage((n * d) as u64);
         // Router and gate above are ALWAYS fp32 (see `crate::q8`'s module
         // doc for why); only the routed experts' gate/up/down switch tier.
-        if let Some(q8) = &self.q8 {
+        // Training builds additionally need EVERY expert's OWN gate_pre/up/h/
+        // expert_out (not a shared scratch reused across experts -- see
+        // `model::moe::MoeActs`'s own doc for why forward's per-call-reused
+        // `ExpertScratch` cannot serve backward), so `moe_acts` is `Some` only
+        // for a training, non-int8 build (asserted mutually exclusive at
+        // construction).
+        let moe_acts: Option<MoeActs> = if let Some(q8) = &self.q8 {
             // xn2 quantized once, shared by every expert's gate/up (the
             // down-projection's input `h` is expert-specific and quantized
             // separately inside `expert_fwd_i8`'s own scratch).
@@ -887,6 +1496,27 @@ impl Qwen35 {
                     ei != 0,
                 ));
             }
+            None
+        } else if self.is_train {
+            let acts = MoeActs::new(g, &shape);
+            for ei in 0..e {
+                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                steps.extend(expert_fwd(
+                    g,
+                    &moe_ids(),
+                    &shape,
+                    &xn2,
+                    &gate,
+                    self.w(&ep("gate.weight")),
+                    self.w(&ep("up.weight")),
+                    self.w(&ep("down.weight")),
+                    &acts.at(ei as usize),
+                    &moe_acc,
+                    ei,
+                    ei != 0,
+                ));
+            }
+            Some(acts)
         } else {
             let scratch = ExpertScratch {
                 gate_pre: &g.storage((n * moe_ff) as u64),
@@ -911,17 +1541,25 @@ impl Qwen35 {
                     ei != 0,
                 ));
             }
-        }
+            None
+        };
 
         let moe_out = g.storage((n * d) as u64);
+        let sh_gate_pre = g.storage((n * shared_ff) as u64);
+        let sh_up = g.storage((n * shared_ff) as u64);
+        let sh_h = g.storage((n * shared_ff) as u64);
+        let sh_mlp_out = g.storage((n * d) as u64);
+        let sh_gate_logits = g.storage(n as u64);
+        let sh_gate_scalar = g.storage(n as u64);
+        let sh_scaled = g.storage((n * d) as u64);
         let sh_scratch = SharedExpertScratch {
-            gate_pre: &g.storage((n * shared_ff) as u64),
-            up: &g.storage((n * shared_ff) as u64),
-            h: &g.storage((n * shared_ff) as u64),
-            mlp_out: &g.storage((n * d) as u64),
-            gate_logits: &g.storage(n as u64),
-            gate_scalar: &g.storage(n as u64),
-            scaled: &g.storage((n * d) as u64),
+            gate_pre: &sh_gate_pre,
+            up: &sh_up,
+            h: &sh_h,
+            mlp_out: &sh_mlp_out,
+            gate_logits: &sh_gate_logits,
+            gate_scalar: &sh_gate_scalar,
+            scaled: &sh_scaled,
         };
         steps.extend(shared_expert_fwd(
             g,
@@ -940,7 +1578,21 @@ impl Qwen35 {
         ));
 
         g.submit(&[], &steps);
-        moe_out
+
+        let acts = moe_acts.map(|acts| MoeLayerActs {
+            xn2,
+            router_logits,
+            gate,
+            fe: g.storage(e as u64),
+            acts,
+            sh_gate_pre,
+            sh_up,
+            sh_h,
+            sh_mlp_out,
+            sh_gate_logits,
+            sh_gate_scalar,
+        });
+        (moe_out, acts)
     }
 
     // ---- full stack ----------------------------------------------------------
@@ -949,6 +1601,7 @@ impl Qwen35 {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
+        let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
 
         g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d)]);
 
@@ -957,16 +1610,31 @@ impl Qwen35 {
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
 
-            let attn_out = match ty {
-                LayerType::Linear => self.layer_gdn_fwd(l, &xn1, n),
-                LayerType::Full => self.layer_gqa_fwd(l, &xn1, n),
+            let (attn_out, mixer_acts) = match ty {
+                LayerType::Linear => {
+                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n);
+                    (o, a.map(MixerActs::Gdn))
+                }
+                LayerType::Full => {
+                    let (o, a) = self.layer_gqa_fwd(l, &xn1, n);
+                    (o, a.map(MixerActs::Gqa))
+                }
             };
 
             let xmid = g.storage((n * d) as u64);
             g.submit(&[], &[g.step(ADD2, &[xres, &attn_out, &xmid], &[n * d], n * d)]);
 
-            let moe_out = self.moe_sublayer(l, &xmid, n);
+            let (moe_out, moe_acts) = self.moe_sublayer(l, &xmid, n);
             g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &self.res[l + 1]], &[n * d], n * d)]);
+
+            if self.is_train {
+                layer_acts.push(LayerTrainActs {
+                    xn1,
+                    mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
+                    xmid,
+                    moe: moe_acts.expect("qwen35: is_train but moe_sublayer returned no acts"),
+                });
+            }
         }
 
         let xn_final = g.storage((n * d) as u64);
@@ -974,6 +1642,486 @@ impl Qwen35 {
 
         let v = self.cfg.vocab;
         g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+
+        if self.is_train {
+            *self.train_acts.borrow_mut() = Some(TrainActs { layers: layer_acts, xn_final });
+        }
+    }
+
+    // ---- backward (training builds only) ----------------------------------
+
+    /// Reverse of [`Self::layer_gdn_fwd`]'s 11 steps. `d_out` is the upstream
+    /// gradient into this layer's mixer output (`attn_out`); accumulates into
+    /// `d_xn1` (already zero-fresh -- the FIRST touch below is a plain
+    /// overwrite, `acc=0`, establishing its base value, exactly like every
+    /// other multi-source accumulator in this file).
+    fn gdn_mixer_bwd(&self, l: usize, xn1: &DeviceBuffer, la: &GdnLayerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32) {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let conv_dim = c.linear_conv_dim();
+        let key_dim = c.linear_key_dim();
+        let value_dim = c.linear_value_dim();
+        let nvh = c.linear_num_value_heads;
+        let khd = c.linear_key_head_dim;
+        let vhd = c.linear_value_head_dim;
+        let group = c.linear_group();
+        let kw = c.linear_conv_kernel_dim;
+        let (b, t, chunk) = (self.b, self.t, self.chunk);
+        let n_chunks = t / chunk;
+        let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
+        let shape = la.shape;
+
+        // ---- 11. out_proj backward ----
+        let d_gated = g.storage((n * value_dim) as u64);
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, d_out, &la.gated, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0);
+            g.submit(&[], &s);
+        }
+
+        // ---- 10. gated RMSNorm backward: gated = normed*z_silu; z_silu = silu(z); normed = rmsnorm(out_tok) ----
+        let d_normed = g.storage((n * value_dim) as u64);
+        let d_z_silu = g.storage((n * value_dim) as u64);
+        let d_z = g.storage((n * value_dim) as u64);
+        let d_out_tok = g.storage((n * value_dim) as u64);
+        {
+            let mut s = vec![
+                g.step(MUL, &[&d_gated, &la.z_silu, &d_normed], &[n * value_dim], n * value_dim),
+                g.step(MUL, &[&d_gated, &la.normed, &d_z_silu], &[n * value_dim], n * value_dim),
+                g.step(SILU_BWD, &[&la.z, &d_z_silu, &d_z], &[n * value_dim], n * value_dim),
+            ];
+            self.rmsnorm_bwd_step(&mut s, &la.out_tok, &p("norm.weight"), &d_normed, &d_out_tok, vhd, n * nvh);
+            g.submit(&[], &s);
+        }
+
+        // ---- 9. permute back to chunk-major (forward used to_chunk_major=0; backward flips it) ----
+        let d_out_cm = g.storage(shape.bhc() as u64 * shape.chunk as u64 * vhd as u64);
+        g.submit(
+            &[],
+            &[g.step(GDN_LAYOUT_PERMUTE, &[&d_out_tok, &d_out_cm], &[b, nvh, n_chunks, chunk, vhd, 1], b * nvh * n_chunks * chunk * vhd)],
+        );
+
+        // ---- 8. gdn_chunk_bwd -- the chunked-recurrence backward itself ----
+        let bh = shape.bh() as u64;
+        let bhc = shape.bhc() as u64;
+        let cw = shape.chunk as u64;
+        let dk = shape.dk as u64;
+        let dv = shape.dv as u64;
+        let d_final_state = g.storage(bh * dk * dv); // no incremental decode continuation -> zero
+        let d_initial_state = g.storage(bh * dk * dv); // discarded (no earlier chunk upstream)
+        let d_query_cm = g.storage(bhc * cw * dk);
+        let d_key_cm = g.storage(bhc * cw * dk);
+        let d_value_cm = g.storage(bhc * cw * dv);
+        let d_g_cm = g.storage(bhc * cw);
+        let d_beta_cm = g.storage(bhc * cw);
+        let bwd_scratch = GdnBwdScratchBufs::new(g, &shape);
+        {
+            let steps = gdn_chunk_bwd(
+                g,
+                &gdn_ids(),
+                &gdn_bwd_ids(),
+                &shape,
+                &la.query_cm,
+                &la.key_cm,
+                &la.value_cm,
+                &la.beta_cm,
+                &la.scratch_train.as_ref(),
+                &d_out_cm,
+                &d_final_state,
+                &bwd_scratch.as_ref(),
+                &d_query_cm,
+                &d_key_cm,
+                &d_value_cm,
+                &d_g_cm,
+                &d_beta_cm,
+                &d_initial_state,
+            );
+            let mut clears = bwd_scratch.clears();
+            // `d_final_state` (external gradient, none), plus `d_query`/`d_key`/
+            // `d_beta` (2/4/2-source accumulators this function's own doc lists
+            // as the CALLER's responsibility, distinct from `GdnBwdScratch`'s
+            // own MUST-zero list) -- see `gdn_chunk_bwd`'s doc, "Every output
+            // with more than one contributing forward use is explicitly
+            // zeroed by the caller".
+            clears.push(&d_final_state);
+            clears.push(&d_query_cm);
+            clears.push(&d_key_cm);
+            clears.push(&d_beta_cm);
+            g.submit(&clears, &steps);
+        }
+
+        // ---- 7. permute back to token-major (forward used to_chunk_major=1; backward flips it) ----
+        let permute_bwd = |src_cm: &DeviceBuffer, dim: u32| -> DeviceBuffer {
+            let dst = g.storage(n as u64 * nvh as u64 * dim as u64);
+            g.submit(
+                &[],
+                &[g.step(GDN_LAYOUT_PERMUTE, &[src_cm, &dst], &[b, nvh, n_chunks, chunk, dim, 0], b * nvh * n_chunks * chunk * dim)],
+            );
+            dst
+        };
+        let d_query_w = permute_bwd(&d_query_cm, khd);
+        let d_key_w = permute_bwd(&d_key_cm, khd);
+        let d_value = permute_bwd(&d_value_cm, vhd);
+        let d_g_decay = permute_bwd(&d_g_cm, 1);
+        let d_beta = permute_bwd(&d_beta_cm, 1);
+
+        // ---- 6. kv_expand backward (group-sum, overwrite -- no accumulate needed) ----
+        let d_query_n = g.storage((n * key_dim) as u64);
+        let d_key_n = g.storage((n * key_dim) as u64);
+        g.submit(
+            &[],
+            &[
+                kv_expand_bwd(g, KV_EXPAND_BWD, &d_query_w, &d_query_n, n, nvh, group, khd, nvh * khd, 0),
+                kv_expand_bwd(g, KV_EXPAND_BWD, &d_key_w, &d_key_n, n, nvh, group, khd, nvh * khd, 0),
+            ],
+        );
+
+        // ---- 5. beta/g_decay backward into bproj/aproj, A_log/dt_bias reductions, in_proj_{b,a,z} ----
+        let d_bproj = g.storage((n * nvh) as u64);
+        let d_aproj = g.storage((n * nvh) as u64);
+        {
+            let mut s = vec![
+                g.step(SIGMOID_BWD, &[&la.bproj, &d_beta, &d_bproj], &[n * nvh], n * nvh),
+                g.step(GDN_DECAY_GATE_BWD, &[&la.aproj, self.w(&p("A_log")), self.w(&p("dt_bias")), &d_g_decay, &d_aproj], &[n, nvh], n * nvh),
+            ];
+            // d_A_log[h] = sum_row d_g_decay[row,h]*g_decay[row,h]; d_dt_bias[h] = sum_row d_aproj[row,h].
+            let mul_tmp = g.storage((n * nvh) as u64);
+            s.push(g.step(MUL, &[&d_g_decay, &la.g_decay, &mul_tmp], &[n * nvh], n * nvh));
+            s.push(g.step(BIAS_GRAD, &[&mul_tmp, self.g(&p("A_log"))], &[n, nvh], nvh));
+            s.push(g.step(BIAS_GRAD, &[&d_aproj, self.g(&p("dt_bias"))], &[n, nvh], nvh));
+            // FIRST touch to d_xn1 in this function (acc=0) -- in_proj_a/z below
+            // accumulate on top; in_proj_qkv (step 1, processed last here)
+            // accumulates last of all.
+            self.proj_bwd(&mut s, &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
+            self.proj_bwd(&mut s, &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
+            self.proj_bwd(&mut s, &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
+            g.submit(&[], &s);
+        }
+
+        // ---- 4. L2-norm backward ----
+        let nkh = c.linear_num_key_heads;
+        let d_query = g.storage((n * key_dim) as u64);
+        let d_key = g.storage((n * key_dim) as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(L2NORM_SCALE_DX, &[&la.query, &self.ones_khd, &d_query_n, &d_query], &[n * nkh, khd, f(1e-6)], n * key_dim),
+                g.step(L2NORM_SCALE_DX, &[&la.key, &self.ones_khd, &d_key_n, &d_key], &[n * nkh, khd, f(1e-6)], n * key_dim),
+            ],
+        );
+
+        // ---- 3. qkv split backward (concat2 x2: the 3-way split's adjoint) ----
+        let d_qk = g.storage((n * 2 * key_dim) as u64);
+        let d_mixed_act = g.storage((n * conv_dim) as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(CONCAT2, &[&d_query, &d_key, &d_qk], &[n, key_dim, key_dim, 1, 1], n * 2 * key_dim),
+                g.step(CONCAT2, &[&d_qk, &d_value, &d_mixed_act], &[n, 2 * key_dim, value_dim, 1, 1], n * conv_dim),
+            ],
+        );
+
+        // ---- 2. conv1d + SiLU backward ----
+        let d_ncl_act = g.storage((n * conv_dim) as u64);
+        let d_ncl_out = g.storage((n * conv_dim) as u64);
+        let d_ncl_in = g.storage((n * conv_dim) as u64);
+        let d_mixed_qkv = g.storage((n * conv_dim) as u64);
+        let conv_shape =
+            Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
+        {
+            let mut s = vec![
+                g.step(NLC_NCHW, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
+                g.step(SILU_BWD, &[&la.ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
+            ];
+            s.extend(conv1d_bwd(g, &conv_kernels(), &conv_shape, &d_ncl_out, &la.ncl_in, self.w(&p("conv1d.weight")), Some(&d_ncl_in), Some(self.g(&p("conv1d.weight")))));
+            s.push(g.step(NCHW_NLC, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
+            g.submit(&[], &s);
+        }
+
+        // ---- 1. in_proj_qkv backward (last accumulate into d_xn1) ----
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
+            g.submit(&[], &s);
+        }
+    }
+
+    /// Reverse of [`Self::layer_gqa_fwd`]'s 7 steps.
+    fn gqa_mixer_bwd(&self, l: usize, xn1: &DeviceBuffer, la: &GqaLayerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32) {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
+        let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
+        let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
+
+        // ---- 7. o_proj backward ----
+        let d_ctx_gated = g.storage((n * qd) as u64);
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, d_out, &la.ctx_gated, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0);
+            g.submit(&[], &s);
+        }
+
+        // ---- 6. ctx*gate backward, sigmoid backward ----
+        let d_ctx = g.storage((n * qd) as u64);
+        let d_gate = g.storage((n * qd) as u64);
+        let d_q_gate = g.storage((n * qd) as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(MUL, &[&d_ctx_gated, &la.gate, &d_ctx], &[n * qd], n * qd),
+                g.step(MUL, &[&d_ctx_gated, &la.ctx, &d_gate], &[n * qd], n * qd),
+                g.step(SIGMOID_BWD, &[&la.q_gate, &d_gate, &d_q_gate], &[n * qd], n * qd),
+            ],
+        );
+
+        // ---- 5. gqa_bwd ----
+        let ga = Gqa { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        let d_scores = g.storage(self.b as u64 * nh as u64 * self.t as u64 * self.t as u64);
+        let d_q_normed = g.storage((n * qd) as u64);
+        let d_k_normed = g.storage((n * kvd) as u64);
+        let d_v = g.storage((n * kvd) as u64);
+        g.submit(&[], &gqa_bwd(g, &kernel_ids(), &ga, &la.q_normed, &la.k_normed, &la.v, &la.probs, &d_ctx, &d_scores, &d_q_normed, &d_k_normed, &d_v));
+
+        // ---- 4. RoPE backward (in place, sign=-1) ----
+        let half = c.rotary_dim() / 2;
+        g.submit(
+            &[],
+            &[
+                rope2d_partial_bwd(g, ROPE2D_PARTIAL, &d_q_normed, &self.cos, &self.sin, n, nh, half, qd, 0, hd),
+                rope2d_partial_bwd(g, ROPE2D_PARTIAL, &d_k_normed, &self.cos, &self.sin, n, nkv, half, kvd, 0, hd),
+            ],
+        );
+
+        // ---- 3. per-head QK-norm backward ----
+        let d_q_value = g.storage((n * qd) as u64);
+        let d_k = g.storage((n * kvd) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &la.q_value, &p("q_norm.weight"), &d_q_normed, &d_q_value, hd, n * nh);
+            self.rmsnorm_bwd_step(&mut s, &la.k, &p("k_norm.weight"), &d_k_normed, &d_k, hd, n * nkv);
+            g.submit(&[], &s);
+        }
+
+        // ---- 2. q_full [value|gate] split backward (concat2, per-head interleaved) ----
+        let d_q_full = g.storage((n * qpd) as u64);
+        g.submit(&[], &[g.step(CONCAT2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, hd, hd, 1, 1], n * nh * 2 * hd)]);
+
+        // ---- 1. q/k/v proj backward ----
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);
+            self.proj_bwd(&mut s, &d_k, xn1, &p("k_proj.weight"), d_xn1, n, d, kvd, 1);
+            self.proj_bwd(&mut s, &d_v, xn1, &p("v_proj.weight"), d_xn1, n, d, kvd, 1);
+            g.submit(&[], &s);
+        }
+    }
+
+    /// Reverse of [`Self::moe_sublayer`]. Returns `d_xn2` (the gradient into
+    /// the pre-MoE-norm hidden state, i.e. `ln2`'s output) -- the caller still
+    /// owes `ln2`'s own backward to fold that into `d_xmid`.
+    ///
+    /// **Ordering, matching [`model::moe::moe_layer_bwd`]'s own documented
+    /// phase contract exactly** (Phase A: every expert's `d_gate` column ->
+    /// Phase B: router backward, kernel-level, THEN the router weight's own
+    /// dense-linear backward (`router_weight_bwd`, supplied here as the
+    /// FIRST touch to `d_xn2`, `acc=0`) -> Phase C: every expert's SwiGLU
+    /// backward, accumulating into `d_xn2`) runs FIRST, fully establishing
+    /// `d_xn2`'s value; the shared expert's OWN backward (no composed helper
+    /// exists for it in `model::moe` -- hand-derived here) runs SECOND, its
+    /// three `d_xn2` touches all `acc=1` on top of the routed-MoE total.
+    fn moe_sublayer_bwd(&self, l: usize, la: &MoeLayerActs, d_moe_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let e = c.n_experts;
+        let moe_ff = c.moe_intermediate_size;
+        let shared_ff = c.shared_expert_intermediate_size;
+        let p = |s: &str| format!("blocks.{l}.{s}");
+        let shape = MoeShape { rows: n, d_model: d, moe_ff, n_experts: e, top_k: c.top_k };
+
+        let d_xn2 = g.storage((n * d) as u64);
+
+        // ---- Phase A/B/C: routed experts + router (model::moe::moe_layer_bwd) ----
+        let d_router_logits = g.storage((n * e) as u64);
+        let d_gate = g.storage((n * e) as u64);
+        let router_weight_bwd_steps = {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_router_logits, &la.xn2, &p("mlp.router.weight"), &d_xn2, n, d, e, 0);
+            s
+        };
+        let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e)
+            .map(|ei| {
+                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                (self.w(&ep("gate.weight")).clone(), self.w(&ep("up.weight")).clone(), self.w(&ep("down.weight")).clone())
+            })
+            .collect();
+        let expert_grads: Vec<ExpertGrads> = (0..e)
+            .map(|ei| {
+                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                ExpertGrads {
+                    gate_w: Some(self.g(&ep("gate.weight"))),
+                    up_w: Some(self.g(&ep("up.weight"))),
+                    down_w: Some(self.g(&ep("down.weight"))),
+                }
+            })
+            .collect();
+        let d_expert_out = g.storage((n * d) as u64);
+        let d_h = g.storage((n * moe_ff) as u64);
+        let d_gate_pre = g.storage((n * moe_ff) as u64);
+        let d_up = g.storage((n * moe_ff) as u64);
+        let sb = ExpertBwdScratch { d_expert_out: &d_expert_out, d_h: &d_h, d_gate_pre: &d_gate_pre, d_up: &d_up };
+        let moe_steps = moe_layer_bwd(
+            g,
+            &router_bwd_ids(),
+            &moe_bwd_ids(),
+            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 },
+            &shape,
+            &la.router_logits,
+            &la.gate,
+            Some(&la.fe),
+            &d_gate,
+            &d_router_logits,
+            &router_weight_bwd_steps,
+            &la.xn2,
+            &expert_weights,
+            &expert_grads,
+            &la.acts,
+            &sb,
+            d_moe_out,
+            &d_xn2,
+        );
+        g.submit(&[], &moe_steps);
+
+        // ---- shared expert backward (hand-derived -- no `model::moe` helper
+        // exists for a SIGMOID-GATED shared expert; accumulates onto d_xn2,
+        // whose base value the routed-MoE backward above already established) ----
+        let d_mlp_out = g.storage((n * d) as u64);
+        let d_gate_scalar = g.storage(n as u64);
+        let d_gate_logits = g.storage(n as u64);
+        let d_sh_h = g.storage((n * shared_ff) as u64);
+        let d_sh_gate_pre = g.storage((n * shared_ff) as u64);
+        let d_sh_up = g.storage((n * shared_ff) as u64);
+        {
+            let mut s = vec![
+                // scaled = mlp_out * gate_scalar (scale_row.wgsl is its own
+                // backward w.r.t. its `x` operand -- see that kernel's own doc).
+                g.step(SCALE_ROW, &[d_moe_out, &la.sh_gate_scalar, &d_mlp_out], &[n * d, d], n * d),
+                g.step(ROW_DOT, &[d_moe_out, &la.sh_mlp_out, &d_gate_scalar], &[n, d, 0, 0, f(1.0)], n),
+                g.step(SIGMOID_BWD, &[&la.sh_gate_logits, &d_gate_scalar, &d_gate_logits], &[n], n),
+            ];
+            self.proj_bwd(&mut s, &d_gate_logits, &la.xn2, &p("mlp.shared_expert_gate.weight"), &d_xn2, n, d, 1, 1);
+            self.proj_bwd(&mut s, &d_mlp_out, &la.sh_h, &p("mlp.shared_expert.down.weight"), &d_sh_h, n, shared_ff, d, 0);
+            s.extend(swiglu_bwd(g, &kernel_ids(), &la.sh_gate_pre, &la.sh_up, &d_sh_h, &d_sh_gate_pre, &d_sh_up, n * shared_ff));
+            self.proj_bwd(&mut s, &d_sh_up, &la.xn2, &p("mlp.shared_expert.up.weight"), &d_xn2, n, d, shared_ff, 1);
+            self.proj_bwd(&mut s, &d_sh_gate_pre, &la.xn2, &p("mlp.shared_expert.gate.weight"), &d_xn2, n, d, shared_ff, 1);
+            g.submit(&[], &s);
+        }
+
+        d_xn2
+    }
+
+    /// Full backward pass — mirrors [`Self::run_forward`]'s layer loop in
+    /// REVERSE, threading `d_res[l+1] -> d_res[l]` the same way forward
+    /// threads `res[l] -> res[l+1]`. Requires an immediately preceding
+    /// `forward()` call on a [`Self::new_train`] instance (see
+    /// [`Self::train_acts`]'s own doc).
+    pub fn backward(&self) {
+        assert!(self.is_train, "qwen35: backward() requires a Qwen35::new_train build");
+        let ta = self.train_acts.borrow_mut().take().expect(
+            "qwen35: backward() called without an immediately preceding forward() -- \
+             every forward() call reallocates its activation cache fresh (this file's \
+             own convention throughout), so backward() must run against the SAME call",
+        );
+        let g = &self.gpu;
+        let n = self.b * self.t;
+        let d = self.cfg.d_model;
+        let v = self.cfg.vocab;
+
+        // ---- CE gradient ----
+        g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
+        let d_logits = g.storage((n * v) as u64);
+        g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &d_logits], n * v)]);
+
+        // ---- lm_head backward ----
+        let d_xn_final = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
+            g.submit(&[], &s);
+        }
+
+        // ---- final norm backward ----
+        let mut d_res_next = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &self.res[self.cfg.n_layers as usize], "norm.weight", &d_xn_final, &d_res_next, d, n);
+            g.submit(&[], &s);
+        }
+
+        for (l, _ty) in self.cfg.layer_types().iter().enumerate().rev() {
+            let la = &ta.layers[l];
+
+            // ---- second residual add backward: res[l+1] = xmid + moe_out ----
+            // Both branches receive the FULL upstream gradient (d_res_next):
+            // `d_moe_out` is passed straight through (read-only reuse of the
+            // same buffer, never mutated in place downstream); `d_xmid`'s own
+            // base value is `d_res_next` too, ADD2'd with ln2's own dx below
+            // (matching `qwen::model.rs::build_backward_steps`'s own idiom of
+            // computing a norm's dx into a private temp then ADD2-combining
+            // with the residual branch, never accumulating in place).
+            let d_moe_out = &d_res_next;
+            let d_xn2 = self.moe_sublayer_bwd(l, &la.moe, d_moe_out, n);
+
+            let d_ln2_dx = g.storage((n * d) as u64);
+            let d_xmid = g.storage((n * d) as u64);
+            {
+                let mut s = Vec::new();
+                self.rmsnorm_bwd_step(&mut s, &la.xmid, &format!("blocks.{l}.ln2.weight"), &d_xn2, &d_ln2_dx, d, n);
+                s.push(g.step(ADD2, &[&d_res_next, &d_ln2_dx, &d_xmid], &[n * d], n * d));
+                g.submit(&[], &s);
+            }
+
+            // ---- first residual add backward: xmid = res[l] + attn_out ----
+            // `d_attn_out` is `d_xmid` itself (read-only reuse, same reasoning
+            // as `d_moe_out` above); `d_xn1` accumulates the mixer's own
+            // weight-gradient chain (its first touch is `acc=0`, see each
+            // mixer backward's own doc).
+            let d_xn1 = g.storage((n * d) as u64);
+            match &la.mixer {
+                MixerActs::Gdn(acts) => self.gdn_mixer_bwd(l, &la.xn1, acts, &d_xmid, &d_xn1, n),
+                MixerActs::Gqa(acts) => self.gqa_mixer_bwd(l, &la.xn1, acts, &d_xmid, &d_xn1, n),
+            }
+
+            // ---- ln1 backward: xn1 = rmsnorm(res[l]) -> d_res[l] = d_xmid + d_tmp ----
+            let d_ln1_dx = g.storage((n * d) as u64);
+            let d_res_l = g.storage((n * d) as u64);
+            {
+                let mut s = Vec::new();
+                self.rmsnorm_bwd_step(&mut s, &self.res[l], &format!("blocks.{l}.ln1.weight"), &d_xn1, &d_ln1_dx, d, n);
+                s.push(g.step(ADD2, &[&d_xmid, &d_ln1_dx, &d_res_l], &[n * d], n * d));
+                g.submit(&[], &s);
+            }
+            d_res_next = d_res_l;
+        }
+
+        // ---- embedding backward (tok.weight; untied per this task's tiny
+        // config -- lm_head.weight already got its own dW above) ----
+        g.submit(&[], &[g.step(EMB_BWD, &[&self.tokens, &d_res_next, self.g("tok.weight")], &[n, d, v], v * d)]);
+    }
+
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+    }
+
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.ps.read_grad(&self.gpu, name)
     }
 
     pub fn forward(&self) -> f32 {
@@ -1048,9 +2196,6 @@ impl model::ModelConfig for Qwen35Config {
     }
 }
 
-const BACKWARD_PANIC: &str =
-    "qwen35: backward not implemented -- model::gdn has no backward yet, see crates/model/tests/gdn_chunk_bwd.rs";
-
 impl model::Model for Qwen35 {
     type Config = Qwen35Config;
 
@@ -1073,13 +2218,13 @@ impl model::Model for Qwen35 {
         Qwen35::forward(self)
     }
     fn backward(&self) {
-        panic!("{BACKWARD_PANIC}")
+        Qwen35::backward(self)
     }
     fn zero_grads(&self) {
-        panic!("{BACKWARD_PANIC}")
+        Qwen35::zero_grads(self)
     }
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {
-        panic!("{BACKWARD_PANIC}")
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        Qwen35::adamw_step(self, t, lr, wd, clip, extra_scale)
     }
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)
@@ -1093,8 +2238,8 @@ impl model::Model for Qwen35 {
     fn write_weight(&self, name: &str, data: &[f32]) {
         Qwen35::write_weight(self, name, data)
     }
-    fn read_grad(&self, _name: &str) -> Vec<f32> {
-        panic!("qwen35: no gradients exist -- every weight is Role::Frozen (see backward()'s panic)")
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        Qwen35::read_grad(self, name)
     }
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
         Some(Qwen35::logits_all(self, tokens))

@@ -314,6 +314,134 @@ fetching an already-quantized GGUF directly.
   `gdn_chunk_fwd`'s bit-for-bit (identical error numbers to the pre-existing
   forward test), confirming the shared-prefix refactor changed no behavior.
 
+- **P9 — qwen35-level backward + `gradcheck::check_qwen35`** (`crates/qwen35/
+  src/model.rs`; one new kernel, `gdn_decay_gate_bwd.wgsl`): wires the three
+  already-proven primitives (`model::gdn::gdn_chunk_bwd`, `model::block::
+  gqa_bwd`, `model::moe::moe_layer_bwd`) together into `Qwen35::backward()`,
+  which no longer panics. Pure integration for everything except the one new
+  kernel — the gradient math itself was not re-derived here.
+
+  **Two construction paths, not one**: `Qwen35::new`/`new_i8` are unchanged
+  (still `Role::Frozen`, still panic on `backward()`/`zero_grads()`/
+  `adamw_step()`); a new `Qwen35::new_train` builds every weight
+  `Role::Trainable` (full-parameter — no LoRA subset, per the approved scope)
+  and makes `forward()` additionally populate a `TrainActs` activation cache
+  (`RefCell<Option<TrainActs>>`, taken and consumed by the very next
+  `backward()` call) that `layer_gdn_fwd`/`layer_gqa_fwd`/`moe_sublayer`
+  populate via a new `is_train`-gated branch mirroring the existing `q8`
+  int8 branch. The GDN branch's key wiring point: `layer_gdn_fwd`'s training
+  path calls `gdn_chunk_fwd_train` (saving the per-chunk history
+  `gdn_chunk_bwd` needs) instead of the inference `gdn_chunk_fwd`, via new
+  owned `GdnScratchTrainBufs`/`GdnBwdScratchBufs` wrappers mirroring the
+  existing `GdnScratchBufs`.
+
+  **The one new kernel**, `gdn_decay_gate_bwd.wgsl`: backward of
+  `g = -exp(A_log)*softplus(a_proj+dt_bias)` w.r.t. `a_proj` (`d_a_proj =
+  d_g * -exp(A_log)*sigmoid(a_proj+dt_bias)`, recomputing the un-saved
+  pre-activation); `d_A_log`/`d_dt_bias` are NOT computed inside it (per this
+  repo's "one kernel, one job" convention) — they compose from its output via
+  `mul.wgsl`+`bias_grad.wgsl` and `bias_grad.wgsl` alone, respectively.
+  Everything else reuses existing kernels: `concat2.wgsl` (twice, for the
+  3-way qkv split's adjoint) for the GDN mixer, once for GQA's 2-way q-gate
+  split; `gdn_layout_permute.wgsl` again with the flag flipped for its own
+  backward (a permutation's adjoint is the inverse permutation, no new
+  kernel); `l2norm_scale_dx.wgsl`, `kv_expand_bwd.wgsl`, `conv1d_bwd`
+  (`audio::conv`), `sigmoid_bwd.wgsl`, `silu_bwd.wgsl`, `rope2d_partial_bwd`
+  (sign=-1, already built for exactly this), `matmul_dx.wgsl`/
+  `matmul_dw.wgsl` (naive tier only — no tiled-GEMM selection, correctness-
+  first per `docs/porting-playbook.md` §10, appropriate at this tiny
+  gradcheck scale), all newly REGISTERED in qwen35's own `PIPELINES` (they
+  already existed in `crates/kernels`).
+
+  **The one hand-derived (not composed) piece**: the sigmoid-gated shared
+  expert's backward. `model::moe` has no helper for it — `crates/glm`'s
+  shared expert has no gate at all, and no other model composes this exact
+  shape — so it is hand-derived from `scale_row.wgsl` (self-adjoint w.r.t.
+  its scaled operand), `row_dot.wgsl`, `sigmoid_bwd.wgsl`, `swiglu_bwd`, and
+  `proj_bwd`. **Ordering constraint discovered while wiring it**:
+  `moe_layer_bwd`'s own contract requires its caller-supplied
+  `router_weight_bwd` to be the FIRST (`acc=0`) touch to the shared MoE-input
+  gradient `d_xn2` — but the shared expert's own chain also writes `d_xn2`.
+  Resolved by ordering, not a new accumulator: the routed-MoE backward
+  (`moe_layer_bwd`, which establishes `d_xn2`'s base value per its own
+  documented phase order) runs FIRST in program order, and the shared
+  expert's three `d_xn2` touches all use `acc=1` (accumulate) on top —
+  correct because this engine's `Step`s execute strictly in submission
+  order, the same assumption every other multi-source accumulator in this
+  file already relies on.
+
+  **`moe_layer_bwd`'s phase ordering, followed exactly as documented**:
+  Phase A (every expert's `d_gate` column, `expert_dgate`, needed before
+  Phase B since the router needs the WHOLE `d_gate` row) → Phase B
+  (`router_bwd`'s kernel-level router backward, THEN the router weight's own
+  dense-linear backward, supplied here as `router_weight_bwd_steps`) → Phase
+  C (every expert's SwiGLU backward, `expert_bwd`, accumulating into
+  `d_xn2`). `moe_layer_bwd` itself enforces this order (I only supply the
+  buffers/ids and the caller-owed `router_weight_bwd_steps`, not the
+  ordering).
+
+  **Gradcheck**: went through the generic `gradcheck` crate machinery
+  (`gradcheck::check_qwen35`, `crates/gradcheck/src/lib.rs`), NOT a bespoke
+  `crates/qwen35/tests/` harness — `Qwen35` already implements the full
+  `model::Model` trait (forward, backward, zero_grads, adamw_step, read_grad,
+  read/write_weight), so the blanket `impl<M: model::Model> CheckModel for M`
+  makes it checkable with zero new test-harness code, exactly like
+  `check_qwen`/`check_glm`/`check_moe`. A hybrid config smaller than
+  `Qwen35Config::tiny()` (`n_layers: 4, n_experts: 3, top_k: 3` — `top_k ==
+  n_experts` removes the hard top-k selection boundary finite differences
+  cannot see through, the same mitigation `check_moe`/`check_glm` already
+  use; `t: 12` still gives GDN a genuine 3-chunk recurrence at chunk size 4)
+  keeps `directional_check`'s `O(n_dirs)`-forward-passes-per-tensor cost
+  manageable. Verified on **both** `BRAIN_DEVICE=cpu` and the default GPU
+  backend (`docs/lessons.md` #5): both pass at the workspace's own fp32
+  GPU-directional-check tolerance `(atol=4e-3, rtol=8e-2)` — the same gate
+  `check_qwen`/`check_glm`/`check_seq2seq`/`check_moe` all use (the tighter
+  "block FD < 1e-4, model FD < 1e-3" figures in `docs/porting-playbook.md`
+  §8 are FLUX.2's own f64 HOST-trainer check, a different, much tighter
+  regime than the fp32-GPU `directional_check` family qwen35 belongs to).
+  Observed worst relative error: **1.87e-2** (CPU/Cranelift JIT,
+  `blocks.3.self_attn.o_proj.weight`) / **1.20e-2** (GPU/Vulkan,
+  `blocks.3.self_attn.q_proj.weight`) — both well inside the gate, in line
+  with every sibling model's own numbers at this tolerance.
+
+  **The first passing run was hollow for the whole GDN branch — caught on
+  review, not by the checker.** Every `blocks.{0,1,2}.linear_attn.*`
+  parameter's finite-difference numeric gradient came back *exactly* `0.0`,
+  and the `(4e-3, 8e-2)` gate's absolute floor swallowed the distinction from
+  a genuinely tiny one. Direct probing (perturb `A_log` by ±10 by hand,
+  re-`forward()`, compare loss) confirmed the loss was bit-identical —
+  `tiny()`'s standard `std=0.02` init, cascaded through `in_proj_qkv` then a
+  *depthwise* causal conv1d (only 4 summed terms per channel, far less
+  central-limit averaging than a `d_model`-wide matmul) then SiLU, collapses
+  `query`/`key` to ~1e-6 before `l2norm_scale.wgsl`, whose `eps=1e-6`
+  (correct for the real `d_model=2048`) then dominates the normalization —
+  the entire recurrence downstream reads back at ~1e-11 regardless of decay/
+  beta/gate parameters. Full writeup: `docs/lessons.md` #40. Fixed in the
+  **test harness only** (`qwen35_gradcheck_harness`, `crates/gradcheck/src/
+  lib.rs`, overrides `in_proj_qkv.weight`/`conv1d.weight` to `std=1.0` post-
+  init) — neither `qwen35::init`'s production init nor `model::gdn`'s `eps`
+  needed to change. Re-verified after the fix: every GDN-layer parameter
+  (`in_proj_qkv.weight`, `conv1d.weight`, `in_proj_z.weight`,
+  `out_proj.weight`, `norm.weight`) now shows real, non-floor-dominated
+  agreement, and the new `check_qwen35_a_log_elementwise` test (per-entry FD
+  on `blocks.2.linear_attn.A_log`, following `check_t5_rel_bias_elementwise`'s
+  own precedent for a cross-stage-folded parameter `directional_check` can't
+  resolve) confirms `A_log`'s own gradient directly. A follow-up ad hoc
+  elementwise probe on `blocks.2.ln1.weight` at `eps=1e-2` initially looked
+  alarming (up to 3x mismatch, one sign flip) but resolved cleanly at
+  `eps=1e-3` — finite-difference truncation error from the UT-transform's
+  nonlinearity at too-large an eps, not a backward bug (T5's own elementwise
+  doc already documents this exact eps-sensitivity U-curve).
+
+  **Not fully confident on** (flagged rather than silently assumed):
+  `router_bwd`'s `Softmax` variant's aux-loss `fe` (expert-usage-fraction)
+  scratch buffer's own zero/overwrite contract was trusted from
+  `model::moe`'s existing (independently gradient-checked) composition
+  rather than re-derived here; the naive (non-tiled) `matmul_dx`/`matmul_dw`
+  choice for every weight gradient is a real perf gap at the 35B scale (out
+  of scope for this integration pass, called out for the eventual
+  performance-optimization pass per `docs/porting-playbook.md` §10).
+
 ## In progress
 
 (nothing actively in flight right now — see "Not started" for the next
@@ -345,17 +473,6 @@ pieces.)
   materializing a whole-model F32 intermediate on disk or in host RAM) —
   matching the original plan's "prefer the direct mmap-streaming GGUF path"
   intent, now with a concrete number behind why it is not optional.
-- **P9 — qwen35-level backward + `gradcheck::check_qwen35`**: `model::gdn`'s
-  own backward now exists (P2b) and `model::block::gqa_bwd`/`model::moe`'s
-  MoE backward already existed before this port — what's left is wiring
-  ALL of them together into `qwen35::Qwen35::backward()` (currently a
-  clear panic), plus backward for this model's own glue ops (the sigmoid
-  output gate, the gated-RMSNorm composition, the conv1d/L2-norm/decay-gate
-  chain upstream of `gdn_chunk_bwd`, the chunk-major layout permute), then
-  an f64 FD oracle at a tiny hybrid config on both backends. Per the
-  (approved, revised) project policy, this is required, not deferred as
-  forward-only. Vision backward is out of scope until P8b (vision forward)
-  itself lands.
 - **P10b — INT4 quantized inference** for qwen35 specifically
   (`crates/qwen35/src/q4.rs`, mirroring P10a's `q8.rs` shape but over
   `model::int4`), once useful — P10a (int8, single-GPU) already landed.
@@ -375,9 +492,6 @@ pieces.)
   emitter (256-way dense unroll is impractical, ~30k MatMul nodes); fixed-`T`
   cache-free prefill only, explicitly stopping at "compiles + best-effort
   OpenVINO compile attempt" without chasing a working NPU run.
-- **AGENTS.md policy edit**: replace the "imported models ship forward-only"
-  allowance with "full backward + gradcheck is the default expectation" —
-  land alongside P9.
 - **Qwen3.5-27B (dense)**: a second named config once the shared hybrid code
   is proven — the dense sibling is the same code with `n_experts=1`-shaped
   MoE-as-dense and no linear-attention layers, additive not a fork.
