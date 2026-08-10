@@ -112,6 +112,8 @@ T5-XXL encoder, SDXL UNet, ControlNet, FLUX.1/Kontext, PuLID, plus the forward-o
 | **vlm** | | | | | |
 | [`brain/fastvlm`](docs/models/vlm/readme.md) | image captioning | ✓ | | | |
 | [`brain/qwenvl`](docs/models/vlm/readme.md) | image + text → text (Qwen3-VL, validation-tier) | ✓ | | | |
+| **omni** | | | | | |
+| [`brain/omni`](docs/models/omni/readme.md) | text/audio/image/video → text, plus spoken output (`speak`) | ✓ | | | |
 | **asr** | | | | | |
 | [`brain/nemotron`](docs/models/asr/readme.md) | streaming speech-to-text | ✓ | | | |
 | [`brain/qwen-asr`](docs/models/asr/readme.md) | offline speech-to-text | ✓ | | | |

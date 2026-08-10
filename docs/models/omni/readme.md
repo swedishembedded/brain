@@ -77,17 +77,19 @@ See `docs/lessons.md` for the write-up.
 
 ## Serving
 
-Reachable over all three of brain's surfaces — D-Bus (`Run`/`Subscribe` with
-typed audio/image blobs), the OpenAI-compatible HTTP API (`/v1/chat/completions`
-with `image_url`/`input_audio` content parts, `/v1/audio/speech`,
-`/v1/audio/transcriptions`), and the Anthropic-compatible API (`/v1/messages`
-with `image` content blocks) — scheduled by `residency` with per-turn lifetime
-management: the Thinker stays resident across a conversation, the audio/vision
-towers are built, used and dropped per turn, and the Talker + Code2Wav are only
-built once the Thinker's text response is available.
+Reachable over all three of brain's surfaces when `BRAIN_OMNI_HF_DIR` is set —
+D-Bus (`Run`/`Subscribe` with typed audio/image/video blobs; both declared
+actions, `generate` and `speak`), the OpenAI-compatible HTTP API
+(`/v1/chat/completions` with `image_url`/`input_audio` content parts), and the
+Anthropic-compatible API (`/v1/messages` with `image` content blocks) —
+scheduled by `residency`. There are NO `/v1/audio/*` routes: the HTTP chat
+surfaces hardcode the `generate` action, so speech OUTPUT (`speak`: response
+text + a 24 kHz waveform blob) is reachable over D-Bus/`brain do` only.
 
-`examples/omni.py` exercises every transport × modality-in × modality-out
-combination locally.
+`examples/omni.py` exercises the D-Bus and HTTP transports with text, speech,
+image and video INPUT; it does not yet drive microphone capture or the
+speech-output (`speak`) path — each unbuilt combination `skip()`s with the
+reason printed.
 
 ## Known limitations
 
