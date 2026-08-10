@@ -318,20 +318,36 @@ pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
 pub const GDN_ADD_IDENTITY: &str = include_str!("../wgsl/gdn_add_identity.wgsl");
 /// `wgsl/gdn_chunk_cumsum_step.wgsl`
 pub const GDN_CHUNK_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_cumsum_step.wgsl");
+/// `wgsl/gdn_chunk_reverse_cumsum_step.wgsl`
+pub const GDN_CHUNK_REVERSE_CUMSUM_STEP: &str = include_str!("../wgsl/gdn_chunk_reverse_cumsum_step.wgsl");
 /// `wgsl/gdn_decay_gate.wgsl`
 pub const GDN_DECAY_GATE: &str = include_str!("../wgsl/gdn_decay_gate.wgsl");
 /// `wgsl/gdn_decay_mask.wgsl`
 pub const GDN_DECAY_MASK: &str = include_str!("../wgsl/gdn_decay_mask.wgsl");
+/// `wgsl/gdn_decay_mask_bwd.wgsl`
+pub const GDN_DECAY_MASK_BWD: &str = include_str!("../wgsl/gdn_decay_mask_bwd.wgsl");
 /// `wgsl/gdn_decay_scale.wgsl`
 pub const GDN_DECAY_SCALE: &str = include_str!("../wgsl/gdn_decay_scale.wgsl");
+/// `wgsl/gdn_decay_scale_bwd.wgsl`
+pub const GDN_DECAY_SCALE_BWD: &str = include_str!("../wgsl/gdn_decay_scale_bwd.wgsl");
+/// `wgsl/gdn_decay_scale_bwd_last.wgsl`
+pub const GDN_DECAY_SCALE_BWD_LAST: &str = include_str!("../wgsl/gdn_decay_scale_bwd_last.wgsl");
 /// `wgsl/gdn_layout_permute.wgsl`
 pub const GDN_LAYOUT_PERMUTE: &str = include_str!("../wgsl/gdn_layout_permute.wgsl");
 /// `wgsl/gdn_mask_strict_lower.wgsl`
 pub const GDN_MASK_STRICT_LOWER: &str = include_str!("../wgsl/gdn_mask_strict_lower.wgsl");
+/// `wgsl/gdn_mask_strict_lower_bwd.wgsl`
+pub const GDN_MASK_STRICT_LOWER_BWD: &str = include_str!("../wgsl/gdn_mask_strict_lower_bwd.wgsl");
 /// `wgsl/gdn_row_scale_off.wgsl`
 pub const GDN_ROW_SCALE_OFF: &str = include_str!("../wgsl/gdn_row_scale_off.wgsl");
 /// `wgsl/gdn_state_decay.wgsl`
 pub const GDN_STATE_DECAY: &str = include_str!("../wgsl/gdn_state_decay.wgsl");
+/// `wgsl/gdn_state_decay_bwd_dscale.wgsl`
+pub const GDN_STATE_DECAY_BWD_DSCALE: &str = include_str!("../wgsl/gdn_state_decay_bwd_dscale.wgsl");
+/// `wgsl/gdn_ut_bwd_dattn0.wgsl`
+pub const GDN_UT_BWD_DATTN0: &str = include_str!("../wgsl/gdn_ut_bwd_dattn0.wgsl");
+/// `wgsl/gdn_ut_bwd_dtmat.wgsl`
+pub const GDN_UT_BWD_DTMAT: &str = include_str!("../wgsl/gdn_ut_bwd_dtmat.wgsl");
 /// `wgsl/gdn_ut_step.wgsl`
 pub const GDN_UT_STEP: &str = include_str!("../wgsl/gdn_ut_step.wgsl");
 /// `wgsl/geglu_shift.wgsl`
@@ -680,6 +696,8 @@ pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
 /// `wgsl/router_gate_train.wgsl`
 pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
+/// `wgsl/row_dot.wgsl`
+pub const ROW_DOT: &str = include_str!("../wgsl/row_dot.wgsl");
 /// `wgsl/row_scatter.wgsl`
 pub const ROW_SCATTER: &str = include_str!("../wgsl/row_scatter.wgsl");
 /// `wgsl/scale_add.wgsl`
@@ -940,13 +958,21 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row_dh", GATE_ROW_DH),
     ("gdn_add_identity", GDN_ADD_IDENTITY),
     ("gdn_chunk_cumsum_step", GDN_CHUNK_CUMSUM_STEP),
+    ("gdn_chunk_reverse_cumsum_step", GDN_CHUNK_REVERSE_CUMSUM_STEP),
     ("gdn_decay_gate", GDN_DECAY_GATE),
     ("gdn_decay_mask", GDN_DECAY_MASK),
+    ("gdn_decay_mask_bwd", GDN_DECAY_MASK_BWD),
     ("gdn_decay_scale", GDN_DECAY_SCALE),
+    ("gdn_decay_scale_bwd", GDN_DECAY_SCALE_BWD),
+    ("gdn_decay_scale_bwd_last", GDN_DECAY_SCALE_BWD_LAST),
     ("gdn_layout_permute", GDN_LAYOUT_PERMUTE),
     ("gdn_mask_strict_lower", GDN_MASK_STRICT_LOWER),
+    ("gdn_mask_strict_lower_bwd", GDN_MASK_STRICT_LOWER_BWD),
     ("gdn_row_scale_off", GDN_ROW_SCALE_OFF),
     ("gdn_state_decay", GDN_STATE_DECAY),
+    ("gdn_state_decay_bwd_dscale", GDN_STATE_DECAY_BWD_DSCALE),
+    ("gdn_ut_bwd_dattn0", GDN_UT_BWD_DATTN0),
+    ("gdn_ut_bwd_dtmat", GDN_UT_BWD_DTMAT),
     ("gdn_ut_step", GDN_UT_STEP),
     ("geglu_shift", GEGLU_SHIFT),
     ("geglu_shift_da", GEGLU_SHIFT_DA),
@@ -1121,6 +1147,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_gate", ROUTER_GATE),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
     ("router_gate_train", ROUTER_GATE_TRAIN),
+    ("row_dot", ROW_DOT),
     ("row_scatter", ROW_SCATTER),
     ("scale_add", SCALE_ADD),
     ("scale_add_dexp", SCALE_ADD_DEXP),

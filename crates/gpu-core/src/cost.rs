@@ -880,6 +880,59 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(2 * n, 8 * n)
         }
 
+        // ---- Gated DeltaNet (GDN) backward -------------------------------
+        // Generic per-row dot product: params [rows, d, a_off, b_off, alpha];
+        // one MAC per element plus one closing scalar multiply per row.
+        "row_dot" => {
+            let (rows, d) = (p(0)?, p(1)?);
+            f(2 * rows * d + rows, 4 * (2 * rows * d + rows))
+        }
+        // Reverse of the per-chunk cumsum: identical shape to
+        // `gdn_chunk_cumsum_step` (one add per row, dispatch width `bhc`).
+        "gdn_chunk_reverse_cumsum_step" => {
+            let bhc = p(0)?;
+            f(bhc, 12 * bhc)
+        }
+        // UT-transform backward, both halves: params [bhc, c_len, i]; same
+        // triangular dispatch shape as `gdn_ut_step` (threads = bhc*i, each
+        // thread's serial loop at most `i` MACs).
+        "gdn_ut_bwd_dattn0" | "gdn_ut_bwd_dtmat" => {
+            let (bhc, i) = (p(0)?, p(2)?);
+            f(2 * bhc * i * i, 4 * (2 * bhc * i * i))
+        }
+        // Elementwise mask-multiply backward over [bhc,c,c]; two muls + one
+        // add live on the strictly-lower half, nothing outside it.
+        "gdn_mask_strict_lower_bwd" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            let n = bhc * c * c;
+            f(2 * n, 4 * (4 * n))
+        }
+        // Row-sum or column-sum over [bhc,c,c] (params [bhc, c_len, mode]);
+        // dispatched twice, each call a triangular reduction bounded by c_len.
+        "gdn_decay_mask_bwd" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            f(2 * bhc * c * c, 4 * (2 * bhc * c * c))
+        }
+        // params [bh, c_len, g_cs_off]; one mul + one sub per element.
+        "gdn_decay_scale_bwd" => {
+            let (bh, c) = (p(0)?, p(1)?);
+            let n = bh * c;
+            f(2 * n, 4 * (3 * n))
+        }
+        // params [bh, c_len, g_cs_off]; same per-row total work as
+        // `gdn_decay_scale`'s own forward (one thread per bh, loop c_len).
+        "gdn_decay_scale_bwd_last" => {
+            let (bh, c) = (p(0)?, p(1)?);
+            f(2 * bh * c, 4 * (2 * bh * c))
+        }
+        // params [bh, dk, dv, c_len, g_cs_off]; one thread per bh, loop
+        // dk*dv MACs plus one exp + one mul + one add for the closing term.
+        "gdn_state_decay_bwd_dscale" => {
+            let (bh, dk, dv) = (p(0)?, p(1)?, p(2)?);
+            let n = bh * dk * dv;
+            f(2 * n + 3 * bh, 4 * (2 * n + 3 * bh))
+        }
+
         _ => None,
     }
 }
