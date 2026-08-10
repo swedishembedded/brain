@@ -95,8 +95,10 @@ pub fn router_fwd(g: &Gpu, ids: &MoeIds, shape: &MoeShape, logits: &DeviceBuffer
 /// differs).
 #[derive(Clone, Copy)]
 pub enum RouterKind {
-    /// `router_gate.wgsl` (fwd) + `router_bwd.wgsl` (fwd/bwd; array-free
-    /// since the #35-recurrence fix — no expert-count cap). Qwen3-Omni's
+    /// `router_gate.wgsl` (fwd) + `router_bwd.wgsl` (bwd) — BOTH array-free
+    /// (no expert-count cap): the backward since the #35-recurrence fix, the
+    /// forward since the audit-F4 rewrite (its `array<f32,128>` scratch was
+    /// the same silent-OOB literal one expert higher). Qwen3-Omni's
     /// Thinker/Talker.
     Softmax { aux_coef: f32, z_coef: f32 },
     /// `router_gate_sigmoid.wgsl` (fwd) + `router_bwd_sigmoid.wgsl` (bwd,
@@ -662,6 +664,19 @@ pub fn shared_expert_fwd(
 // sub-batch, run the SAME
 // `model::block::pick_gemm`-selected tiled GEMM the dense path already uses
 // (unchanged, no new GEMM kernel), scatter the scaled result back.
+//
+// KNOWN COST (audit F9, deliberate remainder): the per-expert call shape
+// below does one host scan over `host_gate`, one index upload, and one
+// `submit` PER EXPERT — at GLM-5.2 scale (~128 experts x ~48 MoE layers)
+// that is ~6100 submits and small uploads per forward. Every per-expert
+// count is knowable host-side from ONE pass over `host_gate`, and dispatch
+// ordering within a submit already guarantees the shared scratch is safe to
+// reuse across experts in a single batched submission — so a layer-level
+// entry point (bucket rows for ALL experts in one pass, per-expert index
+// regions, one submit per layer) removes the storm with no new kernel. That
+// API change lands WITH its call-site migration (crates/glm, crates/omni) so
+// the faster sibling is never an unconsumed second path (docs/lessons.md #8);
+// this crate alone cannot do it without stranding the current callers.
 
 /// Kernel indices [`expert_fwd_compact`] dispatches, resolved by the calling
 /// model against its own registered pipeline list.
@@ -767,6 +782,18 @@ pub fn expert_fwd_compact(
     accumulate: bool,
 ) -> usize {
     let (d, ff, e) = (shape.d_model, shape.moe_ff, shape.n_experts);
+    // A short readback here previously panicked with a bare index message in
+    // the filter below, while the capacity precondition next door got a
+    // detailed assert — same rigor for both preconditions.
+    assert_eq!(
+        host_gate.len(),
+        (shape.rows * e) as usize,
+        "expert_fwd_compact: host_gate has {} elements, want rows*n_experts = {}x{} -- \
+         pass the CURRENT full readback of `gate`",
+        host_gate.len(),
+        shape.rows,
+        e
+    );
     let rows: Vec<u32> = (0..shape.rows).filter(|&r| host_gate[(r * e + e_idx) as usize] > 0.0).collect();
     let count = rows.len() as u32;
     if count == 0 {
