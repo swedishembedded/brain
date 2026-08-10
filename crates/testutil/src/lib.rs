@@ -56,6 +56,21 @@ pub fn model_dir(reference: &str) -> Option<String> {
     Some(brain_modelstore::Store::new(root).repo_dir(&r).to_string_lossy().into_owned())
 }
 
+/// Read a raw little-endian `f32` blob fixture (the parity dumps' wire
+/// format), or `None` when absent (the caller skips) — hoisted from three
+/// near-identical copies in the fastvlm/qwenvl/moondream parity harnesses.
+pub fn read_f32(path: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
+    let b = std::fs::read(path).ok()?;
+    Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
+/// Read a raw little-endian `i32` blob fixture as `u32` ids (token-id
+/// dumps), or `None` when absent — sibling of [`read_f32`].
+pub fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {
+    let b = std::fs::read(path).ok()?;
+    Some(b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

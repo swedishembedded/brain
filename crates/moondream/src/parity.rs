@@ -18,10 +18,7 @@ mod tests {
 #[allow(dead_code)]
 use brain_testutil::testdata;
 use brain_testutil::model_dir;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::read_f32;
     use std::collections::HashMap;
 
 
@@ -31,9 +28,6 @@ fn repo_path(rel: &str) -> String {
 
     const N: u32 = 4; // dense blocks, must match the dump
 
-    fn read_f32(p: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
-        Some(std::fs::read(p).ok()?.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
-    }
 
     fn layer_of(name: &str) -> Option<u32> {
         name.strip_prefix("blocks.")?.split_once('.')?.0.parse().ok()

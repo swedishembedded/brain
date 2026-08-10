@@ -17,10 +17,7 @@ mod tests {
 #[allow(dead_code)]
 use brain_testutil::testdata;
 use brain_testutil::model_dir;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::{read_f32, read_i32};
     use std::collections::HashMap;
 
     use crate::config::FastVlmConfig;
@@ -28,15 +25,7 @@ fn repo_path(rel: &str) -> String {
     use qwen3::Qwen;
 
 
-    fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {
-        let b = std::fs::read(path).ok()?;
-        Some(b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
-    }
 
-    fn read_f32(path: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
-        let b = std::fs::read(path).ok()?;
-        Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
-    }
 
     #[test]
     fn fastvlm_decoder_logits_match_hf_reference() {
