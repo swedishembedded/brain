@@ -54,6 +54,21 @@ impl TtsResident {
         Some(TtsResident { weights_dir, ckpt_dir, lang, ref_wav, ref_text })
     }
 
+    /// Direct constructor for callers that already hold the two paths (e.g.
+    /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target) — no env
+    /// round-trip; see `crate::resident_facenet::FacenetResident::new`.
+    /// Default English, no reference voice — the synthesis-tuning knobs
+    /// (`BRAIN_TTS_LANG`/`_REF`/`_REF_TEXT`) remain `from_env`-only.
+    pub fn new(weights_dir: impl Into<String>, ckpt_dir: impl Into<String>) -> TtsResident {
+        TtsResident {
+            weights_dir: weights_dir.into(),
+            ckpt_dir: ckpt_dir.into(),
+            lang: "english".to_string(),
+            ref_wav: None,
+            ref_text: String::new(),
+        }
+    }
+
     /// Brain checkpoint paths (same layout as `brain tts`'s `paths()` helper).
     fn paths(&self) -> TtsPaths {
         TtsPaths {

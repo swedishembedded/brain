@@ -41,11 +41,18 @@ impl Sam2Resident {
     /// every call would fail is worse than not serving it.
     pub fn from_env() -> Option<Sam2Resident> {
         let path = std::env::var("BRAIN_SAM2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let variant = std::env::var("BRAIN_SAM2_VARIANT").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "tiny".into());
+        Self::new(path, variant)
+    }
+
+    /// Direct constructor (no env round-trip) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    pub fn new(path: impl Into<String>, variant: impl Into<String>) -> Option<Sam2Resident> {
+        let (path, variant) = (path.into(), variant.into());
         if !std::path::Path::new(&path).exists() {
-            eprintln!("brain: sam2 not served (BRAIN_SAM2_WEIGHTS={path} does not exist)");
+            eprintln!("brain: sam2 not served ({path} does not exist)");
             return None;
         }
-        let variant = std::env::var("BRAIN_SAM2_VARIANT").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "tiny".into());
         Some(Sam2Resident { path, variant })
     }
 }

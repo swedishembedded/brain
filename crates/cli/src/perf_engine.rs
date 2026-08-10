@@ -374,7 +374,7 @@ pub fn run_weights_with(opt: &Options, budget: u32, passes: u32) -> Result<Artif
     art.smoke = opt.smoke;
 
     let started = Instant::now();
-    let runs = weights::run(budget, passes.max(1));
+    let runs = weights::run(budget, passes.max(1))?;
     let wall_s = started.elapsed().as_secs_f64().max(1e-6);
 
     art.performance = weights::to_json(&runs);

@@ -50,7 +50,13 @@ impl RestoreResident {
     /// one commonly names `vqgan_code1024.pth`, which carries none of the
     /// CodeFormer tensors.
     pub fn from_env() -> Option<RestoreResident> {
-        let path = std::env::var("BRAIN_RESTORE_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        Self::new(std::env::var("BRAIN_RESTORE_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    }
+
+    /// Direct constructor (no env round-trip) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    pub fn new(path: impl Into<String>) -> Option<RestoreResident> {
+        let path = path.into();
         std::path::Path::new(&restore::caps::checkpoint_path(&path)).exists().then_some(RestoreResident { path })
     }
 }
@@ -104,7 +110,13 @@ pub struct VqganResident {
 impl VqganResident {
     /// `None` when the var is unset or does not resolve to an existing file.
     pub fn from_env() -> Option<VqganResident> {
-        let path = std::env::var("BRAIN_VQGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        Self::new(std::env::var("BRAIN_VQGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    }
+
+    /// Direct constructor (no env round-trip) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    pub fn new(path: impl Into<String>) -> Option<VqganResident> {
+        let path = path.into();
         std::path::Path::new(&vqgan::caps::checkpoint_path(&path)).exists().then_some(VqganResident { path })
     }
 }

@@ -31,7 +31,15 @@ impl UpscaleResident {
     /// `None` when the var is unset or names nothing that exists — registering a
     /// model whose every call would fail is worse than not serving it.
     pub fn from_env() -> Option<UpscaleResident> {
-        let path = std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        Self::new(std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    }
+
+    /// Direct constructor for callers that already hold the path (e.g. `brain
+    /// perf`'s `upscale:<weights>` target) — no env round-trip: that pattern
+    /// shipped this exact target dead (`BRAIN_UPSCALE_WEIGHTS` set, the var
+    /// above read).
+    pub fn new(path: impl Into<String>) -> Option<UpscaleResident> {
+        let path = path.into();
         std::path::Path::new(&path).exists().then_some(UpscaleResident { path })
     }
 }

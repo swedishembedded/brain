@@ -48,7 +48,13 @@ pub struct NemotronResident {
 
 impl NemotronResident {
     pub fn from_env() -> Option<NemotronResident> {
-        std::env::var("BRAIN_NEMOTRON").ok().filter(|p| !p.is_empty()).map(|dir| NemotronResident { dir })
+        std::env::var("BRAIN_NEMOTRON").ok().filter(|p| !p.is_empty()).map(NemotronResident::new)
+    }
+
+    /// Direct constructor (no env round-trip) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    pub fn new(dir: impl Into<String>) -> NemotronResident {
+        NemotronResident { dir: dir.into() }
     }
 }
 
@@ -274,10 +280,17 @@ pub struct QwenAsrResident {
 
 impl QwenAsrResident {
     pub fn from_env() -> Option<QwenAsrResident> {
-        let dir = std::env::var("BRAIN_QWEN_ASR").ok().filter(|p| !p.is_empty())?;
+        std::env::var("BRAIN_QWEN_ASR").ok().filter(|p| !p.is_empty()).map(QwenAsrResident::new)
+    }
+
+    /// Direct constructor (no env round-trip for the PATH) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale. The two
+    /// tuning knobs (`BRAIN_QWEN_ASR_WINDOW`/`_MAXNEW`) stay env-read here:
+    /// they configure HOW the model runs, not WHICH weights serve.
+    pub fn new(dir: impl Into<String>) -> QwenAsrResident {
         let window_secs = std::env::var("BRAIN_QWEN_ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
         let max_new = std::env::var("BRAIN_QWEN_ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
-        Some(QwenAsrResident { dir, window_secs, max_new })
+        QwenAsrResident { dir: dir.into(), window_secs, max_new }
     }
 }
 

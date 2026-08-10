@@ -66,21 +66,25 @@ fn drive(policy_name: &str, plan: Box<dyn weightset::ResidencyPlan + Send + Sync
 /// refiners = 34 groups (see `zimage::ZImageConfig::turbo`). `budget`/
 /// `passes` are the caller's scenario knobs — `budget` is the window size
 /// (device slots), `passes` the number of denoise steps simulated.
-pub fn run(budget: u32, passes: u32) -> Vec<Run> {
-    // The honest precondition, AT the entry point: `WeightSet::build` refuses
-    // a zero budget, and passes = 0 would divide churn_overhead by nothing.
-    assert!(budget >= 1 && passes >= 1, "weights scenario: budget and passes must both be >= 1 (got budget={budget}, passes={passes})");
+pub fn run(budget: u32, passes: u32) -> Result<Vec<Run>, String> {
+    // The honest precondition, AT the entry point, as an Err rather than a
+    // panic: `WeightSet::build` refuses a zero budget, and passes = 0 would
+    // divide churn_overhead by nothing -- a caller's bad knob is a reportable
+    // input error, not a crash.
+    if budget < 1 || passes < 1 {
+        return Err(format!("weights scenario: budget and passes must both be >= 1 (got budget={budget}, passes={passes})"));
+    }
     let n_groups: u32 = 34;
     let lookahead: u32 = 1;
     let cyclic_pin = if budget >= n_groups { n_groups } else { budget.saturating_sub(lookahead.max(1)) };
     let required_per_pass = (n_groups - cyclic_pin) as u64;
-    vec![
+    Ok(vec![
         drive("cyclic_scan", Box::new(CyclicScan { lookahead }), n_groups, budget, passes, required_per_pass),
         drive("lru", Box::new(Lru), n_groups, budget, passes, required_per_pass),
         // AllResident is the bit-identical control arm, valid only with a
         // full budget -- run it there rather than erroring at a small one.
         drive("all_resident", Box::new(AllResident), n_groups, n_groups.max(budget), passes, required_per_pass),
-    ]
+    ])
 }
 
 pub fn to_json(runs: &[Run]) -> Value {
@@ -114,7 +118,7 @@ mod tests {
     /// in a doc.
     #[test]
     fn cyclic_scan_is_optimal_lru_is_worse_all_resident_never_reloads() {
-        let runs = run(10, 4);
+        let runs = run(10, 4).expect("valid knobs");
         let cyclic = runs.iter().find(|r| r.policy == "cyclic_scan").unwrap();
         let lru = runs.iter().find(|r| r.policy == "lru").unwrap();
         let all_resident = runs.iter().find(|r| r.policy == "all_resident").unwrap();
@@ -125,7 +129,7 @@ mod tests {
 
     #[test]
     fn a_window_at_least_as_wide_as_the_model_never_reloads_for_cyclic_scan_either() {
-        let runs = run(34, 8);
+        let runs = run(34, 8).expect("valid knobs");
         let cyclic = runs.iter().find(|r| r.policy == "cyclic_scan").unwrap();
         assert_eq!(cyclic.reloads, 0);
     }

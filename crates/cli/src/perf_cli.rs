@@ -133,8 +133,10 @@ targets (--target):
                                      one synthetic 384x384 image per request)
   sam2:<weights-dir>[:tiny|large]    SAM 2.1 promptable segmentation via the residency executor
                                      (unit: mask; one centred point prompt per request)
-  clip:<text-encoder-dir>:<eva.pt>   EVA-CLIP-L/336 image tower via the residency executor
-                                     (unit: embedding; embed_image only -- no tokenizer needed)
+  clip:<checkpoint-root>             EVA-CLIP-L/336 image tower via the residency executor
+                                     (unit: embedding; embed_image only). The root is the same
+                                     SDXL-layout dir BRAIN_CLIP_DIR serves (tokenizer[_2]/ +
+                                     the EVA release .pt)
   facenet:<weights-dir>              SCRFD detect + ArcFace embed via the residency executor
                                      (unit: embedding; align=true on a synthetic image)
   tts:<weights-dir>:<hf-ckpt-dir>    Qwen3-TTS speaker-free synthesis via the residency executor
@@ -196,7 +198,16 @@ fn gate(args: &[String]) {
     while i < args.len() {
         match args[i].as_str() {
             "--baseline" => baseline = Some(val(args, &mut i, "--baseline")),
-            "--floor" => floor = val(args, &mut i, "--floor").parse().unwrap_or(floor),
+            "--floor" => {
+                // An unparseable floor must be a hard error, not the silent
+                // default: `--floor O.9` (typo) quietly gating at 0.85 is a
+                // gate whose threshold the operator never chose.
+                let v = val(args, &mut i, "--floor");
+                floor = v.parse().unwrap_or_else(|_| {
+                    eprintln!("perf gate: --floor {v:?} is not a number");
+                    std::process::exit(2);
+                });
+            }
             "--update" => update = true,
             other if candidate.is_none() => candidate = Some(other.to_string()),
             other => {
@@ -219,7 +230,25 @@ fn gate(args: &[String]) {
     };
     if update {
         // Promote the candidate to the new baseline — deliberate, never a
-        // side effect of a passing run.
+        // side effect of a passing run. And only a candidate the gate itself
+        // would accept: promoting a smoke/invalid/unmeasured artifact would
+        // poison every later comparison against it (the same refusals
+        // `perf::gate::gate` applies, enforced at promotion time).
+        if !cand.valid {
+            eprintln!(
+                "perf gate: refusing --update: candidate failed its correctness gate ({})",
+                cand.invalid_reason.as_deref().unwrap_or("no reason recorded")
+            );
+            std::process::exit(1);
+        }
+        if cand.smoke {
+            eprintln!("perf gate: refusing --update: candidate is a smoke run — not a measurement");
+            std::process::exit(1);
+        }
+        if cand.output_per_s.is_none() && cand.goodput_per_s.is_none() && cand.ttfa_p99.is_none() && cand.ial_p99.is_none() {
+            eprintln!("perf gate: refusing --update: candidate measured nothing — a baseline with no metrics can never gate");
+            std::process::exit(1);
+        }
         if let Err(e) = std::fs::copy(&cand_path, &base_path) {
             eprintln!("perf gate: updating baseline: {e}");
             std::process::exit(2);
@@ -627,7 +656,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
-         'sam2:<weights-dir>[:tiny|large]', 'clip:<text-encoder-dir>:<eva-clip.pt>', \
+         'sam2:<weights-dir>[:tiny|large]', 'clip:<checkpoint-root>', \
          'facenet:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
          'zimage[:<W>x<H>x<steps>]', 'upscale:<weights>', 'restore:<weights>', \
          'vqgan:<weights>', 'nemotron:<checkpoint-dir>', or 'qwen-asr:<checkpoint-dir>')"
@@ -1050,9 +1079,11 @@ fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("gpt weights not found: {weights}"));
     }
-    // SAFETY: single-threaded CLI startup, no concurrent env access.
-    unsafe { std::env::set_var("BRAIN_GPT_WEIGHTS", weights) };
-    let resident = crate::resident_llm::GptResident::from_env().ok_or("gpt: BRAIN_GPT_WEIGHTS did not resolve")?;
+    // Direct constructor -- never the set_var+from_env round-trip: the process
+    // environment is a stringly-typed channel with no compile-time link to the
+    // reader, and exactly that pattern shipped the facenet/upscale/clip perf
+    // targets dead on arrival (wrong var names, unfixable by the type system).
+    let resident = crate::resident_llm::GptResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1069,8 +1100,7 @@ fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("glm weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_GLM_WEIGHTS", weights) };
-    let resident = crate::resident_llm::GlmResident::from_env().ok_or("glm: BRAIN_GLM_WEIGHTS did not resolve")?;
+    let resident = crate::resident_llm::GlmResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/glm", "glm"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1088,8 +1118,7 @@ fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("yolo weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_YOLO", weights) };
-    let resident = crate::resident::YoloResident::from_env().ok_or("yolo: BRAIN_YOLO did not resolve")?;
+    let resident = crate::resident::YoloResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/yolo", "yolo"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1106,8 +1135,7 @@ fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("depth weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_DEPTH_WEIGHTS", weights) };
-    let resident = crate::resident_depth::DepthResident::from_env().ok_or("depth: BRAIN_DEPTH_WEIGHTS did not resolve")?;
+    let resident = crate::resident_depth::DepthResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/depth", "depth"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build =
@@ -1125,8 +1153,7 @@ fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("sam2 weights dir not found: {dir}"));
     }
     sam2::caps::variant_config(variant)?;
-    unsafe { std::env::set_var("BRAIN_SAM2_WEIGHTS", dir) };
-    let resident = crate::resident_sam2::Sam2Resident::from_env().ok_or("sam2: BRAIN_SAM2_WEIGHTS did not resolve")?;
+    let resident = crate::resident_sam2::Sam2Resident::new(dir, variant).ok_or_else(|| format!("sam2: checkpoint {dir} did not resolve"))?;
     let exec = forecast_executor(resident);
     let info = vec![
         ("weights".to_string(), serde_json::json!(dir)),
@@ -1144,23 +1171,27 @@ fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, sam2::caps::MODEL, "segment", "mask", info, build)))
 }
 
-/// `clip:<sdxl-text-encoder-dir>:<eva-clip.pt>` — the EVA-CLIP-L/336 image
-/// tower behind the residency executor (unit: embedding). Text towers exist
-/// on the same resident but need a real tokenizer to exercise honestly;
-/// `embed_image` needs only a pixel grid.
-fn build_clip(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
-    let (text_encoder_dir, eva_path) =
-        rest.split_once(':').ok_or("clip target needs 'clip:<sdxl-text-encoder-dir>:<eva-clip.pt>'")?;
-    if !std::path::Path::new(eva_path).exists() {
-        return Err(format!("clip EVA-CLIP weights not found: {eva_path}"));
+/// `clip:<checkpoint-root>` — the EVA-CLIP-L/336 image tower behind the
+/// residency executor (unit: embedding). The root is the SDXL-layout dir
+/// `ClipResident` serves from (`tokenizer[_2]/`, `text_encoder[_2]/`, plus
+/// the EVA release file for `embed_image`) — the SAME directory `brain
+/// serve` takes via `BRAIN_CLIP_DIR`, because this target measures that
+/// resident. (The old `clip:<text-encoder-dir>:<eva.pt>` spec set two env
+/// vars nothing reads — dead on arrival, the env round-trip's third victim.)
+/// Text towers exist on the same resident but need a real tokenizer to
+/// exercise honestly; `embed_image` needs only a pixel grid.
+fn build_clip(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("clip checkpoint root not found: {dir}"));
     }
-    unsafe {
-        std::env::set_var("BRAIN_CLIP_TEXT_ENCODER", text_encoder_dir);
-        std::env::set_var("BRAIN_CLIP_EVA", eva_path);
+    let eva = std::path::Path::new(dir).join(clip::caps::EVA_FILE);
+    if !eva.exists() {
+        return Err(format!("clip: {} not found under {dir} (embed_image needs the EVA-CLIP-L/336 release file)", clip::caps::EVA_FILE));
     }
-    let resident = crate::resident_clip::ClipResident::from_env().ok_or("clip: BRAIN_CLIP_* did not resolve")?;
+    let resident = crate::resident_clip::ClipResident::new(dir)
+        .ok_or_else(|| format!("clip: {dir} holds neither tokenizer/ nor tokenizer_2/"))?;
     let exec = forecast_executor(resident);
-    let info = vec![("weights".to_string(), serde_json::json!(eva_path)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
         capability::Invocation::new().blob("image", synth_image_blob(336, 336))
     });
@@ -1176,8 +1207,8 @@ fn build_facenet(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("facenet weights dir not found: {dir}"));
     }
-    unsafe { std::env::set_var("BRAIN_FACENET_WEIGHTS", dir) };
-    let resident = crate::resident_facenet::FacenetResident::from_env().ok_or("facenet: BRAIN_FACENET_WEIGHTS did not resolve")?;
+    let resident = crate::resident_facenet::FacenetResident::new(dir)
+        .ok_or_else(|| format!("facenet: {dir} does not hold both released antelopev2 graphs"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1194,9 +1225,7 @@ fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights_dir).exists() {
         return Err(format!("tts weights dir not found: {weights_dir}"));
     }
-    unsafe { std::env::set_var("BRAIN_TTS_WEIGHTS", weights_dir) };
-    unsafe { std::env::set_var("BRAIN_TTS_CKPT", ckpt_dir) };
-    let resident = crate::resident_tts::TtsResident::from_env().ok_or("tts: BRAIN_TTS_WEIGHTS did not resolve")?;
+    let resident = crate::resident_tts::TtsResident::new(weights_dir, ckpt_dir);
     let exec = forecast_executor(resident);
     let info = TargetInfo::new("tts", "audio_chunk").with("weights", weights_dir.into()).with("engine", "residency-executor".into());
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1265,8 +1294,7 @@ fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("upscale weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_UPSCALE_WEIGHTS", weights) };
-    let resident = crate::resident_upscale::UpscaleResident::from_env().ok_or("upscale: BRAIN_UPSCALE_WEIGHTS did not resolve")?;
+    let resident = crate::resident_upscale::UpscaleResident::new(weights).ok_or_else(|| format!("upscale: {weights} did not resolve"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1281,8 +1309,7 @@ fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("restore weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_RESTORE_WEIGHTS", weights) };
-    let resident = crate::resident_restore::RestoreResident::from_env().ok_or("restore: BRAIN_RESTORE_WEIGHTS did not resolve")?;
+    let resident = crate::resident_restore::RestoreResident::new(weights).ok_or_else(|| format!("restore: {weights} did not resolve to a CodeFormer checkpoint"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1298,8 +1325,7 @@ fn build_vqgan(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("vqgan weights not found: {weights}"));
     }
-    unsafe { std::env::set_var("BRAIN_VQGAN_WEIGHTS", weights) };
-    let resident = crate::resident_restore::VqganResident::from_env().ok_or("vqgan: BRAIN_VQGAN_WEIGHTS did not resolve")?;
+    let resident = crate::resident_restore::VqganResident::new(weights).ok_or_else(|| format!("vqgan: {weights} did not resolve to a VQGAN checkpoint"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1317,8 +1343,7 @@ fn build_nemotron(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("nemotron checkpoint dir not found: {dir}"));
     }
-    unsafe { std::env::set_var("BRAIN_NEMOTRON", dir) };
-    let resident = crate::resident_asr::NemotronResident::from_env().ok_or("nemotron: BRAIN_NEMOTRON did not resolve")?;
+    let resident = crate::resident_asr::NemotronResident::new(dir);
     let exec = forecast_executor(resident);
     let info =
         TargetInfo::new("nemotron", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());
@@ -1342,8 +1367,7 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("qwen-asr checkpoint dir not found: {dir}"));
     }
-    unsafe { std::env::set_var("BRAIN_QWEN_ASR", dir) };
-    let resident = crate::resident_asr::QwenAsrResident::from_env().ok_or("qwen-asr: BRAIN_QWEN_ASR did not resolve")?;
+    let resident = crate::resident_asr::QwenAsrResident::new(dir);
     let exec = forecast_executor(resident);
     let info =
         TargetInfo::new("qwen-asr", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());

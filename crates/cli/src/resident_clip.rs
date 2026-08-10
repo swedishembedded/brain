@@ -45,10 +45,19 @@ impl ClipResident {
     /// registering a model whose every call would fail is worse than not
     /// serving it.
     pub fn from_env() -> Option<ClipResident> {
-        let dir = std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty())?;
+        Self::new(std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty())?)
+    }
+
+    /// Direct constructor (no env round-trip) — see
+    /// `crate::resident_facenet::FacenetResident::new`'s rationale. `brain
+    /// perf`'s old `clip:` target set `BRAIN_CLIP_TEXT_ENCODER`/`BRAIN_CLIP_EVA`,
+    /// two variables NOTHING reads — this is the seam that makes that class of
+    /// mismatch impossible.
+    pub fn new(dir: impl Into<String>) -> Option<ClipResident> {
+        let dir = dir.into();
         let d = std::path::Path::new(&dir);
         if !d.join("tokenizer").exists() && !d.join("tokenizer_2").exists() {
-            eprintln!("brain: clip not served (BRAIN_CLIP_DIR={dir} holds neither tokenizer/ nor tokenizer_2/)");
+            eprintln!("brain: clip not served ({dir} holds neither tokenizer/ nor tokenizer_2/)");
             return None;
         }
         Some(ClipResident { dir })

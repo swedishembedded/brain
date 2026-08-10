@@ -42,12 +42,21 @@ impl FacenetResident {
     /// — registering a model whose every call would fail is worse than not
     /// serving it.
     pub fn from_env() -> Option<FacenetResident> {
-        let dir = std::env::var("BRAIN_FACENET_DIR").ok().filter(|p| !p.is_empty())?;
+        Self::new(std::env::var("BRAIN_FACENET_DIR").ok().filter(|p| !p.is_empty())?)
+    }
+
+    /// Direct constructor for callers that already hold the directory (e.g.
+    /// `brain perf`'s `facenet:<dir>` target) — the compile-time seam that
+    /// avoids round-tripping the path through the process environment (an
+    /// env-name mismatch shipped that perf target dead on arrival). Same
+    /// validation as `from_env`.
+    pub fn new(dir: impl Into<String>) -> Option<FacenetResident> {
+        let dir = dir.into();
         let d = std::path::Path::new(&dir);
         let missing: Vec<&str> =
             facenet::caps::FacenetProvider::RELEASE_FILES.iter().copied().filter(|f| !d.join(f).exists()).collect();
         if !missing.is_empty() {
-            eprintln!("brain: facenet not served (BRAIN_FACENET_DIR={dir} is missing {missing:?})");
+            eprintln!("brain: facenet not served ({dir} is missing {missing:?})");
             return None;
         }
         Some(FacenetResident { dir })
