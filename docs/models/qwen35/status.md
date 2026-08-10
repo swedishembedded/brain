@@ -466,18 +466,28 @@ fetching an already-quantized GGUF directly.
     references: `gdn_recurrent_step` vs. `gdn_chunk_fwd` at `chunk=1`
     (worst delta 1.2e-7 GPU / 8.9e-8 CPU), `gdn_causal_conv1d_step` vs.
     `conv1d_fwd` over a short sequence (bit-identical, both backends).
-  - **P11b — single-sequence incremental decode wiring** (in progress,
-    `crates/qwen35moe/src/model.rs`): a `Qwen35::step`-style entry point
-    analogous to `qwen3::Qwen::step`/`decode_at` — persistent per-layer
-    state (plain non-paged KV cache for GQA layers via `model::block`'s
-    existing decode helpers, `gdn_recurrent_step`'s `state` +
-    `gdn_causal_conv1d_step`'s `hist` for GDN layers), single sequence,
-    fp32, text-only. Deliberately NOT the paged multi-sequence engine yet —
-    proves the per-layer decode MATH matches prefill (`logits_all`) before
-    building the scheduler-facing `PagedDecoder`/multi-GPU layer-sharding
-    on top.
+  - **P11b — single-sequence incremental decode wiring** (done,
+    `crates/qwen35moe/src/model.rs`, commit `12438b9e`): `Qwen35::step`
+    (+ `reset_decode_cache`/`decode_pos`), analogous to `qwen3::Qwen::step`/
+    `decode_at` — persistent per-layer state (plain non-paged KV cache for
+    GQA layers via `model::block::gqa_decode_step`, `gdn_recurrent_step`'s
+    `state` + `gdn_causal_conv1d_step`'s `hist` for GDN layers), single
+    sequence, fp32, text-only. Single-position M-RoPE (no exact
+    qwen35moe-internal precedent — `qwen3::Qwen` has no GDN layers to mirror
+    against) resolved by recomputing a fresh 1-row `qwenvl::mrope::
+    mrope_tables` table per step, mirroring `qwen3::Qwen::step_mrope`'s own
+    per-step-table pattern for the same structural reason
+    (`rope2d_partial_fwd`'s `row % tmod` addressing can't reach into a larger
+    precomputed table at `rows=1`). Validated against `logits_all` (whole-
+    sequence prefill) replayed step-by-step over the same tokens at a tiny
+    hybrid config (both layer types, a real multi-chunk GDN prefill): worst
+    maxabs **2.98e-8** on both backends — fp32 machine epsilon, since both
+    paths run the identical kernels in a different dispatch order, not
+    merely "close by tolerance". No decode-specific MoE function was needed
+    (`moe_sublayer` already works correctly at `n=1`, confirmed by the
+    passing test).
   - **Not started**: the actual `PagedDecoder` impl (multi-sequence paging,
-    admission, prefix cache) and multi-GPU layer-range sharding — once
+    admission, prefix cache) and multi-GPU layer-range sharding — now that
     P11b's single-sequence math is proven, per this ledger's own "climb the
     ladder" convention.
 - **P8b — vision splice**: image/video token embedding into the decoder's
