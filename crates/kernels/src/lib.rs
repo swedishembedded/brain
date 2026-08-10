@@ -168,6 +168,8 @@ pub const BROADCAST_ADD_HW: &str = include_str!("../wgsl/broadcast_add_hw.wgsl")
 pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.wgsl");
 /// `wgsl/bsq_quantize.wgsl`
 pub const BSQ_QUANTIZE: &str = include_str!("../wgsl/bsq_quantize.wgsl");
+/// `wgsl/causal_conv1d_step.wgsl`
+pub const CAUSAL_CONV1D_STEP: &str = include_str!("../wgsl/causal_conv1d_step.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
@@ -887,6 +889,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("broadcast_add_hw", BROADCAST_ADD_HW),
     ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
     ("bsq_quantize", BSQ_QUANTIZE),
+    ("causal_conv1d_step", CAUSAL_CONV1D_STEP),
     ("ce_grad", CE_GRAD),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_grad_stats", CE_GRAD_STATS),

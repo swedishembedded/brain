@@ -1012,6 +1012,7 @@ dependencies = [
 name = "brain-model"
 version = "0.1.1"
 dependencies = [
+ "brain-audio",
  "brain-backend-cpu",
  "brain-checkpoint",
  "brain-data",

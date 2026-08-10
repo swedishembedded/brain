@@ -809,6 +809,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let cin_g = cin / g.max(1);
             f(2 * cout * cin_g * k * n * lo, 4 * (n * cout * lo + n * cin * l + 2 * cout * cin_g * k))
         }
+        // Causal depthwise Conv1d, single-token decode step: params [n, c, k].
+        // `n*c = rows` threads, each a `K`-tap MAC (the `conv1d` family's
+        // `Cin_g=1` depthwise case at `L=1`, `w`'s footprint counted once as
+        // `c*k` -- same convention as `conv1d`'s own weight term, not
+        // multiplied out per row) plus a `K-1`-element ring-buffer shift
+        // (`hist` read AND written, so its footprint counts twice).
+        "causal_conv1d_step" => {
+            let (n, c, k) = (p(0)?, p(1)?, p(2)?);
+            let rows = n * c;
+            let km1 = k.saturating_sub(1);
+            f(2 * rows * k, 4 * (2 * rows + c * k + 2 * rows * km1))
+        }
 
         // ---- bmm/bmm_acc: batched matmul, both operands vary per batch.
         // Params [batch, m, k, n, trans_a, trans_b, alpha, a_off, b_off, out_off].

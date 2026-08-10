@@ -108,11 +108,18 @@
 //! ## What this module does NOT do
 //!
 //! Per the porting task this exists for: no GQA head-repeat (`H` here is
-//! already `num_v_heads`), no L2-norm, no gated RMSNorm, no depthwise conv,
-//! no decay-gate computation (`raw_g`/`beta` arrive ready-made), no T-padding
+//! already `num_v_heads`), no L2-norm, no gated RMSNorm, no
+//! decay-gate computation (`raw_g`/`beta` arrive ready-made), no T-padding
 //! (caller must pass `t` already a multiple of `chunk` — [`GdnShape::n_chunks`]
-//! asserts it), no incremental/decode (single-token) path — chunked/prefill
-//! (steps 1-11) only.
+//! asserts it). [`gdn_chunk_fwd`] ITSELF remains chunked/prefill (steps 1-11)
+//! only, unchanged — the single-token recurrence and the causal depthwise
+//! conv decode step this paragraph used to say were out of scope are now
+//! provided as SEPARATE, decode-only entry points below: [`gdn_recurrent_step`]
+//! (the per-token state update, validated against this module's own
+//! [`gdn_chunk_fwd`] at `chunk=1` — see that function's doc) and
+//! [`gdn_causal_conv1d_step`] (the streaming ring-buffer sibling of
+//! `audio::conv::conv1d_fwd`'s whole-sequence causal conv, validated against
+//! it the same way).
 //!
 //! ## Backward
 //!
@@ -1040,4 +1047,242 @@ pub fn gdn_chunk_bwd(
     steps.push(splice(bwd.dot_scratch, d_beta, 0, bhc * c));
 
     steps
+}
+
+// =============================================================================
+// Decode: the single-token recurrent state update -- gdn_recurrent_step
+// =============================================================================
+//
+// Everything above is [`gdn_chunk_fwd`]'s prefill machinery (whole sequence at
+// once, chunk-parallel). Incremental decode needs the OTHER form of the same
+// recurrence: given one new token and the recurrent state persisted from the
+// previous token, produce this token's output and the updated state, with no
+// chunk/UT-transform machinery at all. Transcribed directly from HuggingFace's
+// `torch_recurrent_gated_delta_rule` (`transformers/models/qwen3_5_moe/
+// modeling_qwen3_5_moe.py` lines 332-381) -- read that function, not this
+// paraphrase, before changing anything here. Per-`(batch,head)`, per-token
+// `query,key: [Dk]`, `value: [Dv]`, scalar raw log-decay `g` and scalar sigmoid
+// gate `beta` (both already computed by the caller, exactly as
+// [`gdn_chunk_fwd`] expects, and `query` UNSCALED -- see below):
+//
+//   state = state * exp(g)                     -- decay, state: [Dk,Dv]
+//   kv_mem[Dv]  = sum_Dk state[Dk,Dv] * key[Dk] -- kv_mem = key^T @ state
+//   delta[Dv]   = (value[Dv] - kv_mem[Dv]) * beta
+//   state[Dk,Dv] += key[Dk] * delta[Dv]         -- rank-1 outer-product accumulate
+//   output[Dv]  = sum_Dk state[Dk,Dv] * query[Dk] * scale -- POST-update state
+//
+// `scale = 1/sqrt(Dk)`. The reference's own `torch_recurrent_gated_delta_rule`
+// pre-scales `query` ONCE, outside its per-token loop; this module instead
+// folds `scale` into the one `bmm` that ever consumes `query` (its `alpha`),
+// matching [`gdn_chunk_fwd`]'s own convention (see this file's top-of-module
+// doc, step 1) of never mutating `query` itself. `key`/`value`/`state` are
+// otherwise identical to [`gdn_chunk_fwd`]'s own per-chunk state-update math
+// (steps 10's `v_prime`/`v_new`/state-decay/state-accumulate) -- unsurprising,
+// since [`gdn_chunk_fwd`] AT `chunk=1` degenerates to exactly this recurrence
+// (`T_mat` collapses to the 1x1 identity, `decay_mask`'s only cell is `1`, so
+// `u = v_beta`, `w = k_beta*exp(g)`, and the chunk loop's `v_prime`/`v_new`
+// become precisely this function's `kv_mem`/`delta`) -- which is the oracle
+// `crates/model/tests/gdn_recurrent_step.rs` checks this function against,
+// rather than re-deriving a second independent host reference: running
+// [`gdn_chunk_fwd`] with `chunk=1` over T one-token "chunks" and running this
+// function T times in a row, state threaded between calls, must agree to
+// fp32 tolerance.
+//
+// ## Why every step composes from EXISTING kernels
+//
+// * `state *= exp(g)`: [`GdnIds::state_decay`] (`gdn_state_decay.wgsl`)
+//   already computes exactly `state[bh,dk,dv] *= exp(g_cs[g_cs_off +
+//   bh*c_len + c_len-1])` in place -- passing `c_len=1, g_cs_off=0` and
+//   `raw_g` itself (a single value needs no cumsum) degenerates that to
+//   `state *= exp(raw_g[bh])`, this function's decay step, VERBATIM. This is
+//   a better fit than `exp.wgsl` + `scale_row.wgsl` (the composition this
+//   module's own porting task sketched): `scale_row.wgsl` is not an in-place
+//   kernel (separate `x`/`y` bindings), and `Gpu::step`'s own
+//   `assert_no_output_alias` FORBIDS binding one buffer as both an input and
+//   the output slot of a single dispatch -- so decaying `state` through
+//   `scale_row.wgsl` would need a second `[bh,dk,dv]`-sized scratch buffer
+//   for no benefit, when `gdn_state_decay.wgsl` (already in [`GdnIds`], no
+//   new kernel, no extra scratch) does the identical arithmetic in place.
+// * `kv_mem = key^T @ state`: [`bmm_step`] with `batch=bh, m=1, k=dk, n=dv,
+//   trans_a=false, trans_b=false` -- `key` addressed as `[bh,1,dk]` (its own
+//   natural `[bh,dk]` layout, unchanged), `state` as `[bh,dk,dv]`, output into
+//   a dedicated `[bh,dv]` scratch buffer (never `state` itself -- see the
+//   `assert_no_output_alias` note above; every bmm output here is a buffer
+//   distinct from all of that call's inputs).
+// * `delta = (value - kv_mem) * beta`: [`GdnIds::sub`] into a SECOND small
+//   scratch buffer (again distinct from `value`/`kv_mem`), then
+//   [`GdnIds::row_scale`] (`scale_row.wgsl`, `m=dv`) writing back into the
+//   FIRST scratch buffer -- legal because by the time `row_scale` runs, that
+//   buffer's `kv_mem` value has already been consumed by `sub` and nothing
+//   else needs it; the two scratch buffers simply ping-pong rather than one
+//   being reused as a `scale_row.wgsl` self-alias (which, again, `Gpu::step`
+//   would reject).
+// * `state += key ⊗ delta`: [`bmm_step`] with [`GdnIds::bmm_acc`], `batch=bh,
+//   m=dk, k=1, n=dv` -- `key` reinterpreted as `[bh,dk,1]` (SAME physical
+//   bytes as the `kv_mem` bmm's `[bh,1,dk]` view: with `k=1` the address
+//   expression collapses to the same `a_base + i` either way, so no separate
+//   transposed copy of `key` is needed), `delta` as `[bh,1,dv]` (its own
+//   natural `[bh,dv]` layout), accumulating into `state` (the one dispatch
+//   here where `state` legitimately appears ONLY as the output binding, which
+//   `bmm_acc.wgsl` is specifically designed to read-modify-write).
+// * `output = query^T @ state(updated) * scale`: [`bmm_step`] with
+//   [`GdnIds::bmm`], the same `batch=bh, m=1, k=dk, n=dv` shape as `kv_mem`'s
+//   own bmm with `query` in place of `key` and `alpha=scale`, run AFTER the
+//   state update above (`state` at this point already holds the new value).
+//
+// No new kernel, no new [`GdnIds`] field -- every kernel this function
+// dispatches is already a [`GdnIds`] member [`gdn_chunk_fwd`] itself uses.
+
+/// Small per-token scratch [`gdn_recurrent_step`] needs, both `[bh,Dv]`
+/// (`bh = shape.bh()`). Ping-ponged across the call (see this section's doc,
+/// "Why every step composes from existing kernels") rather than being two
+/// fixed-role buffers: `kv_mem` first holds `key^T @ state`, then (after
+/// `sub`) is overwritten with the beta-scaled `delta` that `scale`
+/// (initially holding `value - kv_mem`) has just been used to produce.
+pub struct GdnRecurrentScratch<'a> {
+    /// `[bh, Dv]` -- `key^T @ state`, then (after the `sub`+`row_scale` pair)
+    /// the final `delta = (value - kv_mem) * beta` fed to the state's
+    /// rank-1 accumulate.
+    pub kv_mem: &'a DeviceBuffer,
+    /// `[bh, Dv]` -- `value - kv_mem`, consumed immediately by the
+    /// `row_scale` call that produces `kv_mem`'s final `delta` value above.
+    pub sub_out: &'a DeviceBuffer,
+}
+
+/// The single-token Gated DeltaNet recurrent state update -- see this
+/// section's doc (above [`GdnRecurrentScratch`]) for the exact formula and
+/// why it needs no kernel beyond [`GdnIds`]'s existing members.
+///
+/// **Processes exactly ONE token per call** (`shape.t` is not read by this
+/// function at all -- every buffer here is `[bh, ...]`-shaped with NO time
+/// axis, unlike [`gdn_chunk_fwd`]'s chunk-major `[bhc, c, ...]` convention).
+/// A caller decoding `N` tokens sequentially calls this `N` times, threading
+/// the SAME `state` buffer from one call to the next -- the same shape as
+/// `crates/qwen3/src/model.rs`'s `decode_at`/`decode_steps` calling one
+/// incremental step per token rather than taking a token count. This was the
+/// simpler of the two options this function's porting task left open (loop
+/// inside vs. outside): it composes directly with a host decode loop that
+/// also has to do other per-token work (embedding lookup, GQA-layer KV
+/// append, sampling) between GDN layers, none of which this module knows
+/// about or should.
+///
+/// `state` is both the input recurrent state AND the in-place-updated output
+/// -- the same "one buffer, evolved in place, also the return value"
+/// convention [`gdn_chunk_fwd`]'s own `final_state` uses (seed it with zeros
+/// for a fresh sequence's first token). `query`/`key`/`value`/`raw_g`/`beta`
+/// are `[bh,Dk]`/`[bh,Dk]`/`[bh,Dv]`/`[bh]`/`[bh]` respectively -- this
+/// token's row alone, no chunk or time axis; `query` is UNSCALED (see this
+/// section's doc for where `1/sqrt(Dk)` is folded in). `out` is `[bh,Dv]`,
+/// overwritten (never accumulated).
+pub fn gdn_recurrent_step(
+    g: &Gpu,
+    ids: &GdnIds,
+    shape: &GdnShape,
+    query: &DeviceBuffer,
+    key: &DeviceBuffer,
+    value: &DeviceBuffer,
+    raw_g: &DeviceBuffer,
+    beta: &DeviceBuffer,
+    state: &DeviceBuffer,
+    scratch: &GdnRecurrentScratch,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    let (dk, dv) = (shape.dk, shape.dv);
+    let bh = shape.bh();
+    let scale = 1.0f32 / (dk as f32).sqrt();
+
+    vec![
+        // state *= exp(raw_g) -- gdn_state_decay.wgsl's own in-place contract,
+        // degenerated to a length-1 window (see this section's doc).
+        g.step(ids.state_decay, &[raw_g, state], &[bh, dk, dv, 1, 0], bh * dk * dv),
+        // kv_mem = key^T @ state (state already decayed).
+        bmm_step(g, ids.bmm, bh, 1, dk, dv, false, false, 1.0, key, 0, state, 0, scratch.kv_mem, 0),
+        // sub_out = value - kv_mem.
+        g.step(ids.sub, &[value, scratch.kv_mem, scratch.sub_out], &[bh * dv, 0, 0], bh * dv),
+        // kv_mem <- sub_out * beta == delta (ping-pong: kv_mem's old value was
+        // fully consumed by the sub above).
+        g.step(ids.row_scale, &[scratch.sub_out, beta, scratch.kv_mem], &[bh * dv, dv], bh * dv),
+        // state += key ⊗ delta.
+        bmm_step(g, ids.bmm_acc, bh, dk, 1, dv, false, false, 1.0, key, 0, scratch.kv_mem, 0, state, 0),
+        // out = query^T @ state(updated), scaled by 1/sqrt(Dk).
+        bmm_step(g, ids.bmm, bh, 1, dk, dv, false, false, scale, query, 0, state, 0, out, 0),
+    ]
+}
+
+// =============================================================================
+// Decode: the causal depthwise Conv1d streaming step -- gdn_causal_conv1d_step
+// =============================================================================
+//
+// Qwen3.5's GDN layer runs `in_proj_qkv`'s output through a causal depthwise
+// `Conv1d` (`kernel_size=4`, `groups=conv_dim`, i.e. one independent K-tap FIR
+// filter per channel) before the recurrence above ever sees `query`/`key`/
+// `value`. `audio::conv::conv1d_fwd` (`conv1d.wgsl`) already computes this for
+// a WHOLE sequence at once (causal expressed as a left `pad=K-1`); decode
+// needs the streaming, one-token-at-a-time sibling, since re-running the
+// whole-sequence kernel over a growing sequence every step would be O(T^2).
+//
+// [`gdn_causal_conv1d_step`] is a thin `Step` wrapper around the new
+// `causal_conv1d_step.wgsl` kernel (see that file's own header for the exact
+// per-`(n,c)` math and why NO existing kernel fit without an `N`x memory cost
+// -- checked per `docs/kernel-checklist.md` sec A before adding it). Kept in
+// this module (rather than `audio::conv`, where `conv1d_fwd` itself lives)
+// because its only caller is GDN-shaped decode and its state -- a per-`(n,c)`
+// history ring buffer -- is exactly the kind of persisted-across-calls decode
+// state [`gdn_recurrent_step`]'s `state` argument already is; a future
+// non-GDN streaming-conv caller can still reuse the kernel directly without
+// this wrapper.
+//
+// `hist` is the persistent "conv state": `[N, C, K-1]`, threaded across calls
+// the same way [`gdn_recurrent_step`]'s `state` is, and must start ZEROED for
+// a fresh sequence (matching `conv1d_fwd`'s own implicit left zero-pad for a
+// whole sequence's first `K-1` tokens). Validated against `conv1d_fwd` by
+// `crates/model/tests/causal_conv1d_step.rs`: running `conv1d_fwd` once over a
+// short sequence and running this function once per token over the same
+// input (with the SAME zeroed `hist` start) must agree to fp32 tolerance.
+
+/// Kernel index [`gdn_causal_conv1d_step`] dispatches.
+#[derive(Clone, Copy)]
+pub struct GdnConvIds {
+    /// `causal_conv1d_step.wgsl`.
+    pub causal_conv1d_step: usize,
+}
+
+/// The shape one call to [`gdn_causal_conv1d_step`] operates over: `n`
+/// sequences decoding in parallel (the decode batch), `c` channels
+/// (`conv_dim = key_dim*2 + value_dim` for Qwen3.5's `in_proj_qkv`), `k` the
+/// causal conv kernel size (4 for Qwen3.5-35B-A3B's GDN layers).
+#[derive(Clone, Copy)]
+pub struct GdnConvShape {
+    pub n: u32,
+    pub c: u32,
+    pub k: u32,
+}
+
+impl GdnConvShape {
+    /// `N*C*(K-1)` -- the `hist` ring-buffer's element count. Panics if
+    /// `k == 0` (not a real conv kernel size); `k == 1` is legal (an empty
+    /// history, a pointwise "conv") and gives `0`.
+    pub fn hist_len(&self) -> u32 {
+        assert!(self.k > 0, "GdnConvShape: k must be >= 1");
+        self.n * self.c * (self.k - 1)
+    }
+}
+
+/// One `causal_conv1d_step.wgsl` dispatch -- see this section's doc and that
+/// kernel's own header for the exact per-`(n,c)` math, the `hist`
+/// zero-initialisation requirement, and why this composes no other kernel.
+/// `x`/`y`: `[N,C]` (this token's per-channel input/output, one row per
+/// sequence); `w`: `[C,K]` (the depthwise conv weight, shared across every
+/// sequence and every decode step); `hist`: `[N,C,K-1]`, read AND
+/// written in place (the persisted conv state -- see this section's doc).
+pub fn gdn_causal_conv1d_step(
+    g: &Gpu,
+    ids: &GdnConvIds,
+    shape: &GdnConvShape,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    hist: &DeviceBuffer,
+    y: &DeviceBuffer,
+) -> Step {
+    g.step(ids.causal_conv1d_step, &[x, w, hist, y], &[shape.n, shape.c, shape.k], shape.n * shape.c)
 }

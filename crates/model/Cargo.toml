@@ -31,3 +31,10 @@ brain-backend-cpu = { workspace = true }
 # this is not a real cycle.
 [dev-dependencies]
 brain-gradcheck.workspace = true
+# Test-only: `crates/model/tests/causal_conv1d_step.rs` gates
+# `gdn::gdn_causal_conv1d_step` against `audio::conv::conv1d_fwd`'s
+# whole-sequence causal conv (the existing oracle the porting task named).
+# `brain-audio` does not depend on `brain-model`, so this is a plain
+# dev-dependency, not the "test crate depends on the crate under test" cycle
+# shape `brain-gradcheck` above is.
+brain-audio.workspace = true
