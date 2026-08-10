@@ -148,7 +148,10 @@ def main() -> None:
             "h": H, "w": W,
         },
         "provenance": {
-            "repo": str(DIAMOND_REPO),
+            # The upstream identity, never the machine-local clone path --
+            # fixtures are committed, so an absolute path here leaks the dev
+            # box's layout into the repo (same rule as c4c322f's goldens fix).
+            "repo": "eloialonso/diamond (local clone; set BRAIN_DIAMOND_REPO)",
             "repo_commit": subprocess.run(
                 ["git", "-C", str(DIAMOND_REPO), "rev-parse", "HEAD"],
                 capture_output=True, text=True, check=True).stdout.strip(),
