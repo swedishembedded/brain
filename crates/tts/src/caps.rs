@@ -45,6 +45,29 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "Qwen3-TTS voice synthesis — text to 24 kHz speech (Talker + MTP + codec).", vec![synth])
 }
 
+/// The env-configured RESIDENT surface's `speak` action (`cli::resident_tts::
+/// TtsResident` — weights resolved from `BRAIN_TTS_WEIGHTS`/`BRAIN_TTS_CKPT`
+/// at registration, so no path params; declares the audio output the
+/// instance actually emits). Lives HERE, next to [`manifest`]'s `synth`
+/// spec, so the two surfaces' specs cannot silently diverge — the resident
+/// used to build its own private Manifest in `crates/cli`.
+pub fn speak_spec() -> ActionSpec {
+    ActionSpec::new("speak", "synthesize speech from text (Qwen3-TTS, 24 kHz f32 PCM)")
+        .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
+        .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
+        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
+        .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
+        .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: raw mono f32 little-endian PCM at 24 kHz"))
+}
+
+/// The resident (D-Bus/HTTP) manifest — [`speak_spec`] under the same
+/// [`MODEL`] id the catalog's [`manifest`] uses.
+pub fn resident_manifest() -> Manifest {
+    Manifest::new(MODEL, "text-to-speech (Qwen3-TTS Talker + MTP + codec)", vec![speak_spec()])
+}
+
 /// The executable TTS model behind the manifest. Stateless: `pipeline::synth`
 /// owns loading (per call), so construction is free and there is no hot cache.
 #[derive(Default)]

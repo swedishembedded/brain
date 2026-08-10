@@ -21,7 +21,7 @@
 //!     in-context (ICL) clone path (the reference wav is codec-encoded in-tree).
 
 use capability::{
-    ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
+    ActionResult, Blob, Invocation, Manifest, Media, Outcome, Progress,
 };
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
@@ -80,20 +80,13 @@ impl TtsResident {
         }
     }
 
-    fn speak_spec() -> ActionSpec {
-        ActionSpec::new("speak", "synthesize speech from text (Qwen3-TTS, 24 kHz f32 PCM)")
-            .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
-            .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
-            .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature").default(json!(0.9)))
-            .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
-            .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
-            .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
-    }
 }
 
 impl ResidentModel for TtsResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(tts::caps::MODEL, "text-to-speech (Qwen3-TTS Talker + MTP + codec)", vec![Self::speak_spec()])
+        // The spec lives in tts::caps, next to the catalog's `synth` spec,
+        // so the two surfaces cannot silently diverge.
+        tts::caps::resident_manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
@@ -140,7 +133,10 @@ struct TtsInstance {
 }
 
 impl Instance for TtsInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action != "speak" {
+            return Err(format!("tts: unsupported action '{action}' (this resident declares: speak)"));
+        }
         let text = inv.get_str("text").ok_or("tts speak: missing required param 'text'")?;
         if text.trim().is_empty() {
             return Err("tts speak: 'text' must be non-empty".to_string());
