@@ -515,6 +515,57 @@ fetching an already-quantized GGUF directly.
   mirroring `Qwen35::step`'s existing pattern) and video (multi-frame) —
   single image only, matching this task's scope.
 
+- **P13 — full serving contract** (done, commit `ae46e519`):
+  `crates/qwen35moe/src/caps.rs` (`Qwen35Provider`, one streaming `generate`
+  action for `brain do qwen35moe …`/D-Bus-direct dispatch, model id
+  `brain/qwen35moe`) and `crates/cli/src/resident_qwen35moe.rs`
+  (`Qwen35Resident`, the always-hot adapter putting `qwen35moe::serve::
+  Engine`/`Scheduler` behind the residency `Executor`, env-gated on
+  `BRAIN_QWEN35MOE_WEIGHTS`/`_TOKENIZER`/`_CTX`/`_MAX_BATCH`, registered in
+  `resident.rs::build_executor`). **Deviation from this file's own earlier
+  plan note above**: the model id is `brain/qwen35moe`, NOT the byte-exact
+  upstream `Qwen/Qwen3.5-35B-A3B` — verified against the REAL precedent
+  (`qwen3::caps::MODEL == "brain/qwen"`, `omni::caps::MODEL == "brain/omni"`)
+  rather than the plan's untested assumption; the upstream id is still used
+  wherever provenance genuinely matters (import/fetch), just not as this
+  catalog entry's id.
+  - Chat rendering (`messages`/`system`/`tools`/stop-strings/
+    `enable_thinking`/tool-call scanning) reuses `qwen3::chat::{parse_request,
+    SeqState}` completely as-is — zero duplication, confirmed by a real
+    passing test with a real tokenizer
+    (`tokenizer_present_runs_the_shared_chat_parse_with_tools`).
+  - `qwen35moe::sample` gained `generate_kv_stream`/`generate_kv_stream_with_head`
+    (a per-token-callback variant of the existing `generate_kv`), needed for
+    `caps.rs`'s and `Qwen35Resident`'s streaming `Progress`; validated to
+    produce byte-identical output to the non-streaming path.
+  - **Verified, not assumed**: registering `Qwen35Resident` with the
+    residency `Executor` alone, with NO new code in `crates/apiserve` or
+    `crates/dbus`, is enough for `brain/qwen35moe` to appear on both the
+    OpenAI and Anthropic `/v1/models` lists with chat capability — exercised
+    against a real `axum` router in `resident_qwen35moe.rs`'s own test
+    (`brain_qwen35moe_is_auto_exposed_on_openai_and_anthropic_model_lists`),
+    not just inspected by hand. `docs/api-security-audit.md`'s re-audit
+    trigger (a change to those two crates) did not fire, and no code
+    actually landed there.
+  - `examples/llm/qwen35moe.py` + README (mirroring `examples/omni/omni.py`'s
+    D-Bus/OpenAI/Anthropic wire-contract proof, minus multimodal blobs — a
+    dedicated new script rather than generalizing `omni.py`, since omni's
+    script/doc are built entirely around blob inputs that don't apply here),
+    wired into `tests/e2e/examples.bats`/`manifest.tsv`.
+  - **Honestly scoped down vs `QwenResident`** (documented in
+    `resident_qwen35moe.rs`'s own module doc, matching what `qwen35moe::
+    serve::Engine` actually is per P11c above, not overclaimed): fp32
+    weights only on the served path (no `new_i8` wiring into `Engine::
+    from_map`, even though `Qwen35::new_i8` itself exists and IS reachable
+    through the separate `caps.rs`/`brain do` path), no int8 KV, no LoRA
+    adapter folding (no `qwen35moe` counterpart to `qwen3::lora::
+    fold_adapter_into` exists yet), no multi-GPU sharding, no `.gguf`
+    serving path, no fast batched prefill (`Qwen35::step` one prompt token
+    at a time). `estimate()`'s VRAM figure only counts the GQA-side KV pool
+    (the GDN recurrent-state pool is real but small and its sizing helper is
+    crate-private in `serve.rs` by design) — an honest under-count, not a
+    silent one.
+
 ## In progress
 
 - **P11 — `qwen35moe::serve::Engine`**: `model::serve::PagedDecoder` impl; KV
@@ -607,9 +658,6 @@ fetching an already-quantized GGUF directly.
 - **P12 — LoRA + memory-bounded finetune validation**: base frozen in
   INT4/INT8 (never fp32/bf16), only LoRA adapters trainable, on real
   weights, measured loss descent, bounded peak RSS/VRAM.
-- **P13 — full serving contract**: `Qwen35Resident`, `caps.rs` (model id
-  must be byte-exact `Qwen/Qwen3.5-35B-A3B`), D-Bus verification, OpenAI/
-  Anthropic auto-exposure via `catalog::api_caps`, examples + manifest.
 - **Qwen3.5-27B (dense)**: a second named config once the shared hybrid code
   is proven — the dense sibling is the same code with `n_experts=1`-shaped
   MoE-as-dense and no linear-attention layers, additive not a fork.
