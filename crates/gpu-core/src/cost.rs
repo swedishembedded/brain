@@ -362,6 +362,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "splice_add" => f(n0(), 12 * n0()),
         // params [n, src_base, dst_base]: same op as splice_add, independent offsets.
         "splice_add_offset_src" => f(n0(), 12 * n0()),
+        // params [rows, n_experts, top_k]: one thread per row scans up to
+        // n_experts gate entries (int compares, no flops) and writes up to
+        // top_k ids -- see router_topk_compact.wgsl's own doc.
+        "router_topk_compact" => {
+            let (rows, e, k) = (p(0)?, p(1)?, p(2)?);
+            c(0, rows * e, 4 * (rows * e + rows * k))
+        }
         // params [width, row]: one cache-row write.
         "kv_append" => f(0, 8 * p(0)?),
         // params [rows, heads_out, group, hd, ...]: replicate kv heads (copy);

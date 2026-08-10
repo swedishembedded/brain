@@ -257,6 +257,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // -- LoRA tier -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
     // Appended at the true end, same convention as the splice tier above.
     ("axpy", kernels::AXPY),                                     // 92
+    // -- decode-only sparse MoE dispatch tier -- see
+    // `Qwen35::moe_sublayer_decode_sparse`. Appended at the true end, same
+    // convention as the splice/LoRA tiers above.
+    ("router_topk_compact", kernels::ROUTER_TOPK_COMPACT),       // 93
 ];
 
 const RMSNORM: usize = 0;
@@ -352,6 +356,7 @@ const ATTN_DECODE_APPLY: usize = 89;
 const SPLICE: usize = 90;
 const SPLICE_BWD: usize = 91;
 const AXPY: usize = 92;
+const ROUTER_TOPK_COMPACT: usize = 93;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -1961,6 +1966,13 @@ impl Qwen35 {
                 ));
             }
             Some(acts)
+        } else if n == 1 {
+            // Decode's sparse dispatch -- see `Self::moe_sublayer_decode_sparse`'s
+            // own doc. Batched/prefill (`n > 1`, the `else` arm below) is left
+            // completely alone: per-dispatch overhead is amortised there, so
+            // this optimisation only pays off at decode's single row.
+            self.moe_sublayer_decode_sparse(l, &mut steps, &shape, &xn2, &gate, &moe_acc);
+            None
         } else {
             let scratch = ExpertScratch {
                 gate_pre: &g.storage((n * moe_ff) as u64),
@@ -2037,6 +2049,114 @@ impl Qwen35 {
             sh_gate_scalar,
         });
         (moe_out, acts)
+    }
+
+    /// Decode's sparse expert dispatch -- the `n==1` sibling of
+    /// [`Self::moe_sublayer`]'s dense per-expert loop, called from inside it
+    /// (see the call site's own comment) rather than replacing it, so the
+    /// batched/prefill path is untouched.
+    ///
+    /// The dense loop calls `model::moe::expert_fwd` once per expert, for all
+    /// `n_experts` (256) experts, unconditionally -- `moe_linear_gated.wgsl`
+    /// already early-exits per-row for a non-selected expert (so no wasted
+    /// FLOPs), but the DISPATCH itself still happens 256 times, 5 GPU submits
+    /// each. At decode's `rows=1` that fixed per-dispatch overhead, not FLOPs,
+    /// dominates: only `top_k` (8) of those 256 experts are ever selected for
+    /// the single row. This function finds out WHICH `top_k` experts those
+    /// are and calls `expert_fwd` only for those, cheaply:
+    ///
+    /// 1. `steps` (this layer's ln2 rmsnorm, router matmul, and
+    ///    `router_fwd_kind` -- queued but not yet executed by the caller) is
+    ///    submitted now and cleared: the compaction readback below needs
+    ///    `gate`'s real device contents, so this is a genuine synchronisation
+    ///    point, the same shape of trade `model::moe::expert_fwd_compact`
+    ///    already makes (see its own doc) -- unavoidable, since only the HOST
+    ///    can decide how many/which GEMM dispatches to issue next, and no
+    ///    indirect-dispatch primitive exists anywhere in this engine.
+    /// 2. `router_topk_compact.wgsl` (new kernel, see its own header) turns
+    ///    the dense `[1, n_experts]` gate row into a compact `[top_k]` list of
+    ///    the selected expert ids (padded with the sentinel `n_experts` for
+    ///    any shortfall -- shouldn't happen, defensive only).
+    /// 3. That `[top_k]` u32 buffer (8 words at the real 256-expert/top-8
+    ///    scale, vs 256 f32 words for the dense gate `expert_fwd_compact`
+    ///    would need) is read back and deduplicated on the host -- a no-op
+    ///    given `router_gate.wgsl`'s own construction (its selection is
+    ///    already distinct), done anyway because it's nearly free at 8
+    ///    elements and turns "trust the invariant" into "checked".
+    /// 4. `expert_fwd` (the SAME step-builder the dense loop uses, unmodified)
+    ///    is called once per distinct real expert id, first with
+    ///    `accumulate=false` (mirrors the dense loop's own `ei != 0` set-vs-
+    ///    add contract for `moe_acc`) and the rest `accumulate=true`.
+    ///
+    /// Correctness: `moe_linear_gated.wgsl` writes exactly 0 for any row
+    /// whose gate weight for the dispatched expert is 0 (`model::moe`'s own
+    /// module doc), so the dense loop's non-selected experts are already a
+    /// provable no-op on `moe_acc` -- excluding them here must not change
+    /// `moe_acc`'s final contents, only how many dispatches produce them. See
+    /// this crate's `moe_sublayer_decode_sparse_matches_dense_loop_bit_identical`
+    /// test (both backends) for the check.
+    fn moe_sublayer_decode_sparse(
+        &self,
+        l: usize,
+        steps: &mut Vec<Step>,
+        shape: &MoeShape,
+        xn2: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        moe_acc: &DeviceBuffer,
+    ) {
+        let g = &self.gpu;
+        let (d, moe_ff, e, top_k, rows) = (shape.d_model, shape.moe_ff, shape.n_experts, shape.top_k, shape.rows);
+        debug_assert_eq!(rows, 1, "moe_sublayer_decode_sparse: decode-only, expected rows==1, got {rows}");
+
+        // Flush the router steps queued so far -- the readback below needs
+        // `gate`'s real device contents, not just its recorded dispatch.
+        g.submit(&[], steps);
+        steps.clear();
+
+        let top_ids = g.storage((rows * top_k) as u64);
+        g.submit(&[], &[g.step(ROUTER_TOPK_COMPACT, &[gate, &top_ids], &[rows, e, top_k], rows)]);
+        let host_ids: Vec<u32> = g.read(&top_ids, (rows * top_k) as usize).iter().map(|v| v.to_bits()).collect();
+
+        // Dedup + drop the `e` sentinel (no real expert has that id). Defensive
+        // no-op given router_gate.wgsl's own top_k-distinct construction.
+        let mut real_ids: Vec<u32> = Vec::with_capacity(top_k as usize);
+        for id in host_ids {
+            if id < e && !real_ids.contains(&id) {
+                real_ids.push(id);
+            }
+        }
+
+        if real_ids.is_empty() {
+            // Defensive only (router_gate.wgsl always selects >=1 expert for
+            // top_k>=1): still honour the set-vs-add contract so `moe_acc`
+            // is never left uninitialised for the shared-expert combine below.
+            g.submit(&[moe_acc], &[]);
+            return;
+        }
+
+        let scratch = ExpertScratch {
+            gate_pre: &g.storage(moe_ff as u64),
+            up: &g.storage(moe_ff as u64),
+            h: &g.storage(moe_ff as u64),
+            expert_out: &g.storage(d as u64),
+        };
+        for (i, &ei) in real_ids.iter().enumerate() {
+            let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+            steps.extend(expert_fwd(
+                g,
+                &moe_ids(),
+                shape,
+                xn2,
+                gate,
+                self.w(&ep("gate.weight")),
+                self.w(&ep("up.weight")),
+                self.w(&ep("down.weight")),
+                &scratch,
+                moe_acc,
+                ei,
+                i != 0,
+            ));
+        }
     }
 
     // ---- full stack ----------------------------------------------------------
@@ -3210,5 +3330,279 @@ impl model::Model for Qwen35 {
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()
+    }
+}
+
+/// Bit-identical gate for [`Qwen35::moe_sublayer_decode_sparse`] -- the
+/// decode-only (`n==1`) sparse MoE dispatch this task added. Decode is
+/// inference-only (`Qwen35::step` has no backward), so there is no gradcheck
+/// entry point here; a direct bit-identical comparison against the dense
+/// per-expert loop it replaces is both stronger and cheaper.
+#[cfg(test)]
+mod decode_sparse_moe_tests {
+    use super::*;
+    use crate::config::Qwen35Config;
+
+    /// The exact dense per-expert loop `moe_sublayer`'s `else` arm used
+    /// (unconditionally, for every `n`) before this task's `n==1` sparse
+    /// branch — reimplemented standalone here as the independent baseline,
+    /// since `moe_sublayer` itself now always takes the sparse path at
+    /// `n==1`. Any future edit to the real dense loop must be mirrored here
+    /// or this test stops being an honest baseline.
+    fn moe_out_dense_reference(m: &Qwen35, l: usize, xmid: &DeviceBuffer) -> Vec<f32> {
+        let g = &m.gpu;
+        let c = &m.cfg;
+        let n = 1u32;
+        let d = c.d_model;
+        let e = c.n_experts;
+        let moe_ff = c.moe_intermediate_size;
+        let shared_ff = c.shared_expert_intermediate_size;
+        let p = |s: &str| format!("blocks.{l}.{s}");
+
+        let xn2 = g.storage((n * d) as u64);
+        let router_logits = g.storage((n * e) as u64);
+        let mut steps = vec![
+            rmsnorm_fwd(g, &kernel_ids(), xmid, m.w(&p("ln2.weight")), &xn2, d, n),
+            g.step(MATMUL, &[&xn2, m.w(&p("mlp.router.weight")), &router_logits], &[n, d, e], n * e),
+        ];
+        let shape = MoeShape { rows: n, d_model: d, moe_ff, n_experts: e, top_k: c.top_k };
+        let gate = g.storage((n * e) as u64);
+        steps.push(router_fwd_kind(
+            g,
+            &moe_ids(),
+            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 },
+            &shape,
+            &router_logits,
+            None,
+            &gate,
+            None,
+        ));
+
+        let moe_acc = g.storage((n * d) as u64);
+        let scratch = ExpertScratch {
+            gate_pre: &g.storage((n * moe_ff) as u64),
+            up: &g.storage((n * moe_ff) as u64),
+            h: &g.storage((n * moe_ff) as u64),
+            expert_out: &g.storage((n * d) as u64),
+        };
+        for ei in 0..e {
+            let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+            steps.extend(expert_fwd(
+                g,
+                &moe_ids(),
+                &shape,
+                &xn2,
+                &gate,
+                m.w(&ep("gate.weight")),
+                m.w(&ep("up.weight")),
+                m.w(&ep("down.weight")),
+                &scratch,
+                &moe_acc,
+                ei,
+                ei != 0,
+            ));
+        }
+
+        let moe_out = g.storage((n * d) as u64);
+        let sh_gate_pre = g.storage((n * shared_ff) as u64);
+        let sh_up = g.storage((n * shared_ff) as u64);
+        let sh_h = g.storage((n * shared_ff) as u64);
+        let sh_mlp_out = g.storage((n * d) as u64);
+        let sh_gate_logits = g.storage(n as u64);
+        let sh_gate_scalar = g.storage(n as u64);
+        let sh_scaled = g.storage((n * d) as u64);
+        let sh_scratch = SharedExpertScratch {
+            gate_pre: &sh_gate_pre,
+            up: &sh_up,
+            h: &sh_h,
+            mlp_out: &sh_mlp_out,
+            gate_logits: &sh_gate_logits,
+            gate_scalar: &sh_gate_scalar,
+            scaled: &sh_scaled,
+        };
+        steps.extend(shared_expert_fwd(
+            g,
+            &shared_expert_ids(),
+            n,
+            d,
+            shared_ff,
+            &xn2,
+            m.w(&p("mlp.shared_expert.gate.weight")),
+            m.w(&p("mlp.shared_expert.up.weight")),
+            m.w(&p("mlp.shared_expert.down.weight")),
+            Some(m.w(&p("mlp.shared_expert_gate.weight"))),
+            &sh_scratch,
+            &moe_acc,
+            &moe_out,
+        ));
+
+        g.submit(&[], &steps);
+        g.read(&moe_out, d as usize)
+    }
+
+    fn run(gpu: Gpu) {
+        let cfg = Qwen35Config::tiny();
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 11);
+        let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);
+
+        // Arbitrary but deterministic single-row hidden state fed straight
+        // into `moe_sublayer` -- this isolates the MoE dispatch itself from
+        // the rest of the layer stack (attention/GDN), which is not this
+        // task's concern.
+        let xvals: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.017 - 3.0).sin()).collect();
+        let xmid = m.gpu.storage_init("decode_sparse_test_xmid", &xvals);
+
+        for l in 0..cfg.n_layers as usize {
+            let dense = moe_out_dense_reference(&m, l, &xmid);
+            let (sparse_buf, _) = m.moe_sublayer(l, &xmid, 1);
+            let sparse = m.gpu.read(&sparse_buf, d);
+            assert_eq!(
+                dense.len(),
+                sparse.len(),
+                "layer {l}: dense/sparse moe_out length mismatch"
+            );
+            assert_eq!(
+                dense, sparse,
+                "layer {l}: sparse decode-path MoE dispatch diverged from the dense \
+                 per-expert loop it replaces -- must be bit-identical, not just close"
+            );
+        }
+    }
+
+    /// Pin the CPU JIT explicitly regardless of `BRAIN_DEVICE` (`docs/lessons.md`
+    /// #5 -- a barrier-crossing kernel can silently misbehave on exactly one
+    /// backend), mirroring `tests/decode_step.rs`'s own convention.
+    #[test]
+    fn moe_sublayer_decode_sparse_matches_dense_loop_bit_identical_cpu() {
+        run(Gpu::new_cpu(PIPELINES));
+    }
+
+    /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
+    /// backend otherwise -- run this under both `BRAIN_DEVICE=cpu` and unset.
+    #[test]
+    fn moe_sublayer_decode_sparse_matches_dense_loop_bit_identical_default_backend() {
+        run(Gpu::new(PIPELINES));
+    }
+
+    /// The actual claim behind this task ("fewer GPU dispatches per decode
+    /// step"), measured via `Gpu::stats()`, not asserted (`docs/lessons.md`'s
+    /// "close the loop" convention), at the REAL 256-expert/top-8 shape
+    /// (`Qwen35Config::qwen35_35b_a3b`'s own `n_experts`/`top_k` — the
+    /// dispatch COUNT this measures depends only on those two numbers, not on
+    /// `d_model`/`vocab`/`n_layers`, so the rest of the config stays
+    /// `tiny()`-cheap to build and run in milliseconds on the CPU backend).
+    ///
+    /// `dispatches` (individual `pass.dispatch_workgroups` calls -- pipeline
+    /// bind + launch, the unit `docs/kernel-checklist.md`'s own killed-
+    /// hypothesis table means by "per-dispatch overhead") is the honest
+    /// metric here, not `submits`: this engine lazily coalesces every queued
+    /// step into ONE real hardware submission at the next readback
+    /// (`backend_wgpu::Backend::submit`'s own doc — "a whole forward's
+    /// dispatches coalesce into a single queue.submit"), and the ORIGINAL
+    /// dense per-expert loop already queued its whole 1280-dispatch layer
+    /// through exactly one host-side `Gpu::submit` call, same as the sparse
+    /// path below -- `submits` was already 1-vs-1 before this task and stays
+    /// that way; it is `dispatches` that this task's whole point is to cut.
+    /// See this crate's final report for the exact numbers.
+    #[test]
+    fn moe_sublayer_decode_sparse_cuts_gpu_dispatches_at_real_expert_scale() {
+        let mut cfg = Qwen35Config::tiny();
+        cfg.n_experts = 256;
+        cfg.top_k = 8;
+        cfg.n_layers = 1;
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let init = crate::init::init_weights(&cfg, 3);
+        let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);
+        let d = cfg.d_model as usize;
+        let xvals: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.031 + 1.0).cos()).collect();
+        let xmid = m.gpu.storage_init("dispatch_count_test_xmid", &xvals);
+
+        let before_dense = m.gpu.stats().expect("cpu backend reports device stats");
+        let _dense = moe_out_dense_reference(&m, 0, &xmid);
+        let after_dense = m.gpu.stats().unwrap();
+
+        let before_sparse = m.gpu.stats().unwrap();
+        let (_sparse_buf, _) = m.moe_sublayer(0, &xmid, 1);
+        let after_sparse = m.gpu.stats().unwrap();
+
+        let dense_dispatches = after_dense.dispatches - before_dense.dispatches;
+        let sparse_dispatches = after_sparse.dispatches - before_sparse.dispatches;
+        println!(
+            "moe_sublayer decode dispatch @ n_experts={} top_k={}: dense={dense_dispatches} \
+             dispatches, sparse={sparse_dispatches} dispatches ({:.1}x fewer)",
+            cfg.n_experts,
+            cfg.top_k,
+            dense_dispatches as f64 / sparse_dispatches.max(1) as f64
+        );
+        assert!(
+            sparse_dispatches < dense_dispatches,
+            "sparse decode dispatch ({sparse_dispatches} dispatches) did not beat the dense \
+             per-expert loop ({dense_dispatches} dispatches)"
+        );
+    }
+
+    /// Real-hardware wall-clock, nice-to-have evidence alongside the
+    /// dispatch-count test above: one `moe_sublayer` call, dense vs sparse,
+    /// on the real wgpu backend (this box's Tesla P40s) at the real MoE
+    /// layer shape (`n_experts=256`, `top_k=8`, `d_model=2048`,
+    /// `moe_intermediate_size=512` -- `Qwen35Config::qwen35_35b_a3b`'s own
+    /// numbers). `vocab`/`block_size`/`n_layers` stay `tiny()`-small (this
+    /// benchmark calls `moe_sublayer` directly, never touching the embed/lm
+    /// -head/attention tensors those gate) so the weight upload itself stays
+    /// small -- this is real GEMM/dispatch cost at real MoE dimensions, NOT
+    /// a full 140 GB fp32 checkpoint load (out of scope for this pass; see
+    /// this crate's final report for why). `#[ignore]`d: needs a real GPU
+    /// and is a benchmark, not a correctness gate --
+    /// `cargo test -p brain-qwen35moe --lib -- --ignored --nocapture
+    /// moe_sublayer_decode_sparse_wallclock_at_real_scale_gpu`.
+    #[test]
+    #[ignore]
+    fn moe_sublayer_decode_sparse_wallclock_at_real_scale_gpu() {
+        let mut cfg = Qwen35Config::tiny();
+        cfg.d_model = 2048;
+        cfg.n_experts = 256;
+        cfg.top_k = 8;
+        cfg.moe_intermediate_size = 512;
+        cfg.shared_expert_intermediate_size = 512;
+        cfg.n_layers = 1;
+        let gpu = Gpu::new(PIPELINES); // real default backend (wgpu on this box)
+        println!("backend: {}", gpu.kind());
+        let init = crate::init::init_weights(&cfg, 5);
+        let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);
+        let d = cfg.d_model as usize;
+        let xvals: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.031 + 1.0).cos()).collect();
+        let xmid = m.gpu.storage_init("wallclock_test_xmid", &xvals);
+
+        // Warm up (pipeline compilation, allocator caches) before timing.
+        let _ = moe_out_dense_reference(&m, 0, &xmid);
+        let (_wsparse, _) = m.moe_sublayer(0, &xmid, 1);
+        m.gpu.poll_wait();
+
+        const ITERS: u32 = 5;
+        let mut dense_best = f64::INFINITY;
+        for _ in 0..ITERS {
+            let t0 = std::time::Instant::now();
+            let _ = moe_out_dense_reference(&m, 0, &xmid);
+            m.gpu.poll_wait();
+            dense_best = dense_best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut sparse_best = f64::INFINITY;
+        for _ in 0..ITERS {
+            let t0 = std::time::Instant::now();
+            let (out, _) = m.moe_sublayer(0, &xmid, 1);
+            m.gpu.poll_wait();
+            sparse_best = sparse_best.min(t0.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(&out);
+        }
+        println!(
+            "moe_sublayer wall-clock @ n_experts={} top_k={} d_model={} moe_ff={} (best of {ITERS}): \
+             dense={dense_best:.2} ms, sparse={sparse_best:.2} ms ({:.1}x)",
+            cfg.n_experts,
+            cfg.top_k,
+            cfg.d_model,
+            cfg.moe_intermediate_size,
+            dense_best / sparse_best
+        );
     }
 }

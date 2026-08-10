@@ -695,6 +695,8 @@ pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
 /// `wgsl/router_gate_train.wgsl`
 pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
+/// `wgsl/router_topk_compact.wgsl`
+pub const ROUTER_TOPK_COMPACT: &str = include_str!("../wgsl/router_topk_compact.wgsl");
 /// `wgsl/row_dot.wgsl`
 pub const ROW_DOT: &str = include_str!("../wgsl/row_dot.wgsl");
 /// `wgsl/row_scatter.wgsl`
@@ -1145,6 +1147,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_gate", ROUTER_GATE),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
     ("router_gate_train", ROUTER_GATE_TRAIN),
+    ("router_topk_compact", ROUTER_TOPK_COMPACT),
     ("row_dot", ROW_DOT),
     ("row_scatter", ROW_SCATTER),
     ("scale_add", SCALE_ADD),
