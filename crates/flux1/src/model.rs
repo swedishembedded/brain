@@ -116,40 +116,17 @@ fn f(x: f32) -> u32 {
     x.to_bits()
 }
 
-/// DiT numeric tier. fp32 is the parity reference (47.6 GiB of weights at full
-/// depth — it does NOT fit one 24 GiB card, so the fp32 gate runs at reduced
-/// depth); int8 quantizes every linear except the ones named in
-/// [`Flux1Model::new_with`] and brings the full 12 B model to ~12 GiB.
-/// Norms / RoPE / attention / GELU always stay f32.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Precision {
-    F32,
-    Int8,
-}
+// DiT numeric tier — `model::dispatch::Precision`, shared with flux2 (the
+// ONE name→tier map). For THIS model: fp32 is the parity reference (47.6 GiB
+// of weights at full depth — it does NOT fit one 24 GiB card, so the fp32
+// gate runs at reduced depth); int8 quantizes every linear except the ones
+// named in [`Flux1Model::new_with`] and brings the full 12 B model to
+// ~12 GiB. Norms / RoPE / attention / GELU always stay f32.
+pub use model::dispatch::Precision;
 
-impl Precision {
-    /// The CLI/capability enum (`fp32 | int8`) — the ONE name→tier map.
-    pub fn from_name(s: &str) -> Result<Precision, String> {
-        match s {
-            "fp32" => Ok(Precision::F32),
-            "int8" => Ok(Precision::Int8),
-            other => Err(format!("unknown precision {other} (fp32|int8)")),
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Precision::F32 => "fp32",
-            Precision::Int8 => "int8",
-        }
-    }
-}
-
-enum LinW {
-    F32(DeviceBuffer),
-    /// packed `[n, k/4]` u32 + per-channel scale `[n]` (`model::int8` layout)
-    I8(DeviceBuffer, DeviceBuffer),
-}
+// The resident-weight representation (fp32 | packed int8 + per-channel
+// scale) is shared with flux2 via `model::dispatch`.
+use model::dispatch::LinW;
 
 /// One biased linear. Every FLUX.1 linear has a bias, so it lives here rather
 /// than at each call site.
@@ -160,7 +137,7 @@ struct Lin {
 
 impl Lin {
     fn is_i8(&self) -> bool {
-        matches!(self.w, LinW::I8(..))
+        self.w.is_i8()
     }
 }
 
@@ -239,13 +216,9 @@ struct Scratch {
     ln_beta: DeviceBuffer,
 }
 
-/// Int8 activation-quantization scratch: the per-token dynamic scale plus one
-/// packed-activation buffer per contraction width.
-struct I8Scratch {
-    sx: DeviceBuffer,
-    xq_d: DeviceBuffer,
-    xq_mlp: DeviceBuffer,
-}
+// Int8 activation scratch — `model::dispatch::I8Scratch`, keyed by the two
+// in-block contraction widths (hidden, mlp), shared with flux2.
+use model::dispatch::I8Scratch;
 
 /// A per-stage tap of the residual slab, for the parity ladder.
 pub struct Trace {
@@ -523,11 +496,7 @@ impl Flux1Model {
             ln_gamma: upv(&vec![1.0f32; d]),
             ln_beta: upv(&vec![0.0f32; d]),
         };
-        let i8scr = (precision == Precision::Int8).then(|| I8Scratch {
-            sx: a(n.max(64)),
-            xq_d: a(n * du / 4),
-            xq_mlp: a(n * mlpu / 4),
-        });
+        let i8scr = (precision == Precision::Int8).then(|| I8Scratch::new(&gpu, n.max(64), n, &[cfg.hidden as u32, cfg.mlp_hidden() as u32]));
 
         let host = |name: &str| -> (Vec<f32>, Vec<f32>) {
             (get(&format!("{name}.weight")).1.clone(), get(&format!("{name}.bias")).1.clone())
@@ -618,26 +587,10 @@ impl Flux1Model {
     }
 
     /// Sliced fp32 matmul: rows `xr0..xr0+m` of `x` `[.., k]` → the `m*n` floats
-    /// of `o` at float offset `ooff`. Kernel choice is
-    /// `model::block::gemm_variant` — shared with flux2.
+    /// of `o` at float offset `ooff` — the shared `model::dispatch::mm_rows_off`.
     #[allow(clippy::too_many_arguments)]
     fn mm_rows_at(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
-        let xo = (xr0 as u64 * k as u64, m as u64 * k as u64);
-        let oo = (ooff, m as u64 * n as u64);
-        let (kind, threads) = model::block::gemm_variant(self.gemm_tier(), m, n);
-        self.gpu.step_sliced(kind, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], threads)
-    }
-
-    /// Int8 only: which packed-activation scratch holds a K-wide activation.
-    fn xq_for(&self, k: u32) -> &DeviceBuffer {
-        let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        if k == self.cfg.hidden as u32 {
-            &i8s.xq_d
-        } else if k == self.cfg.mlp_hidden() as u32 {
-            &i8s.xq_mlp
-        } else {
-            panic!("no int8 activation scratch for K={k}")
-        }
+        model::dispatch::mm_rows_off(&self.gpu, self.gemm_tier(), x, w, o, xr0, ooff, m, k, n)
     }
 
     /// Int8 only (a no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
@@ -645,30 +598,18 @@ impl Flux1Model {
     /// feeds every linear reading that activation.
     fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
         let Some(i8s) = self.i8scr.as_ref() else { return };
-        s.extend(model::int8::quant_rows_steps(
-            &self.gpu,
-            model::int8::QuantRows { kernels: [K_MAXABS, K_QUANT], x, sx: &i8s.sx, xq: self.xq_for(k) },
-            r0,
-            r1,
-            k,
-        ));
+        i8s.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, r0, r1, k);
     }
 
-    /// Int8 DP4A matmul over pre-quantized rows (tiled, or the GEMV at `m ≤ 32`).
+    /// Int8 DP4A matmul over pre-quantized rows (tiled, or the GEMV at `m ≤ 32`)
+    /// — the shared `model::dispatch::mm8_rows_off`. Same selection rule as the
+    /// fp32 tier: the DP4A family has identical dispatch geometry and is
+    /// GPU-only, hence always the `Fast` arm.
     #[allow(clippy::too_many_arguments)]
     fn mm8(&self, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
         let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        let kg = k as u64 / 4;
-        let xo = (xr0 as u64 * kg, m as u64 * kg);
-        let so = (xr0 as u64, m as u64);
-        let oo = (ooff, m as u64 * n as u64);
-        let bufs = [self.xq_for(k), wq, &i8s.sx, sw, o];
-        let offs = [xo, (0, 0), so, (0, 0), oo];
-        // Same selection rule as the fp32 tier — the DP4A family has identical
-        // dispatch geometry and is GPU-only, hence always the `Fast` arm.
         let tier = model::block::GemmVariants::Fast { gemv: Some(K_MATMUL_I8_GEMV), tiled: K_MATMUL_I8 };
-        let (kind, threads) = model::block::gemm_variant(tier, m, n);
-        self.gpu.step_sliced(kind, &bufs, &offs, &[m, k / 4, n], threads)
+        model::dispatch::mm8_rows_off(&self.gpu, tier, i8s, wq, sw, o, xr0, ooff, m, k, n)
     }
 
     /// One linear over rows `r0..r1` at the model's tier, bias included.

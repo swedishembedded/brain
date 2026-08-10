@@ -19,6 +19,7 @@ pub mod actstats;
 pub mod kvcalib;
 pub mod attninject;
 pub mod block;
+pub mod dispatch;
 pub mod collective;
 pub mod paged;
 pub mod rowemit;

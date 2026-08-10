@@ -93,47 +93,11 @@ fn rows(data: &[f32], cols: usize, r0: usize, r1: usize) -> &[f32] {
     &data[r0 * cols..r1 * cols]
 }
 
-/// DiT numeric tier: fp32 is the parity reference; int8 quantizes every linear
-/// (per-channel symmetric weights + dynamic per-token activation quant, DP4A
-/// GEMM — GPU only). Norms/RoPE/attention/SwiGLU always stay f32.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Precision {
-    F32,
-    Int8,
-}
-
-impl Precision {
-    /// The CLI/capability enum (`fp32 | int8`) — the ONE name→tier map.
-    pub fn from_name(s: &str) -> Result<Precision, String> {
-        match s {
-            "fp32" => Ok(Precision::F32),
-            "int8" => Ok(Precision::Int8),
-            other => Err(format!("unknown precision {other} (fp32|int8)")),
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Precision::F32 => "fp32",
-            Precision::Int8 => "int8",
-        }
-    }
-}
-
-/// One linear's resident weight: fp32, or int8 (packed `[n, k/4]` u32 +
-/// per-channel scale `[n]` — `model::int8::quantize_weight` layout).
-enum Lin {
-    F32(DeviceBuffer),
-    I8(DeviceBuffer, DeviceBuffer),
-}
-
-impl Lin {
-    /// Whether this linear consumes the packed int8 activation (i.e. its
-    /// activation must be quantized before it runs).
-    fn is_i8(&self) -> bool {
-        matches!(self, Lin::I8(..))
-    }
-}
+// The numeric-tier machinery (Precision map, packed-int8 resident weight,
+// K-keyed activation scratch, DP4A dispatch) is shared with flux1 via
+// `model::dispatch` — this file keeps only the FLUX.2-specific graph.
+pub use model::dispatch::Precision;
+use model::dispatch::LinW as Lin;
 
 /// One attention/MLP weight set (a double block holds two: img and txt).
 struct StreamW {
@@ -205,19 +169,12 @@ struct Scratch {
     ctx_in: DeviceBuffer,
 }
 
-/// Int8 activation-quantization scratch (allocated only under
-/// [`Precision::Int8`]): the per-token dynamic scale and one packed-activation
-/// buffer per contraction width. One quant feeds every linear reading that
-/// activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2/wo_b). The boundary
-/// linears (img_in/txt_in/final_layer) stay fp32, so only the two in-block
-/// widths (hidden, mlp) need packed buffers.
-struct I8Scratch {
-    /// `[n_max]` per-token activation scale (`max_abs_row` output).
-    sx: DeviceBuffer,
-    /// packed activations, keyed by K: hidden and mlp width.
-    xq_d: DeviceBuffer,
-    xq_mlp: DeviceBuffer,
-}
+// Int8 activation scratch (allocated only under [`Precision::Int8`]):
+// `model::dispatch::I8Scratch`, keyed by the two in-block contraction widths
+// (hidden, mlp). One quant feeds every linear reading that activation
+// (n1 → q/k/v and w1/w3, ctx → wo, hs → w2/wo_b); the boundary linears
+// (img_in/txt_in/final_layer) stay fp32.
+use model::dispatch::I8Scratch;
 
 pub struct Flux2Model {
     pub cfg: Flux2Config,
@@ -439,11 +396,7 @@ impl Flux2Model {
             beta: (0..6).map(|_| a(bd)).collect(),
             gate: (0..5).map(|_| a(bd)).collect(),
         };
-        let i8scr = (precision == Precision::Int8).then(|| I8Scratch {
-            sx: a(n),
-            xq_d: a(n * du / 4),
-            xq_mlp: a(n * mlpu / 4),
-        });
+        let i8scr = (precision == Precision::Int8).then(|| I8Scratch::new(&gpu, n, n, &[cfg.hidden as u32, cfg.mlp_hidden() as u32]));
 
         Flux2Model {
             cfg: cfg.clone(),
@@ -608,24 +561,7 @@ impl Flux2Model {
     /// sample's window of the joint slab.
     #[allow(clippy::too_many_arguments)]
     fn mm_rows_at(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
-        let xo = (xr0 as u64 * k as u64, m as u64 * k as u64);
-        let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
-        let (kind, threads) = model::block::gemm_variant(self.gemm_tier(), m, n);
-        self.gpu.step_sliced(kind, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], threads)
-    }
-
-    /// Int8 only: which packed-activation scratch holds a K-wide activation.
-    /// The widths are distinct in every variant, so K keys the buffer.
-    fn xq_for(&self, k: u32) -> &DeviceBuffer {
-        let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        let c = &self.cfg;
-        if k == c.hidden as u32 {
-            &i8s.xq_d
-        } else if k == c.mlp_hidden() as u32 {
-            &i8s.xq_mlp
-        } else {
-            panic!("no int8 activation scratch for K={k}")
-        }
+        model::dispatch::mm_rows_off(&self.gpu, self.gemm_tier(), x, w, o, xr0, or0 as u64 * n as u64, m, k, n)
     }
 
     /// Int8 only (no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
@@ -634,36 +570,18 @@ impl Flux2Model {
     /// that activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2).
     fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
         let Some(i8s) = self.i8scr.as_ref() else { return };
-        s.extend(model::int8::quant_rows_steps(
-            &self.gpu,
-            model::int8::QuantRows { kernels: [K_MAXABS, K_QUANT], x, sx: &i8s.sx, xq: self.xq_for(k) },
-            r0,
-            r1,
-            k,
-        ));
+        i8s.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, r0, r1, k);
     }
 
     /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
-    /// packed scratch, writing rows `or0..or0+m` of `o` `[.., n]`. Dequantizes
-    /// with the per-token `sx` (sliced at `xr0`) × per-channel `sw`.
+    /// packed scratch, writing rows `or0..or0+m` of `o` `[.., n]` — the shared
+    /// `model::dispatch::mm8_rows_off`. Same selection rule and the same
+    /// measured `gemv: None` as the fp32 tier — see `gemm_tier`.
     #[allow(clippy::too_many_arguments)]
     fn mm8(&self, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
         let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        let kg = k as u64 / 4;
-        let xo = (xr0 as u64 * kg, m as u64 * kg);
-        let so = (xr0 as u64, m as u64);
-        let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
-        // Same selection rule and the same measured `gemv: None` as the fp32
-        // tier — see `gemm_tier`.
         let tier = model::block::GemmVariants::Fast { gemv: None, tiled: K_MATMUL_I8 };
-        let (kind, threads) = model::block::gemm_variant(tier, m, n);
-        self.gpu.step_sliced(
-            kind,
-            &[self.xq_for(k), wq, &i8s.sx, sw, o],
-            &[xo, (0, 0), so, (0, 0), oo],
-            &[m, k / 4, n],
-            threads,
-        )
+        model::dispatch::mm8_rows_off(&self.gpu, tier, i8s, wq, sw, o, xr0, or0 as u64 * n as u64, m, k, n)
     }
 
     /// One linear over rows `r0..r1` at the model's tier: fp32 [`Self::mm_rows`]
