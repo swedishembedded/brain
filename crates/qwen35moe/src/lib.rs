@@ -10,6 +10,7 @@
 //! `config.json`/`modeling_qwen3_5_moe.py` (see
 //! `/data/workspace/resources/qwen3.5/` for the reference sources).
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod init;

@@ -148,6 +148,27 @@ run_example() {
   [[ "$output" == *"kind=quantiles"* ]]
 }
 
+# ------------------------------------------------------------- llm/
+
+@test "examples/llm/qwen35moe.py runs against the mock over D-Bus" {
+  run_example "$REPO/examples/llm/qwen35moe.py" --dbus --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
+}
+
+@test "examples/llm/qwen35moe.py runs against the mock over OpenAI-compatible HTTP" {
+  run_example "$REPO/examples/llm/qwen35moe.py" \
+    --openai "127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" \
+    --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
+}
+
+@test "examples/llm/qwen35moe.py runs against the mock over Anthropic-compatible HTTP" {
+  run_example "$REPO/examples/llm/qwen35moe.py" \
+    --anthropic "127.0.0.1:$ANTHROPIC_PORT" --api-key "$ANTHROPIC_KEY" \
+    --model brain/mock --in-text "hi" --out-stdio
+  [[ "$output" == *"You said: hi"* ]]
+}
+
 # ------------------------------------------------------------- omni/
 
 @test "examples/omni/omni.py runs against the mock over D-Bus" {

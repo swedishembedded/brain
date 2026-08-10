@@ -44,6 +44,7 @@ mod resident_lfm;
 mod resident_llm;
 mod resident_mock;
 mod resident_omni;
+mod resident_qwen35moe;
 mod resident_tts;
 mod resident_upscale;
 mod resident_clip;

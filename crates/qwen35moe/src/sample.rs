@@ -139,3 +139,74 @@ pub fn generate_kv_with_head(
     }
     out
 }
+
+/// [`generate_kv`] with a per-token callback: `on_token(index, token)` fires as
+/// each token is accepted (before the next decode step), giving callers a true
+/// streaming timeline (TTFT/ITL) without re-implementing the decode loop.
+/// Returning `false` from `on_token` stops generation early (the token is kept),
+/// letting callers honour cancellation or stop-strings. Added for `crate::caps`
+/// (P13's `capability` wiring), mirroring `qwen3::sample::generate_kv_stream`'s
+/// own signature exactly — see that function's doc for the full contract
+/// (`eos` is a stop-id SET, an empty slice disables the check). Reads the head
+/// fresh from `model` on every call; a caller serving many requests against one
+/// resident model should read it once and call
+/// [`generate_kv_stream_with_head`] directly instead.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream(
+    model: &Qwen35,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
+    let head = model.read_weight(model.cfg.head_weight());
+    generate_kv_stream_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head, on_token)
+}
+
+/// [`generate_kv_stream`] with the LM head weight supplied by the caller
+/// instead of read fresh from `model` on every call — same reasoning as
+/// [`generate_kv_with_head`] vs [`generate_kv`], now with the per-token
+/// callback. This IS the streaming implementation; [`generate_kv_stream`]
+/// delegates here with a freshly-read head.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream_with_head(
+    model: &Qwen35,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    head: &[f32],
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
+    let vocab = model.cfg.vocab as usize;
+    let d = model.cfg.d_model as usize;
+    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
+
+    model.reset_decode_cache();
+    let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
+    let mut hidden = Vec::new();
+    for &tok in seed_prompt {
+        hidden = model.step(tok);
+    }
+
+    let mut out = Vec::with_capacity(max_new);
+    for _ in 0..max_new {
+        let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
+        if eos.contains(&next) {
+            break;
+        }
+        out.push(next);
+        if !on_token(out.len() - 1, next) {
+            break; // caller asked to stop (cancellation / stop-string)
+        }
+        hidden = model.step(next);
+    }
+    out
+}

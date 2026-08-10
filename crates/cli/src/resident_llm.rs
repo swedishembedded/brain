@@ -33,7 +33,11 @@ use qwen3::chat::{parse_request, sampling_params, text_outcome, SeqState};
 /// The shared `"generate"` action spec. `chat` adds Qwen's chat contract: the
 /// chat-template toggle plus `messages`/`system`/`top_p`/`stop` and per-token
 /// streaming (one `Progress::token` delta each accepted token).
-fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
+///
+/// `pub(crate)`: reused as-is by [`crate::resident_qwen35moe::Qwen35Resident`]
+/// (same chat contract, same `qwen3::chat` shared parse underneath) rather
+/// than duplicated a third time.
+pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
@@ -60,7 +64,8 @@ fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
 }
 
 /// Estimate the Hot VRAM footprint of a checkpoint as ~1.3x its file size.
-fn est_vram(path: &str) -> MemCost {
+/// `pub(crate)`: reused by [`crate::resident_qwen35moe::Qwen35Resident`] too.
+pub(crate) fn est_vram(path: &str) -> MemCost {
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0).saturating_mul(13) / 10;
     MemCost::new(bytes, 0)
 }

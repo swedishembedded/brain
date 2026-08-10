@@ -96,6 +96,17 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen3::caps::QwenProvider::new()),
             resident: None,
         },
+        // Qwen3.5-35B-A3B: like qwen3, `weights` is a per-invocation action
+        // param (not baked into the Provider at construction), so this
+        // manifest is genuinely weights-free -- the same reason qwen3's own
+        // entry above needs no `resident` (the HTTP/D-Bus-served, always-hot
+        // path is `crate::resident_qwen35moe::Qwen35Resident`, registered
+        // directly in `resident.rs::build_executor`, not through this ctor).
+        ModelEntry {
+            manifest: qwen35moe::caps::manifest,
+            provider: always!(qwen35moe::caps::Qwen35Provider::new()),
+            resident: None,
+        },
         ModelEntry {
             manifest: lfm::caps::manifest,
             provider: always!(lfm::caps::LfmProvider::new()),
