@@ -97,16 +97,22 @@ pub fn is_exposed(exec: &Executor, provider: Provider, model: &str) -> bool {
 /// Resolve a chat request's `model` string: is there a manifest whose `model == id`
 /// AND that advertises the chat capability? Chat dispatch (the `generate` action)
 /// gates on this — an unknown or non-chat model is a `model_not_found`.
-pub fn resolve_chat(exec: &Executor, model: &str) -> bool {
-    exec.manifests().iter().any(|m| m.model == model && api_caps(m).chat)
+///
+/// Takes the manifest SNAPSHOT, not the `Executor`: `Executor::manifests()` deep-
+/// clones the whole catalog (every `ActionSpec`, param and help string), and the
+/// OpenRouter candidate walk calls a resolver once per candidate id — so each
+/// handler fetches the snapshot ONCE per request and the walk borrows it, instead
+/// of paying a full catalog clone per candidate on the concurrent serving path.
+pub fn resolve_chat(manifests: &[Manifest], model: &str) -> bool {
+    manifests.iter().any(|m| m.model == model && api_caps(m).chat)
 }
 
 /// Resolve an embeddings request's `model` string: is there a manifest whose
 /// `model == id` AND that advertises the embeddings capability? The `/embeddings`
 /// dispatch (the `embed` action) gates on this — an unknown or non-embeddings model
-/// is a `model_not_found`.
-pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
-    exec.manifests().iter().any(|m| m.model == model && api_caps(m).embeddings)
+/// is a `model_not_found`. Snapshot-taking — see [`resolve_chat`].
+pub fn resolve_embed(manifests: &[Manifest], model: &str) -> bool {
+    manifests.iter().any(|m| m.model == model && api_caps(m).embeddings)
 }
 
 /// Resolve an image request's `model` string to the **action name** to invoke: is
@@ -115,9 +121,9 @@ pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
 /// `/images/generations`)? `None` on an unknown or non-image model (a
 /// `model_not_found`). The action is picked by shape — nothing is hard-coded per
 /// model — so any model exposing a text→image action serves here (z-image/flux2 name
-/// it `text2image`).
-pub fn resolve_image(exec: &Executor, model: &str) -> Option<String> {
-    exec.manifests().iter().find(|m| m.model == model && api_caps(m).image).and_then(text2image_action)
+/// it `text2image`). Snapshot-taking — see [`resolve_chat`].
+pub fn resolve_image(manifests: &[Manifest], model: &str) -> Option<String> {
+    manifests.iter().find(|m| m.model == model && api_caps(m).image).and_then(text2image_action)
 }
 
 /// Strip a leading `"<segment>/"` provider namespace from an OpenRouter-style model

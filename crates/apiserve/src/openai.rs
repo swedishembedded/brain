@@ -139,8 +139,9 @@ fn read_mean(o: &capability::Outcome) -> Option<Vec<f32>> {
 /// the identical `CreateEmbeddingRequest`/`CreateEmbeddingResponse` grammar under
 /// Bearer auth, so the provider only shapes the error bodies. Each input string is
 /// dispatched as one `embed` job through [`bridge::submit`] (so admission → 429 is
-/// enforced exactly as for chat); the response collects one `data` entry per input,
-/// indexed in request order.
+/// enforced exactly as for chat), and every input's job is submitted CONCURRENTLY
+/// so the executor's batch-by-model dispatch can group them into one `run_batch`;
+/// the response collects one `data` entry per input, indexed in request order.
 pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     let provider = state.provider;
     let body: Value = match serde_json::from_slice(&body) {
@@ -155,23 +156,36 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     // the OpenRouter surface this also strips a `"<provider>/"` prefix and walks a
     // `models` fallback array; OpenAI is exact-match only. The resolved local id
     // replaces the requested one for dispatch and the echoed response `model`.
-    match catalog::resolve_model(provider, &body, |id| catalog::resolve_embed(&state.exec, id).then_some(())) {
+    let manifests = state.exec.manifests(); // one catalog snapshot per request (see catalog::resolve_chat)
+    match catalog::resolve_model(provider, &body, |id| catalog::resolve_embed(&manifests, id).then_some(())) {
         Some((id, ())) => req.model = id,
-        None => match bridge::ensure_and_recheck(&state, provider, &req.model, |id| catalog::resolve_embed(&state.exec, id).then_some(())).await {
+        None => match bridge::ensure_and_recheck(&state, provider, &req.model, |id| catalog::resolve_embed(&state.exec.manifests(), id).then_some(())).await {
             Ok(()) => {}
             Err(e) => return e.into_response(),
         },
     }
 
+    // Submit ALL inputs concurrently (order preserved by position): the
+    // executor batches by model, so N jobs in flight together can be grouped
+    // into ONE `Instance::run_batch` call -- awaiting them one at a time in a
+    // for-loop serialized the single most batchable workload on the API into N
+    // sequential submit->admit->run round-trips and the dispatcher never saw a
+    // batch. Admission (429) is still enforced per job by `bridge::submit`;
+    // `try_join_all` returns the FIRST failure and drops (cancels) the
+    // remaining futures, keeping the request's all-or-nothing semantics.
+    let outcomes = match futures::future::try_join_all(
+        req.inputs.iter().map(|text| bridge::submit(&state, &req.model, "embed", Invocation::new().set("text", json!(text)))),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => return e.into_response(),
+    };
+
     let mut data: Vec<Value> = Vec::with_capacity(req.inputs.len());
     let mut prompt_tokens = 0i64;
-    for (index, text) in req.inputs.iter().enumerate() {
-        let inv = Invocation::new().set("text", json!(text));
-        let outcome = match bridge::submit(&state, &req.model, "embed", inv).await {
-            Ok(o) => o,
-            Err(e) => return e.into_response(),
-        };
-        let mut vector = match read_mean(&outcome) {
+    for (index, (text, outcome)) in req.inputs.iter().zip(&outcomes).enumerate() {
+        let mut vector = match read_mean(outcome) {
             Some(v) if !v.is_empty() => v,
             _ => return ApiError::invalid_request(provider, "model did not return a 'mean' embedding vector").into_response(),
         };
@@ -227,7 +241,8 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
     // Resolve the model against the chat-capable manifests before dispatching. On the
     // OpenRouter surface this also strips a `"<provider>/"` prefix and walks a `models`
     // fallback array (see [`catalog::resolve_model`]); OpenAI is exact-match only.
-    match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&state.exec, id).then_some(())) {
+    let manifests = state.exec.manifests(); // one catalog snapshot per request (see catalog::resolve_chat)
+    match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&manifests, id).then_some(())) {
         Some((model, ())) => {
             if stream {
                 stream_chat(state, model, inv, native, want_usage()).await
@@ -250,7 +265,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
             }
             _ => ApiError::model_not_found(provider, &requested).into_response(),
         },
-        None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_chat(&state.exec, id).then_some(())).await {
+        None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_chat(&state.exec.manifests(), id).then_some(())).await {
             Ok(()) => match bridge::submit(&state, &requested, "generate", inv).await {
                 Ok(outcome) => Json(non_stream_body(&requested, &bridge::read_chat_outcome(&outcome), native)).into_response(),
                 Err(e) => e.into_response(),
@@ -760,14 +775,15 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
     // On the OpenRouter surface this also strips a `"<provider>/"` prefix and walks a
     // `models` fallback array; OpenAI is exact-match only. The resolved local id
     // replaces the requested one for dispatch.
-    let action = match catalog::resolve_model(provider, &body, |id| catalog::resolve_image(&state.exec, id)) {
+    let manifests = state.exec.manifests(); // one catalog snapshot per request (see catalog::resolve_chat)
+    let action = match catalog::resolve_model(provider, &body, |id| catalog::resolve_image(&manifests, id)) {
         Some((id, action)) => {
             req.model = id;
             action
         }
         None => {
             let requested = req.model.clone();
-            match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_image(&state.exec, id)).await {
+            match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_image(&state.exec.manifests(), id)).await {
                 Ok(action) => action,
                 Err(e) => return e.into_response(),
             }

@@ -50,7 +50,7 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
     // treatment inside `catalog::candidates`; Anthropic has no candidate list
     // (exact-match only), so it resolves directly.
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
-    if catalog::resolve_chat(&state.exec, &model) {
+    if catalog::resolve_chat(&state.exec.manifests(), &model) {
         if stream {
             let est_input = heuristic_tokens(&request_text(&body));
             stream_messages(state, model, inv, est_input).await
@@ -76,7 +76,7 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
             _ => ApiError::model_not_found(PROVIDER, &model).into_response(),
         }
     } else {
-        match bridge::ensure_and_recheck(&state, PROVIDER, &model, |id| catalog::resolve_chat(&state.exec, id).then_some(())).await {
+        match bridge::ensure_and_recheck(&state, PROVIDER, &model, |id| catalog::resolve_chat(&state.exec.manifests(), id).then_some(())).await {
             Ok(()) => match bridge::submit(&state, &model, "generate", inv).await {
                 Ok(outcome) => {
                     let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
