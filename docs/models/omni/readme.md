@@ -1,100 +1,107 @@
-# Qwen3-Omni-30B-A3B in brain
+# Omni-Modal Assistant (Qwen3-Omni)
 
-An omni-modal model: **text, audio and vision/video in → text and speech out**,
-running on the same portable WGSL engine as the rest of brain. This is a
-faithful, parity-verified re-implementation of `Qwen3OmniMoeForConditionalGeneration`
-(`Qwen/Qwen3-Omni-30B-A3B-Instruct`) — the only released variant with the Talker
-(speech-output) path.
+Text, audio, image and video in — text out, plus real synthesized speech out.
+Qwen3-Omni is brain's most ambitious served model: a single assistant that
+can read a prompt, listen to a clip, look at an image or video frames, answer
+in text, and — when you ask it to speak — respond with an actual spoken
+waveform instead of just text. Reach for it when you want one model handling
+mixed-modality input and, optionally, a spoken reply, rather than wiring
+separate ASR/VLM/TTS models together yourself.
 
-35.25 B params total (70.5 GB bf16 upstream); only ~3 B are active per token
-(30B-A3B = 30 B total routed weights, ~3 B active), but int8-quantized storage
-still needs the full parameter count resident, ~35 GB.
+## Support
 
----
+| Capability | Supported |
+|---|---|
+| Inference             | [x] |
+| LoRA fine-tune         | [ ] |
+| CLI (`brain do`)       | [ ] |
+| HTTP API               | [x] |
+| D-Bus                  | [x] |
+| Batched/streaming serving | [x] (token streaming; not batched) |
 
-## Architecture
+## Getting the weights
 
-Three components chained end to end (`crates/omni`):
+Model id: `brain/omni`. Reserved vendor `brain/` — never auto-fetched.
 
+- `BRAIN_OMNI_HF_DIR` — the HF checkpoint directory (`config.json` +
+  tokenizer files + the sharded `model.safetensors.index.json` + shards).
+  This is the gate: serving is unavailable until it's set.
+
+## Running it
+
+Serve it over D-Bus and/or the HTTP chat APIs:
+
+```bash
+BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+  brain serve --dbus --openai --anthropic
 ```
-  text ───────────────────────────────┐
-  audio ──► AuT (audio tower) ────────┤
-  image/video ──► ViT (vision tower)──┤
-                                       ▼
-                            ┌──────────────────────┐
-                            │   Thinker (MoE LLM)   │  48 layers, 128 experts/top-8
-                            └──────────┬───────────┘  text out; hidden layer 24 → Talker
-                                       ▼
-                            ┌──────────────────────┐
-                            │  Talker (MoE, +MTP)   │  20 layers, 128 experts/top-6
-                            └──────────┬───────────┘  [T,16] codec codes
-                                       ▼
-                            ┌──────────────────────┐
-                            │      Code2Wav         │  RVQ decode → 24 kHz waveform
-                            └──────────────────────┘
+
+`brain serve` prints a freshly generated API key per dialect on startup (or
+write them to a file with `--api-keys-out FILE`). Text + image, over the
+OpenAI-compatible API (default port 8788):
+
+```bash
+curl http://localhost:8788/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <key from brain serve>' \
+  -d '{
+    "model": "brain/omni",
+    "messages": [{"role": "user", "content": [
+      {"type": "text", "text": "What is in this image?"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    ]}]
+  }'
 ```
 
-- **Audio tower (AuT)** (`crates/omni`, reusing `qwen-asr`'s Whisper/Qwen-omni-style
-  encoder at Omni's scale: 32 layers, `d_model=1280`, 20 heads, `ffn=5120`,
-  128 mel bins) — conv-stem + windowed transformer, `n_window_infer=800`,
-  projects to the Thinker's hidden width (2048).
-- **Vision tower** (`crates/qwenvl`, extended to Omni's scale: depth 27,
-  hidden 1152, `gelu_pytorch_tanh`, DeepStack taps `[8,16,24]`) — ViT +
-  PatchMerger + DeepStack, `spatial_merge_size=2`, temporal patching for video.
-- **Thinker** — a Qwen3-MoE decoder (128 experts, top-8, no shared expert,
-  `use_qk_norm`, GQA 32/4) with **3-axis interleaved M-RoPE** over text,
-  audio (`position_id_per_seconds=13`), image and video positions, spliced
-  with multimodal embeddings via the shared `model::vlm` seam.
-- **Talker** (`crates/tts`, extended to MoE: 20 layers, 128 experts top-6,
-  shared_expert 768) — consumes the Thinker's hidden state at
-  `accept_hidden_layer=24` (not just token embeddings) plus a per-speaker
-  embedding (`chelsie`/`ethan`/`aiden`), autoregressively sampling codebook-0
-  acoustic tokens at 12.5 Hz.
-- **MTP code predictor** (`crates/tts`, unchanged shape — already 5 layers /
-  16 codebooks) — fills residual codebooks 1..15 from codebook-0 each frame.
-- **Code2Wav** (`crates/codec`, extended: `hidden_size=1024`,
-  `intermediate_size=3072`, mean-pooled multi-codebook embedding input instead
-  of RVQ dequant) — 8-layer sliding-window (72) GQA pre-transformer → ConvNeXt
-  upsample `[2,2]` → SEANet decoder `[8,5,4,3]` + SnakeBeta → 24 kHz waveform.
-  `chunked_decode(chunk_size=300, left_context_size=25)` for streaming.
+The same model is reachable on the Anthropic-compatible `/v1/messages`
+endpoint with `image` content blocks.
 
-`tools/goldens/omni_dump_reference.py` bakes component-scoped parity goldens
-(audio tower, vision tower, one MoE decoder layer, M-RoPE position ids, code
-predictor, code2wav) from the released checkpoint, run through the real
-transformers reference implementation — each component streams only its own
-tensors, so no dump needs the whole 70.5 GB model resident.
+Real spoken output (the `speak` action: response text + a 24 kHz waveform) is
+D-Bus/`brain do`-only today — the HTTP chat endpoints always dispatch the
+`generate` action, so speech output doesn't come back over HTTP:
 
-See `docs/models/omni/status.md` for the measured, chronological build ledger.
+```python
+from brain_py.dbus import BrainDBus
+with BrainDBus() as brain:
+    out = brain.subscribe("brain/omni", "speak",
+        {"prompt": "Say hello.", "speaker": "chelsie"})
+    # out.blobs["audio"]: raw mono f32 LE PCM at 24 kHz
+    # out.text: the response text
+```
 
-## Sparse MoE core
+[`examples/omni/omni.py`](../../../examples/omni/omni.py) exercises text,
+speech, image and video input over both the D-Bus and HTTP transports.
 
-Both the Thinker and the Talker are top-k MoE. brain's only prior HF-importable
-MoE forward (`crates/glm`) evaluated **every** expert densely — 16× wasted work
-at 128 experts / top-8. This model motivated a real sparse MoE core
-(`model::moe`: router → top-k → gather-by-expert → grouped GEMM → scatter-add,
-fp32 and int8/DP4A), which `glm` was migrated onto in the same workstream.
-See `docs/lessons.md` for the write-up.
+## Options
 
-## Serving
+- `messages` / `prompt` — chat input, same shape as brain's other chat
+  models; `messages` is a flattened JSON array, `prompt` is a raw string.
+- `max_new` — max tokens to generate (default `32`).
+- `audio` input blob — raw mono f32 little-endian PCM at 16 kHz.
+- `image` input blob — interleaved HWC f32 pixels in `[0,1]`.
+- `video` input blob — N concatenated HWC f32 RGB frames plus
+  `{frames,w,h,c}` metadata; brain decodes already-extracted frames, it does
+  not demux a video file itself.
+- `speaker` (`speak` only) — voice name (`chelsie`, `ethan`, `aiden`;
+  default `chelsie`).
 
-Reachable over all three of brain's surfaces when `BRAIN_OMNI_HF_DIR` is set —
-D-Bus (`Run`/`Subscribe` with typed audio/image/video blobs; both declared
-actions, `generate` and `speak`), the OpenAI-compatible HTTP API
-(`/v1/chat/completions` with `image_url`/`input_audio` content parts), and the
-Anthropic-compatible API (`/v1/messages` with `image` content blocks) —
-scheduled by `residency`. There are NO `/v1/audio/*` routes: the HTTP chat
-surfaces hardcode the `generate` action, so speech OUTPUT (`speak`: response
-text + a 24 kHz waveform blob) is reachable over D-Bus/`brain do` only.
+## Hardware and limits
 
-`examples/omni.py` exercises the D-Bus and HTTP transports with text, speech,
-image and video INPUT; it does not yet drive microphone capture or the
-speech-output (`speak`) path — each unbuilt combination `skip()`s with the
-reason printed.
-
-## Known limitations
-
-- NPU export (`crates/npu`) is wired for the audio tower, vision tower and
-  Code2Wav, and validated as far as CPU-side OpenVINO parity — this development
-  box has no NPU, so an actual device run has not happened. See status.md.
-- Only `Qwen3-Omni-30B-A3B-Instruct` is supported; `-Thinking` and `-Captioner`
-  have no Talker and are out of scope for now.
+- Generation is greedy (argmax) only — `temp`/`top_p`/`top_k`/`seed` are
+  accepted for API compatibility but have no effect.
+- `speak` is text-only on the input side today: a `speak` call does not also
+  take audio/image input, and it's single-turn (no multi-turn spoken
+  context).
+- Weights stream from the checkpoint per generated token rather than living
+  fully resident in an optimized serving layout, so throughput is
+  validation-tier, not production-grade.
+- Only `Qwen3-Omni-30B-A3B-Instruct` is supported. The `-Thinking` and
+  `-Captioner` variants have no Talker (speech-output) component and are out
+  of scope for this model.
+- The full weight set needs roughly 35 GB resident even at int8 precision
+  (it's a mixture-of-experts model: only a few billion parameters are active
+  per token, but the router can route to any expert, so the whole set has to
+  be loaded).
+- No LoRA/fine-tuning path.
+- No CLI (`brain do`/`brain caps`) access — D-Bus and the HTTP chat APIs
+  only.
