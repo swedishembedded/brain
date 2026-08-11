@@ -424,6 +424,80 @@ impl Codec {
         wav
     }
 
+    /// Chunked variant of [`Self::decode_omni`]: yields audio incrementally
+    /// via `on_chunk` instead of building one `Vec` -- bounded per-chunk
+    /// memory for the (expensive) upsample+SEANet stage instead of holding
+    /// the whole `~T*1920`-sample buffer, and a real streaming decode a
+    /// caller can start emitting from before the whole waveform is ready.
+    ///
+    /// The pre-transformer front runs ONCE over the full `codes` sequence,
+    /// same as `decode_omni` -- there is no O(chunks²) cost to chunking
+    /// here, since only the back (upsample + SEANet) actually needs
+    /// persistent cross-chunk state (`decode_stream::Back::new_omni`, the
+    /// symmetric-crop-aware streaming primitives added alongside this).
+    /// Bit-exact vs `decode_omni` on the same input regardless of
+    /// `chunk_frames` -- proven in `crates/codec/tests/`, not just asserted
+    /// here.
+    ///
+    /// `chunk_frames` is measured in CODE frames (12.5 Hz), not output
+    /// samples -- matching the reference's own `chunked_decode(chunk_size=
+    /// 300, ...)` convention (though this implementation's front/back split
+    /// is real streaming state, not the reference's re-decode-and-discard
+    /// `left_context_size` shape). `chunk_frames == 0` decodes the whole
+    /// thing in one `Back::step` call.
+    pub fn decode_omni_chunked(&self, codes: &[u32], chunk_frames: usize, mut on_chunk: impl FnMut(&[f32])) {
+        let nq = self.cfg.num_quantizers as usize;
+        assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
+        let t = (codes.len() / nq) as u32;
+        assert!(t > 0, "empty codes");
+        let hidden = self.cfg.hidden_size;
+
+        // --- front: identical to decode_omni's own (now correctly
+        // sliding-window-attended, per M23), run ONCE over the whole
+        // sequence -- see this fn's own doc for why that's not a chunking
+        // cost. ---
+        let x = self.code_embedding_mean(codes, t, nq, hidden);
+        let x = self.transformer(&x, t);
+        let h = self.transpose(&x, t, hidden); // [hidden, T] NCL
+        let latent: Vec<f32> = self.gpu.read(&h, (hidden * t) as usize);
+
+        // --- back: streamed, chunk_frames code-frames at a time. ---
+        let w = self.back_weights();
+        let mut back = crate::decode_stream::Back::new_omni(&w, &self.cfg);
+        let chunk = if chunk_frames == 0 { t as usize } else { chunk_frames.max(1) };
+        let mut a = 0usize;
+        while a < t as usize {
+            let b = (a + chunk).min(t as usize);
+            let l_new = b - a;
+            let mut slab = vec![0.0f32; hidden as usize * l_new];
+            for c in 0..hidden as usize {
+                slab[c * l_new..c * l_new + l_new].copy_from_slice(&latent[c * t as usize + a..c * t as usize + b]);
+            }
+            let out = back.step(&slab, l_new);
+            if !out.is_empty() {
+                on_chunk(&out);
+            }
+            a = b;
+        }
+    }
+
+    /// This Code2Wav's `upsample.*`/`decoder.*` weights as a plain host map
+    /// -- what the pure-CPU streaming back (`decode_stream::Back`) needs.
+    /// Read once via `ParamStore::read_weight` (not per-chunk): `Back`'s own
+    /// persistent state is what amortizes the cost across chunks; this is
+    /// just getting those weights off the `ParamStore` once at session
+    /// start, mirroring `codec_bridge::codec_weights`'s existing "strip a
+    /// prefix, read every match" shape for a live `Codec` instead of a raw
+    /// checkpoint reader.
+    fn back_weights(&self) -> HashMap<String, Vec<f32>> {
+        self.ps
+            .params
+            .iter()
+            .filter(|(name, _)| name.starts_with("upsample.") || name.starts_with("decoder."))
+            .map(|(name, _)| (name.clone(), self.ps.read_weight(&self.gpu, name)))
+            .collect()
+    }
+
     /// `hidden[t] = mean_q( code_embedding[ codes[t,q] + q*codebook_size ] )` --
     /// `codes` is `[T, nq]` row-major; returns token-major `[T, hidden]`.
     /// `codebook_size` is deliberately the SAME stride for every quantizer

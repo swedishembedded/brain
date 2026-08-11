@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use model::hostmath;
 
 use crate::config::CodecConfig;
-use crate::streaming::{StreamConv1d, StreamConvTr1d};
+use crate::streaming::{StreamConv1d, StreamConvTr1d, StreamConvTr1dSym};
 
-type W = HashMap<String, Vec<f32>>;
+pub(crate) type W = HashMap<String, Vec<f32>>;
 
 // ---- small host ops (flat slices; NCL = [C,L] index c*L+l, TM = [L,C] l*C+c) ----
 
@@ -112,17 +112,36 @@ fn snake(x: &[f32], alpha: &[f32], beta: &[f32], c: usize, l: usize) -> Vec<f32>
 
 // ---- streaming back (upsample + SEANet) ----
 
-/// Holds the per-conv streaming state for the codec back, created lazily by name.
-struct Back<'a> {
+/// Holds the per-conv streaming state for the codec back, created lazily by
+/// name. Shared by BOTH codecs' streaming decode (the standalone Qwen3-TTS
+/// codec via [`Back::new`], Qwen3-Omni's Code2Wav via [`Back::new_omni`]):
+/// the upsample + SEANet architecture is identical between them (same
+/// weight-name convention, same block structure), and the ONE real
+/// difference — the SEANet decoder's `block.1` transposed conv uses the
+/// pad=0 convention for the standalone codec (`causal_convtr`) but the
+/// symmetric-crop convention for Omni (`causal_convtr_sym`,
+/// `crate::model::Codec::causal_convtr_sym`'s doc has the full reasoning) —
+/// is one boolean toggle, not a second copy of every other stage.
+pub(crate) struct Back<'a> {
     w: &'a W,
     cfg: &'a CodecConfig,
     convs: HashMap<String, StreamConv1d>,
     convtrs: HashMap<String, StreamConvTr1d>,
+    convtrs_sym: HashMap<String, StreamConvTr1dSym>,
+    /// `true` for Omni's Code2Wav (SEANet `block.1` is symmetric-crop);
+    /// `false` for the standalone codec (pad=0, same convention as upsample).
+    omni_seanet: bool,
 }
 
 impl<'a> Back<'a> {
     fn new(w: &'a W, cfg: &'a CodecConfig) -> Back<'a> {
-        Back { w, cfg, convs: HashMap::new(), convtrs: HashMap::new() }
+        Back { w, cfg, convs: HashMap::new(), convtrs: HashMap::new(), convtrs_sym: HashMap::new(), omni_seanet: false }
+    }
+
+    /// Qwen3-Omni's Code2Wav: same architecture, symmetric-crop `block.1`.
+    /// Used by `crate::model::Codec::decode_omni_chunked`, outside this module.
+    pub(crate) fn new_omni(w: &'a W, cfg: &'a CodecConfig) -> Back<'a> {
+        Back { w, cfg, convs: HashMap::new(), convtrs: HashMap::new(), convtrs_sym: HashMap::new(), omni_seanet: true }
     }
 
     /// Streaming causal conv on NCL `[cin,l]` -> `[cout,l]`.
@@ -137,7 +156,8 @@ impl<'a> Back<'a> {
         self.convs.get_mut(prefix).unwrap().step(x, l)
     }
 
-    /// Streaming causal transposed conv on NCL `[cin,l]` -> `[cout,l*stride]`.
+    /// Streaming causal transposed conv (pad=0 convention) on NCL
+    /// `[cin,l]` -> `[cout,l*stride]`.
     fn convtr_step(&mut self, x: &[f32], prefix: &str, cin: usize, cout: usize, k: usize, stride: usize, l: usize) -> Vec<f32> {
         if !self.convtrs.contains_key(prefix) {
             let wn = format!("{prefix}.conv.weight");
@@ -146,6 +166,21 @@ impl<'a> Back<'a> {
             self.convtrs.insert(prefix.to_string(), sc);
         }
         self.convtrs.get_mut(prefix).unwrap().step(x, l)
+    }
+
+    /// Streaming causal transposed conv (symmetric-crop convention, Omni's
+    /// SEANet `block.1`) on NCL `[cin,l]` -> `[cout, <=l*stride]` (shorter
+    /// than `l*stride` only while the one-time left crop is still being
+    /// consumed, see [`StreamConvTr1dSym`]'s own doc).
+    #[allow(clippy::too_many_arguments)]
+    fn convtr_sym_step(&mut self, x: &[f32], prefix: &str, cin: usize, cout: usize, k: usize, stride: usize, pad: usize, l: usize) -> Vec<f32> {
+        if !self.convtrs_sym.contains_key(prefix) {
+            let wn = format!("{prefix}.conv.weight");
+            let bn = format!("{prefix}.conv.bias");
+            let sc = StreamConvTr1dSym::new(cin, cout, k, stride, pad, self.w[&wn].clone(), self.w[&bn].clone());
+            self.convtrs_sym.insert(prefix.to_string(), sc);
+        }
+        self.convtrs_sym.get_mut(prefix).unwrap().step(x, l)
     }
 
     fn snake_w(&self, prefix: &str) -> (Vec<f32>, Vec<f32>) {
@@ -195,7 +230,7 @@ impl<'a> Back<'a> {
     }
 
     /// One chunk: latent NCL `[latent, l_new]` -> waveform `[l_new * 1920]`.
-    fn step(&mut self, latent: &[f32], l_new: usize) -> Vec<f32> {
+    pub(crate) fn step(&mut self, latent: &[f32], l_new: usize) -> Vec<f32> {
         let latent_dim = self.cfg.latent_dim as usize;
         let dec_dim = self.cfg.decoder_dim as usize;
         let mut l = l_new;
@@ -219,8 +254,20 @@ impl<'a> Back<'a> {
             let bp = format!("decoder.{}", i + 1);
             let (a, b) = self.snake_w(&format!("{bp}.block.0"));
             h = snake(&h, &a, &b, in_dim, l);
-            h = self.convtr_step(&h, &format!("{bp}.block.1"), in_dim, out_dim, 2 * rate as usize, rate as usize, l);
-            l *= rate as usize;
+            h = if self.omni_seanet {
+                let rate = rate as usize;
+                self.convtr_sym_step(&h, &format!("{bp}.block.1"), in_dim, out_dim, 2 * rate, rate, rate, l)
+            } else {
+                self.convtr_step(&h, &format!("{bp}.block.1"), in_dim, out_dim, 2 * rate as usize, rate as usize, l)
+            };
+            // Derived from the actual output length, not an analytic l*rate
+            // formula: the symmetric-crop convention can emit FEWER than
+            // l*rate samples per chunk while its one-time left crop is still
+            // being consumed (StreamConvTr1dSym's own doc) -- deriving this
+            // way is correct for BOTH conventions (pad=0 always emits
+            // exactly l*rate, so this is a no-op change for the standalone
+            // codec's own existing behavior).
+            l = if out_dim > 0 { h.len() / out_dim } else { 0 };
             for (j, dil) in [(2usize, 1usize), (3, 3), (4, 9)] {
                 h = self.residual_unit(&h, &format!("{bp}.block.{j}"), out_dim, dil, l);
             }
@@ -567,6 +614,87 @@ mod tests {
         assert_eq!(y_full.len(), y_chunk.len(), "length mismatch");
         let maxd = y_full.iter().zip(&y_chunk).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
         assert!(maxd < 1e-6, "streaming back chunked != full: {maxd}");
+    }
+
+    /// Same shape as [`back_chunked_equals_full`], but `Back::new_omni`
+    /// (symmetric-crop SEANet `block.1`) — the real thing `crate::model::
+    /// Codec::decode_omni_chunked` will drive. Chunk size 1 throughout is
+    /// deliberate: it forces the SMALLEST possible per-stage length at every
+    /// SEANet decoder stage, maximizing how many consecutive chunks the
+    /// one-time left crop must be carried across before real samples start
+    /// emitting — the exact path a convenient round chunk size would not
+    /// stress (every real stage's `pad` here is 2 or 3, and a length-1 input
+    /// to a stage keeps re-entering the "still owed a crop" branch for
+    /// several calls in a row before `StreamConvTr1dSym` catches up).
+    #[test]
+    fn back_omni_chunked_equals_full() {
+        let mut seed = Lcg::new(2026);
+        let cfg = CodecConfig { latent_dim: 4, decoder_dim: 8, upsampling_ratios: vec![2], upsample_rates: vec![3, 2], ..Default::default() };
+
+        let mut w: W = HashMap::new();
+        let fill = |w: &mut W, name: &str, n: usize, seed: &mut Lcg| {
+            w.insert(name.to_string(), seed.vec(n));
+        };
+        let latent = 4usize;
+        let dec = 8usize;
+        fill(&mut w, "upsample.0.0.conv.weight", latent * latent * 2, &mut seed);
+        fill(&mut w, "upsample.0.0.conv.bias", latent, &mut seed);
+        fill(&mut w, "upsample.0.1.dwconv.conv.weight", latent * 7, &mut seed);
+        fill(&mut w, "upsample.0.1.dwconv.conv.bias", latent, &mut seed);
+        fill(&mut w, "upsample.0.1.norm.weight", latent, &mut seed);
+        fill(&mut w, "upsample.0.1.norm.bias", latent, &mut seed);
+        fill(&mut w, "upsample.0.1.pwconv1.weight", 4 * latent * latent, &mut seed);
+        fill(&mut w, "upsample.0.1.pwconv1.bias", 4 * latent, &mut seed);
+        fill(&mut w, "upsample.0.1.pwconv2.weight", latent * 4 * latent, &mut seed);
+        fill(&mut w, "upsample.0.1.pwconv2.bias", latent, &mut seed);
+        fill(&mut w, "upsample.0.1.gamma", latent, &mut seed);
+        fill(&mut w, "decoder.0.conv.weight", dec * latent * 7, &mut seed);
+        fill(&mut w, "decoder.0.conv.bias", dec, &mut seed);
+        for (i, &rate) in cfg.upsample_rates.clone().iter().enumerate() {
+            let in_dim = dec >> i;
+            let out_dim = dec >> (i + 1);
+            let bp = format!("decoder.{}", i + 1);
+            fill(&mut w, &format!("{bp}.block.0.alpha"), in_dim, &mut seed);
+            fill(&mut w, &format!("{bp}.block.0.beta"), in_dim, &mut seed);
+            fill(&mut w, &format!("{bp}.block.1.conv.weight"), in_dim * out_dim * (2 * rate as usize), &mut seed);
+            fill(&mut w, &format!("{bp}.block.1.conv.bias"), out_dim, &mut seed);
+            for j in [2usize, 3, 4] {
+                fill(&mut w, &format!("{bp}.block.{j}.act1.alpha"), out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.act1.beta"), out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv1.conv.weight"), out_dim * out_dim * 7, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv1.conv.bias"), out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.act2.alpha"), out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.act2.beta"), out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.weight"), out_dim * out_dim, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.bias"), out_dim, &mut seed);
+            }
+        }
+        let out_dim = dec >> cfg.upsample_rates.len();
+        fill(&mut w, "decoder.5.alpha", out_dim, &mut seed);
+        fill(&mut w, "decoder.5.beta", out_dim, &mut seed);
+        fill(&mut w, "decoder.6.conv.weight", out_dim * 7, &mut seed);
+        fill(&mut w, "decoder.6.conv.bias", 1, &mut seed);
+
+        let t = 12usize;
+        let lat: Vec<f32> = seed.vec(latent * t);
+
+        let mut full = Back::new_omni(&w, &cfg);
+        let y_full = full.step(&lat, t);
+
+        // Chunk size 1, every step -- the crop-stress shape this test exists for.
+        let mut bk = Back::new_omni(&w, &cfg);
+        let mut y_chunk = Vec::new();
+        for a in 0..t {
+            let mut slab = vec![0.0f32; latent];
+            for c in 0..latent {
+                slab[c] = lat[c * t + a];
+            }
+            y_chunk.extend_from_slice(&bk.step(&slab, 1));
+        }
+        assert_eq!(y_full.len(), y_chunk.len(), "length mismatch");
+        assert!(!y_full.is_empty(), "oracle output must be non-empty (a vacuous pass would hide a real bug)");
+        let maxd = y_full.iter().zip(&y_chunk).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(maxd < 1e-6, "streaming omni back chunked != full: {maxd}");
     }
 
     /// End-to-end parity: the pure-CPU streaming decoder vs the real gpu_core
