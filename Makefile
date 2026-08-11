@@ -210,8 +210,9 @@ test/slow:
 # somewhere else in the repo (Makefile target / bats test / crate doc comment /
 # doc — an orphan gate), and no non-overridable absolute machine path. See
 # scripts/gates/check-scripts.sh for the full rationale. check-env-docs.sh
-# additionally requires every serving-crate BRAIN_* env var to be documented
-# in docs/serving.md § Configuration (env-only config MUST have a reference).
+# additionally requires every BRAIN_* env var read anywhere in crates/ to be
+# documented in docs/using/configuration.md, a docs/models/<model>.md page, or
+# .agents/rules/testing.md (env-only config MUST have a reference).
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
