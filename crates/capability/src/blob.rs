@@ -96,6 +96,30 @@ pub fn decode_video_hwc(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u
     Ok(all.chunks_exact(per_frame).map(|chunk| (chunk.to_vec(), w, h)).collect())
 }
 
+/// Encode N RGB frames as a video [`Blob`]: concatenated interleaved-HWC f32
+/// planes + `{"frames","w","h","c"}` metadata — the encoder counterpart of
+/// [`decode_video_hwc`], for a caller that has real frames (e.g.
+/// `imaging::video::decode_frames`'s output) and wants to send them over a
+/// `generate`/`converse` `video` input. Every frame must share the SAME
+/// `w`/`h` (the wire format carries no per-frame dimensions, matching
+/// [`decode_video_hwc`]'s own single `{w,h}` pair).
+pub fn video_blob(frames: &[(Vec<f32>, u32, u32)]) -> Result<Blob, String> {
+    let (_, w, h) = frames.first().ok_or("video_blob: at least one frame required")?;
+    let (w, h) = (*w, *h);
+    let per_frame = w as usize * h as usize * 3;
+    let mut bytes = Vec::with_capacity(frames.len() * per_frame * 4);
+    for (i, (hwc, fw, fh)) in frames.iter().enumerate() {
+        if (*fw, *fh) != (w, h) {
+            return Err(format!("video_blob: frame {i} is {fw}x{fh}, expected {w}x{h} -- every frame must share dims"));
+        }
+        if hwc.len() != per_frame {
+            return Err(format!("video_blob: frame {i} has {} elements, expected {w}x{h}x3={per_frame}", hwc.len()));
+        }
+        bytes.extend(hwc.iter().flat_map(|f| f.to_le_bytes()));
+    }
+    Ok(Blob::new(Media::Bytes, bytes).with_meta(json!({"frames": frames.len(), "w": w, "h": h, "c": 3})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +210,28 @@ mod tests {
             Blob::new(Media::Bytes, vec![0; 12]).with_meta(json!({"frames": 2, "w": 1, "h": 1, "c": 3})),
         );
         assert!(decode_video_hwc(&inv, "video").unwrap_err().contains("expected"));
+    }
+
+    #[test]
+    fn video_blob_roundtrips_through_decode_video_hwc() {
+        let frames: Vec<(Vec<f32>, u32, u32)> = vec![(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 2, 1), (vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0], 2, 1)];
+        let b = video_blob(&frames).unwrap();
+        assert_eq!(b.media, Media::Bytes);
+        assert_eq!(b.meta, json!({"frames": 2, "w": 2, "h": 1, "c": 3}));
+        let inv = Invocation::new().blob("video", b);
+        let back = decode_video_hwc(&inv, "video").unwrap();
+        assert_eq!(back, frames);
+    }
+
+    #[test]
+    fn video_blob_rejects_mismatched_frame_dims() {
+        let frames: Vec<(Vec<f32>, u32, u32)> = vec![(vec![0.0; 6], 2, 1), (vec![0.0; 12], 4, 1)];
+        let err = video_blob(&frames).unwrap_err();
+        assert!(err.contains("expected 2x1"), "error should name the mismatch: {err}");
+    }
+
+    #[test]
+    fn video_blob_rejects_empty_frame_list() {
+        assert!(video_blob(&[]).unwrap_err().contains("at least one frame"));
     }
 }

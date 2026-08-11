@@ -42,7 +42,7 @@ use qwen_asr::config::AudioEncoderConfig;
 use qwen_asr::encoder::{audio_pipelines, AudioEncoder};
 use qwenvl::config::VisionConfig;
 use qwenvl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
-use qwenvl::preprocess::{image_token_count, normalize_unit, pack_patches, patch_grid, smart_resize_default};
+use qwenvl::preprocess::{image_token_count, normalize_unit, pack_patches, pack_patches_temporal, patch_grid, smart_resize_default};
 
 use qwenvl::mrope::get_rope_index_multi;
 
@@ -219,30 +219,72 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
 }
 
 /// Encode a short video as a list of ALREADY-DECODED frames (RGB HWC each) —
-/// frame extraction (mp4 demux) is out of scope for this crate (the same
-/// scope line the M14 plan drew: `av`-based extraction belongs in brain-py,
-/// upstream of this call), so a caller (`crate::caps`) hands over frames it
-/// already has. Each frame runs through the SAME validated single-frame
-/// [`encode_image`] path (real multi-frame temporal patching is
-/// `qwenvl`'s own not-yet-covered work, per its M5 status entry); embeddings
-/// concatenate row-major, and the returned grid's `t` is the frame count —
-/// the meshgrid `qwenvl::mrope::get_rope_index_multi` needs is identical in
-/// shape to a real multi-frame video grid, only the per-frame encode itself
-/// is the (documented) approximation.
+/// frame extraction from a video FILE is `imaging::video::decode_frames`'s
+/// job (a caller, e.g. `crate::caps`, hands over frames it already has).
+///
+/// Real temporal patching, not the single-frame replication [`encode_image`]
+/// uses for a genuinely-still image: every frame is resized to ONE shared
+/// smart-resized extent (derived from the first frame — a real video's
+/// frames must share a grid to be paired, unlike independent images), padded
+/// to a multiple of `temporal_patch_size` by repeating the LAST frame
+/// (`Qwen2VLVideoProcessor`'s own convention, confirmed against the
+/// installed `transformers` reference before implementing this: `if pad :=
+/// -T % temporal_patch_size: repeats = patches[:, -1:].expand(...)`), then
+/// packed `temporal_patch_size` real frames at a time via
+/// `qwenvl::preprocess::pack_patches_temporal`.
+///
+/// One `VisionEncoder::encode` + `PatchMerger::merge` pass per temporal
+/// GROUP (frame pair), not one pass over the whole clip: the encoder's own
+/// contract (`VisionEncoder::encode`'s doc) is full attention over ONE 2D
+/// patch grid, and extending that to real multi-group windowed attention
+/// across a clip is separate, larger, not-yet-covered work (unchanged by
+/// this fix) — this closes the temporal-PATCHING gap specifically, not the
+/// cross-frame-attention one. The returned grid's `t` is the number of
+/// temporal GROUPS (`frames.len().div_ceil(temporal_patch_size)`), matching
+/// the reference's own `grid_t = num_frames // temporal_patch_size` — NOT
+/// the raw frame count the previous version of this function used, which
+/// was a second, smaller bug alongside the frame-replication one.
 pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>, u32, u32)]) -> Result<ImageSplice, String> {
     if frames.is_empty() {
         return Err("omni: encode_video_frames: at least one frame required".to_string());
     }
-    let mut embeds = Vec::new();
-    let mut n_rows = 0u32;
-    let (mut fh, mut fw) = (0u32, 0u32);
-    for (rgb, w, h) in frames {
-        let one = encode_image(reader, gpu, rgb, *w, *h)?;
-        embeds.extend(one.embeds);
-        n_rows += one.n_rows;
-        (fh, fw) = (one.grid.1, one.grid.2);
+    let cfg = VisionConfig::qwen3_omni();
+    let (encoder_w, main_merger_w) = vision_weights(reader)?;
+
+    let (_, w0, h0) = &frames[0];
+    let (hp, wp) = smart_resize_default(*h0, *w0);
+    let mut chw_frames: Vec<Vec<f32>> = frames
+        .iter()
+        .map(|(rgb, w, h)| {
+            let resized_hwc = imaging::host::resize_bilinear_hwc(rgb, 3, *w, *h, wp, hp);
+            let mut chw = imaging::pixels::hwc_to_chw(&resized_hwc, 3, hp as usize, wp as usize);
+            normalize_unit(&mut chw);
+            chw
+        })
+        .collect();
+
+    let temporal = cfg.temporal_patch_size;
+    while !(chw_frames.len() as u32).is_multiple_of(temporal) {
+        chw_frames.push(chw_frames.last().expect("non-empty, checked above").clone());
     }
-    Ok(ImageSplice { embeds, n_rows, grid: (frames.len() as u32, fh, fw) })
+
+    let (gh, gw) = patch_grid(hp, wp, cfg.patch_size);
+    let merge = cfg.spatial_merge_size;
+    let gpu_local = gpu.new_like(vision_pipelines());
+    let enc = VisionEncoder::new(&gpu_local, cfg.clone(), &encoder_w);
+    let merger = PatchMerger::new(&gpu_local, &main_merger_w, cfg.hidden, merge, cfg.out_hidden_size, false);
+
+    let n_groups = chw_frames.len() as u32 / temporal;
+    let n_rows_per_group = image_token_count(hp, wp, cfg.patch_size, merge);
+    let mut embeds = Vec::with_capacity((n_groups * n_rows_per_group * cfg.out_hidden_size) as usize);
+    for g in 0..n_groups {
+        let group: Vec<&[f32]> = chw_frames[(g * temporal) as usize..((g + 1) * temporal) as usize].iter().map(|f| f.as_slice()).collect();
+        let patches = pack_patches_temporal(&group, 3, hp, wp, cfg.patch_size, merge, temporal);
+        let encoder_out = enc.encode(gh, gw, &patches);
+        embeds.extend(merger.merge(&encoder_out, gh * gw));
+    }
+
+    Ok(ImageSplice { embeds, n_rows: n_groups * n_rows_per_group, grid: (n_groups, gh / merge, gw / merge) })
 }
 
 /// One resolved multimodal prompt: the full token id sequence (media blocks,

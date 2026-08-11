@@ -29,6 +29,7 @@
 //! | [`Shape`] | `vision::net` | **re-exported**; no second NCHW type |
 //! | [`device::NONE`] | `vision::ids` | **re-exported**; one sentinel |
 //! | [`Ctx`], [`mask`], [`tiling`], [`Normalization`] | — | net-new, or a kernel dispatch replacing host code |
+//! | [`video::decode_frames`] | — | net-new: no video-file decoder existed anywhere in the workspace (`omni::mm::encode_video_frames` took already-decoded frames only) |
 //! | [`host::resize_bilinear_hwc`] | `depth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
 //! | [`color::yuyv_to_rgb`] | `capture::convert` | **moved**; `crates/capture` is V4L2-only again |
 //! | [`pixels::chw_to_hwc`] / [`pixels::hwc_to_chw`] | `cli::image_io`, `npu::{calib,sim}`, `wm-display`, tests | **moved**; one generic pair |
@@ -119,6 +120,7 @@ pub mod letterbox;
 pub mod mask;
 pub mod pixels;
 pub mod tiling;
+pub mod video;
 
 pub use codec::{decode, load, save_ppm};
 pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};

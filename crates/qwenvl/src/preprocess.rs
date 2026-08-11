@@ -103,6 +103,68 @@ pub fn pack_patches(img_chw: &[f32], channels: u32, h_bar: u32, w_bar: u32, patc
     out
 }
 
+/// im2col patch packing for `frames_chw.len() / temporal` groups of REAL
+/// distinct frames (`grid_t > 1`) — the video twin of [`pack_patches`],
+/// which correctly repeats one image across its `temporal` slots because an
+/// image carries no motion. Confirmed against the installed reference
+/// (`transformers.models.qwen2_vl.video_processing_qwen2_vl
+/// .Qwen2VLVideoProcessor._preprocess`) before writing this: it `view`s
+/// `[grid_t, temporal_patch_size, channel, gh/merge, merge, patch, gw/merge,
+/// merge, patch]` then `permute(0,1,4,7,5,8,3,2,6,9)` — i.e. `grid_t` is the
+/// OUTERMOST flattened axis (ahead of the spatial merge blocks), and each
+/// row's per-element order is `(channel, temporal_patch_size, patch_h,
+/// patch_w)`, identical to [`pack_patches`]'s own `vidx` layout. That
+/// equivalence is why frame group `g`'s temporal slot `tp` here reads
+/// `frames_chw[g * temporal + tp]` at exactly the position `pack_patches`
+/// reads its single image — the loop nesting (spatial blocks, then merge
+/// rows/cols) is unchanged, only the frame source per `tp` differs.
+///
+/// `frames_chw.len()` MUST already be a multiple of `temporal` — the
+/// reference's own odd-frame-count handling (`Qwen2VLVideoProcessor
+/// ._preprocess`: `if pad := -T % temporal_patch_size: repeats =
+/// patches[:, -1:].expand(...)`, i.e. repeat the LAST frame to pad up to a
+/// multiple) is the caller's job, not this function's — a pure repack
+/// should not also embed a frame-count policy.
+pub fn pack_patches_temporal(frames_chw: &[&[f32]], channels: u32, h_bar: u32, w_bar: u32, patch: u32, merge: u32, temporal: u32) -> Vec<f32> {
+    assert!(!frames_chw.is_empty(), "frames_chw must be non-empty");
+    assert_eq!(frames_chw.len() % temporal as usize, 0, "frame count {} must be a multiple of temporal_patch_size {temporal} (caller must pad by repeating the last frame)", frames_chw.len());
+    for f in frames_chw {
+        assert_eq!(f.len(), (channels * h_bar * w_bar) as usize, "each frame must be [C, h_bar, w_bar]");
+    }
+    assert!(h_bar.is_multiple_of(patch * merge) && w_bar.is_multiple_of(patch * merge));
+    let (gh, gw) = patch_grid(h_bar, w_bar, patch);
+    let pv = channels * temporal * patch * patch;
+    let n_groups = frames_chw.len() as u32 / temporal;
+    let n = n_groups * gh * gw;
+    let mut out = vec![0f32; (n * pv) as usize];
+    let pix = |frame: &[f32], c: u32, y: u32, x: u32| frame[((c * h_bar + y) * w_bar + x) as usize];
+    let mut row = 0u32;
+    for g in 0..n_groups {
+        for bh in 0..gh / merge {
+            for bw in 0..gw / merge {
+                for ih in 0..merge {
+                    for iw in 0..merge {
+                        let (hi, wi) = (bh * merge + ih, bw * merge + iw);
+                        for c in 0..channels {
+                            for tp in 0..temporal {
+                                let frame = frames_chw[(g * temporal + tp) as usize];
+                                for ph in 0..patch {
+                                    for pw in 0..patch {
+                                        let vidx = ((c * temporal + tp) * patch + ph) * patch + pw;
+                                        out[(row * pv + vidx) as usize] = pix(frame, c, hi * patch + ph, wi * patch + pw);
+                                    }
+                                }
+                            }
+                        }
+                        row += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Normalize `[0,1]` pixels to `[-1,1]` (Qwen3-VL uses mean=std=0.5 per channel):
 /// `x -> (x - 0.5) / 0.5`.
 pub fn normalize_unit(pixels: &mut [f32]) {
@@ -184,6 +246,52 @@ mod tests {
         let img = vec![7.0, 9.0]; // c0=7 at (0,0), c1=9 at (0,0)
         let out = pack_patches(&img, 2, 1, 1, 1, 1, 1);
         assert_eq!(out, vec![7.0, 9.0]);
+    }
+
+    #[test]
+    fn pack_patches_temporal_of_a_duplicated_frame_matches_pack_patches() {
+        // The bit-identical-with-the-old-behavior check: two IDENTICAL frames
+        // through pack_patches_temporal must equal one image through
+        // pack_patches's own temporal=2 broadcast -- proving the new
+        // function is a real generalization, not a different formula that
+        // happens to agree on hand-picked cases.
+        let img = vec![1.0, 2.0, 3.0, 4.0]; // [1,2,2]
+        let want = pack_patches(&img, 1, 2, 2, 2, 1, 2);
+        let got = pack_patches_temporal(&[&img, &img], 1, 2, 2, 2, 1, 2);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn pack_patches_temporal_places_distinct_frames_in_their_own_temporal_slot() {
+        // Two GENUINELY DIFFERENT frames: tp=0 must be frame0's pixels, tp=1
+        // must be frame1's -- the exact bug this function exists to fix
+        // (pack_patches ignores tp and replicates one frame into both
+        // slots). C=1, patch=2, merge=1 on a 2x2 frame -> 1 patch, pv=8.
+        let frame0 = vec![1.0, 2.0, 3.0, 4.0];
+        let frame1 = vec![100.0, 200.0, 300.0, 400.0];
+        let got = pack_patches_temporal(&[&frame0, &frame1], 1, 2, 2, 2, 1, 2);
+        // vidx = ((0*2+tp)*2+ph)*2+pw -- tp=0 block first, tp=1 block second.
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0, 100.0, 200.0, 300.0, 400.0], "frame0 must occupy tp=0, frame1 must occupy tp=1 -- not a replicated single frame");
+    }
+
+    #[test]
+    fn pack_patches_temporal_two_groups_are_grid_t_major() {
+        // Four frames, temporal=2 -> 2 groups (grid_t=2). Group order must be
+        // OUTERMOST in the flattened row order (matches the reference's own
+        // grid_t*gh*gw flatten order, grid_t ahead of the spatial axes).
+        let f = [vec![1.0f32], vec![2.0], vec![3.0], vec![4.0]]; // C=1, 1x1 frames
+        let refs: Vec<&[f32]> = f.iter().map(|v| v.as_slice()).collect();
+        let got = pack_patches_temporal(&refs, 1, 1, 1, 1, 1, 2);
+        // C=1,patch=1 -> pv = temporal = 2. group0 = [frame0,frame1] = [1,2];
+        // group1 = [frame2,frame3] = [3,4].
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a multiple of temporal_patch_size")]
+    fn pack_patches_temporal_rejects_a_frame_count_not_a_multiple_of_temporal() {
+        let frame = vec![0.0f32; 4];
+        pack_patches_temporal(&[&frame], 1, 2, 2, 2, 1, 2); // 1 frame, temporal=2
     }
 
     #[test]
