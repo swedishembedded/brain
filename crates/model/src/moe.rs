@@ -657,6 +657,95 @@ pub fn shared_expert_fwd(
     steps
 }
 
+/// Kernel indices [`shared_expert_fwd_i8`] dispatches. The gate/up/down
+/// SwiGLU linears go through `matmul_i8_dyn` (`crate::int8`'s per-channel
+/// weight scale + per-token dynamic activation scale — the SAME kernel
+/// `qwen3::q8::Q8::mm8` uses), NOT [`expert_fwd_i8`]'s GATED
+/// `moe_linear_gated_i8`: the shared expert applies to every row
+/// unconditionally, so it has no per-row route/skip to express through a
+/// gate array — using the gated kernel here would be dispatching the wrong
+/// shape, not just a slower one. The tiny sigmoid-gate projection
+/// (`d_model -> 1`) stays fp32 via the plain `matmul`, matching
+/// [`expert_fwd_i8`]'s own "not worth quantizing a rank-1 output" scope.
+#[derive(Clone, Copy)]
+pub struct SharedExpertIds8 {
+    pub matmul_i8: usize,
+    pub matmul: usize,
+    pub silu_mul: usize,
+    pub sigmoid: usize,
+    pub scale_row: usize,
+    pub add2: usize,
+    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair —
+    /// used to quantize the intermediate `h` (the shared expert's OWN
+    /// SwiGLU output, a different width than any routed expert's, so it
+    /// cannot reuse `MoeIds8::quant`'s call site, only its kernel ids).
+    pub quant: [usize; 2],
+}
+
+/// Scratch for [`shared_expert_fwd_i8`]. `hq`/`sh` are `h` quantized fresh
+/// (the shared expert's own intermediate, `shared_ff` wide — not the same
+/// buffer any routed expert's `ExpertScratch8::hq` uses).
+pub struct SharedExpertScratch8<'a> {
+    pub gate_pre: &'a DeviceBuffer,
+    pub up: &'a DeviceBuffer,
+    pub h: &'a DeviceBuffer,
+    pub hq: &'a DeviceBuffer,
+    pub sh: &'a DeviceBuffer,
+    pub mlp_out: &'a DeviceBuffer,
+    pub gate_logits: &'a DeviceBuffer,
+    pub gate_scalar: &'a DeviceBuffer,
+    pub scaled: &'a DeviceBuffer,
+}
+
+/// int8 counterpart of [`shared_expert_fwd`]. `xq`/`sx` are the SAME
+/// quantized input the routed [`expert_fwd_i8`] loop already produced once
+/// (the shared expert reads the identical `x` every routed expert does) —
+/// reused here, not requantized. `x_fp32` is that same activation's
+/// original fp32 form, needed only for the (unquantized) sigmoid-gate
+/// projection when `shared_gate_w` is `Some`. Same two real architectures
+/// as [`shared_expert_fwd`] (`Some`/`None` gate) — see that function's doc.
+#[allow(clippy::too_many_arguments)]
+pub fn shared_expert_fwd_i8(
+    g: &Gpu,
+    ids: &SharedExpertIds8,
+    rows: u32,
+    d_model: u32,
+    shared_ff: u32,
+    xq: &DeviceBuffer,
+    sx: &DeviceBuffer,
+    x_fp32: &DeviceBuffer,
+    gate_w: Lin8,
+    up_w: Lin8,
+    down_w: Lin8,
+    shared_gate_w: Option<&DeviceBuffer>,
+    scratch: &SharedExpertScratch8,
+    acc: &DeviceBuffer,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    let mm8 = |xq: &DeviceBuffer, sx: &DeviceBuffer, w: Lin8, out: &DeviceBuffer, kg: u32, n: u32| {
+        g.step(ids.matmul_i8, &[xq, w.wq, sx, w.sw, out], &[rows, kg, n], rows.div_ceil(128) * n.div_ceil(128) * 256)
+    };
+    let mut steps = vec![
+        mm8(xq, sx, gate_w, scratch.gate_pre, d_model / 4, shared_ff),
+        mm8(xq, sx, up_w, scratch.up, d_model / 4, shared_ff),
+        g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[rows * shared_ff], rows * shared_ff),
+    ];
+    steps.extend(crate::int8::quant_rows_steps(g, crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq }, 0, rows, shared_ff));
+    steps.push(mm8(scratch.hq, scratch.sh, down_w, scratch.mlp_out, shared_ff / 4, d_model));
+    match shared_gate_w {
+        Some(shared_gate_w) => {
+            steps.push(g.step(ids.matmul, &[x_fp32, shared_gate_w, scratch.gate_logits], &[rows, d_model, 1], rows));
+            steps.push(g.step(ids.sigmoid, &[scratch.gate_logits, scratch.gate_scalar], &[rows], rows));
+            steps.push(g.step(ids.scale_row, &[scratch.mlp_out, scratch.gate_scalar, scratch.scaled], &[rows * d_model, d_model], rows * d_model));
+            steps.push(g.step(ids.add2, &[acc, scratch.scaled, out], &[rows * d_model], rows * d_model));
+        }
+        None => {
+            steps.push(g.step(ids.add2, &[acc, scratch.mlp_out, out], &[rows * d_model], rows * d_model));
+        }
+    }
+    steps
+}
+
 // ---- row-compacted sparse expert forward (tiled, not naive) ---------------
 //
 // `expert_fwd` above removes the redundant FLOPs of evaluating every expert
