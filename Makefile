@@ -238,9 +238,13 @@ check/spdx:
 #                 .agents/ file path)
 #   commit-msg  - silently strips Co-Authored-By:/Claude-Session: trailer
 #                 lines from every new commit message (never fails)
-#   pre-push    - fails the push if a trailer line survived anyway (see
-#                 scripts/hooks/pre-push; both hooks share the stripping
-#                 logic in scripts/hooks/trailers.py)
+#   pre-push    - fails the push if a trailer line survived anyway, OR if a
+#                 docs/.agents citation survived anyway (a full-tree re-run
+#                 of check-no-doc-citations.sh, since the pre-commit hook's
+#                 own check is diff-scoped and not guaranteed to fire on
+#                 every commit a rebase replays); see scripts/hooks/pre-push,
+#                 the trailer half shares its stripping logic with
+#                 scripts/hooks/trailers.py
 hooks/install:
 	install -m 755 scripts/hooks/pre-commit .git/hooks/pre-commit
 	install -m 755 scripts/hooks/commit-msg .git/hooks/commit-msg

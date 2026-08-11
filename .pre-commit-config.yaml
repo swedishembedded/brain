@@ -11,6 +11,7 @@ repos:
         entry: python3 scripts/spdx/check.py
         language: system
         pass_filenames: true
+        stages: [pre-commit]
       - id: no-doc-citations-in-code
         name: "No docs/ or .agents/ file-path citations in code"
         description: >-
@@ -19,9 +20,14 @@ repos:
           message) — those trees move and get rewritten, and a citation to
           them is a cross-reference nothing keeps in sync. State the fact or
           reasoning inline instead. See scripts/gates/check-no-doc-citations.sh.
+          Diff-scoped (staged files only) at this stage; scripts/hooks/pre-push
+          re-runs it as a full-tree scan so a commit that slipped past this
+          hook (e.g. one a rebase replayed without firing it) still gets
+          caught before anything is shared.
         entry: bash scripts/gates/check-no-doc-citations.sh
         language: system
         pass_filenames: true
+        stages: [pre-commit]
       - id: no-em-dash
         name: "No new em dashes (U+2014)"
         description: >-
@@ -32,6 +38,7 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
       - id: strip-commit-trailers
         name: "Strip Co-Authored-By:/Claude-Session: trailers"
         description: >-
@@ -41,10 +48,15 @@ repos:
         language: system
         stages: [commit-msg]
       - id: no-commit-trailers-on-push
-        name: "No Co-Authored-By:/Claude-Session: trailers reach the remote"
+        name: "Pre-push backstop: trailers + doc citations"
         description: >-
-          Fails the push if a trailer line survived (should only happen for
-          a commit that bypassed the commit-msg hook). See
+          Fails the push if a Co-Authored-By:/Claude-Session: trailer
+          survived (should only happen for a commit that bypassed the
+          commit-msg hook), OR if the full working tree being pushed still
+          cites a docs/ or .agents/ file path anywhere in crates/, scripts/,
+          tools/, or examples/ (a full-tree, not diff-scoped, re-run of
+          no-doc-citations-in-code -- the deterministic backstop for
+          whatever got the diff-scoped commit-time check bypassed). See
           scripts/hooks/pre-push.
         entry: python3 scripts/hooks/pre-push
         language: system

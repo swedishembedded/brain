@@ -2,15 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Git pre-push hook: FAILS the push if any commit about to be pushed still
-has a Co-Authored-By:/Claude-Session: trailer line.
+"""Git pre-push hook: FAILS the push if (1) any commit about to be pushed
+still has a Co-Authored-By:/Claude-Session: trailer line, or (2) the tree
+being pushed cites a docs/ or .agents/ file path from crates/, scripts/,
+tools/, or examples/ (scripts/gates/check-no-doc-citations.sh).
 
 Unlike scripts/hooks/commit-msg (which silently cleans new commits and never
 fails), this is a real gate — a safety net for a commit that reached this
-repo without going through that hook (made before it was installed, fetched,
-merged, or cherry-picked in). It does NOT try to rewrite history itself;
+repo without going through the equivalent pre-commit checks (made before
+they were installed, fetched, merged, cherry-picked in, or replayed by a
+rebase -- pre-commit hooks are NOT guaranteed to fire on every commit a
+`git rebase --continue` creates, and the doc-citation check is diff-scoped
+at commit time, so a citation sitting in a file that a given commit doesn't
+happen to touch again can ride along unnoticed until it's the whole tree
+being pushed that matters). It does NOT try to rewrite history itself;
 rewriting commits that are about to be shared is a decision for a human, not
-a hook, so it just reports which commits are affected and refuses the push.
+a hook, so it just reports what's wrong and refuses the push. The
+doc-citation check runs ONCE against the full working tree (not per-commit,
+not diff-scoped) -- it is the actual thing being shared with the remote, so
+that is the one scan that can't miss anything regardless of how it got that
+way.
 
 Git invokes this as: pre-push <remote-name> <remote-url>, with one line per
 ref-update on stdin: "<local-ref> <local-sha> <remote-ref> <remote-sha>". But
@@ -30,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trailers import has_trailer
 
 ZERO = "0" * 40
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def rev_list(*args):
@@ -46,6 +58,15 @@ def commits_to_check(local_sha, remote_sha):
         # long-lived one doesn't rescan all of history.
         return rev_list(local_sha, "--not", "--remotes")
     return rev_list(f"{remote_sha}..{local_sha}")
+
+
+def check_doc_citations():
+    """Run scripts/gates/check-no-doc-citations.sh against the WHOLE working
+    tree (no file args -- its own full-repo-scan mode), once. Returns the
+    gate's stdout+stderr on failure, None if clean."""
+    gate = REPO_ROOT / "scripts" / "gates" / "check-no-doc-citations.sh"
+    result = subprocess.run(["bash", str(gate)], capture_output=True, text=True, cwd=REPO_ROOT)
+    return None if result.returncode == 0 else (result.stdout + result.stderr)
 
 
 def main(argv):
@@ -71,7 +92,10 @@ def main(argv):
         if has_trailer(body):
             offenders.append(sha)
 
+    failed = False
+
     if offenders:
+        failed = True
         print("pre-push: refusing to push — these commits still have a "
               "Co-Authored-By:/Claude-Session: trailer line:", file=sys.stderr)
         for sha in offenders:
@@ -84,11 +108,23 @@ def main(argv):
             "new commits, so this usually means one of these came from elsewhere "
             "(fetch/merge/cherry-pick) or was made without the hook installed.\n"
             "Fix with an interactive rebase (git rebase -i <base>, reword or amend), "
-            "then push again.",
+            "then push again.\n",
             file=sys.stderr,
         )
-        return 1
-    return 0
+
+    citation_report = check_doc_citations()
+    if citation_report is not None:
+        failed = True
+        print("pre-push: refusing to push -- " + citation_report, file=sys.stderr)
+        print(
+            "This is the full-tree backstop (scripts/gates/check-no-doc-citations.sh, no "
+            "file args) -- it runs regardless of whether the pre-commit hook fired on the "
+            "commit that introduced this, so fixing it is the same either way: remove the "
+            "citation and state the fact inline, then commit and push again.",
+            file=sys.stderr,
+        )
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
