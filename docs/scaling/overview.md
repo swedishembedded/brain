@@ -1,136 +1,77 @@
-# Scaling brain across GPUs (and, later, machines)
+# Scaling brain across GPUs
 
-How to train and run models on more than one device — the three parallelism
-dimensions brain implements, when to use each, what to expect, and how they
-compose toward multi-node clusters.
+How to train and run brain's models on more than one device. There are three
+independent ways to spread work across GPUs — **data**, **pipeline**, and
+**tensor** parallelism — plus a transport layer that works the same whether
+the GPUs are in one machine or spread across a network. This page is the
+umbrella; each dimension has its own page:
 
-This is the umbrella. Depth lives in:
-- [`DATAPARALLEL.md`](data-parallel.md) — **Data** parallelism (replicate + all-reduce)
-- [`SHARDING.md`](pipeline-sharding.md) — **Pipeline** parallelism (split layers) + micro-batching
-- [`TENSOR_PARALLEL.md`](tensor-parallel.md) — **Tensor** parallelism (split one op) + the
-  transport (collectives), the process **grid**, and the **planner**
+- [Data parallelism](data-parallel.md) — replicate the model, split the batch
+- [Pipeline parallelism](pipeline.md) — split a model's layers across GPUs
+- [Tensor parallelism](tensor-parallel.md) — split one layer's math across GPUs
 
-Design notes and the reference papers (Megatron, GPipe, PipeDream/1F1B, ZeRO,
-PTD-P) are under `resources/dp/`.
+## The three dimensions, in plain terms
 
-## The three dimensions at a glance
+**Data parallel.** Put a full copy of the model on each GPU. Each copy trains
+on a different slice of the batch at the same time, then the copies combine
+their gradients so every copy ends the step with the identical update. This
+is a *speed* technique: it doesn't change how much model fits in memory, it
+changes how fast you get through training data.
 
-| dimension | splits | per-step communication | primary purpose | brain API |
-|---|---|---|---|---|
-| **Data (D)** | the batch | one gradient all-reduce | throughput (model fits one card) | `model::DataParallel<M>` |
-| **Pipeline (P)** | the layers | one residual per stage boundary | capacity (weights > one card) | `model::Pipeline<M>` |
-| **Tensor (T)** | one matmul | two all-reduces per layer | capacity for a layer too wide for one card | `Collective` + per-model weave |
+**Pipeline parallel.** Cut the model's layers into contiguous groups ("stages")
+and put each stage on its own GPU. Data flows stage 0 → stage 1 → stage 2 …
+during the forward pass and back during the backward pass. This is a
+*capacity* technique: it lets you train or run a model whose weights don't
+fit on a single card, because no single GPU ever holds more than its own
+stage.
 
-They are **orthogonal** and compose: `DP( PP( TP(model) ) )`. On this 2-GPU box
-only one dimension can exceed 1, so composition is validated on the degenerate
-configs; the code is written for a `(t, p, d)` grid of any size (§Grid).
+**Tensor parallel.** Instead of splitting *between* layers, split *inside* one
+— e.g. give each GPU a slice of a layer's weight matrix, have it compute its
+slice of the output, then combine the partial results. This is also a
+*capacity* technique, for the case where even one layer is too large for one
+GPU, but it needs a round of communication in the middle of every layer
+instead of just at stage boundaries, so it's the most communication-hungry of
+the three.
 
-### Which to reach for
+## Which to reach for
 
-1. **Model fits on one card, want it faster** → **Data parallel**. Simplest, and
-   the only one that raises throughput here. Speedup grows with grad-accumulation
-   (the gradient sync is a fixed per-step cost).
-2. **Model's weights don't fit on one card** → **Pipeline** (split layers across
-   cards; cheapest communication — one residual per cut). Add **micro-batching**
-   to overlap the stages.
-3. **A single layer is too wide for one card** (huge `d_model`/`d_ff`) → **Tensor
-   parallel**, but keep the degree **small** — it all-reduces *per layer*. Use the
-   least TP that makes the layer fit while keeping local GEMMs large (§Planner).
-4. **Very large model** → combine: TP within a node (fast link), PP across nodes,
-   DP to scale the batch.
+1. **Model fits on one GPU and you want training to go faster** → data
+   parallel. It's the simplest of the three, and the only one that raises
+   throughput on its own.
+2. **Model's weights don't fit on one GPU** → pipeline parallel. Split the
+   layers across your cards; the only thing that crosses a stage boundary is
+   the residual stream, so it's cheap to communicate.
+3. **A single layer itself is too wide for one GPU** → the tensor-parallel
+   communication primitives exist and are tested (splitting a weight matrix
+   column-wise or row-wise across GPUs and combining the partial results), but
+   as of today no shipped model wires that primitive into a full forward pass.
+   Treat tensor parallelism as a building block that's ready to be composed
+   into a model, not yet as a one-step capability for an existing one.
 
-## Transport-agnostic by design (cluster-ready)
+## Single machine or a network of machines
 
-Every dimension moves data through one seam — `model::Collective`
-(`all_reduce` / `all_gather` / `reduce_scatter` / `broadcast`), a per-rank
-(NCCL/MPI-shaped) interface. Today the only implementation is `HostCollective`,
-which stages through host RAM (the right transport for a single box with no
-NVLink). **A future compute-node/cluster transport is a new `Collective` impl over
-sockets — not a rewrite of the sharding code.** The `Grid` (§Grid) maps ranks to
-`(tensor, pipeline, data)` coordinates and hands each dimension its collective
-group, so the layout and the transport are independent.
+All three dimensions move data through the same abstraction: whichever GPUs
+are cooperating exchange sums, gathers, and broadcasts through one collective
+interface. That abstraction already has two implementations — one for GPUs
+that are threads inside a single process on one machine, and one that runs
+the identical operations over TCP sockets between separate processes, which
+may be on separate machines. Callers don't change: the same data-parallel (or
+pipeline) code that runs across the GPUs in one box also runs across GPUs on
+a network, because it never talks to the transport directly. So data-parallel
+training across a single machine or across a network of machines is a working
+capability today, not something planned for later.
 
-## Hardware reality on this box (2× Tesla P40, **no NVLink**)
+## What "correct" and "fast" mean here
 
-The interconnect is PCIe via host RAM. That shapes what helps:
+**Correctness is bit-exact.** Both data-parallel and pipeline-parallel runs
+are validated against the equivalent single-GPU run: the parallel run has to
+reproduce the serial run's loss and gradients (small floating-point summation
+differences from combining values in a different order aside).
 
-- **DP**: the 2.4 GB (0.6B model) gradient all-reduce is the fixed cost; the fused
-  host optimiser reads grads once and updates once. **1.34–1.58×** measured
-  (rising with grad-accumulation).
-- **PP**: cross-card traffic is one small residual per cut — cheap. Sharding is
-  bit-exact and distributes weights evenly (auto-placed). Micro-batching overlaps
-  stages for **1.26×** on top.
-- **TP**: an all-reduce *per layer*. Activations are small (~2 MB) but there are
-  `2·n_layers` of them, so on PCIe TP is **latency-bound** — implemented for
-  **capacity and correctness**, not speed. Real TP speedups need NVLink/NVSwitch.
-
-Rule of thumb here: **DP for speed, PP for capacity, TP only when a layer itself
-won't fit.**
-
-## How to use it
-
-### Data parallel (any model)
-```rust
-use model::{Batch, DataParallel};
-let mut dp = DataParallel::<Qwen>::new(cfg, batch, seqlen, &init, &[0, 1]);
-dp.zero_grads();
-dp.forward_backward(&microbatches);                 // concurrent across cards
-dp.adamw_step(step, lr, wd, Some(1.0), 1.0 / microbatches.len() as f32);
-dp.save("out.safetensors");
-```
-
-### Pipeline parallel (any `Shardable` model — gpt, qwen)
-```rust
-use model::{Batch, Pipeline};
-let mut pipe = Pipeline::<Qwen>::new(cfg, batch, seqlen, &init, &[0, 1]); // cuts auto-placed
-// one batch:
-let loss = pipe.forward(Batch::Lm { tokens: &x, targets: &y });
-pipe.backward();
-pipe.adamw_step(step, lr, wd, Some(1.0), 1.0 / grad_accum as f32);
-// or micro-batched (overlapped stages, bounded activation memory):
-let loss = pipe.train_step(&microbatches, step, lr, wd, Some(1.0));
-```
-
-### Planning the tensor-parallel degree
-```rust
-use model::{plan_tp, Hardware, ModelShape};
-let plan = plan_tp(&hw, &shape);   // smallest TP that fits, keeping GEMMs large
-println!("{} -> {}", plan.degree, plan.note);
-```
-
-## Expectations (what "correct" and "fast" mean here)
-
-**Correctness is bit-exact.** Every dimension is validated against the
-single-device result: DP grads `rel ≤ 1.3e-7`, PP loss+grads `rel 0.00e0`, TP
-fwd/bwd `rel ≤ 2e-7` (differences are only floating-point summation order in the
-all-reduce). This is the gate — a parallel run must reproduce the serial run.
-
-**Speed** is bounded by the interconnect, not the compute:
-- `fwd+bwd` genuinely overlaps across cards (DP ~3×, PP micro-batch ~2×).
-- End-to-end is capped by the fixed per-step sync (no NVLink), so speedups are
-  modest on 2 cards and improve with more grad-accumulation and more pipeline
-  stages.
-
-## Composition & the grid
-
-Ranks form a `(tp, pp, dp)` **grid** (`model::Grid`), laid out TP-fastest so
-tensor-parallel peers are adjacent (they need the tightest coupling). Each
-dimension's peer set is a `Collective` group (`model::LocalGroups`). This is the
-Megatron PTD-P placement and is the same whether ranks are threads on one box or
-processes across a cluster. See [`TENSOR_PARALLEL.md`](tensor-parallel.md).
-
-## Status & roadmap
-
-**Done + bit-exact-validated:** the transport (collectives), the layout (grid +
-groups), the TP planner, and all three dimension mechanics — DP (generic, all 9
-models), PP (generic `Shardable`, auto-placed, micro-batched), TP (MLP + attention,
-forward *and* backward).
-
-**Remaining (integration, not new primitives):**
-- **Per-model TP weave** — wire the proven col/row-parallel linears + all-reduces
-  into a full model's `forward`/`backward` (per-model, like the `Shardable` weave).
-- **Unified 3D executor** — assign each rank its grid coord and run
-  TP-in-stage → PP-across-stages → DP-across-replicas over `LocalGroups`.
-- **More `Shardable` models** — glm (MLA+MoE+MTP), moe; seq2seq is encoder-decoder
-  (needs a two-boundary shard model); non-transformers use DP only.
-- **Network `Collective`** — the socket transport for multi-machine clusters.
+**Speed** depends entirely on your interconnect and GPU count — how fast your
+GPUs can exchange gradients or activations relative to how fast they compute.
+A slow link between GPUs caps the achievable speedup regardless of how many
+cards you add; a fast one lets the speedup scale with card count. Any
+concrete number is a property of one measured configuration, not a general
+guarantee — actual speedup on your hardware depends on your interconnect and
+GPU count.

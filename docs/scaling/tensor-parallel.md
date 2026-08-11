@@ -1,121 +1,69 @@
-# Tensor parallelism, collectives, the grid, and the planner
+# Tensor parallelism
 
-The third parallelism dimension and the machinery that composes all three. Tensor
-parallelism splits **one tensor operation across devices** (`Y = XW` → each GPU
-computes `X·Wᵢ`, combined by a collective) — distinct from the intra-GPU
-kernel/workgroup tiling (brain's reg2 GEMM), which is how each *local* shard is
-then executed efficiently. See [`SCALING.md`](overview.md) for the umbrella.
+The third parallelism dimension: instead of splitting *between* layers
+(pipeline parallelism) or replicating the whole model (data parallelism),
+tensor parallelism splits **one matrix multiply inside a single layer**
+across GPUs. Where pipeline parallelism only needs to communicate at stage
+boundaries, tensor parallelism needs a round of communication in the middle
+of every layer's forward and backward pass — it's the most
+communication-hungry of the three dimensions, so it's meant for the narrow
+case where even one layer's weights are too large for one GPU, not as a
+general speedup technique.
 
-Grounded in Megatron-LM and PTD-P (`resources/dp/`).
+## What a column-parallel / row-parallel split means
 
-## The collective layer (`model::collective`)
+Take a layer that computes `Y = X · W` for some weight matrix `W`. Split `W`
+one of two ways:
 
-Everything moves data through `Collective` — a per-rank (NCCL/MPI-shaped)
-interface:
+- **Column-parallel**: give each GPU a slice of `W`'s output columns. Each
+  GPU computes its own slice of `Y` directly from the full input `X` — no
+  communication needed for this step, because each GPU's output columns
+  don't depend on any other GPU's slice of `W`.
+- **Row-parallel**: give each GPU a slice of `W`'s input rows (paired with a
+  matching slice of the incoming activations). Each GPU computes a partial,
+  incomplete result, and the GPUs' partial results have to be **summed**
+  together to get the true `Y` — a communication step.
 
-| op | meaning |
-|---|---|
-| `all_reduce(rank, x)` | element-wise **sum** of every rank's `x`; all get the total |
-| `all_gather(rank, x)` | concat every rank's `x` in rank order |
-| `reduce_scatter(rank, x)` | sum, then each rank keeps its `1/world` slice |
-| `broadcast(rank, x, root)` | root's `x` to all |
+A transformer layer's attention and feed-forward blocks are built from pairs
+of these: one column-parallel projection whose output feeds directly into a
+row-parallel projection, so the communication step only has to happen once
+per pair rather than after every individual matrix multiply. In the backward
+pass, the same pattern repeats in reverse for the input gradient, while each
+GPU's own weight-slice gradients stay local and need no communication at all.
 
-Reductions sum in a fixed rank order, so results are deterministic /
-bit-reproducible. `HostCollective` implements it in-process via a barrier + shared
-host staging (the transport for a single box, no NVLink). **A networked cluster is
-a new `Collective` impl over sockets; call sites don't change.**
+## Current scope
 
-## Tensor-parallel transformer layer (Megatron `f`/`g`)
+The communication primitives (the combine operations described above) and
+the specific column-parallel/row-parallel arithmetic for a transformer's
+attention and feed-forward blocks are implemented and tested, including
+end-to-end forward and backward numerical parity against the equivalent
+single-GPU computation. What doesn't exist yet is a shipped model that wires
+this primitive into its own full forward and backward pass — today it's a
+proven, ready-to-use building block, not a capability any model exposes
+end-to-end. Composing it into a model is a per-architecture integration, the
+same shape of work as it took to add [pipeline sharding](pipeline.md) to a
+model, just not done yet for tensor parallelism.
 
-Per layer, TP degree `k`, with the residual stream **replicated** across the `k`
-ranks (only the inside of attention/MLP is sharded):
+## Composing all three dimensions
 
-**MLP** `Z = GeLU(X·Wfc)·Wproj`:
-- `Wfc` **column-parallel** — rank *i* owns `ff/k` hidden columns, computes
-  `Yᵢ = GeLU(X·Wfcᵢ)`. No communication; the intermediate stays sharded.
-- `Wproj` **row-parallel** — rank *i* owns `ff/k` input rows, computes a partial
-  `Zᵢ = Yᵢ·Wprojᵢ` (`[m,d]`). **One all-reduce** sums the partials → `Z`.
+Data, pipeline, and tensor parallelism are designed to be orthogonal and
+combine: a group of GPUs can be tensor-parallel with each other for one
+stage's layers, that stage can be one of several pipeline stages, and the
+whole pipeline can be replicated data-parallel. Data-parallel and pipeline
+parallelism have each been validated independently; running all three
+together end-to-end isn't yet a shipped capability, since it depends on
+tensor parallelism first being woven into a real model as described above.
 
-**Attention** (heads are independent):
-- QKV **column-parallel by head** — rank *i* owns `n_heads/k` heads (its q/k/v
-  rows), runs attention on them. No communication.
-- Output projection **row-parallel** — partial `[m,d]` per rank + **one
-  all-reduce**.
+## Choosing a degree, if you're extending a model
 
-So **2 all-reduces per layer forward** (attn + MLP). In the **backward** the
-conjugate `f` operator all-reduces the **input gradient** `dX` at each
-column-parallel entry; the weight-shard gradients (`dWfc`, `dWproj`) are **local**
-(no communication) and reassemble to the single-GPU gradient.
-
-### Validated bit-exact (`crates/model/tests/tensor_parallel.rs`, 2×P40)
-
-| what | vs single-GPU |
-|---|--:|
-| MLP forward | rel 9.95e-8 |
-| attention forward (head-split) | rel 8.66e-8 |
-| training: `dX` (all-reduced) | rel 2.03e-7 |
-| training: `dWfc`, `dWproj` (local shards) | **rel 0.00e0** |
-
-The small residuals are only floating-point summation order in the all-reduce.
-
-**Gotcha found by TDD:** build the per-rank `Gpu`s **sequentially before
-threading** — `BRAIN_GPU_INDEX` is process-global and wgpu device init is not
-concurrency-safe; setting it inside the threads deadlocks (same discipline as
-`Pipeline`/`DataParallel`).
-
-## The 3D process grid (`model::grid`)
-
-A world of `tp·pp·dp` ranks maps to `(tensor, pipeline, data)` coordinates,
-**TP-fastest**:
-
-```text
-rank = (dp_rank · pp + pp_rank) · tp + tp_rank
-```
-
-so ranks `0..tp` are one tensor-parallel group. This is the Megatron PTD-P
-placement: **TP needs the tightest coupling** (an all-reduce per layer → same
-node/NVLink, lowest rank stride), **pipeline** crosses nodes (a residual per
-boundary), **data** is outermost (one grad all-reduce per step).
-
-- `Grid::{coord, rank, tp_group, pp_group, dp_group}` — the portable rank math.
-- `LocalGroups` — the in-process realisation: one `HostCollective` per group in
-  each dimension, so rank *r* reaches its peers via `lg.tp(r)` / `pp(r)` / `dp(r)`
-  (returns the group's collective + the rank's local index). A cluster builds the
-  same per-group communicators over sockets.
-
-## The tensor-parallel planner (`model::plan`)
-
-TP has a real per-layer communication cost, so more of it is not always better.
-The cost model:
-
-```text
-T_total(t) = T_local(t) + T_comm(t) + T_sync(t)
-```
-
-Raising `t` cuts `T_local` (FLOPs/`t`) but adds `T_comm` (a ring all-reduce per
-layer: `bytes/bandwidth + latency`) and, once the local dim drops below the reg2
-tile (`gemm_min_dim = 128`), lowers GEMM efficiency.
-
-`plan_tp` is **capacity-first** (Megatron practice): pick the **smallest** degree
-that makes the model fit while keeping local GEMMs large — TP is for *fitting*, and
-data/pipeline parallelism chase throughput. It reports when memory forces a degree
-that shrinks GEMMs below the tile. `tp_step_secs` exposes the cost model directly
-(unit-tested: free communication ⇒ more TP strictly faster; a slow high-latency
-link makes TP a net loss).
-
-## Extending: weaving TP into a full model
-
-The mechanic and transport are proven; making a whole model tensor-parallel is a
-per-model weave (like the `Shardable` pipeline weave):
-
-1. Give the model a TP context (`rank`, `world`, its `Collective`).
-2. Shard the four projection weights: QKV + FC **column-parallel**, output-proj +
-   down-proj **row-parallel**. Keep embeddings, layernorms, and the residual
-   stream **replicated**.
-3. Insert **one all-reduce** after the attention output projection and one after
-   the MLP down projection (forward); the conjugate `dX` all-reduce in the
-   backward.
-4. Gate it exactly like the single-device path so `world == 1` is byte-identical.
-
-Then a unified executor assigns each rank a `Grid` coordinate and runs
-TP-in-stage → PP-across-stages → DP-across-replicas over `LocalGroups`.
+Because a tensor-parallel split needs a communication round on every layer
+(rather than once per stage boundary, or once per training step), raising the
+degree isn't free the way adding more pipeline stages or more data-parallel
+replicas is: past a point, the communication cost per layer outweighs the
+compute saved by splitting the layer further, and splitting a matrix multiply
+too thin also lowers how efficiently each GPU's slice runs. The practical
+rule of thumb, consistent with how large-model training frameworks generally
+use tensor parallelism: use the smallest degree that makes a layer fit,
+reach for data or pipeline parallelism for throughput and capacity instead,
+and keep the GPUs sharing a tensor-parallel group on the fastest interconnect
+you have, since they pay for it every layer.
