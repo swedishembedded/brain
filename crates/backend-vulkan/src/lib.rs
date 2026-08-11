@@ -538,7 +538,7 @@ impl VulkanBackend {
         self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
         let dev = &self.ctx.device;
         let set_layouts = [set_layout];
-        let mut pools = self.pools.lock().unwrap();
+        let mut pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
         let info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(*pools.last().unwrap())
             .set_layouts(&set_layouts);
@@ -627,7 +627,7 @@ impl VulkanBackend {
     pub fn step(&self, kind: usize, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> VkStep {
         let ubuf = self.make_uniform(params);
         let step = self.record(kind, &ubuf, bufs, &[], threads, true);
-        self.uniforms.lock().unwrap().push(ubuf);
+        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).push(ubuf);
         step
     }
 
@@ -648,7 +648,7 @@ impl VulkanBackend {
     ) -> VkStep {
         let ubuf = self.make_uniform(params);
         let step = self.record(kind, &ubuf, bufs, offsets, threads, true);
-        self.uniforms.lock().unwrap().push(ubuf);
+        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).push(ubuf);
         step
     }
 
@@ -661,9 +661,9 @@ impl VulkanBackend {
     /// Transient uniform buffers currently alive (unsubmitted + in-flight +
     /// recycled). Bounded by the largest single frame, not by frame count.
     pub fn transient_uniform_count(&self) -> usize {
-        self.uniforms.lock().unwrap().len()
-            + self.inflight_uniforms.lock().unwrap().len()
-            + self.free_uniforms.lock().unwrap().values().map(Vec::len).sum::<usize>()
+        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).len()
+            + self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).len()
+            + self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).values().map(Vec::len).sum::<usize>()
     }
 
     /// A transient per-dispatch uniform: recycled from `free_uniforms` when one
@@ -707,7 +707,7 @@ impl VulkanBackend {
         // `update_descriptor_sets` is legal). Caller-held `step_buf` sets must
         // stay valid across flushes, so they always allocate fresh.
         let set = if transient {
-            self.free_sets.lock().unwrap().get_mut(&kind).and_then(Vec::pop)
+            self.free_sets.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&kind).and_then(Vec::pop)
         } else {
             None
         }
@@ -764,12 +764,12 @@ impl VulkanBackend {
             self.flush();
             self.run_clears(clears);
         }
-        self.pending.lock().unwrap().extend_from_slice(steps);
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(steps);
         // These steps' transient uniforms are now in flight: eligible for
         // recycling once the flush that runs them has fence-waited. Uniforms of
         // steps NOT yet submitted stay in `uniforms`, untouched by a flush that
         // races between their creation and their own submit.
-        self.inflight_uniforms.lock().unwrap().append(&mut self.uniforms.lock().unwrap());
+        self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).append(&mut self.uniforms.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     fn run_clears(&self, clears: &[&VkOwnedBuffer]) {
@@ -787,7 +787,7 @@ impl VulkanBackend {
     /// memory barrier between consecutive dispatches), submit, fence-wait, then
     /// reclaim the batch's descriptor sets + transient uniform buffers.
     fn flush(&self) {
-        let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap());
+        let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
             return;
         }
@@ -900,11 +900,11 @@ impl VulkanBackend {
     /// `step_buf` steps (transient = false) are caller-owned and left alone, so
     /// the `uniform_dynamic` reuse pattern keeps working across flushes.
     fn recycle_transients(&self, steps: &[VkStep]) {
-        for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap()) {
-            self.free_uniforms.lock().unwrap().entry(u.size).or_default().push(u);
+        for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
+            self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
         }
         let mut seen = std::collections::HashSet::new();
-        let mut free = self.free_sets.lock().unwrap();
+        let mut free = self.free_sets.lock().unwrap_or_else(|e| e.into_inner());
         for s in steps {
             if s.transient && seen.insert(s.set) {
                 free.entry(s.kind).or_default().push(s.set);
@@ -922,7 +922,7 @@ impl VulkanBackend {
     /// `MAX_TIMED_DISPATCHES + 1` marks (enough to bracket the largest batch
     /// this backend will time).
     unsafe fn timestamp_pool(&self) -> vk::QueryPool {
-        let mut slot = self.profile.pool.lock().unwrap();
+        let mut slot = self.profile.pool.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = *slot {
             return p;
         }
@@ -950,7 +950,7 @@ impl VulkanBackend {
     /// between `ts[i]` and `ts[i+1]`) into the per-kernel-kind accumulator.
     fn record_timing(&self, kinds: &[usize], ts: &[u64]) {
         let period_ns = self.ctx.timestamp_period_ns;
-        let mut acc = self.profile.acc.lock().unwrap();
+        let mut acc = self.profile.acc.lock().unwrap_or_else(|e| e.into_inner());
         for (i, &kind) in kinds.iter().enumerate() {
             let dt_ns = ts[i + 1].saturating_sub(ts[i]) as f64 * period_ns;
             let entry = &mut acc[kind];
@@ -1014,25 +1014,25 @@ impl Drop for VulkanBackend {
         let dev = &self.ctx.device;
         unsafe {
             let _ = dev.device_wait_idle();
-            for u in std::mem::take(&mut *self.uniforms.lock().unwrap()) {
+            for u in std::mem::take(&mut *self.uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
                 self.ctx.destroy_buffer(u);
             }
-            for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap()) {
+            for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
                 self.ctx.destroy_buffer(u);
             }
-            for (_, us) in std::mem::take(&mut *self.free_uniforms.lock().unwrap()) {
+            for (_, us) in std::mem::take(&mut *self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
                 for u in us {
                     self.ctx.destroy_buffer(u);
                 }
             }
-            for &pool in self.pools.lock().unwrap().iter() {
+            for &pool in self.pools.lock().unwrap_or_else(|e| e.into_inner()).iter() {
                 dev.destroy_descriptor_pool(pool, None);
             }
             // Pipelines are NOT destroyed here: `self.pipelines` is an
             // `Arc<VkPipelineSet>`, possibly shared with a `share()` sibling
             // still alive. `VkPipelineSet::drop` destroys them exactly once,
             // when the last handle referencing this kernel set drops.
-            if let Some(qp) = self.profile.pool.lock().unwrap().take() {
+            if let Some(qp) = self.profile.pool.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 dev.destroy_query_pool(qp, None);
             }
         }
@@ -1165,7 +1165,7 @@ impl Backend for VulkanBackend {
         if self.ctx.timestamp_valid_bits == 0 {
             return None;
         }
-        let acc = self.profile.acc.lock().unwrap();
+        let acc = self.profile.acc.lock().unwrap_or_else(|e| e.into_inner());
         Some(
             self.names
                 .iter()
@@ -1177,7 +1177,7 @@ impl Backend for VulkanBackend {
     }
 
     fn reset_kernel_times(&self) {
-        for e in self.profile.acc.lock().unwrap().iter_mut() {
+        for e in self.profile.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
             *e = (0.0, 0);
         }
     }

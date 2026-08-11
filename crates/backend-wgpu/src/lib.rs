@@ -624,7 +624,7 @@ impl WgpuBackend {
             );
         }
         if let Some(p) = &self.shared.gpu_profile {
-            let acc = p.acc.lock().unwrap();
+            let acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
             let mut rows: Vec<(usize, f64, u64)> =
                 acc.iter().enumerate().filter(|(_, (_, c))| *c > 0).map(|(i, (ms, c))| (i, *ms, *c)).collect();
             rows.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1008,7 +1008,7 @@ impl WgpuBackend {
 
     /// [`Self::flush`] body, with the device's io lock already held.
     fn flush_inner(&self) {
-        let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap());
+        let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
             return;
         }
@@ -1147,7 +1147,7 @@ impl WgpuBackend {
         // Flatten the per-set resolves back into one timeline. Set `c` occupies
         // `[c*PER_SET, c*PER_SET + counts[c])` of the flattened buffer, which is
         // exactly index `i` of the timeline, so no re-mapping is needed.
-        let mut acc = p.acc.lock().unwrap();
+        let mut acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
         for (i, (kind, ..)) in steps.iter().enumerate() {
             let dt = ticks[i + 1].saturating_sub(ticks[i]);
             let e = &mut acc[*kind];
@@ -1225,7 +1225,7 @@ impl WgpuBackend {
             let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
             staging.unmap();
 
-            let mut acc = p.acc.lock().unwrap();
+            let mut acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
             for (i, (kind, ..)) in chunk.iter().enumerate() {
                 let dt = ticks[2 * i + 1].saturating_sub(ticks[2 * i]);
                 let e = &mut acc[*kind];
@@ -1386,7 +1386,7 @@ impl WgpuBackend {
             }
             self.queue().submit(Some(enc.finish()));
         }
-        self.pending.lock().unwrap().extend(steps.iter().cloned());
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend(steps.iter().cloned());
         self.stats_dispatch
             .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }

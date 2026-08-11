@@ -341,7 +341,7 @@ impl CpuBackend {
                 let t = std::time::Instant::now();
                 self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
                 let dt = t.elapsed();
-                let mut g = prof.lock().unwrap();
+                let mut g = prof.lock().unwrap_or_else(|e| e.into_inner());
                 g[*kind].0 += dt;
                 g[*kind].1 += 1;
             } else {
@@ -354,7 +354,7 @@ impl CpuBackend {
     /// was set). Sorted by total time descending.
     pub fn dump_profile(&self) {
         let Some(prof) = &self.shared.profile else { return };
-        let g = prof.lock().unwrap();
+        let g = prof.lock().unwrap_or_else(|e| e.into_inner());
         let mut rows: Vec<(usize, std::time::Duration, u64)> =
             g.iter().enumerate().map(|(i, (d, c))| (i, *d, *c)).filter(|r| r.2 > 0).collect();
         rows.sort_by(|a, b| b.1.cmp(&a.1));

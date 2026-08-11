@@ -646,7 +646,15 @@ impl VkContext {
 
     /// Run `f` with the reusable host-visible staging buffer grown to >= `size`.
     fn with_staging<R>(&self, size: vk::DeviceSize, f: impl FnOnce(&VkBuffer) -> R) -> R {
-        let mut guard = self.staging.lock().unwrap();
+        // Not `.unwrap()`: a prior panic while this SAME lock was held (e.g. a
+        // real "device lost" fault mid-readback, on a DIFFERENT job/thread
+        // that used this shared `VkContext`) poisons the mutex permanently --
+        // `.unwrap()` here would then panic EVERY future call, on every
+        // future request, forever, even ones that have nothing to do with
+        // whatever the original fault was (see `queue_guard`'s identical
+        // recovery, already the established pattern in this file; `Drop`
+        // below needs the same fix for the same reason).
+        let mut guard = self.staging.lock().unwrap_or_else(|e| e.into_inner());
         let need = size.max(4);
         if guard.as_ref().map(|b| b.size < need).unwrap_or(true) {
             if let Some(old) = guard.take() {
@@ -825,7 +833,14 @@ impl Drop for VkContext {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
-            if let Some(s) = self.staging.lock().unwrap().take() {
+            // Same poisoning risk as `with_staging` above -- Drop must never
+            // itself panic (it can run on the DISPATCHER thread, via
+            // `ResidencyManager::build_failed` dropping the failed claim's
+            // instance; an uncaught panic there is the exact server-wide
+            // wedge `crates/residency/src/executor.rs::dispatch_loop`'s
+            // per-message catch_unwind exists to survive -- surviving it is
+            // not a reason to make it MORE likely).
+            if let Some(s) = self.staging.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.device.destroy_buffer(s.buffer, None);
                 self.device.free_memory(s.memory, None);
             }
