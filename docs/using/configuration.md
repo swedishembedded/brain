@@ -52,7 +52,7 @@ served, with no error.
 | Variable | Serves | Value |
 | --- | --- | --- |
 | `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
-| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint + `tokenizer.json` |
+| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import-gguf`) + `tokenizer.json` |
 | `BRAIN_GPT_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLM_WEIGHTS` | GLM decoder | checkpoint (char-level) |
 | `BRAIN_LFM` + `BRAIN_LFM_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |

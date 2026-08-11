@@ -23,6 +23,7 @@ mod flops_cli;
 mod flux2_cli;
 mod forecast_cli;
 mod glm_cli;
+mod gguf_import;
 mod gpt_cli;
 mod image_io;
 mod imageops;
@@ -276,6 +277,13 @@ FORECASTING (chronos2 / kronos / fincast behind one seam)
 CAPABILITIES (typed actions; one dispatch path for CLI + event API)
   brain caps                               # every model's action manifest
   brain do <model> <action> [--param v ...]
+
+GGUF IMPORT (one-time conversion; dispatches on general.architecture)
+  brain import-gguf FILE [--out PATH] [--id VENDOR/REPO]
+      Convert a GGUF checkpoint to brain-native safetensors, choosing the
+      importer by the file's own `general.architecture`. Defaults to a sibling
+      <stem>.brain.safetensors, which the model-dir scan then serves on its own.
+      brain import-gguf --list                # registered architectures
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
@@ -627,6 +635,7 @@ fn main() {
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("qwen35moe") => qwen35moe_cli::run_qwen35moe(&argv[2..]),
+        Some("import-gguf") => gguf_import::run_import_gguf(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
         Some("lfm") => lfm_cli::run_lfm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),

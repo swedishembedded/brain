@@ -25,7 +25,11 @@
 //! warning recommending migration to the store layout.
 //!
 //! [`resident_for`] dispatches by `card.family`: `qwen`, `gpt`, `glm`, `lfm`,
-//! `yolo`, `depth` today. Each family's own checkpoint-writing code must
+//! `yolo`, `depth`, `qwen35` today. A `.gguf` whose `general.architecture` has
+//! a registered importer ([`crate::gguf_import`]) but is not itself servable is
+//! reported with the one-time `brain import-gguf` command that makes it
+//! servable - see that module's doc for why the scan does not convert it in
+//! place. Each family's own checkpoint-writing code must
 //! attach a real [`ModelCard`] (`checkpoint::save_carded`, not the plain
 //! `checkpoint::save`, which never carries one) for a checkpoint to be
 //! reachable here at all — a `from_card` resident constructor alone is not
@@ -239,8 +243,27 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
         },
         "yolo" => Some(Arc::new(crate::resident::YoloResident::from_card(weights, card, tokenizer))),
         "depth" => Some(Arc::new(crate::resident_depth::DepthResident::from_card(weights, card, tokenizer))),
+        // What `crate::gguf_import`'s registry-driven conversion stamps on the
+        // checkpoint it writes - so an imported GGUF is picked up by the very
+        // next scan with no env vars and no per-model wiring.
+        "qwen35" => match crate::resident_qwen35moe::Qwen35Resident::from_card(weights, card, tokenizer) {
+            Ok(q) => Some(Arc::new(q)),
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
         other => {
-            eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
+            // A `.gguf` whose architecture HAS a registered importer is not a
+            // dead end, it just needs the one-time conversion - name the exact
+            // command instead of reporting it as unservable. See
+            // `crate::gguf_import`'s module doc for why discovery does not run
+            // that conversion itself.
+            if weights.ends_with(".gguf") && crate::gguf_import::importer_for(other).is_some() {
+                eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' needs a one-time conversion -- run `brain import-gguf {weights}`)", card.id);
+            } else {
+                eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
+            }
             None
         }
     }

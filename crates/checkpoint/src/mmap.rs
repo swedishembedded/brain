@@ -379,7 +379,18 @@ mod tests {
     /// This is what lets the alignment tests below construct BOTH the
     /// aligned and the misaligned case deterministically, rather than hoping
     /// serde_json's header length happens to land one way or the other.
+    ///
+    /// The file name carries a per-call serial number, NOT just
+    /// `(dtype, want_mod4, pid)`: two of the callers below ask for the same
+    /// `("BF16", 0)` fixture with DIFFERENT tensor lengths, and libtest runs
+    /// them on separate threads of one process. Keying only on the arguments
+    /// gave them one shared path, so whichever wrote second silently replaced
+    /// the other's file mid-test - the 200k-element chunking test would then
+    /// open a 4-element tensor and fail its "must span multiple chunks"
+    /// assertion, roughly one run in three.
     fn make_file_at_alignment(dtype: &str, raw: &[u8], want_mod4: usize) -> std::path::PathBuf {
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for pad in 0..4 {
             let header = serde_json::json!({
                 "t": {"dtype": dtype, "shape": [raw.len() / dtype_width(dtype)], "data_offsets": [0, raw.len()]},
@@ -391,7 +402,7 @@ mod tests {
                 let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
                 file.extend_from_slice(&hbytes);
                 file.extend_from_slice(raw);
-                let path = std::env::temp_dir().join(format!("mmap_st_align_{want_mod4}_{}_{}.safetensors", dtype, std::process::id()));
+                let path = std::env::temp_dir().join(format!("mmap_st_align_{want_mod4}_{}_{}_{serial}.safetensors", dtype, std::process::id()));
                 std::fs::write(&path, &file).unwrap();
                 return path;
             }

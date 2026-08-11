@@ -28,15 +28,21 @@ have the whole file up front and want the more accurate offline pass.
 
 ## Running it
 
-Audio is always **raw mono f32 little-endian PCM at 16 kHz**.
+Pass a WAV file directly - `--in audio=` decodes a RIFF/WAVE file, downmixes it
+to mono and resamples it to 16 kHz for you:
 
 ```bash
 BRAIN_NEMOTRON=/path/to/nemotron/hf \
-  brain do brain/nemotron transcribe --in audio=clip.pcm --out text=out.txt
+  brain do brain/nemotron transcribe --in audio=clip.wav --out text=out.txt
 
 BRAIN_QWEN_ASR=/path/to/qwen3-asr/hf \
-  brain do brain/qwen-asr transcribe --in audio=clip.pcm --out text=out.txt
+  brain do brain/qwen-asr transcribe --in audio=clip.wav --out text=out.txt
 ```
+
+The blob wire format itself is **raw mono f32 little-endian PCM at 16 kHz**
+(what the D-Bus fd transport and the Python examples send). A headerless file
+already in that format is still accepted as-is - `--in audio=clip.pcm` passes
+its bytes through untouched; only a RIFF/WAVE header triggers decoding.
 
 Resident server (D-Bus), both models:
 

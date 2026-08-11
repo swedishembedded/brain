@@ -231,7 +231,8 @@ fn coerce(ty: &ParamType, s: &str) -> Value {
 
 /// Load a file into a [`Blob`] with the media the action's input spec declares.
 /// Images/masks are decoded to raw **HWC f32** planes in `[0,1]` (meta `{w,h,c}`);
-/// text/bytes are read raw.
+/// a WAV audio file is decoded to raw 16 kHz mono f32 PCM (meta
+/// `{"sample_rate":16000}`); text/bytes are read raw.
 fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> {
     let media = spec.inputs.iter().find(|b| b.name == name).map(|b| b.media).ok_or_else(|| format!("action has no input '{name}'"))?;
     match media {
@@ -241,7 +242,28 @@ fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> 
             let bytes: Vec<u8> = hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
             Ok(Blob::new(media, bytes).with_meta(json!({"w": w, "h": h, "c": c})))
         }
+        Media::Audio => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            load_audio_bytes(bytes)
+        }
         _ => std::fs::read(path).map(|b| Blob::new(media, b)).map_err(|e| e.to_string()),
+    }
+}
+
+/// An `--in audio=FILE` payload → the `audio` blob wire format.
+///
+/// A container file (RIFF/WAVE) is DECODED - downmixed to mono and resampled to
+/// 16 kHz - through the same `audio::asr_caps::audio_blob_from_wav` the HTTP
+/// `input_audio` content part uses; feeding a model the literal RIFF header
+/// reinterpreted as f32 samples is silent garbage, which is what happened before.
+/// Anything else is passed through untouched: raw headerless 16 kHz mono f32-LE
+/// PCM is the `audio` blob's own wire format and stays accepted as-is, with no
+/// meta so an already-correct payload isn't relabelled.
+fn load_audio_bytes(bytes: Vec<u8>) -> Result<Blob, String> {
+    if audio::asr_caps::is_wav(&bytes) {
+        audio::asr_caps::audio_blob_from_wav(&bytes)
+    } else {
+        Ok(Blob::new(Media::Audio, bytes))
     }
 }
 
@@ -301,5 +323,63 @@ impl Provider for DemoModel {
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         (name == "echo").then(|| Arc::new(EchoAction) as Arc<dyn Action>)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capability::BlobSpec;
+
+    fn audio_spec() -> ActionSpec {
+        ActionSpec::new("transcribe", "transcribe").input(BlobSpec::new("audio", Media::Audio, "raw mono f32 LE PCM at 16 kHz").required())
+    }
+
+    /// A `--in audio=clip.wav` must be DECODED, not handed to the model as the
+    /// literal RIFF bytes: same samples as a direct `wav::parse` +
+    /// `resample_linear`, and tagged with the 16 kHz meta the ASR guards check.
+    #[test]
+    fn load_blob_decodes_a_wav_file_to_16khz_f32_pcm() {
+        let src_rate = 8000u32; // not 16 kHz, so the resample is actually exercised
+        let samples: Vec<f32> = (0..48).map(|i| (i as f32 / 48.0) - 0.5).collect();
+        let wav_bytes = audio::wav::encode(&samples, src_rate);
+
+        let dir = std::env::temp_dir().join(format!("brain-caps-cli-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.wav");
+        std::fs::write(&path, &wav_bytes).unwrap();
+
+        let blob = load_blob(&audio_spec(), "audio", path.to_str().unwrap()).expect("wav loads");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let parsed = audio::wav::parse(&wav_bytes).expect("fixture parses");
+        let want = audio::resample_linear(&parsed.samples, parsed.sample_rate, 16000);
+        assert!(!want.is_empty());
+        assert_eq!(blob.media, Media::Audio);
+        assert_eq!(blob.bytes.len(), want.len() * 4, "one f32 per resampled sample");
+        assert_eq!(blob.meta["sample_rate"], 16000);
+        let got: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        assert_eq!(got, want);
+        // The header must be gone: raw pass-through would have kept 44+ bytes of it.
+        assert_ne!(blob.bytes.len(), wav_bytes.len());
+        // And it round-trips through the ASR blob decoder the models use.
+        assert_eq!(audio::asr_caps::wav_from_blob(&blob).unwrap(), want);
+    }
+
+    /// Backward compatibility: a headerless raw-PCM file (the documented
+    /// `clip.pcm`) is still passed through byte-for-byte, with no meta invented.
+    #[test]
+    fn load_blob_passes_a_non_wav_audio_file_through_unchanged() {
+        let raw: Vec<u8> = (0..64u8).collect();
+        let dir = std::env::temp_dir().join(format!("brain-caps-cli-pcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.pcm");
+        std::fs::write(&path, &raw).unwrap();
+
+        let blob = load_blob(&audio_spec(), "audio", path.to_str().unwrap()).expect("raw pcm loads");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(blob.bytes, raw);
+        assert!(blob.meta.get("sample_rate").is_none(), "no sample_rate invented for raw PCM: {}", blob.meta);
     }
 }

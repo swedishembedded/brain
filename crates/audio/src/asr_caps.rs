@@ -39,6 +39,37 @@ pub fn transcribe_stream_spec() -> ActionSpec {
         .streaming()
 }
 
+/// The sample rate every brain ASR front end is fixed at, and the rate the
+/// `audio` blob wire format is defined in.
+pub const ASR_SAMPLE_RATE: u32 = 16000;
+
+/// Does `bytes` start with a canonical RIFF/WAVE header? Used by the callers
+/// that accept EITHER a container file or an already-raw PCM payload (the CLI's
+/// `--in audio=...`) and must tell the two apart without guessing.
+pub fn is_wav(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+/// Decode a whole WAV **file** into brain's `audio` blob wire format: mono f32
+/// little-endian PCM at 16 kHz with `meta = {"sample_rate": 16000}`.
+///
+/// The single implementation of "WAV file → brain audio blob", shared by every
+/// surface that accepts a container file from a client: the HTTP `input_audio`
+/// content part (`apiserve::media`) and the CLI's `--in audio=clip.wav`
+/// (`brain do`). Multi-channel input is downmixed to mono by [`crate::wav::parse`]
+/// itself; any source rate is linearly resampled to 16 kHz.
+pub fn audio_blob_from_wav(bytes: &[u8]) -> Result<Blob, String> {
+    let wav = crate::wav::parse(bytes).map_err(|e| e.to_string())?;
+    let samples = crate::resample_linear(&wav.samples, wav.sample_rate, ASR_SAMPLE_RATE);
+    Ok(audio_blob_from_samples(&samples))
+}
+
+/// Pack already-16 kHz mono f32 samples into the `audio` blob wire format.
+pub fn audio_blob_from_samples(samples: &[f32]) -> Blob {
+    let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    Blob::new(Media::Audio, pcm).with_meta(serde_json::json!({ "sample_rate": ASR_SAMPLE_RATE }))
+}
+
 /// Decode an `audio` [`Blob`] to a 16 kHz mono f32 waveform. Rejects a non-16 kHz
 /// `sample_rate` (the ASR front ends are fixed at 16 kHz) and a byte length that is
 /// not a whole number of f32 samples.

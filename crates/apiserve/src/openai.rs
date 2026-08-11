@@ -926,9 +926,19 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
 
         let mut finish = String::from("stop");
         let (mut prompt, mut completion) = (0i64, 0i64);
+        // Whether any real token delta was streamed. A model that only reports
+        // coarse `Progress::step` ticks (no `delta`) - `brain/omni` is one -
+        // produces its whole answer in the terminal `Outcome` and would
+        // otherwise stream a syntactically valid but EMPTY assistant message.
+        // See the `Done` arm below for the one-shot fallback chunk.
+        let mut saw_delta = false;
+        // The terminal outcome's full text, emitted as a single content chunk
+        // only when nothing was streamed incrementally.
+        let mut final_text = String::new();
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
+                    saw_delta = true;
                     yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
                 }
                 StreamMsg::Event(v) => {
@@ -947,6 +957,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
                     finish = co.finish;
+                    final_text = co.text;
                 }
                 StreamMsg::Err(e) => {
                     // Surface the error as a NAMED `error` SSE event (mirrors the
@@ -968,6 +979,13 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 }
             }
         }
+        // Fallback for a resident that never emitted a token delta: stream the
+        // completed outcome's text as ONE content chunk so the assistant message
+        // isn't empty. Invisible to residents that DO stream (`saw_delta`).
+        if !saw_delta && !final_text.is_empty() {
+            yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": final_text }), None, native).to_string()));
+        }
+
         // Terminal chunk: empty delta + finish_reason.
         let fr = finish_openai(&finish);
         yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(fr), native).to_string()));

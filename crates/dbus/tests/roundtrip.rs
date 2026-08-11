@@ -52,6 +52,34 @@ impl Action for CatAction {
     }
 }
 
+/// `describe` - echoes a DESCRIPTOR of the multimodal blobs it received, in the
+/// exact format `crates/cli/src/resident_mock.rs::media_suffix` uses. Proves the
+/// `Run(in_fds, in_meta)` path carries typed media AND its per-blob metadata
+/// (an image's `w`/`h` come from `in_meta`, not from the bytes) all the way into
+/// the action - `cat` above only ever exercised an untyped `bytes` blob.
+struct DescribeAction;
+impl Action for DescribeAction {
+    fn spec(&self) -> ActionSpec {
+        use capability::BlobSpec;
+        ActionSpec::new("describe", "echo a descriptor of the attached media")
+            .input(BlobSpec::new("image", Media::Image, "optional HWC-f32 image"))
+            .input(BlobSpec::new("audio", Media::Audio, "optional 16 kHz mono f32-LE PCM"))
+            .output(BlobSpec::new("out", Media::Text, "the descriptor"))
+    }
+    fn run(&self, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let mut text = "seen:".to_string();
+        if let Some(b) = inv.get_blob("image") {
+            assert_eq!(b.media, Media::Image, "in_meta media must reach the action");
+            text.push_str(&format!(" [image:{}x{}]", b.meta["w"], b.meta["h"]));
+        }
+        if let Some(b) = inv.get_blob("audio") {
+            assert_eq!(b.media, Media::Audio, "in_meta media must reach the action");
+            text.push_str(&format!(" [audio:{}samples@16k]", b.bytes.len() / 4));
+        }
+        Ok(Outcome::new().set("len", json!(text.len())).blob("out", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+
 /// `slow` — a long-running action that polls the invocation's cancel token each
 /// step, so `Cancel(job)` can be verified end-to-end: uncancelled it takes ~10 s,
 /// cancelled it aborts within one 20 ms step.
@@ -74,12 +102,13 @@ impl Action for SlowAction {
 
 impl Provider for RevProvider {
     fn manifest(&self) -> Manifest {
-        Manifest::new("rev", "byte reverser (test provider)", vec![RevAction.spec(), CatAction.spec(), SlowAction.spec()])
+        Manifest::new("rev", "byte reverser (test provider)", vec![RevAction.spec(), CatAction.spec(), DescribeAction.spec(), SlowAction.spec()])
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         match name {
             "reverse" => Some(Arc::new(RevAction) as Arc<dyn Action>),
             "cat" => Some(Arc::new(CatAction) as Arc<dyn Action>),
+            "describe" => Some(Arc::new(DescribeAction) as Arc<dyn Action>),
             "slow" => Some(Arc::new(SlowAction) as Arc<dyn Action>),
             _ => None,
         }
@@ -152,6 +181,22 @@ fn run_roundtrips_a_result_over_an_fd() {
         let echoed = brain_dbus::fd::read_owned_to_vec(out_fds2.get("out").expect("out fd")).unwrap();
         assert_eq!(echoed, payload, "input fd not echoed correctly");
         eprintln!("roundtrip ok: Run(rev.cat) input-fd -> output-fd -> {:?}", String::from_utf8_lossy(&echoed));
+
+        // ---- multimodal input fds: a typed image + audio blob, each with its
+        // own `in_meta` entry, must reach the action with media AND metadata
+        // intact (the D-Bus half of the same coverage `apiserve`'s multimodal
+        // content-part tests give the HTTP surfaces). ----
+        let img_hwc: Vec<u8> = vec![0u8; 4 * 3 * 3 * 4]; // 4x3 RGB, f32-LE
+        let pcm: Vec<u8> = vec![0u8; 320 * 4]; // 320 f32-LE samples
+        let mut media_fds: HashMap<String, ZOwnedFd> = HashMap::new();
+        media_fds.insert("image".to_string(), memfd(&img_hwc).into());
+        media_fds.insert("audio".to_string(), memfd(&pcm).into());
+        let media_meta = r#"{"image":{"media":"image","w":4,"h":3,"c":3},"audio":{"media":"audio","sample_rate":16000}}"#;
+        let (_r3, out_fds3, _m3): (String, HashMap<String, ZOwnedFd>, String) =
+            proxy.call("Run", &("rev", "describe", "{}", media_fds, media_meta, "memfd")).await.unwrap();
+        let desc = brain_dbus::fd::read_owned_to_vec(out_fds3.get("out").expect("out fd")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&desc), "seen: [image:4x3] [audio:320samples@16k]");
+        eprintln!("roundtrip ok: Run(rev.describe) media in_fds+in_meta -> {:?}", String::from_utf8_lossy(&desc));
 
         // ---- Cancel: bogus id -> false; a live Subscribe job -> true, and the
         // polling action must actually abort (its registry entry drains long before

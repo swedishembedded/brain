@@ -12,7 +12,9 @@
 //!   string) or `prompt`, echoes the last user turn back deterministically, streams
 //!   it token-by-token via [`Progress::token`], and returns a `text` blob plus
 //!   `{prompt_tokens, completion_tokens, finish_reason}` — matching
-//!   [`apiserve`'s `bridge::read_outcome`].
+//!   [`apiserve`'s `bridge::read_outcome`]. Optional `image`/`audio` input blobs
+//!   are echoed as a deterministic descriptor (see [`media_suffix`]), so the
+//!   multimodal request plumbing of all three transports is testable weight-free.
 //! * **`embed`**: takes `text` as a param OR as an input blob (the fd-in/fd-out
 //!   embedding contract every real embedding model — `lfm` — uses), returns
 //!   `outputs.mean` (a fixed dim-8 `Vec<f32>` derived from the input) plus
@@ -68,6 +70,14 @@ impl MockResident {
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (accepted, only inspected for the mock tool-call trigger)"))
             .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive (accepted, ignored by the mock)"))
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored by the mock").default(json!(true)))
+            // Optional multimodal inputs, declared exactly as a real multimodal
+            // model does (`crates/omni/src/caps.rs`) - NOT required, so a
+            // text-only invocation still validates. The mock doesn't look at
+            // the pixels/samples; it appends a deterministic descriptor of what
+            // arrived (see [`media_suffix`]) so all three transports' blob
+            // plumbing is testable with zero weights.
+            .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (audio::asr_caps's wire convention)"))
+            .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
             .output(BlobSpec::new("text", Media::Text, "the generated text"))
     }
 
@@ -250,6 +260,31 @@ fn sleep_cancellable(ms: u64, cancel: &capability::CancelToken) -> bool {
 /// echoes); this used to be one of three hand-synced copies.
 use capability::last_user_text;
 
+/// A deterministic descriptor of the multimodal blobs attached to a chat
+/// invocation, appended to the echoed reply: `" [image:{w}x{h}]"` for an image
+/// (dimensions read from the blob's `meta`) and `" [audio:{n}samples@16k]"` for
+/// audio (`bytes.len() / 4`, the blob wire format being f32-LE). Empty when
+/// neither is present, so a text-only reply is unchanged.
+///
+/// This is what makes `BRAIN_MOCK=1 brain serve --openai --anthropic --dbus` able
+/// to prove an attached image/audio actually REACHED the model, not merely that
+/// the request parsed - the mock has no weights to look at the content with, so
+/// the shape of what arrived is the observable. Format matches the
+/// `image:{w}x{h}` string `crates/apiserve/tests/api.rs`'s tool-call fake
+/// already echoes, deliberately: one descriptor shape across the test surfaces.
+/// Image first, then audio, so a request carrying both has one fixed rendering.
+fn media_suffix(inv: &Invocation) -> String {
+    let mut out = String::new();
+    if let Some(b) = inv.get_blob("image") {
+        let (w, h) = (b.meta["w"].as_u64().unwrap_or(0), b.meta["h"].as_u64().unwrap_or(0));
+        out.push_str(&format!(" [image:{w}x{h}]"));
+    }
+    if let Some(b) = inv.get_blob("audio") {
+        out.push_str(&format!(" [audio:{}samples@16k]", b.bytes.len() / 4));
+    }
+    out
+}
+
 /// The stop sequences (the handler passes them as a JSON-array string), or empty.
 fn parse_stop(inv: &Invocation) -> Vec<String> {
     inv.get_str("stop")
@@ -292,6 +327,7 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResul
     }
 
     let reply = if user.trim().is_empty() { "mock reply ready".to_string() } else { format!("You said: {}", user.trim()) };
+    let reply = format!("{reply}{}", media_suffix(inv));
     let words: Vec<&str> = reply.split_whitespace().collect();
     let stops = parse_stop(inv);
 
@@ -709,5 +745,43 @@ mod tests {
         let mut inst = MockInstance;
         let err = inst.run("forecast", &Invocation::new().set("horizon", json!(4)), &mut |_| {}).unwrap_err();
         assert!(err.contains("context"), "error should name the missing input: {err}");
+    }
+
+    /// The chat action must ACCEPT (spec-validate) and ECHO attached media, so a
+    /// weights-free `BRAIN_MOCK=1 brain serve` can prove an image/audio actually
+    /// reached the model over any transport - not just that the request parsed.
+    #[test]
+    fn generate_echoes_attached_image_and_audio_blobs() {
+        let spec = MockResident::generate_spec();
+        assert!(spec.inputs.iter().any(|b| b.name == "image" && b.media == Media::Image && !b.required));
+        assert!(spec.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio && !b.required));
+
+        let messages = serde_json::to_string(&json!([{ "role": "user", "content": "hi" }])).unwrap();
+        let image = Blob::new(Media::Image, vec![0u8; 4 * 3 * 3 * 4]).with_meta(json!({"w": 4, "h": 3, "c": 3}));
+        let audio = Blob::new(Media::Audio, vec![0u8; 320 * 4]).with_meta(json!({"sample_rate": 16000}));
+        let inv = Invocation::new().set("messages", json!(messages)).blob("image", image).blob("audio", audio);
+        let inv = spec.validate(inv).expect("an invocation carrying both optional blobs must validate");
+
+        let mut deltas = String::new();
+        let out = MockInstance
+            .run("generate", &inv, &mut |p| {
+                if let Some(d) = p.delta {
+                    deltas.push_str(&d);
+                }
+            })
+            .unwrap();
+        let text = String::from_utf8(out.blobs["text"].bytes.clone()).unwrap();
+        assert_eq!(text, "You said: hi [image:4x3] [audio:320samples@16k]");
+        // The streamed deltas still reconstruct the text blob byte for byte.
+        assert_eq!(deltas, text);
+    }
+
+    /// The negative control: a text-only turn is unchanged (no empty descriptor).
+    #[test]
+    fn generate_without_media_is_the_plain_echo() {
+        let messages = serde_json::to_string(&json!([{ "role": "user", "content": "hi" }])).unwrap();
+        let inv = Invocation::new().set("messages", json!(messages));
+        let out = MockInstance.run("generate", &inv, &mut |_| {}).unwrap();
+        assert_eq!(String::from_utf8(out.blobs["text"].bytes.clone()).unwrap(), "You said: hi");
     }
 }

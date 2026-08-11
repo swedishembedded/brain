@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain qwen35moe …` — import / run the Qwen3.5-35B-A3B hybrid decoder.
+//! `brain qwen35moe …` - run the Qwen3.5-35B-A3B hybrid decoder.
 //!
-//!   brain qwen35moe import --gguf FILE --out qwen35.safetensors
 //!   brain qwen35moe infer  --weights F [--tokenizer tokenizer.json] --prompt "..."
 //!                     [--max-new N --temp X --top-k K --chat --i8]
+//!   brain qwen35moe export --weights F --out model.onnx [--seq T]
+//!
+//! GGUF import lives in the GENERIC `brain import-gguf` command
+//! ([`crate::gguf_import`]), which dispatches on the file's own
+//! `general.architecture`; `brain qwen35moe import` remains as a deprecated
+//! forward to it.
 //!
 //! Two-step flow (GGUF -> brain-native safetensors -> infer), not a direct
 //! GGUF-streaming infer path: `qwen35moe::model::Qwen35`'s public
@@ -44,36 +49,23 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     })
 }
 
-/// `brain qwen35moe import --gguf FILE --out qwen35.safetensors` — streams the
-/// GGUF checkpoint into brain's native format via
-/// `qwen35moe::import::import_gguf` (see that function's own module doc for
-/// the full llama.cpp<->HF tensor-naming discussion; this is a thin CLI
-/// wrapper, not a second implementation).
+/// `brain qwen35moe import --gguf FILE --out qwen35.safetensors` - **deprecated**
+/// alias for the generic `brain import-gguf FILE [--out PATH] [--id NAME]`.
+///
+/// Kept working so existing callers and scripts don't break - every flag
+/// (`--gguf`, `--out`, `--id`) still means the same thing - but it is a pure
+/// forward: the generic command picks the importer from the file's own
+/// `general.architecture` through [`crate::gguf_import`]'s registry, which is
+/// the only place a new architecture ever has to be registered. Nothing
+/// qwen35moe-specific is decided here any more.
+///
+/// One deliberate difference: with `--out` omitted the output is now a sibling
+/// `<stem>.brain.safetensors` next to the source instead of `qwen35.safetensors`
+/// in the working directory, so the conversion lands where the model-dir scan
+/// will find it. Callers that passed `--out` are unaffected.
 fn import(args: &[String]) {
-    let mut gguf = String::new();
-    let mut out = "qwen35.safetensors".to_string();
-    let mut id: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--gguf" => gguf = val(args, &mut i, "--gguf"),
-            "--out" => out = val(args, &mut i, "--out"),
-            "--id" => id = Some(val(args, &mut i, "--id")),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
-    if gguf.is_empty() {
-        eprintln!("usage: brain qwen35moe import --gguf FILE --out qwen35.safetensors [--id VENDOR/REPO]");
-        return;
-    }
-    match qwen35moe::import::import_gguf(&gguf, &out, id.as_deref()) {
-        Ok(()) => eprintln!("qwen35moe: imported {gguf} -> {out}"),
-        Err(e) => {
-            eprintln!("qwen35moe import failed: {e}");
-            std::process::exit(1);
-        }
-    }
+    eprintln!("brain qwen35moe import is deprecated -- use `brain import-gguf FILE [--out PATH] [--id NAME]`");
+    crate::gguf_import::run_import_gguf(args);
 }
 
 /// `brain qwen35moe infer --weights F [--tokenizer T | --gguf G] --prompt "..."`

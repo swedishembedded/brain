@@ -286,7 +286,15 @@ fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
 /// [`classify`]'s name map.
 pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
     let mg = MmapGguf::open(gguf_path)?;
-    let cfg = config_from_gguf(&mg)?;
+    import_mmap(&mg, out_path, id_override)
+}
+
+/// [`import_gguf`] over an ALREADY-OPEN checkpoint. The generic
+/// architecture-dispatch registry (`brain import-gguf`) opens the file and
+/// reads `general.architecture` before it can know which importer to call, so
+/// it hands the open handle straight through rather than mmapping twice.
+pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+    let cfg = config_from_gguf(mg)?;
     let params = cfg.param_list();
 
     let mut card = ModelCard::new(id_override.unwrap_or("qwen35"), "qwen35");
@@ -294,7 +302,7 @@ pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>) -
     card.param_count = Some(params.iter().map(|(_, n)| *n as u64).sum());
 
     import::to_st(
-        &mg,
+        mg,
         &params,
         &|n| Ok(classify(n, cfg.n_layers, cfg.n_experts)),
         out_path,
@@ -335,8 +343,14 @@ pub fn import_gguf_truncated_to_map(mg: &checkpoint::gguf::MmapGguf, cfg: &Qwen3
     import::to_map(mg, &cfg.param_list(), &|n| Ok(classify(n, cfg.n_layers, cfg.n_experts)), "qwen35 truncated")
 }
 
-#[cfg(test)]
-mod tests {
+/// Test fixtures for this importer, shared across crates.
+///
+/// `pub` (not `#[cfg(test)]`) so `brain-cli`'s GGUF-import-registry tests can
+/// drive a REAL conversion through the generic architecture dispatch without
+/// a second, drifting copy of this checkpoint builder. Not part of the model's
+/// runtime surface.
+#[doc(hidden)]
+pub mod testing {
     use super::*;
     use checkpoint::gguf::GgufValue;
     use checkpoint::gguf_write::{write, TensorOut};
@@ -345,13 +359,13 @@ mod tests {
         (key.to_string(), v)
     }
 
-    /// Build a minimal synthetic GGUF exercising every tensor kind
+    /// Write a minimal synthetic GGUF exercising every tensor kind
     /// `classify` handles, at a tiny shape (2 layers: one linear-attention,
     /// one full-attention, `full_attention_interval=2` so layer 1 is Full;
     /// `n_experts=3`), plus a dropped MTP block at index 2 and a dropped
     /// unrecognized leaf, to prove the coverage check actually distinguishes
     /// "dropped on purpose" from "silently lost".
-    fn synthetic_gguf(path: &str) {
+    pub fn write_synthetic_gguf(path: &str) {
         let d = 4u64; // hidden
         let n_heads = 2u64;
         let head_dim = 4u64; // -> q_proj width doubled = 16
@@ -443,6 +457,12 @@ mod tests {
 
         write(path, &kvs, &tensors, 32).unwrap();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::testing::write_synthetic_gguf as synthetic_gguf;
 
     #[test]
     fn config_from_gguf_matches_synthetic_header() {

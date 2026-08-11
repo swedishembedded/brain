@@ -63,6 +63,7 @@ auto-fetch a model's weights for you (see
 | `brain bench` | architecture-evaluation harness: `eval`, `scale`, `advise`, `compare` |
 | `brain perf` | performance benchmarking: latency/throughput/serve/sweep, vs. a baseline |
 | `brain flops` | offline/online FLOP and int-OPS accounting for a forward/backward pass |
+| `brain import-gguf` | one-time GGUF → brain-native conversion, dispatched by the file's `general.architecture` |
 | `brain caps` | every model's action manifest — see above |
 | `brain do` | run one action on one model, uniformly — see above |
 | `brain gradcheck` | finite-difference backprop correctness gate |

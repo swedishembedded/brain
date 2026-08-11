@@ -27,11 +27,16 @@
 //! `QwenResident` there is only ONE engine kind here, not a `Legacy`/`Batched`
 //! split.
 //!
-//! Config is env-only, following `BRAIN_QWEN_*`'s naming convention:
+//! Two ways in. [`Qwen35Resident::from_card`] serves a checkpoint the
+//! model-dir scan found (family `"qwen35"` - what `brain import-gguf`'s
+//! conversion stamps), under its own card id and with its sibling
+//! `tokenizer.json`; no env vars involved. The env path below is the manual
+//! alternative, for a checkpoint outside the models directory.
+//!
+//! Env config follows `BRAIN_QWEN_*`'s naming convention:
 //!   * `BRAIN_QWEN35MOE_WEIGHTS` — a brain-format Qwen3.5-35B-A3B checkpoint
-//!     (`.safetensors`, `checkpoint::load`-compatible — the same format
-//!     `qwen35moe::import::import_gguf` writes). The primary gate; unset ⇒
-//!     not served.
+//!     (`.safetensors`, `checkpoint::load`-compatible - what `brain
+//!     import-gguf` writes). The primary gate; unset ⇒ not served.
 //!   * `BRAIN_QWEN35MOE_TOKENIZER` — the sibling `tokenizer.json`. Required at
 //!     `activate()` (there is no GGUF-embedded-tokenizer fallback here, unlike
 //!     `QwenResident` — `Engine` never touches a `.gguf` file at all).
@@ -68,6 +73,7 @@ const MODEL: &str = qwen35moe::caps::MODEL;
 /// the scheduler (`BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER`).
 /// See this module's own doc for the exact (single-GPU, fp32-only) scope.
 pub struct Qwen35Resident {
+    id: String,
     path: String,
     tokenizer: String,
 }
@@ -76,7 +82,22 @@ impl Qwen35Resident {
     pub fn from_env() -> Option<Qwen35Resident> {
         let path = std::env::var("BRAIN_QWEN35MOE_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN35MOE_TOKENIZER").ok().unwrap_or_default();
-        Some(Qwen35Resident { path, tokenizer })
+        Some(Qwen35Resident { id: MODEL.to_string(), path, tokenizer })
+    }
+
+    /// The model-dir counterpart of [`from_env`](Self::from_env): a checkpoint
+    /// discovered by `crate::model_dir` (family `"qwen35"` - what
+    /// `qwen35moe::import`'s conversion stamps on its `ModelCard`) served under
+    /// its OWN card id rather than the env fallback [`MODEL`].
+    ///
+    /// `tokenizer` is the sibling `tokenizer.json` the scan found. It is
+    /// required: `Engine` never opens a `.gguf`, so unlike `QwenResident` there
+    /// is no embedded-tokenizer fallback (see this module's own doc) - a
+    /// checkpoint without one would activate straight into an error, so it is
+    /// declined at discovery instead, exactly like the `lfm` family.
+    pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, tokenizer: Option<&str>) -> Result<Qwen35Resident, String> {
+        let tokenizer = tokenizer.filter(|t| !t.is_empty()).ok_or("qwen35moe: no sibling tokenizer.json")?;
+        Ok(Qwen35Resident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.to_string() })
     }
 
     /// The hard per-sequence `prompt + max_new` cap, which this engine also
@@ -103,14 +124,14 @@ impl ResidentModel for Qwen35Resident {
         // doc on why this must be real engine capacity, not an architectural
         // maximum) — same reasoning as `QwenResident::manifest`.
         Manifest::new(
-            MODEL,
+            &self.id,
             "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, fp32 weights + fp32 KV, one active sequence at a time -- see crate::resident_qwen35moe's module doc)",
             vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true)],
         )
         .with_max_context_tokens(Self::ctx() as u64)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(MODEL, "default")
+        InstanceKey::new(&self.id, "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
@@ -316,7 +337,7 @@ mod tests {
     /// needing a real checkpoint/tokenizer.
     #[test]
     fn brain_qwen35moe_is_auto_exposed_on_openai_and_anthropic_model_lists() {
-        let resident = Qwen35Resident { path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new() };
+        let resident = Qwen35Resident { id: MODEL.to_string(), path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new() };
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);

@@ -43,7 +43,8 @@ fast and scalable kernel — not a naive one.
    projections (never the MoE experts), and cross-GPU pipeline sharding
    (`model::shard::Shardable`) for real weights that exceed one card.
    Gradient-checked (`gradcheck::check_qwen35`, `check_qwen35_lora`).
-   `brain qwen35moe {import,infer,export}`, `brain do qwen35moe generate`.
+   `brain qwen35moe {infer,export}`, `brain do qwen35moe generate`; the GGUF
+   conversion runs through the generic `brain import-gguf` (see below).
    See `.agents/roadmap/qwen35.md`.
 3. **Sparse MoE Transformer** (`crates/moe`) — RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
@@ -697,9 +698,18 @@ Direct binary — the model is selected by the command:
 ```bash
 ./target/release/brain <cmd> [opts]
 # data gpt qwen glm tts wm yolo depth mirror splat npu federated bench forecast
-# caps|capabilities  do  run|serve  pid  gradcheck
+# caps|capabilities  do  run|serve  pid  gradcheck  import-gguf
 # train | eval | generate           (these three are the bare MoE model)
 ```
+
+**GGUF import is generic.** `brain import-gguf FILE [--out PATH] [--id NAME]`
+picks the importer from the file's own `general.architecture` via the registry
+in `crates/cli/src/gguf_import.rs`; `--list` prints what's registered. Adding an
+architecture means implementing `GgufArchitectureImporter` and adding one line
+to that table - never a new per-model subcommand. The model-dir scan does NOT
+convert on its own (fp32 dequant-on-load makes the output far larger than the
+quantized source); it logs the exact command instead. That module's doc holds
+the full reasoning.
 
 **Device selection** — `--device` declares **which compute is schedulable**, not
 "a backend". Omit it and brain uses *every* device present (all GPUs + CPU +

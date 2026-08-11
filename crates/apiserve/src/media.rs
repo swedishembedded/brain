@@ -22,7 +22,7 @@
 //! declare; a model that wants more would need a richer wire shape this
 //! module doesn't attempt to invent.
 
-use capability::{Blob, Media};
+use capability::Blob;
 use serde_json::Value;
 
 use crate::b64;
@@ -71,10 +71,9 @@ fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
         return Err(format!("input_audio: only format 'wav' is supported (no MP3 decoder in this workspace), got {format:?}"));
     }
     let bytes = b64::decode(b64_data)?;
-    let wav = audio::wav::parse(&bytes).map_err(|e| format!("input_audio: {e}"))?;
-    let samples = audio::resample_linear(&wav.samples, wav.sample_rate, 16000);
-    let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    Ok(Blob::new(Media::Audio, pcm).with_meta(serde_json::json!({"sample_rate": 16000})))
+    // The shared "WAV file → brain audio blob" decode (`brain do --in
+    // audio=clip.wav` goes through the same one).
+    audio::asr_caps::audio_blob_from_wav(&bytes).map_err(|e| format!("input_audio: {e}"))
 }
 
 /// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for the
@@ -137,6 +136,7 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capability::Media;
     use serde_json::json;
 
     /// A 1x1 white binary PPM (P6) — `imaging::codec::decode` supports P6

@@ -2222,3 +2222,266 @@ async fn openai_chat_tools_bounds_are_400_not_panics_or_500s() {
         assert_valid("openai.json", "ErrorResponse", &v);
     }
 }
+
+// =========================================== step-only (non-token-streaming) chat
+
+/// The full reply [`StepOnlyChat`] returns in its terminal outcome - never as a
+/// token delta.
+const STEP_ONLY_TEXT: &str = "the whole answer arrives at the end";
+
+/// A chat model that emits ONLY coarse `Progress::step` ticks (delta `None`) and
+/// carries its whole reply in the terminal `Outcome`'s `text` blob - the shape
+/// `crates/omni` (Qwen3-Omni) actually has. The SSE renderers used to drop such a
+/// reply entirely, producing a well-formed stream with zero content.
+struct StepOnlyChat;
+struct StepOnlyChatInst;
+impl ResidentModel for StepOnlyChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-steponly",
+            "a chat model that reports only coarse progress",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-steponly", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(StepOnlyChatInst))
+    }
+}
+impl Instance for StepOnlyChatInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Coarse steps only - `Progress::step` sets `delta: None`.
+        progress(Progress::step(0, 2, "prefill"));
+        progress(Progress::step(1, 2, "decode"));
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(7))
+            .set("completion_tokens", json!(9))
+            .set("finish_reason", json!("stop"))
+            .blob("text", Blob::new(Media::Text, STEP_ONLY_TEXT.as_bytes().to_vec())))
+    }
+}
+fn step_only_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(StepOnlyChat), Arc::new(FakeChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    let state = AppState::new(exec, key.clone(), provider);
+    (router(state), key)
+}
+
+/// Concatenated `delta.content` across an OpenAI chat SSE body.
+fn openai_stream_content(text: &str) -> String {
+    sse_data(text)
+        .iter()
+        .filter(|d| d.as_str() != "[DONE]")
+        .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+        .filter_map(|v| v["choices"][0]["delta"]["content"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Concatenated `text_delta` text across an Anthropic messages SSE body.
+fn anthropic_stream_content(text: &str) -> String {
+    sse_events(text)
+        .iter()
+        .filter(|(ev, _)| ev == "content_block_delta")
+        .filter_map(|(_, d)| serde_json::from_str::<Value>(d).ok())
+        .filter_map(|v| v["delta"]["text"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn openai_stream_emits_the_outcome_text_when_the_model_streams_no_deltas() {
+    let (app, key) = step_only_app(Provider::OpenAI);
+    let body = json!({"model": "brain-steponly", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(openai_stream_content(&text), STEP_ONLY_TEXT, "the whole outcome text must be streamed as content: {text}");
+    // Still a well-formed stream: every chunk validates and it terminates properly.
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"));
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        assert_valid("openai.json", "CreateChatCompletionStreamResponse", &serde_json::from_str(d).unwrap());
+    }
+    assert!(
+        datas.iter().filter_map(|d| serde_json::from_str::<Value>(d).ok()).any(|v| v["choices"][0]["finish_reason"] == "stop"),
+        "terminal finish_reason chunk still present: {text}"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_stream_emits_the_outcome_text_when_the_model_streams_no_deltas() {
+    let (app, key) = step_only_app(Provider::Anthropic);
+    let body = json!({"model": "brain-steponly", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(anthropic_stream_content(&text), STEP_ONLY_TEXT, "the whole outcome text must be streamed as a text_delta: {text}");
+    // The synthetic delta must land INSIDE the content block, before its stop.
+    let names: Vec<String> = sse_events(&text).into_iter().map(|(e, _)| e).collect();
+    let last_delta = names.iter().rposition(|n| n == "content_block_delta").expect("a content_block_delta was emitted");
+    let stop = names.iter().position(|n| n == "content_block_stop").expect("content_block_stop present");
+    assert!(last_delta < stop, "the synthetic delta must precede content_block_stop: {names:?}");
+    assert_eq!(names.last().map(String::as_str), Some("message_stop"));
+}
+
+#[tokio::test]
+async fn a_model_that_does_stream_deltas_gets_no_synthetic_duplicate_chunk() {
+    // The other half of the fix: `FakeChat` streams real token deltas AND
+    // returns the same text in its outcome. The fallback must stay invisible -
+    // "Hello world" exactly once, not twice.
+    let (app, key) = step_only_app(Provider::OpenAI);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(openai_stream_content(&text), "Hello world", "no duplicated tail: {text}");
+
+    let (app, key) = step_only_app(Provider::Anthropic);
+    let body = json!({"model": "brain-chat", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(anthropic_stream_content(&text), "Hello world", "no duplicated tail: {text}");
+}
+
+// ====================================================== multimodal content parts
+
+/// A chat model that echoes a DESCRIPTOR of the multimodal blobs that reached
+/// its invocation into its reply text - byte-for-byte the format
+/// `crates/cli/src/resident_mock.rs::media_suffix` uses (`" [image:{w}x{h}]"`,
+/// `" [audio:{n}samples@16k]"`), so the HTTP surfaces are exercised against the
+/// same observable a `BRAIN_MOCK=1 brain serve` exposes.
+///
+/// The point is the POSITIVE case: `apiserve::media`'s own unit tests only cover
+/// decoding in isolation plus the negative (bad format) paths, and nothing proved
+/// that a decoded `input_audio` / Anthropic `image` block actually survives
+/// `to_invocation` → executor → resident.
+struct MediaEchoChat;
+struct MediaEchoChatInst;
+impl ResidentModel for MediaEchoChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-mediaecho",
+            "a chat model that echoes attached media",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .input(BlobSpec::new("audio", Media::Audio, "optional 16 kHz mono f32-LE PCM"))
+                .input(BlobSpec::new("image", Media::Image, "optional HWC-f32 image"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-mediaecho", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(MediaEchoChatInst))
+    }
+}
+impl Instance for MediaEchoChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let mut text = "seen:".to_string();
+        if let Some(b) = inv.get_blob("image") {
+            text.push_str(&format!(" [image:{}x{}]", b.meta["w"], b.meta["h"]));
+        }
+        if let Some(b) = inv.get_blob("audio") {
+            text.push_str(&format!(" [audio:{}samples@16k]", b.bytes.len() / 4));
+        }
+        progress(Progress::token(0, 1, text.clone()));
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(1))
+            .set("completion_tokens", json!(1))
+            .set("finish_reason", json!("stop"))
+            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+fn media_echo_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(MediaEchoChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    let state = AppState::new(exec, key.clone(), provider);
+    (router(state), key)
+}
+
+/// A base64 WAV file: 16-bit PCM, mono, `rate` Hz, `n` samples. Built with the
+/// workspace's own encoder so the fixture can't silently drift from the parser.
+fn wav_b64(n: usize, rate: u32) -> String {
+    let samples: Vec<f32> = (0..n).map(|i| (i as f32 / n as f32) - 0.5).collect();
+    events::base64::encode(&audio::wav::encode(&samples, rate))
+}
+
+/// A 1x1 white binary PPM (P6), base64 - the same fixture `apiserve::media`'s
+/// unit tests use.
+const TINY_PPM_B64: &str = "UDYKMSAxCjI1NQr///8=";
+
+#[tokio::test]
+async fn openai_input_audio_content_part_reaches_the_model() {
+    // 320 samples at 16 kHz stay 320 after the (identity) resample, so the
+    // descriptor pins the whole decode: base64 → WAV parse → 16 kHz f32 PCM blob.
+    let (app, key) = media_echo_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-mediaecho",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what did you hear?"},
+            {"type": "input_audio", "input_audio": {"data": wav_b64(320, 16000), "format": "wav"}},
+        ]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "seen: [audio:320samples@16k]", "{v}");
+}
+
+#[tokio::test]
+async fn openai_input_audio_is_resampled_to_16khz_before_it_reaches_the_model() {
+    // An 8 kHz clip must arrive at 16 kHz (twice the samples) - the model side
+    // is fixed at 16 kHz, so a pass-through would be silently wrong.
+    let (app, key) = media_echo_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-mediaecho",
+        "messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": wav_b64(160, 8000), "format": "wav"}}]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "seen: [audio:320samples@16k]", "{v}");
+}
+
+#[tokio::test]
+async fn anthropic_image_content_block_reaches_the_model() {
+    let (app, key) = media_echo_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-mediaecho",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": TINY_PPM_B64}},
+        ]}],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_valid("anthropic.json", "Message", &v);
+    assert_eq!(v["content"][0]["text"], "seen: [image:1x1]", "{v}");
+}
+
+#[tokio::test]
+async fn a_text_only_request_attaches_no_media_blobs() {
+    // The negative control: the fake reports exactly what arrived, so this
+    // proves the surfaces don't invent an empty image/audio blob.
+    let (app, key) = media_echo_app(Provider::OpenAI);
+    let body = json!({"model": "brain-mediaecho", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "seen:", "{v}");
+}

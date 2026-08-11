@@ -531,26 +531,50 @@ impl StWriter {
 mod tests {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ---- test-scoped counting allocator: tracks peak live bytes while armed ----
+    //
+    // A `#[global_allocator]` sees EVERY thread in the test binary, and libtest
+    // runs tests in parallel by default, so the arming state has to be
+    // per-thread rather than one process-wide flag. With a global flag, two
+    // things went wrong at once and both produced wrong numbers rather than
+    // errors: a second `peak_live` on another test's thread disarmed the first
+    // mid-measurement (peaks read back as a few KB instead of megabytes), and
+    // unrelated concurrent allocations were charged to whoever happened to be
+    // armed. The thread-local `MEASURING` flag below fixes both - only the
+    // measuring thread's own allocations are ever counted - and `peak_live`
+    // additionally serializes on `MEASURE_LOCK` so the shared LIVE/PEAK
+    // counters belong to exactly one measurement at a time.
+    //
+    // `MEASURING` is const-initialized, so reading it allocates nothing (a
+    // lazily-initialized thread-local would recurse straight back into `alloc`);
+    // `try_with` keeps a late allocation during TLS teardown from panicking.
 
     struct Counting;
     static LIVE: AtomicUsize = AtomicUsize::new(0);
     static PEAK: AtomicUsize = AtomicUsize::new(0);
-    static ARMED: AtomicBool = AtomicBool::new(false);
+    static MEASURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    thread_local! {
+        static MEASURING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn measuring() -> bool {
+        MEASURING.try_with(|m| m.get()).unwrap_or(false)
+    }
 
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let p = System.alloc(layout);
-            if !p.is_null() && ARMED.load(Ordering::Relaxed) {
+            if !p.is_null() && measuring() {
                 let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
                 PEAK.fetch_max(live, Ordering::Relaxed);
             }
             p
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            if ARMED.load(Ordering::Relaxed) {
+            if measuring() {
                 // Saturating: frees of pre-arm allocations must not underflow.
                 let mut cur = LIVE.load(Ordering::Relaxed);
                 loop {
@@ -568,14 +592,17 @@ mod tests {
     #[global_allocator]
     static ALLOC: Counting = Counting;
 
-    /// Run `f` with peak-live-byte tracking armed; returns the peak.
+    /// Run `f` with peak-live-byte tracking armed on THIS thread; returns the peak.
     fn peak_live<R>(f: impl FnOnce() -> R) -> (R, usize) {
+        let guard = MEASURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         LIVE.store(0, Ordering::Relaxed);
         PEAK.store(0, Ordering::Relaxed);
-        ARMED.store(true, Ordering::Relaxed);
+        MEASURING.with(|m| m.set(true));
         let r = f();
-        ARMED.store(false, Ordering::Relaxed);
-        (r, PEAK.load(Ordering::Relaxed))
+        MEASURING.with(|m| m.set(false));
+        let peak = PEAK.load(Ordering::Relaxed);
+        drop(guard);
+        (r, peak)
     }
 
     fn scratch(name: &str) -> String {

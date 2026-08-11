@@ -293,9 +293,17 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
 
         let mut finish = String::from("stop");
         let mut completion = 0i64;
+        // Whether any real token delta was streamed. A resident that only
+        // reports coarse `Progress::step` ticks (no `delta`) - `brain/omni` is
+        // one - carries its whole answer in the terminal `Outcome`, and would
+        // otherwise stream a well-formed but EMPTY text block. See the one-shot
+        // fallback below `content_block_stop`.
+        let mut saw_delta = false;
+        let mut final_text = String::new();
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
+                    saw_delta = true;
                     yield Ok(Event::default().event("content_block_delta").data(json!({
                         "type": "content_block_delta",
                         "index": 0,
@@ -311,9 +319,10 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                     yield Ok(Event::default().comment(p.comment_text()));
                 }
                 StreamMsg::Done(outcome) => {
-                    let (_t, _p, c, fr) = bridge::read_outcome(&outcome);
+                    let (t, _p, c, fr) = bridge::read_outcome(&outcome);
                     completion = c;
                     finish = fr;
+                    final_text = t;
                 }
                 StreamMsg::Err(e) => {
                     yield Ok(Event::default().event("error").data(json!({
@@ -323,6 +332,17 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                     return;
                 }
             }
+        }
+
+        // Fallback for a resident that never emitted a token delta: emit the
+        // completed outcome's text as ONE `text_delta` so the text block isn't
+        // empty. Invisible to residents that DO stream (`saw_delta`).
+        if !saw_delta && !final_text.is_empty() {
+            yield Ok(Event::default().event("content_block_delta").data(json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": final_text },
+            }).to_string()));
         }
 
         // content_block_stop → message_delta (stop_reason + cumulative output) → message_stop.

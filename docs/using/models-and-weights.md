@@ -112,6 +112,35 @@ at (to serve it) or pass directly via `--weights` (for one-off CLI use). Each
 model's own page under `docs/models/` documents whether it supports an
 `import` step and what its checkpoint layout looks like.
 
+### Importing a GGUF
+
+A quantized GGUF checkpoint is converted by one generic command that picks the
+right importer from the file's own `general.architecture` metadata:
+
+```bash
+brain import-gguf /path/to/Model-Q4_K_M.gguf        # -> Model-Q4_K_M.brain.safetensors
+brain import-gguf FILE --out PATH --id VENDOR/REPO  # explicit output / catalog id
+brain import-gguf --list                            # registered architectures
+```
+
+By default the conversion is written next to the source as
+`<stem>.brain.safetensors`, so if the GGUF already lives in the models
+directory the next model-dir scan discovers and serves the result with no
+further configuration.
+
+This step is deliberately **explicit and one-time**, not something the
+model-dir scan does for you. brain's engine is fp32 (dequantize-on-load), so
+converting a quantized GGUF materializes a much larger file - a 22 GB Q4_K_M
+of a 35B model becomes roughly 140 GB of fp32 safetensors. Silently writing
+that during a server-startup directory scan would be a surprising use of disk
+and an unbounded startup delay, so the scan instead logs the exact
+`brain import-gguf` command to run.
+
+Not every GGUF architecture needs this. Architectures brain serves directly
+from GGUF (e.g. `qwen3`) are picked up by the model-dir scan as they are; the
+import path is for architectures whose tensor layout has to be translated
+first. `brain import-gguf --list` shows which those are.
+
 ## See also
 
 - [Configuration](configuration.md) — every `BRAIN_*` environment variable,
