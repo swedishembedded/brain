@@ -229,9 +229,29 @@ fn add_into(a: &mut [f32], b: &[f32]) {
 /// `opts.max_frames`. `codec_head_w` is `talker.codec_head.weight`
 /// (`[vocab, hidden]` — tied to `codec_embedding` in the reference, but
 /// materialized as its own tensor in the real checkpoint, loaded like any
-/// other weight here).
+/// other weight here). A thin wrapper over [`generate_codes_streaming`],
+/// which is the real loop.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, codec_head_w: &[f32], codec_eos_id: u32, mtp: &MtpModel, codec_embed: impl Fn(u32) -> Vec<f32>, prompt: &TalkerPrompt, opts: &GenOpts) -> Result<Vec<u32>, String> {
+    let mut frames = Vec::new();
+    generate_codes_streaming(reader, gpu, cfg, codec_head_w, codec_eos_id, mtp, codec_embed, prompt, opts, |frame| frames.extend_from_slice(frame))?;
+    Ok(frames)
+}
+
+/// [`generate_codes`], but `on_frame` is called with each frame's 16 codes
+/// (`[cb0, residual_1, .., residual_15]`) as soon as it's sampled, instead
+/// of building one `Vec` and returning it at the end — so code generation
+/// can overlap with vocoding (`crate::codec_bridge::load_codec` +
+/// `codec::model::Codec::decode_omni_chunked`) rather than waiting for
+/// every frame before the first sample can be decoded to audio.
+///
+/// No new KV-cache work was needed for this: the Talker's own
+/// [`TalkerKvCache`] already makes [`decode_step`] O(1) per new frame (it
+/// predates this function) — every frame this loop produces was ALREADY
+/// available one at a time before this change; the only thing missing was a
+/// seam to hand it to the caller immediately instead of only at the end.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, codec_head_w: &[f32], codec_eos_id: u32, mtp: &MtpModel, codec_embed: impl Fn(u32) -> Vec<f32>, prompt: &TalkerPrompt, opts: &GenOpts, mut on_frame: impl FnMut(&[u32])) -> Result<(), String> {
     let d = cfg.hidden as usize;
     let n_prefix = (prompt.embeds.len() / d) as u32;
     let n_trailing = prompt.trailing.len() / d;
@@ -247,7 +267,6 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
     let mut past_hidden = gpu.read(&hidden, (n_prefix * cfg.hidden) as usize)[((n_prefix - 1) * cfg.hidden) as usize..].to_vec();
     let mut cb0 = sample_cb0(last_logits, codec_eos_id, opts.min_new == 0, opts.temperature, opts.top_k, &mut rng);
 
-    let mut frames: Vec<u32> = Vec::new();
     let mut s = 0u32;
     let mut cache_row = n_prefix;
     loop {
@@ -256,8 +275,10 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
         }
         let cb0_embed = codec_embed(cb0);
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
-        frames.push(cb0);
-        frames.extend_from_slice(&residuals);
+        let mut frame = Vec::with_capacity(1 + residuals.len());
+        frame.push(cb0);
+        frame.extend_from_slice(&residuals);
+        on_frame(&frame);
 
         let mut feed = cb0_embed;
         add_into(&mut feed, &res_sum);
@@ -277,7 +298,7 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
         cb0 = sample_cb0(gpu.read(&logits, cfg.vocab as usize), codec_eos_id, s >= opts.min_new, opts.temperature, opts.top_k, &mut rng);
         cache_row += 1;
     }
-    Ok(frames)
+    Ok(())
 }
 
 #[cfg(test)]
