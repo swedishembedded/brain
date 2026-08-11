@@ -44,7 +44,7 @@ fast and scalable kernel — not a naive one.
    (`model::shard::Shardable`) for real weights that exceed one card.
    Gradient-checked (`gradcheck::check_qwen35`, `check_qwen35_lora`).
    `brain qwen35moe {import,infer,export}`, `brain do qwen35moe generate`.
-   See `docs/models/qwen35/status.md`.
+   See `.agents/roadmap/qwen35.md`.
 3. **Sparse MoE Transformer** (`crates/moe`) — RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glm`) — `glm_moe_dsa`: **MLA** (low-rank q/kv with
@@ -85,7 +85,7 @@ fast and scalable kernel — not a naive one.
     release). Imported from **ONNX** — the first import in the repo to read the
     protobuf, via the new `onnx::read` — with two-way coverage (462 / 119
     tensors). Forward-parity-gated per stage at cosine 1.000000.
-    See `docs/models/face/status.md`. **Serving contract met**: `facenet::caps`
+    See `.agents/roadmap/face.md`. **Serving contract met**: `facenet::caps`
     (`detect`, `embed`), `crates/cli/src/resident_facenet.rs`
     (`BRAIN_FACENET_DIR`), D-Bus `Run`, `examples/vision/`. *(`run_batch` is the
     serial default and says why: both released graphs are built for
@@ -102,8 +102,8 @@ fast and scalable kernel — not a naive one.
     `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`), D-Bus `Run`,
     `examples/vision/`; `run_batch` groups a batch **by image**, so N prompts on
     one frame cost ONE Hiera trunk pass and N decoder passes. *(Forward only: the
-    video memory bank and backward/gradcheck are deferred — see
-    `docs/imaging/plan.md` §4.)*
+    video memory bank and backward/gradcheck are deferred — see the Limits
+    section of `docs/models/sam2.md`.)*
 10. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
     HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
     24 alternating frame/global attention levels (QK-norm + normalized 2D RoPE),
@@ -133,7 +133,7 @@ fast and scalable kernel — not a naive one.
     distilled, no CFG; `base` variants = 50 steps + CFG, same tensors.
     Parity-gated per stage (forward cosine 1.000000 vs diffusers).
     `brain flux2 generate` (t2i + `--ref` editing). 9B weights are
-    NC-licensed — see `docs/models/flux2/readme.md`.
+    NC-licensed — see `docs/models/flux2.md`.
 
 12b-bis. **FLUX.1 / Kontext** (`crates/flux1`) — BFL's 12 B MMDiT: 19
     double-stream blocks (separate img/txt weights, joint attention over
@@ -145,7 +145,7 @@ fast and scalable kernel — not a naive one.
     BFL tensors, two-way covered. Adds **no kernel**. **Forward-parity-gated at
     reduced depth in fp32 (worst 1−cos 1.5e-11) and at full depth in int8
     (`out` cosine 0.9985 / 0.9991)** — the full-depth fp32 number does NOT fit a
-    24 GiB card and is not claimed. See `docs/models/flux1/status.md`.
+    24 GiB card and is not claimed. See `.agents/roadmap/flux1.md`.
     *(Transformer forward only: **no sampler loop, no VAE glue, no CLI, no
     serving surface**; backward/gradcheck deferred.)*
 
@@ -158,7 +158,7 @@ fast and scalable kernel — not a naive one.
     (B=2, T=128), plus a **checkpoint-free** `tiny_ref` gate at deliberately
     distinct dims (`heads ≠ d_kv`, `heads·d_kv ≠ d_model`) at cosine 1.0000000000
     — because at XXL those three numbers are all equal and a swap would be
-    invisible. See `docs/models/t5/status.md`. **Backward exists**: a full
+    invisible. See `.agents/roadmap/t5.md`. **Backward exists**: a full
     hand-written T5 backward (`crates/t5/src/train.rs`) gated by
     `gradcheck::check_t5{,_one_block,_tiled}`. *(**T=512 — the length FLUX.1
     actually uses — is untested**; no tokenizer; the serving contract is
@@ -171,7 +171,7 @@ fast and scalable kernel — not a naive one.
     the codebook assignment and `embed` for the lookup. Adds **no kernel and no
     block**. Both released checkpoints (`codeformer.pth`, `vqgan_code1024.pth`)
     imported and forward-parity-gated at cosine 1.000000000 with **zero**
-    code-index disagreements. See `docs/models/vqgan/status.md`. **Serving
+    code-index disagreements. See `.agents/roadmap/vqgan.md`. **Serving
     contract met**: `vqgan::caps` (`encode`/`decode` — the codes travel as a
     `Media::Bytes` blob), `resident_restore::VqganResident`
     (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. **Training /
@@ -208,7 +208,7 @@ fast and scalable kernel — not a naive one.
     rebuild). Composes `vqgan::model::run_blocks` + `vae::blocks` and adds
     **no kernel and no block**. Two-way import coverage over all 515 checkpoint
     tensors; forward-parity-gated per stage at cosine 1.000000000 with **zero**
-    code-index disagreements at every `w`. See `docs/models/restore/status.md`.
+    code-index disagreements at every `w`. See `.agents/roadmap/restore.md`.
     **Serving contract met**: `restore::caps` (`restore_face`, `w` as a plain
     float param), `resident_restore::RestoreResident` (`BRAIN_RESTORE_WEIGHTS`),
     D-Bus `Run`, `examples/restore/`. *(Forward only: `adain=True` — the
@@ -230,7 +230,7 @@ fast and scalable kernel — not a naive one.
     gated at **exact id equality** vs HF `CLIPTokenizer` on both SDXL tokenizers.
     *(Forward only: the tokenizer is not yet wired into `crates/clip`'s own tests,
     image preprocessing is not implemented, and backward/gradcheck + the serving
-    contract are deferred — see `docs/imaging/plan.md` §4.)*
+    contract are deferred — see the Limits section of `docs/models/clip.md`.)*
 
 12e. **SDXL UNet2DConditionModel** (`crates/unet`) — the first UNet *diffusion
     backbone* in the imaging stack (`crates/wm-diamond` has a UNet-shaped world
@@ -253,7 +253,7 @@ fast and scalable kernel — not a naive one.
     DPM-Solver++(2M) × {ε, v-pred} — live in `diffusion::discrete`, gated at
     **66 checks / 0 failed** (timesteps, sigmas, `init_noise_sigma`,
     `scale_model_input` and the full step trajectory). See
-    `docs/models/unet/status.md`. *(Forward only, and **no serving contract**:
+    `.agents/roadmap/unet.md`. *(Forward only, and **no serving contract**:
     no capability manifest, no residency adapter, no `run_batch`, no D-Bus, no
     example, no CLI. No sampler loop and no VAE/text-encoder glue, so "SDXL
     works" is **not** claimed. Batch = 1; backward/`check_unet` deferred.)*
@@ -272,7 +272,7 @@ fast and scalable kernel — not a naive one.
     Imported **844 → 810** tensors, **1 251 014 160 params = 5.00 GB fp32**.
     Residual-parity-gated vs a hooked diffusers `ControlNetModel` at
     **140 comparisons / 0 failed, worst 1−cos 1.914e-11, worst rel_l2 6.187e-6**
-    on both a P40 and `BRAIN_DEVICE=cpu`. See `docs/models/controlnet/status.md`.
+    on both a P40 and `BRAIN_DEVICE=cpu`. See `.agents/roadmap/controlnet.md`.
     *(Forward/residuals only: **no backward, no `check_controlnet`**, no INT8, no
     batch > 1, no sampler loop, no CLI and **no serving contract**. "InstantID
     works" is NOT claimed.)*
@@ -288,7 +288,7 @@ fast and scalable kernel — not a naive one.
     **no kernel and no shared block**, and contains no second face model and no
     second CLIP. 312 tensors → 562 M params. Parity-gated vs a hooked reference
     on both backends — IDFormer 29 taps, the CA unit 8, and the **conditioned
-    FLUX.1 forward** 10, worst 1−cos **1.44e-11**. See `docs/models/pulid/status.md`.
+    FLUX.1 forward** 10, worst 1−cos **1.44e-11**. See `.agents/roadmap/pulid.md`.
     *(Forward only: **no backward, no `check_pulid`**, no serving contract. The
     crate takes `id_cond` as **host slices** — there is **no image → `id_cond`
     path**, so the facenet/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
@@ -311,7 +311,7 @@ fast and scalable kernel — not a naive one.
     * **Qwen3-ASR 1.7B** (`crates/qwen-asr`) — Whisper-style audio encoder + a spliced
       Qwen3-1.7B decoder (reuses `crates/qwen3`); offline, fixed audio window.
     Shared audio-in/text-out contract in `audio::asr_caps`. See
-    `docs/models/asr/status.md`.
+    `.agents/roadmap/asr.md`.
 13c. **Qwen3-Omni-30B** (`crates/omni`) — Thinker (dense-then-MoE Qwen3
     decoder, real M-RoPE incl. audio/image/video splice) + Talker
     (sigmoid-gated MoE) + 5-layer MTP code predictor → Code2Wav vocoder,
@@ -329,14 +329,14 @@ fast and scalable kernel — not a naive one.
     NOT fully production-ready: no real Qwen3-Omni checkpoint exists in this
     environment to validate any of it against (every test uses a synthetic
     checkpoint), and decode is O(T²) recompute, not KV-cached — see
-    `docs/models/omni/status.md`'s M22 entry for the precise remainder.
+    `.agents/roadmap/omni.md`'s M22 entry for the precise remainder.
     **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen3`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
     caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP);
     real-checkpoint coverage of the served path is a skip-if-absent smoke in
     `qwenvl::caps::tests` (runs when `BRAIN_QWENVL_WEIGHTS` is set).
-    Full ledger: `docs/models/omni/status.md`.
+    Full ledger: `.agents/roadmap/omni.md`.
 13d. **FastVLM** (`crates/fastvlm`) — served VLM, `brain/fastvlm`: FastViTHD
     conv/attention vision tower + `mlp2x_gelu` projector spliced into a Qwen2
     decoder; one `caption` action (per-token Progress) over `brain do` and
@@ -344,16 +344,16 @@ fast and scalable kernel — not a naive one.
     exists (`train_smoke.rs`) but has no CLI verb. **Moondream 3**
     (`crates/moondream`) — SigLIP ViT + MoE decoder, gradient-checked and
     import-covered but **forward-only and unserved** (no caps surface, no CLI
-    reference; reachable only from tests — parked). Both documented in
-    `docs/models/vlm/readme.md` + `docs/models/vlm/VALIDATION.md` (that
-    directory's ledger).
+    reference; reachable only from tests — parked). Both documented on
+    `docs/models/vlm.md`; Moondream 3's remaining work is tracked in
+    `.agents/roadmap/vlm.md`.
 
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream`) —
     the other two vision-language architectures alongside Qwen3-VL above; all
     three share one shape (vision encoder → connector/projector →
     autoregressive text decoder, image embeddings spliced into the decoder's
-    stream) and one validation ladder, documented together in
-    `docs/models/vlm/VALIDATION.md`. **FastVLM** (Apple): FastViTHD hybrid
+    stream) and one validation ladder, documented together on
+    `docs/models/vlm.md`. **FastVLM** (Apple): FastViTHD hybrid
     conv/attention vision encoder + `mlp2x_gelu` projector in front of a Qwen2
     decoder (LLaVA-style splice, image token id `-200`). Real-weight
     validated end to end — decoder logits at mean|Δ|≈3e-6 vs `transformers`,
@@ -505,7 +505,7 @@ front-end to depend on.
 | `vqgan` / `restore` / `upscale` | VQGAN/CodeFormer VQ autoencoder; CodeFormer face restoration; Real-ESRGAN super-resolution — the imaging pipeline's code/restore/upscale tail |
 | `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
 | `qwen-asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
-| `omni` / `qwenvl` / `fastvlm` / `moondream` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 — see `docs/models/vlm/VALIDATION.md` for the latter three |
+| `omni` / `qwenvl` / `fastvlm` / `moondream` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 — see `docs/models/vlm.md` for the latter three |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
 | `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
 
@@ -524,33 +524,33 @@ front-end to depend on.
 
 | Task | Where |
 |---|---|
-| Architecture & crate graph | `docs/architecture.md` |
-| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`docs/lessons.md`** — read before designing a gate |
-| Testing strategy + gradient-check gate | `docs/testing.md` |
-| **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`docs/porting-playbook.md`** — read BEFORE starting any port |
+| Architecture & crate graph | `.agents/rules/architecture.md` |
+| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`.agents/rules/lessons.md`** — read before designing a gate |
+| Testing strategy + gradient-check gate | `.agents/rules/testing.md` |
+| **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`.agents/rules/porting.md`** — read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
-| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/p40.md` |
-| **Performance benchmarking** (`brain perf`): design / ledger | `docs/performance/benchmarking.md`, `docs/performance/status.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
+| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/hardware-notes.md` |
+| **Performance benchmarking** (`brain perf`): design | `docs/performance/benchmarking.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
 | Perf regression gate (hard floors vs a committed baseline) | `brain perf gate`; `crates/perf/src/gate.rs` |
 | Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |
-| Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/engine/devices.md`; `crates/gpu-core/src/devices.rs` |
+| Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/introduction/hardware.md`; `crates/gpu-core/src/devices.rs` |
 | Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
 | Roofline probe (compute/bandwidth ceiling used for "% of roof") | `gpu_core::roof`; bounded by `BRAIN_ROOF_BUDGET_S` (default 10s); off by default on the CPU device class, force-run there with `BRAIN_NO_ROOF=0` |
-| GPU backend wait bound (Vulkan fence wait, wgpu `poll`) | `BRAIN_GPU_WAIT_S` (default 30s) — a wedged submit now panics with which call site timed out instead of hanging the process forever; see `docs/lessons.md` #38 |
+| GPU backend wait bound (Vulkan fence wait, wgpu `poll`) | `BRAIN_GPU_WAIT_S` (default 30s) — a wedged submit now panics with which call site timed out instead of hanging the process forever; see `.agents/rules/lessons.md` #38 |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen3::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen3::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
-| **Profile a forward or a BACKWARD, per kernel kind** | `crates/unet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `docs/kernel-checklist.md` §F.1 |
-| **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
+| **Profile a forward or a BACKWARD, per kernel kind** | `crates/unet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `.agents/rules/kernels.md` §F.1 |
+| **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
 | **Which kernels already exist** (before writing a new one) | the catalogue in **`README.md`** — every kernel with what it does, how, its structural optimisation level, and per-backend support |
-| **Something is slow (model, kernel, training step)** | **`docs/kernel-checklist.md` §F** — the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `docs/porting-playbook.md` §10, case studies in `docs/performance/overview.md` |
+| **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** — the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
-| Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
+| Federated MoE pipeline (done vs remaining) | `docs/training/federated-experts.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
-| Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `docs/models/qwen35/status.md` |
+| Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |
 | Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `examples/llm/` |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain do`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
@@ -558,26 +558,26 @@ front-end to depend on.
 | D-Bus control surface | `crates/dbus`, `examples/dbus` |
 | **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |
 | Event/HFSM controller (`brain run`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
-| GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
+| GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
 | LFM2.5-Encoder (bidir conv/attn hybrid, MLM, 8k) | `docs/models/lfm/{readme,status}.md`; `crates/lfm`, `crates/cli/src/lfm_cli.rs`; goldens via `tools/goldens/lfm_dump_reference.py` |
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolo/readme.md` |
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
-| Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/goldens/arcface_dump_reference.py` |
+| Face recognition (SCRFD + alignment + ArcFace) | `.agents/roadmap/face.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/goldens/arcface_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
-| VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/codeformer_dump_reference.py` |
-| FLUX.1 / Kontext (12 B MMDiT, per-block modulation, edit path) | `docs/models/flux1/status.md`; `crates/flux1/src/{config,import,model}.rs`; goldens via `tools/goldens/flux1_dump_reference.py` |
-| T5-XXL encoder (FLUX.1 conditioning) | `docs/models/t5/status.md`; `crates/t5/src/{config,import,model,hostbias}.rs`; goldens via `tools/goldens/t5_dump_reference.py` |
+| VQGAN / CodeFormer VQ autoencoder | `.agents/roadmap/vqgan.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/codeformer_dump_reference.py` |
+| FLUX.1 / Kontext (12 B MMDiT, per-block modulation, edit path) | `.agents/roadmap/flux1.md`; `crates/flux1/src/{config,import,model}.rs`; goldens via `tools/goldens/flux1_dump_reference.py` |
+| T5-XXL encoder (FLUX.1 conditioning) | `.agents/roadmap/t5.md`; `crates/t5/src/{config,import,model,hostbias}.rs`; goldens via `tools/goldens/t5_dump_reference.py` |
 | **Which GEMM kernel a forward dispatches** (naive / skinny-M GEMV / 128×128 tiled), fp32 and int8 | `model::block::gemm_variant` — one rule, shared by flux1 and flux2; `block::pick_gemm` is the training-shaped sibling |
-| CodeFormer face restoration (code Transformer + CFT + the `w` dial) | `docs/models/restore/status.md`; `crates/restore/src/{config,import,model}.rs` over `crates/vqgan` + `crates/vae`; goldens via `tools/goldens/codeformer_restore_dump_reference.py` |
-| Real-ESRGAN super-resolution (the imaging pipeline's upscale tail) | `crates/upscale/src/{config,import,model,caps}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/esrgan_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
-| SDXL UNet forward + the discrete samplers (DDIM/Euler/Euler-a/DPM++) | `docs/models/unet/status.md`; `crates/unet/src/{config,import,model,hostemb}.rs` over `crates/vae/src/blocks.rs`; `crates/diffusion/src/discrete.rs`; goldens via `tools/goldens/sdxl_dump_reference.py` |
-| **Adding control conditioning to ANY diffusion backbone** (the named-injection-point seam, not an SDXL crate) | `crates/controlnet/src/adapter.rs` — `ControlAdapter`/`ControlSource`/`InjectionPoint`/`Residuals`; SDXL producer in `src/{config,import,model}.rs`; `docs/models/controlnet/status.md`; goldens via `tools/goldens/controlnet_dump_reference.py` |
-| PuLID identity conditioning on FLUX.1 (IDFormer + the 20 cross-attention sites) | `docs/models/pulid/status.md`; `crates/pulid/src/{config,import,model,adapter}.rs`; the backbone seam is `crates/flux1/src/inject.rs`; goldens via `tools/goldens/pulid_dump_reference.py` |
+| CodeFormer face restoration (code Transformer + CFT + the `w` dial) | `.agents/roadmap/restore.md`; `crates/restore/src/{config,import,model}.rs` over `crates/vqgan` + `crates/vae`; goldens via `tools/goldens/codeformer_restore_dump_reference.py` |
+| Real-ESRGAN super-resolution (the imaging pipeline's upscale tail) | `crates/upscale/src/{config,import,model,caps}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/esrgan_dump_reference.py`; user-facing page `docs/models/upscale.md` |
+| SDXL UNet forward + the discrete samplers (DDIM/Euler/Euler-a/DPM++) | `.agents/roadmap/unet.md`; `crates/unet/src/{config,import,model,hostemb}.rs` over `crates/vae/src/blocks.rs`; `crates/diffusion/src/discrete.rs`; goldens via `tools/goldens/sdxl_dump_reference.py` |
+| **Adding control conditioning to ANY diffusion backbone** (the named-injection-point seam, not an SDXL crate) | `crates/controlnet/src/adapter.rs` — `ControlAdapter`/`ControlSource`/`InjectionPoint`/`Residuals`; SDXL producer in `src/{config,import,model}.rs`; `.agents/roadmap/controlnet.md`; goldens via `tools/goldens/controlnet_dump_reference.py` |
+| PuLID identity conditioning on FLUX.1 (IDFormer + the 20 cross-attention sites) | `.agents/roadmap/pulid.md`; `crates/pulid/src/{config,import,model,adapter}.rs`; the backbone seam is `crates/flux1/src/inject.rs`; goldens via `tools/goldens/pulid_dump_reference.py` |
 | **Upload a host `&[f32]` to a device buffer** | `Gpu::write_f32` (`crates/gpu-core`) — the `&[f32]` half of `Gpu::write`/`read`; never re-derive `to_bits().collect()` at a call site |
-| CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
+| CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; user-facing page `docs/models/clip.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
-| SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
+| SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; user-facing page `docs/models/sam2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
@@ -586,7 +586,7 @@ front-end to depend on.
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,clip_bpe,qwen_tokenizer,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/tts/{readme,acceleration}.md`; `crates/{tts,codec,speaker,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
-| **ASR (speech-to-text)**: status / serving / perf | `docs/models/asr/status.md`; `crates/{nemotron,qwen-asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
+| **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotron,qwen-asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/zimage/{readme,status}.md`; `crates/{zimage,dit,diffusion,vae}` |
@@ -669,7 +669,7 @@ assumption. `brain devices` prints the table. Placement is explicit
 (`Gpu::new_on`, scoped `devices::with_gpu`) — never env mutation;
 `BRAIN_GPU_INDEX` remains user *input* only, parsed once at first registry use.
 Out-of-range indices are errors, never silent clamps. See
-`docs/engine/devices.md`.
+`docs/introduction/hardware.md`.
 
 This bounds where work **executes** — host RAM and disk stay available as
 cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
@@ -776,8 +776,7 @@ improves as the model grows, and **`advise`** says what to tune.
 
 `brain perf` is the sibling of `brain bench` and answers a different question:
 **how much correct work does brain deliver per unit of hardware, memory, energy
-and time?** Full design (including the scenarios not yet built) in
-`docs/performance/benchmarking.md`; what exists in `docs/performance/status.md`.
+and time?** Full design in `docs/performance/benchmarking.md`.
 
 ```bash
 brain perf list                       # scenarios + the standard workload matrix
@@ -816,14 +815,14 @@ structurally cannot. Cross-cutting: `fidelity` (correctness gate) and `energy`.
 Each scenario states what it *cannot* see: where a metric needs an engine
 capability that does not exist (a pluggable admission policy, prefix caching, a
 pipeline cache, a multi-rank harness), the field is `null` and the artifact
-carries a `notes` string explaining why. See `docs/performance/status.md` for the
-per-scenario table and the findings so far.
+carries a `notes` string explaining why — read that field rather than assuming
+a metric that isn't there was simply forgotten.
 
 ## Conventions & invariants
 
 - **Write down what you learned, in the same change.** When you find a
   non-obvious defect — something that was silently wrong, or a gate that was
-  green without running — add it to **`docs/lessons.md`** as part of the commit
+  green without running — add it to **`.agents/rules/lessons.md`** as part of the commit
   that fixes it, with the number that proved it. Not later, not in a follow-up:
   the reason is fresh exactly once, and every entry in that file is there because
   it cost someone a day.
@@ -831,13 +830,22 @@ per-scenario table and the findings so far.
   Where it goes:
   | what you learned | where it belongs |
   |---|---|
-  | a cross-cutting defect class (a gate that lies, a metric that cannot see X) | `docs/lessons.md` |
-  | a kernel-authoring or optimisation rule, incl. a killed hypothesis | `docs/kernel-checklist.md` |
-  | a step in porting a model that was not obvious | `docs/porting-playbook.md` |
-  | a measured number about ONE model | `docs/models/<model>/status.md` |
+  | a cross-cutting defect class (a gate that lies, a metric that cannot see X) | `.agents/rules/lessons.md` |
+  | a kernel-authoring or optimisation rule, incl. a killed hypothesis | `.agents/rules/kernels.md` |
+  | a step in porting a model that was not obvious | `.agents/rules/porting.md` |
+  | a measured number about ONE model | the test that asserts it (a parity/gradcheck test's own assertion is the durable record — a number nothing checks is a number that silently goes stale) |
+  | work still outstanding on ONE model | `.agents/roadmap/<model>.md` |
 
   A commit message is not a home for a finding: nobody greps commit messages.
   If a lesson only exists in one, it will be relearned.
+
+  **`docs/` is user-facing product documentation, not a workspace.** It is what
+  gets published — it explains how to use brain, not how brain was built or
+  what's left to do. Never write a status ledger, a plan, a measurement log, an
+  audit result, or a "known gaps" section there. Internal findings, rules, and
+  per-model roadmaps go in `.agents/` as the table above describes; a `docs/`
+  page only changes when the public contract (a command, a flag, an env var, a
+  model's supported capabilities) actually changes.
 
 - **Zero compile warnings. Always.** A build that emits warnings is not done.
   Fix every warning the build reports — **including ones your change did not
@@ -863,7 +871,7 @@ per-scenario table and the findings so far.
   | math that runs on a device | a WGSL kernel in `crates/kernels/wgsl/`, dispatched via `gpu_core` |
   | math that genuinely runs on the host | **`model::hostmath`** — and nowhere else |
   | CPU-parallel execution (rayon) | `backend_cpu::par` only — the on-CPU scheduler's primitives; no other crate may depend on rayon |
-  | deterministic filler in a test or fixture | **`data::rng::Lcg`** (`signed`/`unit`/`scaled` + the `vec*` forms). `data::rng::Rng` is SplitMix64 and defines the on-disk datasets — its stream must not move, so it is *not* the test PRNG. The copied `(s >> 33)/2^31 − 1.0` helper was one-sided (`[-1,0)`), so no test ever fed a positive value to an activation kernel; see `docs/testing.md` §0 |
+  | deterministic filler in a test or fixture | **`data::rng::Lcg`** (`signed`/`unit`/`scaled` + the `vec*` forms). `data::rng::Rng` is SplitMix64 and defines the on-disk datasets — its stream must not move, so it is *not* the test PRNG. The copied `(s >> 33)/2^31 − 1.0` helper was one-sided (`[-1,0)`), so no test ever fed a positive value to an activation kernel; see `.agents/rules/testing.md` §0 |
   | shared model blocks | `model::block`, `model::vit` |
   | uploading a host `&[f32]` to a device buffer | **`Gpu::write_f32`** — the `&[f32]` sibling of `Gpu::write`/`Gpu::read`. It was missing, so this had congealed into two byte-identical private `fn write` helpers (`unet::model`, `controlnet::model`) and ~20 inline `to_bits().collect()` sites in 10 crates |
   | ONNX graph emission (DSL + shared norm/silu emitters) | `crates/npu/src/topo.rs` (`TopoBase`); model-specific graphs stay in `crates/npu/src/*_topology.rs` |
@@ -984,7 +992,7 @@ per-scenario table and the findings so far.
   (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
   at the source level; the runtime is loaded at run time (`runtime-linking`), so
   `make build`/`make test` stay green with no OpenVINO installed.
-- **Kernels follow `docs/kernel-checklist.md`** — before writing one, check for
+- **Kernels follow `.agents/rules/kernels.md`** — before writing one, check for
   an existing fast sibling (`_rows`/`_wg`/`_reg*`/`_tiled`) and put the fix in
   *selection*, not a new copy: the single most expensive defect class here is a
   fast kernel a later model never learned about (`gn_stats`, fixed in 2025,
@@ -993,7 +1001,7 @@ per-scenario table and the findings so far.
   crash (`silu_mul` → cosine 0.504). Before optimizing, profile per kernel-kind
   and publish the table: every confident hypothesis on this engine has been
   wrong, and the profile has been right.
-- **New model ports follow `docs/porting-playbook.md`** — reference goldens
+- **New model ports follow `.agents/rules/porting.md`** — reference goldens
   dumped FIRST (transformer I/O captured via forward hooks, replayed in the
   parity test), two-way import coverage, kernel Params read before dispatch,
   tiny-config smoke with step bisection, then the parity ladder
@@ -1017,7 +1025,7 @@ per-scenario table and the findings so far.
   `check_controlnet`, `check_pulid`, `check_instantid` are genuinely absent
   because those ports prioritized reaching a working forward pass on
   hardware-constrained checkpoints first, each documented in its own
-  `docs/models/<model>/status.md` — that list is a record of what shipped
+  `.agents/roadmap/<model>.md` — that list is a record of what shipped
   under real constraints, not a template to reach for on a new port. Do not
   cite "some models ship forward-only" as a reason to skip backward on a new
   model; if a genuine constraint forces that tradeoff, name it and record it
@@ -1060,7 +1068,7 @@ per-scenario table and the findings so far.
      if it does not, **extend or refactor the surface** (add a method, generalize a
      frame type) rather than bolting on a side channel — and update every existing
      client/example that the change touches. The full checklist lives in
-     `docs/serving-contract.md` (linked from the Serving stack section); keep it and
+     `.agents/rules/serving-contract.md` (linked from the Serving stack section); keep it and
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
@@ -1089,14 +1097,14 @@ per-scenario table and the findings so far.
   ONLY at the two dispatch seams that resolve a client-supplied name against the
   catalog (`apiserve::catalog::candidates` for HTTP, the D-Bus/`brain do` model
   argument) — never bake it into a manifest or a test fixture. See
-  `docs/models/naming.md`.
+  `docs/using/models-and-weights.md`.
 - **The API surface must stay WATERTIGHT — every change triggers a full security
   audit AND is covered by automated security tests.** Any change to `crates/apiserve`
   (the HTTP providers) OR `crates/dbus` (the D-Bus surface) — a route, handler, auth
   path, error shape, admission policy, or exposed method — is **not done** until you
   have BOTH:
   1. **Audited the WHOLE API** (not just the changed handler) against
-     **`docs/api-security-audit.md`** — authn/authz (key required on every route incl.
+     **`.agents/rules/api-security.md`** — authn/authz (key required on every route incl.
      the fallback, constant-time compare, no key in any log/response/error), input/DoS
      bounds (body-size 413, JSON depth, param/array bounds → 400), admission/backpressure
      (429/503, cancel-on-disconnect frees compute), SSRF/egress, error hygiene (no
@@ -1185,7 +1193,7 @@ per-scenario table and the findings so far.
   becomes an in-process value — not scattered re-checks downstream, and not
   deferred to a separate, optional command a caller has to remember to run
   (a validator nothing calls automatically is equivalent to no validator: see
-  `docs/lessons.md` §1, "a gate that never runs is worse than no gate"). This
+  `.agents/rules/lessons.md` §1, "a gate that never runs is worse than no gate"). This
   generalizes the WATERTIGHT-API rule above (network input is hostile) to
   every other boundary: file input is exactly as hostile as network input,
   it just fails later and quieter.
