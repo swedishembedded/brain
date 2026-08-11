@@ -203,10 +203,25 @@ pub fn resolve_action(name: &str) -> Result<OmniActionKind, String> {
 /// path shared by [`OmniProvider::action`] callers and the residency adapter
 /// (`cli::resident_omni::OmniInstance::run`), so the two serving surfaces
 /// cannot disagree about what an action name does.
+///
+/// Validates `inv` against the resolved action's own [`ActionSpec`] first
+/// (`residency::bridge::ProviderInstance::run`'s exact pattern) — `Action::run`'s
+/// own doc says "the invocation is already validated against `Action::spec`",
+/// a contract this function used to silently violate: unknown params went
+/// unrejected and declared defaults (e.g. `generate_spec`'s `max_new` default
+/// of 32) were never filled from the spec, only hand-duplicated per call site.
 pub fn run_action(inner: &Arc<OmniInner>, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     match resolve_action(action)? {
-        OmniActionKind::Generate => GenerateAction { inner: inner.clone() }.run(inv, progress),
-        OmniActionKind::Speak => SpeakAction { inner: inner.clone() }.run(inv, progress),
+        OmniActionKind::Generate => {
+            let act = GenerateAction { inner: inner.clone() };
+            let inv = act.spec().validate(inv.clone())?;
+            act.run(&inv, progress)
+        }
+        OmniActionKind::Speak => {
+            let act = SpeakAction { inner: inner.clone() };
+            let inv = act.spec().validate(inv.clone())?;
+            act.run(&inv, progress)
+        }
     }
 }
 

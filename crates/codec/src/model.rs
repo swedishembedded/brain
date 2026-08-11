@@ -52,6 +52,7 @@ const CONVTR1D: usize = 11;
 const SNAKE: usize = 12;
 const SCALE_CHAN: usize = 13;
 const AXPY: usize = 14;
+const GQA_SCORES_WIN: usize = 15;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -69,6 +70,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("snake_beta", kernels::SNAKE_BETA),
     ("scale_chan", kernels::SCALE_CHAN),
     ("axpy", kernels::AXPY),
+    ("gqa_scores_win", kernels::GQA_SCORES_WIN),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
@@ -534,7 +536,24 @@ impl Codec {
             let scores = self.st((nh * t * t) as usize);
             let probs = self.st((nh * t * t) as usize);
             let ctx = self.st((t * hq) as usize);
-            self.gpu.submit(&[], &block::gqa_fwd(&self.gpu, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
+            // Sliding-window causal, not plain causal: the real reference
+            // (`Qwen3OmniMoeCode2WavAttention`/`MimiAttention`, both built on
+            // `create_sliding_window_causal_mask(sliding_window=config.
+            // sliding_window)`) masks key `j` out once `i-j >= sliding_window`
+            // on EVERY forward call, not only a chunked/streaming one -- this
+            // pre_transformer is Mimi-derived and both `decode` (standalone
+            // Qwen3-TTS) and `decode_omni` (Qwen3-Omni's Code2Wav) share this
+            // one `transformer()` body and this one `sliding_window` config
+            // field (`CodecConfig::sliding_window`, real value 72 for both
+            // released checkpoints). `gqa_fwd_win` degenerates to `gqa_fwd`'s
+            // plain causal mask exactly when `sliding_window >= t`, so this is
+            // the correct dispatch unconditionally, not a `decode_omni`-only
+            // special case. NOTE: `enc_transformer` below has the identical
+            // gap (its own `EncoderConfig::sliding_window`, 250, is likewise
+            // parsed and never applied) -- left unfixed here, out of this
+            // change's scope (the encode path is not on Qwen3-Omni's call
+            // path at all), filed as `.todo/codec-encoder-sliding-window.md`.
+            self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, self.cfg.sliding_window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
             x = self.add2(&x, &attn, t * d);

@@ -234,6 +234,36 @@ pub fn gqa_fwd_kmask(
     ]
 }
 
+/// [`gqa_fwd`] with a sliding-window causal mask (the `gqa_scores_win`
+/// kernel): key `j` is live only for `i-window < j <= i`. `window >= a.t`
+/// degenerates to `gqa_fwd`'s plain causal mask exactly (see the kernel's own
+/// doc), so a caller with no window requirement may always use this entry
+/// point instead of keeping two call sites. The kernel id is passed
+/// explicitly, same convention as [`gqa_fwd_kmask`], so [`KernelIds`] stays
+/// unchanged for models that never window.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_fwd_win(
+    g: &Gpu,
+    win_kernel: usize,
+    k: &KernelIds,
+    a: &Gqa,
+    window: u32,
+    q: &DeviceBuffer,
+    kbuf: &DeviceBuffer,
+    v: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let mut p = a.params().to_vec();
+    p.push(window);
+    vec![
+        g.step(win_kernel, &[q, kbuf, scores], &p, a.b * a.n_heads * a.t * a.t),
+        g.step(k.attn_softmax, &[scores, probs], &[a.b, a.n_heads, a.t], a.b * a.n_heads * a.t),
+        g.step(k.gqa_apply, &[probs, v, ctx], &p[..6], a.b * a.n_heads * a.t * a.head_dim),
+    ]
+}
+
 /// Kernel-pipeline indices for incremental KV-cache decode attention — the
 /// O(cached length) twin of [`gqa_fwd`]'s O(T²) full recompute. Hoisted from
 /// `qwen3::Qwen`'s `decode_steps` (`crates/qwen3/src/model.rs`) so a second
