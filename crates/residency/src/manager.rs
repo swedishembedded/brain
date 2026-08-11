@@ -352,8 +352,21 @@ impl ResidencyManager {
             None => return false,
         };
         let cost = m.estimate(key);
-        pick_device(&cost, &self.budgets, exclude).is_some()
+        if pick_device(&cost, &self.budgets, exclude).is_some()
             || plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
+        {
+            return true;
+        }
+        // Neither fits now nor is evictable into. If it could never fit even on a
+        // fully empty device (e.g. `--device npu` excluded the CPU/GPU this model
+        // actually needs), returning `false` here would leave it permanently
+        // unplaceable: the cost never changes, so every future round would repeat
+        // this same "not placeable" verdict and the group would sit in the queue
+        // forever with no error and no explanation. Let it through instead so it
+        // reaches `claim()`, which turns the same unplaceable cost into a real,
+        // per-job `ClaimError::TooLarge` -- a clean failure instead of a silent
+        // hang. Mirrors `placeable_multi`'s identical fix (see its own doc).
+        !could_ever_fit(&cost, &self.budgets)
     }
 
     /// [`Self::placeable`]'s multi-device sibling — the executor's scheduling
@@ -1148,6 +1161,33 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 1, "the existing resident must be untouched");
         let hot: Vec<String> = mgr.residency().into_iter().map(|(k, _, _)| k.model).collect();
         assert_eq!(hot, vec!["small".to_string()]);
+    }
+
+    /// `--device npu` on a model with no NPU path (`MemCost.npu == 0`, e.g. an
+    /// LLM): the job can never be placed (no NPU-eligible cost, CPU/GPU excluded
+    /// from compute), so it must fail fast with `ClaimError::TooLarge` -- not
+    /// hang in the queue forever. Regression for `placeable()` lacking the
+    /// `could_ever_fit` escape hatch `placeable_multi()` already had: without
+    /// it, `Executor::assign` never calls `claim()` for this group (it never
+    /// appears in `placeable`), so no error is ever produced and the caller
+    /// just times out with a generic 429 once the HTTP layer's own admission
+    /// deadline expires.
+    #[test]
+    fn placeable_lets_a_permanently_unplaceable_job_through_so_claim_can_fail_it_cleanly() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Npu(0), 8 * GB, 0); // only an NPU is schedulable ...
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "llm".into(), vram: 4 * GB, live })); // ... but this model has no NPU path (npu cost == 0)
+
+        let key = InstanceKey::new("llm", "default");
+        assert!(
+            mgr.placeable(&key, "llm", &no_exclude()),
+            "must let the group through to claim() rather than hang it in the queue forever"
+        );
+
+        let err = mgr.claim("llm", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
     }
 
     #[test]

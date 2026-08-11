@@ -74,4 +74,39 @@ pub fn run_devices(_args: &[String]) {
             devs[0].identity.name
         ),
     }
+    print_npus();
+}
+
+/// NPU section: separate from the GPU table above because "present" and
+/// "usable" are two different questions here. The device node
+/// (`/dev/accel/accel*`) shows up as soon as the `intel_vpu` kernel driver
+/// binds, which says nothing about whether OpenVINO can actually schedule on
+/// it — that also needs host NPU firmware (`/lib/firmware/intel/vpu`, loaded
+/// by the HOST kernel, invisible to `/dev/accel`'s mere presence) and a
+/// working OpenVINO runtime. Reporting both lets `brain devices` explain a
+/// "node present but `--device npu` still errors" machine instead of just
+/// omitting the NPU as if it didn't exist — see
+/// `scripts/build/setup-npu-runtime.sh` for the same two-question diagnostic.
+fn print_npus() {
+    let npu_nodes = gpu_core::Inventory::probe().npus;
+    println!();
+    if npu_nodes == 0 {
+        println!("no NPU device node found (expected /dev/accel/accel*)");
+        return;
+    }
+    println!("NPU: {npu_nodes} device node(s) present (/dev/accel/accel*)");
+    match npu::openvino::available_devices() {
+        Ok(devs) if devs.iter().any(|d| d == "NPU" || d.starts_with("NPU.")) => {
+            println!("  npu0   usable — OpenVINO reports it (available_devices: {})", devs.join(", "));
+        }
+        Ok(devs) => {
+            println!(
+                "  npu0   device node present but OpenVINO does NOT report NPU (available_devices: {}) \
+                 — likely missing host NPU firmware (/lib/firmware/intel/vpu on the HOST, not any \
+                 container); see scripts/build/setup-npu-runtime.sh",
+                devs.join(", ")
+            );
+        }
+        Err(e) => println!("  npu0   device node present but OpenVINO could not be queried: {e}"),
+    }
 }

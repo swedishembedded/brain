@@ -443,16 +443,6 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         })
         .collect();
 
-    if gpus.is_empty() && !all_gpus.is_empty() {
-        eprintln!("brain serve: --device excluded every GPU; scheduling on CPU only");
-    } else if all_gpus.is_empty() {
-        eprintln!("brain serve: no GPUs detected (nvidia-smi); serving with CPU-only budget");
-    }
-    let ram = host_ram_available();
-    let reserved = reserve_gb << 30;
-    // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
-    // compute — `--device gpu` bounds where work runs, not where bytes may rest.
-    let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     // Schedulable NPUs: `--device` narrows to `set.npus`; with no `--device`, any NPU
     // present is scheduled. The Meteor-Lake-class NPU shares system RAM, so it gets a
     // modest per-device budget. A model with an NPU path (MemCost.npu > 0) is then
@@ -462,11 +452,36 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         None if npu::openvino::npu_present() => vec![0],
         None => vec![],
     };
+    let ram = host_ram_available();
     // NPUs always share system RAM (see the comment above); their device
     // budget only needs to be at least the pool's total, same reasoning as
     // the iGPU fallback — `resident::build_executor` declares them into the
     // shared pool alongside `unified_gpus` and Device::Cpu.
     let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, ram)).collect();
+
+    // What is actually schedulable is `gpus`/`npus`/`cpu_schedulable`, not just
+    // `gpus` — a prior version of this message said "scheduling on CPU only"
+    // purely from `gpus.is_empty()`, which was wrong on two counts whenever an
+    // NPU was involved: `--device npu` schedules on the NPU (never CPU — CPU
+    // compute is excluded, see `cpu_compute_ram` below), and `--device npu,cpu`
+    // schedules on both, not "CPU only".
+    if gpus.is_empty() && npus.is_empty() {
+        if all_gpus.is_empty() {
+            eprintln!("brain serve: no GPUs or NPUs detected; serving with CPU-only budget");
+        } else {
+            eprintln!("brain serve: --device excluded every GPU; scheduling on CPU only");
+        }
+    } else if gpus.is_empty() && !npus.is_empty() {
+        if cpu_schedulable {
+            eprintln!("brain serve: --device excluded every GPU; scheduling on NPU + CPU");
+        } else {
+            eprintln!("brain serve: --device restricted to NPU; scheduling on NPU only (CPU and GPU excluded)");
+        }
+    }
+    let reserved = reserve_gb << 30;
+    // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
+    // compute — `--device gpu` bounds where work runs, not where bytes may rest.
+    let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     eprintln!(
         "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
         set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),

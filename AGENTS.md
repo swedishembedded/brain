@@ -604,7 +604,17 @@ front-end to depend on.
 
 **Always build through the Makefile, never `cargo` directly:** `make build`
 (debug), `make release` (optimized), `make test` (suite). They wrap cargo with
-the project's expected flags/targets.
+the project's expected flags/targets, and — critically — all three share the
+same `./target` dir, so a `make build` after a `make release` (or vice versa)
+reuses the other's downloaded/compiled dependency graph instead of a cold
+rebuild. Interleaving raw `cargo build -p <crate>` calls (or worse, a
+one-off `CARGO_HOME` override on just that call) does not add a second cache —
+it just adds an extra, redundant compile pass against the same `./target`, and
+if the `CARGO_HOME` differs from the shell's own default it can even pull a
+second copy of the registry. Do not override `CARGO_HOME` per-command; if a
+build fails with a registry/permission error under the shell's default
+`CARGO_HOME`, fix that env var's value once (for the session/shell), not
+per-invocation.
 
 ```bash
 make build                           # debug build
