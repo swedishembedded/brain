@@ -4,14 +4,13 @@
 //! Greedy text generation over the Thinker decoder, streaming each layer's
 //! weights from a checkpoint one at a time instead of holding all 48 layers
 //! (128 experts each) GPU-resident — the real model does not fit that way on
-//! this box without int8 quantization + cross-GPU sharding (`docs/models/
-//! omni/status.md` M1), which is a separate, not-yet-built piece of
+//! this box without int8 quantization + cross-GPU sharding, which is a
+//! separate, not-yet-built piece of
 //! production residency (`crates/qwen3/src/shard.rs`'s int8 path is the
 //! precedent). Weight I/O is still the validation-tier: every layer's weights
 //! are re-read from the mmap for every generated token (no resident weights),
 //! so a real 48-layer decode is still minutes, not milliseconds, per token —
-//! `.agents/roadmap/omni.md`'s M9 entry records this half of the scope
-//! boundary and it remains true.
+//! that remains true today.
 //!
 //! **KV-cache**: the ATTENTION math is no longer the validation-tier's O(T²)
 //! full recompute. [`generate_greedy`] now [`prefill`]s the prompt once

@@ -9,8 +9,7 @@
 //!    installing the seam perturbed the graph, every number in `tests/parity.rs`
 //!    would have been quietly invalidated by adding it.
 //! 2. **An installed adapter reaches EVERY site, once, in graph order.** A seam
-//!    that is wired but never dispatched looks exactly like a correct no-op —
-//!    `.agents/rules/lessons.md` #1 and #8 in one.
+//!    that is wired but never dispatched looks exactly like a correct no-op.
 //!
 //! Weight-free at `UNetConfig::tiny`, so it always runs.
 

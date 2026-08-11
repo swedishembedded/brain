@@ -12,7 +12,7 @@
 //! **`use_post_quant_conv` is honoured and defaults to TRUE**, because the
 //! reference's `AutoencoderKL.__init__` does and a config.json only carries the
 //! keys it overrides. Dropping it is a decode that stays in a plausible `[-1,1]`
-//! range and is UNCORRELATED with the truth — `.agents/rules/lessons.md` #16, which cost
+//! range and is UNCORRELATED with the truth — which cost
 //! a day of looking at a fox that had the right shape and unusable colour.
 //!
 //! GroupNorm comes from [`crate::topo::TopoBase::group_norm`], which is

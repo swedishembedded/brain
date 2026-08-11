@@ -62,9 +62,9 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
 }
 
 /// The real 70 GB source -> ~35 GB int8-native import, run for the first
-/// time against all 15 shards (`.agents/roadmap/omni.md` recorded this as
-/// "not yet done -- mechanism proven on synthetic and partial data only, 4 of
-/// 15 shards"). Two checks beyond the metadata-level name mapping above,
+/// time against all 15 shards (previously the mechanism was proven only on
+/// synthetic and partial data, 4 of 15 shards). Two checks beyond the
+/// metadata-level name mapping above,
 /// which never touches actual written bytes:
 ///
 /// 1. Two-way name coverage against the REAL WRITTEN output (not a dry-run

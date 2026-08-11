@@ -19,14 +19,14 @@ dbus-run-session -- bash -c '
 
 Nothing to pre-fetch: `--model` defaults to `LiquidAI/LFM2.5-350M`, a
 fully-qualified `<vendor>/<repo>` reference — brain's transparent auto-fetch
-(`docs/using/models-and-weights.md`) downloads and converts it on the first request that
+downloads and converts it on the first request that
 names it (that first call is as slow as the cold fetch; every one after is
 instant). Point `--model` at `LiquidAI/LFM2.5-230M` for the smaller encoder,
 or `brain/mock` for a weight-free smoke test.
 
 Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM`/
 `BRAIN_LFM_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm`
-— the env-loaded-checkpoint fallback (`docs/using/models-and-weights.md`'s `brain/`
+— the env-loaded-checkpoint fallback (the `brain/`
 table), unchanged from before auto-fetch existed.
 
 Environment knobs: `BRAIN_LFM_BATCH` (batched-forward slots per instance,

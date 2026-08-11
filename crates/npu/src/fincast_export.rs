@@ -124,7 +124,7 @@ mod tests {
         // Also exercise the real NPU when present (informational): the deterministic
         // top-2 MoE routing is sensitive to NPU fp16 rounding — a near-tie gate can
         // flip an expert, so a small cosine deviation there is a hardware precision
-        // artifact, not a graph bug. Documented in .agents/roadmap/fincast.md.
+        // artifact, not a graph bug.
         let npu_cfg = NpuConfig { device: NpuDevice::Npu, allow_fallback: false, ..Default::default() };
         if let Ok(mut npu) = FincastSession::load_bytes(&bytes, &npu_cfg) {
             let cos_npu = cosine(&mut npu);

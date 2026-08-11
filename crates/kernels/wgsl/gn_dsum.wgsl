@@ -9,8 +9,7 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm backward per-group reductions, NCHW — spec:
-// docs/world-models/specs/P1.gn.md §4.5. One invocation per (n,g) group
+// GroupNorm backward per-group reductions, NCHW. One invocation per (n,g) group
 // (N*G threads): n = k/G, g = k%G, cpg = C/G. `dyg` = dy*gamma_c, produced
 // by the EXISTING scale_chan kernel (bufs [dy, gb, dyg], params
 // [N*C*H*W, C, H*W]). With xhat = (x-mean_k)*rstd_k:
@@ -19,7 +18,7 @@
 // Output packing (consumed by gn_dx, keeps it at 4 storage buffers):
 //   sums[4k+0] = mean_k (copied from stats)   sums[4k+2] = S1_k
 //   sums[4k+1] = rstd_k (copied from stats)   sums[4k+3] = S2_k
-// Reduction order: ascending (c,h,w) — determinism contract (spec §11).
+// Reduction order: ascending (c,h,w) — a determinism contract.
 
 struct Params {
     N: u32,

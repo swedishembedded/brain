@@ -46,7 +46,7 @@
 //! * **end-to-end generation.** `crates/flux1` has no sampler loop and no VAE
 //!   glue, so "generate a face" cannot be run at all, let alone gated.
 //! * **full-depth conditioning.** The fp32 FLUX.1 backbone is 47.6 GiB and does
-//!   not fit one 24 GiB card (see `.agents/roadmap/flux1.md`), so the
+//!   not fit one 24 GiB card, so the
 //!   conditioned gate runs at reduced depth, exactly as flux1's own fp32 gate
 //!   does. The 20-site full-depth schedule is gated as a *schedule*
 //!   ([`PulidConfig::schedule`]), not as a forward.

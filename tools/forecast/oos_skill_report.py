@@ -17,7 +17,7 @@ Per model (+ a shuffled-prediction NEGATIVE CONTROL and a naive last-value basel
     fine-tune is graded on names it never trained on
   - with --ft-model/--base-model: the paired per-week IC difference (promotion
     gate) and a mechanical VERDICT block against the pre-registered criteria
-    (docs/validation-criteria.md in trademiner)
+    (from trademiner)
 
 Leak-safety is the harness's job (post-cutoff origins, past-only normalization).
 This step only ranks and scores what it produced. Small samples are noise-dominated:

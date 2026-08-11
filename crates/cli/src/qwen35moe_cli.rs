@@ -15,8 +15,7 @@
 //! `checkpoint::gguf::MmapGguf` supports is reachable today only through
 //! `Qwen35`'s private constructor. Exposing that publicly (for real 35B-scale
 //! serving, where materializing a HashMap defeats the point) is `serve.rs`'s
-//! own concern — see `.agents/roadmap/qwen35.md`'s P11 entries — not
-//! duplicated here.
+//! own concern, not duplicated here.
 //!
 //! `import_gguf` only writes tensors -- the tokenizer is not carried through
 //! the safetensors conversion -- so `infer` takes EITHER `--tokenizer

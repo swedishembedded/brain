@@ -9,7 +9,7 @@ tiny fixed-seed config/input and dumps every module's weights, inputs, and
 per-module activations as raw little-endian f32 blobs + manifest.json.
 
 This script is resource-prep tooling: it is NEVER part of brain's build/test
-path (see docs/world-models/FIXTURES.md). Output is copied into
+path. Output is copied into
 crates/wm-diamond/tests/fixtures/diamond/ and committed.
 
 Usage:

@@ -4,7 +4,7 @@
 //! Device-path tests: every operation `imaging` exposes, dispatched for real.
 //!
 //! These exist because a mismatched `Params` list is *silently wrong, not a
-//! crash* (`.agents/rules/kernels.md` §B). Each test pins the numeric result of
+//! crash*. Each test pins the numeric result of
 //! one dispatch against a value derived independently in the test — the same
 //! discipline a gradcheck oracle uses, and the only thing that catches a field
 //! swapped between `stride` and `pad`, or an `Ho`/`Wo` left stale.

@@ -9,8 +9,7 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm backward w.r.t. x, NCHW — spec:
-// docs/world-models/specs/P1.gn.md §4.6. One invocation per element
+// GroupNorm backward w.r.t. x, NCHW. One invocation per element
 // (N*C*H*W threads). With hw = H*W, c = (idx/hw) % C, n = idx/(C*hw),
 // cpg = C/G, k = n*G + c/cpg, M = f32(cpg*H*W), `dyg` = dy*gamma (scale_chan),
 // `sums` the gn_dsum output ([4*N*G]: mean|rstd|S1|S2 per (n,g)):

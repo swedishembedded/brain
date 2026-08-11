@@ -32,8 +32,8 @@
 // with `Cout=C`, `Cin/G=1` collapsed away). `hist`: `[N,C,K-1]`, `read_write`
 // -- both this call's window AND the write-back the next call reads.
 //
-// No existing elementwise/reduction primitive fit this without an extra pass
-// (`.agents/rules/kernels.md` sec A): `row_dot.wgsl` is the nearest sibling in
+// No existing elementwise/reduction primitive fit this without an extra pass:
+// `row_dot.wgsl` is the nearest sibling in
 // SHAPE (one thread, small serial reduction) but its two operands are
 // addressed IDENTICALLY per row, whereas here the weight varies only by
 // CHANNEL while `hist`/`x` vary by both `n` and `c` -- using `row_dot` would

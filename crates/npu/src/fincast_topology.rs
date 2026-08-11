@@ -17,8 +17,8 @@
 //! folded into a constant, and **no RoPE**. The MLP is a **sparse top-2 MoE**
 //! (`num_experts` experts, each `LayerNorm → gate_proj → ReLU → down_proj`)
 //! whose deterministic routing is expressed in-graph via `TopK` + a
-//! `GreaterOrEqual(prob, 2nd-largest)` mask (no `uniform` stochasticity — see
-//! `.agents/roadmap/fincast.md`). The horizon head is a SiLU ResidualBlock.
+//! `GreaterOrEqual(prob, 2nd-largest)` mask (no `uniform` stochasticity).
+//! The horizon head is a SiLU ResidualBlock.
 
 use fincast::FincastConfig;
 use onnx::builder::GraphBuilder;

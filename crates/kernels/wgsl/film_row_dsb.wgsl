@@ -9,15 +9,14 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-row-group modulation, scale/shift gradient — spec:
-// docs/world-models/specs/P1.film.md §4.6. One invocation per (cond,d)
+// FiLM per-row-group modulation, scale/shift gradient. One invocation per (cond,d)
 // (NC*D threads, NC = R/rows_per_cond): thread t has k = t/D, d = t%D.
-// Sequential loop i in 0..rows_per_cond (ascending — determinism contract,
-// spec §11), r = k*rows_per_cond + i:
+// Sequential loop i in 0..rows_per_cond (ascending — a determinism contract),
+// r = k*rows_per_cond + i:
 //   ds += dy[r*D+d] * x[r*D+d]      db += dy[r*D+d]
 // then writes BOTH halves of the packed dsb[NC,2D]:
 //   dsb[k*2D + d] = ds              dsb[k*2D + D + d] = db
-// OVERWRITES dsb (=, never += — s,b are activations here, spec §1).
+// OVERWRITES dsb (=, never += — s,b are activations here).
 //
 
 struct Params {

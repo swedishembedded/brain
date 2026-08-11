@@ -19,7 +19,7 @@
 //
 // Why this exists. The composed form is `nchw_nlc` -> `layernorm_rows` ->
 // `nlc_nchw`, and it shipped because the middle stage is coalesced. But
-// `.agents/rules/kernels.md` §E measured the two permutes at **67-86% of the
+// a measured pass found the two permutes at **67-86% of the
 // whole thing**, at 14-33% of the bandwidth roof — and it worsens with `H*W`
 // (47.5 GB/s at 65536 against 102.8 at 1024). The reason to reject fusing was
 // the strided channel access, and the composition pays that sector

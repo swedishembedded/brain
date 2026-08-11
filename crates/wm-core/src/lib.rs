@@ -4,8 +4,6 @@
 //! World-model core: the playable [`WorldModel`] trait, the deterministic,
 //! GPU-free [`FakeWorldModel`] test model, and host-side dispatch helpers for
 //! the world-model kernel families ([`gn`] GroupNorm, [`film`] FiLM/adaLN).
-//!
-//! Specs: docs/models/world-models/specs/p1.worldmodel-trait.md, P1.gn.md, P1.film.md
 
 pub mod attn;
 pub mod film;
@@ -71,9 +69,6 @@ pub trait WorldModel {
 /// * Background: `R = x/63`, `G = y/63`, `B = 0.25`; the blue channel is
 ///   `1.0` exactly on the square footprint, so the square position is always
 ///   recoverable from a frame.
-///
-/// Exact math, index conventions and hand-computed reference values:
-/// docs/models/world-models/specs/p1.worldmodel-trait.md §4–§5.
 pub struct FakeWorldModel {
     /// Square top-left corner, `0..64` each (the only mutable state).
     px: u32,

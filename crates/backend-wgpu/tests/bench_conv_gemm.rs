@@ -8,8 +8,8 @@
 //! DISPLAY= cargo test --release -p brain-backend-wgpu --test bench_conv_gemm -- --ignored --nocapture
 //! ```
 //!
-//! `docs/performance/overview.md` rejected im2col+GEMM for conv on the bandwidth-bound
-//! Intel Arc but flagged it "worth it on a compute-bound discrete GPU". The P40
+//! im2col+GEMM was rejected for conv on the bandwidth-bound
+//! Intel Arc but flagged as "worth it on a compute-bound discrete GPU". The P40
 //! is that GPU (34 FLOP/byte ridge). This measures both paths' wall-clock and
 //! GFLOP/s, and checks the GEMM output matches the direct conv (parity).
 

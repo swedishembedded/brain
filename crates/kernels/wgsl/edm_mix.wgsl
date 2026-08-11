@@ -9,13 +9,12 @@
 // @npu   no
 // @quant none
 //
-// EDM output mix D = c_skip*x + c_out*F — spec:
-// docs/world-models/specs/P1.glue.md §3.3/§4.3. Row-major [N, M], total = N*M;
+// EDM output mix D = c_skip*x + c_out*F. Row-major [N, M], total = N*M;
 // ab is packed [N,2]: ab[2n] = a[n] (c_skip), ab[2n+1] = b[n] (c_out).
 //   n = i / m;  y[i] = ab[2n] * x[i] + ab[2n+1] * f[i]
 // Property: a=1, b=0 gives y == x (exact f32 ==). Backward w.r.t. x/f uses
 // scale_row with the host-kept unpacked a_vec/b_vec; no `dab` kernel — the
-// EDM coefficients are sigma-derived constants, never trained (spec §3.3).
+// EDM coefficients are sigma-derived constants, never trained.
 // Exactly 4 storage buffers (the packing is what keeps it at the limit).
 //
 

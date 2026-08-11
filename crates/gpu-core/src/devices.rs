@@ -33,8 +33,8 @@
 //! (`crates/npu`) that a model must be explicitly built for. This module
 //! therefore *inventories* NPUs and honours `npu` in a spec, but a plain `brain
 //! <cmd>` with no `--device` will not silently route work there — only an
-//! explicit request does. Transparent NPU scheduling needs the per-model export
-//! path first; see `docs/models/yolo/npu.md`.
+//! explicit request does. Transparent NPU scheduling needs the per-model
+//! export path first.
 //!
 //! Parsing ([`DeviceSpec::parse`]) is pure and total; resolution
 //! ([`DeviceSpec::resolve`]) probes the machine. They are separate so the

@@ -21,8 +21,8 @@
 //! **DeepStack is out of scope**: `omni::mm::encode_image`'s own host path
 //! does not exercise the 3 DeepStack taps / per-tap mergers either (see its
 //! doc comment on `deepstack_merger.*` weights) — this graph mirrors the code
-//! actually served, not a gap unique to the NPU path. `.agents/roadmap/omni.md`'s
-//! M15 entry records this as a named scope limitation, not an oversight.
+//! actually served, not a gap unique to the NPU path. This is a named scope
+//! limitation, not an oversight.
 
 use onnx::{GraphBuilder, Node};
 

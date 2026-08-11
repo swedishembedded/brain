@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Measures the non-ReBAR Pascal "2x resident per storage buffer" cost cited
-//! by `.agents/rules/lessons.md` §14 and `crates/qwen3/src/q8.rs` — directly, via
-//! `nvidia-smi` memory deltas around known allocations, rather than by
-//! inference from a model's total footprint.
+//! Measures the non-ReBAR Pascal "2x resident per storage buffer" cost, also
+//! noted in `crates/qwen3/src/q8.rs` — directly, via `nvidia-smi` memory
+//! deltas around known allocations, rather than by inference from a model's
+//! total footprint.
 //!
 //! ```text
 //! CARGO_HOME=/data/resources/cargo-home cargo test --release -p brain-gpu-core \
@@ -16,8 +16,7 @@
 //! shape as `bench_matmul.rs`. Needs `nvidia-smi` on `$PATH` (skips cleanly
 //! otherwise).
 //!
-//! **Result** (P40 ×2, non-ReBAR, measured 2026-08-07 — see
-//! `.agents/rules/lessons.md` and `.agents/roadmap/omni.md` M1 for the write-up):
+//! **Result** (P40 ×2, non-ReBAR, measured 2026-08-07):
 //! the doubling is real, exactly 2.00x, upload-triggered (allocation alone is
 //! 1.00x), independent of `COPY_SRC`/`COPY_DST` usage flags and independent of
 //! upload chunk size — but it is **specific to the default wgpu backend's

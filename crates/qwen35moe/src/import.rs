@@ -14,8 +14,8 @@
 //! its generic Mamba/SSM tensor-naming scheme, which differs substantially
 //! from HF's `linear_attn.in_proj_*` names.
 //!
-//! **This mapping was derived empirically**, per `.agents/rules/porting.md`
-//! §0's "checkpoint headers are free architecture docs" — by range-reading
+//! **This mapping was derived empirically** — checkpoint headers are free
+//! architecture docs — by range-reading
 //! the GGUF header (magic + KV metadata + tensor info list, all present near
 //! the start of the file, long before the bulk tensor data) directly off the
 //! partially-downloaded `Qwen3.5-35B-A3B-Q4_K_M.gguf`, decoding it by hand
@@ -130,8 +130,8 @@ fn kv_f32(mg: &MmapGguf, key: &str) -> Option<f32> {
 /// `linear_key_head_dim`/`linear_value_head_dim` is a plausible-but-unproven
 /// reading of llama.cpp's SSM KV schema — the TENSOR SHAPES are ground truth
 /// and this function derives the head-shape fields from them directly rather
-/// than trusting the KV key names, matching `.agents/rules/porting.md`'s
-/// "verify empirically" rule. `qwen35moe.ssm.group_count` is used only as an
+/// than trusting the KV key names, verifying empirically.
+/// `qwen35moe.ssm.group_count` is used only as an
 /// assertion cross-check (it must equal the derived `linear_num_key_heads`),
 /// not as the primary source.
 pub fn config_from_gguf(mg: &MmapGguf) -> Result<Qwen35Config, String> {
@@ -384,8 +384,7 @@ pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>) -
 /// `[0, cfg.n_layers)` only, collected straight into a `HashMap` instead of
 /// written to an intermediate safetensors file.
 ///
-/// Why this exists (see `.agents/roadmap/qwen35.md`'s LoRA-smoke-test
-/// entry for the full account): `import_gguf`'s own safetensors output is a
+/// Why this exists: `import_gguf`'s own safetensors output is a
 /// full fp32 re-encoding of the checkpoint — at the real 35B-A3B shape that
 /// is ~140 GB on disk, which does not fit alongside the already-downloaded
 /// ~60 GB of GGUF source files in this box's available disk. Loading directly
@@ -654,7 +653,7 @@ mod tests {
     /// every tensor's byte range against the file length up front, so a
     /// still-downloading/truncated file fails this test with an "out of
     /// range" error rather than silently passing on partial data). Self-skips
-    /// loudly when unset (`.agents/rules/testing.md`'s convention) rather than failing
+    /// loudly when unset rather than failing
     /// a box that hasn't fetched the multi-GB file.
     #[test]
     fn config_and_tokenizer_extract_from_the_real_checkpoint() {

@@ -384,8 +384,8 @@ fn bench_matmul_quant() {
         assert!(drel < 1e-6, "matmul_i8_dyn diverges (rel {drel:.3e})");
     }
 
-    /// Runs int4/W4A8 (`matmul_q4_dyn`, CPU+GPU — naive, `.agents/rules/porting.md`
-    /// §10 "correct, then freeze") at `(m, k, n)` on both backends.
+    /// Runs int4/W4A8 (`matmul_q4_dyn`, CPU+GPU — naive, "correct, then
+    /// freeze") at `(m, k, n)` on both backends.
     fn run_q4_dyn(cpu: &Gpu, wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
         let x = fill(m * k, 3);
         let w = fill(n * k, 4);

@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// adaLN gated residual, branch gradient — spec:
-// docs/world-models/specs/P1.film.md §4.8. One invocation per element
+// adaLN gated residual, branch gradient. One invocation per element
 // (R*D threads), r = idx/D, d = idx%D, k = r/rows_per_cond:
 //   dh[r,d] = dy[r,d] * g[k,d]
 // Gate buffer g[NC,D]. OVERWRITES dh (=, SSA fresh buffer).

@@ -276,7 +276,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
 }
 
 /// Bounds enforced on `tools`/`tool_choice` before they ever reach the resident
-/// model (`.agents/rules/api-security.md`'s input-handling/DoS section): a request
+/// model: a request
 /// body is otherwise unbounded attacker-controlled JSON, and `tools` feeds
 /// straight into prompt construction (the `<tools>` block's byte length is
 /// unbounded input to the tokenizer/model if left unchecked).
@@ -369,7 +369,7 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
 /// entries, at most [`MAX_TOOLS_BYTES`] serialized bytes, and every element's
 /// `function.name` a non-empty string of at most [`MAX_TOOL_NAME_LEN`]
 /// characters. Enforced BEFORE the array ever reaches the resident model /
-/// prompt renderer (`.agents/rules/api-security.md`).
+/// prompt renderer.
 fn validate_tools(provider: Provider, tools: &Value) -> Result<(), ApiError> {
     let arr = tools.as_array().ok_or_else(|| ApiError::invalid_request(provider, "'tools' must be an array"))?;
     if arr.len() > MAX_TOOLS {
@@ -536,8 +536,7 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
 /// OpenAI's `ChatCompletionMessageToolCall`: `{id, type:"function",
 /// function:{name, arguments}}`. `arguments` is re-emitted verbatim as the
 /// JSON-text string the resident produced — never re-parsed (the server relays
-/// model output; it does not parse-and-execute tool calls, see
-/// `.agents/rules/api-security.md`).
+/// model output; it does not parse-and-execute tool calls).
 fn openai_tool_calls(calls: &[Value]) -> Vec<Value> {
     calls
         .iter()

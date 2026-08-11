@@ -3,7 +3,7 @@
 
 //! SDXL UNet profiler: where a forward's time actually goes, per kernel kind.
 //!
-//! `.agents/rules/kernels.md` §E: profile per kernel-kind BEFORE touching
+//! Profile per kernel-kind BEFORE touching
 //! anything, and publish the table — on this engine every confident hypothesis
 //! about what is slow has been wrong and the profile has been right.
 //!
@@ -15,7 +15,7 @@
 //! * **Every timed region is bracketed by `poll_wait()`.** `submit` with an
 //!   empty clear list only appends to `pending`; a loop of bare submits measures
 //!   host-side bind-group construction and reports it as device bandwidth. That
-//!   mistake produced 377 GB/s on a ~346 GB/s card (`.agents/rules/lessons.md` #6).
+//!   mistake produced 377 GB/s on a ~346 GB/s card.
 //! * **Best-of-N**, not mean: the minimum is the least contaminated sample.
 //! * **Groups are contiguous runs of one kernel**, submitted in graph order, so
 //!   the sum of the parts is comparable to the whole. Per-group drains add one

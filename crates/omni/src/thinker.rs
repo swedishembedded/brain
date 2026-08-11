@@ -15,9 +15,8 @@
 //! internals (sharding, LoRA, int8, KV-cache) are all interleaved in one
 //! large constructor with no seam to swap out just the dense SwiGLU MLP for
 //! `model::moe`'s sparse one, unlike `crates/glm`, which already carries an
-//! `Mlp::Dense`/`Mlp::Moe` enum at exactly that point (see
-//! `.agents/roadmap/omni.md`'s M6 design note for the two ways to close
-//! this gap; giving `qwen3::Qwen` the same seam `glm` has is the "one
+//! `Mlp::Dense`/`Mlp::Moe` enum at exactly that point (giving `qwen3::Qwen`
+//! the same seam `glm` has is the "one
 //! implementation" answer and the natural following step). This module is
 //! deliberately narrower than `qwen3::Qwen` in every other respect
 //! (forward-only, single device, no sharding/LoRA/int8/KV-cache) so it can
@@ -38,8 +37,7 @@
 //! that degenerate diagonal table via `get_rope_index(tokens, image_token_id,
 //! &[])` (empty grids) rather than reaching for a second kernel — one
 //! implementation for both cases, per the M6a lesson about wiring the wrong
-//! RoPE kernel into a second, parallel path (`.agents/rules/lessons.md`, status.md's
-//! M6a entry).
+//! RoPE kernel into a second, parallel path.
 //!
 //! **Multimodal splice**: not this module's concern. A caller with image/
 //! audio embeddings splices them into the token-embedding buffer via
@@ -301,7 +299,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
 /// for this ONE token's absolute 3-axis position (`qwenvl::mrope::mrope_tables`
 /// called with a single-element `positions` slice) — `rope2d_fwd`'s table-driven
 /// kernel needs no separate "decode" variant, unlike `qwen3::Qwen`'s `ROPE_AT`
-/// (see `.agents/roadmap/omni.md`'s KV-cache entry for why: Thinker's RoPE
+/// (Thinker's RoPE
 /// path was already row-driven, so a 1-row table IS the decode case). `cap` is
 /// the cache's allocated capacity (must match what [`layer_fwd`]'s prefill
 /// call and every prior decode step against this same cache used).

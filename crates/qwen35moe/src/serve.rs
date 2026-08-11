@@ -85,7 +85,7 @@
 //! `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
 //! dispatch prefill -- a per-token loop is the explicitly-sanctioned
 //! correctness-first shape for this pass
-//! (`.agents/rules/porting.md` §10, "correct-then-freeze"; the same
+//! ("correct-then-freeze" -- the same
 //! principle already applied to this model's int8 GEMM tiling and MoE decode
 //! dispatch). The performance gap (one submit+readback per PROMPT token,
 //! instead of one batched whole-prompt forward) is real and is intentionally
@@ -399,8 +399,8 @@ impl Engine {
     /// `release_table`) and so may not ALL be resident at any one instant --
     /// this matches `PagedDecoder::kv_pool_bytes`'s own documented contract
     /// ("computed before any device allocation happens... a prediction, not
-    /// a postmortem"), and per `.agents/rules/lessons.md` #34 ("an unmeasured memory
-    /// claim is worse than none") reports the GDN cost at all rather than
+    /// a postmortem"), and since an unmeasured memory claim is worse than
+    /// none, reports the GDN cost at all rather than
     /// silently counting only the paged-KV half.
     pub fn kv_pool_bytes(&self) -> u64 {
         let n_full = self.model.cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;

@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// Per-sample weighted MSE gradient — spec:
-// docs/world-models/specs/P1.glue.md §3.5/§4.5. Exact gradient of
+// Per-sample weighted MSE gradient. Exact gradient of
 // L = scale * Σ_n out[n] (out from mse_value_w) w.r.t. pred. [N, M]
 // row-major, total = N*M, one invocation per ELEMENT:
 //   n = i / m

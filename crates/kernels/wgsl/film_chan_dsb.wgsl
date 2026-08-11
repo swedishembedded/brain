@@ -9,14 +9,13 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-channel modulation, scale/shift gradient — spec:
-// docs/world-models/specs/P1.film.md §4.3. One invocation per (n,c) pair
+// FiLM per-channel modulation, scale/shift gradient. One invocation per (n,c) pair
 // (N*C threads): thread t has n = t/C, c = t%C. ONE sequential loop over
-// (h,w) in ascending order (determinism contract, spec §11) accumulating
+// (h,w) in ascending order (a determinism contract) accumulating
 //   ds += dy[i] * x[i]      db += dy[i]
 // then writing BOTH halves of the packed dsb[N,2C]:
 //   dsb[n*2C + c] = ds      dsb[n*2C + C + c] = db
-// OVERWRITES dsb (=, never += — s,b are activations here, spec §1).
+// OVERWRITES dsb (=, never += — s,b are activations here).
 //
 
 struct Params {

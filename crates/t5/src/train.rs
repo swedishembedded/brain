@@ -52,7 +52,7 @@
 //! mode allocates it **per block** — the SSA discipline AGENTS.md requires, and
 //! affordable at the shapes a gradcheck and a small finetune run at. At T = 512
 //! this is the term that has to become `block::chunked_bidir_bwd`'s per-chunk
-//! recompute; that is recorded in `.agents/roadmap/t5.md` as the remaining
+//! recompute; that is recorded in the roadmap as the remaining
 //! scaling work, not papered over here. `scores` stays a single scratch slab
 //! because nothing in the reverse reads it.
 //!

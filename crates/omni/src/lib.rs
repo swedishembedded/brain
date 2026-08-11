@@ -4,9 +4,7 @@
 //! Qwen3-Omni-30B-A3B-Instruct: an omni-modal model — text, audio and
 //! vision/video in, text and speech out.
 //!
-//! Three components chained end to end (see `docs/models/omni/readme.md` for
-//! the full architecture and `.agents/roadmap/omni.md` for the build
-//! ledger): the **Thinker** (a Qwen3-MoE decoder with audio/vision towers
+//! Three components chained end to end: the **Thinker** (a Qwen3-MoE decoder with audio/vision towers
 //! spliced in), the **Talker** (a Qwen3-MoE decoder + MTP code predictor,
 //! consuming the Thinker's hidden state), and **Code2Wav** (RVQ decode to a
 //! 24 kHz waveform). Built on `model::moe`'s sparse top-k core, reusing

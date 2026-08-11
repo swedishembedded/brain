@@ -109,8 +109,7 @@ struct KernelPipeline {
 /// (`gpu_core::testgpu::dev`, `gpu_core::roof::measure`'s internal probe
 /// device) silently built a WHOLE NEW Vulkan device instead — the exact
 /// "many concurrent devices on one card" shape `device_sharing.rs` documents
-/// as deadlocking the NVIDIA driver roughly half the time. See
-/// `.agents/rules/lessons.md`'s Vulkan-device-sharing entry.
+/// as deadlocking the NVIDIA driver roughly half the time.
 struct VkPipelineSet {
     ctx: Arc<VkContext>,
     pipelines: Vec<KernelPipeline>,

@@ -9,13 +9,12 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm backward w.r.t. gamma, NCHW — spec:
-// docs/world-models/specs/P1.gn.md §4.3. One invocation per channel
+// GroupNorm backward w.r.t. gamma, NCHW. One invocation per channel
 // (C threads). With cpg = C/G, k = n*G + c/cpg, xhat = (x-mean_k)*rstd_k:
 //   dgb[c] = dgb[c] + sum_{n,h,w} dy * xhat        (ACCUMULATES, gamma half)
 // Writes ONLY dgb[c] (c < C); gn_dbeta owns the beta half dgb[C+c].
 // `stats` is gn_stats output ([2*N*G]: mean|rstd interleaved per (n,g)).
-// Reduction order: ascending (n,h,w) — determinism contract (spec §11).
+// Reduction order: ascending (n,h,w) — a determinism contract.
 
 struct Params {
     N: u32,

@@ -13,13 +13,13 @@
 # read anywhere under crates/ (env::var, env::var_os, and any helper matching
 # `fn(...)("BRAIN_X", ...)` such as env_path/env_or) and requires each one to
 # be documented in one of three places:
-#   1. docs/using/configuration.md  — the user-facing reference (default home)
-#   2. docs/models/**                — a per-model page, for a model-specific
+#   1. the user-facing config reference (default home)
+#   2. a per-model page                — for a model-specific
 #                                       knob that's more natural to explain in
 #                                       context (the page must literally spell
 #                                       out the variable name, not a shorthand
 #                                       like "`_VAE`")
-#   3. .agents/rules/testing.md      — test-fixture-only and internal
+#   3. the internal testing rules      — test-fixture-only and internal
 #                                       engine-tuning vars, neither of which
 #                                       belong in user-facing docs
 #

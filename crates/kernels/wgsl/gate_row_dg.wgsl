@@ -9,14 +9,13 @@
 // @npu   no
 // @quant none
 //
-// adaLN gated residual, gate gradient — spec:
-// docs/world-models/specs/P1.film.md §4.9. One invocation per (cond,d)
+// adaLN gated residual, gate gradient. One invocation per (cond,d)
 // (NC*D threads, NC = R/rows_per_cond): thread t has k = t/D, d = t%D.
-// Sequential loop i in 0..rows_per_cond (ascending — determinism contract,
-// spec §11), r = k*rows_per_cond + i:
+// Sequential loop i in 0..rows_per_cond (ascending — a determinism contract),
+// r = k*rows_per_cond + i:
 //   s += dy[r*D+d] * h[r*D+d]
 // writes dg[k*D + d] = s over the gate-shaped dg[NC,D].
-// OVERWRITES dg (=, never += — g is an activation here, spec §1).
+// OVERWRITES dg (=, never += — g is an activation here).
 //
 
 struct Params {

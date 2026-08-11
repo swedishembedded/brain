@@ -9,8 +9,7 @@
 // @npu   yes
 // @quant none
 //
-// Asymmetric zero-pad on NCHW (gather) — spec:
-// docs/world-models/specs/P1.glue.md §3.6/§4.6. Params carry the UNPADDED
+// Asymmetric zero-pad on NCHW (gather). Params carry the UNPADDED
 // dims h, w and pad amounts l/r/t/b (left/right/top/bottom, u32, each may be
 // 0); padded dims are derived: hp = h+t+b, wp = w+l+r. Batch and channel are
 // combined (p = image index). One thread per OUTPUT element idx < total

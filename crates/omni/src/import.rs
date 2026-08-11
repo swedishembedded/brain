@@ -18,7 +18,7 @@
 //! time — `crates/qwen3/src/q8.rs`, `crates/zimage/src/block.rs`): Omni is
 //! large enough, specifically because of its MoE expert count, that the
 //! disk cost of the old convention is prohibitive rather than merely
-//! wasteful. See `.agents/roadmap/omni.md` M3 for the measurement.
+//! wasteful.
 //! Norms, biases, layer-scales, and embeddings/heads stay f32 (any tensor
 //! that is not rank-2, or whose last dimension is not a multiple of 4 —
 //! `model::int8::quantize_weight`'s hard requirement — falls back to f32
@@ -342,7 +342,7 @@ pub fn hf_to_brain(hf: &str) -> Option<String> {
 /// dimension) a multiple of 4 (`model::int8::quantize_weight`'s hard
 /// requirement). Every real 2-D weight in this checkpoint meets that (2048,
 /// 1024, 1152, 768, 384, 4304, 5120, 3072, 1280, 480, 152064, … are all
-/// multiples of 4 — see `.agents/roadmap/omni.md` "Facts"); convolutions
+/// multiples of 4); convolutions
 /// (rank 3: `[out, in, kernel]`) and every 1-D tensor (norms, biases,
 /// layer-scales) fall through to f32 automatically, not by a special case.
 pub fn should_quantize(shape: &[u64]) -> bool {
@@ -665,7 +665,7 @@ mod tests {
 
     // Every assertion below is a REAL tensor name from the released
     // checkpoint's model.safetensors.index.json (dumped 2026-08-07), not an
-    // invented example — see .agents/roadmap/omni.md.
+    // invented example.
 
     #[test]
     fn audio_tower_names() {
@@ -729,7 +729,7 @@ mod tests {
         // which MoE has a shared expert -- it would map a
         // "thinker....shared_expert_gate.weight" leaf too, but the real
         // checkpoint never emits one (Thinker's shared_expert_intermediate_size
-        // is 0, confirmed in .agents/roadmap/omni.md), so this never runs
+        // is 0), so this never runs
         // in practice. Asserted here so a future change to the shared-expert
         // arm doesn't silently start dropping it for the family that DOES
         // have one (talker_moe_names, below, is the real coverage case).

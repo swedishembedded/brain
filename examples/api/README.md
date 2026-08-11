@@ -30,7 +30,7 @@ examples/api/claude-with-brain.sh -p "hi"          # or pass any claude flags th
 ```
 
 That's it — no import step. The first message you send in `claude` is the first
-request that names `MODEL`; brain's transparent auto-fetch (`docs/using/models-and-weights.md`)
+request that names `MODEL`; brain's transparent auto-fetch
 downloads and converts it right then, streaming progress to Claude Code while it
 does, and every request after is instant. Point `MODEL` at any
 `<vendor>/<repo>[-<QUANT>]` your build of brain can serve to use a different model,

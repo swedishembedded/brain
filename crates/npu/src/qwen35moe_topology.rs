@@ -6,9 +6,8 @@
 //! cache-free PREFILL only, text-only (no vision splice) — the same scope
 //! every other `*_topology.rs` file in this crate documents for itself
 //! (`qwen_topology.rs`'s own module doc), not a new limitation introduced
-//! here. See `.agents/roadmap/qwen35.md`'s P14 entry for the task this
-//! file closes and the exact boundary where this pass stops (recorded in this
-//! module's doc below, and in the final report that shipped alongside it).
+//! here. The exact boundary where this pass stops is recorded in this
+//! module's doc below.
 //!
 //! Two sub-problems neither `qwen_topology.rs` (plain GQA) nor
 //! `glm_topology.rs` (MoE, but small-`E` and no linear-attention layer) has an
@@ -55,8 +54,7 @@
 //!
 //! `glm_topology.rs::Topo::moe` (the only existing MoE emitter in this crate)
 //! evaluates **every** expert densely over the whole row batch and combines
-//! with a `TopK`+`ScatterElements`-built dense gate — correct, but
-//! `.agents/roadmap/qwen35.md`'s own P14 note already flags that a literal
+//! with a `TopK`+`ScatterElements`-built dense gate — correct, but a literal
 //! port of that at Qwen3.5's 256 experts is impractical (a dense per-expert
 //! `swiglu` loop is 3 `MatMul`s/expert; 256 experts x 40 layers is tens of
 //! thousands of `MatMul` nodes for weights that are 32x oversized relative to
@@ -255,8 +253,7 @@ impl<'a> Topo<'a> {
     /// unrotated. Qwen3.5's text-only degenerate M-RoPE (all three position
     /// axes equal for every token, since there is no vision splice in this
     /// export) collapses `qwenvl::mrope::mrope_tables` to plain 1-D RoPE —
-    /// confirmed by `.agents/roadmap/qwen35.md`'s P11b note that this
-    /// collapse is exact, not approximate — so a single `theta`-based table
+    /// this collapse is exact, not approximate — so a single `theta`-based table
     /// is exactly right here, no per-axis section bookkeeping needed.
     fn rope_partial(&mut self, x: &str, hd: usize, rot: usize, t: usize, theta: f32) -> String {
         if rot == 0 {

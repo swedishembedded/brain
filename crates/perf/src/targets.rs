@@ -701,8 +701,8 @@ mod tests {
 /// `device_stats()`/admission-policy seam to read. Once the LLM residents are
 /// rewired onto `qwen3::serve::Engine` (this plan's W5), those numbers become
 /// reachable here with no change to this struct's shape — reporting a
-/// fabricated number now would violate the "never a fabricated zero" rule
-/// (`docs/performance/benchmarking.md` §1), so they are simply absent.
+/// fabricated number now would violate the "never a fabricated zero" rule,
+/// so they are simply absent.
 pub struct HttpTarget {
     rt: tokio::runtime::Runtime,
     router: axum::Router,

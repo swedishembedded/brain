@@ -56,7 +56,7 @@
 //! ```
 //!
 //! The margin head is **not in the released checkpoint** — insightface ships the
-//! embedding only (see `.agents/roadmap/face.md`). `head.weight` is therefore
+//! embedding only. `head.weight` is therefore
 //! initialised, not imported, exactly as it would be when fine-tuning onto a new
 //! identity set.
 

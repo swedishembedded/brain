@@ -6,7 +6,7 @@
 //!
 //! Why this exists. `vqgan_bench`, `unet_bench` and `flux2_bench` cover the
 //! conv/diffusion datapaths; the LLM datapath had no per-kernel-kind profiler at
-//! all, so every recorded qwen number in `docs/performance/` came from
+//! all, so every recorded qwen number came from
 //! `BRAIN_PROFILE`'s timestamp table — and, more importantly, all of them were
 //! measured on `qwen-synth:8x512x8` (47 M params, vocab 32 k). That target
 //! **structurally cannot express Qwen3-0.6B**: it forces `head_dim = d/h` and
@@ -313,8 +313,7 @@ fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], m: usize, k: u
 /// reference above, plus GOP/s against the measured DP4A roof (never the
 /// fp32 roof — `Roofs::compute_roof`/`utilisation_of` pick the DP4A one
 /// automatically when `int_ops > flops`, the fix for the 4.15x-flattering
-/// bug `docs/performance/overview.md`'s "int8 weights on the served path"
-/// section records).
+/// bug recorded when profiling int8 weights on the served path).
 ///
 /// `qwen_bench gemm8 [m k n] [reps]` — defaults to the qkv-projection shape
 /// at Qwen3-0.6B's 128-row served prefill (`d_model=1024, q_dim=2048`).

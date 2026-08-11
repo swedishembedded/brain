@@ -1411,7 +1411,7 @@ impl Qwen35 {
     /// dW), and the adapter grads `gA`/`gB` are produced (scale folded into
     /// the private `lora_a`/`lora_da` scratch) — naive `matmul_dx`/`matmul_dw`
     /// only, no tiled-GEMM selection, matching a correctness-first tiny
-    /// gradcheck config per `.agents/rules/porting.md` §10. Mirrors
+    /// gradcheck config. Mirrors
     /// `qwen3::model.rs`'s own `proj_bwd` exactly.
     #[allow(clippy::too_many_arguments)]
     fn proj_bwd(&self, steps: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
@@ -3469,8 +3469,8 @@ mod decode_sparse_moe_tests {
         }
     }
 
-    /// Pin the CPU JIT explicitly regardless of `BRAIN_DEVICE` (`.agents/rules/lessons.md`
-    /// #5 -- a barrier-crossing kernel can silently misbehave on exactly one
+    /// Pin the CPU JIT explicitly regardless of `BRAIN_DEVICE` (a
+    /// barrier-crossing kernel can silently misbehave on exactly one
     /// backend), mirroring `tests/decode_step.rs`'s own convention.
     #[test]
     fn moe_sublayer_decode_sparse_matches_dense_loop_bit_identical_cpu() {
@@ -3485,16 +3485,15 @@ mod decode_sparse_moe_tests {
     }
 
     /// The actual claim behind this task ("fewer GPU dispatches per decode
-    /// step"), measured via `Gpu::stats()`, not asserted (`.agents/rules/lessons.md`'s
-    /// "close the loop" convention), at the REAL 256-expert/top-8 shape
+    /// step"), measured via `Gpu::stats()`, not asserted (closing the loop
+    /// rather than declaring victory unmeasured), at the REAL 256-expert/top-8 shape
     /// (`Qwen35Config::qwen35_35b_a3b`'s own `n_experts`/`top_k` — the
     /// dispatch COUNT this measures depends only on those two numbers, not on
     /// `d_model`/`vocab`/`n_layers`, so the rest of the config stays
     /// `tiny()`-cheap to build and run in milliseconds on the CPU backend).
     ///
     /// `dispatches` (individual `pass.dispatch_workgroups` calls -- pipeline
-    /// bind + launch, the unit `.agents/rules/kernels.md`'s own killed-
-    /// hypothesis table means by "per-dispatch overhead") is the honest
+    /// bind + launch, the unit "per-dispatch overhead" means here) is the honest
     /// metric here, not `submits`: this engine lazily coalesces every queued
     /// step into ONE real hardware submission at the next readback
     /// (`backend_wgpu::Backend::submit`'s own doc — "a whole forward's

@@ -144,8 +144,8 @@ fn serve(args: &[String]) {
     let mut block_size = 16u32;
     // int8 KV default ON, matching the production resident's default
     // (resident_llm.rs::QwenResident::kv_int8) -- measured +0.0154 loss vs
-    // fp32 on the real Qwen3-0.6B checkpoint (.agents/roadmap/qwen.md
-    // P12), close enough to free that the memory win is the clear default.
+    // fp32 on the real Qwen3-0.6B checkpoint, close enough to free that the
+    // memory win is the clear default.
     // --int8 is kept as a harmless no-op (already the default) for anyone
     // with it in a script; --kv-fp32 is the real opt-out.
     let mut int8 = true;
@@ -937,7 +937,7 @@ fn eval_chat(args: &[String]) {
 /// `kv_calib.json` next to the checkpoint and pass `--kv-calib` to `brain
 /// qwen serve` (`BRAIN_QWEN_KV_CALIB=1` for `brain serve`'s resident) to opt
 /// IN to it (`KvCalib::from_model_dir`); calibration is NOT picked up
-/// automatically -- `.agents/roadmap/qwen.md` P12's own measurement found
+/// automatically -- measurement found that
 /// a small (10-prompt) calibration set makes things WORSE, so the serving
 /// default stays plain online-absmax and a caller must explicitly ask for a
 /// specific calibration file. This is a SEPARATE artifact from `--out`'s raw

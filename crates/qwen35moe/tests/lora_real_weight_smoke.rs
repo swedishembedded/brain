@@ -16,7 +16,8 @@
 //! split across both physical GPUs (`crate::shard`'s `Shardable` impl, cut
 //! placed by `model::plan_balanced`), runs a handful of real AdamW steps on a
 //! tiny synthetic token stream, and asserts the loss actually decreases (not
-//! just "doesn't crash" -- `.agents/rules/lessons.md`'s "close the loop" convention).
+//! just "doesn't crash" -- closing the loop rather than declaring victory on
+//! absence-of-crash alone).
 //!
 //! **Why pipeline-sharded, not truncated to one card** (superseding this
 //! file's earlier single-GPU-truncation approach): a model this large

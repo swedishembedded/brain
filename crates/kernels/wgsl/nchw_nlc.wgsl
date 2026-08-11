@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// Layout permutation NCHW -> NLC [N, L=H*W, C] (gather) — spec:
-// docs/world-models/specs/P1.glue.md §3.8/§4.8. total = N*c*hw. One thread
+// Layout permutation NCHW -> NLC [N, L=H*W, C] (gather). total = N*c*hw. One thread
 // per OUTPUT (NLC) element:
 //   n = idx/(hw*c); r0 = idx % (hw*c); l = r0/c; ch = r0 % c    (u32 ops)
 //   y[idx] = x[(n*c + ch)*hw + l]

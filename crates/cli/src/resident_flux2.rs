@@ -29,8 +29,8 @@ impl Flux2Resident {
 
 /// How many concurrent same-key generations one instance batches into a single
 /// denoise loop (`BRAIN_FLUX2_MAX_BATCH`, default 4). Only the DiT activation
-/// scratch scales with it — see `.agents/roadmap/flux2.md` for the measured
-/// VRAM per sample and the point where latency stops paying for throughput.
+/// scratch scales with it — measured VRAM per sample determines
+/// the point where latency stops paying for throughput.
 /// The scheduler's own `Policy::max_batch` caps the group size on top of this.
 pub fn max_batch() -> u32 {
     std::env::var("BRAIN_FLUX2_MAX_BATCH")

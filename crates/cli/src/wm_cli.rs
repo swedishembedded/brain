@@ -4,7 +4,7 @@
 //! `brain wm …` — world-model subcommands: import (torch .pt -> .safetensors),
 //! play (windowed SDL / headless), bench. Models: `diamond` (pretrained
 //! Atari-100k EDM world model) and `fake` (deterministic GPU-free test
-//! model). See docs/models/world-models/status.md.
+//! model).
 
 use crate::args::Args;
 use data::episode::EpisodeDataset;
@@ -137,7 +137,7 @@ fn run_finetune(rest: &[String]) {
     );
     if !last.is_finite() {
         eprintln!("training diverged (NaN/inf loss) — NOT saving. Lower --lr (batch-1 \
-fine-tuning is sensitive; see docs/models/world-models/playbooks.md).");
+fine-tuning is sensitive).");
         std::process::exit(1);
     }
     if let Err(e) = tr.save(&tensors, &out) {

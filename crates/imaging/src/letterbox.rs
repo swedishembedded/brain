@@ -32,8 +32,8 @@
 //! a refactor.
 //!
 //! The clean fix is a *mode* on `resize_nearest` (one extra `Params` word,
-//! selecting half-pixel vs asymmetric) rather than a second nearest kernel —
-//! `.agents/rules/kernels.md` §A. The pad half is also blocked: `pad2d.wgsl` is
+//! selecting half-pixel vs asymmetric) rather than a second nearest kernel.
+//! The pad half is also blocked: `pad2d.wgsl` is
 //! zero-fill only and cannot express the grey `114/255` fill, which likewise
 //! wants a `pad_value` word rather than a new kernel.
 //!

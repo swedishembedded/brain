@@ -9,8 +9,7 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm forward apply, NCHW x[N,C,H,W] — spec:
-// docs/world-models/specs/P1.gn.md §4.2. One invocation per element
+// GroupNorm forward apply, NCHW x[N,C,H,W]. One invocation per element
 // (N*C*H*W threads). With hw = H*W, c = (idx/hw) % C, n = idx/(C*hw),
 // cpg = C/G, g = c/cpg, k = n*G + g:
 //   y[idx] = gamma_c * (x[idx] - mean_k) * rstd_k + beta_c

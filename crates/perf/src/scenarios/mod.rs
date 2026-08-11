@@ -9,7 +9,7 @@
 //! Tier 2 (one module each): `mixed`, `overload`, `cancel`, `kvcache`,
 //! `residency`, `placement`, `frontend`, `faults`, `soak` — the scenarios where
 //! brain has something to measure that a single-model, single-GPU, HTTP-shaped
-//! harness structurally cannot. See `docs/performance/benchmarking.md`.
+//! harness structurally cannot.
 //!
 //! The three core scenarios differ **only** in their arrival process, and that
 //! is the entire point: requests that all exist at t=0 exercise a different

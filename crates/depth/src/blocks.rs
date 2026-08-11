@@ -1548,8 +1548,8 @@ impl FastConvexUpsample {
     ///
     /// This was a `bool align` whose `true` branch pushed `0` — it read as
     /// "align_corners = true" at every call site and meant the opposite. A
-    /// mismatched param list is silently wrong rather than a crash
-    /// (`.agents/rules/kernels.md` §B), so the parameter now carries the word it
+    /// mismatched param list is silently wrong rather than a crash,
+    /// so the parameter now carries the word it
     /// actually pushes instead of a name that inverts it.
     fn up_params(&self, c: u32, align_word: Option<u32>) -> Vec<u32> {
         let mut v = vec![self.depth.n, c, self.depth.h, self.depth.w, self.out_shape.h, self.out_shape.w];

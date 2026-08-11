@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Settling `.agents/rules/kernels.md` §E's open question: does a FUSED
-//! channels-first LayerNorm beat the composed `nchw_nlc → layernorm_rows →
-//! nlc_nchw`?
+//! Settling an open question: does a FUSED channels-first LayerNorm beat the
+//! composed `nchw_nlc → layernorm_rows → nlc_nchw`?
 //!
-//! §E's row says the composition shipped as the correct first cut, but that the
-//! measurement did **not** rule fusing out: the two permutes were 67–86% of the
-//! whole, and both pay the sector amplification that was the stated reason to
-//! avoid fusing. This test answers it — correctness first, then the numbers,
+//! The composition shipped as the correct first cut, but the measurement did
+//! **not** rule fusing out: the two permutes were 67–86% of the whole, and
+//! both pay the sector amplification that was the stated reason to avoid
+//! fusing. This test answers it — correctness first, then the numbers,
 //! printed so the answer lands in the record rather than in someone's terminal.
 //!
 //! Run:
@@ -79,8 +78,8 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
     // reductions — on `backend-cpu` the JIT does not refuse it, it miscompiles
     // it and the process dies in the allocator with no attributable message.
     // The fused kernel is barrier-free and IS legal there, and checking it
-    // against the host oracle on both backends is the point (`.agents/rules/lessons.md`
-    // #5); only the A/B comparison needs the cap.
+    // against the host oracle on both backends is the point; only the A/B
+    // comparison needs the cap.
     let coop = gpu.caps().workgroup_reductions;
     // The CPU JIT walks these shapes on one core; the 2 M-element case is the
     // GPU's headline, not a useful CPU test.

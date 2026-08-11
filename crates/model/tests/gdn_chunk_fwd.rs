@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `model::gdn::gdn_chunk_fwd` vs. a host **f64** oracle, on a tiny synthetic
-//! shape with pairwise-distinct `B,H,T,Dk,Dv,C` (`.agents/rules/lessons.md` #4: a toy
-//! shape where dims coincide can hide a head/width swap that a real port
-//! would carry into the checkpoint). `B=1,H=2,T=8,Dk=3,Dv=4,C=4` gives TWO
+//! shape with pairwise-distinct `B,H,T,Dk,Dv,C` (a toy shape where dims
+//! coincide can hide a head/width swap that a real port would carry into the
+//! checkpoint). `B=1,H=2,T=8,Dk=3,Dv=4,C=4` gives TWO
 //! chunks, so the sequential across-chunk state carry (step 10) is actually
 //! exercised, not vacuously skipped.
 //!
@@ -18,8 +18,8 @@
 //! `value`/`v_i` in the reference (`v_new = v_i - v_prime`) means THIS
 //! reassigned tensor, never the function's original `value` parameter.
 //!
-//! Run on both backends (`.agents/rules/lessons.md` #5 — a barrier-crossing bug can
-//! return silently-wrong results on exactly one backend):
+//! Run on both backends (a barrier-crossing bug can return silently-wrong
+//! results on exactly one backend):
 //!   cargo test -p brain-model --test gdn_chunk_fwd
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_chunk_fwd
 
@@ -262,8 +262,8 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     let g = gpu_core::testgpu::dev(PIPES);
     let ids = ids(&g);
 
-    // Pairwise-distinct dims (.agents/rules/lessons.md #4), 2 chunks so the
-    // across-chunk state carry is actually exercised.
+    // Pairwise-distinct dims, 2 chunks so the across-chunk state carry is
+    // actually exercised.
     let (bn, hn, tn, dk, dv, cn) = (1usize, 2usize, 8usize, 3usize, 4usize, 4usize);
     let n_chunks = tn / cn;
     let bh = bn * hn;

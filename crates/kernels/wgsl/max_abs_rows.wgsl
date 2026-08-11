@@ -18,7 +18,7 @@
 // `max_abs_row` gives thread `t` row `t` and walks the whole row from that one
 // invocation: a warp's 32 loads are `k` floats apart, so each 32-byte sector
 // fetched serves ONE useful float, and the row itself is a serial chain of
-// `k` dependent loads. That is trap C2 of `.agents/rules/kernels.md`, the same
+// `k` dependent loads. That is a known trap, the same
 // shape as `gn_stats` (159x), `rmsnorm` (19.4x) and the `layernorm` family
 // (2.8-10x) — and it sits on the int8 dynamic-activation-quant path, so EVERY
 // int8 linear in `qwen::q8`, `zimage`, and the FLUX.2 DiT pays it once per

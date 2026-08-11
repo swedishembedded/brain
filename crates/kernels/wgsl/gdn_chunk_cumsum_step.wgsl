@@ -19,8 +19,8 @@
 // The host issues ONE DISPATCH PER ROW INDEX `i`, `i` from 1 to `c_len - 1`,
 // each updating EVERY row in parallel:
 //   g_cs[row,i] += g_cs[row,i-1]
-// `.agents/rules/kernels.md`: the CPU (Cranelift) JIT allows exactly one
-// top-level `workgroupBarrier()` per kernel, so a true parallel-scan
+// The CPU (Cranelift) JIT allows exactly one top-level `workgroupBarrier()`
+// per kernel, so a true parallel-scan
 // reduction cannot fit in one kernel here; `c_len` is only tens up to ~64 for
 // this model family, so a plain O(c_len) sequential-DISPATCH scan — the same
 // "host-orchestrated multi-pass" idiom as `scan_block.wgsl`/`scan_add.wgsl` —

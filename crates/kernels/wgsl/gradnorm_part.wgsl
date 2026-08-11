@@ -21,7 +21,7 @@
 // (measured: 30 133 ms of 34 545 ms over 5 `brain gpt train` steps), because a
 // 38.6 M-element embedding gradient is 38.6 M dependent scalar loads on one
 // lane of a 3840-core card. Same bug class as `gn_stats` and `rmsnorm`, one
-// level up in the optimiser — see `docs/performance/overview.md`.
+// level up in the optimiser.
 //
 // Coalescing: the loop is grid-strided over the WHOLE dispatch
 // (`i += n_wg * 64`), so at every step the 64 lanes of a workgroup read 64

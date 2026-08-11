@@ -14,7 +14,7 @@
 //! - [`npu`]: fp32 ONNX export + the OpenVINO (Intel NPU) playback path.
 //!
 //! Reference: the DIAMOND repo (github.com/eloialonso/diamond, MIT).
-//! Parity fixtures: `make wm-fixtures` (docs/models/world-models/fixtures.md).
+//! Parity fixtures: `make wm-fixtures`.
 
 pub mod cond;
 pub mod config;

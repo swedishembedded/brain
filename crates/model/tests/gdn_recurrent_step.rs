@@ -4,7 +4,7 @@
 //! `model::gdn::gdn_recurrent_step` (the single-token decode primitive) vs.
 //! `model::gdn::gdn_chunk_fwd` run at `chunk=1` (six one-token "chunks") on the
 //! SAME tiny random input, at a real, non-degenerate `GdnShape` (`b,h,dk,dv,t`
-//! all pairwise distinct — `.agents/rules/lessons.md` #4).
+//! all pairwise distinct).
 //!
 //! Why `gdn_chunk_fwd` at `chunk=1` is a valid oracle (not circular): at
 //! `chunk=1` the UT-transform collapses to the 1x1 identity (`decay_mask`'s
@@ -18,7 +18,7 @@
 //! cross-check that needs no second host reference or PyTorch run — matching
 //! the porting task's own reasoning for why this is a legitimate oracle.
 //!
-//! Run on both backends (`.agents/rules/lessons.md` #5):
+//! Run on both backends:
 //!   cargo test -p brain-model --test gdn_recurrent_step
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_recurrent_step
 
@@ -73,7 +73,7 @@ fn gdn_recurrent_step_matches_chunk_fwd_at_chunk_1() {
     let g = gpu_core::testgpu::dev(PIPES);
     let ids = ids(&g);
 
-    // Pairwise-distinct dims (.agents/rules/lessons.md #4): b=2,h=3,dk=5,dv=4,t=6.
+    // Pairwise-distinct dims: b=2,h=3,dk=5,dv=4,t=6.
     let (bn, hn, tn, dk, dv) = (2usize, 3usize, 6usize, 5usize, 4usize);
     let bh = bn * hn;
     let cn = 1usize; // chunk = 1: six one-token "chunks".

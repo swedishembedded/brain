@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Regenerate docs/reference/kernels.md's catalogue from metadata the kernels DECLARE.
+"""Regenerate the kernel catalogue from metadata the kernels DECLARE.
 
 Every column comes from an `@`-tagged field in the kernel's own header:
 
@@ -15,7 +15,7 @@ Every column comes from an `@`-tagged field in the kernel's own header:
     // @quant none
 
 This script only reads and formats them — it infers nothing. That matters: the
-catalogue is what `.agents/rules/kernels.md` tells you to consult before
+catalogue is what you're expected to consult before
 writing a kernel, and a table built from heuristics run over the code is a table
 of guesses. The author states the facts next to the kernel; a wrong row is then
 a wrong claim in the source, fixable where the knowledge is.
@@ -25,7 +25,7 @@ on every run — a declaration that contradicts the code is an error, not a
 preference, so the block cannot rot into fiction:
 
   * `@cpu`   vs the top-level `workgroupBarrier()` count (the JIT splits at one
-             and no more; two or more corrupts memory — `.agents/rules/lessons.md` #26)
+             and no more; two or more corrupts memory)
   * `@gpu`   vs the declared `@workgroup_size`
   * `@quant` vs the presence of `dot4I8Packed`
   * `@opt 5` vs the presence of a register block / DP4A / split-K
@@ -33,7 +33,7 @@ preference, so the block cannot rot into fiction:
 `@what`, `@how` and `@npu` are author judgement and are taken as given.
 
 Usage:
-    scripts/build/gen-kernel-table.py            # rewrite docs/reference/kernels.md in place
+    scripts/build/gen-kernel-table.py            # rewrite the kernel catalogue in place
     scripts/build/gen-kernel-table.py --check    # exit 1 if stale or invalid
 """
 
@@ -204,7 +204,7 @@ def build_table():
         "",
         "**cpu** — `backend-cpu`'s Cranelift JIT splits a kernel body at ONE top-level",
         "`workgroupBarrier()` and no more; with two or more it does not fail cleanly, it",
-        "**corrupts memory** ([`.agents/rules/lessons.md`](../../.agents/rules/lessons.md) #26), so those are `✗`",
+        "**corrupts memory**, so those are `✗`",
         f"({counts['cpu_no']} kernels) — cross-checked against the barrier count on every run.",
         f"`native` marks the {counts['native']} kernels with a hand-written AVX2 path that runs instead",
         "of the JIT; `native only` means that path is the *only* way it works there, because",
@@ -252,13 +252,13 @@ def main():
 
     if check:
         if new != text:
-            print("docs/reference/kernels.md is stale — run `make kernels-table`.", file=sys.stderr)
+            print("kernel catalogue is stale — run `make kernels-table`.", file=sys.stderr)
             return 1
         print(f"kernel table up to date ({n_kernels()} kernels, all fields declared)")
         return 0
 
     README.write_text(new)
-    print(f"kernel table: {n_kernels()} kernels written to docs/reference/kernels.md")
+    print(f"kernel table: {n_kernels()} kernels written to the kernel catalogue")
     return 0
 
 

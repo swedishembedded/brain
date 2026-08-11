@@ -6,7 +6,7 @@
 
 Sends a context series to `brain serve --dbus` as a sealed memfd and reads the
 forecast distribution back as a file descriptor — the same generic `Run` + fd
-path every brain model uses (see .agents/rules/serving-contract.md). Works for all three
+path every brain model uses. Works for all three
 forecasting foundation models:
 
   chronos2  probabilistic universal forecaster  -> [levels, horizon] quantiles

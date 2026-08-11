@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! GroupNorm (NCHW) host-side dispatch — spec: `docs/models/world-models/specs/p1.gn.md`.
+//! GroupNorm (NCHW) host-side dispatch.
 //!
 //! Composes the six `gn_*` kernels plus the existing `scale_chan` into a
 //! forward pass (`gn_stats` → `gn_apply`) and a backward pass

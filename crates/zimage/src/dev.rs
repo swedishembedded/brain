@@ -27,10 +27,10 @@ use crate::ZImageConfig;
 /// COMPLETE source tensor map (`w: Tensors`) for their whole life, even
 /// though every block's weights are already quantized/uploaded and never
 /// read from that map again — on the int8 DiT alone that was ~24 GB of host
-/// RAM held for nothing. See `.agents/rules/lessons.md`: "a builder that takes
+/// RAM held for nothing. A builder that takes
 /// `HashMap<String, Vec<f32>>` has already lost — the caller must
 /// materialize everything, and the callee may keep it, and neither is
-/// visible in the type."
+/// visible in the type.
 #[derive(Clone)]
 pub(crate) struct HostWeights {
     xemb_w: Vec<f32>,
@@ -553,8 +553,8 @@ impl DitI8Cache {
 /// the device footprint is `budget` blocks' worth of weights regardless of
 /// how many blocks the model actually has. This is what lets the fp32 DiT
 /// (structurally too large to fit one GPU whole) run on one GPU at all —
-/// the trade is `n_groups` submits per forward instead of one (see
-/// .agents/rules/lessons.md and the design plan's Risk #5: unmeasured here, a later
+/// the trade is `n_groups` submits per forward instead of one (the design
+/// plan's Risk #5: unmeasured here, a later
 /// concern if it turns out to dominate).
 struct WindowedPhase {
     input: DeviceBuffer,
@@ -631,8 +631,7 @@ impl WindowedPhase {
     }
 
     /// Reload count so far — the churn number the whole design exists to
-    /// bound. Exposed for observability (`.agents/roadmap/zimage.md`,
-    /// `braintop`), not for correctness.
+    /// bound. Exposed for observability (`braintop`), not for correctness.
     fn reloads(&self) -> u64 {
         self.ws.reloads()
     }
@@ -645,8 +644,7 @@ impl WindowedPhase {
 /// device budget as one blob; [`ZImageDitShard`] works around that by
 /// splitting across two GPUs. This is the other way to make fp32 fit one
 /// GPU: keep only `window` blocks' worth of weights resident at once and
-/// stream the rest from disk per forward, per the design in
-/// `.agents/roadmap/zimage.md`.
+/// stream the rest from disk per forward.
 ///
 /// The noise/context refiners stay fully resident ([`Phase`], as in
 /// [`ZImageDit`]) — they are a handful of layers, not the 6B-parameter

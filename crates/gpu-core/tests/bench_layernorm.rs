@@ -6,8 +6,8 @@
 //!
 //! The per-element kernels give thread `t` row `t`, so a warp's 32 loads are
 //! `d` floats apart and each 32-byte sector fetched serves one useful float.
-//! This is the LayerNorm half of the finding in `docs/performance/overview.md`
-//! (the RMSNorm half measured 19.4x). Shapes are the ones `gpt`, `pid`,
+//! This is the LayerNorm half of the same finding (the RMSNorm half measured
+//! 19.4x). Shapes are the ones `gpt`, `pid`,
 //! `seq2seq` and the ViT trunk actually dispatch.
 //!
 //! ```text

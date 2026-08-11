@@ -9,7 +9,7 @@
 // @npu   yes
 // @quant none
 //
-// Elementwise Hadamard product — spec: docs/world-models/specs/P1.glue.md §3.1/§4.1.
+// Elementwise Hadamard product.
 //   y[i] = a[i] * b[i]         one invocation per element, i in [0, n)
 // Backward COMPOSES from this same kernel (no new kernel):
 //   da = mul(dy, b);  db = mul(dy, a)

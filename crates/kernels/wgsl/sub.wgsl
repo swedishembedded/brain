@@ -11,8 +11,8 @@
 //
 // Elementwise subtract:  out[i] = a[a_off + i] - b[b_off + i],  i in [0,total).
 // `a_off`/`b_off` let a caller subtract a CONTIGUOUS sub-range of a larger
-// buffer without binding a byte-offset slice (`.agents/rules/kernels.md`'s
-// 256-byte slice-alignment rule, which a `Params` offset sidesteps — the same
+// buffer without binding a byte-offset slice (the 256-byte slice-alignment
+// rule that applies to those, which a `Params` offset sidesteps — the same
 // convention `splice_add.wgsl`/`bmm.wgsl` use). Gated DeltaNet's per-chunk
 // `v_new = v_c - v_prime` (`torch_chunk_gated_delta_rule`) needs exactly
 // this: `v_c` is one chunk's slice of the full `value` tensor

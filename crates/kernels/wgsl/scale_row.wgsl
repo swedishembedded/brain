@@ -9,12 +9,12 @@
 // @npu   no
 // @quant none
 //
-// Per-row (per-sample) scalar scale on a row-major [N, M] tensor — spec:
-// docs/world-models/specs/P1.glue.md §3.2/§4.2. total = N*M, m = M.
+// Per-row (per-sample) scalar scale on a row-major [N, M] tensor. total =
+// N*M, m = M.
 //   y[i] = s[i / m] * x[i]
 // EDM use: c_in/c_skip/c_out/lambda(sigma) row factors. Backward w.r.t. x is
 // this same kernel (dx = scale_row(dy, s)); `ds` is deliberately NOT provided
-// — EDM c_* are sigma-derived constants, never trained (spec §3.2).
+// — EDM c_* are sigma-derived constants, never trained.
 //
 
 struct Params {

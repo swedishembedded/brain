@@ -45,8 +45,8 @@
 // WHY A WORKGROUP PER CHANNEL, not a thread per channel.
 // `da` is a reduction over N*H*W into a single scalar per channel. The obvious
 // shape — one invocation per channel, as bn_dgamma.wgsl / gn_dgamma.wgsl still
-// do, and as the prelu_bwd.wgsl fallback must — is the documented double fault
-// (.agents/rules/kernels.md §C.2): it launches only C threads (64 for an
+// do, and as the prelu_bwd.wgsl fallback must — is a known double fault: it
+// launches only C threads (64 for an
 // IResNet stem, on a 3840-core card), and each of those threads walks a
 // contiguous run alone, so a warp's 32 lanes sit H*W floats apart and every
 // 32-byte sector fetched serves ONE useful float. Here the 64 threads of a
@@ -94,8 +94,7 @@
 // Reduction order: ascending flat (n, h, w) within each thread's stride-64
 // slice, then ascending thread index — deterministic for a fixed shape, but
 // NOT the same order as prelu_bwd.wgsl's single ascending run, so the two agree
-// to fp32 reassociation and not bit-exactly (`+` reassociates; see
-// .agents/rules/kernels.md §E.4).
+// to fp32 reassociation and not bit-exactly (`+` reassociates).
 
 struct Params {
     N: u32,

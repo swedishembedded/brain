@@ -10,8 +10,7 @@
 // @quant none
 //
 // Layout permutation NLC [N, L=H*W, C] -> NCHW (gather) — exact inverse AND
-// adjoint of nchw_nlc. Spec: docs/world-models/specs/P1.glue.md §3.9/§4.9.
-// total = N*c*hw. One thread per OUTPUT (NCHW) element:
+// adjoint of nchw_nlc. total = N*c*hw. One thread per OUTPUT (NCHW) element:
 //   n = idx/(c*hw); r0 = idx % (c*hw); ch = r0/hw; l = r0 % hw   (u32 ops)
 //   y[idx] = x[(n*hw + l)*c + ch]
 // Backward: dx = nchw_nlc(dy). Pure copy: output bits are exact images of

@@ -10,9 +10,9 @@
 //! GPU-sharded residency. `estimate()` reports the checkpoint's on-disk size
 //! as a RAM cost (the mmap footprint the streaming reads touch), not a real
 //! VRAM budget — this resident does not yet participate in the GPU-residency
-//! scheduling `.agents/rules/lessons.md §14` describes for a production Omni; that is
+//! scheduling a production Omni would need; that is
 //! `crates/qwen3/src/shard.rs`'s int8-sharded-across-2-GPUs pattern, not yet
-//! built for Thinker (`.agents/roadmap/omni.md`'s M9 entry).
+//! built for Thinker.
 //!
 //! Config is env-only, mirroring `TtsResident`:
 //!   * `BRAIN_OMNI_HF_DIR` — the real HF checkpoint directory (config.json +
@@ -27,8 +27,7 @@ use std::sync::Arc;
 
 /// Qwen3-Omni behind the scheduler. Loads directly from a real HF checkpoint
 /// directory (`BRAIN_OMNI_HF_DIR`) — no brain-native import step involved yet
-/// (`.agents/roadmap/omni.md`'s M9 entry on the two open loader-side
-/// naming gaps for Talker/Code2Wav). Dispatches both declared actions
+/// (there are two open loader-side naming gaps for Talker/Code2Wav). Dispatches both declared actions
 /// (`generate`, `speak`) through `omni::caps::run_action`.
 pub struct OmniResident {
     hf_dir: String,
@@ -100,8 +99,7 @@ impl Instance for OmniInstance {
 /// why a multi-device-only model must stay out of the plain single-device
 /// registry). A SEPARATE resident from [`OmniResident`] above: that one is
 /// the validation-tier, single-device, no-KV-cache HF-checkpoint path; this
-/// is the sharded int8 path `.agents/roadmap/omni.md`'s M18/M20 entries
-/// describe, and the two are not interchangeable.
+/// is the sharded int8 path, and the two are not interchangeable.
 ///
 /// Config is env-only:
 ///   * `BRAIN_OMNI_INT8_CHECKPOINT` — a brain-native int8-quantized checkpoint

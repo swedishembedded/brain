@@ -12,8 +12,8 @@
 // Naive W4A8 matmul: 8-bit dynamic per-token activations times 4-bit
 // per-channel weights, out = dequant(x_q8 @ w_q4^T). The int4-weight sibling
 // of `matmul.wgsl` / `matmul_i8_dyn.wgsl`'s naive tier -- deliberately NOT
-// register-tiled. `.agents/rules/porting.md` §10 rule 1: get it correct, then
-// freeze it. A register-tiled `matmul_q4_reg`/`matmul_q4_dyn` mirroring
+// register-tiled -- get it correct, then freeze it. A register-tiled
+// `matmul_q4_reg`/`matmul_q4_dyn` mirroring
 // `matmul_i8_dyn.wgsl`'s 128x128 interleaved-tile shape is the documented
 // follow-on optimization once a real model dispatches this kernel enough to
 // need it -- not attempted here.

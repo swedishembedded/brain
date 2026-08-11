@@ -93,8 +93,7 @@ pub struct QuantRows<'a> {
 /// as a sub-range and the units differ per buffer — `x` and `xq` are offset in
 /// ELEMENTS of their own width (`k` vs `k/4`) while `sx` is offset in ROWS.
 /// Getting one wrong is silently wrong arithmetic, not a crash; `step_sliced`'s
-/// element-vs-byte contract already cost this repo a SIGSEGV (see
-/// `.agents/rules/porting.md` §3).
+/// element-vs-byte contract already cost this repo a SIGSEGV.
 ///
 /// **Alignment:** `step_sliced` turns each offset into a real
 /// `BufferBinding::offset`, so every one must clear

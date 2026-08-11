@@ -19,8 +19,8 @@
 //   d_g_cs[row,j] -= sum_{i>=j} d_decay_mask[row,i,j] * decay_mask[row,i,j]
 //
 // One kernel, dispatched TWICE with `mode` selecting which reduction
-// direction this call performs (`.agents/rules/kernels.md`'s no-atomics rule:
-// a single thread cannot cheaply accumulate both a row's AND a column's worth
+// direction this call performs (this engine's no-atomics rule: a single
+// thread cannot cheaply accumulate both a row's AND a column's worth
 // of a shared tensor without either racing or redundant work, so two
 // dispatches over two different thread-to-cell mappings is the correct
 // decomposition here, not two separate files -- the body is identical enough

@@ -11,7 +11,7 @@
 //! exact (`router_gate.wgsl`'s own doc comment proves it), but `n_experts`x
 //! the FLOPs of an actual top-k dispatch. At 128 experts / top-8
 //! (Qwen3-Omni's Thinker) that is 16x wasted work, which motivated this
-//! module (`.agents/rules/lessons.md`).
+//! module.
 //!
 //! The fix here is deliberately the smallest one that removes the FLOPs
 //! without adding new failure modes: [`moe_linear_gated`] is `matmul.wgsl`
@@ -35,8 +35,7 @@
 //! row-compaction/gather-scatter (WGSL kernels here may not use atomics, so a
 //! parallel stream-compaction would need a separate prefix-sum pass; the
 //! per-row early-exit already removes the FLOPs, just not the thread
-//! *launches* — see `.agents/roadmap/omni.md` M2 for the follow-up plan),
-//! no TILED int8 GEMM tier (both int8 and fp32 are naive-dispatch today; a
+//! *launches*), no TILED int8 GEMM tier (both int8 and fp32 are naive-dispatch today; a
 //! future tiled+gated kernel is one change, not two, once compaction lands).
 //!
 //! **Backward** (this session's addition) is a hoist, not a from-scratch
@@ -308,7 +307,7 @@ pub struct MoeIdsBwd {
     /// rows — bit-identical to the dense kernels over the same `dy`, since a
     /// non-routed row's `dy` is already exactly 0.0 there; see
     /// `moe_linear_gated_dx.wgsl`'s own doc) vs the dense ones (measure
-    /// before committing either way, per `.agents/rules/kernels.md` §F).
+    /// before committing either way).
     pub linear_gated: bool,
 }
 
@@ -663,8 +662,8 @@ pub fn shared_expert_fwd(
 // `expert_fwd` above removes the redundant FLOPs of evaluating every expert
 // densely, but stays naive-tier (one thread per output element, no tiling) --
 // measured 6.51x SLOWER than GLM's existing dense TILED path at GLM-5.2's
-// real shape (`.agents/roadmap/glm.md`, `crates/glm/examples/
-// moe_migration_bench.rs`), because the naive kernel's per-FLOP inefficiency
+// real shape (`crates/glm/examples/moe_migration_bench.rs`), because the
+// naive kernel's per-FLOP inefficiency
 // at ~64 rows/expert swamps the 32x FLOP-count win sparsity promises. This
 // section is the real fix: gather each expert's routed rows into a dense
 // sub-batch, run the SAME
@@ -681,8 +680,8 @@ pub fn shared_expert_fwd(
 // entry point (bucket rows for ALL experts in one pass, per-expert index
 // regions, one submit per layer) removes the storm with no new kernel. That
 // API change lands WITH its call-site migration (crates/glm, crates/omni) so
-// the faster sibling is never an unconsumed second path (.agents/rules/lessons.md #8);
-// this crate alone cannot do it without stranding the current callers.
+// the faster sibling is never an unconsumed second path; this crate alone
+// cannot do it without stranding the current callers.
 
 /// Kernel indices [`expert_fwd_compact`] dispatches, resolved by the calling
 /// model against its own registered pipeline list.

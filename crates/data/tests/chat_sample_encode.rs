@@ -79,7 +79,7 @@ fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
 
 #[test]
 fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_conversation() {
-    // KNOWN LIMITATION (docs/guides/training.md "Known gaps"): a tool-call
+    // KNOWN LIMITATION: a tool-call
     // turn followed by a tool result and a final answer is TWO assistant
     // turns after the last real user turn -- Qwen3's own template inserts
     // an empty <think></think> block only for the LITERALLY LAST assistant

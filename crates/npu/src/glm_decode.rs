@@ -4,7 +4,6 @@
 //! GLM autoregressive decode via OpenVINO (NPU/CPU/GPU): export the fixed-seq
 //! ONNX decoder once, compile it, and greedily fill tokens (cache-free — re-runs
 //! the graph over the padded context each step, mirroring brain's own sampler).
-//! See `docs/models/glm/npu.md`.
 
 use std::time::Instant;
 

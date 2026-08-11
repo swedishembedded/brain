@@ -418,18 +418,17 @@ impl Glm {
         // `router_gate_sigmoid.wgsl`'s forward router (this model's
         // `RouterKind::SigmoidNoAuxTc` path) hard-caps at `MAX_E = 64u` via
         // fixed-size `array<f32,64>` locals -- silently out-of-bounds above
-        // that, the same failure shape .agents/rules/lessons.md #35 already named once.
+        // that, a familiar failure shape.
         // `GlmConfig::glm5_2()` declares 256 routed experts, so without this
         // assert that config would corrupt silently rather than fail loudly.
         // A proper fix (an array-free top-k, mirroring `router_bwd.wgsl`'s
         // rewrite) is real kernel work, not a literal bump -- tracked
-        // separately; bumping the constant again would just recreate #35.
+        // separately; bumping the constant again would just recreate the same bug.
         assert!(
             cfg.n_routed_experts <= 64,
             "GLM config has {} routed experts, but router_gate_sigmoid.wgsl's \
              forward router hard-caps at 64 (fixed-size array scratch) -- \
-             running this would silently write out of bounds, not error. See \
-             .agents/roadmap/omni.md's router-cap section.",
+             running this would silently write out of bounds, not error.",
             cfg.n_routed_experts
         );
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
@@ -687,8 +686,8 @@ impl Glm {
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
         // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
         // The threshold is `block::pick_gemm`'s MEASURED `m < 8`, not the
-        // `m < 128` this used to carry — the guard `.agents/rules/lessons.md` §15 records
-        // as costing 22x on an SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
+        // `m < 128` this used to carry — a guard that cost 22x on an
+        // SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
         // naive vs tiled is 1.5x at m=8 rising to 34.1x at m=127, bit-identical
         // throughout. `pick_gemm` owns the rule so this cannot drift again.
         let naive = std::env::var("BRAIN_GLM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
@@ -1483,7 +1482,7 @@ impl Glm {
             let arr: Vec<serde_json::Value> = itos.iter().map(|ch| serde_json::Value::from(ch.to_string())).collect();
             config["itos"] = serde_json::Value::Array(arr);
         }
-        // "brain/glm" matches docs/using/models-and-weights.md's reserved-vendor fallback
+        // "brain/glm" matches the reserved-vendor fallback
         // -- the same id crates/cli/src/resident_llm.rs::GlmResident::from_env
         // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
         // here is auto-discoverable by crates/cli/src/model_dir.rs without

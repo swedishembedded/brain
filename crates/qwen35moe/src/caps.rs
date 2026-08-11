@@ -10,8 +10,7 @@
 //! module's own doc for the design.
 //!
 //! What differs from `qwen3::caps`, because `qwen35moe::model::Qwen35` is a
-//! different model at a different stage of the port (`docs/models/qwen35/
-//! status.md`):
+//! different model at a different stage of the port:
 //! - Loading goes through `checkpoint::load(path).by_role("")` +
 //!   `Qwen35Config::from_json` + [`Qwen35::new`]/[`Qwen35::new_i8`] — the same
 //!   load path `crate::qwen35moe_cli`'s own `infer` command already uses
@@ -52,7 +51,7 @@ use crate::model::Qwen35;
 /// The model id used on the CLI (`brain do qwen35moe …`) and the event API.
 /// A `brain/`-prefixed synthetic id (this crate's checkpoints carry no
 /// upstream vendor/repo provenance of their own here) — the real upstream id
-/// is `Qwen/Qwen3.5-35B-A3B` (`.agents/roadmap/qwen35.md`), used where a
+/// is `Qwen/Qwen3.5-35B-A3B`, used where a
 /// checkpoint's actual provenance matters (import/fetch), not as this
 /// catalog entry's id — matching every other `caps.rs`'s `MODEL` convention
 /// (`qwen3::caps::MODEL == "brain/qwen"`, `omni::caps::MODEL == "brain/omni"`).
@@ -365,7 +364,7 @@ mod tests {
     /// module's doc claims actually works end to end for `Qwen35` too.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset, per `.agents/rules/testing.md`. The checkpoint's
+    /// self-skips loudly when unset. The checkpoint's
     /// vocab is sized to the real tokenizer's full range so the rendered
     /// chat-template special tokens (`<|im_start|>` etc., ids up in the
     /// 151000s) never index outside the embedding table.

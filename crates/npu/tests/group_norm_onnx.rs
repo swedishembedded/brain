@@ -109,7 +109,7 @@ fn the_decomposition_uses_only_opset_13_ops() {
 /// NUMERICAL: run the emitted graph and compare against the host formula.
 ///
 /// Skips loudly when onnxruntime is absent — and says so, rather than passing
-/// silently and looking like it checked the numbers (`.agents/rules/lessons.md` #1).
+/// silently and looking like it checked the numbers.
 #[test]
 fn the_emitted_graph_matches_the_host_formula() {
     let (x, gamma, beta) = fixture();

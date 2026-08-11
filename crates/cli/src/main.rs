@@ -167,7 +167,7 @@ INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
   brain npu sim      --weights F --data <dir> [--calib <dir>]   # fp32 vs INT8 mAP, no NPU
       export/quantize/sim are pure Rust (any machine); run/bench/check-compile need
       OpenVINO + an Intel NPU. The whole-graph NPU path is separate from --device
-      cpu|gpu; see docs/models/yolo/npu.md.
+      cpu|gpu.
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
@@ -217,7 +217,7 @@ EVENT/STDIO CONTROLLER
       so the loop is usable without a trained checkpoint.
       Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
 
-PERFORMANCE BENCHMARKING (how fast, at what cost — see docs/performance/benchmarking.md)
+PERFORMANCE BENCHMARKING (how fast, at what cost)
   brain perf list                          # scenarios + the standard workload matrix
   brain perf run <latency|throughput|serve|sweep>
       --target qwen-synth:<L>x<D>x<H>[xV] | qwen:<weights> | ...   (required, see `brain perf list`)
@@ -231,7 +231,7 @@ PERFORMANCE BENCHMARKING (how fast, at what cost — see docs/performance/benchm
       Report output artifacts/s + the latency curve, never total throughput alone;
       goodput (output meeting the SLO) is the comparison metric, not peak rate.
 
-FLOP/OPS ACCOUNTING (docs/performance/flops.md)
+FLOP/OPS ACCOUNTING
   brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
               [--train] [--i8] [--stages N] [--run]
       OFFLINE per-kernel FLOP/int-OPS/bytes for the recorded forward (and

@@ -27,7 +27,7 @@
 // split the packed K axis, each reads its slice of W row `col` ONCE and
 // applies it to all M rows, one barrier, threads 0..m fold the partials.
 //
-// NOT register-tiled (`.agents/rules/porting.md` §10: correct, then freeze) --
+// NOT register-tiled (correct, then freeze) --
 // this is the naive-but-cooperative tier, same complexity class as
 // `matmul_i8_gemv`, not `matmul_i8_dyn`'s 128x128 interleaved shape.
 //

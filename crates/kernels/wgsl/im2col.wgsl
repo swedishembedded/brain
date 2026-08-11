@@ -18,8 +18,8 @@
 // colᵀ, i.e. `matmul_reg2(x=W, w=col)` → y[Cout, HW]. On a compute-bound GPU
 // (P40: 34 FLOP/byte) the register GEMM's ~34% of peak dwarfs the collapse the
 // direct register-tiled conv (`conv_act_reg`) suffers on deep small-spatial
-// layers — the trade `docs/PERFORMANCE.md` flagged as "worth it on a
-// compute-bound discrete GPU". im2col's extra [HW, Cin*K*K] write+read is the
+// layers — a trade found to be "worth it on a compute-bound discrete GPU".
+// im2col's extra [HW, Cin*K*K] write+read is the
 // cost; the arithmetic-intensity win pays for it here.
 //
 // One invocation per (hw, cinkk) element of `col`.

@@ -9,15 +9,14 @@
 // @npu   no
 // @quant none
 //
-// adaLN gated residual merge (forward) for [R,D] rows — spec:
-// docs/world-models/specs/P1.film.md §4.7. One invocation per element
+// adaLN gated residual merge (forward) for [R,D] rows. One invocation per element
 // (R*D threads), r = idx/D, d = idx%D, condition group k = r/rows_per_cond:
 //   y[r,d] = x[r,d] + g[k,d] * h[r,d]
 // Gate buffer g[NC,D] (NC = R/rows_per_cond): g[k,d] = g[k*D + d].
 // Exactly 4 storage buffers — at the family limit.
 // OVERWRITES y (=, SSA fresh buffer).
 //
-// BACKWARD CONTRACT (spec §1/§3.3): dx of this op is the IDENTITY
+// BACKWARD CONTRACT: dx of this op is the IDENTITY
 // (dx = dy element-wise). There is deliberately NO gate_row_dx kernel —
 // callers reuse dy directly, or the existing add kernel to accumulate the
 // residual gradient. dh/dg are gate_row_dh / gate_row_dg.

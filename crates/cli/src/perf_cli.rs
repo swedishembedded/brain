@@ -6,7 +6,7 @@
 //! Sibling to `brain bench` (which asks whether an architecture *learns* a task).
 //! This asks how much correct work brain delivers per unit of hardware, memory,
 //! energy and time — and is built so a single flattering number cannot be
-//! reported on its own. See `docs/performance/benchmarking.md`.
+//! reported on its own.
 
 use perf::scenarios::{self, Options};
 use perf::target::{PerfTarget, TargetInfo};
@@ -1246,7 +1246,7 @@ fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// `zimage[:<W>x<H>x<steps>]` — Z-Image (Tongyi S3-DiT) text-to-image behind
 /// the residency executor (unit: denoise_step). Mirrors `build_flux2`
 /// exactly; large (13-24 GiB VRAM), so check the memory-safety protocol
-/// (`docs/performance/arc.md` §0) before running on a unified-memory box.
+/// before running on a unified-memory box.
 fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let (w, h, steps) = if rest.is_empty() {
         (512u32, 512u32, 4u32)
@@ -1436,7 +1436,7 @@ fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc
 /// Shares `SynthSpec::parse`/`config`/`build_engine` with every other synth
 /// caller (`startup`/`cancel`/`kvcache`/`faults`/`http:qwen-synth:`) rather
 /// than a second, independent copy of the shape-to-config arithmetic
-/// (`.agents/rules/lessons.md` #19: a registration/derivation split across N call
+/// (a registration/derivation split across N call
 /// sites is a defect waiting for its turn — this WAS two copies until now,
 /// and the derived `head_dim`/`n_kv_heads` silently did not match real
 /// Qwen3-0.6B's, understating both the memory win and the append kernel's

@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-channel modulation, input gradient — spec:
-// docs/world-models/specs/P1.film.md §4.2. One invocation per element
+// FiLM per-channel modulation, input gradient. One invocation per element
 // (N*C*H*W threads):
 //   dx[n,c,h,w] = dy[n,c,h,w] * (1 + s[n,c])
 // sb[N,2C] packed scale-first (s[n,c] = sb[n*2C + c]); reads ONLY the scale

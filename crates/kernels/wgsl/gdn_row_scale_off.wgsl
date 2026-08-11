@@ -18,8 +18,8 @@
 // `value`/`key` scaled by `beta` into `v_beta`/`k_beta` — because those run
 // once over EVERY chunk at once (whole-tensor, offset 0), matching
 // `scale_row.wgsl`'s existing contract exactly (`crates/model/src/gdn.rs`
-// checked this before adding a new kernel, per `.agents/rules/kernels.md`
-// §A). This sibling exists only for the sequential per-chunk loop's two
+// checked this before adding a new kernel). This sibling exists only for the
+// sequential per-chunk loop's two
 // row-scales that read one chunk's slice out of a larger buffer, which
 // `scale_row.wgsl`'s zero-offset callers (`crates/model/src/moe.rs`'s
 // shared-expert gate, notably) must not be made to pay for or reason about:

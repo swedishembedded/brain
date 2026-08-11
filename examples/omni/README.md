@@ -4,16 +4,14 @@ Send a text prompt to Qwen3-Omni's Thinker decoder, get a completion back —
 over D-Bus (`Run`/`Subscribe`), or the OpenAI-compatible `/v1/chat/completions`,
 or the Anthropic-compatible `/v1/messages`. Same `generate` action, same
 `{messages/prompt, max_new, ...}` params, underneath all three — this example
-is what proves that (see `.agents/roadmap/omni.md`'s M10/M11/M12 entries
-for how each transport got there).
+is what proves that.
 
 **Scope, honestly**: text in/out, speech in (`--in-speech`, WAV), and image in
 (`--in-image`, PPM) are real over `--dbus` — real audio/vision tower encode,
 host-side embedding splice, and real M-RoPE positions (`crates/omni/src/mm.rs`).
 `--openai`/`--anthropic` reject blob inputs with a clear error (their
 content-part wiring is separate, not-yet-done server-side work — `--dbus` is
-the one transport that carries blobs generically today, per `docs/models/
-omni/status.md`'s M10 finding). `--in-mic`/`--in-video` and `--out-mic`/
+the one transport that carries blobs generically today). `--in-mic`/`--in-video` and `--out-mic`/
 `--out-audio` still `skip()` cleanly — live capture and video-frame
 extraction need extra dependencies this script doesn't take on, and speech
 output needs Talker+Code2Wav chained together, not wired into a generation

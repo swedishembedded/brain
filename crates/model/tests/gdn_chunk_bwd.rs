@@ -20,8 +20,8 @@
 //! `d_out = 1` everywhere, `d_final_state = 1` everywhere (the gradient of a
 //! plain sum is uniformly 1).
 //!
-//! Run on both backends (`.agents/rules/lessons.md` #5 — a barrier-crossing bug can
-//! return silently-wrong results on exactly one backend):
+//! Run on both backends (a barrier-crossing bug can return silently-wrong
+//! results on exactly one backend):
 //!   cargo test -p brain-model --test gdn_chunk_bwd
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test gdn_chunk_bwd
 

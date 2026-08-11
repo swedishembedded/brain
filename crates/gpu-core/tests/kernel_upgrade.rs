@@ -3,11 +3,11 @@
 
 //! The transparent kernel upgrade, end to end on a real device.
 //!
-//! This is the test that would have caught the `crates/vae` defect described in
-//! `.agents/rules/kernels.md` §A: a model registers the kernel it has always
-//! registered, dispatches the thread count it has always dispatched, and must
-//! come out running the faster kernel with the same answer. Nothing in this
-//! file names a call site — that is the point.
+//! This is the test that would have caught the `crates/vae` defect: a model
+//! registers the kernel it has always registered, dispatches the thread
+//! count it has always dispatched, and must come out running the faster
+//! kernel with the same answer. Nothing in this file names a call site —
+//! that is the point.
 //!
 //! Its own binary, because `BRAIN_NO_KERNEL_UPGRADE` is process-wide and
 //! `bench_max_abs_row.rs` needs it set.

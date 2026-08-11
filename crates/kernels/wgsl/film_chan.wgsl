@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-channel modulation (forward) for NCHW — spec:
-// docs/world-models/specs/P1.film.md §4.1. One invocation per element
+// FiLM per-channel modulation (forward) for NCHW. One invocation per element
 // (N*C*H*W threads):
 //   y[n,c,h,w] = x[n,c,h,w] * (1 + s[n,c]) + b[n,c]
 // s,b packed in ONE buffer sb[N,2C], scale first then shift per row n:

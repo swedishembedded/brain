@@ -291,7 +291,7 @@ fn import(args: &[String]) {
 }
 
 /// `brain glm export --weights F --out model.onnx --seq T` — ONNX decoder graph
-/// (dense-expert MoE) for OpenVINO / the NPU (see docs/models/glm/npu.md).
+/// (dense-expert MoE) for OpenVINO / the NPU.
 fn export(args: &[String]) {
     let mut a = Args::new(args);
     let weights = a.str_or("--weights", "");

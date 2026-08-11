@@ -29,8 +29,7 @@ fn main() {
         println!(
             "cargo:warning=brain-npu: no INTEL_OPENVINO_DIR / OPENVINO_INSTALL_DIR in env. \
              The OpenVINO runtime is loaded at run time (runtime-linking); the build still \
-             succeeds. Source setupvars.sh before `brain --device npu` / `brain npu run`. \
-             See docs/models/yolo/npu.md."
+             succeeds. Source setupvars.sh before `brain --device npu` / `brain npu run`."
         );
     }
 }

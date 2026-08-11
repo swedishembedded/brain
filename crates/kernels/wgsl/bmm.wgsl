@@ -29,8 +29,8 @@
 // `batch_idx * (per-batch element count)` address — this engine's convention
 // for addressing a sub-range of a buffer from a kernel's own `Params`
 // (`splice_add.wgsl` is the existing example) instead of binding a
-// byte-offset slice, which `.agents/rules/kernels.md` requires to be
-// 256-byte aligned; a `Params` offset has no such constraint, which matters
+// byte-offset slice, which requires 256-byte alignment; a `Params` offset
+// has no such constraint, which matters
 // because GDN's tiny test shapes are nowhere near 64-float-aligned. GDN's
 // caller picks a flat batch layout with its sequential/recurrent axis (the
 // chunk index) OUTERMOST, specifically so "chunk c, every (batch,head)" is
@@ -45,7 +45,7 @@
 // serial fp32 loop (`@opt 2`, matching `matmul.wgsl`'s own naive tier) — the
 // matrices GDN drives this with are small (`C`/`Dk`/`Dv` in the tens to low
 // hundreds), so correctness-first beats a register-tiled variant here
-// (`.agents/rules/porting.md` §10: get it correct, then freeze).
+// (get it correct, then freeze).
 
 struct Params {
     batch: u32,

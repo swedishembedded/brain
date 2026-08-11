@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-row-group modulation, input gradient — spec:
-// docs/world-models/specs/P1.film.md §4.5. One invocation per element
+// FiLM per-row-group modulation, input gradient. One invocation per element
 // (R*D threads), r = idx/D, d = idx%D, k = r/rows_per_cond:
 //   dx[r,d] = dy[r,d] * (1 + s[k,d])
 // sb[NC,2D] packed scale-first (s[k,d] = sb[k*2D + d]); reads ONLY the

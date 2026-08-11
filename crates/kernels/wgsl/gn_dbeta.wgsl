@@ -9,14 +9,13 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm backward w.r.t. beta, NCHW — spec:
-// docs/world-models/specs/P1.gn.md §4.4. One invocation per channel
+// GroupNorm backward w.r.t. beta, NCHW. One invocation per channel
 // (C threads):
 //   dgb[C+c] = dgb[C+c] + sum_{n,h,w} dy       (ACCUMULATES, beta half)
 // Writes ONLY dgb[C+c]; gn_dgamma owns the gamma half dgb[c]. The two
 // dispatches have disjoint write sets and may share one submit.
 // Params keep the uniform {N,C,H,W,G} layout of the gn_* family; G is unused.
-// Reduction order: ascending (n,h,w) — determinism contract (spec §11).
+// Reduction order: ascending (n,h,w) — a determinism contract.
 
 struct Params {
     N: u32,

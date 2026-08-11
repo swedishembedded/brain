@@ -340,7 +340,7 @@ def run_npu(a):
     except Exception as e:  # noqa: BLE001 - no OpenVINO / no NPU hardware here
         print(f"   [npu skipped: {e}]")
         print("   (needs OpenVINO + the Intel NPU user-mode driver + level-zero at run "
-              "time; see docs/yolo/NPU.md)")
+              "time)")
         return
     print(f"brain (Intel NPU INT8)  device {dev} | latency p50 {p50:7.2f} ms "
           f"(p99 {p99:7.2f}, mean {mean:7.2f}) | {fps:7.2f} img/s | "

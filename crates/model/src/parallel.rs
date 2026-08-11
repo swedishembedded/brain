@@ -29,7 +29,7 @@
 //!
 //! It is **not** a workaround for the old serial `gradnorm_sq` (87.2% of GPT's
 //! training GPU time until `gradnorm_part` + `clip_coef_wg` made it 2122×
-//! faster; see `docs/performance/overview.md`). That kernel was one reason
+//! faster). That kernel was one reason
 //! *this design was reachable*, but it is not what keeps the norm here:
 //!
 //! * The clip is over the **summed** gradient, and the sum exists only in host

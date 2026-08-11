@@ -83,6 +83,6 @@ The context goes in as one input blob fd (`{"media":"bytes","shape":[T]}`); scal
 knobs (`horizon`, `freq`) ride in the params JSON. The forecast comes back as an
 output blob fd whose meta carries `{shape, kind, levels}`, so the client knows how
 to unpack it. Concurrent forecasts from many clients share the one `Executor` and
-are scheduled across devices — see `crates/residency` and `.agents/rules/serving-contract.md`.
+are scheduled across devices — see `crates/residency`.
 Nothing here is forecasting-specific in the transport: it is the same path
 `examples/embedding` uses for LFM embeddings.

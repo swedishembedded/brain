@@ -35,10 +35,9 @@ use crate::surface::Provider;
 /// registered, then retries `resolve`. Returns a `model_not_found` for every other
 /// outcome (no supplier configured, `Unknown`, or the fetch itself failing) —
 /// deliberately the SAME error as an unknown model, so a failed/refused fetch
-/// tells a client nothing more than "this model isn't available" (see
-/// `.agents/rules/api-security.md`'s error-hygiene section: hub URLs, filesystem
-/// paths, and other fetch-internal detail are logged server-side, never reflected
-/// to the caller).
+/// tells a client nothing more than "this model isn't available" (hub URLs,
+/// filesystem paths, and other fetch-internal detail are logged server-side,
+/// never reflected to the caller).
 pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: &str, resolve: impl Fn(&str) -> Option<T>) -> Result<T, ApiError> {
     let Some(supplier) = state.supplier.clone() else {
         return Err(ApiError::model_not_found(provider, model));

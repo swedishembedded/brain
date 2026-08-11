@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! FiLM / adaLN modulation host-side dispatch — spec:
-//! `docs/models/world-models/specs/p1.film.md`.
+//! FiLM / adaLN modulation host-side dispatch.
 //!
 //! Three kernel sub-families over a shared `Gpu` kernel table:
 //!

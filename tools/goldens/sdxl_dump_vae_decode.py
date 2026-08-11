@@ -49,7 +49,7 @@ def main() -> None:
     # The reference's own defaults matter here: `use_quant_conv` and
     # `use_post_quant_conv` are True in `AutoencoderKL.__init__` and SDXL's
     # config.json omits both. Constructing from_config preserves that, which is
-    # the behaviour brain's VaeConfig must match (.agents/rules/lessons.md #18).
+    # the behaviour brain's VaeConfig must match.
     vae = AutoencoderKL.from_config(cfg)
     assert vae.config.use_post_quant_conv, "reference defaults changed — re-check VaeConfig"
 

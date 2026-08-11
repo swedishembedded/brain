@@ -9,7 +9,7 @@
 //! wiring/shapes (the MLA + dense-expert MoE builders) without hardware.
 //!
 //! Numerical parity vs brain's own forward requires OpenVINO + NPU hardware and
-//! is gated separately (see docs/models/glm/npu.md); it is not asserted here.
+//! is gated separately; it is not asserted here.
 
 use std::collections::HashMap;
 

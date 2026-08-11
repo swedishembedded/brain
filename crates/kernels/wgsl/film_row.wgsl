@@ -9,8 +9,7 @@
 // @npu   no
 // @quant none
 //
-// FiLM per-row-group modulation (forward) for [R,D] rows — spec:
-// docs/world-models/specs/P1.film.md §4.4. One invocation per element
+// FiLM per-row-group modulation (forward) for [R,D] rows. One invocation per element
 // (R*D threads), r = idx/D, d = idx%D, condition group k = r/rows_per_cond:
 //   y[r,d] = x[r,d] * (1 + s[k,d]) + b[k,d]
 // s,b packed in ONE buffer sb[NC,2D] (NC = R/rows_per_cond, divisibility

@@ -6,7 +6,7 @@
 //! checkpoint's adapters were written to disk but silently dropped on the next
 //! `load_inference`: `QwenConfig::to_json` never emitted `lora`, so
 //! `from_json` always rebuilt the param list without `*.lora_a`/`*.lora_b`,
-//! and `lora_fwd` never dispatched. See .agents/rules/lessons.md.
+//! and `lora_fwd` never dispatched.
 
 use std::collections::HashMap;
 
@@ -23,8 +23,8 @@ fn tmp(name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// rank=3 is coprime with tiny()'s head_dim=8 and d_model=16 (.agents/rules/lessons.md
-/// §4: a degenerate rank equal to head_dim or d_model would hide a whole
+/// rank=3 is coprime with tiny()'s head_dim=8 and d_model=16 (a degenerate
+/// rank equal to head_dim or d_model would hide a whole
 /// shape-transposition bug class).
 #[test]
 fn lora_adapter_survives_save_and_reload() {

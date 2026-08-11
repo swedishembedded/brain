@@ -35,7 +35,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (i >= p.total) { return; }
     // max(min(..)) instead of clamp, and f32(u32(..)) instead of floor (the
     // value is >= 0, where u32 truncation == floor): the wgsl-cpu JIT's math
-    // subset has neither Clamp nor Floor (docs/world-models/PLAYBOOKS.md §2).
+    // subset has neither Clamp nor Floor.
     let c = max(min(coef[0u] * x[i] + coef[1u] * f[i], 1.0), -1.0);
     let b = f32(u32((c + 1.0) * 127.5));
     y[i] = b / 255.0 * 2.0 - 1.0;

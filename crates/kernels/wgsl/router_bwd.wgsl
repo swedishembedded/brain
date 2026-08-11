@@ -14,8 +14,8 @@
 // from `logits`/`gate`/`d_gate` in each pass instead of cached in a
 // fixed-size local array, mirroring `router_bwd_sigmoid.wgsl`'s style. This
 // kernel used to hard-cap at `E <= 64` via `array<f32,64>` scratch — silent
-// out-of-bounds writes above that (.agents/rules/lessons.md #35's failure shape,
-// recurring here because #35's fix never reached this file).
+// out-of-bounds writes above that (a failure shape seen before, recurring
+// here because the earlier fix never reached this file).
 //
 //   p = softmax(logits)             (full distribution)
 //   S = selected (top-k) experts,   gate_e = p_e / Z  for e in S,  Z = sum_{S} p

@@ -539,7 +539,7 @@ pub trait Backend: Send + Sync {
     /// and sized to the largest single write ever issued, so one giant `write`
     /// per tensor leaves a same-size staging buffer permanently resident
     /// (measured: exactly 2.00x the logical size, see
-    /// `crates/gpu-core/tests/vram_overhead.rs` and `.agents/rules/lessons.md`).
+    /// `crates/gpu-core/tests/vram_overhead.rs`).
     /// Chunking through this method instead caps that resident staging cost at
     /// the chunk size, regardless of tensor count or size.
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]);
@@ -569,9 +569,8 @@ pub trait Backend: Send + Sync {
     /// Exists because `poll_wait` has no way to bound a stall: a device that
     /// stops responding mid-dispatch (observed on an Intel Arc iGPU under
     /// severe, unpredictable thermal/power throttling — the same code
-    /// produced a clean 2.6s pass and a 120s+ stall back to back, see
-    /// `docs/performance/arc.md` gap A1) hangs the calling thread
-    /// indefinitely with no recourse. A self-calibrating loop like
+    /// produced a clean 2.6s pass and a 120s+ stall back to back) hangs the
+    /// calling thread indefinitely with no recourse. A self-calibrating loop like
     /// `gpu_core::roof`'s can use this to abandon a stalled measurement and
     /// report "unmeasurable" instead of hanging the whole process.
     ///
@@ -665,7 +664,7 @@ pub trait Backend: Send + Sync {
     /// This exists because host wall-clock around a drained slice is not a
     /// measurement of a kernel — it measures launch + execute + fence, whose
     /// floor is roughly constant and therefore inflates small kernels in inverse
-    /// proportion to their size (up to 29x measured; `.agents/rules/lessons.md` #31).
+    /// proportion to their size (up to 29x measured).
     /// A profiler that attributes time between kernels must use device time.
     fn set_kernel_timing(&self, _on: bool) -> bool {
         false

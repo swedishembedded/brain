@@ -43,8 +43,7 @@ impl AudioEncoderConfig {
     /// [`qwen3_asr`] already models, just wider/deeper: `num_mel_bins`,
     /// `downsample_hidden`, `output_dim`, `n_window`, `n_window_infer` and
     /// `max_pos` are identical between the two models (confirmed against the
-    /// released `Qwen/Qwen3-Omni-30B-A3B-Instruct` config — see
-    /// `.agents/roadmap/omni.md` "Facts"); only `d_model`/`n_heads`/
+    /// released `Qwen/Qwen3-Omni-30B-A3B-Instruct` config); only `d_model`/`n_heads`/
     /// `ffn_dim`/`n_layers` differ. `crates/omni` reuses [`crate::encoder::AudioEncoder`]
     /// unchanged with this preset — no new encoder code, only a config.
     pub fn qwen3_omni() -> AudioEncoderConfig {

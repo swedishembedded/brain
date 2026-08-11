@@ -13,7 +13,7 @@
 //!
 //! Licence note: the reference is Apache-2.0 but the authors state the model is
 //! "for research and educational purposes only" and "does not constitute
-//! financial advice" (see `docs/licences.md`). Flagged, not blocked.
+//! financial advice". Flagged, not blocked.
 
 pub mod config;
 pub mod forecaster;

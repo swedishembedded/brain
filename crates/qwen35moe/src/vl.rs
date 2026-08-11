@@ -9,7 +9,7 @@
 //! `forward` contract) — the difference is what it wraps, not how it's wired:
 //! Qwen3.5's vision config is numerically IDENTICAL to
 //! `qwenvl::VisionConfig::qwen3_omni()` except `deepstack_indexes` is EMPTY
-//! (`.agents/roadmap/qwen35.md`'s "P2 — vision tower reuse decision"), so
+//! (a deliberate vision-tower reuse decision), so
 //! there is no DeepStack here at all (no tap-feature encode, no per-level
 //! merger, no `write_deepstack` call) — a config-level reuse, not a fork of
 //! `crates/qwenvl`.

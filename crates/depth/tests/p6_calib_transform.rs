@@ -15,8 +15,7 @@
 //! defect was in the transform rather than in the weights.
 //!
 //! NOT covered here: how far the INT8 scales actually move. That needs a
-//! ZipDepth checkpoint and a calibration set, neither of which is on this box —
-//! see `.agents/roadmap/depth.md`.
+//! ZipDepth checkpoint and a calibration set, neither of which is on this box.
 
 use depth::predict::{preprocess_chw, target_size};
 

@@ -1671,7 +1671,7 @@ async fn write_keys_file_is_owner_only_0600() {
 /// a runnable chat resident under that exact name; every other model is
 /// `Unknown`. Counts `ensure` calls so a test can assert a classify-only
 /// (`Unknown`) outcome never triggers one — the zero-network-I/O invariant
-/// `.agents/rules/api-security.md` requires for a name the store would refuse.
+/// required for a name the store would refuse.
 struct StubSupplier {
     ensure_calls: AtomicUsize,
 }
@@ -1845,7 +1845,7 @@ async fn unknown_model_with_a_supplier_present_still_404s_with_no_fetch_attempt(
 
 /// A supplier whose `ensure` fails must still just 404 -- the raw failure reason
 /// (which could carry a hub URL or a filesystem path) is never reflected into the
-/// response body (`.agents/rules/api-security.md`'s error-hygiene requirement).
+/// response body.
 #[tokio::test]
 async fn a_failed_fetch_404s_without_leaking_the_internal_error_reason() {
     struct AlwaysFails;

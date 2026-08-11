@@ -314,21 +314,21 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: crate::resident_forecast::chronos2_manifest,
             provider: || {
-                Err("chronos-2 has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set; see docs/using/configuration.md".to_string())
+                Err("chronos-2 has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string())
             },
             resident: resident!(crate::resident_forecast::Chronos2Resident::from_env),
         },
         ModelEntry {
             manifest: crate::resident_forecast::fincast_manifest,
             provider: || {
-                Err("fincast has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set; see docs/using/configuration.md".to_string())
+                Err("fincast has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string())
             },
             resident: resident!(crate::resident_forecast::FincastResident::from_env),
         },
         ModelEntry {
             manifest: crate::resident_forecast::kronos_manifest,
             provider: || {
-                Err("kronos has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set; see docs/using/configuration.md".to_string())
+                Err("kronos has no direct `brain do` provider yet — serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string())
             },
             resident: resident!(crate::resident_forecast::KronosResident::from_env),
         },

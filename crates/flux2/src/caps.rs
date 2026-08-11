@@ -11,7 +11,7 @@
 //! text-to-image, reference-image editing, and LoRA personalisation.
 //!
 //! The **9B variants are NC-licensed** (FLUX.2 \[Non-Commercial\] License,
-//! Black Forest Labs — see `docs/models/flux2.md`): they refuse to run
+//! Black Forest Labs): they refuse to run
 //! unless `BRAIN_FLUX2_ALLOW_NC=1`, and print the attribution notice once when
 //! enabled.
 
@@ -61,7 +61,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new(
             "strength",
             ParamType::Float,
-            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source (0.1 -> ~0.999 structural fidelity),              high = redraw it (0.9 -> ~0.77). Does NOT add colour — see docs/models/flux2.md.              Omit to generate from noise with the references only conditioning.",
+            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source (0.1 -> ~0.999 structural fidelity),              high = redraw it (0.9 -> ~0.77). Does NOT add colour.              Omit to generate from noise with the references only conditioning.",
         ))
         .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` is set").required());
     for r in EXTRA_REFS {

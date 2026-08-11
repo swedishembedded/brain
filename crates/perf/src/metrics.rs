@@ -4,10 +4,9 @@
 //! Turning the emission timeline into the reported numbers.
 //!
 //! Every metric here is derived from one per-request record ([`ReqRecord`]) that
-//! the driver fills in as emissions arrive. The definitions are the ones in
-//! `docs/performance/benchmarking.md` §2 and are deliberately model-agnostic:
-//! "artifact" is a token for a decoder, an audio chunk for TTS, a frame for
-//! detection.
+//! the driver fills in as emissions arrive. The definitions are deliberately
+//! model-agnostic: "artifact" is a token for a decoder, an audio chunk for
+//! TTS, a frame for detection.
 //!
 //! Two rules are enforced here rather than left to the caller, because getting
 //! them wrong silently produces a flattering number:

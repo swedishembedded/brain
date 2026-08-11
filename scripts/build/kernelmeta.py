@@ -10,7 +10,7 @@ same structural facts about a kernel. They each had their own copy, which is
 exactly how one bug ended up in two places: both counted `workgroupBarrier`
 over the RAW source, so both counted the word where a header *mentions* it, and
 the seeder baked four wrong `@cpu` rows into the catalogue that the checker then
-happily agreed with (`.agents/rules/lessons.md` #33).
+happily agreed with.
 
 Anything derived from a kernel's code belongs here, so a fix lands once and the
 two scripts cannot disagree about what a kernel is.

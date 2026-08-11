@@ -123,8 +123,8 @@ STDIO CONTROLLER  (the default, with no surface flag)
 MODEL CONFIGURATION (env-only — there is no config file)
   Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
   vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM, BRAIN_NEMOTRON, ...): a model whose
-  weights var is unset is simply not served. The full reference table for
-  every serving variable is docs/using/configuration.md, section 'Configuration'.
+  weights var is unset is simply not served. Run `brain serve --help` for the
+  full reference table of every serving variable.
 
 GLOBAL
   --device cpu|gpu|npu|gpu0|cpu0-7|gpu,cpu   consumed before this subcommand
@@ -554,8 +554,7 @@ const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// Build the transparent auto-fetch supplier for a live `brain serve`, unless
 /// disabled via `BRAIN_AUTO_FETCH=0` (also accepts `false`/`off`,
 /// case-insensitive; anything else -- including unset -- is enabled, since
-/// transparent auto-fetch is the point of `brain serve`; see
-/// `docs/using/models-and-weights.md` and `.agents/rules/api-security.md`). `None` when
+/// transparent auto-fetch is the point of `brain serve`). `None` when
 /// disabled OR when no models directory can be resolved at all (no `$HOME`) --
 /// either way, an unresolved model then just 404s/errors with zero I/O, same as
 /// before this existed.

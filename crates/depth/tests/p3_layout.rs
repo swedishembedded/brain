@@ -49,8 +49,8 @@ fn the_built_graph_matches_the_config_exactly() {
 /// So the graph must have 278 - 43 = 235 tensors, and the elements must match
 /// exactly (the counters are scalars, contributing 43 elements).
 ///
-/// These numbers are from an independent Python-side inspection of the real file,
-/// recorded in `.agents/roadmap/depth.md` — not from anything in this repo.
+/// These numbers are from an independent Python-side inspection of the real
+/// file — not from anything in this repo.
 #[test]
 fn the_graph_has_the_released_checkpoints_tensor_count_and_size() {
     let (_gpu, got) = build(ZipConfig::base());

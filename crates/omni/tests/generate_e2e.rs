@@ -21,14 +21,14 @@
 //! No sampling randomness: both sides are greedy (argmax), so an EXACT
 //! token-id match is the bar, not a cosine floor. Measured on the real
 //! checkpoint (5 new tokens, `BRAIN_DEVICE=cpu` — the GPU run hit an
-//! unrelated pre-existing VRAM shortfall, see `.agents/roadmap/omni.md`):
+//! unrelated pre-existing VRAM shortfall):
 //! the prefill and the first 3 KV-cache decode steps matched EXACTLY,
 //! diverging only on the 4th. `BRAIN_OMNI_DEBUG_LOGITS=1` at that step
 //! showed the top-2 candidates 0.17 logits apart and the golden's actual
 //! pick in 3rd place, 1.3 logits back — a closely-contested position, not a
 //! confidently-wrong one, consistent with accumulated bf16 (HF's reference
-//! compute, `torch_dtype=bfloat16`) vs. fp32 (this engine's — `docs/
-//! lessons.md`'s "fp32 arithmetic only" convention, never claimed
+//! compute, `torch_dtype=bfloat16`) vs. fp32 (this engine's fp32-arithmetic-
+//! only convention, never claimed
 //! bit-identical to a bf16 reference) rounding rather than a loop-control
 //! bug: the SAME `decode_step` code path ran correctly 3 times immediately
 //! before diverging, and every primitive it composes is independently

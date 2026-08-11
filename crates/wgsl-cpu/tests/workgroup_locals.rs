@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Pins the `compile_one_wg` fix (see `.agents/rules/lessons.md` — the Cranelift-JIT
+//! Pins the `compile_one_wg` fix (the Cranelift-JIT
 //! bug where a per-invocation local written before the barrier and read back
 //! by a later top-level statement of the SAME segment silently read its
 //! zero-initialised value instead) directly, with tiny synthetic fixtures

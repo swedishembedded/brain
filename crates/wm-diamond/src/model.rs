@@ -499,8 +499,8 @@ mod kernel_slots {
     /// device init, and two `#[allow(dead_code)]` markers are what let them
     /// stay. Removing a slot renumbers every one after it, and a stale constant
     /// then dispatches the WRONG pipeline: silently different numbers if the
-    /// bind-group arities happen to match, a panic if they do not
-    /// (`.agents/rules/lessons.md` #13). This test is what makes that a red build.
+    /// bind-group arities happen to match, a panic if they do not. This test
+    /// is what makes that a red build.
     #[test]
     fn every_slot_constant_names_its_kernel() {
         for (slot, name) in [

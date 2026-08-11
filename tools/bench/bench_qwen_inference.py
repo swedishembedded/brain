@@ -176,7 +176,7 @@ def run_npu(a):
         m = bench_brain_qwen("npu", a)
     except Exception as e:  # noqa: BLE001
         print(f"   [npu skipped: {e}]")
-        print("   (needs OpenVINO + the Intel NPU driver at run time; see docs/yolo/NPU.md)")
+        print("   (needs OpenVINO + the Intel NPU driver at run time)")
         return
     print(_row("brain (Intel NPU, OpenVINO)", m,
                "(load incl. ONNX export + NPU compile)"))

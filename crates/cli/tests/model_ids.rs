@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The durable gate for the fully-qualified naming invariant (AGENTS.md,
-//! `docs/using/models-and-weights.md`): every model `brain caps` advertises must be a
+//! The durable gate for the fully-qualified naming invariant: every model `brain caps` advertises must be a
 //! valid `ModelRef` under a reserved vendor, and none of them may collide
 //! with a legacy short name in `modelref::alias`'s deprecation table -- a
 //! `capability::Manifest.model` is always canonical, never a legacy alias.

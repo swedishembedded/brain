@@ -35,8 +35,7 @@
 //!
 //! The serving contract is met by [`caps`] (the `detect`/`embed`
 //! `capability::Provider`), `crates/cli/src/resident_facenet.rs` (the residency
-//! adapter, `BRAIN_FACENET_DIR`) and `examples/vision/` — see
-//! `.agents/rules/serving-contract.md`.
+//! adapter, `BRAIN_FACENET_DIR`) and `examples/vision/`.
 //!
 //! # Two normalisations, one letter apart
 //!

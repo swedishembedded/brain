@@ -6,7 +6,7 @@
 //! Before this, `set_kernel_timing`/`kernel_times` inherited `backend-api`'s
 //! defaults (`false`/`None`), so `gpu_core::profile` fell back to host-
 //! bracketed group times on this backend — which the wgpu-side lesson
-//! (`.agents/rules/kernels.md` §F.1) already measured inflating small
+//! already measured inflating small
 //! kernels up to 29x, meaning the *ranking*, not just the precision, was
 //! wrong. These tests pin the real `vkCmdWriteTimestamp`-based
 //! implementation across both `flush()` paths (batched, and the

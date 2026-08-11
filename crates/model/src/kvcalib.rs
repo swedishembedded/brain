@@ -30,8 +30,8 @@
 //! behaviour vs the plain online-absmax one, which is what makes the A/B
 //! (and the "no calibration file present" default) clean.
 //!
-//! See `.agents/roadmap/qwen.md` (P12) for the real-checkpoint
-//! measurement this was built against, on the one consumer that exists today.
+//! This was built against a real-checkpoint measurement, on the one
+//! consumer that exists today.
 
 use std::path::Path;
 

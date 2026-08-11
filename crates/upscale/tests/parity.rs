@@ -13,7 +13,7 @@
 //!   runs anywhere `make fetch/testdata` has run, with no 67 MB checkpoint and
 //!   no network. Its dims are chosen so `num_feat` (16), `num_grow_ch` (8) and
 //!   the image side (32) all differ: a degenerate config would hide a
-//!   width-for-width swap (`.agents/rules/lessons.md` #4).
+//!   width-for-width swap.
 //! * **`x4plus_*`** — the released checkpoint at its real 64/32/23 shape, which
 //!   is the thing anyone actually runs. Skips unless `BRAIN_ESRGAN` names it.
 //!
@@ -30,7 +30,7 @@ use vae::blocks::Tensors;
 /// Every stage of a correct fp32 replay sits at 1.0 to ten digits.
 const GATE: f64 = 0.999_999_9;
 
-/// Cosine cannot see a dropped scale factor (`.agents/rules/lessons.md` #2), and this
+/// Cosine cannot see a dropped scale factor, and this
 /// net has two `* 0.2` residuals that a cosine-only ladder would miss
 /// completely. So `rel_l2` is asserted alongside it, at every rung.
 const REL_L2_GATE: f64 = 2e-4;
@@ -217,7 +217,7 @@ fn the_tile_seam_shrinks_with_the_halo() {
 /// The same seam measurement on the RELEASED net, whose 23 blocks give a far
 /// larger receptive field than the 2-block tiny config — so a halo that is
 /// ample there can be far too small here. Measuring only the toy would be
-/// exactly the degenerate-fixture mistake of `.agents/rules/lessons.md` #4.
+/// exactly the degenerate-fixture mistake of measuring only a toy config.
 #[test]
 fn the_tile_seam_on_the_released_net() {
     let Some(g) = goldens() else { return };

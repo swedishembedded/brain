@@ -18,8 +18,8 @@
 // slices, so the two together reproduce `matmul_dw_reg`'s accumulate exactly.
 //
 // One invocation per output element, walking the slice axis with stride `rc`.
-// Barrier-free, so `backend-cpu` compiles it (.agents/rules/lessons.md #26) — but only
-// since it started taking `num_workgroups`. Without that arg the CPU JIT
+// Barrier-free, so `backend-cpu` compiles it — but only since it started
+// taking `num_workgroups`. Without that arg the CPU JIT
 // refuses the kernel outright (`kernel missing num_workgroups arg`), so the
 // claim in this comment was false for as long as it was written, and
 // `crates/wgsl-cpu/tests/compile_all.rs` was red on exactly this one kernel.

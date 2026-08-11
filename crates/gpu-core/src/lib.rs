@@ -41,8 +41,8 @@ pub mod tune;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
 
-/// Per-kernel-kind profiling of a recorded pass (`.agents/rules/kernels.md`
-/// §F.1) — the one implementation the model benches share.
+/// Per-kernel-kind profiling of a recorded pass — the one implementation the
+/// model benches share.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod profile;
 
@@ -313,8 +313,8 @@ mod native_facade {
         /// The caller's kernel list with any drop-in fast variants **appended**
         /// (see [`crate::upgrade`]). Every constructor funnels through this, so
         /// a model inherits the faster kernel by registering the slow one —
-        /// which is what `.agents/rules/kernels.md` §A asks for and what
-        /// `crates/vae` did not get when `gn_stats` was fixed for DIAMOND.
+        /// which is what `crates/vae` did not get when `gn_stats` was fixed
+        /// for DIAMOND.
         /// Returns a borrowed view when there is nothing to add.
         fn expanded<'a>(kernels: &'a [(&'a str, &'a str)]) -> std::borrow::Cow<'a, [(&'a str, &'a str)]> {
             match crate::upgrade::expand(kernels) {
@@ -483,8 +483,8 @@ mod native_facade {
         /// This is the ONLY honest source for attributing time BETWEEN kernels.
         /// Host wall-clock around a drained slice measures launch + execute +
         /// fence, whose floor is roughly constant and therefore inflates small
-        /// kernels in inverse proportion to their size — up to 29x measured, and
-        /// enough to invert a ranking (`.agents/rules/lessons.md` #31).
+        /// kernels in inverse proportion to their size — up to 29x measured,
+        /// enough to invert a ranking.
         pub fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
             self.inner.kernel_times()
         }

@@ -5,8 +5,8 @@
 //! sparse-naive (`model::moe::expert_fwd`'s `moe_linear_gated`, real FLOPs
 //! only for routed rows) beat dense-tiled (`crates/glm`'s current
 //! `pick_gemm`-selected `matmul_reg3`, every row, every expert) at GLM-5.2's
-//! REAL shape on a REAL P40 -- not assumed from FLOP-counting alone, which
-//! `.agents/roadmap/omni.md`'s own risk note says can invert either way
+//! REAL shape on a REAL P40 -- not assumed from FLOP-counting alone, since
+//! the result can invert either way
 //! depending on how naive-vs-tiled scales at the realistic per-expert row
 //! count.
 //!
@@ -45,8 +45,8 @@ fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
 }
 
-/// Best-of-`REPS`, poll_wait-bracketed (.agents/rules/kernels.md §E.0: a
-/// bare-submit loop times host recording, not the device).
+/// Best-of-`REPS`, poll_wait-bracketed (a bare-submit loop times host
+/// recording, not the device).
 fn best_of(g: &Gpu, steps: &[gpu_core::Step]) -> f64 {
     g.submit(&[], steps);
     g.poll_wait();

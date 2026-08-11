@@ -25,7 +25,7 @@ a kernel can be 5/5 structurally and still be a defect at a given shape.
 
 **cpu** — `backend-cpu`'s Cranelift JIT splits a kernel body at ONE top-level
 `workgroupBarrier()` and no more; with two or more it does not fail cleanly, it
-**corrupts memory** ([`.agents/rules/lessons.md`](../../.agents/rules/lessons.md) #26), so those are `✗`
+**corrupts memory**, so those are `✗`
 (9 kernels) — cross-checked against the barrier count on every run.
 `native` marks the 32 kernels with a hand-written AVX2 path that runs instead
 of the JIT; `native only` means that path is the *only* way it works there, because

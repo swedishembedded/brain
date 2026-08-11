@@ -802,7 +802,7 @@ impl Yolo {
             .iter()
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
-        // "brain/yolo" matches docs/using/models-and-weights.md's reserved-vendor
+        // "brain/yolo" matches the reserved-vendor
         // fallback -- the same id crates/cli/src/resident.rs::YoloResident::
         // from_env synthesizes for an env-loaded checkpoint -- so a
         // checkpoint saved here is auto-discoverable by

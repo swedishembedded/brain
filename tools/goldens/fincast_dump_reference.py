@@ -13,7 +13,7 @@ Parity trap: the reference MoE gate is **stochastic even at eval** (it draws
 top-2 expectation, so this script **neutralizes** the reference stochasticity —
 `threshold_eval -> ~0` (always route the top-2) and `capacity_factor_eval` huge
 (no capacity dropping) — making the reference a deterministic top-2 oracle that
-brain must reproduce. Documented in docs/fincast/STATUS.md.
+brain must reproduce.
 
 Outputs (into <out_dir>):
   - golden_meta.json  (committed): config, context, shapes, a sampled subset of

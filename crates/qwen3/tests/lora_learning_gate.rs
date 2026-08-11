@@ -7,9 +7,9 @@
 //! base, through the SAME production entry point `brain qwen finetune
 //! --lora` uses (`qwen3::finetune::finetune`), differing ONLY in which
 //! completion their training data supervises for one fixed prompt --
-//! reloads both from disk (not the live in-process model -- see
-//! .agents/rules/lessons.md on the config field that used to silently drop on
-//! reload) -- and asserts each adapter's greedy completion for that prompt
+//! reloads both from disk (not the live in-process model -- catching the
+//! config field that used to silently drop on reload) -- and asserts each
+//! adapter's greedy completion for that prompt
 //! matches ITS OWN training target, and the two adapters disagree with each
 //! other. `adapter_a != base` alone would be Lessons §16's "a statistic a
 //! broken result also satisfies" (ANY perturbation, data-independent, would
@@ -144,7 +144,7 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         seed: 1234,
     };
     // rank=3 is coprime with this config's head_dim=8 / d_model=16
-    // (.agents/rules/lessons.md §4: a degenerate rank equal to head_dim or d_model
+    // (a degenerate rank equal to head_dim or d_model
     // would hide a whole shape-transposition bug class) -- same choice as
     // crates/qwen3/tests/lora_roundtrip.rs.
     qwen3::finetune::finetune(base_path, out_dir, &opts, &qwen3::finetune::Mode::Lora { rank: 3, alpha: 6.0 }, adapter_out.to_str().unwrap())
@@ -172,7 +172,7 @@ fn lora_adapters_trained_on_different_targets_diverge_and_match_their_own_data_a
     println!("adapter B loss: {b_loss0:.4} -> {b_loss1:.4}");
     // A weak sanity signal only -- `finetune`'s returned loss is the FINAL
     // step's single-batch loss, not a corpus average, so it is noisy and NOT
-    // the thing this gate hangs its verdict on (.agents/rules/lessons.md §16: a
+    // the thing this gate hangs its verdict on (a
     // statistic a broken result also satisfies is not a check). The real
     // proof is the greedy-completion match below.
     assert!(a_loss1 < a_loss0, "adapter A training loss did not decrease at all: {a_loss0:.4} -> {a_loss1:.4}");

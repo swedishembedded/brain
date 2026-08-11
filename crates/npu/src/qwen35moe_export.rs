@@ -39,8 +39,8 @@ pub fn export_qwen35_fp32(weights_path: &str, out_path: &str, seq_len: usize) ->
 /// stack stays resident in the in-memory [`onnx::graph::Graph`] until this
 /// function's single `finish_external` call serializes ALL of them at once —
 /// external data solves the *protobuf 2GB proto-size* limit, not the
-/// *transient host RAM* one (~120 GB, the same order of magnitude as
-/// `.agents/roadmap/qwen35.md`'s already-documented "~140GB, does not fit
+/// *transient host RAM* one (~120 GB, the same order of magnitude as the
+/// already-documented "~140GB, does not fit
 /// on this hardware" full-precision-import finding). A real fix needs the
 /// graph builder itself to stream each initializer straight to the sidecar
 /// file as it's produced rather than accumulating them all in `Graph::

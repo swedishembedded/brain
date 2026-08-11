@@ -281,8 +281,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // ---- paged KV decode/prefill (the SERVING tape) ---------------------
         //
         // These were all uncovered, so `qwen3::serve`'s step could not report a
-        // rate at all — and an unrateable pass cannot be ranked, which is the
-        // first thing `.agents/rules/kernels.md` §F asks for.
+        // rate at all — and an unrateable pass cannot be ranked.
         //
         // CONVENTION, because these kernels are DATA-dependent in a way the
         // others are not: the work per sequence is `seq_lens[b]`, which lives in

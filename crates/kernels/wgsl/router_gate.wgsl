@@ -23,26 +23,26 @@
 //
 // Used to hard-cap at `n_experts <= 128` via `array<f32,128> prob`/
 // `array<bool,128> used` scratch — silent out-of-bounds writes above that
-// (.agents/rules/lessons.md #35b's failure shape: a `const` bump without its array
-// literal is a silent out-of-bounds write; Qwen3.5-35B-A3B's 256 experts hit
-// this wall directly). Fixed the same way `router_bwd.wgsl` already was:
+// (a failure shape seen before: a `const` bump without its array literal is
+// a silent out-of-bounds write; Qwen3.5-35B-A3B's 256 experts hit this wall
+// directly). Fixed the same way `router_bwd.wgsl` already was:
 // nothing here is cached in an array sized by `n_experts`. The softmax
 // numerator is stashed in the `gate` OUTPUT buffer itself (we already own
 // read_write access to `[seq_len, n_experts]`, so it doubles as scratch — no
 // second E-sized buffer needed) and re-divided by `sm` on every later read
 // instead of being cached. The only `var<function>` array left is
 // `sel_idx: array<u32, MAX_TOP_K>`, bounded by `top_k` (8 at the real 256-
-// expert scale), never by `n_experts` — this is the actual fix `docs/
-// lessons.md` #35b calls for ("an array-free top-k rewrite... no
-// n_experts-sized function array"), not a bigger constant.
+// expert scale), never by `n_experts` — this is the actual fix needed ("an
+// array-free top-k rewrite... no n_experts-sized function array"), not a
+// bigger constant.
 //
 // Cost: the top-k selection becomes O(top_k^2 * n_experts) instead of the
 // old O(top_k * n_experts) (excluding an already-picked expert now scans the
 // small `sel_idx` set instead of an O(1) `used[e]` lookup) — at the real
 // scale (top_k=8, E=256) that is ~17k vs ~3.5k scalar ops per token, still
 // trivial next to a single GEMM. A workgroup-cooperative (`_rows`-style)
-// rewrite is a valid follow-on per `.agents/rules/kernels.md`'s
-// measure-before-optimizing rule; this fix is correctness-first.
+// rewrite is a valid follow-on once profiling justifies it; this fix is
+// correctness-first.
 
 struct Params {
     seq_len: u32,

@@ -6,8 +6,7 @@
 //! GQA (QK-norm, half-split RoPE), and a sparse MoE FFN (`model::moe`, 128
 //! experts / top-8, no shared expert), composed fresh from
 //! `model::block`/`model::moe` primitives rather than a modified
-//! `qwen3::Qwen` — see `crates/omni/src/thinker.rs`'s module doc and
-//! `.agents/roadmap/omni.md`'s M6 design note for why.
+//! `qwen3::Qwen` — see `crates/omni/src/thinker.rs`'s module doc for why.
 //!
 //! The golden (`tools/goldens/omni_dump_reference.py`'s `layer0`) is a pure
 //! 9-token TEXT prompt with no image/audio, so its M-RoPE table (built here

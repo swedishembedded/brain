@@ -8,8 +8,8 @@
 //! two things that are silently wrong rather than loudly broken:
 //!
 //! * **`post_quant_conv` present when the config says so.** Dropping it leaves a
-//!   decode in a plausible `[-1,1]` range and UNCORRELATED with the truth
-//!   (`.agents/rules/lessons.md` #16). On the NPU that would be found by someone looking
+//!   decode in a plausible `[-1,1]` range and UNCORRELATED with the truth.
+//!   On the NPU that would be found by someone looking
 //!   at a wrong picture on other hardware.
 //! * **The channel schedule is REVERSED.** The decoder walks
 //!   `block_out_channels` high→low; walking it forward builds a net with the

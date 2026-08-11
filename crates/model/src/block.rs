@@ -19,7 +19,7 @@
 // bindings and its Params fields — so the arity IS the WGSL kernel's binding
 // list. Packing those into a struct would put a second, drifting description
 // of a kernel's signature next to the authoritative one in the .wgsl, which
-// is the failure mode `.agents/rules/kernels.md` exists to prevent.
+// is a failure mode worth preventing.
 #![allow(clippy::too_many_arguments)]
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -1106,8 +1106,8 @@ impl LayerNormIds {
 /// `Step`: [`layernorm_fwd`] and friends bind whole buffers (`Gpu::step`), while
 /// the DiT forwards normalise a ROW RANGE of a joint slab and must bind
 /// sub-ranges (`Gpu::step_sliced`). Both shapes have to share ONE selection
-/// rule — a second copy is a place a model silently keeps the slow kernel, which
-/// is `.agents/rules/kernels.md` §A's most expensive defect class.
+/// rule — a second copy is a place a model silently keeps the slow kernel,
+/// the most expensive class of defect there is.
 pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
@@ -1315,9 +1315,9 @@ pub enum GemmVariants {
 /// apart in the useful direction**: `flux1` learned that a register-tiled GEMM
 /// at M=1 wastes 127/128 of every tile and routed skinny-M to the GEMV kernels;
 /// `flux2`, written first, never did, so every one of its per-token modulation
-/// mat-vecs paid the full tile. That is `.agents/rules/kernels.md` §A — "a fast
-/// kernel a later model never learned about" — and the checklist's answer is to
-/// put the fix in *selection*, in one place, not in a second copy.
+/// mat-vecs paid the full tile. That is a fast kernel a later model never
+/// learned about, and the answer is to put the fix in *selection*, in one
+/// place, not in a second copy.
 ///
 /// The same rule serves the fp32 and the int8 (DP4A) tiers: the two families
 /// take different buffers but identical dispatch geometry, so int8 callers pass

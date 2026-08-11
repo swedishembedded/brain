@@ -3,9 +3,9 @@
 
 //! Per-kernel-kind profiling of a recorded pass — the one implementation.
 //!
-//! `.agents/rules/kernels.md` §F.1 prescribes a specific shape for this: group
-//! contiguous runs of one kernel *in submit order*, time each group, and publish
-//! the table alongside the whole-pass number. Four benches had grown their own
+//! The prescribed shape: group contiguous runs of one kernel *in submit
+//! order*, time each group, and publish the table alongside the whole-pass
+//! number. Four benches had grown their own
 //! copy of it (`vqgan_bench`, `unet_bench`, `flux2_bench`, `zimage_bench`) and a
 //! fifth was about to, which is precisely the duplication AGENTS.md's "one
 //! implementation" rule exists to stop — the copies had already drifted on the
@@ -19,7 +19,7 @@
 //!   covered pass silently *under*-reported its rate instead of declaring
 //!   itself incomplete. Here an uncovered pass says so.
 //!
-//! ## RESOLVED: the time source (`.agents/rules/lessons.md` #31)
+//! ## RESOLVED: the time source
 //!
 //! [`profile`] now uses DEVICE time wherever the backend can give it:
 //! `Gpu::set_kernel_timing(true)` + one timed submit of the WHOLE pass (the same
@@ -29,9 +29,7 @@
 //! which path a given profile actually took. Validated: kernel device time
 //! against the whole-pass number agree to within 0.7% (80.28 ms vs 80.85 ms),
 //! where the old host-bracketed-slice method was off by up to 29x on small
-//! kernels and inverted the ranking (see `.agents/rules/lessons.md` #31 for the full
-//! before/after and the `docs/performance/overview.md` finds that followed once
-//! ranking was trustworthy).
+//! kernels and inverted the ranking.
 //!
 //! Only backends without a device-timestamp path fall back to the OLD
 //! host-wall-clock-per-group method below, which still carries the launch+fence
@@ -43,7 +41,7 @@
 //! decides whether a change worked. [`PassProfile::summed_secs`] is the sum of
 //! the per-group timings, each of which pays its own queue drain; on a VQGAN
 //! backward that inflates the total by ~44%. **Rank with the table, decide with
-//! the pass** (`.agents/rules/lessons.md` #21).
+//! the pass.**
 
 use crate::roof::{Bound, Roofs};
 
@@ -188,8 +186,7 @@ impl PassProfile {
                     // overstates the work (a data-dependent kernel costed by an
                     // upper bound, a synthetic harness whose buffers alias so
                     // the "streaming" byte estimate is fiction) or the timed
-                    // region was the host (`.agents/rules/kernels.md` §E.0,
-                    // which exists because a bare-submit loop once reported
+                    // region was the host (a bare-submit loop once reported
                     // 377 GB/s on a ~346 GB/s card). Printing it as a percentage
                     // launders a broken number into a flattering one.
                     r.utilisation(rf)
@@ -278,7 +275,7 @@ impl PassProfile {
                 self.groups,
             );
         }
-        println!("Rank with the table; decide with the whole-pass number (.agents/rules/lessons.md #21).");
+        println!("Rank with the table; decide with the whole-pass number.");
         if self.device_timed {
             println!(
                 "Per-kernel times are DEVICE times (timestamp queries inside the production \
@@ -330,8 +327,8 @@ impl PassProfile {
 /// Every timed region is `poll_wait`-bracketed. This is not defensive style: on
 /// the wgpu backend `submit` with an empty clear list only appends to the
 /// pending list, so an unbracketed loop times host-side recording and reports a
-/// rate above the physical roof (`.agents/rules/kernels.md` §E.0 — it once
-/// produced 377 GB/s on a ~346 GB/s card).
+/// rate above the physical roof — it once produced 377 GB/s on a ~346 GB/s
+/// card.
 pub fn best_of(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
     gpu.submit(&[], steps);
     gpu.poll_wait();

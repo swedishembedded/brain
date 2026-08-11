@@ -256,8 +256,7 @@ fn gamma_interarrival(rng: &mut Rng, rate: f64, shape: f64) -> f64 {
 
 /// The eight token-shaped standard shapes, plus five unit-appropriate presets
 /// for non-token targets (frame/embed/image_gen/speech). Every one runs on
-/// every device, so a single grid characterises a model on a machine. See
-/// `docs/performance/benchmarking.md`.
+/// every device, so a single grid characterises a model on a machine.
 pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) -> Option<Workload> {
     let (input, output, slo) = match name {
         "interactive" => (128, 256, Slo::interactive(500.0, 50.0)),

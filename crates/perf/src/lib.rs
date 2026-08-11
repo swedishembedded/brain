@@ -11,9 +11,6 @@
 //! | `bench` | can this architecture **learn** task X? | architectures |
 //! | `perf`  | how **fast**, and at what cost — and is it still correct? | models × hardware × config |
 //!
-//! The full design, including the scenarios not yet implemented, is in
-//! `docs/performance/benchmarking.md`.
-//!
 //! # What makes this brain's suite rather than a generic LLM harness
 //!
 //! brain serves detection, depth, TTS, image generation, forecasting, 3D and

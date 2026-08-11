@@ -3,9 +3,8 @@
 
 //! P1.glue — tests for the nine elementwise/layout glue WGSL kernels.
 //!
-//! Written FROM docs/models/world-models/specs/p1.glue.md (§5 hand-computed
-//! references, §6 required properties, §7 edge cases, §9 required tests,
-//! §10 determinism) — NEVER from the implementation.
+//! Written FROM the spec (hand-computed references, required properties,
+//! edge cases, required tests, determinism) — NEVER from the implementation.
 //!
 //! These tests do NOT build any model: they drive the WGSL kernels directly
 //! via `gpu_core`, exactly like `mse_fd.rs`. Gating runs are

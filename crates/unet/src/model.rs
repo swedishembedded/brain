@@ -77,7 +77,7 @@ const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 10;
 /// The tiled GEMM every `nn.Linear` here dispatches: the ONE the shared block
 /// set already registers. This crate used to register its own `matmul_reg2`
 /// beside it and send every linear there — the slower of two kernels it was
-/// already carrying (`.agents/rules/lessons.md` #17).
+/// already carrying.
 const K_MATMUL_REG: usize = vae::blocks::MATMUL_REG3_SLOT;
 // `layernorm_rows` occupies the last slot and is resolved BY NAME through
 // `block::LayerNormIds::resolve_fwd`, never indexed directly.

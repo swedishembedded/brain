@@ -24,7 +24,7 @@
 //! shows up across a chunk boundary (e.g. the recurrent state failing to
 //! thread correctly) has a chance to surface here, unlike a single-chunk toy
 //! shape. Runs on both the CPU JIT and the default GPU backend
-//! (`.agents/rules/lessons.md` #5 -- a barrier-crossing kernel can silently misbehave
+//! (a barrier-crossing kernel can silently misbehave
 //! on exactly one backend).
 
 use gpu_core::Gpu;
@@ -91,7 +91,8 @@ fn decode_step_matches_full_prefill_cpu() {
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
 /// backend otherwise -- run this under both `BRAIN_DEVICE=cpu` and unset
-/// (the default GPU backend) per `.agents/rules/lessons.md` #5. `decode_step_matches
+/// (the default GPU backend), since a barrier-crossing kernel can silently
+/// misbehave on exactly one backend. `decode_step_matches
 /// _full_prefill_cpu` above pins the CPU JIT explicitly regardless of
 /// `BRAIN_DEVICE` so the CPU path is always exercised even when this one
 /// runs against the GPU.

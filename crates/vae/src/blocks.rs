@@ -113,8 +113,7 @@ pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTM
 /// bank conflicts removed — same `Params`, same `@workgroup_size(256)`, same
 /// dispatch arithmetic, bit-identical output — and it measured faster at all
 /// twelve shapes swept from `[1,4096,4096]` to `[8192,320,320]` (1.08x-1.30x).
-/// There is no shape where preferring `matmul_reg2` is correct; see
-/// `.agents/rules/lessons.md` #17.
+/// There is no shape where preferring `matmul_reg2` is correct.
 pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 
 /// The backward kernels the reverse walk of a train-mode [`Builder`] dispatches,
@@ -127,8 +126,8 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// Everything here is barrier-free and gather-based: one invocation per element
 /// of the buffer it writes. The two per-channel reductions (`gn_dgamma` /
 /// `gn_dbeta`, C invocations each) and the per-group `gn_dsum` (N*G) have no
-/// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
-/// in `.agents/rules/kernels.md`, NOT a correctness gate, because none of them
+/// cooperative twin anywhere in the tree — that is a documented perf gap,
+/// NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
 pub const BWD_KERNELS: [(&str, &str); 21] = [
     ("conv2d_dx", kernels::CONV2D_DX),
@@ -620,8 +619,8 @@ impl<'a> Builder<'a> {
     /// Upload one weight tensor, non-ReBAR-safe.
     ///
     /// **Not `storage_init`**, and both departures are load-bearing on a P40
-    /// (`.agents/rules/kernels.md` §D, `paramstore`'s upload loop, and
-    /// `zimage::BlockWeights::upload` all record the same two):
+    /// (`paramstore`'s upload loop, and
+    /// `zimage::BlockWeights::upload` both record the same two):
     ///
     /// 1. `create_buffer_init`'s mapped-at-creation path forces weights into an
     ///    inefficient memory type on a card without resizable BAR, inflating a
@@ -751,10 +750,9 @@ impl<'a> Builder<'a> {
     ///   0.75 byte/FLOP, a 461 GFLOP/s roofline that caching stretches to ~700.
     /// * **lowered** (`self.coop`, `cout >= GEMM_CONV_MIN_COUT`) — `im2col_at` +
     ///   `matmul_reg3` + `nlc_bias_nchw`, i.e. `y[HW, Cout] = col[HW, CinKK] ·
-    ///   Wᵀ`, which runs at the GEMM's ~34% of peak. This is the trade
-    ///   `docs/performance/overview.md` scoped to "a compute-bound discrete
-    ///   GPU" and `docs/performance/p40.md` already took for YOLO's convs; the
-    ///   P40 is that GPU. The transposed orientation (positions as GEMM ROWS)
+    ///   Wᵀ`, which runs at the GEMM's ~34% of peak. This is the same trade
+    ///   already scoped to "a compute-bound discrete GPU" and taken for
+    ///   YOLO's convs; the P40 is that GPU. The transposed orientation (positions as GEMM ROWS)
     ///   is what makes it chunkable: a spatial chunk is a contiguous row range
     ///   of both `col` and the output, so the 2.4 GB whole-image operand
     ///   becomes a bounded scratch (see `im2col_at.wgsl`).
@@ -934,7 +932,7 @@ impl<'a> Builder<'a> {
             //
             // `crates/wm-diamond` built this pair after measuring the serial
             // kernel at 77% of its frame time, and the shared builder never
-            // learned about it — `.agents/rules/lessons.md` #8 once more.
+            // learned about it.
             let part = self.act(2 * g as u64 * GN_P as u64);
             self.steps.push(self.gpu.step(
                 K_GN_PART,

@@ -237,8 +237,8 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
          prefixes between requests, so hit-rate is genuinely zero here, not \
          structurally unmeasurable. What IS measured is admission pressure -- how \
          often a request had to wait purely for pool space, and for how long. \
-         Driving this scenario's workload through `docs/performance/benchmarking.md`'s \
-         kvcache session mix (shared system prefix, branching sessions) is what would \
+         Driving this scenario's workload through a kvcache session mix \
+         (shared system prefix, branching sessions) is what would \
          make prefix hit-rate/eviction-regret meaningful here too."
             .into(),
     );
@@ -386,7 +386,7 @@ pub fn run_weights_with(opt: &Options, budget: u32, passes: u32) -> Result<Artif
          identical seeds -- there is no randomness here at all, the \
          schedule is fully deterministic. It answers 'does the weight \
          window's eviction policy actually beat a naive one' with a \
-         measured ratio, not a claim. See .agents/roadmap/zimage.md for \
+         measured ratio, not a claim, against \
          the real (not simulated) int8 build's own numbers."
             .into(),
     );

@@ -27,8 +27,8 @@
 //!
 //! ## Params were read before dispatching, and are written out here
 //!
-//! `.agents/rules/kernels.md` §B: *a mismatched param list is silently wrong,
-//! not a crash* (`silu_mul` cost a forward cosine of 0.504). Every dispatch
+//! A mismatched param list is silently wrong,
+//! not a crash (`silu_mul` cost a forward cosine of 0.504). Every dispatch
 //! below states its kernel's `Params` field order in a comment immediately
 //! above it. Keep those comments truthful; they are the contract.
 //!

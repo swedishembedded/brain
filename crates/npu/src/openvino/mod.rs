@@ -20,7 +20,7 @@ pub enum NpuError {
     /// The NPU path is not supported on this target (non x86_64-linux/windows).
     Unsupported(String),
     /// OpenVINO runtime could not be loaded (not installed / not on the loader
-    /// path). Install OpenVINO and source `setupvars.sh`. See docs/models/yolo/npu.md.
+    /// path). Install OpenVINO and source `setupvars.sh`.
     RuntimeNotFound(String),
     /// The requested device (e.g. "NPU") is not present on this machine.
     DeviceUnavailable(String),
@@ -42,7 +42,7 @@ impl fmt::Display for NpuError {
                  (the `openvino` pip wheel) — brain auto-discovers it inside an active \
                  virtualenv. Otherwise set LD_LIBRARY_PATH to the dir containing \
                  libopenvino_c.so (or source an OpenVINO setupvars.sh). The Intel NPU \
-                 also needs its user-mode driver. See docs/models/yolo/npu.md"
+                 also needs its user-mode driver."
             ),
             NpuError::DeviceUnavailable(s) => write!(f, "device unavailable: {s}"),
             NpuError::Other(s) => write!(f, "{s}"),

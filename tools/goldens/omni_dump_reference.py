@@ -6,7 +6,7 @@
 
 The full checkpoint is 70.5 GB bf16 across 28 010 tensors — too large to load
 wholesale on this box even once, let alone twice (brain's own device copy).
-Per the plan of record (`.agents/roadmap/omni.md`), parity is validated
+Per the plan of record, parity is validated
 **component by component**: each dump below streams ONLY the tensors that
 component needs straight out of the sharded safetensors files (via
 `model.safetensors.index.json`), builds the real upstream HF module for that

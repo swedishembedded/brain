@@ -9,13 +9,12 @@
 // @npu   yes
 // @quant none
 //
-// GroupNorm statistics for an NCHW tensor x[N,C,H,W] — spec:
-// docs/world-models/specs/P1.gn.md §4.1. One invocation per (n,g) group
+// GroupNorm statistics for an NCHW tensor x[N,C,H,W]. One invocation per (n,g) group
 // (N*G threads): thread k has n = k/G, g = k%G, cpg = C/G, M = cpg*H*W.
 //   mean_k = mean over channels [g*cpg,(g+1)*cpg) x (h,w) of x   (population)
 //   rstd_k = 1/sqrt(var_k + eps)   -- eps INSIDE the sqrt, from params (f32 bits)
 // Output packing: stats[2k] = mean_k, stats[2k+1] = rstd_k.
-// Reduction order: ascending (c,h,w) — determinism contract (spec §11).
+// Reduction order: ascending (c,h,w) — a determinism contract.
 
 struct Params {
     N: u32,

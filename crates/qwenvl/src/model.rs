@@ -161,8 +161,8 @@ impl Qwen3Vl {
     /// Greedy KV-cache generation for one image + text prompt: real
     /// `qwen3::Qwen` `step`/`step_embed` machinery (via this session's new
     /// `step_mrope`/`step_embed_mrope`, Phase 7a), not [`Self::forward`]'s
-    /// training-loss-shaped batched path -- the gap `docs/models/omni/
-    /// status.md`'s own note names ("`Qwen3Vl::forward()` returns `f32`...
+    /// training-loss-shaped batched path -- the gap noted as
+    /// ("`Qwen3Vl::forward()` returns `f32`...
     /// there is no sampling loop").
     ///
     /// Prefill splices the image at its token run the same way

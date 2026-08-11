@@ -22,8 +22,8 @@
 //!
 //! Both probes self-calibrate their trip count until the timed region is long
 //! enough to dominate launch and drain, and both are `poll_wait`-bracketed —
-//! `.agents/rules/kernels.md` §E.0 exists because a bare-submit loop once
-//! reported 377 GB/s on a ~346 GB/s card by timing the host.
+//! a bare-submit loop once reported 377 GB/s on a ~346 GB/s card by timing
+//! the host.
 //!
 //! Results are cached per adapter, with the same key discipline
 //! [`crate::tune`] uses (adapter slug + a fingerprint of the probe sources), so
@@ -260,10 +260,10 @@ static MEASURE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 ///
 /// Defaults to skipped (as if `BRAIN_NO_ROOF=1`) on the CPU backend, where the
 /// probe's calibration loop has a known-bad interaction with `backend-cpu`'s
-/// rayon dispatch (.agents/rules/lessons.md #37/#38) — a per-call-site opt-out is what
-/// #37 asked every new caller to add by hand; this applies it once at the
-/// source instead. Set `BRAIN_NO_ROOF=0` to force the probe to run anyway,
-/// even on the CPU backend.
+/// rayon dispatch — a per-call-site opt-out is what every new caller was
+/// once asked to add by hand; this applies it once at the source instead.
+/// Set `BRAIN_NO_ROOF=0` to force the probe to run anyway, even on the CPU
+/// backend.
 pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
     match std::env::var("BRAIN_NO_ROOF").as_deref() {
         Ok(v) if v != "0" => return None,
@@ -356,9 +356,8 @@ pub fn measure(gpu: &Gpu) -> Option<Roofs> {
 /// budget or the whole measurement is abandoned (`best_of` returns `None`).
 /// Generous relative to a healthy measurement (clean rounds in this probe
 /// take well under a second even on a slow iGPU) but far below the
-/// multi-minute stalls this exists to bound — see `poll_wait_timeout`'s doc
-/// and the incident note in `docs/performance/arc.md` gap A1. Only bounds
-/// anything on backends that actually implement `poll_wait_timeout`
+/// multi-minute stalls this exists to bound — see `poll_wait_timeout`'s doc.
+/// Only bounds anything on backends that actually implement `poll_wait_timeout`
 /// (currently `backend-wgpu`); on others this is a no-op budget the default
 /// trait method ignores.
 const PER_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);

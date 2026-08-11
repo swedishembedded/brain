@@ -19,7 +19,7 @@
 //! The serving contract is met by [`caps`] (the `segment`
 //! `capability::Provider`), `crates/cli/src/resident_sam2.rs` (the residency
 //! adapter, `BRAIN_SAM2_WEIGHTS`, with a genuine per-image `run_batch`) and
-//! `examples/vision/` — see `.agents/rules/serving-contract.md`.
+//! `examples/vision/`.
 //!
 //! ```text
 //! image [1,3,1024,1024]

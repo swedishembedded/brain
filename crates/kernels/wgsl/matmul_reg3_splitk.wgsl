@@ -36,9 +36,9 @@
 // so the chunk loop is unchanged and every `k` is visited exactly once. A slice
 // past the end contributes zeros, which the sum absorbs.
 //
-// NOT for `backend-cpu`: three barriers, and the JIT splits a body at one
-// (`.agents/rules/lessons.md` #26). The selector keeps that device on `matmul_reg3`'s
-// own reference tier.
+// NOT for `backend-cpu`: three barriers, and the JIT splits a body at only
+// one barrier. The selector keeps that device on `matmul_reg3`'s own
+// reference tier.
 
 struct Params { m: u32, k: u32, n: u32, slices: u32, };
 

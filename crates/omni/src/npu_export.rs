@@ -7,7 +7,7 @@
 //! every other `*_export.rs` in `crates/npu`). Validation stops at CPU-side
 //! structural checks + (where an OpenVINO CPU device is available) numeric
 //! parity against the real host forward — there is no NPU device on this box
-//! to run against (`.agents/roadmap/omni.md`'s M15 entry says so plainly).
+//! to run against.
 //!
 //! Each export builds its weight map with the SAME loader `crate::mm`/
 //! `crate::codec_bridge` already use for the real GPU/host forward

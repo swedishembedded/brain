@@ -1091,12 +1091,12 @@ impl Engine {
             // QK-norm goes through `self.rms` like every other norm in this
             // tape. It used to call `block::rmsnorm_fwd` directly — the
             // per-element kernel, one thread per row — which is the coalescing
-            // bug `docs/performance/overview.md` measures at 19.4x for exactly
+            // bug measured at 19.4x for exactly
             // this op, and it was the only norm here bypassing the selector.
             // QK-norm goes through `self.rms` like every other norm in this
             // tape. It used to call `block::rmsnorm_fwd` directly — the
             // per-element kernel, one thread per row — which is the coalescing
-            // bug `docs/performance/overview.md` measures at 19.4x for exactly
+            // bug measured at 19.4x for exactly
             // this op, and it was the only norm here bypassing the selector.
             s.push(self.rms(&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
             s.push(self.rms(&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
@@ -1924,8 +1924,8 @@ mod tests {
     /// that packs to more than one int8 word/head (16/4=4), with
     /// `n_heads*head_dim=96 != d_model=20` so a transposed/mismatched dimension
     /// cannot accidentally read as correct. Replaces `tiny()` for int8-KV
-    /// numeric gates -- see `.agents/rules/lessons.md` #4 (degenerate test dims hide bug
-    /// classes) and #18 (a toy-fitted constant cannot predict the real shape).
+    /// numeric gates -- degenerate test dims hide bug
+    /// classes, and a toy-fitted constant cannot predict the real shape.
     fn kv_probe_cfg() -> QwenConfig {
         QwenConfig {
             vocab: 29,
@@ -2469,7 +2469,7 @@ mod tests {
     /// with the existing `argmax_part`/`argmax_final`) must return EXACTLY the
     /// row's true top-K logits+indices, sorted descending — an exact,
     /// deterministic operation with no tolerance to gate on
-    /// (`.agents/rules/lessons.md` #4: dims chosen so vocab != any other dimension, so
+    /// (dims chosen so vocab != any other dimension, so
     /// a transposed/wrong-stride bug can't hide behind a coincidence).
     #[test]
     fn topk_extraction_matches_host_reference() {
@@ -2846,8 +2846,8 @@ mod tests {
     /// the quantised cache) — a structural sanity check that CUMULATIVE
     /// divergence over several autoregressive steps stays small, not a
     /// precision claim: G3 already derives the exact per-element quantization
-    /// bound (0.5 of a step) for a single append, and P12
-    /// (`.agents/roadmap/qwen.md`) is the REAL accuracy measurement (loss
+    /// bound (0.5 of a step) for a single append, and
+    /// the REAL accuracy measurement (loss
     /// delta +0.0154 on Qwen3-0.6B) — this test cannot substitute for either
     /// (lesson 18: a toy config's error magnitude cannot predict the real
     /// one). What it CAN catch is a wiring break that makes int8 decode wildly

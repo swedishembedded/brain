@@ -9,9 +9,9 @@
 //! Measured on the Tesla P40 (gpu0): cosine 0.998950 / max_abs 0.81 vs both
 //! fp32 and the golden (fp32 matches the golden to 1e-4, so the two
 //! comparisons coincide); the asserts gate at 0.998, tighter than the 0.995 /
-//! 0.99 the port plan required — see `.agents/roadmap/flux2.md` for the
-//! per-family bisection that bought the margin. Also prints fp32 vs int8
-//! single-forward wall times (informational).
+//! 0.99 the port plan required, thanks to a per-family bisection that bought
+//! the margin. Also prints fp32 vs int8 single-forward wall times
+//! (informational).
 //!
 //! Env: `BRAIN_FLUX2_TRANSFORMER` = the klein-4B diffusers `transformer/` dir.
 //! Skips without weights, fixtures, or a GPU backend (int8 needs DP4A).

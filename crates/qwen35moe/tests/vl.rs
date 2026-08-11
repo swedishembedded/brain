@@ -14,7 +14,7 @@
 //! the image content changes the loss -- not a silent no-op), (c) the M-RoPE
 //! positions written for the image run match `get_rope_index`'s own
 //! independent host computation exactly. Run under both `BRAIN_DEVICE=cpu`
-//! and the default GPU backend (`.agents/rules/lessons.md` #5) -- `Qwen35Vl::new`
+//! and the default GPU backend -- `Qwen35Vl::new`
 //! builds its decoder via `Qwen35::new`, which resolves its `Gpu` from
 //! `BRAIN_DEVICE` (see `gpu_core::Gpu::new`'s own doc), so running this whole
 //! file under each setting exercises both.

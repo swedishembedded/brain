@@ -15,7 +15,7 @@
 //! Feeds the WHOLE prompt through [`Qwen35::step`] one token at a time
 //! (rather than a fast batched prefill-into-cache path): correctness-first
 //! for this pass, matching every other qwen35moe decode primitive landed so
-//! far (`.agents/rules/porting.md` §10) -- a batched prefill fast path is
+//! far -- a batched prefill fast path is
 //! the same deferred performance work `qwen35moe::serve::Engine`'s own
 //! per-token prefill loop names.
 

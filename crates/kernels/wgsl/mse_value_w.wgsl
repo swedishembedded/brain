@@ -9,15 +9,14 @@
 // @npu   no
 // @quant none
 //
-// Per-sample weighted MSE partial sums — spec:
-// docs/world-models/specs/P1.glue.md §3.4/§4.4. pred/tgt are [N, M] row-major
+// Per-sample weighted MSE partial sums. pred/tgt are [N, M] row-major
 // (n = samples N, m = M); w is [N]. ONE THREAD PER SAMPLE k (n threads):
 //   out[k] = w[k] * ( Σ_{j=0..m-1} (pred[k*m+j] - tgt[k*m+j])^2 ) / f32(m)
 // Reduction convention mirrors mse_value.wgsl: divide by the element count
 // in-kernel so the host reduction is a PLAIN SUM: L = scale * Σ_k out[k]
 // (upstream `scale` lives in mse_grad_w's params / on the host, NOT here).
-// Loop ascending j, single division after the loop — determinism contract
-// (spec §10). Gradient: mse_grad_w. No dtgt (targets are data), no dw
+// Loop ascending j, single division after the loop — a determinism contract.
+// Gradient: mse_grad_w. No dtgt (targets are data), no dw
 // (lambda(sigma) is a constant, not trained). Exactly 4 storage buffers.
 //
 
