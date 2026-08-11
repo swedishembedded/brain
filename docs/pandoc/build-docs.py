@@ -30,10 +30,15 @@ toc-title: "Contents"
 """
 
 def manifest():
+    """Yields ('part', title) for a `== Title` line, ('doc', rel_path) otherwise."""
     for line in open(os.path.join(DOCS, "manifest.txt")):
         line = line.strip()
-        if line and not line.startswith("#"):
-            yield line
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("== "):
+            yield ("part", line[3:].strip())
+        else:
+            yield ("doc", line)
 
 # strip cross-document .md links to their text (no dead links in the bundle),
 # keep external links, anchors, and images.
@@ -55,7 +60,12 @@ def transform(rel_path, text):
 
 def build_markdown():
     parts = [META]
-    for rel in manifest():
+    for kind, val in manifest():
+        if kind == "part":
+            latex_part = val.replace("{", "\\{").replace("}", "\\}")
+            parts.append(f"`\\part{{{latex_part}}}`{{=latex}}\n\n")
+            continue
+        rel = val
         p = os.path.join(DOCS, rel)
         if not os.path.isfile(p):
             print(f"WARN missing: {rel}", file=sys.stderr)
