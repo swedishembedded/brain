@@ -362,6 +362,18 @@ fn submit_subscribed_job(
             })
             .on_progress(move |p: Progress| {
                 if let Ok(mut s) = sp.lock() {
+                    // A mid-stream chunk (e.g. one vocoded audio segment,
+                    // `capability::Progress::chunk`'s own doc) goes out as a
+                    // real `blob` frame over the SAME SEQPACKET+memfd
+                    // side-channel the terminal reply already uses below --
+                    // not deferred to `reply`, which is the whole point of
+                    // this field existing.
+                    if let Some((name, blob)) = &p.chunk {
+                        match bytes_to_fd(name, &blob.bytes, false) {
+                            Ok((fd, _)) => s.blob(name, blob.media.name(), &blob.meta, fd.as_fd()),
+                            Err(e) => s.error(&format!("chunk blob {name}: {e}")),
+                        }
+                    }
                     s.progress(p.step, p.total, &p.message, None, p.delta.as_deref(), p.event.as_ref());
                 }
             })

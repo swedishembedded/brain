@@ -38,10 +38,17 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     let inner = provider.inner();
 
     println!("running real Thinker(text) -> Talker -> MTP -> Code2Wav chain -- expect this to take a while (every layer's weights streamed fresh per step)...");
-    let (text, wav, sample_rate) = inner.speak("Say hello.", 8, "chelsie").expect("speak failed on real weights");
+    let mut streamed = Vec::new();
+    let mut n_chunks = 0u32;
+    let (text, wav, sample_rate) = inner
+        .speak("Say hello.", 8, "chelsie", |chunk| {
+            n_chunks += 1;
+            streamed.extend_from_slice(chunk);
+        })
+        .expect("speak failed on real weights");
 
     println!("text: {text:?}");
-    println!("wav: {} samples at {sample_rate} Hz ({:.2}s)", wav.len(), wav.len() as f32 / sample_rate as f32);
+    println!("wav: {} samples at {sample_rate} Hz ({:.2}s), {n_chunks} chunks", wav.len(), wav.len() as f32 / sample_rate as f32);
 
     assert!(!text.is_empty(), "Thinker must produce some text");
     assert!(!wav.is_empty(), "Code2Wav must produce a non-empty waveform");
@@ -50,4 +57,12 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     println!("rms: {rms:.6}");
     assert!(rms > 1e-4, "waveform rms {rms} looks like silence, not real speech");
     assert_eq!(sample_rate, 24000, "Code2Wav's own configured output rate");
+
+    // Real streaming, not just a real waveform: the on_chunk callback must
+    // have actually fired, and the reassembled stream must equal the
+    // returned waveform exactly -- proves decode_omni_chunked's chunked
+    // path (validated on synthetic weights in crates/codec/tests/
+    // decode_omni_chunked.rs) also holds on the real checkpoint.
+    assert!(n_chunks > 0, "speak must stream at least one audio chunk");
+    assert_eq!(streamed, wav, "reassembled streamed chunks must equal the returned waveform exactly");
 }

@@ -66,16 +66,19 @@ fn generate_spec_declares_every_param_the_http_handlers_set() {
     assert!(spec.outputs.iter().any(|o| o.media == Media::Text), "generate_spec must output a Media::Text blob");
 }
 
-/// `speak` is deliberately NOT `.streaming()` (one-shot: the whole waveform
-/// is the single artifact today, per its own module doc) and is reached only
-/// by its literal action name -- `api_caps` only classifies `generate` as
-/// chat, so `speak` alone changing shape would never silently start (or
-/// stop) being chat-exposed. This pins the shape `caps.rs`'s own doc claims
-/// (`speak_spec`'s own doc: "text response + spoken waveform out").
+/// `speak` IS `.streaming()`: `OmniInner::speak` now vocodes via
+/// `Codec::decode_omni_chunked`, emitting real audio chunks mid-run via
+/// `Progress::chunk` for a `Subscribe`-based caller (the terminal `Outcome`
+/// still carries the full reassembled waveform too, unchanged, for a plain
+/// `Run` caller). `speak` is reached only by its literal action name --
+/// `api_caps` only classifies `generate` as chat, so `speak` alone changing
+/// shape would never silently start (or stop) being chat-exposed. This pins
+/// the shape `caps.rs`'s own doc claims (`speak_spec`'s own doc: "text
+/// response + spoken waveform out").
 #[test]
 fn speak_spec_declares_the_documented_shape() {
     let spec = omni::caps::speak_spec();
-    assert!(!spec.streaming, "speak is one-shot today, not .streaming()");
+    assert!(spec.streaming, "speak now streams real audio chunks mid-run via Progress::chunk");
     for name in ["messages", "prompt", "max_new", "speaker"] {
         assert!(spec.params.iter().any(|p| p.name == name), "speak_spec is missing param '{name}'");
     }

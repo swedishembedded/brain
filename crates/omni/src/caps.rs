@@ -101,9 +101,14 @@ pub fn generate_spec() -> ActionSpec {
 /// Chains Thinker (text) -> Talker + MTP + Code2Wav (`crate::caps::OmniInner
 /// ::speak`, `crate::talker_generate`'s module doc) -- text-only user turn,
 /// no audio/image splice on this path yet (`crate::talker_prompt`'s scope
-/// note).
+/// note). `.streaming()`: audio chunks now arrive mid-run via
+/// `Progress::chunk` (`Codec::decode_omni_chunked`, wired in
+/// `OmniInner::speak`) for a `Subscribe`-based caller; the terminal
+/// `Outcome` still carries the FULL reassembled audio too, unchanged, for a
+/// plain `Run` caller that never sees progress frames.
 pub fn speak_spec() -> ActionSpec {
     ActionSpec::new("speak", "Qwen3-Omni: text response + spoken waveform (Thinker -> Talker -> MTP -> Code2Wav)")
+        .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
@@ -120,6 +125,7 @@ pub fn speak_spec() -> ActionSpec {
 /// the literal action name `generate`).
 pub fn converse_spec() -> ActionSpec {
     ActionSpec::new("converse", "Qwen3-Omni: real audio/image/video input, text response + spoken waveform out (Thinker -> Talker -> MTP -> Code2Wav, media-aware user segment). D-Bus/CLI only.")
+        .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
@@ -308,9 +314,16 @@ impl OmniInner {
     /// module doc). Text-only user turn (no audio/image splice on this
     /// path yet — see `crate::talker_prompt`'s scope note). `speaker` is a
     /// name from `TalkerConfig::speaker_id` (falls back to the first entry,
-    /// typically `"chelsie"`, if unrecognized). Returns `(text, wav_samples,
-    /// sample_rate)`.
-    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str) -> Result<(String, Vec<f32>, u32), String> {
+    /// typically `"chelsie"`, if unrecognized). Vocodes via
+    /// `Codec::decode_omni_chunked` (`SPEAK_CHUNK_FRAMES` at a time),
+    /// calling `on_chunk` with each real audio segment as it's decoded — a
+    /// `Subscribe`-based caller gets real mid-stream audio
+    /// (`ConverseAction`/`SpeakAction::run` turn this into
+    /// `Progress::chunk`); `on_chunk` may be a no-op for a caller that only
+    /// wants the final reassembled waveform this still returns. Returns
+    /// `(text, wav_samples, sample_rate)` — the SAME complete waveform
+    /// regardless of whether `on_chunk` streamed it too.
+    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let (text, new_ids) = self.generate(prompt, max_new);
         let user_ids = self.tok.encode(prompt);
 
@@ -344,7 +357,11 @@ impl OmniInner {
         let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default())?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
-        let wav = codec.decode_omni(&codes);
+        let mut wav = Vec::new();
+        codec.decode_omni_chunked(&codes, SPEAK_CHUNK_FRAMES, |chunk| {
+            wav.extend_from_slice(chunk);
+            on_chunk(chunk);
+        });
         Ok((text, wav, self.cfg.code2wav.output_sample_rate))
     }
 
@@ -364,9 +381,10 @@ impl OmniInner {
     /// `video_token_id`, no separate bookkeeping needed) — into
     /// `build_talker_prompt` so a media position gets
     /// `hidden_projection(hidden)` instead of the text branch. From there,
-    /// identical to `speak`: Talker -> MTP -> Code2Wav.
+    /// identical to `speak`: Talker -> MTP -> Code2Wav, chunked/streamed the
+    /// same way (see [`Self::speak`]'s doc on `on_chunk`).
     #[allow(clippy::too_many_arguments)]
-    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str) -> Result<(String, Vec<f32>, u32), String> {
+    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let text_ids = self.tok.encode(prompt);
         let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video)?;
         let n_prompt = mm_prompt.token_ids.len() as u32;
@@ -402,10 +420,22 @@ impl OmniInner {
         let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts::default())?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
-        let wav = codec.decode_omni(&codes);
+        let mut wav = Vec::new();
+        codec.decode_omni_chunked(&codes, SPEAK_CHUNK_FRAMES, |chunk| {
+            wav.extend_from_slice(chunk);
+            on_chunk(chunk);
+        });
         Ok((text, wav, self.cfg.code2wav.output_sample_rate))
     }
 }
+
+/// Code frames (12.5 Hz) per `Codec::decode_omni_chunked` call in
+/// `OmniInner::speak`/`converse` — matching the reference's own
+/// `chunked_decode(chunk_size=300, ...)` convention (`Codec::
+/// decode_omni_chunked`'s own doc has the full reasoning for why this
+/// implementation's front/back split doesn't need the reference's
+/// `left_context_size` re-decode-and-discard shape).
+const SPEAK_CHUNK_FRAMES: usize = 300;
 
 struct GenerateAction {
     inner: Arc<OmniInner>,
@@ -455,8 +485,13 @@ impl Action for SpeakAction {
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
 
         progress(Progress::step(0, 2, "generating text"));
-        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker)?;
-        progress(Progress::step(1, 2, "synthesizing speech"));
+        let mut n_chunks = 0u32;
+        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker, |chunk| {
+            n_chunks += 1;
+            let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
+            progress(Progress::chunk(1, 2, format!("audio chunk {n_chunks}"), "audio", blob));
+        })?;
         let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         progress(Progress::step(2, 2, "done"));
         Ok(Outcome::new()
@@ -488,8 +523,13 @@ impl Action for ConverseAction {
         let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
 
         progress(Progress::step(0, 2, "generating text"));
-        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker)?;
-        progress(Progress::step(1, 2, "synthesizing speech"));
+        let mut n_chunks = 0u32;
+        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker, |chunk| {
+            n_chunks += 1;
+            let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
+            progress(Progress::chunk(1, 2, format!("audio chunk {n_chunks}"), "audio", blob));
+        })?;
         let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         progress(Progress::step(2, 2, "done"));
         Ok(Outcome::new()

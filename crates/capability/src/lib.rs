@@ -434,21 +434,42 @@ pub struct Progress {
     pub message: String,
     pub delta: Option<String>,
     pub event: Option<serde_json::Value>,
+    /// A named binary chunk to emit MID-STREAM (e.g. one vocoded audio
+    /// segment from a chunked decode) — `(name, blob)`, reusing [`Blob`]'s
+    /// own shape (media tag + bytes + meta) rather than inventing a second
+    /// one, since a mid-stream chunk and a terminal [`Outcome`] blob carry
+    /// the same kind of payload, just at a different point in the action's
+    /// life. `None` for every progress kind that predates this field — an
+    /// existing caller matching on `step`/`total`/`message`/`delta`/`event`
+    /// is unaffected. The D-Bus `Subscribe` transport
+    /// (`crates/dbus/src/service.rs`) is what actually turns a `Some` here
+    /// into an out-of-band memfd `blob` frame on the SAME `SOCK_SEQPACKET`
+    /// side-channel `StreamTx::blob` already uses for terminal blobs — no
+    /// new transport, and this stays a plain in-process `Vec<u8>` (cheap,
+    /// no fd overhead) until it reaches that boundary.
+    pub chunk: Option<(String, Blob)>,
 }
 
 impl Progress {
     /// A plain step update (no token payload).
     pub fn step(step: u32, total: u32, message: impl Into<String>) -> Progress {
-        Progress { step, total, message: message.into(), delta: None, event: None }
+        Progress { step, total, message: message.into(), delta: None, event: None, chunk: None }
     }
     /// A streaming token: `text` is the new fragment carried in `delta`.
     pub fn token(step: u32, total: u32, text: impl Into<String>) -> Progress {
-        Progress { step, total, message: "token".into(), delta: Some(text.into()), event: None }
+        Progress { step, total, message: "token".into(), delta: Some(text.into()), event: None, chunk: None }
     }
     /// A structured out-of-band progress payload (e.g. a tool-call event
     /// surfaced during streaming generation), carried in `event`.
     pub fn event(step: u32, total: u32, v: serde_json::Value) -> Progress {
-        Progress { step, total, message: "event".into(), delta: None, event: Some(v) }
+        Progress { step, total, message: "event".into(), delta: None, event: Some(v), chunk: None }
+    }
+    /// A mid-stream binary chunk (e.g. one vocoded audio segment), named
+    /// `name` — see [`Self::chunk`]'s field doc for the full shape/transport
+    /// story. `message` is still a plain human-readable step description
+    /// (e.g. `"decoding chunk 3/10"`); the payload itself lives in `chunk`.
+    pub fn chunk(step: u32, total: u32, message: impl Into<String>, name: impl Into<String>, blob: Blob) -> Progress {
+        Progress { step, total, message: message.into(), delta: None, event: None, chunk: Some((name.into(), blob)) }
     }
 }
 
