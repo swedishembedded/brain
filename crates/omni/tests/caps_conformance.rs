@@ -66,3 +66,33 @@ fn generate_spec_declares_every_param_the_http_handlers_set() {
     assert!(spec.outputs.iter().any(|o| o.media == Media::Text), "generate_spec must output a Media::Text blob");
 }
 
+/// `speak` is deliberately NOT `.streaming()` (one-shot: the whole waveform
+/// is the single artifact today, per its own module doc) and is reached only
+/// by its literal action name -- `api_caps` only classifies `generate` as
+/// chat, so `speak` alone changing shape would never silently start (or
+/// stop) being chat-exposed. This pins the shape `caps.rs`'s own doc claims
+/// (`speak_spec`'s own doc: "text response + spoken waveform out").
+#[test]
+fn speak_spec_declares_the_documented_shape() {
+    let spec = omni::caps::speak_spec();
+    assert!(!spec.streaming, "speak is one-shot today, not .streaming()");
+    for name in ["messages", "prompt", "max_new", "speaker"] {
+        assert!(spec.params.iter().any(|p| p.name == name), "speak_spec is missing param '{name}'");
+    }
+    assert!(spec.outputs.iter().any(|o| o.media == Media::Text), "speak_spec must output a Media::Text blob");
+    assert!(spec.outputs.iter().any(|o| o.media == Media::Audio), "speak_spec must output a Media::Audio blob");
+}
+
+/// `converse` must NOT be chat-exposed: `api_caps` gates chat classification
+/// on the literal action name `generate` (`crates/apiserve/src/catalog.rs`),
+/// so an action named `converse` is invisible to `/v1/chat/completions`/
+/// `/v1/messages` regardless of its own shape -- this is the real function,
+/// not a re-derivation, proving `caps.rs`'s own "D-Bus/CLI only" doc claim
+/// for `converse` rather than merely asserting it in prose.
+#[test]
+fn converse_is_not_chat_exposed() {
+    let solo_manifest = capability::Manifest::new(omni::caps::MODEL, "converse-only probe", vec![omni::caps::converse_spec()]);
+    let caps = api_caps(&solo_manifest);
+    assert!(!caps.chat, "converse alone must not be classified chat-capable -- it would then wrongly appear on /v1/chat/completions");
+}
+

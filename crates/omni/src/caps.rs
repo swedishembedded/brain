@@ -2,23 +2,31 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `capability` surface for Qwen3-Omni: text generation (with optional real
-//! audio/image input) and now real speech output.
+//! audio/image/video input), real speech output, and now real audio/image/
+//! video input FUSED WITH speech output in one call.
 //!
-//! `generate` (text prompt in, plus an optional speech clip and/or image
-//! spliced in via `crate::mm`, greedy text out —
-//! `crate::generate::generate_greedy`/`generate_greedy_multimodal`) and
-//! `speak` (text prompt in, response text + a real spoken waveform out —
+//! Three actions: `generate` (text prompt in, plus an optional speech clip
+//! and/or image and/or video spliced in via `crate::mm`, greedy text out —
+//! `crate::generate::generate_greedy`/`generate_greedy_multimodal`); `speak`
+//! (text prompt in, response text + a real spoken waveform out —
 //! `OmniInner::speak`, chaining Thinker -> Talker -> MTP -> Code2Wav via
-//! `crate::talker_prompt`/`crate::talker_generate`) are both declared.
-//! `speak`'s own scope: text-only user turn (no audio/image splice on the
-//! Talker side yet — `crate::talker_prompt`'s doc), single-turn (no
-//! multi-turn Talker context). No `converse`/`transcribe` actions —
-//! `converse` would need `speak`'s loop wired onto `generate`'s multimodal
-//! input path together (not done); `transcribe` needs a dedicated ASR-shaped
-//! prompt this crate hasn't built (use `brain/qwen-asr` directly for
-//! transcription today). Declaring an action whose `run()` can't actually do
-//! what its spec promises is worse than not declaring it. Video input IS
-//! wired into `generate` now: a `video` blob (`Media::Bytes`, N concatenated
+//! `crate::talker_prompt`/`crate::talker_generate` — text-only user turn:
+//! the Talker's user segment always takes the text-projection branch); and
+//! `converse` (real audio/image/video input AND real speech output, same
+//! turn — `OmniInner::converse`, `crate::talker_prompt::UserMediaSplice`'s
+//! per-position `hidden_projection`/`text_projection` selection is what
+//! makes this correct instead of silently ignoring the multimodal input on
+//! the Talker side the way reusing `speak`'s text-only assembly would).
+//! `converse` is D-Bus/CLI-reachable only:
+//! `apiserve::catalog::api_caps` classifies an action as chat-capable only
+//! when it is literally named `generate` (see this doc's own note on
+//! `generate_spec()` below), so `converse` never appears on `/v1/chat/
+//! completions`/`/v1/messages`. No `transcribe` action — it needs a
+//! dedicated ASR-shaped prompt this crate hasn't built (use `brain/qwen-asr`
+//! directly for transcription today). Declaring an action whose `run()`
+//! can't actually do what its spec promises is worse than not declaring it.
+//! All three actions are single-turn (no multi-turn Talker context tracked
+//! across calls). Video input: a `video` blob (`Media::Bytes`, N concatenated
 //! HWC-f32 RGB frames + `{frames,w,h,c}` meta —
 //! `capability::blob::decode_video_hwc`) decodes to the already-decoded-frame
 //! list `crate::mm::encode_video_frames` takes. Frame EXTRACTION (demuxing an
@@ -57,10 +65,10 @@ use gpu_core::Gpu;
 use serde_json::json;
 
 use crate::config::OmniConfig;
-use crate::generate::{generate_greedy, generate_greedy_multimodal};
+use crate::generate::{generate_greedy, generate_greedy_multimodal, thinker_hidden_at_layer};
 use crate::mm::build_multimodal_prompt;
 use crate::talker_generate::{self, GenOpts};
-use crate::talker_prompt::build_talker_prompt;
+use crate::talker_prompt::{build_talker_prompt, UserMediaSplice};
 use crate::thinker::thinker_pipelines;
 
 /// Model name in the manifest.
@@ -104,12 +112,31 @@ pub fn speak_spec() -> ActionSpec {
         .output(BlobSpec::new("audio", Media::Audio, "the spoken response: raw mono f32 little-endian PCM at Code2WavConfig::output_sample_rate (24 kHz)"))
 }
 
-/// The manifest (`generate` + `speak`).
+/// The `converse` action schema: real audio/image/video input AND real
+/// speech output, in one call — see this module's doc for why this needs
+/// `crate::talker_prompt::UserMediaSplice` rather than reusing `speak`'s
+/// text-only Talker-prompt assembly, and why it is D-Bus/CLI-only (not
+/// classified chat-capable by `apiserve::catalog::api_caps`, which keys on
+/// the literal action name `generate`).
+pub fn converse_spec() -> ActionSpec {
+    ActionSpec::new("converse", "Qwen3-Omni: real audio/image/video input, text response + spoken waveform out (Thinker -> Talker -> MTP -> Code2Wav, media-aware user segment). D-Bus/CLI only.")
+        .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
+        .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
+        .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").default(json!(32)))
+        .param(ParamSpec::new("speaker", ParamType::Str, "voice name from TalkerConfig::speaker_id (chelsie/ethan/aiden); falls back to the first configured voice").default(json!("chelsie")))
+        .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
+        .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
+        .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
+        .output(BlobSpec::new("text", Media::Text, "the generated response text"))
+        .output(BlobSpec::new("audio", Media::Audio, "the spoken response: raw mono f32 little-endian PCM at Code2WavConfig::output_sample_rate (24 kHz)"))
+}
+
+/// The manifest (`generate` + `speak` + `converse`).
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; the multimodal+speech-output combination is not wired in yet).",
-        vec![generate_spec(), speak_spec()],
+        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, real speech output via speak, and real audio/image/video input fused with speech output via converse (validation-tier: streamed weights, no int8/GPU-sharded residency).",
+        vec![generate_spec(), speak_spec(), converse_spec()],
     )
 }
 
@@ -173,6 +200,7 @@ impl Provider for OmniProvider {
         match resolve_action(name).ok()? {
             OmniActionKind::Generate => Some(Arc::new(GenerateAction { inner: self.inner.clone() })),
             OmniActionKind::Speak => Some(Arc::new(SpeakAction { inner: self.inner.clone() })),
+            OmniActionKind::Converse => Some(Arc::new(ConverseAction { inner: self.inner.clone() })),
         }
     }
 }
@@ -185,8 +213,10 @@ impl Provider for OmniProvider {
 pub enum OmniActionKind {
     /// Thinker text generation ([`GenerateAction`] path — text out).
     Generate,
-    /// Thinker -> Talker -> MTP -> Code2Wav ([`SpeakAction`] path — text + audio out).
+    /// Thinker -> Talker -> MTP -> Code2Wav ([`SpeakAction`] path — text + audio out, text-only user turn).
     Speak,
+    /// Thinker -> Talker -> MTP -> Code2Wav ([`ConverseAction`] path — real audio/image/video in AND audio out, same turn).
+    Converse,
 }
 
 /// Resolve an action name to its handler, or an error naming the declared
@@ -195,7 +225,8 @@ pub fn resolve_action(name: &str) -> Result<OmniActionKind, String> {
     match name {
         "generate" => Ok(OmniActionKind::Generate),
         "speak" => Ok(OmniActionKind::Speak),
-        other => Err(format!("omni: unsupported action '{other}' (this model declares: generate, speak)")),
+        "converse" => Ok(OmniActionKind::Converse),
+        other => Err(format!("omni: unsupported action '{other}' (this model declares: generate, speak, converse)")),
     }
 }
 
@@ -219,6 +250,11 @@ pub fn run_action(inner: &Arc<OmniInner>, action: &str, inv: &Invocation, progre
         }
         OmniActionKind::Speak => {
             let act = SpeakAction { inner: inner.clone() };
+            let inv = act.spec().validate(inv.clone())?;
+            act.run(&inv, progress)
+        }
+        OmniActionKind::Converse => {
+            let act = ConverseAction { inner: inner.clone() };
             let inv = act.spec().validate(inv.clone())?;
             act.run(&inv, progress)
         }
@@ -291,7 +327,7 @@ impl OmniInner {
             .or_else(|| tc.speaker_id.values().next().copied())
             .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
 
-        let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids);
+        let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids, None);
 
         let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
@@ -306,6 +342,64 @@ impl OmniInner {
         // device, with Talker's own pipeline table, is required here.
         let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
         let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default())?;
+
+        let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
+        let wav = codec.decode_omni(&codes);
+        Ok((text, wav, self.cfg.code2wav.output_sample_rate))
+    }
+
+    /// [`Self::speak`], but the user turn carries real audio/image/video
+    /// input AND the Talker's own user segment reflects it — the gap
+    /// `speak` alone leaves open (its user segment is always
+    /// `text_projection(thinker_embed(id))`, `crate::talker_prompt`'s
+    /// original scope note). Builds the SAME `MultimodalPrompt`
+    /// (`crate::mm::build_multimodal_prompt`) [`Self::generate_multimodal`]
+    /// uses, reuses it for both the text generation AND a second Thinker
+    /// pass (`crate::generate::thinker_hidden_at_layer`, teacher-forced,
+    /// early-exits after `TalkerConfig::accept_hidden_layer`) that captures
+    /// the accept-layer hidden state for every USER-segment position, then
+    /// feeds `crate::talker_prompt::UserMediaSplice` — a per-position mask
+    /// derived directly from `mm_prompt.token_ids` (a position is a media
+    /// position iff its token id is `audio_token_id`/`image_token_id`/
+    /// `video_token_id`, no separate bookkeeping needed) — into
+    /// `build_talker_prompt` so a media position gets
+    /// `hidden_projection(hidden)` instead of the text branch. From there,
+    /// identical to `speak`: Talker -> MTP -> Code2Wav.
+    #[allow(clippy::too_many_arguments)]
+    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str) -> Result<(String, Vec<f32>, u32), String> {
+        let text_ids = self.tok.encode(prompt);
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video)?;
+        let n_prompt = mm_prompt.token_ids.len() as u32;
+        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
+        let new_ids = out_ids[n_prompt as usize..].to_vec();
+        let text = self.tok.decode(&new_ids);
+
+        let tc = &self.cfg.talker;
+        let text_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "text_projection")?;
+        let hidden_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "hidden_projection")?;
+        let codec_embedding = self.reader.tensor("talker.model.codec_embedding.weight").ok_or("omni: missing tensor talker.model.codec_embedding.weight")?;
+        let d = tc.text.hidden as usize;
+        let codec_embed = |id: u32| codec_embedding[id as usize * d..(id as usize + 1) * d].to_vec();
+        let specials = crate::codec_bridge::talker_prompt_specials(&self.cfg);
+        let speaker_id = tc
+            .speaker_id
+            .get(speaker)
+            .copied()
+            .or_else(|| tc.speaker_id.values().next().copied())
+            .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
+
+        let user_hidden = thinker_hidden_at_layer(&self.reader, &self.gpu, &self.cfg.thinker.text, &mm_prompt.x_host, &mm_prompt.positions, n_prompt, tc.accept_hidden_layer);
+        let tcfg = &self.cfg.thinker;
+        let media_mask: Vec<bool> = mm_prompt.token_ids.iter().map(|&t| t == tcfg.audio_token_id || t == tcfg.image_token_id || t == tcfg.video_token_id).collect();
+        let splice = UserMediaSplice { hidden_proj: &hidden_proj, hidden: &user_hidden, media_mask: &media_mask };
+
+        let tprompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &mm_prompt.token_ids, &new_ids, Some(splice));
+
+        let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
+        let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
+        let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
+        let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts::default())?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
         let wav = codec.decode_omni(&codes);
@@ -372,6 +466,39 @@ impl Action for SpeakAction {
     }
 }
 
+struct ConverseAction {
+    inner: Arc<OmniInner>,
+}
+
+impl Action for ConverseAction {
+    fn spec(&self) -> ActionSpec {
+        converse_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let prompt = last_user_text(inv);
+        if prompt.trim().is_empty() {
+            return Err("omni converse: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+        let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
+
+        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
+        let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
+        let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
+
+        progress(Progress::step(0, 2, "generating text"));
+        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker)?;
+        progress(Progress::step(1, 2, "synthesizing speech"));
+        let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
+        progress(Progress::step(2, 2, "done"));
+        Ok(Outcome::new()
+            .set("text", json!(text))
+            .blob("text", Blob::new(Media::Text, text.into_bytes()))
+            .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +529,26 @@ mod tests {
         }
         let err = resolve_action("transcribe").expect_err("undeclared action must error");
         assert!(err.contains("unsupported action"), "error must name the failure: {err}");
+    }
+
+    /// Spec: `converse` resolves to its own distinct handler (not aliasing
+    /// `speak` or `generate`), and its schema really is the union its doc
+    /// claims — every multimodal input `generate_spec` declares AND the
+    /// audio output `speak_spec` declares. A `converse_spec` missing either
+    /// half would validate fine but silently drop real input or promise an
+    /// output `ConverseAction::run` never produces.
+    #[test]
+    fn converse_resolves_distinctly_and_declares_the_full_union_shape() {
+        let c = resolve_action("converse").expect("converse must resolve");
+        assert_eq!(c, OmniActionKind::Converse);
+        assert_ne!(c, OmniActionKind::Generate);
+        assert_ne!(c, OmniActionKind::Speak);
+
+        let spec = converse_spec();
+        for name in ["audio", "image", "video"] {
+            assert!(spec.inputs.iter().any(|b| b.name == name), "converse_spec must declare input '{name}'");
+        }
+        assert!(spec.outputs.iter().any(|b| b.media == Media::Text), "converse_spec must declare a text output");
+        assert!(spec.outputs.iter().any(|b| b.media == Media::Audio), "converse_spec must declare an audio output");
     }
 }

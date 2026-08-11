@@ -27,8 +27,11 @@ use std::sync::Arc;
 
 /// Qwen3-Omni behind the scheduler. Loads directly from a real HF checkpoint
 /// directory (`BRAIN_OMNI_HF_DIR`) — no brain-native import step involved yet
-/// (there are two open loader-side naming gaps for Talker/Code2Wav). Dispatches both declared actions
-/// (`generate`, `speak`) through `omni::caps::run_action`.
+/// (there are two open loader-side naming gaps for Talker/Code2Wav).
+/// Dispatches every declared action (`generate`, `speak`, `converse`)
+/// generically through `omni::caps::run_action` -- a new action needs no
+/// change here, only a `manifest()` entry and a `resolve_action` arm in
+/// `omni::caps`.
 pub struct OmniResident {
     hf_dir: String,
 }
