@@ -121,7 +121,12 @@ impl ThinkerInt8Store {
     }
 }
 
-fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
+/// Read one packed int8 weight + its `.scale` sibling and upload both,
+/// UNQUANTIZED (no dequantize-then-f32 round trip) -- the primitive every
+/// resident int8 weight (expert or otherwise) is built from. `pub(crate)`
+/// so non-expert callers (e.g. `crate::thinker::lm_head_fwd_i8`'s weight
+/// loader) can reuse it without re-deriving this read+upload sequence.
+pub(crate) fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
     let packed = reader.tensor_u32(name).unwrap_or_else(|| panic!("ThinkerInt8Store: missing packed weight '{name}'"));
     let scale_name = format!("{name}.scale");
     let scale = reader.tensor(&scale_name).unwrap_or_else(|| panic!("ThinkerInt8Store: missing scale sibling '{scale_name}'"));

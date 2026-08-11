@@ -84,6 +84,8 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("max_abs_row", kernels::MAX_ABS_ROW),               // 16
         ("quant_pack", kernels::QUANT_PACK),                 // 17
         ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 18
+        // General (non-MoE) int8 GEMM -- see `lm_head_fwd_i8`'s doc.
+        ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),           // 19
     ]
 }
 
@@ -359,5 +361,37 @@ pub fn final_norm(g: &Gpu, cfg: &MoeTextConfig, norm_w: &DeviceBuffer, h: &Devic
 pub fn lm_head_fwd(g: &Gpu, lm_head_w: &DeviceBuffer, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
     let out = g.storage((n * vocab) as u64);
     g.submit(&[], &[g.step(MATMUL, &[hidden, lm_head_w, &out], &[n, d, vocab], n * vocab)]);
+    out
+}
+
+/// Kernel indices [`lm_head_fwd_i8`] dispatches — `matmul_i8` is a general
+/// int8 GEMM (`matmul_i8_dyn.wgsl`, the SAME kernel [`model::moe::
+/// shared_expert_fwd_i8`]'s own dense linears already use), not an MoE-only
+/// primitive, so this is a fresh (non-MoE) int8 dispatch surface rather than
+/// a reuse of [`moe_ids8`].
+pub struct LmHeadIds8 {
+    pub matmul_i8: usize,
+    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair.
+    pub quant: [usize; 2],
+}
+
+/// int8 counterpart of [`lm_head_fwd`]: `hidden` is quantized once (a single
+/// `[n, d]` activation, not reused across N experts, so there is no "quantize
+/// once, share across readers" concern the MoE path has), `lm_head_w` is
+/// ALREADY a packed [`model::moe::Lin8`] view (the checkpoint's real
+/// `lm_head.weight` is quantized on disk by `omni::import::should_quantize`
+/// like every other rank-2 `k%4==0` weight — a caller loads it via
+/// `crate::int8_resident`'s `load_lin8` rather than dequantizing, unlike
+/// [`crate::int8_thinker_resident::load_mat`]'s current always-dequantize
+/// path). vocab is not required to be a multiple of 4 for the OUTPUT side
+/// (only `d`, the K dimension, needs to be — the packing constraint is on
+/// the CONTRACTED dimension, matching every other int8 GEMM in this crate).
+pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
+    let xq = g.storage((n * d / 4) as u64);
+    let sx = g.storage(n as u64);
+    let mut steps = quant_rows_steps(g, QuantRows { kernels: ids.quant, x: hidden, sx: &sx, xq: &xq }, 0, n, d).to_vec();
+    let out = g.storage((n * vocab) as u64);
+    steps.push(g.step(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], n.div_ceil(128) * vocab.div_ceil(128) * 256));
+    g.submit(&[], &steps);
     out
 }
