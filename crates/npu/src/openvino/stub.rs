@@ -289,6 +289,15 @@ impl KvSession {
     pub fn device(&self) -> &str {
         ""
     }
+    pub fn last_marshal_ms(&self) -> f64 {
+        0.0
+    }
+    pub fn last_infer_ms(&self) -> f64 {
+        0.0
+    }
+    pub fn last_readback_ms(&self) -> f64 {
+        0.0
+    }
     #[allow(clippy::type_complexity)]
     pub fn run_step(
         &mut self,

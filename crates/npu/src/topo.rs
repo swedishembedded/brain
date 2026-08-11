@@ -336,13 +336,35 @@ impl<'a> TopoBase<'a> {
     }
 }
 
-/// Bias-free linear `y = x @ Wᵀ` with per-output-channel weight-only
+/// Weight-quantization block size along the reduction (`inp`) axis. A scale
+/// spanning the *whole* channel -- `inp` up to 3072 in these models -- lets one
+/// outlier weight set the quantization step for every other weight in that
+/// channel; GGUF's own block formats (`Q4_0`/`Q8_0`) use 32-element blocks for
+/// exactly this reason (see AGENTS.md's NPU weight-quantization rule --
+/// whole-channel INT8 measured cosine 0.994 against fp32 vs 1.000000 for the
+/// identical driver at fp32 -- a real accuracy defect, not driver error).
+/// Falls back to whole-channel (`group = inp`, `n_groups = 1`) when `inp`
+/// isn't a multiple of 32, which reproduces the old behavior exactly rather
+/// than guessing at a ragged group.
+const QUANT_GROUP: usize = 32;
+
+/// Bias-free linear `y = x @ Wᵀ` with per-(group, output-channel) weight-only
 /// quantization — the ONE emitter every topology's `linear` delegates to
 /// (the per-model copies it replaces drifted exactly the way AGENTS.md's
 /// one-implementation rule warns about). Brain weights are `[out,in]`
 /// row-major; ONNX wants `[in,out]`, transposed here once. `Quant::F32`
 /// stores the fp32 initializer; `Int8`/`Int4` store symmetric integers +
-/// scales and dequantise in-graph (`DequantizeLinear` → MatMul).
+/// one scale per `(group, out)` pair and dequantise in-graph.
+///
+/// Dequantization is `Cast(int -> float)` → `Reshape` to `[n_groups, group,
+/// out]` → `Mul` against the scale reshaped to `[n_groups, 1, out]`
+/// (broadcast over `group`) → `Reshape` back to `[inp, out]` -- NOT
+/// `DequantizeLinear`, whose `axis` scale is one value per *whole* output
+/// channel (opset ≤20 has no `block_size` attribute for sub-channel
+/// granularity; opset 21 added one, but that raises every model's opset for
+/// an OpenVINO-NPU op-coverage bet nothing here has validated). Cast/Reshape/
+/// Mul are already proven on this plugin throughout `topo.rs`, so the group
+/// is applied by hand instead.
 #[allow(clippy::too_many_arguments)]
 pub fn linear_quant(
     b: &mut TopoBase,
@@ -378,32 +400,166 @@ pub fn linear_quant(
     };
     let wq = format!("{winit}.q");
     if !b.has(&wq) {
-        let wt = transpose(&w.get(name));
-        let mut scales = vec![0f32; out];
+        let wt = transpose(&w.get(name)); // [inp, out]
+        let group = if inp % QUANT_GROUP == 0 { QUANT_GROUP } else { inp };
+        let n_groups = inp / group;
+        let mut scales = vec![0f32; n_groups * out];
         let mut q = vec![0i8; inp * out];
-        for o in 0..out {
-            let mut mx = 0f32;
-            for i in 0..inp {
-                mx = mx.max(wt[i * out + o].abs());
-            }
-            let s = if mx > 0.0 { mx / qmax } else { 1.0 };
-            scales[o] = s;
-            for i in 0..inp {
-                q[i * out + o] = (wt[i * out + o] / s).round().clamp(-qmax, qmax) as i8;
+        for gi in 0..n_groups {
+            let lo = gi * group;
+            let hi = lo + group;
+            for o in 0..out {
+                let mut mx = 0f32;
+                for i in lo..hi {
+                    mx = mx.max(wt[i * out + o].abs());
+                }
+                let s = if mx > 0.0 { mx / qmax } else { 1.0 };
+                scales[gi * out + o] = s;
+                for i in lo..hi {
+                    q[i * out + o] = (wt[i * out + o] / s).round().clamp(-qmax, qmax) as i8;
+                }
             }
         }
-        let zp = format!("{winit}.zp");
         if q4 {
             b.g.init_i4(&wq, &[inp as i64, out as i64], q);
-            b.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
         } else {
             b.g.init_i8(&wq, &[inp as i64, out as i64], q);
-            b.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
         }
-        b.f32(&format!("{winit}.s"), &[out as i64], scales);
-        b.g.add(
-            Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1),
-        );
+        b.f32(&format!("{winit}.s"), &[n_groups as i64, out as i64], scales);
+
+        let wq_f = format!("{winit}.qf");
+        b.g.add(Node::new("Cast", &[&wq], &[&wq_f]).attr_int("to", 1)); // to FLOAT
+
+        let sh3 = format!("{winit}.sh3");
+        b.i64(&sh3, &[3], vec![n_groups as i64, group as i64, out as i64]);
+        let qf3 = self_reshape(b, &wq_f, &sh3, &format!("{winit}.qf3"));
+
+        let shs3 = format!("{winit}.shs3");
+        b.i64(&shs3, &[3], vec![n_groups as i64, 1, out as i64]);
+        let s3 = self_reshape(b, &format!("{winit}.s"), &shs3, &format!("{winit}.s3"));
+
+        let deq3 = format!("{winit}.deq3");
+        b.node("Mul", &[&qf3, &s3], &deq3);
+
+        let sh2 = format!("{winit}.sh2");
+        b.i64(&sh2, &[2], vec![inp as i64, out as i64]);
+        b.node("Reshape", &[&deq3, &sh2], winit);
     }
     b.node("MatMul", &[x, winit], y);
+}
+
+/// `Reshape(x, shape) -> out_name`, returning `out_name` -- a named-output
+/// sibling of [`TopoBase::reshape`] (which always mints a fresh temp) for
+/// call sites that need a stable, `winit`-derived name to reference again.
+fn self_reshape(b: &mut TopoBase, x: &str, shape: &str, out_name: &str) -> String {
+    b.node("Reshape", &[x, shape], out_name);
+    out_name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onnx::graph::TensorData;
+
+    struct FixedWeight(Vec<f32>);
+    impl WeightSource for FixedWeight {
+        fn get(&self, _name: &str) -> Vec<f32> {
+            self.0.clone()
+        }
+    }
+
+    fn find<'a>(g: &'a onnx::graph::Graph, name: &str) -> &'a TensorData {
+        &g.initializers.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no initializer `{name}`")).data
+    }
+
+    /// The exact defect this quantization scheme exists to fix: a single
+    /// outlier weight anywhere in a channel must not crush the resolution of
+    /// every OTHER weight in that channel (whole-channel INT8 measured
+    /// cosine 0.994 vs fp32's 1.000000 for the same driver -- see AGENTS.md's
+    /// NPU weight-quantization rule). `out=1`,
+    /// `inp=64` (two 32-wide groups): group 0 is uniformly small (0.01),
+    /// group 1 hides one 100x outlier among otherwise-small values. Against
+    /// the OLD whole-channel scheme this reconstructs to a single scale ≈
+    /// 100/127 ≈ 0.79, which rounds every 0.01 value to 0 -- total loss of the
+    /// smaller group. This test would FAIL against that implementation.
+    #[test]
+    fn group_quant_isolates_an_outlier_to_its_own_group() {
+        let inp = 64usize;
+        let out = 1usize;
+        let mut wmat = vec![0.01f32; inp];
+        wmat[40] = 100.0; // inside group 1 (elements [32,64))
+        let w = FixedWeight(wmat.clone());
+
+        let mut g = GraphBuilder::new("t");
+        let mut b = TopoBase::new(&mut g);
+        linear_quant(&mut b, "x", "w", "w.wt", &w, out, inp, Quant::Int8, "y");
+
+        let TensorData::F32(scales) = find(g.graph(), "w.wt.s") else { panic!("scale not f32") };
+        assert_eq!(scales.len(), 2, "expected one scale per (group, out) = 2*1, got {}", scales.len());
+        let (s_lo, s_hi) = (scales[0], scales[1]);
+        assert!(
+            s_hi > s_lo * 1000.0,
+            "group 1's outlier-dominated scale ({s_hi}) should dwarf group 0's ({s_lo}) -- \
+             if they're close, grouping isn't actually isolating the outlier"
+        );
+
+        let TensorData::I8(q) = find(g.graph(), "w.wt.q") else { panic!("weights not i8") };
+        assert_eq!(q.len(), inp * out);
+        // Reconstruct exactly what the graph's Cast->Reshape->Mul->Reshape
+        // chain computes: deq[i] = q[i] as f32 * scale[i / group]. Only
+        // group 0 (indices [0,32)) is under test here -- it shares NO group
+        // with the outlier at index 40, so its own local scale is tiny and
+        // its values should reconstruct almost exactly. Group 1's OTHER
+        // members (e.g. index 41) still share the outlier's coarse scale and
+        // are expected to reconstruct poorly -- that's unavoidable within one
+        // group and not what this fix claims to solve; asserting tightness
+        // there would be testing the wrong thing.
+        let group = 32usize;
+        for i in 0..group {
+            let deq = q[i] as f32 * scales[i / group];
+            let rel_err = (deq - wmat[i]).abs() / wmat[i].abs();
+            assert!(
+                rel_err < 0.05,
+                "index {i} (group 0, no outlier): reconstructed {deq} vs original {}, rel_err {rel_err} -- \
+                 a whole-channel scale (set by group 1's outlier) would have rounded this to 0",
+                wmat[i]
+            );
+        }
+    }
+
+    /// Structural: no `DequantizeLinear` (whole-channel-only, opset<=20 has no
+    /// sub-channel block) and the group-scale initializer's shape reflects
+    /// >1 group when `inp` is a clean multiple of the block size and larger
+    /// than it.
+    #[test]
+    fn group_quant_graph_shape() {
+        let (inp, out) = (64usize, 8usize);
+        let w = FixedWeight(vec![0.1f32; out * inp]);
+        let mut g = GraphBuilder::new("t");
+        let mut b = TopoBase::new(&mut g);
+        linear_quant(&mut b, "x", "w", "w.wt", &w, out, inp, Quant::Int8, "y");
+
+        let ops: Vec<&str> = g.graph().nodes.iter().map(|n| n.op_type.as_str()).collect();
+        assert!(!ops.contains(&"DequantizeLinear"), "must not use whole-channel DequantizeLinear: {ops:?}");
+        assert!(ops.contains(&"Cast"), "expected a Cast(int->float) node: {ops:?}");
+        assert!(ops.iter().filter(|&&o| o == "Mul").count() >= 1, "expected the group-scale Mul: {ops:?}");
+
+        assert_eq!(find(g.graph(), "w.wt.q").len(), inp * out);
+        let TensorData::F32(scales) = find(g.graph(), "w.wt.s") else { panic!("scale not f32") };
+        assert_eq!(scales.len(), 2 * out, "inp=64 at block=32 should give 2 groups, got {} scales for out={out}", scales.len());
+    }
+
+    /// A ragged `inp` (not a multiple of the block size) must fall back to a
+    /// single whole-channel group rather than reshaping into a ragged shape
+    /// the graph can't express.
+    #[test]
+    fn group_quant_falls_back_when_inp_not_a_multiple_of_block() {
+        let (inp, out) = (50usize, 4usize);
+        let w = FixedWeight(vec![0.1f32; out * inp]);
+        let mut g = GraphBuilder::new("t");
+        let mut b = TopoBase::new(&mut g);
+        linear_quant(&mut b, "x", "w", "w.wt", &w, out, inp, Quant::Int8, "y");
+        let TensorData::F32(scales) = find(g.graph(), "w.wt.s") else { panic!("scale not f32") };
+        assert_eq!(scales.len(), out, "non-multiple-of-32 inp should fall back to one group (n_groups=1)");
+    }
 }

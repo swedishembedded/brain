@@ -535,59 +535,10 @@ impl<'a> Topo<'a> {
     }
 
     fn matmul_w(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
-        let qmax = match self.quant {
-            Quant::F32 => {
-                if !self.has(winit) {
-                    let wt = transpose(&w.get(name), out, inp);
-                    self.f32(winit, &[inp as i64, out as i64], wt);
-                }
-                self.node("MatMul", &[x, winit], y);
-                return;
-            }
-            Quant::Int8 => 127.0f32,
-            Quant::Int4 => 7.0f32,
-        };
-        let wq = format!("{winit}.q");
-        if !self.has(&wq) {
-            let wt = transpose(&w.get(name), out, inp);
-            let mut scales = vec![0f32; out];
-            let mut q = vec![0i8; inp * out];
-            for oc in 0..out {
-                let mut mx = 0f32;
-                for i in 0..inp {
-                    mx = mx.max(wt[i * out + oc].abs());
-                }
-                let sc = if mx > 0.0 { mx / qmax } else { 1.0 };
-                scales[oc] = sc;
-                for i in 0..inp {
-                    q[i * out + oc] = (wt[i * out + oc] / sc).round().clamp(-qmax, qmax) as i8;
-                }
-            }
-            let zp = format!("{winit}.zp");
-            if matches!(self.quant, Quant::Int4) {
-                self.g.init_i4(&wq, &[inp as i64, out as i64], q);
-                self.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
-            } else {
-                self.g.init_i8(&wq, &[inp as i64, out as i64], q);
-                self.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
-            }
-            self.f32(&format!("{winit}.s"), &[out as i64], scales);
-            self.g.add(Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1));
-        }
-        self.node("MatMul", &[x, winit], y);
+        crate::topo::linear_quant(&mut self.b, x, name, winit, w, out, inp, self.quant, y);
     }
 }
 
-/// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`.
-fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0f32; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {

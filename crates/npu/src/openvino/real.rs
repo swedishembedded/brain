@@ -1302,6 +1302,14 @@ pub struct KvSession {
     hd: usize,
     cap: usize,
     device: String,
+    /// Timing of the most recent [`run_step`](Self::run_step), split so a
+    /// caller can tell host<->device marshalling apart from device compute -
+    /// both scale with `cap` (the past K/V upload is `O(n_layers*nkv*cap*hd)`
+    /// every step) and a wall-clock total alone cannot distinguish "the step
+    /// got slower" from "marshalling now dominates the step".
+    last_marshal_ms: f64,
+    last_infer_ms: f64,
+    last_readback_ms: f64,
 }
 
 impl KvSession {
@@ -1337,11 +1345,32 @@ impl KvSession {
             hd,
             cap,
             device: dev_str(&device),
+            last_marshal_ms: 0.0,
+            last_infer_ms: 0.0,
+            last_readback_ms: 0.0,
         })
     }
 
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    /// Host->device tensor upload time (`set_tensor` for x/rope/mask/past-K/V)
+    /// of the most recent [`run_step`](Self::run_step), in ms.
+    pub fn last_marshal_ms(&self) -> f64 {
+        self.last_marshal_ms
+    }
+
+    /// Device compute time (`InferRequest::infer`) of the most recent
+    /// [`run_step`](Self::run_step), in ms.
+    pub fn last_infer_ms(&self) -> f64 {
+        self.last_infer_ms
+    }
+
+    /// Device->host tensor download time (`get_tensor` for hidden/new-K/V) of
+    /// the most recent [`run_step`](Self::run_step), in ms.
+    pub fn last_readback_ms(&self) -> f64 {
+        self.last_readback_ms
     }
 
     fn set_f32(&mut self, holders: &mut Vec<Tensor>, name: &str, dims: &[i64], data: &[f32]) -> Result<(), NpuError> {
@@ -1368,6 +1397,7 @@ impl KvSession {
         past_v: &[Vec<f32>],
     ) -> Result<(Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>), NpuError> {
         let (d, nkv, hd, cap, nl) = (self.d as i64, self.nkv as i64, self.hd as i64, self.cap as i64, self.n_layers);
+        let t_marshal = Instant::now();
         let mut holders: Vec<Tensor> = Vec::with_capacity(4 + 2 * nl);
         self.set_f32(&mut holders, "x", &[1, 1, d], x)?;
         self.set_f32(&mut holders, "rope_cos", &[1, 1, 1, hd], cos)?;
@@ -1377,8 +1407,13 @@ impl KvSession {
             self.set_f32(&mut holders, &format!("past_k_{l}"), &[1, nkv, cap, hd], &past_k[l])?;
             self.set_f32(&mut holders, &format!("past_v_{l}"), &[1, nkv, cap, hd], &past_v[l])?;
         }
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        self.last_marshal_ms = t_marshal.elapsed().as_secs_f64() * 1e3;
 
+        let t_infer = Instant::now();
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        self.last_infer_ms = t_infer.elapsed().as_secs_f64() * 1e3;
+
+        let t_readback = Instant::now();
         let get = |req: &openvino::InferRequest, name: &str| -> Result<Vec<f32>, NpuError> {
             let t = req.get_tensor(name).map_err(|e| NpuError::Other(format!("get {name}: {e:?}")))?;
             Ok(t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
@@ -1390,6 +1425,7 @@ impl KvSession {
             new_k.push(get(&self.request, &format!("new_k_{l}"))?);
             new_v.push(get(&self.request, &format!("new_v_{l}"))?);
         }
+        self.last_readback_ms = t_readback.elapsed().as_secs_f64() * 1e3;
         drop(holders);
         Ok((hidden, new_k, new_v))
     }

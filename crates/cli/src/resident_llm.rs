@@ -90,10 +90,21 @@ const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
 /// scoped (thread-local) selection in the canonical device registry, so every
 /// `Gpu::new` inside `f` binds that physical card — race-free across the
 /// executor's concurrent activation lanes. Shared by the resident adapters.
+///
+/// `f` always builds a wgpu (GPU/CPU backend) engine, so a `Device::Npu`
+/// assignment must never reach here silently -- a resident that wants NPU
+/// placement (`MemCost::with_npu`) must branch on `Device::Npu` in its own
+/// `activate` *before* calling this (see `resident_depth.rs`), the same way
+/// every other NPU-capable resident already does.
 pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, String> {
     match device {
         Device::Gpu(i) => gpu_core::devices::with_gpu(i, f),
-        _ => Ok(f()),
+        Device::Cpu => Ok(f()),
+        Device::Npu(i) => Err(format!(
+            "on_device: got Device::Npu({i}) but this resident has no NPU activation path -- \
+             a resident declaring MemCost::with_npu must branch on Device::Npu in its own \
+             activate() before calling on_device, not fall through to the wgpu build"
+        )),
     }
 }
 

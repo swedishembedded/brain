@@ -106,30 +106,50 @@ fn import(args: &[String]) {
     }
 }
 
-/// `brain qwen precompile --weights F --seq T [--npu-cache D]` — export + compile
-/// the NPU decoder once into the cache so later `infer --device npu --seq T`
-/// (with the same `--npu-cache`) skips the export + compile wait.
+/// `brain qwen precompile --weights F --seq T [--npu-cache D] [--allow-fallback]`
+/// -- export + compile the NPU decoder once into the cache so later `infer
+/// --device npu --seq T` (with the same `--npu-cache`) skips the export +
+/// compile wait.
+///
+/// Refuses (exit 1) rather than silently report a CPU/GPU compile as an "NPU"
+/// precompile -- `--device npu` is an explicit ask, and a fallback that isn't
+/// surfaced as a fallback is how "it's on the NPU" claims stop being true (see
+/// `lfm-bench`'s identical assertion, `crates/cli/src/npu_cli.rs`). Pass
+/// `--allow-fallback` to opt into a CPU/GPU compile on purpose.
 fn precompile(args: &[String]) {
     let mut weights = String::new();
     let mut npu_cache = "out/npu-cache".to_string();
     let mut seq = 0usize;
+    let mut allow_fallback = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--weights" => weights = val(args, &mut i, "--weights"),
             "--npu-cache" => npu_cache = val(args, &mut i, "--npu-cache"),
             "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            "--allow-fallback" => allow_fallback = true,
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
     if weights.is_empty() || seq == 0 {
-        eprintln!("usage: brain qwen precompile --weights F --seq T [--npu-cache out/npu-cache]");
+        eprintln!("usage: brain qwen precompile --weights F --seq T [--npu-cache out/npu-cache] [--allow-fallback]");
         return;
     }
-    match npu::qwen_decode::precompile(&weights, seq, npu::openvino::NpuDevice::Npu, true, std::path::Path::new(&npu_cache)) {
-        Ok((dev, ms)) => println!("precompiled seq {seq} on OpenVINO {dev} in {:.1}s -> cache {npu_cache}", ms / 1e3),
-        Err(e) => eprintln!("precompile failed: {e}"),
+    match npu::qwen_decode::precompile(&weights, seq, npu::openvino::NpuDevice::Npu, allow_fallback, std::path::Path::new(&npu_cache)) {
+        Ok((dev, ms)) if dev == "NPU" || allow_fallback => {
+            println!("precompiled seq {seq} on OpenVINO {dev} in {:.1}s -> cache {npu_cache}", ms / 1e3)
+        }
+        Ok((dev, _)) => {
+            eprintln!(
+                "brain qwen precompile: compiled on {dev}, not NPU (pass --allow-fallback to accept this on purpose)"
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("precompile failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -258,6 +278,7 @@ fn infer(args: &[String]) {
     let mut chat = false;
     let mut npu_cache = "out/npu-cache".to_string();
     let mut seq: Option<usize> = None;
+    let mut allow_fallback = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -273,6 +294,8 @@ fn infer(args: &[String]) {
             "--npu-cache" => npu_cache = val(args, &mut i, "--npu-cache"),
             // NPU: pin the compiled context length so one cache serves all prompts.
             "--seq" => seq = val(args, &mut i, "--seq").parse().ok(),
+            // NPU: accept a silent CPU/GPU compile instead of refusing (see below).
+            "--allow-fallback" => allow_fallback = true,
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -299,17 +322,31 @@ fn infer(args: &[String]) {
         return;
     }
     // NPU / OpenVINO whole-graph path (greedy only): export -> compile -> decode.
+    // `--device npu` is an explicit ask, so a CPU/GPU compile is refused unless
+    // `--allow-fallback` opts into it on purpose -- otherwise "npu: ran on
+    // OpenVINO device CPU" reads as an NPU result when it silently wasn't one
+    // (the same no-silent-fallback rule `lfm-bench` enforces).
     if want_npu() {
         let cache = (!npu_cache.is_empty()).then(|| std::path::PathBuf::from(&npu_cache));
-        match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, true, cache.as_deref(), seq) {
-            Ok(run) => {
+        match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, allow_fallback, cache.as_deref(), seq) {
+            Ok(run) if run.device == "NPU" || allow_fallback => {
                 eprintln!("npu: ran on OpenVINO device {} (onnx_cached={})", run.device, run.onnx_cached);
                 eprintln!("qwen-timing load_ms={:.1} gen_ms={:.1} tokens={}", run.load_ms, run.gen_ms, run.tokens.len());
                 print!("{prompt}");
                 print!("{}", tok.decode(&run.tokens));
                 println!();
             }
-            Err(e) => eprintln!("npu infer failed: {e}"),
+            Ok(run) => {
+                eprintln!(
+                    "brain qwen infer: compiled on {}, not NPU (pass --allow-fallback to accept this on purpose)",
+                    run.device
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("npu infer failed: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

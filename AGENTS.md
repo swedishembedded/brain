@@ -1002,6 +1002,28 @@ a metric that isn't there was simply forgotten.
   (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
   at the source level; the runtime is loaded at run time (`runtime-linking`), so
   `make build`/`make test` stay green with no OpenVINO installed.
+- **Weight-only quantization must be block/group-wise, never whole-channel-only.**
+  A scale spanning an entire output channel (`inp` up to 3072 in these models)
+  lets one outlier weight set the quantization step for every other weight
+  sharing that channel -- GGUF's own block formats (`Q4_0`/`Q8_0`) use
+  **32-element blocks** for exactly this reason, and K-quants (`Q4_K`/`Q5_K`)
+  go further with per-role mixed precision. This was a *real, measured* defect,
+  not a theoretical one: whole-channel INT8 on the Qwen3 KV-cache decode graph
+  measured **cosine 0.994 / max_abs 11.2** against fp32 (same driver, same
+  tokens) -- vs **1.000000 / 0.0002** at fp32. The fix
+  (`crates/npu/src/topo.rs::linear_quant`, `QUANT_GROUP = 32`) dequantizes
+  via `Cast`→`Reshape`→`Mul`→`Reshape` (per-`(group, out)` scales) rather than a
+  single `DequantizeLinear(axis=1)` call, because ONNX's native block-quant
+  needs opset 21's `block_size` attribute, whose OpenVINO-NPU op-coverage isn't
+  established -- the group is applied by hand with ops already proven on that
+  plugin. **Every NPU topology's quantized linear must go through this one
+  shared emitter** (`crate::topo::linear_quant`) -- three files (`glm_topology`,
+  `kronos_topology`, `fincast_topology`) had drifted into their own
+  byte-identical, whole-channel-only copies before this was caught; a new
+  per-model copy is the same mistake again. This applies equally to
+  `model::int8::quantize_weight` (the GPU-serving INT8 path shared by
+  `qwen3::q8`, `zimage`, `flux1`/`flux2`) if/when it is audited for the same
+  granularity.
 - **Kernels follow `.agents/rules/kernels.md`** — before writing one, check for
   an existing fast sibling (`_rows`/`_wg`/`_reg*`/`_tiled`) and put the fix in
   *selection*, not a new copy: the single most expensive defect class here is a
