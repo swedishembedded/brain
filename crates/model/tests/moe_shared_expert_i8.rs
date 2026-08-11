@@ -55,10 +55,9 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 }
 
 /// `shared_gate_w: Some` — Qwen3-Omni's Talker shape (the one this test
-/// exists to validate before real weights, per the porting playbook's
-/// "verified standalone against a host-computed oracle before real
-/// weights" precedent `docs/models/omni/status.md`'s M7a entry already
-/// established for the fp32 primitive).
+/// exists to validate before real weights, verified standalone against a
+/// host-computed oracle first, the same precedent already established for
+/// this component's fp32 primitive).
 #[test]
 fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
     let g = gpu_core::testgpu::dev(PIPES);

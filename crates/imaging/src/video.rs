@@ -3,9 +3,9 @@
 
 //! Video file → RGB frames, via the `ffmpeg` CLI (subprocess, not a build
 //! dependency). The workspace has no video-container/codec crate at all
-//! (`docs/models/omni/status.md`'s M9b entry: `omni::mm::encode_video_frames`
-//! already takes already-decoded frames, but nothing turned a real video
-//! FILE into them) — pure-Rust demuxers/decoders for real containers are
+//! (`omni::mm::encode_video_frames` already took already-decoded frames, but
+//! nothing turned a real video FILE into them until this) -- pure-Rust
+//! demuxers/decoders for real containers are
 //! immature or absent, and this repo is deliberately dependency-light
 //! (`AGENTS.md`), so this follows the same subprocess pattern already used
 //! elsewhere (`crates/perf/src/energy.rs`, `crates/npu/src/openvino/real.rs`).

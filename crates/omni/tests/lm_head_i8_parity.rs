@@ -8,8 +8,7 @@
 //! (`[vocab, hidden]` = 152064 x 2048 at Thinker's real shape, ~1.2 GiB fp32
 //! / ~300 MiB int8) and, unlike the router, an approximation error here only
 //! perturbs logit MAGNITUDES feeding a softmax/argmax, not a hard routing
-//! decision -- the reasoning `docs/models/omni/status.md`'s Gap 4 entry
-//! records for quantizing this component before the router.
+//! decision -- the reason this component was quantized before the router.
 
 use data::rng::Lcg;
 use model::int8::quantize_weight;

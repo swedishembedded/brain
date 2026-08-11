@@ -7,12 +7,11 @@
 //! see `crates/codec/src/model.rs::transformer`'s doc for the real bug this
 //! closes and why it affects both `Codec::decode` and `Codec::decode_omni`).
 //!
-//! No real checkpoint is available in this environment (`docs/models/omni/
-//! status.md`'s M17 testdata audit: the omni checkpoint mirror is the one
-//! subtree actually restorable here, and even that is 66 GB — not staged for
-//! a routine test run), so this is the tiny-config rung of the parity ladder
-//! (`docs/porting-playbook.md` §4-5): synthetic weights, an independent
-//! host-side masked-attention oracle, and a mutation-style check that the
+//! No real checkpoint is available in this environment (the omni checkpoint
+//! mirror is the one subtree actually restorable here, and even that is
+//! 66 GB -- not staged for a routine test run), so this is the tiny-config
+//! rung of the parity ladder: synthetic weights, an independent host-side
+//! masked-attention oracle, and a mutation-style check that the
 //! window is actually load-bearing (not merely "runs without panicking"). A
 //! real T>72 golden against the released checkpoint is real, separate
 //! follow-up work once the checkpoint is staged — tracked in

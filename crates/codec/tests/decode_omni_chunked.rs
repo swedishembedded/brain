@@ -6,9 +6,9 @@
 //! degenerate `chunk_frames=0` (one shot) case. No real checkpoint needed
 //! (none is staged in this environment -- the honest boundary this crate's
 //! other real-weight-gated tests in `decode.rs`/`encode.rs` already document
-//! for themselves); this is the tiny-config rung of the parity ladder
-//! (`docs/porting-playbook.md` §4), composing every piece this session
-//! validated in isolation (`gqa_fwd_win` sliding-window attention,
+//! for themselves); this is the tiny-config rung of the parity ladder,
+//! composing every piece already validated in isolation
+//! (`gqa_fwd_win` sliding-window attention,
 //! `StreamConvTr1dSym`, `Back::new_omni`) through the REAL `Codec` entry
 //! points, not a re-derivation of any of their math.
 //!
