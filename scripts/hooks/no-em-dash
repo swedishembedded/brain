@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+"""Pre-commit gate: refuses a commit that ADDS a new em dash (U+2014).
+
+Diff-scoped, not file-scoped: this repo already has ~12k pre-existing em
+dashes across ~1000 files (the prevailing prose style before this rule
+existed), so a whole-file scan would block every commit that merely touches
+one of those files. Only lines the staged diff actually ADDS are checked, so
+existing occurrences are grandfathered in until a separate, deliberate
+cleanup pass touches them.
+
+The em dash itself is written as the "\\u2014" escape everywhere in this
+file, on purpose - a literal em dash character here would trip this same
+gate on its own diff the day this file was first committed.
+
+Usage:
+    scripts/hooks/no-em-dash             # checks `git diff --cached`
+    scripts/hooks/no-em-dash <file> ...  # ignored beyond triggering pre-commit;
+                                          # the check always re-derives the
+                                          # staged diff itself so a rename or
+                                          # partial `git add -p` stage is seen
+                                          # exactly as git will commit it.
+
+Exit status: 0 if no added line introduces an em dash, 1 otherwise (every
+offending file:line is printed, not just the first).
+"""
+import subprocess
+import sys
+
+EM_DASH = "\u2014"
+
+
+def main(argv):
+    diff = subprocess.run(
+        ["git", "diff", "--cached", "--unified=0", "--no-color"],
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    path = None
+    line_no = 0
+    offenders = []
+    for line in diff.split("\n"):
+        if line.startswith("+++ b/"):
+            path = line[6:]
+            continue
+        if line.startswith("@@"):
+            # "@@ -a,b +c,d @@" -- c is where added-line numbering starts.
+            hunk = line.split("@@")[1].strip()
+            plus = [p for p in hunk.split(" ") if p.startswith("+")][0]
+            line_no = int(plus[1:].split(",")[0])
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            if EM_DASH in line:
+                offenders.append(f"{path}:{line_no}: {line[1:].strip()}")
+            line_no += 1
+        elif not line.startswith("-"):
+            continue
+
+    if offenders:
+        print(f"no-em-dash: refusing to commit new em dash (U+{ord(EM_DASH):04X}) - use \"-\" instead:", file=sys.stderr)
+        for o in offenders:
+            print(f"  {o}", file=sys.stderr)
+        print(
+            "\nThis only checks lines the diff ADDS -- pre-existing em dashes elsewhere "
+            "in these files are untouched. If this line is unavoidable prose quoting "
+            "someone else's exact text, that's the one legitimate exception.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

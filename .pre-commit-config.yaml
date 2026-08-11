@@ -22,6 +22,16 @@ repos:
         entry: bash scripts/gates/check-no-doc-citations.sh
         language: system
         pass_filenames: true
+      - id: no-em-dash
+        name: "No new em dashes (U+2014)"
+        description: >-
+          Refuses a commit that ADDS a new em dash (U+2014) -- diff-scoped,
+          so the ~12k pre-existing occurrences across the repo's prose are
+          grandfathered in. See scripts/hooks/no-em-dash.
+        entry: python3 scripts/hooks/no-em-dash
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: strip-commit-trailers
         name: "Strip Co-Authored-By:/Claude-Session: trailers"
         description: >-
