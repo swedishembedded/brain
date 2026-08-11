@@ -39,12 +39,13 @@ use std::sync::OnceLock;
 use capability::{ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::moe::Lin8;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::config::MoeTextConfig;
-use crate::int8_resident::{expert_bytes, ThinkerInt8Store};
-use crate::thinker::{final_norm, layer_fwd, lm_head_fwd, thinker_pipelines, ThinkerLayerWeights};
+use crate::int8_resident::{expert_bytes, load_lin8, ExpertLin8, ThinkerInt8Store};
+use crate::thinker::{final_norm, layer_fwd, lm_head_fwd_i8, thinker_pipelines, LmHeadIds8, ThinkerLayerWeights};
 
 pub const MODEL: &str = "brain/omni-int8-thinker-multi";
 
@@ -146,9 +147,13 @@ pub struct Int8ThinkerInstance {
     /// `thinker.norm.weight` and `thinker.lm_head.weight`, resident on the
     /// LAST shard's `Gpu` — that is where [`Self::forward`]'s final hidden
     /// state already ends up (its own host round-trip loop), so applying
-    /// the head there avoids one extra cross-device hop.
+    /// the head there avoids one extra cross-device hop. `lm_head_w` is kept
+    /// in its checkpoint-native packed int8 form (`load_lin8`, no
+    /// dequantize-then-f32 round trip) and dispatched via
+    /// `thinker::lm_head_fwd_i8` -- the primitive already existed and was
+    /// parity-tested, this struct just wasn't calling it yet.
     final_norm_w: DeviceBuffer,
-    lm_head_w: DeviceBuffer,
+    lm_head_w: ExpertLin8,
 }
 
 impl Int8ThinkerInstance {
@@ -218,6 +223,8 @@ impl Int8ThinkerInstance {
         let d = self.cfg.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
         let embed_row = |t: u32| self.embed_table_host[t as usize * d..(t as usize + 1) * d].to_vec();
+        let idx = |name: &str| last.gpu.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
+        let lm_head_ids8 = LmHeadIds8 { matmul_i8: idx("matmul_i8_dyn"), quant: [idx("max_abs_row"), idx("quant_pack")] };
 
         let mut ids: Vec<u32> = prompt_ids.to_vec();
         let mut out = Vec::with_capacity(max_new_tokens as usize);
@@ -237,7 +244,8 @@ impl Int8ThinkerInstance {
             let gpu = &last.gpu;
             let h1 = gpu.storage_init("h1", last_row);
             let normed = final_norm(gpu, &self.cfg, &self.final_norm_w, &h1, 1);
-            let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.hidden, self.cfg.vocab);
+            let lm_head_w = Lin8 { wq: &self.lm_head_w.packed, sw: &self.lm_head_w.scale };
+            let logits = lm_head_fwd_i8(gpu, &lm_head_ids8, lm_head_w, &normed, 1, self.cfg.hidden, self.cfg.vocab);
             let logits_host = gpu.read(&logits, self.cfg.vocab as usize);
             let next = argmax(&logits_host);
 
@@ -430,7 +438,7 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
         let embed_table_host = load_mat_host(&reader, "thinker.embed_tokens.weight", vocab, hidden);
         let last = shards.last().ok_or_else(|| format!("{MODEL}: activate_multi got zero devices"))?;
         let final_norm_w = load_vec(&reader, &last.gpu, "thinker.norm.weight");
-        let lm_head_w = load_mat(&reader, &last.gpu, "thinker.lm_head.weight", vocab, hidden);
+        let lm_head_w = load_lin8(&last.gpu, &reader, "thinker.lm_head.weight");
         Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, embed_table_host, final_norm_w, lm_head_w }))
     }
 }

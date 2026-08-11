@@ -176,9 +176,9 @@ fn sharded_generate_matches_unsharded_generate() {
 /// separately-tested `forward()` (`sharded_two_gpu_forward_matches_
 /// unsharded_single_gpu_forward`) plus a from-scratch embed/final_norm/
 /// lm_head/argmax built directly from the public loaders
-/// (`load_mat_host`/`load_vec`/`load_mat`, `thinker::final_norm`/
-/// `lm_head_fwd`) — no code path shared with `generate()`'s own
-/// implementation. Single-device only (this is about `generate()`'s own
+/// (`load_mat_host`/`load_vec`/`int8_resident::load_lin8`, `thinker::
+/// final_norm`/`lm_head_fwd_i8`) -- no code path shared with `generate()`'s
+/// own implementation. Single-device only (this is about `generate()`'s own
 /// correctness, not the cross-device question the other test already
 /// covers), so it runs even on a one-GPU box.
 #[test]
@@ -231,12 +231,20 @@ fn generate_first_token_matches_independently_assembled_reference() {
     let hidden: Vec<f32> = hidden_blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     let last_row = &hidden[(prompt_ids.len() - 1) * d..prompt_ids.len() * d];
 
+    // Int8, matching what Int8ThinkerInstance::generate() actually dispatches
+    // (thinker::lm_head_fwd_i8, wired in over the fp32 lm_head_fwd it used to
+    // call) -- an fp32 reference here would compare quantized-argmax against
+    // unquantized-argmax, a different and flakier question than what this
+    // test exists to check.
     let gpu = gpu_core::testgpu::dev(omni::thinker::thinker_pipelines());
     let norm_w = omni::int8_thinker_resident::load_vec(&reader, &gpu, "thinker.norm.weight");
-    let lm_head_w = omni::int8_thinker_resident::load_mat(&reader, &gpu, "thinker.lm_head.weight", cfg.vocab, cfg.hidden);
+    let lm_head_w = omni::int8_resident::load_lin8(&gpu, &reader, "thinker.lm_head.weight");
+    let idx = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
+    let lm_head_ids8 = omni::thinker::LmHeadIds8 { matmul_i8: idx("matmul_i8_dyn"), quant: [idx("max_abs_row"), idx("quant_pack")] };
     let h1 = gpu.storage_init("h1", last_row);
     let normed = omni::thinker::final_norm(&gpu, &cfg, &norm_w, &h1, 1);
-    let logits = omni::thinker::lm_head_fwd(&gpu, &lm_head_w, &normed, 1, cfg.hidden, cfg.vocab);
+    let lin8 = model::moe::Lin8 { wq: &lm_head_w.packed, sw: &lm_head_w.scale };
+    let logits = omni::thinker::lm_head_fwd_i8(&gpu, &lm_head_ids8, lin8, &normed, 1, cfg.hidden, cfg.vocab);
     let logits_host = gpu.read(&logits, cfg.vocab as usize);
     let reference_token = logits_host.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab");
 
