@@ -86,7 +86,7 @@ help:
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
 	@echo "  make qwen/serving-perf-gate  qwen serving perf regression gate (vs baselines)"
-	@echo "  make kernels-table           regenerate README.md's kernel catalogue from the .wgsl"
+	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
@@ -360,10 +360,10 @@ gradcheck:
 kernels-regen:
 	scripts/build/kernels-regen.sh
 
-# Regenerate README.md's kernel catalogue from crates/kernels/wgsl/. Every
-# column is derived from the sources, so the table cannot be edited by hand —
-# and `kernels-table/check` is what stops it drifting silently, which is the
-# failure mode docs/lessons.md #29 records for the generator above.
+# Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
+# Every column is derived from the sources, so the table cannot be edited by
+# hand — and `kernels-table/check` is what stops it drifting silently, which
+# is the failure mode .agents/rules/lessons.md #29 records for the generator above.
 kernels-table:
 	scripts/build/gen-kernel-table.py
 
