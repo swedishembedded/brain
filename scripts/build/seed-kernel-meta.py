@@ -4,7 +4,7 @@
 
 """ONE-TIME bootstrap: seed the `@`-tagged metadata block into every .wgsl.
 
-The kernel catalogue in README.md is generated from metadata the kernels
+The kernel catalogue in docs/reference/kernels.md is generated from metadata the kernels
 *declare*, not from heuristics run over their code — a heuristic guesses, and a
 guess in a reference table is worse than no table. This script writes the
 initial blocks, seeded from the same structural signals the first version of
