@@ -11,6 +11,17 @@ repos:
         entry: python3 scripts/spdx/check.py
         language: system
         pass_filenames: true
+      - id: no-doc-citations-in-code
+        name: "No docs/ or .agents/ file-path citations in code"
+        description: >-
+          crates/, scripts/, tools/, and examples/ must never cite a docs/ or
+          .agents/ file path (a comment, a doc-string, a user-facing error
+          message) — those trees move and get rewritten, and a citation to
+          them is a cross-reference nothing keeps in sync. State the fact or
+          reasoning inline instead. See scripts/gates/check-no-doc-citations.sh.
+        entry: bash scripts/gates/check-no-doc-citations.sh
+        language: system
+        pass_filenames: true
       - id: strip-commit-trailers
         name: "Strip Co-Authored-By:/Claude-Session: trailers"
         description: >-

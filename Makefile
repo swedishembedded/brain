@@ -213,9 +213,14 @@ test/slow:
 # additionally requires every BRAIN_* env var read anywhere in crates/ to be
 # documented in docs/using/configuration.md, a docs/models/<model>.md page, or
 # .agents/rules/testing.md (env-only config MUST have a reference).
+# check-no-doc-citations.sh additionally requires that crates/, scripts/,
+# tools/, and examples/ never cite a docs/ or .agents/ file path — see that
+# script for why (also wired as a pre-commit hook, so this is a slow-path
+# backstop for anything pre-commit was bypassed for).
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
+	bash scripts/gates/check-no-doc-citations.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
@@ -228,7 +233,9 @@ check/spdx:
 
 # Install the local git hooks into .git/hooks — a one-time-per-clone step,
 # not run automatically, since it writes outside version control:
-#   pre-commit  - the check/spdx gate above
+#   pre-commit  - the check/spdx gate above, plus check-no-doc-citations.sh
+#                 (crates/scripts/tools/examples must never cite a docs/ or
+#                 .agents/ file path)
 #   commit-msg  - silently strips Co-Authored-By:/Claude-Session: trailer
 #                 lines from every new commit message (never fails)
 #   pre-push    - fails the push if a trailer line survived anyway (see
