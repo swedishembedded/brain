@@ -24,7 +24,7 @@
 //!
 //! Scope today: **forward parity only**. The backward/gradcheck path, the
 //! sampling pipeline (schedule + VAE + text encoders) and the serving contract
-//! are follow-ups — see `docs/imaging/plan.md`.
+//! are follow-ups.
 
 pub mod config;
 pub mod import;

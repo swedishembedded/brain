@@ -75,7 +75,7 @@ impl VaeConfig {
             // `post_quant_conv`, a 4x4 mixing of the latent channels: the decode
             // stayed in a plausible [-1,1] range and was UNCORRELATED with the
             // reference (cosine -0.03), so the picture had roughly the right
-            // structure and unusable colour. See `docs/lessons.md` #16.
+            // structure and unusable colour. See `.agents/rules/lessons.md` #16.
             use_quant_conv: v.get("use_quant_conv").and_then(|x| x.as_bool()).unwrap_or(true),
             use_post_quant_conv: v
                 .get("use_post_quant_conv")

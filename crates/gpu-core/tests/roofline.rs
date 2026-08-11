@@ -12,7 +12,7 @@
 //!    rate goes to absurdity. `roof_fma` sources its multiplier and addend from
 //!    the uniform to prevent that; the sanity ceiling here is what would catch
 //!    a regression in that guarantee.
-//! 2. **A host-timed region.** `docs/kernel-checklist.md` §E.0: `submit` only
+//! 2. **A host-timed region.** `.agents/rules/kernels.md` §E.0: `submit` only
 //!    appends to the pending list on the wgpu backend, so an unbracketed loop
 //!    times host recording and reports a rate above the hardware roof. A
 //!    bandwidth number at or above the arithmetic rate is that failure.

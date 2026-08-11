@@ -50,7 +50,7 @@ pub struct GenOpts {
     /// Image-to-image init strength in `(0, 1]`. `None` (or 1.0) starts the
     /// denoise from pure noise — the reference images then only *condition*
     /// via their tokens, so the result keeps the composition but is a fresh
-    /// generation (see `docs/models/flux2/status.md`: this is why a
+    /// generation (see `.agents/roadmap/flux2.md`: this is why a
     /// reference-only "colorize" reinterprets the scene). With `Some(s)` the
     /// first reference is VAE-encoded and the trajectory starts partway down
     /// the schedule from `x_σ = (1−σ)·x₀ + σ·ε` — the rectified-flow forward

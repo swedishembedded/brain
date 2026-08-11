@@ -11,7 +11,7 @@
 //! cost is linear in pixels and whose peak VRAM is linear in them too, so
 //! grouping N images saves no work and multiplies the high-water mark by N. The
 //! serial default is the right answer here, and saying so is the point —
-//! `docs/serving-contract.md` asks for a genuine batching decision, not
+//! `.agents/rules/serving-contract.md` asks for a genuine batching decision, not
 //! necessarily a genuine batch.
 //!
 //! **Value range and geometry.** The reference feeds RGB in `[0,1]` (unlike the
@@ -151,7 +151,7 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 ///
 /// The first draft of this constant was 16, justified on the 2-block toy where
 /// it is 4x below an 8-bit step. On the model anyone actually runs it is off by
-/// nearly three orders of magnitude — `docs/lessons.md` #18. 32 is the current
+/// nearly three orders of magnitude — `.agents/rules/lessons.md` #18. 32 is the current
 /// cost/quality point, and `tile` defaults to 0 so callers who can afford the
 /// memory never meet the trade-off at all.
 ///

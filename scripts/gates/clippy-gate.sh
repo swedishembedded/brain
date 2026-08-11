@@ -33,7 +33,7 @@ ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 cd "$ROOT"
 
 # The number of clippy warnings the workspace currently carries. Every one is
-# pre-existing; see task #24 and docs/imaging/plan.md. The largest group is
+# pre-existing. The largest group is
 # doc-list indentation, which needs per-site judgment — an automated pass
 # reattached a summary line to the wrong list item, which is a documentation
 # defect rather than a lint fix.

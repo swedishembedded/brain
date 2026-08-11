@@ -325,7 +325,7 @@ mod tests {
     /// but now with tool-call/stop-string/cancellation parity it never had.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset, per `docs/testing.md`. The checkpoint's
+    /// self-skips loudly when unset, per `.agents/rules/testing.md`. The checkpoint's
     /// vocab is sized to the real tokenizer's full range so the rendered
     /// chat-template special tokens (`<|im_start|>` etc., ids up in the
     /// 151000s) never index outside the embedding table.

@@ -60,7 +60,7 @@ impl WeightSource for Zeros {
 
 fn tiny() -> RrdbTopo {
     // Dims that all DIFFER, so a width-for-width swap cannot pass
-    // (`docs/lessons.md` #4): feat 16, grow 8, blocks 2, image 32.
+    // (`.agents/rules/lessons.md` #4): feat 16, grow 8, blocks 2, image 32.
     RrdbTopo {
         in_channels: 3,
         out_channels: 3,

@@ -38,7 +38,7 @@ use qwen35moe::q8::Qwen35Q8;
 
 /// See this file's module doc for why this exists instead of `tiny()`.
 /// Every dimension that is distinct in `tiny()` stays distinct here too
-/// (docs/lessons.md #4), and `full_attention_interval=4`/`n_layers=8`
+/// (.agents/rules/lessons.md #4), and `full_attention_interval=4`/`n_layers=8`
 /// exercises both layer types exactly like `tiny()` does (layers 3 and 7 are
 /// `Full`/GQA, the rest `Linear`/GDN).
 fn tiny_i8_cfg() -> Qwen35Config {
@@ -207,7 +207,7 @@ fn qwen35_q8_build_resident_shape_matches_the_designed_coverage() {
 /// Runs both an fp32 and an int8 `Qwen35` forward at [`tiny_i8_cfg`] from the
 /// SAME fresh init weights, and checks the int8 path's logits track the fp32
 /// path's within a generous quantization tolerance. Shared by the CPU and
-/// default-backend variants below (`docs/lessons.md` #5).
+/// default-backend variants below (`.agents/rules/lessons.md` #5).
 fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
     let cfg = tiny_i8_cfg();
     let b = 1;
@@ -260,7 +260,7 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
 /// backend otherwise -- this is the real forward-EXECUTION parity gate
-/// (`docs/lessons.md` #5 asks for both backends; see
+/// (`.agents/rules/lessons.md` #5 asks for both backends; see
 /// [`int8_forward_on_cpu_backend_fails_with_the_known_dp4a_barrier_limitation`]
 /// below for why the CPU backend cannot run this same check). If the
 /// resolved default happens to BE the CPU backend (`BRAIN_DEVICE=cpu` set
@@ -289,7 +289,7 @@ fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
 /// an int8 `Qwen` under `Backend::Cpu` but only walks its OFFLINE step list
 /// via `cost_fwd()`, never calls `.forward()`.
 ///
-/// Rather than silently skip the CPU leg `docs/lessons.md` #5 asks for, this
+/// Rather than silently skip the CPU leg `.agents/rules/lessons.md` #5 asks for, this
 /// test documents the boundary explicitly: an int8 forward attempted on the
 /// CPU backend must fail LOUDLY with that known, named panic — not silently
 /// produce a wrong answer and not fail for some unrelated reason. The real

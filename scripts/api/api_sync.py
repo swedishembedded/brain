@@ -129,7 +129,7 @@ def main() -> int:
     if any_drift and not args.check:
         print("\nVendored specs updated. Next: `cargo test -p brain-apiserve` to see which")
         print("conformance tests now fail, adapt the handlers, then run the API security audit")
-        print("(docs/api-security-audit.md) before shipping.")
+        print("(.agents/rules/api-security.md) before shipping.")
     return 1 if any_drift else 0
 
 

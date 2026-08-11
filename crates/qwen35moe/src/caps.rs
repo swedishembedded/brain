@@ -52,7 +52,7 @@ use crate::model::Qwen35;
 /// The model id used on the CLI (`brain do qwen35moe …`) and the event API.
 /// A `brain/`-prefixed synthetic id (this crate's checkpoints carry no
 /// upstream vendor/repo provenance of their own here) — the real upstream id
-/// is `Qwen/Qwen3.5-35B-A3B` (`docs/models/qwen35/status.md`), used where a
+/// is `Qwen/Qwen3.5-35B-A3B` (`.agents/roadmap/qwen35.md`), used where a
 /// checkpoint's actual provenance matters (import/fetch), not as this
 /// catalog entry's id — matching every other `caps.rs`'s `MODEL` convention
 /// (`qwen3::caps::MODEL == "brain/qwen"`, `omni::caps::MODEL == "brain/omni"`).
@@ -365,7 +365,7 @@ mod tests {
     /// module's doc claims actually works end to end for `Qwen35` too.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset, per `docs/testing.md`. The checkpoint's
+    /// self-skips loudly when unset, per `.agents/rules/testing.md`. The checkpoint's
     /// vocab is sized to the real tokenizer's full range so the rendered
     /// chat-template special tokens (`<|im_start|>` etc., ids up in the
     /// 151000s) never index outside the embedding table.

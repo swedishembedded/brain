@@ -4,7 +4,7 @@
 
 """Dump CLIP-family reference goldens for brain's `crates/clip` parity ladder.
 
-Three encoders, one crate (docs/imaging/plan.md phase 3b):
+Three encoders, one crate:
 
   clip_l/text.safetensors        SDXL `text_encoder`   — HF CLIPTextModel, 12L x 768,
                                  quick_gelu. Consumed by SDXL (penultimate) and by

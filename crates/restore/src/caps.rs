@@ -24,7 +24,7 @@
 //! # Scope this action inherits from the model
 //!
 //! `crates/restore` is forward-only and takes an **aligned** face
-//! (`docs/models/restore/status.md`): detection + 5-point alignment live in
+//! (`.agents/roadmap/restore.md`): detection + 5-point alignment live in
 //! `crates/facenet` and are not chained in here, because CodeFormer's alignment
 //! template is facexlib's 512² one and not `facenet::ARCFACE_DST_112` rescaled —
 //! wiring the wrong template would silently degrade every restoration. An

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Measures the non-ReBAR Pascal "2x resident per storage buffer" cost cited
-//! by `docs/lessons.md` §14 and `crates/qwen3/src/q8.rs` — directly, via
+//! by `.agents/rules/lessons.md` §14 and `crates/qwen3/src/q8.rs` — directly, via
 //! `nvidia-smi` memory deltas around known allocations, rather than by
 //! inference from a model's total footprint.
 //!
@@ -17,7 +17,7 @@
 //! otherwise).
 //!
 //! **Result** (P40 ×2, non-ReBAR, measured 2026-08-07 — see
-//! `docs/lessons.md` and `docs/models/omni/status.md` M1 for the write-up):
+//! `.agents/rules/lessons.md` and `.agents/roadmap/omni.md` M1 for the write-up):
 //! the doubling is real, exactly 2.00x, upload-triggered (allocation alone is
 //! 1.00x), independent of `COPY_SRC`/`COPY_DST` usage flags and independent of
 //! upload chunk size — but it is **specific to the default wgpu backend's

@@ -7,7 +7,7 @@
 //! `array<f32, 128>`/`array<bool, 128>` scratch -- the exact wall
 //! Qwen3.5-35B-A3B's 256 experts hits, and the same failure shape
 //! `router_bwd_expert_cap.rs` already proved for the backward kernel
-//! (docs/lessons.md #35b).
+//! (.agents/rules/lessons.md #35b).
 //!
 //! The host oracle is a real top-k selection (softmax, greedy argmax without
 //! replacement, renormalise), not just "sums to something plausible" -- it

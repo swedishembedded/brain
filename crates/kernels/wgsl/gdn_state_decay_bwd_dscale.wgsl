@@ -23,7 +23,7 @@
 //   d_g_cs[g_cs_off + bh*c_len + c_len-1] += d_decay_last * decay_last
 //
 // One thread per `(b,h)`, serial loop over `dk*dv` (correctness-first tier —
-// `docs/kernel-checklist.md` §C.2 would want a cooperative reduction at real
+// `.agents/rules/kernels.md` §C.2 would want a cooperative reduction at real
 // model scale, but `dk`/`dv` are tens to low hundreds here, matching every
 // other GDN reduction's tier). `state_in` is the forward-saved
 // PRE-this-chunk's-update state (`GdnScratchTrain::state_history` at index

@@ -4,7 +4,7 @@
 //! Regression test for `router_bwd.wgsl`'s array-free rewrite (see that
 //! file's header doc): correctness at `n_experts` values that exceed the
 //! kernel's former hard-coded `array<f32, 64>` scratch (64) -- the same
-//! failure shape docs/lessons.md #35 already named once, recurring here
+//! failure shape .agents/rules/lessons.md #35 already named once, recurring here
 //! because #35's fix never reached this file.
 //!
 //! The host oracle mirrors the kernel's own 5-pass structure line for line

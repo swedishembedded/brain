@@ -852,7 +852,7 @@ impl WgpuBackend {
         // BETWEEN dispatches inside a single compute pass. Without it the only
         // way to time a dispatch is to give it its own pass, which changes the
         // execution being measured — so its numbers are not the production
-        // pass's numbers (`docs/lessons.md` #31).
+        // pass's numbers (`.agents/rules/lessons.md` #31).
         let want_ts_inside =
             want_ts && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
         if want_ts_inside {

@@ -539,7 +539,7 @@ pub trait Backend: Send + Sync {
     /// and sized to the largest single write ever issued, so one giant `write`
     /// per tensor leaves a same-size staging buffer permanently resident
     /// (measured: exactly 2.00x the logical size, see
-    /// `crates/gpu-core/tests/vram_overhead.rs` and `docs/lessons.md`).
+    /// `crates/gpu-core/tests/vram_overhead.rs` and `.agents/rules/lessons.md`).
     /// Chunking through this method instead caps that resident staging cost at
     /// the chunk size, regardless of tensor count or size.
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]);
@@ -665,7 +665,7 @@ pub trait Backend: Send + Sync {
     /// This exists because host wall-clock around a drained slice is not a
     /// measurement of a kernel — it measures launch + execute + fence, whose
     /// floor is roughly constant and therefore inflates small kernels in inverse
-    /// proportion to their size (up to 29x measured; `docs/lessons.md` #31).
+    /// proportion to their size (up to 29x measured; `.agents/rules/lessons.md` #31).
     /// A profiler that attributes time between kernels must use device time.
     fn set_kernel_timing(&self, _on: bool) -> bool {
         false

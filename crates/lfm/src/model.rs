@@ -112,7 +112,7 @@ const ROW_SCATTER: usize = 50;
 //   Re-measured twice since on the same box: the split row reproduces to 0.2%
 //   (274.73 / 274.68 ms) but the GEMM row swings 9% (1194.77 / 1090.09 ms), so
 //   the ratio is 3.97-4.35x and the honest claim is "about 4x". The direction
-//   never moves; see docs/models/lfm/status.md for the three-run table.
+//   never moves; see .agents/roadmap/lfm.md for the three-run table.
 //
 // The ledger's old "flash measured ~= naive here" was measured against the
 // BASELINE kernel, whose per-thread `q[128]`/`o[128]` arrays fall out of
@@ -1535,7 +1535,7 @@ mod tests {
 
     /// The slot consts index `PIPELINES` positionally, so inserting a pipeline
     /// silently re-points every const after it — a mismatched kernel is wrong
-    /// output, not a crash (`docs/kernel-checklist.md` §B). Pin the ones this
+    /// output, not a crash (`.agents/rules/kernels.md` §B). Pin the ones this
     /// file dispatches by NAME.
     #[test]
     fn slot_constants_name_the_pipeline_they_index() {

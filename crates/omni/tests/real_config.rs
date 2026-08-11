@@ -5,7 +5,7 @@
 //! `config.json`, not just the inline sample in `config.rs`'s unit tests.
 //!
 //! Real-weight-adjacent, so it follows the engine's standard opt-in-env-var
-//! pattern (`docs/testing.md`): skips (never panics) when the checkpoint dir
+//! pattern (`.agents/rules/testing.md`): skips (never panics) when the checkpoint dir
 //! is not present.
 //!
 //! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
@@ -28,7 +28,7 @@ fn matches_the_released_checkpoint() {
     let json = std::fs::read_to_string(dir.join("config.json")).expect("read config.json");
     let c = omni::config::OmniConfig::parse(&json).expect("parse");
 
-    // Every number here is from docs/models/omni/status.md's "Facts" section,
+    // Every number here is from .agents/roadmap/omni.md's "Facts" section,
     // dumped straight from the released config.json — this test just proves
     // the PARSER reproduces them from the real file, not a hand-copied one.
     assert_eq!(c.thinker.audio.n_layers, 32);

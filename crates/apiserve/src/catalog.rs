@@ -12,7 +12,7 @@
 //!   (`openai.rs`/`anthropic.rs`) — a differently-shaped-but-similar action (e.g.
 //!   FastVLM's streaming `caption`, which also takes a `prompt` and emits `Text`)
 //!   would be listed but then fail `ActionSpec::validate` on the chat params it
-//!   doesn't declare. See `docs/serving-contract.md`.
+//!   doesn't declare. See `.agents/rules/serving-contract.md`.
 //! - **Embeddings**: an action **named `embed`** that also takes a `text` param.
 //!   Named AND shaped, for two independent reasons `/v1/embeddings`
 //!   (`openai.rs::handle_embeddings`) breaks on otherwise-plausible matches: it

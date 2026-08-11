@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Hardware smoke for the generic [`npu::openvino::NpuGraph`] runner — the reuse
-//! seam behind `docs/npu-residency.md`. Builds a tiny ONNX (MatMul + Relu) with the
+//! seam every model's NPU export shares. Builds a tiny ONNX (MatMul + Relu) with the
 //! shared `onnx::GraphBuilder`, compiles it on the NPU (fp16), runs it, and checks
 //! the output against a host reference. Skips when no NPU/OpenVINO is present.
 

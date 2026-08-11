@@ -26,7 +26,7 @@
 // cells `d_t_mat[row,k,j]`. No race: within one dispatch (fixed `i`), column
 // `j` is unique per thread, so two threads never write the same `(k,j)` cell
 // regardless of `k`; across dispatches, each host call has its own `i`,
-// strictly decreasing, run in sequence by `docs/kernel-checklist.md`'s
+// strictly decreasing, run in sequence by `.agents/rules/kernels.md`'s
 // host-orchestrated multi-dispatch convention (matching
 // `gdn_chunk_cumsum_step.wgsl`/`gdn_ut_step.wgsl`) -- no two dispatches
 // execute concurrently. `attn0` (frozen forward values) is read-only;

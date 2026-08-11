@@ -6,9 +6,9 @@
 //! existing whole-sequence causal conv (`pad = K-1`, `stride=1`,
 //! `dilation=1`, `groups=Cin` — the causal expression that module's own doc
 //! names), on a real, non-degenerate shape (`N,C,K,L` all pairwise distinct —
-//! `docs/lessons.md` #4).
+//! `.agents/rules/lessons.md` #4).
 //!
-//! Run on both backends (`docs/lessons.md` #5):
+//! Run on both backends (`.agents/rules/lessons.md` #5):
 //!   cargo test -p brain-model --test causal_conv1d_step
 //!   BRAIN_DEVICE=cpu cargo test -p brain-model --test causal_conv1d_step
 
@@ -24,7 +24,7 @@ fn causal_conv1d_step_matches_conv1d_fwd() {
     let conv1d_idx = g.kernel_index("conv1d").unwrap_or_else(|| panic!("kernel 'conv1d' not registered"));
     let step_idx = g.kernel_index("causal_conv1d_step").unwrap_or_else(|| panic!("kernel 'causal_conv1d_step' not registered"));
 
-    // Pairwise-distinct dims (docs/lessons.md #4): N=2 sequences, C=5
+    // Pairwise-distinct dims (.agents/rules/lessons.md #4): N=2 sequences, C=5
     // channels (conv_dim), K=4 (Qwen3.5's actual linear_conv_kernel_dim), L=7
     // tokens.
     let (nn, cc, kk, ll) = (2usize, 5usize, 4usize, 7usize);

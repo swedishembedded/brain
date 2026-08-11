@@ -51,7 +51,7 @@ use crate::import::hf_to_brain;
 
 /// One audio clip's splice-ready embeddings: `[n_rows, hidden]`, already at
 /// Thinker decoder width (`AudioEncoder::encode`'s projector output — no
-/// extra projection needed, see `docs/models/omni/status.md` M4).
+/// extra projection needed, see `.agents/roadmap/omni.md` M4).
 pub struct AudioSplice {
     pub embeds: Vec<f32>,
     pub n_rows: u32,
@@ -67,7 +67,7 @@ pub struct ImageSplice {
 }
 
 /// Stream every `thinker.audio_tower.*` tensor from `reader` (mmap-backed —
-/// `docs/models/omni/status.md`'s mmap/streaming instruction) into the
+/// `.agents/roadmap/omni.md`'s mmap/streaming instruction) into the
 /// `AudioEncoder` weight map, fusing q/k/v exactly as `crate::import` and
 /// `tests/audio_parity.rs` already do, and encode a raw 16kHz mono clip
 /// (`samples`, e.g. `audio::wav::parse`'s output) into a splice-ready
@@ -273,7 +273,7 @@ struct MediaBlock {
 /// by `text_ids` (the user's own already-tokenized text). This is a real but
 /// simplified convention — one block per medium, media always before text,
 /// not a fully general interleaved multi-turn processor — documented as such
-/// in `docs/models/omni/status.md`'s multimodal entry.
+/// in `.agents/roadmap/omni.md`'s multimodal entry.
 ///
 /// Real embeddings come from [`encode_audio`]/[`encode_image`]/
 /// [`encode_video_frames`], spliced host-side ([`splice_host`]); real 3-axis

@@ -39,7 +39,7 @@ fn write_tiny_ckpt(dir: &std::path::Path, cfg: &Qwen35Config) -> std::path::Path
 
 /// `tiny()`'s `block_size` (24) picked deliberately: `gdn_chunk_size(24) == 8`
 /// (3 chunks) — a genuine multi-chunk GDN recurrence, not a degenerate
-/// single-chunk collapse (`docs/models/qwen35/status.md`'s own P9 gradcheck
+/// single-chunk collapse (`.agents/roadmap/qwen35.md`'s own P9 gradcheck
 /// note makes the same choice for the same reason).
 const SEQ: usize = 24;
 

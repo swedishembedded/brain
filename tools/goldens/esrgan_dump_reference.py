@@ -143,7 +143,7 @@ def main() -> None:
 
     # 1. The tiny, checkpoint-free gate. Dims chosen so num_feat, num_grow_ch and
     #    the image side all DIFFER — a degenerate config would hide a width swap
-    #    (docs/lessons.md #4).
+    #    (.agents/rules/lessons.md #4).
     tiny = build(a.num_feat, a.num_block, a.num_grow_ch)
     torch.manual_seed(a.seed)
     for p in tiny.parameters():

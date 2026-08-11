@@ -130,7 +130,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // (M3) -- what is NOT yet true is that the resulting unified
         // checkpoint is directly loadable by tts::mtp::MtpModel/codec::Codec
         // for the Talker/Code2Wav pieces (two open naming gaps, see
-        // docs/models/omni/status.md's M7b/M8 entries); Thinker-only
+        // .agents/roadmap/omni.md's M7b/M8 entries); Thinker-only
         // generation (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not
         // this converted-checkpoint path) is unaffected by either gap.
         "omni" => omni::import::import_as(hf_dir, out, Some(&id)),
@@ -170,7 +170,7 @@ fn remove_upstream_weights(dir: &Path) {
 /// Constructed by `run_cli.rs::build_auto_fetch_supplier` and threaded into
 /// every HTTP/D-Bus surface (`run_apis`), behind `BRAIN_AUTO_FETCH=0` to
 /// disable. Wiring it in went through the full watertight-API security pass
-/// (AGENTS.md) -- see `docs/api-security-audit.md`'s auto-fetch entry.
+/// (AGENTS.md) -- see `.agents/rules/api-security.md`'s auto-fetch entry.
 #[derive(Clone)]
 enum FetchState {
     Running,

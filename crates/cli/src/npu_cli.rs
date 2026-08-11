@@ -64,7 +64,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 /// core seam. `--compare` also runs the pure device path and reports the max diff.
 /// `brain npu lfm --weights F --seq S --out model.onnx [--int8]` — export the
 /// LFM2.5-Encoder at a fixed sequence-length bucket for OpenVINO compilation
-/// (static shapes; one graph per bucket, see docs/models/lfm/status.md).
+/// (static shapes; one graph per bucket, see .agents/roadmap/lfm.md).
 fn lfm(args: &[String]) {
     let mut weights = String::new();
     let mut seq = 1024usize;

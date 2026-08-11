@@ -10,7 +10,7 @@
 //! (`transformers/models/qwen3_omni_moe/modeling_qwen3_omni_moe.py`,
 //! `Qwen3OmniMoeForConditionalGeneration`, lines ~3770-3848 and ~3976-4020 at
 //! the time of writing), not inferred from Omni's own goldens (none exercise
-//! the composed splice — see `docs/models/omni/status.md`'s M9b entry).
+//! the composed splice — see `.agents/roadmap/omni.md`'s M9b entry).
 //!
 //! **Scope, honestly**: text-only user turns. Real Qwen3-Omni selects, PER
 //! POSITION, between `talker.hidden_projection(thinker_hidden_at_accept_layer)`
@@ -18,7 +18,7 @@
 //! (thinker_embed_tokens(id))` (plain text positions) for the user segment.
 //! This module only implements the text branch — a user turn with audio/
 //! image/video input plus speech OUTPUT in the same turn is not wired here
-//! yet (tracked in `docs/models/omni/status.md`'s M9b entry). Single-turn
+//! yet (tracked in `.agents/roadmap/omni.md`'s M9b entry). Single-turn
 //! only: one user segment + the current assistant segment, no multi-turn
 //! conversation history (matches `omni::caps::generate`'s own single-turn-
 //! per-call scope — the real reference supports resuming a multi-turn

@@ -81,7 +81,7 @@ pub fn warp_grid(m: &[f32; 6], src_w: u32, src_h: u32, out_w: u32, out_h: u32) -
 /// Resample `x` (`[1, C, H, W]` on device) through `grid` (`[Ho, Wo, 2]`, host)
 /// with bilinear interpolation and zero padding.
 ///
-/// `grid_sample` Params — read before dispatching, per `docs/kernel-checklist.md`
+/// `grid_sample` Params — read before dispatching, per `.agents/rules/kernels.md`
 /// §B — are `[N, C, H, W, Ho, Wo, align_corners]`, bindings `(x, grid, y)`, one
 /// invocation per OUTPUT element (`N*C*Ho*Wo`). `align_corners = 0` is PyTorch's
 /// default and what this grid is built for; the padding mode is `'zeros'`, which

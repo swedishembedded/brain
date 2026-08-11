@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Measured DiT batch scaling at REAL klein-4B dims — the profile behind the
-//! throughput ladder in `docs/models/flux2/status.md`.
+//! throughput ladder in `.agents/roadmap/flux2.md`.
 //!
 //! Times `Flux2Model::forward_batch` at B = 1, 2, 4, 8 for the 512² shape
 //! (512 text + 1024 image = 1536 joint tokens per sample), reporting ms per

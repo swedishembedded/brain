@@ -12,7 +12,7 @@
 //!
 //! There is no `threshold.wgsl`, no `dilate.wgsl`, no `blur.wgsl`, and this
 //! module does not add any: the operations fall out of kernels brain already
-//! has, which is the outcome `docs/kernel-checklist.md` §A asks for.
+//! has, which is the outcome `.agents/rules/kernels.md` §A asks for.
 //!
 //! | op | composition |
 //! |---|---|

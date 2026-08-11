@@ -15,11 +15,11 @@
 #   examples/api/claude-with-brain.sh -p "hi"      # or pass any claude flags through
 #
 # Nothing to pre-fetch or pre-import: MODEL doesn't have to be resident yet.
-# brain's transparent auto-fetch (see docs/models/naming.md) downloads +
+# brain's transparent auto-fetch (see docs/using/models-and-weights.md) downloads +
 # converts it on the first request that names it -- the first message you send
 # in claude takes as long as that cold fetch (progress streams to Claude Code
 # as it happens); every one after is instant. Point MODEL at any
-# `<vendor>/<repo>[-<QUANT>]` your machine can serve (`docs/models/naming.md`
+# `<vendor>/<repo>[-<QUANT>]` your machine can serve (`docs/using/models-and-weights.md`
 # lists the supported architectures) to use a different model, or set
 # `BRAIN_AUTO_FETCH=0` to require it already be resident (the pre-auto-fetch
 # behavior) and fail fast instead of fetching.
@@ -31,7 +31,7 @@
 # to prove the server + key path works), so `--check` is runnable in CI with no
 # weights and no `claude` install. Without BRAIN_MOCK, `GET /v1/models` alone never
 # triggers a fetch (discovery routes are deliberately fetch-free — see
-# `docs/api-security-audit.md`), so `--check` stays fast and offline-safe even
+# `.agents/rules/api-security.md`), so `--check` stays fast and offline-safe even
 # though MODEL is a real, not-yet-fetched reference; see `tests/e2e/claude_code.bats`
 # for a full interactive run against the deterministic mock.
 

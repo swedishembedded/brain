@@ -19,7 +19,7 @@
 //! implementation existed), so `Gpu::share` on this backend built a WHOLE NEW
 //! device instead of truly sharing one — the exact "many concurrent devices on
 //! one card" shape this file exists to rule out, just never exercised here.
-//! See `docs/lessons.md`'s Vulkan-device-sharing entry.
+//! See `.agents/rules/lessons.md`'s Vulkan-device-sharing entry.
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || !matches!(gpu_core::backend_name(), "wgpu" | "vulkan")

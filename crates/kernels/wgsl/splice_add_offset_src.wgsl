@@ -22,7 +22,7 @@
 // instead: a bind-group buffer offset must be a multiple of
 // `min_storage_buffer_offset_alignment` (256B), and `local_row * d * 4` has no
 // such guarantee for an arbitrary row/`d_model` -- this was tried and failed
-// on real hardware enforcing the full 256B limit (`docs/lessons.md`). A
+// on real hardware enforcing the full 256B limit (`.agents/rules/lessons.md`). A
 // uniform-parameter offset has no such constraint.
 //
 // New kernel rather than adding `src_base` to `splice_add.wgsl` itself:

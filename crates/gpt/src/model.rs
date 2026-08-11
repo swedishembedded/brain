@@ -186,7 +186,7 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
         MATMUL_REG3
     };
     // The threshold is `block::pick_gemm`'s MEASURED one (`m < 8`), not the
-    // `m < 128` this used to carry. That guard is the one `docs/lessons.md` §15
+    // `m < 128` this used to carry. That guard is the one `.agents/rules/lessons.md` §15
     // records as costing 22x on an SDXL UNet, and it is worth more here than
     // there: A/B'd on a P40 at `k=768, n=3072`, naive vs tiled is
     //
@@ -959,7 +959,7 @@ impl Gpt {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
-        // "brain/gpt" matches docs/models/naming.md's reserved-vendor fallback
+        // "brain/gpt" matches docs/using/models-and-weights.md's reserved-vendor fallback
         // -- the same id crates/cli/src/resident_llm.rs::GptResident::from_env
         // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
         // here is auto-discoverable by crates/cli/src/model_dir.rs without

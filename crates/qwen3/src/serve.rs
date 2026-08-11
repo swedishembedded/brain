@@ -1924,7 +1924,7 @@ mod tests {
     /// that packs to more than one int8 word/head (16/4=4), with
     /// `n_heads*head_dim=96 != d_model=20` so a transposed/mismatched dimension
     /// cannot accidentally read as correct. Replaces `tiny()` for int8-KV
-    /// numeric gates -- see `docs/lessons.md` #4 (degenerate test dims hide bug
+    /// numeric gates -- see `.agents/rules/lessons.md` #4 (degenerate test dims hide bug
     /// classes) and #18 (a toy-fitted constant cannot predict the real shape).
     fn kv_probe_cfg() -> QwenConfig {
         QwenConfig {
@@ -2469,7 +2469,7 @@ mod tests {
     /// with the existing `argmax_part`/`argmax_final`) must return EXACTLY the
     /// row's true top-K logits+indices, sorted descending — an exact,
     /// deterministic operation with no tolerance to gate on
-    /// (`docs/lessons.md` #4: dims chosen so vocab != any other dimension, so
+    /// (`.agents/rules/lessons.md` #4: dims chosen so vocab != any other dimension, so
     /// a transposed/wrong-stride bug can't hide behind a coincidence).
     #[test]
     fn topk_extraction_matches_host_reference() {
@@ -2847,7 +2847,7 @@ mod tests {
     /// divergence over several autoregressive steps stays small, not a
     /// precision claim: G3 already derives the exact per-element quantization
     /// bound (0.5 of a step) for a single append, and P12
-    /// (`docs/models/qwen/status.md`) is the REAL accuracy measurement (loss
+    /// (`.agents/roadmap/qwen.md`) is the REAL accuracy measurement (loss
     /// delta +0.0154 on Qwen3-0.6B) — this test cannot substitute for either
     /// (lesson 18: a toy config's error magnitude cannot predict the real
     /// one). What it CAN catch is a wiring break that makes int8 decode wildly

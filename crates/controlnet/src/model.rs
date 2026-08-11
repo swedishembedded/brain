@@ -49,7 +49,7 @@
 //! ### Zero-convs are 1x1 convs, so they are `Builder::conv(k = 1, pad = 0)`
 //! Not a GEMM over `[HW, C]` rows, which is the other obvious lowering: that
 //! would need a permute in and a permute out for a kernel whose entire work is
-//! `C` MACs per position, and `docs/imaging/plan.md` §3.1.1 measured those
+//! `C` MACs per position, and a measured pass found those
 //! permutes running at 14–33 % of the roofline.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};

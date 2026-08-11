@@ -19,7 +19,7 @@
 //! `BRAIN_QWEN_CTX` sizing Qwen's built context length — default in `QwenResident::ctx`,
 //! currently 24576). Each `from_env` returns `None` when its primary weights
 //! var is unset/empty. The operator-facing reference for every serving env
-//! var is `docs/serving.md` § Configuration.
+//! var is `docs/using/configuration.md` § Configuration.
 
 use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
 use checkpoint::st::ModelCard;
@@ -297,7 +297,7 @@ impl QwenResident {
     /// Whether the paged engine's KV pool is packed int8 (online per-token
     /// absmax, ~3.9x smaller pool at Qwen3's head_dim) rather than fp32.
     /// Default ON: measured on the real Qwen3-0.6B checkpoint (`brain qwen
-    /// eval --kv fp32,int8`, `docs/models/qwen/status.md` P12) at +0.0154
+    /// eval --kv fp32,int8`, `.agents/roadmap/qwen.md` P12) at +0.0154
     /// loss vs fp32 (token-acc actually slightly HIGHER) -- close enough to
     /// free that the memory win is a clear default. `BRAIN_QWEN_KV_INT8=0`
     /// (also `false`/`off`, case-insensitive, matching `BRAIN_AUTO_FETCH`'s
@@ -788,7 +788,7 @@ mod tests {
         assert!(err.contains("GiB"), "error must name the computed size: {err}");
     }
 
-    /// The plan's ctx=24576 sizing table (docs/models/qwen/status.md's
+    /// The plan's ctx=24576 sizing table (.agents/roadmap/qwen.md's
     /// planning notes) was a HAND ESTIMATE before this test -- this replaces
     /// it with the real number, computed through the exact same
     /// `pool_sizing`/`kv_pool_bytes` the resident actually calls, at the
@@ -956,7 +956,7 @@ mod tests {
     /// find the first's system-prompt blocks already cached.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset, per `docs/testing.md`.
+    /// self-skips loudly when unset, per `.agents/rules/testing.md`.
     #[test]
     fn prefix_cache_hit_rate_is_observable_through_the_real_http_router() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
@@ -1026,7 +1026,7 @@ mod tests {
     /// model's vocab hung indefinitely until this fix landed.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset, per `docs/testing.md`.
+    /// self-skips loudly when unset, per `.agents/rules/testing.md`.
     #[test]
     fn rejected_admission_resolves_promptly_instead_of_hanging() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {

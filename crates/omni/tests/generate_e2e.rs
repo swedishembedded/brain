@@ -21,7 +21,7 @@
 //! No sampling randomness: both sides are greedy (argmax), so an EXACT
 //! token-id match is the bar, not a cosine floor. Measured on the real
 //! checkpoint (5 new tokens, `BRAIN_DEVICE=cpu` — the GPU run hit an
-//! unrelated pre-existing VRAM shortfall, see `docs/models/omni/status.md`):
+//! unrelated pre-existing VRAM shortfall, see `.agents/roadmap/omni.md`):
 //! the prefill and the first 3 KV-cache decode steps matched EXACTLY,
 //! diverging only on the 4th. `BRAIN_OMNI_DEBUG_LOGITS=1` at that step
 //! showed the top-2 candidates 0.17 logits apart and the golden's actual

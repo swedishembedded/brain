@@ -22,7 +22,7 @@
 //! faithful partial rather than a convenient one. The gradient w.r.t. the
 //! latent input is **not** propagated (the encoder is frozen, so there is
 //! nothing to propagate it into); wiring the two trainers together end to end
-//! is the remaining work and is listed in `docs/models/restore/status.md`.
+//! is the remaining work and is listed in `.agents/roadmap/restore.md`.
 //!
 //! # The non-differentiable argmin, and why it never enters the loss
 //!
@@ -183,7 +183,7 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
 
 /// Compile-time check that the two halves of [`TRAIN_PIPELINES`] line up with
 /// the `K_*` indices. A silently shifted index is the failure mode
-/// `docs/kernel-checklist.md` exists to prevent.
+/// `.agents/rules/kernels.md` exists to prevent.
 const _: () = {
     assert!(TRAIN_PIPELINES.len() == 29);
 };

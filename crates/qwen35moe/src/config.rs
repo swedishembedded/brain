@@ -17,7 +17,7 @@
 //! Field names and defaults are taken directly from the real checkpoint's
 //! `config.json`/`configuration_qwen3_5_moe.py` — see
 //! `/data/workspace/resources/qwen3.5/` for the sources this was built
-//! against. Per `docs/lessons.md` #16, a config default must mirror the
+//! against. Per `.agents/rules/lessons.md` #16, a config default must mirror the
 //! *reference's* default, not "off": `configuration_qwen3_5_moe.py`'s
 //! `__post_init__` hardcodes `partial_rotary_factor = 0.25` and
 //! `full_attention_interval = 4` as defaults not always present in a
@@ -119,7 +119,7 @@ pub struct Qwen35Config {
 
 impl Qwen35Config {
     /// A tiny hybrid config for tests / gradient checks. Every dimension that
-    /// is distinct in the real config stays distinct here (`docs/lessons.md`
+    /// is distinct in the real config stays distinct here (`.agents/rules/lessons.md`
     /// #4 — degenerate/collapsed toy dims hide whole bug classes): d_model,
     /// head_dim, n_heads, n_kv_heads, linear_key_head_dim,
     /// linear_value_head_dim, linear_num_key_heads, linear_num_value_heads,
@@ -269,7 +269,7 @@ impl Qwen35Config {
         });
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
-        // adapters are silently dropped (docs/lessons.md #23).
+        // adapters are silently dropped (.agents/rules/lessons.md #23).
         if let Some(l) = &self.lora {
             v["lora"] = serde_json::json!({
                 "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
@@ -303,7 +303,7 @@ impl Qwen35Config {
             head_dim: g("head_dim", 12),
             attn_bias: c["attention_bias"].as_bool().unwrap_or(false),
             rope_theta: gf("rope_theta", 1.0e7),
-            // Reference default per docs/lessons.md #16 — a config.json that
+            // Reference default per .agents/rules/lessons.md #16 — a config.json that
             // predates this field still means 0.25, not "unset -> full RoPE".
             partial_rotary_factor: gf("partial_rotary_factor", 0.25),
             mrope_section: mrope,
@@ -336,7 +336,7 @@ impl Qwen35Config {
     /// though the real checkpoint stores `mlp.experts.{gate_up,down}_proj` as
     /// ONE fused 3-D tensor per layer — `import.rs` splits gate/up/down and
     /// slices per expert on the host at import time (same "split fused
-    /// weights at import" rule `docs/porting-playbook.md` §2 uses for qkv/
+    /// weights at import" rule `.agents/rules/porting.md` §2 uses for qkv/
     /// gate-up fusions elsewhere), because `model::moe`'s dispatch reads one
     /// 2-D expert weight per call.
     ///
@@ -496,14 +496,14 @@ mod tests {
         let mut cfg = Qwen35Config::tiny();
         cfg.lora = Some(LoraCfg::attn(8, 16.0));
         let back = Qwen35Config::from_json(&cfg.to_json());
-        let lora = back.lora.expect("lora must round-trip (docs/lessons.md #23)");
+        let lora = back.lora.expect("lora must round-trip (.agents/rules/lessons.md #23)");
         assert_eq!(lora.rank, 8);
         assert_eq!(lora.alpha, 16.0);
     }
 
     #[test]
     fn tiny_config_has_pairwise_distinct_dims_within_each_layer_type() {
-        // docs/lessons.md #4: degenerate/collapsed toy dims hide whole bug
+        // .agents/rules/lessons.md #4: degenerate/collapsed toy dims hide whole bug
         // classes. Assert the toy config doesn't accidentally collapse any of
         // the dims that are distinct in the real 35B-A3B config.
         let cfg = Qwen35Config::tiny();

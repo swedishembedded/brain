@@ -36,7 +36,7 @@
 //! The serving contract is met by [`caps`] (the `restore_face`
 //! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
 //! adapter, `BRAIN_RESTORE_WEIGHTS`) and `examples/restore/` — see
-//! `docs/serving-contract.md`.
+//! `.agents/rules/serving-contract.md`.
 
 pub mod caps;
 pub mod config;

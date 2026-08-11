@@ -71,8 +71,7 @@ fn pad_to(hw: (u32, u32), win: u32) -> (u32, u32) {
 }
 
 /// The image path of SAM 2.1. Video memory (`memory_attention`,
-/// `memory_encoder`, object-pointer temporal encoding) is deliberately absent —
-/// see `docs/imaging/plan.md` open decision 3.
+/// `memory_encoder`, object-pointer temporal encoding) is deliberately absent.
 #[derive(Clone, Debug)]
 pub struct Sam2Config {
     // ---- image / trunk ----

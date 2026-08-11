@@ -744,7 +744,7 @@ fn run_train(args: &[String]) {
             (name.clone(), vec![n as u64], gpu.read(ps.w(name), n))
         })
         .collect();
-    // "brain/depth" matches docs/models/naming.md's reserved-vendor fallback
+    // "brain/depth" matches docs/using/models-and-weights.md's reserved-vendor fallback
     // -- the same id crates/cli/src/resident_depth.rs::DepthResident::from_env
     // synthesizes for an env-loaded checkpoint -- so a checkpoint saved here
     // is auto-discoverable by crates/cli/src/model_dir.rs without requiring

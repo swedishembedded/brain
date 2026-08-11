@@ -50,7 +50,7 @@
 //! those go through `brain perf run`'s residency-executor target
 //! resolution, a different (bigger) integration that would need omni
 //! plugged into production residency first (not yet built — see
-//! `docs/models/omni/status.md`'s int8/GPU-sharded-residency entry). Run
+//! `.agents/roadmap/omni.md`'s int8/GPU-sharded-residency entry). Run
 //! this bench directly, same as its siblings.
 //!
 //! Usage:
@@ -127,7 +127,7 @@ fn report(label: &str, reps: usize, mut f: impl FnMut()) -> f64 {
 /// Total resident params for one MoE decoder layer (every expert), and the
 /// ACTIVE params one token's decode step actually reads (router + its
 /// top_k experts + the always-on shared expert, if any) — the distinction
-/// `docs/kernel-checklist.md §F` calls out: MoE decode bandwidth is bounded
+/// `.agents/rules/kernels.md §F` calls out: MoE decode bandwidth is bounded
 /// by ACTIVE bytes, not resident ones, unlike a dense model where they're
 /// the same number.
 fn moe_layer_params(cfg: &MoeTextConfig) -> (u64, u64) {

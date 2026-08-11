@@ -740,8 +740,8 @@ fn blocks_agree_across_backends() {
 /// What the composed LayerNorm2d costs, split into the two NCHW<->NLC permutes
 /// and the LayerNorm itself.
 ///
-/// This is the measurement `docs/imaging/plan.md` §3.1 asks for BEFORE anyone
-/// adds a fused `layernorm2d` kernel. A fused channels-first kernel replaces the
+/// This is the measurement to make BEFORE adding a fused `layernorm2d`
+/// kernel. A fused channels-first kernel replaces the
 /// permutes but must then walk each position's channels with ONE thread — the
 /// documented coalescing trap — so it only wins if the permutes dominate by more
 /// than the ~8x sector amplification it would take on. Run with `--nocapture`.

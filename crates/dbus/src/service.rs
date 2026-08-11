@@ -111,7 +111,7 @@ impl Manager {
     /// `"no model '{model}'"` `fdo::Error` a genuinely unknown model already
     /// gets elsewhere in this file -- the raw fetch-failure reason (which could
     /// carry a hub URL or a filesystem path) is logged server-side, never
-    /// reflected to the caller (`docs/api-security-audit.md`'s error-hygiene
+    /// reflected to the caller (`.agents/rules/api-security.md`'s error-hygiene
     /// requirement).
     async fn ensure_resident(&self, model: &str) -> fdo::Result<()> {
         if self.executor.manifests().iter().any(|m| m.model == model) {
@@ -497,7 +497,7 @@ impl Manager {
         let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
-        // the running action aborts at its next poll (see docs/serving-contract.md).
+        // the running action aborts at its next poll (see .agents/rules/serving-contract.md).
         let (job, token) = self.register_job(&mut inv);
         let jobs = self.jobs.clone();
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;

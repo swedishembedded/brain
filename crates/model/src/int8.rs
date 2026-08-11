@@ -94,7 +94,7 @@ pub struct QuantRows<'a> {
 /// ELEMENTS of their own width (`k` vs `k/4`) while `sx` is offset in ROWS.
 /// Getting one wrong is silently wrong arithmetic, not a crash; `step_sliced`'s
 /// element-vs-byte contract already cost this repo a SIGSEGV (see
-/// `docs/porting-playbook.md` §3).
+/// `.agents/rules/porting.md` §3).
 ///
 /// **Alignment:** `step_sliced` turns each offset into a real
 /// `BufferBinding::offset`, so every one must clear

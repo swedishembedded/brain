@@ -35,7 +35,7 @@
 //
 // WHY THIS SHAPE EXISTS EVEN THOUGH IT IS THE SLOW ONE.
 // One invocation per channel is the documented double fault of
-// docs/kernel-checklist.md §C.2 — C threads total, each walking a contiguous
+// .agents/rules/kernels.md §C.2 — C threads total, each walking a contiguous
 // run alone so a warp's 32 lanes sit H*W floats apart — and on a GPU it is the
 // wrong kernel; prelu_bwd_wg.wgsl is. But `da` is a reduction over N*H*W into
 // one scalar per channel, and this engine has no atomics, so the only
@@ -56,7 +56,7 @@
 // Iteration order: plane by plane, ascending (n, h, w) — contiguous within each
 // (n, c) plane. A single ascending fp32 accumulation, so `da` here and `da`
 // from prelu_bwd_wg.wgsl agree to reassociation, not bit-exactly (`+`
-// reassociates; docs/kernel-checklist.md §E.4).
+// reassociates; .agents/rules/kernels.md §E.4).
 //
 // `da` IS ALWAYS [C], one entry per channel, EVEN WHEN nslope == 1. With a
 // single shared slope the true gradient is the sum of all C entries, and this

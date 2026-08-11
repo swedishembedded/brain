@@ -23,7 +23,7 @@
 //
 // Used to hard-cap at `n_experts <= 128` via `array<f32,128> prob`/
 // `array<bool,128> used` scratch — silent out-of-bounds writes above that
-// (docs/lessons.md #35b's failure shape: a `const` bump without its array
+// (.agents/rules/lessons.md #35b's failure shape: a `const` bump without its array
 // literal is a silent out-of-bounds write; Qwen3.5-35B-A3B's 256 experts hit
 // this wall directly). Fixed the same way `router_bwd.wgsl` already was:
 // nothing here is cached in an array sized by `n_experts`. The softmax
@@ -41,7 +41,7 @@
 // small `sel_idx` set instead of an O(1) `used[e]` lookup) — at the real
 // scale (top_k=8, E=256) that is ~17k vs ~3.5k scalar ops per token, still
 // trivial next to a single GEMM. A workgroup-cooperative (`_rows`-style)
-// rewrite is a valid follow-on per `docs/kernel-checklist.md`'s
+// rewrite is a valid follow-on per `.agents/rules/kernels.md`'s
 // measure-before-optimizing rule; this fix is correctness-first.
 
 struct Params {

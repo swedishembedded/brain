@@ -125,7 +125,7 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
         FLAT_LAYOUT_WARNING.call_once(|| {
             eprintln!(
                 "brain: {} holds models directly (the flat legacy layout); \
-                 migrate to <vendor>/<repo>/ (see docs/models/naming.md) -- \
+                 migrate to <vendor>/<repo>/ (see docs/using/models-and-weights.md) -- \
                  this warning prints once per process",
                 dir.display()
             );

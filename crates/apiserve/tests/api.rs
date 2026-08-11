@@ -1436,8 +1436,8 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
 /// A chat model whose `run_batch` pays its (mocked) generation cost ONCE per
 /// batch, not once per invocation — a stand-in for "one shared forward pass
 /// serves every sequence in it", exactly what `qwen3::serve::Scheduler` does for
-/// real (see `docs/performance/status.md`'s M3: TTFA at concurrency 2 measured
-/// LOWER than at concurrency 1 through this same router, with a real model).
+/// real — measured with a real model, TTFA at concurrency 2 came in LOWER
+/// than at concurrency 1 through this same router.
 /// The framework always calls `run_batch` (never `run` directly — see
 /// `residency::executor::run_group`), so `run` here just routes through it.
 struct BatchingChat {
@@ -1671,7 +1671,7 @@ async fn write_keys_file_is_owner_only_0600() {
 /// a runnable chat resident under that exact name; every other model is
 /// `Unknown`. Counts `ensure` calls so a test can assert a classify-only
 /// (`Unknown`) outcome never triggers one — the zero-network-I/O invariant
-/// `docs/api-security-audit.md` requires for a name the store would refuse.
+/// `.agents/rules/api-security.md` requires for a name the store would refuse.
 struct StubSupplier {
     ensure_calls: AtomicUsize,
 }
@@ -1845,7 +1845,7 @@ async fn unknown_model_with_a_supplier_present_still_404s_with_no_fetch_attempt(
 
 /// A supplier whose `ensure` fails must still just 404 -- the raw failure reason
 /// (which could carry a hub URL or a filesystem path) is never reflected into the
-/// response body (`docs/api-security-audit.md`'s error-hygiene requirement).
+/// response body (`.agents/rules/api-security.md`'s error-hygiene requirement).
 #[tokio::test]
 async fn a_failed_fetch_404s_without_leaking_the_internal_error_reason() {
     struct AlwaysFails;

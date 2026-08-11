@@ -195,7 +195,7 @@ const PIPELINES: &[(&str, &str)] = &[
 /// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg3` (128×128 tile, 256
 /// threads, ~4 TFLOP/s on a P40) wins from `m = 8` up — it bounds-guards its
 /// tile, so a short M costs only the idle rows, while the naive
-/// one-thread-per-output `matmul` collapses on a wide N (`docs/lessons.md` #15). Same math either way
+/// one-thread-per-output `matmul` collapses on a wide N (`.agents/rules/lessons.md` #15). Same math either way
 /// (parity gated by `tests/backend_parity` + gradcheck), so this only changes
 /// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
@@ -1884,7 +1884,7 @@ impl Qwen {
             // multiple of `min_storage_buffer_offset_alignment` (256B) --
             // `local_row * d` has no such guarantee, and that produced a real
             // wgpu validation failure on hardware enforcing the full 256B
-            // limit (`docs/lessons.md`). A uniform-parameter source offset has
+            // limit (`.agents/rules/lessons.md`). A uniform-parameter source offset has
             // no such constraint. `None` (every caller except
             // `step_embed_mrope` on an image row) is a pure no-op, bit-for-bit
             // unchanged from before this parameter existed.
@@ -1927,7 +1927,7 @@ impl Qwen {
     ///
     /// Exposed for the PROFILER (`qwen_bench`), not for driving — `forward()`
     /// owns the submit and the readback. `gpu_core::profile` needs the step
-    /// list to build the per-kernel-kind table `docs/kernel-checklist.md` §F.1
+    /// list to build the per-kernel-kind table `.agents/rules/kernels.md` §F.1
     /// asks for before anyone optimises, and until this existed there was no
     /// way to get one for a decoder LM at all: every recorded qwen number in
     /// `docs/performance/` came from `BRAIN_PROFILE`'s timestamp table on a

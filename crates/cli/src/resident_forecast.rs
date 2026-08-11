@@ -8,7 +8,7 @@
 //! a context series in (f32-LE blob + `{shape}` meta), a forecast tensor out
 //! (f32-LE blob + `{shape,kind,levels}` meta). The dispatch is fully generic, so
 //! this is all that is needed to reach these models over `Run` — see
-//! `docs/serving-contract.md`.
+//! `.agents/rules/serving-contract.md`.
 //!
 //! **NPU placement.** chronos2 and fincast advertise an NPU footprint
 //! (`MemCost::with_npu`), so `place::pick_device` auto-schedules them on the NPU

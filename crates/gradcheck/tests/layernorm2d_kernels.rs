@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Settling `docs/kernel-checklist.md` §E's open question: does a FUSED
+//! Settling `.agents/rules/kernels.md` §E's open question: does a FUSED
 //! channels-first LayerNorm beat the composed `nchw_nlc → layernorm_rows →
 //! nlc_nchw`?
 //!
@@ -79,7 +79,7 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
     // reductions — on `backend-cpu` the JIT does not refuse it, it miscompiles
     // it and the process dies in the allocator with no attributable message.
     // The fused kernel is barrier-free and IS legal there, and checking it
-    // against the host oracle on both backends is the point (`docs/lessons.md`
+    // against the host oracle on both backends is the point (`.agents/rules/lessons.md`
     // #5); only the A/B comparison needs the cap.
     let coop = gpu.caps().workgroup_reductions;
     // The CPU JIT walks these shapes on one core; the 2 M-element case is the

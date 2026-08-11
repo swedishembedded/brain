@@ -5,7 +5,7 @@
 //! `block::flash_bidir_fwd` (both flash variants) at the model's real 8k shape.
 //!
 //! Why this exists: `crates/lfm/src/model.rs` registered `flash_attn_bidir` and
-//! never dispatched it, and `docs/models/lfm/status.md` recorded "flash measured
+//! never dispatched it, and `.agents/roadmap/lfm.md` recorded "flash measured
 //! ≈ naive here". That measurement predates `flash_attn_bidir_split`, which is
 //! numerically identical (cosine 1.00000000) but 14.4× the baseline at
 //! `head_dim = 64` — and 64 is exactly lfm's `head_dim`. So the recorded

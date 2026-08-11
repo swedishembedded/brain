@@ -22,7 +22,7 @@
 //! secondary device's VRAM is invisible to the manager (double-booking risk:
 //! another model could be placed on top of memory that is actually spoken
 //! for), or it gets folded into `ram` (wrong pool, wrong eviction pressure).
-//! `docs/lessons.md`'s own cataloged "gates that lie" pattern names this
+//! `.agents/rules/lessons.md`'s own cataloged "gates that lie" pattern names this
 //! exact shape of bug. [`MultiDeviceCost`] is the honest alternative: every
 //! device an instance touches is named, with its own real byte count,
 //! checked against its own real budget.

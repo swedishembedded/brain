@@ -4,7 +4,7 @@
 //! Training-step profiler: where a FORWARD **and a BACKWARD** actually spend
 //! their time, per kernel kind.
 //!
-//! Every profiler in this tree measured a forward. `docs/kernel-checklist.md`
+//! Every profiler in this tree measured a forward. `.agents/rules/kernels.md`
 //! §E asks for a per-kernel-kind table before anyone optimises, and for the
 //! backward there was no way to get one — so the training datapath had never
 //! been looked at, only assumed to look like the forward. It does not: the
@@ -23,7 +23,7 @@
 //! every other model bench now call, rather than each carrying a copy:
 //!   * every timed region is `poll_wait()`-bracketed — a bare `submit` only
 //!     appends to `pending`, so an unbracketed loop times the HOST and reports
-//!     it as device throughput (`docs/lessons.md` #6);
+//!     it as device throughput (`.agents/rules/lessons.md` #6);
 //!   * best-of-N, not mean: the minimum is the least contaminated sample;
 //!   * groups are CONTIGUOUS runs of one kernel in submit order, so the sum of
 //!     the parts is comparable to the whole, and both are printed;
@@ -117,7 +117,7 @@ fn gn_ab(reps: usize) {
     // `gn_stats_wg` uses workgroupBarrier; backend-cpu reports
     // workgroup_reductions: false and its JIT cannot compile it. Dispatching it
     // anyway panics — which is exactly why `vae::blocks` branches on the
-    // QUERIED capability rather than assuming (docs/lessons.md #5).
+    // QUERIED capability rather than assuming (.agents/rules/lessons.md #5).
     let coop = gpu.caps().workgroup_reductions;
     if !coop {
         println!("(no workgroup reductions on this device — the cooperative kernel is not selectable)");
@@ -444,7 +444,7 @@ fn dwtn_ab(reps: usize) {
 /// The forward threshold (128) was measured for the ORIGINAL kernel pair and
 /// never re-derived after `matmul_reg3` replaced `matmul_reg2` in the lowering.
 /// The backward's equivalent re-derivation moved 128 -> 32 and was worth 4x at
-/// the shapes in between, and `docs/kernel-checklist.md` §F.6 says every kernel
+/// the shapes in between, and `.agents/rules/kernels.md` §F.6 says every kernel
 /// pair gets its own swept threshold — so this must be measured, not inherited.
 ///
 /// direct  = conv_bias_reg

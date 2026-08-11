@@ -7,8 +7,8 @@
 //! Same shape of thing as the ECAPA-TDNN speaker encoder: an **embedding model
 //! consumed by a generative one**. `speaker` turns a waveform into a 1024-d
 //! voice vector for Qwen3-TTS; this turns a photo into a 512-d identity vector
-//! for the identity-preserving image pipeline (PuLID / InstantID — see
-//! `docs/imaging/plan.md`). Hence the same layout: `config` / `import` / `model`
+//! for the identity-preserving image pipeline (PuLID / InstantID). Hence the
+//! same layout: `config` / `import` / `model`
 //! + a parity test replaying dumped reference goldens.
 //!
 //! # Pipeline
@@ -36,7 +36,7 @@
 //! The serving contract is met by [`caps`] (the `detect`/`embed`
 //! `capability::Provider`), `crates/cli/src/resident_facenet.rs` (the residency
 //! adapter, `BRAIN_FACENET_DIR`) and `examples/vision/` — see
-//! `docs/serving-contract.md`.
+//! `.agents/rules/serving-contract.md`.
 //!
 //! # Two normalisations, one letter apart
 //!

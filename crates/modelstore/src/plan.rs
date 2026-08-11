@@ -135,7 +135,7 @@ struct GgufVendorOverride {
 const GGUF_VENDOR_OVERRIDES: &[GgufVendorOverride] = &[
     // Qwen3.5-35B-A3B ships no GGUF of its own; bartowski's quants are the
     // ones this repo has fetched and validated against (see
-    // docs/models/qwen35/status.md).
+    // .agents/roadmap/qwen35.md).
     GgufVendorOverride {
         vendor: "Qwen",
         repo: "Qwen3.5-35B-A3B",
@@ -227,7 +227,7 @@ pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
     // substring too — a plain first-match-wins scan in the other order would
     // silently route it to the dense qwen importer, which would download the
     // full 70.5 GB checkpoint and then fail (or worse, partially import) on a
-    // family it cannot represent. See docs/models/omni/status.md M3.
+    // family it cannot represent. See .agents/roadmap/omni.md M3.
     ["omni", "gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
 }
 

@@ -8,8 +8,7 @@
 //! nearest-2× upsample, and its NCHW↔NLC permutations); every transformer stage
 //! comes from `model::block` (`layernorm_fwd`, `pick_gemm`, `flash_bidir_fwd`,
 //! `bidir_fwd`) and the existing attention kernels. **This crate adds no kernel
-//! and no block** — the measured claim that put phase 4b in
-//! `docs/imaging/plan.md`, now discharged.
+//! and no block.**
 //!
 //! ```text
 //! emb   = time_embedding(sinusoid(t)) + add_embedding([pooled ‖ sinusoid(time_ids)])
@@ -78,7 +77,7 @@ const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 10;
 /// The tiled GEMM every `nn.Linear` here dispatches: the ONE the shared block
 /// set already registers. This crate used to register its own `matmul_reg2`
 /// beside it and send every linear there — the slower of two kernels it was
-/// already carrying (`docs/lessons.md` #17).
+/// already carrying (`.agents/rules/lessons.md` #17).
 const K_MATMUL_REG: usize = vae::blocks::MATMUL_REG3_SLOT;
 // `layernorm_rows` occupies the last slot and is resolved BY NAME through
 // `block::LayerNormIds::resolve_fwd`, never indexed directly.

@@ -68,7 +68,7 @@ pub use nemotron_topology::{build_nemotron_encoder, build_nemotron_head, build_s
 pub use qwen_asr_topology::{build_qwen_asr_head, QwenAsrTopo};
 pub use qwenvl_topology::{build_vit_head, VitTopo};
 
-/// The one per-model NPU seam (see `docs/npu-residency.md`). A model implements
+/// The one per-model NPU seam. A model implements
 /// [`build`](NpuModel::build) — its device-heavy forward, composed from the shared
 /// `topo`/`onnx` block library — plus a [`cache_key`](NpuModel::cache_key); the
 /// generic [`openvino::NpuGraph`] and the residency NPU instance do compile / cache /

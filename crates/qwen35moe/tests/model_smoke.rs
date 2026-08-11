@@ -11,7 +11,7 @@
 //! `gdn_chunk_size(24)=8` -> 3 chunks, exercising the cross-chunk recurrence
 //! loop, not just a single degenerate chunk), and produces finite,
 //! deterministic logits on both the CPU JIT and the default GPU backend
-//! (`docs/lessons.md` #5 — a barrier-crossing kernel can silently misbehave
+//! (`.agents/rules/lessons.md` #5 — a barrier-crossing kernel can silently misbehave
 //! on exactly one backend).
 
 use gpu_core::Gpu;
@@ -68,7 +68,7 @@ fn forward_is_finite_and_deterministic_cpu() {
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
 /// backend otherwise (see `gpu_core`'s own doc) -- run this test under both
 /// `BRAIN_DEVICE=cpu` and unset (the default GPU backend) to cover both,
-/// per `docs/lessons.md` #5.
+/// per `.agents/rules/lessons.md` #5.
 #[test]
 fn forward_is_finite_and_deterministic_default_backend() {
     let gpu = Gpu::new(PIPELINES);

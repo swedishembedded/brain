@@ -19,7 +19,7 @@
 // bindings and its Params fields — so the arity IS the WGSL kernel's binding
 // list. Packing those into a struct would put a second, drifting description
 // of a kernel's signature next to the authoritative one in the .wgsl, which
-// is the failure mode `docs/kernel-checklist.md` exists to prevent.
+// is the failure mode `.agents/rules/kernels.md` exists to prevent.
 #![allow(clippy::too_many_arguments)]
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -1107,7 +1107,7 @@ impl LayerNormIds {
 /// the DiT forwards normalise a ROW RANGE of a joint slab and must bind
 /// sub-ranges (`Gpu::step_sliced`). Both shapes have to share ONE selection
 /// rule — a second copy is a place a model silently keeps the slow kernel, which
-/// is `docs/kernel-checklist.md` §A's most expensive defect class.
+/// is `.agents/rules/kernels.md` §A's most expensive defect class.
 pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
@@ -1315,7 +1315,7 @@ pub enum GemmVariants {
 /// apart in the useful direction**: `flux1` learned that a register-tiled GEMM
 /// at M=1 wastes 127/128 of every tile and routed skinny-M to the GEMV kernels;
 /// `flux2`, written first, never did, so every one of its per-token modulation
-/// mat-vecs paid the full tile. That is `docs/kernel-checklist.md` §A — "a fast
+/// mat-vecs paid the full tile. That is `.agents/rules/kernels.md` §A — "a fast
 /// kernel a later model never learned about" — and the checklist's answer is to
 /// put the fix in *selection*, in one place, not in a second copy.
 ///

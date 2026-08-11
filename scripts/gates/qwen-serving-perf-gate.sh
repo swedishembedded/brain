@@ -13,9 +13,8 @@
 # read (see `crates/perf/src/gate.rs`'s own "nothing was actually gated"
 # refusal) — `serve` at one concurrency is the scenario shaped for gating.
 #
-# Dev-box gate, NOT CI: this box's absolute numbers drift across a session
-# (see docs/performance/status.md's M3->M4 bisection) — the floor is
-# deliberately generous (0.5, i.e. half of baseline) to absorb that drift
+# Dev-box gate, NOT CI: this box's absolute numbers drift across a session —
+# the floor is deliberately generous (0.5, i.e. half of baseline) to absorb that drift
 # while still catching an order-of-magnitude regression (e.g. a rewiring
 # that serializes concurrent requests again). Capture the baseline on a
 # rested machine via --update, then hand-review the diff.

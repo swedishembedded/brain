@@ -6,7 +6,7 @@
 
 **Scope, honestly**: text in/out, speech in (`--in-speech`), image in
 (`--in-image`), and video in (`--in-video`) are all real end to end over
-`--dbus` (`docs/models/omni/status.md`'s multimodal-input entry: real
+`--dbus` (`.agents/roadmap/omni.md`'s multimodal-input entry: real
 audio/vision tower encode + host-side embedding splice + real M-RoPE
 positions, `crate::mm`). `--in-video` needs PyAV (`pip install av`) to
 extract frames -- unlike speech/image, which stay zero-dependency by design,

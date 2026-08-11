@@ -114,7 +114,7 @@ pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTM
 /// dispatch arithmetic, bit-identical output — and it measured faster at all
 /// twelve shapes swept from `[1,4096,4096]` to `[8192,320,320]` (1.08x-1.30x).
 /// There is no shape where preferring `matmul_reg2` is correct; see
-/// `docs/lessons.md` #17.
+/// `.agents/rules/lessons.md` #17.
 pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 
 /// The backward kernels the reverse walk of a train-mode [`Builder`] dispatches,
@@ -128,7 +128,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// of the buffer it writes. The two per-channel reductions (`gn_dgamma` /
 /// `gn_dbeta`, C invocations each) and the per-group `gn_dsum` (N*G) have no
 /// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
-/// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
+/// in `.agents/rules/kernels.md`, NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
 pub const BWD_KERNELS: [(&str, &str); 21] = [
     ("conv2d_dx", kernels::CONV2D_DX),
@@ -620,7 +620,7 @@ impl<'a> Builder<'a> {
     /// Upload one weight tensor, non-ReBAR-safe.
     ///
     /// **Not `storage_init`**, and both departures are load-bearing on a P40
-    /// (`docs/kernel-checklist.md` §D, `paramstore`'s upload loop, and
+    /// (`.agents/rules/kernels.md` §D, `paramstore`'s upload loop, and
     /// `zimage::BlockWeights::upload` all record the same two):
     ///
     /// 1. `create_buffer_init`'s mapped-at-creation path forces weights into an
@@ -934,7 +934,7 @@ impl<'a> Builder<'a> {
             //
             // `crates/wm-diamond` built this pair after measuring the serial
             // kernel at 77% of its frame time, and the shared builder never
-            // learned about it — `docs/lessons.md` #8 once more.
+            // learned about it — `.agents/rules/lessons.md` #8 once more.
             let part = self.act(2 * g as u64 * GN_P as u64);
             self.steps.push(self.gpu.step(
                 K_GN_PART,

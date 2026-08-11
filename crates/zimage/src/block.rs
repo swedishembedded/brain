@@ -619,7 +619,7 @@ impl Int8Weights {
 /// (never the whole model) but cannot itself be chunk-bounded further
 /// without a row-block quantizer — that refinement belongs to the windowed-
 /// execution phase, which needs it anyway for the fp32 stress case; see
-/// docs/lessons.md.
+/// .agents/rules/lessons.md.
 fn quantize_block(t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> HostInt8Block {
     let (dim, hid) = (d.dim as usize, d.hidden as usize);
     let q = |n: &str, no: usize, k: usize| {

@@ -49,7 +49,7 @@ pub fn fbits(x: f32) -> u32 {
 ///
 /// Resolved by name against the list the [`Gpu`] was built with rather than
 /// hardcoded, because a wrong index is silently wrong output rather than a
-/// crash (`docs/kernel-checklist.md`).
+/// crash (`.agents/rules/kernels.md`).
 #[derive(Clone, Copy, Debug)]
 pub struct RowKernels {
     pub ln: usize,

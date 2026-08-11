@@ -16,7 +16,7 @@
 //! **Adds no kernel and no block.** Everything convolutional is
 //! `vae::blocks::Builder`; everything transformer is `model::block` plus the
 //! existing attention kernels. That was the measured finding that put the UNet
-//! family into `docs/imaging/plan.md` §2 ahead of a bigger DiT, and it holds.
+//! family ahead of a bigger DiT, and it holds.
 //!
 //! Note the crate description's original wording — "ResBlocks with timestep
 //! scale-shift" — was wrong: SDXL ships `resnet_time_scale_shift: "default"`,

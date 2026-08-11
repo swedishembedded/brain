@@ -4,7 +4,7 @@
 //! SAM 2.1 promptable segmentation — the **image path**: Hiera trunk, FPN neck,
 //! prompt encoder and the two-way mask decoder.
 //!
-//! Out of scope by design (`docs/imaging/plan.md`, open decision 3): the video
+//! Out of scope by design: the video
 //! memory bank — `memory_attention`, `memory_encoder`, and the temporal object
 //! pointer. Those tensors are present in the checkpoint, recognised by name and
 //! COUNTED as deliberately skipped by [`import`], never silently ignored.
@@ -19,7 +19,7 @@
 //! The serving contract is met by [`caps`] (the `segment`
 //! `capability::Provider`), `crates/cli/src/resident_sam2.rs` (the residency
 //! adapter, `BRAIN_SAM2_WEIGHTS`, with a genuine per-image `run_batch`) and
-//! `examples/vision/` — see `docs/serving-contract.md`.
+//! `examples/vision/` — see `.agents/rules/serving-contract.md`.
 //!
 //! ```text
 //! image [1,3,1024,1024]

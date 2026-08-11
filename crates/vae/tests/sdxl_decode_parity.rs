@@ -10,7 +10,7 @@
 //! produced structurally-correct but visibly corrupted pictures, and no test
 //! could see it: the UNet's own 165-tap parity is green, and a
 //! gradient-magnitude sanity check on the output passes on a broken image
-//! (`docs/lessons.md` #1, #16).
+//! (`.agents/rules/lessons.md` #1, #16).
 //!
 //! Golden fixture: `testdata/golden/vae/sdxl_vae_decode.safetensors`, a fixed
 //! `[1,4,16,16]` latent and diffusers' `vae.decode(z).sample` `[1,3,128,128]`,

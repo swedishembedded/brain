@@ -94,7 +94,7 @@ pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u
 /// each frame's own merged patch grid on H/W). This is a documented
 /// approximation of HF's exact reference (which additionally scales audio's T
 /// axis by wall-clock seconds via `position_id_per_seconds`), not a byte-exact
-/// port — see `crate::generate`'s module doc / `docs/models/omni/status.md`'s
+/// port — see `crate::generate`'s module doc / `.agents/roadmap/omni.md`'s
 /// multimodal entry.
 ///
 /// The post-run anchor advance is `max(t, h, w)` (not `max(h, w)` — the

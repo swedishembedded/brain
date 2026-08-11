@@ -8,7 +8,7 @@
 //! kernel nobody knew about: `gn_stats` was fixed for DIAMOND in 2025 and
 //! `crates/vae`, written afterwards against the same kernel *name*, silently
 //! inherited the slow one — 2262 ms of a 6.5 s decode, 159x when finally
-//! selected. `docs/kernel-checklist.md` §A therefore says the fix belongs in
+//! selected. `.agents/rules/kernels.md` §A therefore says the fix belongs in
 //! **selection**, never in a copy each model opts into by hand.
 //!
 //! Two selection seams already existed:

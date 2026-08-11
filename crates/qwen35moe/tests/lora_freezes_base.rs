@@ -9,7 +9,7 @@
 //! `conv1d.weight`) must come out of a real training loop bit-identical to
 //! where it started. Not a gradcheck (that's `gradcheck::check_qwen35_lora`,
 //! which validates the ADAPTER gradients are numerically correct) — this is
-//! the complementary "did the freeze actually hold" check `docs/lessons.md`'s
+//! the complementary "did the freeze actually hold" check `.agents/rules/lessons.md`'s
 //! "close the loop on features that silently do nothing" convention asks
 //! for: a LoRA wiring bug that accidentally left the base `Role::Trainable`
 //! (or silently no-opped the adapter update) would still gradient-check fine
@@ -77,7 +77,7 @@ fn lora_training_only_updates_adapters_cpu() {
 }
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
-/// backend otherwise -- run both per `docs/lessons.md` #5.
+/// backend otherwise -- run both per `.agents/rules/lessons.md` #5.
 #[test]
 fn lora_training_only_updates_adapters_default_backend() {
     run(Gpu::new(PIPELINES));

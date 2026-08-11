@@ -10,7 +10,7 @@
 //! precedent). Weight I/O is still the validation-tier: every layer's weights
 //! are re-read from the mmap for every generated token (no resident weights),
 //! so a real 48-layer decode is still minutes, not milliseconds, per token —
-//! `docs/models/omni/status.md`'s M9 entry records this half of the scope
+//! `.agents/roadmap/omni.md`'s M9 entry records this half of the scope
 //! boundary and it remains true.
 //!
 //! **KV-cache**: the ATTENTION math is no longer the validation-tier's O(T²)

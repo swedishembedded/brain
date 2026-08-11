@@ -16,7 +16,7 @@
 //! full-resolution image across the bus after every stage; here the image stays
 //! put and only the final result is returned. `capability::Media` already has
 //! `Image` and `Mask` and `Run` already passes blobs by fd, so this needs no new
-//! D-Bus surface — see `docs/imaging/plan.md` §3.5.
+//! D-Bus surface.
 //!
 //! # Model stages go through the registry
 //!

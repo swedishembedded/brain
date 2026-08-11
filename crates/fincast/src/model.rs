@@ -10,7 +10,7 @@
 //! data-dependent): the per-dim query scaling (`softplus(scaling)`), the causal
 //! multi-head attention over the ≤`context_len/patch_len` patch tokens, and the
 //! top-2 MoE gating + combine. This mirrors the reference exactly (see
-//! `docs/models/fincast/status.md`), with **deterministic** top-2 routing (the parity
+//! `.agents/roadmap/fincast.md`), with **deterministic** top-2 routing (the parity
 //! trap).
 //!
 //! Per decoder block on `emb [s,d]` (`s = n_patches`):
@@ -42,7 +42,7 @@ const LAYERNORM: usize = 6;
 // Naive `matmul` is used throughout (not the tiled GEMM): it JIT-compiles on the
 // CPU backend (the tiled kernel needs work-group barriers the Cranelift JIT
 // rejects), so the same forward runs on both CPU and GPU. A tiled/register-blocked
-// fast path is a perf follow-up (see docs/models/fincast/status.md).
+// fast path is a perf follow-up (see .agents/roadmap/fincast.md).
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),

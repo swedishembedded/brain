@@ -222,7 +222,7 @@ impl Flux2Model {
     /// ([`Flux2Model::forward_batch`]). Only the activation scratch grows —
     /// weights are shared — so the extra cost is `(b_max − 1) × ` the per-sample
     /// working set (≈ 0.5 GiB at 512² for klein-4B; see
-    /// `docs/models/flux2/status.md`). `b_max = 1` allocates exactly what the
+    /// `.agents/roadmap/flux2.md`). `b_max = 1` allocates exactly what the
     /// unbatched model always did.
     pub fn new_batched(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, b_max: u32, precision: Precision) -> Flux2Model {
         assert!(b_max >= 1, "b_max must be >= 1");
@@ -803,7 +803,7 @@ impl Flux2Model {
         // Debug aid (batch profiling): BRAIN_FLUX2_TIME_FORWARD=1 splits the
         // forward into host conditioning / input upload / step recording /
         // device execution, which is how the B≥4 plateau in
-        // `docs/models/flux2/status.md` was attributed.
+        // `.agents/roadmap/flux2.md` was attributed.
         let timed = std::env::var("BRAIN_FLUX2_TIME_FORWARD").is_ok();
         let t_start = std::time::Instant::now();
 

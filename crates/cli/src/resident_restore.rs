@@ -26,7 +26,7 @@
 //! holding both sets of activations, which for a 512² VQ generator is a worse
 //! trade than running twice. So the default serial [`Instance::run_batch`]
 //! stands, and this comment is the required statement of why
-//! (`docs/serving-contract.md` §3).
+//! (`.agents/rules/serving-contract.md` §3).
 //!
 //! What DOES batch here is the fidelity dial: `w` is a one-element device buffer
 //! read by `scale_add`, not a recorded constant, so a sweep of N values over one

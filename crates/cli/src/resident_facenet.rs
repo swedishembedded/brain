@@ -21,7 +21,7 @@
 //! re-upload 280 MB of weights and defeat the point.
 //!
 //! The default serial [`Instance::run_batch`] therefore stands, and this comment
-//! is the required statement of why (`docs/serving-contract.md` §3). The batch
+//! is the required statement of why (`.agents/rules/serving-contract.md` §3). The batch
 //! axis exists in the architecture — `crates/facenet/src/train.rs` trains
 //! ArcFace at batch > 1 — so widening the *inference* graphs to a configurable
 //! N (as `yolo::Yolo::load(path, batch)` does) is the follow-up that would make

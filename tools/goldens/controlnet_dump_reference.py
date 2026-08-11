@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Dump SDXL-ControlNet reference goldens for brain's `crates/controlnet`
-parity ladder (docs/imaging/plan.md phase 4c).
+parity ladder.
 
   stages.safetensors             per-STAGE taps of a real diffusers
                                  `ControlNetModel` forward, captured with

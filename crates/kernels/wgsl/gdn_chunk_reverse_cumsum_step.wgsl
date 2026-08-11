@@ -20,7 +20,7 @@
 // `0` (the reverse of forward's `1` UP TO `c_len - 1`), each updating EVERY
 // row in parallel:
 //   d_raw_g[row,i] += d_raw_g[row,i+1]
-// Same JIT constraint as the forward step (`docs/kernel-checklist.md`: the CPU
+// Same JIT constraint as the forward step (`.agents/rules/kernels.md`: the CPU
 // backend allows exactly one top-level `workgroupBarrier()` per kernel, so a
 // true parallel reverse-scan cannot fit in one kernel here) — `c_len` is only
 // tens for this model family, so the same O(c_len) sequential-dispatch idiom

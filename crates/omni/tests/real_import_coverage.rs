@@ -31,7 +31,7 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
     let idx_json = std::fs::read_to_string(dir.join("model.safetensors.index.json")).expect("read index");
     let idx: serde_json::Value = serde_json::from_str(&idx_json).expect("parse index");
     let weight_map = idx["weight_map"].as_object().expect("weight_map object");
-    assert_eq!(weight_map.len(), 28010, "index tensor count drifted from the recorded fact (docs/models/omni/status.md)");
+    assert_eq!(weight_map.len(), 28010, "index tensor count drifted from the recorded checkpoint shape");
 
     let mut unmapped = Vec::new();
     let mut seen_brain_names: HashSet<String> = HashSet::new();
@@ -62,7 +62,7 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
 }
 
 /// The real 70 GB source -> ~35 GB int8-native import, run for the first
-/// time against all 15 shards (`docs/models/omni/status.md` recorded this as
+/// time against all 15 shards (`.agents/roadmap/omni.md` recorded this as
 /// "not yet done -- mechanism proven on synthetic and partial data only, 4 of
 /// 15 shards"). Two checks beyond the metadata-level name mapping above,
 /// which never touches actual written bytes:

@@ -391,7 +391,7 @@ impl ResidentModel for ZImageResident {
         // `DitEngine::build_from_source` itself makes — the number budgeted
         // here and the number the code actually allocates must be the same
         // expression, or this estimate silently outlives whichever engine
-        // it was written for (see docs/lessons.md).
+        // it was written for (see .agents/rules/lessons.md).
         if key.config.contains(":fp32:") {
             let (vram, ram) = zimage::pipeline::hifi_cost_bytes(gpu_core::devices::gpus().len());
             return MemCost::new(vram, ram);

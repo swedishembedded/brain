@@ -19,7 +19,7 @@
 // safely there needs row COMPACTION (feed the tile only the routed rows) or a
 // whole-tile skip decision, either of which needs a gather/prefix-sum pass
 // this workstream deferred (see `moe_linear_gated.wgsl`'s own doc and
-// `docs/models/omni/status.md` M2). This kernel accepts a tiled kernel's
+// `.agents/roadmap/omni.md` M2). This kernel accepts a tiled kernel's
 // throughput ceiling in exchange for a row-level skip that is trivially safe
 // (an ordinary `return`, no barrier in this kernel at all) — the same trade
 // `moe_linear_gated.wgsl` already makes for the fp32 tier. Promoting both to

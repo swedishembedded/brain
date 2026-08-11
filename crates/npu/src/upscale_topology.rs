@@ -11,7 +11,7 @@
 //! **The two `* 0.2` residual scalings are the architecture.** Each dense block
 //! and each RRDB returns `x + 0.2*f(x)`. Emitting them as a bare `Add` produces
 //! a graph that runs, is the right shape, and is WRONG — the same failure mode
-//! `crates/upscale`'s parity gate exists to catch (`docs/lessons.md` #18 is the
+//! `crates/upscale`'s parity gate exists to catch (`.agents/rules/lessons.md` #18 is the
 //! neighbouring story). They are emitted as an explicit `Mul` by a scalar
 //! initializer, and `residual_scalings_are_present` counts them.
 //!

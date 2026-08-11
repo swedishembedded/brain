@@ -43,7 +43,7 @@
 // covers 4 scores, each reading a contiguous 32-byte run.
 //
 // Exactly ONE top-level `workgroupBarrier()` — the CPU JIT splits a body at one
-// and no more (`docs/lessons.md` #26).
+// and no more (`.agents/rules/lessons.md` #26).
 //
 // Dispatch: `ceil(scores / (64/LPS)) * 64` threads. Params are byte-identical to `paged_decode_scores_batched`, so the
 // two are interchangeable at the call site and the selector picks between them
@@ -68,7 +68,7 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> scores:       array<f32>;
 
 // Lanes cooperating on one score. SWEPT on a P40 at Qwen3-0.6B (head_dim 128),
-// never guessed — `docs/kernel-checklist.md` §F.6:
+// never guessed — `.agents/rules/kernels.md` §F.6:
 //
 //     LPS      64      16       8       4       2
 //     ms    56.37   19.31   17.73   17.24   28.65

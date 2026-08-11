@@ -81,10 +81,9 @@ impl Default for GenerateOptions {
 ///
 /// The two text encoders are needed ONCE per generation and the VAE once at the
 /// end, while the UNet runs every step — so the encoders are built for the
-/// encode and dropped, and the VAE is built for the decode and dropped. That is
-/// the same tiering `docs/imaging/plan.md` prescribes for FLUX.1, done by
-/// construction here rather than through `crates/residency`, because this
-/// pipeline owns its own lifetimes.
+/// encode and dropped, and the VAE is built for the decode and dropped. Same
+/// tiering as FLUX.1, done by construction here rather than through
+/// `crates/residency`, because this pipeline owns its own lifetimes.
 pub struct Sdxl {
     gpu: Gpu,
     root: std::path::PathBuf,

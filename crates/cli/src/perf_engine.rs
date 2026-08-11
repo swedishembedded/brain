@@ -386,7 +386,7 @@ pub fn run_weights_with(opt: &Options, budget: u32, passes: u32) -> Result<Artif
          identical seeds -- there is no randomness here at all, the \
          schedule is fully deterministic. It answers 'does the weight \
          window's eviction policy actually beat a naive one' with a \
-         measured ratio, not a claim. See docs/models/zimage/status.md for \
+         measured ratio, not a claim. See .agents/roadmap/zimage.md for \
          the real (not simulated) int8 build's own numbers."
             .into(),
     );

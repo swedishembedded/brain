@@ -1436,7 +1436,7 @@ fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc
 /// Shares `SynthSpec::parse`/`config`/`build_engine` with every other synth
 /// caller (`startup`/`cancel`/`kvcache`/`faults`/`http:qwen-synth:`) rather
 /// than a second, independent copy of the shape-to-config arithmetic
-/// (`docs/lessons.md` #19: a registration/derivation split across N call
+/// (`.agents/rules/lessons.md` #19: a registration/derivation split across N call
 /// sites is a defect waiting for its turn — this WAS two copies until now,
 /// and the derived `head_dim`/`n_kv_heads` silently did not match real
 /// Qwen3-0.6B's, understating both the memory win and the append kernel's

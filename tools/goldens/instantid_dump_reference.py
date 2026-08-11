@@ -112,7 +112,7 @@ def main():
     # ONE SITE PER DISTINCT WIDTH, not the first two. SDXL's 70 attn2 modules
     # come in two hidden sizes (640 and 1280), and `heads = hidden // 64` differs
     # between them (10 vs 20) — gating only one width cannot catch a
-    # width-dependent bug. See docs/lessons.md #4.
+    # width-dependent bug. See .agents/rules/lessons.md #4.
     by_width = {}
     for k in ip_attn:
         if k.endswith(".to_k_ip.weight"):

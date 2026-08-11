@@ -22,7 +22,7 @@
 //!
 //! Both probes self-calibrate their trip count until the timed region is long
 //! enough to dominate launch and drain, and both are `poll_wait`-bracketed —
-//! `docs/kernel-checklist.md` §E.0 exists because a bare-submit loop once
+//! `.agents/rules/kernels.md` §E.0 exists because a bare-submit loop once
 //! reported 377 GB/s on a ~346 GB/s card by timing the host.
 //!
 //! Results are cached per adapter, with the same key discipline
@@ -260,7 +260,7 @@ static MEASURE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 ///
 /// Defaults to skipped (as if `BRAIN_NO_ROOF=1`) on the CPU backend, where the
 /// probe's calibration loop has a known-bad interaction with `backend-cpu`'s
-/// rayon dispatch (docs/lessons.md #37/#38) — a per-call-site opt-out is what
+/// rayon dispatch (.agents/rules/lessons.md #37/#38) — a per-call-site opt-out is what
 /// #37 asked every new caller to add by hand; this applies it once at the
 /// source instead. Set `BRAIN_NO_ROOF=0` to force the probe to run anyway,
 /// even on the CPU backend.

@@ -856,7 +856,7 @@ docs** — cite this lesson and, if it matters for that model's memory budget,
 measure with `vram_overhead.rs` on the backend that model actually plans to
 run.
 
-## 36. A `const` bump without its array literal is a silent out-of-bounds write
+## 35b. A `const` bump without its array literal is a silent out-of-bounds write
 
 `crates/kernels/wgsl/router_gate.wgsl` and `router_gate_train.wgsl` declare
 `const MAX_EXPERTS: u32 = 128u;` — bumped up from 64 in an earlier commit,
@@ -921,9 +921,9 @@ record that sounds like verification but is actually just "different code
 path, assumed safe" is worse than no record at all, because it stops the
 next reader from re-deriving what was never actually checked.
 
-## 37. The softmax top-k router's cap outlived its own bug-class writeup
+## 35c. The softmax top-k router's cap outlived its own bug-class writeup
 
-#36's "recurrence" paragraph fixed `router_bwd.wgsl` array-free and added a
+`35b`'s "recurrence" paragraph fixed `router_bwd.wgsl` array-free and added a
 guard `assert!` to `router_gate_sigmoid.wgsl`'s forward path, but left
 `router_gate.wgsl`/`router_gate_train.wgsl` — the plain-softmax top-k
 router, used by every model that isn't the sigmoid-`noaux_tc` scheme —
@@ -940,7 +940,7 @@ softmax numerator is stashed in the `gate`/`probs` OUTPUT buffer itself
 (already sized `[rows, n_experts]`, so it doubles as scratch) instead of a
 second buffer, and the only remaining `var<function>` array
 (`sel_idx: array<u32, 32>`) is bounded by `top_k`, never by `n_experts` — the
-exact fix shape #36 names but a bound the `top_k`-side needed too (a
+exact fix shape `35b` names but a bound the `top_k`-side needed too (a
 top-k selection loop that excludes already-picked experts via an `n_experts`-
 sized `used[]` bool array has the identical failure shape as caching the
 probabilities themselves; both are "an array sized by the wrong dimension").
@@ -948,7 +948,7 @@ probabilities themselves; both are "an array sized by the wrong dimension").
 Caught by `crates/model/tests/router_gate_expert_cap.rs`, mirroring
 `router_bwd_expert_cap.rs`'s own shape: a real (non-same-composition) host
 oracle at `n_experts` values below, one past, and far past the former cap
-(8, 129, 256) — the class of test #36 itself says is the only thing that
+(8, 129, 256) — the class of test `35b` itself says is the only thing that
 actually catches this, since a same-composition sparse-vs-dense oracle is
 blind to a bug present identically on both sides of the comparison.
 
@@ -960,7 +960,7 @@ array-free rewrite there needs its own group-limited top-k pass structure
 raising that router past 64 routed experts needs to do that work first, not
 bump the `assert!`.
 
-## 38. `testdata/`'s "restorable from a mirror" claim needs auditing against a real machine, not assumed from the script
+## 36. `testdata/`'s "restorable from a mirror" claim needs auditing against a real machine, not assumed from the script
 
 `scripts/data/fetch-testdata.sh`'s own header states the design goal
 plainly: `testdata/` is disposable, gitignored, and `make fetch/testdata`
@@ -989,7 +989,7 @@ tree as safe to clear, run the stated recovery path for real (or audit
 mirror-existence + script-coverage per subtree) rather than trusting the
 tree's own claimed disposability.
 
-## 39. A roofline probe calibrated for GPU throughput reads as a hang on the CPU backend
+## 37. A roofline probe calibrated for GPU throughput reads as a hang on the CPU backend
 
 `gpu_core::roof::measure_compute`'s self-calibrating loop starts at a small
 iteration count and doubles (or jumps straight to a computed target) until a
@@ -1008,7 +1008,7 @@ per-layer work began.
 
 The root cause (somewhere in `measure_compute`'s calibration loop,
 `crates/backend-cpu`'s rayon dispatch, or their interaction under this
-kernel set / thread count) was not tracked down at the time — see #40 for the
+kernel set / thread count) was not tracked down at the time — see #38 for the
 follow-up. `gpu_core::roof` already ships the escape hatch, `BRAIN_NO_ROOF=1`,
 which skips the probe outright and makes callers report "roofline unmeasured"
 instead of guessing. **Any new bench or profiler that calls
@@ -1017,15 +1017,15 @@ might run on the CPU backend should default to skipping the probe there, or
 at minimum document the escape hatch loudly** — the existing benches never
 hit this because they only ever ran on GPU.
 
-## 40. Two unrelated unbounded waits, not one bug, were behind "the GPU hangs"
+## 38. Two unrelated unbounded waits, not one bug, were behind "the GPU hangs"
 
-Lesson #39 above named the CPU-side symptom (a roofline probe stuck for
+Lesson #37 above named the CPU-side symptom (a roofline probe stuck for
 hours) but explicitly left the root cause untracked. Revisiting it: the
 kernel itself was innocent (`roof_fma.wgsl` takes its iteration count
 through a *uniform*, not a specialization constant, so there is no per-rung
 recompile; the first rung is only a few GFLOP, trivially fast on any real
 device) — the "hours at near-zero CPU" was always a BLOCK, not slow
-arithmetic, confirming #39's own reasoning without yet finding what was
+arithmetic, confirming #37's own reasoning without yet finding what was
 blocking.
 
 Reading `gpu_core::roof`'s three calibration loops
@@ -1035,7 +1035,7 @@ defects**:
 
 1. **The calibration loop itself had no ceiling of any kind** — no
    wall-clock deadline, no total-work budget, only the opt-in
-   `BRAIN_NO_ROOF=1` escape hatch #39 already documented. A backend that
+   `BRAIN_NO_ROOF=1` escape hatch #37 already documented. A backend that
    stalls on ANY single dispatch inside that loop (for any reason) blocks
    forever, because nothing bounds how long the loop is willing to wait
    before giving up and reporting "unmeasured."
@@ -1050,7 +1050,7 @@ defects**:
 Fix: a wall-clock deadline on every calibration loop (`BRAIN_ROOF_BUDGET_S`,
 returning "unmeasured" on expiry — the SAME contract `ensure`'s doc already
 promised for an unprobeable device, so no caller needed to change); the
-probe now defaults OFF on the CPU device class specifically, since #39's own
+probe now defaults OFF on the CPU device class specifically, since #37's own
 root cause was never fully bisected and CPU is the one backend that
 reproduced it; both backends' waits now have a finite deadline
 (`BRAIN_GPU_WAIT_S`) and report which submit wedged rather than retrying
@@ -1114,7 +1114,7 @@ use it before writing down a driver-level conclusion; a wrong "it's the
 driver's fault, needs a kernel-level fix" diagnosis can stand undisturbed
 for an entire investigation if nothing pushes back on it.
 
-## 41. A `write_*` call with no matching read on that code path is a silent no-op, not a bug the type system catches
+## 39. A `write_*` call with no matching read on that code path is a silent no-op, not a bug the type system catches
 
 `qwenvl::Qwen3Vl::generate()` (KV-cache generation) called
 `self.decoder.write_deepstack(level, &data)` during prefill — a real
@@ -1149,7 +1149,7 @@ from "the setter function got called." A parity test between the two paths
 (`deepstack_step_matches_full_recompute`) is the gate that would have caught
 this before it shipped, not after.
 
-## 42. A tiny gradcheck config can numerically starve a normalization op, producing a hollow — but *passing* — gradcheck
+## 40. A tiny gradcheck config can numerically starve a normalization op, producing a hollow — but *passing* — gradcheck
 
 `gradcheck::check_qwen35` (qwen35's model-level backward integration) passed
 clean on first run: every parameter's finite-difference check fell inside
@@ -1199,7 +1199,7 @@ implementation is correct. When a parameter reports numeric `0.0` across
 every check in a report, perturb it by hand outside the checker and confirm
 the *loss itself* moves before trusting the pass.
 
-## 43. A kernel's uniform offset parameter usually offsets only ONE named side — check which before reusing it in the other direction
+## 41. A kernel's uniform offset parameter usually offsets only ONE named side — check which before reusing it in the other direction
 
 `qwen3::Qwen::decode_steps`'s per-token DeepStack add needed to read
 `deepstack_bufs[level]` (a compact `[n_rows,d]` block) starting at
@@ -1234,7 +1234,7 @@ symmetric across every operand, and assuming so produces a bug the
 compiler, the alignment validator, and a coarse test can all miss (only a
 value-level parity check caught this one).
 
-## 44. Streaming through mmap fixes the peak but not the sum, and a checkpoint's index filename is a naming convention, not a guarantee
+## 42. Streaming through mmap fixes the peak but not the sum, and a checkpoint's index filename is a naming convention, not a guarantee
 
 Fixing Z-Image's OOM on a memory-constrained box took three independent
 bugs, each invisible until a real large checkpoint ran on a real machine:

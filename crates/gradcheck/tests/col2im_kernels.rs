@@ -13,7 +13,7 @@
 //! doing if it is the SAME number, so this gates it against the kernel already
 //! in use — the one every conv-net gradcheck in the tree currently validates.
 //!
-//! Run on BOTH backends (`docs/lessons.md` #5): `col2im` is barrier-free by
+//! Run on BOTH backends (`.agents/rules/lessons.md` #5): `col2im` is barrier-free by
 //! construction, so `backend-cpu` must agree too, and if it ever does not the
 //! JIT is mis-executing something the GPU tolerates.
 

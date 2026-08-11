@@ -409,7 +409,7 @@ fn backward_matches_reference() {
 }
 
 /// The two backward variants must agree. `+` reassociates, so this is a
-/// tolerance check, not `assert_eq!` (docs/kernel-checklist.md §E.4) — but a
+/// tolerance check, not `assert_eq!` (.agents/rules/kernels.md §E.4) — but a
 /// dispatch-geometry or indexing divergence between them is orders of
 /// magnitude larger than reassociation and cannot hide under it.
 ///

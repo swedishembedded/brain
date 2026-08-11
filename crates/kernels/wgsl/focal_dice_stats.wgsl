@@ -37,7 +37,7 @@
 // over `hw`, which is the same shape as `add_chan_bcast_dv` / `bn_dgamma`. It is
 // barrier-free on purpose — the reduction is over `hw`, and a cooperative twin
 // would be a second kernel needing its own caps gate (see
-// docs/kernel-checklist.md §C.2); at SAM 2's four masks a workgroup-per-mask
+// .agents/rules/kernels.md §C.2); at SAM 2's four masks a workgroup-per-mask
 // variant is a perf item, not a correctness one.
 struct Params {
     n_masks: u32,

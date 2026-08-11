@@ -16,7 +16,7 @@
 //! built from the SAME weights -- the same "one model instance for the
 //! reference, one independent path for the thing under test" structure
 //! `decode_step.rs` itself uses. Runs on both the CPU JIT and the default
-//! GPU backend (`docs/lessons.md` #5).
+//! GPU backend (`.agents/rules/lessons.md` #5).
 
 use std::collections::HashMap;
 
@@ -72,7 +72,7 @@ fn scheduler_decode_matches_step_cpu() {
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
 /// backend otherwise -- run this under both `BRAIN_DEVICE=cpu` and unset
-/// (the default GPU backend) per `docs/lessons.md` #5.
+/// (the default GPU backend) per `.agents/rules/lessons.md` #5.
 /// `scheduler_decode_matches_step_cpu` above pins the CPU JIT explicitly
 /// regardless of `BRAIN_DEVICE` so the CPU path is always exercised even when
 /// this one runs against the GPU.

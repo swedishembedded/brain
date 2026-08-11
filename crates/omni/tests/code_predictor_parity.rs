@@ -12,7 +12,7 @@
 //! renamed with `tts::import::mtp_hf_to_brain` (the exact rename
 //! `tts::import::import_mtp` already applies for standalone Qwen3-TTS, and
 //! that `omni::import::map_code_predictor`'s doc comment claims -- currently
-//! incorrectly, see `docs/models/omni/status.md`'s M7b entry -- is not
+//! incorrectly, see `.agents/roadmap/omni.md`'s M7b entry -- is not
 //! needed again), then built directly with `MtpModel::build_on` -- no
 //! `ParamStore`/checkpoint-file round trip, same pattern as every other
 //! real-weight test in this crate.

@@ -37,7 +37,7 @@ fn decode_only_model_from_folded_tensors_matches_the_live_trained_forward() {
 
     let base_cfg = QwenConfig::tiny();
     let base_init = qwen3::init_weights(&base_cfg, 21);
-    // rank=3 coprime with tiny()'s head_dim=8/d_model=16 (docs/lessons.md §4).
+    // rank=3 coprime with tiny()'s head_dim=8/d_model=16 (.agents/rules/lessons.md §4).
     let lora_cfg = QwenConfig { lora: Some(LoraCfg::attn(3, 6.0)), ..QwenConfig::tiny() };
     let mut init: HashMap<String, Vec<f32>> = qwen3::init_weights(&lora_cfg, 21);
     for (k, v) in &base_init {

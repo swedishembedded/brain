@@ -285,7 +285,7 @@ impl QwenBpe {
     /// per-message-boundary encoder (multi-turn SFT with per-message loss
     /// masking, `data::chat::ChatSample::encode`) renders byte-identically to
     /// this batch path rather than a parallel reimplementation that could
-    /// drift from it (see docs/lessons.md on shared preprocessing).
+    /// drift from it (see .agents/rules/lessons.md on shared preprocessing).
     pub fn frame_message(&self, role: &str, content: &str) -> String {
         format!("<|im_start|>{role}\n{content}<|im_end|>\n")
     }

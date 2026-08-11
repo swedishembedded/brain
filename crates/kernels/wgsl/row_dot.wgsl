@@ -16,7 +16,7 @@
 //
 // A reusable primitive, not GDN-specific (hence no `gdn_` prefix, matching
 // `row_dot`'s sibling `scale_row.wgsl`/`bmm.wgsl` naming) — checked against
-// `crates/kernels/wgsl/` before adding (per `docs/kernel-checklist.md` §A) and
+// `crates/kernels/wgsl/` before adding (per `.agents/rules/kernels.md` §A) and
 // none of the existing per-row reductions (`argmax_row`, `bn_stats`,
 // `ce_stats`, ...) compute a plain two-operand row dot product with
 // independent offsets. First needed by `model::gdn::gdn_chunk_bwd` (Gated
@@ -36,7 +36,7 @@
 // dense result into a pre-zeroed accumulator, possibly at an offset" pattern.
 // This keeps `row_dot` itself trivial (no output offset, no accumulate flag)
 // at the cost of one extra dispatch per accumulating use — irrelevant at the
-// dispatch counts GDN's chunk recurrence runs at (`docs/kernel-checklist.md`
+// dispatch counts GDN's chunk recurrence runs at (`.agents/rules/kernels.md`
 // §E's own dispatch-overhead measurement: ~0.03%).
 
 struct Params { rows: u32, d: u32, a_off: u32, b_off: u32, alpha: f32 };

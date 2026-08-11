@@ -31,7 +31,7 @@ Do this:
 
 5. **Security audit** (mandatory — new accepted input is a surface change): run the
    `security-review` skill over `crates/apiserve` (+ `crates/dbus`) against
-   `docs/api-security-audit.md` and fix findings.
+   `.agents/rules/api-security.md` and fix findings.
 
 6. Commit the vendored-spec update + code reconciliation together, noting what upstream
    changed.

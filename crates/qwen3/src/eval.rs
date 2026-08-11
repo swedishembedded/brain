@@ -277,7 +277,7 @@ mod paged_scoring_tests {
     ///
     /// Needs a real tokenizer + chat template (`QWEN_TOKENIZER=/path/to/
     /// tokenizer.json`, its sibling `tokenizer_config.json` supplies the
-    /// template) — self-skips loudly when unset, per `docs/testing.md`. The
+    /// template) — self-skips loudly when unset, per `.agents/rules/testing.md`. The
     /// checkpoint's vocab matches the real tokenizer's full range so the
     /// rendered special tokens (`<|im_start|>` etc.) never index outside the
     /// embedding table (the exact class of bug root-caused as a CPU-backend

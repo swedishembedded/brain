@@ -83,7 +83,7 @@
 // function. Three reasons, all load-bearing:
 //   * a thread-private array indexed by a loop lands in local (global-backed)
 //     memory unless the compiler can unroll every index — the documented
-//     `flash_attn_bidir` trap (docs/kernel-checklist.md C.1);
+//     `flash_attn_bidir` trap (.agents/rules/kernels.md C.1);
 //   * the wgsl-cpu Cranelift JIT inlines a single entry point and rejects
 //     user-defined function calls outright, so a `cubic_w`/`src_coord` helper
 //     would compile on wgpu and hard-fail on the CPU backend (same reason

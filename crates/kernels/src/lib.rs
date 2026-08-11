@@ -3,7 +3,7 @@
 
 //! Raw WGSL compute kernels — the single source of truth for brain's GPU
 //! engine. fp32-only, core-compute-only (single bind group, <=8 storage
-//! buffers/kernel per docs/kernel-checklist.md — the largest today binds 7,
+//! buffers/kernel per .agents/rules/kernels.md — the largest today binds 7,
 //! this header used to claim <=4 — no atomics/subgroups/f16) so the same
 //! text runs on old desktop GPUs and on WebGPU in the browser.
 //!

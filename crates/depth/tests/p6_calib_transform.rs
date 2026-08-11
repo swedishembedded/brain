@@ -16,7 +16,7 @@
 //!
 //! NOT covered here: how far the INT8 scales actually move. That needs a
 //! ZipDepth checkpoint and a calibration set, neither of which is on this box —
-//! see `docs/models/depth/status.md`.
+//! see `.agents/roadmap/depth.md`.
 
 use depth::predict::{preprocess_chw, target_size};
 

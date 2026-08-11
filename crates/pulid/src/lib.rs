@@ -46,7 +46,7 @@
 //! * **end-to-end generation.** `crates/flux1` has no sampler loop and no VAE
 //!   glue, so "generate a face" cannot be run at all, let alone gated.
 //! * **full-depth conditioning.** The fp32 FLUX.1 backbone is 47.6 GiB and does
-//!   not fit one 24 GiB card (see `docs/models/flux1/status.md`), so the
+//!   not fit one 24 GiB card (see `.agents/roadmap/flux1.md`), so the
 //!   conditioned gate runs at reduced depth, exactly as flux1's own fp32 gate
 //!   does. The 20-site full-depth schedule is gated as a *schedule*
 //!   ([`PulidConfig::schedule`]), not as a forward.
@@ -54,7 +54,7 @@
 //!   with facexlib's RetinaFace alignment and a BiSeNet face parse (background
 //!   whitened, face greyscaled) — two models brain does not have. The ArcFace
 //!   half needs none of it: PuLID calls insightface antelopev2, which IS
-//!   `crates/facenet`. See `docs/imaging/plan.md`.
+//!   `crates/facenet`.
 //! * backward / gradcheck, INT8, the serving contract (no capability manifest,
 //!   no residency adapter, no D-Bus surface) — all follow-ups.
 

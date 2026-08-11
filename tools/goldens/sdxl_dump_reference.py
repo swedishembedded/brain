@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Dump SDXL reference goldens for brain's `crates/unet` + `crates/diffusion`
-parity ladder (docs/imaging/plan.md phase 4b).
+parity ladder.
 
 Two independent golden sets, because they gate two independent pieces:
 

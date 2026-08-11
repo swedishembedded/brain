@@ -108,7 +108,7 @@ pub fn speak_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; the multimodal+speech-output combination is not wired in yet -- see docs/models/omni/status.md's M9b entry).",
+        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, plus real speech output via speak (validation-tier: streamed weights, no int8/GPU-sharded residency; the multimodal+speech-output combination is not wired in yet -- see .agents/roadmap/omni.md's M9b entry).",
         vec![generate_spec(), speak_spec()],
     )
 }

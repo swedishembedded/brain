@@ -2450,7 +2450,7 @@ impl LayerNorm2d {
     ///
     /// Measured 4.38x over the composed path at `[1,32,65536]`, 2.72x at
     /// `[1,64,16384]`, 1.34x at `[1,256,4096]`, 1.09x at `[1,96,1024]` — the
-    /// margin growing with `H*W` (`docs/kernel-checklist.md` §E).
+    /// margin growing with `H*W` (`.agents/rules/kernels.md` §E).
     ///
     /// Inference ONLY, and the name says so because the reason is structural,
     /// not a tuning choice: the composed forward's `xt` (the NLC image of the

@@ -118,7 +118,7 @@ pub struct Ki {
 impl Ki {
     /// Resolve against the pipeline list the [`Gpu`] was constructed with.
     /// Panics naming the kernel if one is absent — a wrong index is silently
-    /// wrong output, not a crash (`docs/kernel-checklist.md`).
+    /// wrong output, not a crash (`.agents/rules/kernels.md`).
     pub fn resolve(names: &[(&str, &str)]) -> Ki {
         let f = |k: &str| {
             names

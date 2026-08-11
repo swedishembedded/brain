@@ -37,7 +37,7 @@
 // past the end contributes zeros, which the sum absorbs.
 //
 // NOT for `backend-cpu`: three barriers, and the JIT splits a body at one
-// (`docs/lessons.md` #26). The selector keeps that device on `matmul_reg3`'s
+// (`.agents/rules/lessons.md` #26). The selector keeps that device on `matmul_reg3`'s
 // own reference tier.
 
 struct Params { m: u32, k: u32, n: u32, slices: u32, };

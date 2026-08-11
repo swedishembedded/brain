@@ -10,7 +10,7 @@
 //!    would have been quietly invalidated by adding it.
 //! 2. **An installed adapter reaches EVERY site, once, in graph order.** A seam
 //!    that is wired but never dispatched looks exactly like a correct no-op —
-//!    `docs/lessons.md` #1 and #8 in one.
+//!    `.agents/rules/lessons.md` #1 and #8 in one.
 //!
 //! Weight-free at `UNetConfig::tiny`, so it always runs.
 

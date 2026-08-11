@@ -17,7 +17,7 @@
 //! The two residual scalings are the architecture, not a detail: each dense
 //! block and each RRDB returns `x + 0.2 * f(x)`. Dropping either leaves a net
 //! that still runs and produces a plausible-looking, wrong image — the same
-//! failure shape as `docs/lessons.md` #16 — so `RESIDUAL_SCALE` is named once
+//! failure shape as `.agents/rules/lessons.md` #16 — so `RESIDUAL_SCALE` is named once
 //! and the parity test taps both block outputs.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -249,7 +249,7 @@ fn rrdb_block(
 mod tests {
     /// The slot consts index [`KERNELS`] positionally, so inserting one
     /// re-points every const after it — a mismatched kernel is wrong output,
-    /// not a crash (`docs/kernel-checklist.md` §B).
+    /// not a crash (`.agents/rules/kernels.md` §B).
     #[test]
     fn slot_constants_name_the_kernel_they_index() {
         for (slot, want) in [

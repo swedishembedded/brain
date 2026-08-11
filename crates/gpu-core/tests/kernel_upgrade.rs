@@ -4,7 +4,7 @@
 //! The transparent kernel upgrade, end to end on a real device.
 //!
 //! This is the test that would have caught the `crates/vae` defect described in
-//! `docs/kernel-checklist.md` §A: a model registers the kernel it has always
+//! `.agents/rules/kernels.md` §A: a model registers the kernel it has always
 //! registered, dispatches the thread count it has always dispatched, and must
 //! come out running the faster kernel with the same answer. Nothing in this
 //! file names a call site — that is the point.

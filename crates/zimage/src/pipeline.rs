@@ -125,7 +125,7 @@ pub fn hifi_needs_window(gpu_count: usize) -> bool {
 /// window's own device footprint small (~1.4 GB at Z-Image-Turbo's real
 /// shape — dim 3840, hidden 10240) regardless of model size, at the cost of
 /// reloading every other block once per denoise step (see
-/// docs/models/zimage/status.md for the measured churn/latency).
+/// .agents/roadmap/zimage.md for the measured churn/latency).
 pub fn window_blocks_from_env() -> u32 {
     std::env::var("BRAIN_ZIMAGE_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
 }
@@ -136,7 +136,7 @@ pub fn window_blocks_from_env() -> u32 {
 /// actually allocates, not a separate hardcoded guess: the number the
 /// scheduler budgets and the number the code allocates must be the same
 /// expression, or a claim like "fp32 needs 24 GB" silently outlives the
-/// windowed engine that made it false on a one-GPU box (see docs/lessons.md).
+/// windowed engine that made it false on a one-GPU box (see .agents/rules/lessons.md).
 ///
 /// `ram_bytes` is the CPU-resident fp32 Qwen-4B encoder's footprint (~16 GB,
 /// measured — `pipeline.rs`'s own doc comments quote this figure for the
@@ -355,7 +355,7 @@ enum Encoder {
     /// exceed a unified-memory box's smaller one) if both stayed resident at
     /// once, so this variant is never resident between calls — `encode` builds
     /// it fresh from `qreader_path`, runs the one forward it needs, and drops it
-    /// before returning, exactly mirroring the SDXL fix (`docs/lessons.md` #14):
+    /// before returning, exactly mirroring the SDXL fix (`.agents/rules/lessons.md` #14):
     /// build, use once, drop, THEN run the part that stays resident (here, the
     /// DiT sampling loop). Costs a rebuild (~1-2 s: open + int8 quantize +
     /// upload) every `generate()` call instead of once at `build()` time — the
@@ -524,7 +524,7 @@ impl HotPipeline {
                 // box's), so neither is built here -- `Encoder::OnDemand`
                 // builds, encodes, and drops the encoder inside every
                 // `generate()` call instead, so it and the DiT are never
-                // resident at once (docs/lessons.md #14). Opt back into the
+                // resident at once (.agents/rules/lessons.md #14). Opt back into the
                 // old both-resident behaviour with
                 // `BRAIN_ZIMAGE_ENCODER_RESIDENT=1` on a card with room for
                 // both (a real 24 GB+ discrete GPU).

@@ -4,7 +4,7 @@ Send a text prompt to Qwen3-Omni's Thinker decoder, get a completion back —
 over D-Bus (`Run`/`Subscribe`), or the OpenAI-compatible `/v1/chat/completions`,
 or the Anthropic-compatible `/v1/messages`. Same `generate` action, same
 `{messages/prompt, max_new, ...}` params, underneath all three — this example
-is what proves that (see `docs/models/omni/status.md`'s M10/M11/M12 entries
+is what proves that (see `.agents/roadmap/omni.md`'s M10/M11/M12 entries
 for how each transport got there).
 
 **Scope, honestly**: text in/out, speech in (`--in-speech`, WAV), and image in

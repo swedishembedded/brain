@@ -518,8 +518,8 @@ impl Feed<'_> {
     }
 }
 
-/// A **generic** compiled OpenVINO graph with named multi-tensor I/O — the reuse
-/// seam behind `docs/npu-residency.md`. Any model's exported ONNX (fp16 on the NPU
+/// A **generic** compiled OpenVINO graph with named multi-tensor I/O — the one
+/// reuse seam every model's NPU export shares. Any model's exported ONNX (fp16 on the NPU
 /// by default; INT8/INT4 orthogonal) compiles here once and runs via [`run`], feeding
 /// f32/i64 inputs by name and reading f32 outputs by name. This generalises the
 /// per-model bespoke sessions so a residency `NpuInstance` is model-agnostic: a model

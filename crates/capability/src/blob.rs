@@ -3,7 +3,7 @@
 
 //! The shared HWC-f32 image ↔ [`Blob`] codec — the ONE implementation of brain's
 //! image-blob wire format (raw interleaved HWC f32 in `[0,1]`, little-endian,
-//! meta `{"w","h","c"}`; see `docs/serving-contract.md` §1). Every provider and
+//! meta `{"w","h","c"}`; see `.agents/rules/serving-contract.md` §1). Every provider and
 //! resident adapter decodes/encodes images through here; never re-implement it
 //! locally (that is how per-model encodings drift apart).
 

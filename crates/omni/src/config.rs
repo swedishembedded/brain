@@ -7,7 +7,7 @@
 //! The nesting mirrors the checkpoint exactly: `thinker_config.{audio_config,
 //! vision_config, text_config}`, `talker_config.{text_config,
 //! code_predictor_config}`, `code2wav_config`. Every default below is the
-//! REAL released value (dumped 2026-08-07 — see `docs/models/omni/status.md`
+//! REAL released value (dumped 2026-08-07 — see `.agents/roadmap/omni.md`
 //! "Facts"), not a guess: this file is the single place those numbers are
 //! recorded as code, everything else derives from it.
 //!
@@ -474,7 +474,7 @@ mod tests {
 
     /// A trimmed but structurally faithful inline copy of the released
     /// `config.json` — cross-checks the parser against the real nesting and
-    /// the real numbers recorded in `docs/models/omni/status.md`, without
+    /// the real numbers recorded in `.agents/roadmap/omni.md`, without
     /// needing the (70.5 GB) checkpoint present to run `cargo test`.
     const SAMPLE: &str = r#"{
         "im_start_token_id": 151644, "im_end_token_id": 151645,

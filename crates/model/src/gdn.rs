@@ -74,7 +74,7 @@
 //! CONTIGUOUS slice `[chunk*(B*H), (chunk+1)*(B*H))` of the buffer's own
 //! flat batch axis — addressable with a plain `Params` element offset
 //! (`off_of` below), never a bound byte-offset slice (which
-//! `docs/kernel-checklist.md` requires to be 256-byte aligned — this
+//! `.agents/rules/kernels.md` requires to be 256-byte aligned — this
 //! module's own gradcheck-style test at deliberately tiny, non-aligned dims
 //! would fail under that scheme). With `(b,h)` outermost instead (a literal
 //! `[B,H,T,D]` reshape), the same per-chunk slice is STRIDED
@@ -1224,7 +1224,7 @@ pub fn gdn_recurrent_step(
 // [`gdn_causal_conv1d_step`] is a thin `Step` wrapper around the new
 // `causal_conv1d_step.wgsl` kernel (see that file's own header for the exact
 // per-`(n,c)` math and why NO existing kernel fit without an `N`x memory cost
-// -- checked per `docs/kernel-checklist.md` sec A before adding it). Kept in
+// -- checked per `.agents/rules/kernels.md` sec A before adding it). Kept in
 // this module (rather than `audio::conv`, where `conv1d_fwd` itself lives)
 // because its only caller is GDN-shaped decode and its state -- a per-`(n,c)`
 // history ring buffer -- is exactly the kind of persisted-across-calls decode
