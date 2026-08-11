@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+"""Git commit-msg hook: silently strips Co-Authored-By:/Claude-Session:
+trailer lines from the commit message before the commit is created.
+
+Never fails the commit — if anything goes wrong reading/writing the message
+file, this exits 0 and leaves the message untouched rather than blocking a
+commit over a cosmetic cleanup. scripts/hooks/pre-push is the actual gate
+(it fails the push if a trailer line ever slips through).
+
+Installed via `make hooks/install`; the pre-commit-framework path is
+.pre-commit-config.yaml's commit-msg-stage hook, which invokes this file the
+same way (git passes the message-file path as $1).
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trailers import strip_trailers
+
+
+def main(argv):
+    if len(argv) != 1:
+        return 0
+    msg_path = Path(argv[0])
+    try:
+        original = msg_path.read_bytes()
+        cleaned = strip_trailers(original)
+        if cleaned != original:
+            msg_path.write_bytes(cleaned)
+    except OSError:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

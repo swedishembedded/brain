@@ -56,7 +56,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
-        clippy check/scripts qwen/serving-perf-gate \
+        clippy check/scripts check/spdx hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 flux2/generate flux2/edit zimage/int8-e2e
 
@@ -76,6 +76,9 @@ help:
 	@echo "                               claude-code + scheduler are heavier, opt-in)"
 	@echo "  make clippy                  the clippy ratchet gate (exit 0 + no new warnings)"
 	@echo "  make check/scripts           scripts/tools self-validation + env-var doc gate"
+	@echo "  make check/spdx              SPDX-License-Identifier + copyright header gate"
+	@echo "  make hooks/install           install the local git hooks (SPDX check, commit"
+	@echo "                               trailer cleanup/gate)"
 	@echo "  make gradcheck               the FULL numerical backprop gate (every model check"
 	@echo "                               + kernel FD suite in crates/gradcheck)"
 	@echo "  make parity                  cross-backend parity gate: CPU == Vulkan == NPU"
@@ -213,8 +216,31 @@ check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
 
+# SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
+# source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
+# line, immediately followed by the copyright line. scripts/spdx/rules.py has
+# the file-selection rules (shared with scripts/spdx/check.py); `make
+# hooks/install` wires the same check into a git pre-commit hook so a
+# non-compliant commit is refused locally, not just caught here.
+check/spdx:
+	python3 scripts/spdx/check.py $$(git ls-files)
+
+# Install the local git hooks into .git/hooks — a one-time-per-clone step,
+# not run automatically, since it writes outside version control:
+#   pre-commit  - the check/spdx gate above
+#   commit-msg  - silently strips Co-Authored-By:/Claude-Session: trailer
+#                 lines from every new commit message (never fails)
+#   pre-push    - fails the push if a trailer line survived anyway (see
+#                 scripts/hooks/pre-push; both hooks share the stripping
+#                 logic in scripts/hooks/trailers.py)
+hooks/install:
+	install -m 755 scripts/hooks/pre-commit .git/hooks/pre-commit
+	install -m 755 scripts/hooks/commit-msg .git/hooks/commit-msg
+	install -m 755 scripts/hooks/pre-push .git/hooks/pre-push
+	@echo "installed: .git/hooks/{pre-commit,commit-msg,pre-push}"
+
 # Everything, for a release gate.
-test/full: test test/doc test/slow test/e2e check/scripts kernels-table/check
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx kernels-table/check
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.

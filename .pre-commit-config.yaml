@@ -1,0 +1,33 @@
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+repos:
+  - repo: local
+    hooks:
+      - id: spdx-license-headers
+        name: SPDX license headers (Apache-2.0)
+        description: >-
+          Every Rust/C/Python/shell/Makefile/WGSL/... source file must start
+          with "SPDX-License-Identifier: Apache-2.0" plus the project
+          copyright line right after it. See scripts/spdx/check.py.
+        entry: python3 scripts/spdx/check.py
+        language: system
+        pass_filenames: true
+      - id: strip-commit-trailers
+        name: "Strip Co-Authored-By:/Claude-Session: trailers"
+        description: >-
+          Silently removes these trailer lines from the commit message —
+          never fails the commit. See scripts/hooks/commit-msg.
+        entry: python3 scripts/hooks/commit-msg
+        language: system
+        stages: [commit-msg]
+      - id: no-commit-trailers-on-push
+        name: "No Co-Authored-By:/Claude-Session: trailers reach the remote"
+        description: >-
+          Fails the push if a trailer line survived (should only happen for
+          a commit that bypassed the commit-msg hook). See
+          scripts/hooks/pre-push.
+        entry: python3 scripts/hooks/pre-push
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+        verbose: true

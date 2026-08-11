@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+"""Git pre-push hook: FAILS the push if any commit about to be pushed still
+has a Co-Authored-By:/Claude-Session: trailer line.
+
+Unlike scripts/hooks/commit-msg (which silently cleans new commits and never
+fails), this is a real gate — a safety net for a commit that reached this
+repo without going through that hook (made before it was installed, fetched,
+merged, or cherry-picked in). It does NOT try to rewrite history itself;
+rewriting commits that are about to be shared is a decision for a human, not
+a hook, so it just reports which commits are affected and refuses the push.
+
+Git invokes this as: pre-push <remote-name> <remote-url>, with one line per
+ref-update on stdin: "<local-ref> <local-sha> <remote-ref> <remote-sha>". But
+when installed via the `pre-commit` framework (stages: [pre-push] in
+.pre-commit-config.yaml), that stdin protocol data is consumed by pre-commit
+itself and NOT forwarded to this script — so this only uses stdin as a
+best-effort precise range, and always falls back to "commits on HEAD not
+already known to be on any remote" (accurate for the common case: pushing
+the current branch), which works identically whether or not real stdin data
+arrived.
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trailers import has_trailer
+
+ZERO = "0" * 40
+
+
+def rev_list(*args):
+    out = subprocess.run(["git", "rev-list", *args], capture_output=True, text=True)
+    return [l for l in out.stdout.split("\n") if l] if out.returncode == 0 else []
+
+
+def commits_to_check(local_sha, remote_sha):
+    if local_sha == ZERO:
+        return []  # a delete
+    if remote_sha == ZERO:
+        # New ref: only check commits not already reachable from some
+        # existing remote-tracking ref, so pushing a fresh branch off a
+        # long-lived one doesn't rescan all of history.
+        return rev_list(local_sha, "--not", "--remotes")
+    return rev_list(f"{remote_sha}..{local_sha}")
+
+
+def main(argv):
+    shas = set()
+    if not sys.stdin.isatty():
+        for line in sys.stdin:
+            parts = line.split()
+            if len(parts) != 4:
+                continue
+            _local_ref, local_sha, _remote_ref, remote_sha = parts
+            shas.update(commits_to_check(local_sha, remote_sha))
+
+    if not shas:
+        # No usable stdin protocol data (e.g. invoked via the pre-commit
+        # framework) — fall back to HEAD vs. what's already known remotely.
+        shas.update(rev_list("HEAD", "--not", "--remotes"))
+
+    offenders = []
+    for sha in shas:
+        message = subprocess.run(["git", "cat-file", "-p", sha], capture_output=True).stdout
+        idx = message.find(b"\n\n")
+        body = message[idx + 2:] if idx != -1 else b""
+        if has_trailer(body):
+            offenders.append(sha)
+
+    if offenders:
+        print("pre-push: refusing to push — these commits still have a "
+              "Co-Authored-By:/Claude-Session: trailer line:", file=sys.stderr)
+        for sha in offenders:
+            subject = subprocess.run(
+                ["git", "log", "-1", "--format=%s", sha], capture_output=True, text=True
+            ).stdout.strip()
+            print(f"  {sha[:10]}  {subject}", file=sys.stderr)
+        print(
+            "\nThe commit-msg hook (make hooks/install) strips these automatically on "
+            "new commits, so this usually means one of these came from elsewhere "
+            "(fetch/merge/cherry-pick) or was made without the hook installed.\n"
+            "Fix with an interactive rebase (git rebase -i <base>, reword or amend), "
+            "then push again.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
