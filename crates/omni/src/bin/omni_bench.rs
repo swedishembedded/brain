@@ -368,7 +368,7 @@ fn talker_layer_mode(a: &[String]) {
     let sin_b = gpu.storage_init("sin", &sin);
 
     let secs = report(&format!("talker-layer prefill T={n}"), reps, || {
-        talker::layer_fwd(&gpu, &cfg, &w, &x, &cos_b, &sin_b, n, None);
+        talker::layer_fwd(&gpu, &cfg, &w, &x, &cos_b, &sin_b, n, None, None);
     });
     println!("-> {:.0} tok/s (single layer; multiply by ~1/{} for a rough 20-layer estimate)", n as f64 / secs, cfg.n_layers);
 }

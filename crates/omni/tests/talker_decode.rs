@@ -120,7 +120,7 @@ fn decode_matches_hand_chained_layer_fwd_plus_final_norm() {
 
     let mut h = x;
     for lw in &layers {
-        let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos, &sin, n, None);
+        let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos, &sin, n, None, None);
         h = out;
     }
     let ids = KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: 0, silu_da: 0, silu_db: 0 };

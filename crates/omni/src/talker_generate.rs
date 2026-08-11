@@ -123,7 +123,7 @@ fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32]
     for l in 0..cfg.n_layers {
         let layer = load_talker_layer(reader, gpu, l, cfg.n_experts)?;
         let lc = cache.layer(l as usize);
-        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc));
+        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc), None);
         h = out;
     }
     let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").ok_or("omni: missing tensor talker.model.norm.weight")?);
@@ -144,7 +144,7 @@ fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[
     for l in 0..cfg.n_layers {
         let layer = load_talker_layer(reader, gpu, l, cfg.n_experts)?;
         let lc = cache.layer(l as usize);
-        h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, pos, cache.cap);
+        h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, pos, cache.cap, None);
     }
     let norm_w = gpu.storage_init("w", &reader.tensor("talker.model.norm.weight").ok_or("omni: missing tensor talker.model.norm.weight")?);
     Ok(final_norm(gpu, cfg, &norm_w, &h, 1))

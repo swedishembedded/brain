@@ -133,7 +133,7 @@ fn incremental_decode_matches_batched_layer_fwd_at_every_position() {
     // (a) Batched reference: layer_fwd chained across all n positions at once.
     let mut h = x_full.clone();
     for lw in &layers {
-        let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos_full, &sin_full, n, None);
+        let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos_full, &sin_full, n, None, None);
         h = out;
     }
     let want = gpu.read(&h, (n * cfg.hidden) as usize);
@@ -156,10 +156,10 @@ fn incremental_decode_matches_batched_layer_fwd_at_every_position() {
         for (l, lw) in layers.iter().enumerate() {
             hrow = if pos == 0 {
                 // First position: a length-1 "prefill" populates the cache's row 0.
-                let (out, ..) = layer_fwd(&gpu, &cfg, lw, &hrow, &cos_row, &sin_row, 1, Some(&cache_refs[l]));
+                let (out, ..) = layer_fwd(&gpu, &cfg, lw, &hrow, &cos_row, &sin_row, 1, Some(&cache_refs[l]), None);
                 out
             } else {
-                layer_decode_step(&gpu, &cfg, lw, &cache_refs[l], &hrow, &cos_row, &sin_row, pos, cap)
+                layer_decode_step(&gpu, &cfg, lw, &cache_refs[l], &hrow, &cos_row, &sin_row, pos, cap, None)
             };
         }
         got[row_start..row_start + cfg.hidden as usize].copy_from_slice(&gpu.read(&hrow, cfg.hidden as usize));
