@@ -1,0 +1,150 @@
+# Configuration
+
+brain has no config file. Every choice — which models `brain serve` activates,
+where they run, and how they're tuned — is a `BRAIN_*` environment variable,
+set before you run `brain serve` or a `brain <model>` subcommand. This page is
+the complete reference, grouped by purpose.
+
+Unset variables take documented defaults; a model whose weights variable is
+unset simply isn't served (no error, it's just absent from `brain caps`).
+
+## Device selection
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_DEVICE` | the schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …); same values as `--device` | all detected devices |
+| `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
+| `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
+| `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |
+| `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
+
+### Backend workarounds & debugging
+
+Most users never need these — they exist for GPU-driver quirks and profiling.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_VK_SERIAL` | forces one-dispatch-at-a-time submission on the native-Vulkan backend; works around a hang on some Intel integrated-GPU drivers | auto-detected by vendor |
+| `BRAIN_VK_NO_SERIAL` | forces the opposite of `BRAIN_VK_SERIAL` even on a vendor that's normally auto-serialized | unset |
+| `BRAIN_VK_VALIDATE` | enables Vulkan validation layers on the native-Vulkan backend | off |
+| `BRAIN_GPU_GL` | forces the OpenGL backend instead of Vulkan (wgpu) | off |
+| `BRAIN_GPU_VALIDATION` | enables wgpu debug/validation instance flags | off |
+| `BRAIN_GPU_CHECKED` | enables extra wgpu-side checked-mode assertions | off |
+| `BRAIN_GPU_MEM_PERF` | switches wgpu's memory allocator to its performance-hint mode | off |
+| `BRAIN_PROFILE` | enables per-kernel dispatch timing, printed at exit | off |
+| `BRAIN_VERBOSE` | CLI/serving log verbosity (`0` = quiet) | 0 |
+
+**NPU capability boundary.** brain can run a subset of models on an Intel NPU
+through a separate export -> compile -> run path (ONNX export, OpenVINO
+compile, named-tensor inference), with fp16 as the default precision and
+INT8/INT4 as opt-in. This path is **not** automatically scheduled by
+`brain serve` the way GPU/CPU placement is — the residency scheduler does not
+yet place jobs on the NPU on its own. To use it today, pass `--device npu` (or
+a model's own NPU-specific flags/vars) on the relevant model's own command;
+see that model's page under `docs/models/` for the exact flags.
+
+## Model weights & gating
+
+Whether a model shows up in `brain caps` / is servable by `brain serve` is
+gated entirely by whether its weights variable(s) are set. Unset ⇒ not
+served, with no error.
+
+| Variable | Serves | Value |
+| --- | --- | --- |
+| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
+| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint + `tokenizer.json` |
+| `BRAIN_GPT_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
+| `BRAIN_GLM_WEIGHTS` | GLM decoder | checkpoint (char-level) |
+| `BRAIN_LFM` + `BRAIN_LFM_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
+| `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit | the four component paths (all required) |
+| `BRAIN_ZIMAGE_DIT`, `BRAIN_ZIMAGE_VAE`, `BRAIN_ZIMAGE_QWEN`, `BRAIN_ZIMAGE_TOKENIZER` | Z-Image text2image/edit | the four component paths (all required) |
+| `BRAIN_YOLO` | YOLOv8 detection | checkpoint |
+| `BRAIN_DEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
+| `BRAIN_SAM2_WEIGHTS` | SAM 2.1 segmentation | `sam2.1_hiera_*.pt` checkpoint |
+| `BRAIN_FACENET_DIR` | antelopev2 face detect/embed | dir holding `glintr100.onnx` + `scrfd_10g_bnkps.onnx` |
+| `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
+| `BRAIN_RESTORE_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
+| `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
+| `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
+| `BRAIN_FASTVLM_WEIGHTS` | FastVLM vision-language | checkpoint directory |
+| `BRAIN_QWENVL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only — not yet residency-scheduled) | checkpoint directory |
+| `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
+| `BRAIN_FINCAST` | FinCast forecasting | weights |
+| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting | the two checkpoint dirs |
+| `BRAIN_TTS_WEIGHTS` (+ `BRAIN_TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF checkpoint dir for config/tokenizer) |
+| `BRAIN_NEMOTRON` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
+| `BRAIN_QWEN_ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
+| `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker (validation tier) | HF checkpoint dir |
+| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, int8 checkpoint variant | unset (uses `BRAIN_OMNI_HF_DIR`) |
+| `BRAIN_MOCK` | deterministic, weight-free mock model (for exercising the serving stack without real weights) | any non-empty value |
+
+## Serving & admission
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
+| `BRAIN_AUTO_FETCH` | `0`/`false`/`off` disables transparent auto-fetch of missing model files | enabled |
+| `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
+| `BRAIN_ADMIT_DEADLINE_MS` | how long a request waits for a free lane before it's shed with 429 | 10000 |
+| `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` | longer deadline applied instead, but only while the request's own model is still cold-building (its first-ever activation) | 180000 |
+| `BRAIN_SCHED_MAX_BATCH` | maximum jobs the scheduler groups into one batch | 8 |
+| `BRAIN_SCHED_AGE_WEIGHT` | scheduler priority weight per millisecond a job has waited | 1.0 |
+| `BRAIN_SCHED_BATCH_WEIGHT` | scheduler priority weight favoring larger batches | 200.0 |
+| `BRAIN_SCHED_MAX_WAIT_MS` | a group whose oldest job has waited longer than this is force-picked regardless of batch size | 2000 |
+| `BRAIN_CONF` | see above | 0.25 |
+
+See [`docs/using/serving.md`](serving.md) for what admission/backpressure means in practice.
+
+## Precision & tuning
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_NO_AUTOTUNE` | `1` skips runtime kernel autotuning and uses the static best-guess policy | autotune on |
+| `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
+| `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
+| `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
+| `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |
+| `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen calib` | unset |
+| `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
+| `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
+| `BRAIN_LFM_BATCH` | LFM batched-forward slots per instance | 2 |
+| `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
+| `BRAIN_FLUX2_TE_DEVICE` | FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated int8 shard on that card) | co-located with the DiT |
+| `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
+| `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
+| `BRAIN_YOLO_BATCH` | YOLO true-batch forward width | 1 |
+| `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |
+| `BRAIN_ZIMAGE_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |
+| `BRAIN_ZIMAGE_ENCODER_GPU` | which GPU card hosts the Z-Image text encoder | shares the DiT's card |
+| `BRAIN_ZIMAGE_ENCODER_CUT` | fp32 2-card encoder split point (layer index) | ~2/3 of layers |
+| `BRAIN_ZIMAGE_ENCODER_FP32SPLIT` | `1` enables the fp32 2-card encoder split | off |
+| `BRAIN_ZIMAGE_ENCODER_RESIDENT` | `1` keeps the encoder resident even when it shares the DiT's card | off (build on demand) |
+| `BRAIN_ZIMAGE_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
+| `BRAIN_ZIMAGE_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
+| `BRAIN_TTS_LANG` / `BRAIN_TTS_REF` / `BRAIN_TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
+| `BRAIN_CODEC_WEIGHTS` | TTS codec weights override | derived from `BRAIN_TTS_WEIGHTS` |
+| `BRAIN_TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |
+| `BRAIN_TTS_MTP` | TTS next-token-prediction placement (`cpu`, `npu`, `fused`) | model-size default |
+| `BRAIN_TTS_CODEC` | TTS codec placement (`windowed`, `cpu-stream`, `npu-stream`) | default engine path |
+| `BRAIN_TTS_STREAM_CHUNK` | frames per chunk in `cpu-stream` codec mode | 16 |
+| `BRAIN_TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
+| `BRAIN_TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from `BRAIN_TTS_WEIGHTS` |
+| `BRAIN_TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
+| `BRAIN_TTS_RES` | resources base for `brain tts serve`'s default engine paths | unset (flags supply paths) |
+| `BRAIN_QWEN_ASR_WINDOW` / `BRAIN_QWEN_ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
+| `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
+| `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
+| `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache dir (ASR/NPU) | `$TMPDIR/brain_ov_cache` |
+| `BRAIN_GPT` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
+
+Deeper per-model knobs not listed here are documented on that model's own
+page under `docs/models/`.
+
+## Paths
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
+| `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
+| `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
+| `BRAIN_TTS_RES` | resources base for `brain tts serve`'s default paths | unset |
