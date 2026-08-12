@@ -61,6 +61,7 @@
 pub mod config;
 pub mod import;
 pub mod init;
+pub mod lora;
 pub mod model;
 
 pub use config::DeepseekV2Config;

@@ -46,8 +46,21 @@
 //! neither term at inference, and this crate does not implement a training
 //! schedule that would want them.
 //!
-//! Not implemented here (see this crate's lib doc for why): LoRA, INT8,
-//! sharding, paged-KV decode. One more known limit worth naming rather than
+//! **LoRA.** [`DeepseekV2Config::lora`], when `Some`, freezes every OTHER
+//! parameter (`Role::Frozen`, weight buffer only -- see [`DeepseekV2::new_on`]'s
+//! role-assignment doc) and adds a rank-`r` adapter on the targeted attention
+//! projections (`q_proj`/`k_proj`/`v_proj`/`o_proj` -- never an MoE expert or
+//! the router). Composed entirely from `matmul`/`matmul_dx`/`matmul_dw`/
+//! `axpy`/`grad_scale`, the exact same five kernels
+//! `qwen3::model::Qwen::lora_fwd`/`proj_bwd` and
+//! `qwen35moe::model::Qwen35::lora_fwd`/`proj_bwd` already dispatch for their
+//! own decoders -- this crate adds no kernel for it, only `axpy` gains a
+//! pipeline slot (every other kernel LoRA needs was already registered for the
+//! base decoder's own forward/backward). See [`DeepseekV2::lora_fwd`]/
+//! [`DeepseekV2::lora_bwd`].
+//!
+//! Not implemented here (see this crate's lib doc for why): INT8, sharding,
+//! paged-KV decode. One more known limit worth naming rather than
 //! discovering: the embedding and `lm_head` matmuls are **untiled**, so at the
 //! real 129280 x 1280 shape their weight binding is ~662 MB - fine on
 //! Vulkan/wgpu-native and on the CPU backend, over the GL backend's 128 MB
@@ -115,6 +128,11 @@ const CLIP_COEF: usize = 37;
 const GRAD_SCALE_BUF: usize = 38;
 const SPLICE: usize = 39;
 const SPLICE_BWD: usize = 40;
+/// LoRA's fused scaled-accumulate (`y += (alpha/rank) * delta`), the one
+/// kernel the base decoder's forward/backward never needed on its own --
+/// every other LoRA dispatch (`MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE`)
+/// reuses a slot already registered above.
+const AXPY: usize = 41;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -162,6 +180,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // index above is unchanged.
     ("splice", kernels::SPLICE),
     ("splice_bwd", kernels::SPLICE_BWD),
+    // LoRA's scaled-accumulate -- appended last, so every index above is
+    // unchanged for a non-LoRA build too.
+    ("axpy", kernels::AXPY),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -338,6 +359,16 @@ pub struct DeepseekV2 {
     fe: DeviceBuffer,
     inv: DeviceBuffer,
 
+    // LoRA scratch (rank `r`; `d_model`-wide, since every targetable
+    // projection here is square -- see `DeepseekV2Config::param_list`'s doc).
+    // Reused across all four attention sites of a layer, and across layers, in
+    // one sequential Vec<Step> tape, exactly as `qwen3`/`qwen35moe` reuse
+    // their own single set. `.max(1)`-sized so a non-LoRA build still gets a
+    // valid (unused, one-element) buffer.
+    lora_a: DeviceBuffer,
+    lora_da: DeviceBuffer,
+    lora_out: DeviceBuffer,
+
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
 }
@@ -381,11 +412,29 @@ impl DeepseekV2 {
         );
         assert!(cfg.top_k() >= 1 && cfg.top_k() <= cfg.n_experts(), "deepseekv2: top_k must be in 1..=n_experts");
 
+        // Role assignment, mirroring `qwen3::model.rs`'s and
+        // `qwen35moe::model.rs`'s own LoRA branch exactly:
+        //  - inference (`!train`): every weight Role::Frozen (weight buffer
+        //    only -- no gradient, no AdamW moments).
+        //  - LoRA training (`train && cfg.lora.is_some()`): only the
+        //    `.lora_a`/`.lora_b` adapter tensors `cfg.param_list()` added for
+        //    each targeted leaf are Trainable; every other weight -- including
+        //    a LoRA-targeted leaf's own frozen base, the embeddings, the
+        //    norms, the MoE router/experts/shared expert and the untied head
+        //    -- is Frozen.
+        //  - full training (`train && cfg.lora.is_none()`): every weight
+        //    Role::Trainable, unchanged from before this field existed.
         let roles: Vec<_> = cfg
             .param_list()
             .into_iter()
             .map(|(n, c)| {
-                let role = if train { Role::Trainable } else { Role::Frozen };
+                let role = if !train {
+                    Role::Frozen
+                } else if cfg.lora.is_some() {
+                    if n.ends_with(".lora_a") || n.ends_with(".lora_b") { Role::Trainable } else { Role::Frozen }
+                } else {
+                    Role::Trainable
+                };
                 (n, c, role)
             })
             .collect();
@@ -401,6 +450,13 @@ impl DeepseekV2 {
         let ff_max = cfg.ff_max() as u64;
         let bht2 = (b * cfg.n_heads() * t * t) as u64;
         let st = |x: u64| gpu.storage(x);
+
+        // LoRA scratch: rank `r` (1 when unconfigured), output width `d_model`
+        // (every targetable projection is square).
+        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
+        let lora_a = st(n * lora_r);
+        let lora_da = st(n * lora_r);
+        let lora_out = st(n * d);
 
         let mut res = Vec::new();
         let mut dres = Vec::new();
@@ -484,6 +540,9 @@ impl DeepseekV2 {
             d_expert_out: st(n * d),
             fe: st(e),
             inv: st(n),
+            lora_a,
+            lora_da,
+            lora_out,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             gpu,
@@ -538,6 +597,57 @@ impl DeepseekV2 {
         s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
     }
 
+    /// `Some((rank, alpha/rank))` when `leaf` (e.g. `"q_proj"`) is one of
+    /// [`DeepseekV2Config::lora`]'s targets, `None` otherwise (no LoRA
+    /// configured at all, or this leaf is not targeted) -- mirrors
+    /// `qwen3::model.rs`'s own `lora_for` exactly.
+    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+    }
+
+    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`, in
+    /// place on `y` (which [`Self::mm`] has already written `x·Wᵀ` into for
+    /// the SAME `wname`, immediately before this call at every call site). A
+    /// no-op when `leaf` is not targeted -- mirrors `qwen3::model.rs`'s own
+    /// `lora_fwd` exactly (same two-matmul + `AXPY` fusion, this file's own
+    /// persistent `lora_a`/`lora_out` scratch).
+    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+        s.push(self.gpu.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
+        s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// Backward for the OPTIONAL LoRA delta on a targeted linear, split out
+    /// from [`Self::mm_bwd`] rather than folded into it: the base gradient
+    /// (weight grad skipped automatically when the base is `Role::Frozen`,
+    /// via [`Self::trainable`]) is unconditional and already correct; this
+    /// adds the adapter's own `gA`/`gB` and its share of `dx` on top, always
+    /// ACCUMULATING (`acc = 1`) into `dx` because [`Self::mm_bwd`]'s own write
+    /// for the SAME buffer always runs first, at every one of this decoder's
+    /// four call sites. No-op when `leaf` is not targeted. Mirrors
+    /// `qwen3::model.rs`'s `proj_bwd` LoRA branch exactly (same seven-step
+    /// derivation: `a = x·Aᵀ`, `gB += (alpha/r)·d_outᵀ·a`, `da = (alpha/r)·
+    /// d_out·B`, `gA += daᵀ·x`, `dx += da·A`), over this crate's own
+    /// `MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE` kernel ids.
+    #[allow(clippy::too_many_arguments)]
+    fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        // a = x·Aᵀ ; gB += scale·d_outᵀ·a  (scale folded into `a`, private scratch)
+        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+        s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
+        s.push(self.gpu.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
+        // da = scale·(d_out·B) ; gA += daᵀ·x ; dx += da·A
+        s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
+        s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
+        s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+        s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+    }
+
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
         s.push(block::rmsnorm_fwd(&self.gpu, &kernel_ids(), x, self.w(wname), out, dim, rows));
     }
@@ -585,12 +695,16 @@ impl DeepseekV2 {
             // ---- plain MHA (no bias anywhere; q/k/v/o are all square) ----
             self.norm_fwd(&mut s, &self.res[l], &p("ln1.weight"), &lb.xn1, d, n);
             self.mm(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
+            self.lora_fwd(&mut s, "q_proj", &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
             self.mm(&mut s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
+            self.lora_fwd(&mut s, "k_proj", &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
             self.mm(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
+            self.lora_fwd(&mut s, "v_proj", &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, d, t_use, c.rope_theta()));
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nh, hd, d, t_use, c.rope_theta()));
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             self.mm(&mut s, &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
+            self.lora_fwd(&mut s, "o_proj", &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
 
             // ---- MLP: dense (leading blocks) or MoE ----
@@ -794,14 +908,18 @@ impl DeepseekV2 {
 
             // ===== MHA backward (output grad = dxmid) =====
             self.mm_bwd(&mut s, &self.dxmid, &lb.ctx, &p("self_attn.o_proj.weight"), &self.d_ctx, n, d, d, 0);
+            self.lora_bwd(&mut s, "o_proj", &self.dxmid, &lb.ctx, &p("self_attn.o_proj.weight"), &self.d_ctx, n, d, d);
             s.extend(block::gqa_bwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v));
             // RoPE is orthogonal per (position, channel pair), so its backward is
             // the inverse rotation applied in place on the grads.
             s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, d, t_use, c.rope_theta()));
             s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nh, hd, d, t_use, c.rope_theta()));
             self.mm_bwd(&mut s, &self.d_v, &lb.xn1, &p("self_attn.v_proj.weight"), &self.d_xn, n, d, d, 0);
+            self.lora_bwd(&mut s, "v_proj", &self.d_v, &lb.xn1, &p("self_attn.v_proj.weight"), &self.d_xn, n, d, d);
             self.mm_bwd(&mut s, &self.d_k, &lb.xn1, &p("self_attn.k_proj.weight"), &self.d_xn, n, d, d, 1);
+            self.lora_bwd(&mut s, "k_proj", &self.d_k, &lb.xn1, &p("self_attn.k_proj.weight"), &self.d_xn, n, d, d);
             self.mm_bwd(&mut s, &self.d_q, &lb.xn1, &p("self_attn.q_proj.weight"), &self.d_xn, n, d, d, 1);
+            self.lora_bwd(&mut s, "q_proj", &self.d_q, &lb.xn1, &p("self_attn.q_proj.weight"), &self.d_xn, n, d, d);
             // ln1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
             self.norm_bwd(&mut s, &self.res[l], &p("ln1.weight"), &self.d_xn, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));

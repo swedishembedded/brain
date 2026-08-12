@@ -252,6 +252,58 @@ fn grads_match_finite_differences_smooth() {
     assert_grad_gate(&report, "deepseekv2 smooth");
 }
 
+/// **LoRA**: the four attention projections' base weights frozen, only their
+/// `.lora_a`/`.lora_b` adapters trainable. Smooth shape (`top_k == n_experts`),
+/// same reason as the plain gate above - the router weight itself is not part
+/// of this graph's trainable set at all here, so the selection-boundary
+/// problem does not even apply, but the fixture is kept consistent with its
+/// sibling gates anyway.
+///
+/// Reuses `harness` UNCHANGED: its own rescale loop (`FIXTURE_INIT_STD`)
+/// walks every tensor `init_weights` produced except the norm gains, and
+/// since `cfg.lora.is_some()` makes that include `.lora_a`/`.lora_b`, the
+/// loop overwrites LoRA `B`'s zero init with
+/// the same `std = 0.15` noise as `A` - which is exactly what a gradcheck
+/// wants (a `B = 0` adapter has an exactly-zero `dA` by construction, since
+/// `da = d_out·B`; `check_qwen_lora`'s own doc names the same degeneracy and
+/// takes a few AdamW steps to escape it, which is unnecessary work here only
+/// because this harness's rescale already lands away from zero).
+///
+/// **`directional_check`, not `elementwise_check`, is the right gate here.**
+/// `elementwise_check` exists for a parameter a reverse pass FOLDS across
+/// several call sites into one shared gradient buffer (T5's `rel_bias`,
+/// summed over every block - see `gradcheck::elementwise_check`'s own doc,
+/// and this crate's `check_deepseekocr_relpos_elementwise` sibling for the
+/// SAM rel-pos tables, which genuinely are folded across every window of a
+/// block). A LoRA `A`/`B` pair is NOT that shape: each targeted projection
+/// (`q_proj`/`k_proj`/`v_proj`/`o_proj`) owns its own private `A`/`B`, read
+/// and written by exactly ONE matmul chain in the whole graph - nothing sums
+/// contributions from several sites into it. `qwen3::gradcheck::check_qwen_lora`
+/// and `qwen35moe::gradcheck::check_qwen35_lora` (this crate's own two
+/// precedents for gating a LoRA decoder) both gate with `directional_check`
+/// alone for the identical reason, and this test follows them rather than
+/// inventing a different rule.
+#[test]
+fn grads_match_finite_differences_lora() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    let cfg = DeepseekV2Config { lora: Some(deepseekv2::config::lora_cfg(2, 4.0)), ..cfg_of(4, 4, false, 1.0) };
+    let m = harness(7, cfg);
+    // Only the four attention leaves' adapters are trainable - nothing else,
+    // proving the role split (not merely the LoRA math) is wired correctly.
+    let names = m.param_names();
+    assert!(!names.is_empty(), "no trainable parameters at all");
+    assert!(
+        names.iter().all(|n| n.ends_with(".lora_a") || n.ends_with(".lora_b")),
+        "a non-adapter tensor is trainable under LoRA: {names:?}"
+    );
+    let report = directional_check(&m, 5e-3, 4, 7 ^ 0x1234);
+    report.print();
+    println!("deepseekv2 LoRA (rank 2, attention-only, {} trainable tensors): max_rel={:.3e}", names.len(), report.max_rel());
+    assert_grad_gate(&report, "deepseekv2 LoRA");
+}
+
 /// Smooth shape with a routed scaling factor != 1.0. The scale multiplies the
 /// gate in the forward and must multiply the logit gradient in the backward; a
 /// forward-only scale (or a backward-only one) is off by exactly 2.5x on the
