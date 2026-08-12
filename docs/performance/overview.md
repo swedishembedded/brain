@@ -382,6 +382,135 @@ periodic `poll_wait` flush - no redundant copy or non-streaming read was
 found. This remains a real but unexamined-for-kernel-level-wins cost, not
 touched this pass.
 
+### DeepSeek-OCR model construction: profiled below the crate boundary, JIT compile ruled out
+
+Follow-up pass, same loop. The paragraph above left model construction's
+20-28 s "real but unexamined" - `BRAIN_PROFILE` only ever timed the whole
+`caps::Session::load` call as one bracket. This pass added fine-grained
+`std::time::Instant` brackets (gated on the same `BRAIN_PROFILE` env var,
+zero cost when unset) at every candidate named in the investigation brief -
+GGUF header parse, per-`Gpu::new_cpu` Cranelift JIT compile time
+(`crates/wgsl-cpu::Jit::new`), and the streaming upload loop's own
+alloc/read+write/flush phases (`crates/paramstore::ParamStore::
+new_with_roles_src`, `crates/deepseekv2::DeepseekV2::new_on`) - to find out
+which of them the 20+ seconds actually belongs to, rather than guess.
+
+**The Cranelift JIT hypothesis (§F.4, "profile the branch your hardware does
+not take") is KILLED, cleanly, by real numbers.** `deepseekocr::caps::
+Session::load` builds FIVE separate `gpu_core::Gpu` instances (one per
+kernel-set: SAM, CLIP, the glue stage, the decoder, and the preprocessor),
+each compiling its whole `PIPELINES` list up front. Measured on the real
+checkpoint:
+
+| `Gpu::new_cpu` call | kernels compiled | JIT time |
+|---|---|---|
+| SAM (`sam1::model::PIPELINES`) | 42 | 50.5 ms |
+| CLIP (`CLIP_VISION_PIPELINES`) | 37 | 58.7 ms |
+| glue (`GLUE_PIPELINES`) | 9 | 8.6 ms |
+| decoder (`deepseekv2::PIPELINES`, 42 slots after this session's KV-cache/LoRA additions) | 47 (incl. duplicates the CPU fast path also serves) | 43.6-51.3 ms |
+| preprocessor | 5 | 12.3-24.6 ms |
+| **total, all five** | | **~174-186 ms, i.e. under 0.5% of a 40.7-48.2 s load** |
+
+Compiling 40+ WGSL kernels per `Gpu` five times over was a reasonable thing
+to suspect - it is real, measurable work, just not enough of it. The
+dominant cost is squarely the weight stream/upload:
+
+```
+stage build: decoder Gpu::new_cpu (Cranelift JIT compile): 44.1 ms
+stage build: decoder new_on (weight stream/upload + scratch alloc): 36698.4 ms
+  deepseekv2: new_on: ParamStore::new_with_roles_src (2234 tensors): 36324.7 ms
+    paramstore: alloc 863.2 ms, read+write 35444.5 ms, flush/readback 1.9 ms
+  deepseekv2: new_on: scratch buffer allocation: 366.1 ms
+  deepseekv2: new_on: tape build (fwd): 7.0 ms
+stage load: TOTAL: 40692.1 ms
+```
+
+`read+write` - fetching each of the decoder's 2234 tensors via
+`WeightReader::raw_words` (zero-copy mmap slice, the fp32 expansion already
+matches dtype) and copying it into a freshly `gpu.storage`-allocated
+destination buffer via `write_at` - is **97.6% of the upload bracket and
+87% of the whole load**, on both runs measured (43.3 s of 48.2 s; 35.4 s of
+40.7 s). `alloc` (the `gpu.storage` call that reserves each destination
+buffer) is 2.4%; the scratch buffers `DeepseekV2::new_on` allocates after
+the weights (res/dres, per-layer attention/MoE activations, at this
+model's `SEQ_LEN=512`) are 1%; tape build is noise. So the "reduce
+avoidable buffer allocation churn" candidate from this investigation's own
+brief is also ruled out - the allocation calls themselves are cheap; the
+cost is in the first real touch of the memory they return.
+
+**Splitting `read+write` further: source read vs destination write.** A raw
+`dd if=<fp32 file> of=/dev/null bs=4M` on the exact same 11.7 GB decoder
+file read it in **7.9 s (1.5 GB/s)** - so a pure sequential disk scan is not
+the bottleneck either. A throwaway diagnostic
+(`crates/deepseekv2/tests/weight_read_order_bench.rs`, `#[ignore]`d, kept as
+a real tool rather than deleted) reads every decoder tensor via the exact
+same `raw_words` call the real upload loop uses, in the real upload's
+construction order, touching one word per 4 KiB page (enough to force the
+same page faults `write_at` would) but allocating **no destination
+buffer**: **13.3 s for the same 10.93 GiB (881 MB/s)**. That leaves roughly
+**35.4 - 13.3 ≈ 22 s** unaccounted for by source reads at all - which,
+since `write_at` is a plain `copy_from_slice` into an already-`gpu.storage`-
+reserved buffer, can only be the cost of physically backing that
+destination memory the first time it is touched (a fresh `vec![0u32; n]`
+on Linux is a lazy zero-page mapping - `alloc`'s own 863 ms confirms nothing
+is actually written at allocation time - so the real first-touch cost is
+deferred into `write_at`, indistinguishable there from the source fetch
+until this diagnostic separated them).
+
+**This machine's swap was observed pinned at 97-100% full (7.8-8.0 GiB of
+8.0 GiB) continuously for the ENTIRE investigation** - independent of these
+runs specifically, checked repeatedly via `free -h`/`/proc/swaps` across
+more than half an hour and multiple sibling agents' concurrent builds on
+this shared 30 GiB box (one of this session's own real-weight runs was
+SIGKILLed by the OOM killer during vision-encode, after model construction
+had already completed and printed every stage above it). Allocating ~12 GiB
+of brand-new destination pages for the decoder's weights, on a box already
+that memory-starved system-wide, is exactly the condition under which
+first-touch page faults get expensive (the kernel must reclaim or evict to
+free a physical frame for each new page, competing with everything else
+resident). The two orderings above were also cross-checked for a
+locality effect (construction order - the real upload's own layer/expert
+order - vs file/physical order) but the comparison was confounded by page
+cache warmth between back-to-back runs in one process (both produced the
+identical `0x5ecf400` checksum over the same 2234 tensors, at least
+confirming `param_list()` and the file's own tensor set agree byte-for-byte);
+getting a clean cold/cold pair needs a quiet machine this session did not
+have on demand.
+
+**No fix landed this pass.** All three candidates this investigation's own
+brief named going in - JIT caching, per-tensor dequant parallelism, and
+buffer-allocation churn - were checked against real measurement and ruled
+out: there is no dequant on this path at all (the fp32 expansion already
+matches dtype, so `raw_words` is zero-copy), JIT is under 0.5% of the load,
+and allocation is 2.4% of the upload bracket. What is actually expensive -
+first-touch physical memory allocation for ~12 GiB of destination weights -
+is not a `ParamStore`-level inefficiency to tune away; it is the real cost
+of making that much memory resident, currently inflated by this shared
+machine's own memory pressure rather than by anything `crates/deepseekocr`,
+`crates/deepseekv2`, `crates/paramstore` or `crates/wgsl-cpu` does wrong.
+The one structural lever big enough to matter further - a genuine zero-copy
+`CpuBuffer` that borrows straight from the source mmap for the exact-dtype
+`raw_words` case, instead of duplicating into a freshly allocated `Vec<u32>`
+- is a `backend-cpu` buffer-representation change, larger and riskier than
+this pass's scope (and `backend-cpu`'s fast-path kernels are explicitly out
+of bounds for this investigation). A quiet, uncontended machine would also
+answer how much of the 22 s destination-side cost is inherent vs this
+session's specific contention; this box did not offer one.
+
+**What this pass DID leave behind, real and load-bearing:** the fine-grained
+`BRAIN_PROFILE` brackets above are now permanent (zero cost when the env var
+is unset - a single `std::env::var` check per `Jit::new`/
+`new_with_roles_src` call, the same pattern `deepseekocr::stage_time`
+already uses), so the next investigation of this cost starts with a real
+per-stage table instead of one lumped 20-28 s number. Verified against the
+full test matrix after landing (`cargo test -p brain-deepseekocr --release`,
+`-p brain-deepseekv2 --release`, both 100% green including the
+`grads_match_finite_differences_*` gradchecks and
+`generate_greedy_kv_matches_recompute`) plus two real end-to-end real-weight
+CLI runs through every touched code path (`BRAIN_DEEPSEEK_OCR_DIR=<dir>
+BRAIN_PROFILE=1 brain do deepseek-ai/DeepSeek-OCR generate --max_new 2..8
+--in image=page.ppm --json`), both producing coherent generated output.
+
 **Brain's own wall-clock, same machine, same real weights, same image, same
 prompt, `--max_new 32`, greedy:** the absolute number has moved across the
 passes documented in this page:
