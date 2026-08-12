@@ -3,7 +3,7 @@
 
 //! `model::moe::expert_fwd_compact` (row-compacted, tiled-GEMM dispatch) vs.
 //! `crates/glm`'s proven-exact dense-eval-then-mask oracle, on a tiny
-//! synthetic MoE — the same oracle `moe_sparse_parity.rs` already validates
+//! synthetic MoE - the same oracle `moe_sparse_parity.rs` already validates
 //! the naive sparse path against, reused here for the compacted path.
 //!
 //! Also checks it agrees with `expert_fwd` (the already-gradcheck-validated
@@ -109,7 +109,7 @@ fn build(shape: MoeShape, seed: u64) -> Setup {
         (0..e).map(|i| g.storage_init(&format!("down_w{i}"), &rng.vec_scaled((d * ff) as usize, 0.5))).collect();
 
     let gate = g.storage((m * e) as u64);
-    g.submit(&[], &[router_fwd(&g, &moe_ids, &shape, &logits, &gate)]);
+    g.submit(&[], &[router_fwd(&g, &moe_ids, &shape, &logits, &gate, true, 1.0)]);
     g.poll_wait();
     let host_gate = g.read(&gate, (m * e) as usize);
 
@@ -117,7 +117,7 @@ fn build(shape: MoeShape, seed: u64) -> Setup {
 }
 
 /// The compacted path must reproduce the dense-eval-then-mask oracle exactly
-/// (within float tolerance) — the same claim `moe_sparse_parity.rs` already
+/// (within float tolerance) - the same claim `moe_sparse_parity.rs` already
 /// proves for the naive sparse path, checked here for the compacted one.
 #[test]
 fn compact_matches_dense_oracle() {
@@ -170,7 +170,7 @@ fn compact_matches_dense_oracle() {
         &compact[..4.min(compact.len())],
         &dense[..4.min(dense.len())],
     );
-    assert!(dense.iter().any(|&v| v.abs() > 1e-9), "oracle output is all-zero — the test shape routes nothing");
+    assert!(dense.iter().any(|&v| v.abs() > 1e-9), "oracle output is all-zero - the test shape routes nothing");
 }
 
 /// The compacted path and the existing naive sparse path ([`expert_fwd`])
@@ -218,7 +218,7 @@ fn compact_matches_naive_sparse() {
 }
 
 /// A layer where AT LEAST ONE expert is routed zero rows exercises the
-/// `count == 0` early-return path — real at low `rows`/high `n_experts`, and
+/// `count == 0` early-return path - real at low `rows`/high `n_experts`, and
 /// the one branch the two parity tests above (chosen to route densely) never
 /// hit.
 #[test]
@@ -250,7 +250,7 @@ fn an_unrouted_expert_still_honours_the_accumulate_contract() {
 }
 
 /// Mutation-verify: [`CompactExpertScratch`]'s capacity guard must be a real,
-/// load-bearing panic — not dead code that happens to never trigger.
+/// load-bearing panic - not dead code that happens to never trigger.
 #[test]
 #[should_panic(expected = "exceeding scratch capacity")]
 fn undersized_scratch_panics_loudly_rather_than_truncating() {

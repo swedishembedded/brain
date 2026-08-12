@@ -141,7 +141,7 @@ impl Engine {
     }
 
     fn new(w: Weights) -> Engine {
-        // Shared accelerator (wgpu or native CPU) — same plumbing as the trainer,
+        // Shared accelerator (wgpu or native CPU) - same plumbing as the trainer,
         // GPT, and PID models. No bespoke device init here anymore.
         let gpu = Gpu::new(ENGINE_PIPELINES);
 
@@ -285,7 +285,10 @@ impl Engine {
             steps.push(self.gpu.step(
                 K_ROUTER,
                 &[&self.router_logits, &self.gate],
-                &[t, e, c.top_k],
+                // norm=1, scale=1.0: the classic Switch/Mixtral renormalised
+                // top-k gate this model has always used (`router_gate.wgsl`'s
+                // `norm`/`scale` tail made explicit, not a behaviour change).
+                &[t, e, c.top_k, 1, gpu_core::f(1.0)],
                 t,
             ));
             for ei in 0..e {

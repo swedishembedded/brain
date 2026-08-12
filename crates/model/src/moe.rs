@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Sparse top-k MoE expert FFN — router weights in, combined output out,
+//! Sparse top-k MoE expert FFN - router weights in, combined output out,
 //! without evaluating every expert densely.
 //!
 //! `crates/glm` (today's only HF-importable MoE forward) evaluates **every**
 //! expert over the **whole** row batch and discards non-selected rows by
 //! multiplying by a zero gate weight afterward (`Mlp::Moe` in
-//! `crates/glm/src/model.rs`, combining with `scale_add.wgsl`) — numerically
+//! `crates/glm/src/model.rs`, combining with `scale_add.wgsl`) - numerically
 //! exact (`router_gate.wgsl`'s own doc comment proves it), but `n_experts`x
 //! the FLOPs of an actual top-k dispatch. At 128 experts / top-8
 //! (Qwen3-Omni's Thinker) that is 16x wasted work, which motivated this
@@ -15,7 +15,7 @@
 //!
 //! The fix here is deliberately the smallest one that removes the FLOPs
 //! without adding new failure modes: [`moe_linear_gated`] is `matmul.wgsl`
-//! with one extra check — a row whose gate weight for this expert is zero
+//! with one extra check - a row whose gate weight for this expert is zero
 //! writes 0 and returns *before* the K-reduction, instead of computing it and
 //! discarding it downstream. Composing three of those (gate/up/down
 //! projection) plus the existing `silu_mul`/`scale_add` kernels reproduces
@@ -24,7 +24,7 @@
 //!
 //! [`expert_fwd_i8`] is the same trick over `model::int8`'s packed weights,
 //! via a NEW naive (non-tiled) DP4A kernel rather than gating the existing
-//! `matmul_i8_dyn`/`matmul_i8_gemv` — see `moe_linear_gated_i8.wgsl`'s doc for
+//! `matmul_i8_dyn`/`matmul_i8_gemv` - see `moe_linear_gated_i8.wgsl`'s doc for
 //! why: those stage rows into workgroup-shared memory across a barrier, and a
 //! per-thread early return ahead of a `workgroupBarrier()` that not every
 //! thread in the workgroup reaches is undefined behaviour in WGSL. Row-level
@@ -40,8 +40,8 @@
 //!
 //! **Backward** (this session's addition) is a hoist, not a from-scratch
 //! derivation: two complete, gradient-checked MoE backwards already existed
-//! — `crates/moe/src/train.rs`'s softmax-router training loop and
-//! `crates/glm/src/model.rs`'s sigmoid `noaux_tc` router MLP arm — and
+//! - `crates/moe/src/train.rs`'s softmax-router training loop and
+//! `crates/glm/src/model.rs`'s sigmoid `noaux_tc` router MLP arm - and
 //! comparing them line for line shows the expert half (SwiGLU backward,
 //! `scale_add_dexp`/`scale_add_dgate` combine) is IDENTICAL; only the router
 //! half differs. [`RouterKind`] parameterises that one difference so there is
@@ -55,14 +55,14 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 /// [`crate::block::KernelIds`]).
 #[derive(Clone, Copy)]
 pub struct MoeIds {
-    /// `router_gate.wgsl` (or `router_gate_train.wgsl` if probs are wanted) —
+    /// `router_gate.wgsl` (or `router_gate_train.wgsl` if probs are wanted) -
     /// softmax -> top-k -> renormalise into a dense `[rows, n_experts]` gate.
     pub router_gate: usize,
-    /// `moe_linear_gated.wgsl` — `matmul.wgsl` with a per-row gate early-exit.
+    /// `moe_linear_gated.wgsl` - `matmul.wgsl` with a per-row gate early-exit.
     pub linear_gated: usize,
-    /// `silu_mul.wgsl` — shared with every other SwiGLU MLP in the engine.
+    /// `silu_mul.wgsl` - shared with every other SwiGLU MLP in the engine.
     pub silu_mul: usize,
-    /// `scale_add.wgsl` — the same combine step `crates/glm` already uses.
+    /// `scale_add.wgsl` - the same combine step `crates/glm` already uses.
     pub scale_add: usize,
 }
 
@@ -77,16 +77,37 @@ pub struct MoeShape {
 }
 
 /// Router forward: `logits [rows, n_experts] -> gate [rows, n_experts]`
-/// (dense, nonzero only at the `top_k` selected experts, renormalised so they
-/// sum to 1 per row). Plain softmax top-k — Qwen3-Omni's Thinker and Talker
-/// routers both use this (no aux-loss-free sigmoid/bias/group-limiting; that
-/// variant is `router_gate_sigmoid.wgsl`, already in use by `crates/glm`).
-pub fn router_fwd(g: &Gpu, ids: &MoeIds, shape: &MoeShape, logits: &DeviceBuffer, gate: &DeviceBuffer) -> Step {
-    g.step(ids.router_gate, &[logits, gate], &[shape.rows, shape.n_experts, shape.top_k], shape.rows)
+/// (dense, nonzero only at the `top_k` selected experts). Plain softmax top-k -
+/// Qwen3-Omni's Thinker and Talker routers both use this (no aux-loss-free
+/// sigmoid/bias/group-limiting; that variant is `router_gate_sigmoid.wgsl`,
+/// already in use by `crates/glm`).
+///
+/// `norm_topk_prob` renormalises the selected probabilities to sum to 1 per row
+/// (Switch/Mixtral, and what every caller in this workspace wants);
+/// `routed_scaling` is DeepSeek's `routed_scaling_factor` applied on top
+/// (`1.0` = none). Both are spelled at every call site rather than defaulted:
+/// the pair is exactly the tail `RouterKind::SigmoidNoAuxTc` already carries,
+/// and a forward that silently defaults one of them is a gradient the backward
+/// cannot check - `router_bwd` must be handed the SAME two values.
+pub fn router_fwd(
+    g: &Gpu,
+    ids: &MoeIds,
+    shape: &MoeShape,
+    logits: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    norm_topk_prob: bool,
+    routed_scaling: f32,
+) -> Step {
+    g.step(
+        ids.router_gate,
+        &[logits, gate],
+        &[shape.rows, shape.n_experts, shape.top_k, norm_topk_prob as u32, gpu_core::f(routed_scaling)],
+        shape.rows,
+    )
 }
 
 /// Which router computes an MoE layer's per-token expert weights. The two
-/// variants existing kernels support today — parameterising the difference
+/// variants existing kernels support today - parameterising the difference
 /// here means one router entry point ([`router_fwd_kind`]/[`router_bwd`]),
 /// not two hand-duplicated implementations (confirmed by comparing
 /// `crates/glm/src/model.rs:915-935` against `crates/moe/src/train.rs:466-486`
@@ -94,30 +115,37 @@ pub fn router_fwd(g: &Gpu, ids: &MoeIds, shape: &MoeShape, logits: &DeviceBuffer
 /// differs).
 #[derive(Clone, Copy)]
 pub enum RouterKind {
-    /// `router_gate.wgsl` (fwd) + `router_bwd.wgsl` (bwd) — BOTH array-free
+    /// `router_gate.wgsl` (fwd) + `router_bwd.wgsl` (bwd) - BOTH array-free
     /// (no expert-count cap): the backward since the #35-recurrence fix, the
     /// forward since the audit-F4 rewrite (its `array<f32,128>` scratch was
     /// the same silent-OOB literal one expert higher). Qwen3-Omni's
     /// Thinker/Talker.
-    Softmax { aux_coef: f32, z_coef: f32 },
+    ///
+    /// `norm_topk_prob`/`routed_scaling` are the SAME two knobs
+    /// [`RouterKind::SigmoidNoAuxTc`] carries, now expressed on this family
+    /// too: `true`/`1.0` is Switch/Mixtral (and what every caller in this
+    /// workspace uses today), `false` keeps the RAW top-k softmax
+    /// probabilities as combine weights. The backward has a genuinely
+    /// different (simpler) form for `false` - see `router_bwd.wgsl`'s header.
+    Softmax { aux_coef: f32, z_coef: f32, norm_topk_prob: bool, routed_scaling: f32 },
     /// `router_gate_sigmoid.wgsl` (fwd) + `router_bwd_sigmoid.wgsl` (bwd,
     /// already unbounded). `crates/glm`'s GLM-5.2/DeepSeek-V3 "noaux_tc"
     /// router: per-expert selection bias, group-limited top-k, optional
     /// renormalisation. `router_gate_sigmoid.wgsl`'s forward hard-caps at 64
-    /// experts (`MAX_E`, fixed-size array scratch) — [`router_fwd_kind`]
+    /// experts (`MAX_E`, fixed-size array scratch) - [`router_fwd_kind`]
     /// asserts this loudly rather than let it silently corrupt (the same
     /// stopgap `crates/glm/src/model.rs::new_impl_on` already applies; a
     /// real array-free top-k rewrite is separate kernel work, not a literal
-    /// bump — see that assert's own doc for why).
+    /// bump - see that assert's own doc for why).
     SigmoidNoAuxTc { n_group: u32, topk_group: u32, norm_topk_prob: bool, routed_scaling: f32 },
 }
 
 /// Router forward, dispatching whichever kernel `kind` selects. `bias`/
-/// `probs` are REQUIRED (`Some`) for `SigmoidNoAuxTc` — `router_gate_sigmoid
+/// `probs` are REQUIRED (`Some`) for `SigmoidNoAuxTc` - `router_gate_sigmoid
 /// .wgsl`'s mandatory 3rd/5th bindings (`probs` is written but never read
 /// back by `router_bwd_sigmoid.wgsl`, which recomputes `sigmoid(logits)`
 /// inline rather than reading a saved probability; the buffer must still
-/// exist because the shader's own interface requires it) — and unused
+/// exist because the shader's own interface requires it) - and unused
 /// (`None`, ignored) for `Softmax`, which has no bias/probs bindings at all.
 pub fn router_fwd_kind(
     g: &Gpu,
@@ -130,7 +158,7 @@ pub fn router_fwd_kind(
     probs: Option<&DeviceBuffer>,
 ) -> Step {
     match kind {
-        RouterKind::Softmax { .. } => router_fwd(g, ids, shape, logits, gate),
+        RouterKind::Softmax { norm_topk_prob, routed_scaling, .. } => router_fwd(g, ids, shape, logits, gate, norm_topk_prob, routed_scaling),
         RouterKind::SigmoidNoAuxTc { n_group, topk_group, norm_topk_prob, routed_scaling } => {
             assert!(
                 shape.n_experts <= 64,
@@ -156,7 +184,7 @@ pub fn router_fwd_kind(
 pub struct RouterBwdIds {
     /// `router_bwd.wgsl` (Softmax) or `router_bwd_sigmoid.wgsl` (SigmoidNoAuxTc).
     pub router_bwd: usize,
-    /// `expert_counts.wgsl` — Softmax's aux-loss load-balancing fractions.
+    /// `expert_counts.wgsl` - Softmax's aux-loss load-balancing fractions.
     /// `None` for SigmoidNoAuxTc: DeepSeek-V3's selection bias is a
     /// forward-only load-balancing heuristic, never backprop'd (matches
     /// `crates/glm/src/model.rs`'s own note keeping `moe.router.bias`
@@ -165,11 +193,11 @@ pub struct RouterBwdIds {
 }
 
 /// Router backward: gradient w.r.t. the router logits, dispatching whichever
-/// kernel `kind` selects. Returns the full step list — `Softmax` needs an
+/// kernel `kind` selects. Returns the full step list - `Softmax` needs an
 /// extra `expert_counts` dispatch first (its aux-loss term needs per-expert
 /// usage fractions); `SigmoidNoAuxTc` does not (no aux loss).
 ///
-/// Does NOT touch `d_x` or the router weight's own gradient — those are an
+/// Does NOT touch `d_x` or the router weight's own gradient - those are an
 /// ordinary dense-linear backward over `d_router_logits` (this fn's own
 /// output), which is not MoE-specific math, so this module does not own its
 /// GEMM-kernel choice (`crates/glm`'s adaptive `pick_gemm` vs plain
@@ -188,12 +216,17 @@ pub fn router_bwd(
 ) -> Vec<Step> {
     let (rows, e, top_k) = (shape.rows, shape.n_experts, shape.top_k);
     match kind {
-        RouterKind::Softmax { aux_coef, z_coef } => {
+        RouterKind::Softmax { aux_coef, z_coef, norm_topk_prob, routed_scaling } => {
             let fe = fe.expect("RouterKind::Softmax requires an fe (expert-usage) scratch buffer for the aux-loss term");
             let ec = ids.expert_counts.expect("RouterKind::Softmax requires RouterBwdIds::expert_counts");
             vec![
                 g.step(ec, &[gate, fe], &[rows, e, top_k], e),
-                g.step(ids.router_bwd, &[logits, gate, d_gate, fe, dlogits], &[rows, e, top_k, 0, gpu_core::f(aux_coef), gpu_core::f(z_coef)], rows),
+                g.step(
+                    ids.router_bwd,
+                    &[logits, gate, d_gate, fe, dlogits],
+                    &[rows, e, top_k, 0, gpu_core::f(aux_coef), gpu_core::f(z_coef), norm_topk_prob as u32, gpu_core::f(routed_scaling)],
+                    rows,
+                ),
             ]
         }
         RouterKind::SigmoidNoAuxTc { norm_topk_prob, routed_scaling, n_group, .. } => {
@@ -213,7 +246,7 @@ pub struct ExpertScratch<'a> {
     pub expert_out: &'a DeviceBuffer,
 }
 
-/// One expert's gated SwiGLU FFN step, combined into `acc` — the sparse
+/// One expert's gated SwiGLU FFN step, combined into `acc` - the sparse
 /// replacement for `crates/glm`'s dense per-expert loop body. `x` is the
 /// (already normed) hidden state shared by every expert; `gate_w`/`up_w`/
 /// `down_w` are expert `e_idx`'s own weights. `accumulate` is `false` only
@@ -252,14 +285,14 @@ pub fn expert_fwd(
     ]
 }
 
-/// Saved per-expert activations for backward — exactly [`ExpertScratch`]'s
+/// Saved per-expert activations for backward - exactly [`ExpertScratch`]'s
 /// four tensors, but OWNED per-expert rather than one shared scratch set
 /// reused across experts. [`ExpertScratch`]'s forward-time contract (fully
 /// overwritten each call, safe to alias across experts) does not hold for
 /// training: backward needs EVERY expert's own `gate_pre`/`up`/`h`/
 /// `expert_out`, not just whichever expert ran last. Allocates exactly what
 /// `crates/glm/src/model.rs`'s `Mlp::Moe` already allocates per layer
-/// (`model.rs:463-466`) — memory-neutral, not a reduction. Recompute-in-
+/// (`model.rs:463-466`) - memory-neutral, not a reduction. Recompute-in-
 /// backward and true row compaction are follow-ups that compose over this
 /// API unchanged; NOT part of this item.
 pub struct MoeActs {
@@ -281,7 +314,7 @@ impl MoeActs {
         }
     }
 
-    /// Expert `e`'s saved activations, as an [`ExpertScratch`] — the same
+    /// Expert `e`'s saved activations, as an [`ExpertScratch`] - the same
     /// value forward AND backward read for that expert (forward writes it
     /// during the layer's forward pass; backward reads it here unchanged).
     pub fn at(&self, e: usize) -> ExpertScratch<'_> {
@@ -304,14 +337,14 @@ pub struct MoeIdsBwd {
     /// (or a tiled sibling with the same 3-buffer/3-param dense contract).
     pub linear_dw: usize,
     /// Selects the gated kernels (5 bindings incl. `gate`, skip non-routed
-    /// rows — bit-identical to the dense kernels over the same `dy`, since a
+    /// rows - bit-identical to the dense kernels over the same `dy`, since a
     /// non-routed row's `dy` is already exactly 0.0 there; see
     /// `moe_linear_gated_dx.wgsl`'s own doc) vs the dense ones (measure
     /// before committing either way).
     pub linear_gated: bool,
 }
 
-/// One expert's weight gradients — `None` skips that weight's dW entirely
+/// One expert's weight gradients - `None` skips that weight's dW entirely
 /// (a frozen weight, or a caller that only wants dX for this expert).
 #[derive(Clone, Copy)]
 pub struct ExpertGrads<'a> {
@@ -332,7 +365,7 @@ pub struct ExpertBwdScratch<'a> {
 /// Phase A of an MoE layer's backward: gradient w.r.t. one expert's gate
 /// weight (`scale_add_dgate.wgsl`), writing column `e_idx` of `d_gate` from
 /// that expert's SAVED output (`saved.expert_out`, from [`MoeActs::at`]).
-/// Must run for EVERY expert BEFORE [`router_bwd`] — the router needs the
+/// Must run for EVERY expert BEFORE [`router_bwd`] - the router needs the
 /// WHOLE `d_gate` row, and this call only ever writes one column of it. See
 /// [`moe_layer_bwd`]'s doc for the full ordering contract.
 pub fn expert_dgate(g: &Gpu, ids: &MoeIdsBwd, shape: &MoeShape, saved: &ExpertScratch, d_acc: &DeviceBuffer, d_gate: &DeviceBuffer, e_idx: u32) -> Step {
@@ -343,13 +376,13 @@ pub fn expert_dgate(g: &Gpu, ids: &MoeIdsBwd, shape: &MoeShape, saved: &ExpertSc
 /// Phase C of an MoE layer's backward: one expert's SwiGLU backward,
 /// accumulating dX into `d_x` (the shared input gradient every expert
 /// contributes to). Must run AFTER [`router_bwd`] (see [`moe_layer_bwd`]'s
-/// ordering contract) — mirrors `crates/moe/src/train.rs`'s Phase C loop and
+/// ordering contract) - mirrors `crates/moe/src/train.rs`'s Phase C loop and
 /// `crates/glm/src/model.rs`'s per-expert MLP backward arm exactly (both
 /// already gradient-checked); this hoists that sequence, it does not
 /// re-derive it.
 ///
 /// `accumulate` governs only the FIRST touch to `d_x` within this call (the
-/// up-projection's dX write) — mirroring [`expert_fwd`]'s own `accumulate`
+/// up-projection's dX write) - mirroring [`expert_fwd`]'s own `accumulate`
 /// semantics exactly (`false` only when nothing has written `d_x` yet for
 /// this row, e.g. a frozen/non-dispatched router). The gate-projection's dX
 /// write that follows always accumulates on top of whatever the up
@@ -424,7 +457,7 @@ pub fn expert_bwd(
 /// One MoE layer's full backward pass: Phase A (every expert's `d_gate`
 /// column, [`expert_dgate`]) -> Phase B ([`router_bwd`]'s kernel-level
 /// router backward, THEN the router weight's own dense-linear backward,
-/// `router_weight_bwd` — caller-supplied since that GEMM's kernel/tiling
+/// `router_weight_bwd` - caller-supplied since that GEMM's kernel/tiling
 /// choice is not MoE-specific math this module should own, e.g.
 /// `crates/glm`'s adaptive `pick_gemm` vs plain `MATMUL_DW`/`MATMUL_DX`) ->
 /// Phase C (every expert's SwiGLU backward, [`expert_bwd`], accumulating
@@ -437,13 +470,13 @@ pub fn expert_bwd(
 /// (`router_weight_bwd`'s dX write must be the FIRST touch to `d_x`,
 /// accumulate=0). Every caller should use this wrapper rather than the
 /// three phases' primitives directly, so the ordering cannot silently drift
-/// per call site — the exact failure class `gradcheck`'s own doc warns
+/// per call site - the exact failure class `gradcheck`'s own doc warns
 /// about: a partial gradient that a scalar check alone can pass by
 /// coincidence (the T5 `rel_bias` case: a 33% error `directional_check`
 /// alone reported as `rel_err = 6.2e-4`).
 ///
 /// `router_weight_bwd`'s steps must reference the SAME `d_router_logits`
-/// buffer [`router_bwd`] writes — `Step`s are plain dispatch descriptors
+/// buffer [`router_bwd`] writes - `Step`s are plain dispatch descriptors
 /// (kernel index + buffer handles + params), not lazily evaluated, so the
 /// caller may build them before this call returns; only their POSITION in
 /// the returned step list (after `router_bwd`'s steps, before Phase C)
@@ -518,7 +551,7 @@ pub struct Lin8<'a> {
 
 /// Scratch for one expert's int8 FFN step. `gate_pre`/`up`/`h` stay fp32 (the
 /// activation functions and quantization math are fp32 arithmetic, per the
-/// engine-wide invariant — only storage is int8); `hq`/`sh` are `h` quantized
+/// engine-wide invariant - only storage is int8); `hq`/`sh` are `h` quantized
 /// fresh each call, since `h` is a different tensor for every expert.
 pub struct ExpertScratch8<'a> {
     pub gate_pre: &'a DeviceBuffer,
@@ -531,7 +564,7 @@ pub struct ExpertScratch8<'a> {
 
 /// int8 counterpart of [`expert_fwd`]. `xq`/`sx` are the shared input `x`,
 /// ALREADY quantized once by the caller (via `crate::int8::quant_rows_steps`)
-/// before the expert loop starts — every expert reads the same quantized
+/// before the expert loop starts - every expert reads the same quantized
 /// activation, so quantizing it 128 times would be pure waste.
 #[allow(clippy::too_many_arguments)]
 pub fn expert_fwd_i8(
@@ -616,11 +649,7 @@ pub struct SharedExpertScratch<'a> {
 ///   expert (`model.rs:794`, GLM-5.2/DeepSeek-V3's architecture) exactly --
 ///   a distinct real design, not a degenerate case of the gated one.
 ///
-/// FORWARD-ONLY (audit F18): there is no `shared_expert_bwd` — the GLM/Omni
-/// MoE trainers will need the adjoint of this exact composition (dense
-/// SwiGLU backward + the sigmoid-gate product rule for the `Some` arm) and
-/// it does not exist yet. Implement it WITH its gradcheck when training
-/// first needs it; do not assume the routed experts' backward covers it.
+/// Its adjoint is [`shared_expert_bwd`], which covers BOTH arms.
 #[allow(clippy::too_many_arguments)]
 pub fn shared_expert_fwd(
     g: &Gpu,
@@ -657,13 +686,185 @@ pub fn shared_expert_fwd(
     steps
 }
 
+/// Kernel indices [`shared_expert_bwd`] dispatches, resolved by the calling
+/// model against its own registered pipeline list. The last three are needed
+/// ONLY by the sigmoid-gated (`Some`) arm; the unweighted arm never reads them
+/// and may leave them at any value.
+#[derive(Clone, Copy)]
+pub struct SharedExpertBwdIds {
+    /// `matmul_dx.wgsl` (`{d_out, w, dx}` / `{m, k, n, acc}`).
+    pub linear_dx: usize,
+    /// `matmul_dw.wgsl` (`{d_out, x, dw}` / `{m, k, n}`).
+    pub linear_dw: usize,
+    pub silu_da: usize,
+    pub silu_db: usize,
+    /// `scale_row.wgsl` - its OWN backward w.r.t. `x` (`dx = scale_row(dy, s)`;
+    /// see that kernel's header). Gated arm only.
+    pub scale_row: usize,
+    /// `row_dot.wgsl` - the row-scale factor's gradient
+    /// `ds[row] = sum_d dy[row,d]*x[row,d]`. Gated arm only.
+    pub row_dot: usize,
+    /// `sigmoid_bwd.wgsl`. Gated arm only.
+    pub sigmoid_bwd: usize,
+}
+
+/// The forward activations [`shared_expert_bwd`] reads back.
+///
+/// A SUBSET of [`SharedExpertScratch`], not a copy of it: the backward never
+/// reads the forward's `scaled` buffer, and the three gated-arm tensors are
+/// `Option` because the unweighted arm's forward never produces them (
+/// `crates/glm` allocates no sigmoid-gate buffers at all). Build it from a
+/// forward scratch with [`SharedExpertScratch::acts`], or by hand.
+#[derive(Clone, Copy)]
+pub struct SharedExpertActs<'a> {
+    pub gate_pre: &'a DeviceBuffer, // [rows, shared_ff]
+    pub up: &'a DeviceBuffer,       // [rows, shared_ff]
+    pub h: &'a DeviceBuffer,        // [rows, shared_ff]
+    /// The SwiGLU's output BEFORE the sigmoid scale. Gated arm only.
+    pub mlp_out: Option<&'a DeviceBuffer>, // [rows, d_model]
+    pub gate_logits: Option<&'a DeviceBuffer>, // [rows]
+    pub gate_scalar: Option<&'a DeviceBuffer>, // [rows]
+}
+
+impl<'a> SharedExpertScratch<'a> {
+    /// The subset of this forward scratch [`shared_expert_bwd`] reads. Always
+    /// fills the gated arm's three `Option`s - a caller that ran the forward
+    /// through this struct ran the gate projection into these buffers, so they
+    /// are valid whenever the forward was called with `Some(shared_gate_w)`
+    /// and simply unread otherwise.
+    pub fn acts(&self) -> SharedExpertActs<'a> {
+        SharedExpertActs {
+            gate_pre: self.gate_pre,
+            up: self.up,
+            h: self.h,
+            mlp_out: Some(self.mlp_out),
+            gate_logits: Some(self.gate_logits),
+            gate_scalar: Some(self.gate_scalar),
+        }
+    }
+}
+
+/// The shared expert's weight gradients - `None` skips that weight's dW
+/// entirely (a frozen weight under a LoRA build, or a caller that only wants
+/// dX). Same contract as [`ExpertGrads`], plus the sigmoid-gate projection.
+#[derive(Clone, Copy, Default)]
+pub struct SharedExpertGrads<'a> {
+    pub gate_w: Option<&'a DeviceBuffer>,
+    pub up_w: Option<&'a DeviceBuffer>,
+    pub down_w: Option<&'a DeviceBuffer>,
+    /// The `d_model -> 1` sigmoid-gate projection's dW. Gated arm only.
+    pub shared_gate_w: Option<&'a DeviceBuffer>,
+}
+
+/// Scratch for [`shared_expert_bwd`], sized once by the caller. The last three
+/// are required by the gated (`Some`) arm and unused by the unweighted one,
+/// where `d_out` IS the gradient w.r.t. the SwiGLU's output.
+pub struct SharedExpertBwdScratch<'a> {
+    pub d_h: &'a DeviceBuffer,          // [rows, shared_ff]
+    pub d_gate_pre: &'a DeviceBuffer,   // [rows, shared_ff]
+    pub d_up: &'a DeviceBuffer,         // [rows, shared_ff]
+    pub d_mlp_out: Option<&'a DeviceBuffer>,    // [rows, d_model]
+    pub d_gate_scalar: Option<&'a DeviceBuffer>, // [rows]
+    pub d_gate_logits: Option<&'a DeviceBuffer>, // [rows]
+}
+
+/// Adjoint of [`shared_expert_fwd`], for BOTH of its arms.
+///
+/// `d_out` is the gradient w.r.t. that function's `out`. Because the forward's
+/// last step is `out = acc + (gated) mlp_out`, `d_out` is ALSO the gradient
+/// w.r.t. `acc` unchanged - the routed experts' own backward consumes the same
+/// buffer, and no kernel is needed to split it. That is why this function takes
+/// no `d_acc` output.
+///
+/// `shared_gate_w` selects the arm, exactly as in the forward:
+/// - `None` - unweighted. This is the composition `crates/glm` hand-wrote
+///   inline (`Mlp::Moe`'s shared-expert block) and now calls; the step sequence
+///   below IS that code, moved, not re-derived.
+/// - `Some(w)` - per-row `sigmoid(x @ wᵀ)` gate. `scale_row` is its own
+///   backward w.r.t. `x`, `row_dot` gives the row-scale factor's gradient, and
+///   `sigmoid_bwd` closes it. `crates/qwen35moe`'s `moe_sublayer_bwd` derived
+///   this arm first; it is reproduced here so both real architectures have one
+///   home.
+///
+/// `accumulate` governs only the FIRST touch to `d_x` (whichever step that is
+/// in the selected arm), mirroring [`expert_bwd`]'s own semantics: `false` when
+/// nothing has written `d_x` yet, `true` when the routed-MoE backward already
+/// established its base value. Every later `d_x` write in this call accumulates.
+///
+/// ORDERING: this must run AFTER the routed [`moe_layer_bwd`] when both share
+/// `d_x`, since that phase owns `d_x`'s first write in every current caller.
+#[allow(clippy::too_many_arguments)]
+pub fn shared_expert_bwd(
+    g: &Gpu,
+    ids: &SharedExpertBwdIds,
+    rows: u32,
+    d_model: u32,
+    shared_ff: u32,
+    x: &DeviceBuffer,
+    gate_w: &DeviceBuffer,
+    up_w: &DeviceBuffer,
+    down_w: &DeviceBuffer,
+    shared_gate_w: Option<&DeviceBuffer>,
+    gr: &SharedExpertGrads,
+    saved: &SharedExpertActs,
+    sb: &SharedExpertBwdScratch,
+    d_out: &DeviceBuffer,
+    d_x: &DeviceBuffer,
+    accumulate: bool,
+) -> Vec<Step> {
+    let (m, d, ff) = (rows, d_model, shared_ff);
+    let mut steps: Vec<Step> = Vec::new();
+    // Backward of `y = x·Wᵀ`: weight grad (when trainable) then input grad -
+    // the exact pair `crates/glm`'s `mm_bwd` emits, in that order.
+    let mm_bwd = |steps: &mut Vec<Step>, d_y: &DeviceBuffer, xin: &DeviceBuffer, w: &DeviceBuffer, dw: Option<&DeviceBuffer>, dx: &DeviceBuffer, k: u32, n: u32, acc: u32| {
+        if let Some(dw) = dw {
+            steps.push(g.step(ids.linear_dw, &[d_y, xin, dw], &[m, k, n], n * k));
+        }
+        steps.push(g.step(ids.linear_dx, &[d_y, w, dx], &[m, k, n, acc], m * k));
+    };
+
+    // Which gradient the SwiGLU's down-projection sees, and whether `d_x`'s
+    // first touch has already happened by the time the SwiGLU runs.
+    let (d_mlp_out, first_touch) = match shared_gate_w {
+        None => (d_out, accumulate as u32),
+        Some(sgw) => {
+            let d_mlp_out = sb.d_mlp_out.expect("shared_expert_bwd: the gated arm needs SharedExpertBwdScratch::d_mlp_out");
+            let d_gate_scalar = sb.d_gate_scalar.expect("shared_expert_bwd: the gated arm needs SharedExpertBwdScratch::d_gate_scalar");
+            let d_gate_logits = sb.d_gate_logits.expect("shared_expert_bwd: the gated arm needs SharedExpertBwdScratch::d_gate_logits");
+            // scaled = mlp_out * gate_scalar : d_mlp_out = d_out * gate_scalar
+            // (scale_row is its own backward w.r.t. `x`), and the row-scale
+            // factor's own gradient is the row dot with the forward's mlp_out.
+            let gate_scalar = saved.gate_scalar.expect("shared_expert_bwd: the gated arm needs SharedExpertActs::gate_scalar");
+            let saved_mlp_out = saved.mlp_out.expect("shared_expert_bwd: the gated arm needs SharedExpertActs::mlp_out");
+            let gate_logits = saved.gate_logits.expect("shared_expert_bwd: the gated arm needs SharedExpertActs::gate_logits");
+            steps.push(g.step(ids.scale_row, &[d_out, gate_scalar, d_mlp_out], &[m * d, d], m * d));
+            steps.push(g.step(ids.row_dot, &[d_out, saved_mlp_out, d_gate_scalar], &[m, d, 0, 0, gpu_core::f(1.0)], m));
+            steps.push(g.step(ids.sigmoid_bwd, &[gate_logits, d_gate_scalar, d_gate_logits], &[m], m));
+            // gate projection (d_model -> 1) -- the gated arm's FIRST d_x touch.
+            mm_bwd(&mut steps, d_gate_logits, x, sgw, gr.shared_gate_w, d_x, d, 1, accumulate as u32);
+            (d_mlp_out as &DeviceBuffer, 1u32)
+        }
+    };
+
+    // down projection: dW + dX -> d_h (fresh per call, acc=0)
+    mm_bwd(&mut steps, d_mlp_out, saved.h, down_w, gr.down_w, sb.d_h, ff, d, 0);
+    // SwiGLU backward: d_h -> d_gate_pre, d_up
+    steps.push(g.step(ids.silu_da, &[saved.gate_pre, saved.up, sb.d_h, sb.d_gate_pre], &[m * ff], m * ff));
+    steps.push(g.step(ids.silu_db, &[saved.gate_pre, sb.d_h, sb.d_up], &[m * ff], m * ff));
+    // up then gate projection, both into d_x
+    mm_bwd(&mut steps, sb.d_up, x, up_w, gr.up_w, d_x, d, ff, first_touch);
+    // always on top of the up projection's write above, within this one call
+    mm_bwd(&mut steps, sb.d_gate_pre, x, gate_w, gr.gate_w, d_x, d, ff, 1);
+    steps
+}
+
 /// Kernel indices [`shared_expert_fwd_i8`] dispatches. The gate/up/down
 /// SwiGLU linears go through `matmul_i8_dyn` (`crate::int8`'s per-channel
-/// weight scale + per-token dynamic activation scale — the SAME kernel
+/// weight scale + per-token dynamic activation scale - the SAME kernel
 /// `qwen3::q8::Q8::mm8` uses), NOT [`expert_fwd_i8`]'s GATED
 /// `moe_linear_gated_i8`: the shared expert applies to every row
 /// unconditionally, so it has no per-row route/skip to express through a
-/// gate array — using the gated kernel here would be dispatching the wrong
+/// gate array - using the gated kernel here would be dispatching the wrong
 /// shape, not just a slower one. The tiny sigmoid-gate projection
 /// (`d_model -> 1`) stays fp32 via the plain `matmul`, matching
 /// [`expert_fwd_i8`]'s own "not worth quantizing a rank-1 output" scope.
@@ -675,7 +876,7 @@ pub struct SharedExpertIds8 {
     pub sigmoid: usize,
     pub scale_row: usize,
     pub add2: usize,
-    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair —
+    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair -
     /// used to quantize the intermediate `h` (the shared expert's OWN
     /// SwiGLU output, a different width than any routed expert's, so it
     /// cannot reuse `MoeIds8::quant`'s call site, only its kernel ids).
@@ -683,7 +884,7 @@ pub struct SharedExpertIds8 {
 }
 
 /// Scratch for [`shared_expert_fwd_i8`]. `hq`/`sh` are `h` quantized fresh
-/// (the shared expert's own intermediate, `shared_ff` wide — not the same
+/// (the shared expert's own intermediate, `shared_ff` wide - not the same
 /// buffer any routed expert's `ExpertScratch8::hq` uses).
 pub struct SharedExpertScratch8<'a> {
     pub gate_pre: &'a DeviceBuffer,
@@ -699,11 +900,11 @@ pub struct SharedExpertScratch8<'a> {
 
 /// int8 counterpart of [`shared_expert_fwd`]. `xq`/`sx` are the SAME
 /// quantized input the routed [`expert_fwd_i8`] loop already produced once
-/// (the shared expert reads the identical `x` every routed expert does) —
+/// (the shared expert reads the identical `x` every routed expert does) -
 /// reused here, not requantized. `x_fp32` is that same activation's
 /// original fp32 form, needed only for the (unquantized) sigmoid-gate
 /// projection when `shared_gate_w` is `Some`. Same two real architectures
-/// as [`shared_expert_fwd`] (`Some`/`None` gate) — see that function's doc.
+/// as [`shared_expert_fwd`] (`Some`/`None` gate) - see that function's doc.
 #[allow(clippy::too_many_arguments)]
 pub fn shared_expert_fwd_i8(
     g: &Gpu,
@@ -761,11 +962,11 @@ pub fn shared_expert_fwd_i8(
 //
 // KNOWN COST (audit F9, deliberate remainder): the per-expert call shape
 // below does one host scan over `host_gate`, one index upload, and one
-// `submit` PER EXPERT — at GLM-5.2 scale (~128 experts x ~48 MoE layers)
+// `submit` PER EXPERT - at GLM-5.2 scale (~128 experts x ~48 MoE layers)
 // that is ~6100 submits and small uploads per forward. Every per-expert
 // count is knowable host-side from ONE pass over `host_gate`, and dispatch
 // ordering within a submit already guarantees the shared scratch is safe to
-// reuse across experts in a single batched submission — so a layer-level
+// reuse across experts in a single batched submission - so a layer-level
 // entry point (bucket rows for ALL experts in one pass, per-expert index
 // regions, one submit per layer) removes the storm with no new kernel. That
 // API change lands WITH its call-site migration (crates/glm, crates/omni) so
@@ -796,7 +997,7 @@ pub struct CompactExpertFwdIds {
 
 /// Per-expert scratch for [`expert_fwd_compact`], sized ONCE by the caller
 /// for `capacity` rows and reused across every expert in a layer (fully
-/// overwritten each call — the tail past this call's `count` is simply
+/// overwritten each call - the tail past this call's `count` is simply
 /// unused, never read, so leftover data from a larger previous expert is
 /// harmless). `capacity_for` returns the only value that makes
 /// [`expert_fwd_compact`]'s capacity panic unreachable: every row could in
@@ -812,7 +1013,7 @@ pub struct CompactExpertScratch {
 }
 
 impl CompactExpertScratch {
-    /// `capacity` rows' worth of scratch — pass `shape.rows` for the
+    /// `capacity` rows' worth of scratch - pass `shape.rows` for the
     /// unconditionally-safe bound, or a smaller measured high-watermark if
     /// the caller already knows routing is more balanced than that.
     pub fn new(g: &Gpu, shape: &MoeShape, capacity: u32) -> CompactExpertScratch {
@@ -834,24 +1035,24 @@ impl CompactExpertScratch {
     }
 }
 
-/// Row-compacted sparse expert forward — see this section's header doc.
+/// Row-compacted sparse expert forward - see this section's header doc.
 ///
 /// `host_gate` MUST be the CURRENT contents of `gate` (`[shape.rows,
 /// shape.n_experts]`), already read back by the caller (`Gpu::read`). This
 /// function does NOT perform that readback itself, so the caller controls
-/// exactly when the host/device round trip happens — once per LAYER (read
+/// exactly when the host/device round trip happens - once per LAYER (read
 /// `gate` once, call this once per expert against the same `host_gate`), not
 /// once per expert. Consequently this is NOT a pure step-builder like
 /// [`expert_fwd`]: each expert's compacted row count is a value only the
 /// HOST can know (discovered from `host_gate`), so this function builds AND
 /// submits its own steps rather than returning a `Vec<Step>` for the caller
-/// to batch — every other step-list builder in this engine always knows its
+/// to batch - every other step-list builder in this engine always knows its
 /// dispatch shapes before building a `Step`, which a data-dependent row
 /// count breaks by construction. This is therefore a real synchronisation
 /// point per expert (the `submit` below), acceptable for a BATCHED forward
 /// (training/eval), not intended for a per-token decode loop.
 ///
-/// Panics if expert `e_idx` routes more rows than `scratch`'s capacity —
+/// Panics if expert `e_idx` routes more rows than `scratch`'s capacity -
 /// size `scratch` via [`CompactExpertScratch::new`] with `shape.rows` to
 /// make this impossible, rather than silently truncating which rows this
 /// expert's output reaches.
@@ -878,7 +1079,7 @@ pub fn expert_fwd_compact(
     let (d, ff, e) = (shape.d_model, shape.moe_ff, shape.n_experts);
     // A short readback here previously panicked with a bare index message in
     // the filter below, while the capacity precondition next door got a
-    // detailed assert — same rigor for both preconditions.
+    // detailed assert - same rigor for both preconditions.
     assert_eq!(
         host_gate.len(),
         (shape.rows * e) as usize,
@@ -891,7 +1092,7 @@ pub fn expert_fwd_compact(
     let rows: Vec<u32> = (0..shape.rows).filter(|&r| host_gate[(r * e + e_idx) as usize] > 0.0).collect();
     let count = rows.len() as u32;
     if count == 0 {
-        // Nothing routed to this expert this call — still honour
+        // Nothing routed to this expert this call - still honour
         // `accumulate`'s set-vs-add contract: a zero-row expert must not
         // silently skip zeroing `acc` if it happens to be the first expert
         // in the layer's loop.

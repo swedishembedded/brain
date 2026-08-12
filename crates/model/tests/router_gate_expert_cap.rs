@@ -95,7 +95,7 @@ fn run_gate_case(n_experts: u32) {
 
     let logits_buf = g.storage_init("logits", &logits);
     let gate_buf = g.storage((n_rows * n_experts) as u64);
-    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf], &[n_rows, n_experts, top_k], n_rows)]);
+    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf], &[n_rows, n_experts, top_k, 1, gpu_core::f(1.0)], n_rows)]);
     g.poll_wait();
     let got = g.read(&gate_buf, (n_rows * n_experts) as usize);
 
@@ -116,7 +116,7 @@ fn run_train_case(n_experts: u32) {
     let logits_buf = g.storage_init("logits", &logits);
     let gate_buf = g.storage((n_rows * n_experts) as u64);
     let probs_buf = g.storage((n_rows * n_experts) as u64);
-    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf, &probs_buf], &[n_rows, n_experts, top_k], n_rows)]);
+    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf, &probs_buf], &[n_rows, n_experts, top_k, 1, gpu_core::f(1.0)], n_rows)]);
     g.poll_wait();
     let got_gate = g.read(&gate_buf, (n_rows * n_experts) as usize);
     let got_probs = g.read(&probs_buf, (n_rows * n_experts) as usize);
@@ -158,7 +158,7 @@ fn router_gate_matches_host_oracle_at_256_experts() {
 
     let logits_buf = g.storage_init("logits", &logits);
     let gate_buf = g.storage((n_rows * n_experts) as u64);
-    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf], &[n_rows, n_experts, top_k], n_rows)]);
+    g.submit(&[], &[g.step(kernel, &[&logits_buf, &gate_buf], &[n_rows, n_experts, top_k, 1, gpu_core::f(1.0)], n_rows)]);
     g.poll_wait();
     let got = g.read(&gate_buf, (n_rows * n_experts) as usize);
 

@@ -4,7 +4,7 @@
 //! Moondream overlap multi-crop bookkeeping and the feature-space
 //! reconstruct → adaptive-pool → global‖local channel-concat that forms the
 //! connector's `[729, 2·dim]` input. Ports `select_tiling`/`reconstruct_from_crops`
-//! (`image_crops.py`) faithfully — reconstruct runs in **patch units**
+//! (`image_crops.py`) faithfully - reconstruct runs in **patch units**
 //! (`patch_size=1`), stitching the ViT's `[n_local, 27, 27, dim]` local feature
 //! maps and trimming the 4-patch overlap on interior edges. The pixel-space
 //! `overlap_crop_image` (which needs a JPEG/PNG decoder brain still lacks) is a
@@ -14,31 +14,16 @@ use gpu_core::Gpu;
 
 use crate::vision::ADAPTIVE_AVGPOOL2D_ID;
 
-/// Pick `(h_tiles, w_tiles)` with `h·w ≤ max_crops` best matching the image aspect
-/// ratio. Faithful port of `image_crops.py::select_tiling` — inputs are the
-/// margin-subtracted pixel dims and the usable `crop_window_size`.
-pub fn select_tiling(height: u32, width: u32, crop_size: u32, max_crops: u32) -> (u32, u32) {
-    if height <= crop_size || width <= crop_size {
-        return (1, 1);
-    }
-    let (h, w, cs, mc) = (height as f64, width as f64, crop_size as f64, max_crops as f64);
-    let min_h = (h / cs).ceil();
-    let min_w = (w / cs).ceil();
-    if min_h * min_w > mc {
-        let ratio = (mc / (min_h * min_w)).sqrt();
-        return ((min_h * ratio).floor().max(1.0) as u32, (min_w * ratio).floor().max(1.0) as u32);
-    }
-    let mut h_tiles = (mc * h / w).sqrt().floor().max(min_h);
-    let mut w_tiles = (mc * w / h).sqrt().floor().max(min_w);
-    if h_tiles * w_tiles > mc {
-        if w_tiles > h_tiles {
-            w_tiles = (mc / h_tiles).floor();
-        } else {
-            h_tiles = (mc / w_tiles).floor();
-        }
-    }
-    (h_tiles.max(1.0) as u32, w_tiles.max(1.0) as u32)
-}
+/// Pick `(h_tiles, w_tiles)` with `h·w ≤ max_crops` best matching the image
+/// aspect ratio. Faithful port of `image_crops.py::select_tiling` - inputs are
+/// the margin-subtracted pixel dims and the usable `crop_window_size`.
+///
+/// **The definition now lives in `imaging::tiling`**, beside the other models'
+/// named crop policies (InternVL/DeepSeek-OCR's discrete `internvl_grid`), per
+/// that crate's own stated convention: the policies sit side by side, named per
+/// reference model, and are never unified. This is a re-export, not a second
+/// copy.
+pub use imaging::tiling::moondream_select_tiling as select_tiling;
 
 /// Stitch local feature maps `[n_local, grid, grid, dim]` (row-major, tile order
 /// `(tile_y, tile_x)`) into a single channel-first `[dim, out_h, out_w]` map,
@@ -116,17 +101,13 @@ mod tests {
     use super::*;
     use crate::vision::vision_pipelines;
 
+    /// The policy itself is gated in `imaging::tiling` (where it now lives);
+    /// this pins that Moondream still reaches the SAME function through its own
+    /// name, so the re-export cannot silently point somewhere else.
     #[test]
-    fn select_tiling_matches_reference() {
-        // height/width ≤ crop → single tile.
-        assert_eq!(select_tiling(300, 300, 378, 12), (1, 1));
-        // Square large image → balanced tiling under budget.
-        let (h, w) = select_tiling(1000, 1000, 266, 12);
-        assert!(h * w <= 12 && h >= 1 && w >= 1);
-        assert_eq!((h, w), (3, 3)); // floor(sqrt(12)) each, then min_h/min_w=ceil(1000/266)=4 lifts→ capped
-        // Wide image → more horizontal tiles.
-        let (h2, w2) = select_tiling(400, 1600, 266, 12);
-        assert!(w2 >= h2 && h2 * w2 <= 12);
+    fn select_tiling_reexports_the_moondream_policy() {
+        assert_eq!(select_tiling(300, 300, 378, 12), imaging::tiling::moondream_select_tiling(300, 300, 378, 12));
+        assert_eq!(select_tiling(1000, 1000, 266, 12), (3, 3));
     }
 
     #[test]

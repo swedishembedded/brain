@@ -86,7 +86,7 @@ fn vit_ids(base: usize) -> VitKernelIds {
         matmul: base + K_MATMUL,
         matmul_rows: base + K_MATMUL_ROWS,
         bias_add: base + K_BIAS_ADD,
-        gelu_erf: base + K_GELU_ERF,
+        mlp_act: base + K_GELU_ERF,
         scale_chan: base + K_SCALE_CHAN,
         add2: base + K_ADD2,
         attn_scores_cross: base + K_ATTN_SCORES_CROSS,
@@ -179,7 +179,7 @@ impl<'g> Mirror<'g> {
         head_rows.extend_from_slice(&regs[..reg * c]);
         let pos_patch = pos[c..].to_vec();
 
-        // Trunk specials: cam_token [1,2,1,C] / reg_token [1,2,4,C] — variant
+        // Trunk specials: cam_token [1,2,1,C] / reg_token [1,2,4,C] - variant
         // 0 for frame 0, variant 1 for every later frame; pose/ray rows zero.
         let cam_t = &init[&format!("{VGT}.cam_token")];
         let reg_t = &init[&format!("{VGT}.reg_token")];
@@ -357,7 +357,7 @@ impl<'g> Mirror<'g> {
             (s * c * patches) as u32,
         ));
         // conv bias is a SHARED [C] vector; add_chan_bcast broadcasts a
-        // per-image [N,C] one, so dispatch it per frame (N=1) — at N=s it
+        // per-image [N,C] one, so dispatch it per frame (N=1) - at N=s it
         // would read past the bias for every frame but the first.
         for fi in 0..s {
             let off = (fi * c * patches) as u64;
@@ -564,7 +564,7 @@ impl<'g> Mirror<'g> {
     }
 
     /// Run the recorded forward on `s` frames of RAW [0,1] CHW pixels
-    /// (concatenated): ImageNet normalization happens here (reference parity —
+    /// (concatenated): ImageNet normalization happens here (reference parity -
     /// the VGT normalizes internally), then DINOv2 → trunk → heads → camera.
     pub fn forward(&mut self, frames_chw: &[f32], s: usize, hp: usize, wp: usize) {
         let rebuild = match &self.built {
@@ -604,7 +604,7 @@ impl<'g> Mirror<'g> {
         );
     }
 
-    /// Raw camera 9-vectors `[s, 9]` (activations NOT applied — see
+    /// Raw camera 9-vectors `[s, 9]` (activations NOT applied - see
     /// `gaussians::decode_cameras`).
     pub fn cam_pred_raw(&self) -> Vec<f32> {
         let b = self.built.as_ref().unwrap();
@@ -628,25 +628,25 @@ impl<'g> Mirror<'g> {
         &self.built.as_ref().unwrap().patch_out
     }
 
-    /// Post-trunk token buffer `[s*(7+hp*wp), C]` — smoke-test introspection.
+    /// Post-trunk token buffer `[s*(7+hp*wp), C]` - smoke-test introspection.
     #[doc(hidden)]
     pub fn trunk_tokens(&self) -> &DeviceBuffer {
         &self.built.as_ref().unwrap().trunk_tokens
     }
 
-    /// Patch-conv output `[s, C, hp*wp]` — smoke-test introspection.
+    /// Patch-conv output `[s, C, hp*wp]` - smoke-test introspection.
     #[doc(hidden)]
     pub fn conv_out(&self) -> &DeviceBuffer {
         &self.built.as_ref().unwrap().conv_out
     }
 
-    /// DPT scratch (holds the LAST recorded head's stages) — introspection.
+    /// DPT scratch (holds the LAST recorded head's stages) - introspection.
     #[doc(hidden)]
     pub fn dpt_scratch(&self) -> &crate::dpt::DptScratch {
         &self.built.as_ref().unwrap().dscr
     }
 
-    /// Raw RGB buffer for one frame — smoke-test introspection.
+    /// Raw RGB buffer for one frame - smoke-test introspection.
     #[doc(hidden)]
     pub fn rgb_frame(&self, fi: usize) -> &DeviceBuffer {
         &self.built.as_ref().unwrap().rgb_frames[fi]

@@ -362,14 +362,28 @@ fn kind_name(k: RouterKind) -> &'static str {
 fn softmax_router_gradcheck_top_k_less_than_n_experts() {
     // top_k < n_experts: exercises moe_linear_gated's early-exit branch for
     // real -- the branch a top_k==n_experts config can never take.
-    run_case(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001 }, 2, 0xA0FF);
+    run_case(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001, norm_topk_prob: true, routed_scaling: 1.0 }, 2, 0xA0FF);
 }
 
 #[test]
 fn softmax_router_gradcheck_top_k_equals_n_experts() {
     // top_k == n_experts: every row selects every expert (dense-equivalent
     // case) -- the shape check_moe/check_glm's tiny configs actually run.
-    run_case(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001 }, E, 0xA0FE);
+    run_case(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001, norm_topk_prob: true, routed_scaling: 1.0 }, E, 0xA0FE);
+}
+
+#[test]
+fn softmax_router_gradcheck_unnormalized_and_scaled() {
+    // norm_topk_prob=false + routed_scaling != 1: the second real combine-weight
+    // branch of `router_gate.wgsl`/`router_bwd.wgsl`, added for DeepSeek-OCR's
+    // decoder. The backward is NOT the normalised form with `Z := 1` -- it has
+    // no `sdp/Z^2` cross-term at all (see `router_bwd.wgsl`'s header), so this
+    // is the gate on a genuinely different expression, not a parameter sweep.
+    //
+    // `top_k == E`: with the renormalisation gone the gate weights are the raw
+    // softmax probabilities, smooth in every direction, so FD is well
+    // conditioned -- the same reason `check_moe` pins `top_k == n_experts`.
+    run_case(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001, norm_topk_prob: false, routed_scaling: 1.5 }, E, 0xA0FD);
 }
 
 // ---- SigmoidNoAuxTc router (GLM-5.2/DeepSeek-V3's kind) ----

@@ -83,7 +83,7 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
     let down_w8_dev = upload8(&down_w8, "down");
 
     let gate = g.storage((m * e) as u64);
-    g.submit(&[], &[router_fwd(&g, &ids, &shape, &logits, &gate)]);
+    g.submit(&[], &[router_fwd(&g, &ids, &shape, &logits, &gate, true, 1.0)]);
 
     // fp32 sparse reference.
     let scratch = ExpertScratch {
@@ -134,5 +134,5 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
     // Measured 0.0084 on this shape/seed; 0.02 leaves headroom for RNG/shape
     // drift without hiding an actual quantization regression.
     assert!(rel_l2 < 0.02, "int8 sparse diverged from fp32 sparse: rel_l2={rel_l2:.4} i8[..4]={:?} fp32[..4]={:?}", &i8out[..4], &fp32[..4]);
-    assert!(fp32.iter().any(|&v| v.abs() > 1e-9), "fp32 reference is all-zero — the test shape routes nothing");
+    assert!(fp32.iter().any(|&v| v.abs() > 1e-9), "fp32 reference is all-zero - the test shape routes nothing");
 }

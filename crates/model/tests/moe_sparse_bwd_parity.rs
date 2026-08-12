@@ -106,7 +106,7 @@ fn gated_backward_matches_dense_bit_for_bit() {
     let x = g.storage_init("x", &rng.vec_scaled((m * d) as usize, 1.0));
     let logits = g.storage_init("logits", &rng.vec_scaled((m * e) as usize, 2.0));
     let gate = g.storage((m * e) as u64);
-    g.submit(&[], &[router_fwd(&g, &fwd_ids, &shape, &logits, &gate)]);
+    g.submit(&[], &[router_fwd(&g, &fwd_ids, &shape, &logits, &gate, true, 1.0)]);
 
     let weights: Vec<_> = (0..e)
         .map(|i| {

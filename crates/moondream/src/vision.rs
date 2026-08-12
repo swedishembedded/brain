@@ -16,7 +16,7 @@ use crate::config::VisionConfig;
 
 const DINO_EPS: f32 = 1e-6;
 
-/// The ViT kernels (tanh-GELU at the `gelu_erf` slot for Moondream's gelu_approx).
+/// The ViT kernels (tanh-GELU at the `mlp_act` slot for Moondream's gelu_approx).
 pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
     &[
         ("layernorm", kernels::LAYERNORM),
@@ -63,7 +63,7 @@ fn vit_bwd_ids() -> VitBwdIds {
         matmul_dx: 13,
         matmul_dw: 14,
         bias_grad: 15,
-        gelu_erf_bwd: 16, // tanh gelu bwd (matches the tanh-GELU forward slot)
+        mlp_act_bwd: 16, // tanh gelu bwd (matches the tanh-GELU forward slot)
         scale_chan_dg: 0, // unused (no LayerScale)
         ln_head_dx: 0,    // unused (no QK-norm)
         ln_head_dgb: 0,   // unused
@@ -83,7 +83,7 @@ fn vit_ids() -> VitKernelIds {
         matmul: 1,
         matmul_rows: 2,
         bias_add: 3,
-        gelu_erf: 4, // tanh GELU wired here
+        mlp_act: 4, // tanh GELU wired here
         scale_chan: 5,
         add2: 6,
         attn_scores_cross: 7,

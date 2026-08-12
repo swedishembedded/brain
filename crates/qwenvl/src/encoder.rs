@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-VL ViT vision encoder — GPU forward, built on the shared `model::vit`
+//! Qwen3-VL ViT vision encoder - GPU forward, built on the shared `model::vit`
 //! block builder.
 //!
 //! Pipeline per image (single frame, `t=1`): pack patches host-side into
@@ -50,7 +50,7 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         ("matmul_dx", kernels::MATMUL_DX),               // 14
         ("matmul_dw", kernels::MATMUL_DW),               // 15
         ("bias_grad", kernels::BIAS_GRAD),               // 16
-        ("gelu_bwd", kernels::GELU_BWD),                 // 17 (tanh gelu bwd — block MLP)
+        ("gelu_bwd", kernels::GELU_BWD),                 // 17 (tanh gelu bwd - block MLP)
         ("layernorm_dx", kernels::LAYERNORM_DX),         // 18
         ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA), // 19
         ("layernorm_dbeta", kernels::LAYERNORM_DBETA),   // 20
@@ -64,8 +64,9 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
 }
 
 /// Backward kernel ids for [`vit_block_bwd`]. Qwen3-VL ViT has no QK-norm/LayerScale
-/// (those ids are never dispatched → 0); the block MLP is tanh-GELU, so gelu_erf_bwd
-/// points at the TANH gelu_bwd (matching the tanh-GELU forward slot).
+/// (those ids are never dispatched → 0); the block MLP is tanh-GELU, so
+/// `mlp_act_bwd` points at the TANH `gelu_bwd` (matching the tanh-GELU
+/// forward slot).
 fn vit_bwd_ids() -> VitBwdIds {
     VitBwdIds {
         layernorm_dx: 18,
@@ -74,7 +75,7 @@ fn vit_bwd_ids() -> VitBwdIds {
         matmul_dx: 14,
         matmul_dw: 15,
         bias_grad: 16,
-        gelu_erf_bwd: 17,
+        mlp_act_bwd: 17,
         scale_chan_dg: 0,
         ln_head_dx: 0,
         ln_head_dgb: 0,
@@ -103,7 +104,7 @@ fn vit_ids() -> VitKernelIds {
         matmul: 1,
         matmul_rows: 2,
         bias_add: 3,
-        gelu_erf: 4, // tanh GELU wired here for Qwen3-VL
+        mlp_act: 4, // tanh GELU wired here for Qwen3-VL
         scale_chan: 5,
         add2: 6,
         attn_scores_cross: 7,
@@ -134,7 +135,7 @@ impl<'g> VisionEncoder<'g> {
     /// Build from host weights. Required keys: `patch_embed.weight` `[hidden,
     /// patch_vec]`, `patch_embed.bias` `[hidden]`, `pos_embed` `[num_pos, hidden]`,
     /// and per block `blocks.{b}.<leaf>` for every `BLOCK_LEAVES`. (No post-block
-    /// norm — the PatchMerger's LayerNorm is the final norm, matching HF.)
+    /// norm - the PatchMerger's LayerNorm is the final norm, matching HF.)
     pub fn new(gpu: &'g Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> VisionEncoder<'g> {
         let mut w = HashMap::new();
         for (name, data) in weights {
@@ -275,7 +276,7 @@ impl<'g> VisionEncoder<'g> {
     }
 
     /// Training-mode forward (per-block [`VitBlockCache`] for the backward). No
-    /// post-LN — the last block's output is the feature map (matching `encode`).
+    /// post-LN - the last block's output is the feature map (matching `encode`).
     pub fn forward_train(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> QwenVitTrain {
         let g = self.gpu;
         let ids = vit_ids();

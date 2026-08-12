@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3.5-35B-A3B hybrid decoder forward AND backward assembly — device
+//! Qwen3.5-35B-A3B hybrid decoder forward AND backward assembly - device
 //! [`Step`]s wired to the [`model::Model`] trait.
 //!
 //! **Scope, strictly**: no incremental/KV-cache decode with an image splice
 //! (single-sequence text decode via [`Qwen35::step`] is separate follow-on
-//! work; see `crate::vl`'s own doc) — a prefill-shaped vision-language
+//! work; see `crate::vl`'s own doc) - a prefill-shaped vision-language
 //! embedding splice IS wired here ([`Qwen35::enable_mm_splice`]/
 //! [`Qwen35::write_img_embeds`], driven by `crate::vl::Qwen35Vl`), mirroring
 //! `qwen3::Qwen`'s own seam. No incremental/KV-cache decode (a full-sequence
 //! prefill-shaped forward over a fixed `t` only, matching [`model::gdn`]'s own
 //! "chunked/prefill only" scope), no T-padding (`t` must already be a
-//! multiple of the derived GDN chunk size — asserted loudly in
+//! multiple of the derived GDN chunk size - asserted loudly in
 //! [`Qwen35::new_on`], see [`gdn_chunk_size`]). **Two construction paths**:
 //! [`Qwen35::new`]/[`Qwen35::new_i8`] build a frozen (`Role::Frozen`),
 //! forward-only instance (`backward`/`zero_grads`/`adamw_step` all assert and
-//! panic on such an instance — see [`Qwen35::backward`]'s own assert);
+//! panic on such an instance - see [`Qwen35::backward`]'s own assert);
 //! [`Qwen35::new_train`] builds a fully trainable (`Role::Trainable`
-//! everywhere, full-parameter — no LoRA-specific subset) instance whose
+//! everywhere, full-parameter - no LoRA-specific subset) instance whose
 //! `forward()` additionally saves the activation cache `backward()` reads
 //! (see [`Qwen35::train_acts`]'s own doc for the exact "one forward, one
 //! backward, then the cache is gone" contract). Int8 and training are
@@ -37,16 +37,16 @@
 //!
 //! One assumption worth flagging up front: `Qwen3_5MoeRMSNorm.forward`
 //! (attention/MLP layer norms) computes `output * (1.0 + weight)`, not a
-//! plain `output * weight` — the reference's own comment says so ("We
+//! plain `output * weight` - the reference's own comment says so ("We
 //! initialize with 0s to be 1 centered as the RMSNorm here does"). This
 //! engine's shared `rmsnorm.wgsl` (used by every model, not just this one)
 //! assumes the plain-multiply form, i.e. that a checkpoint's stored weight is
-//! already the FINAL per-channel multiplier — which is exactly what
+//! already the FINAL per-channel multiplier - which is exactly what
 //! llama.cpp's GGUF conversion typically bakes in for this style of norm (the
 //! `+1` folded into the stored value at conversion time), and is also what
 //! `crates/qwen35moe/src/import.rs` (unmodified by this change) assumes. If that
 //! assumption is wrong for some future checkpoint source, RMSNorm output
-//! would be off by a `(x+1)` vs `x` factor — a real, if unlikely, gap, called
+//! would be off by a `(x+1)` vs `x` factor - a real, if unlikely, gap, called
 //! out here rather than silently assumed away. `Qwen3_5MoeRMSNormGated` (the
 //! Gated DeltaNet output norm) is a genuinely different class with no such
 //! `+1` (`hidden_states = self.weight * hidden_states...`, verified directly
@@ -56,13 +56,13 @@
 //!
 //! Every layer, regardless of token-mixer type: `xn1 = rmsnorm(res)`, mix
 //! (GDN or GQA, below), `xmid = res + mix_out`, `xn2 = rmsnorm(xmid)`, MoE
-//! (universal — every layer, no dense fallback), `res' = xmid + moe_out`.
+//! (universal - every layer, no dense fallback), `res' = xmid + moe_out`.
 //!
 //! **Gated DeltaNet** (`Qwen3_5MoeGatedDeltaNet.forward`): `mixed_qkv =
 //! in_proj_qkv(xn1)` → depthwise causal conv1d (`causal_conv1d_fn`, SiLU
-//! activation AFTER the conv — confirmed from `self.activation =
+//! activation AFTER the conv - confirmed from `self.activation =
 //! config.hidden_act` and every Qwen family config using `"silu"`, not
-//! assumed) → split into `query,key,value` (one whole-row contiguous split —
+//! assumed) → split into `query,key,value` (one whole-row contiguous split -
 //! confirmed via `torch.split(mixed_qkv, [key_dim,key_dim,value_dim],
 //! dim=-1)`, i.e. NOT per-head) → L2-normalize `query`/`key` (no learnable
 //! scale, confirmed `use_qk_l2norm_in_kernel=True` calls the bare `l2norm`
@@ -70,21 +70,21 @@
 //! `g=-exp(A_log)*softplus(in_proj_a(xn1)+dt_bias)` (confirmed verbatim) →
 //! repeat `query`/`key` from `linear_num_key_heads` to `linear_num_value_heads`
 //! (`repeat_interleave`, i.e. `model::block::kv_expand_fwd`'s exact
-//! `repeat_kv` semantics — confirmed, no new kernel needed) → chunk-major
+//! `repeat_kv` semantics - confirmed, no new kernel needed) → chunk-major
 //! permute (new `gdn_layout_permute.wgsl`, see its own header) →
 //! `model::gdn::gdn_chunk_fwd` → permute back → gated RMSNorm
-//! (`Qwen3_5MoeRMSNormGated`: norm computed on the UNGATED value first — "#
-//! Norm before gate" in the reference — THEN `* weight`, THEN `*
+//! (`Qwen3_5MoeRMSNormGated`: norm computed on the UNGATED value first - "#
+//! Norm before gate" in the reference - THEN `* weight`, THEN `*
 //! SiLU(in_proj_z(xn1))`; confirmed this is exactly `rmsnorm_fwd` composed
 //! with `silu.wgsl` + `mul.wgsl`, no new kernel) → `out_proj`.
 //!
 //! **GQA (`Qwen3_5MoeAttention.forward`)**: `q_proj` emits a DOUBLED width
 //! (`num_heads*head_dim*2`) whose split into `query`/`gate` is **per-head
-//! interleaved**, not a single whole-row split — confirmed:
+//! interleaved**, not a single whole-row split - confirmed:
 //! `torch.chunk(q_proj(x).view(*shape,-1,head_dim*2), 2, dim=-1)` chunks the
 //! LAST axis of a `[...,n_heads,2*head_dim]` view, so head `h`'s own
 //! `2*head_dim` slice splits into its own first/second half. `concat_split
-//! .wgsl` (existing — see this module's kernel-choice note below) handles
+//! .wgsl` (existing - see this module's kernel-choice note below) handles
 //! this by folding `n_heads` into its own batch axis (`N = rows*n_heads`,
 //! `Ctot = 2*head_dim`, `Csrc = head_dim`). Then per-head QK-RMSNorm, partial
 //! M-RoPE (`rope2d_partial_fwd`, `partial_rotary_factor` fraction rotated),
@@ -95,23 +95,23 @@
 //! - **qkv / q-gate splits**: the task's own text suggested `region_copy
 //!   .wgsl` for these. Read closely, `region_copy` requires `src` and `dst`
 //!   to share the SAME `row_stride`/`off` addressing (`dst[i] = src[i]` for
-//!   the identical flat `i`) — it copies a sub-REGION between two
+//!   the identical flat `i`) - it copies a sub-REGION between two
 //!   same-shaped buffers, it cannot project a wide strided row into a fresh
 //!   COMPACT narrower buffer (which is what a real split needs: downstream
 //!   consumers like `l2norm_scale`/`gdn_chunk_fwd`/`gqa_fwd` all require
 //!   compact operands, and none of them accept an extra `row_stride`
-//!   parameter to work around it). `concat_split.wgsl` (existing — originally
+//!   parameter to work around it). `concat_split.wgsl` (existing - originally
 //!   for `concat2`'s backward channel-slice) does exactly the needed gather:
-//!   `da[n,c,h,w] = dy[n, c+c_off, h, w]` — setting `H=W=1` makes it a plain
+//!   `da[n,c,h,w] = dy[n, c+c_off, h, w]` - setting `H=W=1` makes it a plain
 //!   compact channel-slice-into-a-fresh-buffer copy, and folding a repeated
 //!   axis (e.g. per-head) into its `N` handles the interleaved case too. Used
 //!   for both splits; no new kernel.
-//! - **chunk-major permute**: genuinely new (`gdn_layout_permute.wgsl`) — see
+//! - **chunk-major permute**: genuinely new (`gdn_layout_permute.wgsl`) - see
 //!   its own header for why `nlc_nchw`/`nchw_nlc` (the only existing
 //!   layout-permute kernels) don't cover a 5-index permute that also SPLITS
 //!   the token axis into `(chunk, c)`.
 //! - **GDN q/k head repeat**: `model::block::kv_expand_fwd` is exactly
-//!   `repeat_kv`-shaped and shape-generic (any `hd`, not GQA-specific) — used
+//!   `repeat_kv`-shaped and shape-generic (any `hd`, not GQA-specific) - used
 //!   as-is, no variant needed.
 //! - **conv1d layout**: `conv1d.wgsl` is NCL (`[N,Cin,L]`); every other
 //!   buffer in this engine is token-major (`[rows, C]` = `[B,T,C]` row-major,
@@ -361,7 +361,7 @@ const ROUTER_TOPK_COMPACT: usize = 93;
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
 /// dispatches `block::rope_fwd`/`rope_bwd` (it uses the M-RoPE table-driven
 /// `rope2d_partial_{fwd,bwd}` instead, which take their own kernel index, not
-/// a [`KernelIds`] field) — harmless, matching `omni::thinker::kernel_ids`'s
+/// a [`KernelIds`] field) - harmless, matching `omni::thinker::kernel_ids`'s
 /// own convention for a slot this model genuinely never dispatches.
 fn kernel_ids() -> KernelIds {
     KernelIds {
@@ -462,17 +462,17 @@ fn gdn_bwd_ids() -> GdnBwdIds {
     }
 }
 
-/// [`model::moe::router_bwd`]'s kernel ids — `Softmax` router (qwen35's own,
+/// [`model::moe::router_bwd`]'s kernel ids - `Softmax` router (qwen35's own,
 /// see `moe_sublayer`'s `RouterKind::Softmax` choice), so `expert_counts` is
 /// required (aux-loss usage fractions), unused by the returned scalar loss
-/// (`aux_coef=0.0`, see `moe_sublayer`'s own comment) but still dispatched —
+/// (`aux_coef=0.0`, see `moe_sublayer`'s own comment) but still dispatched -
 /// `router_bwd.wgsl`'s own interface requires the `fe` buffer to exist.
 fn router_bwd_ids() -> RouterBwdIds {
     RouterBwdIds { router_bwd: ROUTER_BWD, expert_counts: Some(EXPERT_COUNTS) }
 }
 
 /// [`model::moe::expert_dgate`]/[`expert_bwd`]'s kernel ids (composed by
-/// [`moe_layer_bwd`]) — `linear_gated: true` selects the row-skipping
+/// [`moe_layer_bwd`]) - `linear_gated: true` selects the row-skipping
 /// backward kernels, matching `moe_sublayer`'s own gated forward
 /// (`MOE_LINEAR_GATED`).
 fn moe_bwd_ids() -> MoeIdsBwd {
@@ -491,7 +491,7 @@ fn moe_bwd_ids() -> MoeIdsBwd {
 /// 64 (`torch_chunk_gated_delta_rule`'s `chunk_size=64`); `model::gdn` is
 /// prefill-only and asserts `t % chunk == 0` itself (no padding support), so
 /// rather than force every caller's `t` to be a multiple of 64, this picks
-/// the LARGEST candidate in `[64,32,16,8,4,2,1]` that divides `t` exactly —
+/// the LARGEST candidate in `[64,32,16,8,4,2,1]` that divides `t` exactly -
 /// landing on exactly 64 at the real 35B-A3B scale (`block_size=4096`,
 /// `4096%64==0`) while still giving a tiny test config (`tiny()`:
 /// `block_size=24`) a genuinely multi-chunk exercise (`24%8==0` -> chunk 8,
@@ -507,10 +507,10 @@ pub fn gdn_chunk_size(t: u32) -> u32 {
     1
 }
 
-/// Owned scratch buffers for one [`model::gdn::gdn_chunk_fwd`] call — see
+/// Owned scratch buffers for one [`model::gdn::gdn_chunk_fwd`] call - see
 /// that module's [`GdnScratch`] doc for what each buffer holds. Freshly
 /// allocated per Gated-DeltaNet layer call (never shared/reused across
-/// layers or across forward passes), so every buffer here is zero-fresh —
+/// layers or across forward passes), so every buffer here is zero-fresh -
 /// `t_mat` is still passed through `Gpu::submit`'s `clears` list at the call
 /// site per [`gdn_chunk_fwd`]'s own documented contract, defensively.
 struct GdnScratchBufs {
@@ -587,7 +587,7 @@ impl GdnScratchBufs {
     }
 }
 
-/// Owned scratch for one [`gdn_chunk_fwd_train`] call — the training-mode
+/// Owned scratch for one [`gdn_chunk_fwd_train`] call - the training-mode
 /// sibling of [`GdnScratchBufs`] that additionally saves the per-chunk
 /// history [`gdn_chunk_bwd`] reads back (see [`GdnScratchTrain`]'s own doc for
 /// exactly which field is which). `clears()` lists every field
@@ -698,7 +698,7 @@ impl GdnScratchTrainBufs {
     }
 }
 
-/// Owned scratch for one [`gdn_chunk_bwd`] call — see [`GdnBwdScratch`]'s own
+/// Owned scratch for one [`gdn_chunk_bwd`] call - see [`GdnBwdScratch`]'s own
 /// doc for what each field holds and which MUST be zeroed (`clears()` below:
 /// `d_g_cs`, `d_exp_g_cs`, `d_u`, `d_decay_mask`).
 struct GdnBwdScratchBufs {
@@ -800,7 +800,7 @@ impl GdnBwdScratchBufs {
 // ---- backward activation cache (training builds only) ----------------------
 
 /// Everything [`Qwen35::layer_gdn_fwd`]'s training branch saves for
-/// [`Qwen35::backward`]'s GDN mixer arm — the SSA activation-cache convention
+/// [`Qwen35::backward`]'s GDN mixer arm - the SSA activation-cache convention
 /// this module's doc describes, at the per-buffer granularity backward
 /// actually reads. Field names match the local variable they were assigned
 /// from in `layer_gdn_fwd`'s body.
@@ -851,7 +851,7 @@ struct GqaLayerActs {
     ctx_gated: DeviceBuffer,
 }
 
-/// Everything [`Qwen35::moe_sublayer`]'s training branch saves — universal
+/// Everything [`Qwen35::moe_sublayer`]'s training branch saves - universal
 /// (every layer, both mixer types).
 struct MoeLayerActs {
     xn2: DeviceBuffer,
@@ -860,7 +860,7 @@ struct MoeLayerActs {
     fe: DeviceBuffer,
     acts: MoeActs,
     // Note: `moe_acc`'s own VALUE is never read by backward (only its
-    // gradient, `d_moe_out` itself — no `model::moe` backward primitive reads
+    // gradient, `d_moe_out` itself - no `model::moe` backward primitive reads
     // the pre-shared-expert-add accumulator back), so it is deliberately NOT
     // saved here despite being a real forward intermediate.
     // shared expert (sigmoid-gated: Qwen3.5's `shared_expert_gate`).
@@ -885,18 +885,18 @@ struct LayerTrainActs {
 }
 
 /// The full backward activation cache for one `forward()` call on a
-/// [`Qwen35::new_train`] instance — see [`Qwen35::train_acts`]'s own doc.
+/// [`Qwen35::new_train`] instance - see [`Qwen35::train_acts`]'s own doc.
 struct TrainActs {
     layers: Vec<LayerTrainActs>,
     xn_final: DeviceBuffer,
 }
 
-/// Qwen3.5-35B-A3B hybrid decoder — forward/inference only (see module doc).
+/// Qwen3.5-35B-A3B hybrid decoder - forward/inference only (see module doc).
 pub struct Qwen35 {
     pub gpu: Gpu,
     pub cfg: Qwen35Config,
     /// Pipeline shard this instance owns (whole model, `embed && head`, by
-    /// default — see [`Shard::whole`]). Layer indices stay ABSOLUTE
+    /// default - see [`Shard::whole`]). Layer indices stay ABSOLUTE
     /// throughout (`res`/`ps`/weight names are all indexed/named by the real
     /// `0..cfg.n_layers` layer number); only the forward/backward loop bounds
     /// and the embed/head gates are shard-relative. Mirrors `qwen3::Qwen`'s
@@ -904,14 +904,14 @@ pub struct Qwen35 {
     pub shard: Shard,
     ps: ParamStore,
     /// `Some` selects the int8 (DP4A) inference tier for the linears
-    /// `Qwen35Q8::is_i8_linear` names (`ps` excludes those names entirely —
+    /// `Qwen35Q8::is_i8_linear` names (`ps` excludes those names entirely -
     /// see [`Qwen35::new_impl_on`]'s role filter); `None` is the plain fp32
     /// path. See `crate::q8`'s module doc for exactly which linears that is
     /// and why.
     q8: Option<Qwen35Q8>,
     b: u32,
     t: u32,
-    /// The GDN chunk size this instance was built for — see [`gdn_chunk_size`].
+    /// The GDN chunk size this instance was built for - see [`gdn_chunk_size`].
     chunk: u32,
     /// `true` for a [`Self::new_train`] build: every weight is `Role::Trainable`
     /// (see [`Self::new_impl_on`]'s role filter), `forward()` saves the
@@ -928,7 +928,7 @@ pub struct Qwen35 {
     count: Cell<f32>,
 
     /// Residual stream, one entry per layer boundary (`res[0]` = embeddings,
-    /// `res[n_layers]` = input to the final norm) — the SSA activation-cache
+    /// `res[n_layers]` = input to the final norm) - the SSA activation-cache
     /// convention `crates/glm/src/model.rs` uses, kept here even though
     /// nothing backprops through it (useful for parity debugging: any layer's
     /// residual output is independently readable).
@@ -950,7 +950,7 @@ pub struct Qwen35 {
     /// n_rows)`, `run_forward` overwrites residual rows `[row0, row0+n_rows)`
     /// with `img_embeds` (written by the vision front-end via
     /// [`Qwen35::write_img_embeds`]) right after the token-embedding gather,
-    /// and — on a `new_train` build — `backward` routes those rows' gradient
+    /// and - on a `new_train` build - `backward` routes those rows' gradient
     /// into `d_img_embeds` (read via [`Qwen35::read_d_img_embeds`]) instead of
     /// `tok.weight`. Mirrors `qwen3::Qwen`'s own seam exactly, except no
     /// fwd/bwd step-list rebuild is needed: `run_forward`/`backward` already
@@ -962,12 +962,12 @@ pub struct Qwen35 {
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
 
-    /// Backward's activation cache — `Some` only right after a `forward()`
+    /// Backward's activation cache - `Some` only right after a `forward()`
     /// call on a [`Self::new_train`] instance (populated by `run_forward`'s
     /// train branch; read by `backward()`). This mirrors the engine-wide
     /// "forward reallocates fresh buffers every call" convention this file
     /// already uses everywhere else, so `backward()` MUST run against the
-    /// same `forward()` call whose gradient it computes — exactly the
+    /// same `forward()` call whose gradient it computes - exactly the
     /// `zero_grads(); forward(); backward();` sequencing every caller
     /// (`gradcheck`, a real training loop) already uses.
     train_acts: RefCell<Option<TrainActs>>,
@@ -1024,7 +1024,7 @@ pub struct Qwen35 {
     // Sized once at construction for `cfg.lora`'s rank and the widest output
     // dimension across the 9 targetable leaves (GDN's `in_proj_qkv`/
     // `in_proj_z`/`in_proj_b`/`in_proj_a`/`out_proj`, GQA's `q_proj`/
-    // `k_proj`/`v_proj`/`o_proj`) — mirrors `qwen3::Qwen`'s own
+    // `k_proj`/`v_proj`/`o_proj`) - mirrors `qwen3::Qwen`'s own
     // `lora_a`/`lora_da`/`lora_out` fields exactly (see [`Self::lora_fwd`]/
     // [`Self::proj_bwd`]'s LoRA branch). Size-1 dummies when `cfg.lora` is
     // `None` (rank forced to 1 in [`Self::new_impl_on`], never read).
@@ -1122,7 +1122,7 @@ impl Qwen35 {
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
-    /// binary — see `gpu_core::testgpu`).
+    /// binary - see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false, shard)
@@ -1139,14 +1139,14 @@ impl Qwen35 {
         Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true, false, shard)
     }
 
-    /// [`Self::new_i8`] on an existing device handle — see [`Self::new_on`].
+    /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false, shard)
     }
 
     /// Build a TRAINABLE model: every weight `Role::Trainable` (full-parameter
-    /// backward — no LoRA-specific plumbing here, per this task's scope note),
+    /// backward - no LoRA-specific plumbing here, per this task's scope note),
     /// `forward()` additionally saves the activation cache `backward()` reads.
     /// int8 and training are mutually exclusive (mirrors `qwen3::Qwen`'s own
     /// `assert!(!(i8 && train))`).
@@ -1155,7 +1155,7 @@ impl Qwen35 {
         Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, true, shard)
     }
 
-    /// [`Self::new_train`] on an existing device handle — see [`Self::new_on`].
+    /// [`Self::new_train`] on an existing device handle - see [`Self::new_on`].
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
@@ -1163,8 +1163,8 @@ impl Qwen35 {
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
     /// weights) in `shard` are allocated on this device, as a TRAINABLE
-    /// build (`Role::Trainable` full-parameter, or — when `cfg.lora` is
-    /// `Some` — frozen base + trainable LoRA adapters). `shard.gpu_index`
+    /// build (`Role::Trainable` full-parameter, or - when `cfg.lora` is
+    /// `Some` - frozen base + trainable LoRA adapters). `shard.gpu_index`
     /// names the canonical physical card (device registry); `Shard::ANY_GPU`
     /// keeps the ambient selection. Mirrors `qwen3::Qwen::new_shard` exactly
     /// (see `crate::shard`'s [`model::Shardable`] impl, the only caller this
@@ -1367,14 +1367,14 @@ impl Qwen35 {
 
     /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
     /// parameters (LoRA base, inference) have none, so their weight-gradient
-    /// dispatches must be skipped — only the input-gradient (dX) path runs to
+    /// dispatches must be skipped - only the input-gradient (dX) path runs to
     /// keep backprop flowing to lower-layer adapters. Mirrors
     /// `qwen3::model.rs`'s own `trainable` helper exactly.
     fn trainable(&self, name: &str) -> bool {
         self.ps.grad.contains_key(name)
     }
 
-    /// The gradient buffer for a trainable weight — only valid on a
+    /// The gradient buffer for a trainable weight - only valid on a
     /// [`Self::new_train`] instance (every weight is `Role::Trainable` there,
     /// see [`Self::new_impl_on`]'s role filter).
     fn g(&self, name: &str) -> &DeviceBuffer {
@@ -1382,14 +1382,14 @@ impl Qwen35 {
     }
 
     /// True if a LoRA adapter is configured for the given projection leaf
-    /// (one of the 9 targetable leaf names — never an MoE expert leaf).
+    /// (one of the 9 targetable leaf names - never an MoE expert leaf).
     /// Mirrors `qwen3::model.rs`'s own `lora_for` exactly.
     fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
         self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
-    /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output —
+    /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output -
     /// mirrors `qwen3::model.rs`'s own `lora_fwd` exactly (same two-matmul +
     /// `AXPY` fusion, using this file's own persistent `lora_a`/`lora_out`
     /// scratch).
@@ -1405,11 +1405,11 @@ impl Qwen35 {
 
     /// Backward for a (possibly-LoRA) linear `y = x·Wᵀ`. Accumulates the input
     /// gradient into `dx` (flag `acc`). For a full weight: `dW += d_outᵀ·x`
-    /// (skipped when `wname` is Frozen — a LoRA-mode base, or an untargeted
+    /// (skipped when `wname` is Frozen - a LoRA-mode base, or an untargeted
     /// weight under a LoRA build, e.g. `mlp.router.weight`), `dx = d_out·W`.
     /// For a LoRA-targeted leaf: the base weight is always frozen (dX only, no
     /// dW), and the adapter grads `gA`/`gB` are produced (scale folded into
-    /// the private `lora_a`/`lora_da` scratch) — naive `matmul_dx`/`matmul_dw`
+    /// the private `lora_a`/`lora_da` scratch) - naive `matmul_dx`/`matmul_dw`
     /// only, no tiled-GEMM selection, matching a correctness-first tiny
     /// gradcheck config. Mirrors
     /// `qwen3::model.rs`'s own `proj_bwd` exactly.
@@ -1418,7 +1418,7 @@ impl Qwen35 {
         let g = &self.gpu;
         match self.lora_for(leaf) {
             Some((r, scale)) => {
-                // base: dx += d_out·W (frozen weight — no dW).
+                // base: dx += d_out·W (frozen weight - no dW).
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
@@ -1442,7 +1442,7 @@ impl Qwen35 {
     }
 
     /// RMSNorm backward via the shared builder: input grad always, gain grad
-    /// only when the gain is trainable (frozen under a LoRA build — no norm
+    /// only when the gain is trainable (frozen under a LoRA build - no norm
     /// gain is ever a LoRA target, so this mirrors `qwen3::Qwen`'s own
     /// LoRA-base-frozen branch, applied here to every norm rather than to a
     /// projection weight).
@@ -1463,14 +1463,14 @@ impl Qwen35 {
 
     /// Enable the VLM embedding splice at residual rows `[row0, row0+n_rows)`:
     /// after the token-embedding gather, `run_forward` overwrites those rows
-    /// with the image tokens written via [`Self::write_img_embeds`], and — on
-    /// a `new_train` build — `backward` routes their gradient to
+    /// with the image tokens written via [`Self::write_img_embeds`], and - on
+    /// a `new_train` build - `backward` routes their gradient to
     /// [`Self::read_d_img_embeds`] (zeroing them in the residual grad first so
     /// `EMB_BWD` never trains the image-placeholder token id). Unlike
     /// `qwen3::Qwen::enable_mm_splice`, this needs no fwd/bwd step-list
     /// rebuild: `run_forward`/`backward` already build their step lists fresh
     /// on every call (see this module's top-of-file doc), so enabling the
-    /// splice is pure buffer allocation + a flag — call once after
+    /// splice is pure buffer allocation + a flag - call once after
     /// construction, before the first `forward()`.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
         let sz = (n_rows * self.cfg.d_model) as u64;
@@ -1490,19 +1490,39 @@ impl Qwen35 {
         self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model) as usize)
     }
 
-    /// Read the gradient of the spliced image embeddings after `backward()` —
+    /// Read the gradient of the spliced image embeddings after `backward()` -
     /// feeds the vision tower/connector backward. Requires a `new_train` build
     /// (see [`Self::backward`]'s splice-gradient step).
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
         self.gpu.read(&self.d_img_embeds, self.img_numel())
     }
 
+    /// The splice INPUT buffer itself, for a vision tower sharing THIS
+    /// decoder's [`Gpu`] - write into it with a `Step` and the embedding never
+    /// leaves the device. [`Self::write_img_embeds`] is the cross-device path
+    /// (`crate::vl::Qwen35Vl` runs its tower on a second, possibly CPU-backed
+    /// device and must round trip through the host); this accessor is purely
+    /// additive and changes nothing about that. Valid only after
+    /// [`Self::enable_mm_splice`] - before that this is the 1-float
+    /// placeholder the constructor allocates.
+    pub fn img_embeds_buf(&self) -> &DeviceBuffer {
+        &self.img_embeds
+    }
+
+    /// The splice GRADIENT buffer itself - the device-side counterpart of
+    /// [`Self::read_d_img_embeds`], so a same-device vision tower's backward
+    /// can consume it as an input buffer instead of re-uploading a host `Vec`.
+    /// Same validity rule as [`Self::img_embeds_buf`].
+    pub fn d_img_embeds_buf(&self) -> &DeviceBuffer {
+        &self.d_img_embeds
+    }
+
     /// Overwrite the M-RoPE `cos`/`sin` tables (`[b·t, rotary_dim/2]` row-major
-    /// — see the `cos`/`sin` fields' own doc, and
+    /// - see the `cos`/`sin` fields' own doc, and
     /// `qwenvl::mrope::{get_rope_index, mrope_tables}` for how to build them
     /// from real 2-D image-grid positions) for the next `forward()`. RoPE here
     /// is unconditionally table-driven already (no `enable_mrope` gating
-    /// needed, unlike `qwen3::Qwen`) — this simply replaces the plain-
+    /// needed, unlike `qwen3::Qwen`) - this simply replaces the plain-
     /// sequential-position table built at construction.
     pub fn write_mrope_tables(&self, cos: &[f32], sin: &[f32]) {
         self.gpu.write_f32(&self.cos, cos);
@@ -1900,7 +1920,7 @@ impl Qwen35 {
         // aux_coef/z_coef only affect router_bwd (never reached here -- see
         // model::moe::router_fwd_kind's forward-only call path), so 0.0 is a
         // pure "unused" value, not a behaviour change to the forward gate math.
-        steps.push(router_fwd_kind(g, &moe_ids(), RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 }, &shape, &router_logits, None, &gate, None));
+        steps.push(router_fwd_kind(g, &moe_ids(), RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0, norm_topk_prob: true, routed_scaling: 1.0 }, &shape, &router_logits, None, &gate, None));
 
         let moe_acc = g.storage((n * d) as u64);
         // Router and gate above are ALWAYS fp32 (see `crate::q8`'s module
@@ -2161,7 +2181,7 @@ impl Qwen35 {
     // ---- full stack ----------------------------------------------------------
 
     /// Run this stage's forward graph over its own layer range
-    /// (`self.shard.start..self.shard.end`, ABSOLUTE layer indices — `res`
+    /// (`self.shard.start..self.shard.end`, ABSOLUTE layer indices - `res`
     /// stays indexed by the real layer number, only the loop bounds are
     /// shard-relative). The embedding gather (+ vision splice) runs only on
     /// the embed stage; the final norm + lm_head/logits only on the head
@@ -2231,7 +2251,7 @@ impl Qwen35 {
 
         // Head epilogue (final norm + lm_head/logits): only the head stage.
         // On a non-head stage `xn_final` is never read (`self.shard.head` is
-        // `false` in `Self::forward`'s CE step too — see `Qwen35::forward`'s
+        // `false` in `Self::forward`'s CE step too - see `Qwen35::forward`'s
         // own doc), so a size-1 dummy stands in, matching this file's
         // "size-1 dummy where a value doesn't apply" convention used
         // elsewhere (`gqa_kcache`/`gdn_state`).
@@ -2592,7 +2612,7 @@ impl Qwen35 {
             g,
             &router_bwd_ids(),
             &moe_bwd_ids(),
-            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 },
+            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0, norm_topk_prob: true, routed_scaling: 1.0 },
             &shape,
             &la.router_logits,
             &la.gate,
@@ -2638,7 +2658,7 @@ impl Qwen35 {
         d_xn2
     }
 
-    /// Full backward pass — mirrors [`Self::run_forward`]'s layer loop in
+    /// Full backward pass - mirrors [`Self::run_forward`]'s layer loop in
     /// REVERSE, threading `d_res[l+1] -> d_res[l]` the same way forward
     /// threads `res[l] -> res[l+1]`. Requires an immediately preceding
     /// `forward()` call on a [`Self::new_train`] instance (see
@@ -2650,7 +2670,7 @@ impl Qwen35 {
     /// [`Self::write_out_dres`] before this call). At the end of the reversed
     /// layer loop, this stage's INPUT-boundary gradient (`dres[shard.start]`)
     /// is stashed in `self.dres_boundary_out` for [`Self::read_in_dres`] to
-    /// read — mirrors `qwen3::Qwen::build_backward_steps`'s own shard gating,
+    /// read - mirrors `qwen3::Qwen::build_backward_steps`'s own shard gating,
     /// adapted to this file's "no persistent per-layer `dres` array" design
     /// (a single carried local, `d_res_next`, plays that role here).
     pub fn backward(&self) {
@@ -2783,7 +2803,7 @@ impl Qwen35 {
 
     /// Run the forward graph and return the scalar loss. Only meaningful on
     /// a whole (single-device) instance or a pipeline stage that owns the
-    /// head (`self.shard.head`) — `self.logits`/`self.ce_buf` are only
+    /// head (`self.shard.head`) - `self.logits`/`self.ce_buf` are only
     /// written on the head stage (see [`Self::run_forward`]'s own gate); a
     /// non-head stage's forward step is driven through
     /// [`Self::run_forward`] directly by [`model::Shardable::run_forward_stage`]
@@ -3204,14 +3224,14 @@ impl Qwen35 {
         self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
     }
     /// Read this stage's INPUT-boundary residual gradient `dres[shard.start]`
-    /// (for the previous stage's [`Self::write_out_dres`]) — populated by the
+    /// (for the previous stage's [`Self::write_out_dres`]) - populated by the
     /// preceding `backward()` call (see [`Self::backward`]'s own doc for why
     /// this is a stashed buffer rather than a `self.dres[..]` array index).
     pub fn read_in_dres(&self) -> Vec<f32> {
         self.gpu.read(&self.dres_boundary_out.borrow(), self.res_numel())
     }
     /// Write this stage's OUTPUT-boundary residual gradient `dres[shard.end]`
-    /// (from the next stage's [`Self::read_in_dres`]) — consumed by the next
+    /// (from the next stage's [`Self::read_in_dres`]) - consumed by the next
     /// `backward()` call on a non-head stage.
     pub fn write_out_dres(&self, data: &[f32]) {
         self.gpu.write(&self.dres_boundary_in, bytemuck::cast_slice(data));
@@ -3344,7 +3364,7 @@ mod decode_sparse_moe_tests {
 
     /// The exact dense per-expert loop `moe_sublayer`'s `else` arm used
     /// (unconditionally, for every `n`) before this task's `n==1` sparse
-    /// branch — reimplemented standalone here as the independent baseline,
+    /// branch - reimplemented standalone here as the independent baseline,
     /// since `moe_sublayer` itself now always takes the sparse path at
     /// `n==1`. Any future edit to the real dense loop must be mirrored here
     /// or this test stops being an honest baseline.
@@ -3369,7 +3389,7 @@ mod decode_sparse_moe_tests {
         steps.push(router_fwd_kind(
             g,
             &moe_ids(),
-            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0 },
+            RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0, norm_topk_prob: true, routed_scaling: 1.0 },
             &shape,
             &router_logits,
             None,
@@ -3487,7 +3507,7 @@ mod decode_sparse_moe_tests {
     /// The actual claim behind this task ("fewer GPU dispatches per decode
     /// step"), measured via `Gpu::stats()`, not asserted (closing the loop
     /// rather than declaring victory unmeasured), at the REAL 256-expert/top-8 shape
-    /// (`Qwen35Config::qwen35_35b_a3b`'s own `n_experts`/`top_k` — the
+    /// (`Qwen35Config::qwen35_35b_a3b`'s own `n_experts`/`top_k` - the
     /// dispatch COUNT this measures depends only on those two numbers, not on
     /// `d_model`/`vocab`/`n_layers`, so the rest of the config stays
     /// `tiny()`-cheap to build and run in milliseconds on the CPU backend).
@@ -3496,7 +3516,7 @@ mod decode_sparse_moe_tests {
     /// bind + launch, the unit "per-dispatch overhead" means here) is the honest
     /// metric here, not `submits`: this engine lazily coalesces every queued
     /// step into ONE real hardware submission at the next readback
-    /// (`backend_wgpu::Backend::submit`'s own doc — "a whole forward's
+    /// (`backend_wgpu::Backend::submit`'s own doc - "a whole forward's
     /// dispatches coalesce into a single queue.submit"), and the ORIGINAL
     /// dense per-expert loop already queued its whole 1280-dispatch layer
     /// through exactly one host-side `Gpu::submit` call, same as the sparse

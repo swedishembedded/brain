@@ -28,8 +28,8 @@
 //! | [`codec::decode_p6`] / [`codec::encode_p6`] | `events::ppm` | **re-exported**; `events` keeps the definition (it is wasm-reachable and must not gain `image`) |
 //! | [`Shape`] | `vision::net` | **re-exported**; no second NCHW type |
 //! | [`device::NONE`] | `vision::ids` | **re-exported**; one sentinel |
-//! | [`Ctx`], [`mask`], [`tiling`], [`Normalization`] | — | net-new, or a kernel dispatch replacing host code |
-//! | [`video::decode_frames`] | — | net-new: no video-file decoder existed anywhere in the workspace (`omni::mm::encode_video_frames` took already-decoded frames only) |
+//! | [`Ctx`], [`mask`], [`tiling`], [`Normalization`] | - | net-new, or a kernel dispatch replacing host code |
+//! | [`video::decode_frames`] | - | net-new: no video-file decoder existed anywhere in the workspace (`omni::mm::encode_video_frames` took already-decoded frames only) |
 //! | [`host::resize_bilinear_hwc`] | `depth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
 //! | [`color::yuyv_to_rgb`] | `capture::convert` | **moved**; `crates/capture` is V4L2-only again |
 //! | [`pixels::chw_to_hwc`] / [`pixels::hwc_to_chw`] | `cli::image_io`, `npu::{calib,sim}`, `wm-display`, tests | **moved**; one generic pair |
@@ -37,18 +37,18 @@
 //! | [`Rgb8`] / [`codec::load`] | `mirror::preprocess::{RgbImage, load_ppm}` | **moved**; the second P6 parser is gone |
 //!
 //! `cli::depth_cli`'s calibration letterbox now calls [`letterbox_rgb`] with
-//! `pad = 0.5` — bit-identical to the copy it replaced, which deliberately keeps
+//! `pad = 0.5` - bit-identical to the copy it replaced, which deliberately keeps
 //! the ZipDepth INT8 scales stable while leaving survey §6.2 (calibration
 //! preprocesses differently from inference) as its own gated fix.
 //!
 //! Still owed, each blocked on a numeric gate rather than on effort:
 //! `zimage::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
-//! metric to gate the ramp against — see [`mask`]),
+//! metric to gate the ramp against - see [`mask`]),
 //! `zimage::caps::build_outpaint_canvas` (needs `pad2d.wgsl` to grow a
 //! `pad_mode` word before edge-replication can be expressed), and
 //! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `zimage::finetune` /
 //! `zimage::pipeline` (host per-pixel arithmetic, which this crate deliberately
-//! does not offer a host entry point for — see the table above).
+//! does not offer a host entry point for - see the table above).
 //!
 //! `data::{imageset, gen_detect}` cannot migrate at all: `imaging` -> `vision`
 //! -> `model` -> `data`, so `data` depending on `imaging` is a dependency cycle.
@@ -63,9 +63,9 @@
 //!
 //! | kind of work | where it lives |
 //! |---|---|
-//! | per-pixel arithmetic over a whole image (resize, pad, crop, normalise, blur, dilate, composite) | a **kernel dispatch** — [`Ctx`], `crates/kernels/wgsl/*` |
+//! | per-pixel arithmetic over a whole image (resize, pad, crop, normalise, blur, dilate, composite) | a **kernel dispatch** - [`Ctx`], `crates/kernels/wgsl/*` |
 //! | layout permutation, geometry, IO, codecs, policy | **host glue, here** |
-//! | a reduction to a handful of scalars (mask IoU) | host, here — the readback dominates |
+//! | a reduction to a handful of scalars (mask IoU) | host, here - the readback dominates |
 //!
 //! Nothing in this crate re-implements a kernel on the host. The one host
 //! resampler, [`letterbox::letterbox_rgb`], is here *because* it cannot be
@@ -79,30 +79,36 @@
 //! Where the survey found two things that look like one function, the difference
 //! is an explicit, documented parameter with a stated default:
 //!
-//! * [`AlignCorners`] — half-pixel vs corner-aligned resampling. Both are
+//! * [`AlignCorners`] - half-pixel vs corner-aligned resampling. Both are
 //!   plausible, they differ by half a pixel, and a gradient check cannot tell
 //!   them apart.
-//! * [`Filter`] — nearest / bilinear / bicubic, each naming the exact reference
+//! * [`Filter`] - nearest / bilinear / bicubic, each naming the exact reference
 //!   function it reproduces. Note in particular that `Filter::Bicubic` is
 //!   PyTorch's non-antialiased `a = -0.75` cubic and is **not** the same function
 //!   as `mirror::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
 //!   `a = -0.5`) or `resize_bicubic_torch` (antialiased, f64). Antialiased
 //!   downsampling has no kernel; this crate does not pretend otherwise.
-//! * [`ChannelPolicy`] — what a 1-channel buffer means when RGB8 is wanted.
-//! * [`Normalization`] — mean/std as data, so ImageNet, `(x-0.5)/0.5` and the
+//! * [`ChannelPolicy`] - what a 1-channel buffer means when RGB8 is wanted.
+//! * [`Normalization`] - mean/std as data, so ImageNet, `(x-0.5)/0.5` and the
 //!   identity are the same code path.
 //! * [`letterbox::letterbox_rgb`]'s `pad` fill is a parameter (yolo passes
 //!   `114/255`, depth's calibration passes `0.5`), never a constant.
 //!
 //! ## What this crate deliberately does NOT contain
 //!
-//! * **Model-specific target-size policies.** `depth::predict::target_size`,
-//!   `mirror::preprocess::{resize_dims, adaptive_target}`,
-//!   `qwenvl::preprocess::smart_resize` and `moondream::preprocess::select_tiling`
-//!   are five different reference models' contracts. They may be hosted here
-//!   side by side as named policies, but they must never be unified — and
-//!   copying them here while the originals still exist would add five more
-//!   duplicates, not remove any. They move when their callers move.
+//! * **A UNIFIED model target-size policy.** `depth::predict::target_size`,
+//!   `mirror::preprocess::{resize_dims, adaptive_target}` and
+//!   `qwenvl::preprocess::smart_resize` are different reference models'
+//!   contracts. They may be hosted here side by side as NAMED policies, but
+//!   they must never be unified - and copying them here while the originals
+//!   still exist would add duplicates, not remove any. They move when their
+//!   callers move.
+//!
+//!   Two have made that move: [`tiling::moondream_select_tiling`] (moved out of
+//!   `moondream::preprocess`, which now re-exports it - one definition) and
+//!   [`tiling::internvl_grid`] (net-new, InternVL/DeepSeek-OCR's discrete
+//!   candidate-ratio grid). They sit next to each other and share no code,
+//!   which is the point.
 //! * **A host resize *for callers that hold a `Gpu`*.** `resize_bilinear.wgsl`
 //!   with `AlignCorners::HalfPixel` is bit-equivalent to the host loop, and
 //!   shipping a convenience twin next to a kernel is the trap. [`host`] carries

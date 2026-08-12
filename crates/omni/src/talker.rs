@@ -3,10 +3,10 @@
 
 //! Qwen3-Omni's Talker text decoder: the same GQA+QK-norm+M-RoPE attention
 //! stack as [`crate::thinker`] (Talker's decoder layer reuses
-//! `Qwen3OmniMoeThinkerTextAttention` verbatim in the reference — see
+//! `Qwen3OmniMoeThinkerTextAttention` verbatim in the reference - see
 //! `MoeTextConfig::talker_defaults`'s doc comment) over a sparse top-k MoE
 //! FFN **plus an always-active shared expert**
-//! (`model::moe::shared_expert_fwd`) — the one architectural difference from
+//! (`model::moe::shared_expert_fwd`) - the one architectural difference from
 //! Thinker's MoE block. `Qwen3OmniMoeTalkerTextSparseMoeBlock.forward`:
 //! `expert_output + sigmoid(shared_expert_gate(x)) * shared_expert(x)`.
 //!
@@ -112,7 +112,7 @@ fn decode_ids() -> GqaDecodeIds {
 }
 
 /// The hoisted attention sublayer's kernel indices, resolved against
-/// [`talker_pipelines`]'s ordering — see `model::block::GqaAttnIds`.
+/// [`talker_pipelines`]'s ordering - see `model::block::GqaAttnIds`.
 fn attn_ids() -> GqaAttnIds {
     GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids() }
 }
@@ -132,7 +132,7 @@ const SIGMOID: usize = 12;
 const SCALE_ROW: usize = 13;
 const KV_APPEND: usize = 14;
 const MATMUL_I8_DYN: usize = 21;
-/// `model::vlm::splice_fwd`'s kernel index — see `crate::thinker`'s module doc.
+/// `model::vlm::splice_fwd`'s kernel index - see `crate::thinker`'s module doc.
 pub const SPLICE: usize = 11;
 
 /// One decoder layer's weights, keyed exactly as they arrive from
@@ -219,7 +219,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
 
     let shape = cfg.moe_shape(n);
     let gate = g.storage((n * cfg.n_experts) as u64);
-    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate));
+    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate, true, 1.0));
 
     let moe_ff = cfg.moe_intermediate;
     let se_ff = cfg.shared_expert_intermediate;

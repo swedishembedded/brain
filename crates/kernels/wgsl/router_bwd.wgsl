@@ -10,23 +10,36 @@
 // @quant none
 //
 // Router backward: gradient w.r.t. the router logits, combining three paths.
-// One invocation per token row. No cap on E — `pr[e]`/`dp[e]` are recomputed
+// One invocation per token row. No cap on E - `pr[e]`/`dp[e]` are recomputed
 // from `logits`/`gate`/`d_gate` in each pass instead of cached in a
 // fixed-size local array, mirroring `router_bwd_sigmoid.wgsl`'s style. This
-// kernel used to hard-cap at `E <= 64` via `array<f32,64>` scratch — silent
+// kernel used to hard-cap at `E <= 64` via `array<f32,64>` scratch - silent
 // out-of-bounds writes above that (a failure shape seen before, recurring
 // here because the earlier fix never reached this file).
 //
 //   p = softmax(logits)             (full distribution)
-//   S = selected (top-k) experts,   gate_e = p_e / Z  for e in S,  Z = sum_{S} p
+//   S = selected (top-k) experts,   Z = sum_{S} p
+//   norm = 1:  gate_e = scale * p_e / Z    for e in S     (renormalised)
+//   norm = 0:  gate_e = scale * p_e        for e in S     (RAW top-k probs)
 //
 // 1. Combine path: given d_gate_e (e in S),
-//      dp_f = d_gate_f / Z - (sum_{e in S} d_gate_e p_e) / Z^2     (f in S, else 0)
+//      norm=1: dp_f = scale * (d_gate_f / Z - (sum_{e in S} d_gate_e p_e) / Z^2)
+//      norm=0: dp_f = scale *  d_gate_f
+//    (f in S, else 0). The `norm=0` form is genuinely SIMPLER, not a limit of
+//    the other: with no 1/Z factor there is no quotient rule, so the
+//    `sdp / Z^2` cross-term that couples every selected expert to every other
+//    one is ABSENT - writing it as `norm=1` with `Z := 1` would be wrong, since
+//    `Z != 1` in general and the cross-term would survive.
 // 2. Load-balancing aux:  aux = aux_coef * E * sum_e f_e * mean_n p_{n,e}
 //      => dp_e += aux_coef * E * f_e / n_rows     (all e)
 // 3. Then softmax backward:  d_logit_i = p_i (dp_i - sum_j p_j dp_j)
 // 4. Router z-loss:  z = z_coef * mean_n (logsumexp_n)^2
 //      => d_logit_i += z_coef * 2 * lse / n_rows * p_i
+//
+// `norm`/`scale` mirror `router_gate.wgsl`'s (and `router_bwd_sigmoid.wgsl`'s)
+// tail Params exactly and must match the forward's - a forward that did not
+// renormalise differentiated as if it had is a silent wrong gradient, not a
+// crash.
 
 struct Params {
     n_rows: u32,
@@ -35,6 +48,8 @@ struct Params {
     _pad: u32,
     aux_coef: f32,
     z_coef: f32,
+    norm: u32,      // 1 = the forward renormalised the selected probabilities
+    scale: f32,     // routed_scaling_factor the forward applied (1.0 = none)
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -64,13 +79,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // Pass 3: Z and sdp over the selected (gate>0) experts. `pr_e` recomputed,
     // not cached -- `mx`/`sum` already fix it, so re-deriving is one exp+div.
+    // Both are the RENORMALISED branch's bookkeeping only: with `norm = 0` the
+    // combine path has no 1/Z factor at all, so this whole pass is skipped
+    // rather than run and multiplied away.
+    let renorm = p.norm != 0u;
     var z = 0.0;
     var sdp = 0.0;
-    for (var e: u32 = 0u; e < E; e = e + 1u) {
-        if (gate[base + e] > 0.0) {
-            let pr_e = exp(logits[base + e] - mx) / sum;
-            z = z + pr_e;
-            sdp = sdp + d_gate[base + e] * pr_e;
+    if (renorm) {
+        for (var e: u32 = 0u; e < E; e = e + 1u) {
+            if (gate[base + e] > 0.0) {
+                let pr_e = exp(logits[base + e] - mx) / sum;
+                z = z + pr_e;
+                sdp = sdp + d_gate[base + e] * pr_e;
+            }
         }
     }
     let zz = max(z, 1e-9);
@@ -82,7 +103,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let pr_e = exp(logits[base + e] - mx) / sum;
         var dp_e = 0.0;
         if (gate[base + e] > 0.0) {
-            dp_e = d_gate[base + e] / zz - sdp / (zz * zz);
+            if (renorm) { dp_e = p.scale * (d_gate[base + e] / zz - sdp / (zz * zz)); }
+            else        { dp_e = p.scale *  d_gate[base + e]; }
         }
         dp_e = dp_e + p.aux_coef * f32(E) * fe[e] / nrows;
         gpdot = gpdot + pr_e * dp_e;
@@ -94,7 +116,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let pr_i = exp(logits[base + i] - mx) / sum;
         var dp_i = 0.0;
         if (gate[base + i] > 0.0) {
-            dp_i = d_gate[base + i] / zz - sdp / (zz * zz);
+            if (renorm) { dp_i = p.scale * (d_gate[base + i] / zz - sdp / (zz * zz)); }
+            else        { dp_i = p.scale *  d_gate[base + i]; }
         }
         dp_i = dp_i + p.aux_coef * f32(E) * fe[i] / nrows;
         dlogits[base + i] = pr_i * (dp_i - gpdot) + zterm * pr_i;

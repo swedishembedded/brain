@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Router gating: softmax over experts -> keep top_k -> renormalise
+// @what  Router gating: softmax over experts -> keep top_k -> optional renorm + scale
 // @how   one thread per token, array-free (no expert-count cap)
 // @opt   1
 // @cpu   yes
@@ -9,10 +9,19 @@
 // @npu   no
 // @quant none
 //
-// Router gating: softmax over experts -> keep top_k -> renormalise. Produces a
-// dense gate matrix [seq_len, n_experts] that is nonzero only for the top_k
-// experts of each token (their renormalised probabilities). One invocation
-// per token.
+// Router gating: softmax over experts -> keep top_k -> optional renormalise,
+// then an optional constant scale. Produces a dense gate matrix
+// [seq_len, n_experts] that is nonzero only for the top_k experts of each
+// token. One invocation per token.
+//
+//   gate[e] = (p[e] / sm) * (norm ? 1/sum_selected(p/sm) : 1) * scale
+//
+// `norm = 1, scale = 1.0` is the classic Switch/Mixtral router and the value
+// every caller passed before these two Params existed. `norm = 0` keeps the
+// RAW top-k softmax probabilities as combine weights (they no longer sum to 1
+// per token), and `scale` is DeepSeek's `routed_scaling_factor` on top - the
+// same `norm`/`scale` tail `router_gate_sigmoid.wgsl` already carries, so the
+// two router families now express the same two policy knobs the same way.
 //
 // Running every expert and masking by this gate is numerically identical to a
 // true sparse top-k dispatch *without* capacity dropping. Capacity limits exist
@@ -22,23 +31,23 @@
 // on this property to discard a densely-computed one.
 //
 // Used to hard-cap at `n_experts <= 128` via `array<f32,128> prob`/
-// `array<bool,128> used` scratch — silent out-of-bounds writes above that
+// `array<bool,128> used` scratch - silent out-of-bounds writes above that
 // (a failure shape seen before: a `const` bump without its array literal is
 // a silent out-of-bounds write; Qwen3.5-35B-A3B's 256 experts hit this wall
 // directly). Fixed the same way `router_bwd.wgsl` already was:
 // nothing here is cached in an array sized by `n_experts`. The softmax
 // numerator is stashed in the `gate` OUTPUT buffer itself (we already own
-// read_write access to `[seq_len, n_experts]`, so it doubles as scratch — no
+// read_write access to `[seq_len, n_experts]`, so it doubles as scratch - no
 // second E-sized buffer needed) and re-divided by `sm` on every later read
 // instead of being cached. The only `var<function>` array left is
 // `sel_idx: array<u32, MAX_TOP_K>`, bounded by `top_k` (8 at the real 256-
-// expert scale), never by `n_experts` — this is the actual fix needed ("an
+// expert scale), never by `n_experts` - this is the actual fix needed ("an
 // array-free top-k rewrite... no n_experts-sized function array"), not a
 // bigger constant.
 //
 // Cost: the top-k selection becomes O(top_k^2 * n_experts) instead of the
 // old O(top_k * n_experts) (excluding an already-picked expert now scans the
-// small `sel_idx` set instead of an O(1) `used[e]` lookup) — at the real
+// small `sel_idx` set instead of an O(1) `used[e]` lookup) - at the real
 // scale (top_k=8, E=256) that is ~17k vs ~3.5k scalar ops per token, still
 // trivial next to a single GEMM. A workgroup-cooperative (`_rows`-style)
 // rewrite is a valid follow-on once profiling justifies it; this fix is
@@ -48,6 +57,8 @@ struct Params {
     seq_len: u32,
     n_experts: u32,
     top_k: u32,
+    norm: u32,      // 1 = renormalise the selected probabilities to sum to 1
+    scale: f32,     // routed_scaling_factor (1.0 = none)
 };
 
 const MAX_TOP_K: u32 = 32u; // bounds ONLY the top-k bookkeeping, never n_experts
@@ -67,7 +78,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let base = t * E;
     let k = min(p.top_k, MAX_TOP_K);
 
-    // Pass 1: row max (no array — a running scalar).
+    // Pass 1: row max (no array - a running scalar).
     var mx = -3.4e38;
     for (var e: u32 = 0u; e < E; e = e + 1u) { mx = max(mx, logits[base + e]); }
 
@@ -100,15 +111,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         sel_sum = sel_sum + best_v;
     }
 
-    // Pass 4: finalise — renormalise the kept experts, zero the rest.
-    let inv = 1.0 / max(sel_sum, 1e-9);
+    // Pass 4: finalise - keep the selected experts (renormalised iff `norm`,
+    // then scaled), zero the rest.
+    let inv = select(1.0, 1.0 / max(sel_sum, 1e-9), p.norm != 0u);
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         var selected = false;
         for (var s: u32 = 0u; s < k; s = s + 1u) {
             if (sel_idx[s] == e) { selected = true; break; }
         }
         if (selected) {
-            gate[base + e] = (gate[base + e] / sm) * inv;
+            gate[base + e] = (gate[base + e] / sm) * inv * p.scale;
         } else {
             gate[base + e] = 0.0;
         }

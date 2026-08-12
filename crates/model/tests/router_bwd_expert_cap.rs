@@ -128,7 +128,7 @@ fn run_case(n_experts: u32) {
     let fe_buf = g.storage_init("fe", &fe);
     let dlogits_buf = g.storage((n_rows * n_experts) as u64);
 
-    let params = [n_rows, n_experts, top_k, 0u32, gpu_core::f(aux_coef), gpu_core::f(z_coef)];
+    let params = [n_rows, n_experts, top_k, 0u32, gpu_core::f(aux_coef), gpu_core::f(z_coef), 1, gpu_core::f(1.0)];
     g.submit(
         &[],
         &[g.step(

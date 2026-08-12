@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-ASR audio encoder — Whisper/Qwen-omni style, on the shared WGSL engine.
+//! Qwen3-ASR audio encoder - Whisper/Qwen-omni style, on the shared WGSL engine.
 //!
 //! Pipeline (mel `[num_mel, T]`, T a multiple of `chunk_len = 2*n_window = 100`):
 //!   chunk into `[num_chunks, 1, 128, 100]` → 3× `conv2d(k3,s2,p1)+bias` + erf-GELU
@@ -13,7 +13,7 @@
 //! The multi-modal projector (`Linear→GELU→Linear`, 1024→1024→2048) turns the
 //! encoder output into decoder-space audio embeddings.
 //!
-//! Parity-gated against `Qwen3ASREncoder` — see the test at the bottom.
+//! Parity-gated against `Qwen3ASREncoder` - see the test at the bottom.
 
 use std::collections::HashMap;
 
@@ -54,7 +54,7 @@ fn vit_ids() -> VitKernelIds {
         matmul: 1,
         matmul_rows: 2,
         bias_add: 3,
-        gelu_erf: 4,
+        mlp_act: 4,
         scale_chan: 5,
         add2: 6,
         attn_scores_cross: 7,
@@ -103,7 +103,7 @@ impl<'g> AudioEncoder<'g> {
     }
 
     /// [`encode`](Self::encode) with the windowed-transformer HEAD supplied by a
-    /// closure — the seam the NPU resident uses to run the audio-encoder ONNX head
+    /// closure - the seam the NPU resident uses to run the audio-encoder ONNX head
     /// (`packed[n_audio·d], n_audio, spans → (encoder_out, audio_embeds)`) on the
     /// Intel NPU, while the conv stem + valid-position packing stay host-side.
     /// Bit-identical to `encode` when the closure reproduces `encode_packed` (the
@@ -152,7 +152,7 @@ impl<'g> AudioEncoder<'g> {
     /// The windowed transformer + `ln_post` + projector over already-packed,
     /// pos-added tokens `[n_audio, d_model]` with block-diagonal `spans`
     /// (`(row0, len)`). Returns `(encoder_out [n_audio, d_model], audio_embeds
-    /// [n_audio, output_dim])`. This is the NPU-portable head — `crates/npu` builds
+    /// [n_audio, output_dim])`. This is the NPU-portable head - `crates/npu` builds
     /// an ONNX graph parity-gated against it; `encode` = conv stem + pack + this.
     pub fn encode_packed(&self, packed: &[f32], n_audio: u32, spans: &[(u32, u32)]) -> (Vec<f32>, Vec<f32>) {
         let c = &self.cfg;

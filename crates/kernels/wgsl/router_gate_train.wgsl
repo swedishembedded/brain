@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Router gating (training variant): softmax + full probs + top_k gate
+// @what  Router gating (training variant): softmax + full probs + top_k gate (optional renorm + scale)
 // @how   one thread per token, array-free (no expert-count cap)
 // @opt   1
 // @cpu   yes
@@ -13,7 +13,7 @@
 // the full softmax probabilities (needed by the backward pass). One
 // invocation per token row.
 //
-// Same fix as `router_gate.wgsl` (see its header for the full rationale) —
+// Same fix as `router_gate.wgsl` (see its header for the full rationale) -
 // removed the `n_experts`-capped `array<f32,128>`/`array<bool,128>` scratch.
 // Here the softmax itself is computed straight into the `probs` OUTPUT buffer
 // (unnormalised numerator, then normalised in place in a second pass) instead
@@ -25,6 +25,8 @@ struct Params {
     n_rows: u32,
     n_experts: u32,
     top_k: u32,
+    norm: u32,      // 1 = renormalise the selected probabilities to sum to 1
+    scale: f32,     // routed_scaling_factor (1.0 = none)
 };
 
 const MAX_TOP_K: u32 = 32u; // bounds ONLY the top-k bookkeeping, never n_experts
@@ -56,7 +58,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         probs[base + e] = pe;
         sm = sm + pe;
     }
-    // Pass 2b: normalise `probs` in place — it is now the real softmax.
+    // Pass 2b: normalise `probs` in place - it is now the real softmax.
     for (var e: u32 = 0u; e < E; e = e + 1u) { probs[base + e] = probs[base + e] / sm; }
 
     // Pass 3: greedy top-k over the now-normalised `probs`.
@@ -76,15 +78,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         sel_sum = sel_sum + best_v;
     }
 
-    // Pass 4: finalise `gate` — renormalise the kept experts, zero the rest.
-    let inv = 1.0 / max(sel_sum, 1e-9);
+    // Pass 4: finalise `gate` - keep the selected experts (renormalised iff
+    // `norm`, then scaled), zero the rest. Same two knobs as
+    // `router_gate.wgsl`; see its header for what they mean.
+    let inv = select(1.0, 1.0 / max(sel_sum, 1e-9), p.norm != 0u);
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         var selected = false;
         for (var s: u32 = 0u; s < k; s = s + 1u) {
             if (sel_idx[s] == e) { selected = true; break; }
         }
         if (selected) {
-            gate[base + e] = probs[base + e] * inv;
+            gate[base + e] = probs[base + e] * inv * p.scale;
         } else {
             gate[base + e] = 0.0;
         }

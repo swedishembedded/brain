@@ -3,7 +3,7 @@
 
 //! Build Qwen3.5-35B-A3B (`qwen35moe`) as an ONNX graph (fixed sequence length
 //! `T`) for a **best-effort** OpenVINO/NPU compile attempt. Fixed-`T`,
-//! cache-free PREFILL only, text-only (no vision splice) — the same scope
+//! cache-free PREFILL only, text-only (no vision splice) - the same scope
 //! every other `*_topology.rs` file in this crate documents for itself
 //! (`qwen_topology.rs`'s own module doc), not a new limitation introduced
 //! here. The exact boundary where this pass stops is recorded in this
@@ -16,13 +16,13 @@
 //! ## 1. A `gdn_chunk`-shaped emitter for Gated DeltaNet
 //!
 //! `model::gdn::gdn_chunk_fwd`'s own module doc lays out an 11-step chunked
-//! recurrence (see that file for the authoritative derivation — this doc only
+//! recurrence (see that file for the authoritative derivation - this doc only
 //! summarises how each step becomes ONNX). The WGSL engine needs a literal
 //! chunk-major flat-buffer permute and a serial per-row forward-substitution
 //! for the UT-transform because its own kernels can only address contiguous
 //! batch ranges and cannot run a true parallel scan or a triangular solve in
-//! one dispatch. ONNX has none of those constraints — real N-D tensors with
-//! native broadcasting — so three steps get a strictly SIMPLER, still
+//! one dispatch. ONNX has none of those constraints - real N-D tensors with
+//! native broadcasting - so three steps get a strictly SIMPLER, still
 //! bit-for-bit-equivalent translation instead of a literal port of the WGSL
 //! kernel sequence:
 //!
@@ -31,13 +31,13 @@
 //!   inconsistent, and this repo has zero existing precedent for it), the
 //!   cumulative sum over a chunk's `C` positions is computed as one `MatMul`
 //!   against a constant upper-triangular-inclusive ones matrix
-//!   (`out = in_row_vector @ M`, `M[j,i] = 1` iff `j<=i`) — exactly a cumsum,
+//!   (`out = in_row_vector @ M`, `M[j,i] = 1` iff `j<=i`) - exactly a cumsum,
 //!   expressed with the one op (`MatMul`) every other node in this graph
 //!   already relies on, so there is no new operator-support risk to chase;
 //! - **step 7 (UT-transform, `(I-attn0)^-1` via forward substitution)**:
 //!   `attn0` is strictly lower-triangular and therefore nilpotent
 //!   (`attn0^C = 0` for a `C x C` matrix), so `(I-attn0)^-1` has the EXACT
-//!   closed-form Neumann series `I + attn0 + attn0^2 + ... + attn0^(C-1)` —
+//!   closed-form Neumann series `I + attn0 + attn0^2 + ... + attn0^(C-1)` -
 //!   computed here as `C-1` statically unrolled `MatMul`+`Add` pairs (`C` =
 //!   the GDN chunk size, fixed at export time by [`qwen35moe::model::gdn_chunk_size`]);
 //! - **step 10 (the sequential across-chunk state recurrence)**: unrolled
@@ -54,12 +54,12 @@
 //!
 //! `glm_topology.rs::Topo::moe` (the only existing MoE emitter in this crate)
 //! evaluates **every** expert densely over the whole row batch and combines
-//! with a `TopK`+`ScatterElements`-built dense gate — correct, but a literal
+//! with a `TopK`+`ScatterElements`-built dense gate - correct, but a literal
 //! port of that at Qwen3.5's 256 experts is impractical (a dense per-expert
 //! `swiglu` loop is 3 `MatMul`s/expert; 256 experts x 40 layers is tens of
 //! thousands of `MatMul` nodes for weights that are 32x oversized relative to
 //! what top-8 routing actually uses). GLM's own `n_routed_experts` is small
-//! enough that the dense form was never meant to scale past it — this file
+//! enough that the dense form was never meant to scale past it - this file
 //! does not copy that approach.
 //!
 //! Instead, every layer's per-expert `gate`/`up`/`down` weights are stacked
@@ -69,15 +69,15 @@
 //! the router this model actually uses per `qwen35moe::model::moe_sublayer`):
 //! softmax over all `E` logits, keep the `top_k` largest **by softmax
 //! probability** (equivalent to by logit, since softmax is monotonic
-//! per-row — `TopK` is run directly on the softmax output, not the raw
+//! per-row - `TopK` is run directly on the softmax output, not the raw
 //! logits, to make that equivalence explicit rather than relied upon
 //! silently), then renormalise the kept weights to sum to 1
-//! (`gate[e] = probs[e] / sum_selected(probs)`) — `router_gate.wgsl`'s own
+//! (`gate[e] = probs[e] / sum_selected(probs)`) - `router_gate.wgsl`'s own
 //! passes 1-4 line for line. `Gather(stack, topk_idx, axis=0)` then pulls out
 //! only the `top_k` selected experts' weights **per token**
 //! (`[1,T,top_k,in,out]`, ONNX Gather's documented multi-dim-index output
 //! shape), and a single broadcasting `MatMul` runs every selected expert's
-//! FFN at once. Memory and FLOPs scale with `top_k`, not `E` — the actual
+//! FFN at once. Memory and FLOPs scale with `top_k`, not `E` - the actual
 //! sparse property, not `glm_topology`'s "run everything, mask after" shape.
 //!
 //! ## Router math cross-check against `model::moe`
@@ -88,11 +88,11 @@
 //! probabilities (not the raw logits, though the two orderings coincide),
 //! then `gate[e] = probs[e] / sum_of_kept_probs` for kept `e`, else `0`. This
 //! file's router block (`Topo::moe_layer`) is `Softmax` -> `TopK(top_k,
-//! axis=-1, largest=1)` -> `ReduceSum` of the kept values -> `Div` — the same
+//! axis=-1, largest=1)` -> `ReduceSum` of the kept values -> `Div` - the same
 //! four passes, with `TopK`'s own sort standing in for `router_gate.wgsl`'s
 //! explicit greedy-max loop (both select the same top-k set; ONNX `TopK`
 //! with `largest=1` is defined to return the `k` largest values, matching the
-//! kernel's greedy selection exactly for a strict, no-tie ordering — ties are
+//! kernel's greedy selection exactly for a strict, no-tie ordering - ties are
 //! the one place `TopK`'s internal tie-break and the kernel's first-found
 //! greedy tie-break could in principle diverge, noted in this file's final
 //! report as a low-probability, unverified edge case rather than silently
@@ -101,15 +101,15 @@
 //! ## Scope boundary this file does NOT cross
 //!
 //! Fixed-`T`, cache-free PREFILL only (no `Qwen35::step`-shaped incremental
-//! decode form — `model::gdn`'s own doc says the decode-step primitives
+//! decode form - `model::gdn`'s own doc says the decode-step primitives
 //! (`gdn_recurrent_step`) are a SEPARATE entry point this file does not use).
 //! No vision splice (`qwen35moe::model` doesn't have one yet either). No
-//! INT8/INT4 weight quantization for this model (a real follow-on — every
+//! INT8/INT4 weight quantization for this model (a real follow-on - every
 //! other topology file's `Quant::Int8` path is a mechanical
 //! per-output-channel scale that composes cleanly with the emitters below,
 //! but doubling the file's size to add it was judged out of scope for a
 //! "compiles + best-effort compile attempt" pass). "Compiles to valid ONNX +
-//! best-effort OpenVINO compile" is the explicit stopping point — see
+//! best-effort OpenVINO compile" is the explicit stopping point - see
 //! `crates/npu/tests/qwen35moe_onnx.rs` for exactly the same
 //! structural-always / `BRAIN_OV_PROBE`-gated split every other topology
 //! file's own tests use, not a new verification mechanism.
@@ -173,7 +173,7 @@ impl<'a> Topo<'a> {
     // ---- generic small helpers -------------------------------------------
 
     /// A `[1]`-shaped i64 constant holding `val`, registered idempotently and
-    /// named by value — safe to reuse across every call site that needs the
+    /// named by value - safe to reuse across every call site that needs the
     /// same scalar (an axis index, a slice bound, a top-k), since the name
     /// encodes the value itself, not the call site's intent.
     fn ci64(&mut self, val: i64) -> String {
@@ -201,7 +201,7 @@ impl<'a> Topo<'a> {
 
     /// `ReduceSum(x, axis)`, opset-13-correct: `axes` is an INPUT tensor (not
     /// an attribute, unlike `ReduceMean` which keeps the attribute form until
-    /// opset 18 — see `fincast_topology.rs::Topo::reduce_sum`'s own comment
+    /// opset 18 - see `fincast_topology.rs::Topo::reduce_sum`'s own comment
     /// for the same fact, independently needed here).
     fn reduce_sum(&mut self, x: &str, axis: i64, keepdims: bool) -> String {
         let ax = self.ci64(axis);
@@ -210,7 +210,7 @@ impl<'a> Topo<'a> {
         o
     }
 
-    /// Bare L2-normalize over the LAST axis (no learnable scale) — GDN's
+    /// Bare L2-normalize over the LAST axis (no learnable scale) - GDN's
     /// query/key norm (`model::gdn`'s caller uses `l2norm_scale.wgsl` with an
     /// all-ones scale buffer, i.e. plain L2 normalize):
     /// `y = x / sqrt(sum(x^2, -1) + eps)`. `eps=1e-6`, matching
@@ -228,7 +228,7 @@ impl<'a> Topo<'a> {
 
     /// `[1,rows,src_heads,dim] -> [1,rows,src_heads*group,dim]`, repeating
     /// each source head `group` times CONSECUTIVELY (`repeat_interleave`
-    /// semantics — matches `model::block::kv_expand_fwd`'s `repeat_kv`
+    /// semantics - matches `model::block::kv_expand_fwd`'s `repeat_kv`
     /// convention that both GDN's own q/k head repeat (step 6,
     /// `linear_num_key_heads -> linear_num_value_heads`) and GQA's kv-expand
     /// need). `tag` scopes the generated shape-initializer names so distinct
@@ -252,8 +252,8 @@ impl<'a> Topo<'a> {
     /// of each head rotate (`partial_rotary_factor`), the rest pass through
     /// unrotated. Qwen3.5's text-only degenerate M-RoPE (all three position
     /// axes equal for every token, since there is no vision splice in this
-    /// export) collapses `qwenvl::mrope::mrope_tables` to plain 1-D RoPE —
-    /// this collapse is exact, not approximate — so a single `theta`-based table
+    /// export) collapses `qwenvl::mrope::mrope_tables` to plain 1-D RoPE -
+    /// this collapse is exact, not approximate - so a single `theta`-based table
     /// is exactly right here, no per-axis section bookkeeping needed.
     fn rope_partial(&mut self, x: &str, hd: usize, rot: usize, t: usize, theta: f32) -> String {
         if rot == 0 {
@@ -301,7 +301,7 @@ impl<'a> Topo<'a> {
 
     /// Stack every expert's `[out,in]` weight (brain layout) into one
     /// `[E,in,out]` ONNX initializer (transposed once, like every other
-    /// `linear` weight in this codebase) — the `Gather`-indexable form the
+    /// `linear` weight in this codebase) - the `Gather`-indexable form the
     /// sparse dispatch in [`Topo::moe_layer`] needs. Registered once per
     /// `name` (layer-scoped names, so always a fresh first call per layer).
     fn expert_stack(&mut self, name: &str, w: &dyn WeightSource, e: usize, out: usize, inp: usize, namer: impl Fn(usize) -> String) -> String {
@@ -610,7 +610,7 @@ impl<'a> Topo<'a> {
 
     /// One GQA mixer layer (`qwen35moe::model::layer_gqa_fwd`'s reference):
     /// doubled `q_proj` (value+gate, per-head split), QK-RMSNorm, partial
-    /// M-RoPE (degenerate to plain RoPE, text-only — see [`Self::rope_partial`]),
+    /// M-RoPE (degenerate to plain RoPE, text-only - see [`Self::rope_partial`]),
     /// GQA attention, sigmoid output gate, `o_proj`. Returns `mix_out:[1,T,d]`.
     fn gqa_layer(&mut self, l: usize, xn1: &str, w: &dyn WeightSource, c: &Qwen35Config, t: usize) -> String {
         let d = c.d_model as usize;
@@ -655,7 +655,7 @@ impl<'a> Topo<'a> {
 
         // Repeat kv heads BEFORE transposing to head-first (token-major
         // layout, matching `repeat_heads`'s own `[1,rows,heads,dim]` contract
-        // — reused unchanged from GDN's own head-repeat, see that helper's doc).
+        // - reused unchanged from GDN's own head-repeat, see that helper's doc).
         let k_exp = self.repeat_heads(&k_rot, "gqa_k", t, nkv, group, hd); // [1,T,nh,hd]
         let v_exp = self.repeat_heads(&v4, "gqa_v", t, nkv, group, hd);
 
@@ -718,6 +718,16 @@ impl<'a> Topo<'a> {
         // Router: EXACT `router_gate.wgsl` math -- softmax over all E experts,
         // top_k by softmax probability, renormalise the kept weights (see
         // module doc's router cross-check).
+        //
+        // `router_gate.wgsl` now also carries `norm`/`scale` Params
+        // (`RouterKind::Softmax { norm_topk_prob, routed_scaling }`). This
+        // export hardcodes `norm = 1, scale = 1.0` -- the values
+        // `qwen35moe::model` passes, and the only shape this graph expresses:
+        // the `Div` below IS the renormalisation, and there is no `Mul` by a
+        // scale factor. A future model exported through this file with
+        // `norm_topk_prob = false` or `routed_scaling != 1.0` needs the `Div`
+        // dropped / a `Mul` added; it would otherwise export a DIFFERENT
+        // router than it runs, silently.
         let probs = self.softmax(&logits, -1);
         self.i64("moe_topk_k", &[1], vec![k as i64]);
         let vals = self.tmp("moe_tkv");
@@ -786,7 +796,7 @@ impl<'a> Topo<'a> {
 /// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]` (brain's
 /// `[out,in]` weight layout -> ONNX `[in,out]`). Each topology file keeps its
 /// own copy of this (see `qwen_topology.rs`/`glm_topology.rs`) rather than
-/// sharing one — small enough that duplicating it is cheaper than a new
+/// sharing one - small enough that duplicating it is cheaper than a new
 /// shared dependency edge.
 fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut out = vec![0f32; data.len()];

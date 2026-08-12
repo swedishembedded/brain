@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A resident int8 weight store for the Thinker's routed MoE experts — the
+//! A resident int8 weight store for the Thinker's routed MoE experts - the
 //! dominant memory cost of the whole checkpoint (see [`expert_bytes`]'s doc:
 //! ~27.6 GiB of the ~36 GB total at the real Thinker shape), and the reason
 //! a single 24 GB P40 cannot hold the Thinker at all without quantization
@@ -15,7 +15,7 @@
 //! norms, `embed_tokens`, and `lm_head` stay fp32, read and held resident
 //! the ordinary way. `omni::import::should_quantize` DID quantize those too
 //! at import time (every 2-D weight with `k % 4 == 0`, not just MoE
-//! experts) — so this is a real, deliberate scope cut, not a checkpoint
+//! experts) - so this is a real, deliberate scope cut, not a checkpoint
 //! limitation: the non-expert weights total only ~5-6 GiB combined (attention
 //! ~3 GiB + embed/lm_head ~2.4 GiB across 48 layers + vocab 152064, computed
 //! from `MoeTextConfig::thinker_defaults`'s real dims), small enough next to
@@ -35,7 +35,7 @@ use crate::config::MoeTextConfig;
 
 /// One int8-quantized expert linear: packed weight + per-channel scale, read
 /// straight from the checkpoint's ALREADY-quantized `U32`/`F32` `.scale`
-/// pair (`omni::import` quantized at IMPORT time — unlike `qwen3::q8::Q8`,
+/// pair (`omni::import` quantized at IMPORT time - unlike `qwen3::q8::Q8`,
 /// which quantizes an fp32 SOURCE checkpoint on load, there is no
 /// `model::int8::quantize_weight` call here at all, just a read + upload).
 pub struct ExpertLin8 {
@@ -50,10 +50,10 @@ pub struct ThinkerLayerExperts8 {
 
 impl ThinkerLayerExperts8 {
     /// Expert `e`'s `(gate, up, down)` weights, as [`model::moe::Lin8`]
-    /// views — the exact shape [`model::moe::expert_fwd_i8`] takes. This is
+    /// views - the exact shape [`model::moe::expert_fwd_i8`] takes. This is
     /// the per-LAYER accessor `crate::thinker::moe_sublayer`'s `int8_experts`
     /// parameter calls (it already knows which layer it is; only the expert
-    /// index varies within one call) — see [`ThinkerInt8Store::lin8_at`] for
+    /// index varies within one call) - see [`ThinkerInt8Store::lin8_at`] for
     /// the multi-layer (by absolute layer index) sibling.
     pub fn lin8_at(&self, e: usize) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         let (gate, up, down) = &self.experts[e];
@@ -65,16 +65,16 @@ impl ThinkerLayerExperts8 {
     }
 }
 
-/// A resident (GPU-uploaded) subset of the Thinker's routed-expert weights —
+/// A resident (GPU-uploaded) subset of the Thinker's routed-expert weights -
 /// only the ABSOLUTE layer indices named at construction (a caller building
 /// a two-card shard builds two of these, one per device, with disjoint
-/// layer ranges — see [`Self::build`]'s doc).
+/// layer ranges - see [`Self::build`]'s doc).
 pub struct ThinkerInt8Store {
     pub layers: HashMap<usize, ThinkerLayerExperts8>,
 }
 
 /// The brain-native tensor name for expert `e`'s `leaf` weight in layer `l`
-/// (`gate.weight` | `up.weight` | `down.weight`) — the exact convention
+/// (`gate.weight` | `up.weight` | `down.weight`) - the exact convention
 /// `omni::import::map_thinker` writes (`thinker.blocks.{l}.mlp.experts.{e}.
 /// {leaf}`), confirmed against that module's own test
 /// (`map_thinker("thinker.model.layers.0.mlp.experts.127.down_proj.weight")
@@ -86,7 +86,7 @@ fn expert_name(l: usize, e: usize, leaf: &str) -> String {
 impl ThinkerInt8Store {
     /// Stream + upload `owned_layers`' routed-expert weights from `reader`
     /// onto `gpu`. Panics loudly (never silently skips) if an expected
-    /// tensor is missing or has the wrong dtype — `WeightReader::tensor_u32`/
+    /// tensor is missing or has the wrong dtype - `WeightReader::tensor_u32`/
     /// `tensor` already panic on a dtype mismatch (this session's earlier
     /// `checkpoint` work), so a checkpoint that was not actually quantized
     /// the way `omni::import` promises fails HERE, at load time, not with a
@@ -114,7 +114,7 @@ impl ThinkerInt8Store {
         self.layers.get(&l).unwrap_or_else(|| panic!("ThinkerInt8Store: layer {l} not owned by this shard"))
     }
 
-    /// Expert `e`'s `(gate, up, down)` weights in layer `l` — shorthand for
+    /// Expert `e`'s `(gate, up, down)` weights in layer `l` - shorthand for
     /// `self.layer(l).lin8_at(e)`.
     pub fn lin8_at(&self, l: usize, e: usize) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         self.layer(l).lin8_at(e)
@@ -139,13 +139,13 @@ pub fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
 }
 
 /// One layer's routed experts PLUS the always-active shared expert's own
-/// quantized weights — Talker's one real architectural difference from
+/// quantized weights - Talker's one real architectural difference from
 /// Thinker (`crate::talker`'s module doc). `shared_expert_gate` (the
 /// `[1, hidden]` sigmoid-gate projection) is loaded fp32-resident via
 /// [`crate::int8_thinker_resident::load_mat`], which dequantizes on read if
 /// the checkpoint happened to quantize it (`omni::import::should_quantize`'s
 /// literal rank-2/k%4==0 rule does not special-case a singleton output
-/// channel) — matching `model::moe::shared_expert_fwd_i8`'s own "not worth
+/// channel) - matching `model::moe::shared_expert_fwd_i8`'s own "not worth
 /// quantizing a rank-1 output" scope cut regardless of how the checkpoint
 /// stored it.
 pub struct TalkerLayerExperts8 {
@@ -155,7 +155,7 @@ pub struct TalkerLayerExperts8 {
 }
 
 impl TalkerLayerExperts8 {
-    /// Expert `e`'s `(gate, up, down)` weights — same contract as
+    /// Expert `e`'s `(gate, up, down)` weights - same contract as
     /// [`ThinkerLayerExperts8::lin8_at`].
     pub fn lin8_at(&self, e: usize) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         let (gate, up, down) = &self.experts[e];
@@ -166,7 +166,7 @@ impl TalkerLayerExperts8 {
         )
     }
     /// The shared expert's own `(gate, up, down)` weights as [`model::moe::
-    /// Lin8`] views — the exact shape [`model::moe::shared_expert_fwd_i8`] takes.
+    /// Lin8`] views - the exact shape [`model::moe::shared_expert_fwd_i8`] takes.
     pub fn shared_lin8(&self) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         let (gate, up, down) = &self.shared_expert;
         (
@@ -178,13 +178,13 @@ impl TalkerLayerExperts8 {
 }
 
 /// A resident (GPU-uploaded) subset of the Talker's routed+shared expert
-/// weights — same per-device layer-range shape as [`ThinkerInt8Store`].
+/// weights - same per-device layer-range shape as [`ThinkerInt8Store`].
 pub struct TalkerInt8Store {
     pub layers: HashMap<usize, TalkerLayerExperts8>,
 }
 
 /// The brain-native tensor name for routed expert `e`'s `leaf` weight in
-/// Talker layer `l` — `omni::import::map_talker`'s convention
+/// Talker layer `l` - `omni::import::map_talker`'s convention
 /// (`talker.blocks.{l}.mlp.experts.{e}.{leaf}.weight`), confirmed against
 /// that module's own test (`map_talker("talker.model.layers.19.mlp.experts.
 /// 5.up_proj.weight") == "talker.blocks.19.mlp.experts.5.up.weight"`).
@@ -193,7 +193,7 @@ fn talker_expert_name(l: usize, e: usize, leaf: &str) -> String {
 }
 
 /// The brain-native tensor name for the shared expert's `leaf` weight in
-/// Talker layer `l` (`talker.blocks.{l}.mlp.shared_expert.{leaf}.weight`) —
+/// Talker layer `l` (`talker.blocks.{l}.mlp.shared_expert.{leaf}.weight`) -
 /// `map_talker`'s convention, confirmed against its own test
 /// (`map_talker("talker.model.layers.0.mlp.shared_expert.down_proj.weight")
 /// == "talker.blocks.0.mlp.shared_expert.down.weight"`).
@@ -204,7 +204,7 @@ fn talker_shared_expert_name(l: usize, leaf: &str) -> String {
 impl TalkerInt8Store {
     /// [`ThinkerInt8Store::build`]'s Talker twin: routed experts PLUS the
     /// shared expert's three linears, plus its gate (dequantized on read if
-    /// needed — see [`TalkerLayerExperts8`]'s doc).
+    /// needed - see [`TalkerLayerExperts8`]'s doc).
     pub fn build(gpu: &Gpu, reader: &WeightReader, owned_layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> TalkerInt8Store {
         let mut layers = HashMap::new();
         for l in owned_layers {
@@ -227,20 +227,20 @@ impl TalkerInt8Store {
         TalkerInt8Store { layers }
     }
 
-    /// Layer `l`'s expert store — same "panic on an unowned layer, never
+    /// Layer `l`'s expert store - same "panic on an unowned layer, never
     /// default past it" contract as [`ThinkerInt8Store::layer`].
     pub fn layer(&self, l: usize) -> &TalkerLayerExperts8 {
         self.layers.get(&l).unwrap_or_else(|| panic!("TalkerInt8Store: layer {l} not owned by this shard"))
     }
 
-    /// Routed expert `e`'s `(gate, up, down)` weights in layer `l` —
+    /// Routed expert `e`'s `(gate, up, down)` weights in layer `l` -
     /// shorthand for `self.layer(l).lin8_at(e)`, same convenience
     /// [`ThinkerInt8Store::lin8_at`] provides.
     pub fn lin8_at(&self, l: usize, e: usize) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         self.layer(l).lin8_at(e)
     }
 
-    /// Layer `l`'s shared expert `(gate, up, down)` weights — shorthand for
+    /// Layer `l`'s shared expert `(gate, up, down)` weights - shorthand for
     /// `self.layer(l).shared_lin8()`.
     pub fn shared_lin8_at(&self, l: usize) -> (model::moe::Lin8<'_>, model::moe::Lin8<'_>, model::moe::Lin8<'_>) {
         self.layer(l).shared_lin8()
@@ -248,7 +248,7 @@ impl TalkerInt8Store {
 }
 
 /// Real per-device byte total for `layers`' routed-expert weights, computed
-/// from the checkpoint's DECLARED shapes (`WeightReader::shape`) — no GPU,
+/// from the checkpoint's DECLARED shapes (`WeightReader::shape`) - no GPU,
 /// no upload, so a caller can call this for [`crate::int8_thinker_resident::
 /// Int8ThinkerResident`]'s `estimate_multi` BEFORE deciding placement,
 /// exactly the "know the cost before building" contract
@@ -303,7 +303,7 @@ mod tests {
     /// A tiny synthetic int8 checkpoint, written via the SAME `StWriter`
     /// M18's real import used, with the EXACT brain-native names/dtypes
     /// `omni::import` produces (`thinker.blocks.{l}.mlp.experts.{e}.{leaf}
-    /// .weight` as `U32`, `.scale` as `F32`) — the honest structural
+    /// .weight` as `U32`, `.scale` as `F32`) - the honest structural
     /// alternative to a real 36 GB checkpoint (not present in this
     /// environment), proving the STREAMING/NAMING/UPLOAD machinery is
     /// correct rather than re-proving `quantize_weight`'s own math (already
@@ -408,7 +408,7 @@ mod tests {
 
     /// The store's `Lin8` views must feed `expert_fwd_i8` and produce the
     /// SAME result as the fp32 source weights through the fp32 sparse path
-    /// (within `moe_sparse_i8_parity.rs`'s own quantization tolerance) —
+    /// (within `moe_sparse_i8_parity.rs`'s own quantization tolerance) -
     /// proving `ThinkerInt8Store` is not just structurally plausible but
     /// numerically USABLE by the real kernel it exists to feed.
     #[test]
@@ -438,7 +438,7 @@ mod tests {
         let x_host = rng.vec_scaled((m * d) as usize, 1.0);
         let x = g.storage_init("x", &x_host);
         let gate = g.storage((m * e) as u64);
-        g.submit(&[], &[model::moe::router_fwd(&g, &router_ids, &shape, &logits, &gate)]);
+        g.submit(&[], &[model::moe::router_fwd(&g, &router_ids, &shape, &logits, &gate, true, 1.0)]);
 
         // int8 path via the store.
         let xq = g.storage((m * d / 4) as u64);

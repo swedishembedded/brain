@@ -9,7 +9,7 @@
 //! adaptive-LN modulation (`gate·(LNnoaffine(x)·(1+scale)+shift) + x`) →
 //! 4 plain 2048-dim ViT blocks over the S frame tokens → out-norm →
 //! MLP(2048→1024→9, GELU-erf) → delta accumulated into the RAW prediction
-//! (activations — relu on fov — are applied host-side on readback).
+//! (activations - relu on fov - are applied host-side on readback).
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::vit::{vit_block_fwd, VitBlockWeights, VitKernelIds, VitScratch, VitShape};
@@ -108,7 +108,7 @@ pub fn record_cam_head(
     let su = s as u32;
     let d2 = dim2 as u32;
     let n2 = su * d2;
-    // gather cam tokens (row 0 of each frame) — cam_tok is in the clears list
+    // gather cam tokens (row 0 of each frame) - cam_tok is in the clears list
     for fi in 0..s {
         steps.push(gpu.step_sliced(
             k.axpy,
@@ -124,7 +124,7 @@ pub fn record_cam_head(
         &[d2, su, f(1e-5)],
         su,
     ));
-    // adapt_norm: LayerNorm without affine, eps 1e-6 (constant once — the
+    // adapt_norm: LayerNorm without affine, eps 1e-6 (constant once - the
     // input cam_n never changes across iterations).
     steps.push(gpu.step(
         k.vit.layernorm,
@@ -207,7 +207,7 @@ pub fn record_cam_head(
             su * d2 / 2,
         ));
         steps.push(gpu.step(k.vit.bias_add, &[&b.h1, cw.get("param_predictor.fc1.bias")], &[su, d2 / 2], su * d2 / 2));
-        steps.push(gpu.step(k.vit.gelu_erf, &[&b.h1, &b.h1g], &[su * d2 / 2], su * d2 / 2));
+        steps.push(gpu.step(k.vit.mlp_act, &[&b.h1, &b.h1g], &[su * d2 / 2], su * d2 / 2));
         steps.push(gpu.step(
             k.vit.matmul,
             &[&b.h1g, cw.get("param_predictor.fc2.weight"), &b.delta],

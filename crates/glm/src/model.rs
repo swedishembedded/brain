@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! GLM-5.2 (`glm_moe_dsa`) decoder — forward + backprop as WGSL compute
+//! GLM-5.2 (`glm_moe_dsa`) decoder - forward + backprop as WGSL compute
 //! dispatches on the shared `gpu_core` engine. Phase 1: the dense MLA-MoE core
 //! (the DSA indexer is a no-op while `index_topk >= block_size`, so attention is
-//! exact dense MLA — the regime tiny models / tests run in).
+//! exact dense MLA - the regime tiny models / tests run in).
 //!
 //! Per pre-norm block (no biases; RMSNorm everywhere):
 //!   h   = RMSNorm(x)·input_ln
@@ -32,6 +32,23 @@ use crate::config::{GlmConfig, IdxMode};
 
 /// Cross-entropy ignore index (masked target positions).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
+
+/// Kernel ids for `model::moe::shared_expert_bwd`'s UNWEIGHTED arm - the only
+/// one GLM-5.2/DeepSeek-V3 has (no sigmoid shared-expert gate). The three
+/// gated-arm slots are unreachable here, so they carry `usize::MAX` rather than
+/// a plausible-looking `0` that would silently dispatch `embed` if the arm
+/// selection ever regressed.
+fn shared_expert_bwd_ids() -> model::moe::SharedExpertBwdIds {
+    model::moe::SharedExpertBwdIds {
+        linear_dx: MATMUL_DX,
+        linear_dw: MATMUL_DW,
+        silu_da: SILU_DA,
+        silu_db: SILU_DB,
+        scale_row: usize::MAX,
+        row_dot: usize::MAX,
+        sigmoid_bwd: usize::MAX,
+    }
+}
 
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED: usize = 0;
@@ -71,7 +88,7 @@ const GRADNORM_SQ: usize = 32;
 const GRAD_SCALE: usize = 33;
 const CLIP_COEF: usize = 34;
 const GRAD_SCALE_BUF: usize = 35;
-// DSA indexer (Phase 2; forward-only — the indexer is detached from the LM loss)
+// DSA indexer (Phase 2; forward-only - the indexer is detached from the LM loss)
 const LAYERNORM: usize = 36;
 const MLA_INDEX_SCORES: usize = 37;
 const ROPE_SUB: usize = 38;
@@ -125,7 +142,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 "#;
 
 /// RoPE at an EXPLICIT absolute position, INTERLEAVED (adjacent pairs `2j,2j+1`)
-/// convention — the decode-step twin of `kernels::ROPE_TRAIN` (which GLM's
+/// convention - the decode-step twin of `kernels::ROPE_TRAIN` (which GLM's
 /// forward uses). Identical math (base 10000, pairs `2j,2j+1`) but the rotary
 /// position is `pos_base + row` instead of `row % tcols`. NOT interchangeable
 /// with `kernels::ROPE_AT`, which is the half-split (GPT-NeoX) convention.
@@ -213,7 +230,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
     // Row-compacted MoE forward (inference-only path, `logits_all_compact`):
     // `model::moe::expert_fwd_compact` resolves this BY NAME (`Gpu::kernel_index`),
-    // so appending it here (and only here) is the whole opt-in — see that
+    // so appending it here (and only here) is the whole opt-in - see that
     // function's call site below for why it isn't a named `usize` const like the
     // other kernels (its scatter target is looked up once, not per dispatch site).
     ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
@@ -285,7 +302,7 @@ pub struct Glm {
     sh_out: DeviceBuffer,
     mlp_out: DeviceBuffer,
 
-    // `forward_compact`'s row-compacted MoE scratch — sized ONCE here to the
+    // `forward_compact`'s row-compacted MoE scratch - sized ONCE here to the
     // model's full configured capacity `b * t` (same convention every other
     // buffer in this struct follows), not reallocated per `logits_all_compact`
     // call. A follow-up closed this the same day it was found: it used to be
@@ -374,7 +391,7 @@ pub struct Glm {
 impl Glm {
     /// Trainable load, streaming: build directly off a mmap-backed
     /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
-    /// at a time — peak host ≈ one tensor of f32, never the whole-model
+    /// at a time - peak host ≈ one tensor of f32, never the whole-model
     /// `checkpoint::load` + `by_role("")` host copy. AdamW moments are device
     /// zero-init (not read from the checkpoint), so streaming is byte-identical
     /// to the former eager path.
@@ -385,7 +402,7 @@ impl Glm {
         Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, &reader, true)
     }
 
-    /// Inference load, streaming — see [`Glm::from_reader_inference`].
+    /// Inference load, streaming - see [`Glm::from_reader_inference`].
     pub fn load_inference(path: &str, b: u32, t: u32) -> Glm {
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
@@ -393,7 +410,7 @@ impl Glm {
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],
-    /// uploading one tensor at a time (peak host ≈ one tensor of f32) — never the
+    /// uploading one tensor at a time (peak host ≈ one tensor of f32) - never the
     /// `checkpoint::load` + `by_role("")` whole-model host copy. Numerically
     /// identical to [`Glm::load_inference`]; used by the resident serve path.
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Glm {
@@ -405,7 +422,7 @@ impl Glm {
         Glm::new_impl(cfg, b, t, init, true)
     }
 
-    /// Build in training mode on an existing device handle — see `Gpt::new_on`.
+    /// Build in training mode on an existing device handle - see `Gpt::new_on`.
     pub fn new_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Glm {
         Glm::new_impl_on(gpu, cfg, b, t, init, true)
     }
@@ -433,14 +450,14 @@ impl Glm {
         );
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
         // router selection bias (`e_score_correction_bias`), which is never
-        // updated by backprop (matches the reference — a load-balance heuristic
+        // updated by backprop (matches the reference - a load-balance heuristic
         // would drive it), so it stays Frozen and out of the optimiser.
         let roles: Vec<_> = cfg
             .param_list()
             .into_iter()
             .map(|(n, c)| {
                 // The router selection bias and the whole DSA indexer are detached
-                // from the LM loss (never backprop'd) — keep them Frozen so they
+                // from the LM loss (never backprop'd) - keep them Frozen so they
                 // stay out of the optimiser and the gradient-checked set.
                 let role = if !train || n.ends_with("moe.router.bias") || n.contains(".idx.") {
                     Role::Frozen
@@ -526,7 +543,7 @@ impl Glm {
         let ff_max = dense_ff.max(moe_ff).max(shared_ff);
 
         // `logits_all_compact`/`forward_compact` always run at `b_use = 1` (the
-        // former asserts it), so `t` alone bounds every call's row count — but
+        // former asserts it), so `t` alone bounds every call's row count - but
         // size to the full `b * t` anyway, matching every other buffer above,
         // since it costs nothing extra when `b == 1` and stays correct if that
         // assert is ever relaxed.
@@ -686,7 +703,7 @@ impl Glm {
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
         // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
         // The threshold is `block::pick_gemm`'s MEASURED `m < 8`, not the
-        // `m < 128` this used to carry — a guard that cost 22x on an
+        // `m < 128` this used to carry - a guard that cost 22x on an
         // SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
         // naive vs tiled is 1.5x at m=8 rising to 34.1x at m=127, bit-identical
         // throughout. `pick_gemm` owns the rule so this cannot drift again.
@@ -794,7 +811,7 @@ impl Glm {
             s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
             // DSA sparse indexer (IndexShare): `Full` layers compute a fresh top-k
             // mask; `Full`+`Shared` layers add it into the scores before softmax.
-            // The indexer is detached (Frozen params) — no backward path.
+            // The indexer is detached (Frozen params) - no backward path.
             match c.idx_mode(l as u32) {
                 IdxMode::Full => {
                     self.indexer_fwd(&mut s, lb, l, b_use, t_use);
@@ -956,12 +973,42 @@ impl Glm {
                     self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("mlp.gate.weight"), &self.d_xn, n, d, dense_ff, 1);
                 }
                 Mlp::Moe { router_logits, gate, probs: _, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
-                    // shared expert backward (writes d_xn first, acc=0)
-                    self.mm_bwd(&mut s, &self.dres[l + 1], sh_h, &p("moe.shared.down.weight"), &self.d_h, n, shared_ff, d, 0);
-                    s.push(self.gpu.step(SILU_DA, &[sh_gate, sh_up, &self.d_h, &self.d_gate_pre], &[n * shared_ff], n * shared_ff));
-                    s.push(self.gpu.step(SILU_DB, &[sh_gate, &self.d_h, &self.d_up], &[n * shared_ff], n * shared_ff));
-                    self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &p("moe.shared.up.weight"), &self.d_xn, n, d, shared_ff, 0);
-                    self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("moe.shared.gate.weight"), &self.d_xn, n, d, shared_ff, 1);
+                    // Shared expert backward (writes d_xn first, acc=0) --
+                    // `model::moe::shared_expert_bwd`'s UNWEIGHTED arm, which
+                    // IS the sequence this block used to spell out inline
+                    // (same kernels, same order, same params: bit-identical,
+                    // gated by `gradcheck::check_glm`). Hoisted so the
+                    // DeepSeek-OCR/Omni MoE trainers share one definition.
+                    let shw = |nm: &str| self.w(&p(&format!("moe.shared.{nm}")));
+                    let shg = |nm: &str| {
+                        let full = p(&format!("moe.shared.{nm}"));
+                        self.trainable(&full).then(|| self.g(&full))
+                    };
+                    s.extend(model::moe::shared_expert_bwd(
+                        &self.gpu,
+                        &shared_expert_bwd_ids(),
+                        n,
+                        d,
+                        shared_ff,
+                        &lb.xn2,
+                        shw("gate.weight"),
+                        shw("up.weight"),
+                        shw("down.weight"),
+                        None, // GLM-5.2/DeepSeek-V3: unweighted, no sigmoid gate
+                        &model::moe::SharedExpertGrads { gate_w: shg("gate.weight"), up_w: shg("up.weight"), down_w: shg("down.weight"), shared_gate_w: None },
+                        &model::moe::SharedExpertActs { gate_pre: sh_gate, up: sh_up, h: sh_h, mlp_out: None, gate_logits: None, gate_scalar: None },
+                        &model::moe::SharedExpertBwdScratch {
+                            d_h: &self.d_h,
+                            d_gate_pre: &self.d_gate_pre,
+                            d_up: &self.d_up,
+                            d_mlp_out: None,
+                            d_gate_scalar: None,
+                            d_gate_logits: None,
+                        },
+                        &self.dres[l + 1],
+                        &self.d_xn,
+                        false, // this is d_xn's FIRST touch in the MoE arm
+                    ));
                     // router backward: d_gate[n,E] from each expert, then through sigmoid
                     for ei in 0..e as usize {
                         s.push(self.gpu.step(SCALE_ADD_DGATE, &[&expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
@@ -1080,14 +1127,14 @@ impl Glm {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
-    /// Per-position logits for one sequence (B must be 1, len <= t) — the
+    /// Per-position logits for one sequence (B must be 1, len <= t) - the
     /// row-compacted-MoE inference twin of [`Self::logits_all`], used ONLY by
     /// `sample::generate`'s O(T²) recompute loop. Forward-only: duplicates
     /// `build_forward`'s non-MoE plumbing (attention, norms) per layer but
     /// replaces the dense per-expert loop with `model::moe::expert_fwd_compact`
     /// (~7x faster at GLM's real MoE shape). Skips the MTP head
     /// entirely (`generate` never reads it). Never touches `build_backward` /
-    /// `gradcheck::check_glm` — this is a parallel path, not a training-graph
+    /// `gradcheck::check_glm` - this is a parallel path, not a training-graph
     /// change, so it cannot regress gradient correctness.
     pub fn logits_all_compact(&self, tokens: &[u32]) -> Vec<f32> {
         let t_use = tokens.len() as u32;
@@ -1098,7 +1145,7 @@ impl Glm {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
-    /// Inference-only forward, row-compacted MoE — see [`Self::logits_all_compact`].
+    /// Inference-only forward, row-compacted MoE - see [`Self::logits_all_compact`].
     fn forward_compact(&self, b_use: u32, t_use: u32) {
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -1238,7 +1285,7 @@ impl Glm {
     }
 
     /// Per-position **final-norm hidden** states for one sequence (`[len, d_model]`),
-    /// the recompute twin of [`Self::step`]'s output — used to validate the KV
+    /// the recompute twin of [`Self::step`]'s output - used to validate the KV
     /// decode. (B must be 1, len <= t.)
     pub fn hidden_all(&self, tokens: &[u32]) -> Vec<f32> {
         let t_use = tokens.len() as u32;
@@ -1394,13 +1441,13 @@ impl Glm {
     }
 
     pub fn load_itos(path: &str) -> Option<Vec<char>> {
-        // Header/config only — no tensor data is faulted in.
+        // Header/config only - no tensor data is faulted in.
         Self::itos_from_config(&checkpoint::weightio::WeightReader::open(path).ok()?.config())
     }
 
     /// One DSA-indexer **distillation** step (host-side): train the `idx.*` params
     /// of every `Full` indexer layer to match the dense MLA attention distribution
-    /// over keys (the DeepSeek-V3.2 recipe — the indexer is detached from the LM
+    /// over keys (the DeepSeek-V3.2 recipe - the indexer is detached from the LM
     /// loss). Requires a dense forward (`index_topk >= block_size`, so the cached
     /// `probs` are the *unmasked* attention). Each idx tensor is updated with a
     /// per-tensor **RMS-normalized** step of size `lr` (RMSprop-style, so training
@@ -1627,7 +1674,7 @@ mod kv_step_tests {
     }
 
     /// The incremental KV-cache `step` must reproduce GLM's own `O(T²)` recompute
-    /// (`hidden_all` / `logits_all`) for every prefix — same engine, same weights,
+    /// (`hidden_all` / `logits_all`) for every prefix - same engine, same weights,
     /// so any difference is only float reassociation in the MLA attention reduction
     /// and the (naive n=1 vs batched) matmuls. Exercises MLA + one dense + one MoE
     /// layer (`tiny()`: first_k_dense_replace=1, n_layers=2).
@@ -1676,7 +1723,7 @@ mod compact_forward_tests {
 
     /// `logits_all_compact` (row-compacted MoE, `expert_fwd_compact`) must agree
     /// with `logits_all` (the dense-per-expert path build_forward's training
-    /// graph also uses) — bit-identically in practice (`max` is exact, GEMM
+    /// graph also uses) - bit-identically in practice (`max` is exact, GEMM
     /// summation order does not change here because every row's routed
     /// experts contribute the exact same terms either way once `moe_acc` is
     /// explicitly pre-zeroed; see the comment at that `submit` call in

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! FastViTHD vision encoder — built on brain's `crates/vision` Conv framework.
+//! FastViTHD vision encoder - built on brain's `crates/vision` Conv framework.
 //!
 //! Five stages (RepMixer conv token-mixing in 0–2, self-attention in 3–4) built
 //! from the shared `Conv`/`ConvSpec` primitives + the attention kernels; no
@@ -27,7 +27,7 @@ fn vit_ids() -> VitKernelIds {
         matmul: kidx("matmul"),
         matmul_rows: kidx("matmul_rows"),
         bias_add: kidx("bias_add"),
-        gelu_erf: kidx("gelu_erf"),
+        mlp_act: kidx("gelu_erf"),
         scale_chan: kidx("scale_chan"),
         add2: kidx("add2"),
         attn_scores_cross: kidx("attn_scores_cross"),
@@ -39,14 +39,14 @@ fn vit_ids() -> VitKernelIds {
 }
 
 /// Index of a manually-dispatched kernel (not covered by `ConvKernelIds`) in
-/// [`PIPELINES`], by name. Panics if absent — a programming error.
+/// [`PIPELINES`], by name. Panics if absent - a programming error.
 pub fn kidx(name: &str) -> usize {
     PIPELINES.iter().position(|(n, _)| *n == name).unwrap_or_else(|| panic!("kernel `{name}` not in FastViTHD PIPELINES"))
 }
 
 /// Kernel registry for the FastViTHD tower: the conv/BN/act family (RepMixer,
 /// MobileOne, ConvFFN, PatchEmbed, SE) plus the transpose + attention kernels the
-/// stage-4/5 attention blocks need. Resolved by name, so a superset is fine —
+/// stage-4/5 attention blocks need. Resolved by name, so a superset is fine -
 /// absent kernels map to `NONE` and only error if actually dispatched.
 pub const PIPELINES: &[(&str, &str)] = &[
     // --- conv / bn / activation ---
@@ -223,7 +223,7 @@ impl ConvUnit {
         self.out_shape
     }
 
-    /// Input element count (`N·C·H·W`) — used to size the input grad in the encoder.
+    /// Input element count (`N·C·H·W`) - used to size the input grad in the encoder.
     pub fn in_numel(&self) -> u32 {
         self.conv.in_shape.numel()
     }
@@ -284,11 +284,11 @@ impl ConvUnit {
             cur = &self.activated;
         }
         // SAFETY of lifetimes: `cur` borrows either self.conv.out(), self.biased,
-        // or self.activated — all owned by `self`, so `'a` is valid.
+        // or self.activated - all owned by `self`, so `'a` is valid.
         cur
     }
 
-    /// The unit's cached output buffer (valid after `forward`) — the activation if
+    /// The unit's cached output buffer (valid after `forward`) - the activation if
     /// GELU is on, else the biased conv output, else the raw conv/BN output.
     pub fn output(&self) -> &DeviceBuffer {
         if self.gelu {
@@ -322,7 +322,7 @@ impl ConvUnit {
     }
 }
 
-/// ConvFFN — the FastViTHD channel-mixer: depthwise 7×7 + BN → 1×1 (`fc1`) +bias
+/// ConvFFN - the FastViTHD channel-mixer: depthwise 7×7 + BN → 1×1 (`fc1`) +bias
 /// → erf-GELU → 1×1 (`fc2`) +bias. Present in every RepMixer and Attention block.
 pub struct ConvFFN {
     dw: ConvUnit,
@@ -378,8 +378,8 @@ impl ConvFFN {
     }
 }
 
-/// RepMixerBlock — the FastViTHD stage-0–2 block: a RepMixer token-mixer (a single
-/// fused depthwise 3×3 conv + bias, no residual — folded) then a ConvFFN with a
+/// RepMixerBlock - the FastViTHD stage-0–2 block: a RepMixer token-mixer (a single
+/// fused depthwise 3×3 conv + bias, no residual - folded) then a ConvFFN with a
 /// LayerScale residual `x = mixer(x) + layer_scale ⊙ ConvFFN(mixer(x))`. The
 /// LayerScale is stored as an `sb` buffer `[2C]` (`[scale=ls-1, shift=0]`) applied
 /// by `film_chan`, so it needs no per-channel-multiply kernel.
@@ -468,7 +468,7 @@ impl RepMixerBlock {
     }
 }
 
-/// PatchEmbed — the FastViTHD inter-stage downsample (stride-2, `in_ch → out_ch`):
+/// PatchEmbed - the FastViTHD inter-stage downsample (stride-2, `in_ch → out_ch`):
 /// a grouped large-kernel conv (7×7, stride 2, `groups = in_ch`, fused
 /// ReparamLargeKernelConv) then a 1×1 MobileOne. Halves H×W, `out_ch` must be a
 /// multiple of `in_ch` (FastViTHD doubles the channels).
@@ -520,7 +520,7 @@ impl PatchEmbed {
     }
 }
 
-/// AttentionBlock — the FastViTHD stage-3/4 block: `x = x + ls1 ⊙ MHSA(LN(x))`
+/// AttentionBlock - the FastViTHD stage-3/4 block: `x = x + ls1 ⊙ MHSA(LN(x))`
 /// then `x = x + ls2 ⊙ ConvFFN(x)`. The MHSA runs over the conv feature map by
 /// transposing NCHW→NLC (`nchw_nlc`), a per-token LayerNorm over C, a fused-qkv
 /// Linear (no bias, no RoPE, no QK-norm, head_dim 32), the shared
@@ -643,10 +643,10 @@ impl AttentionBlock {
     }
 
     /// Backward of [`forward`](Self::forward). Reverses the two LayerScale residuals,
-    /// the ConvFFN, the fused-qkv MHSA (full attention via the cross bwd kernels —
+    /// the ConvFFN, the fused-qkv MHSA (full attention via the cross bwd kernels -
     /// the cached `probs` carry the softmax), the pre-attention LayerNorm, and the
     /// NCHW↔NLC transposes (their adjoint is the opposite transpose). Both residual
-    /// identity paths accumulate into `d_in`. (`x_in` is unused — the forward cached
+    /// identity paths accumulate into `d_in`. (`x_in` is unused - the forward cached
     /// every activation the backward needs, including the NLC input `self.nlc`.)
     pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, _x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
         let g = ctx.gpu;
@@ -728,7 +728,7 @@ impl AttentionBlock {
     }
 }
 
-/// RepCPE — the FastViTHD conditional positional encoding before the attention
+/// RepCPE - the FastViTHD conditional positional encoding before the attention
 /// stages: a single fused depthwise 7×7 conv + bias (the identity skip is folded
 /// into the conv), applied in place. It's exactly a [`ConvUnit`], so
 /// `repcpe(ctx, prefix, shape, ch)` is a thin constructor.
@@ -896,7 +896,7 @@ impl Encoder {
         self.layers.iter().flat_map(|l| l.param_list()).collect()
     }
 
-    /// Put every BatchNorm in eval (running-stat) mode — required for inference /
+    /// Put every BatchNorm in eval (running-stat) mode - required for inference /
     /// reference parity (training-mode batch stats differ from the reference).
     pub fn set_eval(&self, eval: bool) {
         for l in &self.layers {
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(outv.len(), (16 * 8 * 8) as usize, "depthwise 3×3 pad 1 preserves 8×8");
         assert!(outv.iter().all(|v| v.is_finite()), "output finite");
         // erf-GELU has a global minimum ≈ -0.17, so post-activation values can't go
-        // much below that — a sanity check that the GELU actually ran.
+        // much below that - a sanity check that the GELU actually ran.
         assert!(outv.iter().cloned().fold(f32::INFINITY, f32::min) > -0.2, "GELU floor");
     }
 

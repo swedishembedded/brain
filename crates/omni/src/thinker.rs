@@ -9,7 +9,7 @@
 //! **Why this is a new, dedicated forward rather than an extension of
 //! `qwen3::Qwen`**: `qwen3::Qwen`'s attention/RoPE/QK-norm/DeepStack-splice
 //! machinery is already exactly right for Thinker (confirmed by reading
-//! `forward_steps` in full — same RMSNorm, same per-head QK-norm, same
+//! `forward_steps` in full - same RMSNorm, same per-head QK-norm, same
 //! `block::gqa_fwd`, an existing `mrope`/`rope2d_step` path, and DeepStack
 //! splice support already wired for the vision-language case). But its
 //! internals (sharding, LoRA, int8, KV-cache) are all interleaved in one
@@ -20,7 +20,7 @@
 //! implementation" answer and the natural following step). This module is
 //! deliberately narrower than `qwen3::Qwen` in every other respect
 //! (forward-only, single device, no sharding/LoRA/int8/KV-cache) so it can
-//! be validated against real weights now — it composes the SAME shared
+//! be validated against real weights now - it composes the SAME shared
 //! primitives `qwen3::Qwen` itself is built from
 //! (`model::block::{rmsnorm_fwd,rope2d_fwd,gqa_fwd}`), not a re-derivation of
 //! the attention math.
@@ -30,19 +30,19 @@
 //! fed a `[n, head_dim/2]` `cos`/`sin` table the caller builds with
 //! `qwenvl::mrope::{get_rope_index, mrope_tables}`. There is deliberately no
 //! separate "plain RoPE" code path: for a token stream where all three axes
-//! carry the same position (pure text, or pure audio — see the M6 design
+//! carry the same position (pure text, or pure audio - see the M6 design
 //! note), Omni's interleaved M-RoPE collapses exactly to ordinary half-split
 //! RoPE (`qwenvl::mrope`'s own `diagonal_positions_collapse_to_plain_rope`
 //! test proves this), so a caller with no image/video/audio span just builds
 //! that degenerate diagonal table via `get_rope_index(tokens, image_token_id,
-//! &[])` (empty grids) rather than reaching for a second kernel — one
+//! &[])` (empty grids) rather than reaching for a second kernel - one
 //! implementation for both cases, per the M6a lesson about wiring the wrong
 //! RoPE kernel into a second, parallel path.
 //!
 //! **Multimodal splice**: not this module's concern. A caller with image/
 //! audio embeddings splices them into the token-embedding buffer via
 //! `model::vlm::splice_fwd` (`splice.wgsl`, in [`thinker_pipelines`]) BEFORE
-//! calling [`decode`] — `decode` and [`layer_fwd`] only ever see an
+//! calling [`decode`] - `decode` and [`layer_fwd`] only ever see an
 //! already-assembled `[n, d]` embedding sequence, exactly like `x` in
 //! `qwen3::Qwen::write_img_embeds`'s contract.
 
@@ -57,7 +57,7 @@ use crate::int8_resident::ThinkerLayerExperts8;
 /// Kernel pipeline this module dispatches. Forward-only: the backward slots
 /// `KernelIds` carries (`rms_inv`/`rmsnorm_dx`/`rmsnorm_dw`/`rope_bwd`/
 /// `gqa_d*`/`silu_da`/`silu_db`) are never reached, so they point at index 0
-/// (`rmsnorm`) rather than a real backward kernel — harmless since nothing
+/// (`rmsnorm`) rather than a real backward kernel - harmless since nothing
 /// dispatches them, and it keeps this list short.
 pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
     &[
@@ -123,7 +123,7 @@ fn decode_ids() -> GqaDecodeIds {
 }
 
 /// The hoisted attention sublayer's kernel indices, resolved against
-/// [`thinker_pipelines`]'s ordering — see `model::block::GqaAttnIds`.
+/// [`thinker_pipelines`]'s ordering - see `model::block::GqaAttnIds`.
 fn attn_ids() -> GqaAttnIds {
     GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids() }
 }
@@ -139,14 +139,14 @@ fn attn_weights<'a>(w: &ThinkerLayerWeights<'a>) -> GqaAttnWeights<'a> {
 const MATMUL: usize = 5;
 const ADD2: usize = 6;
 const ROPE2D: usize = 1;
-/// `model::vlm::splice_fwd`'s kernel index — exposed for a caller assembling
+/// `model::vlm::splice_fwd`'s kernel index - exposed for a caller assembling
 /// a multimodal embedding sequence before [`decode`]; see the module doc.
 pub const SPLICE: usize = 11;
 const KV_APPEND: usize = 12;
 
 /// One decoder layer's weights, keyed exactly as they arrive from
 /// `omni::import` (`thinker.blocks.{l}.*`, prefix already stripped by the
-/// caller — see [`ThinkerLayer::new`]'s doc).
+/// caller - see [`ThinkerLayer::new`]'s doc).
 pub struct ThinkerLayerWeights<'a> {
     pub ln1: &'a DeviceBuffer,
     pub wq: &'a DeviceBuffer,
@@ -165,7 +165,7 @@ pub struct ThinkerLayerWeights<'a> {
 /// A layer's persistent incremental-decode KV cache: `[cap, n_kv_heads*
 /// head_dim]` buffers the caller (`crate::generate`) sizes once for the whole
 /// generation (`cap` = prompt length + max new tokens) and owns across every
-/// call — [`layer_fwd`] only ever WRITES into these (a bulk prefill fill, when
+/// call - [`layer_fwd`] only ever WRITES into these (a bulk prefill fill, when
 /// given `Some`), never reads them back; [`layer_decode_step`] does both.
 pub struct ThinkerLayerCache<'a> {
     pub kcache: &'a DeviceBuffer,
@@ -179,12 +179,12 @@ pub struct ThinkerLayerCache<'a> {
 /// renorm gate `[n, n_experts]` `model::moe`'s expert loop actually consumes.
 /// `n` is the sequence length (batch folded in, matching every other
 /// forward-only harness in this engine). `cos`/`sin` are the `[n, head_dim/2]`
-/// M-RoPE tables (`qwenvl::mrope::mrope_tables`) — see the module doc for why
+/// M-RoPE tables (`qwenvl::mrope::mrope_tables`) - see the module doc for why
 /// there is one RoPE path, not a separate "plain" and "M-RoPE" one.
 ///
 /// `cache`, when `Some`, bulk-fills this layer's persistent KV cache with the
 /// `n` positions' post-RoPE key/value rows (`model::block::kv_cache_fill`) as
-/// a side effect — the prefill half of [`crate::generate`]'s KV-cache decode
+/// a side effect - the prefill half of [`crate::generate`]'s KV-cache decode
 /// loop, letting [`layer_decode_step`] continue attending from `pos = n`
 /// onward without recomputing anything this call already did. Purely
 /// additive: `out`/`router_logits`/`xmid`/`gate` are identical whether `cache`
@@ -197,7 +197,7 @@ pub struct ThinkerLayerCache<'a> {
 /// `last_hidden_state`-shaped tensor (see `thinker_layer_parity.rs`'s module
 /// doc for the real bug this distinction caught; [`decode`] applies it).
 ///
-/// `int8_experts`: see [`moe_sublayer`]'s doc — `Some` swaps only the
+/// `int8_experts`: see [`moe_sublayer`]'s doc - `Some` swaps only the
 /// routed-expert dispatch to int8; `None` (every caller before this
 /// parameter existed) is the original fp32 path, unchanged.
 #[allow(clippy::too_many_arguments)]
@@ -208,7 +208,7 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
 }
 
 /// The MoE FFN sublayer shared by [`layer_fwd`] (full batched forward) and
-/// [`layer_decode_step`] (single-token KV-cache decode) — the two attention
+/// [`layer_decode_step`] (single-token KV-cache decode) - the two attention
 /// shapes differ, but the post-attention residual `xmid [n, d] -> out [n, d]`
 /// math is identical either way (router -> top-k renorm gate -> per-expert
 /// SwiGLU -> residual add), so it lives once here instead of twice.
@@ -216,7 +216,7 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
 /// `int8_experts`: `Some(store)` dispatches every routed expert through
 /// [`model::moe::expert_fwd_i8`] against `store`'s resident packed weights
 /// (`crate::int8_resident::ThinkerInt8Store`) instead of `w.experts`' fp32
-/// ones — `w.experts` is simply UNUSED in that branch (attention/router/
+/// ones - `w.experts` is simply UNUSED in that branch (attention/router/
 /// norms still come from `w`, unchanged; only the expert linears are
 /// swapped). `None` (every caller before this parameter existed) is the
 /// original fp32 path, bit-for-bit unchanged.
@@ -247,7 +247,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
 
     let shape = cfg.moe_shape(n);
     let gate = g.storage((n * cfg.n_experts) as u64);
-    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate));
+    steps.push(router_fwd(g, &mids, &shape, &router_logits, &gate, true, 1.0));
 
     let moe_ff = cfg.moe_intermediate;
     let moe_out = g.storage((n * d) as u64);
@@ -296,10 +296,10 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
 /// One incremental KV-cache decode step: a SINGLE new token's embedding row
 /// `x [1, d]` through this layer, attending against `cache`'s `pos+1` valid
 /// positions (`model::block::gqa_decode_step`) instead of recomputing full
-/// causal attention over a growing sequence — the O(cached length), not O(T²),
+/// causal attention over a growing sequence - the O(cached length), not O(T²),
 /// twin of [`layer_fwd`]. `cos`/`sin` are the `[1, head_dim/2]` M-RoPE table
 /// for this ONE token's absolute 3-axis position (`qwenvl::mrope::mrope_tables`
-/// called with a single-element `positions` slice) — `rope2d_fwd`'s table-driven
+/// called with a single-element `positions` slice) - `rope2d_fwd`'s table-driven
 /// kernel needs no separate "decode" variant, unlike `qwen3::Qwen`'s `ROPE_AT`
 /// (Thinker's RoPE
 /// path was already row-driven, so a 1-row table IS the decode case). `cap` is
@@ -317,7 +317,7 @@ pub fn layer_decode_step(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, 
 }
 
 /// All 48 decoder layers plus the top-level final RMSNorm
-/// (`thinker.model.norm.weight`) — the weights [`decode`] needs beyond one
+/// (`thinker.model.norm.weight`) - the weights [`decode`] needs beyond one
 /// layer's own [`ThinkerLayerWeights`].
 pub struct ThinkerWeights<'a> {
     pub layers: &'a [ThinkerLayerWeights<'a>],
@@ -326,11 +326,11 @@ pub struct ThinkerWeights<'a> {
 
 /// Runs the full Thinker text-decoder stack: `x [n, d] -> [n, d]`, one
 /// [`layer_fwd`] per entry in `w.layers` chained residual-to-residual, then
-/// `model.norm` — the piece [`layer_fwd`] deliberately leaves out (see its
+/// `model.norm` - the piece [`layer_fwd`] deliberately leaves out (see its
 /// doc). `x` is an already-assembled embedding sequence: plain token
 /// embeddings for pure text, or the same buffer after a caller has spliced in
 /// image/audio embeddings via `model::vlm::splice_fwd` at the appropriate
-/// rows (`SPLICE`, in [`thinker_pipelines`]) — this function has no opinion
+/// rows (`SPLICE`, in [`thinker_pipelines`]) - this function has no opinion
 /// on how `x` was built, only on what to do with it. `cos`/`sin` are the
 /// M-RoPE tables for this same sequence (`qwenvl::mrope`), shared unchanged
 /// across every layer (position doesn't change with depth).
@@ -344,7 +344,7 @@ pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer
 }
 
 /// The top-level final RMSNorm (`thinker.model.norm.weight`) [`layer_fwd`]
-/// deliberately leaves out — factored out of [`decode`] so a caller that
+/// deliberately leaves out - factored out of [`decode`] so a caller that
 /// streams layer weights one at a time instead of holding `[ThinkerLayerWeights]`
 /// resident (`crate::generate`, for a real-weight generation loop too large to
 /// keep GPU-resident all at once) can apply it without re-deriving it.
@@ -356,7 +356,7 @@ pub fn final_norm(g: &Gpu, cfg: &MoeTextConfig, norm_w: &DeviceBuffer, h: &Devic
 }
 
 /// `hidden [n, d] -> logits [n, vocab]` via `thinker.lm_head.weight`
-/// (`[vocab, d]`, untied from the embedding table —
+/// (`[vocab, d]`, untied from the embedding table -
 /// `MoeTextConfig`'s real source config has `tie_word_embeddings: false`).
 pub fn lm_head_fwd(g: &Gpu, lm_head_w: &DeviceBuffer, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
     let out = g.storage((n * vocab) as u64);
@@ -364,7 +364,7 @@ pub fn lm_head_fwd(g: &Gpu, lm_head_w: &DeviceBuffer, hidden: &DeviceBuffer, n: 
     out
 }
 
-/// Kernel indices [`lm_head_fwd_i8`] dispatches — `matmul_i8` is a general
+/// Kernel indices [`lm_head_fwd_i8`] dispatches - `matmul_i8` is a general
 /// int8 GEMM (`matmul_i8_dyn.wgsl`, the SAME kernel [`model::moe::
 /// shared_expert_fwd_i8`]'s own dense linears already use), not an MoE-only
 /// primitive, so this is a fresh (non-MoE) int8 dispatch surface rather than
@@ -380,11 +380,11 @@ pub struct LmHeadIds8 {
 /// once, share across readers" concern the MoE path has), `lm_head_w` is
 /// ALREADY a packed [`model::moe::Lin8`] view (the checkpoint's real
 /// `lm_head.weight` is quantized on disk by `omni::import::should_quantize`
-/// like every other rank-2 `k%4==0` weight — a caller loads it via
+/// like every other rank-2 `k%4==0` weight - a caller loads it via
 /// `crate::int8_resident`'s `load_lin8` rather than dequantizing, unlike
 /// [`crate::int8_thinker_resident::load_mat`]'s current always-dequantize
 /// path). vocab is not required to be a multiple of 4 for the OUTPUT side
-/// (only `d`, the K dimension, needs to be — the packing constraint is on
+/// (only `d`, the K dimension, needs to be - the packing constraint is on
 /// the CONTRACTED dimension, matching every other int8 GEMM in this crate).
 pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
     let xq = g.storage((n * d / 4) as u64);

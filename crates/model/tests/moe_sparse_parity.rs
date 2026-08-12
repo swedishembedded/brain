@@ -92,7 +92,7 @@ fn sparse_matches_dense_oracle() {
         (0..e).map(|i| g.storage_init(&format!("down_w{i}"), &rng.vec_scaled((d * ff) as usize, 0.5))).collect();
 
     let gate = g.storage((m * e) as u64);
-    g.submit(&[], &[router_fwd(&g, &ids, &shape, &logits, &gate)]);
+    g.submit(&[], &[router_fwd(&g, &ids, &shape, &logits, &gate, true, 1.0)]);
 
     let scratch_gate_pre = g.storage((m * ff) as u64);
     let scratch_up = g.storage((m * ff) as u64);
@@ -131,5 +131,5 @@ fn sparse_matches_dense_oracle() {
     // A meaningful test, not a vacuous one: every row must actually have been
     // routed somewhere (router_gate always keeps exactly top_k > 0 experts
     // per row), so the accumulator cannot be all zero.
-    assert!(dense.iter().any(|&v| v.abs() > 1e-9), "oracle output is all-zero — the test shape routes nothing");
+    assert!(dense.iter().any(|&v| v.abs() > 1e-9), "oracle output is all-zero - the test shape routes nothing");
 }

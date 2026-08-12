@@ -6,7 +6,7 @@
 //! executable can train the model from scratch on the GPU.
 //!
 //! Entry point:
-//!   * `train(args)`    — generate the toy corpus, init weights, and run the
+//!   * `train(args)`    - generate the toy corpus, init weights, and run the
 //!     optimisation loop, then save weights in the inference engine's format.
 //!     Numerical correctness is gated by the finite-difference `brain-gradcheck`.
 //!
@@ -251,7 +251,7 @@ impl Trainer {
         Trainer::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
     }
 
-    /// Build on an existing device handle — see `Gpt::new_on`.
+    /// Build on an existing device handle - see `Gpt::new_on`.
     pub(crate) fn new_on(gpu: Gpu, cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Trainer {
         let c = cfg.clone();
         // Parameter weights/grads/Adam-moment buffers (all zero-initialised) live
@@ -404,7 +404,10 @@ impl Trainer {
             // moe
             s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n], n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
-            s.push(self.gpu.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k], n));
+            // norm=1, scale=1.0: `router_gate_train.wgsl`'s renormalised
+            // Switch/Mixtral gate -- this model's behaviour since it was
+            // written, now spelled rather than implied.
+            s.push(self.gpu.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k, 1, f(1.0)], n));
             for ei in 0..e as usize {
                 let ep = |name: &str| format!("blocks.{l}.moe.experts.{ei}.{name}");
                 s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_gate.weight")), &lb.gate_pre[ei]], &[n, d, ff], n * ff));
@@ -426,7 +429,7 @@ impl Trainer {
     }
 
     /// Run the (cached) backward pass: accumulate every parameter gradient
-    /// (does NOT zero them — the caller zeroes once per effective batch via
+    /// (does NOT zero them - the caller zeroes once per effective batch via
     /// [`Self::zero_grads`], matching the GPT/PID grad-accum contract that the
     /// generic trainer relies on).
     pub fn backward(&self) {
@@ -472,7 +475,7 @@ impl Trainer {
             }
             // Phase B: router gradient -> d_xn (init), grad_Wrouter
             s.push(self.gpu.step(EXPERT_COUNTS, &[&lb.gate, &self.fe], &[n, e, c.top_k], e));
-            s.push(self.gpu.step(ROUTER_BWD, &[&lb.router_logits, &lb.gate, &self.d_gate, &self.fe, &self.d_router_logits], &[n, e, c.top_k, 0, f(c.aux_coef), f(c.z_coef)], n));
+            s.push(self.gpu.step(ROUTER_BWD, &[&lb.router_logits, &lb.gate, &self.d_gate, &self.fe, &self.d_router_logits], &[n, e, c.top_k, 0, f(c.aux_coef), f(c.z_coef), 1, f(1.0)], n));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_router_logits, &lb.xn2, self.g(&pn("moe.router.weight"))], &[n, d, e], e * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_router_logits, self.w(&pn("moe.router.weight")), &self.d_xn], &[n, d, e, 0], n * d));
             // Phase C: per-expert SwiGLU backward, accumulate into d_xn
@@ -520,7 +523,7 @@ impl Trainer {
         s
     }
 
-    /// One AdamW step with MoE's fixed betas/eps and no grad clipping — the
+    /// One AdamW step with MoE's fixed betas/eps and no grad clipping - the
     /// signature the existing CLI / federated callers use. `t` is the
     /// (1-based) step index for bias correction. Delegates to the shared
     /// optimizer so the dispatch graph is cached across steps.
@@ -567,8 +570,8 @@ impl Trainer {
     /// Federated train-scope: freeze the shared backbone by zeroing the
     /// gradients of every parameter that is **not** part of expert `e` (call
     /// after [`Self::backward`]). Combined with `adamw_step(.., wd = 0.0, ..)`
-    /// this leaves all non-expert weights exactly unchanged — AdamW with a zero
-    /// gradient and no weight decay is a no-op — so a worker can train expert
+    /// this leaves all non-expert weights exactly unchanged - AdamW with a zero
+    /// gradient and no weight decay is a no-op - so a worker can train expert
     /// `e` against an immutable shared backbone, then return only its shard.
     pub fn freeze_grads_except_expert(&self, e: u32) {
         let names = self.param_names();
@@ -772,7 +775,7 @@ fn make_corpus(n: usize, vocab: u32, seed: u64) -> Vec<u32> {
     corpus_and_table(n, vocab, seed).0
 }
 
-/// A reset-free orbit of the same rule starting from (s0, s1) — used to test
+/// A reset-free orbit of the same rule starting from (s0, s1) - used to test
 /// generalisation to a never-seen trajectory.
 pub fn orbit(table: &[u32], vocab: u32, n: usize, s0: u32, s1: u32) -> Vec<u32> {
     let mut d = vec![s0 % vocab, s1 % vocab];

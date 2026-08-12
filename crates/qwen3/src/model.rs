@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3 dense decoder Transformer — forward + backprop as WGSL compute
+//! Qwen3 dense decoder Transformer - forward + backprop as WGSL compute
 //! dispatches, sharing the engine with the GPT/MoE/PID models (`gpu_core`,
 //! `paramstore`, `optim`, `kernels`).
 //!
@@ -37,7 +37,7 @@ use crate::config::QwenConfig;
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
 // ---- kernel indices (order matches PIPELINES) ----
-/// Plain (untiled) embedding gather — kept in PIPELINES at index 0 for stable
+/// Plain (untiled) embedding gather - kept in PIPELINES at index 0 for stable
 /// indexing; the forward uses the vocab-tiled `EMBED_TILE` instead.
 #[allow(dead_code)]
 const EMBED: usize = 0;
@@ -81,7 +81,7 @@ const MATMUL_DX_REG: usize = 33;
 const MATMUL_DW_REG: usize = 34;
 const CE_STATS: usize = 35;
 const CE_GRAD_STATS: usize = 36;
-// int8 (DP4A) inference path for the encoder linears — GPU only.
+// int8 (DP4A) inference path for the encoder linears - GPU only.
 const QUANT_PACK: usize = 37;
 const MATMUL_I8: usize = 38;
 const MAX_ABS_ROW: usize = 39;
@@ -108,12 +108,12 @@ const BIAS_GRAD: usize = 50;
 // Decode-regime int8 GEMV (single-barrier; the m=1 shape KV decode dispatches).
 const MATMUL_I8_GEMV: usize = 51;
 // Decode-regime fp32 kernels (A1/A2): workgroup-per-row rmsnorm and the
-// workgroup-per-column GEMV — the m=1 shapes KV decode is made of.
+// workgroup-per-column GEMV - the m=1 shapes KV decode is made of.
 const RMSNORM_ROWS: usize = 52;
 const MATMUL_GEMV: usize = 53;
 // Encoder right-padding key mask (FLUX.2 text-encoder parity).
 const GQA_SCORES_KMASK: usize = 54;
-// Workgroup-per-row softmax over the [B*H*T, T] score slab — the coalesced twin
+// Workgroup-per-row softmax over the [B*H*T, T] score slab - the coalesced twin
 // of `attn_softmax` (see the kmask attention below).
 const SOFTMAX_ROWS: usize = 55;
 // `matmul_reg2` with its shared-memory bank conflicts removed; bit-identical
@@ -193,7 +193,7 @@ const PIPELINES: &[(&str, &str)] = &[
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
 /// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg3` (128×128 tile, 256
-/// threads, ~4 TFLOP/s on a P40) wins from `m = 8` up — it bounds-guards its
+/// threads, ~4 TFLOP/s on a P40) wins from `m = 8` up - it bounds-guards its
 /// tile, so a short M costs only the idle rows, while the naive
 /// one-thread-per-output `matmul` collapses on a wide N. Same math either way
 /// (parity gated by `tests/backend_parity` + gradcheck), so this only changes
@@ -327,7 +327,7 @@ pub struct Qwen {
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
     // Additive per-key attention mask ([t] f32; 0 live / -3.4e38 excluded) and
-    // its arming flag — the padded-encoder path (`encode_hiddens_padded`).
+    // its arming flag - the padded-encoder path (`encode_hiddens_padded`).
     kmask: DeviceBuffer,
     kmask_on: Cell<bool>,
     /// The device runs workgroup-cooperative reductions (barriers). Selects the
@@ -374,12 +374,12 @@ pub struct Qwen {
     vcache: Vec<DeviceBuffer>,
     dec_pos: Cell<u32>,
     /// Int8 (DP4A) linears for inference. When present, the 7 per-layer linears
-    /// run in int8 (weights ~4× smaller — fits the fp32-encoder-too-big case on
+    /// run in int8 (weights ~4× smaller - fits the fp32-encoder-too-big case on
     /// one card) and are absent from the fp32 `ps`. None ⇒ all-fp32 path.
     q8: Option<crate::q8::Q8>,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
     /// a single token and `scores`/`probs` for `n_heads·ctx` (KV-cache decode
-    /// only — the KV cache is the only ctx-scaled allocation). The batched
+    /// only - the KV cache is the only ctx-scaled allocation). The batched
     /// forward/backward entry points assert against being called on such an
     /// instance instead of silently reading/writing past the smaller buffers.
     decode_only: bool,
@@ -388,7 +388,7 @@ pub struct Qwen {
 impl Qwen {
     /// Load a trainable model (weights + grad + AdamW moments) from a checkpoint.
     /// Streams the weights one tensor at a time off a mmap-backed
-    /// [`WeightReader`](checkpoint::weightio::WeightReader) — peak host ≈ one
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) - peak host ≈ one
     /// tensor of f32, never the whole-model `checkpoint::load` + `by_role("")`
     /// host copy. AdamW moments are device zero-init (not read from disk), so
     /// this is byte-identical to the former eager path.
@@ -401,14 +401,14 @@ impl Qwen {
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
-    /// grad/AdamW buffers), cutting device memory ~4× — essential for loading a
+    /// grad/AdamW buffers), cutting device memory ~4× - essential for loading a
     /// real 0.6B checkpoint for generation. Builds only the forward graph.
     pub fn load_inference(path: &str, b: u32, t: u32) -> Qwen {
         Self::load_inference_with(path, b, t, false)
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],
-    /// uploading one tensor at a time (peak host ≈ one tensor of f32) — never the
+    /// uploading one tensor at a time (peak host ≈ one tensor of f32) - never the
     /// `checkpoint::load` + `by_role("")` whole-model host copy. Numerically
     /// identical to [`Qwen::load_inference`]; used by the resident serve path.
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
@@ -422,12 +422,12 @@ impl Qwen {
     /// KV-cache decode only ([`Self::step`]/[`Self::prefill`]/[`Self::step_embed`])
     /// rather than the batched forward. Activations are sized for a single
     /// token (`n = 1`) instead of `b·t`, and `scores`/`probs` for `n_heads·ctx`
-    /// instead of `n_heads·ctx²` — the KV cache (`[ctx, kv_dim]` per layer) is
+    /// instead of `n_heads·ctx²` - the KV cache (`[ctx, kv_dim]` per layer) is
     /// the only allocation that scales with `ctx`. No backward buffers and no
     /// `logits`/`d_logits` buffer (the LM head is applied host-side; see
     /// `sample::generate_kv_stream`). Calling a batched forward/backward entry
     /// point on the result panics loudly rather than reading/writing past the
-    /// smaller buffers — use the KV-cache decode API instead.
+    /// smaller buffers - use the KV-cache decode API instead.
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
@@ -455,7 +455,7 @@ impl Qwen {
     /// Streaming inference load shared by [`Self::load_inference`] and
     /// [`Self::load_inference_i8`]: drive the builder straight off a mmap-backed
     /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
-    /// at a time — peak host ≈ one tensor of f32, never the whole-model
+    /// at a time - peak host ≈ one tensor of f32, never the whole-model
     /// `checkpoint::load` + `by_role("")` host copy on top of the device copy.
     /// The int8 tier reads + quantizes one linear at a time (the reader is passed
     /// to `Q8::build` as the [`TensorSource`](checkpoint::TensorSource)).
@@ -477,7 +477,7 @@ impl Qwen {
     /// roles (offload/LoRA/frozen) exactly as the whole-model path does.
     /// `shard.gpu_index` names the canonical physical card (device registry);
     /// `Shard::ANY_GPU` keeps the ambient selection.
-    /// Takes any `checkpoint::TensorSource` — the eager `&HashMap<String,
+    /// Takes any `checkpoint::TensorSource` - the eager `&HashMap<String,
     /// Vec<f32>>` every existing caller passes (coerces, unchanged), or a
     /// streaming mmap'd `WeightReader`/`RemapSource` pair, which never
     /// materializes the whole checkpoint on the host.
@@ -487,7 +487,7 @@ impl Qwen {
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
     /// Weights are ~4× smaller than fp32, so the whole Qwen3-4B encoder (~4.8 GB of
-    /// weights → ~9.5 GB resident) fits a single 24 GB card — where the fp32
+    /// weights → ~9.5 GB resident) fits a single 24 GB card - where the fp32
     /// encoder (~30 GB resident on non-ReBAR Pascal) does not. Frozen, no LoRA.
     /// See [`Self::new_shard`]'s doc: `init` may be any `TensorSource`.
     pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen {
@@ -514,7 +514,7 @@ impl Qwen {
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
         // In int8 mode the 7 per-layer linears live in `q8` (packed int8), NOT the
-        // fp32 store — filter them out so no fp32 copy is ever uploaded.
+        // fp32 store - filter them out so no fp32 copy is ever uploaded.
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(name, _)| !(i8 && crate::q8::Q8::is_i8_linear(name)))
@@ -559,7 +559,7 @@ impl Qwen {
         let offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>> = std::cell::RefCell::new(None);
 
         // Decode-only: activations at n=1 (one token) instead of b·t, and the
-        // score/prob extent at n_heads·ctx instead of n_heads·ctx² — the KV
+        // score/prob extent at n_heads·ctx instead of n_heads·ctx² - the KV
         // cache below is the only allocation left that scales with ctx.
         let n = if decode_only { 1u64 } else { (b * t) as u64 };
         let d = cfg.d_model as u64;
@@ -585,7 +585,7 @@ impl Qwen {
         // Residual stream: `res[i]` is live only at this shard's boundaries
         // (`start..=end`); non-boundary indices are size-1 dummies so the model's
         // absolute `res[l]`/`res[l+1]` indexing is preserved unchanged. For a
-        // whole shard every index is live — identical to the single-device path.
+        // whole shard every index is live - identical to the single-device path.
         let mut res = Vec::new();
         let mut dres = Vec::new();
         for i in 0..=cfg.n_layers as usize {
@@ -627,14 +627,14 @@ impl Qwen {
         let max_out = hq.max(ff).max(d).max(hkv);
 
         // Head-only buffers (final norm + lm_head + cross-entropy). Only the last
-        // pipeline stage carries them; on other stages they are size-1 dummies —
+        // pipeline stage carries them; on other stages they are size-1 dummies -
         // this is where sharding saves the most (`logits`/`d_logits` are
         // `n·vocab`, ~311 MB each at vocab 152k, block 512).
         let head = shard.head;
         let hd_v = |x: u64| if head { st(x) } else { st(1) };
         // Decode-only builds skip the CE-head buffers (the LM head is applied
         // host-side, see `sample::generate_kv_stream`) and all backward scratch
-        // (backward never runs — `train` is forced false), regardless of `head`.
+        // (backward never runs - `train` is forced false), regardless of `head`.
         let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
         let bwd = |x: u64| if decode_only { st(1) } else { st(x) };
 
@@ -670,7 +670,7 @@ impl Qwen {
         };
 
         // Incremental-decode KV cache: one [t, kv_dim] key/value buffer per layer.
-        // Only meaningful for a whole (single-device) model — `step` asserts that —
+        // Only meaningful for a whole (single-device) model - `step` asserts that -
         // so allocate for every layer regardless of `shard`.
         let mut kcache = Vec::with_capacity(cfg.n_layers as usize);
         let mut vcache = Vec::with_capacity(cfg.n_layers as usize);
@@ -748,7 +748,7 @@ impl Qwen {
         };
         // Decode-only builds never call the batched forward_steps (its dispatch
         // sizes assume the b·t-sized buffers this build deliberately doesn't
-        // have) — the KV-cache decode path builds its own tape per call
+        // have) - the KV-cache decode path builds its own tape per call
         // (`decode_submit`). `forward()`/`run_forward()` assert against being
         // called on a decode-only instance rather than relying on this being empty.
         m.fwd_steps = if decode_only { Vec::new() } else { m.forward_steps(m.b, m.t) };
@@ -759,7 +759,7 @@ impl Qwen {
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
         // `embed_tile.wgsl` (the batched forward's embedding gather) tile-gates
         // its own reads, so an out-of-vocab token here can't OOB-read the way
-        // decode_submit's single-token EMBED could — but it silently leaves
+        // decode_submit's single-token EMBED could - but it silently leaves
         // that position's embedding row at whatever the buffer previously held
         // (no tile ever claims it), which is a correctness bug, not a crash.
         // Same root cause as the decode-path segfault (a checkpoint/tokenizer
@@ -782,7 +782,7 @@ impl Qwen {
 
     /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
     /// parameters (LoRA base, inference) have none, so their weight-gradient
-    /// dispatches must be skipped — only the input-gradient (dX) path runs to
+    /// dispatches must be skipped - only the input-gradient (dX) path runs to
     /// keep backprop flowing to lower-layer adapters.
     fn trainable(&self, name: &str) -> bool {
         self.ps.grad.contains_key(name)
@@ -810,7 +810,7 @@ impl Qwen {
         }
     }
 
-    /// Kernel-index map for [`block::gqa_decode_step`] — the hoisted twin of
+    /// Kernel-index map for [`block::gqa_decode_step`] - the hoisted twin of
     /// this struct's own original inline KV-cache decode dispatch (`decode_steps`
     /// below), migrated onto `model::block` so `omni::thinker` (the primitive's
     /// second user) and this, its original owner, share one implementation
@@ -824,7 +824,7 @@ impl Qwen {
     /// warp's 32 loads are `dim` floats apart and each 32-byte sector fetched
     /// serves ONE useful float; `rmsnorm_rows` walks a row with 64 threads and
     /// is coalesced by construction. That penalty is per-access, not per-thread,
-    /// so it does not go away at prefill row counts — measured on the FLUX.2
+    /// so it does not go away at prefill row counts - measured on the FLUX.2
     /// text encoder (512 tokens, 28 layers, 112 dispatches): **72.0 -> 6.3 ms**.
     /// The reference kernel's epsilon is a hard-coded 1e-6, which is what the
     /// runtime-eps twin is handed here.
@@ -925,7 +925,7 @@ impl Qwen {
     fn proj_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         match self.lora_for(leaf) {
             Some((r, scale)) => {
-                // base: dx += d_out·W (frozen weight — no dW). d_out is NOT mutated
+                // base: dx += d_out·W (frozen weight - no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad, so the adapter scale is folded into the private scratch.
                 let (bk, bt) = dx_kernel_bw(m, k);
@@ -966,7 +966,7 @@ impl Qwen {
         assert!(
             !self.decode_only,
             "forward_steps: batched forward called on a decode-only-built Qwen \
-             (activations sized for n=1, no logits buffer) — use step/prefill/step_embed instead"
+             (activations sized for n=1, no logits buffer) - use step/prefill/step_embed instead"
         );
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -1106,10 +1106,10 @@ impl Qwen {
         }
         let last = c.n_layers as usize;
         s.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
-        // lm_head. When the whole vocab fits one tile (v0=0, cnt=v — the common
+        // lm_head. When the whole vocab fits one tile (v0=0, cnt=v - the common
         // case for a small vocab like the TTS Talker's 3072), it is a plain
         // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
-        // (`matmul_reg3`) instead of the naive column-tiled `matmul_tile` — the
+        // (`matmul_reg3`) instead of the naive column-tiled `matmul_tile` - the
         // Talker lm_head was ~50 ms (naive) vs ~2 ms (reg2). Only when the weight
         // genuinely exceeds a binding budget do we fall back to the tiled path.
         let head = c.head_weight();
@@ -1170,7 +1170,7 @@ impl Qwen {
         // dres[end] from the next stage and start straight at the layer loop)
         if self.shard.head {
             // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
-            // then the per-element gradient reads them — O(rows*vocab) instead of
+            // then the per-element gradient reads them - O(rows*vocab) instead of
             // the naive per-element softmax recompute's O(rows*vocab^2). At vocab
             // 151936 this is the difference between ~10 ms and ~56 s per backward.
             s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
@@ -1269,7 +1269,7 @@ impl Qwen {
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
         // GPU optimiser for `Trainable` params.
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
-        // Host (RAM-resident) optimiser for `Offload` params — built lazily on the
+        // Host (RAM-resident) optimiser for `Offload` params - built lazily on the
         // first step from the store's current weights.
         if !self.ps.offload.is_empty() {
             let mut slot = self.offload_opt.borrow_mut();
@@ -1320,7 +1320,7 @@ impl Qwen {
     /// with the image tokens written via [`Self::write_img_embeds`], and the
     /// backward routes their gradient to [`Self::read_d_img_embeds`] (zeroing them
     /// in dres[0] so `emb_bwd` never trains the placeholder token). Reallocates the
-    /// image buffers and rebuilds the fwd/bwd graphs — call once after construction
+    /// image buffers and rebuilds the fwd/bwd graphs - call once after construction
     /// (before the first forward). No effect on `tok.weight`/other params.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
         let sz = (n_rows * self.cfg.d_model) as u64;
@@ -1344,17 +1344,36 @@ impl Qwen {
         self.gpu.write(&self.img_embeds, bytemuck::cast_slice(data));
     }
 
-    /// Read the gradient of the spliced image embeddings after `backward` — feeds
+    /// Read the gradient of the spliced image embeddings after `backward` - feeds
     /// the vision connector/encoder backward.
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
         self.gpu.read(&self.d_img_embeds, self.img_numel())
+    }
+
+    /// The splice INPUT buffer itself, for a vision tower sharing THIS decoder's
+    /// [`Gpu`] - write into it with a `Step` and the embedding never leaves the
+    /// device. [`Self::write_img_embeds`] is the cross-device path (`qwenvl`
+    /// runs its tower on a second, possibly CPU-backed device and must round
+    /// trip through the host); this accessor is purely additive and changes
+    /// nothing about that. Valid only after [`Self::enable_mm_splice`] - before
+    /// that this is the 1-float placeholder the constructor allocates.
+    pub fn img_embeds_buf(&self) -> &DeviceBuffer {
+        &self.img_embeds
+    }
+
+    /// The splice GRADIENT buffer itself - the device-side counterpart of
+    /// [`Self::read_d_img_embeds`], so a same-device vision tower's backward can
+    /// consume it as an input buffer instead of re-uploading a host `Vec`.
+    /// Same validity rule as [`Self::img_embeds_buf`].
+    pub fn d_img_embeds_buf(&self) -> &DeviceBuffer {
+        &self.d_img_embeds
     }
 
     // ---- interleaved M-RoPE seam (Qwen3-VL) ----
 
     /// Switch q/k to the table-driven `rope2d` M-RoPE path (from the analytic
     /// rope_base). Allocates the `[b·t, head_dim/2]` cos/sin tables and rebuilds
-    /// the fwd/bwd graphs — call once after construction, then supply the tables
+    /// the fwd/bwd graphs - call once after construction, then supply the tables
     /// each batch via [`Self::write_mrope_tables`] (computed by
     /// `qwenvl::mrope::{get_rope_index, mrope_tables}`).
     pub fn enable_mrope(&mut self) {
@@ -1450,7 +1469,7 @@ impl Qwen {
     }
 
     /// The maximum sequence length this instance was sized for (the `t` it was
-    /// built/loaded with) — generation must keep its context within this.
+    /// built/loaded with) - generation must keep its context within this.
     pub fn ctx_len(&self) -> usize {
         self.t as usize
     }
@@ -1469,7 +1488,7 @@ impl Qwen {
     /// Hidden state (residual stream) at a given depth for a single sequence,
     /// row-major `[len·d_model]`. `layer` indexes the residual buffer: `res[0]`
     /// is the token embedding, `res[l]` (1..=n_layers) is the output of block
-    /// `l-1` (pre-final-norm). This is what diffusion text encoders consume —
+    /// `l-1` (pre-final-norm). This is what diffusion text encoders consume -
     /// Z-Image/FLUX.2 use the **penultimate** hidden state (transformers
     /// `hidden_states[-2]`), which is `res[n_layers-1]` (see [`Self::encode`]).
     ///
@@ -1487,7 +1506,7 @@ impl Qwen {
         self.gpu.read(&self.res[layer], (t_use * self.cfg.d_model) as usize)
     }
 
-    /// The **penultimate** hidden state (`res[n_layers-1]`, un-normed) — the
+    /// The **penultimate** hidden state (`res[n_layers-1]`, un-normed) - the
     /// caption features Z-Image and FLUX.2 feed to the DiT (diffusers
     /// `text_encoder(...).hidden_states[-2]`). Returns row-major `[len·d_model]`.
     pub fn encode(&self, tokens: &[u32]) -> Vec<f32> {
@@ -1499,7 +1518,7 @@ impl Qwen {
     /// queries with real outputs (they rope at their own positions and attend
     /// the content), but are **excluded as keys** for every query. Without
     /// this, pad-row features diverge wildly from the reference (the FLUX.2
-    /// text encoder feeds all 512 rows — pads included — to the DiT unmasked,
+    /// text encoder feeds all 512 rows - pads included - to the DiT unmasked,
     /// so parity requires the masked values).
     pub fn encode_hiddens_padded(
         &self,
@@ -1513,7 +1532,7 @@ impl Qwen {
         out
     }
 
-    /// [`Self::encode`] over a **right-padded** sequence — the penultimate
+    /// [`Self::encode`] over a **right-padded** sequence - the penultimate
     /// hidden with the same HF-`attention_mask` semantics as
     /// [`Self::encode_hiddens_padded`] (pads excluded as keys). What a
     /// fixed-`cap_len` caption encoder (Z-Image's resident pipeline) needs
@@ -1526,7 +1545,7 @@ impl Qwen {
     }
 
     /// Arm the per-key pad mask (`tokens[content_len..]` excluded as keys)
-    /// for the next forward(s) — public so a SPLIT encoder (two `Qwen`
+    /// for the next forward(s) - public so a SPLIT encoder (two `Qwen`
     /// shards run back to back, e.g. `zimage::pipeline::Encoder::Split`) can
     /// arm both halves around its manual `run_forward` sequence. Pair with
     /// [`Self::disarm_kmask`].
@@ -1540,14 +1559,14 @@ impl Qwen {
         self.kmask_on.set(true);
     }
 
-    /// Disarm the pad mask — see [`Self::arm_pad_kmask`].
+    /// Disarm the pad mask - see [`Self::arm_pad_kmask`].
     pub fn disarm_kmask(&self) {
         self.kmask_on.set(false);
     }
 
     /// Several hidden-state taps from **one** forward, each row-major
     /// `[len·d_model]` in the order requested. FLUX.2 Klein concatenates
-    /// `hidden_states[9|18|27]` per token — with [`Self::encode_hidden`] that
+    /// `hidden_states[9|18|27]` per token - with [`Self::encode_hidden`] that
     /// would be three full forwards; every `res[l]` buffer is live after a
     /// single pass, so this reads them all.
     pub fn encode_hiddens(&self, tokens: &[u32], layers: &[usize]) -> Vec<Vec<f32>> {
@@ -1589,7 +1608,7 @@ impl Qwen {
     /// so it runs on whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT).
     ///
     /// The token is embedded through the tied `tok.weight` table; apply the (tied)
-    /// head to the returned hidden to get logits — `logits[v] = tok.weight[v]·hidden`.
+    /// head to the returned hidden to get logits - `logits[v] = tok.weight[v]·hidden`.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         let pos = self.dec_pos.get();
         let hidden = self.decode_at(Some(token_id), pos, None, None);
@@ -1627,8 +1646,8 @@ impl Qwen {
     /// Prefill many positions with ONE readback: tokens and raw-embedding rows
     /// interleave freely, every position's K/V lands in the cache, and only
     /// the LAST hidden state is read back. During prefill the intermediate
-    /// hiddens are thrown away, so the per-step submit+fence+map round trip —
-    /// measured at the top of the caption profile — is pure waste.
+    /// hiddens are thrown away, so the per-step submit+fence+map round trip -
+    /// measured at the top of the caption profile - is pure waste.
     pub fn prefill(&self, inputs: &[PrefillInput<'_>]) -> Vec<f32> {
         assert!(!inputs.is_empty(), "prefill of nothing");
         for input in inputs {
@@ -1648,7 +1667,7 @@ impl Qwen {
         self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
     }
 
-    /// [`Self::step`] from a RAW embedding instead of a token id — the seam a
+    /// [`Self::step`] from a RAW embedding instead of a token id - the seam a
     /// vision-language front-end feeds image embeddings through: prefill walks
     /// text tokens via `step` and image rows via `step_embed`, and the KV cache
     /// never knows the difference. No residual splice needed on this path.
@@ -1699,7 +1718,7 @@ impl Qwen {
     /// submitting them.
     ///
     /// Split out of [`Self::decode_submit`] purely so the profiler can time the
-    /// decode tape per kernel kind — `gpu_core::profile` needs a step list, and
+    /// decode tape per kernel kind - `gpu_core::profile` needs a step list, and
     /// the decode tape is rebuilt per token rather than recorded once like
     /// `fwd_steps`, so there was nothing to hand it. Behaviour is unchanged:
     /// `decode_submit` records exactly this and submits it.
@@ -1709,7 +1728,7 @@ impl Qwen {
     /// (the analytic `rope_at` dispatch is untouched in that branch).
     /// `deepstack_row`: `Some(local_row)` when this step decodes image row
     /// `local_row` (0-based within the spliced image) on a checkpoint with
-    /// `enable_deepstack` on — applies that row's per-level residual add.
+    /// `enable_deepstack` on - applies that row's per-level residual add.
     /// `None` (every existing caller before this parameter existed, and
     /// every non-image-row step) is a no-op, bit-for-bit unchanged.
     pub fn decode_steps(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) -> Vec<Step> {
@@ -1721,7 +1740,7 @@ impl Qwen {
         // A token id the tokenizer produced but this checkpoint's embedding
         // table doesn't cover (a checkpoint/tokenizer vocab mismatch) used to
         // reach EMBED's `emb[tokens[t] * d_model + c]` gather unchecked and
-        // read arbitrarily far out of bounds of the embedding buffer — on the
+        // read arbitrarily far out of bounds of the embedding buffer - on the
         // CPU JIT (raw pointer arithmetic, no bounds checks: see wgsl-cpu's
         // "we synthesise our own bounds via the kernel's early-return mask"
         // doc comment, which only covers `idx`, never a value READ from a
@@ -1752,7 +1771,7 @@ impl Qwen {
         let decode_ids = Self::decode_ids();
         let g = &self.gpu;
         let w = |name: &str| self.ps.w(name);
-        // KV decode is m=1 by construction — the decode regime. Use the
+        // KV decode is m=1 by construction - the decode regime. Use the
         // workgroup-cooperative kernels (A1/A2: rmsnorm_rows, matmul_gemv)
         // wherever the device executes workgroup reductions; the per-element
         // reference kernels run ONE thread per row here (measured: rmsnorm was
@@ -1783,7 +1802,7 @@ impl Qwen {
             s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
         }
         // Int8 (m=1): quantize the input row once per distinct input, then the
-        // single-barrier packed GEMV — the exact decode-regime shape the
+        // single-barrier packed GEMV - the exact decode-regime shape the
         // serving engine measured (runs on the CPU JIT too, unlike the tiled
         // GEMM, so int8 KV decode is not GPU-only).
         let mm8 = |s: &mut Vec<Step>, q8: &crate::q8::Q8, lin: &crate::q8::Lin8, x: &DeviceBuffer, out: &DeviceBuffer, k: u32| {
@@ -1910,7 +1929,7 @@ impl Qwen {
         &self.gpu
     }
 
-    /// OFFLINE FLOP/OPS cost of the recorded batch forward — walks the step
+    /// OFFLINE FLOP/OPS cost of the recorded batch forward - walks the step
     /// list, executes nothing. Per this device/stage: a sharded instance
     /// reports only its own layers. The int8 path shows up as `int_ops`
     /// (`matmul_i8_*`), fp32 as `flops`; see `gpu_core::cost`.
@@ -1925,7 +1944,7 @@ impl Qwen {
 
     /// The forward dispatches of one batched pass, in submit order.
     ///
-    /// Exposed for the PROFILER (`qwen_bench`), not for driving — `forward()`
+    /// Exposed for the PROFILER (`qwen_bench`), not for driving - `forward()`
     /// owns the submit and the readback. `gpu_core::profile` needs the step
     /// list to build the per-kernel-kind table needed
     /// before anyone optimises, and until this existed there was no
@@ -2070,7 +2089,7 @@ mod tests {
 
     /// The streaming mmap load (`from_reader_inference`) uploads byte-identical
     /// device weights to the eager whole-model-host-map load (`Qwen::new` over
-    /// `by_role("")`) — proving equivalence, not merely that it compiles. Also
+    /// `by_role("")`) - proving equivalence, not merely that it compiles. Also
     /// pins both to the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
     #[test]
     fn streaming_load_matches_eager() {
@@ -2080,7 +2099,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let cfg_json = cfg.to_json();
         let init = crate::init::init_weights(&cfg, 5);
-        // Persist as safetensors — flat 1-D tensors (only the values matter here).
+        // Persist as safetensors - flat 1-D tensors (only the values matter here).
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
         let path = std::env::temp_dir().join(format!("qwen-stream-parity-{}.st", std::process::id()));
@@ -2100,7 +2119,7 @@ mod tests {
     }
 
     /// Writes `cfg`'s `init` to a temp `.st` file and opens a [`checkpoint::weightio::WeightReader`]
-    /// on it — the fixture [`streaming_load_matches_eager`] already established
+    /// on it - the fixture [`streaming_load_matches_eager`] already established
     /// for exercising the streaming (`from_reader_*`) constructors.
     fn write_reader_fixture(cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>, tag: &str) -> std::path::PathBuf {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
@@ -2110,7 +2129,7 @@ mod tests {
         path
     }
 
-    /// Read `n` elements from `buf`, or `None` if that panics (out of bounds) —
+    /// Read `n` elements from `buf`, or `None` if that panics (out of bounds) -
     /// lets a test prove a buffer's TRUE extent (not just that it's big enough)
     /// by bracketing a read that must succeed against one that must not.
     fn try_read(gpu: &Gpu, buf: &DeviceBuffer, n: usize) -> Option<Vec<f32>> {
@@ -2122,10 +2141,10 @@ mod tests {
     }
 
     /// [`Qwen::from_reader_decode`] must build activations at `n=1` and
-    /// `scores`/`probs` at `n_heads·ctx` (NOT `n_heads·ctx²`) — the KV cache is
+    /// `scores`/`probs` at `n_heads·ctx` (NOT `n_heads·ctx²`) - the KV cache is
     /// the only ctx-scaled allocation. For each buffer, reading exactly the
     /// decode-shaped extent succeeds while reading the old training-shaped
-    /// (`b·t` / `ctx²`) extent is out of bounds — proving the buffer genuinely
+    /// (`b·t` / `ctx²`) extent is out of bounds - proving the buffer genuinely
     /// IS the smaller size, not merely that it's big enough to under-read.
     #[test]
     fn from_reader_decode_sizes_activations_and_scores_for_decode_not_prefill() {
@@ -2200,10 +2219,10 @@ mod tests {
 
     /// REGRESSION (CPU-backend JIT dispatch segfault): a
     /// decode token id the checkpoint's embedding table doesn't cover (a
-    /// checkpoint/tokenizer vocab mismatch — e.g. a real BPE tokenizer's
+    /// checkpoint/tokenizer vocab mismatch - e.g. a real BPE tokenizer's
     /// `<|im_start|>`-class special token fed to a tiny synthetic checkpoint)
     /// used to reach `EMBED`'s unchecked `emb[tokens[t]*d_model+c]` gather and
-    /// read arbitrarily far out of bounds — 100% reproducible SIGSEGV on the
+    /// read arbitrarily far out of bounds - 100% reproducible SIGSEGV on the
     /// CPU JIT backend (no bounds checks on a value read FROM a buffer, only
     /// on the invocation index), silently wrong on GPU. Must now be a clean,
     /// catchable panic naming the offending id, on every backend.
@@ -2218,7 +2237,7 @@ mod tests {
         let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
         let dec = Qwen::from_reader_decode(&reader, 12);
 
-        // The real Qwen3 tokenizer's `<|im_start|>` id — exactly what a
+        // The real Qwen3 tokenizer's `<|im_start|>` id - exactly what a
         // checkpoint/tokenizer mismatch fed into the crash.
         let out_of_vocab = 151644u32;
         assert!(out_of_vocab as usize >= cfg.vocab as usize);
@@ -2242,7 +2261,7 @@ mod tests {
     /// batched-forward path (`set_batch` → `embed_tile.wgsl`): that kernel
     /// tile-gates its own reads so an out-of-vocab id can't OOB-read the way
     /// the single-token `EMBED` kernel could, but it silently leaves the
-    /// position's embedding row un-written (stale/garbage) — a correctness
+    /// position's embedding row un-written (stale/garbage) - a correctness
     /// bug, not a crash. Must also fail loudly instead.
     #[test]
     fn logits_all_rejects_a_token_id_outside_the_vocab() {
@@ -2262,7 +2281,7 @@ mod tests {
         assert!(msg.contains("151644") && msg.contains("vocab"), "panic message should name the id and 'vocab': {msg:?}");
     }
 
-    /// Every kernel this model can dispatch has a cost formula — pins the
+    /// Every kernel this model can dispatch has a cost formula - pins the
     /// FLOP/OPS accounting against silent drift when PIPELINES grows.
     #[test]
     fn pipelines_fully_costed() {
@@ -2445,7 +2464,7 @@ mod kv_tests {
     }
 
     /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute
-    /// (`logits_all`) for every prefix — the cache is algebraically exact, same
+    /// (`logits_all`) for every prefix - the cache is algebraically exact, same
     /// engine, same weights, so any difference is only attention reduction order.
     /// Runs on GPU and (with `BRAIN_DEVICE=cpu`) the wgsl-cpu JIT; both must pass.
     #[test]
@@ -2617,7 +2636,7 @@ mod kv_tests {
     }
 
     /// [`mrope_step_matches_full_recompute`], but for DeepStack too:
-    /// `decode_steps`'s `deepstack_row` parameter (this session's addition —
+    /// `decode_steps`'s `deepstack_row` parameter (this session's addition -
     /// before it existed, `qwenvl::Qwen3Vl::generate()` called
     /// `write_deepstack` into buffers the incremental path never read, a
     /// real silent bug, fixed by adding `deepstack_row`)
@@ -2730,7 +2749,7 @@ mod kv_tests {
     }
 
     /// Mutation-verify: a WRONG `deepstack_row` (off by one) must actually
-    /// change the output vs the correct one — proving
+    /// change the output vs the correct one - proving
     /// `deepstack_step_matches_full_recompute`'s tolerance isn't so loose it
     /// would pass even with the feature silently disabled/misindexed.
     #[test]
