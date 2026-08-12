@@ -32,12 +32,18 @@ backward pass.
 - [ ] A numeric/parity golden for the composed Thinker→Talker→Code2Wav speech
       pipeline — end-to-end validation currently only checks that the output
       is a real, non-silent waveform, not that it matches a reference
-- [ ] KV-cache decode for the int8 dual-GPU Thinker `generate()` path (it
-      currently recomputes the full forward pass on every step)
 - [ ] Multimodal input and speech output through the int8 dual-GPU resident
-      path — it currently serves Thinker text generation only; multimodal
-      input and `speak` still require the slower, non-sharded streaming
-      resident that reads straight from the HF checkpoint directory
+      path - it serves Thinker TEXT generation only (over the ordinary chat
+      contract); multimodal input and `speak` still require the slower,
+      non-sharded streaming resident that reads straight from the HF
+      checkpoint directory
+- [ ] A workgroup-tiled int8 MoE expert kernel (see the note below) - with
+      weights resident and decode KV-cached, the remaining ~2.3 s/token is
+      almost entirely those naive per-thread expert dispatches
+- [ ] `BRAIN_PROFILE`'s Vulkan kernel table silently skips any batch over
+      `MAX_TIMED_DISPATCHES` (8192), which a 48-layer 128-expert MoE forward
+      always exceeds - so on the int8 path the table covers only the head
+      matmul, and per-kernel attribution inside a layer is unavailable
 - [ ] OpenAI/Anthropic HTTP surfaces drop `image_url`/`input_audio` content
       parts instead of routing them to the model
 - [ ] `/v1/audio/speech` and `/v1/audio/transcriptions` HTTP endpoints

@@ -39,27 +39,45 @@
 //! multi-device-only model has no meaningful single-device footprint; see
 //! `crates/cli/src/resident_omni.rs::int8_thinker_multi_from_env`).
 //!
-//! Still out of scope, deliberately: no KV cache (each `generate()` step is a
-//! full recompute - see [`Int8ThinkerInstance::generate`]'s own doc for what a
-//! cached decode loop would need), and no tokenization (token ids in, token
-//! ids out) unless a caller wraps it.
+//! # Two request shapes, one action
+//!
+//! `generate` accepts EITHER a raw `ids` blob (token ids in, token ids out -
+//! the original contract, which the multi-GPU and executor tests drive) OR the
+//! ordinary chat request every other served text model takes (`messages` /
+//! `prompt`, text out). The chat shape is what makes this model reachable over
+//! `/v1/chat/completions`, `/v1/messages` and D-Bus the same way `brain/omni`
+//! is, rather than being a faster path nobody can call: `apiserve::catalog::
+//! api_caps` classifies a model chat-capable only from its manifest, so the
+//! declared spec is [`crate::caps::chat_generate_spec`] - the SAME builder
+//! `brain/omni`'s own `generate` uses, not a second copy of that param list.
+//!
+//! Tokenization needs vocab files, and a brain-native int8 checkpoint is a
+//! single `.safetensors` with no tokenizer sibling, so the directory to read
+//! them from is configured separately (`crates/cli/src/resident_omni.rs::
+//! int8_thinker_multi_from_env`). Without one the model still serves the raw
+//! `ids` contract and says so on a chat request, rather than failing to load.
+//!
+//! Still out of scope, deliberately: multimodal input and speech output - this
+//! serves Thinker TEXT generation only, and `brain/omni` remains the path with
+//! the audio/image/video splice and `speak`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use capability::{ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress};
+use capability::{last_user_text, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 use gpu_core::{DeviceBuffer, Gpu};
-use model::moe::Lin8;
 use model::shard::LayerBytes;
 use paramstore::upload::Uploader;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::config::MoeTextConfig;
-use crate::int8_resident::{expert_bytes, load_lin8, ExpertLin8, ThinkerInt8Store};
-use crate::thinker::{final_norm, layer_fwd, lm_head_fwd_i8, thinker_pipelines, LmHeadIds8, ThinkerLayerWeights};
+use crate::int8_resident::{expert_bytes, ThinkerInt8Store};
+use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, thinker_pipelines, ThinkerLayerCache, ThinkerLayerWeights};
 
 pub const MODEL: &str = "brain/omni-int8-thinker-multi";
 
@@ -334,15 +352,58 @@ pub struct Int8ThinkerInstance {
     reader: WeightReader,
     embed: EmbedTable,
     /// `thinker.norm.weight` and `thinker.lm_head.weight`, resident on the
-    /// LAST shard's `Gpu` — that is where [`Self::forward`]'s final hidden
-    /// state already ends up (its own host round-trip loop), so applying
-    /// the head there avoids one extra cross-device hop. `lm_head_w` is kept
-    /// in its checkpoint-native packed int8 form (`load_lin8`, no
-    /// dequantize-then-f32 round trip) and dispatched via
-    /// `thinker::lm_head_fwd_i8` -- the primitive already existed and was
-    /// parity-tested, this struct just wasn't calling it yet.
+    /// LAST shard's `Gpu`.
     final_norm_w: DeviceBuffer,
-    lm_head_w: ExpertLin8,
+    lm_head_w: DeviceBuffer,
+    /// The tokenizer backing the CHAT request shape, and the stop ids that go
+    /// with it. `None` when no tokenizer directory was configured or it could
+    /// not be read - the raw `ids` contract still works, so a missing
+    /// tokenizer degrades one request shape instead of failing the load.
+    tok: Option<(QwenBpe, Vec<u32>)>,
+}
+
+/// What one walk through the sharded stack does at each layer.
+enum Pass<'a> {
+    /// Batched causal forward over `n` positions, optionally bulk-filling the
+    /// KV cache (the prefill half of the decode loop, and the cacheless
+    /// `forward` action).
+    Batched { cache: Option<&'a Int8KvCache> },
+    /// One new token attending against `cache` at row `pos`.
+    Decode { cache: &'a Int8KvCache, pos: u32 },
+}
+
+/// Per-layer incremental-decode KV cache for the sharded int8 Thinker.
+///
+/// Each layer's cache is allocated on the SAME device as the layer that fills
+/// it, so it never crosses a card - the sharding here splits by layer RANGE and
+/// never splits a layer, which is exactly what makes that possible.
+///
+/// This is what turns `generate` from O(T²) into O(T): every step used to
+/// re-embed the whole ids-so-far window and re-run the full stack over it.
+/// Measured on the real 30B checkpoint at a 9-token prompt, that recompute was
+/// the dominant remaining cost once the weights stopped streaming.
+struct Int8KvCache {
+    /// Indexed by ABSOLUTE layer number, on that layer's own device.
+    layers: Vec<(DeviceBuffer, DeviceBuffer)>,
+    cap: u32,
+}
+
+impl Int8KvCache {
+    fn new(shards: &[DeviceShard], cfg: &MoeTextConfig, cap: u32) -> Int8KvCache {
+        let hkv = (cfg.n_kv_heads * cfg.head_dim) as u64;
+        let mut layers = Vec::with_capacity(cfg.n_layers as usize);
+        for l in 0..cfg.n_layers as usize {
+            // The shard that owns layer `l`; a plan always covers every layer,
+            // and the last shard is a safe home for a degenerate one.
+            let shard = shards.iter().find(|s| s.range.contains(&l)).unwrap_or_else(|| shards.last().expect("at least one shard"));
+            layers.push((shard.gpu.storage(cap as u64 * hkv), shard.gpu.storage(cap as u64 * hkv)));
+        }
+        Int8KvCache { layers, cap }
+    }
+
+    fn layer(&self, l: usize) -> ThinkerLayerCache<'_> {
+        ThinkerLayerCache { kcache: &self.layers[l].0, vcache: &self.layers[l].1 }
+    }
 }
 
 impl Int8ThinkerInstance {
@@ -355,31 +416,54 @@ impl Int8ThinkerInstance {
     /// norm/lm_head — this is the MoE-bearing-layers validation action, not
     /// a full generate()).
     pub fn forward(&self, x_host: &[f32], n: u32) -> Vec<f32> {
-        let d = self.cfg.hidden;
-        assert_eq!(x_host.len(), (n * d) as usize, "x must be [n, d]");
-
         // M-RoPE table: diagonal (plain text), same construction
         // thinker_decode.rs/thinker_int8_parity.rs use.
         let tokens: Vec<u32> = (0..n).collect();
         let positions = qwenvl::mrope::get_rope_index(&tokens, u32::MAX, &[]);
-        let section: [u32; 3] = [self.cfg.mrope_section[0], self.cfg.mrope_section[1], self.cfg.mrope_section[2]];
-        let (cos_tab, sin_tab) = qwenvl::mrope::mrope_tables(&positions, section, self.cfg.head_dim, self.cfg.rope_theta);
+        let (cos_tab, sin_tab) = self.mrope_tables(&positions);
+        self.run_shards(x_host, n, &cos_tab, &sin_tab, Pass::Batched { cache: None })
+    }
 
+    /// The M-RoPE cos/sin tables for `positions`, at this Thinker's section
+    /// split / head dim / theta.
+    fn mrope_tables(&self, positions: &[[u32; 3]]) -> (Vec<f32>, Vec<f32>) {
+        let section: [u32; 3] = [self.cfg.mrope_section[0], self.cfg.mrope_section[1], self.cfg.mrope_section[2]];
+        qwenvl::mrope::mrope_tables(positions, section, self.cfg.head_dim, self.cfg.rope_theta)
+    }
+
+    /// Every owned layer, in absolute layer order, across every device shard,
+    /// with a host round-trip handing the residual stream on at each boundary.
+    /// Returns the final hidden state `[n, d]`, host-resident.
+    ///
+    /// The one place the shard walk lives. [`Self::forward`], the prefill and
+    /// each decode step differ only in the [`Pass`] handed in, never in how the
+    /// stack is traversed - so cross-device handoff is written and reasoned
+    /// about once.
+    fn run_shards(&self, x_host: &[f32], n: u32, cos_tab: &[f32], sin_tab: &[f32], pass: Pass) -> Vec<f32> {
+        let d = self.cfg.hidden;
+        assert_eq!(x_host.len(), (n * d) as usize, "x must be [n, d]");
         let mut h_host = x_host.to_vec();
         for shard in &self.shards {
             if shard.range.is_empty() {
                 continue; // a capacity-driven plan may legitimately leave a stage empty
             }
             let gpu = &shard.gpu;
-            let cos = gpu.storage_init("cos", &cos_tab);
-            let sin = gpu.storage_init("sin", &sin_tab);
+            let cos = gpu.storage_init("cos", cos_tab);
+            let sin = gpu.storage_init("sin", sin_tab);
             let mut h = gpu.storage_init("h", &h_host);
             for l in shard.range.clone() {
                 let lb = &shard.layer_bufs[&l];
                 let w = weights(lb);
                 let experts8 = shard.store.layer(l);
-                let (out, ..) = layer_fwd(gpu, &self.cfg, &w, &h, &cos, &sin, n, None, Some(experts8));
-                h = out;
+                h = match &pass {
+                    Pass::Batched { cache } => {
+                        let lc = cache.map(|c| c.layer(l));
+                        layer_fwd(gpu, &self.cfg, &w, &h, &cos, &sin, n, lc.as_ref(), Some(experts8)).0
+                    }
+                    Pass::Decode { cache, pos } => {
+                        layer_decode_step(gpu, &self.cfg, &w, &cache.layer(l), &h, &cos, &sin, *pos, cache.cap, Some(experts8))
+                    }
+                };
             }
             // Host-mediated handoff to the next shard's device (a no-op
             // read+carry on the LAST shard -- still correct, just an extra
@@ -395,51 +479,103 @@ impl Int8ThinkerInstance {
     /// `eos_ids` are already token ids, and the return value is the
     /// GENERATED tokens only, prompt excluded).
     ///
-    /// Deliberately the simple O(T²) shape, not a KV-cache decode loop: each
-    /// step re-embeds the WHOLE ids-so-far window and calls [`Self::forward`]
-    /// again (a full recompute) rather than extending
-    /// `thinker::layer_decode_step`'s per-layer cache across device shards.
-    /// That is real, separable follow-up (`layer_decode_step` needs its own
-    /// `ThinkerLayerCache` per owned layer, and per this module's
-    /// layer-RANGE-never-expert-split sharding, each layer's cache would live
-    /// entirely on the ONE shard that owns that layer - not a cross-device
-    /// complication, just unbuilt).
+    /// KV-cached: the prompt is prefilled ONCE into a per-layer cache sized
+    /// `prompt + max_new_tokens`, and each subsequent token is a single-row
+    /// decode step against it - the same shape `crate::generate`'s bf16 path
+    /// uses, and the reason `thinker::layer_decode_step` already takes the
+    /// `int8_experts` argument. Each layer's cache lives on the device that
+    /// owns that layer ([`Int8KvCache`]), so nothing crosses a card.
     pub fn generate(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
         let d = self.cfg.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
-        let idx = |name: &str| last.gpu.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
-        let lm_head_ids8 = LmHeadIds8 { matmul_i8: idx("matmul_i8_dyn"), quant: [idx("max_abs_row"), idx("quant_pack")] };
 
-        let mut ids: Vec<u32> = prompt_ids.to_vec();
         let mut out = Vec::with_capacity(max_new_tokens as usize);
         if prompt_ids.is_empty() || max_new_tokens == 0 {
             return out;
         }
 
+        let n0 = prompt_ids.len() as u32;
+        let cache = Int8KvCache::new(&self.shards, &self.cfg, n0 + max_new_tokens);
+
+        // Prefill: the whole prompt through the stack once, filling the cache.
+        let positions = qwenvl::mrope::get_rope_index(prompt_ids, u32::MAX, &[]);
+        let (cos_tab, sin_tab) = self.mrope_tables(&positions);
+        let mut x_host = Vec::with_capacity(prompt_ids.len() * d);
+        for &t in prompt_ids {
+            x_host.extend_from_slice(&self.embed.row(&self.reader, t));
+        }
+        let hidden = self.run_shards(&x_host, n0, &cos_tab, &sin_tab, Pass::Batched { cache: Some(&cache) });
+        let mut next = self.head_argmax(last, &hidden[(n0 as usize - 1) * d..n0 as usize * d]);
+
+        // New tokens are always plain text: continue the prompt's last
+        // position diagonally, +1 on every axis per step.
+        let mut mrope_pos = positions[positions.len() - 1].map(|p| p + 1);
+        let mut cache_row = n0;
         for _ in 0..max_new_tokens {
-            let n = ids.len() as u32;
-            let mut x_host = Vec::with_capacity(ids.len() * d);
-            for &t in &ids {
-                x_host.extend_from_slice(&self.embed.row(&self.reader, t));
-            }
-            let hidden = self.forward(&x_host, n);
-            let last_row = &hidden[(n as usize - 1) * d..n as usize * d];
-
-            let gpu = &last.gpu;
-            let h1 = gpu.storage_init("h1", last_row);
-            let normed = final_norm(gpu, &self.cfg, &self.final_norm_w, &h1, 1);
-            let lm_head_w = Lin8 { wq: &self.lm_head_w.packed, sw: &self.lm_head_w.scale };
-            let logits = lm_head_fwd_i8(gpu, &lm_head_ids8, lm_head_w, &normed, 1, self.cfg.hidden, self.cfg.vocab);
-            let logits_host = gpu.read(&logits, self.cfg.vocab as usize);
-            let next = argmax(&logits_host);
-
             if eos_ids.contains(&next) {
                 break;
             }
-            ids.push(next);
             out.push(next);
+            if out.len() as u32 == max_new_tokens {
+                break;
+            }
+            let (cos_tab, sin_tab) = self.mrope_tables(&[mrope_pos]);
+            let x_row = self.embed.row(&self.reader, next);
+            let hidden = self.run_shards(&x_row, 1, &cos_tab, &sin_tab, Pass::Decode { cache: &cache, pos: cache_row });
+            next = self.head_argmax(last, &hidden);
+            cache_row += 1;
+            mrope_pos = mrope_pos.map(|p| p + 1);
         }
         out
+    }
+
+    /// Final norm + `lm_head` over ONE hidden row, on the shard that carries
+    /// the head, and the argmax of the resulting logits.
+    fn head_argmax(&self, last: &DeviceShard, row: &[f32]) -> u32 {
+        let gpu = &last.gpu;
+        let h1 = gpu.storage_init("h1", row);
+        let normed = final_norm(gpu, &self.cfg, &self.final_norm_w, &h1, 1);
+        let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.hidden, self.cfg.vocab);
+        argmax(&gpu.read(&logits, self.cfg.vocab as usize))
+    }
+}
+
+impl Int8ThinkerInstance {
+    /// The chat request shape: `messages`/`prompt` in, generated `text` out.
+    ///
+    /// Deliberately the same three steps `omni::caps::OmniInner::generate`
+    /// takes - `last_user_text` (the shared messages-array extraction, not a
+    /// second parser), `encode`, greedy generate, `decode` - so the two models
+    /// answer an identical request the same way and differ only in how the
+    /// weights are stored and placed.
+    fn generate_chat(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let Some((tok, eos_ids)) = &self.tok else {
+            return Err(format!(
+                "{MODEL}: no tokenizer configured, so this model serves only the raw token-id contract \
+                 (a 'generate' call with an 'ids' blob). Point BRAIN_OMNI_INT8_TOKENIZER_DIR (or \
+                 BRAIN_OMNI_HF_DIR) at a directory holding tokenizer.json, or vocab.json + merges.txt."
+            ));
+        };
+        let prompt = last_user_text(inv);
+        if prompt.trim().is_empty() {
+            return Err(format!("{MODEL} generate: empty prompt (need 'messages' with a user turn, or 'prompt')"));
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+        let prompt_ids = tok.encode(&prompt);
+
+        progress(Progress::step(0, max_new, "generating"));
+        let t0 = std::time::Instant::now();
+        let new_ids = self.generate(&prompt_ids, max_new, eos_ids);
+        gpu_core::profile::stage_time("omni-int8 generate", t0);
+        for shard in &self.shards {
+            shard.gpu.dump_profile();
+        }
+        let text = tok.decode(&new_ids);
+        progress(Progress::step(max_new, max_new, text.clone()));
+        Ok(Outcome::new()
+            .set("text", serde_json::json!(text))
+            .set("tokens", serde_json::json!(new_ids))
+            .blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
 }
 
@@ -452,12 +588,20 @@ impl Instance for Int8ThinkerInstance {
     /// output blob `hidden` (same shape) — internal/validation action, not
     /// real generation, see this module's own doc.
     ///
-    /// `generate`: input blob `ids` (raw LE `u32` token ids), meta
-    /// `{"max_new_tokens": u32, "eos_ids": [u32]}`; output blob `ids` (raw
-    /// LE `u32`, the GENERATED tokens only, prompt excluded — matches
-    /// [`Self::generate`]'s own contract).
+    /// `generate`, in either of the two shapes this module's doc describes:
+    ///
+    /// * **raw** - input blob `ids` (raw LE `u32` token ids), meta
+    ///   `{"max_new_tokens": u32, "eos_ids": [u32]}`; output blob `ids` (raw
+    ///   LE `u32`, the GENERATED tokens only, prompt excluded - matches
+    ///   [`Self::generate`]'s own contract).
+    /// * **chat** - no `ids` blob: `messages`/`prompt` in, `max_new` tokens,
+    ///   `text` out, exactly like `brain/omni`. Requires a tokenizer.
+    ///
+    /// The `ids` blob is what selects between them, so an existing raw caller
+    /// is unaffected by the chat shape existing.
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
+            "generate" if inv.get_blob("ids").is_none() => self.generate_chat(inv, _progress),
             "forward" => {
                 let blob = inv.get_blob("x").ok_or_else(|| format!("{MODEL}: missing 'x' blob"))?;
                 let n = blob.meta.get("n").and_then(|v| v.as_u64()).ok_or_else(|| format!("{MODEL}: 'x' blob missing meta.n"))? as u32;
@@ -522,13 +666,27 @@ pub struct Int8ThinkerResident {
     /// must never panic there (a panic on the dispatcher thread takes every
     /// OTHER model on the server down with it, not just this one).
     plan: OnceLock<Plan>,
+    /// Directory holding `tokenizer.json` (or `vocab.json` + `merges.txt`) for
+    /// the chat request shape. Separate from `checkpoint_path` because a
+    /// brain-native int8 checkpoint is a single file with no tokenizer
+    /// sibling. `None` ⇒ raw token-ids contract only.
+    tokenizer_dir: Option<String>,
 }
 
 impl Int8ThinkerResident {
     /// `devices` is `(device, usable bytes)` - see the field's own doc for
-    /// why the capacity travels with the identity.
+    /// why the capacity travels with the identity. No tokenizer: the raw
+    /// token-ids contract only; see [`Self::with_tokenizer_dir`].
     pub fn new(checkpoint_path: String, cfg: MoeTextConfig, devices: Vec<(Device, u64)>) -> Int8ThinkerResident {
-        Int8ThinkerResident { checkpoint_path, cfg, devices, plan: OnceLock::new() }
+        Int8ThinkerResident { checkpoint_path, cfg, devices, plan: OnceLock::new(), tokenizer_dir: None }
+    }
+
+    /// Read the tokenizer for the CHAT request shape from `dir`
+    /// (`tokenizer.json`, or `vocab.json` + `merges.txt`). Without it this
+    /// model still loads and still serves raw token ids.
+    pub fn with_tokenizer_dir(mut self, dir: Option<String>) -> Int8ThinkerResident {
+        self.tokenizer_dir = dir;
+        self
     }
 
     /// Total device bytes this checkpoint needs, whatever the split - the sum
@@ -617,10 +775,18 @@ impl ResidentModel for Int8ThinkerResident {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             MODEL,
-            "A layer-sharded, int8-MoE-expert Thinker spanning as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard), streamed onto each card with bounded host memory -- no tokenization (token ids in, token ids out) and no KV cache (each generate() step is a full recompute; see this module's own doc for why and what a follow-up KV-cache decode loop would need).",
+            "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/omni (text only -- no audio/image/video input and no speak), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache.",
             vec![
                 ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob"),
-                ActionSpec::new("generate", "greedy generation: token ids in (meta max_new_tokens/eos_ids), generated token ids out"),
+                // The SAME builder brain/omni's generate uses -- what makes
+                // this model reachable over /v1/chat/completions and
+                // /v1/messages rather than D-Bus-only. Adding the raw `ids`
+                // blob keeps the original token-ids contract advertised too.
+                crate::caps::chat_generate_spec(
+                    "Qwen3-Omni Thinker (int8, GPU-resident): greedy text completion. Also accepts the raw contract -- an 'ids' blob of LE u32 token ids with meta max_new_tokens/eos_ids, answered with an 'ids' blob.",
+                )
+                .input(BlobSpec::new("ids", Media::Bytes, "optional raw prompt token ids (LE u32), meta {max_new_tokens, eos_ids}; when present it replaces messages/prompt and the reply is an 'ids' blob"))
+                .output(BlobSpec::new("ids", Media::Bytes, "generated token ids (LE u32), prompt excluded -- only for a request that supplied the 'ids' blob")),
             ],
         )
     }
@@ -676,12 +842,25 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
         let last = shards.last().ok_or_else(|| format!("{MODEL}: plan has zero stages"))?;
         let mut up = Uploader::new(&last.gpu);
         let final_norm_w = load_vec(&mut up, &reader, "thinker.norm.weight");
-        let lm_head_w = load_lin8(&mut up, &reader, "thinker.lm_head.weight");
+        let lm_head_w = load_mat(&mut up, &reader, "thinker.lm_head.weight");
 
         let embed = EmbedTable::open(&reader)?;
         if embed.hidden() != self.cfg.hidden as usize {
             return Err(format!("{MODEL}: {EMBED_TENSOR} is [_, {}] but the config says hidden={}", embed.hidden(), self.cfg.hidden));
         }
-        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w }))
+        // A tokenizer that will not load is reported and dropped, not fatal:
+        // it costs one request shape, and failing the whole activation over it
+        // would take away the raw contract that does work.
+        let tok = self.tokenizer_dir.as_ref().and_then(|dir| match QwenBpe::from_dir(dir) {
+            Ok(t) => {
+                let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].into_iter().filter_map(|s| t.special_id(s)).collect();
+                Some((t, eos))
+            }
+            Err(e) => {
+                eprintln!("{MODEL}: cannot read a tokenizer from '{dir}': {e} -- serving the raw token-id contract only");
+                None
+            }
+        });
+        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok }))
     }
 }

@@ -322,6 +322,25 @@ impl PassProfile {
     }
 }
 
+/// Whether `BRAIN_PROFILE` asks for profiling output - see
+/// [`backend_api::profile_enabled`], which every backend shares.
+pub use backend_api::profile_enabled as enabled;
+
+/// Wall time of a host-side STAGE to stderr under `BRAIN_PROFILE` - the coarse
+/// timeline above the per-kernel tables.
+///
+/// Device timestamps ([`crate::Gpu::kernel_times`]) attribute time BETWEEN
+/// kernels and nothing else; a serving path whose cost is checkpoint I/O, host
+/// dequantization or a cross-device residual hop spends that time where no
+/// kernel is running, so a kernel table alone reports a tiny total and silently
+/// omits the dominant term. These two views are complementary and neither
+/// substitutes for the other.
+pub fn stage_time(name: &str, since: Instant) {
+    if enabled() {
+        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
 /// Time one submit of `steps`, best of `reps`.
 ///
 /// Every timed region is `poll_wait`-bracketed. This is not defensive style: on

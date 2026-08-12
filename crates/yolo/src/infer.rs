@@ -171,7 +171,7 @@ impl Yolo {
         let size = self.cfg.input;
         let n = images.len();
         assert_eq!(n, self.batch() as usize, "detect_batch expects exactly model batch images");
-        let prof = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let prof = gpu_core::profile::enabled();
         let t_start = std::time::Instant::now();
 
         // 1. letterbox each image into the model's CHW input; stack to [N,3,H,W].

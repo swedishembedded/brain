@@ -138,6 +138,43 @@ fn probe_storage(gpu: &Gpu, label: &'static str, mib: u64, upload: Upload) -> Pr
     Probe { label, logical_mib: mib, landed_on: dominant_delta(&before, &after) }
 }
 
+/// Allocate a buffer, drop it, and report the VRAM still held afterwards, in
+/// MiB - the question "does dropping a device buffer actually give the memory
+/// back?", which is separate from how much a live buffer costs.
+///
+/// It is asked because on the native Vulkan backend the answer used to be NO:
+/// its buffer type had no `Drop`, so every buffer any model ever allocated
+/// stayed on the card until the whole device was destroyed. That is invisible
+/// to a resident model (its weights live forever anyway) and fatal to anything
+/// with a working SET - `omni`'s bf16 Thinker drops each streamed layer's
+/// ~2.4 GiB before loading the next, and instead accumulated all of them until
+/// a 24 GB card reported `ERROR_OUT_OF_DEVICE_MEMORY` mid-request.
+///
+/// `reps` allocations are made and dropped in sequence, so a backend that
+/// frees nothing shows `reps x mib` held rather than one buffer's worth -
+/// which also distinguishes a real leak from allocator retention of a single
+/// block for reuse.
+fn probe_drop_releases(gpu: &Gpu, label: &'static str, mib: u64, reps: usize) -> Probe {
+    settle();
+    let before = nvidia_smi_all_used_mib();
+    let n = (mib * 1024 * 1024 / 4) as usize;
+    for _ in 0..reps {
+        let b = gpu.storage(n as u64);
+        gpu.write_f32(&b, &vec![0.5f32; n]);
+        gpu.flush();
+        gpu.poll_wait();
+        drop(b);
+        // A backend that defers destruction to a safe point needs one call
+        // past the drop to reach it; production loops hit this via their next
+        // dispatch or readback.
+        gpu.flush();
+    }
+    gpu.poll_wait();
+    settle();
+    let after = nvidia_smi_all_used_mib();
+    Probe { label, logical_mib: mib, landed_on: dominant_delta(&before, &after) }
+}
+
 fn print_row(p: &Probe) {
     match p.landed_on {
         Some((idx, delta)) => {
@@ -185,7 +222,13 @@ fn measure_storage_buffer_resident_overhead() {
     drop(gpu);
     settle();
     match Gpu::try_new_vulkan(KERNELS) {
-        Ok(vk_gpu) => rows.push(probe_storage(&vk_gpu, "native-vulkan-1024mib", 1024, Upload::Init)),
+        Ok(vk_gpu) => {
+            rows.push(probe_storage(&vk_gpu, "native-vulkan-1024mib", 1024, Upload::Init));
+            // 6. Does dropping give it back? Four 1 GiB buffers allocated and
+            //    dropped one at a time: ~0 MiB held if Drop frees, ~4096 if
+            //    nothing is ever released.
+            rows.push(probe_drop_releases(&vk_gpu, "native-vulkan-drop-x4", 1024, 4));
+        }
         Err(e) => eprintln!("skip native-vulkan probe: {e}"),
     }
 
@@ -215,5 +258,17 @@ fn measure_storage_buffer_resident_overhead() {
     }
     if let (Some(a), Some(b)) = (get("wgpu-1024mib"), get("native-vulkan-1024mib")) {
         eprintln!("backend fix:          wgpu={a:.2}x native-vulkan={b:.2}x (delta {:.2}x)  <-- the answer", a - b);
+    }
+    // Unlike the ratios above (a diagnostic a human reads), this one IS a
+    // gate: "a dropped buffer frees" is a correctness property, not a
+    // measurement. 4 GiB allocated and dropped must not still be held.
+    if let Some(held) = rows.iter().find(|p| p.label == "native-vulkan-drop-x4").and_then(|p| p.landed_on) {
+        let (idx, delta) = held;
+        eprintln!("drop releases:        gpu{idx} still holds {delta} MiB after 4x1024 MiB allocated and dropped");
+        assert!(
+            delta < 1024,
+            "native Vulkan backend held {delta} MiB on gpu{idx} after allocating and dropping 4x1024 MiB -- \
+             dropped buffers are not being freed, which is what walks a streaming model to OOM"
+        );
     }
 }

@@ -37,8 +37,13 @@ nothing stays on the GPU between calls. It is correct and slow.
 The **GPU-resident** path is a second, separately-gated model,
 `brain/omni-int8-thinker-multi`. Its weights live in VRAM across calls,
 layer-sharded across however many GPUs their real per-layer byte cost needs.
+It takes the same chat request as `brain/omni` (text only - no audio/image/
+video and no `speak`), and on two 24 GB P40s it is about **25x faster per
+token**: measured on the real checkpoint, 2.3 s/token against 57.6 s/token for
+the streaming path above, on the same prompt with the same output.
+
 It wants a brain-native int8 checkpoint, which is not the format you
-downloaded - convert once:
+downloaded - convert once (~8 minutes, 66 GB in, 33.6 GB out):
 
 ```bash
 brain omni import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
@@ -51,8 +56,16 @@ every rank-2 weight to int8. Then serve it:
 
 ```bash
 BRAIN_OMNI_INT8_CHECKPOINT=/path/to/omni-int8.safetensors \
-  brain serve --dbus --device vulkan
+BRAIN_OMNI_INT8_TOKENIZER_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+  brain serve --openai --dbus --device vulkan
 ```
+
+An int8 checkpoint is a single `.safetensors` and carries no tokenizer, so
+`BRAIN_OMNI_INT8_TOKENIZER_DIR` says where to read `tokenizer.json` (or
+`vocab.json` + `merges.txt`) from - normally the HF directory you converted
+from. It defaults to the checkpoint's own directory when that holds tokenizer
+files, then to `BRAIN_OMNI_HF_DIR`. Without any of them the model still loads
+and still serves raw token ids, but it is not on the chat endpoints.
 
 How the sharding decides itself:
 
@@ -82,11 +95,12 @@ Two limits worth knowing before you point it at real weights:
   (`crates/gpu-core/tests/vram_overhead.rs`). brain's own Vulkan backend
   measures a clean 1.00x. At the real Thinker shape the difference decides
   whether the model fits two 24 GB cards at all.
-- **This path is token-ids-in/token-ids-out and Thinker-only.** It is not on
-  `/v1/chat/completions` - `apiserve`'s chat filter requires a streaming
-  `generate` with `messages` and a text output, and this model declares raw
-  blob actions instead. It has no tokenizer, no multimodal splice and no
-  `speak`. Use `brain/omni` for the chat/multimodal surface.
+- **This path is Thinker text only.** It has no multimodal splice and no
+  `speak`, so an image, an audio clip or a spoken reply still needs
+  `brain/omni`. It IS on `/v1/chat/completions`, `/v1/messages` and D-Bus with
+  the same `messages`/`prompt` contract, and it additionally accepts a raw
+  `ids` blob (LE `u32` token ids, meta `max_new_tokens`/`eos_ids`) for callers
+  that tokenize themselves.
 
 ## Running it
 
@@ -155,9 +169,11 @@ speech, image and video input over both the D-Bus and HTTP transports.
   context).
 - On `brain/omni`, weights stream from the checkpoint per generated token
   rather than living resident, so throughput is validation-tier, not
-  production-grade. The GPU-resident alternative is
-  `brain/omni-int8-thinker-multi` (see "GPU residency" above), which trades
-  the chat/multimodal surface for weights that stay on the cards.
+  production-grade - measured on two P40s, 89% of a request is re-reading the
+  37 of 48 layers that do not fit (343 GiB per 4 tokens), against 2% in
+  kernels. The GPU-resident alternative is `brain/omni-int8-thinker-multi`
+  (see "GPU residency" above), which keeps the chat surface and trades only
+  the multimodal/`speak` half for weights that stay on the cards.
 - Only `Qwen3-Omni-30B-A3B-Instruct` is supported. The `-Thinking` and
   `-Captioner` variants have no Talker (speech-output) component and are out
   of scope for this model.

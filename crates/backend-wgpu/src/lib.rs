@@ -471,7 +471,7 @@ impl DeviceShared {
                     .features()
                     .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
                 on: std::sync::atomic::AtomicBool::new(
-                    std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false),
+                    backend_api::profile_enabled(),
                 ),
             })
         } else {
@@ -791,7 +791,7 @@ impl WgpuBackend {
         // and the NVIDIA driver's worker threads segfault under many concurrent
         // pipeline-set compilations/teardowns on one device.
         let _guard = init_lock();
-        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let profile_on = backend_api::profile_enabled();
         #[cfg(not(target_arch = "wasm32"))]
         let want_ts = self.shared.gpu_profile.is_some();
         #[cfg(target_arch = "wasm32")]
@@ -944,7 +944,7 @@ impl WgpuBackend {
         // and adapter-gated, so the default request stays feature-empty (the
         // portability invariant) and profiling degrades to op counts where the
         // feature is absent (WebGPU, old drivers).
-        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let profile_on = backend_api::profile_enabled();
         // Timestamps are requested whenever the adapter has them, not only under
         // BRAIN_PROFILE: `Backend::set_kernel_timing` lets a profiler turn
         // per-kernel DEVICE timing on at runtime, and it must not require the
@@ -1720,7 +1720,7 @@ struct WeakWgpu(std::sync::Weak<DeviceShared>);
 impl backend_api::WeakBackend for WeakWgpu {
     fn upgrade(&self) -> Option<Box<dyn Backend>> {
         let shared = self.0.upgrade()?;
-        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let profile_on = backend_api::profile_enabled();
         Some(Box::new(WgpuBackend::from_shared(shared, profile_on)))
     }
 }

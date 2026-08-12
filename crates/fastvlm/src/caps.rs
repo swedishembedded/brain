@@ -299,12 +299,10 @@ fn load_decode(dir: &str, precision: &str) -> Result<DecodeStage, String> {
 }
 
 /// Stage wall time to stderr when `BRAIN_PROFILE` is set — the resident
-/// provider's coarse timeline above the per-kernel tables.
-fn stage_time(name: &str, since: std::time::Instant) {
-    if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
-        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
-    }
-}
+/// provider's coarse timeline above the per-kernel tables. Hoisted to
+/// `gpu_core::profile::stage_time` once a second resident (`omni`) needed the
+/// same line.
+use gpu_core::profile::stage_time;
 
 /// `image_aspect_ratio: "pad"`: letterbox to square with the 0.5 grey fill the
 /// HF "pad" processor uses (0.5 grey in [0,1]), then bilinear-resize to `side`,

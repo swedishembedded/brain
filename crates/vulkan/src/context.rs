@@ -139,6 +139,16 @@ pub struct VkContext {
     /// Reusable host-visible staging buffer for device-local up/downloads (grown
     /// on demand; transfers are fence-serialized so a single buffer suffices).
     staging: std::sync::Mutex<Option<VkBuffer>>,
+    /// Buffers whose Rust owner has dropped, waiting for a moment the device is
+    /// provably done with them - see [`Self::bury`] / [`Self::reclaim_dead`].
+    dead: std::sync::Mutex<Vec<VkBuffer>>,
+    /// Dispatches recorded against THIS DEVICE by any backend handle and not
+    /// yet submitted. Device-wide rather than per-handle because
+    /// `Backend::share`/`new_like` hand out sibling handles with their own
+    /// command streams, and a buffer dropped by one of them may still be named
+    /// by a dispatch another has recorded - so "is anything recorded anywhere"
+    /// is the question a safe reclaim has to answer.
+    pending_steps: std::sync::atomic::AtomicU64,
     /// Total queue submissions issued through this context (each is a blocking
     /// submit + fence wait). Perf observability: inference must keep this O(1)
     /// per frame, not O(dispatches) — see `backend-vulkan/tests/perf_contract.rs`.
@@ -470,6 +480,8 @@ impl VkContext {
             prec,
             mem_props,
             staging: std::sync::Mutex::new(None),
+            dead: std::sync::Mutex::new(Vec::new()),
+            pending_steps: std::sync::atomic::AtomicU64::new(0),
             submits: std::sync::atomic::AtomicU64::new(0),
             queue_lock: std::sync::Mutex::new(()),
         })
@@ -827,6 +839,50 @@ impl VkContext {
             self.device.free_memory(buf.memory, None);
         }
     }
+
+    /// Hand a dropped buffer over to be destroyed later.
+    ///
+    /// Deferred rather than immediate because a caller's recorded-but-not-yet-
+    /// submitted dispatch may still name this buffer's raw handle: the backend
+    /// batches `vkCmdDispatch` recording and submits later, so "the Rust owner
+    /// dropped" does not imply "the device is done with it".
+    pub fn bury(&self, buf: VkBuffer) {
+        self.dead.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
+    }
+
+    /// Note that `n` dispatches have been recorded against this device, and are
+    /// not yet submitted. Pairs with [`Self::steps_submitted`].
+    pub fn steps_recorded(&self, n: u64) {
+        self.pending_steps.fetch_add(n, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Note that `n` previously-recorded dispatches have been submitted (and,
+    /// on this backend, fence-waited).
+    pub fn steps_submitted(&self, n: u64) {
+        self.pending_steps.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Destroy every buried buffer, returning the bytes released - but only
+    /// when NOTHING is recorded against this device anywhere, which is what
+    /// makes it safe: an unsubmitted dispatch is the one thing that can still
+    /// name a buffer whose Rust owner has already dropped. Returns 0 (freeing
+    /// nothing, dropping nothing) while work is outstanding; the next caller
+    /// past the last submit does the work instead.
+    ///
+    /// Callers reach this right after a fence-waited submit, so a live server
+    /// hits it every flush and the buried set never grows unbounded.
+    pub fn reclaim_dead(&self) -> u64 {
+        if self.pending_steps.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return 0;
+        }
+        let dead: Vec<VkBuffer> = std::mem::take(&mut *self.dead.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut freed = 0u64;
+        for b in dead {
+            freed += b.size;
+            self.destroy_buffer(b);
+        }
+        freed
+    }
 }
 
 impl Drop for VkContext {
@@ -843,6 +899,12 @@ impl Drop for VkContext {
             if let Some(s) = self.staging.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 self.device.destroy_buffer(s.buffer, None);
                 self.device.free_memory(s.memory, None);
+            }
+            // The device is idle (waited above), so anything still buried is
+            // safe to destroy - and must be, before the device goes away.
+            for b in std::mem::take(&mut *self.dead.lock().unwrap_or_else(|e| e.into_inner())) {
+                self.device.destroy_buffer(b.buffer, None);
+                self.device.free_memory(b.memory, None);
             }
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);

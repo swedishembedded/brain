@@ -322,15 +322,17 @@ fast and scalable kernel — not a naive one.
     been run for real (70GB→36GB, 54,764 tensors, exact two-way name
     coverage). A layer-sharded int8 dual-GPU Thinker (`crates/omni/src/
     int8_resident.rs`, `int8_thinker_resident.rs`) is built and validated on
-    two real P40s: real streamed int8 expert AND non-expert weights, real
-    cross-device residual handoff, a real greedy `generate()`, and — as of
-    M22 — reachable through `residency::Executor` for real
+    two real P40s against the REAL 30B checkpoint: real int8 expert AND
+    non-expert weights resident across both cards, real cross-device residual
+    handoff, KV-cached greedy decode, and the same chat request contract
+    `brain/omni` takes (`omni::caps::chat_generate_spec`), so it serves
+    `/v1/chat/completions` and `/v1/messages` rather than raw token ids only
     (`Executor::register_multi`, `crates/cli/src/resident_omni.rs::
-    int8_thinker_multi_from_env`, env `BRAIN_OMNI_INT8_CHECKPOINT`). Still
-    NOT fully production-ready: no real Qwen3-Omni checkpoint exists in this
-    environment to validate any of it against (every test uses a synthetic
-    checkpoint), and decode is O(T²) recompute, not KV-cached — see
-    `.agents/roadmap/omni.md`'s M22 entry for the precise remainder.
+    int8_thinker_multi_from_env`, env `BRAIN_OMNI_INT8_CHECKPOINT` +
+    `BRAIN_OMNI_INT8_TOKENIZER_DIR`). Measured: **2.3 s/token vs 57.6
+    s/token** for the streaming bf16 path, identical output, 16.9/16.7 GiB on
+    two 24 GB cards. Text only - multimodal input and `speak` still require
+    `brain/omni`; see `.agents/roadmap/omni.md`.
     **Qwen3-VL** (`crates/qwenvl`) is a separate served model, `brain/qwenvl` — reuses `crates/qwen3`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/

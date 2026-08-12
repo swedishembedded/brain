@@ -76,7 +76,8 @@ served, with no error.
 | `BRAIN_NEMOTRON` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
 | `BRAIN_QWEN_ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
 | `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker, validation tier - full chat + audio/image/video + `speak`, but weights re-stream from the checkpoint per generated token | HF checkpoint dir |
-| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, **GPU-resident** - int8 weights sharded across as many GPUs as they need, loaded with bounded host memory. A separate model id (`brain/omni-int8-thinker-multi`), not a variant of the above; build the file with `brain omni import` | unset (not served) |
+| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, **GPU-resident** - int8 weights sharded across as many GPUs as they need, loaded with bounded host memory. A separate model id (`brain/omni-int8-thinker-multi`), not a variant of the above; build the file with `brain omni import`. Text-only, but ~25x the tokens/second of the streaming path above | unset (not served) |
+| `BRAIN_OMNI_INT8_TOKENIZER_DIR` | where the int8 model reads `tokenizer.json` (or `vocab.json` + `merges.txt`) so it can serve ordinary chat requests - an int8 checkpoint is a single file with no tokenizer sibling. Without one it still serves raw token ids, but is not on `/v1/chat/completions` | the checkpoint's own directory if it has tokenizer files, else `BRAIN_OMNI_HF_DIR` |
 | `BRAIN_MOCK` | deterministic, weight-free mock model (for exercising the serving stack without real weights) | any non-empty value |
 
 ## Serving & admission

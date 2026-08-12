@@ -25,6 +25,51 @@ fn omni_manifest_is_chat_exposed() {
         /v1/chat/completions and /v1/messages would 404 it, same as if it were never registered");
 }
 
+/// Spec: the GPU-resident int8 Thinker is reachable over the SAME chat
+/// surfaces as `brain/omni`. It used to declare raw blob actions only, so
+/// `/v1/chat/completions` 404'd the one model on this box fast enough to be
+/// worth calling (~25x the streaming path's tokens/second on two P40s) - the
+/// speed was unreachable through the interface anyone actually uses.
+#[test]
+fn int8_thinker_manifest_is_chat_exposed() {
+    use residency::{Device, ResidentModel};
+    // Manifest construction is pure: no checkpoint is opened, no GPU touched.
+    let r = omni::int8_thinker_resident::Int8ThinkerResident::new(
+        "/nonexistent.safetensors".to_string(),
+        omni::config::MoeTextConfig::thinker_defaults(),
+        vec![(Device::Gpu(0), 1 << 34)],
+    );
+    let caps = api_caps(&r.manifest());
+    assert!(
+        caps.chat,
+        "brain/omni-int8-thinker-multi is not classified chat-capable by apiserve::catalog::api_caps -- \
+         /v1/chat/completions and /v1/messages would 404 it, leaving the fast path reachable only over D-Bus"
+    );
+}
+
+/// Spec: both Thinker-backed models answer the same request contract, because
+/// they build their `generate` spec from the same `chat_generate_spec` - a
+/// param the chat path sets that only one of them declares is a request that
+/// silently means different things depending on which model you address.
+#[test]
+fn both_thinker_models_declare_the_same_chat_params() {
+    use residency::{Device, ResidentModel};
+    let r = omni::int8_thinker_resident::Int8ThinkerResident::new(
+        "/nonexistent.safetensors".to_string(),
+        omni::config::MoeTextConfig::thinker_defaults(),
+        vec![(Device::Gpu(0), 1 << 34)],
+    );
+    let m = r.manifest();
+    let int8 = m.actions.iter().find(|a| a.name == "generate").expect("int8 must declare generate");
+    for p in omni::caps::generate_spec().params {
+        assert!(
+            int8.params.iter().any(|q| q.name == p.name),
+            "brain/omni declares chat param '{}' but brain/omni-int8-thinker-multi does not",
+            p.name
+        );
+    }
+}
+
 #[test]
 fn last_user_text_prefers_messages_last_user_turn() {
     let inv = Invocation::new().set(

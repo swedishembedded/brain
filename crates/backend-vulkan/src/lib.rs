@@ -78,11 +78,45 @@ pub struct VkStep {
 /// code holds its buffers for the whole run.
 pub struct VkOwnedBuffer {
     inner: VkBuffer,
+    /// The device this buffer belongs to, so dropping it can hand the handles
+    /// back (`VkContext::bury`). Keeping the `Arc` alive also makes the
+    /// buffer-outlives-device ordering impossible to get wrong.
+    ctx: Arc<VkContext>,
 }
 
 impl VkOwnedBuffer {
     fn bytes(&self) -> u64 {
         self.inner.size
+    }
+}
+
+/// **Dropping a device buffer used to free nothing on this backend**: there was
+/// no `Drop` at all, so every buffer any model ever allocated stayed on the card
+/// until the whole `VkContext` was destroyed. A resident model never noticed
+/// (its weights are meant to live forever), but two real paths did:
+///
+/// * `omni`'s bf16 Thinker streams the decoder layers that do not fit, dropping
+///   each layer's ~2.4 GiB of expert weights before loading the next. On wgpu
+///   (where `Drop` frees) its live set is one layer; here it was every layer, so
+///   a single request walked a 24 GB card to `ERROR_OUT_OF_DEVICE_MEMORY` - the
+///   exact failure `paramstore::upload::Uploader::drain` exists to prevent,
+///   silently un-prevented by the backend underneath it.
+/// * Every per-token transient (residual stream, RoPE tables, logits) on ANY
+///   resident model leaked for the life of the process, so a server's VRAM use
+///   grew with the number of requests served instead of staying flat.
+///
+/// Freeing on the spot would be a use-after-free - [`VulkanBackend::step`]
+/// records dispatches into a pending list naming raw `vk::Buffer` handles that
+/// are submitted later - so the handles are buried and destroyed at the next
+/// point the device is provably done with them (see [`VulkanBackend::flush`]).
+impl Drop for VkOwnedBuffer {
+    fn drop(&mut self) {
+        // Handed over field by field rather than by making `VkBuffer` `Copy`:
+        // the handles must have exactly ONE owner responsible for destroying
+        // them, and a `Copy` `VkBuffer` would make an accidental double-free a
+        // silent one-character mistake.
+        let VkBuffer { buffer, memory, size, host_visible } = self.inner;
+        self.ctx.bury(VkBuffer { buffer, memory, size, host_visible });
     }
 }
 
@@ -169,7 +203,7 @@ struct VkProfile {
 impl VkProfile {
     fn new(n_kernels: usize) -> VkProfile {
         VkProfile {
-            enabled: std::sync::atomic::AtomicBool::new(std::env::var("BRAIN_PROFILE").is_ok()),
+            enabled: std::sync::atomic::AtomicBool::new(backend_api::profile_enabled()),
             acc: Mutex::new(vec![(0.0, 0); n_kernels]),
             pool: Mutex::new(None),
         }
@@ -562,7 +596,7 @@ impl VulkanBackend {
     pub fn storage(&self, n: u64) -> VkOwnedBuffer {
         let b = self.ctx.storage(n * 4, vk::BufferUsageFlags::empty());
         self.ctx.zero(&b); // zero-init like wgpu/CPU storage
-        VkOwnedBuffer { inner: b }
+        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
     }
 
     pub fn storage_init(&self, _name: &str, data: &[f32]) -> VkOwnedBuffer {
@@ -572,7 +606,7 @@ impl VulkanBackend {
         } else {
             self.ctx.upload(&b, bytemuck::cast_slice(data)); // fully covers the buffer
         }
-        VkOwnedBuffer { inner: b }
+        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
     }
 
     pub fn buffer(&self, _label: &str, size: u64, usage: BufUsage) -> VkOwnedBuffer {
@@ -583,7 +617,7 @@ impl VulkanBackend {
         };
         let b = self.ctx.storage(size.max(4), extra);
         self.ctx.zero(&b);
-        VkOwnedBuffer { inner: b }
+        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
     }
 
     pub fn uniform_dynamic(&self, len: usize) -> VkOwnedBuffer {
@@ -593,7 +627,7 @@ impl VulkanBackend {
         let size = ((len * 4).div_ceil(16) * 16).max(16) as u64;
         let b = self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
         self.ctx.zero(&b);
-        VkOwnedBuffer { inner: b }
+        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
     }
 
     pub fn write(&self, buf: &VkOwnedBuffer, data: &[u32]) {
@@ -763,6 +797,10 @@ impl VulkanBackend {
             self.flush();
             self.run_clears(clears);
         }
+        // Recorded but not yet submitted: until these run, the buffers they
+        // name must not be destroyed even if their Rust owners drop (see
+        // `VkContext::reclaim_dead`).
+        self.ctx.steps_recorded(steps.len() as u64);
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(steps);
         // These steps' transient uniforms are now in flight: eligible for
         // recycling once the flush that runs them has fence-waited. Uniforms of
@@ -788,6 +826,10 @@ impl VulkanBackend {
     fn flush(&self) {
         let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
+            // This handle has nothing recorded; `reclaim_dead` still checks the
+            // DEVICE-wide count before freeing. It is the only reclaim point a
+            // caller that allocates and drops without ever dispatching reaches.
+            self.ctx.reclaim_dead();
             return;
         }
         let dev = &self.ctx.device;
@@ -899,6 +941,15 @@ impl VulkanBackend {
     /// `step_buf` steps (transient = false) are caller-owned and left alone, so
     /// the `uniform_dynamic` reuse pattern keeps working across flushes.
     fn recycle_transients(&self, steps: &[VkStep]) {
+        // These dispatches have now run to completion (the caller's
+        // `end_and_wait` fence-waited), so they no longer name anything. The
+        // count is dropped HERE rather than when the batch left the pending
+        // list, so it never reads zero while this batch's buffers are in use.
+        self.ctx.steps_submitted(steps.len() as u64);
+        // Buffers dropped while this batch was recorded: with nothing left
+        // recorded anywhere, this is where they are actually destroyed (see
+        // `impl Drop for VkOwnedBuffer`).
+        self.ctx.reclaim_dead();
         for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
             self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
         }

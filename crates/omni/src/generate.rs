@@ -58,6 +58,57 @@ use crate::config::MoeTextConfig;
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, ThinkerLayerCache, ThinkerLayerWeights};
 use crate::thinker_plan::{layer_cost, place_fewest_devices, ThinkerPlacement, EMBED_TENSOR};
 
+/// How much of a generation went into RE-READING streamed layer weights, as
+/// opposed to running kernels on them.
+///
+/// `BRAIN_PROFILE`'s per-kernel tables are device timestamps, so they see only
+/// the dispatches; on this path most of the wall clock is spent with no kernel
+/// running at all, re-reading the layers that did not fit. Without this counter
+/// the kernel table reports a small total and silently omits the term that
+/// actually dominates - which is how "the GPU is barely busy" gets misread as
+/// "the kernels are slow". Aggregated for the process, printed by
+/// [`dump_stream_profile`], same as the kernel tables it sits above.
+mod stream_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LOAD_NS: AtomicU64 = AtomicU64::new(0);
+    static LOADS: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub fn record(ns: u64, bytes: u64) {
+        LOAD_NS.fetch_add(ns, Ordering::Relaxed);
+        LOADS.fetch_add(1, Ordering::Relaxed);
+        BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// `(total load seconds, layer loads, bytes re-read)`.
+    pub fn read() -> (f64, u64, u64) {
+        (LOAD_NS.load(Ordering::Relaxed) as f64 / 1e9, LOADS.load(Ordering::Relaxed), BYTES.load(Ordering::Relaxed))
+    }
+}
+
+/// Print what streaming cost, then each device's own `BRAIN_PROFILE` kernel
+/// table. A resident model's `Gpu` never drops, so the backend's drop-time dump
+/// never fires and the tables are unreadable by construction without this - the
+/// same escape hatch `fastvlm::caps` uses (`Gpu::dump_profile`).
+pub fn dump_stream_profile(gpus: &[Gpu]) {
+    if !gpu_core::profile::enabled() {
+        return;
+    }
+    let (secs, loads, bytes) = stream_stats::read();
+    if loads > 0 {
+        eprintln!(
+            "=== omni streamed weights (BRAIN_PROFILE) === {loads} layer load(s), {:.2} GiB re-read, {:.1} s ({:.2} GiB/s)",
+            bytes as f64 / (1u64 << 30) as f64,
+            secs,
+            bytes as f64 / (1u64 << 30) as f64 / secs.max(f64::MIN_POSITIVE)
+        );
+    }
+    for g in gpus {
+        g.dump_profile();
+    }
+}
+
 /// One decoder layer's weights on one device. Held for the whole generation
 /// when the layer is resident; built and dropped per use when it is streamed.
 pub struct OwnedLayer {
@@ -285,8 +336,17 @@ fn run_layers(
         let w = match stack.resident.get(&l) {
             Some(layer) => layer,
             None => {
+                let t0 = std::time::Instant::now();
                 let mut up = Uploader::new(g);
                 let layer = load_thinker_layer(&mut up, reader, l as u32, cfg.n_experts).unwrap_or_else(|e| panic!("omni: {e}"));
+                // Charged BEFORE the dispatches that consume it, so this is the
+                // re-read cost alone and never overlaps the kernel table. Only
+                // under BRAIN_PROFILE: the byte figure re-walks this layer's
+                // ~384 tensor headers, which is nothing against a 2.4 GiB read
+                // but is not worth paying when nobody reads the number.
+                if gpu_core::profile::enabled() {
+                    stream_stats::record(t0.elapsed().as_nanos() as u64, crate::thinker_plan::layer_device_bytes(reader, cfg, l).unwrap_or(0));
+                }
                 streamed = Some((layer, up));
                 &streamed.as_ref().expect("just set").0
             }

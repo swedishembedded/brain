@@ -704,6 +704,17 @@ pub trait Backend: Send + Sync {
     fn dump_profile(&self) {}
 }
 
+/// Whether `BRAIN_PROFILE` asks for profiling output - the ONE parse of that
+/// variable, for every backend and model crate.
+///
+/// They each carried their own and had drifted: the Vulkan backend used
+/// `var(..).is_ok()`, so `BRAIN_PROFILE=0` turned profiling ON there and OFF
+/// everywhere else. One flag, one meaning: set and not `"0"` is on.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn profile_enabled() -> bool {
+    std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false)
+}
+
 /// Per-handle device-op counters — the queryable form of what
 /// `BRAIN_PROFILE` used to print only to stderr. What a benchmark records so
 /// "how many submits/readbacks did this run cost" is machine-readable.

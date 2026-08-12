@@ -74,10 +74,21 @@ use crate::thinker::thinker_pipelines;
 /// Model name in the manifest.
 pub const MODEL: &str = "brain/omni";
 
-/// The `generate` action schema — see this module's doc for why it mirrors
-/// `MockResident::generate_spec()`'s param list exactly.
-pub fn generate_spec() -> ActionSpec {
-    ActionSpec::new("generate", "Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)")
+/// The chat-shaped `generate` schema every Thinker-backed model shares: the
+/// text params, `.streaming()`, and a `Media::Text` output.
+///
+/// Extracted so `brain/omni-int8-thinker-multi` is reachable through the SAME
+/// request contract as `brain/omni` without a second, hand-synced copy of this
+/// param list. That shape is not cosmetic: `apiserve::catalog::api_caps` gates
+/// `/v1/chat/completions` and `/v1/messages` exposure on exactly
+/// `name == "generate"` + `streaming` + a `messages`/`prompt`/`text` param + a
+/// `Media::Text` output, so a model missing any of it is invisible to the chat
+/// APIs (see this module's doc and `tests/caps_conformance.rs`).
+///
+/// Media INPUTS are deliberately not here: they are the multimodal path's, and
+/// a model that would silently ignore an attached image must not advertise one.
+pub fn chat_generate_spec(desc: &str) -> ActionSpec {
+    ActionSpec::new("generate", desc)
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages; no chat template applied)"))
@@ -91,10 +102,17 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("tools", ParamType::Str, "accepted, not implemented"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "accepted, ignored"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
+        .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
+}
+
+/// The `generate` action schema - see this module's doc for why it mirrors
+/// `MockResident::generate_spec()`'s param list exactly. [`chat_generate_spec`]
+/// plus this path's real audio/image/video inputs.
+pub fn generate_spec() -> ActionSpec {
+    chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)")
         .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
         .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
-        .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
 /// The `speak` action schema: text in, spoken text + a real waveform out.
@@ -314,7 +332,10 @@ impl OmniInner {
     /// splice, plain-sequential M-RoPE positions (`crate::generate`'s doc).
     pub fn generate(&self, prompt: &str, max_new: u32) -> (String, Vec<u32>) {
         let prompt_ids = self.tok.encode(prompt);
+        let t0 = std::time::Instant::now();
         let out_ids = generate_greedy(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &prompt_ids, max_new, &self.eos_ids);
+        gpu_core::profile::stage_time("omni generate", t0);
+        crate::generate::dump_stream_profile(&self.gpus);
         let new_ids = out_ids[prompt_ids.len()..].to_vec();
         let text = self.tok.decode(&new_ids);
         (text, new_ids)
@@ -397,9 +418,9 @@ impl OmniInner {
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
 
         // Talker's own kernel-index scheme (crate::talker::talker_pipelines,
-        // 18 entries) is NOT the same table as self.gpu's (built from
+        // 18 entries) is NOT the same table as self.gpus[0]'s (built from
         // thinker_pipelines, 16 entries) -- dispatching Talker's decode-cache
-        // kernels (indices 15-17) against self.gpu's table read out of bounds.
+        // kernels (indices 15-17) against self.gpus[0]'s table read out of bounds.
         // A real bug this test's own real-weight run caught (`index 16, len
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.
@@ -436,9 +457,9 @@ impl OmniInner {
     #[allow(clippy::too_many_arguments)]
     pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video)?;
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video)?;
         let n_prompt = mm_prompt.token_ids.len() as u32;
-        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
+        let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt as usize..].to_vec();
         let text = self.tok.decode(&new_ids);
 
@@ -456,17 +477,17 @@ impl OmniInner {
             .or_else(|| tc.speaker_id.values().next().copied())
             .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
 
-        let user_hidden = thinker_hidden_at_layer(&self.reader, &self.gpu, &self.cfg.thinker.text, &mm_prompt.x_host, &mm_prompt.positions, n_prompt, tc.accept_hidden_layer);
+        let user_hidden = thinker_hidden_at_layer(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &mm_prompt.x_host, &mm_prompt.positions, n_prompt, tc.accept_hidden_layer);
         let tcfg = &self.cfg.thinker;
         let media_mask: Vec<bool> = mm_prompt.token_ids.iter().map(|&t| t == tcfg.audio_token_id || t == tcfg.image_token_id || t == tcfg.video_token_id).collect();
         let splice = UserMediaSplice { hidden_proj: &hidden_proj, hidden: &user_hidden, media_mask: &media_mask };
 
-        let tprompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &mm_prompt.token_ids, &new_ids, Some(splice));
+        let tprompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_host(), self.cfg.thinker.text.hidden as usize, &mm_prompt.token_ids, &new_ids, Some(splice));
 
-        let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
+        let mtp_gpu = self.gpus[0].new_like(tts::mtp::PIPELINES);
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
-        let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
+        let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
         let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts::default())?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;

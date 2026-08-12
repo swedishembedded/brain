@@ -245,6 +245,12 @@ impl Instance for OmniInstance {
 ///     (the output of `omni::import`'s int8-native path, which
 ///     `brain omni import` produces from a raw HF directory). Unset ⇒ not
 ///     served.
+///   * `BRAIN_OMNI_INT8_TOKENIZER_DIR` - where to read `tokenizer.json` (or
+///     `vocab.json` + `merges.txt`) for the CHAT request shape. Optional: it
+///     defaults to the checkpoint's own directory when that holds tokenizer
+///     files, else to `BRAIN_OMNI_HF_DIR`, which is where they already are
+///     for anyone who converted their own checkpoint. Resolving to nothing is
+///     not an error - the model then serves only raw token ids.
 ///
 /// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
 /// bytes)`, and `reserved` the per-card headroom it keeps free - so what is
@@ -267,5 +273,32 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // assumed) -- validated end to end on two physically separate GPUs
     // during the int8 dual-GPU residency work.
     let cfg = omni::config::MoeTextConfig::thinker_defaults();
-    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices))
+    let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path);
+    if tokenizer_dir.is_none() {
+        eprintln!(
+            "brain: omni-int8-thinker-multi has no tokenizer directory -- it will serve raw token ids only, \
+             NOT /v1/chat/completions. Set BRAIN_OMNI_INT8_TOKENIZER_DIR (or BRAIN_OMNI_HF_DIR)."
+        );
+    }
+    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir))
+}
+
+/// Where the int8 resident reads its tokenizer from, in preference order:
+/// the explicit `BRAIN_OMNI_INT8_TOKENIZER_DIR`, then the checkpoint's own
+/// directory, then `BRAIN_OMNI_HF_DIR`. `None` when none of them holds
+/// tokenizer files.
+///
+/// The search exists because a brain-native int8 checkpoint is a single
+/// `.safetensors` - it carries weights and a model card, never vocab files -
+/// so the tokenizer has to come from somewhere the operator already has. Each
+/// candidate is CHECKED for the files rather than assumed, so a stale env var
+/// falls through to a directory that works instead of disabling chat.
+fn int8_tokenizer_dir(checkpoint_path: &str) -> Option<String> {
+    let has_tokenizer = |dir: &std::path::Path| {
+        dir.join("tokenizer.json").exists() || (dir.join("vocab.json").exists() && dir.join("merges.txt").exists())
+    };
+    let explicit = std::env::var("BRAIN_OMNI_INT8_TOKENIZER_DIR").ok().filter(|p| !p.is_empty());
+    let beside = std::path::Path::new(checkpoint_path).parent().map(|p| p.to_string_lossy().into_owned());
+    let hf = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty());
+    [explicit, beside, hf].into_iter().flatten().find(|d| has_tokenizer(std::path::Path::new(d)))
 }
