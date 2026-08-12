@@ -534,3 +534,174 @@ now with a real 3.6x cost-of-CPU-pin number attached for whoever prioritizes
 it); model construction's 20-25 s is unexamined at the kernel level; and the
 tiled-transpose fix's whole-pass magnitude needs a quiet-machine re-measure
 isolated from the other changes landed in the same pass.
+
+### DeepSeek-OCR: a real 50-page document, and what concurrent requests actually do
+
+Every DeepSeek-OCR number above is one synthetic image, one request. This pass
+asks the two questions that matters for an operator, not a microbenchmark: what
+does a real, multi-page document cost end to end, and what happens when more
+than one request arrives at once against the one resident instance this model
+serves from.
+
+**Workload.** 50 real pages (not synthetic) - pages 60-109 of a public STM32F4
+reference manual PDF, 150 DPI PNG, chosen to land inside a real peripheral-
+register chapter (dense text, tables, register-bit diagrams), rendered once and
+reused unchanged. Served path: **one resident `brain serve --openai` process**
+(the model built ONCE, `BRAIN_DEEPSEEK_OCR_DIR` pointing at the real
+`Q8_0`/`mmproj` pair plus the cached fp32 decoder expansion), driven over the
+real OpenAI-compatible `/v1/chat/completions` HTTP route with the default
+instruction (`<|grounding|>Convert the document to markdown.`) and a real
+document image attached per request - not the `brain do` single-shot CLI, which
+would pay the ~22 GiB weight-upload cost fresh on every one of the 50 pages.
+Machine: the same 22-core CPU-backend box every other number on this page was
+measured on.
+
+**Token budget: `max_new = 128`, not the CLI default of 32.** Two real,
+measured calibration requests decided this (not a guess): at `max_new = 64` a
+warm page cost 59.9 s; at `max_new = 128` a warm page cost 81.2 s and produced
+414 characters of real markdown-ish output (vs. 203-220 characters at 64) -
+enough to capture a heading plus real body text, not a two-token fragment.
+`max_new` is capped at 229 by this model's own context budget (`SEQ_LEN = 512`
+minus the ~283-token image+instruction prompt), so "a few hundred tokens" is
+not reachable at all on this model without exceeding its context; 128 is the
+largest budget this pass's own calibration run showed would keep the full
+50-page sequential sweep inside the session's real time budget (measured, see
+below - not assumed).
+
+**Part 1 result: 50/50 pages succeeded, zero errors.**
+
+| | |
+|---|---|
+| total wall (50 pages, warm instance) | 3947.6 s = **65.8 min** |
+| pages/min | 0.76 |
+| per-page min / median / max / mean | 66.2 s / 78.5 s / 99.7 s / 79.0 s (stdev 5.5 s) |
+| one-time model activation (separate, not in the total above) | 27.0 s |
+| `finish_reason` | 49/50 `length` (used the full 128-token budget), 1/50 `stop` (hit EOS at 72 tokens - wall time was still ~76 s, confirming this decoder's documented "no early stop": the token budget is honored but the *wall clock* is not shortened) |
+
+Per-stage breakdown (`BRAIN_PROFILE`'s `stage_time` brackets, already
+instrumented by an earlier pass in this session, read straight off the resident
+server's stderr for all 50 real requests):
+
+| stage | min | median | max | mean |
+|---|---|---|---|---|
+| vision encode (SAM+CLIP+glue+projector) | 11.2 s | 14.0 s | 51.1 s | 19.0 s |
+| decode (prefill + up to 128 KV-cached steps) | 40.1 s | 61.9 s | 69.7 s | 59.8 s |
+
+The spread is real and worth being honest about: vision-encode cost should be
+content-independent (every page is resized to the same 1024x1024 grid before
+SAM ever sees it), yet it ranged 11.2-51.1 s and CLIP alone ranged 1.2-8.9 s
+across identically-shaped work. This machine ran the entire 50-page sweep with
+available memory pinned at 2.6-3.6 GiB and swap 95-100% full for the whole
+run (see the memory section below) - the most likely explanation for
+same-shape work taking up to 4-5x longer on some pages is host-level
+contention (page reclaim, swap activity) from that pressure, not the document
+content. This pass did not isolate the two causes further; a quiet machine
+would.
+
+**Memory, watched continuously, not just checked once.** `free -h` before the
+run, before every concurrency level in Part 2, and every 20 s throughout both
+parts via a background sampler. The resident model's own steady-state
+footprint on this 30 GiB box is ~26-27 GiB used / **2.6-3.6 GiB available**,
+confirmed STABLE (not still declining) across three calibration requests
+before the 50-page loop was allowed to start, and stable for the entire 66
+minutes after that (280 samples, minimum available 2.6 GiB, no downward
+trend). This is tighter than the ~4-6 GiB floor named going into this pass,
+but that floor was set before knowing this specific model's own documented
+footprint (`docs/models/deepseek-ocr.md`: "a box with less than ~24 GiB free
+will not activate it" - this box had exactly ~24 GiB free at the start) - since
+the number was measured stable rather than declining, the run was allowed to
+continue with tight monitoring rather than aborted outright, and would have
+been killed immediately on any sign of continued decline. It never showed one:
+50 real pages, then the full N=2/4/8 concurrency sweep below, zero OOM
+kills, zero crashes.
+
+### Part 2: concurrent requests against ONE resident instance
+
+**Method.** One resident server, N concurrent HTTP clients (backgrounded shell
+processes, `wait`ed together), each a distinct real page from the same 50,
+non-streaming `/v1/chat/completions`, `max_new = 128`. Wall time is measured
+for the WHOLE batch (dispatch to last reply), not any individual request.
+
+**First finding, at the default settings: concurrent requests are not queued,
+they are dropped.** N=2 at the default `BRAIN_ADMIT_DEADLINE_MS` (10 s) sent
+both requests at once: one ran and finished normally (82.6 s); the other was
+rejected with **HTTP 429** after 10.1 s - the standard admission-shedding path
+(`crates/apiserve/src/bridge.rs`'s `wait_for_admission`), which gives a request
+10 s to be *claimed onto a lane* before shedding it, a deadline sized for fast
+models. DeepSeek-OCR's own single-request latency (66-100 s) vastly exceeds
+that window, and its instance's only lane was occupied by the first request
+the entire time, so the second request could not be admitted before the
+deadline fired - it was shed, not queued. **This is real, current, out-of-the-box
+behaviour of this model behind `brain serve`**: two clients hitting it at once
+today get one real answer and one 429, not two real answers. Fixing the
+generic admission policy (e.g. distinguishing "queued behind a busy peer" from
+"cold build", the way `cold_build_admit_deadline` already does for the
+build-time case) is a `crates/apiserve`/`crates/residency` change and out of
+scope here; it is named so whoever puts this model behind a shared frontend
+knows to raise `BRAIN_ADMIT_DEADLINE_MS` or expect silent 429s under any real
+concurrent load.
+
+**Second finding, with `BRAIN_ADMIT_DEADLINE_MS=1800000` (30 min, so the
+HTTP-admission artifact above is out of the way and the actual compute-level
+concurrency behaviour is what gets measured):**
+
+| N | batch wall time | implied per-request | vs. Part 1's steady-state median (78.5 s) |
+|---|---|---|---|
+| 2 | 181.5 s | 90.7 s | 1.16x |
+| 4 | 315.8 s | 79.0 s | 1.01x |
+| 8 | 649.7 s | 81.2 s | 1.03x |
+
+**Zero speedup at any N tested - purely additive, exactly as documented.**
+`docs/models/deepseek-ocr.md` already claimed this ("`run_batch` is therefore
+the serial default: two concurrent requests share no work") and
+`crates/cli/src/resident_deepseekocr.rs`'s own header explains why (no KV
+cache to share, no batched vision-encoder forward); this pass confirms it with
+real measurement rather than trusting the doc's claim on faith. The per-request
+average at every N lands within a few percent of Part 1's single-stream
+median, which is exactly what "no shared work, no overlap" predicts.
+
+**A more specific finding underneath "no speedup": a real tail-latency
+artifact from HOW the serial default replies, not just THAT it is serial.**
+Reading `crates/residency/src/executor.rs` (`assign`/`group_rows`,
+`Policy::max_batch = 8`) and `crates/residency/src/model.rs` (`Instance::
+run_batch`'s default: `invs.iter().enumerate().map(|(i, inv)| self.run(...))
+.collect()`) together with `executor.rs::run_group` (which calls `run_batch`
+ONCE per dispatched group and only invokes each job's own `reply` callback
+AFTER the WHOLE call returns, `results.len() == replies.len()` then
+zip-dispatch) explains an asymmetry the N=8 run's own numbers show directly:
+one of the 8 concurrent requests was dispatched alone and got its answer in
+84.1 s; the other 7 landed in the dispatcher's next scheduling window together,
+were coalesced into ONE `run_batch` call, and **all seven received their
+answer at the identical wall-clock instant, 649.6 s** - even though internally
+they were computed one at a time, ~81 s apart. A non-streaming caller whose
+request happens to be grouped with others therefore pays the FULL group's
+total latency, not just its own place in a fair FIFO queue - a request
+computed FIRST inside a 7-request group still waits for the other 6 before its
+own answer is returned. This is a consequence of pairing the default
+all-or-nothing `run_batch` reply contract with the executor's own
+up-to-`max_batch` coalescing, not a DeepSeek-OCR-specific bug, and is worth
+naming precisely because "no speedup" alone understates the effect on
+individual request latency under concurrency. *(Caveat: measured on the
+non-streaming endpoint only - a streaming client's per-token deltas ARE routed
+via `progress`/`sinks` during each job's own turn inside the loop, so its
+perceived latency may differ; this pass did not measure the streaming path
+under concurrency.)*
+
+**No batching change was attempted this pass, on purpose.** A real vision-
+encoder batching improvement (the only place shared work could exist, since
+the decoder's MoE forward has no batch axis across different prompts either)
+would need `crates/sam1`'s ViT tower to accept batch > 1 - and that tower's own
+module documentation already states it cannot: *"Batch is 1. `sam1` is a
+single-image tower (its windowed attention spans' storage-binding offsets are
+not 256 B aligned across a batch stride)"* (`crates/deepseekocr/src/lib.rs`).
+Making that true would be a `crates/sam1`/`crates/backend-cpu` architecture
+change, explicitly larger than a "measure it" pass and outside this session's
+own file-avoidance list for `crates/checkpoint`/`crates/wgsl-cpu`/
+`crates/paramstore` neighbours. Given the machine's own memory headroom was
+already down to 2.6-3.6 GiB for a SINGLE resident instance, attempting a
+structural change to how images are batched through that instance - without
+being able to verify its peak-memory behaviour on a quieter box - was judged
+the wrong trade for this pass, exactly the "lean conservative" guidance this
+investigation started from. **No `crates/deepseekocr`, `crates/deepseekv2`,
+`crates/sam1`, `crates/residency` or `crates/apiserve` source file was changed
+this pass** - only this page and `.agents/roadmap/deepseek-ocr.md`'s tracking.

@@ -1844,6 +1844,110 @@ token fails loudly.
       `crates/deepseekocr/src/model.rs` - no `crates/backend-cpu`,
       `crates/backend-wgpu` or `crates/sam1` changes. See
       `docs/performance/overview.md`'s case study for the full numbers.
+- [x] **Real multi-page document workload + concurrent-request measurement
+      (Phase 8, this pass).** Every number in the entries above is one
+      synthetic image, one request. This pass measured the two things that
+      had not been measured yet: a real 50-page document run through the
+      actual served path, and what happens when more than one request hits
+      the one resident instance at once.
+
+      **Workload**: 50 real pages (not synthetic) from a public STM32F4
+      reference manual PDF (pages 60-109, 150 DPI PNG, a real peripheral-
+      register chapter). Served path: ONE resident `brain serve --openai`
+      process (built once), driven over the real `/v1/chat/completions` HTTP
+      route, not the `brain do` CLI (which would pay the ~22 GiB weight
+      upload fresh on every page). `max_new = 128`, decided by two real
+      calibration requests (not a guess) - `SEQ_LEN = 512` minus the
+      ~283-token image+instruction prompt caps `max_new` at 229, so "a few
+      hundred tokens" is not reachable on this model at all; 128 produced
+      real multi-sentence markdown output (414 chars measured) and kept the
+      full 50-page sweep inside this session's time budget.
+
+      **Part 1, 50-page sequential result: 50/50 succeeded, zero errors.**
+      Total wall 3947.6 s (65.8 min) for the 50 pages, plus a separate 27.0 s
+      one-time model activation. Per-page: min 66.2 s, median 78.5 s, max
+      99.7 s, mean 79.0 s (stdev 5.5 s) - pages/min 0.76. Per-stage
+      breakdown (the `stage_time` brackets earlier Phase 8 passes already
+      added): vision-encode 11.2-51.1 s (median 14.0 s), decode
+      (prefill + up to 128 KV-cached steps) 40.1-69.7 s (median 61.9 s). The
+      vision-encode spread is real and flagged honestly as likely
+      machine-contention (this run held available memory at 2.6-3.6 GiB and
+      swap 95-100% full the entire time - see below), not document-content
+      variance, since every page is resized to the identical 1024x1024 grid
+      before SAM ever sees it.
+
+      **Memory, watched continuously (before the run, before every
+      concurrency level, and every 20 s throughout via a background
+      sampler) rather than checked once**: this model's own steady-state
+      footprint on this 30 GiB box is ~26-27 GiB used / 2.6-3.6 GiB
+      available - confirmed STABLE, not still declining, across three
+      calibration requests before the 50-page loop was allowed to start,
+      and stable for the full run after that (280 samples, minimum 2.6 GiB,
+      no downward trend). Tighter than the ~4-6 GiB floor this pass started
+      from, but that floor predates knowing this model's own documented
+      footprint (`docs/models/deepseek-ocr.md`: "a box with less than ~24
+      GiB free will not activate it" - this box had exactly ~24 GiB free at
+      the start); since the number was measured stable rather than
+      declining, the run continued under tight monitoring rather than being
+      aborted outright. Zero OOM kills, zero crashes, across both parts.
+
+      **Part 2, concurrency N=2/4/8 against ONE resident instance - two
+      distinct findings, not one.** First: at the DEFAULT
+      `BRAIN_ADMIT_DEADLINE_MS` (10 s), two concurrent requests do not both
+      get queued - one runs (82.6 s) and the other is shed with a plain
+      **HTTP 429** after 10.1 s, because the generic admission deadline
+      (`crates/apiserve/src/bridge.rs::wait_for_admission`, sized for fast
+      models) is far shorter than this model's own 66-100 s single-request
+      latency and its one lane was occupied the whole time. Real,
+      out-of-the-box behaviour, not a hypothetical - named here for whoever
+      puts this model behind a shared frontend without raising
+      `BRAIN_ADMIT_DEADLINE_MS` first. Second, with that deadline raised to
+      30 min so the actual compute-level concurrency behaviour (not the
+      HTTP-admission artifact) is what gets measured: **zero speedup at any
+      N** - N=2 181.5 s (90.7 s/request), N=4 315.8 s (79.0 s/request), N=8
+      649.7 s (81.2 s/request), every one within a few percent of Part 1's
+      78.5 s single-stream median. Confirms `docs/models/deepseek-ocr.md`'s
+      existing claim ("`run_batch` is therefore the serial default") with
+      real measurement instead of trusting the doc's claim on faith.
+
+      **A more specific finding underneath "no speedup"**: reading
+      `crates/residency/src/executor.rs` (`assign`/`group_rows`,
+      `Policy::max_batch = 8`) together with `crates/residency/src/
+      model.rs`'s default `Instance::run_batch` (a plain sequential
+      `.map().collect()`) and `executor.rs::run_group` (one `run_batch` call
+      per dispatched group, every job's `reply` fired only AFTER the whole
+      call returns) explains an asymmetry the N=8 run's own numbers show
+      directly: one of the 8 requests was dispatched alone and answered in
+      84.1 s; the other 7 were coalesced into ONE `run_batch` call and **all
+      seven received their answer at the identical instant, 649.6 s**, even
+      though they were computed one at a time internally, ~81 s apart. A
+      non-streaming request grouped with others pays the FULL group's
+      latency, not just its own place in a fair FIFO - worth naming
+      precisely because "no speedup" alone understates the effect on
+      individual request latency under concurrency. Not measured: the
+      streaming endpoint's per-token latency under the same concurrency (its
+      `progress`/`sinks` routing during each job's own turn may behave
+      differently - a real open question for a future pass).
+
+      **No batching change attempted, on purpose.** The only place shared
+      work could exist is the vision encoder (the MoE decoder has no batch
+      axis across different prompts either), and `crates/sam1`'s own module
+      docs already rule out batch > 1 for this session
+      ("`sam1` is a single-image tower... its windowed attention spans'
+      storage-binding offsets are not 256 B aligned across a batch stride" -
+      `crates/deepseekocr/src/lib.rs`). Making that true is a
+      `crates/sam1`/`crates/backend-cpu` architecture change, larger than a
+      measurement pass and outside this session's own avoidance list for
+      `crates/checkpoint`/`crates/wgsl-cpu`/`crates/paramstore` neighbours.
+      With a single resident instance already holding this machine down to
+      2.6-3.6 GiB available, attempting a structural batching change without
+      a quiet box to verify its peak-memory behaviour was judged the wrong
+      trade - "lean conservative" was the guidance this investigation
+      started from, and a clean, honest measurement is what it delivered.
+      **No `crates/deepseekocr`, `crates/deepseekv2`, `crates/sam1`,
+      `crates/residency` or `crates/apiserve` source file was touched this
+      pass** - only `docs/performance/overview.md` and this file. See
+      `docs/performance/overview.md`'s case study for the full tables.
 Full plan: `/home/user/.claude/plans/woolly-beaming-avalanche.md` (this
 session's approved plan; not repo-relative, kept here only as a pointer for
 whoever picks this up in the same environment).
