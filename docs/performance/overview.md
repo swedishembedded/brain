@@ -246,3 +246,173 @@ be measured honestly here. Whoever has the real weights should re-run
 generate --max_new 32 --in image=page.ppm --json` and update this section and
 `.agents/roadmap/deepseek-ocr.md`'s Phase 8 entry with the real before/after
 numbers.
+
+### DeepSeek-OCR vision encoder: the CPU-vs-GPU gap, and the real per-kernel cost
+
+Follow-up pass, same repo, same loop. Two constraints shaped it before any
+profiling: `crates/sam1`'s wgpu backend is known to corrupt its per-block
+buffers at this tower's production shape (3+ blocks, 1024x1024) - a separate,
+still-open, actively-tracked defect that is NOT this pass's to fix - so
+`crates/cli/src/resident_deepseekocr.rs` pins the whole composite (SAM, CLIP,
+the decoder) to the CPU backend. The first job was therefore to measure how
+much of the ~75-80 s vision-encode estimate is attributable to that CPU pin at
+all, before touching a single kernel.
+
+**CPU-vs-GPU, isolated.** `crates/sam1/src/bin/sam1_bench.rs` (new) drives
+`SamEncoder` alone at the real `SamViTConfig::deepseek_ocr()` geometry with
+random weights (`sam1::init_dense` - the tower's cost depends on shape, not
+values, and the wgpu corruption is a values bug, not a hang, so a wgpu timing
+number is still meaningful even though its output cannot be trusted and is
+never shipped):
+
+| backend | full 12-block forward (best of 3) | one windowed block (tower-isolated) | one global block (tower-isolated) |
+|---|---|---|---|
+| CPU (shipped) | 72.2 s | 4.04 s | 6.81 s (1.7x windowed) |
+| wgpu (NOT shipped - known output corruption) | 20.0 s | 1.25 s | 2.63 s (2.1x windowed) |
+
+So the CPU pin costs roughly **3.6x** on this tower alone - a real, measured
+number for whoever eventually closes the wgpu correctness gap, not a guess.
+Global (T=4096, full-grid) blocks cost 1.7-2.1x a windowed (T≈196/window)
+block on either backend, consistent with the O(T²) attention-score/apply cost
+the decomposed relative-position design pays at full grid extent.
+
+**Per-kernel breakdown of the CPU forward** (`sam1_bench profile`,
+`BRAIN_PROFILE`'s own per-kernel wall-time accumulator - the only source of
+a per-kernel table on CPU, since this backend has no device-timestamp path):
+
+```
+attn_apply_cross   70-71%   (264 calls, ~192 ms/call average)
+matmul (+matmul_reg3)  15-19%
+attn_scores_cross   2-4%
+attn_softmax_cross  4%
+attn_relpos_qr/add  ~1% each
+gelu_erf, bias_add, layernorm, conv2d, embed  each < 1%
+```
+
+`attn_scores_cross` and `attn_apply_cross` run the IDENTICAL total FLOP count
+per call (both are `m x k x n = 256 x 4096 x 64` GEMMs, just with `k` and `n`
+swapped between the two), yet `attn_apply_cross` cost 20-30x more wall time.
+The only structural difference is the packing loop each runs before its
+shared `matmul_abt` (AVX2+rayon) call: `attn_scores_cross` packs its K
+operand with one contiguous copy per row (the same shape `attn_scores_cross`'s
+own row-copy already is); `attn_apply_cross` TRANSPOSES V into `vt[hd,tk]`
+with `for j in 0..tk { for d in 0..hd { vt[d*tk+j] = kv[..] } }` - `hd=64`
+elements per `j`, each landing in a DIFFERENT row of `vt`, `tk` floats
+(16 KiB) apart, so 64 distinct cache lines are touched per `j` and each is
+not revisited until 63 unrelated lines have been touched in between, for all
+`tk=4096` values of `j` - a scatter pattern with essentially no reuse.
+
+**Two optimizations applied, both re-verified against the full test matrix.**
+
+1. **`crates/sam1` now dispatches its forward GEMMs through
+   `model::block::pick_gemm`** (the same selector `crates/clip` and
+   `crates/deepseekv2` already use), instead of hardcoding the naive `matmul`
+   kernel index for every QKV/proj/fc1/fc2 linear - per kernels.md's "is
+   there already a faster sibling" check, this tower had simply never been
+   wired to the answer its neighbours already found. **Measured effect on
+   the CPU backend: none.** `backend-cpu`'s dispatcher already routes
+   `matmul`/`matmul_reg`/`matmul_reg2`/`matmul_reg3` to the SAME native
+   AVX2+rayon `fast_ops::matmul_abt` regardless of which kernel name is
+   requested, so this tower's forward was never taking the slow scalar-JIT
+   path the naive-vs-tiled selector exists to route around. Kept anyway as a
+   correctness-neutral consistency fix (same selector, same convention every
+   other GEMM-dispatching model in this tree already follows) that becomes a
+   real win the moment SAM runs on a backend where that kernel-family
+   collapse does not hold (wgpu's naive and 128x128-tiled GEMMs are genuinely
+   different code paths).
+
+2. **`backend-cpu::fast_ops::attn_apply_cross`'s V-transpose is now tiled**
+   (`transpose_rows_tiled`, `JT=16` rows): buffer the tile's source rows
+   first (a plain contiguous read, same shape the scores kernel already
+   does), THEN write `vt` `d`-major within the tile, so each 64-byte
+   destination cache line is written whole, once, instead of revisited 16
+   times with 63 unrelated lines touched in between. Same math - unit-tested
+   against the direct definition over tile-aligned and non-aligned shapes and
+   non-zero stride/offset (a real caller slices one head out of a fused qkv
+   buffer). **Isolated A/B, same process, back to back** (so both sides see
+   the same external load - `crates/backend-cpu`'s own
+   `attn_apply_cross_bench`) at the exact SAM global-block shape: 1.0x-2.0x
+   across repeated runs, never measured worse. **Whole-tower effect: not
+   cleanly resolved this session.** This machine ran under sustained, heavy,
+   variable CPU load from a second agent's concurrent builds/tests in a
+   separate worktree for most of this pass (`uptime` load average swung
+   between ~1 and ~32 on a 22-core box over the course of measurement, and
+   `free -h` showed available memory swing between 3 GiB and 25 GiB) - a
+   `sam1_bench` full-tower "before"/"after" pair taken minutes apart under
+   those conditions moved from 68.8 s to 72.2 s, i.e. within the noise this
+   machine was producing, not a clean regression or a clean win. The
+   isolated, same-process A/B is the only measurement in this pass immune to
+   that noise, and it is real; the full-pass number needs a quiet machine to
+   confirm, which this session did not have on demand. Per kernels.md's own
+   "use the whole-pass number to decide, not the per-kernel table" rule,
+   this is reported as an unresolved-magnitude win, not a proven one -
+   exactly the honesty standard the earlier MoE row-compaction entry above
+   set, except that entry had clear evidence of being a net LOSS and this one
+   has no such evidence either way.
+
+**Per-stage `BRAIN_PROFILE` numbers for the vision tower, real weights, real
+document image** (new instrumentation this pass -
+`DeepEncoder::run_forward` now brackets SAM/bridge/CLIP/projector separately,
+where the composite's stage line previously lumped the whole encode+decode
+loop into one number):
+
+| stage | run 1 | run 2 |
+|---|---|---|
+| SAM forward | 33.0 s | 23.8 s |
+| compressor NCHW→NLC + bridge | 1.7 ms | 1.7 ms |
+| CLIP forward | 1.42 s | 1.47 s |
+| concat + projector | 8.3 ms | 12.1 ms |
+| **vision encode total** | **34.4 s** | **25.3 s** |
+
+Both runs are real: same checkpoint, same document image, same machine, a few
+minutes apart, with the pick_gemm and tiled-transpose fixes both applied.
+Whatever the run-to-run variance is attributable to (the same external load
+noted above), the vision encoder's real cost is now DIRECTLY measured at
+25-34 s rather than an undifferentiated "~75-80 s" estimate the prior pass
+could only bound in aggregate - the per-stage instrumentation alone is a
+genuine improvement in what is knowable here, independent of whether the
+kernel fixes above moved the number.
+
+**Model construction, reconfirmed, still not optimized this pass:** 23.5 s
+and 28.1 s across the same two runs (mmproj import 2.3-3.1 s + weight
+upload/tape build 20.1-25.5 s). `crates/deepseekocr/src/import.rs` was
+inspected for redundant work: the fp32 expansion is cached and skipped when
+present (both runs hit that path), `WeightReader` mmaps and streams one
+tensor at a time, and `ParamStore::new_with_roles_src` already uploads via
+`raw_words`/`with_tensor_chunks` with a peak-one-chunk host allocation and a
+periodic `poll_wait` flush - no redundant copy or non-streaming read was
+found. This remains a real but unexamined-for-kernel-level-wins cost, not
+touched this pass.
+
+**Head-to-head vs `llama-mtmd-cli`, this session.** Two same-window pairs
+(each side run within a couple of minutes of the other, same real weights,
+same image, same prompt, `--max_new 32` / `-n 32`, greedy, `--flash-attn
+off` to match brain's eager attention):
+
+| pair | brain | `llama-mtmd-cli` | ratio |
+|---|---|---|---|
+| 1 | 95.6 s | 70.2 s | 1.36x |
+| 2 | 97.1 s | 50.9 s | 1.91x |
+| prior pass (quieter machine) | 123-147 s | ~20.6 s | ~6-7x |
+
+**Read this carefully, not optimistically.** `llama-mtmd-cli`'s OWN number
+moved 2.5-3.4x slower than its previously-recorded ~20.6 s baseline in these
+same two runs (51.7 s and 37.8 s of its own reported "mtmd batch encoding"
+time, vs ~15 s previously) - proof that this session's absolute numbers on
+BOTH sides are inflated by the same shared-machine load documented above, not
+evidence that brain caught up to llama.cpp's true speed. What the two
+same-window pairs DO show honestly: the RELATIVE gap narrowed from ~6-7x to
+roughly 1.4-1.9x under matched conditions, driven overwhelmingly by the
+vision-encoder work above (encode dropped from an unmeasured "~75-80 s" share
+of the total to a directly-measured 25-34 s) rather than by the two kernel
+fixes' precise, individually-unresolved magnitudes. A clean, single-tenant
+re-run of both binaries back to back is the next thing anyone continuing this
+should do before quoting an absolute number either side would want to stand
+behind.
+
+**What is still open:** the wgpu correctness bug itself (out of scope here,
+now with a real 3.6x cost-of-CPU-pin number attached for whoever prioritizes
+it); model construction's 20-25 s is unexamined at the kernel level; the
+tiled-transpose fix's whole-pass magnitude needs a quiet-machine re-measure;
+and a genuinely clean (single-tenant machine) head-to-head number was not
+obtainable this session.

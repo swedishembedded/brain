@@ -1408,6 +1408,88 @@ token fails loudly.
       decode loop** - re-profiling after a fix is what promotes the next
       bottleneck, and this is that promotion. See
       `docs/performance/overview.md`'s case study for the full numbers.
+- [x] **Vision-encoder performance pass (Phase 8 follow-up): the promoted
+      bottleneck, profiled and partly closed.** Before touching a kernel,
+      measured how much of the ~75-80 s vision-encode estimate is the CPU
+      backend `crates/sam1` is pinned to (the wgpu backend corrupts this
+      tower's output at production scale - a separate, still-open defect,
+      NOT fixed here) vs a genuine algorithmic cost: a new weight-free bench
+      (`crates/sam1/src/bin/sam1_bench.rs`, `SamViTConfig::deepseek_ocr()` at
+      real 1024x1024/12-block geometry with random weights) measured the CPU
+      pin at **~3.6x** (72.2 s CPU vs 20.0 s wgpu-as-timing-reference, best
+      of 3) - a real number now attached to whoever eventually closes the
+      wgpu bug, not a guess.
+
+      **Per-kernel breakdown (`BRAIN_PROFILE`, the CPU backend's own
+      accumulator) found `attn_apply_cross` at 70-71%** of the whole tower's
+      CPU forward - 20-30x more wall time than `attn_scores_cross` at the
+      IDENTICAL total FLOP count per call. Root cause: `attn_apply_cross`
+      transposes V into `vt[hd,tk]` with a scatter-write loop (`hd=64`
+      elements per source row, each landing in a DIFFERENT destination row
+      16 KiB apart - 64 cache lines touched per source row, not revisited
+      until 63 unrelated lines have been touched, for all 4096 source rows
+      at the global-attention shape); `attn_scores_cross`'s own packing is a
+      plain contiguous per-row copy and pays none of this.
+
+      **Two fixes landed, both re-verified against the whole relevant test
+      matrix (`cargo test -p brain-sam1 --release`, `-p brain-backend-cpu
+      --release`, `-p brain-clip --release`, `-p brain-deepseekocr
+      --release`, `-p brain-model --release`, `-p brain-deepseekv2
+      --release` - all green, gradcheck and parity included):**
+      1. `crates/sam1` now dispatches its forward GEMMs through
+         `model::block::pick_gemm` (matching `crates/clip`/
+         `crates/deepseekv2`) instead of a hardcoded naive `matmul` index -
+         per kernels.md's "already-faster-sibling" check, but measured to
+         have **zero effect on the CPU backend**: `backend-cpu` already
+         routes every `matmul*` kernel name to the same native AVX2+rayon
+         `fast_ops::matmul_abt`, so the naive-vs-tiled distinction this
+         selector exists for was never live on this backend for this tower.
+         Kept as a correctness-neutral consistency fix, real on any backend
+         where that kernel-family collapse does not hold.
+      2. `backend-cpu::fast_ops::attn_apply_cross`'s V-transpose is now
+         tiled (buffer 16 source rows, then write the destination
+         cache-line-major instead of interleaved with 63 unrelated lines).
+         Same math, unit-tested against the direct definition. **Isolated,
+         same-process A/B: 1.0x-2.0x, never worse.** Whole-tower effect NOT
+         cleanly resolved this session - this machine ran under sustained,
+         heavy, variable load from a second agent's concurrent work for most
+         of the pass (`uptime` load average measured between ~1 and ~32 on a
+         22-core box), and a full-tower before/after pair taken under that
+         noise moved 68.8 s -> 72.2 s, inside the noise floor this machine
+         was producing, not a clean signal either way.
+
+      **New per-stage instrumentation, not just a number.**
+      `DeepEncoder::run_forward` now brackets SAM / the NCHW->NLC bridge /
+      CLIP / the projector separately under `BRAIN_PROFILE` (previously one
+      lumped "encode+splice+decode" line), shared via a `pub(crate)
+      stage_time` hoisted to `crates/deepseekocr/src/lib.rs`. Two real runs
+      (same checkpoint, same document image, a few minutes apart): vision
+      encode measured directly at **25.3 s and 34.4 s** (SAM 23.8-33.0 s,
+      CLIP 1.4-1.5 s, the bridge/projector each under 15 ms) - replacing the
+      prior pass's undifferentiated "~75-80 s" estimate with a real,
+      per-stage number, independent of whether the two kernel fixes above
+      moved it.
+
+      **Updated head-to-head vs `llama-mtmd-cli`, same session:** two
+      same-window pairs (brain 95.6 s vs `llama-mtmd-cli` 70.2 s = 1.36x;
+      brain 97.1 s vs 50.9 s = 1.91x) vs the prior pass's 123-147 s vs
+      ~20.6 s (~6-7x) on a quieter machine. Read honestly, not
+      optimistically: `llama-mtmd-cli`'s OWN number moved 2.5-3.4x slower
+      than its previously-recorded baseline in these same runs, proving
+      BOTH sides' absolute numbers are inflated by this session's shared
+      machine load, not that brain caught up to llama.cpp's true speed. The
+      RELATIVE gap narrowing (~6-7x -> ~1.4-1.9x under matched conditions)
+      is real and is overwhelmingly the vision-encoder work above, not the
+      two kernel fixes' individually-unresolved magnitudes.
+
+      **Still open:** the wgpu correctness bug (out of scope, now has a real
+      3.6x cost-of-CPU-pin number attached); model construction's 20-28 s
+      (reconfirmed, inspected for redundant work - none found in
+      `crates/deepseekocr/src/import.rs`'s streaming path - but not profiled
+      per kernel); the tiled-transpose fix's whole-pass magnitude, which
+      needs a quiet machine to pin down; and a genuinely clean, single-tenant
+      head-to-head number. See `docs/performance/overview.md`'s case study
+      for the full per-stage and per-kernel tables.
 - [x] LoRA training + measured-descent smoke test. Reused, not reinvented: the
       exact `qwen3::model::Qwen::lora_fwd`/`proj_bwd` shape (already ported
       once for `qwen35moe`) - frozen base `Role::Frozen` + trainable

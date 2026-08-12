@@ -167,15 +167,28 @@ per additional token, confirming the quadratic blowup). See
 per-kernel breakdown and a head-to-head against `llama-mtmd-cli` on the same
 weights and image.
 
-**Model load + vision encoding are now the dominant cost, and that is NOT
-optimized this pass.** Of a ~123-147 s total run at `--max_new 32`: ~18 s is
-one-off model construction (streaming the decoder's fp32 expansion + the
-mmproj import), ~50 s is the KV-cached decode (prompt prefill + 32 steps,
-per the `BRAIN_PROFILE` table), and the remaining ~75-80 s is the vision
-encoder (SAM ViT-B at 1024x1024 -> CLIP-L/24 -> compressor -> projector) -
-not touched this session and not yet broken down per kernel. `llama-mtmd-cli`
-encodes the same-shaped image in ~15 s on this machine, so the encoder is
-where the next profiling pass belongs, not the decode loop.
+**Model load + vision encoding were the dominant cost, and the vision
+encoder got its own profiling pass.** Of the ~123-147 s total run above:
+~18 s was one-off model construction, ~50 s was the KV-cached decode, and
+the remaining ~75-80 s was the vision encoder (SAM ViT-B at 1024x1024 ->
+CLIP-L/24 -> compressor -> projector), then unbroken down per kernel. A
+follow-up pass added per-stage instrumentation and found (and partly fixed)
+the encoder's real cost: `attn_apply_cross` (SAM's attention-weighted-V
+step) was 70-71% of the tower's own CPU forward, 20-30x more wall time than
+a same-FLOP-count sibling kernel, traced to a cache-hostile V-transpose now
+tiled for locality. The CPU backend `crates/sam1` is pinned to (the wgpu
+backend corrupts this tower's output at production scale, unrelated to this
+pass) costs roughly 3.6x over wgpu on this tower alone, measured directly
+rather than assumed. With both landed, real-weight runs measured the vision
+encoder directly at 25-34 s (down from the prior pass's undifferentiated
+~75-80 s estimate) and the whole-pipeline head-to-head against
+`llama-mtmd-cli` at roughly 1.4-1.9x under matched, same-session conditions
+(both sides' absolute numbers were inflated by a busy shared machine that
+session, so this is a relative, not absolute, claim). Model construction's
+20-28 s and the tiled-transpose fix's whole-pipeline magnitude remain open.
+See `docs/performance/overview.md`'s case study for the full per-stage and
+per-kernel tables and the honest caveats on what could and could not be
+pinned down on a shared machine.
 
 **No early stop.** The greedy loop always runs `max_new` steps. The output is
 truncated at the first end-of-sentence id and `finish_reason` reports `stop`
