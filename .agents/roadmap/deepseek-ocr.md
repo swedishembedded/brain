@@ -1264,7 +1264,51 @@ token fails loudly.
       infallible. No cancellation for the same reason. No batching, no KV cache,
       greedy only, single global view, CPU only.
 - [ ] Performance pass (published profile table before optimizing)
-- [ ] LoRA training + measured-descent smoke test
+- [x] LoRA training + measured-descent smoke test. Reused, not reinvented: the
+      exact `qwen3::model::Qwen::lora_fwd`/`proj_bwd` shape (already ported
+      once for `qwen35moe`) - frozen base `Role::Frozen` + trainable
+      `.lora_a`/`.lora_b` `Role::Trainable`, two matmuls + `axpy` forward, the
+      matching `matmul_dx`/`matmul_dw`/`grad_scale` backward - composed
+      entirely from `crates/deepseekv2`'s OWN already-registered kernels
+      (`matmul`/`matmul_dx`/`matmul_dw`/`grad_scale`); only `axpy` needed a new
+      pipeline slot in that crate's `PIPELINES`, no new kernel anywhere.
+      `deepseekv2::config::DeepseekV2Config::lora` (`qwen3::LoraCfg` reused
+      as-is, not redeclared - same choice `qwen35moe` made for the identical
+      type) targets the four attention projections
+      (`q_proj`/`k_proj`/`v_proj`/`o_proj`), never an MoE expert or the
+      router. TDD: the composite descent test was written and confirmed RED
+      (compile failure - `deepseekocr::train` and `DeepseekV2Config::lora`
+      did not exist) before any implementation landed, then brought GREEN.
+      Gradient-checked (`deepseekv2/tests/gradcheck.rs::
+      grads_match_finite_differences_lora`, `directional_check` - deliberately
+      NOT `elementwise_check`, because a LoRA `A`/`B` pair is read and written
+      by exactly ONE matmul chain per targeted projection, not folded/summed
+      across several call sites the way T5's `rel_bias` is; that is the same
+      choice `qwen3::gradcheck::check_qwen_lora`/`qwen35moe::gradcheck::
+      check_qwen35_lora` already made for the identical shape). The composite
+      smoke test (`deepseekocr/tests/tiny_ref.rs::
+      composite_lora_backward_freezes_the_base_and_descends`) is modelled
+      directly on `composite_backward_reaches_the_image_and_descends`'s own
+      shape: same tiny checkpoint-free fixture, forward, `zero_grads`,
+      forward+backward, then a plain (non-Adam) gradient step - but asserts
+      three things that test does not need to: reading the decoder base's
+      gradient panics (`Role::Frozen` really allocated no grad buffer, not
+      merely "unused"), `decoder().param_names()` is EXACTLY the `.lora_a`/
+      `.lora_b` set, and a decoder-base tensor plus a vision-encoder tensor
+      are BYTE-IDENTICAL before and after the step. `crates/deepseekocr/src/
+      train.rs` is the one new composite-level file (`lora_init_map`, merging
+      a real/fixture base weight map with a fresh zero-`B` adapter init,
+      mirroring `qwen3::finetune::finetune`'s own merge) -
+      `DeepseekOcr::new`/`new_split` needed **zero** changes: `cfg.decoder.lora`
+      threads straight through `DeepseekV2::new_on`'s existing role
+      assignment. `deepseekv2::lora` (save_adapter/fold_adapter_into) is a
+      direct port of `qwen3::lora`/`qwen35moe::lora` for completeness, not
+      exercised by the smoke test itself. All new/changed tests green on the
+      pooled test device; `qwen3::LoraCfg` gained `PartialEq` (additive) so
+      `DeepseekV2Config`'s existing derive keeps working. *Not done*: a
+      `finetune`-style CLI verb, a masked-dataset training loop, adapter
+      save/load through `brain do` - this phase proves the wiring descends,
+      not a production fine-tune (see `docs/models/deepseek-ocr.md`).
 
 Full plan: `/home/user/.claude/plans/woolly-beaming-avalanche.md` (this
 session's approved plan; not repo-relative, kept here only as a pointer for

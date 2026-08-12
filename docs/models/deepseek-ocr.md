@@ -28,8 +28,26 @@ block spliced over the decoder's `<image>` placeholders.
 
 The backward pass exists end to end (the decoder's cross-entropy gradient
 reaches the input pixels through the splice, the projector, CLIP and the whole
-SAM tower) and is gradient-checked, but there is no training verb, no LoRA and
-no dataset path - so "training" is unchecked above on purpose.
+SAM tower) and is gradient-checked.
+
+**LoRA is wired too, but not yet a production feature** - which is why
+"training" stays unchecked above. `deepseekv2::config::DeepseekV2Config::lora`
+freezes the decoder's base weights (embeddings, norms, the MoE
+router/experts/shared expert, the untied head, and the four attention
+projections' own base matrices) and adds a rank-`r` low-rank adapter on those
+four projections (`q_proj`/`k_proj`/`v_proj`/`o_proj`), composed entirely from
+the same `matmul`/`axpy`/`grad_scale` kernels the base decoder's own
+forward/backward already dispatch - no new kernel. It is gradient-checked
+(`deepseekv2/tests/gradcheck.rs::grads_match_finite_differences_lora`) and
+gated by a descent smoke test
+(`deepseekocr/tests/tiny_ref.rs::composite_lora_backward_freezes_the_base_and_descends`)
+that trains the composite with the decoder's base frozen and ONLY its
+`.lora_a`/`.lora_b` adapters trainable, and asserts a plain gradient step on
+those adapters alone measurably lowers the loss - proof the training path is
+wired correctly and actually descends, not a production fine-tune. Still
+missing: a `finetune`-style CLI verb, a masked-dataset training loop, and
+adapter save/load through `brain do` - see `crates/deepseekocr/src/train.rs`
+for the composite-level merge helper (`lora_init_map`) that exists so far.
 
 ## Getting the weights
 
