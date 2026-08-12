@@ -3,7 +3,7 @@ name = "brain-gradcheck"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Numerical (finite-difference) gradient checker — the backprop correctness gate, replacing the PyTorch oracle."
+description = "Numerical (finite-difference) gradient checker - the backprop correctness gate, replacing the PyTorch oracle."
 
 [lib]
 name = "gradcheck"
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 brain-model.workspace = true
 brain-gpt.workspace = true
 brain-qwen3.workspace = true
-# `check_qwen35` (src/lib.rs) — the Qwen3.5-35B-A3B hybrid GDN/GQA/MoE decoder.
+# `check_qwen35` (src/lib.rs) - the Qwen3.5-35B-A3B hybrid GDN/GQA/MoE decoder.
 brain-qwen35moe.workspace = true
 brain-lfm.workspace = true
 brain-glm.workspace = true
@@ -26,15 +26,15 @@ brain-sam2.workspace = true
 brain-vqgan.workspace = true
 brain-vae.workspace = true
 brain-gpu-core.workspace = true
-# `check_arcface` (src/facenet.rs) — the ArcFace/IResNet training graph.
+# `check_arcface` (src/facenet.rs) - the ArcFace/IResNet training graph.
 brain-facenet.workspace = true
-# `check_clip` (src/clip.rs) — the CLIP text-tower training graph.
+# `check_clip` (src/clip.rs) - the CLIP text-tower training graph.
 brain-clip.workspace = true
-# `check_t5` (src/t5.rs) — the T5 encoder training graph.
+# `check_t5` (src/t5.rs) - the T5 encoder training graph.
 brain-t5.workspace = true
-# `check_codeformer` (src/restore.rs) — CodeFormer's code-prediction Transformer.
+# `check_codeformer` (src/restore.rs) - CodeFormer's code-prediction Transformer.
 brain-restore.workspace = true
 brain-data.workspace = true
-
-[dev-dependencies]
+# `check_deepseekocr_relpos` (src/deepseekocr.rs) - the SAM rel-pos kernels have
+# no model crate yet, so this check registers their WGSL directly.
 brain-kernels.workspace = true

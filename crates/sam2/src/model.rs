@@ -4,19 +4,19 @@
 //! SAM 2 image-path forward graph.
 //!
 //! Composed from the SHARED blocks, never from private copies:
-//!   * `model::vit` — `WindowPlan`/`WindowIndex` (window partition/reverse as a
+//!   * `model::vit` - `WindowPlan`/`WindowIndex` (window partition/reverse as a
 //!     row permutation), `QPoolPlan`/`QPoolCache`/`q_pool_fwd` (Hiera's
 //!     `MaxPool2d` on the attention query only) and `cross_q_fwd` (attention
-//!     with independent q and kv extents — the reason `q_pool` works at all);
-//!   * `model::block` — `chunked_bidir_fwd` (span + query-chunked bidirectional
+//!     with independent q and kv extents - the reason `q_pool` works at all);
+//!   * `model::block` - `chunked_bidir_fwd` (span + query-chunked bidirectional
 //!     attention, used for every block whose query is NOT pooled) and the
 //!     `LayerNormIds` seam that picks the coalesced `layernorm_rows`;
-//!   * `vision::blocks` — `Conv` (patch embed, FPN laterals, `conv_s0`/`conv_s1`,
+//!   * `vision::blocks` - `Conv` (patch embed, FPN laterals, `conv_s0`/`conv_s1`,
 //!     the mask-prompt downsampling), `ConvTranspose` (the mask decoder's two 2x
 //!     upscalings) and `LayerNorm2d` (channels-first, eps 1e-6).
 //!
-//! SSA: every Hiera block writes a FRESH `[rows_out, dim_out]` output buffer —
-//! which is exactly what the backward will need to cache — and the neck, prompt
+//! SSA: every Hiera block writes a FRESH `[rows_out, dim_out]` output buffer -
+//! which is exactly what the backward will need to cache - and the neck, prompt
 //! encoder and decoder allocate a fresh buffer per stage throughout. Intra-block
 //! temporaries are per-block allocations that drop when the block ends.
 //!
@@ -25,7 +25,7 @@
 //! `window_partition` zero-pads the token grid bottom/right when the window does
 //! not divide it (hiera-tiny's 14/7 windows on 64²/32² grids; hiera-large at
 //! 1024 never pads). The pad happens AFTER `norm1`, so the padded tokens are
-//! zeros entering `qkv` — which means their keys and values are the qkv BIAS,
+//! zeros entering `qkv` - which means their keys and values are the qkv BIAS,
 //! not zero, and they genuinely participate in their window's softmax. That is
 //! reproduced exactly here: `WindowPlan` deliberately never pads (it emits a
 //! short final window, which is a DIFFERENT operator), so this module zero-pads
@@ -48,7 +48,7 @@ use crate::hostpe;
 use crate::import::{self, Tensors, NO_MEM_EMBED};
 
 /// Kernels this model dispatches, by name. `vision::ConvKernelIds::resolve` and
-/// `Gpu::kernel_index` both key on the NAME, so the order here is irrelevant —
+/// `Gpu::kernel_index` both key on the NAME, so the order here is irrelevant -
 /// nothing in this crate holds a positional kernel index.
 pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_bias", kernels::CONV_BIAS),
@@ -83,7 +83,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("resize_bilinear", kernels::RESIZE_BILINEAR),
     ("resize_nearest", kernels::RESIZE_NEAREST),
     ("axpy", kernels::AXPY),
-    // `imaging::Ctx`'s per-channel affine — brain's ONE normalise/denormalise
+    // `imaging::Ctx`'s per-channel affine - brain's ONE normalise/denormalise
     // kernel, used by [`Sam2::preprocess`].
     ("film_chan", kernels::FILM_CHAN),
     // ---- backward half (dispatched by [`crate::train`] only) ----
@@ -120,13 +120,13 @@ pub const PIPELINES: &[(&str, &str)] = &[
 const ATTN_CHUNK: u32 = 256;
 
 /// Largest `N*C*H*W` one `maxpool2d` dispatch may cover. The kernel records the
-/// winning input index in an f32 — exact only below 2^24 — and `QPoolCache`
+/// winning input index in an f32 - exact only below 2^24 - and `QPoolCache`
 /// asserts it. hiera-large's block 2 pools 65536 rows x 288 channels = 18.9 M,
 /// over the bound, so its `q_pool` runs in WINDOW CHUNKS: same shared
 /// `q_pool_fwd`, one call per chunk, each under the limit.
 const MAXPOOL_ELEMS: u64 = 1 << 24;
 
-/// Pipeline indices resolved by NAME (never by position — see `vision::ids`).
+/// Pipeline indices resolved by NAME (never by position - see `vision::ids`).
 pub(crate) struct Ids {
     pub(crate) matmul: usize,
     pub(crate) matmul_rows: usize,
@@ -219,9 +219,9 @@ pub struct Sam2 {
 /// Every image-encoder tap, one buffer per stage so the parity ladder can be
 /// climbed rung by rung.
 pub struct Encoded {
-    /// `[H*W, C]` NLC — the interpolated + tiled Hiera position embedding.
+    /// `[H*W, C]` NLC - the interpolated + tiled Hiera position embedding.
     pub pos_embed: DeviceBuffer,
-    /// `[H*W, C]` NLC — `patch_embed`'s output.
+    /// `[H*W, C]` NLC - `patch_embed`'s output.
     pub patch_embed: DeviceBuffer,
     /// Per-block output `[rows_out, dim_out]` NLC (SSA: one buffer per block).
     pub blocks: Vec<DeviceBuffer>,
@@ -241,7 +241,7 @@ pub struct Encoded {
     pub image_embed: DeviceBuffer,
 }
 
-/// A prompt for one image. A BOX is two points with labels 2 and 3 — the image
+/// A prompt for one image. A BOX is two points with labels 2 and 3 - the image
 /// path never passes `boxes=` to the reference prompt encoder, so there is one
 /// code path, not two.
 pub struct Prompt {
@@ -251,7 +251,7 @@ pub struct Prompt {
     pub labels: Vec<f32>,
     /// `[1, 1, 256, 256]` mask logits, ALREADY at `mask_input_size`. The
     /// reference downsamples a full-resolution mask with
-    /// `bilinear, antialias=True`, which brain has no kernel for — see the
+    /// `bilinear, antialias=True`, which brain has no kernel for - see the
     /// crate docs.
     pub mask_lowres: Option<Vec<f32>>,
     pub multimask_output: bool,
@@ -295,7 +295,7 @@ impl Sam2 {
     /// [`Sam2::new`] with a per-tensor trainability predicate. `trainable(name)`
     /// picks the parameters that get gradient + AdamW buffers; everything else
     /// stays `Role::Frozen` (weight buffer only). `crate::train` uses this to
-    /// build the mask-decoder-finetune role set — the trunk and neck stay frozen
+    /// build the mask-decoder-finetune role set - the trunk and neck stay frozen
     /// and allocate no optimiser state at all.
     pub fn new_with_roles(gpu: Gpu, cfg: Sam2Config, weights: &Tensors, trainable: &dyn Fn(&str) -> bool) -> Sam2 {
         let params: Vec<(String, usize, Role)> = import::param_list(&cfg)
@@ -336,7 +336,7 @@ impl Sam2 {
     // dispatch helpers
     // -----------------------------------------------------------------------
 
-    /// `out[rows, n] = x[rows, k] @ W[n, k]^T + b[n]` — the `nn.Linear` pair.
+    /// `out[rows, n] = x[rows, k] @ W[n, k]^T + b[n]` - the `nn.Linear` pair.
     /// `matmul_rows` is bit-identical to `matmul` (per its own header) and loads
     /// each weight row once per 8 output rows; the trunk's `[65536, C]` inputs
     /// are exactly the shape that motivated it.
@@ -348,7 +348,7 @@ impl Sam2 {
 
     pub(crate) fn act_step(&self, x: &DeviceBuffer, y: &DeviceBuffer, n: u32, act: Act) -> Step {
         match act {
-            // ReLU is `leaky_relu` at slope 0 — identical, and costs no kernel.
+            // ReLU is `leaky_relu` at slope 0 - identical, and costs no kernel.
             Act::Relu => self.gpu.step(self.ids.leaky_relu, &[x, y], &[n, f(0.0)], n),
             Act::GeluErf => self.gpu.step(self.ids.gelu_erf, &[x, y], &[n], n),
             Act::Sigmoid => self.gpu.step(self.ids.sigmoid, &[x, y], &[n], n),
@@ -403,7 +403,7 @@ impl Sam2 {
     }
 
     /// SSA copy into a fresh buffer. `axpy` is `out += s*in` (read-modify-write),
-    /// so the destination goes in the submit's CLEAR list — relying on a fresh
+    /// so the destination goes in the submit's CLEAR list - relying on a fresh
     /// allocation being zeroed would be a backend-dependent assumption.
     fn copy_of(&self, src: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let out = self.gpu.storage(n as u64);
@@ -420,7 +420,7 @@ impl Sam2 {
     /// decode belong to `crates/imaging` and to the serving workstream).
     ///
     /// Dispatched through `imaging::Ctx`, which owns the workspace's single
-    /// per-channel affine (`film_chan`) — there is no host pixel loop here.
+    /// per-channel affine (`film_chan`) - there is no host pixel loop here.
     pub fn preprocess(&self, rgb01: &[f32]) -> DeviceBuffer {
         let s = self.cfg.image_size;
         assert_eq!(rgb01.len(), 3 * (s * s) as usize, "preprocess wants a [3,{s},{s}] RGB image in [0,1]");
@@ -437,7 +437,7 @@ impl Sam2 {
         self.encode(&self.upload("sam2_image", image))
     }
 
-    /// [`Self::encode_image`] from a device buffer — what [`Self::preprocess`]
+    /// [`Self::encode_image`] from a device buffer - what [`Self::preprocess`]
     /// hands back.
     pub fn encode(&self, img: &DeviceBuffer) -> Encoded {
         let cfg = &self.cfg;
@@ -553,7 +553,7 @@ impl Sam2 {
             rows_in,
             cfg.trunk_eps,
         ));
-        // `shortcut = do_pool(self.proj(norm1(x)), self.pool)` — note the
+        // `shortcut = do_pool(self.proj(norm1(x)), self.pool)` - note the
         // projection reads norm1's OUTPUT, not the block input, and the pool runs
         // over the FULL grid (not per window).
         let mut sc_owned: Option<DeviceBuffer> = None;
@@ -695,6 +695,7 @@ impl Sam2 {
                 &probs,
                 &spans,
                 ATTN_CHUNK,
+                None,
                 &mut steps,
             );
             keep.push(scores);
@@ -828,7 +829,7 @@ impl Sam2 {
         }
         let fpn: Vec<DeviceBuffer> = fpn.into_iter().map(|f| f.unwrap()).collect();
 
-        // PositionEmbeddingSine per level — a constant table per (h, w).
+        // PositionEmbeddingSine per level - a constant table per (h, w).
         let pos_sine: Vec<DeviceBuffer> = (0..=n)
             .map(|i| {
                 let side = grid >> i;
@@ -857,7 +858,7 @@ impl Sam2 {
         }
 
         // `directly_add_no_mem_embed`: the image path adds the no-memory
-        // embedding to the lowest-resolution KEPT level — `ImageEncoder.forward`
+        // embedding to the lowest-resolution KEPT level - `ImageEncoder.forward`
         // discards `scalp` levels off the bottom, so that is level
         // `n - scalp`, not a hardcoded 2. Cross-checked against the SAM side,
         // which fixes the embedding grid at `image_size / backbone_stride`.
@@ -1006,7 +1007,7 @@ impl Sam2 {
         let s0 = if cfg.pred_obj_scores { 1 } else { 0 };
         let hyper_in = g.storage(nmt as u64 * mask_dim as u64);
         for i in 0..nmt {
-            // mask token i is hs row `s + 1 + i` — with `pred_obj_scores` the
+            // mask token i is hs row `s + 1 + i` - with `pred_obj_scores` the
             // token order is [obj_score, iou, mask x 4, ...prompt], so this is 2,
             // not 1. (The reference dumper found the same off-by-one.)
             let row = s0 + 1 + i;
@@ -1033,7 +1034,7 @@ impl Sam2 {
 
         // ---- IoU head, object score ----
         let iou_tok = self.row_copy(&hs, s0, d);
-        // `MLP(d, iou_head_hidden_dim, num_mask_tokens, iou_head_depth)` —
+        // `MLP(d, iou_head_hidden_dim, num_mask_tokens, iou_head_depth)` -
         // derived, not a hardcoded 3, so the model and `tensor_manifest` (which
         // already reads `iou_head_depth`) cannot drift apart.
         let mut iou_dims = vec![d];
@@ -1291,7 +1292,7 @@ impl Sam2 {
             let p = format!("sam_mask_decoder.transformer.layers.{l}");
             // (1) token self-attention
             if l == 0 {
-                // `skip_first_layer_pe`: no positional add AND no residual —
+                // `skip_first_layer_pe`: no positional add AND no residual -
                 // `queries = self_attn(q=k=v=queries)`.
                 let o = g.storage(qn as u64);
                 self.attention(&format!("{p}.self_attn"), &queries, &queries, &queries, t, t, d, &o);

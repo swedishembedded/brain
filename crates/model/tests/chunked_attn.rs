@@ -29,7 +29,7 @@ fn ids() -> VitKernelIds {
         layernorm: 0,
         matmul: 1,
         bias_add: 2,
-        gelu_erf: 3,
+        mlp_act: 3,
         scale_chan: 4,
         add2: 5,
         attn_scores_cross: 6,

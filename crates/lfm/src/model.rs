@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! LFM2.5-Encoder — bidirectional hybrid short-conv/attention encoder as WGSL
+//! LFM2.5-Encoder - bidirectional hybrid short-conv/attention encoder as WGSL
 //! compute dispatches, sharing the engine (`gpu_core`, `paramstore`, `kernels`)
 //! and the composable Step-builders (`model::block`, `audio::conv`).
 //!
 //! Per pre-norm layer (no biases anywhere), mixer chosen by `layer_types`:
 //!   h = RMSNorm(x)·ln1                                  (eps from checkpoint)
 //!   conv layer:  B,C,X = h·Win (row-thirds) ; y = Wout·(C ⊙ conv1d_dw(B ⊙ X))
-//!                (depthwise k=3, symmetric pad — encoder variant)
+//!                (depthwise k=3, symmetric pad - encoder variant)
 //!   attn layer:  q,k,v = h·Wq,Wk,Wv ; q,k = RoPE(QKNorm(·))
 //!                qkv = [q | expand(k) | expand(v)]      (GQA→MHA, group 2)
 //!                y = Wo·bidir-attention(qkv)            (non-causal, all j)
@@ -18,14 +18,14 @@
 //!
 //! Three regimes behind one layer loop:
 //! - **Materialized** (parity gates, short-T training): the bidir trio with
-//!   per-layer caches and full `[B,H,T,T]` scores — exact, memory ∝ T².
+//!   per-layer caches and full `[B,H,T,T]` scores - exact, memory ∝ T².
 //! - **Chunked inference**: `block::chunked_bidir_fwd` over the same fused qkv
 //!   with a bounded `[H, chunk, T]` slab, shared layer scratch (no caches),
 //!   and the MLM head evaluated only at gathered probe rows.
 //! - **Chunked training** (`new_train_chunked`): materialized caches EXCEPT
-//!   the T×T slabs — attention backward recomputes each chunk's scores/probs
+//!   the T×T slabs - attention backward recomputes each chunk's scores/probs
 //!   (`block::chunked_bidir_bwd`, accumulating dk/dv) and CE runs on the
-//!   gathered supervised rows only — together they fit an 8k training step in
+//!   gathered supervised rows only - together they fit an 8k training step in
 //!   the per-binding budget. Gated bit-tight by `tests/chunked_train_equiv.rs`.
 
 use std::cell::Cell;
@@ -72,7 +72,7 @@ const CE_VALUE: usize = 26;
 const SCORES_CROSS: usize = 27;
 const SOFTMAX_CROSS: usize = 28;
 const APPLY_CROSS: usize = 29;
-/// Plain embedding gather — reused as a generic row-gather (indices → rows).
+/// Plain embedding gather - reused as a generic row-gather (indices → rows).
 const EMBED: usize = 30;
 // Backward / optimizer set (training).
 const CE_STATS: usize = 31;
@@ -96,7 +96,7 @@ const DQ_CROSS: usize = 47;
 const DK_CROSS_ACC: usize = 48;
 const DV_CROSS_ACC: usize = 49;
 const ROW_SCATTER: usize = 50;
-// Fused bidirectional flash attention — the chunked forward's attention when
+// Fused bidirectional flash attention - the chunked forward's attention when
 // the device can run the SPLIT kernel. Both slots are registered because
 // `block::flash_bidir_variant` picks between them from the device's queried
 // `max_workgroup_size`, and only the split one is worth taking here:
@@ -116,7 +116,7 @@ const ROW_SCATTER: usize = 50;
 //
 // The ledger's old "flash measured ~= naive here" was measured against the
 // BASELINE kernel, whose per-thread `q[128]`/`o[128]` arrays fall out of
-// registers — the bottom row above, and 3.1x SLOWER than the GEMM path. It does
+// registers - the bottom row above, and 3.1x SLOWER than the GEMM path. It does
 // not transfer to the split kernel, which is ~4x FASTER. So the gate below is
 // "the split kernel is actually selectable", not "the device is cooperative":
 // on a device that can only run the baseline, GEMM still wins and is kept.
@@ -212,7 +212,7 @@ struct AttnBufs {
     k_pre: DeviceBuffer,
     k: DeviceBuffer,
     v: DeviceBuffer,
-    /// Fused `[q | k_exp | v_exp]`, `[n, 3*d]` — what attention consumes.
+    /// Fused `[q | k_exp | v_exp]`, `[n, 3*d]` - what attention consumes.
     qkv: DeviceBuffer,
     probs: DeviceBuffer,
     ctx: DeviceBuffer,
@@ -278,10 +278,10 @@ enum Regime {
 struct HeadGather {
     cap: u32,
     n_sup: Cell<u32>,
-    /// Gather indices (pad slots point at row 0 — in-range, harmless: their
+    /// Gather indices (pad slots point at row 0 - in-range, harmless: their
     /// targets are IGNORE).
     sup_idx: DeviceBuffer,
-    /// Scatter indices (pad slots are u32::MAX — skipped by `row_scatter`).
+    /// Scatter indices (pad slots are u32::MAX - skipped by `row_scatter`).
     sup_idx_scatter: DeviceBuffer,
     sup_targets: DeviceBuffer,
     probe_h: DeviceBuffer,
@@ -292,7 +292,7 @@ struct HeadGather {
     d_probe_h: DeviceBuffer,
 }
 
-/// Backward scratch (materialized regime only — training asserts it).
+/// Backward scratch (materialized regime only - training asserts it).
 struct BwdBufs {
     dres: Vec<DeviceBuffer>,
     d_logits: DeviceBuffer,
@@ -346,7 +346,7 @@ pub struct Lfm {
     slab_probs: DeviceBuffer,
     slab_dscores: DeviceBuffer,
     /// Mixer-projection / FFN-down outputs (consumed immediately by their
-    /// residual adds — shared across layers, never an activation cache).
+    /// residual adds - shared across layers, never an activation cache).
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     xn_final: DeviceBuffer,
@@ -361,10 +361,10 @@ pub struct Lfm {
 }
 
 impl Lfm {
-    /// Load an inference-only model (frozen weights, materialized attention —
+    /// Load an inference-only model (frozen weights, materialized attention -
     /// intended for short contexts / parity work). Streams the weights one tensor
     /// at a time off a mmap-backed
-    /// [`WeightReader`](checkpoint::weightio::WeightReader) — peak host ≈ one
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) - peak host ≈ one
     /// tensor of f32, never the whole-model `checkpoint::load` + `by_role("")`
     /// host copy on top of the device copy.
     pub fn load_inference(path: &str, b: u32, t: u32) -> Lfm {
@@ -376,7 +376,7 @@ impl Lfm {
 
     /// Load an inference-only model on the chunked long-context path: attention
     /// scratch bounded by `slab_budget_bytes`, MLM head evaluated at up to
-    /// `probe_cap` gathered rows (0 = hidden-states only). Streaming — see
+    /// `probe_cap` gathered rows (0 = hidden-states only). Streaming - see
     /// [`Lfm::from_reader_chunked`].
     pub fn load_inference_chunked(path: &str, b: u32, t: u32, slab_budget_bytes: u64, probe_cap: u32) -> Lfm {
         let reader = checkpoint::weightio::WeightReader::open(path)
@@ -386,7 +386,7 @@ impl Lfm {
 
     /// Streaming chunked-inference load: build from a mmap-backed
     /// [`WeightReader`], uploading one tensor at a time (peak host ≈ one tensor
-    /// of f32) — never the `checkpoint::load` + `by_role("")` whole-model host
+    /// of f32) - never the `checkpoint::load` + `by_role("")` whole-model host
     /// copy. Numerically identical to [`Lfm::load_inference_chunked`]; used by
     /// the resident serve path.
     pub fn from_reader_chunked(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32, slab_budget_bytes: u64, probe_cap: u32) -> Lfm {
@@ -407,7 +407,7 @@ impl Lfm {
     }
 
     /// Trainable model (weights + grads + AdamW moments, forward + backward
-    /// graphs). Materialized attention — training seq is bounded by the T²
+    /// graphs). Materialized attention - training seq is bounded by the T²
     /// score memory; [`Lfm::new_train_chunked`] lifts that for long context.
     pub fn new_train(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Lfm {
         Lfm::new_impl(cfg, b, t, init, None, true)
@@ -415,7 +415,7 @@ impl Lfm {
 
     /// Long-context trainable model: query-chunked attention (fwd + per-chunk
     /// recompute bwd, slab bounded by `slab_budget_bytes`) and the MLM head
-    /// evaluated only at the ≤ `head_cap` supervised rows — together these keep
+    /// evaluated only at the ≤ `head_cap` supervised rows - together these keep
     /// an 8k training step inside the per-binding budget.
     pub fn new_train_chunked(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, slab_budget_bytes: u64, head_cap: u32) -> Lfm {
         let mut m = Lfm::new_impl_chunkedtrain(cfg, b, t, init, slab_budget_bytes, head_cap);
@@ -428,7 +428,7 @@ impl Lfm {
     /// materialized-regime builder ([`new_impl`](Lfm::new_impl)) already takes a
     /// [`TensorSource`](checkpoint::TensorSource), so the mmap-backed
     /// [`WeightReader`](checkpoint::weightio::WeightReader) uploads one tensor at
-    /// a time (AdamW moments are device zero-init, not read from disk) — peak
+    /// a time (AdamW moments are device zero-init, not read from disk) - peak
     /// host ≈ one tensor of f32, byte-identical to the former eager path.
     pub fn load_train(path: &str, b: u32, t: u32) -> Lfm {
         let reader = checkpoint::weightio::WeightReader::open(path)
@@ -443,7 +443,7 @@ impl Lfm {
     /// chain, all typed on `&HashMap` (they wire the gathered-head + slab
     /// optimizer allocation after alloc); the streaming `TensorSource` only
     /// reaches `new_impl_alloc_inner`, so migrating here would mean changing that
-    /// public training-facing signature — out of this inference-load chunk.
+    /// public training-facing signature - out of this inference-load chunk.
     pub fn load_train_chunked(path: &str, b: u32, t: u32, slab_budget_bytes: u64, head_cap: u32) -> Lfm {
         let (cfg, init) = Self::load_ckpt(path);
         Lfm::new_train_chunked(cfg, b, t, &init, slab_budget_bytes, head_cap)
@@ -567,7 +567,7 @@ impl Lfm {
 
         let (regime, logits, ce_buf) = match chunked {
             None => {
-                // tiny_probs (chunked training): the T×T caches shrink to 1 —
+                // tiny_probs (chunked training): the T×T caches shrink to 1 -
                 // scores/probs live in the shared [H, chunk, T] slabs instead.
                 let bht2 = if tiny_probs {
                     1
@@ -600,7 +600,7 @@ impl Lfm {
                 // gemm_bidir_fwd pads every per-head stride to 64 words (step_sliced's
                 // 256B offset-alignment contract), so these scratch buffers (reused as
                 // `packs`/`ctx_pack`/scores-probs) must be sized for the PADDED, not
-                // raw, per-span requirement — `n*3*d`/`n*hq`/`heads*chunk*t` have zero
+                // raw, per-span requirement - `n*3*d`/`n*hq`/`heads*chunk*t` have zero
                 // slack over the raw size at b=1.
                 let slab = heads * block::pad64(chunk as u64 * t as u64);
                 let pack_words = 3 * heads * block::pad64(t as u64 * hd);
@@ -763,7 +763,7 @@ impl Lfm {
     /// Whether the fused flash path is worth taking on THIS device: only when
     /// `block::flash_bidir_variant` actually resolves to the split kernel. The
     /// baseline kernel is 3.1x SLOWER than `gemm_bidir_fwd` at lfm's shape (see
-    /// the `FLASH_BIDIR` comment), so "cooperative device" is not the gate —
+    /// the `FLASH_BIDIR` comment), so "cooperative device" is not the gate -
     /// "the split kernel is selectable" is.
     fn flash_selectable(gpu: &Gpu) -> bool {
         let caps = gpu.caps();
@@ -901,7 +901,7 @@ impl Lfm {
         self.forward_steps_for(self.b)
     }
 
-    /// The forward for a row-batch of `b_use` sequences (≤ the built `b`) —
+    /// The forward for a row-batch of `b_use` sequences (≤ the built `b`) -
     /// buffers are sized for the max, kernels touch the `b_use·t` prefix. The
     /// chunked-inference regime prebuilds one list per group size so the
     /// scheduler never pays repeat-padding for a partial group.
@@ -970,19 +970,19 @@ impl Lfm {
                                 let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
                                 block::chunked_bidir_fwd(
                                     &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
-                                    &ab.ctx, &self.slab_scores, &self.slab_probs, &spans, chunk, &mut s,
+                                    &ab.ctx, &self.slab_scores, &self.slab_probs, &spans, chunk, None, &mut s,
                                 );
                             }
                         },
                         Regime::Chunked { scores, probs, chunk, ctx_pack, .. } => {
                             let spans: Vec<(u32, u32)> = (0..b_use).map(|i| (i * self.t, self.t)).collect();
                             // Fused flash attention wherever the SPLIT kernel is
-                            // selectable — ~4x the GEMM path at 8k/hd=64 on a
+                            // selectable - ~4x the GEMM path at 8k/hd=64 on a
                             // P40 (3.97-4.35x over three runs), cosine
                             // 1.0000000000 (numbers by `FLASH_BIDIR`
                             // above). Otherwise GEMM attention on cooperative
                             // devices (register-tiled matmuls over per-head
-                            // packs, GQA folded into the pack — ~8x the naive
+                            // packs, GQA folded into the pack - ~8x the naive
                             // trio); the chunked cross trio is the CPU-JIT path
                             // (its native fast paths own that regime and read
                             // the fused qkv).
@@ -1008,7 +1008,7 @@ impl Lfm {
                                 let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
                                 block::chunked_bidir_fwd(
                                     &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
-                                    &ab.ctx, scores, probs, &spans, *chunk, &mut s,
+                                    &ab.ctx, scores, probs, &spans, *chunk, None, &mut s,
                                 );
                             }
                         }
@@ -1154,7 +1154,7 @@ impl Lfm {
         if let Some(hg) = &self.head {
             // Gathered head backward: CE stats/grad over ≤ cap rows, tied-head
             // dW from the gathered rows, then the input grad scattered back to
-            // the supervised rows of d_xn (zeroed via submit `clears` — rows
+            // the supervised rows of d_xn (zeroed via submit `clears` - rows
             // with no supervision contribute nothing).
             let cap = hg.cap;
             s.push(self.gpu.step(CE_STATS, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g], &[cap, v, IGNORE], cap));
@@ -1205,7 +1205,7 @@ impl Lfm {
                             block::chunked_bidir_bwd(
                                 &self.gpu, &fwd_ids, &bwd_ids, c.n_heads, hd, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                 &bw.d_ctx, &bw.d_qkv, &self.slab_scores, &self.slab_probs, &self.slab_dscores,
-                                &spans, chunk, &mut s,
+                                &spans, chunk, None, &mut s,
                             );
                         }
                     }
@@ -1238,7 +1238,7 @@ impl Lfm {
                         &bw.d_mix4,
                         &cv.bx_ncl,
                         self.w(&p("conv.conv.weight")),
-                        Some(&bw.d_mix3), // d_bx (NCL) — d_mix3's NLC value is consumed
+                        Some(&bw.d_mix3), // d_bx (NCL) - d_mix3's NLC value is consumed
                         Some(self.ps.g(&p("conv.conv.weight"))),
                     ));
                     s.push(self.gpu.step(NCL_NLC, &[&bw.d_mix3, &bw.d_mix4], &[n * d, d, self.t], n * d));
@@ -1303,7 +1303,7 @@ impl Lfm {
     }
 
     /// Run the forward graph; returns the masked-CE loss (materialized regime;
-    /// 0.0 in the chunked regime — read the taps instead).
+    /// 0.0 in the chunked regime - read the taps instead).
     /// Chunked-inference regime: run the forward for a partial group of
     /// `b_use` sequences (tokens for exactly `b_use*t` rows must be set).
     pub fn forward_group(&self, b_use: u32) {
@@ -1339,7 +1339,7 @@ impl Lfm {
         self.gpu.poll_wait();
     }
 
-    /// OFFLINE FLOP/OPS cost of the recorded forward — walks the step list,
+    /// OFFLINE FLOP/OPS cost of the recorded forward - walks the step list,
     /// executes nothing. Chunked-regime instances cost the recorded per-chunk
     /// graph (what one `forward` submits); see `gpu_core::cost`.
     pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
@@ -1430,7 +1430,7 @@ impl model::ModelConfig for LfmConfig {
 impl model::Model for Lfm {
     type Config = LfmConfig;
 
-    /// Trait construction is the TRAINABLE model — what the generic trainer
+    /// Trait construction is the TRAINABLE model - what the generic trainer
     /// and the blanket gradcheck need. (The inherent `Lfm::new` stays frozen
     /// for parity/inference work.)
     fn new(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
@@ -1492,7 +1492,7 @@ impl model::Model for Lfm {
 mod tests {
     use super::{Lfm, LfmConfig, PIPELINES};
 
-    /// Every kernel this model can dispatch has a cost formula — pins the
+    /// Every kernel this model can dispatch has a cost formula - pins the
     /// FLOP/OPS accounting against silent drift when PIPELINES grows.
     #[test]
     fn pipelines_fully_costed() {
@@ -1534,7 +1534,7 @@ mod tests {
     }
 
     /// The slot consts index `PIPELINES` positionally, so inserting a pipeline
-    /// silently re-points every const after it — a mismatched kernel is wrong
+    /// silently re-points every const after it - a mismatched kernel is wrong
     /// output, not a crash. Pin the ones this file dispatches by NAME.
     #[test]
     fn slot_constants_name_the_pipeline_they_index() {
@@ -1542,7 +1542,7 @@ mod tests {
             (super::MATMUL, "matmul"),
             (super::MATMUL_REG3, "matmul_reg3"),
             (super::RMSNORM_EPS, "rmsnorm_eps"),
-            // `ROPE`/`ROPE_BWD` are local shorthands for the `rope_base` pair —
+            // `ROPE`/`ROPE_BWD` are local shorthands for the `rope_base` pair -
             // lfm's RoPE takes theta as a Params word, which is what
             // `rope_base.wgsl` is (`rope.wgsl` bakes the base in).
             (super::ROPE, "rope_base"),

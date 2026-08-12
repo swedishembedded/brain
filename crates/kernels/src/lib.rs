@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Raw WGSL compute kernels — the single source of truth for brain's GPU
+//! Raw WGSL compute kernels - the single source of truth for brain's GPU
 //! engine. fp32-only, core-compute-only (single bind group, <=8 storage
-//! buffers/kernel — the largest today binds 7,
-//! this header used to claim <=4 — no atomics/subgroups/f16) so the same
+//! buffers/kernel - the largest today binds 7,
+//! this header used to claim <=4 - no atomics/subgroups/f16) so the same
 //! text runs on old desktop GPUs and on WebGPU in the browser.
 //!
 //! Workgroup size is `@workgroup_size(64)` everywhere except the register-tiled
 //! GEMMs (`matmul_reg*`), which need 256 invocations to hold a 128x128 output
 //! tile. Backends read each kernel's declared size via
 //! `backend_api::workgroup_size_of`, so a kernel's WGSL is the only place its
-//! size is written down — but a kernel that departs from 64 must also
+//! size is written down - but a kernel that departs from 64 must also
 //! reconstruct its flat invocation id with its own size.
 //!
 //! Each `.wgsl` file under `wgsl/` is embedded as a `pub const` (UPPER_SNAKE of
@@ -103,6 +103,18 @@ pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wg
 pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
 /// `wgsl/attn_prefix_mask.wgsl`
 pub const ATTN_PREFIX_MASK: &str = include_str!("../wgsl/attn_prefix_mask.wgsl");
+/// `wgsl/attn_relpos_add.wgsl`
+pub const ATTN_RELPOS_ADD: &str = include_str!("../wgsl/attn_relpos_add.wgsl");
+/// `wgsl/attn_relpos_dq.wgsl`
+pub const ATTN_RELPOS_DQ: &str = include_str!("../wgsl/attn_relpos_dq.wgsl");
+/// `wgsl/attn_relpos_dr.wgsl`
+pub const ATTN_RELPOS_DR: &str = include_str!("../wgsl/attn_relpos_dr.wgsl");
+/// `wgsl/attn_relpos_drh.wgsl`
+pub const ATTN_RELPOS_DRH: &str = include_str!("../wgsl/attn_relpos_drh.wgsl");
+/// `wgsl/attn_relpos_drw.wgsl`
+pub const ATTN_RELPOS_DRW: &str = include_str!("../wgsl/attn_relpos_drw.wgsl");
+/// `wgsl/attn_relpos_qr.wgsl`
+pub const ATTN_RELPOS_QR: &str = include_str!("../wgsl/attn_relpos_qr.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
@@ -853,6 +865,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_decode_scores", ATTN_DECODE_SCORES),
     ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
     ("attn_prefix_mask", ATTN_PREFIX_MASK),
+    ("attn_relpos_add", ATTN_RELPOS_ADD),
+    ("attn_relpos_dq", ATTN_RELPOS_DQ),
+    ("attn_relpos_dr", ATTN_RELPOS_DR),
+    ("attn_relpos_drh", ATTN_RELPOS_DRH),
+    ("attn_relpos_drw", ATTN_RELPOS_DRW),
+    ("attn_relpos_qr", ATTN_RELPOS_QR),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
@@ -1211,7 +1229,7 @@ pub const ALL: &[(&str, &str)] = &[
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
 ///
 /// # Panics
-/// Panics if `name` is not a known kernel — callers reference kernels by
+/// Panics if `name` is not a known kernel - callers reference kernels by
 /// compile-time-known names, so an unknown name is a programmer error.
 pub fn src(name: &str) -> &'static str {
     ALL.iter()

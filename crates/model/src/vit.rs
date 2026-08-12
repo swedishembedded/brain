@@ -3,7 +3,7 @@
 
 //! Reusable ViT-block Step-builders (the bidirectional/vision sibling of
 //! [`crate::block`]): pre-LN transformer block with optional per-head QK
-//! LayerNorm, optional table-driven 2D RoPE, and optional LayerScale — the
+//! LayerNorm, optional table-driven 2D RoPE, and optional LayerScale - the
 //! superset covering DINOv2 blocks (LayerScale only), the WorldMirror trunk
 //! (all hooks on), and plain camera-head blocks.
 //!
@@ -29,10 +29,14 @@ pub struct VitKernelIds {
     pub layernorm: usize,
     pub matmul: usize,
     /// 8-row-blocked matmul (bit-identical to `matmul`, 8× less weight
-    /// traffic) — used for the large forward linears.
+    /// traffic) - used for the large forward linears.
     pub matmul_rows: usize,
     pub bias_add: usize,
-    pub gelu_erf: usize,
+    /// The MLP's pointwise activation. ANY `(x)->(y)` elementwise kernel with
+    /// the `Params { total: u32 }` + `(x, out)` signature fits this slot -
+    /// `gelu_erf`, `gelu` (tanh), `quick_gelu` and `silu` are all binary-
+    /// compatible here, so the field names the ROLE, not one kernel.
+    pub mlp_act: usize,
     pub scale_chan: usize,
     pub add2: usize,
     pub attn_scores_cross: usize,
@@ -58,7 +62,7 @@ impl VitShape {
 }
 
 /// Per-head QK LayerNorm weights (applied in place on the q/k regions of the
-/// fused qkv buffer, BEFORE RoPE — WorldMirror order).
+/// fused qkv buffer, BEFORE RoPE - WorldMirror order).
 pub struct QkNorm<'a> {
     pub q_w: &'a DeviceBuffer,
     pub q_b: &'a DeviceBuffer,
@@ -159,7 +163,7 @@ pub fn chunked_attn_fwd(
         apply: k.attn_apply_cross,
     };
     crate::block::chunked_bidir_fwd(
-        g, &ids, sh.heads, sh.head_dim(), c, qkv, 3 * c, 0, c, 2 * c, ctx, scores, probs, spans, chunk, steps,
+        g, &ids, sh.heads, sh.head_dim(), c, qkv, 3 * c, 0, c, 2 * c, ctx, scores, probs, spans, chunk, None, steps,
     );
 }
 
@@ -172,7 +176,12 @@ pub struct VitBwdIds {
     pub matmul_dx: usize,
     pub matmul_dw: usize,
     pub bias_grad: usize,
-    pub gelu_erf_bwd: usize,
+    /// Backward of whatever [`VitKernelIds::mlp_act`] holds - same role-not-
+    /// kernel rule: `Params { total: u32 }` + `(x, dout, dx)`. It MUST be the
+    /// adjoint of the forward slot's kernel; `gelu_bwd` standing in for
+    /// `gelu_erf_bwd` is a real, gradcheck-invisible bug (see
+    /// `crates/gradcheck/tests/gelu_erf_fd.rs`).
+    pub mlp_act_bwd: usize,
     pub scale_chan_dg: usize,
     pub ln_head_dx: usize,
     pub ln_head_dgb: usize,
@@ -232,7 +241,7 @@ impl VitBlockCache {
 
 /// Record one pre-LN ViT block, in place on `x` (`[rows, C]`):
 ///   x += ls1 ∘ proj(attn(qk_norm/rope(qkv(LN1(x)))));
-///   x += ls2 ∘ fc2(gelu_erf(fc1(LN2(x))))
+///   x += ls2 ∘ fc2(mlp_act(fc1(LN2(x))))
 pub fn vit_block_fwd(
     g: &Gpu,
     k: &VitKernelIds,
@@ -280,7 +289,7 @@ pub fn vit_block_fwd(
     steps.push(crate::block::layernorm_fwd(g, &ln, &scr.res, w.norm2_w, w.norm2_b, &scr.ln, c, rows, sh.eps));
     steps.push(g.step(k.matmul_rows, &[&scr.ln, w.fc1_w, &scr.h], &[rows, c, sh.mlp], rows.div_ceil(8) * sh.mlp));
     steps.push(g.step(k.bias_add, &[&scr.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
-    steps.push(g.step(k.gelu_erf, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.mlp_act, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.matmul_rows, &[&scr.h2, w.fc2_w, &scr.ln], &[rows, sh.mlp, c], rows.div_ceil(8) * c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
@@ -357,7 +366,7 @@ impl VitBwdScratch {
 /// the block's [`VitBlockCache`] for the backward. Input = `cache.x_in`
 /// (caller-filled), output → `x_out`. Attention runs ONE dispatch per span
 /// (chunk == span) through [`cross_q_fwd`], caching each span's probs at
-/// [`probs_offsets`] — a running, binding-aligned prefix, so `spans` may be
+/// [`probs_offsets`] - a running, binding-aligned prefix, so `spans` may be
 /// RAGGED. `cache.qkv` must be in the submit clears list (axpy-copied).
 pub fn vit_block_fwd_cached(
     g: &Gpu,
@@ -391,10 +400,10 @@ pub fn vit_block_fwd_cached(
         steps.push(g.step(k.rope2d, &[&cache.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, 0, r.tmod, f(1.0)], rows * sh.heads * half));
         steps.push(g.step(k.rope2d, &[&cache.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
     }
-    // Self-attention is the `q0 == k0`, `qn == kn` case of [`cross_q_fwd`] —
+    // Self-attention is the `q0 == k0`, `qn == kn` case of [`cross_q_fwd`] -
     // ONE implementation of the per-span cross trio, shared with Hiera's pooled
     // query. Its running (and binding-aligned) probs offsets are what make a
-    // RAGGED span list — a border window, Swin's shifted partition — bindable;
+    // RAGGED span list - a border window, Swin's shifted partition - bindable;
     // `si * heads * len * len` was both wrong for ragged spans and unbindable.
     let cross = crate::block::CrossIds {
         scores: k.attn_scores_cross,
@@ -419,7 +428,7 @@ pub fn vit_block_fwd_cached(
     steps.push(crate::block::layernorm_fwd(g, &ln, &cache.res_mid, w.norm2_w, w.norm2_b, &cache.ln2, c, rows, sh.eps));
     steps.push(g.step(k.matmul, &[&cache.ln2, w.fc1_w, &cache.h], &[rows, c, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.bias_add, &[&cache.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
-    steps.push(g.step(k.gelu_erf, &[&cache.h, &cache.h2], &[rows * sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.mlp_act, &[&cache.h, &cache.h2], &[rows * sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.matmul, &[&cache.h2, w.fc2_w, &cache.mlp_out], &[rows, sh.mlp, c], rows * c));
     steps.push(g.step(k.bias_add, &[&cache.mlp_out, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
@@ -434,7 +443,7 @@ pub fn vit_block_fwd_cached(
 /// Backward through one cached block: upstream `d_out` → `d_x_in`, parameter
 /// grads accumulated into `gr`. Same span discipline as the cached forward
 /// (chunk == span; the cross-attention backward kernels ASSIGN, so spans
-/// must cover disjoint rows — which frame spans and the single global span
+/// must cover disjoint rows - which frame spans and the single global span
 /// both satisfy). `sb.d_qkv`/`sb.d_qkv_pre` must be zero-cleared by the
 /// caller's submit for each block.
 pub fn vit_block_bwd(
@@ -469,7 +478,7 @@ pub fn vit_block_bwd(
     steps.push(g.step(kb.matmul_dx, &[d_mlp, w.fc2_w, &sb.d_h2], &[rows, m, c, 0], rows * m));
     steps.push(g.step(kb.matmul_dw, &[d_mlp, &cache.h2, gr.fc2_w], &[rows, m, c], c * m));
     steps.push(g.step(kb.bias_grad, &[d_mlp, gr.fc2_b], &[rows, c], c));
-    steps.push(g.step(kb.gelu_erf_bwd, &[&cache.h, &sb.d_h2, &sb.d_h], &[rows * m], rows * m));
+    steps.push(g.step(kb.mlp_act_bwd, &[&cache.h, &sb.d_h2, &sb.d_h], &[rows * m], rows * m));
     steps.push(g.step(kb.matmul_dx, &[&sb.d_h, w.fc1_w, &sb.d_ln], &[rows, c, m, 0], rows * c));
     steps.push(g.step(kb.matmul_dw, &[&sb.d_h, &cache.ln2, gr.fc1_w], &[rows, c, m], m * c));
     steps.push(g.step(kb.bias_grad, &[&sb.d_h, gr.fc1_b], &[rows, m], m));
@@ -491,7 +500,7 @@ pub fn vit_block_bwd(
     steps.push(g.step(kb.matmul_dw, &[d_attn, &cache.ctx, gr.proj_w], &[rows, c, c], c * c));
     steps.push(g.step(kb.bias_grad, &[d_attn, gr.proj_b], &[rows, c], c));
 
-    // The adjoint of the cached forward's attention, through the SAME builder —
+    // The adjoint of the cached forward's attention, through the SAME builder -
     // so the two can never drift in how they address a span's cached softmax.
     let att: Vec<AttnSpan> = spans.iter().map(|&(row0, len)| AttnSpan::span(row0, len)).collect();
     cross_q_bwd(
@@ -544,13 +553,13 @@ pub fn vit_block_bwd(
 //
 // COMPOSITION, NOT NEW KERNELS. Two observations do all the work:
 //
-//  1. **A disjoint window IS a disjoint span** — once the token rows are in
+//  1. **A disjoint window IS a disjoint span** - once the token rows are in
 //     window-major order. Window partitioning is therefore a PERMUTATION OF
 //     ROWS, and brain already has both halves of a row permutation: `embed`
 //     (gather, `dst[r] = src[idx[r]]`) and `row_scatter` (scatter,
 //     `dst[idx[r]] = src[r]`). For a permutation those two are exact inverses
 //     AND exact adjoints of each other, so the backward of a partition is the
-//     forward of the reverse — no new kernel, and no new gradient form.
+//     forward of the reverse - no new kernel, and no new gradient form.
 //
 //  2. **Every stage of a ViT block except attention is row-wise**, so the whole
 //     block COMMUTES with a row permutation:
@@ -561,7 +570,7 @@ pub fn vit_block_bwd(
 //     NO window parameter at all: permute once, run N blocks with window spans,
 //     unpermute once.
 //
-//     THE ONE EXCEPTION IS `rope2d`, which indexes its table by `row % tmod` —
+//     THE ONE EXCEPTION IS `rope2d`, which indexes its table by `row % tmod` -
 //     an absolute-position op, not a row-wise one. Windowed attention composes
 //     with `rope: None` (Hiera and Swin both use additive/relative position
 //     encodings, not RoPE), or with RoPE tables the caller has ALREADY permuted
@@ -573,35 +582,35 @@ pub fn vit_block_bwd(
 // q and kv have different token counts. The cross-attention kernels
 // (`attn_scores_cross`/`attn_softmax_cross`/`attn_apply_cross` and their four
 // backward kernels) ALREADY take two lengths, two buffers and independent
-// strides/offsets — verified against every kernel header. What they did not
+// strides/offsets - verified against every kernel header. What they did not
 // have was a *builder*: `block::chunked_bidir_fwd` binds one buffer for q and
 // kv and ties the query rows to the key rows. [`cross_q_fwd`] / [`cross_q_bwd`]
 // below are that builder, and [`vit_block_fwd_cached`] / [`vit_block_bwd`] run
 // their own self-attention through it too, so there is exactly one per-span
 // cross-attention dispatch sequence in this file.
 //
-// RAGGED SPANS HAVE A BINDING PRECONDITION — read this before claiming Swin.
+// RAGGED SPANS HAVE A BINDING PRECONDITION - read this before claiming Swin.
 // Swin's shifted-window attention is expressible as ragged spans with no mask
 // (see [`axis_cuts`]), and the arithmetic is right for any partition. But the
 // cached-attention path binds two buffers at a per-span offset, and a storage
 // binding offset must be a multiple of `min_storage_buffer_offset_alignment`
 // (256 B = 64 f32) or wgpu rejects the bind group outright:
-//   * `probs` — SOLVED here: [`probs_offsets`] pads every slab to
+//   * `probs` - SOLVED here: [`probs_offsets`] pads every slab to
 //     [`BIND_ALIGN`], so any span list binds. (Unpadded, `heads*qn*kn` is not a
-//     multiple of 64 for most real shapes — 16 heads x 729^2 is not — so this
+//     multiple of 64 for most real shapes - 16 heads x 729^2 is not - so this
 //     bit already for UNIFORM spans.)
-//   * `q` / `kv` / `d_q` / `d_kv` — SOLVED here: the row offset rides in the
+//   * `q` / `kv` / `d_q` / `d_kv` - SOLVED here: the row offset rides in the
 //     kernels' own `q_off`/`k_off`/`v_off` Params and the buffers bind whole.
-//   * `ctx` / `d_ctx` — NOT solvable without a kernel ABI change:
+//   * `ctx` / `d_ctx` - NOT solvable without a kernel ABI change:
 //     `attn_apply_cross` writes `out[(b*Tq + i)*d_model + ...]` and has no
 //     output-offset Param, so the binding must carry `q0*C` and that offset
 //     must be 64-aligned. [`WindowPlan::ctx_bindable`] answers this for a plan;
 //     [`aligned_ctx`] is the loud failure otherwise.
-// So: shifted/ragged windows run whenever every span's `q0*C` is 64-aligned —
+// So: shifted/ragged windows run whenever every span's `q0*C` is 64-aligned -
 // always true for `C % 64 == 0`, and for many smaller `C`/window combinations.
 // It is NOT unconditional. Lifting the last case means adding an `out_off`
 // Param to `attn_apply_cross`/`attn_bwd_dscores_cross`/`attn_bwd_dv_cross`,
-// which is an ABI change shared with `seq2seq` and `fastvlm` — a deliberate
+// which is an ABI change shared with `seq2seq` and `fastvlm` - a deliberate
 // kernel task, not something to slip in here.
 
 /// The two row-permutation kernels. `embed` gathers, `row_scatter` scatters;
@@ -628,7 +637,7 @@ pub fn gather_rows(
 
 /// `dst[idx[r], :] = src[r, :]`, `n` rows of `d` floats into a `n_rows_out`-row
 /// destination (`row_scatter`). Rows of `dst` that no index names are left
-/// UNTOUCHED — for a permutation every row is named, so nothing needs clearing;
+/// UNTOUCHED - for a permutation every row is named, so nothing needs clearing;
 /// for the q-region scatter of [`q_pool_bwd`] the k/v regions are deliberately
 /// left for `attn_bwd_dk/dv_cross` to write.
 /// Params: `[n_idx, d, n_rows_out]`, threads `n*d`.
@@ -667,12 +676,12 @@ pub fn region_index(rows: u32, n_regions: u32, region: u32) -> Vec<u32> {
 ///
 /// Swin rolls by `-shift` and then masks the softmax so tokens that wrapped
 /// never attend across the seam. That masked partition is EXACTLY the ragged
-/// partition returned here — `[0, shift)`, then full windows, then the
-/// remainder — so brain expresses shifted-window attention with **variable-size
+/// partition returned here - `[0, shift)`, then full windows, then the
+/// remainder - so brain expresses shifted-window attention with **variable-size
 /// spans and no mask at all**, which is why no masked-softmax kernel appears in
 /// this file. `shift == 0` is the plain partition (Hiera, Swin's even layers).
 /// A grid length that is not a multiple of `win` yields a short final window
-/// (Hiera instead zero-pads the token grid upstream — that is the caller's
+/// (Hiera instead zero-pads the token grid upstream - that is the caller's
 /// `pad2d`, not this planner's business).
 fn axis_cuts(len: u32, win: u32, shift: u32) -> Vec<(u32, u32)> {
     assert!(win > 0, "window size must be > 0");
@@ -697,8 +706,15 @@ fn axis_cuts(len: u32, win: u32, shift: u32) -> Vec<(u32, u32)> {
 ///
 /// The token buffer is `[grid_h*grid_w, C]` in row-major grid order. `perm()`
 /// reorders it into window-major order, where window `m` occupies the
-/// contiguous rows `spans()[m]` — so the existing span-chunked attention runs
+/// contiguous rows `spans()[m]` - so the existing span-chunked attention runs
 /// windowed attention unchanged. `inv()` reverses it.
+///
+/// Three partitions live here, all reusing the same permutation/span machinery:
+/// [`WindowPlan::new`] (exact division), [`WindowPlan::shifted`] (Swin's
+/// shift, expressed as RAGGED windows instead of roll + mask) and
+/// [`WindowPlan::padded`] (SAM-1/ViTDet's zero-pad to a uniform grid). They are
+/// three real reference designs, not one policy with knobs - see each
+/// constructor's own doc.
 #[derive(Clone, Debug)]
 pub struct WindowPlan {
     pub grid_h: u32,
@@ -707,6 +723,11 @@ pub struct WindowPlan {
     pub win_w: u32,
     pub shift_h: u32,
     pub shift_w: u32,
+    /// Grid the windows actually tile. Equal to `grid_h`/`grid_w` for every
+    /// partition except [`WindowPlan::padded`]'s, where each is rounded up to
+    /// a multiple of the window.
+    pad_h: u32,
+    pad_w: u32,
     perm: Vec<u32>,
     inv: Vec<u32>,
     spans: Vec<(u32, u32)>,
@@ -715,7 +736,7 @@ pub struct WindowPlan {
 }
 
 impl WindowPlan {
-    /// Plain (unshifted) partition — Hiera, Swin's even layers, DaViT's local
+    /// Plain (unshifted) partition - Hiera, Swin's even layers, DaViT's local
     /// window stage.
     pub fn new(grid_h: u32, grid_w: u32, win_h: u32, win_w: u32) -> WindowPlan {
         WindowPlan::shifted(grid_h, grid_w, win_h, win_w, 0, 0)
@@ -755,7 +776,81 @@ impl WindowPlan {
         for (dstrow, &srcrow) in perm.iter().enumerate() {
             inv[srcrow as usize] = dstrow as u32;
         }
-        WindowPlan { grid_h, grid_w, win_h, win_w, shift_h, shift_w, perm, inv, spans, max_span, uniform }
+        WindowPlan { grid_h, grid_w, win_h, win_w, shift_h, shift_w, pad_h: grid_h, pad_w: grid_w, perm, inv, spans, max_span, uniform }
+    }
+
+    /// SAM-1 / ViTDet's partition: zero-pad the grid bottom/right to the next
+    /// multiple of the window so EVERY window is exactly `win_h x win_w`.
+    ///
+    /// The third real variant next to [`WindowPlan::new`] (exact division only)
+    /// and [`WindowPlan::shifted`] (Hiera/Swin's ragged final window). It is not
+    /// a degenerate case of either: a ragged plan gives border windows a
+    /// SHORTER key set, while this one gives them a full-length key set whose
+    /// tail rows are the padding.
+    ///
+    /// **Out-of-grid positions are the sentinel row `grid_h*grid_w`** - one past
+    /// the last real row. The caller therefore allocates its per-block row
+    /// buffers with `rows()+1` rows, zeroes row `rows()` ONCE, and the existing
+    /// [`gather_rows`] pulls that zero row into every padded slot for free. No
+    /// masked kernel and no new kernel appear anywhere in this file.
+    ///
+    /// **Where the pad must happen matters**, and it is the caller's job, not
+    /// this function's: SAM pads AFTER `norm1` and BEFORE the `qkv` projection,
+    /// so a padded position's k/v is `qkv_bias` (the projection of a zero input
+    /// is its bias, NOT zero) and it participates in the real tokens' softmax
+    /// as an extra key/value. Padding after `qkv` instead would feed exact
+    /// zeros as keys - a different model. Run the projection over `rows()+1`
+    /// rows with row `rows()` zeroed and this falls out automatically.
+    ///
+    /// [`Self::inv`] keeps length `rows()` (real rows only), so reversing a
+    /// padded windowed attention with `gather_rows(inv)` drops the pad rows with
+    /// no extra bookkeeping - the pad exists only inside the windowed buffer.
+    ///
+    /// When the grid already divides evenly this is EXACTLY
+    /// [`WindowPlan::new`]: same `perm`, same `spans`, no sentinel.
+    pub fn padded(grid_h: u32, grid_w: u32, win_h: u32, win_w: u32) -> WindowPlan {
+        assert!(win_h > 0 && win_w > 0, "window size must be > 0");
+        let pad_h = grid_h.div_ceil(win_h) * win_h;
+        let pad_w = grid_w.div_ceil(win_w) * win_w;
+        let sentinel = grid_h * grid_w;
+        let mut perm = Vec::with_capacity((pad_h * pad_w) as usize);
+        let mut spans = Vec::with_capacity(((pad_h / win_h) * (pad_w / win_w)) as usize);
+        let mut cursor = 0u32;
+        for h0 in (0..pad_h).step_by(win_h as usize) {
+            for w0 in (0..pad_w).step_by(win_w as usize) {
+                for dh in 0..win_h {
+                    for dw in 0..win_w {
+                        let (r, c) = (h0 + dh, w0 + dw);
+                        perm.push(if r < grid_h && c < grid_w { r * grid_w + c } else { sentinel });
+                    }
+                }
+                spans.push((cursor, win_h * win_w));
+                cursor += win_h * win_w;
+            }
+        }
+        // Real rows only - the pad has no home in grid order, and that is what
+        // makes `window_reverse` drop it without a mask.
+        let mut inv = vec![0u32; sentinel as usize];
+        for (dstrow, &srcrow) in perm.iter().enumerate() {
+            if srcrow != sentinel {
+                inv[srcrow as usize] = dstrow as u32;
+            }
+        }
+        WindowPlan {
+            grid_h,
+            grid_w,
+            win_h,
+            win_w,
+            shift_h: 0,
+            shift_w: 0,
+            pad_h,
+            pad_w,
+            perm,
+            inv,
+            spans,
+            max_span: win_h * win_w,
+            uniform: true,
+        }
     }
 
     /// window-major row -> grid row (the [`gather_rows`] index: partition).
@@ -767,13 +862,32 @@ impl WindowPlan {
     pub fn inv(&self) -> &[u32] {
         &self.inv
     }
-    /// `(row0, len)` spans over the WINDOW-MAJOR buffer, one per window — feed
+    /// `(row0, len)` spans over the WINDOW-MAJOR buffer, one per window - feed
     /// straight to [`vit_block_fwd`] / [`vit_block_fwd_cached`].
     pub fn spans(&self) -> &[(u32, u32)] {
         &self.spans
     }
     pub fn rows(&self) -> u32 {
         self.grid_h * self.grid_w
+    }
+    /// Rows of the WINDOW-MAJOR buffer - `pad_h*pad_w`, i.e. [`Self::rows`] for
+    /// every partition except [`WindowPlan::padded`]'s, where it is larger by
+    /// exactly the pad. This, not [`Self::rows`], sizes the windowed buffer and
+    /// the [`window_partition`] gather.
+    pub fn win_rows(&self) -> u32 {
+        self.perm.len() as u32
+    }
+    /// The padded grid `(pad_h, pad_w)` the windows tile - `(grid_h, grid_w)`
+    /// unless this is a [`WindowPlan::padded`] plan.
+    pub fn padded_grid(&self) -> (u32, u32) {
+        (self.pad_h, self.pad_w)
+    }
+    /// The out-of-grid row index [`Self::perm`] uses for padded positions
+    /// (`rows()`, one past the last real row), or `None` when this partition
+    /// has no pad. `Some` means the caller must allocate `rows()+1` rows and
+    /// zero the last one before the qkv projection - see [`WindowPlan::padded`].
+    pub fn sentinel(&self) -> Option<u32> {
+        (self.win_rows() > self.rows()).then(|| self.rows())
     }
     /// Longest window, for [`VitScratch::new`] / [`VitBlockCache::new`].
     pub fn max_span(&self) -> u32 {
@@ -810,7 +924,11 @@ pub struct WindowIndex {
     pub fwd: DeviceBuffer,
     /// grid row -> window-major row.
     pub inv: DeviceBuffer,
+    /// Real grid rows ([`WindowPlan::rows`]) - what [`window_reverse`] emits.
     pub rows: u32,
+    /// Window-major rows ([`WindowPlan::win_rows`]) - what [`window_partition`]
+    /// emits. Larger than `rows` only for a [`WindowPlan::padded`] plan.
+    pub win_rows: u32,
 }
 
 impl WindowIndex {
@@ -819,14 +937,19 @@ impl WindowIndex {
             fwd: row_index_buffer(g, "win_perm", plan.perm()),
             inv: row_index_buffer(g, "win_perm_inv", plan.inv()),
             rows: plan.rows(),
+            win_rows: plan.win_rows(),
         }
     }
 }
 
-/// Grid order -> window-major order (`window_partition`), `[rows, c]`.
+/// Grid order -> window-major order (`window_partition`), `[win_rows, c]`.
 /// Adjoint/inverse: [`window_reverse`] with the same [`WindowIndex`].
+///
+/// For a [`WindowPlan::padded`] plan `src` must carry `rows+1` rows with the
+/// last one zeroed (the sentinel the pad indexes) and `dst` `win_rows` - see
+/// that constructor's doc. Every other plan has `win_rows == rows`.
 pub fn window_partition(g: &Gpu, ids: &VitPermuteIds, w: &WindowIndex, src: &DeviceBuffer, dst: &DeviceBuffer, c: u32) -> Step {
-    gather_rows(g, ids, &w.fwd, src, dst, w.rows, c)
+    gather_rows(g, ids, &w.fwd, src, dst, w.win_rows, c)
 }
 
 /// Window-major order -> grid order (`window_reverse`), `[rows, c]`.
@@ -901,7 +1024,7 @@ impl QPoolPlan {
     pub fn rows_in(&self) -> u32 {
         self.n * self.h * self.w
     }
-    /// Query rows leaving it — the `qn` of every [`AttnSpan`].
+    /// Query rows leaving it - the `qn` of every [`AttnSpan`].
     pub fn rows_out(&self) -> u32 {
         self.n * self.ho() * self.wo()
     }
@@ -915,15 +1038,15 @@ impl QPoolPlan {
 /// own buffer, and `argmax` is the one the backward genuinely needs (the
 /// max-pool adjoint is a gather through the recorded winner).
 pub struct QPoolCache {
-    /// `[rows_in, c]` — q region gathered out of the fused qkv (NLC).
+    /// `[rows_in, c]` - q region gathered out of the fused qkv (NLC).
     pub q_c: DeviceBuffer,
     /// `[n, c, h, w]`.
     pub q_nchw: DeviceBuffer,
     /// `[n, c, ho, wo]`.
     pub qp_nchw: DeviceBuffer,
-    /// `[n, c, ho, wo]` — winning INPUT flat index per output, as f32.
+    /// `[n, c, ho, wo]` - winning INPUT flat index per output, as f32.
     pub argmax: DeviceBuffer,
-    /// `[rows_out, c]` — the attention query buffer (NLC, stride `c`).
+    /// `[rows_out, c]` - the attention query buffer (NLC, stride `c`).
     pub q_pooled: DeviceBuffer,
     /// `[n, c, ho, wo]` backward staging.
     pub d_qp_nchw: DeviceBuffer,
@@ -937,7 +1060,7 @@ impl QPoolCache {
     pub fn new(gpu: &Gpu, plan: &QPoolPlan, c: u32) -> QPoolCache {
         let ni = plan.rows_in() as u64 * c as u64;
         let no = plan.rows_out() as u64 * c as u64;
-        // `maxpool2d` stores the winner's input flat index in an f32 — exact
+        // `maxpool2d` stores the winner's input flat index in an f32 - exact
         // only while N*C*H*W < 2^24. Beyond that the pool silently routes the
         // gradient to a NEIGHBOURING pixel, which no test would notice.
         assert!(ni < (1u64 << 24), "q_pool argmax needs n*c*h*w = {ni} < 2^24 (f32 index exactness)");
@@ -965,7 +1088,7 @@ impl QPoolCache {
 ///   * `embed`      `[c, rows_in]`, bufs `[q_idx, qkv, q_c]`
 ///   * `nlc_nchw`   `[n*c*h*w, c, h*w]`, bufs `[q_c, q_nchw]`
 ///   * `maxpool2d`  `[n, c, h, w, K, stride, pad, ho, wo]`,
-///     bufs `[q_nchw, qp_nchw, argmax]` — note `stride` sits BEFORE `pad`
+///     bufs `[q_nchw, qp_nchw, argmax]` - note `stride` sits BEFORE `pad`
 ///   * `nchw_nlc`   `[n*c*ho*wo, c, ho*wo]`, bufs `[qp_nchw, q_pooled]`
 pub fn q_pool_fwd(
     g: &Gpu,
@@ -993,7 +1116,7 @@ pub fn q_pool_fwd(
 
 /// Adjoint of [`q_pool_fwd`]: `d_q_pooled[rows_out, c]` -> the q region of
 /// `d_qkv[rows_in, 3c]`. The four steps are the four forward steps reversed,
-/// each replaced by its own adjoint — `nchw_nlc` <-> `nlc_nchw` are each
+/// each replaced by its own adjoint - `nchw_nlc` <-> `nlc_nchw` are each
 /// other's, `maxpool2d_dx` gathers through `cache.argmax`, and `row_scatter` is
 /// `embed`'s. Nothing here is a new gradient form.
 ///
@@ -1068,7 +1191,7 @@ impl AttnSpan {
 }
 
 /// A storage-binding offset must be a multiple of the adapter's
-/// `min_storage_buffer_offset_alignment` — 256 bytes = 64 f32 on every backend
+/// `min_storage_buffer_offset_alignment` - 256 bytes = 64 f32 on every backend
 /// brain runs on, and wgpu REJECTS the bind group otherwise ("Buffer offset N
 /// does not respect ... limit 256"). That is a hard constraint on every
 /// `step_sliced` offset below, not a style preference.
@@ -1085,7 +1208,7 @@ fn align_up(n: u64) -> u64 {
 /// matter: the running sum is what makes RAGGED spans (a shifted Swin
 /// partition, a border window) address the right slab, and the padding is what
 /// makes the resulting offset bindable at all. `heads*qn*kn` is very often not
-/// a multiple of 64 — 16 heads × 729² is not — so an unpadded prefix sum is a
+/// a multiple of 64 - 16 heads × 729² is not - so an unpadded prefix sum is a
 /// driver validation failure at submit for ragged spans AND for perfectly
 /// uniform ones.
 pub fn probs_offsets(spans: &[AttnSpan], heads: u32) -> Vec<u64> {
@@ -1105,7 +1228,7 @@ pub fn probs_len(spans: &[AttnSpan], heads: u32) -> u64 {
     spans.iter().map(|s| align_up(heads as u64 * s.qn as u64 * s.kn as u64)).sum()
 }
 
-/// Largest `heads*qn*kn` over `spans` — the transient `scores`/`dscores` slab.
+/// Largest `heads*qn*kn` over `spans` - the transient `scores`/`dscores` slab.
 /// Bound at offset 0 every dispatch, so it needs no padding.
 pub fn max_slab(spans: &[AttnSpan], heads: u32) -> u64 {
     spans.iter().map(|s| heads as u64 * s.qn as u64 * s.kn as u64).max().unwrap_or(0)
@@ -1113,7 +1236,7 @@ pub fn max_slab(spans: &[AttnSpan], heads: u32) -> u64 {
 
 /// A row offset folded into a kernel's own `q_off`/`k_off`/`v_off` Param.
 /// Params are `u32` and the kernels index `array<f32>` with `u32`, so this is
-/// the same ceiling the kernel already has — asserted where the shape that
+/// the same ceiling the kernel already has - asserted where the shape that
 /// produced it is still in scope.
 fn row_param(rows: u32, stride: u32, region: u32) -> u32 {
     let v = rows as u64 * stride as u64 + region as u64;
@@ -1121,8 +1244,8 @@ fn row_param(rows: u32, stride: u32, region: u32) -> u32 {
     v as u32
 }
 
-/// `ctx`/`d_ctx` is the ONE buffer of the cross trio with no offset Param —
-/// `attn_apply_cross` writes `out[(b*Tq + i)*d_model + …]` — so it must be
+/// `ctx`/`d_ctx` is the ONE buffer of the cross trio with no offset Param -
+/// `attn_apply_cross` writes `out[(b*Tq + i)*d_model + …]` - so it must be
 /// bound sliced, and its offset must satisfy [`BIND_ALIGN`]. Checked here, with
 /// the shape that produced it, because the driver's complaint arrives at submit
 /// with no hint of which span caused it.
@@ -1138,7 +1261,7 @@ fn aligned_ctx(q0: u32, d_out: u32) -> u64 {
     off
 }
 
-/// Greatest common divisor — used only to phrase the [`aligned_ctx`] message.
+/// Greatest common divisor - used only to phrase the [`aligned_ctx`] message.
 fn num_gcd(a: u64, b: u64) -> u64 {
     if b == 0 {
         a.max(1)
@@ -1148,7 +1271,7 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 }
 
 /// Bidirectional attention where the QUERY lives in its own buffer with its own
-/// length — Hiera's `q_pool`, and the general two-length case.
+/// length - Hiera's `q_pool`, and the general two-length case.
 ///
 /// One dispatch per span, caching the full `[heads, qn, kn]` softmax at
 /// `probs_offsets(spans, heads)[i]`, exactly like [`vit_block_fwd_cached`]'s
@@ -1166,7 +1289,7 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 ///
 /// ROW OFFSETS RIDE IN THE PARAMS, NOT IN THE BINDING. `q`/`kv` are bound whole
 /// and the span's row offset is folded into the kernels' own `q_off`/`k_off`/
-/// `v_off`. Slicing them instead — `(q0*q_stride, 0)` — imposes a 256-byte
+/// `v_off`. Slicing them instead - `(q0*q_stride, 0)` - imposes a 256-byte
 /// alignment on `row0 * stride` that a ragged partition does not satisfy, which
 /// is a hard wgpu validation failure, not a slow path. `ctx` has no offset
 /// Param and is the one binding still sliced (see [`aligned_ctx`]).
@@ -1224,8 +1347,8 @@ pub fn cross_q_fwd(
 
 /// Backward of [`cross_q_fwd`] from the cached `probs` (no recompute), writing
 /// `d_q` in the query buffer's layout and `d_k`/`d_v` into the kv buffer's
-/// regions of `d_kv`. Spans must cover DISJOINT q rows and DISJOINT kv rows —
-/// which windows do — because these four kernels ASSIGN.
+/// regions of `d_kv`. Spans must cover DISJOINT q rows and DISJOINT kv rows -
+/// which windows do - because these four kernels ASSIGN.
 ///
 /// `d_q`/`d_kv` are fully written for the rows the spans cover, so neither
 /// needs pre-zeroing when the spans partition the rows.
@@ -1283,5 +1406,427 @@ pub fn cross_q_bwd(
         steps.push(g.step_sliced(kb.attn_bwd_dv_cross, &[probs, d_ctx, d_kv], &[(ps, 0), (cs, 0), (0, 0)], &p_v, heads * s.kn * hd));
         steps.push(g.step(kb.attn_bwd_dq_cross, &[dscores, kv, d_q], &p_qk, heads * s.qn * hd));
         steps.push(g.step(kb.attn_bwd_dk_cross, &[dscores, q, d_kv], &p_qk, heads * s.kn * hd));
+    }
+}
+
+// ===========================================================================
+// Decomposed relative position bias (SAM ViT-B / ViTDet)
+// ===========================================================================
+//
+// SAM's windowed attention adds a learned bias that DECOMPOSES over the two
+// grid axes - `add_decomposed_rel_pos` in the reference:
+//
+//   scores[(qh,qw), (kh,kw)] = scale * (q . k)
+//                            + q[(qh,qw),:] . Rh[qh,kh,:]
+//                            + q[(qh,qw),:] . Rw[qw,kw,:]
+//
+// with q UNSCALED in the two bias terms (`attn_scores_cross` applies
+// `1/sqrt(head_dim)` itself, so nothing pre-scales the fused buffer's q
+// region - the layout is already what the bias wants).
+//
+// THREE OBSERVATIONS SHAPE THE IMPLEMENTATION, and each one removes work:
+//
+//  1. **The bias is a function of q, so it is never materialised.** Both terms
+//     factor through the small intermediates `rel_h[h, i, kh]` and
+//     `rel_w[h, i, kw]` (`attn_relpos_qr`), which are then FOLDED into the
+//     already-computed score slab in place (`attn_relpos_add`). At SAM ViT-B's
+//     global-attention shape a materialised `[heads, T, T]` bias would be
+//     805 MB; the two intermediates are 12.6 MB each.
+//
+//  2. **The row -> grid map is arithmetic, not an index buffer.**
+//     [`WindowPlan`] emits window-local ROW-MAJOR order, so a span-local query
+//     row `i` sits at `(i / qw, i % qw)`. A query-CHUNKED dispatch therefore
+//     needs exactly one new parameter, `q0` - the chunk's span-local first
+//     query row.
+//
+//  3. **`get_rel_pos`'s table resample and its shifted gather are both linear
+//     and data-INDEPENDENT**, so their composition is a fixed 2-tap weighted
+//     gather. [`rel_pos_gather`] computes the indices and weights on the host
+//     (pure integer/float arithmetic, no device), and the dense table is then
+//     built and differentiated with kernels this repo already has -
+//     `embed` + `scale_row` + `add2` forward, `scale_row` + `emb_bwd` back.
+//     No kernel was added for the interpolation.
+//
+// Two dense-table LAYOUTS are kept, because the forward and the backward want
+// opposite fastest axes and a table is at most `[64, 64, 64]` at real scale:
+// `r` is `[q_ext, k_ext, head_dim]` (what the gather naturally produces, what
+// `attn_relpos_dq`/`_dr` want, and what the `emb_bwd` chain consumes) and
+// `r_t = nlc_nchw(r)` is `[q_ext, head_dim, k_ext]` (what `attn_relpos_qr`
+// wants). Because the backward writes `r`'s layout DIRECTLY, the transpose is
+// forward-only and needs no adjoint.
+
+/// `get_rel_pos`'s 2-tap gather, host-side: for each `(qi, kj)` pair, the two
+/// learned-table rows it reads and their weights.
+///
+/// The reference does this in two steps - resample the `[L, head_dim]` table to
+/// `2*max(q,k)-1` rows with `F.interpolate(..., mode="linear")`, then gather
+/// row `floor(qi*max(k/q,1) - kj*max(q/k,1) + (k-1)*max(q/k,1))` - and both are
+/// linear maps that depend only on `(q_size, k_size, table_len)`. Composed,
+/// every output row is `w0*T[idx0] + w1*T[idx1]`.
+///
+/// The interpolation is PyTorch's `align_corners=False` half-pixel rule:
+/// `src = (dst + 0.5)*(L/max_rel) - 0.5`, clamped at 0, `idx0 = floor(src)`,
+/// `idx1 = idx0 + 1` unless `idx0` is the last row (then `idx1 == idx0`, which
+/// is why the two weights still sum to 1 and the pair still reproduces
+/// `T[idx0]`). `table_len == 2*max(q,k)-1` short-circuits to the identity, so
+/// the no-resample case is exact rather than round-tripped through floats.
+#[derive(Clone, Debug)]
+pub struct RelPosGather {
+    /// `[q_size * k_size]`, row-major in `(qi, kj)`.
+    pub idx0: Vec<u32>,
+    pub idx1: Vec<u32>,
+    pub w0: Vec<f32>,
+    pub w1: Vec<f32>,
+}
+
+impl RelPosGather {
+    pub fn len(&self) -> usize {
+        self.idx0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.idx0.is_empty()
+    }
+}
+
+pub fn rel_pos_gather(q_size: u32, k_size: u32, table_len: u32) -> RelPosGather {
+    assert!(q_size > 0 && k_size > 0, "rel_pos_gather: empty grid {q_size}x{k_size}");
+    assert!(table_len > 0, "rel_pos_gather: empty table");
+    let max_rel = 2 * q_size.max(k_size) - 1;
+
+    // ---- step 1: the resample, as (row, row, weight) per resampled row ----
+    let mut t0 = vec![0u32; max_rel as usize];
+    let mut t1 = vec![0u32; max_rel as usize];
+    let mut tf = vec![0f32; max_rel as usize];
+    if table_len == max_rel {
+        for d in 0..max_rel as usize {
+            t0[d] = d as u32;
+            t1[d] = d as u32;
+        }
+    } else {
+        // `scale = in/out` is what PyTorch computes when no scale is passed.
+        let scale = table_len as f64 / max_rel as f64;
+        for d in 0..max_rel as usize {
+            let src = ((d as f64 + 0.5) * scale - 0.5).max(0.0);
+            let lo = (src.floor() as u32).min(table_len - 1);
+            let hi = if lo + 1 < table_len { lo + 1 } else { lo };
+            t0[d] = lo;
+            t1[d] = hi;
+            tf[d] = (src - lo as f64) as f32;
+        }
+    }
+
+    // ---- step 2: the shifted gather, composed onto step 1 ----
+    let sq = (k_size as f64 / q_size as f64).max(1.0);
+    let sk = (q_size as f64 / k_size as f64).max(1.0);
+    let n = (q_size * k_size) as usize;
+    let mut g = RelPosGather {
+        idx0: Vec::with_capacity(n),
+        idx1: Vec::with_capacity(n),
+        w0: Vec::with_capacity(n),
+        w1: Vec::with_capacity(n),
+    };
+    for qi in 0..q_size {
+        for kj in 0..k_size {
+            let rel = qi as f64 * sq - kj as f64 * sk + (k_size as f64 - 1.0) * sk;
+            // `.long()` on a non-negative value; the +1e-9 absorbs the f64
+            // round-off of an exact integer product (e.g. 3*(4/3.0)).
+            let d = (rel + 1e-9) as usize;
+            assert!(d < max_rel as usize, "rel_pos_gather: index {d} out of range {max_rel}");
+            g.idx0.push(t0[d]);
+            g.idx1.push(t1[d]);
+            g.w0.push(1.0 - tf[d]);
+            g.w1.push(tf[d]);
+        }
+    }
+    g
+}
+
+/// The five EXISTING kernels the dense-table build and its adjoint compose
+/// from. No `attn_relpos_*` kernel appears here on purpose - see the section
+/// header: the interpolation added none.
+#[derive(Clone, Copy)]
+pub struct RelPosTableIds {
+    /// `embed` - the 2-tap gather's two lookups.
+    pub embed: usize,
+    /// `scale_row` - the per-(qi,kj) interpolation weight.
+    pub scale_row: usize,
+    pub add2: usize,
+    /// `nlc_nchw` - `r` -> `r_t`, the forward's fastest-axis transpose.
+    pub nlc_nchw: usize,
+    /// `emb_bwd` - the table scatter; ACCUMULATES, which is what makes the two
+    /// taps (and repeated gather indices) sum correctly.
+    pub emb_bwd: usize,
+}
+
+/// One axis's device-side gather, uploaded once and reused by every forward.
+pub struct RelPosAxis {
+    pub idx0: DeviceBuffer,
+    pub idx1: DeviceBuffer,
+    pub w0: DeviceBuffer,
+    pub w1: DeviceBuffer,
+    /// `[q_ext * k_ext, head_dim]` - the dense table, natural layout.
+    pub r: DeviceBuffer,
+    /// `[q_ext, head_dim, k_ext]` - the same table, `k` fastest.
+    pub r_t: DeviceBuffer,
+    /// `[q_ext * k_ext, head_dim]` staging for the two weighted taps.
+    a: DeviceBuffer,
+    b: DeviceBuffer,
+    a2: DeviceBuffer,
+    b2: DeviceBuffer,
+    pub q_ext: u32,
+    pub k_ext: u32,
+    pub head_dim: u32,
+    pub table_len: u32,
+}
+
+impl RelPosAxis {
+    /// Build one axis from its geometry and the learned table's row count.
+    pub fn new(g: &Gpu, q_ext: u32, k_ext: u32, head_dim: u32, table_len: u32) -> RelPosAxis {
+        let gather = rel_pos_gather(q_ext, k_ext, table_len);
+        let n = gather.len() as u64;
+        let dense = n * head_dim as u64;
+        RelPosAxis {
+            idx0: row_index_buffer(g, "relpos_idx0", &gather.idx0),
+            idx1: row_index_buffer(g, "relpos_idx1", &gather.idx1),
+            w0: g.storage_init("relpos_w0", &gather.w0),
+            w1: g.storage_init("relpos_w1", &gather.w1),
+            r: g.storage(dense),
+            r_t: g.storage(dense),
+            a: g.storage(dense),
+            b: g.storage(dense),
+            a2: g.storage(dense),
+            b2: g.storage(dense),
+            q_ext,
+            k_ext,
+            head_dim,
+            table_len,
+        }
+    }
+
+    fn n(&self) -> u32 {
+        self.q_ext * self.k_ext
+    }
+
+    /// `table[table_len, head_dim]` -> `r` and `r_t`. Six dispatches, all of
+    /// existing kernels. Re-run whenever the learned table changes (i.e. every
+    /// training step; an inference-only model builds it once).
+    pub fn build_fwd(&self, g: &Gpu, k: &RelPosTableIds, table: &DeviceBuffer, steps: &mut Vec<Step>) {
+        let (n, hd) = (self.n(), self.head_dim);
+        let total = n * hd;
+        steps.push(g.step(k.embed, &[&self.idx0, table, &self.a], &[hd, n], total));
+        steps.push(g.step(k.embed, &[&self.idx1, table, &self.b], &[hd, n], total));
+        steps.push(g.step(k.scale_row, &[&self.a, &self.w0, &self.a2], &[total, hd], total));
+        steps.push(g.step(k.scale_row, &[&self.b, &self.w1, &self.b2], &[total, hd], total));
+        steps.push(g.step(k.add2, &[&self.a2, &self.b2, &self.r], &[total], total));
+        steps.push(g.step(k.nlc_nchw, &[&self.r, &self.r_t], &[total, hd, self.k_ext], total));
+    }
+
+    /// `d_r` -> `d_table`, ACCUMULATING (`emb_bwd` adds, so `d_table` must be
+    /// zero-cleared once per step by the caller's submit, exactly like any
+    /// other embedding gradient). `scratch` is `[q_ext*k_ext, head_dim]`.
+    ///
+    /// The forward's `nlc_nchw` needs no adjoint here: `attn_relpos_dr` writes
+    /// `d_r` in `r`'s own layout, so `r_t` is a forward-only convenience copy.
+    pub fn build_bwd(
+        &self,
+        g: &Gpu,
+        k: &RelPosTableIds,
+        d_r: &DeviceBuffer,
+        d_table: &DeviceBuffer,
+        scratch: &DeviceBuffer,
+        steps: &mut Vec<Step>,
+    ) {
+        let (n, hd) = (self.n(), self.head_dim);
+        let total = n * hd;
+        steps.push(g.step(k.scale_row, &[d_r, &self.w0, scratch], &[total, hd], total));
+        steps.push(g.step(k.emb_bwd, &[&self.idx0, scratch, d_table], &[n, hd, self.table_len], self.table_len * hd));
+        steps.push(g.step(k.scale_row, &[d_r, &self.w1, scratch], &[total, hd], total));
+        steps.push(g.step(k.emb_bwd, &[&self.idx1, scratch, d_table], &[n, hd, self.table_len], self.table_len * hd));
+    }
+}
+
+/// Kernel-pipeline indices for the six `attn_relpos_*` kernels. Only the ids a
+/// given direction dispatches need to be valid - an inference-only model may
+/// leave the four backward slots unset.
+#[derive(Clone, Copy)]
+pub struct RelPosIds {
+    /// `attn_relpos_qr` - the q·R hoist (dispatched per axis).
+    pub qr: usize,
+    /// `attn_relpos_add` - fold into the score slab, in place.
+    pub add: usize,
+    pub drh: usize,
+    pub drw: usize,
+    /// `attn_relpos_dq` - ACCUMULATES onto the q region of `d_qkv`.
+    pub dq: usize,
+    /// `attn_relpos_dr` - the dense-table adjoint (`acc` flag).
+    pub dr: usize,
+}
+
+/// The backward-only half of [`RelPos`].
+pub struct RelPosBwd<'a> {
+    /// `[qh*kh, head_dim]` / `[qw*kw, head_dim]` - the NATURAL-layout tables.
+    pub rh: &'a DeviceBuffer,
+    pub rw: &'a DeviceBuffer,
+    /// Adjoints of those, same shapes. Under `acc0 == false` the first span
+    /// ASSIGNS them, so they need no zero-clear.
+    pub d_rh: &'a DeviceBuffer,
+    pub d_rw: &'a DeviceBuffer,
+    /// `[heads, qh*qw, kh]` / `[heads, qh*qw, kw]` - adjoints of the hoisted
+    /// intermediates. Separate buffers from `rel_h`/`rel_w`, which the
+    /// per-chunk score RECOMPUTE is still reading.
+    pub d_rel_h: &'a DeviceBuffer,
+    pub d_rel_w: &'a DeviceBuffer,
+    /// Accumulate into `d_rh`/`d_rw` from the FIRST span too - for a caller
+    /// that folds several blocks/batches into one table gradient.
+    pub acc0: bool,
+}
+
+/// One block's decomposed relative-position bias: the geometry every span
+/// shares, plus the device buffers the six kernels bind.
+///
+/// SAM's windows are uniform (the token grid is zero-padded to a multiple of
+/// the window before partitioning, and cropped after), and its global blocks
+/// are one span over the whole grid - so ONE `(qh, qw, kh, kw)` covers every
+/// span of a block. A ragged partition (a short border window) would need one
+/// dense table per distinct window shape and is rejected loudly by
+/// [`RelPos::check_span`] rather than silently mis-indexed.
+pub struct RelPos<'a> {
+    pub ids: RelPosIds,
+    /// Query grid extent of every span.
+    pub qh: u32,
+    pub qw: u32,
+    /// Key grid extent of every span. SAM always has `qh == kh`, `qw == kw`.
+    pub kh: u32,
+    pub kw: u32,
+    /// `[qh, head_dim, kh]` / `[qw, head_dim, kw]` - the TRANSPOSED tables
+    /// `attn_relpos_qr` reads.
+    pub rh_t: &'a DeviceBuffer,
+    pub rw_t: &'a DeviceBuffer,
+    /// `[heads, qh*qw, kh]` / `[heads, qh*qw, kw]` - the hoisted q·R, rebuilt
+    /// per span.
+    pub rel_h: &'a DeviceBuffer,
+    pub rel_w: &'a DeviceBuffer,
+    pub bwd: Option<RelPosBwd<'a>>,
+}
+
+impl RelPos<'_> {
+    /// Query rows per span (`qh*qw`) - the row stride of `rel_h`/`rel_w`.
+    pub fn span_qn(&self) -> u32 {
+        self.qh * self.qw
+    }
+    /// Key count per span (`kh*kw`).
+    pub fn span_kn(&self) -> u32 {
+        self.kh * self.kw
+    }
+
+    /// Both extents must match the span the chunk loop is running, or every
+    /// index below is quietly wrong. Checked once per span, with the numbers
+    /// still in scope.
+    pub fn check_span(&self, len: u32) {
+        assert_eq!(
+            len,
+            self.span_qn(),
+            "rel-pos span length {len} != qh*qw = {}x{}; a ragged/shifted partition needs one \
+             dense table per window shape, which this bias does not model (SAM pads the grid \
+             to a multiple of the window instead)",
+            self.qh,
+            self.qw
+        );
+        assert_eq!(len, self.span_kn(), "rel-pos self-attention needs qh*qw == kh*kw");
+    }
+
+    /// Invocations per output of `attn_relpos_drh`'s cooperative segment sum:
+    /// the smallest power of two that covers `kw`, capped at the workgroup.
+    fn drh_seg(&self) -> u32 {
+        self.kw.next_power_of_two().min(64)
+    }
+
+    /// The two `attn_relpos_qr` dispatches for one span: `rel_h` (axis 0) and
+    /// `rel_w` (axis 1). `q_off` is the ABSOLUTE float offset of this span's q
+    /// region (`row0*stride + region offset`) - the buffer binds whole, so a
+    /// ragged row offset never has to meet the 256 B binding alignment.
+    pub fn qr_steps(
+        &self,
+        g: &Gpu,
+        heads: u32,
+        head_dim: u32,
+        q: &DeviceBuffer,
+        stride: u32,
+        q_off: u32,
+        steps: &mut Vec<Step>,
+    ) {
+        for (axis, r_t, k_ext, rel) in
+            [(0u32, self.rh_t, self.kh, self.rel_h), (1, self.rw_t, self.kw, self.rel_w)]
+        {
+            let p = [heads, self.qh, self.qw, k_ext, head_dim, stride, q_off, axis];
+            steps.push(g.step(self.ids.qr, &[q, r_t, rel], &p, self.qr_threads(heads, axis, k_ext)));
+        }
+    }
+
+    /// Workgroups × 64 for `attn_relpos_qr` / `attn_relpos_dq` (same tiling;
+    /// only the tiled axis differs - `k_ext` forward, `head_dim` backward).
+    fn qr_threads(&self, heads: u32, axis: u32, k_ext: u32) -> u32 {
+        self.tile_threads(heads, axis, k_ext.div_ceil(64))
+    }
+    fn dq_threads(&self, heads: u32, head_dim: u32, axis: u32) -> u32 {
+        self.tile_threads(heads, axis, head_dim.div_ceil(64))
+    }
+    fn tile_threads(&self, heads: u32, axis: u32, outer_tiles: u32) -> u32 {
+        let (panel_ext, group_len) = if axis == 0 { (self.qh, self.qw) } else { (self.qw, self.qh) };
+        heads * panel_ext * group_len.div_ceil(8) * outer_tiles * 64
+    }
+
+    /// `attn_relpos_add` for one query chunk: `scores += rel_h + rel_w`, in
+    /// place, between the scores kernel and the softmax.
+    pub fn add_step(&self, g: &Gpu, heads: u32, qn: u32, kn: u32, q0: u32, scores: &DeviceBuffer) -> Step {
+        let p = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw];
+        g.step(self.ids.add, &[self.rel_h, self.rel_w, scores], &p, heads * qn * kn)
+    }
+
+    /// `attn_relpos_drh` + `attn_relpos_drw` for one query chunk. Both ASSIGN
+    /// the chunk's own rows of `d_rel_h`/`d_rel_w` - chunks partition the query
+    /// rows, so nothing accumulates here.
+    pub fn drel_steps(&self, g: &Gpu, heads: u32, qn: u32, kn: u32, q0: u32, d_scores: &DeviceBuffer, steps: &mut Vec<Step>) {
+        let b = self.bwd.as_ref().expect("rel-pos backward buffers");
+        let seg = self.drh_seg();
+        let per = 64 / seg;
+        let p_h = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw, seg];
+        steps.push(g.step(self.ids.drh, &[d_scores, b.d_rel_h], &p_h, (heads * qn * self.kh).div_ceil(per) * 64));
+        let p_w = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw];
+        steps.push(g.step(self.ids.drw, &[d_scores, b.d_rel_w], &p_w, heads * qn * self.kw));
+    }
+
+    /// `attn_relpos_dq` (both axes) and `attn_relpos_dr` (both axes) for one
+    /// span, dispatched AFTER the chunk loop has filled every row of
+    /// `d_rel_h`/`d_rel_w`.
+    ///
+    /// `dq` ACCUMULATES onto the q region of `d_qkv`, which the plain
+    /// `attn_bwd_dq_cross` has already assigned - an ordering precondition, not
+    /// a zero-clear. `dr` accumulates when `acc` (any span after a block's
+    /// first, or `RelPosBwd::acc0`).
+    pub fn span_bwd_steps(
+        &self,
+        g: &Gpu,
+        heads: u32,
+        head_dim: u32,
+        q: &DeviceBuffer,
+        d_qkv: &DeviceBuffer,
+        stride: u32,
+        q_off: u32,
+        acc: bool,
+        steps: &mut Vec<Step>,
+    ) {
+        let b = self.bwd.as_ref().expect("rel-pos backward buffers");
+        for (axis, k_ext, d_rel, r, d_r) in [
+            (0u32, self.kh, b.d_rel_h, b.rh, b.d_rh),
+            (1, self.kw, b.d_rel_w, b.rw, b.d_rw),
+        ] {
+            let p = [heads, self.qh, self.qw, k_ext, head_dim, stride, q_off, axis];
+            steps.push(g.step(self.ids.dq, &[d_rel, r, d_qkv], &p, self.dq_threads(heads, head_dim, axis)));
+            let panel_ext = if axis == 0 { self.qh } else { self.qw };
+            let p_r = [heads, self.qh, self.qw, k_ext, head_dim, stride, q_off, axis, u32::from(acc)];
+            let threads = panel_ext * k_ext.div_ceil(8) * head_dim.div_ceil(64) * 64;
+            steps.push(g.step(self.ids.dr, &[d_rel, q, d_r], &p_r, threads));
+        }
     }
 }

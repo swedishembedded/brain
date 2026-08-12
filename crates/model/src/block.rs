@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Reusable transformer-block Step-builders — the composable layer new
+//! Reusable transformer-block Step-builders - the composable layer new
 //! architectures build on instead of re-hand-rolling dispatch sequences.
 //!
 //! Each model maps its own PIPELINE kernel indices into [`KernelIds`] (so no
 //! model has to reorder its pipeline list), then composes the forward/backward
-//! graph from these helpers. They are pure dispatch assembly — no WGSL, no
-//! ParamStore, no buffer ownership — so they stay decoupled from any one model
+//! graph from these helpers. They are pure dispatch assembly - no WGSL, no
+//! ParamStore, no buffer ownership - so they stay decoupled from any one model
 //! and are validated by each caller's gradient check.
 //!
 //! Covered today (the Qwen/RMSNorm family): RMSNorm fwd/bwd, half-split RoPE
@@ -16,7 +16,7 @@
 //! as LoRA adapters and bias). MoE/GPT/PID are not yet ported.
 
 // Every builder here takes a device, a kernel-id set, the kernel's buffer
-// bindings and its Params fields — so the arity IS the WGSL kernel's binding
+// bindings and its Params fields - so the arity IS the WGSL kernel's binding
 // list. Packing those into a struct would put a second, drifting description
 // of a kernel's signature next to the authoritative one in the .wgsl, which
 // is a failure mode worth preventing.
@@ -104,14 +104,14 @@ pub fn rope_fwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32
 /// Table-driven interleaved M-RoPE (forward), in place on a contiguous q/k
 /// buffer: the same half-split rotation `rope_fwd` applies, but the per-token
 /// angle comes from a precomputed `[rows, head_dim/2]` `cos`/`sin` table
-/// (`qwenvl::mrope::mrope_tables`) instead of a single scalar position — the
+/// (`qwenvl::mrope::mrope_tables`) instead of a single scalar position - the
 /// seam that lets a caller feed genuinely divergent per-axis (text/image/
 /// video/audio) positions, or the degenerate all-axes-equal case (which
 /// `qwenvl::mrope`'s own test proves collapses to identical output). `qwen3::
 /// Qwen::rope2d_step` already dispatches this exact kernel for Qwen3-VL;
 /// hoisted here so a second model (`omni::thinker`) doesn't re-wire it.
 ///
-/// `kernel` is `kernels::ROPE2D`'s pipeline index in the caller's own table —
+/// `kernel` is `kernels::ROPE2D`'s pipeline index in the caller's own table -
 /// not a [`KernelIds`] field, since it pairs with two extra buffer bindings
 /// (`cos`/`sin`) `rope_fwd` doesn't have; folding it in would grow every
 /// other model's `KernelIds` literal for a kernel most never dispatch (same
@@ -128,7 +128,7 @@ pub fn rope2d_fwd(g: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer
 /// first `rot_dim = 2*half` channels of each `head_dim`-wide head, leaving
 /// `head_dim - rot_dim` channels untouched (Qwen3.5's
 /// `partial_rotary_factor`). Dispatches `kernels::ROPE2D_PARTIAL`
-/// (`rope2d_partial.wgsl`) — unlike `rope2d_fwd`, the per-head stride in the
+/// (`rope2d_partial.wgsl`) - unlike `rope2d_fwd`, the per-head stride in the
 /// buffer is the FULL `head_dim`, not `2*half`, so the two kernels are not
 /// interchangeable at a partial rotary factor (see the kernel's header for
 /// why a plain `rope2d` dispatch would corrupt every head after the first).
@@ -209,7 +209,7 @@ pub fn gqa_fwd(
 
 /// [`gqa_fwd`] with an additive per-key mask on the scores (the
 /// `gqa_scores_kmask` kernel): `kmask[j]` is 0 for live keys, -3.4e38 for
-/// excluded ones — right-padded encoder batches where pad tokens are queries
+/// excluded ones - right-padded encoder batches where pad tokens are queries
 /// but must not be attended as keys. The kmask pipeline id is passed
 /// explicitly so [`KernelIds`] (a struct literal at every call site in the
 /// workspace) stays unchanged for models that never mask.
@@ -264,11 +264,11 @@ pub fn gqa_fwd_win(
     ]
 }
 
-/// Kernel-pipeline indices for incremental KV-cache decode attention — the
+/// Kernel-pipeline indices for incremental KV-cache decode attention - the
 /// O(cached length) twin of [`gqa_fwd`]'s O(T²) full recompute. Hoisted from
 /// `qwen3::Qwen`'s `decode_steps` (`crates/qwen3/src/model.rs`) so a second
 /// model (`omni::thinker`, a 48-layer MoE decoder) reuses the exact same
-/// dispatch sequence instead of re-deriving it — the "one implementation,
+/// dispatch sequence instead of re-deriving it - the "one implementation,
 /// migrate existing users" rule this crate exists to enforce.
 #[derive(Clone, Copy)]
 pub struct GqaDecodeIds {
@@ -281,12 +281,12 @@ pub struct GqaDecodeIds {
 /// One incremental decode step of GQA attention: appends the new token's
 /// (already QK-normed + RoPE'd) `k_new`/`v_new` into the persistent per-layer
 /// `kcache`/`vcache` at row `pos`, then attends `q` (the same new token) against
-/// all `pos+1` cached positions — O(cached length), not O(cached length)²,
+/// all `pos+1` cached positions - O(cached length), not O(cached length)²,
 /// and implicitly causal (only ever reads cache rows `0..=pos`, never later
 /// ones, since none exist yet).
 ///
 /// `q` is `[n_heads*head_dim]`; `k_new`/`v_new` are `[n_kv_heads*head_dim]`
-/// (a SINGLE new token's row, batch-of-one — this is a decode primitive, not
+/// (a SINGLE new token's row, batch-of-one - this is a decode primitive, not
 /// a batched one). `kcache`/`vcache` are the persistent `[cap, n_kv_heads*
 /// head_dim]` per-layer buffers the caller sized upfront for the whole
 /// generation (`cap` = max sequence length, prompt + max_new_tokens);
@@ -298,7 +298,7 @@ pub struct GqaDecodeIds {
 /// loop: after a normal [`gqa_fwd`] pass over the prompt's `n` positions, bulk
 /// -copy the resulting `k`/`v` (`[n, n_kv_heads*head_dim]`, contiguous, same
 /// per-row layout as the cache) into `kcache`/`vcache` rows `0..n` with one
-/// `kv_append` dispatch each (`width = n*n_kv_heads*head_dim, row = 0` — a
+/// `kv_append` dispatch each (`width = n*n_kv_heads*head_dim, row = 0` - a
 /// flat prefix copy), then decode steps continue from `pos = n`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_decode_step(
@@ -332,7 +332,7 @@ pub fn gqa_decode_step(
 }
 
 /// Bulk-fill a KV cache's rows `0..n` from a batched prefill's contiguous
-/// `k`/`v` output — see [`gqa_decode_step`]'s doc for why one `kv_append`
+/// `k`/`v` output - see [`gqa_decode_step`]'s doc for why one `kv_append`
 /// dispatch suffices (a flat prefix copy, since the cache and the batched
 /// buffer share the same per-row `n_kv_heads*head_dim` stride).
 pub fn kv_cache_fill(g: &Gpu, kv_append: usize, src: &DeviceBuffer, cache: &DeviceBuffer, n: u32, n_kv_heads: u32, head_dim: u32) -> Step {
@@ -360,7 +360,7 @@ pub struct GqaAttnIds {
     /// Naive matmul (`matmul.wgsl`'s `{x,w,out}`/`{m,k,n}` contract).
     pub matmul: usize,
     pub add2: usize,
-    /// Table-driven M-RoPE (`rope2d.wgsl`) — see `rope2d_fwd`.
+    /// Table-driven M-RoPE (`rope2d.wgsl`) - see `rope2d_fwd`.
     pub rope2d: usize,
     /// `kv_append` for [`kv_cache_fill`] (prefill) and [`GqaDecodeIds`] (decode).
     pub kv_append: usize,
@@ -439,7 +439,7 @@ fn gqa_attn_out(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeight
 /// (post-attention residual, ready for the caller's FFN/MoE sublayer).
 /// `cos`/`sin` are the `[n, head_dim/2]` RoPE tables. `kv_cache`, when
 /// `Some((kcache, vcache))`, bulk-fills the persistent per-layer cache with
-/// the `n` post-RoPE key/value rows ([`kv_cache_fill`]) — purely additive,
+/// the `n` post-RoPE key/value rows ([`kv_cache_fill`]) - purely additive,
 /// `xmid` is identical either way.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32, kv_cache: Option<(&DeviceBuffer, &DeviceBuffer)>) -> DeviceBuffer {
@@ -505,7 +505,7 @@ pub fn gqa_bwd(
 
 /// Bidirectional (encoder self-)attention shape over a fused qkv buffer
 /// `[b*t, stride]` whose q/k/v regions each hold `n_heads*head_dim` floats at
-/// `q_off`/`k_off`/`v_off`. MHA by construction — GQA projections are widened
+/// `q_off`/`k_off`/`v_off`. MHA by construction - GQA projections are widened
 /// first with [`kv_expand_fwd`] (group replication), which is what makes these
 /// builders serve GQA encoders (LFM2.5) and plain MHA encoders (seq2seq) alike.
 #[derive(Clone, Copy)]
@@ -561,7 +561,7 @@ pub fn bidir_fwd(
 
 /// Bidirectional attention backward: `d_scores` from the context grad `d_ctx`
 /// (softmax jacobian folded in), then `d_q`/`d_k`/`d_v` written into their
-/// regions of the fused `d_qkv` (disjoint assigns — no accumulation).
+/// regions of the fused `d_qkv` (disjoint assigns - no accumulation).
 pub fn bidir_bwd(
     g: &Gpu,
     k: &BidirIds,
@@ -584,7 +584,7 @@ pub fn bidir_bwd(
 }
 
 /// Kernel-pipeline indices for the cross-attention trio (two lengths +
-/// independent strides/offsets) — the substrate of query-chunked attention.
+/// independent strides/offsets) - the substrate of query-chunked attention.
 #[derive(Clone, Copy)]
 pub struct CrossIds {
     pub scores: usize,
@@ -595,10 +595,16 @@ pub struct CrossIds {
 /// Span + query-chunked bidirectional self-attention over a fused qkv buffer:
 /// for each span `(row0, len)`, queries attend that span's keys/values
 /// (non-causal); results land in `ctx` at the same absolute rows. `chunk`
-/// bounds the materialized score slab to `[heads, chunk, max_span]` — the
+/// bounds the materialized score slab to `[heads, chunk, max_span]` - the
 /// mechanism that keeps long-context (8k+) attention inside the per-binding
 /// budget. Layout-generic: `stride` is the fused row width, `q/k/v_off` the
 /// region offsets, `d_out` the context width (`heads*head_dim`).
+///
+/// `rel` adds SAM's decomposed relative-position bias
+/// (`crate::vit::RelPos` - two hoisted `q·R` dispatches per span, then an
+/// in-place fold into each chunk's score slab before the softmax). `None`
+/// leaves the dispatch sequence byte-for-byte what it was; there is deliberately
+/// no second copy of this loop for the biased case.
 pub fn chunked_bidir_fwd(
     g: &Gpu,
     k: &CrossIds,
@@ -615,9 +621,16 @@ pub fn chunked_bidir_fwd(
     probs: &DeviceBuffer,
     spans: &[(u32, u32)],
     chunk: u32,
+    rel: Option<&crate::vit::RelPos>,
     steps: &mut Vec<Step>,
 ) {
     for &(row0, len) in spans {
+        if let Some(r) = rel {
+            r.check_span(len);
+            // The hoist covers the WHOLE span; the chunk loop only folds the
+            // rows it owns, addressed by `q0`.
+            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
+        }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
@@ -632,6 +645,9 @@ pub fn chunked_bidir_fwd(
                 &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off],
                 heads * qn * len,
             ));
+            if let Some(r) = rel {
+                steps.push(r.add_step(g, heads, qn, len, q0, scores));
+            }
             steps.push(g.step(k.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
             steps.push(g.step_sliced(
                 k.apply,
@@ -651,7 +667,7 @@ pub fn chunked_bidir_fwd(
 ///
 /// `flash_attn_bidir_split` computes the same thing as `flash_attn_bidir` to
 /// cosine 1.00000000 and is faster at every head_dim measured on a P40
-/// (29× at hd=128, 4.4× at hd=32 — see the kernel header for the table),
+/// (29× at hd=128, 4.4× at hd=32 - see the kernel header for the table),
 /// because the baseline's per-thread `q[128]`/`o[128]` arrays cannot live in
 /// registers and its inner loop therefore runs at local-memory bandwidth. The
 /// split kernel needs `@workgroup_size(256)`, so selection is gated on the
@@ -663,7 +679,7 @@ pub struct FlashIds {
 }
 
 /// The flash variant to dispatch on this device: `(kernel index, workgroup
-/// size)`. Pure in its inputs — `caps` comes from `DeviceCaps`, so no backend
+/// size)`. Pure in its inputs - `caps` comes from `DeviceCaps`, so no backend
 /// name is consulted.
 pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32) {
     match ids.split {
@@ -673,7 +689,7 @@ pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize
 }
 
 /// One fused bidirectional flash-attention dispatch over `bsz` samples of `t`
-/// rows each in a packed qkv slab — the variant chosen by
+/// rows each in a packed qkv slab - the variant chosen by
 /// [`flash_bidir_variant`]. Both kernels take the SAME Params and produce the
 /// SAME output layout, so only the pipeline index and the per-workgroup thread
 /// count differ; the workgroup still owns BR = 64 query rows in both.
@@ -681,7 +697,7 @@ pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize
 /// `bsz > 1` is a **sample-major** slab: sample `b` occupies rows
 /// `[b·t, (b+1)·t)` of `qkv` (`[bsz·t, 3·d_model]`) and of `ctx`
 /// (`[bsz·t, d_model]`). One workgroup owns one `(b, head, query-tile)`, so
-/// samples never mix and the per-query arithmetic is unchanged — a batched
+/// samples never mix and the per-query arithmetic is unchanged - a batched
 /// dispatch is bit-identical to `bsz` separate ones.
 pub fn flash_bidir_step(
     g: &Gpu,
@@ -695,7 +711,7 @@ pub fn flash_bidir_step(
     ctx: &DeviceBuffer,
 ) -> Step {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    const BR: u32 = 64; // query rows per workgroup — the same in both kernels
+    const BR: u32 = 64; // query rows per workgroup - the same in both kernels
     let (kind, ws) = flash_bidir_variant(ids, &g.caps());
     let nwg = bsz * heads * t.div_ceil(BR);
     g.step(
@@ -707,7 +723,7 @@ pub fn flash_bidir_step(
 }
 
 /// Span-wise fused flash attention: one dispatch per span replaces the whole
-/// scores/softmax/apply chain with an online-softmax tiled kernel — O(t·hd)
+/// scores/softmax/apply chain with an online-softmax tiled kernel - O(t·hd)
 /// memory AND the tuned inner loops, where the chunked cross trio materializes
 /// `[H, chunk, t]` slabs through naive kernels. Picks the kernel through
 /// [`flash_bidir_variant`], so a caller that registers `flash_attn_bidir_split`
@@ -730,7 +746,7 @@ pub fn flash_bidir_fwd(
     steps: &mut Vec<Step>,
 ) {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    const BR: u32 = 64; // query rows per workgroup — the same in both kernels
+    const BR: u32 = 64; // query rows per workgroup - the same in both kernels
     let (kind, ws) = flash_bidir_variant(ids, &g.caps());
     for &(row0, len) in spans {
         let nwg = heads * len.div_ceil(BR);
@@ -744,7 +760,7 @@ pub fn flash_bidir_fwd(
     }
 }
 
-/// Round up to a 64-word (256B) boundary — `step_sliced`'s storage-buffer
+/// Round up to a 64-word (256B) boundary - `step_sliced`'s storage-buffer
 /// `BufferBinding` offsets must satisfy `min_storage_buffer_offset_alignment`
 /// (256B on the near-universal case), so every per-head/per-segment stride
 /// used as an offset multiplier in [`gemm_bidir_fwd`] is padded to this grain.
@@ -758,7 +774,7 @@ pub struct GemmAttnIds {
     pub head_pack: usize,
     pub head_pack_t: usize,
     pub head_unpack: usize,
-    /// `softmax_rows` — workgroup-per-row softmax over the `[H·chunk, len]`
+    /// `softmax_rows` - workgroup-per-row softmax over the `[H·chunk, len]`
     /// slab (GPU-only; the GEMM path is already gated on cooperative devices).
     pub softmax_rows: usize,
     pub matmul: usize,
@@ -768,12 +784,12 @@ pub struct GemmAttnIds {
 /// Query-chunked bidirectional attention as REAL GEMMs: per-head packed
 /// operands drive the register-tiled matmul instead of the naive
 /// one-thread-per-score kernels. Measured motivation: at t=8192 the naive
-/// trio (and the fused flash kernel — a memory escape hatch, not a fast
+/// trio (and the fused flash kernel - a memory escape hatch, not a fast
 /// path) left a P40 at ~2% of peak; the same insight already made the CPU
 /// fast paths 7× (they route these kernels to the native GEMM).
 ///
-/// Layout: `packs` holds the three per-head-contiguous operands per span —
-/// q (scaled by 1/√hd) at 0, k at `len·d_out`, vᵀ at `2·len·d_out` — with
+/// Layout: `packs` holds the three per-head-contiguous operands per span -
+/// q (scaled by 1/√hd) at 0, k at `len·d_out`, vᵀ at `2·len·d_out` - with
 /// GQA replication folded into the pack (`group` reads the NARROW k/v
 /// projections; no expanded buffer exists). Scores/probs slabs stay
 /// `[H, chunk, len]`; `ctx_pack` collects per-head context, unpacked into
@@ -877,7 +893,7 @@ pub fn gemm_bidir_fwd(
 /// forward pair recomputes each chunk's scores/probs (nothing T×T is cached),
 /// `dscores`/`dq` assign chunk-local rows, and the ACCUMULATING `dk_acc`/
 /// `dv_acc` twins sum each chunk's partial contribution (their `acc_flag`
-/// uniform assigns on a span's first chunk — no zero-clears to forget).
+/// uniform assigns on a span's first chunk - no zero-clears to forget).
 #[derive(Clone, Copy)]
 pub struct CrossBwdIds {
     pub dscores: usize,
@@ -886,10 +902,20 @@ pub struct CrossBwdIds {
     pub dv_acc: usize,
 }
 
-/// Backward of [`chunked_bidir_fwd`] with per-chunk score/softmax recompute —
+/// Backward of [`chunked_bidir_fwd`] with per-chunk score/softmax recompute -
 /// what makes long-context (8k) training fit the per-binding budget: the
 /// transient slabs stay `[heads, chunk, max_span]`. Writes `d_q`/`d_k`/`d_v`
 /// into their regions of the fused `d_qkv`.
+///
+/// `rel` is the adjoint of [`chunked_bidir_fwd`]'s own `rel` - SAME `Option`,
+/// SAME loop. Three things about it are load-bearing:
+///  * the per-chunk score RECOMPUTE must re-apply the bias, or the softmax it
+///    feeds is not the one the forward took;
+///  * `d_rel_h`/`d_rel_w` are filled chunk by chunk (chunks partition the query
+///    rows, so those two ASSIGN), and only then does the span-level pass run;
+///  * that pass ACCUMULATES `dq` onto what `bwd.dq` already assigned, and
+///    accumulates the dense-table adjoint across spans - every window of a
+///    windowed block shares one table.
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,
@@ -909,9 +935,14 @@ pub fn chunked_bidir_bwd(
     d_scores: &DeviceBuffer,
     spans: &[(u32, u32)],
     chunk: u32,
+    rel: Option<&crate::vit::RelPos>,
     steps: &mut Vec<Step>,
 ) {
-    for &(row0, len) in spans {
+    for (si, &(row0, len)) in spans.iter().enumerate() {
+        if let Some(r) = rel {
+            r.check_span(len);
+            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
+        }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
@@ -922,6 +953,9 @@ pub fn chunked_bidir_bwd(
             let p_v = [1, heads, qn, len, head_dim, stride, v_off, d_out];
             // Recompute this chunk's scores + probs from the cached qkv.
             steps.push(g.step_sliced(fwd.scores, &[qkv, qkv, scores], &[(q_row_off, 0), (kv_row_off, 0), (0, 0)], &p_qk, heads * qn * len));
+            if let Some(r) = rel {
+                steps.push(r.add_step(g, heads, qn, len, q0, scores));
+            }
             steps.push(g.step(fwd.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
             // Softmax jacobian → d_scores (chunk-local).
             steps.push(g.step_sliced(
@@ -931,7 +965,7 @@ pub fn chunked_bidir_bwd(
                 &p_v,
                 heads * qn,
             ));
-            // d_q: chunk rows only (disjoint — plain assign into the q region).
+            // d_q: chunk rows only (disjoint - plain assign into the q region).
             steps.push(g.step_sliced(
                 bwd.dq,
                 &[d_scores, qkv, d_qkv],
@@ -939,7 +973,7 @@ pub fn chunked_bidir_bwd(
                 &p_qk,
                 heads * qn * head_dim,
             ));
-            // d_k / d_v: sums over ALL queries — accumulate across chunks.
+            // d_k / d_v: sums over ALL queries - accumulate across chunks.
             let acc = u32::from(q0 > 0);
             let mut p_qk_acc = [0u32; 10];
             p_qk_acc[..9].copy_from_slice(&p_qk);
@@ -961,13 +995,24 @@ pub fn chunked_bidir_bwd(
                 &p_v_acc,
                 heads * len * head_dim,
             ));
+            // The bias is purely ADDITIVE, so d(bias) == d_scores exactly: the
+            // two intermediates' adjoints are partial sums of this same slab.
+            if let Some(r) = rel {
+                r.drel_steps(g, heads, qn, len, q0, d_scores, steps);
+            }
             q0 += qn;
+        }
+        // Span-level: dq (accumulating onto what `bwd.dq` assigned above) and
+        // the dense-table adjoint (accumulating across spans).
+        if let Some(r) = rel {
+            let acc = si > 0 || r.bwd.as_ref().is_some_and(|b| b.acc0);
+            r.span_bwd_steps(g, heads, head_dim, qkv, d_qkv, stride, row0 * stride + q_off, acc, steps);
         }
     }
 }
 
 /// GQA→MHA head replication into a fused-buffer region: dst head `ho` copies
-/// src head `ho/group` (`repeat_kv` layout). `group == 1` is a strided copy —
+/// src head `ho/group` (`repeat_kv` layout). `group == 1` is a strided copy -
 /// the same dispatch places q. `src` is `[rows, (heads_out/group)*hd]`.
 pub fn kv_expand_fwd(
     g: &Gpu,
@@ -1010,7 +1055,7 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
     g.step(idx, &[x, w, out], &[dim, rows, f(eps)], rows)
 }
 
-/// `(kernel index, dispatch threads)` for one RMSNorm — the RMSNorm twin of
+/// `(kernel index, dispatch threads)` for one RMSNorm - the RMSNorm twin of
 /// `ln_variant`: the cooperative workgroup-per-row kernel (`rmsnorm_rows`,
 /// measured 19.4x on a P40 and a win at *every* row width because the
 /// per-element kernel's one-thread-per-row layout is uncoalesced) where the
@@ -1018,7 +1063,7 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 /// per-element reference (`rmsnorm` / `rmsnorm_eps`).
 ///
 /// Both variants take the same buffers `[x, w, out]` and the same Params
-/// `[d, rows, eps]`, so only the index and the thread count change — which is
+/// `[d, rows, eps]`, so only the index and the thread count change - which is
 /// why this returns them instead of building the `Step`: callers bind whole
 /// buffers (`Gpu::step`) or slices (`Gpu::step_sliced`) and both must share one
 /// selection rule. The policy itself lives in `backend_api::select`
@@ -1041,7 +1086,7 @@ pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d:
 
 /// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
 /// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
-/// kernel is eps-free — eps enters through the per-row inverse).
+/// kernel is eps-free - eps enters through the per-row inverse).
 pub fn rmsnorm_eps_bwd(
     g: &Gpu,
     inv_idx: usize,
@@ -1075,7 +1120,7 @@ pub fn rmsnorm_eps_bwd(
 /// thread *t* row *t*: a warp's 32 loads are `d_model` floats apart, so each
 /// 32-byte sector fetched serves one useful float. `layernorm_dx` walks its row
 /// four times that way. The `*_rows` kernels give a whole 64-thread workgroup
-/// to one row and are coalesced by construction — measured 2.3-9.1x on a P40
+/// to one row and are coalesced by construction - measured 2.3-9.1x on a P40
 /// across d_model 768-3072 x 512-2048 rows (`brain-gpu-core`'s
 /// `bench_layernorm`), winning at every shape including the 1-row decode case.
 #[derive(Clone, Copy)]
@@ -1129,14 +1174,14 @@ impl LayerNormIds {
 ///
 /// The policy itself lives in `backend_api::select` (`Op::LayerNorm`) and is
 /// keyed on `DeviceCaps`, never a backend name. The `*_rows` kernels are
-/// `@workgroup_size(64)` — at or below the WebGPU floor of 256 — so no
+/// `@workgroup_size(64)` - at or below the WebGPU floor of 256 - so no
 /// `max_workgroup_size` gate is needed on top of it.
 ///
 /// Public for the same reason [`gemm_variant`] returns indices rather than a
 /// `Step`: [`layernorm_fwd`] and friends bind whole buffers (`Gpu::step`), while
 /// the DiT forwards normalise a ROW RANGE of a joint slab and must bind
 /// sub-ranges (`Gpu::step_sliced`). Both shapes have to share ONE selection
-/// rule — a second copy is a place a model silently keeps the slow kernel,
+/// rule - a second copy is a place a model silently keeps the slow kernel,
 /// the most expensive class of defect there is.
 pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
@@ -1239,7 +1284,7 @@ pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
     {
         return w;
     }
-    // Queried, never assumed — and never smaller than the portable floor, so a
+    // Queried, never assumed - and never smaller than the portable floor, so a
     // backend that under-reports cannot make the tiling worse than it was.
     let bytes = gpu.max_storage_binding_bytes() / TILE_BUDGET_FRACTION;
     (bytes / 4).max(TILE_BUDGET_WORDS)
@@ -1275,7 +1320,7 @@ fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
 /// Pick the GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`: the
 /// register-tiled kernel (128×128 tile, 256 threads) when there is enough work
 /// to fill tiles, else the naive one-thread-per-output kernel. Same math either
-/// way — every variant is bit-identical to the naive reference (measured,
+/// way - every variant is bit-identical to the naive reference (measured,
 /// `max|Δ| = 0`), so this only changes speed. `force_naive` is a model's env
 /// escape.
 ///
@@ -1283,12 +1328,12 @@ fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
 ///
 /// The rule used to be `m < 128 || n < 128 -> naive`, on the reading that a
 /// partial tile is wasted. The tiled kernel bounds-guards its tile, so a short
-/// `M` costs only the unused rows — while the naive kernel gives one thread per
+/// `M` costs only the unused rows - while the naive kernel gives one thread per
 /// output element, each walking `k` serially, which collapses on a wide `N`.
 ///
 /// SDXL's cross-attention `kv` projection is `[77, 2048, 2560]`: 77 text tokens
 /// is under the old threshold, so 60 of those per forward took the naive path at
-/// **43 GFLOP/s — 0.4% of a P40's 11.76 TFLOP/s peak, and 49% of the entire UNet
+/// **43 GFLOP/s - 0.4% of a P40's 11.76 TFLOP/s peak, and 49% of the entire UNet
 /// forward**. Measured on a P40, `k = 2048`, `n = 2560`:
 ///
 /// | m | naive | tiled |
@@ -1301,7 +1346,7 @@ fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
 /// | 77 | 18.67 | **0.84**  (22x) |
 ///
 /// So the crossover is `m = 8`, not 128. Below it the tile genuinely is mostly
-/// idle and naive wins; at `m = 1` the right kernel is neither — it is
+/// idle and naive wins; at `m = 1` the right kernel is neither - it is
 /// `matmul_gemv` (one workgroup per output column), which `gemm_variant`
 /// selects for models that register it.
 pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
@@ -1328,7 +1373,7 @@ pub enum GemmVariants {
     Reference(usize),
     /// The fast tier.
     Fast {
-        /// Skinny-M GEMV — one WORKGROUP per output COLUMN, reading each weight
+        /// Skinny-M GEMV - one WORKGROUP per output COLUMN, reading each weight
         /// row once and applying it to all M rows from registers. `None` when
         /// the model did not register it. **Requires `m <= 32`** (the kernel
         /// says so); `gemm_variant` enforces that, so a model may pass `Some`
@@ -1357,7 +1402,7 @@ pub enum GemmVariants {
 /// Returns `(kernel index, invocation count)` rather than a `Step` for the same
 /// reason [`rms_variant`] does: callers bind whole buffers (`Gpu::step`) or
 /// sub-ranges (`Gpu::step_sliced`) and both must share one selection rule.
-/// Every arm computes the same math — this only changes speed.
+/// Every arm computes the same math - this only changes speed.
 pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
     match v {
         GemmVariants::Reference(k) => (k, m * n),
@@ -1389,7 +1434,7 @@ pub fn swiglu_bwd(
 }
 
 /// [`gqa_decode_step`], called once per position `0..t`, must reproduce
-/// [`gqa_fwd`]'s causal batched output exactly at every row — `gqa_scores.wgsl`
+/// [`gqa_fwd`]'s causal batched output exactly at every row - `gqa_scores.wgsl`
 /// already masks `j > i` to `-inf` (see its header), so [`gqa_fwd`]'s row `i`
 /// already only attends keys `0..=i`, the same set a decode step at `pos = i`
 /// sees from the cache. This is the `model::block` twin of `qwen3::Qwen`'s own
@@ -1508,7 +1553,7 @@ mod tests {
     /// Pins the three arms and, in particular, the `m <= 32` precondition the
     /// GEMV kernels state in their headers: violating it is silently wrong
     /// output, not a crash, so the bound belongs in the selector and nowhere
-    /// else. Thread counts are pinned too — they are the kernels' documented
+    /// else. Thread counts are pinned too - they are the kernels' documented
     /// dispatch geometry (one workgroup per output column; one 256-thread
     /// workgroup per 128x128 output tile), not free parameters.
     #[test]
@@ -1521,7 +1566,7 @@ mod tests {
         assert_eq!(gemm_variant(fast, 512, 3072), (9, 4 * 24 * 256));
 
         // A model that never registered the GEMV kernel keeps the tiled arm at
-        // every M — this is what makes the migration of an existing user
+        // every M - this is what makes the migration of an existing user
         // provably behaviour-preserving before the kernel is added.
         let no_gemv = GemmVariants::Fast { gemv: None, tiled: 9 };
         assert_eq!(gemm_variant(no_gemv, 1, 3072), (9, 24 * 256));
@@ -1532,7 +1577,7 @@ mod tests {
         assert_eq!(gemm_variant(GemmVariants::Reference(2), 512, 3072), (2, 512 * 3072));
     }
 
-    /// The tiling rule, against the budget rather than against a device — the
+    /// The tiling rule, against the budget rather than against a device - the
     /// device half is one `max_storage_binding_bytes()` call.
     ///
     /// This exists because the fixed ~96 MiB budget was 21x smaller than what a
@@ -1545,7 +1590,7 @@ mod tests {
     fn a_real_lm_head_collapses_to_one_tile_on_a_device_that_reports_its_limit() {
         let (vocab, d) = (151936u64, 1024u64);
 
-        // The portable floor still tiles it 7 ways — the behaviour that cost 12x.
+        // The portable floor still tiles it 7 ways - the behaviour that cost 12x.
         assert_eq!(tiles_with_budget(vocab, d, TILE_BUDGET_WORDS).len(), 7);
 
         // Half of a P40's reported 2047 MiB, in f32 words.
@@ -1582,7 +1627,7 @@ mod tests {
         assert_eq!(t.len(), 64);
         assert_eq!(t[0], (0, 64));
 
-        // A budget smaller than one row still yields whole rows, never zero —
+        // A budget smaller than one row still yields whole rows, never zero -
         // a zero-row tile would loop forever.
         assert_eq!(tiles_with_budget(3, 1024, 1).len(), 3);
     }

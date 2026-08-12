@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Numerical gradient checker — brain's backprop correctness gate.
+//! Numerical gradient checker - brain's backprop correctness gate.
 //!
 //! With the PyTorch oracle dropped (brain is pure-Rust), this validates each
 //! model's analytic WGSL gradients against finite differences of its own
@@ -15,7 +15,7 @@ use data::rng::Rng;
 
 /// Per-model gradient-check entry points for the imaging workstream. Each module
 /// documents, at its head, exactly which parameters its check covers and which
-/// are frozen — read that before trusting a green result.
+/// are frozen - read that before trusting a green result.
 pub mod sam2;
 pub use sam2::check_sam2;
 
@@ -33,6 +33,12 @@ pub use t5::check_t5;
 
 pub mod restore;
 pub use restore::check_codeformer;
+
+/// SAM's decomposed relative-position bias kernels - DeepSeek-OCR's SAM ViT-B
+/// tower is the first consumer. Greenfield kernel work: the harness is the
+/// fixture, not a model crate.
+pub mod deepseekocr;
+pub use deepseekocr::{check_deepseekocr_relpos, check_deepseekocr_relpos_elementwise};
 
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
@@ -83,7 +89,7 @@ impl Report {
         self.checks.iter().filter(|c| !c.within(atol, rtol)).collect()
     }
     /// Checks whose ANALYTIC derivative came back exactly `0.0` while the
-    /// numeric one is clearly not zero — the silently-DEAD-gradient shape the
+    /// numeric one is clearly not zero - the silently-DEAD-gradient shape the
     /// `within` atol floor cannot see: with `analytic == 0` and a true
     /// derivative below `atol + rtol·|numeric|` (≈4.35e-3 at the workspace
     /// gate), `abs_err == |numeric|` passes. A backend-specific kernel that
@@ -109,7 +115,7 @@ impl Report {
 /// [`directional_check`] contracts a whole tensor onto one random ±1 direction
 /// and keeps the *best-agreeing* of `n_dirs`. That is the right trade for a
 /// large GEMM weight, but it is measurably blind to a **partial** gradient error
-/// — one where a *share* of the true gradient is missing rather than all of it —
+/// - one where a *share* of the true gradient is missing rather than all of it -
 /// for two compounding reasons: the contraction `⟨∇L − ∇̃L, v⟩` can be
 /// numerically small even when `‖∇L − ∇̃L‖` is not, and best-of-`n_dirs`
 /// actively selects the direction where it is smallest.
@@ -117,12 +123,12 @@ impl Report {
 /// That is not hypothetical. Deleting T5's cross-block `rel_bias` fold (the
 /// `axpy` that sums `attn_bwd_dbias` over the block stack) leaves a **33 %**
 /// error in `rel_bias.weight`'s gradient, and `directional_check` reported
-/// `rel = 6.2e-4` for it at seed 1 — a clean pass. Perturbing one entry at a
+/// `rel = 6.2e-4` for it at seed 1 - a clean pass. Perturbing one entry at a
 /// time removes both effects: every entry is its own comparison, so a missing
 /// share cannot hide behind a contraction.
 ///
 /// Cost is `2·numel` forward passes, so this is for the small, structurally
-/// interesting tensors — the ones a reverse pass *folds* or *shares* — not for
+/// interesting tensors - the ones a reverse pass *folds* or *shares* - not for
 /// a GEMM weight. `eps` wants to be larger than [`directional_check`]'s: a
 /// single-entry step has no `√numel` amplification, so the loss difference is
 /// `eps·|∂L/∂wᵢ|` and fp32 cancellation bites sooner.
@@ -163,11 +169,11 @@ pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
 
 /// Structural guard, generalised from facenet's `every_prelu_slope_gradient_
 /// is_nonzero` (written because `prelu_bwd_wg` returned ALL-ZERO slope
-/// gradients on the CPU backend while `dx` stayed correct — a model that
+/// gradients on the CPU backend while `dx` stayed correct - a model that
 /// trains to a plausible loss with one parameter family silently frozen):
 /// run one backward and return every parameter whose gradient tensor came
 /// back identically zero. Every entry exactly zero is the signature of a
-/// wrong/missing kernel dispatch, not of a small derivative — directional
+/// wrong/missing kernel dispatch, not of a small derivative - directional
 /// magnitudes don't enter, so this catches what the atol floor cannot.
 ///
 /// `name_filter` selects which parameters must be live (`|_| true` for all);
@@ -191,13 +197,13 @@ pub fn zero_grad_params<M: CheckModel>(m: &M, name_filter: impl Fn(&str) -> bool
 /// batch must already be set on `m`.
 ///
 /// **What this cannot see.** A *wholly* wrong gradient fails every direction, so
-/// best-of-`n_dirs` is safe against that. A **partial** one — a share of the
-/// true gradient missing, which is what a mis-folded shared parameter produces —
+/// best-of-`n_dirs` is safe against that. A **partial** one - a share of the
+/// true gradient missing, which is what a mis-folded shared parameter produces -
 /// is a different matter: the contraction onto `v` can be numerically small even
 /// when the error vector is not, and best-of-`n_dirs` picks the direction where
 /// it is smallest. Measured on this repo: with T5's cross-block `rel_bias` fold
 /// deleted (33 % gradient error) this function reported `rel = 6.2e-4` at seed 1
-/// and 5.3e-2 at seed 7 — both inside the workspace `(4e-3, 8e-2)` gate. Every
+/// and 5.3e-2 at seed 7 - both inside the workspace `(4e-3, 8e-2)` gate. Every
 /// parameter a reverse pass *folds across stages* therefore needs
 /// [`elementwise_check`] next to its directional check, not instead of it.
 pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u64) -> Report {
@@ -246,7 +252,7 @@ pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u6
 //
 // The `model::Model` trait already exposes exactly the parameter-access +
 // forward/backward surface the checker needs, so one blanket impl gradient-checks
-// every model (GPT, MoE, PID, and future seq2seq/autoencoder) by construction —
+// every model (GPT, MoE, PID, and future seq2seq/autoencoder) by construction -
 // closing the TESTING.md gap where only GPT was checked. `loss()` is the model's
 // scalar `forward()` (the objective `backward()` differentiates).
 impl<M: model::Model> CheckModel for M {
@@ -289,7 +295,7 @@ pub fn check_gpt(seed: u64) -> Report {
 /// Build a tiny Qwen3 decoder, set a fixed batch, and gradient-check it. This is
 /// the correctness gate for the GQA attention (fwd + the dq/dk/dv backward with
 /// kv-head accumulation), the per-head QK-RMSNorm, the half-split RoPE-base, the
-/// SwiGLU MLP, and the tied-embedding grad accumulation — all through the blanket
+/// SwiGLU MLP, and the tied-embedding grad accumulation - all through the blanket
 /// `CheckModel for model::Model`. The tiny config uses 4 query / 2 kv heads
 /// (group 2) and a decoupled `head_dim` (8, vs d_model/n_heads = 4). Returns the
 /// report.
@@ -309,7 +315,7 @@ pub fn check_qwen(seed: u64) -> Report {
 /// attention backward through the GQA→MHA expansion (`kv_expand_bwd`
 /// group-sum), the gated depthwise symmetric-pad conv mixer (in_proj
 /// row-thirds, `mul` gating, permute adjoints, conv1d dx/dw), the eps-aware
-/// RMSNorm family, and the tied MLM head with UNSHIFTED masked-CE targets —
+/// RMSNorm family, and the tied MLM head with UNSHIFTED masked-CE targets -
 /// only some positions are supervised (the MLM label pattern), the rest are
 /// IGNORE, exercising the masking path.
 pub fn check_lfm(seed: u64) -> Report {
@@ -332,7 +338,7 @@ pub fn check_lfm(seed: u64) -> Report {
 /// Build a tiny **LoRA** Qwen3 decoder and gradient-check the adapters. The
 /// checker walks only the trainable params (`*.lora_a`/`*.lora_b`); the base
 /// weights are frozen. A few AdamW steps run first so the zero-initialised `B`
-/// adapter (and hence `A`'s gradient) is non-trivial before the FD comparison —
+/// adapter (and hence `A`'s gradient) is non-trivial before the FD comparison -
 /// this validates the LoRA forward (`axpy` fusion) and the A/B backward path.
 pub fn check_qwen_lora(seed: u64) -> Report {
     use qwen3::{LoraCfg, Qwen, QwenConfig};
@@ -371,7 +377,7 @@ pub fn check_qwen2(seed: u64) -> Report {
 /// Gradient-check the interleaved-M-RoPE decoder path (`Qwen::enable_mrope`),
 /// which swaps the analytic rope_base for the table-driven `rope2d` on q/k. Uses
 /// simple diagonal per-token position tables (so the rotation is non-trivial but
-/// the interleaving — validated separately in `qwenvl::mrope` — is not needed
+/// the interleaving - validated separately in `qwenvl::mrope` - is not needed
 /// here); the check confirms `rope2d`'s forward and its sign=-1 backward are
 /// correctly wired into the decoder's parameter gradients. Returns the report.
 pub fn check_qwen_mrope(seed: u64) -> Report {
@@ -385,7 +391,7 @@ pub fn check_qwen_mrope(seed: u64) -> Report {
     model.enable_mrope();
 
     // Per-token cos/sin for position = row-within-sequence (row % t), i.e. the
-    // ordinary sequential positions — a non-trivial rotation the rope2d path must
+    // ordinary sequential positions - a non-trivial rotation the rope2d path must
     // reproduce and differentiate.
     let half = hd / 2;
     let (mut cos, mut sin) = (vec![0f32; n * half], vec![0f32; n * half]);
@@ -413,7 +419,7 @@ pub fn check_qwen_mrope(seed: u64) -> Report {
 /// injects the embeddings into the residual stream and `splice_bwd` extracts
 /// their gradient (and that the subsequent `emb_bwd` scatter, over rows the
 /// splice backward zeroed, does not corrupt it). The image rows carry IGNORE
-/// targets, so their only influence on the loss is through attention — a
+/// targets, so their only influence on the loss is through attention - a
 /// non-trivial path exercising the full splice + decoder graph. Returns a
 /// one-entry report ("img_embeds").
 pub fn check_vlm_splice(seed: u64) -> Report {
@@ -469,7 +475,7 @@ pub fn check_vlm_splice(seed: u64) -> Report {
 
 /// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
 /// (validates RMSNorm/RoPE/router/SwiGLU/aux+z-loss backprop). Now that MoE
-/// implements `model::Model`, the blanket `CheckModel` impl makes it checkable —
+/// implements `model::Model`, the blanket `CheckModel` impl makes it checkable -
 /// closing the TESTING.md gap where only GPT was gradient-checked. Returns the
 /// report.
 pub fn check_moe(seed: u64) -> Report {
@@ -512,7 +518,7 @@ pub fn check_moe(seed: u64) -> Report {
 /// `mla_scores`/`mla_bwd_*` kernels), the **sigmoid `noaux_tc` router**
 /// (`router_gate_sigmoid`/`router_bwd_sigmoid` through the sigmoid + top-k
 /// normalization), the **shared expert**, the **dense→MoE layer schedule**, and
-/// the untied `lm_head` — all through the blanket `CheckModel for model::Model`.
+/// the untied `lm_head` - all through the blanket `CheckModel for model::Model`.
 ///
 /// `top_k == n_routed_experts`: every expert is always selected, so the group
 /// top-k selection has no hard boundary (which FD cannot see) while the router's
@@ -534,7 +540,7 @@ pub fn check_glm(seed: u64) -> Report {
 /// gradient-check it. Validates the added auxiliary t+2 path: the shared-embedding
 /// input, the two RMSNorms, the split `eh_proj`, the position-wise SwiGLU block
 /// with its residual, the shared-head norm, and the shared `lm_head` grad
-/// accumulation (main + MTP) — plus that the MTP grad correctly flows back into
+/// accumulation (main + MTP) - plus that the MTP grad correctly flows back into
 /// the final residual. `top_k == n_routed_experts` (smooth router).
 pub fn check_glm_mtp(seed: u64) -> Report {
     use glm::{Glm, GlmConfig};
@@ -552,7 +558,7 @@ pub fn check_glm_mtp(seed: u64) -> Report {
 /// SwiGLU, key-padding causal attention, and the separate u_head backprop). PID
 /// is masked CE over the u_bins label space, so the fixed targets label a few
 /// positions and IGNORE the rest. Now that PID implements `model::Model`, the
-/// blanket `CheckModel` impl makes it checkable — closing the TESTING.md gap.
+/// blanket `CheckModel` impl makes it checkable - closing the TESTING.md gap.
 pub fn check_pid(seed: u64) -> Report {
     use pid::{Pid, PidConfig, IGNORE};
     let cfg = PidConfig {
@@ -583,14 +589,14 @@ pub fn check_pid(seed: u64) -> Report {
 /// validates the bidirectional encoder self-attention, the causal decoder
 /// self-attention, the decoder->encoder cross-attention (whose backward splits
 /// grads across the decoder-Q buffer and the encoder-memory K/V buffer), the
-/// shared src/tgt embedding accumulation, and the masked-CE token head — all
+/// shared src/tgt embedding accumulation, and the masked-CE token head - all
 /// through the blanket `CheckModel for model::Model`. Returns the report.
 pub fn check_seq2seq(seed: u64) -> Report {
     use seq2seq::{Seq2Seq, Seq2SeqConfig, IGNORE};
     let cfg = Seq2SeqConfig {
         vocab: 23,
         block_size: 6,     // decoder (target) length
-        src_block_size: 5, // encoder (source) length — exercises T_dec != T_enc
+        src_block_size: 5, // encoder (source) length - exercises T_dec != T_enc
         n_enc: 2,
         n_dec: 2,
         d_model: 16,
@@ -617,12 +623,12 @@ pub fn check_seq2seq(seed: u64) -> Report {
 /// Gradient-check the FLUX.2 Klein **host** training reference at tiny dims:
 /// the f64 instantiation of `flux2::modelgrad` (double + single block stacks,
 /// joint attention, QK-RMSNorm, interleaved RoPE, SwiGLU, and the whole
-/// conditioning path — timestep MLP → three global modulation linears + final
+/// conditioning path - timestep MLP → three global modulation linears + final
 /// adaLN, with site grads accumulated across the block stack). Unlike the
 /// device models above, flux2's trainer IS the host path (the f32
 /// instantiation of the same code; a device trainer is future work), so the
 /// FD check runs directly against the host forward under the rectified-flow
-/// velocity-MSE loss — same directional-derivative recipe as
+/// velocity-MSE loss - same directional-derivative recipe as
 /// [`directional_check`], in f64.
 pub fn check_flux2(seed: u64) -> Report {
     use flux2::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch, params_mut, Cfg};
@@ -682,7 +688,7 @@ pub fn check_flux2(seed: u64) -> Report {
 /// M-RoPE backward and the sigmoid output-gate composition), and
 /// `model::moe::moe_layer_bwd` (routed experts + softmax router) alongside a
 /// HAND-DERIVED sigmoid-gated shared-expert backward (no `model::moe` helper
-/// exists for that composition) — all through the blanket `CheckModel for
+/// exists for that composition) - all through the blanket `CheckModel for
 /// model::Model` impl, since [`qwen35moe::model::Qwen35`] implements that trait
 /// directly (no bespoke test harness needed, unlike a model whose backward
 /// only exists behind a lower-level API).
@@ -690,15 +696,15 @@ pub fn check_flux2(seed: u64) -> Report {
 /// Smaller than [`qwen35moe::config::Qwen35Config::tiny`] (`n_layers: 8, n_experts: 6`)
 /// on purpose: `directional_check` costs `O(n_dirs)` forward passes PER
 /// PARAMETER TENSOR, and this hybrid config's per-layer tensor count is large
-/// (every routed expert is 3 own-named tensors) — `n_layers: 4` still exercises
+/// (every routed expert is 3 own-named tensors) - `n_layers: 4` still exercises
 /// BOTH layer types (`full_attention_interval: 4` puts layer 3 at `Full`,
 /// layers 0-2 at `Linear`), `n_experts: 3` keeps the routed-expert weight
 /// count small. `top_k: n_experts` (every expert always selected) removes the
-/// hard top-k selection boundary finite differences cannot see through — the
+/// hard top-k selection boundary finite differences cannot see through - the
 /// same mitigation `check_moe`/`check_glm` already use, not a new pattern.
 /// `t: 12` with `tiny()`'s own `linear_conv_kernel_dim`-derived GDN shape picks
 /// chunk size 4 (`qwen35moe::model::gdn_chunk_size(12) == 4`), a genuine 3-chunk
-/// recurrence — smaller than `tiny()`'s own `t: 24` (chunk 8, 3 chunks) at the
+/// recurrence - smaller than `tiny()`'s own `t: 24` (chunk 8, 3 chunks) at the
 /// same chunk COUNT, for less FD compute. `b: 1` (a single sequence) is enough
 /// to exercise every op; nothing here is batch-shaped in a way `b: 2` would add
 /// coverage for.
@@ -767,7 +773,7 @@ fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
 /// `A_log` (`blocks.0.linear_attn.A_log`, `[num_v_heads] = 6` entries at the
 /// tiny config) is read by every token at every chunk of the chunked
 /// recurrence, and `gdn_chunk_bwd`'s `d_A_log` is a genuine sum-fold over the
-/// WHOLE sequence (via `mul(d_g,g)` then `bias_grad` over all rows) — exactly
+/// WHOLE sequence (via `mul(d_g,g)` then `bias_grad` over all rows) - exactly
 /// the shape [`directional_check`]'s own rustdoc warns is blind to a partial
 /// fold error (see `check_t5_rel_bias_elementwise`'s measured T5 case).
 ///
@@ -776,7 +782,7 @@ fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
 /// numeric finite difference reads exactly `0.0` (the true per-tensor
 /// directional derivative is far below fp32 resolution at this depth from
 /// the loss, with only one `Full`-attention layer at the end pulling
-/// gradient back through three Gated-DeltaNet layers' own decay gates) — so
+/// gradient back through three Gated-DeltaNet layers' own decay gates) - so
 /// `directional_check` cannot exercise this fold at all here, pass or fail.
 /// Per-entry finite differences don't have that problem: the loss
 /// difference is `eps·|∂L/∂wᵢ|` with no `√numel` contraction, so it stays
@@ -788,26 +794,26 @@ pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
 }
 
 /// Build a tiny **LoRA** hybrid Qwen3.5-35B-A3B decoder (rank-2 adapters on
-/// every one of the 9 targetable GDN/GQA projections — `qwen35moe::config
-/// ::lora_targets()` — over the same `n_layers: 4, n_experts: 3, top_k: 3`
+/// every one of the 9 targetable GDN/GQA projections - `qwen35moe::config
+/// ::lora_targets()` - over the same `n_layers: 4, n_experts: 3, top_k: 3`
 /// shape [`check_qwen35`] uses, so BOTH layer types are exercised: layers 0-2
 /// are `Linear` (GDN), layer 3 is `Full` (GQA)) and gradient-check the
 /// adapters. This is the correctness gate for `Qwen35::lora_fwd` (the
 /// two-matmul + `AXPY` fusion) and the LoRA branch of `Qwen35::proj_bwd` (the
 /// frozen-base dX-only path plus the `A`/`B` adapter grads), through BOTH
-/// mixer types in one config — the qwen35 analogue of `check_qwen_lora`.
+/// mixer types in one config - the qwen35 analogue of `check_qwen_lora`.
 ///
 /// `directional_check`'s `param_names()` walks only the trainable
-/// `*.lora_a`/`*.lora_b` tensors (`Qwen35::param_names`'s LoRA branch) — the
+/// `*.lora_a`/`*.lora_b` tensors (`Qwen35::param_names`'s LoRA branch) - the
 /// frozen base (every non-targeted weight too: norms, the 3 routed experts
 /// per layer, the shared expert, the router, embeddings, `A_log`/`dt_bias`,
 /// `conv1d.weight`) never gets a finite-difference probe, which is exactly
 /// the LoRA contract this checker is meant to confirm (a frozen base must
-/// never receive a gradient-buffer write — see `Qwen35::trainable`'s callers
+/// never receive a gradient-buffer write - see `Qwen35::trainable`'s callers
 /// throughout `model.rs`).
 ///
 /// A few AdamW steps run first so the zero-initialised `B` adapter (and hence
-/// `A`'s gradient) is non-trivial before the FD comparison — same reasoning
+/// `A`'s gradient) is non-trivial before the FD comparison - same reasoning
 /// as `check_qwen_lora`'s own doc, and the same `in_proj_qkv.weight`/
 /// `conv1d.weight` wide-init workaround [`qwen35_gradcheck_harness`]'s own
 /// doc explains (this harness hits the identical numerical-conditioning gap
@@ -847,7 +853,7 @@ pub fn check_qwen35_lora(seed: u64) -> Report {
 /// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
 /// the encoder→bottleneck→decoder matmul/GELU/bias backprop, all through the
 /// blanket `CheckModel for model::Model`. The objective is mean-squared
-/// reconstruction error, so unlike the token-head models there is no masking —
+/// reconstruction error, so unlike the token-head models there is no masking -
 /// every output element contributes. Returns the report.
 pub fn check_autoencoder(seed: u64) -> Report {
     use autoencoder::{Autoencoder, AutoencoderConfig};
@@ -869,7 +875,16 @@ mod tests {
     /// (analytic exactly 0.0 with a clearly nonzero numeric derivative --
     /// the shape the atol floor waves through; see Report::dead_gradients).
     fn assert_grad_gate(report: &Report, what: &str) {
-        assert_grad_gate(&report, "{what}:");
+        // fp32 directional FD on a device: the workspace-standard combined
+        // abs+rel tolerance, the same `(4e-3, 8e-2)` every explicit gate below
+        // spells out by hand.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "{what}: gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
         let dead = report.dead_gradients();
         assert!(
             dead.is_empty(),
@@ -1000,7 +1015,7 @@ mod tests {
 
     #[test]
     fn flux2_analytic_grads_match_finite_differences() {
-        // Pure host f64 — no GPU, so no MOE_SKIP_GPU_TESTS gate.
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate.
         let report = check_flux2(7);
         report.print();
         // f64 central differences on the host reference are tight.

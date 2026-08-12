@@ -67,7 +67,7 @@ fn fwd_ids() -> VitKernelIds {
         layernorm: 0,
         matmul: 1,
         bias_add: 2,
-        gelu_erf: 3,
+        mlp_act: 3,
         scale_chan: 4,
         add2: 5,
         attn_scores_cross: 6,
@@ -80,7 +80,7 @@ fn fwd_ids() -> VitKernelIds {
 }
 
 /// Only the four `*_cross` backward slots are dispatched by `cross_q_bwd`; the
-/// rest are never read on this path, so they carry the sentinel `usize::MAX` —
+/// rest are never read on this path, so they carry the sentinel `usize::MAX` -
 /// a wrong index here would be a silent miscompute, not a crash.
 fn bwd_ids() -> VitBwdIds {
     VitBwdIds {
@@ -90,7 +90,7 @@ fn bwd_ids() -> VitBwdIds {
         matmul_dx: usize::MAX,
         matmul_dw: usize::MAX,
         bias_grad: usize::MAX,
-        gelu_erf_bwd: usize::MAX,
+        mlp_act_bwd: usize::MAX,
         scale_chan_dg: usize::MAX,
         ln_head_dx: usize::MAX,
         ln_head_dgb: usize::MAX,
@@ -132,7 +132,7 @@ fn dev() -> Gpu {
 #[test]
 fn window_plan_partitions_every_row_once() {
     // The (4,4,4,4,2,2) row is the trap: every window is 2x2, i.e. equal
-    // LENGTH, but none is win_h x win_w — `is_uniform` must still say false or
+    // LENGTH, but none is win_h x win_w - `is_uniform` must still say false or
     // `QPoolPlan::per_window` pools a 4x4 grid that is really 2x2.
     for (gh, gw, wh, ww, sh, sw) in [
         (8u32, 8u32, 4u32, 4u32, 0u32, 0u32),
@@ -168,6 +168,76 @@ fn window_plan_partitions_every_row_once() {
     }
 }
 
+/// SAM-1/ViTDet's zero-pad partition (`WindowPlan::padded`), covering all six
+/// properties its contract promises. Host-only: a plan is a permutation, and
+/// nothing here needs a device.
+#[test]
+fn padded_window_plan_is_uniform_and_covers_every_real_row() {
+    // (a) exact division, (b) pad on one axis only (each way), (c) pad on both.
+    for (gh, gw, wh, ww) in [(8u32, 8u32, 4u32, 4u32), (7, 8, 4, 4), (8, 5, 4, 4), (7, 5, 4, 4), (14, 14, 14, 14), (13, 3, 4, 2)] {
+        let p = WindowPlan::padded(gh, gw, wh, ww);
+        let rows = gh * gw;
+        let (ph, pw) = p.padded_grid();
+        assert_eq!((ph, pw), (gh.div_ceil(wh) * wh, gw.div_ceil(ww) * ww), "padded grid for {gh}x{gw} win {wh}x{ww}");
+        assert_eq!(p.win_rows(), ph * pw);
+        assert_eq!(p.perm().len(), (ph * pw) as usize);
+        assert_eq!(p.rows(), rows);
+
+        // (d) every window is exactly win_h x win_w -- the whole point.
+        assert!(p.is_uniform(), "a padded partition is uniform by construction");
+        assert_eq!(p.max_span(), wh * ww);
+        assert_eq!(p.n_windows(), (ph / wh) * (pw / ww));
+        let mut cur = 0u32;
+        for &(r0, len) in p.spans() {
+            assert_eq!(r0, cur);
+            assert_eq!(len, wh * ww, "every padded window is full-size");
+            cur += len;
+        }
+        assert_eq!(cur, p.win_rows());
+
+        // (e) every REAL grid position appears in exactly one window ...
+        let mut seen = vec![0u32; rows as usize];
+        let mut pad_hits = 0u32;
+        for &r in p.perm() {
+            if r == rows {
+                pad_hits += 1;
+            } else {
+                seen[r as usize] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "every real row must appear exactly once: {seen:?}");
+        // (f) ... and the sentinel appears exactly `pad_h*pad_w - grid_h*grid_w` times.
+        assert_eq!(pad_hits, ph * pw - rows, "sentinel count must be the pad area");
+        assert_eq!(p.sentinel(), (pad_hits > 0).then_some(rows));
+
+        // `inv` stays real-rows-long and really inverts `perm` on them, so
+        // `window_reverse` drops the pad with no extra bookkeeping.
+        assert_eq!(p.inv().len(), rows as usize);
+        for (dst, &src) in p.perm().iter().enumerate() {
+            if src != rows {
+                assert_eq!(p.inv()[src as usize] as usize, dst);
+            }
+        }
+    }
+}
+
+/// (a), stated as an equality rather than as properties: when the grid already
+/// divides evenly, padding is a NO-OP and the plan is `WindowPlan::new`'s.
+#[test]
+fn padded_window_plan_equals_plain_plan_on_an_exact_grid() {
+    for (gh, gw, wh, ww) in [(8u32, 8u32, 4u32, 4u32), (12, 4, 4, 2), (14, 14, 14, 14)] {
+        let plain = WindowPlan::new(gh, gw, wh, ww);
+        let padded = WindowPlan::padded(gh, gw, wh, ww);
+        assert_eq!(padded.perm(), plain.perm(), "perm must match on an exact grid");
+        assert_eq!(padded.inv(), plain.inv(), "inv must match on an exact grid");
+        assert_eq!(padded.spans(), plain.spans(), "spans must match on an exact grid");
+        assert_eq!(padded.max_span(), plain.max_span());
+        assert_eq!(padded.win_rows(), plain.win_rows());
+        assert_eq!(padded.sentinel(), None, "no pad means no sentinel");
+        assert!(padded.is_uniform() && plain.is_uniform());
+    }
+}
+
 #[test]
 fn partition_then_reverse_is_bit_exact() {
     let g = dev();
@@ -194,6 +264,47 @@ fn partition_then_reverse_is_bit_exact() {
     }
 }
 
+/// The padded partition on a device: the sentinel really does gather the one
+/// extra zeroed scratch row into every pad slot, and the reverse really does
+/// drop the pad without a mask. This is the wiring `WindowPlan::padded`'s doc
+/// promises (`rows+1` rows in, `win_rows` rows of window-major buffer out).
+#[test]
+fn padded_partition_gathers_the_sentinel_row_and_reverse_drops_it() {
+    let g = dev();
+    let ids = perm_ids();
+    let (gh, gw, c) = (7u32, 5u32, 16u32);
+    let plan = WindowPlan::padded(gh, gw, 4, 4);
+    let wi = WindowIndex::new(&g, &plan);
+    let rows = plan.rows() as usize;
+    let mut r = Lcg::new(0x5A11);
+    // `rows + 1` rows: the caller's one extra scratch row, zeroed once. Every
+    // real row is deliberately nonzero so a pad row that leaked real data (or
+    // vice versa) shows up.
+    let mut host = r.vec_scaled(rows * c as usize, 0.5);
+    for v in host.iter_mut() {
+        *v += 1.0;
+    }
+    host.extend(std::iter::repeat_n(0.0f32, c as usize));
+    let x = g.storage_init("x", &host);
+    let win = g.storage((plan.win_rows() * c) as u64);
+    let back = g.storage((plan.rows() * c) as u64);
+    g.submit(&[], &[window_partition(&g, &ids, &wi, &x, &win, c), window_reverse(&g, &ids, &wi, &win, &back, c)]);
+
+    let wm = g.read(&win, (plan.win_rows() * c) as usize);
+    let sentinel = plan.sentinel().expect("7x5 under a 4x4 window pads");
+    for (dst, &src) in plan.perm().iter().enumerate() {
+        let a = &wm[dst * c as usize..(dst + 1) * c as usize];
+        if src == sentinel {
+            assert!(a.iter().all(|&v| v == 0.0), "pad row {dst} must be the zeroed sentinel, got {a:?}");
+        } else {
+            let b = &host[src as usize * c as usize..(src as usize + 1) * c as usize];
+            assert_eq!(a, b, "window-major row {dst} != grid row {src}");
+        }
+    }
+    let got = g.read(&back, rows * c as usize);
+    assert_eq!(got.to_vec(), host[..rows * c as usize], "window_reverse must return exactly the real rows, bit-exact");
+}
+
 // ---------------------------------------------------------------------------
 // 2. A ViT block commutes with the permutation: windowed == per-window
 // ---------------------------------------------------------------------------
@@ -203,7 +314,7 @@ struct Blk {
 }
 
 impl Blk {
-    /// `rope: None` deliberately — `rope2d` indexes its table by `row % tmod`,
+    /// `rope: None` deliberately - `rope2d` indexes its table by `row % tmod`,
     /// the one stage of the block that is NOT row-wise and therefore the one
     /// that does not commute with the partition.
     fn new(g: &Gpu, sh: &VitShape, r: &mut Lcg) -> Blk {
@@ -312,7 +423,7 @@ fn windowed_block_equals_per_window_block() {
 /// The shifted partition is the whole point of `WindowPlan::shifted`, and the
 /// cached forward is the only path that can train it. It binds `probs` at a
 /// per-span offset, and `heads*len*len` summed over ragged spans is not a
-/// multiple of the 64-float storage-binding alignment — so before
+/// multiple of the 64-float storage-binding alignment - so before
 /// `probs_offsets` padded its slabs this test died inside the wgpu bind-group
 /// validator ("Buffer offset 128 does not respect ... limit 256"), not on a
 /// numeric assert. Nothing in the original suite exercised ragged spans through
@@ -364,7 +475,7 @@ fn shifted_window_cached_block_matches_unchunked() {
     let worst = got.iter().zip(want.iter()).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     assert!(worst < 2e-5, "cached ragged-span block != unchunked, max abs diff {worst}");
 
-    // and every span's cached softmax must be a probability distribution — the
+    // and every span's cached softmax must be a probability distribution - the
     // check that catches a span reading into its neighbour's slab.
     let att: Vec<AttnSpan> = spans.iter().map(|&(r0, l)| AttnSpan::span(r0, l)).collect();
     let at = probs_offsets(&att, sh.heads);
@@ -554,7 +665,7 @@ fn pooled_attention_gradcheck() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. THE MEASUREMENT — is the permutation gather worth its own kernel?
+// 5. THE MEASUREMENT - is the permutation gather worth its own kernel?
 // ---------------------------------------------------------------------------
 
 fn time_steps(g: &Gpu, probe: &DeviceBuffer, steps: &[gpu_core::Step], iters: u32) -> f64 {
@@ -576,7 +687,7 @@ fn measure_gather_vs_windowed_attention() {
     println!("\nbackend: {}", g.kind());
     println!("{:>18} {:>10} {:>10} {:>10} {:>10} {:>8}", "config", "perm ms", "attn ms", "qpool ms", "block ms", "perm/blk");
 
-    // (grid, C, heads, window) — the second row is SAM 2 Hiera-B+ stage 0
+    // (grid, C, heads, window) - the second row is SAM 2 Hiera-B+ stage 0
     // (1024px input, patch stride 4, 8x8 windows) at half the token grid.
     for &(gh, gw, c, heads, win) in &[(64u32, 64u32, 256u32, 4u32, 8u32), (128, 128, 112, 2, 8)] {
         let sh = VitShape { dim: c, heads, mlp: 4 * c, eps: 1e-5 };
@@ -620,7 +731,7 @@ fn measure_gather_vs_windowed_attention() {
         let ta = time_steps(&g, &ctx, &attn_steps, it);
         let tq = time_steps(&g, &cache.q_pooled, &pool_steps, it);
         let tb = time_steps(&g, &winbuf, &blk_steps, it);
-        // perm as a fraction OF THE BLOCK it is added to — `tp/(tp+tb)` would
+        // perm as a fraction OF THE BLOCK it is added to - `tp/(tp+tb)` would
         // flatter the permutation by putting its own cost in the denominator.
         println!(
             "{:>18} {:>10.3} {:>10.3} {:>10.3} {:>10.3} {:>7.2}%",
