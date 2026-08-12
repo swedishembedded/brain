@@ -54,7 +54,7 @@ and its own page) is [`docs/models/index.md`](docs/models/index.md).
 | Task | Examples |
 |---|---|
 | Text | Qwen3 chat/tool-calling, a mixture-of-experts decoder, a nanoGPT-style baseline |
-| Vision | YOLOv8-style detection, monocular depth, promptable segmentation, face recognition |
+| Vision | YOLOv8-style detection, monocular depth, promptable segmentation, face recognition, document OCR |
 | Image generation & editing | Text-to-image diffusion, face restoration, super-resolution |
 | Speech | Voice cloning / TTS, streaming and offline speech-to-text |
 | Forecasting | Probabilistic time-series and OHLCV forecasters, with LoRA fine-tuning |

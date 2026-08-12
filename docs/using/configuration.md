@@ -67,7 +67,8 @@ served, with no error.
 | `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
 | `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
 | `BRAIN_FASTVLM_WEIGHTS` | FastVLM vision-language | checkpoint directory |
-| `BRAIN_QWENVL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only — not yet residency-scheduled) | checkpoint directory |
+| `BRAIN_QWENVL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only - not yet residency-scheduled) | checkpoint directory |
+| `BRAIN_DEEPSEEK_OCR_DIR` | DeepSeek-OCR document image → text/markdown (CPU-resident, ~22 GiB) | dir holding `mmproj-DeepSeek-OCR-Q8_0.gguf` + `DeepSeek-OCR-Q8_0.gguf` |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
 | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting | the two checkpoint dirs |

@@ -11,6 +11,12 @@ marshalled through D-Bus.
 | `sam2` | `segment` — point/box prompts → a mask | `BRAIN_SAM2_WEIGHTS` (+ optional `BRAIN_SAM2_VARIANT=tiny\|large`) |
 | `facenet` | `detect` → boxes/scores/landmarks, `embed` → a 512-d identity vector | `BRAIN_FACENET_DIR` (the antelopev2 directory) |
 
+A third vision model lives in its own directory here, because its example is
+about a streaming decode rather than a one-shot image result:
+[`deepseek-ocr/`](deepseek-ocr/README.md) - `deepseek-ai/DeepSeek-OCR`, a
+document page in and decoded text out, streamed token by token
+(`BRAIN_DEEPSEEK_OCR_DIR`).
+
 Discover them the same way as everything else:
 
 ```bash

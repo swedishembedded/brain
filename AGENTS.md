@@ -373,6 +373,49 @@ fast and scalable kernel — not a naive one.
     *(Not yet wired into the capability system — no `caps.rs` — so it is
     validated but not servable via `brain caps`/`brain do` yet.)*
 
+13e. **DeepSeek-OCR** (`crates/deepseekocr`, over `crates/sam1` +
+    `crates/clip` + `crates/deepseekv2` + `crates/gguf`) - a document page in,
+    text/markdown out: the **DeepEncoder** (SAM ViT-B at 1024² with decomposed
+    relative-position bias → a 16x conv token compressor → CLIP-L/14 with its
+    patch embed **bypassed** in favour of those tokens → concat
+    `[clip_spatial, compressor_flat]` → one projector linear) spliced into the
+    **DeepSeek-V2-family MoE decoder** (12 layers, 64 routed experts top-6 +
+    2 shared fused, plain MHA - not MLA). Imported from the shipped
+    `ggml-org/DeepSeek-OCR-GGUF` Q8_0 pair with two-way coverage over both
+    files. Parity-gated per stage against a checkpoint-free golden dump at
+    deliberately non-coincidental dims (SAM patch embed → decoder logits), and
+    real-weight-gated at production shape; the SAM tower's own real-weight
+    parity is what found the **wgpu 3-or-more-block corruption at 1024²** that
+    pins this whole model to the CPU backend. The **real 273-row image block**
+    is assembled (256 projector rows + 16 `image_newline` + 1 `view_separator`,
+    the mmproj's two learned vectors) by `layout::RowGather` and sized from
+    `prompt::build_prompt`'s own `n_rows`; the backward is the exact adjoint
+    and reaches the input pixels. Adds **no kernel** beyond the six
+    `attn_relpos_*` the SAM bias needed (gradient-checked,
+    `gradcheck::check_deepseekocr_relpos{,_elementwise}`).
+    **Serving contract met**: `deepseekocr::caps` (`generate`, streaming, real
+    `prompt_tokens`/`completion_tokens`/`finish_reason`),
+    `crates/cli/src/resident_deepseekocr.rs` (`BRAIN_DEEPSEEK_OCR_DIR`), one
+    `catalog.rs` entry wiring `brain caps`/`brain do`/D-Bus/OpenAI/Anthropic at
+    once, `examples/vision/deepseek-ocr/`. The production checkpoint loader is
+    `deepseekocr::import` - this crate's four real-weight test binaries are
+    thin wrappers over it, so a served run and its own parity test cannot
+    disagree about which tensors they loaded.
+    *(**CPU backend only**, by declaration: `estimate` reports a RAM-only
+    `MemCost` (`vram == 0`, ~22 GiB measured) so `place::pick_device` never
+    offers a GPU, and `caps::Session::load` builds on `Gpu::new_cpu` - never an
+    env mutation from inside a server-lifetime resident. `run_batch` is the
+    serial default and says why (per-image encoder pass, no decoder batch
+    axis). Also not done: KV-cached decode - decode is `O(T²)` recompute, tens
+    of seconds per token - EOS early-stop, sampling beyond greedy, INT8, LoRA,
+    a training verb, and the Base/Gundam multi-tile layouts (`rows.rs` and
+    `RowGather` already support them; `deepseekv2::enable_mm_splice` takes ONE
+    run). The composed image+decoder decode loop has **no multimodal oracle** -
+    llama.cpp's debug callback segfaults inside this model's CLIP graph - so it
+    is gated on completing, finite logits and causal self-consistency, and
+    token-for-token agreement with the reference is NOT claimed. Full ledger:
+    `.agents/roadmap/deepseek-ocr.md`.)*
+
 ### Forecasting
 
 14. **Chronos-2** (`crates/chronos2`) — encoder-only T5-style patch transformer,
@@ -505,7 +548,8 @@ front-end to depend on.
 | `vqgan` / `restore` / `upscale` | VQGAN/CodeFormer VQ autoencoder; CodeFormer face restoration; Real-ESRGAN super-resolution — the imaging pipeline's code/restore/upscale tail |
 | `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
 | `qwen-asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
-| `omni` / `qwenvl` / `fastvlm` / `moondream` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 — see `docs/models/vlm.md` for the latter three |
+| `omni` / `qwenvl` / `fastvlm` / `moondream` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
+| `deepseekocr` / `deepseekv2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
 | `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
 
@@ -578,6 +622,7 @@ front-end to depend on.
 | CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; user-facing page `docs/models/clip.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; user-facing page `docs/models/sam2.md` |
+| DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek-ocr.md`; `crates/deepseekocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseekv2,gguf}`; resident `crates/cli/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek-ocr.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |

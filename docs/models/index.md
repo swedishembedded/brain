@@ -31,6 +31,7 @@ page (see [Getting the weights](../using/models-and-weights.md)).
 |---|---|:---:|
 | [`brain/fastvlm`](vlm.md) | image captioning | [x] |
 | [`brain/qwenvl`](vlm.md) | image + text → text | [x] |
+| [`deepseek-ai/DeepSeek-OCR`](deepseek-ocr.md) | document image → text/markdown (OCR, tables, grounding) | [x] |
 | [`brain/omni`](omni/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 
 ## Speech
