@@ -40,6 +40,7 @@ default-members = [
     "crates/fastvlm",
     "crates/moondream",
     "crates/glm",
+    "crates/deepseekv2",
     "crates/seq2seq",
     "crates/autoencoder",
     "crates/diffusion",
@@ -144,6 +145,7 @@ brain-qwenvl = { path = "crates/qwenvl" }
 brain-omni = { path = "crates/omni" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-glm = { path = "crates/glm" }
+brain-deepseekv2 = { path = "crates/deepseekv2" }
 brain-seq2seq = { path = "crates/seq2seq" }
 brain-autoencoder = { path = "crates/autoencoder" }
 brain-diffusion = { path = "crates/diffusion" }
