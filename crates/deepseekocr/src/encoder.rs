@@ -213,12 +213,22 @@ impl DeepEncoder {
 
     /// [`Self::forward`] without the readback - everything up to and including
     /// the projector's submit, leaving the result in `glue.proj_out`.
+    ///
+    /// Each stage is bracketed with [`crate::stage_time`] (`BRAIN_PROFILE`-gated,
+    /// same convention [`crate::caps::Session`] uses for the load/generate
+    /// timeline) -- the per-kernel `BRAIN_PROFILE` table sums SAM + CLIP + glue
+    /// dispatches together because they submit through three different `Gpu`
+    /// handles, so this is the only view of where wall time splits BETWEEN the
+    /// three towers rather than within one of them.
     fn run_forward(&self, image: &[f32]) {
+        let t_sam = std::time::Instant::now();
         self.sam.write_image(image);
         let _ = self.sam.forward();
+        crate::stage_time("encode: sam forward", t_sam);
 
         // NCHW -> NLC. The one layout the whole fixture's non-square compressor
         // grid exists to pin: token (y, x) is channel-vector [:, y, x].
+        let t_glue1 = std::time::Instant::now();
         let comp = self.sam.gpu.read(self.sam.output(), self.sam.out_len());
         let comp_flat = nchw_to_nlc(&comp, self.cfg.compressor_out() as usize, self.n as usize);
         self.glue.gpu.write_f32(&self.glue.comp_flat, &comp_flat);
@@ -238,6 +248,9 @@ impl DeepEncoder {
             }
             None => comp_flat.clone(),
         };
+        crate::stage_time("encode: compressor NCHW->NLC + bridge", t_glue1);
+
+        let t_clip = std::time::Instant::now();
         self.clip.set_tokens(&tokens);
         self.clip.forward();
 
@@ -246,7 +259,9 @@ impl DeepEncoder {
         let clip_spatial = self.clip.read_output()[w..].to_vec();
         assert_eq!(clip_spatial.len(), self.n as usize * w);
         self.glue.gpu.write_f32(&self.glue.clip_spatial, &clip_spatial);
+        crate::stage_time("encode: clip forward", t_clip);
 
+        let t_proj = std::time::Instant::now();
         let (n, cout, dm) = (self.n, self.cfg.compressor_out(), self.cfg.projector_out());
         let pin = self.cfg.projector_in();
         let g = &self.glue.gpu;
@@ -258,6 +273,7 @@ impl DeepEncoder {
             g.step(G_BIAS_ADD, &[&self.glue.proj_out, self.glue.ps.w(PROJECTOR_B)], &[n, dm], n * dm),
         ];
         g.submit(&[], &steps);
+        crate::stage_time("encode: concat + projector", t_proj);
     }
 
     // -----------------------------------------------------------------------

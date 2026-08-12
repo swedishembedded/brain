@@ -145,6 +145,18 @@ pub use preprocess::{preprocess_image, Fit};
 pub use prompt::{build_prompt, ImageTokens, Prompt};
 pub use rows::{row_plan, RowPlan, Src, ViewGrid};
 
+/// Stage wall time to stderr when `BRAIN_PROFILE` is set -- the coarse timeline
+/// above the per-kernel `BRAIN_PROFILE` table (which only ever instruments GPU
+/// kernel dispatch time, not host-side work like weight streaming or a
+/// SAM/CLIP/glue round-trip through `Vec<f32>`). Shared by [`caps`] (the
+/// load/generate timeline) and [`encoder`] (the vision-tower breakdown), so
+/// both print through the same gate and format.
+pub(crate) fn stage_time(name: &str, since: std::time::Instant) {
+    if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
+        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
 /// How a composite gets a device for each sub-model's pipeline list.
 ///
 /// Every stage here is a separate `gpu_core::Gpu` because every stage has its

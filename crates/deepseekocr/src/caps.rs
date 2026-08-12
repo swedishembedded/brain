@@ -294,16 +294,7 @@ impl Session {
     }
 }
 
-/// Stage wall time to stderr when `BRAIN_PROFILE` is set - the coarse timeline
-/// above the per-kernel `BRAIN_PROFILE` table, same pattern `crates/fastvlm`'s
-/// caps.rs already uses. `BRAIN_PROFILE` only ever instruments GPU kernel
-/// dispatch time, not the host-side weight streaming/import a `Session::load`
-/// is dominated by, so this is the only way to see where THAT time goes.
-fn stage_time(name: &str, since: std::time::Instant) {
-    if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
-        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
-    }
-}
+use crate::stage_time;
 
 /// A stateless provider: it holds only the checkpoint directory, and builds (and
 /// caches) the composite on the first `generate` - construction must stay cheap,
