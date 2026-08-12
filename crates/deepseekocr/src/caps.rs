@@ -158,6 +158,7 @@ impl Session {
     /// The reason it must be the CPU at all is `crates/sam1`'s known, tracked
     /// wgpu corruption at 1024x1024 with three or more blocks.
     pub fn load(dir: &str) -> Result<Session, String> {
+        let t0 = std::time::Instant::now();
         let files = Files::locate(dir)?;
         let cfg = import::config(&files, 1)?;
         let tok = import::tokenizer(&files)?;
@@ -169,15 +170,23 @@ impl Session {
         // does not move the run -- asserted per request by
         // `generate_greedy_from_prompt_cb` itself.
         let shape = Self::build_prompt(&tok, &cfg, DEFAULT_INSTRUCTION)?;
+        stage_time("load: config+tokenizer+prompt", t0);
 
+        let t1 = std::time::Instant::now();
         let dev = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
         let vision = import::encoder_weights_from(&files.mmproj)?;
+        stage_time("load: mmproj import (encoder weights)", t1);
+        let t2 = std::time::Instant::now();
         let decoder = import::decoder_reader(&files)?;
+        stage_time("load: decoder_reader open", t2);
+        let t3 = std::time::Instant::now();
         let model = DeepseekOcr::new_with_prompt(&dev, cfg.clone(), &vision, &decoder, 0, SEQ_LEN, &shape, false);
         drop(decoder);
         drop(vision);
+        stage_time("load: DeepseekOcr::new_with_prompt (weight upload + tape build)", t3);
 
         let pre = gpu_core::Gpu::new_cpu(preprocess::PIPELINES);
+        stage_time("load: TOTAL", t0);
         Ok(Session { dir: dir.to_string(), cfg, model, tok, eos, pre })
     }
 
@@ -230,9 +239,12 @@ impl Session {
 
         // Real preprocessing: any extent -> [3, 1024, 1024], aspect-preserving
         // fit-and-pad, the checkpoint's own normalization.
+        let t_pre = std::time::Instant::now();
         let image = preprocess::preprocess_image(&self.pre, &self.cfg, &hwc, w, h, Fit::Pad);
+        stage_time("generate: preprocess", t_pre);
 
         progress(Progress::step(0, max_new, "generating"));
+        let t_gen = std::time::Instant::now();
         // Real per-token deltas: re-decode the running id list each token and
         // emit the UTF-8-safe suffix (`qwen3::chat::stream_delta`), the same
         // loop `qwenvl::caps` runs.
@@ -258,6 +270,7 @@ impl Session {
             }
         });
         debug_assert_eq!(out.len(), prompt.len() + max_new as usize);
+        stage_time("generate: encode+splice+decode (TOTAL)", t_gen);
         // A resident device never drops, so its BRAIN_PROFILE table would
         // otherwise never print -- same pattern `crates/fastvlm`'s caps.rs uses.
         self.model.gpu().dump_profile();
@@ -278,6 +291,17 @@ impl Session {
             .set("completion_tokens", json!(completion as i64))
             .set("finish_reason", json!(finish))
             .blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+
+/// Stage wall time to stderr when `BRAIN_PROFILE` is set - the coarse timeline
+/// above the per-kernel `BRAIN_PROFILE` table, same pattern `crates/fastvlm`'s
+/// caps.rs already uses. `BRAIN_PROFILE` only ever instruments GPU kernel
+/// dispatch time, not the host-side weight streaming/import a `Session::load`
+/// is dominated by, so this is the only way to see where THAT time goes.
+fn stage_time(name: &str, since: std::time::Instant) {
+    if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
+        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
     }
 }
 

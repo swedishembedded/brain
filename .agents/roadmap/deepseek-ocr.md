@@ -1332,11 +1332,82 @@ token fails loudly.
 
       *Still open* (and stated on `docs/models/deepseek-ocr.md`): the greedy
       loop does **not** stop at EOS - the output is truncated and
-      `finish_reason` is honest, but the wall time is always `max_new` full
-      recomputes, because `deepseekv2`'s per-token callback is synchronous and
-      infallible. No cancellation for the same reason. No batching, no KV cache,
-      greedy only, single global view, CPU only.
-- [ ] Performance pass (published profile table before optimizing)
+      `finish_reason` is honest, but the wall time is always `max_new` steps
+      (now `O(1)` decode steps, not full recomputes - see the KV-cache entry
+      below), because `deepseekv2`'s per-token callback is synchronous and
+      infallible. No cancellation for the same reason. No batching, greedy
+      only, single global view, CPU only.
+- [x] **Performance pass (Phase 8): profiled, and the dominant cost fixed.**
+      `BRAIN_PROFILE` on a real `--max_new 32` run (a real document page, the
+      default prompt) found the decode loop's `O(T²)` recompute exactly where
+      the earlier phases already suspected: every generated token re-ran the
+      whole grown sequence through all 12 layers, so a 283-prompt-token run
+      cost ~22 s per additional token and `--max_new 32` took roughly twelve
+      minutes.
+
+      **The fix: `DeepseekV2::generate_greedy_kv`/`step`, a real KV cache -**
+      the `O(T)`-per-token twin `crates/gpt`/`crates/glm`/`crates/qwen3`
+      already keep alongside their own `O(T²)` recompute tier, now built for
+      this MoE decoder too. The prompt still pays ONE batched forward (which
+      also handles the vision-language splice and seeds the persistent
+      per-layer K/V cache via `model::block::kv_cache_fill`'s documented
+      bulk-prefill pattern); every token after that is one incremental
+      attention step (`model::block::gqa_decode_step`, the same primitive
+      `crates/gpt`/`crates/glm`/`crates/qwen3`/`crates/qwen35moe` already use)
+      plus a single-row MoE/dense FFN pass. Adds **one** new kernel wiring
+      (`kernels::ROPE_AT`, for rotating at an explicit absolute position -
+      `rope_base.wgsl`'s `row % tcols` convention cannot express a single new
+      row past position 0) plus the existing `KV_APPEND`/`ATTN_DECODE_SCORES`/
+      `DECODE_SOFTMAX`/`ATTN_DECODE_APPLY` quartet - no new WGSL source at
+      all. `caps::Session::generate` (the served path) was switched onto it.
+
+      **Measured, same machine, same real weights, `--max_new 32`:** total
+      wall dropped from ~12 min (`O(T²)`, extrapolated from the `--max_new
+      2`/`--max_new 10` numbers on `docs/models/deepseek-ocr.md`) to ~123-147 s
+      (`O(T)`) - roughly a 5-6x wall-clock improvement. `BRAIN_PROFILE`'s own
+      per-kernel table for the KV-cached run: `moe_linear_gated` 66.9% (one
+      prompt-prefill forward + 32 decode steps combined), `matmul` 10.6%,
+      `matmul_reg3` 9.7%, the rest (attention decode-step kernels, `silu_mul`,
+      `scale_add`, `rope_at`, `kv_append`, ...) each under 5%.
+
+      **Gated both ways**, per this repo's TDD convention: a toy-dims fast-lane
+      test (`generate_greedy_kv_matches_recompute`, exercising both the dense
+      and MoE MLP branches) and a real-weight extension of the existing
+      llama.cpp-anchored gate (`tests/generate.rs`) - the KV path reproduces
+      the EXACT same ids the `O(T²)` recompute path already verifies against
+      llama.cpp on the real `DeepSeek-OCR-Q8_0` weights.
+
+      **One optimization tried and MEASURED, not shipped:** row-compacted MoE
+      (skip dispatching the ~58/64 non-selected experts per decode step,
+      mirroring `crates/glm`'s `model::moe::expert_fwd_compact`, which measures
+      ~7x on GLM's own *batched* MoE forward). At a single decoded row this
+      needed a host readback of the router gate per MoE layer to know which
+      experts to skip. Measured: `moe_linear_gated` call count dropped
+      67584 -> 8250 (~8.2x), but its own total time was UNCHANGED (~23.3 s
+      either way) and the whole decode's profiled total went UP (34.9 s ->
+      39.3 s) - the per-row gate check already makes a non-selected expert's
+      dispatch cheap on this shape, so the real cost was the selected
+      experts' compute all along, and the extra host round-trips (11 MoE
+      layers x 32 tokens = 352 of them) cost about as much as the skipped
+      dispatches saved. Reverted per the "re-measure the WHOLE pass, not the
+      per-kernel table" rule - a per-kernel call-count win is not the same
+      thing as a whole-pass win.
+
+      **Head-to-head vs `llama-mtmd-cli`, same machine, same real weights,
+      same image, same prompt, `--max_new 32`, greedy (`--temp 0 --top-k
+      1`):** `llama-mtmd-cli` completes in ~20.6 s (its own vision-encode
+      stages log ~15 s of that); brain's KV-cached run takes ~123-147 s. Not
+      a win yet - the KV-cache fix closed the loop that was structurally
+      quadratic, but with decode no longer dominant, model construction
+      (~18 s: streaming the fp32 decoder expansion + the mmproj import) and
+      especially the vision encoder (~75-80 s: SAM ViT-B at 1024x1024 ->
+      CLIP-L/24 -> compressor -> projector, NOT profiled per-kernel this
+      pass) are now the bottleneck, and neither was touched this session.
+      `llama-mtmd-cli` encodes the same-shaped image roughly 5x faster.
+      **The next profiling pass belongs on the vision encoder, not the
+      decode loop** - re-profiling after a fix is what promotes the next
+      bottleneck, and this is that promotion. See
+      `docs/performance/overview.md`'s case study for the full numbers.
 - [x] LoRA training + measured-descent smoke test. Reused, not reinvented: the
       exact `qwen3::model::Qwen::lora_fwd`/`proj_bwd` shape (already ported
       once for `qwen35moe`) - frozen base `Role::Frozen` + trainable
@@ -1382,7 +1453,6 @@ token fails loudly.
       `finetune`-style CLI verb, a masked-dataset training loop, adapter
       save/load through `brain do` - this phase proves the wiring descends,
       not a production fine-tune (see `docs/models/deepseek-ocr.md`).
-
 Full plan: `/home/user/.claude/plans/woolly-beaming-avalanche.md` (this
 session's approved plan; not repo-relative, kept here only as a pointer for
 whoever picks this up in the same environment).

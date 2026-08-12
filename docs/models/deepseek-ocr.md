@@ -145,21 +145,37 @@ The served instance is sized for a 512-token context (the 273-row image block,
 BOS, the instruction, and room to generate), which costs a little more than the
 test's ~260. A box with less than ~24 GiB free will not activate it.
 
-**Slow, and structurally so.** Decode is `O(T²)` recompute with **no KV cache**:
-every generated token re-runs the whole sequence through 12 MoE layers. Measured
-on 22 CPU cores, release build, a 1600x1131 page and the default prompt (283
-prompt tokens):
+**KV-cached decode.** Decode used to be `O(T²)` recompute with no KV cache -
+every generated token re-ran the whole sequence through 12 MoE layers, ~22 s
+per token. `DeepseekV2::generate_greedy_kv` closed that: the prompt still
+pays one batched forward (which also seeds the persistent per-layer K/V
+cache), but every token after that is one `O(1)` incremental decode step
+(`model::block::gqa_decode_step` plus a single-row MoE/dense FFN pass), not a
+full re-run. Measured on 22 CPU cores, release build, a real document page
+(a 3-page CV rendered to PNG, first page, 1654x2340) and the default prompt
+(283 prompt tokens), `--max_new 32`:
 
-| request | wall time |
-|---|---|
-| `--max_new 2` | 1 min 54 s |
-| `--max_new 10` | 4 min 54 s |
+| build | wall time | tokens/s (decode only) |
+|---|---|---|
+| `O(T²)` recompute (previous) | ~12 min (extrapolated from the `--max_new 2`/`--max_new 10` numbers below) | ~0.045 |
+| `O(T)` KV-cache (current) | ~123-147 s | ~0.65 (32 tokens / ~49 s of decode-only kernel time) |
 
-- i.e. **~22 s per generated token**, on top of ~70 s of one-off model build and
-image encoding (with the fp32 expansion already on disk and the page cache
-warm). `max_new 32` is roughly twelve minutes. The image is encoded once, before
-the first token, not per step; over `brain serve` the build cost is paid once
-per activation rather than per request.
+The `O(T²)` numbers this replaces, for reference (same machine, a synthetic
+1600x1131 page): `--max_new 2` 1 min 54 s, `--max_new 10` 4 min 54 s (~22 s
+per additional token, confirming the quadratic blowup). See
+`docs/performance/overview.md`'s case study for the full `BRAIN_PROFILE`
+per-kernel breakdown and a head-to-head against `llama-mtmd-cli` on the same
+weights and image.
+
+**Model load + vision encoding are now the dominant cost, and that is NOT
+optimized this pass.** Of a ~123-147 s total run at `--max_new 32`: ~18 s is
+one-off model construction (streaming the decoder's fp32 expansion + the
+mmproj import), ~50 s is the KV-cached decode (prompt prefill + 32 steps,
+per the `BRAIN_PROFILE` table), and the remaining ~75-80 s is the vision
+encoder (SAM ViT-B at 1024x1024 -> CLIP-L/24 -> compressor -> projector) -
+not touched this session and not yet broken down per kernel. `llama-mtmd-cli`
+encodes the same-shaped image in ~15 s on this machine, so the encoder is
+where the next profiling pass belongs, not the decode loop.
 
 **No early stop.** The greedy loop always runs `max_new` steps. The output is
 truncated at the first end-of-sentence id and `finish_reason` reports `stop`
