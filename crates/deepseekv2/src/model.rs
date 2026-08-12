@@ -516,7 +516,23 @@ impl DeepseekV2 {
                 (n, c, role)
             })
             .collect();
+        // Split the two candidate costs inside what `deepseekocr::model::build`
+        // brackets as one "decoder new_on" stage: streaming/uploading the real
+        // checkpoint's weights (`ParamStore::new_with_roles_src`, one
+        // `raw_words`/`with_tensor_chunks` pull per tensor) vs this
+        // constructor's OWN scratch-buffer allocation below (`res`/`dres`,
+        // the per-layer attention/MoE buffers, LoRA scratch). Gated on the
+        // same `BRAIN_PROFILE` convention `deepseekocr::stage_time` and
+        // `wgsl-cpu::Jit::new` already print through, so a load-time profile
+        // shows all three brackets on one timeline.
+        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let t_ps = std::time::Instant::now();
+        let n_params = roles.len();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if profile {
+            eprintln!("deepseekv2: new_on: ParamStore::new_with_roles_src ({n_params} tensors): {:.1} ms", t_ps.elapsed().as_secs_f64() * 1e3);
+        }
+        let t_scratch = std::time::Instant::now();
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -627,8 +643,15 @@ impl DeepseekV2 {
             dec_pos: Cell::new(0),
             gpu,
         };
+        if profile {
+            eprintln!("deepseekv2: new_on: scratch buffer allocation: {:.1} ms", t_scratch.elapsed().as_secs_f64() * 1e3);
+        }
+        let t_tape = std::time::Instant::now();
         m.fwd_steps = m.build_forward(m.b, m.t);
         m.bwd_steps = if train { m.build_backward() } else { Vec::new() };
+        if profile {
+            eprintln!("deepseekv2: new_on: tape build (fwd{}): {:.1} ms", if train { "+bwd" } else { "" }, t_tape.elapsed().as_secs_f64() * 1e3);
+        }
         m
     }
 

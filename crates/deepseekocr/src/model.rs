@@ -173,12 +173,32 @@ impl DeepseekOcr {
         cfg.check();
         assert!(row0 + n_rows <= seq, "image rows [{row0}, {}) do not fit a {seq}-token sequence", row0 + n_rows);
 
+        // Finer brackets inside `caps::Session::load`'s single "weight upload +
+        // tape build" bracket -- that bracket alone was 20-25s of the load's
+        // 20-28s total and had never been profiled below the crate boundary.
+        // Split into the two candidate costs: Cranelift JIT compilation (one
+        // `Gpu::new_cpu` per sub-model, each compiling its whole `PIPELINES`
+        // list up front) vs the actual weight stream/upload
+        // (`ParamStore::new_with_roles_src` plus this decoder's own scratch
+        // buffer allocation). `crate::stage_time` is the same gate/format
+        // `caps.rs` and `encoder.rs` already print through.
+        let t_enc = std::time::Instant::now();
         let enc = DeepEncoder::new(dev, cfg.clone(), vision, seed, train);
+        crate::stage_time("build: encoder (SAM+CLIP+glue: JIT compile + weight upload)", t_enc);
+
         let rows = layout.map(|l| enc.row_gather(l));
         if let Some(rg) = &rows {
             assert_eq!(rg.rows(), n_rows, "the layout is {} rows but the splice was sized at {n_rows}", rg.rows());
         }
-        let mut dec = DeepseekV2::new_on(dev(deepseekv2::PIPELINES), cfg.decoder.clone(), 1, seq, decoder, train);
+
+        let t_jit = std::time::Instant::now();
+        let gpu = dev(deepseekv2::PIPELINES);
+        crate::stage_time("build: decoder Gpu::new_cpu (Cranelift JIT compile)", t_jit);
+
+        let t_dec = std::time::Instant::now();
+        let mut dec = DeepseekV2::new_on(gpu, cfg.decoder.clone(), 1, seq, decoder, train);
+        crate::stage_time("build: decoder new_on (weight stream/upload + scratch alloc)", t_dec);
+
         dec.enable_mm_splice(row0, n_rows);
         DeepseekOcr { cfg, enc, dec, rows, row0, n_rows, seq }
     }

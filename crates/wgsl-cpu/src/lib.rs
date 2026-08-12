@@ -72,6 +72,15 @@ impl Jit {
     /// Parse and JIT-compile every `(name, wgsl_src)` kernel. Returns an error
     /// string identifying the offending kernel on the first failure.
     pub fn new(kernels: &[(&str, &str)]) -> Result<Jit, String> {
+        // Host-side construction cost, not GPU-kernel-dispatch time -- gated on
+        // the same `BRAIN_PROFILE` convention `deepseekocr::stage_time` and
+        // `backend-cpu`'s own per-kernel table already use, so a load-time
+        // profile shows this bracket beside the streaming-upload one it
+        // competes with for the same 20+ seconds. See
+        // `deepseek-ocr`'s model-construction investigation for why this
+        // needed a real number instead of a guess.
+        let t0 = std::time::Instant::now();
+        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").unwrap();
         // We synthesise our own bounds via the kernels' early-return mask, so the
@@ -130,6 +139,9 @@ impl Jit {
             .map_err(|e| format!("finalize: {e}"))?;
 
         let funcs = ids.iter().map(|id| id.map(|id| module.get_finalized_function(id))).collect();
+        if profile {
+            eprintln!("wgsl-cpu: Jit::new compiled {} kernels in {:.1} ms", kernels.len(), t0.elapsed().as_secs_f64() * 1e3);
+        }
         Ok(Jit {
             _module: module,
             funcs,

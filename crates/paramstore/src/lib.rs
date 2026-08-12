@@ -122,6 +122,20 @@ impl ParamStore {
         let mut offload = Vec::new();
         // Bytes written since the last FORCED flush (see below).
         let mut uploaded = 0u64;
+        // Per-phase accumulators for the `BRAIN_PROFILE` summary below --
+        // added while chasing DeepSeek-OCR's 20+ second model-construction
+        // cost: this loop is the whole of that cost on the CPU backend, and
+        // it was never known
+        // whether the source read (`raw_words`/`with_tensor_chunks`, backed
+        // by an mmap that may still need real disk I/O per page fault) or
+        // the destination allocation/copy (`gpu.storage` + `write_at`, a
+        // fresh host `Vec` per tensor) dominated it. Kept cheap (a handful of
+        // `Instant::now()` calls per tensor) and silent unless `BRAIN_PROFILE`
+        // is set, same gate `deepseekocr`/`wgsl-cpu` already use.
+        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let mut t_alloc = std::time::Duration::ZERO;
+        let mut t_read_write = std::time::Duration::ZERO;
+        let mut t_flush = std::time::Duration::ZERO;
         for (name, numel, role) in &params_roles {
             // storage()+write() (plain DEVICE_LOCAL + transient staging) instead of
             // storage_init(): create_buffer_init's mapped-at-creation path forces
@@ -129,7 +143,12 @@ impl ParamStore {
             // e.g. a 16.8 GB encoder to ~30 GB (OOM). DEVICE_LOCAL buffers pack
             // tightly — the difference between the Qwen encoder fitting a 24 GB card
             // or not. (Same fix as zimage's BlockWeights::upload.)
+            let t0 = std::time::Instant::now();
             let wbuf = gpu.storage(*numel as u64);
+            if profile {
+                t_alloc += t0.elapsed();
+            }
+            let t1 = std::time::Instant::now();
             // Pull exactly this tensor from the source and upload it, in one of two
             // ways, neither of which ever materializes the whole tensor as a second
             // host copy on top of what the source itself may already hold:
@@ -162,6 +181,10 @@ impl ParamStore {
                 panic!("missing init weight {name}");
             }
             assert_eq!(total_written, *numel, "size mismatch for {name}");
+            if profile {
+                t_read_write += t1.elapsed();
+            }
+            let t2 = std::time::Instant::now();
             // Reclaim the write_buffer staging NOW, before the next weight — else it
             // accrues (wgpu only frees it on poll_wait), so a 16.8 GB model uploads
             // ~16.8 GB of extra staging on top of the weights and OOMs a 24 GB card.
@@ -178,6 +201,9 @@ impl ParamStore {
             if uploaded > (1 << 30) {
                 let _ = gpu.read(&wbuf, 1);
                 uploaded = 0;
+            }
+            if profile {
+                t_flush += t2.elapsed();
             }
             weight.insert(name.clone(), wbuf);
             match role {
@@ -197,6 +223,15 @@ impl ParamStore {
                 Role::Frozen => {}
             }
             params.push((name.clone(), *numel));
+        }
+        if profile {
+            eprintln!(
+                "paramstore: new_with_roles_src ({} tensors): alloc {:.1} ms, read+write {:.1} ms, flush/readback {:.1} ms",
+                params.len(),
+                t_alloc.as_secs_f64() * 1e3,
+                t_read_write.as_secs_f64() * 1e3,
+                t_flush.as_secs_f64() * 1e3,
+            );
         }
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
