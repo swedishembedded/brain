@@ -24,7 +24,7 @@
 //!   16 `image_newline` rows and the one `view_separator` row carry the mmproj's
 //!   learned vectors rather than being 17 missing rows.
 //! * **Real per-token streaming**, off
-//!   [`crate::DeepseekOcr::generate_greedy_from_prompt_cb`], diffed with
+//!   [`crate::DeepseekOcr::generate_greedy_kv_from_prompt_cb`], diffed with
 //!   `qwen3::chat::stream_delta` so a multi-byte character never escapes
 //!   half-decoded.
 //! * **Real token accounting.** `prompt_tokens` / `completion_tokens` /
@@ -36,16 +36,18 @@
 //!
 //! ## What is not
 //!
-//! * **The decode loop does not stop at EOS.** `generate_greedy_from_prompt_cb`
-//!   always runs `max_new` full recomputes; this module truncates the result at
-//!   the first end-of-sentence id and reports `finish_reason = "stop"`, but the
-//!   *wall time* is always `max_new` steps. Early termination is a
-//!   `crates/deepseekv2` change (the callback there is synchronous and
-//!   infallible), not something a serving wrapper can fake.
+//! * **The decode loop does not stop at EOS.** `generate_greedy_kv_from_prompt_cb`
+//!   always runs `max_new` steps (each one now `O(1)`, not a full recompute);
+//!   this module truncates the result at the first end-of-sentence id and
+//!   reports `finish_reason = "stop"`, but the *wall time* is always `max_new`
+//!   steps. Early termination is a `crates/deepseekv2` change (the callback
+//!   there is synchronous and infallible), not something a serving wrapper can
+//!   fake.
 //! * **Greedy only, batch 1, one contiguous image run.** No sampling, no
-//!   Base/Gundam multi-tile layout (the decoder splice takes one run), and the
-//!   decode is `O(T²)` recompute rather than KV-cached - a ~280-token prompt
-//!   through a 2.9 B-parameter MoE per generated token.
+//!   Base/Gundam multi-tile layout (the decoder splice takes one run). The
+//!   decode IS now KV-cached (`DeepseekV2::generate_greedy_kv`) - the prompt
+//!   pays one batched forward, every generated token after that is one
+//!   incremental step, not a full re-run of the whole sequence so far.
 //! * **CPU backend.** `crates/sam1`'s tower is known to corrupt its per-block
 //!   buffers on wgpu at 1024x1024 with three or more blocks, so [`Session::load`]
 //!   builds every stage on `gpu_core::Gpu::new_cpu` regardless of the ambient
@@ -238,7 +240,7 @@ impl Session {
         let mut printed = String::new();
         let mut step = 0u32;
         let mut stopped = false;
-        let out = self.model.generate_greedy_from_prompt_cb(&image, &prompt, max_new, |tok_id| {
+        let out = self.model.generate_greedy_kv_from_prompt_cb(&image, &prompt, max_new, |tok_id| {
             step += 1;
             if stopped {
                 return; // past EOS: the loop still runs, but nothing more is emitted
@@ -256,6 +258,9 @@ impl Session {
             }
         });
         debug_assert_eq!(out.len(), prompt.len() + max_new as usize);
+        // A resident device never drops, so its BRAIN_PROFILE table would
+        // otherwise never print -- same pattern `crates/fastvlm`'s caps.rs uses.
+        self.model.gpu().dump_profile();
 
         let text = self.tok.decode(&ids);
         // "stop" when the model emitted EOS inside the budget, "length" when it

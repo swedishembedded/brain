@@ -324,6 +324,57 @@ impl DeepseekOcr {
         self.generate_greedy_cb(image, &prompt.ids, n_new, on_token)
     }
 
+    /// [`Self::generate_greedy`], KV-cached - the `O(T)` twin of the `O(T²)`
+    /// recompute above, forwarded straight to [`DeepseekV2::generate_greedy_kv`].
+    /// The vision encode/splice still runs exactly ONCE, before the prefill
+    /// forward that seeds the cache; every token after that is one incremental
+    /// decode step instead of a full re-run over the whole sequence so far.
+    /// Same contract otherwise (image run must be inside `prompt_ids`, same
+    /// sized-context requirement), and produces the SAME tokens as
+    /// [`Self::generate_greedy`] (`deepseekv2::model::tests::
+    /// generate_greedy_kv_matches_recompute` gates the decoder half of that
+    /// claim; this composite adds no further numerics on top of `write_img_embeds`).
+    pub fn generate_greedy_kv(&self, image: &[f32], prompt_ids: &[u32], n_new: u32) -> Vec<u32> {
+        self.generate_greedy_kv_cb(image, prompt_ids, n_new, |_| {})
+    }
+
+    /// [`Self::generate_greedy_kv`] with a per-token callback - same streaming
+    /// seam as [`Self::generate_greedy_cb`].
+    pub fn generate_greedy_kv_cb(&self, image: &[f32], prompt_ids: &[u32], n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+        assert!(
+            self.row0 + self.n_rows <= prompt_ids.len() as u32,
+            "the prompt's {} tokens do not contain the image run [{}, {})",
+            prompt_ids.len(),
+            self.row0,
+            self.row0 + self.n_rows
+        );
+        assert!(
+            prompt_ids.len() + n_new as usize <= self.seq as usize,
+            "greedy decode of {} + {n_new} tokens exceeds the composite's {}-token sequence",
+            prompt_ids.len(),
+            self.seq
+        );
+        let embeds = self.encode_block(image);
+        self.dec.write_img_embeds(&embeds);
+        self.dec.generate_greedy_kv_cb(prompt_ids, n_new, on_token)
+    }
+
+    /// [`Self::generate_greedy_kv`] driven by the [`Prompt`] this composite was
+    /// built for - the KV-cached twin of [`Self::generate_greedy_from_prompt`].
+    pub fn generate_greedy_kv_from_prompt(&self, image: &[f32], prompt: &Prompt, n_new: u32) -> Vec<u32> {
+        self.generate_greedy_kv_from_prompt_cb(image, prompt, n_new, |_| {})
+    }
+
+    /// [`Self::generate_greedy_kv_from_prompt`] with a per-token callback.
+    pub fn generate_greedy_kv_from_prompt_cb(&self, image: &[f32], prompt: &Prompt, n_new: u32, on_token: impl FnMut(u32)) -> Vec<u32> {
+        assert_eq!(
+            prompt.image_run(),
+            self.image_run(),
+            "this prompt's image run is not the one the splice was sized at"
+        );
+        self.generate_greedy_kv_cb(image, &prompt.ids, n_new, on_token)
+    }
+
     pub fn zero_grads(&self) {
         self.enc.zero_grads();
         self.dec.zero_grads();
@@ -337,5 +388,15 @@ impl DeepseekOcr {
     /// `[seq, vocab]`.
     pub fn read_logits(&self) -> Vec<f32> {
         self.dec.read_logits()
+    }
+
+    /// The decoder's own device handle - the one to call `dump_profile()` on
+    /// for a `BRAIN_PROFILE` breakdown of a `generate_greedy`/`generate_greedy_kv`
+    /// run. The decode loop is where this model's own profile found the
+    /// dominant per-token cost, so this is the handle that matters; the
+    /// encoder (SAM/CLIP) runs on its own separate `Gpu` instances, built
+    /// once per activation, not per generated token.
+    pub fn gpu(&self) -> &gpu_core::Gpu {
+        &self.dec.gpu
     }
 }
