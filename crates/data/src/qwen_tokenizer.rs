@@ -3,8 +3,8 @@
 
 //! Byte-level BPE tokenizer for HF `tokenizer.json` checkpoints (Qwen, LFM2.5).
 //!
-//! Same byte-level BPE family as [`crate::bpe::Gpt2Bpe`] — it reuses the byte
-//! <-> unicode map and the merge loop ([`crate::bpe::bpe_merge`]) — but with
+//! Same byte-level BPE family as [`crate::bpe::Gpt2Bpe`] - it reuses the byte
+//! <-> unicode map and the merge loop ([`crate::bpe::bpe_merge`]) - but with
 //! the checkpoint's vocabulary/merges and a cl100k-style pre-tokenizer
 //!   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,K}
 //!     | ?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
@@ -16,7 +16,7 @@
 //! Special/added tokens (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, …) are
 //! matched as atomic units *before* BPE. A `TemplateProcessing` post-processor
 //! (LFM2.5 prepends `<|startoftext|>`) is captured as [`QwenBpe::template_prefix`]
-//! — callers that want HF-equivalent single-sequence encodings prepend it;
+//! - callers that want HF-equivalent single-sequence encodings prepend it;
 //! `encode()` itself stays template-free. `vocab_size()` reports the model vocab
 //! used to size the embedding table.
 
@@ -51,7 +51,7 @@ impl QwenBpe {
     /// Build from a checkpoint DIRECTORY: `tokenizer.json` when present, else
     /// the split `vocab.json` + `merges.txt` (+ `added_tokens.json`) layout
     /// some Qwen2-family repos ship (FastVLM). Same byte-level BPE either way
-    /// — the split files are re-assembled into the unified shape and parsed by
+    /// - the split files are re-assembled into the unified shape and parsed by
     /// the ONE existing parser, so the formats cannot drift apart.
     pub fn from_dir(dir: &str) -> Result<QwenBpe, String> {
         let unified = format!("{dir}/tokenizer.json");
@@ -95,19 +95,32 @@ impl QwenBpe {
 
     /// Build from a GGUF's embedded `tokenizer.ggml.*` KV (see
     /// [`checkpoint::gguf::GgufTokenizer`]). Supports the GPT-2-style byte-level
-    /// BPE (`model == "gpt2"`) a Qwen3 GGUF ships — the same family as the
+    /// BPE (`model == "gpt2"`) a Qwen3 GGUF ships - the same family as the
     /// `tokenizer.json` path, so it reuses this struct's vocab/merge/special
     /// representation rather than forking a second BPE.
     ///
     /// Mapping: `tokens[id]` is the token text (already in the GPT-2 byte-encoded
     /// domain, i.e. HF `vocab.json` keys) → `encoder`/`decoder` keyed by index;
     /// `merges` are the ranked `"a b"` pairs → `bpe_ranks`; tokens whose
-    /// `token_type` is CONTROL(3) or USER_DEFINED(4) — plus the declared
-    /// bos/eos/unk/pad ids — become atomic `specials`. Qwen's pre-tokenizer caps
-    /// digit runs at one (`\p{N}`), so `digit_run_max = 1`.
+    /// `token_type` is CONTROL(3) or USER_DEFINED(4) - plus the declared
+    /// bos/eos/unk/pad ids - become atomic `specials`. The digit-run cap comes
+    /// from `tokenizer.ggml.pre` (see [`digit_run_max_from_pre`]) - a GGUF
+    /// carries the pre-tokenizer's NAME, never its regex.
+    ///
+    /// **The pre-tokenizer is reproduced only as far as that cap.** This
+    /// scanner is the cl100k/Qwen pattern; a checkpoint whose `pre` names a
+    /// different family agrees with it on ASCII prose, spaces, punctuation runs
+    /// and newline handling, and can still differ elsewhere. For
+    /// `pre = "deepseek-v3"` (DeepSeek-V3/R1, DeepSeek-OCR) the two known
+    /// remaining divergences are its **isolated CJK/kana branch**
+    /// (`[一-龥぀-ゟ゠-ヿ]+`, which splits CJK away from adjacent Latin where
+    /// this scanner keeps one letter run) and its use of `\p{P}\p{S}` where
+    /// this one writes `[^\s\p{L}\p{N}]` (they differ on combining marks and
+    /// control characters). `crates/deepseekocr`'s prompt test pins the real
+    /// vocab against HF ground truth on the strings that model actually sends.
     ///
     /// Non-gpt2 schemes (llama/bert/…) return a clear `Err` (a documented
-    /// follow-up — each needs its own tokenization model).
+    /// follow-up - each needs its own tokenization model).
     pub fn from_gguf(tok: &checkpoint::gguf::GgufTokenizer) -> Result<QwenBpe, String> {
         if tok.model != "gpt2" {
             return Err(format!("gguf tokenizer model '{}' not supported", tok.model));
@@ -170,8 +183,7 @@ impl QwenBpe {
             byte_decoder,
             specials,
             vocab_size,
-            // Qwen's pre-tokenizer uses a bare `\p{N}` (single-digit) run.
-            digit_run_max: 1,
+            digit_run_max: digit_run_max_from_pre(tok.pre.as_deref()),
             // Qwen declares no single-sequence template prefix.
             template_prefix: Vec::new(),
         })
@@ -260,7 +272,7 @@ impl QwenBpe {
 
     /// Special-token ids the checkpoint's post-processor prepends to a single
     /// sequence (LFM2.5: `[<|startoftext|>]`; Qwen: empty). `encode()` does not
-    /// apply this — callers wanting HF-equivalent encodings prepend it.
+    /// apply this - callers wanting HF-equivalent encodings prepend it.
     pub fn template_prefix(&self) -> &[u32] {
         &self.template_prefix
     }
@@ -306,7 +318,7 @@ impl QwenBpe {
 
     /// The Qwen3 template with `enable_thinking=false`: the generation prompt
     /// ends with an empty `<think>` block. This is the exact rendering FLUX.2
-    /// Klein feeds its text encoder — the suffix is part of the conditioning
+    /// Klein feeds its text encoder - the suffix is part of the conditioning
     /// and must not be dropped.
     pub fn apply_chat_template_no_think(&self, msgs: &[(&str, &str)]) -> String {
         let mut s = self.apply_chat_template(msgs, true);
@@ -392,7 +404,7 @@ impl QwenBpe {
 }
 
 /// Read `K` from a `\p{N}{1,K}` branch anywhere in the pre-tokenizer's Split
-/// pattern(s); a bare `\p{N}` (Qwen) — or no pattern at all — means K = 1.
+/// pattern(s); a bare `\p{N}` (Qwen) - or no pattern at all - means K = 1.
 fn digit_run_max_from(pre: &serde_json::Value) -> usize {
     let s = pre.to_string(); // JSON text of the whole pre_tokenizer subtree
     if let Some(pos) = s.find("p{N}{1,") {
@@ -405,8 +417,32 @@ fn digit_run_max_from(pre: &serde_json::Value) -> usize {
     1
 }
 
+/// `K` in `\p{N}{1,K}` for a GGUF's `tokenizer.ggml.pre` scheme.
+///
+/// A GGUF names the pre-tokenizer llama.cpp compiles in; it never stores the
+/// regex, so the cap cannot be read the way [`digit_run_max_from`] reads it out
+/// of a `tokenizer.json`. Only the schemes whose cap is *known* are listed:
+///
+/// * `deepseek-v3` - `\p{N}{1,3}`. Confirmed against the shipped
+///   `deepseek-ai/DeepSeek-OCR` `tokenizer.json`, whose first `Split` really is
+///   `\p{N}{1,3}`; with `K = 1` this vocab tokenizes `12345` as five ids
+///   instead of the reference's `["123", "45"]`.
+/// * everything else (Qwen's `qwen2`, GPT-2, `deepseek-coder`, …) - a bare
+///   `\p{N}`, one digit per pre-token, which is also the safe default because
+///   it is what every caller of this constructor got before the mapping
+///   existed.
+///
+/// Deliberately NOT mapped: `deepseek-llm`, whose `\p{N}+` is an *unbounded*
+/// run and so is not expressible as a `K` at all.
+fn digit_run_max_from_pre(pre: Option<&str>) -> usize {
+    match pre {
+        Some("deepseek-v3") => 3,
+        _ => 1,
+    }
+}
+
 /// Special-token ids a `TemplateProcessing` post-processor places before the
-/// `A` sequence in its `single` template (searched recursively — the processor
+/// `A` sequence in its `single` template (searched recursively - the processor
 /// may sit inside a `Sequence`). Ids resolve through the vocab/added tokens.
 fn template_prefix_from(post: &serde_json::Value, encoder: &HashMap<String, u32>) -> Vec<u32> {
     fn find_single(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
@@ -434,13 +470,23 @@ fn template_prefix_from(post: &serde_json::Value, encoder: &HashMap<String, u32>
     prefix
 }
 
-/// `\p{L}` — NOT `char::is_alphabetic`, which is the Unicode `Alphabetic`
+/// `\p{L}` - NOT `char::is_alphabetic`, which is the Unicode `Alphabetic`
 /// property, a strict superset of `\p{L}` that also contains `Nl` (Roman
 /// numerals, other letter-numbers) and `Other_Alphabetic` marks. The regex
 /// this scanner transcribes says `\p{L}`, so e.g. `Ⅻ` must start a
-/// digit-family token, not a letter run. This is byte-for-byte the mismatch
-/// `clip_bpe.rs`'s `is_letter` fixed (see its 20-line note, incl. the
-/// measured residual gap) — the fix had not been back-ported here.
+/// digit-family token, not a letter run - subtracting [`is_digit`]
+/// (`char::is_numeric` = `Nd | Nl | No`, which is exactly `\p{N}`) removes the
+/// `Nl` part exactly. This is byte-for-byte the mismatch `clip_bpe.rs`'s
+/// `is_letter` carries the long note about; the two definitions are kept
+/// identical on purpose, and `roman_numerals_take_the_digit_branch` below is
+/// this file's own regression test for it.
+///
+/// **Known residual gap, identical to the clip-side one and measured there over
+/// every scalar value: 1510 codepoints where this says letter and `\p{L}` does
+/// not** (905 `Mn` + 423 `Mc` combining marks, 130 `So`, 52 unassigned), and
+/// **0** in the other direction. Latin, Greek, Cyrillic, CJK, Hangul, kana,
+/// digits, punctuation and emoji are unaffected. Closing it needs the
+/// `Other_Alphabetic` range table; until then it is a stated limitation.
 fn is_letter(c: char) -> bool {
     c.is_alphabetic() && !c.is_numeric()
 }
@@ -453,11 +499,11 @@ fn is_ws(c: char) -> bool {
 fn is_nl(c: char) -> bool {
     c == '\r' || c == '\n'
 }
-/// `[^\r\n\p{L}\p{N}]` — the optional leading char a letter run may absorb.
+/// `[^\r\n\p{L}\p{N}]` - the optional leading char a letter run may absorb.
 fn is_letter_prefix(c: char) -> bool {
     !is_nl(c) && !is_letter(c) && !is_digit(c)
 }
-/// `[^\s\p{L}\p{N}]` — a punctuation/symbol char.
+/// `[^\s\p{L}\p{N}]` - a punctuation/symbol char.
 fn is_symbol(c: char) -> bool {
     !is_ws(c) && !is_letter(c) && !is_digit(c)
 }
@@ -671,7 +717,7 @@ mod tests {
 
     /// A tiny synthetic gpt2 GGUF tokenizer: build `QwenBpe::from_gguf` directly
     /// from a hand-made [`GgufTokenizer`] and assert encode/decode round-trip and
-    /// special-id resolution — no GGUF bytes, no files, no GPU.
+    /// special-id resolution - no GGUF bytes, no files, no GPU.
     #[test]
     fn from_gguf_gpt2_roundtrip_and_specials() {
         use checkpoint::gguf::GgufTokenizer;
@@ -716,6 +762,59 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("'llama' not supported"), "{err}");
+    }
+
+    /// `\p{L}` is category `L*`, but `char::is_alphabetic` is the Unicode
+    /// `Alphabetic` *property* = `L* | Nl | Other_Alphabetic`. `Nl` is the
+    /// letter-number class (Roman numerals), and it is the half this scanner
+    /// subtracts: a Roman numeral must take the `\p{N}{1,K}` branch, exactly as
+    /// `clip_bpe`'s twin test asserts for CLIP's pattern. Without the
+    /// subtraction `Ⅻxyz` is ONE letter run and every id downstream of it moves.
+    ///
+    /// ASCII and the common cases must be untouched by that rule, so they are
+    /// asserted in the same test - this is the whole risk of the definition.
+    #[test]
+    fn roman_numerals_take_the_digit_branch() {
+        // U+216B ROMAN NUMERAL TWELVE (Nl): a digit-family pre-token, and at
+        // K = 1 it does not glue onto the following letter run.
+        assert_eq!(qwen_pretokenize("\u{216B}xyz"), vec!["\u{216B}", "xyz"]);
+        // U+2160 ROMAN NUMERAL ONE (Nl) next to a `No` fraction: both digits.
+        assert_eq!(qwen_pretokenize("\u{2160}\u{00BD}"), vec!["\u{2160}", "\u{00BD}"]);
+        // K > 1 groups them like any other `\p{N}` run.
+        assert_eq!(pretokenize_digits("\u{2160}\u{2160}\u{2160}\u{2160}", 3), vec!["\u{2160}\u{2160}\u{2160}", "\u{2160}"]);
+        // …and nothing about ASCII or ordinary text moves.
+        assert_eq!(qwen_pretokenize("Hello, world"), vec!["Hello", ",", " world"]);
+        assert_eq!(qwen_pretokenize("a1b"), vec!["a", "1", "b"]);
+        assert_eq!(qwen_pretokenize("über café"), vec!["über", " café"]);
+    }
+
+    /// The digit-run cap is read from the GGUF's `tokenizer.ggml.pre` NAME (a
+    /// GGUF never stores the regex). DeepSeek-V3's is `\p{N}{1,3}`; every other
+    /// scheme keeps the single-digit default.
+    #[test]
+    fn the_gguf_digit_run_cap_follows_the_pre_tokenizer_name() {
+        assert_eq!(digit_run_max_from_pre(Some("deepseek-v3")), 3);
+        assert_eq!(digit_run_max_from_pre(Some("qwen2")), 1);
+        assert_eq!(digit_run_max_from_pre(Some("deepseek-coder")), 1);
+        assert_eq!(digit_run_max_from_pre(None), 1);
+
+        // End to end through `from_gguf`, on a vocab that can express both
+        // readings: "123" exists as one token AND as three single digits.
+        use checkpoint::gguf::GgufTokenizer;
+        let gt = GgufTokenizer {
+            model: "gpt2".into(),
+            pre: Some("deepseek-v3".into()),
+            tokens: vec!["1".into(), "2".into(), "3".into(), "12".into(), "123".into()],
+            merges: vec!["1 2".into(), "12 3".into()],
+            token_types: vec![1, 1, 1, 1, 1],
+            bos: None,
+            eos: None,
+            unk: None,
+            pad: None,
+        };
+        assert_eq!(QwenBpe::from_gguf(&gt).unwrap().encode("123"), vec![4]);
+        let qwen = GgufTokenizer { pre: Some("qwen2".into()), ..gt };
+        assert_eq!(QwenBpe::from_gguf(&qwen).unwrap().encode("123"), vec![0, 1, 2]);
     }
 
     #[test]
