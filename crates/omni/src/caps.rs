@@ -65,7 +65,7 @@ use gpu_core::Gpu;
 use serde_json::json;
 
 use crate::config::OmniConfig;
-use crate::generate::{generate_greedy, generate_greedy_multimodal, thinker_hidden_at_layer};
+use crate::generate::{generate_greedy, generate_greedy_multimodal, thinker_hidden_at_layer, EmbedTable, ThinkerStack};
 use crate::mm::build_multimodal_prompt;
 use crate::talker_generate::{self, GenOpts};
 use crate::talker_prompt::{build_talker_prompt, UserMediaSplice};
@@ -151,20 +151,27 @@ pub fn manifest() -> Manifest {
 /// re-exported so existing `omni::caps::last_user_text` callers keep working.
 pub use capability::last_user_text;
 
-/// A loaded Thinker, ready to generate — real weights streamed on demand
-/// from `reader`, not resident. `embed_table`/`lm_head` are the two tensors
-/// every generated token needs (`thinker.model.embed_tokens.weight`,
-/// `thinker.lm_head.weight`, untied — `tie_word_embeddings: false`), kept
-/// host-resident once at load time rather than re-read from the mmap on
-/// every token (unlike the 48 decoder layers, which really are re-streamed
-/// per token — see `crate::generate`'s doc for why).
+/// A loaded Thinker, ready to generate.
+///
+/// `gpus` is one handle per device the placement uses and `stack` is the
+/// placement itself (`crate::generate::ThinkerStack`): as many decoder layers
+/// as genuinely fit are resident across those cards, the rest stream per use
+/// in bounded chunks. `embed` is the token embedding, borrowed from the
+/// mapping a row at a time where the dtype allows it rather than expanded to a
+/// 1.2 GB f32 table; `lm_head` is not held on the host at all any more - it is
+/// a device buffer inside `stack`.
 pub struct OmniInner {
     reader: WeightReader,
-    gpu: Gpu,
+    /// DECLARED BEFORE `gpus`, and that order is load-bearing: struct fields
+    /// drop in declaration order, and every buffer in the stack belongs to one
+    /// of those devices. Tearing the devices down first leaves the buffers
+    /// pointing at destroyed driver state - teardown then faults, turning a
+    /// clean SIGTERM into a crash.
+    stack: ThinkerStack,
+    gpus: Vec<Gpu>,
     cfg: OmniConfig,
     tok: QwenBpe,
-    embed_table: Vec<f32>,
-    lm_head: Vec<f32>,
+    embed: EmbedTable,
     eos_ids: Vec<u32>,
 }
 
@@ -172,22 +179,54 @@ pub struct OmniProvider {
     inner: Arc<OmniInner>,
 }
 
+/// Bytes kept free per card for activations when the caller has no budget of
+/// its own to hand in - matching `brain serve`'s own `--reserve-gb` default,
+/// so a standalone `load()` and a scheduled one size the cards the same way.
+const DEFAULT_RESERVE_BYTES: u64 = 2 << 30;
+
 impl OmniProvider {
     /// Load from a real HF checkpoint directory (sharded or single-file —
-    /// `WeightReader::open_hf_dir` handles both). No brain-native import
-    /// step involved: this reads the raw checkpoint directly, the same
-    /// pattern every real-weight test in this crate already uses.
+    /// `WeightReader::open_hf_dir` handles both), placing the Thinker across
+    /// every GPU this process discovered. No brain-native import step
+    /// involved: this reads the raw checkpoint directly.
     pub fn load(dir: &str) -> Result<OmniProvider, String> {
+        Self::load_on(dir, &crate::thinker_plan::discovered_devices(DEFAULT_RESERVE_BYTES))
+    }
+
+    /// [`Self::load`] against a caller-supplied device budget: `(canonical GPU
+    /// index, USABLE bytes)` per card.
+    ///
+    /// Capacity travels with identity because the split has to RESPECT it -
+    /// a 24 GB and an 8 GB card must not get the same number of layers, and a
+    /// model that fits one card must not be spread over three. Which of these
+    /// devices actually gets used, and how many layers each holds, is decided
+    /// by `model::shard`'s capacity-aware planner from the checkpoint's own
+    /// per-tensor byte costs (`crate::thinker_plan`).
+    pub fn load_on(dir: &str, devices: &[(u32, u64)]) -> Result<OmniProvider, String> {
         let reader = WeightReader::open_hf_dir(Path::new(dir)).map_err(|e| format!("omni: open {dir}: {e}"))?;
         let config_json = std::fs::read_to_string(Path::new(dir).join("config.json")).map_err(|e| format!("omni: read config.json: {e}"))?;
         let root: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| format!("omni: parse config.json: {e}"))?;
         let cfg = OmniConfig::from_json(&root);
         let tok = QwenBpe::from_dir(dir)?;
-        let embed_table = reader.tensor("thinker.model.embed_tokens.weight").ok_or("omni: missing thinker.model.embed_tokens.weight")?;
-        let lm_head = reader.tensor("thinker.lm_head.weight").ok_or("omni: missing thinker.lm_head.weight")?;
         let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].into_iter().filter_map(|s| tok.special_id(s)).collect();
-        let gpu = Gpu::new(thinker_pipelines());
-        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, gpu, cfg, tok, embed_table, lm_head, eos_ids }) })
+        let embed = EmbedTable::open(&reader)?;
+        if embed.hidden() != cfg.thinker.text.hidden as usize {
+            return Err(format!("omni: the embedding table is [_, {}] but the config says hidden={}", embed.hidden(), cfg.thinker.text.hidden));
+        }
+        // No device budget at all (no GPU on this box) still has to work:
+        // fall back to the ambient single device, which is what every other
+        // single-device resident does.
+        let (gpus, caps): (Vec<Gpu>, Vec<u64>) = if devices.is_empty() {
+            (vec![Gpu::new(thinker_pipelines())], vec![u64::MAX])
+        } else {
+            let mut gs = Vec::with_capacity(devices.len());
+            for &(i, _) in devices {
+                gs.push(Gpu::new_on_index(i, thinker_pipelines())?);
+            }
+            (gs, devices.iter().map(|&(_, c)| c).collect())
+        };
+        let stack = ThinkerStack::build(&reader, &cfg.thinker.text, &gpus, &caps)?;
+        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, stack, gpus, cfg, tok, embed, eos_ids }) })
     }
 
     /// The shared inner state — the seam `cli::resident_omni`'s
@@ -275,10 +314,21 @@ impl OmniInner {
     /// splice, plain-sequential M-RoPE positions (`crate::generate`'s doc).
     pub fn generate(&self, prompt: &str, max_new: u32) -> (String, Vec<u32>) {
         let prompt_ids = self.tok.encode(prompt);
-        let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
+        let out_ids = generate_greedy(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &prompt_ids, max_new, &self.eos_ids);
         let new_ids = out_ids[prompt_ids.len()..].to_vec();
         let text = self.tok.decode(&new_ids);
         (text, new_ids)
+    }
+
+    /// The whole embedding table as f32, for the two callers that genuinely
+    /// need it in one piece (the multimodal splice and the Talker prompt).
+    /// Borrowed when a host copy already exists, decoded on demand otherwise -
+    /// never a second resident copy alongside the first.
+    fn embed_host(&self) -> std::borrow::Cow<'_, [f32]> {
+        match self.embed.as_host_slice() {
+            Some(t) => std::borrow::Cow::Borrowed(t),
+            None => std::borrow::Cow::Owned(self.embed.to_host(&self.reader)),
+        }
     }
 
     /// [`Self::generate`], with real audio and/or image and/or video input
@@ -301,9 +351,9 @@ impl OmniInner {
         max_new: u32,
     ) -> Result<(String, Vec<u32>), String> {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg.thinker, &self.embed_table, &text_ids, audio, image, video)?;
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video)?;
         let n_prompt = mm_prompt.token_ids.len();
-        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.thinker.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
+        let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt..].to_vec();
         let text = self.tok.decode(&new_ids);
         Ok((text, new_ids))
@@ -340,9 +390,9 @@ impl OmniInner {
             .or_else(|| tc.speaker_id.values().next().copied())
             .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
 
-        let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_table, self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids, None);
+        let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_host(), self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids, None);
 
-        let mtp_gpu = self.gpu.new_like(tts::mtp::PIPELINES);
+        let mtp_gpu = self.gpus[0].new_like(tts::mtp::PIPELINES);
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
 
@@ -353,7 +403,7 @@ impl OmniInner {
         // A real bug this test's own real-weight run caught (`index 16, len
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.
-        let talker_gpu = self.gpu.new_like(crate::talker::talker_pipelines());
+        let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
         let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts::default())?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;

@@ -11,3 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio.workspace = true
+
+# `_exit(2)` for `exit_now` -- the only way to end a process WITHOUT running
+# atexit handlers and shared-library finalizers. Pure Rust binding, no bindgen,
+# and already transitively present via tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

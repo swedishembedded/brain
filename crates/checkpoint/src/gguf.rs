@@ -435,6 +435,29 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
     Ok(out)
 }
 
+/// A ggml type id's spelling, for the per-tensor dtype a cost model reads.
+/// The same id table [`block_geometry`] dispatches on, so a type this reader
+/// can decode always has a name and one it cannot never gets an invented one.
+pub(crate) fn ggml_type_name(ty: u32) -> Option<&'static str> {
+    Some(match ty {
+        T_F32 => "F32",
+        T_F16 => "F16",
+        T_BF16 => "BF16",
+        T_Q4_0 => "Q4_0",
+        T_Q4_1 => "Q4_1",
+        T_Q5_0 => "Q5_0",
+        T_Q5_1 => "Q5_1",
+        T_Q8_0 => "Q8_0",
+        T_Q2_K => "Q2_K",
+        T_Q3_K => "Q3_K",
+        T_Q4_K => "Q4_K",
+        T_Q5_K => "Q5_K",
+        T_Q6_K => "Q6_K",
+        T_Q8_K => "Q8_K",
+        _ => return None,
+    })
+}
+
 /// Block geometry `(elements_per_block, bytes_per_block)` for a ggml type.
 pub(crate) fn block_geometry(ty: u32) -> Option<(usize, usize)> {
     Some(match ty {
@@ -807,6 +830,18 @@ impl MmapGguf {
     /// A tensor's shape (torch order), if present.
     pub fn shape(&self, name: &str) -> Option<&[usize]> {
         self.shapes.get(name).map(|s| s.as_slice())
+    }
+
+    /// A tensor's own ggml quant type, as a name (`"F32"`, `"BF16"`, `"Q4_K"`,
+    /// …), if present.
+    ///
+    /// Per TENSOR, not per file: a GGUF release routinely stores different
+    /// layers at different precisions (attention kept wide, MoE experts
+    /// squeezed), which is exactly why a placement/upload cost model must ask
+    /// each tensor rather than the checkpoint. `None` for a type id this
+    /// reader has no name for - never a guess.
+    pub fn dtype(&self, name: &str) -> Option<&'static str> {
+        ggml_type_name(self.index.get(name)?.0)
     }
 
     /// The full KV metadata map.

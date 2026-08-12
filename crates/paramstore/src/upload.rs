@@ -36,6 +36,7 @@
 use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
 
+use crate::dtype::DeviceLimits;
 use crate::UPLOAD_CHUNK_WORDS;
 
 /// Bytes uploaded between forced drains. A one-element readback costs a
@@ -49,16 +50,42 @@ const DRAIN_EVERY_BYTES: u64 = 1 << 30;
 pub struct Uploader<'g> {
     gpu: &'g Gpu,
     since_drain: u64,
+    limits: DeviceLimits,
 }
 
 impl<'g> Uploader<'g> {
     pub fn new(gpu: &'g Gpu) -> Uploader<'g> {
-        Uploader { gpu, since_drain: 0 }
+        Uploader { gpu, since_drain: 0, limits: DeviceLimits::of(gpu) }
     }
 
     /// The device this uploader targets.
     pub fn gpu(&self) -> &'g Gpu {
         self.gpu
+    }
+
+    /// This device's queried allocation/binding ceilings - see
+    /// [`crate::dtype::DeviceLimits`]. Read from the device at construction,
+    /// so a caller sizing its own buffers asks the same source this uploader
+    /// enforces against rather than hardcoding a second number.
+    pub fn limits(&self) -> DeviceLimits {
+        self.limits
+    }
+
+    /// Force a real submit + device wait now, whatever the drain accounting
+    /// says, so wgpu retires the recorded work and releases every buffer that
+    /// has been dropped since the last one.
+    ///
+    /// The seam a loader needs when it streams a WORKING SET rather than a
+    /// resident model: buffers dropped host-side are not freed on the card
+    /// until the commands referencing them have completed, and with no
+    /// submitted compute a bare `poll_wait` can be a no-op. A loop that
+    /// allocates a multi-GiB group per iteration and drops it therefore
+    /// accumulates every iteration's group on the device until it OOMs - the
+    /// exact failure this exists to prevent - even though its live set is one
+    /// group. Costs one round trip.
+    pub fn drain(&mut self, buf: &DeviceBuffer) {
+        let _ = self.gpu.read(buf, 1);
+        self.since_drain = 0;
     }
 
     /// Allocate a `numel`-word device buffer and stream `name`'s f32 data
@@ -70,6 +97,7 @@ impl<'g> Uploader<'g> {
         // `storage()` + `write*` rather than `storage_init`: create_buffer_init's
         // mapped-at-creation path forces weights into an inefficient memory type
         // on a non-ReBAR GPU (a 16.8 GB encoder ballooned to ~30 GB and OOM'd).
+        self.limits.check_alloc(name, numel)?;
         let buf = self.gpu.storage(numel as u64);
         self.tensor_into(&buf, source, name, numel)?;
         Ok(buf)
@@ -103,6 +131,7 @@ impl<'g> Uploader<'g> {
     /// `WeightReader::tensor_u32`, which materializes the whole packed tensor
     /// on the host first.
     pub fn packed(&mut self, source: &dyn TensorSource, name: &str, numel: usize) -> Result<DeviceBuffer, String> {
+        self.limits.check_alloc(name, numel)?;
         let buf = self.gpu.storage(numel as u64);
         self.packed_into(&buf, source, name, numel)?;
         Ok(buf)

@@ -390,6 +390,11 @@ struct DeviceShared {
     /// [`WgpuBackend::flush_serialized`]'s Intel ANV sliced-binding
     /// workaround to the vendor it was root-caused on.
     vendor_id: u32,
+    /// Set by the uncaptured-error handler the moment the device reports a
+    /// hard fault (out of memory, an internal driver error). Read by `drop`,
+    /// which then LEAKS the device instead of destroying it - see
+    /// [`Self::faulted`]'s use there for the abort this prevents.
+    faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DeviceShared {
@@ -479,6 +484,20 @@ impl DeviceShared {
         if let Some(p) = &plcache {
             p.persist();
         }
+        // Record hard device faults before wgpu's default handler panics on
+        // them. The panic itself is wanted and unchanged (a lane catches it and
+        // fails that one request); what is NOT survivable is destroying the
+        // device afterwards - see `Drop`.
+        let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = faulted.clone();
+            device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Same message and same panic wgpu's own default handler
+                // raises, so nothing downstream sees a behaviour change.
+                panic!("wgpu error: {e}");
+            }));
+        }
         DeviceShared {
             device: std::mem::ManuallyDrop::new(device),
             queue: std::mem::ManuallyDrop::new(queue),
@@ -491,13 +510,85 @@ impl DeviceShared {
             gpu_profile,
             device_lost,
             vendor_id,
+            faulted,
         }
     }
+}
+
+/// Set once the process has decided to exit - see [`set_process_exiting`].
+static PROCESS_EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Declare that the process is shutting down, after which GPU devices are
+/// LEAKED rather than destroyed.
+///
+/// Destroying a Vulkan device is only safe on this NVIDIA driver under
+/// conditions `DeviceShared::drop` already works hard to arrange (see its own
+/// comment: a device torn down while its driver worker threads are live, or
+/// while another thread touches a sibling device, segfaults it). Holding those
+/// conditions gets strictly harder the more devices a process has, and at
+/// process exit it is also pointless: the kernel driver releases every
+/// allocation when the process dies, so destruction buys nothing a moment
+/// before that happens anyway.
+///
+/// This is measured, not defensive: a server that had placed a model across
+/// TWO cards reproducibly `SIGSEGV`d on SIGTERM while the identical run
+/// restricted to ONE card exited cleanly, and the fault vanished under a
+/// debugger's slower thread scheduling - a teardown race, not a logic error.
+///
+/// Deliberately NOT the default: a device dropped during normal operation (a
+/// model evicted, a test's device going out of scope) must still be really
+/// destroyed, or a long-running server would leak a card's worth of VRAM per
+/// eviction. Only the final teardown is exempt.
+pub fn set_process_exiting() {
+    PROCESS_EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`set_process_exiting`] has been called.
+pub fn process_exiting() -> bool {
+    PROCESS_EXITING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for DeviceShared {
     fn drop(&mut self) {
+        // Once the process is on its way out, devices are not torn down either
+        // - see [`set_process_exiting`] for the multi-device driver fault this
+        // avoids and why destroying them then buys nothing.
+        if process_exiting() {
+            self.pipelines.clear();
+            // SAFETY: drop() runs exactly once; the fields are never used again.
+            unsafe {
+                std::mem::forget(std::mem::ManuallyDrop::take(&mut self.queue));
+                std::mem::forget(std::mem::ManuallyDrop::take(&mut self.device));
+            }
+            return;
+        }
+        // A device that has already reported a hard fault is NOT torn down.
+        //
+        // Destroying it is what turns one failed request into a dead process:
+        // an allocation that failed mid-`create_buffer` unwound through wgpu's
+        // error handler, leaving the driver-side allocator and wgpu's own
+        // resource tracking describing different sets of blocks. Teardown then
+        // frees a block twice - observed exactly, on a real 30B load, as
+        // `double free or corruption (out)` + SIGABRT during SIGTERM shutdown,
+        // long after the request that faulted had already been failed cleanly.
+        //
+        // Leaking a device at teardown costs nothing the OS will not reclaim
+        // moments later; aborting the process loses every OTHER model the
+        // server was holding. So: drop the pipelines (owned by us, and safe),
+        // then forget the device and queue.
+        if self.faulted.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("brain: DeviceShared::drop: device reported a hard fault earlier; leaking it rather than destroying inconsistent driver state");
+            self.pipelines.clear();
+            // SAFETY: drop() runs exactly once and the fields are never used
+            // again. `ManuallyDrop::take` moves the values out so they can be
+            // deliberately leaked instead of destroyed.
+            unsafe {
+                std::mem::forget(std::mem::ManuallyDrop::take(&mut self.queue));
+                std::mem::forget(std::mem::ManuallyDrop::take(&mut self.device));
+            }
+            return;
+        }
         // Tear down under the same lock that guards creation, in a safe order:
         // drain the queue, drop the pipelines, then the queue, then the device.
         // Without the drain + serialisation, destroying a device races the
@@ -1691,6 +1782,14 @@ impl Backend for WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     fn max_storage_binding_bytes(&self) -> u64 {
         WgpuBackend::max_storage_binding_bytes(self)
+    }
+    // The other, larger ceiling: the biggest single allocation the driver
+    // accepts. Read from the same `device.limits()` the adapter granted at
+    // request time (`from_adapter` asks for the adapter's own maxima), so this
+    // is the real number for THIS card, never a constant.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn max_buffer_bytes(&self) -> u64 {
+        self.device().limits().max_buffer_size
     }
     fn share(&self) -> Option<Box<dyn Backend>> {
         Some(Box::new(self.share_device()))

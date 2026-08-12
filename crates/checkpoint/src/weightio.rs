@@ -157,13 +157,19 @@ impl WeightReader {
     /// present -- the safe way to check whether a tensor is packed (`U32`,
     /// [`Self::tensor_u32`]'s domain) before reaching for [`Self::tensor`]
     /// or [`Self::tensor_u32`], both of which panic on the wrong accessor
-    /// rather than silently return an empty/reinterpreted value. `None` for
-    /// GGUF -- brain's int8-native packed-weight convention is
-    /// safetensors-only ([`Self::tensor_u32`]'s own doc).
+    /// rather than silently return an empty/reinterpreted value.
+    ///
+    /// GGUF answers with its own per-TENSOR ggml quant type (`"Q4_K"`,
+    /// `"BF16"`, …), not with a single per-file dtype: a real GGUF release
+    /// commonly mixes precisions across layers, and a byte-cost or placement
+    /// model that asked "the checkpoint's dtype" would be wrong for every such
+    /// file. Note `U32` is safetensors-only either way - it is brain's
+    /// packed-int8 convention ([`Self::tensor_u32`]'s own doc), not a ggml
+    /// type - so a GGUF tensor never claims to be packed.
     pub fn dtype(&self, name: &str) -> Option<&str> {
         match &self.inner {
             Inner::St(m) => m.dtype(name),
-            Inner::Gguf(_) => None,
+            Inner::Gguf(m) => m.dtype(name),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].dtype(name),
         }
     }

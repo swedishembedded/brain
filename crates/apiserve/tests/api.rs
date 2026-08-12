@@ -832,6 +832,46 @@ async fn openai_chat_stream_error_frame_is_named_and_generic() {
     assert_eq!(datas.last().map(String::as_str), Some("[DONE]"), "stream must still terminate with [DONE]");
 }
 
+/// A request that fails inside the model must not ALSO look like a successful
+/// empty answer.
+///
+/// The role chunk (`{"role":"assistant","content":""}`) used to be emitted
+/// unconditionally, before anything was known about the request. A failure
+/// after admission - a lane panic, which a real 30B load reproduced by OOMing
+/// a card mid-generation - therefore produced a stream containing a
+/// syntactically valid, empty assistant message followed by `[DONE]`, and a
+/// client that accumulates `choices` and stops at `[DONE]` reported
+/// `success=true` with empty text and no tool calls. The error frame was
+/// there; nothing forced a client to look at it.
+///
+/// So: a stream that produced no output before failing carries NO
+/// `chat.completion.chunk` at all. There is no empty success left to mistake
+/// the failure for, whether or not the client inspects SSE event names.
+#[tokio::test]
+async fn openai_chat_stream_failure_emits_no_empty_assistant_message() {
+    let (app, key) = failing_chat_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+    });
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+
+    for d in sse_data(&text) {
+        if d == "[DONE]" {
+            continue;
+        }
+        let v: Value = serde_json::from_str(&d).unwrap_or(Value::Null);
+        assert_ne!(
+            v["object"].as_str(),
+            Some("chat.completion.chunk"),
+            "a failed request must emit no assistant-message chunk at all, got: {d}"
+        );
+        assert!(v.get("error").is_some(), "the only payload of a failed stream is the error body, got: {d}");
+    }
+}
+
 #[tokio::test]
 async fn anthropic_messages_stream_orders_events_and_concatenates() {
     let (app, key) = chat_app(Provider::Anthropic);

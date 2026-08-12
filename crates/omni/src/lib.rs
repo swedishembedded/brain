@@ -24,3 +24,4 @@ pub mod talker;
 pub mod talker_generate;
 pub mod talker_prompt;
 pub mod thinker;
+pub mod thinker_plan;

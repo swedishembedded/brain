@@ -673,6 +673,36 @@ fn run_apis(a: RunApis) {
                 eprintln!("brain serve: --api-keys-out {path}: {e}");
             }
         }
+        // `serve_all` takes the executor BY VALUE and would drop it - and with
+        // it every resident model and every GPU device those models hold - on
+        // its way out. One handle is deliberately leaked so that drop is not
+        // the last one: the residents (and their devices) then stay alive
+        // until the process itself ends, instead of being torn down during
+        // shutdown.
+        //
+        // This is a real, measured hazard rather than caution. A server that
+        // had placed a model across TWO cards reproducibly faulted on SIGTERM
+        // - intermittently, inside an NVIDIA driver thread (a jump to an
+        // unmapped address, so no Rust frame is even involved), and never with
+        // the same run restricted to ONE card. Nothing about that teardown is
+        // needed: the process is about to exit, and the driver releases every
+        // allocation when it does.
+        //
+        // `Executor` is a cheap Arc-backed handle, so the leak itself is a
+        // pointer, and it is bounded by the process lifetime by construction.
+        std::mem::forget(executor.clone());
+        // Flipped as soon as shutdown FIRES rather than after `serve_all`
+        // returns, because a model evicted during the drain would otherwise
+        // still take the destroy path - see `gpu_core::set_process_exiting`.
+        {
+            let sd = shutdown.clone();
+            let _ = std::thread::Builder::new().name("brain-gpu-exit".to_string()).spawn(move || {
+                while !sd.is_shutdown() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                gpu_core::set_process_exiting();
+            });
+        }
         let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
@@ -680,16 +710,30 @@ fn run_apis(a: RunApis) {
         }
     }
 
-    // HTTP has drained and returned. Give a backgrounded D-Bus surface a bounded
-    // window to finish its own graceful shutdown (both saw the same `shutdown`
-    // fire, so it should already be on its way out) rather than let `main`
-    // return out from under a live thread.
+    // Every surface has drained: from here on the process is only unwinding, so
+    // GPU devices are leaked instead of destroyed. Destroying them buys nothing
+    // (the driver releases everything when the process dies) and on this NVIDIA
+    // driver a multi-device teardown reproducibly faulted -- see
+    // `gpu_core::set_process_exiting`. Set BEFORE the executor's residents (and
+    // their devices) are dropped below.
+    gpu_core::set_process_exiting();
+
+    // Give a backgrounded D-Bus surface a bounded window to finish its own
+    // graceful shutdown (both saw the same `shutdown` fire, so it should
+    // already be on its way out) rather than let `main` return out from under a
+    // live thread.
     if let Some(h) = dbus_handle {
         let deadline = std::time::Instant::now() + DBUS_JOIN_TIMEOUT;
         while !h.is_finished() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
+
+    // Every surface has drained and every reply has been written: end here
+    // rather than returning into libc's `exit`, which would unmap the graphics
+    // driver out from under worker threads this process does not own. See
+    // `brain_shutdown::exit_now` for the fault that motivates it.
+    brain_shutdown::exit_now(0);
 }
 
 /// Per-GPU `(canonical index, total_bytes)`.

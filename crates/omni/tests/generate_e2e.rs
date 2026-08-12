@@ -58,7 +58,7 @@ use checkpoint::mmap::MmapSafetensors;
 use checkpoint::weightio::WeightReader;
 use gpu_core::Gpu;
 use omni::config::MoeTextConfig;
-use omni::generate::generate_greedy;
+use omni::generate::{generate_greedy, EmbedTable, ThinkerStack};
 use omni::thinker::thinker_pipelines;
 
 #[test]
@@ -99,12 +99,22 @@ fn matches_the_real_hf_greedy_generation() {
     // was actually dumped.
     let eos_ids: Vec<u32> = Vec::new();
 
-    let embed_table = reader.tensor("thinker.model.embed_tokens.weight").expect("missing embed_tokens");
-    let lm_head = reader.tensor("thinker.lm_head.weight").expect("missing lm_head");
-    let gpu = Gpu::new(thinker_pipelines());
+    let embed = EmbedTable::open(&reader).expect("open embed table");
+    // Every discovered card, at its real usable capacity: whatever fits is
+    // resident and the rest streams, decided by `omni::thinker_plan`.
+    let devices = omni::thinker_plan::discovered_devices(2 << 30);
+    let (gpus, caps): (Vec<Gpu>, Vec<u64>) = if devices.is_empty() {
+        (vec![Gpu::new(thinker_pipelines())], vec![u64::MAX])
+    } else {
+        (
+            devices.iter().map(|&(i, _)| Gpu::new_on_index(i, thinker_pipelines()).expect("open gpu")).collect(),
+            devices.iter().map(|&(_, c)| c).collect(),
+        )
+    };
+    let stack = ThinkerStack::build(&reader, &cfg, &gpus, &caps).expect("place the thinker");
 
-    println!("running real 48-layer/128-expert generation for {max_new} tokens -- this streams every layer's weights fresh per step, expect minutes...");
-    let got_ids = generate_greedy(&reader, &gpu, &cfg, &embed_table, &lm_head, &want_prompt, max_new, &eos_ids);
+    println!("running real 48-layer/128-expert generation for {max_new} tokens -- layers that do not fit stream fresh per step, expect minutes...");
+    let got_ids = generate_greedy(&stack, &gpus, &reader, &cfg, &embed, &want_prompt, max_new, &eos_ids);
 
     let common_prefix = got_ids.iter().zip(&want_ids).take_while(|(a, b)| a == b).count();
     println!("want: {want_ids:?}");

@@ -102,17 +102,16 @@ fn numel(reader: &WeightReader, name: &str) -> u64 {
 /// Device bytes `name` occupies once loaded **as f32** - i.e. what
 /// [`load_mat`]/[`load_vec`] actually place on the card.
 ///
-/// A packed `U32` tensor is stored `[n, k/4]` but consumed as `[n, k]` f32
-/// (`thinker::layer_fwd` has no int8 dispatch path for attention/router/head,
-/// only for the routed experts), so it costs FOUR TIMES its on-disk size in
-/// VRAM. Charging it its packed size - the bug this function exists to
-/// prevent - under-reports the real per-layer attention cost by 4x.
+/// Delegates to [`paramstore::dtype`], the ONE dtype→device-bytes table, which
+/// the raw-HF path (`crate::thinker_plan`) charges against too: placement is a
+/// question about bytes, and a per-dtype copy of the answer here is how the
+/// two paths would drift. It matters most for the case that table exists to
+/// get right - a packed `U32` tensor is stored `[n, k/4]` but consumed as
+/// `[n, k]` f32 (`thinker::layer_fwd` has no int8 dispatch for attention/
+/// router/head, only for the routed experts), so it costs FOUR TIMES its
+/// on-disk size in VRAM.
 fn f32_resident_bytes(reader: &WeightReader, name: &str) -> u64 {
-    let n = numel(reader, name);
-    match reader.dtype(name) {
-        Some("U32") => n * 4 * 4, // 4 int8 lanes per stored word, each landing as an f32
-        _ => n * 4,
-    }
+    paramstore::dtype::device_bytes(reader.dtype(name), numel(reader, name))
 }
 
 /// Total device bytes layer `l` occupies on whichever shard owns it: its

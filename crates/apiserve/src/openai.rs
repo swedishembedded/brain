@@ -921,8 +921,28 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
     use futures::StreamExt;
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
-        // First chunk: announce the assistant role.
-        yield Ok::<Event, Infallible>(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
+        // The role chunk announces an assistant message, and it is emitted
+        // LAZILY - only once this request has actually produced something to
+        // put in one.
+        //
+        // Emitting it up front is what let a failed request read as a
+        // successful empty one: a request that died inside the model (a lane
+        // panic - a real 30B load OOM'd a card exactly this way) still sent a
+        // syntactically valid `{"role":"assistant","content":""}` chunk before
+        // the error, and a client that accumulates `choices` and stops at
+        // `[DONE]` reported success with empty text. With nothing emitted
+        // before the failure, such a stream now carries NO assistant-message
+        // frame at all - only the named `error` event - so there is no empty
+        // success left to mistake it for.
+        let mut announced = false;
+        macro_rules! announce {
+            () => {
+                if !announced {
+                    announced = true;
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
+                }
+            };
+        }
 
         let mut finish = String::from("stop");
         let (mut prompt, mut completion) = (0i64, 0i64);
@@ -939,12 +959,14 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             match msg {
                 StreamMsg::Delta(piece) => {
                     saw_delta = true;
+                    announce!();
                     yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
                 }
                 StreamMsg::Event(v) => {
                     // reasoning_content / tool_calls deltas only — never delta.content
                     // (see `event_delta`'s doc comment).
                     if let Some(delta) = event_delta(&v) {
+                        announce!();
                         yield Ok(Event::default().data(chunk(&id, &model, delta, None, native).to_string()));
                     }
                 }
@@ -953,6 +975,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     yield Ok(Event::default().comment(p.comment_text()));
                 }
                 StreamMsg::Done(outcome) => {
+                    announce!();
                     let co = bridge::read_chat_outcome(&outcome);
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
@@ -986,6 +1009,12 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": final_text }), None, native).to_string()));
         }
 
+        // A stream that reached its terminal outcome always carries an
+        // assistant message, even an empty one - that IS a successful empty
+        // answer, and is what distinguishes it from the failure path above.
+        if !announced {
+            yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
+        }
         // Terminal chunk: empty delta + finish_reason.
         let fr = finish_openai(&finish);
         yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(fr), native).to_string()));

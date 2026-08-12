@@ -131,11 +131,6 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // into `catalog::models()` so `brain caps`/`brain do` and this executor
     // can no longer disagree about their existence.
     models.extend(crate::catalog::residents());
-    // Qwen3-Omni Thinker text generation, validation-tier (BRAIN_OMNI_HF_DIR)
-    // -- see crate::resident_omni's module doc for the scope this covers.
-    if let Some(o) = crate::resident_omni::OmniResident::from_env() {
-        models.push(Arc::new(o));
-    }
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel — no weights, no
     // GPU — registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
@@ -182,6 +177,15 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
 
     let exec = Executor::start(models, budgets, policy);
+    // Qwen3-Omni (BRAIN_OMNI_HF_DIR): the full chat/multimodal surface, placed
+    // across as many budgeted cards as its real per-layer bytes need. Like the
+    // int8 Thinker below it is multi-device and therefore registered AFTER
+    // `start` via `register_multi` -- see resident_omni's module doc for why a
+    // plain `register` (which is what it used to take) let it spend VRAM the
+    // scheduler had not budgeted.
+    if let Some(o) = crate::resident_omni::OmniResident::from_env(gpus, reserved) {
+        exec.register_multi(Arc::new(o));
+    }
     // The int8 dual-GPU Thinker is multi-device-only, so it is registered
     // AFTER `start` via `register_multi`, never folded into `models` above
     // (see `resident_omni::int8_thinker_multi_from_env`'s own doc for why a

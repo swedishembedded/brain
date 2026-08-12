@@ -1,48 +1,66 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Greedy text generation over the Thinker decoder, streaming each layer's
-//! weights from a checkpoint one at a time instead of holding all 48 layers
-//! (128 experts each) GPU-resident — the real model does not fit that way on
-//! this box without int8 quantization + cross-GPU sharding, which is a
-//! separate, not-yet-built piece of
-//! production residency (`crates/qwen3/src/shard.rs`'s int8 path is the
-//! precedent). Weight I/O is still the validation-tier: every layer's weights
-//! are re-read from the mmap for every generated token (no resident weights),
-//! so a real 48-layer decode is still minutes, not milliseconds, per token —
-//! that remains true today.
+//! Greedy text generation over the Thinker decoder, across however many GPUs
+//! the box has, from a **raw HF checkpoint of any per-tensor dtype**.
 //!
-//! **KV-cache**: the ATTENTION math is no longer the validation-tier's O(T²)
-//! full recompute. [`generate_greedy`] now [`prefill`]s the prompt once
-//! (one pass through each layer, same as before, but ALSO bulk-fills that
-//! layer's persistent KV cache — `model::block::kv_cache_fill`, wired through
-//! `thinker::layer_fwd`'s `cache` param) and then [`decode_step`]s one new
-//! token at a time, attending only against the growing cache
-//! (`model::block::gqa_decode_step`, `thinker::layer_decode_step`) — O(cached
-//! length) per step, not O(cached length)². Every layer's weights are still
-//! reloaded from `reader` on every step (prefill: once per layer; decode:
-//! once per layer per generated token) — the cache changes the ATTENTION
-//! complexity, not the weight-I/O pattern; full GPU-resident weights across
-//! steps is the same not-yet-built M1 work referenced above.
+//! # What runs where, and what it costs
 //!
-//! `layer_fwd`/`layer_decode_step`/`decode`/`final_norm`/`lm_head_fwd`'s own
-//! per-call math is already validated exactly (cosine 1.000000, M6a/M6b; the
-//! KV-cache primitive itself by `model::block`'s own
-//! `decode_step_matches_causal_batched_attention_at_every_position` test) —
-//! this module's own risk surface is purely the loop control (prefill/decode
-//! sequencing, cache sizing, sampling), not the per-layer forward.
+//! [`ThinkerStack`] holds the decoder's weights according to
+//! `crate::thinker_plan`'s placement: the longest run of layers that genuinely
+//! fits is uploaded once, spread across the devices by
+//! `model::shard::plan_by_capacity` (the one capacity-aware partitioner in
+//! this engine - nothing here re-derives placement), and whatever is left over
+//! is streamed per use onto the last stage. A checkpoint small enough to fit
+//! streams nothing and never re-reads a weight; a 30B one at f32 (~120 GiB of
+//! decoder weights) holds what it can and streams the rest, which is slow but
+//! correct and, crucially, BOUNDED.
+//!
+//! # Two bugs this shape exists to prevent
+//!
+//! Both were live on the real 30B checkpoint, and both are about the streamed
+//! layers rather than the math:
+//!
+//! 1. **Unbounded host materialization.** Each weight used to be decoded whole
+//!    into a `Vec<f32>` and handed to `create_buffer_init`. Every upload here
+//!    goes through [`paramstore::upload::Uploader`] instead, which decodes a
+//!    bounded chunk at a time straight from the mapping - so a `BF16` tensor
+//!    never exists as a whole f32 copy on the host, and no upload takes
+//!    wgpu's mapped-at-creation path (which forces weights into an inefficient
+//!    memory type on a non-ReBAR card).
+//! 2. **Unbounded DEVICE accumulation** - the one that actually crashed. A
+//!    dropped `DeviceBuffer` is not reclaimed until the commands referencing
+//!    it have retired, and this loop records dispatches without submitting
+//!    (the first real submit was the terminal readback). So every streamed
+//!    layer's ~2.4 GiB of expert buffers stayed resident even though the live
+//!    set was one layer, and a single request walked a 24 GB card to
+//!    `wgpu error: Out of Memory` about nine layers in. [`Uploader::drain`]
+//!    after each streamed layer forces the submit + wait that reclaims it.
+//!
+//! # KV cache
+//!
+//! The attention math is not the validation-tier O(T²) recompute:
+//! [`generate_greedy`] prefills the prompt once (bulk-filling each layer's
+//! persistent cache) and then decodes one token at a time against it. Each
+//! layer's cache lives on the SAME device as that layer, so the cache never
+//! crosses a card. What still costs per token is re-streaming the layers that
+//! did not fit - the cache changes the attention complexity, not the weight
+//! I/O of a model bigger than the box.
+
+use std::collections::HashMap;
 
 use checkpoint::weightio::WeightReader;
 use gpu_core::{DeviceBuffer, Gpu};
+use paramstore::upload::Uploader;
 use qwenvl::mrope::{get_rope_index, mrope_tables};
 
 use crate::config::MoeTextConfig;
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, ThinkerLayerCache, ThinkerLayerWeights};
+use crate::thinker_plan::{layer_cost, place_fewest_devices, ThinkerPlacement, EMBED_TENSOR};
 
-/// One decoder layer's weights, freshly uploaded from `reader` — dropped
-/// (freeing the GPU buffers) when the caller's borrow of [`OwnedLayer::as_weights`]
-/// goes out of scope, i.e. after that one [`layer_fwd`] call.
-struct OwnedLayer {
+/// One decoder layer's weights on one device. Held for the whole generation
+/// when the layer is resident; built and dropped per use when it is streamed.
+pub struct OwnedLayer {
     ln1: DeviceBuffer,
     wq: DeviceBuffer,
     wk: DeviceBuffer,
@@ -72,43 +90,140 @@ impl OwnedLayer {
     }
 }
 
-fn load_thinker_layer(reader: &WeightReader, gpu: &Gpu, l: u32, n_experts: u32) -> OwnedLayer {
+/// Stream one rank-2 (or rank-1) tensor onto `up`'s device with bounded host
+/// use, whatever dtype the checkpoint declares for it: the mapping's bytes are
+/// lent zero-copy when they already match, else decoded a chunk at a time.
+/// Shape comes from the checkpoint header, so no caller passes it in.
+fn load_tensor(up: &mut Uploader, reader: &WeightReader, name: &str) -> Result<DeviceBuffer, String> {
+    let numel: u64 = reader.shape(name).ok_or_else(|| format!("missing tensor {name}"))?.iter().product();
+    let words = paramstore::dtype::device_f32_words(reader.dtype(name), numel) as usize;
+    up.tensor(reader, name, words)
+}
+
+/// Build layer `l`'s weights on `up`'s device. Every tensor goes through the
+/// bounded uploader - see this module's doc for why nothing here may
+/// materialize a whole tensor host-side or use `storage_init`.
+fn load_thinker_layer(up: &mut Uploader, reader: &WeightReader, l: u32, n_experts: u32) -> Result<OwnedLayer, String> {
     let p = |leaf: &str| format!("thinker.model.layers.{l}.{leaf}");
-    let get = |name: &str| gpu.storage_init("w", &reader.tensor(name).unwrap_or_else(|| panic!("missing tensor {name}")));
-    OwnedLayer {
-        ln1: get(&p("input_layernorm.weight")),
-        wq: get(&p("self_attn.q_proj.weight")),
-        wk: get(&p("self_attn.k_proj.weight")),
-        wv: get(&p("self_attn.v_proj.weight")),
-        wo: get(&p("self_attn.o_proj.weight")),
-        q_norm: get(&p("self_attn.q_norm.weight")),
-        k_norm: get(&p("self_attn.k_norm.weight")),
-        ln2: get(&p("post_attention_layernorm.weight")),
-        router: get(&p("mlp.gate.weight")),
-        experts: (0..n_experts)
-            .map(|e| {
-                (
-                    get(&p(&format!("mlp.experts.{e}.gate_proj.weight"))),
-                    get(&p(&format!("mlp.experts.{e}.up_proj.weight"))),
-                    get(&p(&format!("mlp.experts.{e}.down_proj.weight"))),
-                )
-            })
-            .collect(),
+    let mut get = |name: String| load_tensor(up, reader, &name);
+    let layer = OwnedLayer {
+        ln1: get(p("input_layernorm.weight"))?,
+        wq: get(p("self_attn.q_proj.weight"))?,
+        wk: get(p("self_attn.k_proj.weight"))?,
+        wv: get(p("self_attn.v_proj.weight"))?,
+        wo: get(p("self_attn.o_proj.weight"))?,
+        q_norm: get(p("self_attn.q_norm.weight"))?,
+        k_norm: get(p("self_attn.k_norm.weight"))?,
+        ln2: get(p("post_attention_layernorm.weight"))?,
+        router: get(p("mlp.gate.weight"))?,
+        experts: {
+            let mut v = Vec::with_capacity(n_experts as usize);
+            for e in 0..n_experts {
+                v.push((
+                    get(p(&format!("mlp.experts.{e}.gate_proj.weight")))?,
+                    get(p(&format!("mlp.experts.{e}.up_proj.weight")))?,
+                    get(p(&format!("mlp.experts.{e}.down_proj.weight")))?,
+                ));
+            }
+            v
+        },
+    };
+    Ok(layer)
+}
+
+/// The placed decoder: which device holds which layers, the resident ones'
+/// weights, and the head tensors on the last stage.
+///
+/// Device identity is an INDEX into the caller's own `&[Gpu]`, never a
+/// physical card number this type invented - the same discipline
+/// `crate::thinker_plan` follows, and what lets a 1-GPU box, a 2xP40 box and a
+/// mixed-capacity box all run this unchanged.
+pub struct ThinkerStack {
+    placement: ThinkerPlacement,
+    resident: HashMap<usize, OwnedLayer>,
+    final_norm_w: DeviceBuffer,
+    lm_head_w: DeviceBuffer,
+}
+
+impl ThinkerStack {
+    /// Plan across `gpus` (each with its USABLE byte capacity - a real number
+    /// the caller queried, not an assumption) and upload everything the plan
+    /// says is resident.
+    ///
+    /// `gpus` and `caps` are parallel; `caps[i]` is what device `i` may use.
+    pub fn build(reader: &WeightReader, cfg: &MoeTextConfig, gpus: &[Gpu], caps: &[u64]) -> Result<ThinkerStack, String> {
+        if gpus.is_empty() {
+            return Err("omni: no device to place the Thinker on".to_string());
+        }
+        if gpus.len() != caps.len() {
+            return Err(format!("omni: {} device(s) but {} capacities", gpus.len(), caps.len()));
+        }
+        let cost = layer_cost(reader, cfg).ok_or("omni: checkpoint is missing Thinker tensors this model loads")?;
+        let devices: Vec<(usize, u64)> = caps.iter().copied().enumerate().collect();
+        let placement = place_fewest_devices(&cost, &devices).ok_or_else(|| {
+            format!(
+                "omni: the Thinker does not fit the {} budgeted device(s) even streamed ({} bytes/layer at most, {} bytes available)",
+                devices.len(),
+                cost.per_layer.iter().max().copied().unwrap_or(0),
+                devices.iter().map(|&(_, c)| c).sum::<u64>()
+            )
+        })?;
+
+        let mut resident = HashMap::new();
+        for stage in &placement.stages {
+            let gpu = &gpus[stage.device];
+            // ONE uploader per card for the whole stage: the staging-reclaim
+            // accounting has to span every tensor, which is what keeps a
+            // multi-GB load from accruing a shadow copy of itself.
+            let mut up = Uploader::new(gpu);
+            for l in stage.layers.clone() {
+                let layer = load_thinker_layer(&mut up, reader, l as u32, cfg.n_experts)?;
+                up.drain(&layer.ln1);
+                resident.insert(l, layer);
+            }
+        }
+        let last = &gpus[placement.last_device()];
+        let mut up = Uploader::new(last);
+        let final_norm_w = load_tensor(&mut up, reader, "thinker.model.norm.weight")?;
+        let lm_head_w = load_tensor(&mut up, reader, "thinker.lm_head.weight")?;
+        up.drain(&final_norm_w);
+        eprintln!(
+            "omni: thinker placed on {} device(s): {} resident layer(s) {:?}, {} streamed",
+            placement.stages.len(),
+            placement.stages.iter().map(|s| s.layers.len()).sum::<usize>(),
+            placement.stages.iter().map(|s| (s.device, s.layers.clone(), s.bytes >> 20)).collect::<Vec<_>>(),
+            placement.streamed.len()
+        );
+        Ok(ThinkerStack { placement, resident, final_norm_w, lm_head_w })
+    }
+
+    /// The placement this stack committed to.
+    pub fn placement(&self) -> &ThinkerPlacement {
+        &self.placement
+    }
+
+    /// Device index running layer `l`.
+    fn device_of(&self, l: usize) -> usize {
+        self.placement.device_of(l)
     }
 }
 
-/// One layer's persistent incremental-decode KV cache buffers, sized once for
-/// the whole generation (`cap = prompt length + max_new_tokens`) — [`prefill`]
-/// fills rows `0..prompt_len`, [`decode_step`] extends one row per call.
+/// One layer's persistent incremental-decode KV cache, allocated on the SAME
+/// device as the layer it belongs to.
 struct ThinkerKvCache {
     layers: Vec<(DeviceBuffer, DeviceBuffer)>,
     cap: u32,
 }
 
 impl ThinkerKvCache {
-    fn new(gpu: &Gpu, cfg: &MoeTextConfig, cap: u32) -> Self {
+    fn new(stack: &ThinkerStack, gpus: &[Gpu], cfg: &MoeTextConfig, cap: u32) -> Self {
         let hkv = (cfg.n_kv_heads * cfg.head_dim) as u64;
-        let layers = (0..cfg.n_layers).map(|_| (gpu.storage(cap as u64 * hkv), gpu.storage(cap as u64 * hkv))).collect();
+        let layers = (0..cfg.n_layers as usize)
+            .map(|l| {
+                let g = &gpus[stack.device_of(l)];
+                (g.storage(cap as u64 * hkv), g.storage(cap as u64 * hkv))
+            })
+            .collect();
         Self { layers, cap }
     }
     fn layer(&self, l: usize) -> ThinkerLayerCache<'_> {
@@ -116,56 +231,119 @@ impl ThinkerKvCache {
     }
 }
 
-/// Prefill: the whole prompt `x_host [n, hidden]` through every layer ONCE
-/// (batched causal attention, same math `thinker::decode` uses), bulk-filling
-/// `cache`'s rows `0..n` as a side effect of each layer's own forward
-/// (`thinker::layer_fwd`'s `cache` param) — after this, [`decode_step`]
-/// continues from `pos = n` without recomputing anything this pass already
-/// did. Returns the final-normed hidden state `[n, hidden]`. `positions` is
-/// the real per-token 3-axis M-RoPE position (`qwenvl::mrope::get_rope_index`/
-/// `get_rope_index_multi`) — plain-sequential for pure text, real per-axis
-/// values wherever a caller (`crate::mm`) spliced in media.
-fn prefill(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
-    let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
-    let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
-    let cos = gpu.storage_init("cos", &cos_tab);
-    let sin = gpu.storage_init("sin", &sin_tab);
-
-    let mut h = gpu.storage_init("x", x_host);
-    for l in 0..cfg.n_layers {
-        let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
-        let lc = cache.layer(l as usize);
-        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, Some(&lc), None);
-        h = out;
-    }
-    let norm_w = gpu.storage_init("w", &reader.tensor("thinker.model.norm.weight").expect("missing thinker.model.norm.weight"));
-    final_norm(gpu, cfg, &norm_w, &h, n)
+/// What one pass through the decoder stack does at each layer.
+enum Pass<'a> {
+    /// Batched causal forward over `n` positions, optionally bulk-filling the
+    /// KV cache (the prefill half of the decode loop).
+    Prefill { cache: Option<&'a ThinkerKvCache>, n: u32 },
+    /// A single new token attending against `cache` at row `pos`.
+    Decode { cache: &'a ThinkerKvCache, pos: u32 },
 }
 
-/// One incremental decode step: a single new token's embedding row `x_host`
-/// (`[hidden]`) through every layer, attending against `cache` at cache row
-/// `cache_row` (`thinker::layer_decode_step` — O(cache_row), not
-/// O(cache_row)²) and RoPE'd at the real 3-axis position `mrope_pos` — these
-/// two are DELIBERATELY separate: `cache_row` is always the plain append
-/// index (0,1,2,…, one per generated token), while `mrope_pos` can be
-/// non-monotonic per axis if a media block appeared earlier in the prompt
-/// (`qwenvl::mrope::get_rope_index_multi`'s doc). Layer weights are still
-/// reloaded fresh from `reader` every call (see the module doc). Returns the
-/// final-normed hidden row `[1, hidden]`.
-fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], mrope_pos: [u32; 3], cache_row: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
+/// Run layers `0..stop` of the stack over `x_host`, hopping the residual
+/// stream host-side wherever the plan changes device, and return the final
+/// hidden state as a device buffer ON THE LAST DEVICE TOUCHED (plus that
+/// device's index).
+///
+/// Streamed layers are loaded through the bounded uploader and dropped
+/// immediately, with a forced drain so the card actually reclaims them before
+/// the next layer allocates - see this module's doc.
+fn run_layers(
+    stack: &ThinkerStack,
+    gpus: &[Gpu],
+    reader: &WeightReader,
+    cfg: &MoeTextConfig,
+    x_host: &[f32],
+    cos_tab: &[f32],
+    sin_tab: &[f32],
+    stop: usize,
+    pass: Pass,
+) -> (DeviceBuffer, usize) {
+    let d = cfg.hidden as usize;
+    let rows = x_host.len() / d.max(1);
+    let mut h_host: Vec<f32> = x_host.to_vec();
+    let mut cur: Option<(usize, DeviceBuffer, DeviceBuffer, DeviceBuffer)> = None; // (device, h, cos, sin)
+
+    for l in 0..stop {
+        let dev = stack.device_of(l);
+        let need_move = cur.as_ref().is_none_or(|(cd, ..)| *cd != dev);
+        if need_move {
+            if let Some((cd, h, ..)) = cur.take() {
+                h_host = gpus[cd].read(&h, rows * d);
+            }
+            let g = &gpus[dev];
+            let mut up = Uploader::new(g);
+            let h = up.host_f32(&h_host);
+            let cos = up.host_f32(cos_tab);
+            let sin = up.host_f32(sin_tab);
+            cur = Some((dev, h, cos, sin));
+        }
+        let (_, h, cos, sin) = cur.as_ref().expect("a device is selected by now");
+        let g = &gpus[dev];
+
+        let mut streamed = None;
+        let w = match stack.resident.get(&l) {
+            Some(layer) => layer,
+            None => {
+                let mut up = Uploader::new(g);
+                let layer = load_thinker_layer(&mut up, reader, l as u32, cfg.n_experts).unwrap_or_else(|e| panic!("omni: {e}"));
+                streamed = Some((layer, up));
+                &streamed.as_ref().expect("just set").0
+            }
+        };
+        let weights = w.as_weights();
+        let out = match &pass {
+            Pass::Prefill { cache, n } => {
+                let lc = cache.map(|c| c.layer(l));
+                let (out, ..) = layer_fwd(g, cfg, &weights, h, cos, sin, *n, lc.as_ref(), None);
+                out
+            }
+            Pass::Decode { cache, pos } => layer_decode_step(g, cfg, &weights, &cache.layer(l), h, cos, sin, *pos, cache.cap, None),
+        };
+        // Replace the residual BEFORE the streamed weights are dropped, then
+        // force the submit+wait that lets the card actually reclaim them. Both
+        // halves are load-bearing: dropping without draining is exactly the
+        // unbounded accumulation that OOM'd a 24 GB card.
+        let (cd, _, cos, sin) = cur.take().expect("a device is selected by now");
+        cur = Some((cd, out, cos, sin));
+        if let Some((layer, mut up)) = streamed {
+            drop(layer);
+            let (_, h, ..) = cur.as_ref().expect("just set");
+            up.drain(h);
+        }
+    }
+
+    match cur {
+        Some((dev, h, ..)) => (h, dev),
+        // Zero layers is degenerate but not a panic: upload the input as-is on
+        // the last device so the caller's head still has something to apply.
+        None => {
+            let dev = stack.placement.last_device();
+            let mut up = Uploader::new(&gpus[dev]);
+            (up.host_f32(&h_host), dev)
+        }
+    }
+}
+
+/// Prefill: the whole prompt through every layer once, bulk-filling `cache`.
+/// Returns the final-normed hidden state `[n, hidden]` on the head device.
+fn prefill(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
+    let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
+    let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Prefill { cache: Some(cache), n });
+    debug_assert_eq!(dev, stack.placement.last_device());
+    final_norm(&gpus[dev], cfg, &stack.final_norm_w, &h, n)
+}
+
+/// One incremental decode step: a single new token's embedding row through
+/// every layer. `cache_row` is the plain append index; `mrope_pos` is the real
+/// 3-axis position, which can be non-monotonic per axis when a media block
+/// appeared earlier in the prompt (`qwenvl::mrope::get_rope_index_multi`).
+fn decode_step(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], mrope_pos: [u32; 3], cache_row: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(&[mrope_pos], section, cfg.head_dim, cfg.rope_theta);
-    let cos = gpu.storage_init("cos", &cos_tab);
-    let sin = gpu.storage_init("sin", &sin_tab);
-
-    let mut h = gpu.storage_init("x", x_host);
-    for l in 0..cfg.n_layers {
-        let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
-        let lc = cache.layer(l as usize);
-        h = layer_decode_step(gpu, cfg, &layer.as_weights(), &lc, &h, &cos, &sin, cache_row, cache.cap, None);
-    }
-    let norm_w = gpu.storage_init("w", &reader.tensor("thinker.model.norm.weight").expect("missing thinker.model.norm.weight"));
-    final_norm(gpu, cfg, &norm_w, &h, 1)
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Decode { cache, pos: cache_row });
+    final_norm(&gpus[dev], cfg, &stack.final_norm_w, &h, 1)
 }
 
 fn argmax(row: &[f32]) -> u32 {
@@ -189,103 +367,75 @@ fn debug_log_top_candidates(cache_row: u32, logits: &[f32]) {
     eprintln!("decode step cache_row={cache_row}: top3 (token_id, logit) = {:?}", &sorted[..3.min(sorted.len())]);
 }
 
-/// Greedy (argmax) text generation: [`prefill`]s `prompt_ids` once (populating
-/// a KV cache sized `prompt_ids.len() + max_new_tokens`), samples the first
-/// new token from the prefill's last logit row, then [`decode_step`]s one
-/// token at a time — appending each highest-logit next token and repeating
-/// until `max_new_tokens` or an id in `eos_ids` is produced. Returns the FULL
-/// sequence (prompt + generated). Positions are plain-sequential throughout —
-/// the pure-text M-RoPE-collapse case (see `crate::thinker`'s module doc); a
-/// caller with an image/audio/video span needs the real per-axis positions
-/// wired in separately, not done here.
-pub fn generate_greedy(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, embed_table: &[f32], lm_head_w: &[f32], prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
+/// Greedy (argmax) text generation. Prefills `prompt_ids` once (populating a
+/// KV cache sized `prompt_ids.len() + max_new_tokens`), samples the first new
+/// token from the prefill's last logit row, then decodes one token at a time
+/// until `max_new_tokens` or an id in `eos_ids`. Returns the FULL sequence
+/// (prompt + generated).
+///
+/// Positions are plain-sequential - the pure-text M-RoPE-collapse case (see
+/// `crate::thinker`'s module doc); a caller with an image/audio/video span
+/// goes through [`generate_greedy_multimodal`], which carries real per-axis
+/// positions.
+pub fn generate_greedy(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, embed_table: &EmbedTable, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
     if prompt_ids.is_empty() {
         return prompt_ids.to_vec();
     }
-    let positions = get_rope_index(prompt_ids, u32::MAX, &[]); // plain-sequential: no placeholder token in prompt_ids ever matches u32::MAX
-    generate_greedy_positioned(reader, gpu, cfg, embed_table, lm_head_w, prompt_ids, &positions, max_new_tokens, eos_ids)
+    let positions = get_rope_index(prompt_ids, u32::MAX, &[]); // plain-sequential: no placeholder id ever matches u32::MAX
+    generate_greedy_with_embeds(stack, gpus, reader, cfg, embed_table, prompt_ids, None, &positions, max_new_tokens, eos_ids)
 }
 
-/// [`generate_greedy`], generalized to a caller-supplied embedding buffer and
-/// real per-token M-RoPE positions — the entry `crate::mm::build_multimodal_prompt`
-/// feeds once a prompt has media spliced into it. `prompt_ids`/`positions` must
-/// be the same length; `x_host` is `[prompt_ids.len(), hidden]` and, for a
-/// multimodal prompt, already has the media rows overwritten
-/// (`crate::mm::splice_host`) — this function does no splicing itself, only
-/// the prefill/decode/sample loop. New tokens generated beyond the prompt are
-/// always plain text (no further media insertion mid-generation), so their
-/// positions continue the diagonal from the prompt's last position + 1 on
-/// every axis, exactly like a trailing text run in `get_rope_index`'s own
-/// algorithm.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_greedy_positioned(
-    reader: &WeightReader,
-    gpu: &Gpu,
-    cfg: &MoeTextConfig,
-    embed_table: &[f32],
-    lm_head_w: &[f32],
-    prompt_ids: &[u32],
-    positions: &[[u32; 3]],
-    max_new_tokens: u32,
-    eos_ids: &[u32],
-) -> Vec<u32> {
-    generate_greedy_with_embeds(reader, gpu, cfg, embed_table, lm_head_w, prompt_ids, None, positions, max_new_tokens, eos_ids)
-}
-
-/// The shared implementation behind [`generate_greedy`]/[`generate_greedy_positioned`]
-/// and `crate::mm`'s multimodal entry: `x_host_override`, when `Some`, is used
-/// as the prompt's embedding buffer verbatim (already spliced with media);
-/// when `None`, it's built by a plain per-token gather from `embed_table` (the
-/// pure-text case both public wrappers above use).
+/// The shared implementation behind [`generate_greedy`] and
+/// [`generate_greedy_multimodal`]: `x_host_override`, when `Some`, is the
+/// prompt's embedding buffer verbatim (already spliced with media); when
+/// `None` it is built by a plain per-token gather.
 #[allow(clippy::too_many_arguments)]
 fn generate_greedy_with_embeds(
+    stack: &ThinkerStack,
+    gpus: &[Gpu],
     reader: &WeightReader,
-    gpu: &Gpu,
     cfg: &MoeTextConfig,
-    embed_table: &[f32],
-    lm_head_w: &[f32],
+    embed_table: &EmbedTable,
     prompt_ids: &[u32],
     x_host_override: Option<Vec<f32>>,
     positions: &[[u32; 3]],
     max_new_tokens: u32,
     eos_ids: &[u32],
 ) -> Vec<u32> {
-    let d = cfg.hidden as usize;
     let mut ids: Vec<u32> = prompt_ids.to_vec();
     assert_eq!(positions.len(), prompt_ids.len(), "generate_greedy: positions/prompt_ids length mismatch");
     if max_new_tokens == 0 || prompt_ids.is_empty() {
         return ids;
     }
-    let lm_head = gpu.storage_init("lm_head", lm_head_w);
-    let embed_row = |t: u32| embed_table[t as usize * d..(t as usize + 1) * d].to_vec();
+    let head_gpu = &gpus[stack.placement.last_device()];
 
     let n0 = prompt_ids.len() as u32;
     let cap = n0 + max_new_tokens;
-    let cache = ThinkerKvCache::new(gpu, cfg, cap);
+    let cache = ThinkerKvCache::new(stack, gpus, cfg, cap);
 
     let x_host = x_host_override.unwrap_or_else(|| {
-        let mut x = Vec::with_capacity(prompt_ids.len() * d);
+        let mut x = Vec::with_capacity(prompt_ids.len() * cfg.hidden as usize);
         for &t in prompt_ids {
-            x.extend_from_slice(&embed_row(t));
+            x.extend_from_slice(&embed_table.row(reader, t));
         }
         x
     });
-    let hidden = prefill(reader, gpu, cfg, &x_host, positions, n0, &cache);
-    let logits = lm_head_fwd(gpu, &lm_head, &hidden, n0, cfg.hidden, cfg.vocab);
-    let last_row = gpu.read(&logits, (n0 * cfg.vocab) as usize);
+    let hidden = prefill(stack, gpus, reader, cfg, &x_host, positions, n0, &cache);
+    let logits = lm_head_fwd(head_gpu, &stack.lm_head_w, &hidden, n0, cfg.hidden, cfg.vocab);
+    let last_row = head_gpu.read(&logits, (n0 * cfg.vocab) as usize);
     let mut next = argmax(&last_row[((n0 - 1) * cfg.vocab) as usize..(n0 * cfg.vocab) as usize]);
     ids.push(next);
     let mut cache_row = n0;
     // New tokens are always plain text: continue the diagonal from the
-    // prompt's last position + 1 on every axis (see this function's doc).
+    // prompt's last position + 1 on every axis.
     let mut mrope_pos = positions[positions.len() - 1].map(|p| p + 1);
 
     if !eos_ids.contains(&next) {
         for _ in 1..max_new_tokens {
-            let x_row = embed_row(next);
-            let hidden = decode_step(reader, gpu, cfg, &x_row, mrope_pos, cache_row, &cache);
-            let logits = lm_head_fwd(gpu, &lm_head, &hidden, 1, cfg.hidden, cfg.vocab);
-            let row = gpu.read(&logits, cfg.vocab as usize);
+            let x_row = embed_table.row(reader, next);
+            let hidden = decode_step(stack, gpus, reader, cfg, &x_row, mrope_pos, cache_row, &cache);
+            let logits = lm_head_fwd(head_gpu, &stack.lm_head_w, &hidden, 1, cfg.hidden, cfg.vocab);
+            let row = head_gpu.read(&logits, cfg.vocab as usize);
             next = argmax(&row);
             debug_log_top_candidates(cache_row, &row);
             ids.push(next);
@@ -303,36 +453,94 @@ fn generate_greedy_with_embeds(
 /// forced -- no sampling) through the Thinker's first `capture_layer + 1`
 /// layers, returning that layer's raw (pre-final-norm) hidden state `[n, d]`
 /// -- what `crate::talker_prompt`'s Thinker->Talker prefill assembly needs
-/// (`TalkerConfig::accept_hidden_layer`). A second pass rather than
-/// capturing during [`generate_greedy`]'s own incremental decode loop: the
-/// capture is needed for EVERY position (prompt and generated alike), while
-/// decode only ever computes one NEW position per step and would need its
-/// own per-step capture plumbing for no benefit -- a full KV-cache-free
-/// batched forward is simpler and exactly as correct (this is a one-shot,
-/// not-performance-critical call: once per `converse`/`speak` turn, not
-/// once per decode step). Early-exits after `capture_layer` -- no need to
-/// run the remaining layers or the final norm when only one intermediate
-/// layer's output is wanted.
-pub fn thinker_hidden_at_layer(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, capture_layer: u32) -> Vec<f32> {
+/// (`TalkerConfig::accept_hidden_layer`). A second pass rather than capturing
+/// during the incremental decode loop: the capture is needed for EVERY
+/// position (prompt and generated alike), while decode only ever computes one
+/// NEW position per step. Early-exits after `capture_layer`.
+pub fn thinker_hidden_at_layer(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, capture_layer: u32) -> Vec<f32> {
     assert!(capture_layer < cfg.n_layers, "capture_layer {capture_layer} out of range ({} layers)", cfg.n_layers);
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
-    let cos = gpu.storage_init("cos", &cos_tab);
-    let sin = gpu.storage_init("sin", &sin_tab);
-
-    let mut h = gpu.storage_init("x", x_host);
-    for l in 0..=capture_layer {
-        let layer = load_thinker_layer(reader, gpu, l, cfg.n_experts);
-        let (out, ..) = layer_fwd(gpu, cfg, &layer.as_weights(), &h, &cos, &sin, n, None, None);
-        h = out;
-    }
-    gpu.read(&h, (n * cfg.hidden) as usize)
+    let stop = capture_layer as usize + 1;
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, stop, Pass::Prefill { cache: None, n });
+    gpus[dev].read(&h, (n * cfg.hidden) as usize)
 }
 
 /// The multimodal entry: `prompt.x_host` already has media spliced in
-/// (`crate::mm::build_multimodal_prompt`), so no `embed_table` gather is
-/// needed for the prompt itself — only for tokens generated AFTER it (always
-/// plain text, per [`generate_greedy_positioned`]'s doc).
-pub fn generate_greedy_multimodal(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, embed_table: &[f32], lm_head_w: &[f32], prompt: &crate::mm::MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-    generate_greedy_with_embeds(reader, gpu, cfg, embed_table, lm_head_w, &prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, max_new_tokens, eos_ids)
+/// (`crate::mm::build_multimodal_prompt`), so no embedding gather is needed
+/// for the prompt itself - only for tokens generated after it (always plain
+/// text).
+pub fn generate_greedy_multimodal(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, embed_table: &EmbedTable, prompt: &crate::mm::MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
+    generate_greedy_with_embeds(stack, gpus, reader, cfg, embed_table, &prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, max_new_tokens, eos_ids)
+}
+
+/// How this model reads one embedding row.
+///
+/// The table is `[vocab, hidden]` - 1.2 GB as f32 at the real Thinker shape -
+/// and generation only ever needs a per-token ROW gather, never a GEMM. So it
+/// is neither uploaded nor expanded whenever the mapping can lend its bytes:
+/// rows are read straight from the mapping and converted one row at a time.
+/// Mirrors `crate::int8_thinker_resident::EmbedTable`, for the raw-HF dtypes.
+pub enum EmbedTable {
+    /// The mapping lends `F32` words directly: a row is a slice of the mmap.
+    Mapped { k: usize },
+    /// The mapping cannot lend this dtype as words (`BF16`/`F16`/a GGUF
+    /// quant): one host copy, decoded once at load. Correct, just not free.
+    Host { table: Vec<f32>, k: usize },
+}
+
+impl EmbedTable {
+    /// Open the checkpoint's token embedding, without expanding it when the
+    /// mapping allows a borrow.
+    pub fn open(reader: &WeightReader) -> Result<EmbedTable, String> {
+        let shape = reader.shape(EMBED_TENSOR).ok_or_else(|| format!("omni: missing {EMBED_TENSOR}"))?;
+        if shape.len() != 2 {
+            return Err(format!("omni: {EMBED_TENSOR} must be rank-2, got {shape:?}"));
+        }
+        let k = shape[1] as usize;
+        if reader.dtype(EMBED_TENSOR) == Some("F32") && checkpoint::TensorSource::raw_words(reader, EMBED_TENSOR).is_some() {
+            return Ok(EmbedTable::Mapped { k });
+        }
+        let table = reader.tensor(EMBED_TENSOR).ok_or_else(|| format!("omni: missing {EMBED_TENSOR}"))?;
+        Ok(EmbedTable::Host { table, k })
+    }
+
+    /// The row width (`hidden`).
+    pub fn hidden(&self) -> usize {
+        match self {
+            EmbedTable::Mapped { k } | EmbedTable::Host { k, .. } => *k,
+        }
+    }
+
+    /// Token `t`'s embedding row, `[hidden]`.
+    pub fn row(&self, reader: &WeightReader, t: u32) -> Vec<f32> {
+        let t = t as usize;
+        match self {
+            EmbedTable::Mapped { k } => {
+                let words = checkpoint::TensorSource::raw_words(reader, EMBED_TENSOR).expect("EmbedTable::Mapped implies a lendable mapping");
+                words[t * k..(t + 1) * k].iter().map(|w| f32::from_bits(*w)).collect()
+            }
+            EmbedTable::Host { table, k } => table[t * k..(t + 1) * k].to_vec(),
+        }
+    }
+
+    /// The already-materialized host copy, when there is one - so a caller
+    /// that needs the whole table (`crate::mm`'s splice assembly) borrows it
+    /// instead of decoding a second 1.2 GB copy.
+    pub fn as_host_slice(&self) -> Option<&[f32]> {
+        match self {
+            EmbedTable::Host { table, .. } => Some(table),
+            EmbedTable::Mapped { .. } => None,
+        }
+    }
+
+    /// The whole table as f32 - for the callers that genuinely need a full
+    /// host copy (`crate::mm`'s splice assembly, `crate::talker_prompt`).
+    /// Decodes on demand from the mapping when the table is not already held.
+    pub fn to_host(&self, reader: &WeightReader) -> Vec<f32> {
+        match self {
+            EmbedTable::Host { table, .. } => table.clone(),
+            EmbedTable::Mapped { .. } => reader.tensor(EMBED_TENSOR).expect("EmbedTable::Mapped implies the tensor exists"),
+        }
+    }
 }

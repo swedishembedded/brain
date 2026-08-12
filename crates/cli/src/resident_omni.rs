@@ -4,20 +4,30 @@
 //! Resident-model adapter putting Qwen3-Omni's Thinker text generation behind
 //! the residency [`Executor`], mirroring [`crate::resident_tts::TtsResident`].
 //!
-//! **Validation-tier, not production** (`omni::caps`'s own module doc has the
-//! full reasoning): `generate` streams every decoder layer's weights fresh
-//! from the real HF checkpoint on every generated token, and `estimate()`
-//! reports the checkpoint's on-disk size as a RAM cost (the mmap footprint
-//! the streaming reads touch), not a real VRAM budget - this resident does
-//! not participate in GPU-residency scheduling at all. It is correct and
-//! slow, and it is kept because it is the path with the full chat/multimodal
-//! surface (`generate` with `messages` + audio/image/video, plus `speak`).
+//! This is the path with the full chat/multimodal surface (`generate` with
+//! `messages` + audio/image/video, plus `speak`), served straight from a raw
+//! HF checkpoint (`BRAIN_OMNI_HF_DIR`) with no import step.
 //!
-//! **The GPU-resident path is [`int8_thinker_multi_from_env`] below**
-//! (`omni::int8_thinker_resident`): real int8 weights, resident across as
-//! many GPUs as the checkpoint's per-layer bytes actually need, loaded with
-//! bounded host memory. Prefer it whenever the weights should stay on the
-//! cards between calls.
+//! **It is multi-device, and it budgets honestly.** It used to report
+//! `MemCost::new(0, checkpoint_bytes)` - zero VRAM - and then quietly build a
+//! GPU of its own inside `activate`, so the scheduler placed it on the CPU
+//! lane while it filled a card. Nothing budgeted the bytes it actually spent,
+//! and at the real 30B shape it walked a 24 GB card to `wgpu error: Out of
+//! Memory` inside one request. Now [`OmniResident`] computes a real placement
+//! from the checkpoint's own per-tensor byte costs
+//! (`omni::thinker_plan`/`model::shard`), reports it through
+//! [`MultiDeviceResidentModel::estimate_multi`], and activates on exactly the
+//! devices that reservation named - the same discipline
+//! [`omni::int8_thinker_resident::Int8ThinkerResident`] follows, now shared
+//! rather than being a property of the int8 path specifically.
+//!
+//! Weight PRECISION is a separate axis from placement, and stays as the
+//! checkpoint stores it: this path serves whatever dtype is on disk (bf16
+//! here), decoded to f32 on the card. That is why a 30B checkpoint still does
+//! not fit two 24 GB cards and part of it streams per token - slow, but
+//! bounded and correct. `BRAIN_OMNI_INT8_CHECKPOINT`
+//! ([`int8_thinker_multi_from_env`]) is what changes the precision, and it
+//! uses the identical placement mechanism.
 //!
 //! Config is env-only, mirroring `TtsResident`:
 //!   * `BRAIN_OMNI_HF_DIR` — the real HF checkpoint directory (config.json +
@@ -26,32 +36,65 @@
 //!     not served.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
+use checkpoint::weightio::WeightReader;
 use omni::caps::OmniProvider;
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-/// Qwen3-Omni behind the scheduler. Loads directly from a real HF checkpoint
-/// directory (`BRAIN_OMNI_HF_DIR`) — no brain-native import step involved yet
-/// (there are two open loader-side naming gaps for Talker/Code2Wav).
-/// Dispatches every declared action (`generate`, `speak`, `converse`)
-/// generically through `omni::caps::run_action` -- a new action needs no
-/// change here, only a `manifest()` entry and a `resolve_action` arm in
-/// `omni::caps`.
+/// The placement this resident committed to: which cards, with what usable
+/// capacity, and how many bytes each will hold. Computed once from the
+/// checkpoint header (no GPU) and reused by both `estimate_multi` and
+/// `activate_multi`, so the reservation and the load can never describe
+/// different cards.
+#[derive(Clone, Debug, Default)]
+struct Plan {
+    /// `(canonical GPU index, usable bytes)` for the devices the plan uses -
+    /// exactly what is handed to `OmniProvider::load_on`.
+    devices: Vec<(u32, u64)>,
+    /// Resident device bytes per entry of `devices`.
+    bytes: Vec<u64>,
+    /// Host bytes the instance holds regardless of placement.
+    host_ram: u64,
+}
+
+/// Qwen3-Omni behind the scheduler, placed across as many GPUs as its real
+/// per-layer bytes need. Dispatches both declared actions (`generate`,
+/// `speak`) through `omni::caps::run_action`.
+///
+/// Reachable ONLY via `Executor::register_multi` - see [`Self::activate`],
+/// which refuses the single-device path rather than silently building a GPU
+/// the scheduler did not reserve.
 pub struct OmniResident {
     hf_dir: String,
+    /// Candidate devices as `(index, USABLE bytes)`: the caller's budgeted
+    /// cards minus its per-card reserve. Capacity travels with identity
+    /// because the split must respect it (a 24 GB and an 8 GB card cannot
+    /// take the same number of layers).
+    devices: Vec<(u32, u64)>,
+    plan: OnceLock<Plan>,
 }
 
 impl OmniResident {
     /// Configure from the environment. Returns `None` (not served) when
-    /// `BRAIN_OMNI_HF_DIR` is unset/empty, like every other `from_env` resident.
-    pub fn from_env() -> Option<OmniResident> {
+    /// `BRAIN_OMNI_HF_DIR` is unset/empty, like every other `from_env`
+    /// resident. `gpus` is the caller's budgeted `(index, TOTAL bytes)` list
+    /// and `reserved` its per-card headroom, so what is carried on is genuinely
+    /// usable capacity - the same figure the scheduler budgets against.
+    pub fn from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<OmniResident> {
         let hf_dir = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty())?;
-        Some(OmniResident { hf_dir })
+        let devices = if gpus.is_empty() {
+            eprintln!("brain: omni has no budgeted GPU; it will fall back to the ambient device");
+            Vec::new()
+        } else {
+            gpus.iter().map(|&(i, total)| (i, total.saturating_sub(reserved))).collect()
+        };
+        Some(OmniResident { hf_dir, devices, plan: OnceLock::new() })
     }
 
     /// Rough on-disk size of the checkpoint directory (sum of `*.safetensors`
-    /// shards) — the mmap footprint `generate`'s streaming reads touch, used
-    /// as `estimate()`'s RAM figure. Not a VRAM budget (see this module's doc).
+    /// shards) - the mmap footprint the loader's reads touch, used as the host
+    /// RAM figure.
     fn checkpoint_bytes(&self) -> u64 {
         std::fs::read_dir(&self.hf_dir)
             .into_iter()
@@ -60,6 +103,66 @@ impl OmniResident {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"))
             .filter_map(|e| e.metadata().ok().map(|m| m.len()))
             .sum()
+    }
+
+    /// The placement, computed once. Returns a plan naming ZERO devices (never
+    /// a panic) when the checkpoint cannot be opened or does not fit - the
+    /// documented "this model is unavailable" signal, which `claim_multi`
+    /// turns into a clean per-job error instead of a dispatcher crash.
+    /// `estimate_multi` runs on the dispatcher thread, so neither a panic nor
+    /// a re-parse of a 28k-tensor header per scheduling round is acceptable.
+    fn plan(&self) -> Plan {
+        if let Some(p) = self.plan.get() {
+            return p.clone();
+        }
+        let computed = self.plan_uncached();
+        // A losing racer's value is simply dropped: `plan_uncached` is a pure
+        // function of `self`, so which racer wins cannot matter.
+        let _ = self.plan.set(computed.clone());
+        computed
+    }
+
+    fn plan_uncached(&self) -> Plan {
+        let host_ram = {
+            let bytes = self.checkpoint_bytes();
+            if bytes > 0 { bytes } else { 70u64 << 30 } // 70 GiB fallback: the real checkpoint's own bf16 size
+        };
+        if self.devices.is_empty() {
+            return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
+        }
+        let reader = match WeightReader::open_hf_dir(std::path::Path::new(&self.hf_dir)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("brain/omni: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.hf_dir);
+                return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
+            }
+        };
+        let cfg = match std::fs::read_to_string(std::path::Path::new(&self.hf_dir).join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            Some(root) => omni::config::OmniConfig::from_json(&root).thinker.text,
+            None => {
+                eprintln!("brain/omni: cannot read '{}/config.json' -- reporting zero devices", self.hf_dir);
+                return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
+            }
+        };
+        let Some(cost) = omni::thinker_plan::layer_cost(&reader, &cfg) else {
+            eprintln!("brain/omni: '{}' is missing Thinker tensors this model loads -- reporting zero devices", self.hf_dir);
+            return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
+        };
+        let caps: Vec<(usize, u64)> = self.devices.iter().map(|&(_, c)| c).enumerate().collect();
+        let Some(placement) = omni::thinker_plan::place_fewest_devices(&cost, &caps) else {
+            eprintln!(
+                "brain/omni: does not fit the {} budgeted device(s) even streamed ({} bytes available) -- reporting zero devices",
+                caps.len(),
+                caps.iter().map(|&(_, c)| c).sum::<u64>()
+            );
+            return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
+        };
+        let devices = placement.stages.iter().map(|s| self.devices[s.device]).collect();
+        let bytes = placement.stages.iter().map(|s| s.bytes).collect();
+        Plan { devices, bytes, host_ram }
     }
 }
 
@@ -72,14 +175,41 @@ impl ResidentModel for OmniResident {
         InstanceKey::new(omni::caps::MODEL, "default")
     }
 
+    /// Deliberately unusable: this model is registered via `register_multi`
+    /// and claimed via `claim_multi`, so the single-device estimate is never
+    /// consulted. Reporting a real figure here would invite the plain
+    /// `register` path, which is exactly how it previously ended up on the CPU
+    /// lane with an unbudgeted GPU behind it.
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        let bytes = self.checkpoint_bytes();
-        let ram = if bytes > 0 { bytes } else { 70u64 << 30 }; // 70 GiB fallback: the real checkpoint's own bf16 size
-        MemCost::new(0, ram)
+        MemCost::new(0, 0)
     }
 
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
-        let provider = OmniProvider::load(&self.hf_dir)?;
+        Err("brain/omni: single-device activate is not supported -- this model places itself across devices, claim it via ResidencyManager::claim_multi".to_string())
+    }
+}
+
+impl MultiDeviceResidentModel for OmniResident {
+    fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
+        let plan = self.plan();
+        let per_device = plan.devices.iter().zip(&plan.bytes).map(|(&(i, _), &b)| (Device::Gpu(i), b)).collect();
+        MultiDeviceCost::new(per_device, plan.host_ram)
+    }
+
+    fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let plan = self.plan();
+        if plan.devices.is_empty() {
+            return Err("brain/omni: no placement (checkpoint unreadable, or it does not fit the budgeted devices)".to_string());
+        }
+        // `claim_multi` reserves against exactly the devices `estimate_multi`
+        // named, so it hands back that same set. Insisting on it here (rather
+        // than silently re-planning for whatever arrives) is what makes the
+        // reservation and the allocation describe the same bytes.
+        let planned: Vec<Device> = plan.devices.iter().map(|&(i, _)| Device::Gpu(i)).collect();
+        if devices.len() != planned.len() || !devices.iter().all(|d| planned.contains(d)) {
+            return Err(format!("brain/omni: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
+        }
+        let provider = OmniProvider::load_on(&self.hf_dir, &plan.devices)?;
         Ok(Box::new(OmniInstance { inner: provider.inner() }))
     }
 }

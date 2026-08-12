@@ -647,6 +647,22 @@ pub trait Backend: Send + Sync {
         2 * 1024 * 1024 * 1024 - 1
     }
 
+    /// The largest SINGLE allocation this device will accept, in bytes - a
+    /// different ceiling from [`Self::max_storage_binding_bytes`] and usually
+    /// the larger of the two: a buffer may legally be bigger than any one
+    /// binding into it (a caller then binds sub-ranges, see
+    /// [`Self::step_sliced`]).
+    ///
+    /// Both are properties of the driver/API and must be READ, never assumed:
+    /// on a Vulkan/wgpu backend the buffer ceiling comes from the driver's own
+    /// `maxMemoryAllocationSize` while the binding ceiling is wgpu's `i32`
+    /// clamp on `maxStorageBufferRange`, and the two differ by 2x on the same
+    /// card. The default is "no ceiling this API can express" - correct for a
+    /// host backend, whose only limit is the allocator's.
+    fn max_buffer_bytes(&self) -> u64 {
+        u64::MAX
+    }
+
     /// What this device can actually do — see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.
     fn caps(&self) -> DeviceCaps;

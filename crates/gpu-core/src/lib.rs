@@ -55,6 +55,15 @@ pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
 pub use devices::{ComputeSet, DeviceSpec, Inventory};
 
+/// Declare that the process is exiting, after which GPU devices are leaked
+/// rather than destroyed - see `backend_wgpu::set_process_exiting` for the
+/// measured multi-device teardown fault this exists to avoid. Call it once,
+/// from a process's own shutdown path, never from library code.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_process_exiting() {
+    backend_wgpu::set_process_exiting();
+}
+
 
 /// A process-wide device fixture for **test binaries** — explicit, documented,
 /// and torn down before exit.
@@ -641,6 +650,12 @@ mod native_facade {
         /// pick attention backends per-card instead of assuming a fixed limit.
         pub fn max_storage_binding_bytes(&self) -> u64 {
             self.inner.max_storage_binding_bytes()
+        }
+        /// Largest single ALLOCATION this device allows, in bytes - see
+        /// `backend_api::Backend::max_buffer_bytes` for why this is a separate
+        /// (and usually larger) number than the binding ceiling above.
+        pub fn max_buffer_bytes(&self) -> u64 {
+            self.inner.max_buffer_bytes()
         }
         /// Start all recorded work on the device without waiting (frame
         /// pipelining: overlap host work with device compute; a later `read`

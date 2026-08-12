@@ -94,6 +94,41 @@ impl Shutdown {
 }
 
 /// A fresh, unfired shutdown channel.
+/// End the process **now**, with `code`, running no `atexit` handler and no
+/// shared-library finalizer - only the standard streams are flushed first.
+///
+/// The ordinary way for a Rust program to end (returning from `main`, or
+/// `std::process::exit`) calls libc `exit(3)`, which runs every registered
+/// destructor and then unmaps shared libraries. That is safe only if no thread
+/// is still executing code from those libraries - and a process that has
+/// talked to a GPU does not control that: the graphics driver keeps worker
+/// threads of its own that a program can neither see nor join.
+///
+/// This is a measured hazard on this engine's hardware, not a precaution. A
+/// server that had placed a model across TWO GPUs faulted intermittently on
+/// SIGTERM - always inside a driver thread, always as a jump to an address
+/// that is no longer mapped (so no Rust frame appears in the trace at all),
+/// and never in the same run restricted to ONE GPU. Nothing in that final
+/// teardown is needed: the kernel reclaims every allocation, every mapping and
+/// every device handle when the process dies either way.
+///
+/// Use it only as the LAST statement of a process's own shutdown path, once
+/// every surface has drained - it skips destructors, so anything that must be
+/// flushed or committed has to have happened already.
+pub fn exit_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    // SAFETY: `_exit` is async-signal-safe and never returns. The streams
+    // above are the only buffered state this process owns at this point.
+    unsafe {
+        libc::_exit(code)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(code)
+}
+
 pub fn channel() -> (Trigger, Shutdown) {
     let (tx, rx) = watch::channel(false);
     (Trigger { tx }, Shutdown { rx })

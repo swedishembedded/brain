@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use gpu_core::Gpu;
 
+pub mod dtype;
 pub mod upload;
 
 /// Whether a parameter is optimised. `Frozen` parameters allocate **only** the
