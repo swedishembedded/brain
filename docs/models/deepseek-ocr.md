@@ -206,9 +206,8 @@ work (each image needs its own encoder pass, and the decoder has no batch axis).
 INT8 path).
 
 **No multimodal oracle for the decode loop.** The text decoder alone is matched
-token for token against an independent reference implementation on these
-weights; the image+decoder loop is gated on completing, on finite logits and
-on causal self-consistency, because that reference's own debug callback
-segfaults inside this model's CLIP graph and no post-image token-id capture
-exists to compare against. So "brain decodes the same tokens as the
-reference for a real page" is **not** claimed.
+token for token against llama.cpp on these weights; the image+decoder loop is
+gated on completing, on finite logits and on causal self-consistency, because
+llama.cpp's debug callback segfaults inside this model's CLIP graph and no
+post-image token-id capture exists to compare against. So "brain decodes the
+same tokens as the reference for a real page" is **not** claimed.
