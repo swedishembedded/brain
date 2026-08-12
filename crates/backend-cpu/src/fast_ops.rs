@@ -1338,6 +1338,51 @@ pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: us
     });
 }
 
+/// Transpose `[tk, hd]` (row `j` = `src[j*stride+off .. +hd]`) into `vt[d,j]`
+/// (`[hd, tk]`, row-major), in `JT`-row tiles.
+///
+/// The naive one-pass loop (`for j { for d { vt[d*tk+j] = src[..] } }`) reads
+/// each source row contiguously but WRITES `hd` elements `tk` floats apart --
+/// `hd` separate cache lines touched per `j`, `tk` times, so the write side
+/// streams through the whole `hd*tk` destination in a scatter pattern with no
+/// reuse. Measured the dominant cost of [`attn_apply_cross`] at SAM-1
+/// DeepSeek-OCR's real T=4096 global-attention shape: 70.9% of the whole
+/// tower's CPU forward, 264 calls averaging 192 ms each, vs
+/// `attn_scores_cross`'s 5.9 ms/call at the SAME total FLOPs -- the only
+/// structural difference is this transpose.
+///
+/// Tiling by `JT` source rows, buffered THEN written `d`-major, bounds each
+/// tile's destination footprint to `hd*JT` floats (4 KiB at `hd=64, JT=16`,
+/// one 64-byte cache line per destination row) and - the part that actually
+/// matters - writes each of those lines exactly ONCE, fully, instead of
+/// revisiting it `JT` times interleaved with `hd-1` OTHER lines in between
+/// (the naive `for j { for d { .. } }` order: row `d`'s line for tile-column
+/// `j` is written, then `hd-1` unrelated lines are touched before that same
+/// line is written again for `j+1`, likely evicted from L1 by then at
+/// `hd*JT*4 = 4 KiB` per row times 64 rows). Buffering the tile's `JT` source
+/// rows first (a plain contiguous read per row, `hd` floats each) makes the
+/// `d`-outer / `j`-inner write order possible without re-reading the source
+/// out of order.
+fn transpose_rows_tiled(src: &[f32], stride: usize, off: usize, tk: usize, hd: usize, vt: &mut [f32]) {
+    const JT: usize = 16;
+    let mut buf = [0f32; JT * 64]; // hd is <= 64 for every SamViTConfig this crate defines.
+    debug_assert!(hd <= 64, "transpose_rows_tiled: hd={hd} exceeds the 64-wide scratch tile");
+    let mut j0 = 0usize;
+    while j0 < tk {
+        let jn = (j0 + JT).min(tk);
+        for (jj, j) in (j0..jn).enumerate() {
+            buf[jj * hd..jj * hd + hd].copy_from_slice(&src[j * stride + off..j * stride + off + hd]);
+        }
+        for d in 0..hd {
+            let row = &mut vt[d * tk + j0..d * tk + jn];
+            for (jj, dst) in row.iter_mut().enumerate() {
+                *dst = buf[jj * hd + d];
+            }
+        }
+        j0 = jn;
+    }
+}
+
 /// `attn_apply_cross`: out[b,i,h,:] = Σ_j probs[b,h,i,j]·kv_v[b,j,h,:], written
 /// into the contiguous `[rows, d_model]` context at column h·hd.
 /// params = [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model].
@@ -1359,12 +1404,8 @@ pub fn attn_apply_cross(
     let mut ctxh = vec![0f32; tq * hd];
     for b in 0..bsz {
         for h in 0..heads {
-            for j in 0..tk {
-                let src = (b * tk + j) * kv_stride + v_off + h * hd;
-                for d in 0..hd {
-                    vt[d * tk + j] = kv[src + d];
-                }
-            }
+            let base = b * tk * kv_stride + v_off + h * hd;
+            transpose_rows_tiled(&kv[base..], kv_stride, 0, tk, hd, &mut vt);
             let p = &probs[((b * heads + h) * tq) * tk..((b * heads + h) * tq + tq) * tk];
             // ctx[i,d] = Σ_j P[i,j]·V[j,d] = abt(P[tq,tk], Vᵀ[hd,tk]).
             matmul_abt(p, &vt, &mut ctxh, tq, tk, hd);
@@ -1383,6 +1424,26 @@ mod tests {
     fn lcg(s: &mut u32) -> f32 {
         *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
         ((*s >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+    }
+
+    /// `transpose_rows_tiled` against the naive `vt[d*tk+j] = src[j*stride+off+d]`
+    /// definition, over shapes that are and are not multiples of the tile width
+    /// (`JT = 16`) and that exercise a non-zero `off`/`stride` (a real caller
+    /// slices one head out of a fused `[tk, heads*hd]` buffer).
+    #[test]
+    fn transpose_rows_tiled_matches_the_naive_definition() {
+        let mut seed = 3u32;
+        for &(tk, hd, stride, off) in &[(4096usize, 64usize, 768usize, 128usize), (17, 5, 5, 0), (1, 3, 3, 0), (33, 64, 64, 0)] {
+            let src: Vec<f32> = (0..tk * stride).map(|_| lcg(&mut seed)).collect();
+            let mut vt = vec![0f32; hd * tk];
+            transpose_rows_tiled(&src, stride, off, tk, hd, &mut vt);
+            for j in 0..tk {
+                for d in 0..hd {
+                    let want = src[j * stride + off + d];
+                    assert_eq!(vt[d * tk + j], want, "tk={tk} hd={hd} stride={stride} off={off} j={j} d={d}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1589,6 +1650,76 @@ mod tests {
         eprintln!(
             "gqa_apply   bsz={bsz} heads={n_heads} T={t} hd={hd} ({} threads): AVX2 {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | speedup {:.1}x",
             rayon::current_num_threads(), avx_apply * 1e3, flops_apply / avx_apply, scal_apply * 1e3, scal_apply / avx_apply
+        );
+    }
+
+    // Perf microbench (run: cargo test -p brain-backend-cpu --release attn_apply_cross_bench -- --ignored --nocapture)
+    //
+    // A/B, in the SAME process, back to back -- the two calls see the same
+    // contention from whatever else is on the box, so the RATIO stays
+    // meaningful even when the absolute numbers do not.
+    #[test]
+    #[ignore]
+    fn attn_apply_cross_bench() {
+        // SAM-1 ViT-B's global-attention block at DeepSeek-OCR's real shape
+        // (`SamViTConfig::deepseek_ocr()`): bsz=1, heads=12, hd=64, one query
+        // chunk (attn_chunk=256) against the full T=4096 key/value extent.
+        let (bsz, heads, tq, tk, hd) = (1usize, 12usize, 256usize, 4096usize, 64usize);
+        let kv_stride = 3 * heads * hd; // fused qkv, v at the top third
+        let v_off = 2 * heads * hd;
+        let d_model = heads * hd;
+        let mut s = 11u32;
+        let probs: Vec<f32> = (0..bsz * heads * tq * tk).map(|_| lcg(&mut s).abs()).collect();
+        let kv: Vec<f32> = (0..bsz * tk * kv_stride).map(|_| lcg(&mut s)).collect();
+        let mut out = vec![0f32; bsz * tq * d_model];
+
+        // Naive reference: the pre-tiling transpose this file used to run
+        // (`vt[d*tk+j] = kv[..]`, one `j` at a time, `hd` scattered writes each).
+        fn attn_apply_cross_naive(
+            probs: &[f32], kv: &[f32], out: &mut [f32], bsz: usize, heads: usize, tq: usize, tk: usize, hd: usize,
+            kv_stride: usize, v_off: usize, d_model: usize,
+        ) {
+            let mut vt = vec![0f32; hd * tk];
+            let mut ctxh = vec![0f32; tq * hd];
+            for b in 0..bsz {
+                for h in 0..heads {
+                    for j in 0..tk {
+                        let src = (b * tk + j) * kv_stride + v_off + h * hd;
+                        for d in 0..hd {
+                            vt[d * tk + j] = kv[src + d];
+                        }
+                    }
+                    let p = &probs[((b * heads + h) * tq) * tk..((b * heads + h) * tq + tq) * tk];
+                    matmul_abt(p, &vt, &mut ctxh, tq, tk, hd);
+                    for i in 0..tq {
+                        let dst = (b * tq + i) * d_model + h * hd;
+                        out[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
+                    }
+                }
+            }
+        }
+
+        let iters = 8;
+        attn_apply_cross(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model); // warm
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            attn_apply_cross(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model);
+        }
+        let tiled = t.elapsed().as_secs_f64() / iters as f64;
+
+        attn_apply_cross_naive(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model); // warm
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            attn_apply_cross_naive(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model);
+        }
+        let naive = t.elapsed().as_secs_f64() / iters as f64;
+
+        eprintln!(
+            "attn_apply_cross bsz={bsz} heads={heads} tq={tq} tk={tk} hd={hd}: \
+             naive-transpose {:.2} ms | tiled-transpose {:.2} ms | {:.2}x",
+            naive * 1e3,
+            tiled * 1e3,
+            naive / tiled
         );
     }
 
