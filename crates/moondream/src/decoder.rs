@@ -296,7 +296,7 @@ impl MoondreamDecoderGrads {
 
 const LN_EPS: f32 = 1e-5;
 
-/// One Moondream decoder block — the PARALLEL attn+MLP form: a single shared
+/// One Moondream decoder block - the PARALLEL attn+MLP form: a single shared
 /// LayerNorm feeds BOTH the attention and the FFN, and `x = x + l_attn + l_mlp`
 /// (a 3-way residual). The attention is full MHA with **partial RoPE** and the
 /// **prefix-LM mask** (image prefix bidirectional, else causal); the FFN is the
@@ -492,7 +492,7 @@ impl<'g> MoondreamBlock<'g> {
     /// scratch as the SSA cache (valid immediately after `forward`). The two branches
     /// feed the SAME shared LayerNorm, so their input-grads accumulate into `d_ln`
     /// (the MLP `matmul_dx` writes it, the attention `matmul_dx` adds) before one
-    /// `layernorm_dx` — the shared-activation pattern. The masked-bidir attention
+    /// `layernorm_dx` - the shared-activation pattern. The masked-bidir attention
     /// backward reuses the ViT `_cross` kernels: the cached `probs` already carry the
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
@@ -675,7 +675,7 @@ impl MoondreamBlockGrads {
 }
 
 /// Sparse-MoE FFN: `router → for each expert (w_h, w_g → geglu_shift → w_down) →
-/// gate-weighted accumulate`. Returns the mixed output `[t, d]` (no residual — the
+/// gate-weighted accumulate`. Returns the mixed output `[t, d]` (no residual - the
 /// parallel block owns the 3-way residual). Weight keys: `router.weight` `[e, d]`,
 /// and per expert `experts.{e}.{w_h,w_g}.weight` `[inner, d]`, `w_down.weight`
 /// `[d, inner]`.
@@ -725,7 +725,9 @@ impl<'g> MoeFfn<'g> {
         let mut s: Vec<Step> = Vec::new();
         // Router: logits = xn·router.weight^T, then top-k softmax gate.
         s.push(self.gpu.step(0, &[xn, self.wb("router.weight"), &self.logits], &[t, d, e], t * e));
-        s.push(self.gpu.step(1, &[&self.logits, &self.gate], &[t, e, self.top_k], t));
+        // norm=1, scale=1.0: `router_gate.wgsl`'s renormalised top-k gate
+        // (Moondream 3's router), spelled rather than implied.
+        s.push(self.gpu.step(1, &[&self.logits, &self.gate], &[t, e, self.top_k, 1, f(1.0)], t));
         for ei in 0..e {
             let ep = |leaf: &str| self.wb(&format!("experts.{ei}.{leaf}"));
             s.push(self.gpu.step(0, &[xn, ep("w_h.weight"), &self.h], &[t, d, inner], t * inner));
@@ -745,7 +747,7 @@ impl<'g> MoeFfn<'g> {
 
     /// MoE backward: from the mixed-output grad `d_out` (= the block's `d_out`, since
     /// the MoE output is a residual branch), fill `gr` and write the input grad into
-    /// `d_xn` (the shared-LN branch grad — its first write overwrites, so `d_xn` need
+    /// `d_xn` (the shared-LN branch grad - its first write overwrites, so `d_xn` need
     /// not be pre-zeroed). Per expert the forward is recomputed (the scratch isn't
     /// cached per-expert), then: combine bwd (`scale_add_dexp/dgate`) → `w_down` →
     /// `geglu_shift_da/db` → `w_h`/`w_g`. Finally the router (`router_bwd`, no aux/z
@@ -793,7 +795,7 @@ impl<'g> MoeFfn<'g> {
         g.submit(
             &[],
             &[
-                g.step(K_ROUTER_BWD, &[&self.logits, &self.gate, &d_gate, &fe, &d_logits], &[t, e, self.top_k, 0, f(0.0), f(0.0)], t),
+                g.step(K_ROUTER_BWD, &[&self.logits, &self.gate, &d_gate, &fe, &d_logits], &[t, e, self.top_k, 0, f(0.0), f(0.0), 1, f(1.0)], t),
                 g.step(K_MATMUL_DX, &[&d_logits, self.wb("router.weight"), d_xn], &[t, d, e, 1], t * d),
                 g.step(K_MATMUL_DW, &[&d_logits, xn, &gr.router], &[t, d, e], e * d),
             ],
