@@ -6,13 +6,18 @@
 //!
 //! **Validation-tier, not production** (`omni::caps`'s own module doc has the
 //! full reasoning): `generate` streams every decoder layer's weights fresh
-//! from the real HF checkpoint on every call, with no KV-cache and no int8/
-//! GPU-sharded residency. `estimate()` reports the checkpoint's on-disk size
-//! as a RAM cost (the mmap footprint the streaming reads touch), not a real
-//! VRAM budget — this resident does not yet participate in the GPU-residency
-//! scheduling a production Omni would need; that is
-//! `crates/qwen3/src/shard.rs`'s int8-sharded-across-2-GPUs pattern, not yet
-//! built for Thinker.
+//! from the real HF checkpoint on every generated token, and `estimate()`
+//! reports the checkpoint's on-disk size as a RAM cost (the mmap footprint
+//! the streaming reads touch), not a real VRAM budget - this resident does
+//! not participate in GPU-residency scheduling at all. It is correct and
+//! slow, and it is kept because it is the path with the full chat/multimodal
+//! surface (`generate` with `messages` + audio/image/video, plus `speak`).
+//!
+//! **The GPU-resident path is [`int8_thinker_multi_from_env`] below**
+//! (`omni::int8_thinker_resident`): real int8 weights, resident across as
+//! many GPUs as the checkpoint's per-layer bytes actually need, loaded with
+//! bounded host memory. Prefer it whenever the weights should stay on the
+//! cards between calls.
 //!
 //! Config is env-only, mirroring `TtsResident`:
 //!   * `BRAIN_OMNI_HF_DIR` — the real HF checkpoint directory (config.json +
@@ -95,31 +100,39 @@ impl Instance for OmniInstance {
     }
 }
 
-/// The int8 dual-GPU Thinker (`omni::int8_thinker_resident::Int8ThinkerResident`)
-/// — layer-sharded across every budgeted GPU, streamed straight from a
-/// pre-quantized brain-native checkpoint. Reachable ONLY via
-/// `Executor::register_multi` (never `register` — see that type's own doc on
-/// why a multi-device-only model must stay out of the plain single-device
-/// registry). A SEPARATE resident from [`OmniResident`] above: that one is
-/// the validation-tier, single-device, no-KV-cache HF-checkpoint path; this
-/// is the sharded int8 path, and the two are not interchangeable.
+/// The int8 GPU-sharded Thinker (`omni::int8_thinker_resident::
+/// Int8ThinkerResident`) - layer-sharded across as many budgeted GPUs as its
+/// real per-layer bytes need, streamed straight from a pre-quantized
+/// brain-native checkpoint. Reachable ONLY via `Executor::register_multi`
+/// (never `register` - see that type's own doc on why a multi-device-only
+/// model must stay out of the plain single-device registry). A SEPARATE
+/// resident from [`OmniResident`] above: that one is the validation-tier,
+/// single-device, HF-checkpoint path that re-streams every layer per token;
+/// this one is genuinely GPU-resident, and the two are not interchangeable.
 ///
 /// Config is env-only:
 ///   * `BRAIN_OMNI_INT8_CHECKPOINT` — a brain-native int8-quantized checkpoint
-///     (the output of `omni::import`'s int8-native path). Unset ⇒ not served.
+///     (the output of `omni::import`'s int8-native path, which
+///     `brain omni import` produces from a raw HF directory). Unset ⇒ not
+///     served.
 ///
-/// `gpus` is `build_executor`'s own budgeted GPU list — the shard count
-/// tracks whatever the box actually has (never hardcoded), which is exactly
-/// the gap the int8 dual-GPU residency work closed in
-/// `Int8ThinkerResident::estimate_multi` itself: hardcoding `[Gpu(0), Gpu(1)]`
-/// would silently hang on a 1-GPU box and waste a card on a 3+-GPU one.
-pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)]) -> Option<omni::int8_thinker_resident::Int8ThinkerResident> {
+/// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
+/// bytes)`, and `reserved` the per-card headroom it keeps free - so what is
+/// handed on is each card's genuinely USABLE capacity, the same figure the
+/// scheduler will budget against. Passing capacity (not just identity) is
+/// what lets `model::shard::plan_fewest_devices` size the split to the
+/// hardware: a 24 GB and an 8 GB card get layers in that proportion, a model
+/// that fits one card is not spread over three, and a model that fits none of
+/// them is reported as unplaceable instead of OOMing mid-load. Deriving the
+/// device list from `gpus` (rather than hardcoding `[Gpu(0), Gpu(1)]`) is
+/// also what keeps it correct on a 1-GPU box and on a 3+-GPU one.
+pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<omni::int8_thinker_resident::Int8ThinkerResident> {
     let checkpoint_path = std::env::var("BRAIN_OMNI_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
     if gpus.is_empty() {
         eprintln!("brain: omni-int8-thinker-multi not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)");
         return None;
     }
-    let devices: Vec<Device> = gpus.iter().map(|&(i, _)| Device::Gpu(i)).collect();
+    let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     // Real numbers confirmed against the real checkpoint's config (not
     // assumed) -- validated end to end on two physically separate GPUs
     // during the int8 dual-GPU residency work.

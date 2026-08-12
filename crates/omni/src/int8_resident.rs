@@ -29,7 +29,8 @@
 use std::collections::HashMap;
 
 use checkpoint::weightio::WeightReader;
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::DeviceBuffer;
+use paramstore::upload::Uploader;
 
 use crate::config::MoeTextConfig;
 
@@ -85,21 +86,27 @@ fn expert_name(l: usize, e: usize, leaf: &str) -> String {
 
 impl ThinkerInt8Store {
     /// Stream + upload `owned_layers`' routed-expert weights from `reader`
-    /// onto `gpu`. Panics loudly (never silently skips) if an expected
-    /// tensor is missing or has the wrong dtype - `WeightReader::tensor_u32`/
-    /// `tensor` already panic on a dtype mismatch (this session's earlier
-    /// `checkpoint` work), so a checkpoint that was not actually quantized
-    /// the way `omni::import` promises fails HERE, at load time, not with a
-    /// silently-wrong forward pass later.
-    pub fn build(gpu: &Gpu, reader: &WeightReader, owned_layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> ThinkerInt8Store {
+    /// onto `up`'s device. Panics loudly (never silently skips) if an
+    /// expected tensor is missing or has the wrong dtype, so a checkpoint
+    /// that was not actually quantized the way `omni::import` promises fails
+    /// HERE, at load time, not with a silently-wrong forward pass later.
+    ///
+    /// Takes an [`Uploader`] rather than a bare `Gpu` because both of the
+    /// guarantees this load needs are properties of the WHOLE load, not of
+    /// one tensor: host staging is bounded per chunk, and the device-side
+    /// write staging is drained on a byte budget that spans every tensor
+    /// (see `paramstore::upload`'s module doc). A caller building several
+    /// stores' worth of weights onto one card should therefore pass the SAME
+    /// uploader through all of them.
+    pub fn build(up: &mut Uploader, reader: &WeightReader, owned_layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> ThinkerInt8Store {
         let mut layers = HashMap::new();
         for l in owned_layers {
             let mut experts = Vec::with_capacity(cfg.n_experts as usize);
             for e in 0..cfg.n_experts as usize {
-                let gate = load_lin8(gpu, reader, &expert_name(l, e, "gate"));
-                let up = load_lin8(gpu, reader, &expert_name(l, e, "up"));
-                let down = load_lin8(gpu, reader, &expert_name(l, e, "down"));
-                experts.push((gate, up, down));
+                let gate = load_lin8(up, reader, &expert_name(l, e, "gate"));
+                let up_w = load_lin8(up, reader, &expert_name(l, e, "up"));
+                let down = load_lin8(up, reader, &expert_name(l, e, "down"));
+                experts.push((gate, up_w, down));
             }
             layers.insert(l, ThinkerLayerExperts8 { experts });
         }
@@ -121,21 +128,24 @@ impl ThinkerInt8Store {
     }
 }
 
-/// Read one packed int8 weight + its `.scale` sibling and upload both,
-/// UNQUANTIZED (no dequantize-then-f32 round trip) -- the primitive every
-/// resident int8 weight (expert or otherwise) is built from. `pub` so both
-/// in-crate non-expert callers (e.g. `int8_thinker_resident`'s `lm_head_w`
-/// loader) and integration tests that need an independently-assembled int8
-/// reference can reuse it without re-deriving this read+upload sequence.
-pub fn load_lin8(gpu: &Gpu, reader: &WeightReader, name: &str) -> ExpertLin8 {
-    let packed = reader.tensor_u32(name).unwrap_or_else(|| panic!("ThinkerInt8Store: missing packed weight '{name}'"));
+/// One expert linear, streamed from the checkpoint straight to the device.
+///
+/// Both tensors go through the [`Uploader`], never `WeightReader::tensor_u32`
+/// / `tensor` + `storage_init`: those materialize the whole tensor on the
+/// host first, and `storage_init`'s mapped-at-creation buffer is the wrong
+/// memory type for a weight on a non-ReBAR card (`paramstore`'s own loader
+/// carries the measurement). The packed weight is normally lent zero-copy
+/// straight out of the mapping - brain-native checkpoints are written
+/// 8-byte-aligned precisely so that works - so a real expert costs no host
+/// allocation at all on the way in.
+pub(crate) fn load_lin8(up: &mut Uploader, reader: &WeightReader, name: &str) -> ExpertLin8 {
+    let packed_numel = reader.shape(name).map(|s| s.iter().product::<u64>() as usize).unwrap_or_else(|| panic!("ThinkerInt8Store: missing packed weight '{name}'"));
     let scale_name = format!("{name}.scale");
-    let scale = reader.tensor(&scale_name).unwrap_or_else(|| panic!("ThinkerInt8Store: missing scale sibling '{scale_name}'"));
-    let pb = gpu.storage(packed.len() as u64);
-    gpu.write(&pb, &packed);
-    gpu.poll_wait(); // reclaim the write's staging buffer before the next weight (qwen3::q8's own discipline)
-    let sb = gpu.storage_init(&scale_name, &scale);
-    ExpertLin8 { packed: pb, scale: sb }
+    let scale_numel = reader.shape(&scale_name).map(|s| s.iter().product::<u64>() as usize).unwrap_or_else(|| panic!("ThinkerInt8Store: missing scale sibling '{scale_name}'"));
+    let packed = up.packed(reader, name, packed_numel).unwrap_or_else(|e| panic!("ThinkerInt8Store: {e}"));
+    let scale = up.tensor(reader, &scale_name, scale_numel).unwrap_or_else(|e| panic!("ThinkerInt8Store: {e}"));
+    up.maybe_drain(&packed);
+    ExpertLin8 { packed, scale }
 }
 
 /// One layer's routed experts PLUS the always-active shared expert's own
@@ -205,23 +215,23 @@ impl TalkerInt8Store {
     /// [`ThinkerInt8Store::build`]'s Talker twin: routed experts PLUS the
     /// shared expert's three linears, plus its gate (dequantized on read if
     /// needed - see [`TalkerLayerExperts8`]'s doc).
-    pub fn build(gpu: &Gpu, reader: &WeightReader, owned_layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> TalkerInt8Store {
+    pub fn build(up: &mut Uploader, reader: &WeightReader, owned_layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> TalkerInt8Store {
         let mut layers = HashMap::new();
         for l in owned_layers {
             let mut experts = Vec::with_capacity(cfg.n_experts as usize);
             for e in 0..cfg.n_experts as usize {
-                let gate = load_lin8(gpu, reader, &talker_expert_name(l, e, "gate"));
-                let up = load_lin8(gpu, reader, &talker_expert_name(l, e, "up"));
-                let down = load_lin8(gpu, reader, &talker_expert_name(l, e, "down"));
-                experts.push((gate, up, down));
+                let gate = load_lin8(up, reader, &talker_expert_name(l, e, "gate"));
+                let up_w = load_lin8(up, reader, &talker_expert_name(l, e, "up"));
+                let down = load_lin8(up, reader, &talker_expert_name(l, e, "down"));
+                experts.push((gate, up_w, down));
             }
             let shared_expert = (
-                load_lin8(gpu, reader, &talker_shared_expert_name(l, "gate")),
-                load_lin8(gpu, reader, &talker_shared_expert_name(l, "up")),
-                load_lin8(gpu, reader, &talker_shared_expert_name(l, "down")),
+                load_lin8(up, reader, &talker_shared_expert_name(l, "gate")),
+                load_lin8(up, reader, &talker_shared_expert_name(l, "up")),
+                load_lin8(up, reader, &talker_shared_expert_name(l, "down")),
             );
             let gate_name = format!("talker.blocks.{l}.mlp.shared_expert_gate.weight");
-            let shared_expert_gate = crate::int8_thinker_resident::load_mat(reader, gpu, &gate_name, 1, cfg.hidden);
+            let shared_expert_gate = crate::int8_thinker_resident::load_mat(up, reader, &gate_name);
             layers.insert(l, TalkerLayerExperts8 { experts, shared_expert, shared_expert_gate });
         }
         TalkerInt8Store { layers }
@@ -254,28 +264,34 @@ impl TalkerInt8Store {
 /// exactly the "know the cost before building" contract
 /// `residency::MultiDeviceResidentModel::estimate_multi` requires.
 ///
+/// `None` - never a panic - when the checkpoint is missing an expected
+/// expert tensor or has one at the wrong rank. That contract matters: this
+/// runs on the `Executor`'s DISPATCHER thread via `estimate_multi`, where a
+/// panic takes down every other model on the server, not just this one. The
+/// caller turns `None` into "this model is unavailable".
+///
 /// At the real Thinker shape (`d_model=2048, moe_ff=768, n_experts=128`):
 /// each expert's 3 linears are `[768,2048]` (gate/up) and `[2048,768]`
 /// (down), 1,572,864 params each, packed 4-per-`u32` = 1,572,864 bytes
 /// (~1.5 MiB) + a negligible per-channel scale. ~4.5 MiB/expert x 128 x 48
 /// layers ~= 27.6 GiB total (a 24/24 layer split puts ~13.8 GiB/card).
-pub fn expert_bytes(reader: &WeightReader, layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> u64 {
+pub fn expert_bytes(reader: &WeightReader, layers: impl Iterator<Item = usize>, cfg: &MoeTextConfig) -> Option<u64> {
     let mut total = 0u64;
     for l in layers {
         for e in 0..cfg.n_experts as usize {
             for leaf in ["gate", "up", "down"] {
                 let name = expert_name(l, e, leaf);
-                if let Some(shape) = reader.shape(&name) {
-                    let (n, kg) = (shape[0], shape[1]); // shape is [n, k/4] (packed) per omni::import's own plan
-                    total += n * kg * 4; // packed bytes: u32 * 4
-                    total += n * 4; // scale: f32 per output channel
-                } else {
-                    panic!("ThinkerInt8Store::expert_bytes: missing '{name}' in this checkpoint");
+                let shape = reader.shape(&name)?;
+                if shape.len() != 2 {
+                    return None;
                 }
+                let (n, kg) = (shape[0], shape[1]); // shape is [n, k/4] (packed) per omni::import's own plan
+                total += n * kg * 4; // packed bytes: u32 * 4
+                total += n * 4; // scale: f32 per output channel
             }
         }
     }
-    total
+    Some(total)
 }
 
 #[cfg(test)]
@@ -364,13 +380,14 @@ mod tests {
         let reader = WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
 
         // expert_bytes (host-only, no GPU) must match what build() actually uploads.
-        let expected_bytes = expert_bytes(&reader, [0usize, 1, 2].into_iter(), &cfg);
+        let expected_bytes = expert_bytes(&reader, [0usize, 1, 2].into_iter(), &cfg).expect("every expert tensor is present");
 
         let g = gpu_core::testgpu::dev(PIPES);
         // Shard: this "device" owns layers 0 and 2 only (simulating a
         // two-card layer-range split missing the middle layer, to prove
         // `lin8_at` really scopes to OWNED layers, not "any layer exists").
-        let store = ThinkerInt8Store::build(&g, &reader, [0usize, 2].into_iter(), &cfg);
+        let mut up = Uploader::new(&g);
+        let store = ThinkerInt8Store::build(&mut up, &reader, [0usize, 2].into_iter(), &cfg);
         assert_eq!(store.layers.len(), 2);
         assert!(store.layers.contains_key(&0) && store.layers.contains_key(&2) && !store.layers.contains_key(&1));
 
@@ -386,7 +403,7 @@ mod tests {
         let got_scale = g.read(gate8.sw, expected_scale.len());
         assert_eq!(got_scale, expected_scale, "scale must round-trip exactly");
 
-        let expected_bytes_for_02: u64 = expert_bytes(&reader, [0usize, 2].into_iter(), &cfg);
+        let expected_bytes_for_02: u64 = expert_bytes(&reader, [0usize, 2].into_iter(), &cfg).expect("every expert tensor is present");
         assert!(expected_bytes_for_02 < expected_bytes, "shard of 2 layers must cost less than all 3");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -401,7 +418,8 @@ mod tests {
         write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, &[0], 111);
         let reader = WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
         let g = gpu_core::testgpu::dev(PIPES);
-        let store = ThinkerInt8Store::build(&g, &reader, [0usize].into_iter(), &cfg);
+        let mut up = Uploader::new(&g);
+        let store = ThinkerInt8Store::build(&mut up, &reader, [0usize].into_iter(), &cfg);
         let _ = store.lin8_at(1, 0); // layer 1 was never built
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -421,7 +439,8 @@ mod tests {
         let reader = WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
 
         let g = gpu_core::testgpu::dev(PIPES);
-        let store = ThinkerInt8Store::build(&g, &reader, [0usize].into_iter(), &cfg);
+        let mut up = Uploader::new(&g);
+        let store = ThinkerInt8Store::build(&mut up, &reader, [0usize].into_iter(), &cfg);
 
         let ids8 = MoeIds8 {
             linear_gated_i8: idx(&g, "moe_linear_gated_i8"),
@@ -575,7 +594,8 @@ mod tests {
         let reader = WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
 
         let g = gpu_core::testgpu::dev(PIPES);
-        let store = TalkerInt8Store::build(&g, &reader, [0usize, 2].into_iter(), &cfg);
+        let mut up = Uploader::new(&g);
+        let store = TalkerInt8Store::build(&mut up, &reader, [0usize, 2].into_iter(), &cfg);
         assert_eq!(store.layers.len(), 2);
         assert!(store.layers.contains_key(&0) && store.layers.contains_key(&2) && !store.layers.contains_key(&1));
 
@@ -609,7 +629,8 @@ mod tests {
         write_synthetic_talker_checkpoint(path.to_str().unwrap(), &cfg, &[0], 222);
         let reader = WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
         let g = gpu_core::testgpu::dev(PIPES);
-        let store = TalkerInt8Store::build(&g, &reader, [0usize].into_iter(), &cfg);
+        let mut up = Uploader::new(&g);
+        let store = TalkerInt8Store::build(&mut up, &reader, [0usize].into_iter(), &cfg);
         let _ = store.lin8_at(1, 0); // layer 1 was never built
         std::fs::remove_dir_all(&dir).ok();
     }

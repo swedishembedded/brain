@@ -75,8 +75,8 @@ served, with no error.
 | `BRAIN_TTS_WEIGHTS` (+ `BRAIN_TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF checkpoint dir for config/tokenizer) |
 | `BRAIN_NEMOTRON` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
 | `BRAIN_QWEN_ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
-| `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker (validation tier) | HF checkpoint dir |
-| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, int8 checkpoint variant | unset (uses `BRAIN_OMNI_HF_DIR`) |
+| `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker, validation tier - full chat + audio/image/video + `speak`, but weights re-stream from the checkpoint per generated token | HF checkpoint dir |
+| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, **GPU-resident** - int8 weights sharded across as many GPUs as they need, loaded with bounded host memory. A separate model id (`brain/omni-int8-thinker-multi`), not a variant of the above; build the file with `brain omni import` | unset (not served) |
 | `BRAIN_MOCK` | deterministic, weight-free mock model (for exercising the serving stack without real weights) | any non-empty value |
 
 ## Serving & admission

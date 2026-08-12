@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 #[path = "common/int8_thinker_fixture.rs"]
 mod fixture;
-use fixture::{tiny_cfg, write_synthetic_checkpoint};
+use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 fn skip() -> bool {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -129,7 +129,7 @@ fn generate_through_the_executor_matches_a_direct_activate_multi_reference() {
 
     // ---- reference: direct activate_multi, no Executor ----
     let key = InstanceKey::new(MODEL, "default");
-    let reference_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    let reference_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
     let mut reference_instance = reference_resident.activate_multi(&key, &[Device::Gpu(0), Device::Gpu(1)]).expect("direct activate_multi");
     let reference_out = decode_ids(&reference_instance.run("generate", &generate_inv(&prompt_ids, max_new_tokens, &eos_ids), &mut |_| {}).expect("direct generate"));
     drop(reference_instance); // free both cards before the Executor claims them
@@ -139,7 +139,7 @@ fn generate_through_the_executor_matches_a_direct_activate_multi_reference() {
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let exec = Executor::start(vec![], budgets, Policy::default());
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
     exec.register_multi(Arc::new(resident));
 
     let result = exec.run_blocking(MODEL, "generate", generate_inv(&prompt_ids, max_new_tokens, &eos_ids), |_| {});
@@ -174,7 +174,7 @@ fn executor_reports_real_per_device_bytes_for_the_multi_resident() {
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let exec = Executor::start(vec![], budgets, Policy::default());
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
     exec.register_multi(Arc::new(resident));
 
     let r = exec.run_blocking(MODEL, "generate", generate_inv(&[2, 4], 1, &[]), |_| {});
@@ -243,7 +243,7 @@ fn a_single_device_model_still_schedules_beside_a_resident_multi_device_thinker(
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let exec = Executor::start(vec![Arc::new(TrivialModel)], budgets, Policy::default());
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
     exec.register_multi(Arc::new(resident));
 
     // Make the Thinker resident first (occupies both cards).
@@ -281,7 +281,7 @@ fn a_second_generate_reuses_the_hot_sharded_instance() {
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let exec = Executor::start(vec![], budgets, Policy::default());
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
     exec.register_multi(Arc::new(resident));
 
     assert!(exec.run_blocking(MODEL, "generate", generate_inv(&[1, 2], 1, &[]), |_| {}).is_ok());

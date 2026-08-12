@@ -214,6 +214,38 @@ impl MmapSafetensors {
         true
     }
 
+    /// [`Self::with_tensor_chunks`] for a packed-`U32` tensor: ordered chunks
+    /// of at most `max_elems` `u32` words, each decoded into ONE reused
+    /// scratch this call owns, so peak *extra* host allocation is
+    /// `O(max_elems)` rather than `O(tensor)`. The bounded counterpart to
+    /// [`Self::tensor_u32`], which materializes the whole thing - an int8
+    /// checkpoint is mostly packed `U32`, so without this there was no
+    /// bounded way to move one to a device at all when
+    /// [`Self::raw_words`] declines (a misaligned byte range).
+    /// `max_elems == 0` decodes the whole tensor as one chunk. Panics on a
+    /// non-`U32` dtype, exactly like [`Self::tensor_u32`] - reaching for this
+    /// accessor on a float tensor is a caller bug, not a value to reinterpret.
+    pub fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        let Some(m) = self.index.get(name) else { return false };
+        assert_eq!(m.dtype, "U32", "with_tensor_u32_chunks: '{name}' has dtype {}, not U32", m.dtype);
+        let numel = (m.end - m.start) / 4;
+        let chunk = if max_elems == 0 { numel.max(1) } else { max_elems };
+        let mut scratch: Vec<u32> = Vec::with_capacity(chunk.min(numel.max(1)));
+        let mut off = 0usize;
+        while off < numel {
+            let n = chunk.min(numel - off);
+            let start = self.blob_start + m.start + off * 4;
+            scratch.clear();
+            scratch.extend(self.mmap[start..start + n * 4].chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+            f(off as u64, &scratch);
+            off += n;
+        }
+        // Same rationale as `with_tensor_chunks`: fully consumed, so the pages
+        // need not stay resident for the rest of a whole-checkpoint scan.
+        self.advise_dontneed_tensor(name);
+        true
+    }
+
     /// Materialize one tensor as packed `u32` words (little-endian), decoding
     /// on access from the mmap — the read side of [`crate::weightio::
     /// StWriter::write_u32`]'s int8-native packed layout (4 int8 lanes per

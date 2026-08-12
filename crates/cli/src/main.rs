@@ -31,6 +31,7 @@ mod lfm_cli;
 mod mirror_cli;
 mod model_dir;
 mod npu_cli;
+mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
@@ -251,6 +252,11 @@ QWEN3 (dense decoder; paged continuous-batching serving)
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glm <train|finetune|infer|eval|import|export> ...
+
+QWEN3-OMNI (text/audio/image/video in, text + speech out)
+  brain omni import   --hf <dir> --out omni-int8.safetensors [--id VENDOR/REPO]
+      # brain-native int8 checkpoint for the GPU-resident sharded Thinker
+      # (serve it with BRAIN_OMNI_INT8_CHECKPOINT=<out>)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm import    --hf <dir> --out lfm.safetensors
@@ -636,6 +642,7 @@ fn main() {
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("qwen35moe") => qwen35moe_cli::run_qwen35moe(&argv[2..]),
         Some("import-gguf") => gguf_import::run_import_gguf(&argv[2..]),
+        Some("omni") => omni_cli::run_omni(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
         Some("lfm") => lfm_cli::run_lfm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),

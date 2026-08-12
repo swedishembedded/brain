@@ -875,9 +875,9 @@ mod tests {
     /// (analytic exactly 0.0 with a clearly nonzero numeric derivative --
     /// the shape the atol floor waves through; see Report::dead_gradients).
     fn assert_grad_gate(report: &Report, what: &str) {
-        // fp32 directional FD on a device: the workspace-standard combined
-        // abs+rel tolerance, the same `(4e-3, 8e-2)` every explicit gate below
-        // spells out by hand.
+        // (1) Every tensor within the shared workspace tolerance - the same
+        // `(atol, rtol)` the hand-written checks in this module and the
+        // `brain gradcheck` CLI both use.
         let (atol, rtol) = (4e-3, 8e-2);
         let fails = report.failures(atol, rtol);
         assert!(
@@ -885,6 +885,7 @@ mod tests {
             "{what}: gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
+        // (2) No silently-dead gradient.
         let dead = report.dead_gradients();
         assert!(
             dead.is_empty(),

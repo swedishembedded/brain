@@ -99,11 +99,18 @@ pub(crate) fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
     gpu.write(buf, &bits);
 }
 
-/// Per-upload chunk size, in elements (4 MiB as f32/u32 words) — mirrors
-/// `paramstore::UPLOAD_CHUNK_WORDS`; not shared directly since paramstore's
-/// upload path is `ParamStore`-shaped (weight/grad/Adam roles) and this one
-/// is a bare device-buffer helper zimage's block builders call directly.
-const UPLOAD_CHUNK_WORDS: usize = 1 << 20;
+/// Per-upload chunk size, in elements - `paramstore`'s own constant, not a
+/// copy of it, because the helpers below are thin wrappers over
+/// `paramstore::upload::Uploader` rather than a second implementation of
+/// bounded disk→VRAM transfer.
+///
+/// Scope limit worth knowing: these wrappers build one `Uploader` per call,
+/// so they get its per-tensor staging reclaim but not its cross-tensor forced
+/// drain, which only does anything when a single uploader spans a whole
+/// model's load. Threading one uploader through z-image's block builders
+/// would buy that too - a real change to their construction order, not a
+/// drop-in.
+const UPLOAD_CHUNK_WORDS: usize = paramstore::UPLOAD_CHUNK_WORDS;
 
 /// Upload tensor `name` from `src` into a fresh device buffer, bounding host
 /// scratch to one chunk (never one tensor) whenever the source can say its
@@ -114,24 +121,12 @@ const UPLOAD_CHUNK_WORDS: usize = 1 << 20;
 /// this existed. Panics if `name` is missing — every caller here already had
 /// that panic, just spelled `t.get(..).unwrap_or_else(..)`.
 pub(crate) fn upload_named(gpu: &Gpu, src: &dyn checkpoint::TensorSource, name: &str) -> DeviceBuffer {
-    if let Some(words) = src.raw_words(name) {
-        let b = gpu.storage(words.len() as u64);
-        for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
-            gpu.write_at(&b, (i * UPLOAD_CHUNK_WORDS) as u64, part);
-        }
-        return b;
+    if let Some(numel) = upload_numel(src, name) {
+        return paramstore::upload::Uploader::new(gpu).tensor(src, name, numel).unwrap_or_else(|e| panic!("zimage: {e}"));
     }
-    if let Some(numel) = src.numel(name) {
-        let b = gpu.storage(numel as u64);
-        let mut total = 0usize;
-        let found = src.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
-            gpu.write_f32_at(&b, off, chunk);
-            total += chunk.len();
-        });
-        assert!(found, "zimage: missing {name}");
-        assert_eq!(total, numel, "size mismatch for {name}");
-        return b;
-    }
+    // A source that cannot report its size without decoding: one unbounded
+    // read, exactly as before. No real source this crate builds from is in
+    // this class; it exists so an exotic `TensorSource` still works.
     let mut buf: Option<DeviceBuffer> = None;
     let found = src.with_tensor(name, &mut |data| {
         let b = gpu.storage(data.len() as u64);
@@ -148,19 +143,16 @@ pub(crate) fn upload_named(gpu: &Gpu, src: &dyn checkpoint::TensorSource, name: 
 /// window's device footprint never grows past its build-time allocation no
 /// matter how many distinct blocks rotate through it over a run.
 pub(crate) fn upload_named_into(gpu: &Gpu, buf: &DeviceBuffer, src: &dyn checkpoint::TensorSource, name: &str) {
-    if let Some(words) = src.raw_words(name) {
-        for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
-            gpu.write_at(buf, (i * UPLOAD_CHUNK_WORDS) as u64, part);
-        }
-        return;
-    }
-    let mut total = 0usize;
-    let found = src.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
-        gpu.write_f32_at(buf, off, chunk);
-        total += chunk.len();
-    });
-    assert!(found, "zimage: missing {name}");
-    assert!(total > 0, "zimage: {name} decoded to zero elements");
+    let numel = upload_numel(src, name).unwrap_or_else(|| panic!("zimage: missing {name} (or its source cannot report a size)"));
+    paramstore::upload::Uploader::new(gpu).tensor_into(buf, src, name, numel).unwrap_or_else(|e| panic!("zimage: {e}"));
+}
+
+/// The element count `upload_named*` will transfer: whatever the source can
+/// state cheaply, preferring the zero-copy view's own length when there is
+/// one (they agree; asking `raw_words` first also keeps the two helpers from
+/// disagreeing about which tensors are uploadable).
+fn upload_numel(src: &dyn checkpoint::TensorSource, name: &str) -> Option<usize> {
+    src.raw_words(name).map(|w| w.len()).or_else(|| src.numel(name))
 }
 
 /// [`upload_named`], returning the host f32 values too (for the small,

@@ -43,6 +43,38 @@ pub fn expert_name(l: usize, e: usize, leaf: &str) -> String {
     format!("thinker.blocks.{l}.mlp.experts.{e}.{leaf}.weight")
 }
 
+/// Per-device USABLE capacity that forces the checkpoint at `path` to be
+/// placed across exactly `n` of `devices`.
+///
+/// Placement is capacity-driven (`model::shard::plan_fewest_devices`), so a
+/// test that wants a 2-way split has to make one card genuinely too small -
+/// handing out "generous" budgets would now correctly put everything on card
+/// 0.
+///
+/// The capacity is found by ASKING the real planner rather than by an
+/// arithmetic guess: stage count falls monotonically as capacity rises, so
+/// the smallest capacity on a fine grid that yields exactly `n` stages is the
+/// one wanted. A closed-form `total/n + slack` looks right and quietly is not
+/// - it has to clear a whole layer's granularity plus the head weight, which
+/// depends on the fixture's shape, and when it fails to it produces a plan
+/// with the WRONG number of stages rather than an error.
+pub fn caps_for_split(path: &str, cfg: &MoeTextConfig, devices: &[residency::Device], n: usize) -> Vec<(residency::Device, u64)> {
+    use residency::MultiDeviceResidentModel;
+    let probe = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), cfg.clone(), Vec::new());
+    let total = probe.total_device_bytes().expect("synthetic checkpoint must be measurable");
+    let key = residency::InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
+    const STEPS: u64 = 128;
+    for i in 1..=STEPS {
+        let cap = (total * i).div_ceil(STEPS);
+        let caps: Vec<(residency::Device, u64)> = devices.iter().map(|&d| (d, cap)).collect();
+        let r = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), cfg.clone(), caps.clone());
+        if r.estimate_multi(&key).devices().count() == n {
+            return caps;
+        }
+    }
+    panic!("no per-device capacity over {} device(s) produces an {n}-way split of a {total}-byte checkpoint", devices.len());
+}
+
 /// A tiny synthetic int8 checkpoint, real `omni::import` naming/dtypes for
 /// BOTH the routed-expert tensors `ThinkerInt8Store` reads AND the
 /// attention/norm/router tensors `int8_thinker_resident::load_layer_bufs`

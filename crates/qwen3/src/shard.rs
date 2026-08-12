@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+//! **An ADAPTER, not a sharding implementation.** This file contains no
+//! device-placement or partitioning logic of its own and no other crate
+//! should ever import sharding from here: the generic mechanism - how layers
+//! are cut into per-device stages, both the training-time
+//! `model::shard::plan_balanced` and the capacity-aware
+//! `model::shard::plan_by_capacity`/`plan_fewest_devices` a resident model
+//! places real weights with - lives in `crates/model/src/shard.rs`, which
+//! depends on no model family and is what `omni` (and anything added later)
+//! uses too. All this file does is describe Qwen to it.
+//!
 //! Qwen implements the generic [`model::Shardable`] seam so the shared
 //! [`model::Pipeline`] can pipeline-parallel it across GPUs. All the heavy
 //! lifting — the layer-range parameterisation of the forward/backward graph and

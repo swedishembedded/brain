@@ -27,6 +27,67 @@ Model id: `brain/omni`. Reserved vendor `brain/` — never auto-fetched.
   tokenizer files + the sharded `model.safetensors.index.json` + shards).
   This is the gate: serving is unavailable until it's set.
 
+## GPU residency (the sharded int8 path)
+
+`brain/omni` above is the **validation tier**: it has the full chat and
+audio/image/video surface, but every decoder layer's weights - including all
+128 experts - are re-read from the checkpoint for every generated token, so
+nothing stays on the GPU between calls. It is correct and slow.
+
+The **GPU-resident** path is a second, separately-gated model,
+`brain/omni-int8-thinker-multi`. Its weights live in VRAM across calls,
+layer-sharded across however many GPUs their real per-layer byte cost needs.
+It wants a brain-native int8 checkpoint, which is not the format you
+downloaded - convert once:
+
+```bash
+brain omni import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
+                  --out /path/to/omni-int8.safetensors
+```
+
+The conversion streams one tensor at a time (peak host memory is roughly one
+tensor's f32 expansion, never the whole ~70 GB checkpoint) and quantizes
+every rank-2 weight to int8. Then serve it:
+
+```bash
+BRAIN_OMNI_INT8_CHECKPOINT=/path/to/omni-int8.safetensors \
+  brain serve --dbus --device vulkan
+```
+
+How the sharding decides itself:
+
+- Per-layer VRAM cost is read from the checkpoint's own header - no shape
+  constants, no per-model sharding code. Placement is
+  `model::shard::plan_fewest_devices`, the same generic capacity-aware
+  planner any model crate can call with its own layer description.
+- It uses the **fewest cards that fit**: one GPU if the model fits one, three
+  if it needs three. Nothing assumes two.
+- Cards may differ in size. A 24 GB and an 8 GB card get layers in roughly
+  that proportion, because each stage is checked against *its own* device's
+  usable capacity (`nvidia-smi` total minus `--reserve-gb`).
+- If it fits nowhere, that is reported as an unplaceable model rather than
+  discovered as an out-of-memory failure partway through the load.
+
+Loading is bounded end to end: packed int8 weights are handed to the driver
+straight out of the memory mapping (no host copy at all), and the tensors
+that have to be unpacked to fp32 on the way in (attention/router projections,
+`lm_head`) are dequantized a row block at a time rather than expanded whole.
+The token-embedding table - 1.2 GB as fp32 - is never materialized either;
+rows are read on demand.
+
+Two limits worth knowing before you point it at real weights:
+
+- **Use `--device vulkan`.** On the default wgpu backend a non-ReBAR Pascal
+  card holds ~2x each uploaded buffer resident - measured, not inferred
+  (`crates/gpu-core/tests/vram_overhead.rs`). brain's own Vulkan backend
+  measures a clean 1.00x. At the real Thinker shape the difference decides
+  whether the model fits two 24 GB cards at all.
+- **This path is token-ids-in/token-ids-out and Thinker-only.** It is not on
+  `/v1/chat/completions` - `apiserve`'s chat filter requires a streaming
+  `generate` with `messages` and a text output, and this model declares raw
+  blob actions instead. It has no tokenizer, no multimodal splice and no
+  `speak`. Use `brain/omni` for the chat/multimodal surface.
+
 ## Running it
 
 Serve it over D-Bus and/or the HTTP chat APIs:
@@ -92,16 +153,25 @@ speech, image and video input over both the D-Bus and HTTP transports.
 - `speak` is text-only on the input side today: a `speak` call does not also
   take audio/image input, and it's single-turn (no multi-turn spoken
   context).
-- Weights stream from the checkpoint per generated token rather than living
-  fully resident in an optimized serving layout, so throughput is
-  validation-tier, not production-grade.
+- On `brain/omni`, weights stream from the checkpoint per generated token
+  rather than living resident, so throughput is validation-tier, not
+  production-grade. The GPU-resident alternative is
+  `brain/omni-int8-thinker-multi` (see "GPU residency" above), which trades
+  the chat/multimodal surface for weights that stay on the cards.
 - Only `Qwen3-Omni-30B-A3B-Instruct` is supported. The `-Thinking` and
   `-Captioner` variants have no Talker (speech-output) component and are out
   of scope for this model.
-- The full weight set needs roughly 35 GB resident even at int8 precision
-  (it's a mixture-of-experts model: only a few billion parameters are active
-  per token, but the router can route to any expert, so the whole set has to
-  be loaded).
+- The Thinker needs roughly 31.7 GiB of VRAM resident at int8 (it's a
+  mixture-of-experts model: only a few billion parameters are active per
+  token, but the router can route to any expert, so the whole set has to be
+  loaded). Computed from the real config: ~27.1 GiB of routed experts,
+  ~3.4 GiB of attention/router/norms and ~1.2 GiB of `lm_head`, the last two
+  held as fp32 because no int8 kernel path consumes them. Against two 24 GB
+  cards less the default 2 GB per-card reserve (44 GiB usable) that fits with
+  ~12 GiB to spare on the native Vulkan backend - and does **not** fit on
+  wgpu, where the 2x upload residency above turns it into ~63 GiB.
+  bf16 is not an option on this class of hardware regardless - brain's
+  kernels are fp32 throughout, and Pascal's fp16 rate is 1/64.
 - No LoRA/fine-tuning path.
 - No CLI (`brain do`/`brain caps`) access — D-Bus and the HTTP chat APIs
   only.

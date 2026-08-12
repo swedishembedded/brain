@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use gpu_core::Gpu;
 
+pub mod upload;
+
 /// Whether a parameter is optimised. `Frozen` parameters allocate **only** the
 /// weight buffer — no gradient or AdamW moment buffers — which both cuts memory
 /// (critical for loading a multi-hundred-MB model for inference, or a LoRA
@@ -120,90 +122,38 @@ impl ParamStore {
         let mut params = Vec::with_capacity(params_roles.len());
         let mut trainable = Vec::new();
         let mut offload = Vec::new();
-        // Bytes written since the last FORCED flush (see below).
-        let mut uploaded = 0u64;
+        // The bounded disk->VRAM mover, held across the WHOLE load: both the
+        // host-side chunking and the device-side staging-reclaim discipline
+        // (which is inherently cross-tensor - it drains roughly every GiB, not
+        // every tensor) live in `upload::Uploader`, so a resident model that
+        // streams its own weights gets the identical guarantees without
+        // re-deriving them. See that module's doc for what each one prevents.
+        //
         // Per-phase accumulators for the `BRAIN_PROFILE` summary below --
         // added while chasing DeepSeek-OCR's 20+ second model-construction
-        // cost: this loop is the whole of that cost on the CPU backend, and
-        // it was never known
-        // whether the source read (`raw_words`/`with_tensor_chunks`, backed
-        // by an mmap that may still need real disk I/O per page fault) or
-        // the destination allocation/copy (`gpu.storage` + `write_at`, a
-        // fresh host `Vec` per tensor) dominated it. Kept cheap (a handful of
-        // `Instant::now()` calls per tensor) and silent unless `BRAIN_PROFILE`
-        // is set, same gate `deepseekocr`/`wgsl-cpu` already use.
+        // cost: this loop is the whole of that cost on the CPU backend, and it
+        // was never known whether the source read + device upload (`Uploader::
+        // tensor`, which allocates the device buffer AND streams the source's
+        // bytes into it) or the periodic staging-reclaim drain (`Uploader::
+        // maybe_drain`) dominated it. Kept cheap (a couple `Instant::now()`
+        // calls per tensor) and silent unless `BRAIN_PROFILE` is set, same
+        // gate `deepseekocr`/`wgsl-cpu` already use.
         let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
-        let mut t_alloc = std::time::Duration::ZERO;
-        let mut t_read_write = std::time::Duration::ZERO;
+        let mut t_upload = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
+        let mut up = upload::Uploader::new(gpu);
         for (name, numel, role) in &params_roles {
-            // storage()+write() (plain DEVICE_LOCAL + transient staging) instead of
-            // storage_init(): create_buffer_init's mapped-at-creation path forces
-            // weights into an inefficient memory type on a non-ReBAR GPU, ballooning
-            // e.g. a 16.8 GB encoder to ~30 GB (OOM). DEVICE_LOCAL buffers pack
-            // tightly — the difference between the Qwen encoder fitting a 24 GB card
-            // or not. (Same fix as zimage's BlockWeights::upload.)
             let t0 = std::time::Instant::now();
-            let wbuf = gpu.storage(*numel as u64);
+            let wbuf = up
+                .tensor(source, name, *numel)
+                .unwrap_or_else(|e| panic!("missing init weight {name}: {e}"));
             if profile {
-                t_alloc += t0.elapsed();
+                t_upload += t0.elapsed();
             }
             let t1 = std::time::Instant::now();
-            // Pull exactly this tensor from the source and upload it, in one of two
-            // ways, neither of which ever materializes the whole tensor as a second
-            // host copy on top of what the source itself may already hold:
-            //   - `raw_words`: the source's bytes ALREADY are u32/f32 words (a
-            //     resident HashMap, or an mmap tensor whose dtype matches and is
-            //     4-byte aligned) — lend them straight to `write_at`, zero copies.
-            //   - `with_tensor_chunks`: anything else (BF16 on disk, a GGUF quant
-            //     block) needs converting, so it's converted `UPLOAD_CHUNK_WORDS`
-            //     elements at a time into a scratch the source reuses across
-            //     chunks — peak extra host allocation is one chunk, never one
-            //     tensor (relevant tensors run up to ~1.5 GB as f32).
-            // Both are bit-identical to the old single `with_tensor` + `Vec<u32>`
-            // reinterpret this replaces (see paramstore_upload_peak_is_one_chunk_*
-            // and *_prefers_raw_words_* below).
-            let mut total_written = 0usize;
-            let found = if let Some(words) = source.raw_words(name) {
-                assert_eq!(words.len(), *numel, "size mismatch for {name}");
-                for (i, part) in words.chunks(UPLOAD_CHUNK_WORDS).enumerate() {
-                    gpu.write_at(&wbuf, (i * UPLOAD_CHUNK_WORDS) as u64, part);
-                    total_written += part.len();
-                }
-                true
-            } else {
-                source.with_tensor_chunks(name, UPLOAD_CHUNK_WORDS, &mut |off, chunk| {
-                    gpu.write_f32_at(&wbuf, off, chunk);
-                    total_written += chunk.len();
-                })
-            };
-            if !found {
-                panic!("missing init weight {name}");
-            }
-            assert_eq!(total_written, *numel, "size mismatch for {name}");
+            up.maybe_drain(&wbuf);
             if profile {
-                t_read_write += t1.elapsed();
-            }
-            let t2 = std::time::Instant::now();
-            // Reclaim the write_buffer staging NOW, before the next weight — else it
-            // accrues (wgpu only frees it on poll_wait), so a 16.8 GB model uploads
-            // ~16.8 GB of extra staging on top of the weights and OOMs a 24 GB card.
-            // Peak staging is then just this one tensor. (The DiT does the same via
-            // poll_wait per block.)
-            gpu.poll_wait();
-            // poll_wait alone is not always enough: with no submitted compute the
-            // poll can be a no-op and wgpu keeps holding the write_buffer staging
-            // (observed OOM on a non-ReBAR P40 at ~14 GiB uploaded of a ~12 GiB
-            // shard). A 1-element readback forces a real submit + drain, which is
-            // what reclaims the staging — the same pattern as flux2's
-            // Flux2Model::new upload. ~Every GiB keeps the cost negligible.
-            uploaded += 4 * *numel as u64;
-            if uploaded > (1 << 30) {
-                let _ = gpu.read(&wbuf, 1);
-                uploaded = 0;
-            }
-            if profile {
-                t_flush += t2.elapsed();
+                t_flush += t1.elapsed();
             }
             weight.insert(name.clone(), wbuf);
             match role {
@@ -226,10 +176,9 @@ impl ParamStore {
         }
         if profile {
             eprintln!(
-                "paramstore: new_with_roles_src ({} tensors): alloc {:.1} ms, read+write {:.1} ms, flush/readback {:.1} ms",
+                "paramstore: new_with_roles_src ({} tensors): upload {:.1} ms, flush/readback {:.1} ms",
                 params.len(),
-                t_alloc.as_secs_f64() * 1e3,
-                t_read_write.as_secs_f64() * 1e3,
+                t_upload.as_secs_f64() * 1e3,
                 t_flush.as_secs_f64() * 1e3,
             );
         }

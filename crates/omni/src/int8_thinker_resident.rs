@@ -1,45 +1,59 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A layer-sharded, int8-MoE-expert resident Thinker spanning TWO real GPUs —
-//! the real wiring the original dual-GPU residency work asked for, built on
-//! `crates/residency/src/multi.rs`'s
-//! `MultiDeviceResidentModel`/`claim_multi` and `crate::int8_resident::
-//! ThinkerInt8Store`.
+//! A layer-sharded, int8-MoE-expert resident Thinker spanning as many GPUs as
+//! it actually needs - built on `crates/residency/src/multi.rs`'s
+//! `MultiDeviceResidentModel`/`claim_multi`, `crate::int8_resident::
+//! ThinkerInt8Store`, and the two generic mechanisms this model exists to
+//! USE rather than reimplement:
 //!
-//! **Scope, honestly bounded**: this validates the CROSS-DEVICE MECHANISM
-//! for real — real per-device `MultiDeviceCost` accounting from a real
-//! checkpoint's declared shapes, a real `claim_multi`/`activate_multi`
-//! round trip, two REAL `Gpu` instances (one per physical card, via
-//! `Gpu::new_on_index`), each holding a REAL streamed `ThinkerInt8Store`
-//! shard AND (as of this pass) real streamed attention/norm/router weights
-//! via [`load_layer_bufs`] — dequantized on load if the checkpoint quantized
-//! them (`omni::import::should_quantize` applies to the attention/router
-//! projections too, not just the MoE experts, since they meet the same
-//! rank-2/`k%4==0` shape test; `thinker::layer_fwd` has no int8 dispatch
-//! path for them, only for the experts, so they always come back out as
-//! plain f32 regardless of how the checkpoint stored them) — and a REAL
-//! forward pass that hands the residual stream between shards via a host
-//! round-trip (`gpu_a.read` → `gpu_b.write`, negligible bytes: `n * d_model`
-//! floats per hop, `<10 KiB` at any realistic decode batch). What it still
-//! does NOT do: `embed_tokens`/`lm_head` are out of scope for [`Int8ThinkerInstance::forward`]
-//! specifically (that is the MoE-bearing-layers validation action, not a full
-//! `generate()` — see its own doc); [`Int8ThinkerInstance::generate`] covers
-//! them for real.
+//! * **Placement**: `model::shard::plan_fewest_devices` - a capacity-aware,
+//!   exact-DP contiguous layer partitioner over `(device, usable bytes)`
+//!   pairs. Nothing here knows how many cards the box has, whether they are
+//!   the same size, or how to balance them; it supplies real per-layer byte
+//!   costs read off the checkpoint's own header and takes the plan it is
+//!   given. A 1-GPU box, a 2xP40 box and a mixed 24/8 GB box all work, and a
+//!   model that genuinely does not fit reports that instead of OOMing partway
+//!   through a multi-minute load.
+//! * **Loading**: `paramstore::upload::Uploader` - the bounded disk→VRAM
+//!   mover. Weights are streamed from the mapping to the card with peak host
+//!   allocation of one chunk, never one tensor: the packed expert weights are
+//!   normally lent zero-copy straight out of the mmap, and the packed-but-
+//!   fp32-consumed tensors (attention/router projections, `lm_head`) are
+//!   dequantized a row block at a time by `model::int8::upload_dequantized`
+//!   rather than expanded whole on the host first.
+//!
+//! `embed_tokens` is not uploaded at all: [`Self::generate`](
+//! Int8ThinkerInstance::generate) only ever needs a per-token ROW, so rows
+//! are read (and dequantized) on demand straight from the mapping. At the
+//! real Thinker shape that is a ~1.2 GB f32 table that never exists in host
+//! RAM or VRAM.
+//!
+//! The residual stream is handed between shards via a host round-trip
+//! (`gpu_a.read` → `gpu_b.write`, `n * d_model` floats per hop - under 10 KiB
+//! at any realistic decode batch).
 //!
 //! Reachable through `residency::Executor` via `Executor::register_multi`
 //! (never `register` — [`Int8ThinkerResident::estimate`]/[`activate`](
 //! ResidentModel::activate) are deliberately unusable stand-ins, since a
 //! multi-device-only model has no meaningful single-device footprint; see
 //! `crates/cli/src/resident_omni.rs::int8_thinker_multi_from_env`).
+//!
+//! Still out of scope, deliberately: no KV cache (each `generate()` step is a
+//! full recompute - see [`Int8ThinkerInstance::generate`]'s own doc for what a
+//! cached decode loop would need), and no tokenization (token ids in, token
+//! ids out) unless a caller wraps it.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use capability::{ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
+use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::moe::Lin8;
+use model::shard::LayerBytes;
+use paramstore::upload::Uploader;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
@@ -51,6 +65,102 @@ pub const MODEL: &str = "brain/omni-int8-thinker-multi";
 
 /// A contiguous layer range `[start, end)` assigned to one device.
 type LayerRange = std::ops::Range<usize>;
+
+/// The per-layer NON-expert tensor leaves [`load_layer_bufs`] uploads, under
+/// the `thinker.blocks.{l}.` prefix. Named once so the byte accounting
+/// ([`layer_resident_bytes`]) and the loader cannot drift: an accounting that
+/// silently omits a tensor the loader uploads is exactly the kind of
+/// under-reported budget that lets a placement decision overrun a card.
+pub const LAYER_LEAVES: &[&str] = &[
+    "ln1.weight",
+    "attn.wq.weight",
+    "attn.wk.weight",
+    "attn.wv.weight",
+    "attn.wo.weight",
+    "attn.q_norm.weight",
+    "attn.k_norm.weight",
+    "ln2.weight",
+    "mlp.router.weight",
+];
+
+/// Tensors the LAST shard holds (where `forward`'s own host round-trip
+/// already lands the final hidden state, so applying the head there avoids an
+/// extra cross-device hop).
+pub const HEAD_TENSORS: &[&str] = &["thinker.norm.weight", "thinker.lm_head.weight"];
+
+/// The token embedding - read a row at a time from the mapping, never
+/// uploaded and never materialized (see this module's doc).
+pub const EMBED_TENSOR: &str = "thinker.embed_tokens.weight";
+
+// ---------------------------------------------------------------- byte accounting
+
+/// Declared element count of `name`, or 0 if absent.
+fn numel(reader: &WeightReader, name: &str) -> u64 {
+    reader.shape(name).map(|s| s.iter().product::<u64>()).unwrap_or(0)
+}
+
+/// Device bytes `name` occupies once loaded **as f32** - i.e. what
+/// [`load_mat`]/[`load_vec`] actually place on the card.
+///
+/// A packed `U32` tensor is stored `[n, k/4]` but consumed as `[n, k]` f32
+/// (`thinker::layer_fwd` has no int8 dispatch path for attention/router/head,
+/// only for the routed experts), so it costs FOUR TIMES its on-disk size in
+/// VRAM. Charging it its packed size - the bug this function exists to
+/// prevent - under-reports the real per-layer attention cost by 4x.
+fn f32_resident_bytes(reader: &WeightReader, name: &str) -> u64 {
+    let n = numel(reader, name);
+    match reader.dtype(name) {
+        Some("U32") => n * 4 * 4, // 4 int8 lanes per stored word, each landing as an f32
+        _ => n * 4,
+    }
+}
+
+/// Total device bytes layer `l` occupies on whichever shard owns it: its
+/// routed experts ([`expert_bytes`]) plus every [`LAYER_LEAVES`] tensor.
+/// `None` if the checkpoint is missing any of them.
+pub fn layer_resident_bytes(reader: &WeightReader, cfg: &MoeTextConfig, l: usize) -> Option<u64> {
+    let experts = expert_bytes(reader, std::iter::once(l), cfg)?;
+    let mut non_expert = 0u64;
+    for leaf in LAYER_LEAVES {
+        let name = format!("thinker.blocks.{l}.{leaf}");
+        let b = f32_resident_bytes(reader, &name);
+        if b == 0 {
+            return None; // absent (or empty) -- the loader would panic later
+        }
+        non_expert += b;
+    }
+    Some(experts + non_expert)
+}
+
+/// Total device bytes the LAST shard additionally carries ([`HEAD_TENSORS`]).
+pub fn head_resident_bytes(reader: &WeightReader) -> Option<u64> {
+    let mut total = 0u64;
+    for n in HEAD_TENSORS {
+        let b = f32_resident_bytes(reader, n);
+        if b == 0 {
+            return None;
+        }
+        total += b;
+    }
+    Some(total)
+}
+
+/// The byte-exact per-stage cost model for this checkpoint - the input
+/// `model::shard`'s capacity-aware planner needs. `embed` is 0 because the
+/// embedding is never device-resident here (see this module's doc).
+///
+/// `None` - never a panic - for a checkpoint missing anything the loader
+/// would upload: this runs on the `Executor` dispatcher thread (see
+/// [`MultiDeviceResidentModel::estimate_multi`]'s contract).
+pub fn layer_cost(reader: &WeightReader, cfg: &MoeTextConfig) -> Option<LayerBytes> {
+    let mut per_layer = Vec::with_capacity(cfg.n_layers as usize);
+    for l in 0..cfg.n_layers as usize {
+        per_layer.push(layer_resident_bytes(reader, cfg, l)?);
+    }
+    Some(LayerBytes { per_layer, embed: 0, head: head_resident_bytes(reader)? })
+}
+
+// ---------------------------------------------------------------- loading
 
 pub struct LayerBufs {
     ln1: DeviceBuffer,
@@ -64,15 +174,30 @@ pub struct LayerBufs {
     router: DeviceBuffer,
 }
 
+/// The logical (unpacked) `[n, k]` shape of a tensor that may be stored
+/// packed. A packed tensor's own shape is `[n, k/4]`, so `k` cannot be read
+/// off it directly - but it is always exactly four times the stored last
+/// dimension, which is why no caller has to pass shapes in by hand.
+fn logical_shape(reader: &WeightReader, name: &str) -> Result<(usize, usize), String> {
+    let shape = reader.shape(name).ok_or_else(|| format!("missing tensor {name}"))?;
+    if shape.len() != 2 {
+        return Err(format!("{name}: expected a rank-2 tensor, got shape {shape:?}"));
+    }
+    let n = shape[0] as usize;
+    let k = shape[1] as usize * if reader.dtype(name) == Some("U32") { 4 } else { 1 };
+    Ok((n, k))
+}
+
 /// One tensor, real, host-resident: plain f32 if the checkpoint stored it
 /// that way, or unpacked via [`model::int8::dequantize_weight`] if
 /// `omni::import` quantized it (`should_quantize`: rank-2, last dim a
-/// multiple of 4 — attention/router/embed/lm_head projections all meet this
-/// exactly like the MoE experts do, but unlike the experts have no int8
-/// dispatch path of their own in `thinker::layer_fwd`, so they come back
-/// out as plain f32 either way). `n`/`k` are only consulted on the
-/// quantized branch (the packed shape is `[n, k/4]`, so `k` cannot be
-/// recovered from the tensor's own shape alone).
+/// multiple of 4). `n`/`k` are only consulted on the quantized branch.
+///
+/// **Prefer [`load_mat`]** for anything going to a device: this materializes
+/// the whole f32 expansion on the host (1.2 GB for a real `lm_head`), which
+/// is precisely what the streaming loader avoids. Kept public because a
+/// caller that genuinely wants the host copy - an independent test oracle,
+/// an off-device row gather - has no other way to ask for one.
 pub fn load_mat_host(reader: &WeightReader, name: &str, n: u32, k: u32) -> Vec<f32> {
     match reader.dtype(name) {
         Some("U32") => {
@@ -85,38 +210,44 @@ pub fn load_mat_host(reader: &WeightReader, name: &str, n: u32, k: u32) -> Vec<f
     }
 }
 
-/// [`load_mat_host`], uploaded to `gpu` — the GPU-resident variant every
-/// per-layer weight (attention/router) wants.
-pub fn load_mat(reader: &WeightReader, gpu: &Gpu, name: &str, n: u32, k: u32) -> DeviceBuffer {
-    gpu.storage_init("w", &load_mat_host(reader, name, n, k))
+/// A rank-2 weight, streamed from `reader` onto `up`'s device as f32, with
+/// bounded host use: a plain `F32` tensor goes straight across (zero-copy
+/// where the mapping allows), and a packed one is dequantized a row block at
+/// a time by [`model::int8::upload_dequantized`]. Shapes come from the
+/// checkpoint header, so no caller passes them in.
+pub fn load_mat(up: &mut Uploader, reader: &WeightReader, name: &str) -> DeviceBuffer {
+    let (n, k) = logical_shape(reader, name).unwrap_or_else(|e| panic!("{e}"));
+    match reader.dtype(name) {
+        Some("U32") => model::int8::upload_dequantized(up, reader, name, n, k).unwrap_or_else(|e| panic!("{e}")),
+        _ => up.tensor(reader, name, n * k).unwrap_or_else(|e| panic!("{e}")),
+    }
 }
 
 /// A 1-D tensor (norm gains) — `omni::import::should_quantize` never
 /// quantizes rank-1 tensors, so these are always plain f32.
-pub fn load_vec(reader: &WeightReader, gpu: &Gpu, name: &str) -> DeviceBuffer {
-    gpu.storage_init("w", &reader.tensor(name).unwrap_or_else(|| panic!("missing tensor {name}")))
+pub fn load_vec(up: &mut Uploader, reader: &WeightReader, name: &str) -> DeviceBuffer {
+    let n = numel(reader, name) as usize;
+    assert!(n > 0, "missing tensor {name}");
+    up.tensor(reader, name, n).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// Build layer `l`'s REAL non-expert weights on `gpu`, streamed from
-/// `reader`. Brain-native names (`omni::import::map_thinker`'s output,
-/// prefix `thinker.blocks.{l}.`
-/// already applied by [`ThinkerLayerWeights`]'s own convention), matching
-/// exactly what `crate::int8_resident::ThinkerInt8Store::build` reads for
-/// the same layer's expert weights from the same checkpoint.
-pub fn load_layer_bufs(gpu: &Gpu, reader: &WeightReader, cfg: &MoeTextConfig, l: usize) -> LayerBufs {
-    let (d, hd, nh, nkv, ne) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, cfg.n_experts);
-    let (hq, hkv) = (nh * hd, nkv * hd);
+/// Build layer `l`'s REAL non-expert weights on `up`'s device, streamed from
+/// `reader`. Brain-native names (`omni::import::map_thinker`'s output),
+/// matching exactly what `crate::int8_resident::ThinkerInt8Store::build`
+/// reads for the same layer's expert weights from the same checkpoint, and
+/// exactly the [`LAYER_LEAVES`] the byte accounting charges for.
+pub fn load_layer_bufs(up: &mut Uploader, reader: &WeightReader, l: usize) -> LayerBufs {
     let p = |leaf: &str| format!("thinker.blocks.{l}.{leaf}");
     LayerBufs {
-        ln1: load_vec(reader, gpu, &p("ln1.weight")),
-        wq: load_mat(reader, gpu, &p("attn.wq.weight"), hq, d),
-        wk: load_mat(reader, gpu, &p("attn.wk.weight"), hkv, d),
-        wv: load_mat(reader, gpu, &p("attn.wv.weight"), hkv, d),
-        wo: load_mat(reader, gpu, &p("attn.wo.weight"), d, hq),
-        q_norm: load_vec(reader, gpu, &p("attn.q_norm.weight")),
-        k_norm: load_vec(reader, gpu, &p("attn.k_norm.weight")),
-        ln2: load_vec(reader, gpu, &p("ln2.weight")),
-        router: load_mat(reader, gpu, &p("mlp.router.weight"), ne, d),
+        ln1: load_vec(up, reader, &p("ln1.weight")),
+        wq: load_mat(up, reader, &p("attn.wq.weight")),
+        wk: load_mat(up, reader, &p("attn.wk.weight")),
+        wv: load_mat(up, reader, &p("attn.wv.weight")),
+        wo: load_mat(up, reader, &p("attn.wo.weight")),
+        q_norm: load_vec(up, reader, &p("attn.q_norm.weight")),
+        k_norm: load_vec(up, reader, &p("attn.k_norm.weight")),
+        ln2: load_vec(up, reader, &p("ln2.weight")),
+        router: load_mat(up, reader, &p("mlp.router.weight")),
     }
 }
 
@@ -124,9 +255,71 @@ pub fn weights(b: &LayerBufs) -> ThinkerLayerWeights<'_> {
     ThinkerLayerWeights { ln1: &b.ln1, wq: &b.wq, wk: &b.wk, wv: &b.wv, wo: &b.wo, q_norm: &b.q_norm, k_norm: &b.k_norm, ln2: &b.ln2, router: &b.router, experts: &[] }
 }
 
+/// How this instance reads one embedding row.
+///
+/// The table is `[vocab, hidden]` - 1.2 GB as f32 at the real shape - and
+/// generation only ever needs a per-token ROW gather, never a GEMM. So it is
+/// neither uploaded nor expanded: rows are read straight from the mapping.
+enum EmbedTable {
+    /// Packed int8 on disk: read the row's words from the mapping and scale
+    /// them by that row's own scale. Peak allocation is one row.
+    Packed { scale: Vec<f32>, k: usize },
+    /// Plain f32 on disk: the row is a slice of the mapping.
+    Plain { k: usize },
+    /// The mapping declined to lend its bytes (a byte range this reader
+    /// cannot borrow as words). One host copy, the old behaviour - correct,
+    /// just not free. brain-native checkpoints are written 8-byte-aligned
+    /// specifically so this branch is not taken.
+    Host { table: Vec<f32>, k: usize },
+}
+
+impl EmbedTable {
+    fn open(reader: &WeightReader) -> Result<EmbedTable, String> {
+        let (n, k) = logical_shape(reader, EMBED_TENSOR)?;
+        let packed = reader.dtype(EMBED_TENSOR) == Some("U32");
+        if reader.raw_words(EMBED_TENSOR).is_some() {
+            if !packed {
+                return Ok(EmbedTable::Plain { k });
+            }
+            let scale_name = format!("{EMBED_TENSOR}.scale");
+            let scale = reader.tensor(&scale_name).ok_or_else(|| format!("{MODEL}: missing {scale_name}"))?;
+            if scale.len() != n {
+                return Err(format!("{MODEL}: {scale_name} has {} entries, expected {n}", scale.len()));
+            }
+            return Ok(EmbedTable::Packed { scale, k });
+        }
+        Ok(EmbedTable::Host { table: load_mat_host(reader, EMBED_TENSOR, n as u32, k as u32), k })
+    }
+
+    fn hidden(&self) -> usize {
+        match self {
+            EmbedTable::Packed { k, .. } | EmbedTable::Plain { k } | EmbedTable::Host { k, .. } => *k,
+        }
+    }
+
+    /// Token `t`'s embedding row, `[hidden]`.
+    fn row(&self, reader: &WeightReader, t: u32) -> Vec<f32> {
+        let t = t as usize;
+        match self {
+            EmbedTable::Packed { scale, k } => {
+                let kg = k / 4;
+                let words = reader.raw_words(EMBED_TENSOR).expect("EmbedTable::Packed implies a lendable mapping");
+                let mut out = Vec::with_capacity(*k);
+                model::int8::dequantize_rows_into(&words[t * kg..(t + 1) * kg], scale, t, 1, *k, &mut out);
+                out
+            }
+            EmbedTable::Plain { k } => {
+                let words = reader.raw_words(EMBED_TENSOR).expect("EmbedTable::Plain implies a lendable mapping");
+                words[t * k..(t + 1) * k].iter().map(|w| f32::from_bits(*w)).collect()
+            }
+            EmbedTable::Host { table, k } => table[t * k..(t + 1) * k].to_vec(),
+        }
+    }
+}
+
 /// One device's shard: its own `Gpu`, the absolute layer range it owns, the
 /// resident int8 expert store for that range, and each owned layer's
-/// synthetic non-expert weights (see this module's own doc).
+/// non-expert weights.
 struct DeviceShard {
     gpu: Gpu,
     range: LayerRange,
@@ -137,13 +330,10 @@ struct DeviceShard {
 pub struct Int8ThinkerInstance {
     cfg: MoeTextConfig,
     shards: Vec<DeviceShard>,
-    /// `thinker.embed_tokens.weight` `[vocab, hidden]`, dequantized (real
-    /// checkpoints quantize it too — rank-2, last dim a multiple of 4, same
-    /// as any other real weight) and kept HOST-resident: [`Self::generate`]
-    /// only ever needs a per-token row gather, never a GEMM, so there is no
-    /// reason to spend GPU memory or an upload on the ~1.2 GB dequantized
-    /// table.
-    embed_table_host: Vec<f32>,
+    /// Kept open for the lifetime of the instance so embedding rows can be
+    /// read on demand. This is the header-only mmap handle, not data.
+    reader: WeightReader,
+    embed: EmbedTable,
     /// `thinker.norm.weight` and `thinker.lm_head.weight`, resident on the
     /// LAST shard's `Gpu` — that is where [`Self::forward`]'s final hidden
     /// state already ends up (its own host round-trip loop), so applying
@@ -178,6 +368,9 @@ impl Int8ThinkerInstance {
 
         let mut h_host = x_host.to_vec();
         for shard in &self.shards {
+            if shard.range.is_empty() {
+                continue; // a capacity-driven plan may legitimately leave a stage empty
+            }
             let gpu = &shard.gpu;
             let cos = gpu.storage_init("cos", &cos_tab);
             let sin = gpu.storage_init("sin", &sin_tab);
@@ -197,32 +390,24 @@ impl Int8ThinkerInstance {
         h_host
     }
 
-    /// Greedy (argmax) text generation over the sharded int8 Thinker — the
-    /// validation-tier `generate()` this module's own doc named as the real
-    /// remainder: real tokens in, real sampled tokens out, EOS handling, no
-    /// tokenization (matches `qwenvl::Qwen3Vl::generate`'s own contract:
-    /// `prompt_ids`/`eos_ids` are already token ids, and the return value is
-    /// the GENERATED tokens only, prompt excluded).
+    /// Greedy (argmax) text generation over the sharded int8 Thinker: real
+    /// tokens in, real sampled tokens out, EOS handling, no tokenization
+    /// (matches `qwenvl::Qwen3Vl::generate`'s own contract: `prompt_ids`/
+    /// `eos_ids` are already token ids, and the return value is the
+    /// GENERATED tokens only, prompt excluded).
     ///
     /// Deliberately the simple O(T²) shape, not a KV-cache decode loop: each
     /// step re-embeds the WHOLE ids-so-far window and calls [`Self::forward`]
-    /// again (a full recompute, same as `crate::generate`'s own
-    /// non-resident precedent before its KV cache was added) rather than
-    /// extending `thinker::layer_decode_step`'s per-layer cache across two
-    /// device shards. That is real, separable follow-up (`layer_decode_step`
-    /// needs its own `ThinkerLayerCache` per owned layer, and per this
-    /// module's own layer-RANGE-never-expert-split sharding, each layer's
-    /// cache would live entirely on the ONE shard that owns that layer —
-    /// not a cross-device complication, just unbuilt), not attempted here:
-    /// this validates the sharded MECHANISM end-to-end with real sampling,
-    /// not a performance claim — switching to incremental KV-cache decode
-    /// (threading `layer_decode_step`'s per-layer cache across the shard
-    /// boundary) is real, precisely-scoped follow-up work, not attempted
-    /// here.
+    /// again (a full recompute) rather than extending
+    /// `thinker::layer_decode_step`'s per-layer cache across device shards.
+    /// That is real, separable follow-up (`layer_decode_step` needs its own
+    /// `ThinkerLayerCache` per owned layer, and per this module's
+    /// layer-RANGE-never-expert-split sharding, each layer's cache would live
+    /// entirely on the ONE shard that owns that layer - not a cross-device
+    /// complication, just unbuilt).
     pub fn generate(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
         let d = self.cfg.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
-        let embed_row = |t: u32| self.embed_table_host[t as usize * d..(t as usize + 1) * d].to_vec();
         let idx = |name: &str| last.gpu.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
         let lm_head_ids8 = LmHeadIds8 { matmul_i8: idx("matmul_i8_dyn"), quant: [idx("max_abs_row"), idx("quant_pack")] };
 
@@ -236,7 +421,7 @@ impl Int8ThinkerInstance {
             let n = ids.len() as u32;
             let mut x_host = Vec::with_capacity(ids.len() * d);
             for &t in &ids {
-                x_host.extend_from_slice(&embed_row(t));
+                x_host.extend_from_slice(&self.embed.row(&self.reader, t));
             }
             let hidden = self.forward(&x_host, n);
             let last_row = &hidden[(n as usize - 1) * d..n as usize * d];
@@ -301,81 +486,131 @@ impl Instance for Int8ThinkerInstance {
     }
 }
 
+/// The placement this resident committed to: which device holds which layer
+/// range, and how many of ITS bytes that costs. Computed once (from the
+/// checkpoint's declared shapes, no GPU) and reused by both `estimate_multi`
+/// and `activate_multi`, so the two can never disagree about the split - the
+/// scheduler reserves against exactly what the loader will place.
+#[derive(Clone, Debug, Default)]
+struct Plan {
+    stages: Vec<(Device, LayerRange, u64)>,
+    /// Host bytes the instance holds regardless of placement.
+    host_ram: u64,
+}
+
 /// The [`ResidentModel`]/[`MultiDeviceResidentModel`] adapter: real
 /// `estimate_multi` (from the checkpoint's DECLARED shapes, no GPU), real
-/// `activate_multi` (streams + uploads each shard's real int8 expert
-/// weights via [`ThinkerInt8Store::build`]).
+/// `activate_multi` (streams each shard's real weights onto its card).
 pub struct Int8ThinkerResident {
     pub checkpoint_path: String,
     pub cfg: MoeTextConfig,
-    /// The device SET this instance would occupy. Through `residency::Executor`,
-    /// `estimate_multi`'s returned cost IS the placement decision —
-    /// `ResidencyManager::claim_multi` reserves on exactly these devices and
-    /// hands exactly these to `activate_multi` — so this must be supplied
-    /// explicitly rather than derived from a hardcoded device count: a
-    /// hardcoded `[Gpu(0), Gpu(1)]` would name a device with no budget on a
-    /// 1-GPU box (the claim then sits queued forever with no error — see
-    /// `ResidencyManager::placeable_multi`'s own doc on why an unplaceable
-    /// cost must not silently starve) and would waste every card past the
-    /// second on a 3+-GPU box. Set via [`Self::new`]; not `pub` so every
-    /// construction goes through it rather than a struct literal that could
-    /// forget to size `cost` correctly.
-    devices: Vec<Device>,
-    /// Memoizes `estimate_multi`. Required once this model is reachable
-    /// through `Executor`: `estimate_multi` runs on the DISPATCHER thread,
-    /// once per scheduling round, for every queued group of this model (see
+    /// The candidate devices and each one's USABLE byte capacity - a real
+    /// number the caller queried (`nvidia-smi` total minus the configured
+    /// reserve), not an assumption.
+    ///
+    /// Capacity is carried, not just identity, because the split has to
+    /// RESPECT it: an even layer split across a 24 GB and an 8 GB card fits
+    /// neither the model nor reality. How many of these devices actually get
+    /// used is decided by `model::shard::plan_fewest_devices` from the
+    /// checkpoint's real per-layer bytes - a model that fits one card stays
+    /// on one card, and one that needs three gets three.
+    devices: Vec<(Device, u64)>,
+    /// Memoizes the placement. Required once this model is reachable through
+    /// `Executor`: `estimate_multi` runs on the DISPATCHER thread, once per
+    /// scheduling round, for every queued group of this model (see
     /// `MultiDeviceResidentModel::estimate_multi`'s own doc) — it must not
     /// re-open and re-parse a 54k-tensor checkpoint header on every call, and
     /// must never panic there (a panic on the dispatcher thread takes every
     /// OTHER model on the server down with it, not just this one).
-    cost: OnceLock<MultiDeviceCost>,
+    plan: OnceLock<Plan>,
 }
 
 impl Int8ThinkerResident {
-    pub fn new(checkpoint_path: String, cfg: MoeTextConfig, devices: Vec<Device>) -> Int8ThinkerResident {
-        Int8ThinkerResident { checkpoint_path, cfg, devices, cost: OnceLock::new() }
+    /// `devices` is `(device, usable bytes)` - see the field's own doc for
+    /// why the capacity travels with the identity.
+    pub fn new(checkpoint_path: String, cfg: MoeTextConfig, devices: Vec<(Device, u64)>) -> Int8ThinkerResident {
+        Int8ThinkerResident { checkpoint_path, cfg, devices, plan: OnceLock::new() }
     }
 
-    /// Contiguous layer ranges for `n_devices` shards — layer-RANGE (never
-    /// expert-split: an expert-split cut would move a per-expert partial
-    /// output every layer and break `expert_fwd_i8`'s "quantize the shared
-    /// input once" contract), as even as `n_layers` allows.
-    fn layer_ranges(&self, n_devices: usize) -> Vec<LayerRange> {
-        let n = self.cfg.n_layers as usize;
-        let base = n / n_devices;
-        let extra = n % n_devices;
-        let mut ranges = Vec::with_capacity(n_devices);
-        let mut start = 0;
-        for i in 0..n_devices {
-            let len = base + usize::from(i < extra);
-            ranges.push(start..start + len);
-            start += len;
+    /// Total device bytes this checkpoint needs, whatever the split - the sum
+    /// of every layer plus the head. Useful to a caller sizing budgets, and
+    /// the honest answer to "will this fit at all?" when compared against the
+    /// sum of the available cards.
+    pub fn total_device_bytes(&self) -> Result<u64, String> {
+        let reader = WeightReader::open(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
+        let cost = layer_cost(&reader, &self.cfg).ok_or_else(|| format!("{MODEL}: '{}' is missing tensors this model needs", self.checkpoint_path))?;
+        Ok(cost.total())
+    }
+
+    /// The placement, computed once. Returns a plan naming ZERO devices
+    /// (never panics) when there are no candidate devices, the checkpoint
+    /// cannot be opened, or the model does not fit across the devices given -
+    /// [`MultiDeviceResidentModel::estimate_multi`]'s documented "this model
+    /// is unavailable" signal, which `ResidencyManager::claim_multi` turns
+    /// into a clean per-job error instead of a dispatcher crash or a silently
+    /// stuck queue.
+    fn plan(&self) -> Plan {
+        if let Some(p) = self.plan.get() {
+            return p.clone();
         }
-        ranges
+        let computed = self.plan_uncached();
+        // A losing racer's freshly-computed value is simply dropped -- every
+        // caller ends up seeing the SAME value (whichever `set` won), which is
+        // all correctness here depends on; `plan_uncached` is a pure function
+        // of `self`, so which racer wins does not matter.
+        let _ = self.plan.set(computed.clone());
+        computed
     }
 
-    /// `estimate_multi`'s real work, uncached — see [`Self::cost`]'s doc for
-    /// why the caller memoizes this. Returns a cost naming ZERO devices (never
-    /// panics) when `self.devices` is empty or the checkpoint can't be
-    /// opened — [`MultiDeviceResidentModel::estimate_multi`]'s documented
-    /// "this model is unavailable" signal, which `ResidencyManager::
-    /// claim_multi` turns into a clean per-job error instead of a dispatcher
-    /// crash or a silently-stuck queue.
-    fn estimate_multi_uncached(&self) -> MultiDeviceCost {
+    fn plan_uncached(&self) -> Plan {
         if self.devices.is_empty() {
-            return MultiDeviceCost::new(vec![], 0);
+            return Plan::default();
         }
         let reader = match WeightReader::open(&self.checkpoint_path) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{MODEL}: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.checkpoint_path);
-                return MultiDeviceCost::new(vec![], 0);
+                return Plan::default();
             }
         };
-        let ranges = self.layer_ranges(self.devices.len());
-        let per_device: Vec<(Device, u64)> =
-            self.devices.iter().zip(ranges.iter()).map(|(&d, r)| (d, expert_bytes(&reader, r.clone(), &self.cfg))).collect();
-        MultiDeviceCost::new(per_device, 0)
+        let Some(cost) = layer_cost(&reader, &self.cfg) else {
+            eprintln!("{MODEL}: '{}' is missing tensors this model loads -- reporting zero devices so the claim fails placement instead of panicking", self.checkpoint_path);
+            return Plan::default();
+        };
+        // The embedding is host-resident ONLY on the fallback branch (a
+        // mapping that cannot lend its bytes); charge it honestly rather than
+        // reporting a flat 0 that would be a lie on exactly that branch.
+        let host_ram = match reader.raw_words(EMBED_TENSOR) {
+            Some(_) => 0,
+            None => f32_resident_bytes(&reader, EMBED_TENSOR),
+        };
+        // `plan_fewest_devices` wants `(index, capacity)`; map back to the
+        // caller's own `Device`s afterwards so a non-GPU device in the list
+        // (which this model cannot use) is rejected rather than mis-indexed.
+        let mut caps: Vec<(usize, u64)> = Vec::with_capacity(self.devices.len());
+        for (i, &(d, cap)) in self.devices.iter().enumerate() {
+            match d {
+                Device::Gpu(_) => caps.push((i, cap)),
+                other => {
+                    eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)");
+                }
+            }
+        }
+        let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
+            eprintln!(
+                "{MODEL}: {} does not fit across the {} budgeted device(s) ({} bytes needed, {} available) -- reporting zero devices",
+                self.checkpoint_path,
+                caps.len(),
+                cost.total(),
+                caps.iter().map(|&(_, c)| c).sum::<u64>()
+            );
+            return Plan::default();
+        };
+        let stages = placements
+            .iter()
+            .map(|p| (self.devices[p.shard.gpu_index].0, p.shard.start..p.shard.end, p.bytes))
+            .collect();
+        Plan { stages, host_ram }
     }
 }
 
@@ -383,7 +618,7 @@ impl ResidentModel for Int8ThinkerResident {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             MODEL,
-            "A layer-sharded, int8-MoE-expert Thinker spanning two real GPUs via residency::multi, with real streamed weights (attention/norm/router/experts/embed/lm_head) and real greedy generation -- no tokenization (token ids in, token ids out) and no KV cache (each generate() step is a full recompute; see this module's own doc for why and what a follow-up KV-cache decode loop would need).",
+            "A layer-sharded, int8-MoE-expert Thinker spanning as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard), streamed onto each card with bounded host memory -- no tokenization (token ids in, token ids out) and no KV cache (each generate() step is a full recompute; see this module's own doc for why and what a follow-up KV-cache decode loop would need).",
             vec![
                 ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob"),
                 ActionSpec::new("generate", "greedy generation: token ids in (meta max_new_tokens/eos_ids), generated token ids out"),
@@ -403,42 +638,51 @@ impl ResidentModel for Int8ThinkerResident {
 
 impl MultiDeviceResidentModel for Int8ThinkerResident {
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
-        if let Some(c) = self.cost.get() {
-            return c.clone();
-        }
-        let computed = self.estimate_multi_uncached();
-        // A losing racer's freshly-computed value is simply dropped -- every
-        // caller ends up seeing the SAME value (whichever `set` won), which is
-        // all correctness here depends on; `estimate_multi_uncached` is a pure
-        // function of `self`, so which racer wins does not matter.
-        let _ = self.cost.set(computed.clone());
-        computed
+        let plan = self.plan();
+        MultiDeviceCost::new(plan.stages.iter().map(|&(d, _, bytes)| (d, bytes)).collect(), plan.host_ram)
     }
 
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let plan = self.plan();
+        if plan.stages.is_empty() {
+            return Err(format!("{MODEL}: no placement (checkpoint unreadable, or it does not fit the budgeted devices)"));
+        }
+        // `claim_multi` reserves against exactly the devices `estimate_multi`
+        // named, so it hands back the same set. Insisting on that here (rather
+        // than silently re-planning for whatever arrives) is what makes the
+        // reservation and the allocation describe the same bytes.
+        if devices.len() != plan.stages.len() || !devices.iter().all(|d| plan.stages.iter().any(|&(pd, _, _)| pd == *d)) {
+            return Err(format!(
+                "{MODEL}: activate_multi got devices {devices:?} but the plan placed {:?} -- the reservation and the load would describe different cards",
+                plan.stages.iter().map(|&(d, _, _)| d).collect::<Vec<_>>()
+            ));
+        }
+
         let reader = WeightReader::open(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
-        let ranges = self.layer_ranges(devices.len());
-        let mut shards = Vec::with_capacity(devices.len());
-        for (dev, range) in devices.iter().zip(ranges.iter()) {
+        let mut shards = Vec::with_capacity(plan.stages.len());
+        for (dev, range, _) in &plan.stages {
             let idx = match dev {
                 Device::Gpu(i) => *i,
-                other => return Err(format!("{MODEL}: activate_multi got a non-GPU device {other:?}")),
+                other => return Err(format!("{MODEL}: plan named a non-GPU device {other:?}")),
             };
             let gpu = Gpu::new_on_index(idx, thinker_pipelines())?;
-            let store = ThinkerInt8Store::build(&gpu, &reader, range.clone(), &self.cfg);
-            let layer_bufs = range.clone().map(|l| (l, load_layer_bufs(&gpu, &reader, &self.cfg, l))).collect();
+            // ONE uploader for this whole card's share: the staging-reclaim
+            // budget spans every tensor, which is the part that keeps a
+            // multi-GB load from accruing a shadow copy of itself.
+            let mut up = Uploader::new(&gpu);
+            let store = ThinkerInt8Store::build(&mut up, &reader, range.clone(), &self.cfg);
+            let layer_bufs = range.clone().map(|l| (l, load_layer_bufs(&mut up, &reader, l))).collect();
             shards.push(DeviceShard { gpu, range: range.clone(), store, layer_bufs });
         }
-        // `Self::generate`'s needs: the embedding table stays host-side (a
-        // per-token row gather, never a GEMM -- no reason to spend GPU
-        // memory on it), final norm + lm_head live on the LAST shard's
-        // `Gpu` (where `forward`'s own host round-trip already lands the
-        // final hidden state).
-        let (vocab, hidden) = (self.cfg.vocab, self.cfg.hidden);
-        let embed_table_host = load_mat_host(&reader, "thinker.embed_tokens.weight", vocab, hidden);
-        let last = shards.last().ok_or_else(|| format!("{MODEL}: activate_multi got zero devices"))?;
-        let final_norm_w = load_vec(&reader, &last.gpu, "thinker.norm.weight");
-        let lm_head_w = load_lin8(&last.gpu, &reader, "thinker.lm_head.weight");
-        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, embed_table_host, final_norm_w, lm_head_w }))
+        let last = shards.last().ok_or_else(|| format!("{MODEL}: plan has zero stages"))?;
+        let mut up = Uploader::new(&last.gpu);
+        let final_norm_w = load_vec(&mut up, &reader, "thinker.norm.weight");
+        let lm_head_w = load_lin8(&mut up, &reader, "thinker.lm_head.weight");
+
+        let embed = EmbedTable::open(&reader)?;
+        if embed.hidden() != self.cfg.hidden as usize {
+            return Err(format!("{MODEL}: {EMBED_TENSOR} is [_, {}] but the config says hidden={}", embed.hidden(), self.cfg.hidden));
+        }
+        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w }))
     }
 }

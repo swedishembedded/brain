@@ -19,6 +19,7 @@ brain-npu.workspace = true
 brain-onnx.workspace = true
 brain-audio.workspace = true
 brain-model.workspace = true
+brain-paramstore.workspace = true
 brain-imaging.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true

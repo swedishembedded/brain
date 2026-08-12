@@ -70,6 +70,106 @@ pub fn dequantize_weight(packed: &[u32], sw: &[f32], n: usize, k: usize) -> Vec<
     w
 }
 
+/// Dequantize rows `[r0, r0 + rows)` of a packed tensor into `out` (cleared
+/// and refilled) - [`dequantize_weight`] restricted to a row block, so a
+/// caller can walk a huge tensor without ever holding its f32 expansion.
+/// `packed` holds exactly those rows' words (`rows * k/4`); `sw` is the FULL
+/// per-row scale vector, indexed absolutely from `r0`.
+pub fn dequantize_rows_into(packed: &[u32], sw: &[f32], r0: usize, rows: usize, k: usize, out: &mut Vec<f32>) {
+    assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
+    let kg = k / 4;
+    assert_eq!(packed.len(), rows * kg, "packed len {} != rows*(k/4) {}", packed.len(), rows * kg);
+    out.clear();
+    out.reserve(rows * k);
+    for r in 0..rows {
+        let s = sw[r0 + r];
+        for g in 0..kg {
+            let word = packed[r * kg + g];
+            for b in 0..4 {
+                let q = ((word >> (8 * b)) as u8) as i8;
+                out.push(q as f32 * s);
+            }
+        }
+    }
+}
+
+/// Stream a packed int8 tensor from `source` onto a device **as f32**, with
+/// peak host allocation bounded to one row block rather than the whole
+/// dequantized tensor.
+///
+/// This is the loader for every int8-native weight that has no int8 dispatch
+/// path of its own (attention/router projections, `lm_head`): the checkpoint
+/// stores them packed because the importer quantizes every rank-2 tensor, but
+/// the kernels that consume them are fp32, so they must be unpacked on the way
+/// in. Doing that with `tensor_u32` + [`dequantize_weight`] costs the FULL
+/// f32 expansion in host RAM first - 1.2 GB for a real `lm_head` at
+/// `vocab=152064, hidden=2048`, on top of the packed copy. Here the packed
+/// words arrive in bounded chunks (cut on row boundaries so each block's rows
+/// are complete), are expanded into one reused scratch, and go straight to
+/// the device at their true offset.
+///
+/// `n`/`k` are the LOGICAL (unpacked) shape; the packed tensor is `[n, k/4]`,
+/// so `k` cannot be recovered from its own shape. The per-row scale sibling
+/// is `"{name}.scale"` (`n` floats - small, read whole).
+pub fn upload_dequantized(
+    up: &mut paramstore::upload::Uploader,
+    source: &dyn checkpoint::TensorSource,
+    name: &str,
+    n: usize,
+    k: usize,
+) -> Result<gpu_core::DeviceBuffer, String> {
+    let kg = k / 4;
+    if kg == 0 {
+        return Err(format!("upload_dequantized '{name}': k={k} is not a positive multiple of 4"));
+    }
+    let scale_name = format!("{name}.scale");
+    let mut sw: Vec<f32> = Vec::new();
+    if !source.with_tensor(&scale_name, &mut |s| sw = s.to_vec()) {
+        return Err(format!("upload_dequantized '{name}': missing scale sibling '{scale_name}'"));
+    }
+    if sw.len() != n {
+        return Err(format!("upload_dequantized '{name}': scale has {} entries, expected {n}", sw.len()));
+    }
+
+    let buf = up.gpu().storage((n * k) as u64);
+    // Cut chunks on ROW boundaries: each callback then holds whole rows, so
+    // its scale indices and its destination offset are both exact.
+    let rows_per_chunk = (paramstore::UPLOAD_CHUNK_WORDS / kg).max(1);
+    let mut scratch: Vec<f32> = Vec::with_capacity(rows_per_chunk * k);
+    let mut rows_done = 0usize;
+    let mut err: Option<String> = None;
+    let found = source.with_tensor_u32_chunks(name, rows_per_chunk * kg, &mut |off_words, chunk| {
+        if err.is_some() {
+            return;
+        }
+        if off_words as usize % kg != 0 || chunk.len() % kg != 0 {
+            err = Some(format!("upload_dequantized '{name}': chunk at word {off_words} of len {} is not row-aligned (k/4={kg})", chunk.len()));
+            return;
+        }
+        let r0 = off_words as usize / kg;
+        let rows = chunk.len() / kg;
+        if r0 + rows > n {
+            err = Some(format!("upload_dequantized '{name}': rows {r0}..{} exceed the declared {n}", r0 + rows));
+            return;
+        }
+        dequantize_rows_into(chunk, &sw, r0, rows, k, &mut scratch);
+        up.gpu().write_f32_at(&buf, (r0 * k) as u64, &scratch);
+        rows_done += rows;
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if !found {
+        return Err(format!("upload_dequantized '{name}': not present as a packed tensor in this source"));
+    }
+    if rows_done != n {
+        return Err(format!("upload_dequantized '{name}': wrote {rows_done} rows, expected {n}"));
+    }
+    up.account(4 * (n * k) as u64);
+    up.maybe_drain(&buf);
+    Ok(buf)
+}
+
 /// The buffers and kernel slots one dynamic activation quantization needs —
 /// the same "bundle the ids so the call stays readable" shape as
 /// [`crate::block::FlashIds`].

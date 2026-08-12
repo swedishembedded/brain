@@ -63,6 +63,32 @@ pub trait TensorSource {
         self.with_tensor(name, &mut |d| f(0, d))
     }
 
+    /// Ordered chunks of at most `max_elems` **packed `u32` words** - the
+    /// bounded reader for brain's int8-native storage convention
+    /// (`model::int8::quantize_weight`'s 4-int8-per-`u32` layout, written by
+    /// `weightio::StWriter::write_u32`). Same `O(max_elems)` peak guarantee as
+    /// [`with_tensor_chunks`](Self::with_tensor_chunks), for the dtype that
+    /// one cannot serve (a packed tensor has no meaningful f32 decoding).
+    ///
+    /// Returns whether the tensor was found AND could be served as packed
+    /// words. The default satisfies it from [`raw_words`](Self::raw_words)
+    /// when that lends a zero-copy view, and otherwise reports `false` - a
+    /// source with no packed-word representation (a plain f32 `HashMap`, a
+    /// GGUF) genuinely has nothing to give here, and saying so is better than
+    /// silently reinterpreting float bits as packed lanes.
+    fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        match self.raw_words(name) {
+            Some(words) => {
+                let chunk = if max_elems == 0 { words.len().max(1) } else { max_elems };
+                for (i, part) in words.chunks(chunk).enumerate() {
+                    f((i * chunk) as u64, part);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Element count of `name`, if cheaply known without decoding. Default:
     /// unknown (`None`) — callers that need it fall back to `with_tensor`.
     fn numel(&self, _name: &str) -> Option<usize> {

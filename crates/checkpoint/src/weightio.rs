@@ -276,6 +276,21 @@ impl crate::TensorSource for WeightReader {
         }
     }
 
+    /// Bounded packed-`u32` decode for safetensors - the int8-native
+    /// counterpart to [`Self::with_tensor_chunks`]. GGUF has no packed-`U32`
+    /// convention at all ([`Self::tensor_u32`]'s own doc), so it reports
+    /// `false` rather than reinterpreting a quantized block's bytes.
+    fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        match &self.inner {
+            Inner::St(m) => m.with_tensor_u32_chunks(name, max_elems, f),
+            Inner::Gguf(_) => false,
+            Inner::StSharded(readers, owner) => match owner.get(name) {
+                Some(&si) => readers[si].with_tensor_u32_chunks(name, max_elems, f),
+                None => false,
+            },
+        }
+    }
+
     fn numel(&self, name: &str) -> Option<usize> {
         match &self.inner {
             Inner::St(m) => m.numel(name),
@@ -429,7 +444,28 @@ impl StWriter {
             }
         }
         header.insert("__metadata__".to_string(), Value::Object(meta));
-        let hbytes = serde_json::to_vec(&Value::Object(header))?;
+        let mut hbytes = serde_json::to_vec(&Value::Object(header))?;
+        // Pad the header with JSON-legal trailing spaces so the tensor blob
+        // starts at a multiple of 8. Every planned dtype is 4 bytes wide and
+        // every offset is therefore a multiple of 4 WITHIN the blob, so an
+        // 8-aligned `blob_start` makes every tensor's byte range 4-byte
+        // aligned in the mapping - exactly the condition
+        // `crate::mmap::MmapSafetensors::raw_words` requires to lend a
+        // tensor's bytes ZERO-COPY rather than decoding them into a fresh
+        // host `Vec` on the way to a device.
+        //
+        // This has to be enforced here because the alternative is not an
+        // error but a silent cost: unpadded, `blob_start = 8 + header_len`
+        // is whatever the serialized JSON happens to measure, so whether a
+        // given checkpoint can be uploaded without a host copy depends on
+        // the incidental length of its tensor names. The official
+        // safetensors serializer pads for the same reason, and `serde_json`
+        // accepts trailing whitespace, so the output stays readable by any
+        // conformant reader.
+        while hbytes.len() % 8 != 0 {
+            hbytes.push(b' ');
+        }
+        let hbytes = hbytes;
 
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
@@ -751,6 +787,51 @@ mod tests {
         std::fs::remove_file(&p2).ok();
     }
 
+    /// Every tensor a brain-native checkpoint contains must be lendable
+    /// ZERO-COPY (`raw_words`), whatever the header's JSON happens to
+    /// measure - that is what `create_mixed`'s 8-byte header padding buys,
+    /// and it is what lets a resident stream weights to a device with no
+    /// host materialization at all. Alignment is a property of the header
+    /// LENGTH, so this walks a range of plan sizes (shifting that length
+    /// through every residue mod 8) rather than trusting one lucky file.
+    #[test]
+    fn every_tensor_in_a_written_checkpoint_is_zero_copyable() {
+        use crate::TensorSource;
+        for extra in 0..16usize {
+            let p = scratch(&format!("align{extra}"));
+            // Vary the header length: more (and longer-named) tensors shift
+            // the serialized JSON's byte count through every residue mod 8.
+            let mut plan: Vec<(String, Vec<u64>, Dtype)> = vec![
+                ("packed".to_string(), vec![4u64, 2], Dtype::U32),
+                ("packed.scale".to_string(), vec![4u64], Dtype::F32),
+            ];
+            for i in 0..extra {
+                plan.push((format!("pad{i}"), vec![2u64], Dtype::F32));
+            }
+            let mut w = StWriter::create_mixed(&p, &plan, &Value::Null, None).unwrap();
+            w.write_u32("packed", &[1u32, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+            w.write("packed.scale", &[0.5f32, 0.25, 0.125, 1.0]).unwrap();
+            for i in 0..extra {
+                w.write(&format!("pad{i}"), &[1.0f32, 2.0]).unwrap();
+            }
+            w.finish().unwrap();
+
+            let r = WeightReader::open(&p).unwrap();
+            for name in ["packed", "packed.scale"] {
+                assert!(
+                    r.raw_words(name).is_some(),
+                    "'{name}' is not zero-copyable with {extra} padding tensors - the header is not 8-byte padded"
+                );
+            }
+            // ...and the bounded packed reader agrees with the eager one.
+            let mut streamed: Vec<u32> = Vec::new();
+            assert!(r.with_tensor_u32_chunks("packed", 3, &mut |_, c| streamed.extend_from_slice(c)));
+            assert_eq!(streamed, r.tensor_u32("packed").unwrap());
+
+            std::fs::remove_file(&p).ok();
+        }
+    }
+
     #[test]
     fn stwriter_enforces_plan_order() {
         let p = scratch("order");
@@ -911,6 +992,55 @@ mod tests {
             "eager peak {peak_eager} should hold the whole file ({total_bytes})"
         );
         assert!(peak_stream < peak_eager / 2);
+
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// The packed-`u32` reader is bounded the same way the f32 one is:
+    /// streaming a tensor far larger than the chunk must keep peak live
+    /// allocation near ONE CHUNK, while the whole-tensor `tensor_u32`
+    /// accessor necessarily holds the lot. Measured with the same
+    /// [`peak_live`] harness as `for_each_is_memory_bounded`, not asserted
+    /// from reading the code - this is the guarantee an int8 checkpoint's
+    /// GPU load depends on (a real expert-heavy checkpoint is mostly packed
+    /// `U32`, so an unbounded packed read would be the dominant host cost).
+    #[test]
+    fn with_tensor_u32_chunks_is_memory_bounded() {
+        use crate::TensorSource;
+        let p = scratch("u32-membound");
+        let n = 400_000usize; // 1.6 MB as u32
+        let tensor_bytes = n * 4;
+        let chunk = 4_096usize;
+
+        let plan = vec![("packed".to_string(), vec![n as u64], Dtype::U32)];
+        let data: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2_654_435_761)).collect();
+        let mut w = StWriter::create_mixed(&p, &plan, &Value::Null, None).unwrap();
+        w.write_u32("packed", &data).unwrap();
+        w.finish().unwrap();
+
+        let r = WeightReader::open(&p).unwrap();
+
+        // Streaming: accumulate only a checksum, never retaining a chunk.
+        let (sum, peak_stream) = peak_live(|| {
+            let mut acc = 0u64;
+            let found = r.with_tensor_u32_chunks("packed", chunk, &mut |_, c| {
+                acc = acc.wrapping_add(c.iter().map(|&v| v as u64).sum::<u64>());
+            });
+            assert!(found);
+            acc
+        });
+        assert_eq!(sum, data.iter().map(|&v| v as u64).sum::<u64>(), "the chunked scan must see every word exactly once");
+        assert!(
+            peak_stream < chunk * 4 * 4,
+            "streaming peak {peak_stream} is not within a small multiple of one {chunk}-word chunk"
+        );
+        assert!(peak_stream < tensor_bytes / 8, "streaming peak {peak_stream} is not << the tensor ({tensor_bytes})");
+
+        // The whole-tensor accessor, for contrast: it must hold the lot.
+        let (whole, peak_eager) = peak_live(|| r.tensor_u32("packed").unwrap());
+        assert_eq!(whole, data, "the eager accessor must agree with the chunked one");
+        assert!(peak_eager >= tensor_bytes, "eager peak {peak_eager} should hold the whole tensor ({tensor_bytes})");
+        assert!(peak_stream < peak_eager / 8, "chunked ({peak_stream}) must be far below eager ({peak_eager})");
 
         std::fs::remove_file(&p).ok();
     }

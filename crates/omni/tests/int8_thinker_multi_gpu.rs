@@ -29,6 +29,7 @@
 use data::rng::Lcg;
 use omni::int8_resident::ThinkerInt8Store;
 use omni::int8_thinker_resident::{load_layer_bufs, weights, Int8ThinkerResident};
+use paramstore::upload::Uploader;
 use omni::thinker::{layer_fwd, thinker_pipelines};
 use residency::budget::Budgets;
 use residency::manager::ClaimedMulti;
@@ -37,7 +38,7 @@ use std::sync::Arc;
 
 #[path = "common/int8_thinker_fixture.rs"]
 mod fixture;
-use fixture::{tiny_cfg, write_synthetic_checkpoint};
+use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 #[test]
 fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
@@ -59,7 +60,8 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let mut mgr = ResidencyManager::new(budgets);
-    let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]));
+    let caps = caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2);
+    let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps));
     mgr.register_multi(resident);
 
     let (claimed, devices, key) = mgr.claim_multi(omni::int8_thinker_resident::MODEL, "forward", &capability::Invocation::new(), &Default::default()).expect("claim_multi");
@@ -85,7 +87,8 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     // loaders, one device, no handoff ----
     let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).expect("open synthetic checkpoint");
     let gpu = gpu_core::testgpu::dev(thinker_pipelines());
-    let store = ThinkerInt8Store::build(&gpu, &reader, 0..cfg.n_layers as usize, &cfg);
+    let mut up = Uploader::new(&gpu);
+    let store = ThinkerInt8Store::build(&mut up, &reader, 0..cfg.n_layers as usize, &cfg);
     let tokens: Vec<u32> = (0..n).collect();
     let positions = qwenvl::mrope::get_rope_index(&tokens, u32::MAX, &[]);
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
@@ -94,7 +97,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     let sin = gpu.storage_init("sin", &sin_tab);
     let mut h = gpu.storage_init("h", &x_host);
     for l in 0..cfg.n_layers as usize {
-        let lb = load_layer_bufs(&gpu, &reader, &cfg, l);
+        let lb = load_layer_bufs(&mut up, &reader, l);
         let w = weights(&lb);
         let experts8 = store.layer(l);
         let (out, ..) = layer_fwd(&gpu, &cfg, &w, &h, &cos, &sin, n, None, Some(experts8));
@@ -135,7 +138,12 @@ fn sharded_generate_matches_unsharded_generate() {
     let path = dir.join("thinker.safetensors");
     write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, 777777);
 
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0), Device::Gpu(1)]);
+    // Two residents, differing ONLY in the capacity they were told about:
+    // one card too small to hold the model (so it must shard across both),
+    // and one card big enough (so it must not). Placement is capacity-driven,
+    // so this is how a test asks for a specific split.
+    let sharded_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
+    let whole_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1));
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
 
     let prompt_ids: Vec<u32> = vec![2, 9, 4];
@@ -153,11 +161,11 @@ fn sharded_generate_matches_unsharded_generate() {
         blob.bytes.chunks_exact(4).map(|q| u32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect()
     };
 
-    let mut sharded = resident.activate_multi(&key, &[Device::Gpu(0), Device::Gpu(1)]).expect("activate_multi sharded");
+    let mut sharded = sharded_resident.activate_multi(&key, &[Device::Gpu(0), Device::Gpu(1)]).expect("activate_multi sharded");
     let sharded_out = run_generate(&mut sharded);
     drop(sharded); // free both devices before building the single-device reference on Gpu(0)
 
-    let mut unsharded = resident.activate_multi(&key, &[Device::Gpu(0)]).expect("activate_multi unsharded");
+    let mut unsharded = whole_resident.activate_multi(&key, &[Device::Gpu(0)]).expect("activate_multi unsharded");
     let unsharded_out = run_generate(&mut unsharded);
     drop(unsharded);
 
@@ -176,8 +184,8 @@ fn sharded_generate_matches_unsharded_generate() {
 /// separately-tested `forward()` (`sharded_two_gpu_forward_matches_
 /// unsharded_single_gpu_forward`) plus a from-scratch embed/final_norm/
 /// lm_head/argmax built directly from the public loaders
-/// (`load_mat_host`/`load_vec`/`int8_resident::load_lin8`, `thinker::
-/// final_norm`/`lm_head_fwd_i8`) -- no code path shared with `generate()`'s
+/// (`load_mat_host`/`load_vec`/`load_mat`, `thinker::
+/// final_norm`/`lm_head_fwd`) -- no code path shared with `generate()`'s
 /// own implementation. Single-device only (this is about `generate()`'s own
 /// correctness, not the cross-device question the other test already
 /// covers), so it runs even on a one-GPU box.
@@ -194,7 +202,8 @@ fn generate_first_token_matches_independently_assembled_reference() {
     let path = dir.join("thinker.safetensors");
     write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, 313131);
 
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0)]);
+    let caps1 = caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1);
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps1.clone());
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
     let prompt_ids: Vec<u32> = vec![3, 7, 1];
 
@@ -221,7 +230,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
         x_host.extend_from_slice(&embed_table[t as usize * d..(t as usize + 1) * d]);
     }
 
-    let resident2 = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), vec![Device::Gpu(0)]);
+    let resident2 = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps1);
     let mut instance2 = resident2.activate_multi(&key, &[Device::Gpu(0)]).expect("activate_multi (reference)");
     let bytes2: Vec<u8> = x_host.iter().flat_map(|f| f.to_le_bytes()).collect();
     let inv2 = capability::Invocation::new().blob("x", capability::Blob::new(capability::Media::Bytes, bytes2).with_meta(serde_json::json!({"n": prompt_ids.len() as u32})));
@@ -231,20 +240,17 @@ fn generate_first_token_matches_independently_assembled_reference() {
     let hidden: Vec<f32> = hidden_blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
     let last_row = &hidden[(prompt_ids.len() - 1) * d..prompt_ids.len() * d];
 
-    // Int8, matching what Int8ThinkerInstance::generate() actually dispatches
-    // (thinker::lm_head_fwd_i8, wired in over the fp32 lm_head_fwd it used to
-    // call) -- an fp32 reference here would compare quantized-argmax against
-    // unquantized-argmax, a different and flakier question than what this
-    // test exists to check.
+    // Matching what Int8ThinkerInstance::generate() actually dispatches for
+    // the head (thinker::lm_head_fwd over a dequantized-to-f32 lm_head --
+    // Int8ThinkerInstance keeps attention/router/head in f32, only the routed
+    // MoE experts stay int8, see int8_thinker_resident's module doc).
     let gpu = gpu_core::testgpu::dev(omni::thinker::thinker_pipelines());
-    let norm_w = omni::int8_thinker_resident::load_vec(&reader, &gpu, "thinker.norm.weight");
-    let lm_head_w = omni::int8_resident::load_lin8(&gpu, &reader, "thinker.lm_head.weight");
-    let idx = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
-    let lm_head_ids8 = omni::thinker::LmHeadIds8 { matmul_i8: idx("matmul_i8_dyn"), quant: [idx("max_abs_row"), idx("quant_pack")] };
+    let mut up = Uploader::new(&gpu);
+    let norm_w = omni::int8_thinker_resident::load_vec(&mut up, &reader, "thinker.norm.weight");
+    let lm_head_w = omni::int8_thinker_resident::load_mat(&mut up, &reader, "thinker.lm_head.weight");
     let h1 = gpu.storage_init("h1", last_row);
     let normed = omni::thinker::final_norm(&gpu, &cfg, &norm_w, &h1, 1);
-    let lin8 = model::moe::Lin8 { wq: &lm_head_w.packed, sw: &lm_head_w.scale };
-    let logits = omni::thinker::lm_head_fwd_i8(&gpu, &lm_head_ids8, lin8, &normed, 1, cfg.hidden, cfg.vocab);
+    let logits = omni::thinker::lm_head_fwd(&gpu, &lm_head_w, &normed, 1, cfg.hidden, cfg.vocab);
     let logits_host = gpu.read(&logits, cfg.vocab as usize);
     let reference_token = logits_host.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab");
 
