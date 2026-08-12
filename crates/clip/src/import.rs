@@ -3,13 +3,13 @@
 
 //! Checkpoint import with **two-way coverage validation**: every tensor the
 //! config's manifest names is produced exactly once with the right shape, AND
-//! no source tensor is left unused. A mismatch is an error naming the tensor —
+//! no source tensor is left unused. A mismatch is an error naming the tensor -
 //! never a silent zero-fill (the `flux2::import` / `qwen3::import` discipline).
 //!
 //! Two source layouts:
-//!   * **HF `CLIPTextModel(WithProjection)`** (`text_model.*`) — q/k/v already
+//!   * **HF `CLIPTextModel(WithProjection)`** (`text_model.*`) - q/k/v already
 //!     split, so the only surgery is FUSING them into brain's `[3H, H]` qkv.
-//!   * **EVA02-CLIP `.pt`** (`visual.*`) — three bias-asymmetric linears fused
+//!   * **EVA02-CLIP `.pt`** (`visual.*`) - three bias-asymmetric linears fused
 //!     the same way (k's bias third is zero, because the reference's k linear
 //!     genuinely has none), and the q/k rows permuted into brain's half-split
 //!     RoPE channel order (see [`EvaVisionConfig::head_perm`]).
@@ -79,7 +79,7 @@ fn fuse3(q: &[f32], k: &[f32], v: &[f32]) -> Vec<f32> {
 
 /// Read an SDXL-style `text_encoder*/` directory. Prefers the fp32
 /// `model.safetensors` (or a sharded index); falls back to
-/// `model.fp16.safetensors`, which is all the SDXL 1.0 release ships — the
+/// `model.fp16.safetensors`, which is all the SDXL 1.0 release ships - the
 /// reader widens F16 to f32 exactly, and the goldens were dumped from the same
 /// bytes, so this is not a precision compromise relative to the reference.
 pub fn read_text_encoder(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
@@ -100,7 +100,7 @@ pub fn read_text_encoder(dir: &std::path::Path) -> Result<Vec<StTensor>, String>
 /// HF tensor names that are registered buffers, not parameters, and are
 /// deliberately dropped. `position_ids` is `arange(max_positions)`; brain's
 /// `pos_add` derives the position from the row index. Older `transformers`
-/// exports ship it, newer ones do not — the manifest count is asserted either
+/// exports ship it, newer ones do not - the manifest count is asserted either
 /// way, so a drop can never hide a missing weight.
 const TEXT_DROP: [&str; 1] = ["text_model.embeddings.position_ids"];
 
@@ -108,7 +108,7 @@ const TEXT_DROP: [&str; 1] = ["text_model.embeddings.position_ids"];
 /// it occupies in the fused `blocks.N.qkv.*`.
 enum TextSlot {
     Direct(String),
-    /// `(fused brain name, slot)` — 0 = q, 1 = k, 2 = v.
+    /// `(fused brain name, slot)` - 0 = q, 1 = k, 2 = v.
     Qkv(String, usize),
     Drop,
 }
@@ -210,7 +210,7 @@ pub struct EvaImportReport {
     /// `2 * (layers + 1)` = 50 for EVA02-L/336 (one pair per block + the tower's
     /// own shared pair).
     pub skipped_rope_buffers: usize,
-    /// Keys outside `visual.` — the joint checkpoint's TEXT tower, a different
+    /// Keys outside `visual.` - the joint checkpoint's TEXT tower, a different
     /// model. Counted, not silently ignored.
     pub skipped_non_visual: usize,
 }
@@ -299,7 +299,7 @@ pub fn import_eva_visual(
             return Err(format!("clip import: unrecognized EVA visual tensor {}", t.name));
         };
         // q/k/v: fuse, and permute the q and k HEAD CHANNELS into brain's
-        // half-split RoPE order. v is NOT permuted — it never meets RoPE, and
+        // half-split RoPE order. v is NOT permuted - it never meets RoPE, and
         // the attention output (and therefore `proj`) must stay in reference
         // channel order.
         let fused = match leaf {
@@ -380,12 +380,135 @@ pub fn import_eva_visual(
     if rep.skipped_rope_buffers != expect_rope {
         return Err(format!(
             "clip import: skipped {} rope freq buffers, expected {expect_rope} \
-             (2 per block + the tower's own pair) — the skip set is asserted, not assumed",
+             (2 per block + the tower's own pair) - the skip set is asserted, not assumed",
             rep.skipped_rope_buffers
         ));
     }
     let map = validate(map, &cfg.tensor_manifest())?;
     Ok((map, rep))
+}
+
+// ---------------------------------------------------------------------------
+// vanilla CLIP-L image tower (DeepSeek-OCR's mmproj)
+// ---------------------------------------------------------------------------
+
+/// The prefix `gguf::deepseek_ocr_vision` gives the CLIP branch's tensors in the
+/// brain-native checkpoint it writes.
+pub const DEEPSEEK_OCR_CLIP_PREFIX: &str = "vision.clip.";
+
+/// Import the CLIP-L branch of a DeepSeek-OCR mmproj that
+/// `gguf::deepseek_ocr_vision::import` has already converted to brain's native
+/// `.safetensors`.
+///
+/// This is a **prefix strip and nothing else**: that module's brain-side names
+/// are `vision.clip.<leaf>` and
+/// [`ClipVisionConfig::tensor_manifest`](crate::config::ClipVisionConfig::tensor_manifest)
+/// is that leaf list verbatim, asserted by
+/// `config::tests::manifest_matches_the_gguf_param_list`. There is deliberately
+/// no second name table here - a name mapping that exists twice is a name
+/// mapping that will disagree.
+///
+/// Tensors outside the prefix (the SAM branch, the compressor, the projector)
+/// belong to other crates and are IGNORED rather than rejected, so one imported
+/// checkpoint feeds every stage of the tower. The usual two-way coverage still
+/// holds over what is claimed: every manifest entry must be present with the
+/// right shape, and no `vision.clip.*` tensor may be left over.
+pub fn import_deepseek_ocr_vision(
+    tensors: Vec<StTensor>,
+    cfg: &crate::config::ClipVisionConfig,
+) -> Result<Tensors, String> {
+    let mut map: Tensors = HashMap::new();
+    for t in tensors {
+        let Some(leaf) = t.name.strip_prefix(DEEPSEEK_OCR_CLIP_PREFIX) else {
+            continue; // SAM / compressor / projector - not this tower's tensors
+        };
+        put(&mut map, leaf.to_string(), t.shape, t.data)?;
+    }
+    validate(map, &cfg.tensor_manifest())
+}
+
+// ---------------------------------------------------------------------------
+// vanilla CLIP-L image tower, STRAIGHT FROM THE mmproj GGUF
+// ---------------------------------------------------------------------------
+
+/// Import the CLIP branch **directly from an mmproj GGUF**, without first
+/// materialising a brain-native `.safetensors` of the whole file.
+///
+/// [`import_deepseek_ocr_vision`] above is the safetensors-side prefix strip and
+/// stays the path for a checkpoint already converted; this module is the
+/// GGUF-side one, and it exists because converting the whole mmproj to fp32 just
+/// to read one tower costs ~1.6 GB of disk and dequantizes the SAM branch and
+/// the projector for nothing. It is deliberately the same shape as
+/// `sam1::import` - the mmproj loader's own classifier, narrowed to one tower,
+/// with every other tensor recorded as a `Mapped::Dropped` so the driver's
+/// two-way coverage check still runs over all 476 source tensors.
+pub mod gguf_mmproj {
+    use std::collections::HashMap;
+
+    use checkpoint::gguf::MmapGguf;
+    use gguf::deepseek_ocr_vision as dsv;
+    use gguf::Mapped;
+
+    use crate::config::ClipVisionConfig;
+
+    use super::DEEPSEEK_OCR_CLIP_PREFIX as PREFIX;
+
+    const LABEL: &str = "clip-vision";
+
+    /// Derive the tower's config from an open mmproj GGUF. Note this applies
+    /// [`ClipVisionConfig::from_gguf`]'s LayerNorm-epsilon override - read that
+    /// function's doc before assuming the file's key is what runs.
+    pub fn config_from_gguf(mg: &MmapGguf) -> Result<ClipVisionConfig, String> {
+        Ok(ClipVisionConfig::from_gguf(&dsv::config_from_gguf(mg)?))
+    }
+
+    /// `deepseek_ocr_vision::classify`, narrowed to the CLIP tower. A closure
+    /// factory rather than an inline match so the dry run and the real load
+    /// provably classify identically.
+    fn clip_only(full: &dsv::DeepseekOcrVisionConfig) -> impl Fn(&str) -> Result<Mapped, String> + '_ {
+        move |name: &str| match dsv::classify(name, full)? {
+            Mapped::Simple(n) if n.starts_with(PREFIX) => Ok(Mapped::Simple(n)),
+            _ => Ok(Mapped::Dropped("not part of the CLIP vision tower")),
+        }
+    }
+
+    /// The manifest under the loader's prefixed names (its `param_list` is the
+    /// leaf list with `vision.clip.` in front - asserted by
+    /// `config::tests::manifest_matches_the_gguf_param_list`).
+    fn prefixed(cfg: &ClipVisionConfig) -> Vec<(String, usize)> {
+        cfg.tensor_manifest()
+            .into_iter()
+            .map(|(n, shape)| (format!("{PREFIX}{n}"), shape.iter().product()))
+            .collect()
+    }
+
+    /// Header-only coverage check: every source tensor classified, every
+    /// declared parameter produced, no tensor data read.
+    pub fn dry_run(mg: &MmapGguf) -> Result<(ClipVisionConfig, gguf::ImportStats), String> {
+        let full = dsv::config_from_gguf(mg)?;
+        let cfg = ClipVisionConfig::from_gguf(&full);
+        let stats = gguf::import::dry_run(mg, &prefixed(&cfg), &clip_only(&full), LABEL)?;
+        Ok((cfg, stats))
+    }
+
+    /// Load the tower's weights into an init map keyed by the **leaf** names
+    /// [`crate::model::ClipVision::new_on`] wants (the prefix is stripped after
+    /// the coverage check, so the check still runs against the loader's own
+    /// names).
+    pub fn weights_from_gguf(mg: &MmapGguf) -> Result<(ClipVisionConfig, HashMap<String, Vec<f32>>), String> {
+        let full = dsv::config_from_gguf(mg)?;
+        let cfg = ClipVisionConfig::from_gguf(&full);
+        let w = gguf::import::to_map(mg, &prefixed(&cfg), &clip_only(&full), LABEL)?;
+        Ok((
+            cfg,
+            w.into_iter()
+                .map(|(n, d)| {
+                    let leaf = n.strip_prefix(PREFIX).unwrap_or(&n).to_string();
+                    (leaf, d)
+                })
+                .collect(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -651,5 +774,66 @@ mod tests {
         no_rope.retain(|t| !t.name.ends_with("rope.freqs_cos"));
         let err = import_eva_visual(no_rope, &cfg).unwrap_err();
         assert!(err.contains("rope freq buffers"), "{err}");
+    }
+
+    fn tiny_vision() -> crate::config::ClipVisionConfig {
+        crate::config::ClipVisionConfig {
+            shape: gguf::deepseek_ocr_vision::ClipConfig {
+                d_model: 6,
+                n_layers: 2,
+                n_heads: 2,
+                ffn_hidden: 10,
+                patch_size: 2,
+                image_size: 6,
+                n_positions: 10,
+                layer_norm_eps: 1e-5,
+            },
+            act: crate::config::TextAct::QuickGelu,
+        }
+    }
+
+    /// The mmproj source: every manifest tensor under `vision.clip.`, plus a
+    /// SAM tensor that must be ignored rather than rejected.
+    fn vision_source(cfg: &crate::config::ClipVisionConfig) -> Vec<StTensor> {
+        let mut v: Vec<StTensor> = cfg
+            .tensor_manifest()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, shape))| StTensor {
+                name: format!("{DEEPSEEK_OCR_CLIP_PREFIX}{name}"),
+                data: vec![i as f32; shape.iter().product()],
+                shape,
+            })
+            .collect();
+        v.push(StTensor { name: "vision.sam.pos_embed".into(), shape: vec![2, 3], data: vec![0.0; 6] });
+        v
+    }
+
+    #[test]
+    fn deepseek_ocr_vision_import_is_a_prefix_strip_with_two_way_coverage() {
+        let cfg = tiny_vision();
+        let map = import_deepseek_ocr_vision(vision_source(&cfg), &cfg).expect("import");
+        assert_eq!(map.len(), cfg.tensor_manifest().len());
+        assert_eq!(map["patch_embed.weight"].0, vec![6, 3, 2, 2]);
+        assert_eq!(map["pos_embed"].0, vec![10, 6]);
+        assert_eq!(map["blocks.1.attn.qkv.weight"].0, vec![18, 6]);
+    }
+
+    #[test]
+    fn deepseek_ocr_vision_import_rejects_a_missing_and_an_extra_tensor() {
+        let cfg = tiny_vision();
+        let mut short = vision_source(&cfg);
+        short.retain(|t| !t.name.ends_with("blocks.1.mlp.fc2.bias"));
+        let err = import_deepseek_ocr_vision(short, &cfg).unwrap_err();
+        assert!(err.contains("blocks.1.mlp.fc2.bias"), "{err}");
+
+        let mut extra = vision_source(&cfg);
+        extra.push(StTensor {
+            name: format!("{DEEPSEEK_OCR_CLIP_PREFIX}post_norm.weight"),
+            shape: vec![6],
+            data: vec![0.0; 6],
+        });
+        let err = import_deepseek_ocr_vision(extra, &cfg).unwrap_err();
+        assert!(err.contains("post_norm.weight"), "{err}");
     }
 }

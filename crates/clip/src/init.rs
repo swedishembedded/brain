@@ -3,7 +3,7 @@
 
 //! Random weight initialization for a CLIP **text** tower.
 //!
-//! This exists for tests and gradient checks — a real CLIP-L / bigG tower is
+//! This exists for tests and gradient checks - a real CLIP-L / bigG tower is
 //! always imported ([`crate::import`]), never initialized from scratch. The
 //! scheme follows `transformers`' `CLIPPreTrainedModel._init_weights` in shape
 //! (embeddings and linears normal, LayerNorm gain 1 / bias 0) but NOT in scale:
@@ -57,7 +57,7 @@ pub fn init_text_weights(cfg: &ClipTextConfig, seed: u64) -> HashMap<String, Vec
 /// content span, then `eos` and right-padding.
 ///
 /// `ClipText::set_tokens` pools at the FIRST argmax of the row and asserts it is
-/// `cfg.eos_id`, so every content token must be strictly below `eos_id` — which
+/// `cfg.eos_id`, so every content token must be strictly below `eos_id` - which
 /// this guarantees. Sample `s` puts its EOS at position `1 + s` from the end, so
 /// the batch exercises more than one pooling row.
 pub fn fixed_tokens(cfg: &ClipTextConfig, b: u32, t: u32) -> Vec<u32> {
@@ -73,4 +73,69 @@ pub fn fixed_tokens(cfg: &ClipTextConfig, b: u32, t: u32) -> Vec<u32> {
         row[eos_at] = cfg.eos_id;
     }
     ids
+}
+
+/// Build an initial weight map for a CLIP **image** tower, deterministic for a
+/// fixed `seed`.
+///
+/// Covers exactly [`crate::config::ClipVisionConfig::tensor_manifest`], so the
+/// result can be handed straight to
+/// [`crate::model::ClipVision::new_train_on`]. Same reasoning as
+/// [`init_text_weights`]: a real CLIP-L tower is imported, never initialized, so
+/// this exists for the gradient check - and it deliberately does NOT reproduce
+/// the reference's tiny `factor * d**-0.5` deviations, which at gradcheck
+/// dimensions would drive every activation into the linear regime of
+/// `quick_gelu` and of softmax.
+///
+/// `fan_in` is `numel / shape[0]` rather than the last axis, because the patch
+/// embedding is a 4-D conv weight `[D, 3, k, k]` whose fan-in is `3*k*k`.
+pub fn init_vision_weights(
+    cfg: &crate::config::ClipVisionConfig,
+    seed: u64,
+) -> HashMap<String, Vec<f32>> {
+    let mut rng = Rng::new(seed);
+    let mut w = HashMap::new();
+    let normal = |n: usize, s: f32, rng: &mut Rng| -> Vec<f32> {
+        (0..n).map(|_| (rng.next_gaussian() as f32) * s).collect()
+    };
+    for (name, shape) in cfg.tensor_manifest() {
+        let numel: usize = shape.iter().product();
+        let fan_in = numel / *shape.first().expect("non-empty shape");
+        let v = if name.ends_with("norm.weight") || name.ends_with("norm1.weight") || name.ends_with("norm2.weight") {
+            // LayerNorm gain: 1 + jitter, so `dgamma` is not evaluated where
+            // every gain is identical.
+            normal(numel, 0.1, &mut rng).iter().map(|x| 1.0 + x).collect()
+        } else if name.ends_with(".bias") {
+            normal(numel, 0.05, &mut rng)
+        } else if name == "class_embed" || name == "pos_embed" {
+            normal(numel, 0.5, &mut rng)
+        } else {
+            normal(numel, 1.0 / (fan_in as f32).sqrt(), &mut rng)
+        };
+        assert_eq!(v.len(), numel, "{name}: init size");
+        w.insert(name, v);
+    }
+    w
+}
+
+/// A deterministic pixel batch `[B, 3, S, S]` for `cfg` - the
+/// [`crate::model::PatchSource::Pixels`] fixture input.
+pub fn fixed_pixels(cfg: &crate::config::ClipVisionConfig, b: u32, seed: u64) -> Vec<f32> {
+    let n = b as usize * 3 * (cfg.image_size() * cfg.image_size()) as usize;
+    let mut rng = Rng::new(seed);
+    (0..n).map(|_| rng.next_f32() - 0.5).collect()
+}
+
+/// A deterministic patch-token batch `[B*gh*gw, D]` - the
+/// [`crate::model::PatchSource::Tokens`] fixture input (what a SAM branch's
+/// compressor would hand over).
+pub fn fixed_tokens_grid(
+    cfg: &crate::config::ClipVisionConfig,
+    b: u32,
+    grid: (u32, u32),
+    seed: u64,
+) -> Vec<f32> {
+    let n = (b * grid.0 * grid.1) as usize * cfg.d_model() as usize;
+    let mut rng = Rng::new(seed);
+    (0..n).map(|_| rng.next_f32() - 0.5).collect()
 }

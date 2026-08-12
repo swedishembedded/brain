@@ -17,7 +17,12 @@ brain-paramstore.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-checkpoint.workspace = true
-# `init::init_text_weights` — `data::rng::Rng` is the workspace's only RNG.
+# `config::ClipVisionConfig` wraps `gguf::deepseek_ocr_vision::ClipConfig` rather
+# than restating it, and `import::import_deepseek_ocr_vision` strips the prefix
+# off that module's own brain-side names. `brain-gguf` pulls only
+# brain-checkpoint + serde_json, so this is not a cycle.
+brain-gguf.workspace = true
+# `init::init_text_weights` - `data::rng::Rng` is the workspace's only RNG.
 brain-data.workspace = true
 brain-capability.workspace = true
 serde_json.workspace = true
