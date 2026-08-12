@@ -1,0 +1,17 @@
+[package]
+name = "brain-gguf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GGUF import layer: architecture-keyed hyperparameter extraction, tensor-name classification and a streaming two-way-coverage import driver on top of brain-checkpoint's low-level GGUF reader."
+
+[lib]
+name = "gguf"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

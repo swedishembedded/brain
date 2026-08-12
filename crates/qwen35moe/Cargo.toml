@@ -16,6 +16,7 @@ brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true
 brain-checkpoint.workspace = true
+brain-gguf.workspace = true
 brain-kernels.workspace = true
 brain-data.workspace = true
 brain-qwen3.workspace = true

@@ -8,7 +8,7 @@ members = ["crates/*"]
 #
 # `crates/vulkan` is the ONLY deliberate exclusion. This list is
 # hand-maintained, and a crate silently missing from it is built as a
-# DEPENDENCY but its own tests never run under a bare `cargo test` — which is
+# DEPENDENCY but its own tests never run under a bare `cargo test` - which is
 # how omni's actively-developed int8 dual-GPU work went untested by default
 # (audit F37). When adding a crate under crates/, add it here too unless you
 # are excluding it on purpose WITH a comment saying why.
@@ -21,6 +21,7 @@ default-members = [
     "crates/gpu-core",
     "crates/kernels",
     "crates/checkpoint",
+    "crates/gguf",
     "crates/paramstore",
     "crates/optim",
     "crates/autodiff",
@@ -77,6 +78,9 @@ default-members = [
     "crates/facenet",
     "crates/vqgan",
     "crates/clip",
+    "crates/sam1",
+    "crates/deepseekv2",
+    "crates/deepseekocr",
     "crates/t5",
     "crates/flux1",
     "crates/restore",
@@ -122,6 +126,7 @@ brain-backend-vulkan = { path = "crates/backend-vulkan" }
 brain-gpu-core = { path = "crates/gpu-core" }
 brain-kernels = { path = "crates/kernels" }
 brain-checkpoint = { path = "crates/checkpoint" }
+brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
 brain-data = { path = "crates/data" }
@@ -178,6 +183,9 @@ brain-sam2 = { path = "crates/sam2" }
 brain-facenet = { path = "crates/facenet" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
+brain-sam1 = { path = "crates/sam1" }
+brain-deepseekv2 = { path = "crates/deepseekv2" }
+brain-deepseekocr = { path = "crates/deepseekocr" }
 brain-t5 = { path = "crates/t5" }
 brain-flux1 = { path = "crates/flux1" }
 brain-restore = { path = "crates/restore" }
@@ -204,8 +212,8 @@ brain-server = { path = "crates/server" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 
-# Third-party. fp32-only, core-compute-only GPU stack — see crates/kernels.
-# wgpu/pollster: ONE workspace pin for the native GPU stack — the version was
+# Third-party. fp32-only, core-compute-only GPU stack - see crates/kernels.
+# wgpu/pollster: ONE workspace pin for the native GPU stack - the version was
 # previously copied into 6+ crate manifests, where one crate bumping alone
 # would split the workspace across two wgpu majors. The wasm-target wgpu
 # entries ([target.'cfg(target_arch = "wasm32")'.dependencies]) stay explicit
@@ -223,7 +231,7 @@ bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Jinja2 execution of a checkpoint's OWN `tokenizer_config.json` chat_template
-# string — the generic path for chat rendering, so a new model family needs no
+# string - the generic path for chat rendering, so a new model family needs no
 # hand-ported template code (see crates/data/src/chat_template.rs). Its own
 # `preserve_order` feature keeps a rendered `tojson` byte-identical to the
 # source JSON's key order; deliberately does NOT touch serde_json's own
@@ -248,7 +256,7 @@ prost = "0.14"
 openvino = { version = "0.11", default-features = false, features = ["runtime-linking"] }
 
 # HTTP provider-API surface (crates/apiserve): axum/tower/tokio stack. Confined to
-# that crate — the core compute graph never links these.
+# that crate - the core compute graph never links these.
 axum = { version = "0.7" }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
@@ -264,7 +272,7 @@ anyhow = "1"
 jsonschema = "0.49"
 
 # braintop TUI (crates/braintop): a standalone btop-like monitor that renders the
-# StatsSnapshot over D-Bus. Confined to that bin — no engine/model crate links it.
+# StatsSnapshot over D-Bus. Confined to that bin - no engine/model crate links it.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 

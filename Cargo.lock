@@ -540,6 +540,7 @@ dependencies = [
  "brain-codec",
  "brain-data",
  "brain-dbus",
+ "brain-deepseekocr",
  "brain-depth",
  "brain-eval",
  "brain-events",
@@ -608,6 +609,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
+ "brain-gguf",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
@@ -677,6 +679,45 @@ dependencies = [
  "serde_json",
  "tokio",
  "zbus",
+]
+
+[[package]]
+name = "brain-deepseekocr"
+version = "0.1.1"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
+ "brain-deepseekv2",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-sam1",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-deepseekv2"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-testutil",
+ "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -842,6 +883,15 @@ dependencies = [
 name = "brain-forecast"
 version = "0.1.1"
 dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "brain-gguf"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -1077,6 +1127,7 @@ dependencies = [
  "brain-data",
  "brain-federated",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-qwen3",
@@ -1286,6 +1337,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
+ "brain-gguf",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
@@ -1357,6 +1409,22 @@ dependencies = [
  "brain-hfsm",
  "brain-yolo",
  "serde_json",
+]
+
+[[package]]
+name = "brain-sam1"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-testutil",
+ "brain-vision",
 ]
 
 [[package]]
@@ -1461,6 +1529,7 @@ dependencies = [
 name = "brain-testutil"
 version = "0.1.1"
 dependencies = [
+ "brain-checkpoint",
  "brain-modelref",
  "brain-modelstore",
 ]
