@@ -1,0 +1,27 @@
+[package]
+name = "brain-sam1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SAM-1 / ViTDet ViT-B tower: windowed + global attention with decomposed relative position bias, conv neck and 4x token compressor (DeepSeek-OCR's DeepEncoder front half)."
+
+[lib]
+name = "sam1"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-vision.workspace = true
+brain-paramstore.workspace = true
+brain-data.workspace = true
+# The mmproj loader that already names every SAM tensor. Depended on for the
+# config derivation and the import name map, never re-derived here.
+brain-gguf.workspace = true
+brain-checkpoint.workspace = true
+
+[dev-dependencies]
+brain-gradcheck.workspace = true
+# `tests/parity.rs`: the shared testdata-path and cosine/max_abs report helpers.
+brain-testutil.workspace = true
