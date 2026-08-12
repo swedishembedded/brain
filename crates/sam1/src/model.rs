@@ -104,6 +104,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
     // ---- linear algebra ----
     ("matmul", kernels::MATMUL),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_rows", kernels::MATMUL_ROWS),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
@@ -143,6 +144,7 @@ struct Ids {
     ln_dgamma: usize,
     ln_dbeta: usize,
     matmul: usize,
+    matmul_reg3: usize,
     matmul_dx: usize,
     matmul_dw: usize,
     bias_add: usize,
@@ -168,6 +170,7 @@ impl Ids {
             ln_dgamma: k("layernorm_dgamma"),
             ln_dbeta: k("layernorm_dbeta"),
             matmul: k("matmul"),
+            matmul_reg3: k("matmul_reg3"),
             matmul_dx: k("matmul_dx"),
             matmul_dw: k("matmul_dw"),
             bias_add: k("bias_add"),
@@ -657,6 +660,20 @@ impl SamEncoder {
         Ctx::new(&self.gpu, &self.conv_ids)
     }
 
+    /// Forward-GEMM kernel + dispatch threads for a `[m,k]x[k,n]` linear,
+    /// picked on the output dims -- `block::pick_gemm`'s measured crossover
+    /// (`m >= 8 && n >= 128` takes the 128x128 register-tiled kernel), the same
+    /// rule `crates/clip` and `crates/deepseekv2` already apply to their own
+    /// GEMMs. Every block's QKV/proj/fc1/fc2 linear in this tower runs at
+    /// `m` in the hundreds to thousands (windowed OR global -- both are far
+    /// above the crossover), so this was previously ALWAYS the one-thread-
+    /// per-output-element naive kernel: the register-tiled sibling
+    /// (`matmul_reg3`) was registered by every other model in this crate's own
+    /// composite (`crates/clip`, `crates/deepseekv2`) but never wired in here.
+    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+        block::pick_gemm(m as usize, n as usize, self.ids.matmul, self.ids.matmul_reg3, false)
+    }
+
     /// `[rows, C]` NLC -> `[1, C, grid_h, grid_w]` NCHW (and back).
     fn perm_params(&self) -> [u32; 3] {
         let (c, rows) = (self.cfg.d_model, self.cfg.rows());
@@ -732,7 +749,8 @@ impl SamEncoder {
             }
             _ => &b.ln1,
         };
-        steps.push(g.step(self.ids.matmul, &[attn_in, w("attn.qkv.weight"), &b.qkv], &[ar, c, 3 * c], ar * 3 * c));
+        let (mk, mt) = self.gemm(ar, 3 * c);
+        steps.push(g.step(mk, &[attn_in, w("attn.qkv.weight"), &b.qkv], &[ar, c, 3 * c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
@@ -741,7 +759,8 @@ impl SamEncoder {
             &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
         );
 
-        steps.push(g.step(self.ids.matmul, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], ar * c));
+        let (mk, mt) = self.gemm(ar, c);
+        steps.push(g.step(mk, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.proj, w("attn.proj.bias")], &[ar, c], ar * c));
         let branch: &DeviceBuffer = match &b.win {
             Some(wi) => {
@@ -753,10 +772,12 @@ impl SamEncoder {
         steps.push(g.step(self.ids.add2, &[x, branch, &b.res], &[rows * c], rows * c));
 
         steps.push(block::layernorm_fwd(g, &self.ids.ln, &b.res, w("norm2.weight"), w("norm2.bias"), &b.ln2, c, rows, cfg.eps));
-        steps.push(g.step(self.ids.matmul, &[&b.ln2, w("mlp.fc1.weight"), &b.h], &[rows, c, m], rows * m));
+        let (mk, mt) = self.gemm(rows, m);
+        steps.push(g.step(mk, &[&b.ln2, w("mlp.fc1.weight"), &b.h], &[rows, c, m], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.h, w("mlp.fc1.bias")], &[rows, m], rows * m));
         steps.push(g.step(self.ids.gelu, &[&b.h, &b.h2], &[rows * m], rows * m));
-        steps.push(g.step(self.ids.matmul, &[&b.h2, w("mlp.fc2.weight"), &b.mlp_out], &[rows, m, c], rows * c));
+        let (mk, mt) = self.gemm(rows, c);
+        steps.push(g.step(mk, &[&b.h2, w("mlp.fc2.weight"), &b.mlp_out], &[rows, m, c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.mlp_out, w("mlp.fc2.bias")], &[rows, c], rows * c));
         steps.push(g.step(self.ids.add2, &[&b.res, &b.mlp_out, &b.out], &[rows * c], rows * c));
         g.submit(&[&b.ln1], &steps);
