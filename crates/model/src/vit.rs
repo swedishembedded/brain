@@ -1710,6 +1710,10 @@ pub struct RelPos<'a> {
 }
 
 impl RelPos<'_> {
+    /// Keys per invocation in `attn_relpos_add.wgsl`'s dispatch - see
+    /// [`Self::add_step`]. Must equal that kernel's own `const JB`.
+    pub const ADD_JB: u32 = 8;
+
     /// Query rows per span (`qh*qw`) - the row stride of `rel_h`/`rel_w`.
     pub fn span_qn(&self) -> u32 {
         self.qh * self.qw
@@ -1778,9 +1782,23 @@ impl RelPos<'_> {
 
     /// `attn_relpos_add` for one query chunk: `scores += rel_h + rel_w`, in
     /// place, between the scores kernel and the softmax.
+    ///
+    /// Dispatch width is `heads*qn*ceil(kn/ADD_JB)`, NOT `heads*qn*kn` -
+    /// `attn_relpos_add.wgsl` blocks [`Self::ADD_JB`] keys per invocation
+    /// (`crates/kernels/wgsl/attn_relpos_add.wgsl`'s own `const JB` must stay
+    /// equal to this), which keeps every SAM-1 shape this repo defines clear
+    /// of `backend_api::MAX_GROUPS_PER_DIM`'s 65 535-workgroup 2D-tiling
+    /// threshold (the original one-thread-per-score shape crossed it at
+    /// DeepSeek-OCR's real global-attention chunk shape). See that kernel's
+    /// header comment: this is a mitigation for an intermittent wgpu defect
+    /// this dispatch is implicated in, not a confirmed fix for it - the SAM-1
+    /// tower still corrupts unrelated device buffers on wgpu some fraction of
+    /// runs at production shape, and `crates/cli/src/resident_deepseekocr.rs`
+    /// still pins the CPU backend for that reason.
     pub fn add_step(&self, g: &Gpu, heads: u32, qn: u32, kn: u32, q0: u32, scores: &DeviceBuffer) -> Step {
         let p = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw];
-        g.step(self.ids.add, &[self.rel_h, self.rel_w, scores], &p, heads * qn * kn)
+        let kn_blocks = kn.div_ceil(Self::ADD_JB);
+        g.step(self.ids.add, &[self.rel_h, self.rel_w, scores], &p, heads * qn * kn_blocks)
     }
 
     /// `attn_relpos_drh` + `attn_relpos_drw` for one query chunk. Both ASSIGN

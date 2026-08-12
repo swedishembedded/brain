@@ -203,6 +203,79 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   fixture, and **the SAM tower cannot presently be trusted on wgpu at production
   shape.** Fixing it is its own change.
 
+  **Follow-up investigation (checkpoint-free reproduction, root-cause bisection,
+  and a partial mitigation), still open - the CPU pin in
+  `crates/cli/src/resident_deepseekocr.rs` was NOT lifted:**
+
+  * A minimal, seconds-not-minutes checkpoint-free reproduction exists:
+    `crates/sam1/tests/wgpu_block_count_corruption.rs`. Two `SamEncoder`s share
+    an identical block-0/1 prefix (same `SamViTConfig::deepseek_ocr()` geometry,
+    same `init_dense` seed - its sequential draw over `param_list()` gives
+    blocks 0/1 the same weights regardless of `n_layers`) and differ only in
+    whether a 3rd, global-attention block exists past them. On any correct
+    backend `block_out(0)`/`block_out(1)`/`patch_tokens()` must be
+    bit-identical between the two builds; `backend-cpu` holds this exactly
+    every run, `backend-wgpu` does not.
+  * **First hypothesis, bisected out as INSUFFICIENT ALONE**: a single large
+    2D-tiled dispatch. A reduced-dims variant sized only to cross
+    `backend_api::MAX_GROUPS_PER_DIM`'s 65 535-workgroup tiling threshold for
+    one `attn_relpos_add` dispatch was clean on both backends.
+  * **What DOES change the failure rate** (three independent levers, found by
+    bisecting which dispatch is necessary for the corruption at REAL
+    `SamViTConfig::deepseek_ocr()` dims): disabling just the
+    `attn_relpos_add` dispatch (the kernel that folds the decomposed
+    relative-position bias into the score slab IN PLACE,
+    `scores[idx] += rel_h[..] + rel_w[..]`, dispatched 16 times per global
+    block at `attn_chunk=256` against `T=4096`, every one needing the
+    65 535-workgroup 2D-tile path - `heads*qn*kn = 12 582 912` threads);
+    shrinking `attn_chunk` so no `attn_relpos_add` dispatch needs 2D tiling;
+    and `BRAIN_GPU_CHECKED=1` (wgpu's bounds-checked shader compilation).
+  * **`attn_relpos_add.wgsl` was rewritten** to block `JB=8` keys per
+    invocation (`crates/model/src/vit.rs::RelPos::add_step`/`ADD_JB` dispatches
+    the matching reduced width), cutting the real shape's dispatch to
+    1 572 864 threads / 24 576 workgroups - clear of the tiling threshold at
+    every SAM-1 config this repo defines. Gradient-checked green on both
+    backends (`crates/sam1/tests/gradcheck.rs`, unchanged pass/fail), no
+    "not JIT-compiled" fallback on `backend-cpu`.
+  * **This change does NOT reliably fix the checkpoint-free reproduction.**
+    Measured by running `wgpu_backend_block0_is_unaffected_by_a_third_block`
+    five times in a row AFTER the kernel rewrite: FAIL, ok, FAIL, FAIL, ok
+    (2/5 clean). Critically, every FAILING run reported the IDENTICAL delta
+    (`patch_tokens` max\|Δ\| 8.202e0, `block_out(0)` 2.816e2, `block_out(1)`
+    3.894e2 - the exact same numbers as the ORIGINAL, pre-fix defect) rather
+    than varying noise. A binary outcome - either every tap matches exactly,
+    or every tap is off by one specific, repeatable wrong value - is the
+    signature of a **missing synchronization barrier** (a read observing
+    stale pre-write device memory on some schedules, the correct post-write
+    value on others), not of a fixed index formula. Each of the three levers
+    above measurably changing the failure rate (rather than doing nothing) is
+    consistent with a scheduling/timing-sensitive race, not proof any of them
+    is a red herring.
+  * **A separate real-weight, full-12-layer, checkpoint-free-independent
+    confirmation** lives in `crates/sam1/tests/wgpu_real_weight_parity.rs`
+    (loads the real mmproj, compares `backend-cpu` vs `backend-wgpu` forward
+    tap for tap - no llama.cpp golden needed) and a further checkpoint-free
+    variant at 5 layers
+    (`wgpu_backend_block1_is_unaffected_at_five_layers`) found `block_out(1)`
+    (computed by WINDOWED attention alone, before any global block runs)
+    already diverging by max\|Δ\| 1.209e2 with more total blocks queued -
+    possibly the same race showing a different observable under more queued
+    work, possibly a second one; not distinguished yet (one non-repeated run,
+    and the first race's own measured 2/5 flake rate means a single run is
+    not enough evidence either way).
+  * **What is still unknown**: the actual missing barrier/ordering guarantee.
+    Candidates not yet individually tested: whether `backend-wgpu`'s
+    lazily-accumulated single-pass flush (`WgpuBackend::submit`/`flush_inner`,
+    `crates/backend-wgpu/src/lib.rs`) correctly orders EVERY read-after-write
+    it claims to across dozens of large dispatches queued in one
+    `queue.submit`, versus a genuine driver-level (Mesa ANV, this box's Intel
+    Arc iGPU) scheduling bug specific to many large 2D-tiled dispatches to one
+    buffer. All three test files above are runnable, checkpoint-free (except
+    the real-weight one, which self-skips without the mmproj checkpoint), and
+    fast (`cargo test -p brain-sam1 --release --offline -- --ignored` for the
+    three `#[ignore]`d ones) - re-run each SEVERAL times, not once, before
+    concluding anything from a single pass or fail.
+
 ## Tokenizer / prompt facts pinned from the shipped LM GGUF (Phase 7c)
 
 Read off `DeepSeek-OCR-Q8_0.gguf`'s own `tokenizer.ggml.*` KV, and cross-checked
