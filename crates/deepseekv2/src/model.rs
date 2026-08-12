@@ -69,11 +69,11 @@
 //! sites, not a structural one, and is deliberately deferred to the phase that
 //! first runs this decoder at real scale.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::block::{self, Gqa, KernelIds};
+use model::block::{self, Gqa, GqaDecodeIds, KernelIds};
 use model::moe::{
     self, ExpertBwdScratch, ExpertGrads, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds,
     SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds, SharedExpertScratch,
@@ -133,6 +133,14 @@ const SPLICE_BWD: usize = 40;
 /// every other LoRA dispatch (`MATMUL`/`MATMUL_DX`/`MATMUL_DW`/`GRAD_SCALE`)
 /// reuses a slot already registered above.
 const AXPY: usize = 41;
+// ---- incremental KV-cache decode kernels (single new token vs the growing
+// cache) -- see `DeepseekV2::step`'s doc. Appended so every index above stays
+// unchanged. ----
+const ROPE_AT: usize = 42;
+const ATTN_DECODE_SCORES: usize = 43;
+const DECODE_SOFTMAX: usize = 44;
+const ATTN_DECODE_APPLY: usize = 45;
+const KV_APPEND: usize = 46;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -180,9 +188,20 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // index above is unchanged.
     ("splice", kernels::SPLICE),
     ("splice_bwd", kernels::SPLICE_BWD),
-    // LoRA's scaled-accumulate -- appended last, so every index above is
-    // unchanged for a non-LoRA build too.
+    // LoRA's scaled-accumulate -- appended after the base set, so every
+    // index above is unchanged for a non-LoRA build too.
     ("axpy", kernels::AXPY),
+    // Incremental KV-cache decode -- the O(1)-new-token twin of the O(T)
+    // batched forward above. `rope_at` rotates at an explicit absolute
+    // position (`rope_base` only knows `row % tcols`, unusable for a single
+    // new row past position 0); the other four are the same
+    // append/score/softmax/apply primitives `crates/gpt`/`crates/glm`/
+    // `crates/qwen3` already use for their own decode step.
+    ("rope_at", kernels::ROPE_AT),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -292,6 +311,60 @@ struct LayerBufs {
     mlp: Mlp,
 }
 
+/// Per-layer / shared GPU scratch for the incremental single-token KV-cache
+/// decode path, plus the persistent K/V cache -- the `O(1)`-new-token twin of
+/// [`DeepseekV2::build_forward`]'s `O(T)` batched recompute. Built lazily the
+/// first time [`DeepseekV2::step`] runs (inference-only; sized for `n=1` rows
+/// and a `cap = self.t` cache), so the training buffers above are never
+/// disturbed.
+///
+/// Every scratch buffer below (attention AND MLP/MoE) is reused across
+/// layers -- layers run strictly sequentially in one step, so nothing needs a
+/// per-layer copy except the persistent `kcache`/`vcache` (which must survive
+/// from one step to the next) and `res` (the residual stream snapshot each
+/// layer reads and the next layer writes). This mirrors `crates/gpt`'s
+/// `Decode` struct; the MoE scratch (`moe_acts` etc.) is the one addition
+/// this architecture's decoder needs over that plain-MLP shape.
+struct Decode {
+    cap: u32, // K/V cache capacity == self.t (max context)
+    tok_id: DeviceBuffer,
+    res: Vec<DeviceBuffer>, // [n_layers+1] residual-stream snapshots, [d]
+    xn1: DeviceBuffer,
+    q: DeviceBuffer,
+    k: DeviceBuffer,
+    v: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    proj: DeviceBuffer,
+    xmid: DeviceBuffer,
+    xn2: DeviceBuffer,
+    // dense MLP scratch (shared by every dense layer)
+    dense_gate_pre: DeviceBuffer,
+    dense_up: DeviceBuffer,
+    dense_h: DeviceBuffer,
+    // MoE scratch (shared by every MoE layer)
+    router_logits: DeviceBuffer,
+    gate: DeviceBuffer,
+    moe_acts: MoeActs,
+    sh_gate: DeviceBuffer,
+    sh_up: DeviceBuffer,
+    sh_h: DeviceBuffer,
+    /// The shared expert's own SwiGLU output, BEFORE it is summed with the
+    /// routed accumulator - distinct from `mlp_out` (that sum's destination)
+    /// on purpose, exactly like the model-level `sh_out`/`mlp_out` pair:
+    /// `add2.wgsl` is out-of-place, and binding one buffer as both a
+    /// read-only and a read_write operand in a single dispatch is a wgpu
+    /// usage-scope violation, not merely redundant.
+    sh_out: DeviceBuffer,
+    moe_acc: DeviceBuffer,
+    mlp_out: DeviceBuffer,
+    xn_final: DeviceBuffer,
+    logits: DeviceBuffer,
+    kcache: Vec<DeviceBuffer>, // per layer [cap, d]
+    vcache: Vec<DeviceBuffer>,
+}
+
 pub struct DeepseekV2 {
     pub gpu: Gpu,
     pub cfg: DeepseekV2Config,
@@ -371,6 +444,11 @@ pub struct DeepseekV2 {
 
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
+
+    // ---- incremental KV-cache decode state (lazily built on first `step`) ----
+    dec: RefCell<Option<Decode>>,
+    /// Absolute position the next [`DeepseekV2::step`] will decode (cache fill level).
+    dec_pos: Cell<u32>,
 }
 
 impl DeepseekV2 {
@@ -545,6 +623,8 @@ impl DeepseekV2 {
             lora_out,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            dec: RefCell::new(None),
+            dec_pos: Cell::new(0),
             gpu,
         };
         m.fwd_steps = m.build_forward(m.b, m.t);
@@ -1064,6 +1144,297 @@ impl DeepseekV2 {
         ids
     }
 
+    // ---- incremental KV-cache decode (the O(T) fast path) ----
+
+    /// Reset the incremental KV cache to an empty sequence (next [`Self::step`]
+    /// is absolute position 0).
+    pub fn reset_cache(&self) {
+        self.dec_pos.set(0);
+    }
+
+    /// The absolute position the next [`Self::step`] will decode (cache fill level).
+    pub fn cache_pos(&self) -> u32 {
+        self.dec_pos.get()
+    }
+
+    /// Build the lazy decode state (buffers + K/V cache) the first time it is
+    /// needed.
+    fn ensure_decode(&self) {
+        if self.dec.borrow().is_some() {
+            return;
+        }
+        let c = &self.cfg;
+        let d = c.d_model() as u64;
+        let e = c.n_experts() as u64;
+        let dense_ff = c.ffn_hidden() as u64;
+        let shared_ff = c.shared_ff() as u64;
+        let vocab = c.vocab() as u64;
+        let nh = c.n_heads() as u64;
+        let cap = self.t;
+        let g = &self.gpu;
+        let st = |x: u64| g.storage(x);
+        let idbuf = || g.buffer("dec_tok_id", 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+
+        let mut res = Vec::new();
+        for _ in 0..=c.n_layers() as usize {
+            res.push(st(d));
+        }
+        let (mut kcache, mut vcache) = (Vec::new(), Vec::new());
+        for _ in 0..c.n_layers() as usize {
+            kcache.push(st(cap as u64 * d));
+            vcache.push(st(cap as u64 * d));
+        }
+        let moe_shape1 = MoeShape { rows: 1, d_model: c.d_model(), moe_ff: c.moe_ff(), n_experts: c.n_experts(), top_k: c.top_k() };
+
+        let dec = Decode {
+            cap,
+            tok_id: idbuf(),
+            res,
+            xn1: st(d),
+            q: st(d),
+            k: st(d),
+            v: st(d),
+            scores: st(nh * cap as u64),
+            probs: st(nh * cap as u64),
+            ctx: st(d),
+            proj: st(d),
+            xmid: st(d),
+            xn2: st(d),
+            dense_gate_pre: st(dense_ff),
+            dense_up: st(dense_ff),
+            dense_h: st(dense_ff),
+            router_logits: st(e),
+            gate: st(e),
+            moe_acts: MoeActs::new(g, &moe_shape1),
+            sh_gate: st(shared_ff),
+            sh_up: st(shared_ff),
+            sh_h: st(shared_ff),
+            sh_out: st(d),
+            moe_acc: st(d),
+            mlp_out: st(d),
+            xn_final: st(d),
+            logits: st(vocab),
+            kcache,
+            vcache,
+        };
+        *self.dec.borrow_mut() = Some(dec);
+    }
+
+    /// Bulk-fill the persistent KV cache from a just-run batched forward's
+    /// resident per-layer `k`/`v` buffers ([`Self::layers`]) -- the prefill
+    /// half of [`block::kv_cache_fill`]'s documented pattern: after a normal
+    /// batched pass over the prompt's `n` positions, one flat `kv_append`
+    /// dispatch per layer per buffer copies rows `0..n` into the cache, and
+    /// decode steps continue from `pos = n`. Must be called immediately after
+    /// a [`Self::logits_all`]/[`Self::build_forward`] call over EXACTLY the
+    /// tokens the cache should hold -- `self.layers[l].k`/`.v` hold whatever
+    /// that most recent forward wrote, nothing more.
+    fn fill_cache_from_prefill(&self, n: u32) {
+        self.ensure_decode();
+        let c = &self.cfg;
+        let (nh, hd) = (c.n_heads(), c.head_dim());
+        let dec_ref = self.dec.borrow();
+        let dec = dec_ref.as_ref().unwrap();
+        let g = &self.gpu;
+        let mut s: Vec<Step> = Vec::new();
+        for l in 0..c.n_layers() as usize {
+            s.push(block::kv_cache_fill(g, KV_APPEND, &self.layers[l].k, &dec.kcache[l], n, nh, hd));
+            s.push(block::kv_cache_fill(g, KV_APPEND, &self.layers[l].v, &dec.vcache[l], n, nh, hd));
+        }
+        g.submit(&[], &s);
+    }
+
+    /// **Incremental KV-cache decode** of a single token id at the current
+    /// cache position, returning that new token's logits (`[vocab]`). This is
+    /// the `O(1)`-per-token twin of [`Self::logits_all`]'s `O(T)` batched
+    /// recompute: only the new token's Q/K/V are projected and only the
+    /// new token's row runs through the MoE/dense FFN; its K/V are appended to
+    /// the persistent per-layer cache and a single query attends over
+    /// positions `0..=pos`. Expressed entirely in the existing WGSL op set
+    /// (`model::block::gqa_decode_step` plus `kernels::ROPE_AT` for the
+    /// explicit-position rotation `rope_base.wgsl` cannot express at a single
+    /// row past position 0), so it runs on whatever backend `Gpu` selected.
+    pub fn step(&self, token_id: u32) -> Vec<f32> {
+        self.ensure_decode();
+        let pos = self.dec_pos.get();
+        let logits = self.decode_at(token_id, pos);
+        self.dec_pos.set(pos + 1);
+        logits
+    }
+
+    /// Record + run the incremental decode tape for one token at absolute `pos`.
+    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+        let c = &self.cfg;
+        let d = c.d_model();
+        let nh = c.n_heads();
+        let hd = c.head_dim();
+        let e = c.n_experts();
+        let dense_ff = c.ffn_hidden();
+        let shared_ff = c.shared_ff();
+        let vocab = c.vocab() as usize;
+        let theta = c.rope_theta();
+        let g = &self.gpu;
+        let ids = kernel_ids();
+        let moe_kernel_ids = moe_ids();
+        let shared_ids = shared_expert_ids();
+        let decode_ids = GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY };
+        let shape1 = MoeShape { rows: 1, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
+
+        let dec_ref = self.dec.borrow();
+        let dec = dec_ref.as_ref().unwrap();
+        let cap = dec.cap;
+        assert!(pos < cap, "deepseekv2 decode pos {pos} exceeds the sized context {cap}");
+
+        g.write(&dec.tok_id, &[token_id]);
+        let mut s: Vec<Step> = Vec::new();
+        s.push(g.step(EMBED, &[&dec.tok_id, self.w("tok.weight"), &dec.res[0]], &[d, 1], d));
+
+        for l in 0..c.n_layers() as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ---- plain MHA decode step: LN -> q/k/v -> RoPE@pos -> attend over cache ----
+            self.norm_fwd(&mut s, &dec.res[l], &p("ln1.weight"), &dec.xn1, d, 1);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.q_proj.weight"), &dec.q, 1, d, d);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.k_proj.weight"), &dec.k, 1, d, d);
+            self.mm(&mut s, &dec.xn1, &p("self_attn.v_proj.weight"), &dec.v, 1, d, d);
+            s.push(g.step(ROPE_AT, &[&dec.q], &[1, nh, hd, d, 0, pos, f(theta)], nh * (hd / 2)));
+            s.push(g.step(ROPE_AT, &[&dec.k], &[1, nh, hd, d, 0, pos, f(theta)], nh * (hd / 2)));
+            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nh, hd, pos, cap, &dec.q, &dec.k, &dec.v, &dec.kcache[l], &dec.vcache[l], &dec.scores, &dec.probs, &dec.ctx));
+            self.mm(&mut s, &dec.ctx, &p("self_attn.o_proj.weight"), &dec.proj, 1, d, d);
+            s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[d], d));
+
+            // ---- MLP: dense (leading blocks) or MoE, over the ONE new row ----
+            self.norm_fwd(&mut s, &dec.xmid, &p("ln2.weight"), &dec.xn2, d, 1);
+            if c.is_moe_layer(l as u32) {
+                self.mm(&mut s, &dec.xn2, &p("mlp.router.weight"), &dec.router_logits, 1, d, e);
+                s.push(moe::router_fwd_kind(g, &moe_kernel_ids, self.router_kind(), &shape1, &dec.router_logits, None, &dec.gate, None));
+                // Tried and MEASURED, not shipped: skipping the ~58/64
+                // non-selected experts' dispatches by reading `gate` back to
+                // the host per layer (mirroring `crates/glm`'s
+                // `forward_compact`/`model::moe::expert_fwd_compact` trade).
+                // `moe_linear_gated` call count dropped 67584 -> 8250
+                // (~8.2x), but its OWN total time was unchanged (23.3s ->
+                // 23.5s) and the whole decode's profiled total went UP
+                // (34.9s -> 39.3s): the per-row gate check inside
+                // `moe_linear_gated.wgsl` already makes a non-selected
+                // expert's dispatch cheap, so the real cost was the
+                // SELECTED experts' compute all along, and the 352 extra
+                // host round-trips (11 MoE layers x 32 tokens) this needs
+                // cost about as much as the skipped dispatches saved, so it
+                // was reverted rather than shipped - a per-kernel dispatch
+                // count is not the same thing as a whole-pass win, and only
+                // the whole-pass number decides whether a fix worked.
+                for ei in 0..e as usize {
+                    let ep = |nm: &str| format!("blocks.{l}.mlp.experts.{ei}.{nm}");
+                    s.extend(moe::expert_fwd(
+                        g,
+                        &moe_kernel_ids,
+                        &shape1,
+                        &dec.xn2,
+                        &dec.gate,
+                        self.w(&ep("gate.weight")),
+                        self.w(&ep("up.weight")),
+                        self.w(&ep("down.weight")),
+                        &dec.moe_acts.at(ei),
+                        &dec.moe_acc,
+                        ei as u32,
+                        ei != 0,
+                    ));
+                }
+                s.extend(moe::shared_expert_fwd(
+                    g,
+                    &shared_ids,
+                    1,
+                    d,
+                    shared_ff,
+                    &dec.xn2,
+                    self.w(&p("mlp.shared.gate.weight")),
+                    self.w(&p("mlp.shared.up.weight")),
+                    self.w(&p("mlp.shared.down.weight")),
+                    None,
+                    &SharedExpertScratch {
+                        gate_pre: &dec.sh_gate,
+                        up: &dec.sh_up,
+                        h: &dec.sh_h,
+                        mlp_out: &dec.sh_out,
+                        gate_logits: &self.gate_stub,
+                        gate_scalar: &self.gate_stub,
+                        scaled: &self.gate_stub,
+                    },
+                    &dec.moe_acc,
+                    &dec.mlp_out,
+                ));
+            } else {
+                self.mm(&mut s, &dec.xn2, &p("mlp.gate.weight"), &dec.dense_gate_pre, 1, d, dense_ff);
+                self.mm(&mut s, &dec.xn2, &p("mlp.up.weight"), &dec.dense_up, 1, d, dense_ff);
+                s.push(block::swiglu_fwd(g, &ids, &dec.dense_gate_pre, &dec.dense_up, &dec.dense_h, dense_ff));
+                self.mm(&mut s, &dec.dense_h, &p("mlp.down.weight"), &dec.mlp_out, 1, dense_ff, d);
+            }
+            s.push(g.step(ADD2, &[&dec.xmid, &dec.mlp_out, &dec.res[l + 1]], &[d], d));
+        }
+
+        let last = c.n_layers() as usize;
+        self.norm_fwd(&mut s, &dec.res[last], "norm.weight", &dec.xn_final, d, 1);
+        self.mm(&mut s, &dec.xn_final, c.head_weight(), &dec.logits, 1, d, vocab as u32);
+        g.submit(&[], &s);
+        g.read(&dec.logits, vocab)
+    }
+
+    /// **Greedy autoregressive decode, KV-cached** - the `O(T)` twin of
+    /// [`Self::generate_greedy`]'s `O(T²)` recompute, producing the SAME
+    /// tokens (the cache is algebraically exact, see `tests::
+    /// generate_greedy_kv_matches_recompute` and `tests/generate.rs`'s
+    /// real-weight gate). The prompt is run through ONE batched forward
+    /// ([`Self::logits_all`], which also handles the vision-language splice if
+    /// enabled) to seed the KV cache via [`Self::fill_cache_from_prefill`];
+    /// every token after that is one [`Self::step`] call instead of a full
+    /// re-run over the whole sequence so far.
+    ///
+    /// Resets the incremental cache on entry, so instances are reusable across
+    /// calls; the instance must still be sized for the FINAL length
+    /// (`prompt_ids.len() + n_new <= ctx_len()`, `b == 1`).
+    pub fn generate_greedy_kv(&self, prompt_ids: &[u32], n_new: u32) -> Vec<u32> {
+        self.generate_greedy_kv_cb(prompt_ids, n_new, |_| {})
+    }
+
+    /// [`Self::generate_greedy_kv`] with a per-token callback - same seam as
+    /// [`Self::generate_greedy_cb`].
+    pub fn generate_greedy_kv_cb(&self, prompt_ids: &[u32], n_new: u32, mut on_token: impl FnMut(u32)) -> Vec<u32> {
+        assert!(!prompt_ids.is_empty(), "deepseekv2: greedy decode needs at least one prompt token");
+        assert_eq!(self.b, 1, "deepseekv2: KV-cache decode requires b == 1");
+        let total = prompt_ids.len() + n_new as usize;
+        assert!(
+            total <= self.t as usize,
+            "deepseekv2: greedy decode of {} prompt + {n_new} new tokens needs a context of {total}, but this instance is sized for {}",
+            prompt_ids.len(),
+            self.t
+        );
+        let vocab = self.cfg.vocab() as usize;
+        let mut ids: Vec<u32> = prompt_ids.to_vec();
+        if n_new == 0 {
+            return ids;
+        }
+
+        self.reset_cache();
+        // Prefill: one batched forward over the whole prompt (handles the
+        // splice, RoPE positions and causal mask exactly like the recompute
+        // path), whose resident per-layer k/v seed the persistent cache.
+        let logits = self.logits_all(&ids);
+        self.fill_cache_from_prefill(prompt_ids.len() as u32);
+        self.dec_pos.set(prompt_ids.len() as u32);
+
+        let mut next = argmax(&logits[logits.len() - vocab..]) as u32;
+        ids.push(next);
+        on_token(next);
+        for _ in 1..n_new {
+            let logits = self.step(next);
+            next = argmax(&logits) as u32;
+            ids.push(next);
+            on_token(next);
+        }
+        ids
+    }
+
     // ---- vision-language embedding splice seam ----
 
     /// Enable the VLM embedding splice at residual rows `[row0, row0 + n_rows)`.
@@ -1362,5 +1733,75 @@ mod tests {
         );
         // ... and the no-callback wrapper is the very same loop.
         assert_eq!(m.generate_greedy(&prompt, n_new), all, "generate_greedy diverges from generate_greedy_cb");
+    }
+
+    /// **The KV-cache decode gate** at toy dims, fast lane: [`DeepseekV2::
+    /// generate_greedy_kv`] must produce the SAME greedy tokens as the `O(T²)`
+    /// recompute path ([`DeepseekV2::generate_greedy`]) for every position,
+    /// prompt and generated alike -- the cache is algebraically exact, so any
+    /// divergence is a position/mask/append bug in the decode step, not a
+    /// numerics difference (`crates/gpt`'s `generate_kv_matches_recompute_
+    /// greedy` is the same shape of gate on a plain-MLP decoder; this is its
+    /// MoE-decoder twin). The real-weight gate against llama.cpp is
+    /// `tests/generate.rs`.
+    ///
+    /// Exercises BOTH MLP kinds (`tiny()`'s layer 0 is dense, layer 1 is MoE),
+    /// a splice-free prompt, and re-running from a fresh `reset_cache` so the
+    /// instance is provably reusable across calls.
+    #[test]
+    fn generate_greedy_kv_matches_recompute() {
+        let cfg = DeepseekV2Config::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = DeepseekV2::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 8, &init, false);
+        let prompt = [1u32, 5, 2];
+        let n_new = 5u32;
+
+        let recompute = m.generate_greedy(&prompt, n_new);
+        let kv = m.generate_greedy_kv(&prompt, n_new);
+        assert_eq!(kv, recompute, "KV-cache decode diverged from O(T^2) recompute");
+        assert_eq!(&kv[..prompt.len()], &prompt, "the prompt must come back verbatim");
+
+        // Re-running (a fresh cache each call) must be deterministic, not an
+        // accumulation-of-state artifact of the first run.
+        let kv2 = m.generate_greedy_kv(&prompt, n_new);
+        assert_eq!(kv2, kv, "generate_greedy_kv is not idempotent across calls on the same instance");
+
+        // A shorter run's ids must be the longer run's own prefix (same
+        // property `greedy_decode_is_prefix_stable_and_reads_the_last_row`
+        // checks on the recompute path).
+        let short = m.generate_greedy_kv(&prompt, 2);
+        assert_eq!(short, kv[..prompt.len() + 2], "a shorter KV run must be a prefix of a longer one");
+    }
+
+    /// [`DeepseekV2::generate_greedy_kv_cb`] streams, same contract as
+    /// [`generate_greedy_cb_emits_each_token_as_it_is_produced`] above but over
+    /// the KV-cached loop -- a callback that only drains a finished vector
+    /// would pass every id/count assertion, so this also checks the online
+    /// dispatch counter strictly grows between calls.
+    #[test]
+    fn generate_greedy_kv_cb_emits_each_token_as_it_is_produced() {
+        let cfg = DeepseekV2Config::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = DeepseekV2::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 8, &init, false);
+        let prompt = [1u32, 5, 2];
+        let n_new = 5u32;
+
+        m.gpu.reset_ops_counters();
+        let mut streamed: Vec<u32> = Vec::new();
+        let mut dispatched: Vec<u64> = Vec::new();
+        let all = m.generate_greedy_kv_cb(&prompt, n_new, |id| {
+            dispatched.push(m.gpu.ops_counters().steps);
+            streamed.push(id);
+        });
+
+        assert_eq!(streamed.len(), n_new as usize, "the callback fired {} times for {n_new} new tokens", streamed.len());
+        assert_eq!(streamed, all[prompt.len()..], "the streamed ids differ from the returned generation");
+        assert!(dispatched[0] > 0, "the first token arrived before any forward had been submitted");
+        assert!(
+            dispatched.windows(2).all(|w| w[1] > w[0]),
+            "tokens did not arrive as they were produced: the decoder had dispatched {dispatched:?} steps at the {n_new} calls, so at least one pair of them saw the SAME amount of work done"
+        );
+        assert_eq!(m.generate_greedy_kv(&prompt, n_new), all, "generate_greedy_kv diverges from generate_greedy_kv_cb");
+        assert_eq!(m.generate_greedy(&prompt, n_new), all, "recompute diverges from the KV-cached callback loop");
     }
 }

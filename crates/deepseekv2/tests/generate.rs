@@ -48,7 +48,11 @@
 //!
 //! Cost, backend and skip-when-absent behaviour are `tests/common/real_lm.rs`'s;
 //! the decode is `O(T²)` recompute (nine forwards over ≤ 10 tokens), which at
-//! this size is a rounding error next to loading 12 GB of weights.
+//! this size is a rounding error next to loading 12 GB of weights. Once the
+//! recompute path agrees with the reference, this test also drives
+//! [`deepseekv2::model::DeepseekV2::generate_greedy_kv`] over the SAME prompt
+//! and demands the SAME ids - the real-weight half of the KV-cache decode gate
+//! (the fast-lane half is `src/model.rs`'s `generate_greedy_kv_matches_recompute`).
 
 /// The model-store lookup, the one-off fp32 expansion, the CPU-backend pin and
 /// the inference build - shared with `tests/parity.rs`.
@@ -86,6 +90,17 @@ fn real_lm_greedy_decode_matches_llamacpp() {
 
     let Some(bad) = got.iter().zip(REFERENCE.iter()).position(|(g, w)| g != w) else {
         println!("  all {} positions agree", REFERENCE.len());
+
+        // The KV-cache decode gate on REAL weights: `generate_greedy_kv` must
+        // reproduce `generate_greedy`'s own (llama.cpp-verified) ids exactly.
+        // `tests::generate_greedy_kv_matches_recompute` in `src/model.rs`
+        // already gates this at toy dims; this is the one real-weight check
+        // that the O(1)-per-token attention decode step, the batched-forward
+        // cache prefill and the real MoE router/expert weights all compose
+        // correctly at production scale, not just on a synthetic fixture.
+        let kv = m.generate_greedy_kv(&REFERENCE[..PROMPT], n_new);
+        assert_eq!(kv, got, "KV-cache decode diverged from the O(T^2) recompute on the real weights");
+        println!("  KV-cache decode matches recompute: {kv:?}");
         return;
     };
 
