@@ -281,6 +281,104 @@ config or a reimplementation.
     three `#[ignore]`d ones) - re-run each SEVERAL times, not once, before
     concluding anything from a single pass or fail.
 
+  **Root cause found by precedent, not by live reproduction (this session's
+  follow-up) - a fix is applied, but the CPU pin stays until it can be
+  confirmed against a live failure:**
+
+  * `crates/backend-vulkan/src/lib.rs` already carries the answer to "is this
+    brain's own flush logic or the driver": commit `b6295e36`
+    ("gpu-core/vulkan: fix flaky tiled (sliced-binding) corruption on Intel
+    ANV") root-caused, WITH the Khronos validation layers (both
+    synchronization AND GPU-assisted validation clean, proving the kernels
+    and the synchronization brain issues are spec-correct), that the Intel
+    ANV Vulkan driver on this exact box's Intel Arc iGPU does not reliably
+    make a prior dispatch's writes visible across a **non-zero-offset
+    ("sliced") storage buffer binding** through an in-command-buffer
+    compute-compute pipeline barrier, even with `ALL_COMMANDS` stage/access
+    masks - but a queue submit+fence boundary IS honoured. The measured
+    signature there (~15-25% intermittent, kernels/sync spec-correct) is the
+    same shape as this session's own finding (every failing run reports the
+    IDENTICAL wrong value, consistent with a missing barrier, not a logic
+    bug). `backend-vulkan` already ships the fix: mark a dispatch `sliced`
+    when any of its bindings has a non-zero offset, and in `flush`,
+    serialize (submit+fence per dispatch) any batch containing a sliced
+    dispatch, gated to the Intel vendor ID so every other driver keeps the
+    fast single-pass path.
+  * `crates/model/src/block.rs::chunked_bidir_fwd` (the generic path
+    `sam1`'s global-attention blocks route through) uses `step_sliced` for
+    its per-query-chunk scores matmul and context-apply, at a non-zero
+    offset for every chunk past the first - so a global block's batch
+    (which also contains the 16 `attn_relpos_add` dispatches implicated
+    above) DOES contain sliced dispatches, on both backends. Independently
+    re-reading `wgpu-core-29.0.4`'s and `wgpu-hal-29.0.4`'s (Vulkan) source
+    confirmed `backend-wgpu`'s OWN barrier-request logic is textbook-correct
+    for this pattern (`STORAGE_READ_WRITE` is never in the tracker's
+    `ordered_uses_mask`, so a barrier is requested before every dispatch
+    that touches such a buffer; `wgpu-hal`'s Vulkan backend converts that
+    into a spec-correct `vkCmdPipelineBarrier`) - which is exactly the
+    "spec-correct, driver defeats it anyway" shape `backend-vulkan`'s own
+    validation-layer run already proved. Both backends drive the same Mesa
+    ANV Vulkan implementation on this box, so the same driver bug plausibly
+    explains both.
+  * **Fix applied**: `backend-wgpu::WgpuBackend::flush_serialized` (new)
+    mirrors `backend-vulkan`'s workaround exactly - `WgpuStep` now carries a
+    `sliced` bit (set by `step_sliced` when any binding has a non-zero
+    offset), `DeviceShared` carries the adapter's PCI `vendor_id`, and
+    `flush_inner` serializes (one compute pass + one `queue.submit` + one
+    `device.poll(Wait)` per dispatch) any batch that is on an Intel adapter
+    AND contains a sliced dispatch. `BRAIN_WGPU_SERIAL=1` forces it on any
+    adapter (diagnostic); `BRAIN_WGPU_NO_SERIAL=1` disables the automatic
+    trigger (diagnostic). Verified: `cargo build`/`cargo test -p
+    brain-sam1 --release` (7+5+2+1 non-ignored tests, all green) and `make
+    gradcheck` (full workspace, 0 failures) both pass unchanged with the fix
+    in place - it is a no-op everywhere except Intel+sliced batches, and
+    introduces no regression.
+  * **What this session could NOT do: confirm the fix against a live
+    failure.** The checkpoint-free reproduction (`wgpu_block_count_
+    corruption.rs`) that previously measured a ~40-60% failure rate did not
+    reproduce even ONE failure in this session, in ANY configuration tried:
+    10 sequential repeats of the original 2-vs-3-layer repro (added as
+    `..._repeated_10x`), the 2-vs-5-layer "known-failing" second divergence,
+    a new max-pressure 2-vs-12-layer variant (all 4 global blocks, 64 chunk
+    iterations, added as `..._at_full_twelve_layers`), 4 of the max-pressure
+    variant run CONCURRENTLY (independent processes contending for the same
+    physical GPU), and 3 independent processes each running the 10x-repeat
+    concurrently (30 more trials) - **46 consecutive clean pre-fix baseline
+    trials, zero failures**, checked out from BEFORE this session's fix via
+    `git stash` specifically to make sure this was the unmodified code the
+    original bisection ran against. `uptime` showed the box's 15-minute load
+    average at 59.58 (a 22-core machine) falling to 4.10 within the same
+    session, strongly suggesting the original bisection ran under heavy
+    multi-agent GPU contention this session's quieter conditions do not
+    reproduce - i.e. this looks like a load/scheduling-dependent race whose
+    window is currently not being hit, not a race that stopped existing.
+    With no live failure to test against, before/after comparison (this
+    investigation's own planned decisive experiment) was not possible - the
+    fix's justification rests on the `backend-vulkan` precedent and the
+    matching wgpu-core/wgpu-hal source reading, not on a reproduced-then-
+    fixed failure in this session.
+  * **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is
+    UNCHANGED.** Given the hard bar this investigation set for itself (10+
+    consecutive clean runs BEFORE and AFTER, on a real reproduction) could
+    not be met in either direction because no reproduction failed at all,
+    lifting the pin now would be exactly the "looks fixed after 2 clean
+    runs" mistake this file's own history warns against - regardless of how
+    strong the mechanistic case is. The next session should first try to
+    reproduce the original failure (deliberately loading the GPU with
+    concurrent work, or running under whatever conditions the original
+    bisection actually ran in) BEFORE trusting this fix enough to lift the
+    pin. If a live failure IS found on unmodified code, re-run the same
+    checkpoint-free tests with this fix in place (`git log --grep
+    'flush_serialized'` finds the commit) for the 10+-clean-runs bar this
+    file's own lessons demand.
+  * **Test additions**: `wgpu_backend_block0_is_unaffected_by_a_third_
+    block_repeated_10x` and `wgpu_backend_block0_is_unaffected_at_full_
+    twelve_layers` in `crates/sam1/tests/wgpu_block_count_corruption.rs`,
+    both `#[ignore]`d with a doc comment pointing back here - kept as
+    reproductions for the next session, not strengthened into gates, since
+    a clean run here proves nothing about whether the underlying race
+    still exists.
+
 ## Tokenizer / prompt facts pinned from the shipped LM GGUF (Phase 7c)
 
 Read off `DeepSeek-OCR-Q8_0.gguf`'s own `tokenizer.ggml.*` KV, and cross-checked

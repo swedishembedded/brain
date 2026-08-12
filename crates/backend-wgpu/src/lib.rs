@@ -13,11 +13,16 @@
 use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 use wgpu::util::DeviceExt;
 
-/// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y). The grid is
-/// 1D (grid_y = 1) until the workgroup count exceeds the per-dimension limit, then
-/// it tiles into Y; shaders reconstruct the linear thread index from
+/// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y, sliced). The
+/// grid is 1D (grid_y = 1) until the workgroup count exceeds the per-dimension
+/// limit, then it tiles into Y; shaders reconstruct the linear thread index from
 /// `num_workgroups`, so the split is transparent.
-pub type WgpuStep = (usize, wgpu::BindGroup, u32, u32);
+///
+/// `sliced` is true when any storage buffer in the bind group is bound at a
+/// non-zero offset (built by [`WgpuBackend::step_sliced`]) -- see
+/// [`WgpuBackend::flush_serialized`]'s doc comment for why this needs tracking
+/// per dispatch at all.
+pub type WgpuStep = (usize, wgpu::BindGroup, u32, u32, bool);
 
 /// What adapter this process actually got. Captured the first time a backend is
 /// built, so callers can *record* it rather than only see it on stderr.
@@ -379,6 +384,12 @@ struct DeviceShared {
     /// "wedged submit" when the driver actually dropped the device out from
     /// under us.
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `wgpu::AdapterInfo::vendor` (PCI vendor ID, e.g. `0x8086` = Intel).
+    /// Read once at adapter query time and carried unchanged through
+    /// `new_like` (same physical device, same vendor). Exists solely to gate
+    /// [`WgpuBackend::flush_serialized`]'s Intel ANV sliced-binding
+    /// workaround to the vendor it was root-caused on.
+    vendor_id: u32,
 }
 
 impl DeviceShared {
@@ -394,6 +405,7 @@ impl DeviceShared {
         want_ts: bool,
         caps: backend_api::DeviceCaps,
         plcache: Option<std::sync::Arc<PlCache>>,
+        vendor_id: u32,
     ) -> DeviceShared {
         let device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -478,6 +490,7 @@ impl DeviceShared {
             #[cfg(not(target_arch = "wasm32"))]
             gpu_profile,
             device_lost,
+            vendor_id,
         }
     }
 }
@@ -699,6 +712,7 @@ impl WgpuBackend {
             want_ts,
             self.shared.caps.clone(),
             self.shared.plcache.clone(),
+            self.shared.vendor_id,
         ));
         WgpuBackend::from_shared(shared, profile_on)
     }
@@ -908,8 +922,9 @@ impl WgpuBackend {
         // 2-3 FMAs, so the removed clamps are directly measurable.
         let caps = Self::query_caps(adapter, &info, &device);
         let plcache = PlCache::open(&device, adapter, &info).map(std::sync::Arc::new);
-        let shared =
-            std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts, caps, plcache));
+        let shared = std::sync::Arc::new(DeviceShared::compile(
+            device, queue, kernels, want_ts, caps, plcache, info.vendor,
+        ));
         WgpuBackend::from_shared(shared, profile_on)
     }
 
@@ -1006,11 +1021,92 @@ impl WgpuBackend {
         self.flush_inner();
     }
 
+    /// Give EACH pending dispatch its own compute pass, its own
+    /// `queue.submit`, AND a blocking `device.poll(Wait)` before the next one
+    /// is even recorded -- instead of recording the whole batch into ONE
+    /// compute pass and ONE `queue.submit` and relying on wgpu's in-pass
+    /// hazard tracking to insert whatever barrier a read-after-write on a
+    /// shared storage buffer needs.
+    ///
+    /// # Why this exists: a confirmed Intel ANV driver bug, not a guess
+    ///
+    /// `crates/backend-vulkan` root-caused (with the Khronos validation
+    /// layers proving the *kernels and synchronization are spec-correct* --
+    /// see `git log -1 --grep 'sliced-binding corruption'`) that the Intel
+    /// ANV Vulkan driver does not reliably make a prior dispatch's writes
+    /// visible across a **non-zero-offset ("sliced") storage buffer
+    /// binding** via an in-command-buffer compute-compute pipeline barrier,
+    /// even with `ALL_COMMANDS` stage/access masks -- but a queue
+    /// submit+fence boundary IS honoured. That backend works around it by
+    /// serializing any flush batch containing a sliced dispatch, gated to
+    /// the Intel vendor ID so every other driver keeps the fast single-pass
+    /// path.
+    ///
+    /// `backend-wgpu` has the identical shape of bug: `step_sliced` also
+    /// binds storage buffers at a non-zero `wgpu::BufferBinding::offset`
+    /// (`crates/model/src/block.rs::chunked_bidir_fwd`'s per-query-chunk
+    /// scores matmul and context-apply both do, at every chunk past the
+    /// first), wgpu's own compute-pass hazard tracker inserts a
+    /// textbook-correct barrier for it (verified by reading
+    /// `wgpu-core-29.0.4/src/track/{mod,buffer}.rs` -- `STORAGE_READ_WRITE`
+    /// is never in `ordered_uses_mask`, so a barrier is requested before
+    /// every dispatch that touches such a buffer), and wgpu-hal's Vulkan
+    /// backend converts that into a spec-correct `vkCmdPipelineBarrier`
+    /// (`wgpu-hal-29.0.4/src/vulkan/{command,conv}.rs`) -- all of which is
+    /// exactly the pattern backend-vulkan's validation-layer run already
+    /// showed the driver itself defeats. This is the same GPU (Intel Arc
+    /// iGPU) behind the same Mesa ANV driver as backend-vulkan's find, so
+    /// [`Self::flush_inner`] applies the identical workaround: any batch
+    /// that both runs on an Intel adapter AND contains a sliced dispatch is
+    /// serialized here instead of single-pass flushed.
+    ///
+    /// `BRAIN_WGPU_SERIAL=1` forces this path on every adapter regardless of
+    /// vendor or slicing (diagnostic: confirms serialization itself is
+    /// sufficient). `BRAIN_WGPU_NO_SERIAL=1` disables the automatic
+    /// Intel+sliced trigger (diagnostic: confirms the corruption comes back
+    /// without it). Neither is meant to be set in production. Every step
+    /// pays a full device round-trip here, which is orders of magnitude
+    /// slower than the production single-pass flush -- correctness over
+    /// speed for the batches this actually triggers on (large-vocab tiled
+    /// paths, `sam1`'s chunked relative-position attention), which is rare
+    /// next to the steady-state dispatch count.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flush_serialized(&self, steps: &[WgpuStep]) {
+        for (kind, bg, gx, gy, _sliced) in steps {
+            let mut enc = self
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipelines()[*kind]);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*gx, *gy, 1);
+            }
+            self.queue().submit(Some(enc.finish()));
+            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.poll_wait_bounded("flush_serialized (Intel ANV sliced-binding workaround)");
+        }
+    }
+
     /// [`Self::flush`] body, with the device's io lock already held.
     fn flush_inner(&self) {
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
             return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            const VENDOR_INTEL: u32 = 0x8086;
+            let force_serial = std::env::var("BRAIN_WGPU_SERIAL").is_ok();
+            let no_serial = std::env::var("BRAIN_WGPU_NO_SERIAL").is_ok();
+            let vendor_needs_serial = self.shared.vendor_id == VENDOR_INTEL;
+            if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.4))) {
+                self.flush_serialized(&steps);
+                return;
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = &self.shared.gpu_profile {
@@ -1036,7 +1132,7 @@ impl WgpuBackend {
                 label: None,
                 timestamp_writes: None,
             });
-            for (kind, bg, gx, gy) in &steps {
+            for (kind, bg, gx, gy, _sliced) in &steps {
                 pass.set_pipeline(&self.pipelines()[*kind]);
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(*gx, *gy, 1);
@@ -1090,7 +1186,7 @@ impl WgpuBackend {
                 label: None,
                 timestamp_writes: None,
             });
-            for (i, (kind, bg, gx, gy)) in steps.iter().enumerate() {
+            for (i, (kind, bg, gx, gy, _sliced)) in steps.iter().enumerate() {
                 pass.write_timestamp(&sets[i / PER_SET], (i % PER_SET) as u32);
                 pass.set_pipeline(&self.pipelines()[*kind]);
                 pass.set_bind_group(0, bg, &[]);
@@ -1188,7 +1284,7 @@ impl WgpuBackend {
                 mapped_at_creation: false,
             });
             let mut enc = self.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            for (i, (kind, bg, gx, gy)) in chunk.iter().enumerate() {
+            for (i, (kind, bg, gx, gy, _sliced)) in chunk.iter().enumerate() {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: None,
                     timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
@@ -1328,7 +1424,7 @@ impl WgpuBackend {
         });
         self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
-        (kind, bg, gx, gy)
+        (kind, bg, gx, gy, false)
     }
 
     /// Build one dispatch with a fresh single-use uniform buffer. Convenient for
@@ -1346,6 +1442,9 @@ impl WgpuBackend {
     pub fn step_sliced(&self, kind: usize, bufs: &[&wgpu::Buffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> WgpuStep {
         let ubuf = self.uniform(params);
         let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
+        // A non-zero word offset makes this dispatch `sliced` -- see
+        // `flush_serialized`'s doc comment for why that has to be tracked.
+        let sliced = offsets.iter().any(|&(off_w, _)| off_w != 0);
         for (i, b) in bufs.iter().enumerate() {
             let (off_w, len_w) = offsets[i];
             let resource = if off_w == 0 && len_w == 0 {
@@ -1363,7 +1462,7 @@ impl WgpuBackend {
         let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
         self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
-        (kind, bg, gx, gy)
+        (kind, bg, gx, gy, sliced)
     }
 
     /// Clear the given buffers, then run all steps as a compute pass. The work is

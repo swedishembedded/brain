@@ -177,3 +177,57 @@ fn wgpu_backend_block1_is_unaffected_at_five_layers() {
         5,
     );
 }
+
+/// Maximum-pressure variant: the FULL `SamViTConfig::deepseek_ocr()` (12
+/// layers, all 4 global-attention blocks at `[2, 5, 8, 11]` -- 64
+/// `attn_relpos_add`/scores-matmul/apply chunk iterations total, 4x the
+/// single-global-block repro above) against the 2-layer prefix. More queued
+/// dispatches to the same handful of buffers is a wider window for a
+/// scheduling race, so this is the version most likely to catch the defect
+/// when the smaller repro happens not to on a given (load-dependent) run.
+#[test]
+#[ignore = "known-flaky: see wgpu_backend_block0_is_unaffected_by_a_third_block's doc comment"]
+fn wgpu_backend_block0_is_unaffected_at_full_twelve_layers() {
+    if skip() {
+        return;
+    }
+    assert_prefix_unaffected_by_a_later_block(
+        "wgpu",
+        Gpu::new_wgpu(sam1::PIPELINES),
+        2,
+        Gpu::new_wgpu(sam1::PIPELINES),
+        12,
+    );
+}
+
+/// Repeats [`wgpu_backend_block0_is_unaffected_by_a_third_block`]'s check
+/// `N` times in a row. A single clean run proves nothing here -- the
+/// measured flake rate on the un-mitigated race was roughly 40-60%, so only
+/// many CONSECUTIVE clean runs distinguish "fixed" from "got lucky". The
+/// root cause: `backend-wgpu::WgpuBackend::flush_serialized` now
+/// auto-serializes any flush batch that both runs on an Intel adapter and
+/// contains a `step_sliced` dispatch (see that method's doc comment),
+/// mirroring `backend-vulkan`'s already-confirmed Intel ANV sliced-binding
+/// barrier workaround. This is the test to un-ignore once
+/// the fix has been trusted across several independent invocations of the
+/// whole binary (each process re-queries the adapter once, so N iterations
+/// in ONE process only prove the fix holds given that one vendor-id read --
+/// running the whole test binary several times, per this crate's own
+/// `--ignored` re-run discipline, is what actually re-derives it).
+#[test]
+#[ignore = "slow: re-inits the wgpu device N times - run explicitly to validate a fix"]
+fn wgpu_backend_block0_is_unaffected_by_a_third_block_repeated_10x() {
+    if skip() {
+        return;
+    }
+    const N: usize = 10;
+    for i in 0..N {
+        assert_prefix_unaffected_by_a_later_block(
+            &format!("wgpu run {}/{N}", i + 1),
+            Gpu::new_wgpu(sam1::PIPELINES),
+            2,
+            Gpu::new_wgpu(sam1::PIPELINES),
+            3,
+        );
+    }
+}
