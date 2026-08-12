@@ -393,7 +393,29 @@ off` to match brain's eager attention):
 |---|---|---|---|
 | 1 | 95.6 s | 70.2 s | 1.36x |
 | 2 | 97.1 s | 50.9 s | 1.91x |
+| clean, single-tenant (below) | 83.1 s | 52.9 s | 1.57x |
 | prior pass (quieter machine) | 123-147 s | ~20.6 s | ~6-7x |
+
+**Clean, single-tenant re-run** (the follow-up this section's own prior
+paragraph called for): both binaries run back to back with nothing else on
+the machine (`free -h`: 24 GiB available, `ps aux` clean of other heavy
+processes, no sibling agent worktrees active), same real weights, same
+document image, same prompt, `--max_new 32` / `-n 32`, greedy, `--flash-attn
+off` for `llama-mtmd-cli`. Brain: 83.1 s wall (283 prompt tokens, 32
+completion tokens, `prompt_tokens`/`completion_tokens` both correctly
+populated) - faster than either contended pair above (95.6 s, 97.1 s).
+`llama-mtmd-cli`: 52.9 s wall, of which its own reported "mtmd batch
+encoding" phases total 41.6 s (12.5 s + 29.1 s across two chunks) - close to
+its own pair-2 number (50.9 s) and well above pair 1's (70.2 s) but still
+nowhere near the ~20.6 s baseline from the prior (pre-vision-encoder-fix)
+pass, so `llama-mtmd-cli` itself is not running at its fastest on this
+machine right now either; this is not a controlled-for-everything
+comparison, just the cleanest one available this session. **Ratio: 1.57x**
+- inside the 1.36x-1.91x range the contended pairs already showed, which is
+itself informative: the RATIO does not appear to be distorted by shared-
+machine load as much as the absolute numbers are, at least at this load
+range. Still not a win over llama.cpp, but this is the number to cite going
+forward, not a range to average over.
 
 **Read this carefully, not optimistically.** `llama-mtmd-cli`'s OWN number
 moved 2.5-3.4x slower than its previously-recorded ~20.6 s baseline in these

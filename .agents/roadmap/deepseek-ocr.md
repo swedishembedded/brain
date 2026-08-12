@@ -1482,14 +1482,24 @@ token fails loudly.
       is real and is overwhelmingly the vision-encoder work above, not the
       two kernel fixes' individually-unresolved magnitudes.
 
+      **The clean, single-tenant re-run** (done immediately after, machine
+      verified idle - `free -h` 24 GiB available, no other heavy processes):
+      brain 83.1 s vs `llama-mtmd-cli` 52.9 s (41.6 s of it in `llama-mtmd-
+      cli`'s own reported vision-encode) - **1.57x**, inside the 1.36x-1.91x
+      range the contended pairs already showed. Not a win yet, but this is
+      the number to cite: the ratio held steady across contended and quiet
+      conditions, so shared-machine load was mostly inflating the absolute
+      numbers on both sides, not the relative gap.
+
       **Still open:** the wgpu correctness bug (out of scope, now has a real
       3.6x cost-of-CPU-pin number attached); model construction's 20-28 s
       (reconfirmed, inspected for redundant work - none found in
       `crates/deepseekocr/src/import.rs`'s streaming path - but not profiled
       per kernel); the tiled-transpose fix's whole-pass magnitude, which
-      needs a quiet machine to pin down; and a genuinely clean, single-tenant
-      head-to-head number. See `docs/performance/overview.md`'s case study
-      for the full per-stage and per-kernel tables.
+      needs a quiet machine to pin down (the clean re-run above measured the
+      END-TO-END ratio, not this fix's isolated contribution). See
+      `docs/performance/overview.md`'s case study for the full per-stage and
+      per-kernel tables.
 - [x] LoRA training + measured-descent smoke test. Reused, not reinvented: the
       exact `qwen3::model::Qwen::lora_fwd`/`proj_bwd` shape (already ported
       once for `qwen35moe`) - frozen base `Role::Frozen` + trainable
