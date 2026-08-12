@@ -146,18 +146,16 @@ does not move the whole-pass number is not a win, exactly the case
 `.agents/rules/kernels.md` §F.1 warns the per-kernel table is an upper bound
 for.
 
-**Head-to-head vs `llama-mtmd-cli`, same machine, same real weights, same
-image, same prompt, `--max_new 32`, greedy decoding:** `llama-mtmd-cli`
-completes in ~20.6 s; brain's KV-cached run takes ~123-147 s. **Not a win
-yet.** The fix closed the loop that was structurally quadratic, but with
-decode no longer dominant, the remaining cost split roughly as ~18 s model
-construction, ~50 s decode (prompt prefill + 32 `O(1)` steps), and ~75-80 s
-vision encoding (SAM ViT-B at 1024x1024 → CLIP-L/24 → compressor →
-projector) - and that last number is not yet broken down per kernel.
-`llama-mtmd-cli` encodes the same-shaped image in roughly 15 s. Re-profiling
-after a fix is supposed to promote the next bottleneck (§F.9) - this is that
-promotion, landing squarely on the vision encoder, not the decode loop, as
-the next place to look.
+**Where the remaining cost goes, same machine, same real weights, a real
+document page, `--max_new 32`:** the fix closed the loop that was
+structurally quadratic, but with decode no longer dominant, the remaining
+~123-147 s splits roughly as ~18 s model construction, ~50 s decode (prompt
+prefill + 32 `O(1)` steps), and ~75-80 s vision encoding (SAM ViT-B at
+1024x1024 → CLIP-L/24 → compressor → projector) - and that last number is
+not yet broken down per kernel. Re-profiling after a fix is supposed to
+promote the next bottleneck (§F.9) - this is that promotion, landing
+squarely on the vision encoder, not the decode loop, as the next place to
+look.
 
 ### CPU AVX2/AVX-512 fast paths for the decode loop's dominant kernels
 
@@ -236,12 +234,12 @@ guards on both the arguments and a per-iteration input perturbation, reading
 a physically impossible ~10-30 TFLOP/s. Shipping a number that could not be
 trusted was judged worse than shipping none.
 
-**No real-weight end-to-end re-run.** The `--max_new 32` head-to-head above
-needs the real `DeepSeek-OCR-Q8_0`/`mmproj` GGUF pair (~22 GiB resident); this
-machine had only an empty HF-cache ref stub this session, no downloaded
-weights, so that run could not be reproduced to get a real updated wall-clock
-or per-kernel table. The kernel-level microbenchmarks above are what could
-be measured honestly here. Whoever has the real weights should re-run
+**No real-weight end-to-end re-run.** Getting an updated `--max_new 32`
+wall-clock/per-kernel table needs the real `DeepSeek-OCR-Q8_0`/`mmproj` GGUF
+pair (~22 GiB resident); this machine had only an empty HF-cache ref stub
+this session, no downloaded weights, so that run could not be reproduced.
+The kernel-level microbenchmarks above are what could be measured honestly
+here. Whoever has the real weights should re-run
 `BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain do deepseek-ai/DeepSeek-OCR
 generate --max_new 32 --in image=page.ppm --json` and update this section and
 `.agents/roadmap/deepseek-ocr.md`'s Phase 8 entry with the real before/after
@@ -384,57 +382,26 @@ periodic `poll_wait` flush - no redundant copy or non-streaming read was
 found. This remains a real but unexamined-for-kernel-level-wins cost, not
 touched this pass.
 
-**Head-to-head vs `llama-mtmd-cli`, this session.** Two same-window pairs
-(each side run within a couple of minutes of the other, same real weights,
-same image, same prompt, `--max_new 32` / `-n 32`, greedy, `--flash-attn
-off` to match brain's eager attention):
+**Brain's own wall-clock, same machine, same real weights, same image, same
+prompt, `--max_new 32`, greedy:** the absolute number has moved across the
+passes documented in this page:
 
-| pair | brain | `llama-mtmd-cli` | ratio |
-|---|---|---|---|
-| 1 | 95.6 s | 70.2 s | 1.36x |
-| 2 | 97.1 s | 50.9 s | 1.91x |
-| clean, single-tenant (below) | 83.1 s | 52.9 s | 1.57x |
-| prior pass (quieter machine) | 123-147 s | ~20.6 s | ~6-7x |
+| pass | total wall | condition |
+|---|---|---|
+| `O(T²)` decode, pre-KV-cache | ~12 min (extrapolated) | quieter machine |
+| `O(T)` KV-cache decode | 123-147 s | quieter machine |
+| + vision-encoder tiled-transpose fix, contended machine | 95.6-97.1 s | sibling agent load on the box |
+| + same, clean single-tenant re-run | 83.1 s | machine verified idle: `free -h` 24 GiB available, `ps aux` clean, no sibling worktrees active |
 
-**Clean, single-tenant re-run** (the follow-up this section's own prior
-paragraph called for): both binaries run back to back with nothing else on
-the machine (`free -h`: 24 GiB available, `ps aux` clean of other heavy
-processes, no sibling agent worktrees active), same real weights, same
-document image, same prompt, `--max_new 32` / `-n 32`, greedy, `--flash-attn
-off` for `llama-mtmd-cli`. Brain: 83.1 s wall (283 prompt tokens, 32
-completion tokens, `prompt_tokens`/`completion_tokens` both correctly
-populated) - faster than either contended pair above (95.6 s, 97.1 s).
-`llama-mtmd-cli`: 52.9 s wall, of which its own reported "mtmd batch
-encoding" phases total 41.6 s (12.5 s + 29.1 s across two chunks) - close to
-its own pair-2 number (50.9 s) and well above pair 1's (70.2 s) but still
-nowhere near the ~20.6 s baseline from the prior (pre-vision-encoder-fix)
-pass, so `llama-mtmd-cli` itself is not running at its fastest on this
-machine right now either; this is not a controlled-for-everything
-comparison, just the cleanest one available this session. **Ratio: 1.57x**
-- inside the 1.36x-1.91x range the contended pairs already showed, which is
-itself informative: the RATIO does not appear to be distorted by shared-
-machine load as much as the absolute numbers are, at least at this load
-range. Still not a win over llama.cpp, but this is the number to cite going
-forward, not a range to average over.
-
-**Read this carefully, not optimistically.** `llama-mtmd-cli`'s OWN number
-moved 2.5-3.4x slower than its previously-recorded ~20.6 s baseline in these
-same two runs (51.7 s and 37.8 s of its own reported "mtmd batch encoding"
-time, vs ~15 s previously) - proof that this session's absolute numbers on
-BOTH sides are inflated by the same shared-machine load documented above, not
-evidence that brain caught up to llama.cpp's true speed. What the two
-same-window pairs DO show honestly: the RELATIVE gap narrowed from ~6-7x to
-roughly 1.4-1.9x under matched conditions, driven overwhelmingly by the
-vision-encoder work above (encode dropped from an unmeasured "~75-80 s" share
-of the total to a directly-measured 25-34 s) rather than by the two kernel
-fixes' precise, individually-unresolved magnitudes. A clean, single-tenant
-re-run of both binaries back to back is the next thing anyone continuing this
-should do before quoting an absolute number either side would want to stand
-behind.
+The 83.1 s clean, single-tenant number (283 prompt tokens, 32 completion
+tokens, `prompt_tokens`/`completion_tokens` both correctly populated) is
+faster than either contended run above (95.6 s, 97.1 s), consistent with
+shared-machine load inflating absolute numbers during this session's
+concurrent-agent passes - use 83.1 s as the number to cite going forward,
+not the contended pairs.
 
 **What is still open:** the wgpu correctness bug itself (out of scope here,
 now with a real 3.6x cost-of-CPU-pin number attached for whoever prioritizes
-it); model construction's 20-25 s is unexamined at the kernel level; the
-tiled-transpose fix's whole-pass magnitude needs a quiet-machine re-measure;
-and a genuinely clean (single-tenant machine) head-to-head number was not
-obtainable this session.
+it); model construction's 20-25 s is unexamined at the kernel level; and the
+tiled-transpose fix's whole-pass magnitude needs a quiet-machine re-measure
+isolated from the other changes landed in the same pass.

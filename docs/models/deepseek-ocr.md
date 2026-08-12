@@ -164,8 +164,7 @@ The `O(T²)` numbers this replaces, for reference (same machine, a synthetic
 1600x1131 page): `--max_new 2` 1 min 54 s, `--max_new 10` 4 min 54 s (~22 s
 per additional token, confirming the quadratic blowup). See
 `docs/performance/overview.md`'s case study for the full `BRAIN_PROFILE`
-per-kernel breakdown and a head-to-head against `llama-mtmd-cli` on the same
-weights and image.
+per-kernel breakdown.
 
 **Model load + vision encoding were the dominant cost, and the vision
 encoder got its own profiling pass.** Of the ~123-147 s total run above:
@@ -181,12 +180,11 @@ backend corrupts this tower's output at production scale, unrelated to this
 pass) costs roughly 3.6x over wgpu on this tower alone, measured directly
 rather than assumed. With both landed, real-weight runs measured the vision
 encoder directly at 25-34 s (down from the prior pass's undifferentiated
-~75-80 s estimate) and the whole-pipeline head-to-head against
-`llama-mtmd-cli` at roughly 1.4-1.9x under matched, same-session conditions
-(both sides' absolute numbers were inflated by a busy shared machine that
-session, so this is a relative, not absolute, claim). Model construction's
-20-28 s and the tiled-transpose fix's whole-pipeline magnitude remain open.
-See `docs/performance/overview.md`'s case study for the full per-stage and
+~75-80 s estimate), and a clean single-tenant run measured the whole
+pipeline at 83.1 s (down from the ~95.6-97.1 s the same pass measured under
+concurrent-agent machine load). Model construction's 20-28 s and the
+tiled-transpose fix's whole-pipeline magnitude remain open. See
+`docs/performance/overview.md`'s case study for the full per-stage and
 per-kernel tables and the honest caveats on what could and could not be
 pinned down on a shared machine.
 
@@ -208,8 +206,9 @@ work (each image needs its own encoder pass, and the decoder has no batch axis).
 INT8 path).
 
 **No multimodal oracle for the decode loop.** The text decoder alone is matched
-token for token against llama.cpp on these weights; the image+decoder loop is
-gated on completing, on finite logits and on causal self-consistency, because
-llama.cpp's debug callback segfaults inside this model's CLIP graph and no
-post-image token-id capture exists to compare against. So "brain decodes the
-same tokens as the reference for a real page" is **not** claimed.
+token for token against an independent reference implementation on these
+weights; the image+decoder loop is gated on completing, on finite logits and
+on causal self-consistency, because that reference's own debug callback
+segfaults inside this model's CLIP graph and no post-image token-id capture
+exists to compare against. So "brain decodes the same tokens as the
+reference for a real page" is **not** claimed.
