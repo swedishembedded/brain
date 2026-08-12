@@ -80,8 +80,6 @@ default-members = [
     "crates/facenet",
     "crates/vqgan",
     "crates/clip",
-    "crates/sam1",
-    "crates/deepseekv2",
     "crates/deepseekocr",
     "crates/t5",
     "crates/flux1",
@@ -187,8 +185,6 @@ brain-sam1 = { path = "crates/sam1" }
 brain-facenet = { path = "crates/facenet" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
-brain-sam1 = { path = "crates/sam1" }
-brain-deepseekv2 = { path = "crates/deepseekv2" }
 brain-deepseekocr = { path = "crates/deepseekocr" }
 brain-t5 = { path = "crates/t5" }
 brain-flux1 = { path = "crates/flux1" }

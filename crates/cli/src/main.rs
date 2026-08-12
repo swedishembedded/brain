@@ -37,6 +37,7 @@ mod qwen35moe_cli;
 mod qwen_cli;
 mod resident;
 mod resident_asr;
+mod resident_deepseekocr;
 mod resident_depth;
 mod resident_flux2;
 mod resident_forecast;

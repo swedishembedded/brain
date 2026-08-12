@@ -263,6 +263,18 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_clip::ClipResident::from_env),
         },
+        // DeepSeek-OCR: a document image in, decoded text out. Multi-file
+        // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
+        // facenet's and clip's. CPU-resident by declaration - see
+        // `crate::resident_deepseekocr`'s header.
+        ModelEntry {
+            manifest: deepseekocr::caps::manifest,
+            provider: from_env!(
+                deepseekocr::caps::DeepseekOcrProvider::from_env,
+                "set BRAIN_DEEPSEEK_OCR_DIR to a directory holding mmproj-DeepSeek-OCR-Q8_0.gguf + DeepSeek-OCR-Q8_0.gguf"
+            ),
+            resident: resident!(crate::resident_deepseekocr::DeepseekOcrResident::from_env),
+        },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
             provider: || Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),

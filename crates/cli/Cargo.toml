@@ -85,6 +85,9 @@ brain-npu.workspace = true
 serde_json.workspace = true
 brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
+# DeepSeek-OCR: `deepseekocr::caps` (the manifest + the served `generate`) and
+# `deepseekocr::import` (the checkpoint layout `resident_deepseekocr` locates).
+brain-deepseekocr.workspace = true
 brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.

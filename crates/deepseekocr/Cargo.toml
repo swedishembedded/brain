@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-deepseekocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek-OCR composite: the DeepEncoder (SAM ViT-B + 16x compressor -> CLIP-L with its patch embed bypassed -> concat + linear projector) spliced into the DeepSeek-V2 MHA decoder."
+
+[lib]
+name = "deepseekocr"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-paramstore.workspace = true
+# `model::vlm::splice_fwd` - `crate::layout` assembles its row table with the
+# SAME compact-source/offset-destination seam the decoder's own image splice
+# uses, rather than re-deriving the dispatch shape.
+brain-model.workspace = true
+brain-sam1.workspace = true
+brain-clip.workspace = true
+brain-deepseekv2.workspace = true
+brain-gguf.workspace = true
+brain-data.workspace = true
+# The image substrate: `preprocess` dispatches every per-pixel step (resize,
+# per-channel affine, pad) through `imaging::Ctx` rather than looping on the
+# host, so `--device` means something for a 4K page scan.
+brain-imaging.workspace = true
+# `checkpoint::TensorSource` is the weight-input seam of every constructor here
+# (an eager `&HashMap` coerces to it; an mmap-backed reader streams through it),
+# so this is a library dependency, not a test-only one.
+brain-checkpoint.workspace = true
+# The serving surface (`src/caps.rs`): manifests, typed actions, and the ONE
+# image-blob codec (`capability::blob`) every provider decodes through.
+brain-capability.workspace = true
+# `qwen3::chat::stream_delta` -- the UTF-8-safe streaming-delta rule, ONE
+# implementation shared with `qwenvl::caps` rather than a fourth copy of
+# "strip a trailing replacement char, emit the suffix". Nothing else of
+# `crates/qwen3` is used here.
+brain-qwen3.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
