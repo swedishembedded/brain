@@ -4,7 +4,7 @@
 // @what  Row-wise causal softmax over the key axis
 // @how   one thread per output element, serial inner reduction
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   yes
 // @quant none

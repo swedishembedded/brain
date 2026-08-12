@@ -27,7 +27,7 @@ a kernel can be 5/5 structurally and still be a defect at a given shape.
 `workgroupBarrier()` and no more; with two or more it does not fail cleanly, it
 **corrupts memory**, so those are `✗`
 (9 kernels) - cross-checked against the barrier count on every run.
-`native` marks the 32 kernels with a hand-written AVX2 path that runs instead
+`native` marks the 42 kernels with a hand-written AVX2 path that runs instead
 of the JIT; `native only` means that path is the *only* way it works there, because
 its WGSL has >1 barrier - under `BRAIN_NO_FASTCONV=1` or on a non-AVX2 host it would
 fall back to the JIT and corrupt memory. A `✓` says the JIT *can* run it, not that the
@@ -98,7 +98,7 @@ op (156 kernels), not that this file runs there.
 | [`attn_scores_full`](../../crates/kernels/wgsl/attn_scores_full.wgsl) | Full (bidirectional, NON-causal) attention scores with an additive key mask and NO 1/sqrt(head_dim) scaling - the Chronos-2 encoder contract | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
 | [`attn_scores_masked`](../../crates/kernels/wgsl/attn_scores_masked.wgsl) | Attention scores with causal mask AND key-padding mask (no RoPE) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
 | [`attn_scores_qk`](../../crates/kernels/wgsl/attn_scores_qk.wgsl) | Attention scores from SEPARATE q,k buffers, with a configurable scale and an optional causal mask - covers Kronos's two attention modes | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
-| [`attn_softmax`](../../crates/kernels/wgsl/attn_softmax.wgsl) | Row-wise causal softmax over the key axis | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - |
+| [`attn_softmax`](../../crates/kernels/wgsl/attn_softmax.wgsl) | Row-wise causal softmax over the key axis | one thread per output element, serial inner reduction | 2/5 | native | ✓ | ✓ | - |
 | [`attn_softmax_bidir`](../../crates/kernels/wgsl/attn_softmax_bidir.wgsl) | Row-wise bidirectional softmax over the full key axis | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - |
 | [`attn_softmax_cross`](../../crates/kernels/wgsl/attn_softmax_cross.wgsl) | Row-wise cross-attention softmax over the encoder key axis | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - |
 | [`attn_softmax_full`](../../crates/kernels/wgsl/attn_softmax_full.wgsl) | Row-wise FULL (non-causal) softmax over the key axis, padding-safe | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - |
@@ -238,12 +238,12 @@ op (156 kernels), not that this file runs there.
 | [`gn_stats`](../../crates/kernels/wgsl/gn_stats.wgsl) | GroupNorm statistics for an NCHW tensor x[N,C,H,W] - spec | one thread per output element, 4 nested serial reductions | 1/5 | native | ✓ | ✓ | - |
 | [`gn_stats2`](../../crates/kernels/wgsl/gn_stats2.wgsl) | GroupNorm statistics combine (stage 2 of 2, after gn_part) | one thread per output element, serial fold over P partials | 2/5 | native | ✓ | ✓ | - |
 | [`gn_stats_wg`](../../crates/kernels/wgsl/gn_stats_wg.wgsl) | GroupNorm statistics, one WORKGROUP per (n,g) group - the parallel, COALESCED twin of gn_stats.wgsl | 256-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ (256) | ✓ | - |
-| [`gqa_apply`](../../crates/kernels/wgsl/gqa_apply.wgsl) | GQA attention output, separate v buffer | one thread per output element | 3/5 | ✓ | ✓ | - | - |
-| [`gqa_bwd_dk`](../../crates/kernels/wgsl/gqa_bwd_dk.wgsl) | GQA attention backward, step 4 - gradient w.r.t | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
-| [`gqa_bwd_dq`](../../crates/kernels/wgsl/gqa_bwd_dq.wgsl) | GQA attention backward, step 3 - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - |
-| [`gqa_bwd_dscores`](../../crates/kernels/wgsl/gqa_bwd_dscores.wgsl) | GQA attention backward, step 1 - gradient through (probs @ v) and softmax | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | - | - |
-| [`gqa_bwd_dv`](../../crates/kernels/wgsl/gqa_bwd_dv.wgsl) | GQA attention backward, step 2 - gradient w.r.t | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
-| [`gqa_scores`](../../crates/kernels/wgsl/gqa_scores.wgsl) | GQA attention scores (materialised, for training), separate q/k buffers | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
+| [`gqa_apply`](../../crates/kernels/wgsl/gqa_apply.wgsl) | GQA attention output, separate v buffer | one thread per output element | 3/5 | native | ✓ | - | - |
+| [`gqa_bwd_dk`](../../crates/kernels/wgsl/gqa_bwd_dk.wgsl) | GQA attention backward, step 4 - gradient w.r.t | one thread per output element, serial inner reduction | 2/5 | native | ✓ | - | - |
+| [`gqa_bwd_dq`](../../crates/kernels/wgsl/gqa_bwd_dq.wgsl) | GQA attention backward, step 3 - gradient w.r.t | one thread per output element | 3/5 | native | ✓ | - | - |
+| [`gqa_bwd_dscores`](../../crates/kernels/wgsl/gqa_bwd_dscores.wgsl) | GQA attention backward, step 1 - gradient through (probs @ v) and softmax | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | - | - |
+| [`gqa_bwd_dv`](../../crates/kernels/wgsl/gqa_bwd_dv.wgsl) | GQA attention backward, step 2 - gradient w.r.t | one thread per output element, serial inner reduction | 2/5 | native | ✓ | - | - |
+| [`gqa_scores`](../../crates/kernels/wgsl/gqa_scores.wgsl) | GQA attention scores (materialised, for training), separate q/k buffers | one thread per output element, serial inner reduction | 2/5 | native | ✓ | - | - |
 | [`gqa_scores_kmask`](../../crates/kernels/wgsl/gqa_scores_kmask.wgsl) | GQA attention scores with an additive per-key mask - `gqa_scores` plus `kmask[j]` added to every finite score | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
 | [`gqa_scores_win`](../../crates/kernels/wgsl/gqa_scores_win.wgsl) | GQA attention scores with a sliding-window causal mask - `gqa_scores` plus a lower key bound `i - j < window` | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
 | [`grad_scale`](../../crates/kernels/wgsl/grad_scale.wgsl) | Scale a gradient buffer in place | one thread per output element | 3/5 | ✓ | ✓ | - | - |
@@ -312,9 +312,9 @@ op (156 kernels), not that this file runs there.
 | [`mla_bwd_dq_rope`](../../crates/kernels/wgsl/mla_bwd_dq_rope.wgsl) | MLA backward - grad w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - |
 | [`mla_index_scores`](../../crates/kernels/wgsl/mla_index_scores.wgsl) | DSA indexer scores (forward, detached) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
 | [`mla_scores`](../../crates/kernels/wgsl/mla_scores.wgsl) | MLA (Multi-head Latent Attention) scores (forward), for GLM-5.2 | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - |
-| [`moe_linear_gated`](../../crates/kernels/wgsl/moe_linear_gated.wgsl) | Sparse-MoE expert linear: matmul.wgsl, but skips non-routed rows | one thread per output element, serial inner reduction, early exit | 2/5 | ✓ | ✓ | - | - |
-| [`moe_linear_gated_dw`](../../crates/kernels/wgsl/moe_linear_gated_dw.wgsl) | Sparse-MoE expert linear backward w.r.t. W: matmul_dw.wgsl, gated | one thread per output element, in-loop skip on the gate | 2/5 | ✓ | ✓ | - | - |
-| [`moe_linear_gated_dx`](../../crates/kernels/wgsl/moe_linear_gated_dx.wgsl) | Sparse-MoE expert linear backward w.r.t. x: matmul_dx.wgsl, gated | one thread per output element, pre-reduction early exit on the gate | 2/5 | ✓ | ✓ | - | - |
+| [`moe_linear_gated`](../../crates/kernels/wgsl/moe_linear_gated.wgsl) | Sparse-MoE expert linear: matmul.wgsl, but skips non-routed rows | one thread per output element, serial inner reduction, early exit | 2/5 | native | ✓ | - | - |
+| [`moe_linear_gated_dw`](../../crates/kernels/wgsl/moe_linear_gated_dw.wgsl) | Sparse-MoE expert linear backward w.r.t. W: matmul_dw.wgsl, gated | one thread per output element, in-loop skip on the gate | 2/5 | native | ✓ | - | - |
+| [`moe_linear_gated_dx`](../../crates/kernels/wgsl/moe_linear_gated_dx.wgsl) | Sparse-MoE expert linear backward w.r.t. x: matmul_dx.wgsl, gated | one thread per output element, pre-reduction early exit on the gate | 2/5 | native | ✓ | - | - |
 | [`moe_linear_gated_i8`](../../crates/kernels/wgsl/moe_linear_gated_i8.wgsl) | Sparse-MoE expert linear, int8 (DP4A): moe_linear_gated.wgsl's row skip, packed weights | DP4A packed int8, one thread per output element, serial inner reduction, early exit | 2/5 | ✓ | ✓ | - | int8 |
 | [`moe_linear_gated_q4`](../../crates/kernels/wgsl/moe_linear_gated_q4.wgsl) | Sparse-MoE expert linear, W4A8 q4: moe_linear_gated_i8.wgsl's row skip, int4-packed weights | one thread per output element, serial inner reduction, early exit | 2/5 | ✓ | ✓ | - | q4 |
 | [`moe_scatter_scaled_add`](../../crates/kernels/wgsl/moe_scatter_scaled_add.wgsl) | Scatter a compacted expert's output back into the dense MoE accumulator, gate-scaled | one thread per output element, scatter-add (no atomics: rows are unique per call) | 3/5 | ✓ | ✓ | - | - |

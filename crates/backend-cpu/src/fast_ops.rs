@@ -3,8 +3,8 @@
 
 //! Native CPU fast paths for the memory-bound NCHW kernels (concat / batchnorm
 //! eval / SiLU / upsample). Like [`crate::fast_conv`], these are execution-only
-//! optimizations of the corresponding WGSL kernels — same math, validated
-//! against a scalar reference — that replace the one-invocation-per-element JIT
+//! optimizations of the corresponding WGSL kernels - same math, validated
+//! against a scalar reference - that replace the one-invocation-per-element JIT
 //! loop (whose per-element index decode and per-element libm `expf` dominate)
 //! with structured loops, bulk `memcpy`, and AVX2 vectorization.
 
@@ -52,7 +52,7 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
     }
 }
 
-/// `matmul` (`matmul.wgsl`): `C[M,N] = sum_k A[M,K]·B[N,K]` — i.e. `A @ Bᵀ` with
+/// `matmul` (`matmul.wgsl`): `C[M,N] = sum_k A[M,K]·B[N,K]` - i.e. `A @ Bᵀ` with
 /// K contiguous in both operands. This is the transformer hot path (every q/k/v/o
 /// projection, FFN, and head), which otherwise runs as the scalar per-element JIT
 /// loop. Threaded over output rows; each row uses AVX2 FMA with 4-column register
@@ -63,13 +63,18 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     }
     let row = |arow: &[f32], crow: &mut [f32]| {
         #[cfg(target_arch = "x86_64")]
+        if crate::fast_conv::avx512_available() {
+            unsafe { row_abt_avx512(arow, b, crow, k, n) };
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
         if crate::fast_conv::avx2_available() {
             unsafe { row_abt_avx2(arow, b, crow, k, n) };
             return;
         }
         row_abt_scalar(arow, b, crow, k, n);
     };
-    // Small problems: rayon fan-out costs more than it saves — run inline (still
+    // Small problems: rayon fan-out costs more than it saves - run inline (still
     // AVX2). Threshold ~ a few hundred K MACs, below which the tiny transformer
     // matmuls (patch/head) were slower threaded than the scalar JIT loop.
     if m * n * k < 262_144 {
@@ -160,6 +165,71 @@ unsafe fn row_abt_avx2(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) 
     }
 }
 
+/// AVX-512 twin of [`row_abt_avx2`] - same 4-column register-blocked
+/// accumulation, same tail handling, `__m512` (16-wide) lanes instead of
+/// `__m256` (8-wide) and `_mm512_reduce_add_ps` instead of the hand-rolled
+/// `hsum`. Gated behind [`crate::fast_conv::avx512_available`] - see that
+/// function's doc comment for why this microkernel is compiled and
+/// shape-tested but NOT execution-verified on this development machine (no
+/// AVX-512 host available). Deliberately kept structurally identical to
+/// `row_abt_avx2` (not "improved" independently) so a future host that CAN
+/// exercise it is comparing the same algorithm at a wider vector width, not a
+/// second implementation that could silently diverge.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn row_abt_avx512(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
+    use std::arch::x86_64::*;
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut j = 0usize;
+    while j + 4 <= n {
+        let (p0, p1, p2, p3) =
+            (bp.add(j * k), bp.add((j + 1) * k), bp.add((j + 2) * k), bp.add((j + 3) * k));
+        let (mut a0, mut a1, mut a2, mut a3) =
+            (_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps());
+        let mut kk = 0usize;
+        while kk + 16 <= k {
+            let av = _mm512_loadu_ps(ap.add(kk));
+            a0 = _mm512_fmadd_ps(av, _mm512_loadu_ps(p0.add(kk)), a0);
+            a1 = _mm512_fmadd_ps(av, _mm512_loadu_ps(p1.add(kk)), a1);
+            a2 = _mm512_fmadd_ps(av, _mm512_loadu_ps(p2.add(kk)), a2);
+            a3 = _mm512_fmadd_ps(av, _mm512_loadu_ps(p3.add(kk)), a3);
+            kk += 16;
+        }
+        let (mut s0, mut s1, mut s2, mut s3) =
+            (_mm512_reduce_add_ps(a0), _mm512_reduce_add_ps(a1), _mm512_reduce_add_ps(a2), _mm512_reduce_add_ps(a3));
+        while kk < k {
+            let av = *ap.add(kk);
+            s0 += av * *p0.add(kk);
+            s1 += av * *p1.add(kk);
+            s2 += av * *p2.add(kk);
+            s3 += av * *p3.add(kk);
+            kk += 1;
+        }
+        c[j] = s0;
+        c[j + 1] = s1;
+        c[j + 2] = s2;
+        c[j + 3] = s3;
+        j += 4;
+    }
+    while j < n {
+        let p0 = bp.add(j * k);
+        let mut acc = _mm512_setzero_ps();
+        let mut kk = 0usize;
+        while kk + 16 <= k {
+            acc = _mm512_fmadd_ps(_mm512_loadu_ps(ap.add(kk)), _mm512_loadu_ps(p0.add(kk)), acc);
+            kk += 16;
+        }
+        let mut s = _mm512_reduce_add_ps(acc);
+        while kk < k {
+            s += *ap.add(kk) * *p0.add(kk);
+            kk += 1;
+        }
+        c[j] = s;
+        j += 1;
+    }
+}
+
 /// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
 /// slope 1 is the aliasing copy some blocks use). Branch-free select
 /// auto-vectorizes; ~40 dispatches per ZipDepth frame ran as scalar JIT before.
@@ -169,7 +239,7 @@ pub(crate) fn leaky_relu(x: &[f32], out: &mut [f32], slope: f32) {
     }
 }
 
-/// Apply `out = out*s + b` in place (fused conv epilogue, `act = 0`/identity —
+/// Apply `out = out*s + b` in place (fused conv epilogue, `act = 0`/identity -
 /// e.g. ZipDepth's QARep branches, whose activation comes after the branch sum).
 /// The plain FMA auto-vectorizes; no hand-rolled AVX2 needed.
 pub(crate) fn affine_inplace(buf: &mut [f32], s: f32, b: f32) {
@@ -178,7 +248,7 @@ pub(crate) fn affine_inplace(buf: &mut [f32], s: f32, b: f32) {
     }
 }
 
-/// Apply `out = max(out*s + b, 0)` in place (fused conv epilogue, `act = 1` —
+/// Apply `out = max(out*s + b, 0)` in place (fused conv epilogue, `act = 1` -
 /// the ReLU nets: ZipDepth). FMA + max auto-vectorize.
 pub(crate) fn affine_relu_inplace(buf: &mut [f32], s: f32, b: f32) {
     for v in buf.iter_mut() {
@@ -186,7 +256,7 @@ pub(crate) fn affine_relu_inplace(buf: &mut [f32], s: f32, b: f32) {
     }
 }
 
-/// Apply `out = sigmoid(out*s + b)` in place (fused conv epilogue, `act = 3` —
+/// Apply `out = sigmoid(out*s + b)` in place (fused conv epilogue, `act = 3` -
 /// gate-producing convs). AVX2 via the shared `exp256_ps` when available.
 pub(crate) fn affine_sigmoid_inplace(buf: &mut [f32], s: f32, b: f32) {
     #[cfg(target_arch = "x86_64")]
@@ -370,7 +440,7 @@ unsafe fn affine_avx2(x: &[f32], s: f32, b: f32, out: &mut [f32]) {
 }
 
 /// `concat2`: channel-concat `y[N,Ca+Cb,H,W]` from `a[N,Ca,H,W]`,`b[N,Cb,H,W]`.
-/// Each (n) is two contiguous block copies — no per-element index math.
+/// Each (n) is two contiguous block copies - no per-element index math.
 pub fn concat2(params: &[u32], a: &[f32], b: &[f32], y: &mut [f32]) {
     let (n, ca, cb, h, w) =
         (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
@@ -446,7 +516,7 @@ pub fn chan_place(params: &[u32], src: &[f32], dst: &mut [f32]) {
         // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
         // Rust 2021 disjoint capture a closure that only touches `dptr.0`
         // captures that raw pointer directly, which is not `Send`. Verified by
-        // deletion — it fails with E0277 `*mut f32` cannot be shared between
+        // deletion - it fails with E0277 `*mut f32` cannot be shared between
         // threads safely.
         #[allow(clippy::redundant_locals)]
         let dptr = dptr;
@@ -495,7 +565,7 @@ pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
 /// `gn_stats`: two-pass GroupNorm statistics over NCHW (matches
 /// `gn_stats.wgsl`: population variance, eps inside the rsqrt). One entry per
 /// (n, g): `stats[2k] = mean`, `stats[2k+1] = 1/sqrt(var + eps)`. The group's
-/// channels are contiguous, so each reduction is one contiguous slice —
+/// channels are contiguous, so each reduction is one contiguous slice -
 /// parallelized over chunks with rayon and combined (fp32 accumulation in
 /// chunk-partials; validated against the scalar JIT within fp32 tolerance
 /// like the conv fast paths).
@@ -507,7 +577,7 @@ pub fn gn_stats(params: &[u32], x: &[f32], stats: &mut [f32]) {
     let cpg = c / g;
     let m = cpg * h * w;
     // n*g is tiny (2..8): keep groups sequential, parallelize each reduction
-    // over a few LARGE chunks (no nested rayon — nesting inside the backend's
+    // over a few LARGE chunks (no nested rayon - nesting inside the backend's
     // pool oversubscribes and measured slower than the scalar JIT).
     const CH: usize = 32 * 1024;
     for k in 0..n * g {
@@ -564,7 +634,7 @@ pub fn gn_apply(params: &[u32], x: &[f32], stats: &[f32], gb: &[f32], y: &mut [f
 }
 
 /// `gn_part` (stage 1): per-(group, t) partial (sum, sumsq) over contiguous
-/// chunks — matches `gn_part.wgsl`. Parallel over the partial index.
+/// chunks - matches `gn_part.wgsl`. Parallel over the partial index.
 pub fn gn_part(params: &[u32], x: &[f32], part: &mut [f32]) {
     use rayon::prelude::*;
     let (n, c, h, w, g, pp) = (
@@ -594,7 +664,7 @@ pub fn gn_part(params: &[u32], x: &[f32], part: &mut [f32]) {
     });
 }
 
-/// `gn_stats2` (stage 2): combine partials into (mean, rstd) — matches
+/// `gn_stats2` (stage 2): combine partials into (mean, rstd) - matches
 /// `gn_stats2.wgsl` (population variance via E[x^2] - mean^2, clamped at 0).
 pub fn gn_stats2(params: &[u32], part: &[f32], stats: &mut [f32]) {
     let (n, c, h, w, g, pp) = (
@@ -621,7 +691,7 @@ pub fn gn_stats2(params: &[u32], part: &[f32], stats: &mut [f32]) {
 }
 
 /// dX[m,k] = sum_n dY[m,n] * W[n,k]   (+ accumulate into dx if `acc`).
-/// Backward of `out = x·Wᵀ` w.r.t. x — `matmul_dx`/`matmul_dx_reg` on CPU.
+/// Backward of `out = x·Wᵀ` w.r.t. x - `matmul_dx`/`matmul_dx_reg` on CPU.
 /// dY is [M,N] row-major, W is [N,K] row-major, dX is [M,K].
 pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: usize, acc: bool) {
     if m == 0 || k == 0 {
@@ -660,7 +730,7 @@ pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: u
 }
 
 /// dW[n,k] += sum_m dY[m,n] * X[m,k]   (always accumulates).
-/// Backward of `out = x·Wᵀ` w.r.t. W — `matmul_dw`/`matmul_dw_reg` on CPU.
+/// Backward of `out = x·Wᵀ` w.r.t. W - `matmul_dw`/`matmul_dw_reg` on CPU.
 /// dY is [M,N] row-major, X is [M,K] row-major, dW is [N,K].
 pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: usize) {
     if n == 0 || k == 0 {
@@ -696,8 +766,511 @@ pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: u
     });
 }
 
+/// `dst[i] += scale * src[i]` over `min(dst.len(), src.len())`. The shared
+/// SAXPY-style primitive behind every gated/backward accumulation below
+/// (`moe_linear_gated_dx`, the GQA backward quartet): each of those kernels'
+/// inner loop is "for one index of the reduced axis, scale-and-accumulate a
+/// contiguous row" - this is that operation, vectorised once and reused
+/// rather than re-derived per call site.
+#[inline]
+fn axpy(dst: &mut [f32], scale: f32, src: &[f32]) {
+    if scale == 0.0 {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::fast_conv::avx2_available() {
+        unsafe { axpy_avx2(dst, scale, src) };
+        return;
+    }
+    let n = dst.len().min(src.len());
+    for (d, &s) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d += scale * s;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn axpy_avx2(dst: &mut [f32], scale: f32, src: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = dst.len().min(src.len());
+    let sv = _mm256_set1_ps(scale);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let d = _mm256_loadu_ps(dst.as_ptr().add(i));
+        let s = _mm256_loadu_ps(src.as_ptr().add(i));
+        _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_fmadd_ps(sv, s, d));
+        i += 8;
+    }
+    for j in i..n {
+        *dst.get_unchecked_mut(j) += scale * *src.get_unchecked(j);
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Cross-attention family (attn_{scores,softmax,apply}_cross.wgsl) — the
+// Sparse-MoE gated linear family (moe_linear_gated{,_dx,_dw}.wgsl) - the
+// decode loop's dominant cost (measured at 66.9% of DeepSeek-OCR's profiled
+// decode time), previously running as the scalar one-invocation-per-element
+// JIT loop with zero vectorisation.
+// Same contract as `matmul_abt`/`matmul_dx`/`matmul_dw` PLUS a per-row gate
+// early-exit: a row whose `gate[row*n_experts+e_idx] <= 0` is genuinely never
+// reduced (not computed-then-discarded), exactly mirroring each kernel's own
+// WGSL doc comment. Forward reuses the proven `row_abt_{avx512,avx2}`
+// microkernels directly (same shape as `matmul_abt`, just row-gated); the two
+// backward siblings reuse the shared `axpy` primitive above.
+// ---------------------------------------------------------------------------
+
+/// `moe_linear_gated`: `out[row,:] = 0` if `gate[row*n_experts+e_idx] <= 0`,
+/// else `out[row,:] = x[row,:] @ Wᵀ` - `moe_linear_gated.wgsl`.
+#[allow(clippy::too_many_arguments)]
+pub fn moe_linear_gated_fwd(
+    x: &[f32],
+    w: &[f32],
+    gate: &[f32],
+    out: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    n_experts: usize,
+    e_idx: usize,
+) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let row = |r: usize, xrow: &[f32], orow: &mut [f32]| {
+        if gate[r * n_experts + e_idx] <= 0.0 {
+            orow.iter_mut().for_each(|v| *v = 0.0);
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if crate::fast_conv::avx512_available() {
+            unsafe { row_abt_avx512(xrow, w, orow, k, n) };
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if crate::fast_conv::avx2_available() {
+            unsafe { row_abt_avx2(xrow, w, orow, k, n) };
+            return;
+        }
+        row_abt_scalar(xrow, w, orow, k, n);
+    };
+    if m * n * k < 262_144 {
+        for r in 0..m {
+            row(r, &x[r * k..r * k + k], &mut out[r * n..r * n + n]);
+        }
+        return;
+    }
+    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
+        let row0 = ci * rows_per;
+        let nrows = cchunk.len() / n;
+        for r in 0..nrows {
+            row(row0 + r, &x[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
+        }
+    });
+}
+
+/// `moe_linear_gated_dx`: `dX[row,:] = sum_n dY[row,n]*W[n,:]` when
+/// `gate[row*n_experts+e_idx] > 0`, else left untouched if `acc` else zeroed -
+/// `moe_linear_gated_dx.wgsl`. A non-routed row's `dY` is already exactly
+/// zero end to end (see the WGSL kernel's own doc), so skipping its
+/// reduction changes nothing about the sum; it only removes FLOPs.
+#[allow(clippy::too_many_arguments)]
+pub fn moe_linear_gated_dx(
+    dy: &[f32],
+    w: &[f32],
+    gate: &[f32],
+    dx: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    n_experts: usize,
+    e_idx: usize,
+    acc: bool,
+) {
+    if m == 0 || k == 0 {
+        return;
+    }
+    let row = |r: usize, dyr: &[f32], dxr: &mut [f32]| {
+        if gate[r * n_experts + e_idx] <= 0.0 {
+            if !acc {
+                dxr.iter_mut().for_each(|v| *v = 0.0);
+            }
+            return;
+        }
+        if !acc {
+            dxr.iter_mut().for_each(|v| *v = 0.0);
+        }
+        for nn in 0..n {
+            let dyv = dyr[nn];
+            if dyv == 0.0 {
+                continue;
+            }
+            axpy(dxr, dyv, &w[nn * k..nn * k + k]);
+        }
+    };
+    if m * n * k < 262_144 {
+        for r in 0..m {
+            row(r, &dy[r * n..r * n + n], &mut dx[r * k..r * k + k]);
+        }
+        return;
+    }
+    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    dx.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
+        let row0 = ci * rows_per;
+        let nrows = chunk.len() / k;
+        for r in 0..nrows {
+            row(row0 + r, &dy[(row0 + r) * n..(row0 + r) * n + n], &mut chunk[r * k..r * k + k]);
+        }
+    });
+}
+
+/// `moe_linear_gated_dw`: `dW[n,:] += sum_{row routed} dY[row,n]*X[row,:]` -
+/// `moe_linear_gated_dw.wgsl`. UNLIKE `moe_linear_gated_dx`, the gated axis
+/// here is the summed one (every output element still visits every OTHER
+/// routed row), so a non-routed row is a loop `continue`, not a whole-row exit.
+#[allow(clippy::too_many_arguments)]
+pub fn moe_linear_gated_dw(
+    dy: &[f32],
+    x: &[f32],
+    gate: &[f32],
+    dw: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    n_experts: usize,
+    e_idx: usize,
+) {
+    if n == 0 || k == 0 {
+        return;
+    }
+    let row = |nn: usize, dwr: &mut [f32]| {
+        for mm in 0..m {
+            if gate[mm * n_experts + e_idx] <= 0.0 {
+                continue;
+            }
+            let dyv = dy[mm * n + nn];
+            if dyv == 0.0 {
+                continue;
+            }
+            axpy(dwr, dyv, &x[mm * k..mm * k + k]);
+        }
+    };
+    if m * n * k < 262_144 {
+        for nn in 0..n {
+            row(nn, &mut dw[nn * k..nn * k + k]);
+        }
+        return;
+    }
+    let rows_per = (n / (rayon::current_num_threads() * 4)).max(1);
+    dw.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
+        let n0 = ci * rows_per;
+        let nrows = chunk.len() / k;
+        for r in 0..nrows {
+            row(n0 + r, &mut chunk[r * k..r * k + k]);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Self-attention family (gqa_scores.wgsl / attn_softmax.wgsl / gqa_apply.wgsl
+// + the gqa_bwd_{dscores,dv,dq,dk}.wgsl backward quartet) - plain causal
+// grouped-query (MHA is the `n_kv_heads == n_heads` special case) self-
+// attention, used by every decoder's own attention (`gpt`, `qwen3`, `glm`,
+// `deepseekv2`, ...) and SAM/CLIP's windowed/global attention. Only the
+// cross-attention twin (`attn_{scores,softmax,apply}_cross`) had a native
+// path before this; this is the same GEMM-packing idea applied to the
+// causal-masked, grouped-head shape. `q`/`ctx` are `[B*T, n_heads*head_dim]`;
+// `k`/`v` are `[B*T, n_kv_heads*head_dim]`; `scores`/`probs`/`d_scores` are
+// `[B*n_heads*T*T]` - all contiguous, no stride/offset params (unlike the
+// cross family, which serves a chunked/fused-buffer caller).
+// ---------------------------------------------------------------------------
+
+/// `gqa_scores`: `scores[b,h,i,j] = (q[b,i,h,:]·k[b,j,hkv,:])/√hd` for `j<=i`,
+/// else `-inf`. Sequential over `(b,h)` (matching `attn_scores_cross`'s own
+/// shape) - each head's GEMM already saturates all cores via `matmul_abt`'s
+/// internal threading once `T` is large enough to matter (prefill-scale `T`).
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_scores(
+    q: &[f32],
+    k: &[f32],
+    scores: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let scale = 1.0 / (hd as f32).sqrt();
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    let mut qh = vec![0f32; t * hd];
+    let mut kh = vec![0f32; t * hd];
+    for b in 0..bsz {
+        for h in 0..n_heads {
+            let hkv = h / group;
+            for i in 0..t {
+                let src = (b * t + i) * q_row + h * hd;
+                for d in 0..hd {
+                    qh[i * hd + d] = q[src + d] * scale;
+                }
+            }
+            for j in 0..t {
+                let src = (b * t + j) * k_row + hkv * hd;
+                kh[j * hd..j * hd + hd].copy_from_slice(&k[src..src + hd]);
+            }
+            let base = (b * n_heads + h) * t * t;
+            let out = &mut scores[base..base + t * t];
+            matmul_abt(&qh, &kh, out, t, hd, t);
+            for i in 0..t {
+                for oj in out[i * t + i + 1..i * t + t].iter_mut() {
+                    *oj = -3.4e38;
+                }
+            }
+        }
+    }
+}
+
+/// `attn_softmax`: row-wise causal softmax over the key axis (also serves
+/// dense MHA - the kernel doesn't distinguish, see `attn_softmax.wgsl`'s
+/// header). Parallel over rows, matching `attn_softmax_cross`'s own shape.
+pub fn attn_softmax_causal(scores: &[f32], probs: &mut [f32], bsz: usize, n_heads: usize, t: usize) {
+    let rows = bsz * n_heads * t;
+    probs.par_chunks_mut(t).zip(scores.par_chunks(t)).take(rows).enumerate().for_each(|(r, (p, s))| {
+        let i = r % t;
+        let valid = &s[..=i];
+        let mx = valid.iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
+        let mut sum = 0f32;
+        for (pv, &sv) in p[..=i].iter_mut().zip(valid) {
+            let e = (sv - mx).exp();
+            *pv = e;
+            sum += e;
+        }
+        let inv = 1.0 / sum.max(f32::MIN_POSITIVE);
+        for pv in p[..=i].iter_mut() {
+            *pv *= inv;
+        }
+        for pv in p[i + 1..].iter_mut() {
+            *pv = 0.0;
+        }
+    });
+}
+
+/// `gqa_apply`: `ctx[b,i,h,:] = Σ_{j<=i} probs[b,h,i,j]·v[b,j,hkv,:]`.
+/// Sequential over `(b,h)`, packing `v`'s head slice transposed and reusing
+/// `matmul_abt` - the causal zeros `attn_softmax_causal` already wrote into
+/// `probs` for `j>i` make the "sum over `j<=i`" and "sum over all `j`" the
+/// same computation, so a plain dense GEMM is exact (matching
+/// `attn_apply_cross`'s own reasoning for its unmasked case).
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_apply(
+    probs: &[f32],
+    v: &[f32],
+    ctx: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    let mut vt = vec![0f32; hd * t]; // vt[d, j]
+    let mut ctxh = vec![0f32; t * hd];
+    for b in 0..bsz {
+        for h in 0..n_heads {
+            let hkv = h / group;
+            for j in 0..t {
+                let src = (b * t + j) * k_row + hkv * hd;
+                for d in 0..hd {
+                    vt[d * t + j] = v[src + d];
+                }
+            }
+            let base = (b * n_heads + h) * t * t;
+            let p = &probs[base..base + t * t];
+            matmul_abt(p, &vt, &mut ctxh, t, t, hd);
+            for i in 0..t {
+                let dst = (b * t + i) * q_row + h * hd;
+                ctx[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
+            }
+        }
+    }
+}
+
+/// `gqa_bwd_dscores`: gradient through `probs@v` and the softmax jacobian.
+/// `DProb[i,j] = Σ_d d_ctx[i,d]·v[j,d]` is exactly the same shape as
+/// `gqa_scores`'s own q·k GEMM (with `d_ctx` standing in for `q`, `v` for
+/// `k`, no scale, no mask), so it reuses `matmul_abt` the same way; the
+/// causal masking falls out for free because `probs[i,j]==0` for `j>i`
+/// already zeroes `d_scores[i,j] = probs[i,j]*(DProb[i,j]-dot[i])` there -
+/// `dot[i] = Σ_j probs[i,j]*DProb[i,j]` over ALL `j` equals the causal-only
+/// sum for the same reason.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_bwd_dscores(
+    d_ctx: &[f32],
+    v: &[f32],
+    probs: &[f32],
+    d_scores: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    let mut ctxh = vec![0f32; t * hd];
+    let mut vh = vec![0f32; t * hd];
+    let mut dprob = vec![0f32; t * t];
+    for b in 0..bsz {
+        for h in 0..n_heads {
+            let hkv = h / group;
+            for i in 0..t {
+                let src = (b * t + i) * q_row + h * hd;
+                ctxh[i * hd..i * hd + hd].copy_from_slice(&d_ctx[src..src + hd]);
+            }
+            for j in 0..t {
+                let src = (b * t + j) * k_row + hkv * hd;
+                vh[j * hd..j * hd + hd].copy_from_slice(&v[src..src + hd]);
+            }
+            matmul_abt(&ctxh, &vh, &mut dprob, t, hd, t);
+            let base = (b * n_heads + h) * t * t;
+            let p = &probs[base..base + t * t];
+            let out = &mut d_scores[base..base + t * t];
+            for i in 0..t {
+                let prow = &p[i * t..i * t + t];
+                let dprow = &dprob[i * t..i * t + t];
+                let dot: f32 = prow.iter().zip(dprow).map(|(a, b)| a * b).sum();
+                let orow = &mut out[i * t..i * t + t];
+                for jj in 0..t {
+                    orow[jj] = prow[jj] * (dprow[jj] - dot);
+                }
+            }
+        }
+    }
+}
+
+/// `gqa_bwd_dv`: `d_v[b,hkv,j,:] = Σ_{h∈group(hkv)} Σ_{i>=j} probs[b,h,i,j]·d_ctx[b,i,h,:]`.
+/// Threaded over `d_v`'s own `[B*T, n_kv_heads*head_dim]` rows (the same
+/// `par_chunks_mut`-over-output-rows shape `matmul_dx`/`matmul_dw` already
+/// use), each row accumulated via the shared `axpy` primitive.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_bwd_dv(
+    probs: &[f32],
+    d_ctx: &[f32],
+    d_v: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    d_v.par_chunks_mut(k_row).take(bsz * t).enumerate().for_each(|(bj, row)| {
+        let b = bj / t;
+        let j = bj % t;
+        for hkv in 0..n_kv_heads {
+            let out = &mut row[hkv * hd..hkv * hd + hd];
+            out.iter_mut().for_each(|v| *v = 0.0);
+            for gi in 0..group {
+                let h = hkv * group + gi;
+                let p_base = (b * n_heads + h) * t * t;
+                for i in j..t {
+                    let scale = probs[p_base + i * t + j];
+                    if scale == 0.0 {
+                        continue;
+                    }
+                    let src = (b * t + i) * q_row + h * hd;
+                    axpy(out, scale, &d_ctx[src..src + hd]);
+                }
+            }
+        }
+    });
+}
+
+/// `gqa_bwd_dq`: `d_q[b,i,h,:] = scale·Σ_{j<=i} d_scores[b,h,i,j]·k[b,j,hkv,:]`.
+/// Threaded over `d_q`'s `[B*T, n_heads*head_dim]` rows.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_bwd_dq(
+    d_scores: &[f32],
+    k: &[f32],
+    d_q: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let scale0 = 1.0 / (hd as f32).sqrt();
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    d_q.par_chunks_mut(q_row).take(bsz * t).enumerate().for_each(|(bi, row)| {
+        let b = bi / t;
+        let i = bi % t;
+        for h in 0..n_heads {
+            let hkv = h / group;
+            let out = &mut row[h * hd..h * hd + hd];
+            out.iter_mut().for_each(|v| *v = 0.0);
+            let s_base = (b * n_heads + h) * t * t + i * t;
+            for j in 0..=i {
+                let ds = d_scores[s_base + j];
+                if ds == 0.0 {
+                    continue;
+                }
+                let src = (b * t + j) * k_row + hkv * hd;
+                axpy(out, ds * scale0, &k[src..src + hd]);
+            }
+        }
+    });
+}
+
+/// `gqa_bwd_dk`: `d_k[b,j,hkv,:] = scale·Σ_{h∈group(hkv)} Σ_{i>=j} d_scores[b,h,i,j]·q[b,i,h,:]`.
+/// Threaded over `d_k`'s `[B*T, n_kv_heads*head_dim]` rows, mirroring
+/// `gqa_bwd_dv` exactly with `q` in place of `d_ctx` and the `1/√hd` scale.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_bwd_dk(
+    d_scores: &[f32],
+    q: &[f32],
+    d_k: &mut [f32],
+    bsz: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    hd: usize,
+    group: usize,
+) {
+    let scale0 = 1.0 / (hd as f32).sqrt();
+    let q_row = n_heads * hd;
+    let k_row = n_kv_heads * hd;
+    d_k.par_chunks_mut(k_row).take(bsz * t).enumerate().for_each(|(bj, row)| {
+        let b = bj / t;
+        let j = bj % t;
+        for hkv in 0..n_kv_heads {
+            let out = &mut row[hkv * hd..hkv * hd + hd];
+            out.iter_mut().for_each(|v| *v = 0.0);
+            for gi in 0..group {
+                let h = hkv * group + gi;
+                let s_base = (b * n_heads + h) * t * t;
+                for i in j..t {
+                    let ds = d_scores[s_base + i * t + j];
+                    if ds == 0.0 {
+                        continue;
+                    }
+                    let src = (b * t + i) * q_row + h * hd;
+                    axpy(out, ds * scale0, &q[src..src + hd]);
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Cross-attention family (attn_{scores,softmax,apply}_cross.wgsl) - the
 // substrate of query-chunked bidirectional attention (`model::block::
 // chunked_bidir_fwd`). Per (batch, head) these are small GEMMs over strided
 // head slices of fused buffers; the JIT's one-invocation-per-element loops ran
@@ -887,6 +1460,138 @@ mod tests {
         );
     }
 
+    // Scalar-threaded moe_linear_gated reference, matching moe_linear_gated.wgsl's
+    // OWN row-gated early exit (not `matmul_abt` post-masked) - the honest
+    // apples-to-apples baseline for what the Cranelift-JIT scalar path costs at
+    // this shape, mirroring `matmul_bench`'s "scalar+threads" comparator above.
+    fn moe_fwd_scalar_threaded(x: &[f32], w: &[f32], gate: &[f32], out: &mut [f32], m: usize, k: usize, n: usize, ne: usize, e: usize) {
+        let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+        out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
+            let row0 = ci * rows_per;
+            for r in 0..cchunk.len() / n {
+                let row = row0 + r;
+                let orow = &mut cchunk[r * n..r * n + n];
+                if gate[row * ne + e] <= 0.0 {
+                    orow.iter_mut().for_each(|v| *v = 0.0);
+                    continue;
+                }
+                row_abt_scalar(&x[row * k..row * k + k], w, orow, k, n);
+            }
+        });
+    }
+
+    // Perf microbench at DeepSeek-OCR's real decoder shape (12-layer MoE,
+    // d_model=1280, moe_ff=896, 64 experts top_k=6 - see
+    // `deepseekv2::config::DeepseekV2Config::real`) - the kernel this repo's own
+    // `BRAIN_PROFILE` run measured at 66.9% of the whole decode loop. `m=283`
+    // is the real prompt-prefill row count that run used.
+    //
+    // A single-decode-row (`m=1`) variant of this bench was tried and DROPPED:
+    // at that shape the whole call is a handful of KFLOPs, small enough that
+    // repeated measurements read an impossible ~10-30 TFLOP/s (this
+    // workspace's LTO build proving the repeated, near-identical-input call
+    // loop-invariant and eliding/hoisting the real work despite `black_box`
+    // on both the arguments and a per-iteration input perturbation - neither
+    // defeated it). Rather than ship a benchmark number that cannot be
+    // trusted, this only measures the shape it CAN measure honestly.
+    // (run: cargo test -p brain-backend-cpu --release moe_linear_gated_bench -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn moe_linear_gated_bench() {
+        let (m, k, n, ne, e) = (283usize, 1280usize, 896usize, 64usize, 3usize);
+        let mut s = 5u32;
+        let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        // top_k=6 of 64 experts routed per row -> ~9.4% of rows live for a
+        // given expert, matching the real router's own selection rate.
+        let gate: Vec<f32> = (0..m * ne).map(|_| if lcg(&mut s).abs() < 6.0 / 64.0 { 0.3 } else { 0.0 }).collect();
+        let mut out = vec![0f32; m * n];
+        let iters = 50;
+        moe_linear_gated_fwd(&x, &w, &gate, &mut out, m, k, n, ne, e); // warm
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            moe_linear_gated_fwd(&x, &w, &gate, &mut out, m, k, n, ne, e);
+        }
+        let avx = t.elapsed().as_secs_f64() / iters as f64;
+        let mut out2 = vec![0f32; m * n];
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            moe_fwd_scalar_threaded(&x, &w, &gate, &mut out2, m, k, n, ne, e);
+        }
+        let scalt = t.elapsed().as_secs_f64() / iters as f64;
+        let live_rows = gate.iter().step_by(ne).filter(|&&g| g > 0.0).count().max(1);
+        let gflops = 2.0 * live_rows as f64 * k as f64 * n as f64 / 1e9;
+        eprintln!(
+            "moe_linear_gated m={m} k={k} n={n} ({live_rows} live/{m} rows, {} threads): AVX2 {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | speedup {:.2}x",
+            rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scalt / avx
+        );
+    }
+
+    // Perf microbench for the self-attention family at DeepSeek-OCR's real
+    // decoder shape (n_heads=n_kv_heads=10, head_dim=128 - plain MHA, group=1)
+    // and its real prompt-prefill length (T=283). Scalar-threaded references
+    // mirror the WGSL kernels' own one-thread-per-output-element,
+    // serial-inner-reduction shape, threaded the same way `matmul_bench`'s
+    // "scalar+threads" comparator is (the honest JIT-execution-cost proxy).
+    // (run: cargo test -p brain-backend-cpu --release gqa_family_bench -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn gqa_family_bench() {
+        let (bsz, n_heads, n_kv_heads, t, hd) = (1usize, 10usize, 10usize, 283usize, 128usize);
+        let group = n_heads / n_kv_heads;
+        let f = GqaFixture {
+            bsz,
+            n_heads,
+            n_kv_heads,
+            t,
+            hd,
+            group,
+            q: (0..bsz * t * n_heads * hd).map(|i| ((i as f32) * 0.0001).sin()).collect(),
+            k: (0..bsz * t * n_kv_heads * hd).map(|i| ((i as f32) * 0.0002).sin()).collect(),
+            v: (0..bsz * t * n_kv_heads * hd).map(|i| ((i as f32) * 0.0003).sin()).collect(),
+        };
+        let iters = 20;
+        let flops_scores = 2.0 * (bsz * n_heads * t * t * hd) as f64 / 1e9;
+        let flops_apply = flops_scores;
+
+        let mut scores = vec![0f32; bsz * n_heads * t * t];
+        gqa_scores(&f.q, &f.k, &mut scores, bsz, n_heads, n_kv_heads, t, hd, group); // warm
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            gqa_scores(&f.q, &f.k, &mut scores, bsz, n_heads, n_kv_heads, t, hd, group);
+        }
+        let avx_scores = start.elapsed().as_secs_f64() / iters as f64;
+        let mut scores2 = vec![0f32; bsz * n_heads * t * t];
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            scores2.copy_from_slice(&scores_scalar(&f));
+        }
+        let scal_scores = start.elapsed().as_secs_f64() / iters as f64;
+
+        let probs = softmax_scalar(&scores, bsz, n_heads, t);
+        let mut ctx = vec![0f32; bsz * t * n_heads * hd];
+        gqa_apply(&probs, &f.v, &mut ctx, bsz, n_heads, n_kv_heads, t, hd, group); // warm
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            gqa_apply(&probs, &f.v, &mut ctx, bsz, n_heads, n_kv_heads, t, hd, group);
+        }
+        let avx_apply = start.elapsed().as_secs_f64() / iters as f64;
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = apply_scalar(&probs, &f);
+        }
+        let scal_apply = start.elapsed().as_secs_f64() / iters as f64;
+
+        eprintln!(
+            "gqa_scores  bsz={bsz} heads={n_heads} T={t} hd={hd} ({} threads): AVX2 {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | speedup {:.1}x",
+            rayon::current_num_threads(), avx_scores * 1e3, flops_scores / avx_scores, scal_scores * 1e3, scal_scores / avx_scores
+        );
+        eprintln!(
+            "gqa_apply   bsz={bsz} heads={n_heads} T={t} hd={hd} ({} threads): AVX2 {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | speedup {:.1}x",
+            rayon::current_num_threads(), avx_apply * 1e3, flops_apply / avx_apply, scal_apply * 1e3, scal_apply / avx_apply
+        );
+    }
+
     #[test]
     fn bn_eval_matches_scalar() {
         let (n, c, h, w) = (1, 7, 5, 9);
@@ -900,7 +1605,7 @@ mod tests {
             let inv = 1.0 / (mv[2 * ci + 1] + 1e-5).sqrt();
             (x[idx] - mv[2 * ci]) * inv * gb[2 * ci] + gb[2 * ci + 1]
         };
-        // Legacy 4-word params: the absent act word means identity — the same
+        // Legacy 4-word params: the absent act word means identity - the same
         // contract the padded dispatch uniform provides.
         let mut o = vec![0.0f32; x.len()];
         bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
@@ -983,6 +1688,426 @@ mod tests {
             let nn = t2 / c;
             let exp = x[((nn * c + cc) * h + ho / 2) * w + wo / 2];
             assert_eq!(yi, exp);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // moe_linear_gated family - scalar references mirror the WGSL kernels'
+    // own contract exactly (row-gated early exit / continue), not matmul_abt
+    // with a post-hoc mask, so a bug in the gating logic itself would show up.
+    // -----------------------------------------------------------------
+
+    fn moe_fwd_scalar(x: &[f32], w: &[f32], gate: &[f32], m: usize, k: usize, n: usize, ne: usize, e: usize) -> Vec<f32> {
+        let mut out = vec![0f32; m * n];
+        for r in 0..m {
+            if gate[r * ne + e] <= 0.0 {
+                continue;
+            }
+            for c in 0..n {
+                let mut acc = 0f32;
+                for kk in 0..k {
+                    acc += x[r * k + kk] * w[c * k + kk];
+                }
+                out[r * n + c] = acc;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn moe_linear_gated_fwd_matches_scalar() {
+        let (m, k, n, ne, e) = (13usize, 37usize, 21usize, 4usize, 2usize);
+        let mut s = 11u32;
+        let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        // Deterministic mixed gate: every third row routed out.
+        let gate: Vec<f32> = (0..m * ne).map(|i| if i % 3 == 0 { 0.0 } else { lcg(&mut s).abs() + 0.01 }).collect();
+        let want = moe_fwd_scalar(&x, &w, &gate, m, k, n, ne, e);
+        let mut got = vec![-1.0f32; m * n]; // -1 sentinel: a missed gate write would show up as -1, not 0
+        moe_linear_gated_fwd(&x, &w, &gate, &mut got, m, k, n, ne, e);
+        for i in 0..m * n {
+            let r = i / n;
+            if gate[r * ne + e] <= 0.0 {
+                assert_eq!(got[i], 0.0, "non-routed row {r} elem {i} must be exactly zero");
+            } else {
+                let rel = (got[i] - want[i]).abs() / (want[i].abs() + 1e-3);
+                assert!(rel < 2e-3, "moe_linear_gated_fwd row {r} elem {i}: got {} want {} rel {rel}", got[i], want[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn moe_linear_gated_dx_matches_scalar() {
+        let (m, k, n, ne, e) = (9usize, 23usize, 15usize, 3usize, 1usize);
+        let mut s = 13u32;
+        let dy: Vec<f32> = (0..m * n).map(|_| lcg(&mut s)).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        let gate: Vec<f32> = (0..m * ne).map(|i| if i % 4 == 0 { 0.0 } else { lcg(&mut s).abs() + 0.01 }).collect();
+        for &acc in &[false, true] {
+            let seed_dx: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.001 - 0.5).collect();
+            let mut want = seed_dx.clone();
+            for r in 0..m {
+                if gate[r * ne + e] <= 0.0 {
+                    if !acc {
+                        for c in 0..k {
+                            want[r * k + c] = 0.0;
+                        }
+                    }
+                    continue;
+                }
+                if !acc {
+                    for c in 0..k {
+                        want[r * k + c] = 0.0;
+                    }
+                }
+                for nn in 0..n {
+                    let dyv = dy[r * n + nn];
+                    for c in 0..k {
+                        want[r * k + c] += dyv * w[nn * k + c];
+                    }
+                }
+            }
+            let mut got = seed_dx.clone();
+            moe_linear_gated_dx(&dy, &w, &gate, &mut got, m, k, n, ne, e, acc);
+            for i in 0..m * k {
+                let rel = (got[i] - want[i]).abs() / (want[i].abs() + 1e-3);
+                assert!(rel < 2e-3, "moe_linear_gated_dx acc={acc} elem {i}: got {} want {} rel {rel}", got[i], want[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn moe_linear_gated_dw_matches_scalar() {
+        let (m, k, n, ne, e) = (17usize, 11usize, 8usize, 5usize, 3usize);
+        let mut s = 17u32;
+        let dy: Vec<f32> = (0..m * n).map(|_| lcg(&mut s)).collect();
+        let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+        let gate: Vec<f32> = (0..m * ne).map(|i| if i % 5 == 0 { 0.0 } else { lcg(&mut s).abs() + 0.01 }).collect();
+        let seed_dw: Vec<f32> = (0..n * k).map(|i| (i as f32) * 0.002 - 0.3).collect();
+        let mut want = seed_dw.clone();
+        for nn in 0..n {
+            for mm in 0..m {
+                if gate[mm * ne + e] <= 0.0 {
+                    continue;
+                }
+                let dyv = dy[mm * n + nn];
+                for c in 0..k {
+                    want[nn * k + c] += dyv * x[mm * k + c];
+                }
+            }
+        }
+        let mut got = seed_dw.clone();
+        moe_linear_gated_dw(&dy, &x, &gate, &mut got, m, k, n, ne, e);
+        for i in 0..n * k {
+            let rel = (got[i] - want[i]).abs() / (want[i].abs() + 1e-3);
+            assert!(rel < 2e-3, "moe_linear_gated_dw elem {i}: got {} want {} rel {rel}", got[i], want[i]);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Self-attention (gqa_scores / attn_softmax / gqa_apply + backward)
+    // family - scalar references mirror the WGSL kernels' own formulas
+    // exactly (see the .wgsl files' own doc comments).
+    // -----------------------------------------------------------------
+
+    struct GqaFixture {
+        bsz: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        t: usize,
+        hd: usize,
+        group: usize,
+        q: Vec<f32>,
+        k: Vec<f32>,
+        v: Vec<f32>,
+    }
+
+    fn gqa_fixture(seed: u32) -> GqaFixture {
+        let (bsz, n_heads, n_kv_heads, t, hd) = (2usize, 4usize, 2usize, 5usize, 6usize);
+        let group = n_heads / n_kv_heads;
+        let mut s = seed;
+        let q: Vec<f32> = (0..bsz * t * n_heads * hd).map(|_| lcg(&mut s)).collect();
+        let k: Vec<f32> = (0..bsz * t * n_kv_heads * hd).map(|_| lcg(&mut s)).collect();
+        let v: Vec<f32> = (0..bsz * t * n_kv_heads * hd).map(|_| lcg(&mut s)).collect();
+        GqaFixture { bsz, n_heads, n_kv_heads, t, hd, group, q, k, v }
+    }
+
+    fn scores_scalar(f: &GqaFixture) -> Vec<f32> {
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut out = vec![0f32; bsz * nh * t * t];
+        for b in 0..bsz {
+            for h in 0..nh {
+                let hkv = h / group;
+                for i in 0..t {
+                    for j in 0..t {
+                        let idx = ((b * nh + h) * t + i) * t + j;
+                        if j > i {
+                            out[idx] = -3.4e38;
+                            continue;
+                        }
+                        let mut acc = 0f32;
+                        for d in 0..hd {
+                            acc += f.q[(b * t + i) * q_row + h * hd + d] * f.k[(b * t + j) * k_row + hkv * hd + d];
+                        }
+                        out[idx] = acc * scale;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn softmax_scalar(scores: &[f32], bsz: usize, nh: usize, t: usize) -> Vec<f32> {
+        let mut out = vec![0f32; bsz * nh * t * t];
+        for r in 0..bsz * nh * t {
+            let i = r % t;
+            let base = r * t;
+            let mx = scores[base..=base + i].iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
+            let mut sum = 0f32;
+            for j in 0..=i {
+                let e = (scores[base + j] - mx).exp();
+                out[base + j] = e;
+                sum += e;
+            }
+            for j in 0..=i {
+                out[base + j] /= sum;
+            }
+        }
+        out
+    }
+
+    fn apply_scalar(probs: &[f32], f: &GqaFixture) -> Vec<f32> {
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut ctx = vec![0f32; bsz * t * nh * hd];
+        for b in 0..bsz {
+            for h in 0..nh {
+                let hkv = h / group;
+                for i in 0..t {
+                    for d in 0..hd {
+                        let mut acc = 0f32;
+                        for j in 0..=i {
+                            acc += probs[((b * nh + h) * t + i) * t + j] * f.v[(b * t + j) * k_row + hkv * hd + d];
+                        }
+                        ctx[(b * t + i) * q_row + h * hd + d] = acc;
+                    }
+                }
+            }
+        }
+        ctx
+    }
+
+    #[test]
+    fn gqa_scores_matches_scalar() {
+        let f = gqa_fixture(21);
+        let want = scores_scalar(&f);
+        let mut got = vec![0f32; f.bsz * f.n_heads * f.t * f.t];
+        gqa_scores(&f.q, &f.k, &mut got, f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        for i in 0..got.len() {
+            if want[i] < -1e30 {
+                assert!(got[i] < -1e30, "gqa_scores elem {i} should be masked, got {}", got[i]);
+            } else {
+                assert!((got[i] - want[i]).abs() < 1e-4, "gqa_scores elem {i}: got {} want {}", got[i], want[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn attn_softmax_causal_matches_scalar() {
+        let f = gqa_fixture(23);
+        let scores = scores_scalar(&f);
+        let want = softmax_scalar(&scores, f.bsz, f.n_heads, f.t);
+        let mut got = vec![-1f32; scores.len()];
+        attn_softmax_causal(&scores, &mut got, f.bsz, f.n_heads, f.t);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-5, "attn_softmax_causal elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn gqa_apply_matches_scalar() {
+        let f = gqa_fixture(29);
+        let scores = scores_scalar(&f);
+        let probs = softmax_scalar(&scores, f.bsz, f.n_heads, f.t);
+        let want = apply_scalar(&probs, &f);
+        let mut got = vec![0f32; f.bsz * f.t * f.n_heads * f.hd];
+        gqa_apply(&probs, &f.v, &mut got, f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-4, "gqa_apply elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn gqa_bwd_dscores_matches_scalar() {
+        let f = gqa_fixture(31);
+        let scores = scores_scalar(&f);
+        let probs = softmax_scalar(&scores, f.bsz, f.n_heads, f.t);
+        let mut s = 41u32;
+        let d_ctx: Vec<f32> = (0..f.bsz * f.t * f.n_heads * f.hd).map(|_| lcg(&mut s)).collect();
+
+        // Scalar reference: matches gqa_bwd_dscores.wgsl's own two-loop formula exactly.
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut want = vec![0f32; bsz * nh * t * t];
+        for b in 0..bsz {
+            for h in 0..nh {
+                let hkv = h / group;
+                for i in 0..t {
+                    let mut dot = 0f32;
+                    for j in 0..=i {
+                        let mut dprob = 0f32;
+                        for d in 0..hd {
+                            dprob += d_ctx[(b * t + i) * q_row + h * hd + d] * f.v[(b * t + j) * k_row + hkv * hd + d];
+                        }
+                        dot += probs[((b * nh + h) * t + i) * t + j] * dprob;
+                    }
+                    for j in 0..t {
+                        let idx = ((b * nh + h) * t + i) * t + j;
+                        if j > i {
+                            want[idx] = 0.0;
+                            continue;
+                        }
+                        let mut dprob = 0f32;
+                        for d in 0..hd {
+                            dprob += d_ctx[(b * t + i) * q_row + h * hd + d] * f.v[(b * t + j) * k_row + hkv * hd + d];
+                        }
+                        want[idx] = probs[idx] * (dprob - dot);
+                    }
+                }
+            }
+        }
+        let mut got = vec![0f32; want.len()];
+        gqa_bwd_dscores(&d_ctx, &f.v, &probs, &mut got, bsz, nh, nkv, t, hd, group);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-4, "gqa_bwd_dscores elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn gqa_bwd_dv_matches_scalar() {
+        let f = gqa_fixture(37);
+        let scores = scores_scalar(&f);
+        let probs = softmax_scalar(&scores, f.bsz, f.n_heads, f.t);
+        let mut s = 43u32;
+        let d_ctx: Vec<f32> = (0..f.bsz * f.t * f.n_heads * f.hd).map(|_| lcg(&mut s)).collect();
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut want = vec![0f32; bsz * t * nkv * hd];
+        for b in 0..bsz {
+            for hkv in 0..nkv {
+                for j in 0..t {
+                    for d in 0..hd {
+                        let mut acc = 0f32;
+                        for gi in 0..group {
+                            let h = hkv * group + gi;
+                            for i in j..t {
+                                acc += probs[((b * nh + h) * t + i) * t + j] * d_ctx[(b * t + i) * q_row + h * hd + d];
+                            }
+                        }
+                        want[(b * t + j) * k_row + hkv * hd + d] = acc;
+                    }
+                }
+            }
+        }
+        let mut got = vec![-1f32; want.len()];
+        gqa_bwd_dv(&probs, &d_ctx, &mut got, bsz, nh, nkv, t, hd, group);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-4, "gqa_bwd_dv elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn gqa_bwd_dq_matches_scalar() {
+        let f = gqa_fixture(47);
+        let mut s = 53u32;
+        let d_scores: Vec<f32> = (0..f.bsz * f.n_heads * f.t * f.t).map(|_| lcg(&mut s)).collect();
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut want = vec![0f32; bsz * t * nh * hd];
+        for b in 0..bsz {
+            for h in 0..nh {
+                let hkv = h / group;
+                for i in 0..t {
+                    for d in 0..hd {
+                        let mut acc = 0f32;
+                        for j in 0..=i {
+                            acc += d_scores[((b * nh + h) * t + i) * t + j] * f.k[(b * t + j) * k_row + hkv * hd + d];
+                        }
+                        want[(b * t + i) * q_row + h * hd + d] = acc * scale;
+                    }
+                }
+            }
+        }
+        let mut got = vec![-1f32; want.len()];
+        gqa_bwd_dq(&d_scores, &f.k, &mut got, bsz, nh, nkv, t, hd, group);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-4, "gqa_bwd_dq elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    #[test]
+    fn gqa_bwd_dk_matches_scalar() {
+        let f = gqa_fixture(59);
+        let mut s = 61u32;
+        let d_scores: Vec<f32> = (0..f.bsz * f.n_heads * f.t * f.t).map(|_| lcg(&mut s)).collect();
+        let (bsz, nh, nkv, t, hd, group) = (f.bsz, f.n_heads, f.n_kv_heads, f.t, f.hd, f.group);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let q_row = nh * hd;
+        let k_row = nkv * hd;
+        let mut want = vec![0f32; bsz * t * nkv * hd];
+        for b in 0..bsz {
+            for hkv in 0..nkv {
+                for j in 0..t {
+                    for d in 0..hd {
+                        let mut acc = 0f32;
+                        for gi in 0..group {
+                            let h = hkv * group + gi;
+                            for i in j..t {
+                                acc += d_scores[((b * nh + h) * t + i) * t + j] * f.q[(b * t + i) * q_row + h * hd + d];
+                            }
+                        }
+                        want[(b * t + j) * k_row + hkv * hd + d] = acc * scale;
+                    }
+                }
+            }
+        }
+        let mut got = vec![-1f32; want.len()];
+        gqa_bwd_dk(&d_scores, &f.q, &mut got, bsz, nh, nkv, t, hd, group);
+        for i in 0..got.len() {
+            assert!((got[i] - want[i]).abs() < 1e-4, "gqa_bwd_dk elem {i}: got {} want {}", got[i], want[i]);
+        }
+    }
+
+    // AVX-512 tier: gated on `avx512_available()`, exactly like every other
+    // fast-path microkernel's own test in this module - EXCEPT that on this
+    // development machine (no AVX-512 host, see `fast_conv::avx512_available`'s
+    // doc) the gate is always false, so this test can only prove the kernel
+    // compiles and is shape-correct when skipped; it explicitly reports that
+    // rather than silently passing as if verified.
+    #[test]
+    fn row_abt_avx512_matches_scalar_when_available() {
+        if !crate::fast_conv::avx512_available() {
+            eprintln!("row_abt_avx512: AVX-512 not available on this host, skipping execution-verification (compiled-only)");
+            return;
+        }
+        let mut s = 71u32;
+        for &(k, n) in &[(16usize, 8usize), (23, 5), (64, 32)] {
+            let a: Vec<f32> = (0..k).map(|_| lcg(&mut s)).collect();
+            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+            let mut c = vec![0f32; n];
+            unsafe { row_abt_avx512(&a, &b, &mut c, k, n) };
+            for j in 0..n {
+                let want: f32 = (0..k).map(|kk| a[kk] * b[j * k + kk]).sum();
+                assert!((c[j] - want).abs() / (want.abs() + 1e-3) < 2e-3, "row_abt_avx512 ({k},{n}) elem {j}");
+            }
         }
     }
 }

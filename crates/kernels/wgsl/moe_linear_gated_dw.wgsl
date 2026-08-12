@@ -4,7 +4,7 @@
 // @what  Sparse-MoE expert linear backward w.r.t. W: matmul_dw.wgsl, gated
 // @how   one thread per output element, in-loop skip on the gate
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

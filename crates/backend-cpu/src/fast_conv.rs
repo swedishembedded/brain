@@ -57,7 +57,7 @@ impl ConvParams {
     }
     /// The grouped/dilated 12-u32 ABI of `conv2d_gd.wgsl` / `conv2d_gd_reg.wgsl`
     /// (`[N,Cin,H,W,Cout,K,stride,pad,dilation,groups,Ho,Wo]`). Returns the
-    /// params (dilation folded in) and `groups` separately — the GEMM machinery
+    /// params (dilation folded in) and `groups` separately - the GEMM machinery
     /// is per-group dense, so groups never enters `ConvParams` itself.
     pub fn from_u32_gd(p: &[u32]) -> (ConvParams, usize) {
         (
@@ -95,6 +95,36 @@ pub fn avx2_available() -> bool {
     }
 }
 
+/// True iff the host can run the AVX-512 fast path (F + VL + DQ - the subset
+/// the microkernels gated on this actually use; FMA is implied by `avx512f`).
+/// Mirrors [`avx2_available`]'s exact runtime-detection shape, one tier up.
+///
+/// HONESTY NOTE for whoever next touches this: the machine this tier was
+/// written and tested on (`/proc/cpuinfo` confirms an Intel Core Ultra 7
+/// 155H, "Meteor Lake") does NOT implement AVX-512 at all - Intel disabled it
+/// on this generation's client parts. That means `avx512_available()` always
+/// returns `false` here, so every AVX-512 microkernel gated behind it is
+/// exercised by NEITHER the correctness tests NOR any benchmark run on this
+/// box - only compiled (via `#[target_feature(enable = "avx512f")]`, which
+/// compiles unconditionally regardless of the host) and shape-checked. The
+/// tests that cover those microkernels say so explicitly (they print and
+/// skip, not silently pass) rather than claiming a verification that did not
+/// happen. Do not remove this note or make it sound verified without an
+/// actual AVX-512 host run.
+#[inline]
+pub fn avx512_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512dq")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Compute the bias-free NCHW convolution, matching `conv2d.wgsl` exactly (up to
 /// fp reassociation). Uses the AVX2 GEMM path when available, else a portable
 /// scalar GEMM with the same tiling.
@@ -122,12 +152,12 @@ fn winograd_applicable(p: &ConvParams) -> bool {
 /// Grouped/dilated conv (matches `conv2d_gd.wgsl` / `conv2d_gd_reg.wgsl`
 /// exactly, up to fp reassociation). Two routes:
 ///
-///   * depthwise (`groups == cin == cout`): a dedicated channel-parallel loop —
+///   * depthwise (`groups == cin == cout`): a dedicated channel-parallel loop -
 ///     per-group GEMM would be a [1 x K²]·[K² x P] degenerate product whose
 ///     im2col/panel overhead dwarfs the K² multiplies;
 ///   * general grouped: each `(image, group)` is a DENSE conv on contiguous
 ///     channel slices (x, w and y are all channel-major), so it reuses the
-///     whole GEMM machinery — im2col is dilation-aware.
+///     whole GEMM machinery - im2col is dilation-aware.
 ///
 /// This is what un-JITs ZipDepth's hottest remaining kernel (the grouped 1x1
 /// fusion projections + the dilated depthwise branches were 56% of a CPU frame
@@ -208,7 +238,7 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(
 
     // Winograd F(2,3) for 3×3 s1 p1 exists and is validated, but as implemented
     // (scalar transforms, 16 coord-parallel GEMMs) it is SLOWER than the tuned
-    // AVX2 GEMM below — the transform + materialization overhead and weaker
+    // AVX2 GEMM below - the transform + materialization overhead and weaker
     // parallelization eat the 2.25× multiply saving. So it is OPT-IN
     // (BRAIN_WINOGRAD=1) scaffolding for the Phase-7 work (vectorized fused
     // transforms, column-parallel transform-domain GEMM) rather than the default.
@@ -251,7 +281,7 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(
             // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
             // Rust 2021 disjoint capture a closure that only touches `cptr.0`
             // captures that raw pointer directly, which is not `Send`. Verified by
-            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // deletion - it fails with E0277 `*mut f32` cannot be shared between
             // threads safely.
             #[allow(clippy::redundant_locals)]
             let cptr = cptr;
@@ -311,7 +341,7 @@ unsafe impl Sync for SendMutPtr {}
 /// Build the im2col panel for output columns `[pp0, pp0+pw)` into
 /// `bpanel[kg*pw + j]` (`j` = local column). Out-of-bounds taps are zeroed.
 /// `coords` is scratch for the `(ho,wo)` of each panel column (computed once,
-/// reused across the Kg rows — avoids a div per cell).
+/// reused across the Kg rows - avoids a div per cell).
 unsafe fn build_im2col_panel(
     p: &ConvParams, x: &[f32], pp0: usize, pw: usize, bpanel: &mut [f32], coords: &mut [(usize, usize)],
 ) {
@@ -353,7 +383,7 @@ unsafe fn build_im2col_panel(
 /// Scalar reference path. # Safety: caller guarantees disjoint C columns.
 // A raw-pointer GEMM inner kernel: the arity is the tile's base pointers and
 // strides. `gemm_cols_scalar` and `gemm_cols_avx2` MUST keep identical
-// signatures — they are selected interchangeably at the call site.
+// signatures - they are selected interchangeably at the call site.
 #[allow(clippy::too_many_arguments)]
 unsafe fn gemm_cols_scalar(
     m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
@@ -378,7 +408,7 @@ unsafe fn gemm_cols_scalar(
 #[target_feature(enable = "avx2,fma")]
 // A raw-pointer GEMM inner kernel: the arity is the tile's base pointers and
 // strides. `gemm_cols_scalar` and `gemm_cols_avx2` MUST keep identical
-// signatures — they are selected interchangeably at the call site.
+// signatures - they are selected interchangeably at the call site.
 #[allow(clippy::too_many_arguments)]
 unsafe fn gemm_cols_avx2(
     m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
@@ -589,7 +619,7 @@ mod winograd {
                 // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                 // Rust 2021 disjoint capture a closure that only touches `uptr.0`
                 // captures that raw pointer directly, which is not `Send`. Verified by
-                // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                // deletion - it fails with E0277 `*mut f32` cannot be shared between
                 // threads safely.
                 #[allow(clippy::redundant_locals)]
                 let uptr = uptr;
@@ -615,7 +645,7 @@ mod winograd {
                     // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                     // Rust 2021 disjoint capture a closure that only touches `vptr.0`
                     // captures that raw pointer directly, which is not `Send`. Verified by
-                    // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                    // deletion - it fails with E0277 `*mut f32` cannot be shared between
                     // threads safely.
                     #[allow(clippy::redundant_locals)]
                     let vptr = vptr;
@@ -657,7 +687,7 @@ mod winograd {
                     // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                     // Rust 2021 disjoint capture a closure that only touches `mptr.0`
                     // captures that raw pointer directly, which is not `Send`. Verified by
-                    // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                    // deletion - it fails with E0277 `*mut f32` cannot be shared between
                     // threads safely.
                     #[allow(clippy::redundant_locals)]
                     let mptr = mptr;
@@ -681,7 +711,7 @@ mod winograd {
                 // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                 // Rust 2021 disjoint capture a closure that only touches `yptr.0`
                 // captures that raw pointer directly, which is not `Send`. Verified by
-                // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                // deletion - it fails with E0277 `*mut f32` cannot be shared between
                 // threads safely.
                 #[allow(clippy::redundant_locals)]
                 let yptr = yptr;
@@ -902,7 +932,7 @@ mod tests {
     #[test]
     fn winograd_matches_scalar() {
         // Winograd F(2,3) applies to 3x3 s1 p1; validate vs the direct conv
-        // (looser tol — Winograd has weaker fp conditioning than direct).
+        // (looser tol - Winograd has weaker fp conditioning than direct).
         for p in [cp(1, 8, 12, 12, 16, 3, 1, 1), cp(1, 3, 9, 11, 7, 3, 1, 1), cp(2, 5, 16, 14, 9, 3, 1, 1)] {
             let mut s = 21u32 ^ p.cout as u32;
             let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
@@ -962,7 +992,7 @@ mod tests {
     #[ignore]
     fn bench_conv_gflops() {
         use std::time::Instant;
-        // (label, cin,h,w,cout,k,stride,pad) — the heavy yolov8n@640 conv layers.
+        // (label, cin,h,w,cout,k,stride,pad) - the heavy yolov8n@640 conv layers.
         let shapes = [
             ("stem 3->16 3x3 s2 @640", 3, 640, 640, 16, 3, 2, 1),
             ("16->32 3x3 s2 @320", 16, 320, 320, 32, 3, 2, 1),

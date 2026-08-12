@@ -4,7 +4,7 @@
 // @what  GQA attention backward, step 1 — gradient through (probs @ v) and softmax
 // @how   one thread per output element, 3 nested serial reductions
 // @opt   1
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

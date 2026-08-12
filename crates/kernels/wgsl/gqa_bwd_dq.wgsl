@@ -4,7 +4,7 @@
 // @what  GQA attention backward, step 3 — gradient w.r.t
 // @how   one thread per output element
 // @opt   3
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

@@ -6,8 +6,8 @@
 //! model code is backend-agnostic.
 //!
 //! A buffer is plain host memory (a `Vec<u32>`; every kernel element is 4 bytes).
-//! `submit` runs the recorded steps sequentially — preserving the inter-dispatch
-//! ordering the wgpu compute pass guarantees — and parallelises the invocations
+//! `submit` runs the recorded steps sequentially - preserving the inter-dispatch
+//! ordering the wgpu compute pass guarantees - and parallelises the invocations
 //! *within* each step across a rayon pool. Each invocation owns a disjoint output
 //! element, so the workers never alias their writes.
 //!
@@ -63,7 +63,7 @@ impl CpuBuffer {
 
 /// The CPU compute backend.
 /// The compiled, shareable state of a CPU backend. The CPU backend executes
-/// eagerly — there is no per-handle command stream — so a second handle
+/// eagerly - there is no per-handle command stream - so a second handle
 /// ([`CpuBackend::share`], the `Backend::share` contract) is nothing but
 /// another `Arc` onto this.
 struct CpuShared {
@@ -98,12 +98,12 @@ struct OpCounters {
 pub struct CpuBackend {
     shared: std::sync::Arc<CpuShared>,
     /// Device-op counters, always maintained (relaxed atomics are negligible
-    /// next to a dispatch) — the same contract `backend-wgpu` implements.
+    /// next to a dispatch) - the same contract `backend-wgpu` implements.
     ///
     /// PER HANDLE, not per device: `Backend::stats` is documented as
     /// "accounting for THIS handle since its creation", and a caller measuring
     /// what one engine cost needs a counter its neighbours cannot move. That is
-    /// why this sits on `CpuBackend` and not on the `Arc`-shared `CpuShared` —
+    /// why this sits on `CpuBackend` and not on the `Arc`-shared `CpuShared` -
     /// `share()` is an `Arc` clone, so counters living there would be
     /// device-global and every concurrent user would land in everyone's delta.
     ///
@@ -146,6 +146,16 @@ struct FastIdx {
     attn_scores_cross: Option<usize>,
     attn_softmax_cross: Option<usize>,
     attn_apply_cross: Option<usize>,
+    moe_linear_gated: Option<usize>,
+    moe_linear_gated_dx: Option<usize>,
+    moe_linear_gated_dw: Option<usize>,
+    gqa_scores: Option<usize>,
+    attn_softmax: Option<usize>,
+    gqa_apply: Option<usize>,
+    gqa_bwd_dscores: Option<usize>,
+    gqa_bwd_dv: Option<usize>,
+    gqa_bwd_dq: Option<usize>,
+    gqa_bwd_dk: Option<usize>,
     leaky_relu: Option<usize>,
     bn_eval: Option<usize>,
     gn_stats: Option<usize>,
@@ -163,7 +173,7 @@ struct FastIdx {
 #[derive(Clone)]
 pub struct BindGroup {
     uniform: CpuBuffer,
-    /// `(buffer, word_offset)` — the offset lets a dispatch bind a sub-range of a
+    /// `(buffer, word_offset)` - the offset lets a dispatch bind a sub-range of a
     /// buffer (e.g. a vocab tile of a >128MB embedding) so it stays within a
     /// backend's per-binding size limit, matching the wgpu offset binding.
     bufs: Vec<(CpuBuffer, usize)>,
@@ -203,6 +213,16 @@ impl CpuBackend {
                 attn_scores_cross: find("attn_scores_cross"),
                 attn_softmax_cross: find("attn_softmax_cross"),
                 attn_apply_cross: find("attn_apply_cross"),
+                moe_linear_gated: find("moe_linear_gated"),
+                moe_linear_gated_dx: find("moe_linear_gated_dx"),
+                moe_linear_gated_dw: find("moe_linear_gated_dw"),
+                gqa_scores: find("gqa_scores"),
+                attn_softmax: find("attn_softmax"),
+                gqa_apply: find("gqa_apply"),
+                gqa_bwd_dscores: find("gqa_bwd_dscores"),
+                gqa_bwd_dv: find("gqa_bwd_dv"),
+                gqa_bwd_dq: find("gqa_bwd_dq"),
+                gqa_bwd_dk: find("gqa_bwd_dk"),
                 matmul_dx: find("matmul_dx"),
                 matmul_dx_reg: find("matmul_dx_reg"),
                 matmul_dw: find("matmul_dw"),
@@ -260,7 +280,7 @@ impl CpuBackend {
         w[..data.len()].copy_from_slice(data);
     }
 
-    /// [`Self::write`] at a word offset — the CPU backend has no staging
+    /// [`Self::write`] at a word offset - the CPU backend has no staging
     /// concept, so this is a plain offset `copy_from_slice`; it exists only so
     /// callers streaming a large upload in chunks stay backend-portable.
     pub fn write_at(&self, buf: &CpuBuffer, offset_words: u64, data: &[u32]) {
@@ -295,7 +315,7 @@ impl CpuBackend {
     /// Pad a uniform stream to a 16-byte multiple, matching the wgpu/vulkan
     /// backends' uniform padding. This is a safety property, not cosmetics: a
     /// kernel whose Params struct grew a trailing field (e.g. `conv_act`'s act
-    /// selector) reads the pad word — in bounds, value 0 — from a caller that
+    /// selector) reads the pad word - in bounds, value 0 - from a caller that
     /// predates the field, instead of reading out of bounds.
     fn pad_uniform(params: &[u32]) -> Vec<u32> {
         let mut v = params.to_vec();
@@ -310,7 +330,7 @@ impl CpuBackend {
     }
 
     /// Like [`step`](Self::step) but each buffer carries a `(word_offset,
-    /// word_len)` — the dispatch sees the buffer starting at `word_offset`
+    /// word_len)` - the dispatch sees the buffer starting at `word_offset`
     /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
     pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> CpuStep {
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
@@ -445,11 +465,11 @@ impl CpuBackend {
         // packed GEMMs through the same AVX2 matmul_abt as the linear layers.
         //
         // Buffer lengths reconstruct from the uniform, and must be the EXACT
-        // highest element the kernel touches — `bsz*t*stride` silently assumed
+        // highest element the kernel touches - `bsz*t*stride` silently assumed
         // the base pointer was already advanced to the span's first row (i.e.
         // that `q_off`/`k_off`/`v_off` were region offsets only). A caller may
         // instead bind the buffer whole and carry the span's row offset in
-        // those Params — which is what `model::vit::cross_q_fwd` does, because
+        // those Params - which is what `model::vit::cross_q_fwd` does, because
         // a storage-binding offset must be 256B-aligned and `row0*stride` is
         // not for a ragged window partition. Both conventions land on the same
         // bound below; the old expression was too short for the second and
@@ -491,6 +511,135 @@ impl CpuBackend {
                 let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, vo, h, hd));
                 let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * tq * dm);
                 fast_ops::attn_apply_cross(p, kv, o, b, h, tq, tk, hd, kvs, vo, dm);
+            }
+            return;
+        }
+        // moe_linear_gated{,_dx,_dw}: matmul_abt/matmul_dx/matmul_dw with a
+        // per-row (or per-summed-row) gate early-exit - see fast_ops.rs's own
+        // doc for why this is the decode loop's dominant cost kernel.
+        if Some(kind) == f.moe_linear_gated && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 5);
+                let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, m * k);
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
+                let out = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, m * n);
+                fast_ops::moe_linear_gated_fwd(x, w, gate, out, m, k, n, ne, e);
+            }
+            return;
+        }
+        if Some(kind) == f.moe_linear_gated_dx && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let acc = pu[5] != 0;
+                let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
+                let dx = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, m * k);
+                fast_ops::moe_linear_gated_dx(dy, w, gate, dx, m, k, n, ne, e, acc);
+            }
+            return;
+        }
+        if Some(kind) == f.moe_linear_gated_dw && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 5);
+                let (m, k, n, ne, e) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
+                let x = std::slice::from_raw_parts(bufs[1] as *const f32, m * k);
+                let gate = std::slice::from_raw_parts(bufs[2] as *const f32, m * ne);
+                let dw = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, n * k);
+                fast_ops::moe_linear_gated_dw(dy, x, gate, dw, m, k, n, ne, e);
+            }
+            return;
+        }
+        // Self-attention family (gqa_scores / attn_softmax / gqa_apply + the
+        // gqa_bwd_{dscores,dv,dq,dk} backward quartet): plain causal GQA
+        // self-attention (MHA is `n_kv_heads == n_heads`), the shape every
+        // decoder's own attention and SAM/CLIP's windowed/global attention
+        // use. All buffers are contiguous, no stride/offset params (unlike
+        // the cross-attention family above).
+        if Some(kind) == f.gqa_scores && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let q = std::slice::from_raw_parts(bufs[0] as *const f32, b * t * h * hd);
+                let k = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * hkv * hd);
+                let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * t * t);
+                fast_ops::gqa_scores(q, k, sc, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        if Some(kind) == f.attn_softmax && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (b, h, t) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let s = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let p = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, b * h * t * t);
+                fast_ops::attn_softmax_causal(s, p, b, h, t);
+            }
+            return;
+        }
+        if Some(kind) == f.gqa_apply && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let v = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * hkv * hd);
+                let ctx = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * h * hd);
+                fast_ops::gqa_apply(p, v, ctx, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        if Some(kind) == f.gqa_bwd_dscores && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let d_ctx = std::slice::from_raw_parts(bufs[0] as *const f32, b * t * h * hd);
+                let v = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * hkv * hd);
+                let probs = std::slice::from_raw_parts(bufs[2] as *const f32, b * h * t * t);
+                let d_scores = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, b * h * t * t);
+                fast_ops::gqa_bwd_dscores(d_ctx, v, probs, d_scores, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        if Some(kind) == f.gqa_bwd_dv && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let probs = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let d_ctx = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * h * hd);
+                let d_v = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * hkv * hd);
+                fast_ops::gqa_bwd_dv(probs, d_ctx, d_v, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        if Some(kind) == f.gqa_bwd_dq && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let d_scores = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let k = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * hkv * hd);
+                let d_q = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * h * hd);
+                fast_ops::gqa_bwd_dq(d_scores, k, d_q, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        if Some(kind) == f.gqa_bwd_dk && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (b, h, hkv, t, hd, group) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize);
+                let d_scores = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
+                let q = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * h * hd);
+                let d_k = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * hkv * hd);
+                fast_ops::gqa_bwd_dk(d_scores, q, d_k, b, h, hkv, t, hd, group);
             }
             return;
         }
@@ -546,7 +695,7 @@ impl CpuBackend {
                 // 11th word = activation selector (0 identity, 1 relu, 2 silu,
                 // 3 sigmoid), mirroring the WGSL Params. The uniform buffer is
                 // 16-byte padded, so the word exists even for a legacy 10-word
-                // caller — and reads 0 (identity), which the vision dispatch
+                // caller - and reads 0 (identity), which the vision dispatch
                 // never emits (it always appends the act code).
                 let pu = std::slice::from_raw_parts(uniform, 11);
                 let p = fast_conv::ConvParams::from_u32(pu);
@@ -683,7 +832,7 @@ impl CpuBackend {
         let span = (self.shared.threads as u64 * 8).max(1);
         let mut chunk = total.div_ceil(span).max(1);
         // Work-group kernels (workgroup memory + barriers) must be handed whole
-        // workgroups per chunk — a workgroup's invocations share scratch and a
+        // workgroups per chunk - a workgroup's invocations share scratch and a
         // barrier, so a chunk boundary may not fall mid-workgroup. Round the chunk
         // up to a multiple of the work-group size (the dispatch `total` is already
         // a whole number of workgroups).
@@ -701,14 +850,14 @@ impl CpuBackend {
             // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
             // Rust 2021 disjoint capture a closure that only touches `uni.0`
             // captures that raw pointer directly, which is not `Send`. Verified by
-            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // deletion - it fails with E0277 `*mut f32` cannot be shared between
             // threads safely.
             #[allow(clippy::redundant_locals)]
             let uni = uni;
             // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
             // Rust 2021 disjoint capture a closure that only touches `bufs_ptr.0`
             // captures that raw pointer directly, which is not `Send`. Verified by
-            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // deletion - it fails with E0277 `*mut f32` cannot be shared between
             // threads safely.
             #[allow(clippy::redundant_locals)]
             let bufs_ptr = bufs_ptr;
@@ -739,7 +888,7 @@ unsafe impl Sync for SendMut {}
 // Neutral-handle bridge: downcast the opaque `DeviceBuffer`/`Step` back to
 // `CpuBuffer`/`CpuStep` and delegate to the inherent methods.
 
-/// Weak handle onto the compiled JIT state — `backend_api::Backend::downgrade`.
+/// Weak handle onto the compiled JIT state - `backend_api::Backend::downgrade`.
 struct WeakCpu(std::sync::Weak<CpuShared>);
 
 impl backend_api::WeakBackend for WeakCpu {
@@ -755,7 +904,7 @@ impl Backend for CpuBackend {
     fn dump_profile(&self) {
         CpuBackend::dump_profile(self)
     }
-    /// Device-op accounting — the same counters `backend-wgpu` reports, so a
+    /// Device-op accounting - the same counters `backend-wgpu` reports, so a
     /// caller asking "how many submits/readbacks did this run cost" gets a real
     /// answer on every backend instead of `None` on this one.
     fn stats(&self) -> Option<backend_api::DeviceStats> {
@@ -785,7 +934,7 @@ impl Backend for CpuBackend {
             // reduction kernels (measured token-for-token); the AVX2 fast
             // paths own the decode regime here instead.
             workgroup_reductions: false,
-            // Measured by `gpu_core::roof` like every other device — a CPU has
+            // Measured by `gpu_core::roof` like every other device - a CPU has
             // a roofline too, and the JIT's kernels are graded against it.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
@@ -803,7 +952,7 @@ impl Backend for CpuBackend {
     }
     fn share(&self) -> Option<Box<dyn Backend>> {
         // Eager execution, no per-handle stream: sharing is an Arc clone.
-        // A fresh handle starts its own counters — see `CpuBackend::stats`.
+        // A fresh handle starts its own counters - see `CpuBackend::stats`.
         Some(Box::new(CpuBackend { shared: self.shared.clone(), stats: OpCounters::default() }))
     }
     fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {

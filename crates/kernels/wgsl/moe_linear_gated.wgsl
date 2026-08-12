@@ -4,7 +4,7 @@
 // @what  Sparse-MoE expert linear: matmul.wgsl, but skips non-routed rows
 // @how   one thread per output element, serial inner reduction, early exit
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

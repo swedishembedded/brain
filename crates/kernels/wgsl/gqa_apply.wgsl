@@ -4,7 +4,7 @@
 // @what  GQA attention output, separate v buffer
 // @how   one thread per output element
 // @opt   3
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none
