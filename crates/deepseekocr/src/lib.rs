@@ -58,6 +58,14 @@
 //! * [`caps`] -- the serving surface: one `generate` action (image + instruction
 //!   in, streamed text out) behind `capability::Provider`, plus the [`caps::Session`]
 //!   `crates/cli/src/resident_deepseekocr.rs` owns.
+//! * [`train`] -- LoRA training glue: merging a real (or checkpoint-free
+//!   fixture) base weight map with freshly-initialised adapter tensors for a
+//!   `cfg.decoder.lora`-configured composite. The adapter mechanism itself
+//!   (frozen base + trainable low-rank delta on the decoder's four attention
+//!   projections) lives in `deepseekv2::config::LoraCfg`/
+//!   `deepseekv2::model::DeepseekV2`, reused unchanged -- [`DeepseekOcr::new`]/
+//!   [`DeepseekOcr::new_split`] need no change at all to build a LoRA-adapted
+//!   composite once `cfg.decoder.lora` is set.
 //!
 //! ## What is and is not claimed
 //!
@@ -106,7 +114,15 @@
 //!   `brain caps`/`brain do`, the residency scheduler, D-Bus and the
 //!   OpenAI/Anthropic surfaces, with real per-token streaming and real token
 //!   counts. `run_batch` is the serial default and says why.
-//! * Not done: INT8, LoRA, KV-cached decode, EOS early-stop, sampling beyond
+//! * **LoRA fine-tuning exists** ([`train::lora_init_map`] plus
+//!   `deepseekv2`'s own adapter mechanism): the decoder's base weights frozen,
+//!   only its `.lora_a`/`.lora_b` adapters trainable, gated by a descent smoke
+//!   test (`tests/tiny_ref.rs::composite_lora_backward_freezes_the_base_and_descends`)
+//!   proving a LoRA-only optimizer step measurably lowers the composite loss.
+//!   Not done: a `finetune`-style CLI-driven training LOOP (`qwen3::finetune`'s
+//!   shape) over a real dataset -- this phase proves the wiring descends, not a
+//!   production fine-tune.
+//! * Not done: INT8, KV-cached decode, EOS early-stop, sampling beyond
 //!   greedy, a dedicated `brain deepseekocr` verb, and the wgpu backend (see
 //!   [`caps`]'s header for the `crates/sam1` corruption that forces CPU).
 
@@ -119,6 +135,7 @@ pub mod model;
 pub mod preprocess;
 pub mod prompt;
 pub mod rows;
+pub mod train;
 
 pub use config::DeepseekOcrConfig;
 pub use encoder::{DeepEncoder, GLUE_PIPELINES};

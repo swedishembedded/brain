@@ -521,6 +521,138 @@ fn composite_backward_reaches_the_image_and_descends() {
     assert!(l1 < l0, "a descent step did not decrease the composite loss: {l0} -> {l1}");
 }
 
+/// **LoRA descent smoke test.** Same fixture and the same shape of proof as
+/// [`composite_backward_reaches_the_image_and_descends`] above, but the
+/// decoder is built with `deepseekv2::config::LoraCfg` set: its own base
+/// weights (embeddings, norms, the four attention projections, the MoE
+/// router/experts/shared expert, the untied head) are `Role::Frozen`, and the
+/// ONLY trainable tensors anywhere in the composite are the decoder's
+/// `.lora_a`/`.lora_b` adapter pairs on its four attention projections. A
+/// plain gradient step on THOSE ALONE -- nothing else is ever written -- still
+/// measurably lowers the composite loss, which is the whole point of Phase
+/// 9's "LoRA finetune + descent smoke test": proving the parameter-efficient
+/// training path is wired correctly end to end, not proving it trains to
+/// convergence (see `crates/deepseekocr/src/train.rs` for the composite-level
+/// merge helper this test drives, and `deepseekv2::model`'s own doc for the
+/// adapter mechanism -- composed entirely from the SAME matmul/axpy/grad_scale
+/// kernels the base decoder's forward/backward already dispatch, no new
+/// kernel).
+///
+/// **Why `build_init` runs against a NON-LoRA config.** `build_init`'s
+/// two-way coverage check demands every declared tensor come from the
+/// checkpoint and every checkpoint tensor be declared -- exactly right for
+/// the base weights, and wrong for the adapters, which no checkpoint (real or
+/// fixture) ever carries: LoRA is trained after import. So this test builds
+/// the coverage-checked base map at `cfg_base` (lora: None, byte-identical to
+/// every other test in this file) and only ADDS the adapter tensors on top,
+/// through `deepseekocr::train::lora_init_map` -- the checkpoint coverage
+/// guarantee is exactly as strong as the plain-training test's.
+#[test]
+fn composite_lora_backward_freezes_the_base_and_descends() {
+    let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
+    let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
+    if !ckpt.exists() || !golden_path.exists() {
+        eprintln!("SKIP: fixtures absent");
+        return;
+    }
+    let ck = load(&ckpt);
+    let g = load(&golden_path);
+    let cfg_base = DeepseekOcrConfig::tiny();
+    let base_init = build_init(&cfg_base, &ck);
+
+    let mut cfg = cfg_base.clone();
+    cfg.decoder.lora = Some(deepseekv2::config::lora_cfg(2, 4.0));
+    let init = deepseekocr::train::lora_init_map(&cfg, &base_init, 0x10_A_DEC);
+
+    let ids: Vec<u32> = g["input_ids"].data.iter().map(|v| *v as u32).collect();
+    let seq = ids.len() as u32;
+    let row0 = ids.iter().position(|v| *v == 0).expect("placeholder") as u32;
+    let mut targets: Vec<u32> = ids[1..].to_vec();
+    targets.push(ids[0]);
+
+    let m = DeepseekOcr::new(&|p| gpu_core::testgpu::dev(p), cfg.clone(), &init, 7, seq, row0, true);
+    m.set_tokens(&ids, &targets);
+    let image = &g["image"].data;
+
+    let loss = |m: &DeepseekOcr| -> f64 {
+        let l = m.forward(image);
+        assert!(l.is_finite(), "loss is not finite");
+        l as f64
+    };
+
+    // ---- warm up ONLY the decoder's own optimizer, a few steps ----
+    //
+    // A fresh LoRA adapter starts with `B == 0` (see `deepseekv2::init::
+    // init_adapters`'s doc: "so the adapter starts as an exact no-op delta"),
+    // which makes `A`'s OWN gradient degenerate at step 0: `dA = (d_out ·
+    // B)ᵀ · x` is EXACTLY zero whenever `B` is, regardless of whether the
+    // adapter is wired correctly. That is not a bug this test should chase -
+    // it is the same degeneracy `qwen3::gradcheck::check_qwen_lora`'s own doc
+    // names ("a few AdamW steps run first so the zero-initialised B adapter
+    // (and hence A's gradient) is non-trivial before the FD comparison") and
+    // escapes the identical way: a few real optimizer steps BEFORE measuring
+    // anything, through `m.decoder()`'s own `adamw_step` alone, so the
+    // encoder is never touched by this warm-up either.
+    for step in 1..=3u32 {
+        m.zero_grads();
+        let _ = loss(&m);
+        let _ = m.backward();
+        m.decoder().poll_wait();
+        m.decoder().adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        m.decoder().poll_wait();
+    }
+
+    let l0 = loss(&m);
+    m.zero_grads();
+    let _ = loss(&m);
+    let d_image = m.backward();
+    m.decoder().poll_wait();
+    assert!(d_image.iter().any(|v| v.abs() > 1e-9), "no gradient reached the input image through the LoRA-adapted decoder");
+
+    // ---- the decoder base is truly Role::Frozen: its gradient buffer does not exist ----
+    let base_has_no_grad = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.decoder().read_grad("blocks.0.self_attn.q_proj.weight")));
+    assert!(base_has_no_grad.is_err(), "the decoder base's own gradient buffer must not exist under LoRA (it must be Role::Frozen)");
+
+    // ---- the ONLY trainable tensors anywhere are the decoder's own adapters ----
+    let names = m.decoder().param_names();
+    assert!(!names.is_empty(), "no trainable parameters at all");
+    assert!(
+        names.iter().all(|n| n.ends_with(".lora_a") || n.ends_with(".lora_b")),
+        "a non-adapter decoder tensor is trainable under LoRA: {names:?}"
+    );
+
+    // ---- every adapter got a real, nonzero gradient ----
+    let mut gnorm_sq = 0f32;
+    for n in &names {
+        let gr = m.decoder().read_grad(n);
+        assert!(gr.iter().any(|v| *v != 0.0), "{n}: analytic gradient is exactly zero");
+        gnorm_sq += gr.iter().map(|v| v * v).sum::<f32>();
+    }
+    let gnorm = gnorm_sq.sqrt();
+    assert!(gnorm > 1e-6, "adapter gradient is ~zero (norm {gnorm})");
+
+    // ---- snapshot two weights this step must NOT touch: a decoder base tensor
+    // (frozen by role) and an encoder tensor (never written by this test) ----
+    let dec_base_before = m.decoder().read_weight("blocks.0.self_attn.q_proj.weight");
+    let enc_before = m.encoder().sam().read_weight("vision.sam.patch_embed.weight");
+
+    // ---- descend on the adapters ALONE ----
+    let lr = 1e-1 / gnorm;
+    for n in &names {
+        let w = m.decoder().read_weight(n);
+        let gr = m.decoder().read_grad(n);
+        let stepped: Vec<f32> = w.iter().zip(&gr).map(|(w, gv)| w - lr * gv).collect();
+        m.decoder().write_weight(n, &stepped);
+    }
+    let l1 = loss(&m);
+    println!("  LoRA-only composite loss {l0:.6} -> {l1:.6} (adapter grad norm {gnorm:.4}, {} trainable tensors)", names.len());
+    assert!(l1 < l0, "a LoRA-only descent step did not decrease the composite loss: {l0} -> {l1}");
+
+    // ---- and the two untouched tensors really are byte-identical after it ----
+    assert_eq!(m.decoder().read_weight("blocks.0.self_attn.q_proj.weight"), dec_base_before, "the decoder base moved under a LoRA-only step");
+    assert_eq!(m.encoder().sam().read_weight("vision.sam.patch_embed.weight"), enc_before, "the vision encoder moved under a decoder-only LoRA step");
+}
+
 /// The **real interleaved layout** on the composite, checkpoint-free.
 ///
 /// `DeepseekOcr::new_with_prompt` sizes the splice at the prompt's own

@@ -12,7 +12,13 @@ use serde_json::Value;
 
 /// LoRA adapter configuration (low-rank fine-tuning). When present, the targeted
 /// projections keep a frozen base weight plus trainable `A`/`B` adapters.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` (on top of the `Clone, Debug` every other config-carried struct
+/// in this tree gets): `crates/deepseekv2::config::DeepseekV2Config` derives it
+/// and round-trips through JSON in its own tests, and reusing this struct as-is
+/// rather than redeclaring it (this crate's own `Qwen35Config`/`Qwen35`
+/// precedent) means the derive has to hold here too.
+#[derive(Clone, Debug, PartialEq)]
 pub struct LoraCfg {
     pub rank: u32,
     pub alpha: f32,

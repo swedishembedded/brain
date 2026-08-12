@@ -18,6 +18,10 @@ brain-checkpoint.workspace = true
 brain-gguf.workspace = true
 brain-kernels.workspace = true
 brain-data.workspace = true
+# `qwen3::LoraCfg` -- the model-agnostic `{rank, alpha, targets}` LoRA config,
+# reused as-is rather than redeclared (the same choice `crates/qwen35moe`
+# already made for the same type).
+brain-qwen3.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 
