@@ -1453,6 +1453,114 @@ token fails loudly.
       `finetune`-style CLI verb, a masked-dataset training loop, adapter
       save/load through `brain do` - this phase proves the wiring descends,
       not a production fine-tune (see `docs/models/deepseek-ocr.md`).
+- [x] **CPU AVX2/AVX-512 fast paths for the Phase 8 hot kernels.** Phase 8's
+      own per-kernel table put `moe_linear_gated` at 66.9% of the KV-cached
+      decode loop, running as the scalar one-invocation-per-element
+      Cranelift-JIT loop the whole time - `crates/backend-cpu` had a proven
+      AVX2-fast-path pattern (`fast_conv.rs`/`fast_ops.rs`, runtime-gated on
+      `avx2_available()`) for the base GEMM, conv2d family and cross-attention
+      only; this landed native paths for the two next-highest-value kernel
+      families on that list, same pattern, not a new one.
+      **`moe_linear_gated`{,`_dx`,`_dw`}** (`crates/backend-cpu/src/
+      fast_ops.rs::moe_linear_gated_{fwd,dx,dw}`) - the forward reuses the
+      SAME `row_abt_avx2`/`row_abt_avx512` microkernel `matmul_abt` already
+      uses (a row-gated variant, not a new GEMM); the two backward siblings
+      reuse a new shared `axpy` SAXPY primitive (`dst += scale*src`, AVX2+FMA)
+      that also gave `moe_linear_gated_dx`'s accumulation loop real
+      vectorisation it did not have as scalar-only before.
+      **The self-attention family** (`gqa_scores`/`attn_softmax`/`gqa_apply`
+      + the `gqa_bwd_{dscores,dv,dq,dk}` backward quartet) - the plain causal
+      GQA/MHA attention `deepseekv2`'s own decoder dispatches for its
+      prompt-prefill forward (only the cross-attention twin had a native path
+      before). Per-head GEMM packing reusing `matmul_abt`, mirroring the
+      existing `attn_scores_cross`/`attn_apply_cross` pattern exactly - see
+      `fast_ops.rs`'s own module doc for the derivation, including the reason
+      `gqa_bwd_dscores`'s causal masking needs no explicit branch (a
+      non-routed `probs[i,j]==0` term already zeroes the product).
+      **AVX-512 tier**: `fast_conv::avx512_available()` (F+VL+DQ, mirrors
+      `avx2_available()`'s exact runtime-detection shape) gates a
+      `row_abt_avx512` microkernel (structurally identical to the proven
+      `row_abt_avx2`, 16-wide `__m512` lanes) wired ahead of the AVX2 check in
+      both `matmul_abt` and `moe_linear_gated_fwd`. **Honesty note, not a
+      claim of verification**: this development machine (Intel Core Ultra 7
+      155H) does not implement AVX-512 at all (confirmed via `/proc/cpuinfo`),
+      so `avx512_available()` is always `false` here - the tier compiles and
+      its own unit test (`row_abt_avx512_matches_scalar_when_available`)
+      explicitly prints "AVX-512 not available, skipping" and returns rather
+      than silently passing as if it had verified the vector logic. It has
+      never executed on real hardware in this session.
+      **Correctness**: every new kernel gated against a scalar reference
+      mirroring its own WGSL kernel's exact formula (not `matmul_abt` with a
+      post-hoc mask - the row-gating logic itself is under test), the same
+      bit-approximate/fp-reassociation-tolerance style the existing
+      `fast_ops.rs` tests already use. Full regression green after landing:
+      `cargo test -p brain-backend-cpu --release` (31 passed), `-p
+      brain-deepseekv2 --release` (15+8 passed, including the real
+      `grads_match_finite_differences_*` gradchecks and
+      `generate_greedy_kv_matches_recompute` which exercises the KV-cached
+      decode path these kernels serve), `-p brain-model --release` (every
+      test binary, incl. `moe_sparse_bwd_parity`/`moe_compact_parity`/
+      `vit_windowed`'s 11 tests). `-p brain-sam1 --release` run last, since
+      SAM's own attention doesn't dispatch any of these three families
+      directly - see that run's own result below.
+      **Measured (microbenchmark, not the full pipeline - see below for why)**:
+      `moe_linear_gated` forward at the real decoder shape
+      (`d_model=1280, moe_ff=896, 64 experts top_k=6`, `m=283` prompt-prefill
+      rows, `crates/backend-cpu/src/fast_ops.rs::moe_linear_gated_bench`,
+      `cargo test -p brain-backend-cpu --release moe_linear_gated_bench --
+      --ignored --nocapture`): AVX2 ran 2.4x-6.1x faster than a
+      scalar-with-the-same-rayon-threading baseline across five repeated runs
+      on this shared, contended machine (a sibling agent's own parallel
+      `cargo test -p brain-model` with LTO was running concurrently
+      throughout measurement - 10+ rustc processes at times, swap fully
+      saturated - which is exactly the variance window that range reflects;
+      re-run on an idle box for a tighter number). A single-decode-row (`m=1`) variant was
+      attempted and DROPPED: at that shape the whole call is a few KFLOPs,
+      small enough that this workspace's LTO release build could prove the
+      repeated near-identical-input call loop-invariant and hoist it out of
+      the timing loop even past `black_box` guards on both arguments and a
+      per-iteration input perturbation, reading a physically impossible
+      ~10-30 TFLOP/s. Shipping a number that could not be trusted was judged
+      worse than shipping none - see that bench's own doc comment.
+      **`gqa_scores`/`gqa_apply`** at `deepseekv2`'s real prefill shape
+      (`bsz=1, heads=10, T=283, head_dim=128` MHA, `crates/backend-cpu/src/
+      fast_ops.rs::gqa_family_bench`): AVX2 ran 6.4x (`gqa_scores`) and 15.5x
+      (`gqa_apply`) faster than a single-threaded scalar reference matching
+      the WGSL kernels' own math, on the same contended machine. Caveat this
+      number honestly the other direction from the `moe_linear_gated` one
+      above: the comparator here is single-thread scalar, not
+      scalar-with-the-same-rayon-threading (unlike `moe_linear_gated_bench`'s
+      apples-to-apples baseline) - `gqa_scores`/`gqa_apply` both call
+      `matmul_abt` per head, which threads internally once a head's own GEMM
+      clears its size threshold, so part of this multiplier is parallelism
+      the old scalar JIT path *also* gets (`backend-cpu` always shards
+      invocations across the rayon pool, AVX2 or not - see `lib.rs`'s
+      dispatch fallback). The wall-clock difference is real (that JIT
+      fallback path is what these kernels replace either way), but do not
+      read this specific multiplier as "AVX2 alone."
+      **No real-weight end-to-end DeepSeek-OCR decode re-run** (the
+      `--max_new 32` benchmark this Phase 8 entry's own numbers come from):
+      the real `DeepSeek-OCR-Q8_0`/`mmproj` GGUF pair is not present on this
+      machine this session (only an empty HF-cache ref stub, no downloaded
+      blobs), so the ~22 GiB resident real-weight run this repo's own
+      convention calls for could not be reproduced here. The whole-pass
+      number this entry's Phase 8 table implies - `moe_linear_gated` at 66.9%
+      of a 34.9 s decode - is NOT re-measured; only the kernel-level
+      microbenchmark above is. Whoever next has the real weights available
+      should re-run `BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain do
+      deepseek-ai/DeepSeek-OCR generate --max_new 32 --in image=page.ppm
+      --json` and update this entry and `docs/performance/overview.md`'s case
+      study with the real before/after wall-clock and per-kernel table.
+      Stayed scoped to `crates/backend-cpu` (plus the ten touched `.wgsl`
+      headers' `@cpu: yes -> native` field, required by `make
+      kernels-table/check` once `crates/backend-cpu/src/lib.rs`'s `FastIdx`
+      gains a kernel's name - the generator derives `native` from that struct,
+      not from a separate list, so a fast path and its catalogue entry cannot
+      drift apart) - no `crates/deepseekocr`/`crates/sam1`/`crates/deepseekv2`
+      source changes. SAM's decomposed relative-position kernels
+      (`attn_relpos_*`) were assessed but not landed this pass (out of time
+      budget after the two higher-priority families + the AVX-512 tier); they
+      remain scalar-JIT on CPU.
 Full plan: `/home/user/.claude/plans/woolly-beaming-avalanche.md` (this
 session's approved plan; not repo-relative, kept here only as a pointer for
 whoever picks this up in the same environment).

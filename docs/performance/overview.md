@@ -158,3 +158,91 @@ projector) - and that last number is not yet broken down per kernel.
 after a fix is supposed to promote the next bottleneck (§F.9) - this is that
 promotion, landing squarely on the vision encoder, not the decode loop, as
 the next place to look.
+
+### CPU AVX2/AVX-512 fast paths for the decode loop's dominant kernels
+
+The `moe_linear_gated` 66.9% number in the table above is the scalar,
+one-invocation-per-element Cranelift-JIT path - `crates/backend-cpu` had a
+native AVX2 fast path (`fast_conv.rs`/`fast_ops.rs`) for the base GEMM, the
+conv2d family and cross-attention only; `moe_linear_gated{,_dx,_dw}` and the
+plain causal self-attention family (`gqa_scores`/`attn_softmax`/`gqa_apply` +
+the `gqa_bwd_{dscores,dv,dq,dk}` backward quartet - what `deepseekv2`'s own
+decoder dispatches for its attention) ran the slow path the whole time. This
+pass added native paths for both, plus a third AVX-512 tier gated behind
+runtime `avx512_available()` detection.
+
+**What was added** (`crates/backend-cpu/src/fast_ops.rs`, wired from
+`lib.rs`'s dispatch table exactly like every existing fast path):
+
+- `moe_linear_gated_fwd` reuses the SAME `row_abt_avx2`/`row_abt_avx512`
+  microkernel `matmul_abt` already uses, adding only the WGSL kernel's own
+  per-row gate early-exit (a non-routed row is never reduced, not
+  computed-then-discarded - the same contract the WGSL source documents).
+- `moe_linear_gated_dx`/`moe_linear_gated_dw` reuse a new shared `axpy`
+  SAXPY primitive (`dst += scale*src`, AVX2+FMA) for their accumulation loops.
+- `gqa_scores`/`gqa_apply` pack each head's q/k or probs/v slice contiguous
+  and reuse `matmul_abt`, mirroring the existing `attn_scores_cross`/
+  `attn_apply_cross` pattern exactly, with the causal mask applied after
+  (`gqa_scores`) or falling out for free because the softmax already zeroed
+  the invalid region (`gqa_apply`).
+- `gqa_bwd_dscores`/`gqa_bwd_dv`/`gqa_bwd_dq`/`gqa_bwd_dk` reuse `matmul_abt`
+  (`dscores`, whose causal masking also falls out for free the same way) or
+  the `axpy` primitive threaded over their own output rows (`dv`/`dq`/`dk`),
+  the same `par_chunks_mut`-over-output-rows shape `matmul_dx`/`matmul_dw`
+  already use.
+- A third tier, `avx512_available()` (F+VL+DQ, mirroring `avx2_available()`'s
+  exact runtime-detection shape) gates a `row_abt_avx512` microkernel wired
+  ahead of the AVX2 check in `matmul_abt` and `moe_linear_gated_fwd`.
+  **This machine (Intel Core Ultra 7 155H) does not implement AVX-512 at
+  all** - the tier compiles and its own unit test explicitly detects that and
+  prints "AVX-512 not available, skipping" rather than silently passing as if
+  it had verified the vector logic. It has not executed on real hardware.
+
+**Correctness**: every new kernel is gated against a scalar reference that
+mirrors its own `.wgsl` kernel's exact formula (not `matmul_abt` with a
+post-hoc mask - the row-gating logic itself is under test), the same
+bit-approximate/fp-reassociation-tolerance style this crate's existing tests
+already use. Full regression green after landing: `cargo test -p
+brain-backend-cpu --release`, `-p brain-deepseekv2 --release` (including the
+real finite-difference gradchecks and the KV-cache-vs-recompute parity test),
+`-p brain-model --release`, `-p brain-sam1 --release`, and `make gradcheck`.
+
+**Measured** (microbenchmarks in `fast_ops.rs`'s own `mod tests`, `cargo test
+-p brain-backend-cpu --release <name> -- --ignored --nocapture`), at
+`deepseekv2`'s real decoder shape (`d_model=1280, moe_ff=896`, 64 experts
+top_k=6, 10 heads, head_dim=128) and its real 283-token prompt-prefill length:
+
+| kernel | comparator | speedup | note |
+|---|---|---|---|
+| `moe_linear_gated` fwd, `m=283` | scalar, same rayon threading | 2.4x-6.1x across 5 runs | apples-to-apples baseline; range is real measurement variance under a contended machine (see below), not code changing between runs |
+| `gqa_scores`, `T=283` | scalar, single-threaded | 6.4x | not apples-to-apples: `matmul_abt`'s own internal threading is folded into this number too - see caveat below |
+| `gqa_apply`, `T=283` | scalar, single-threaded | 15.5x | same caveat |
+
+Both benchmarks were run on a machine with a sibling agent's own concurrent
+`cargo test -p brain-model` (LTO, 10+ rustc processes at times, swap fully
+saturated) running throughout measurement - exactly what the `moe_linear_gated`
+range above reflects; a quieter box would read tighter. The `gqa_scores`/
+`gqa_apply` numbers compare against a single-threaded scalar reference (not a
+threaded one), so part of that multiplier is parallelism the old scalar-JIT
+fallback path *also* gets from `backend-cpu`'s own always-threaded dispatch,
+not AVX2 alone - the wall-clock difference is still real (that's the path
+being replaced either way), just don't read "15.5x" as "AVX2 gave 15.5x."
+
+A single-decode-row (`m=1`) variant of the `moe_linear_gated` bench was tried
+and dropped: at that shape the whole call is a few KFLOPs, small enough that
+this workspace's release build (LTO) could prove the repeated near-identical
+call loop-invariant and hoist it out of the timing loop even past `black_box`
+guards on both the arguments and a per-iteration input perturbation, reading
+a physically impossible ~10-30 TFLOP/s. Shipping a number that could not be
+trusted was judged worse than shipping none.
+
+**No real-weight end-to-end re-run.** The `--max_new 32` head-to-head above
+needs the real `DeepSeek-OCR-Q8_0`/`mmproj` GGUF pair (~22 GiB resident); this
+machine had only an empty HF-cache ref stub this session, no downloaded
+weights, so that run could not be reproduced to get a real updated wall-clock
+or per-kernel table. The kernel-level microbenchmarks above are what could
+be measured honestly here. Whoever has the real weights should re-run
+`BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain do deepseek-ai/DeepSeek-OCR
+generate --max_new 32 --in image=page.ppm --json` and update this section and
+`.agents/roadmap/deepseek-ocr.md`'s Phase 8 entry with the real before/after
+numbers.
