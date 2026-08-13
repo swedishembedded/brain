@@ -429,6 +429,21 @@ including this test; `cargo build -p brain-npu` and `cargo test -p brain-npu
 npugraph` ran 1 passed (self-skips without real OpenVINO hardware, per its
 own `npu_present()` guard).
 
+## Process note - never use raw git plumbing to resolve shared-tree contention
+
+B1 landed via `commit-tree`/`update-ref` to avoid clobbering a concurrent
+agent's uncommitted edits to the same files. That bypassed every pre-commit
+hook (they only fire on `git commit`), and the no-em-dash hook would genuinely
+have rejected the commit - it had added 48 new em dashes. Caught and fixed
+retroactively in a2e34d12, run through real `git commit` this time.
+
+**Rule for every later phase in this program**: if a concurrent agent's
+uncommitted work collides with yours in the same file, wait, coordinate, or
+stage only your own hunks with normal `git add -p`/`git commit` - never
+`commit-tree`/`update-ref`/`update-index --cacheinfo` to route around it. A
+commit that skips hooks is not a valid commit in this repo regardless of how
+clean its content is.
+
 ## B1 - unified DType, capability as data
 
 **Problem.** Four separate dtype enums did overlapping jobs: `backend_api::DType`
