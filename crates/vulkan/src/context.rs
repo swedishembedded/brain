@@ -581,6 +581,12 @@ impl VkContext {
                 }
             };
             let alloc = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_type);
+            if std::env::var_os("BRAIN_VK_ALLOC_DEBUG").is_some() {
+                eprintln!("[vk-alloc-debug] requesting {} bytes ({:.3} GiB), type_index={}", req.size, req.size as f64 / (1u64 << 30) as f64, mem_type);
+                if req.size > (1u64 << 30) {
+                    eprintln!("[vk-alloc-debug] backtrace for >1GiB request:\n{}", std::backtrace::Backtrace::force_capture());
+                }
+            }
             let memory = self.device.allocate_memory(&alloc, None).expect("allocate_memory");
             self.device.bind_buffer_memory(buffer, memory, 0).expect("bind_buffer_memory");
             let mappable = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
