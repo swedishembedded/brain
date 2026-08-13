@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // im2col: lower a conv input into a GEMM operand.
 //   x   : [N=1, Cin, H, W]  (NCHW)

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Peak packed-int8 (DP4A) rate probe — the INT8 half of the device roofline
+// @what  Peak packed-int8 (DP4A) rate probe - the INT8 half of the device roofline
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Peak `dot4I8Packed` rate — the int8 sibling of `roof_fma`.
 //

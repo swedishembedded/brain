@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Tiled 3DGS, stage 5: front-to-back compositing. One 64-invocation workgroup
 // owns one 16×16 tile (dispatch threads = n_tiles*64; tile = idx/64), each

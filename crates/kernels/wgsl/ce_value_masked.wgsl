@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-position cross-entropy over U_BINS, with ignore_index (sentinel IGNORE).
 //   out[n] = 0                                  if target[n] == IGNORE

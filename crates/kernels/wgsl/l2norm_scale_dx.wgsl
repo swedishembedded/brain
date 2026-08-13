@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward w.r.t. x for l2norm_scale. With r = rsqrt(sum_k x_k^2 + eps),
 // y_d = x_d * r * g_d, the input gradient for row n is:

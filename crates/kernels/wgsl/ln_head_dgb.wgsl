@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Strided per-head LayerNorm backward (parameter grads): one invocation per
 // head-dim channel c, reducing over all (row, head) vectors.

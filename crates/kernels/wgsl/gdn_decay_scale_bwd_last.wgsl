@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // The other half of `gdn_decay_scale_bwd.wgsl` (see that file's header for the
 // forward formula and the full split rationale): the `+g_cs[bh,c_len-1]` term

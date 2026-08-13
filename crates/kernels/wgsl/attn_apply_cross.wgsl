@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Cross-attention output: out[b,i,h,d] = sum_{j<T_enc} probs[b,h,i,j] * v[b,j,h,d].
 // V comes from the ENCODER-MEMORY buffer `kv` (fused KV layout, stride kv_stride =

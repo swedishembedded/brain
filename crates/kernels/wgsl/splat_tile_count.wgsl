@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Tiled 3DGS, stage 1: per-gaussian overlapped-tile count. The bbox
 // [mean2d ± radius] is intersected with the screen's 16×16 tile grid; culled

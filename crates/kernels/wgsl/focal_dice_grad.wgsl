@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gradient of the SAM-style segmentation objective w.r.t. the mask LOGITS.
 // The matching forward reduction is `focal_dice_stats.wgsl`; this kernel

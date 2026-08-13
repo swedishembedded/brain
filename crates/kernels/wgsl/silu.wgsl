@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // SiLU (a.k.a. swish) activation:  y = x * sigmoid(x) = x / (1 + exp(-x)).
 // Plain (non-gated) elementwise activation. The matching derivative is in

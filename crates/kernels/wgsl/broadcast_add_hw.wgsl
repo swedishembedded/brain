@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Broadcast-add a row-strip and a column-strip into a full map, NCHW.
 //   a : [N, C, H, 1]   (a strip pooled over W)

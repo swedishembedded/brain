@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // LayerNorm backward w.r.t. x. With xhat=(x-mean)*inv, g=dy*gamma:
 //   dx[c] = inv * ( g[c] - mean_k(g) - xhat[c] * mean_k(g*xhat) )

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Grouped+dilated 2D convolution INPUT gradient (transposed-conv GATHER form).
 //   dy : [N, Cout,      Ho, Wo]

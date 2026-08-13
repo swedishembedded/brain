@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Masked L1, per element:  out = |pred - tgt| * mask.
 //   pred, tgt, mask : [total]

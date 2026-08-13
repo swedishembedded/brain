@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Accumulating twin of attn_bwd_dk_cross for QUERY-CHUNKED backward: d_k sums
 // over ALL query rows, so each chunk contributes a partial sum — `acc_flag = 0`

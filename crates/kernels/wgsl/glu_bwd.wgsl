@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of glu.wgsl (F.glu over the middle dim). With a = x[o,c,i],
 // b = x[o,d+c,i], s = sigmoid(b), out = a*s:

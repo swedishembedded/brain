@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Matmul into a COLUMN TILE of the output:  out[:, n_off : n_off+n_tile] = x · Wᵀ
 // where W is bound to a sub-range covering output features [n_off, n_off+n_tile)

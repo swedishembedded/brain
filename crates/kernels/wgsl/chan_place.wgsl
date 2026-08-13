@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Place a tensor into a contiguous channel range of a larger NCHW tensor:
 //   dst[N, Ctot, H, W][c_off + c] = src[N, Csrc, H, W][c]

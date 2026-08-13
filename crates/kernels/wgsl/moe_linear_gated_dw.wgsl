@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of moe_linear_gated.wgsl's `out = x @ W^T` w.r.t. W, for ONE
 // expert. Bit-identical to the dense matmul_dw.wgsl over the SAME `dy`

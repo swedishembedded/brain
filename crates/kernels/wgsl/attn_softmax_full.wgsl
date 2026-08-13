@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row-wise FULL (non-causal) softmax over the key axis, padding-safe. One
 // invocation per (b,h,i). Unlike `attn_softmax_masked` (which restricts to

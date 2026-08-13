@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Convex 3x3 upsample forward (ZipDepth's FastConvexUpsample, unfold path).
 //   mask : [N, 9*S*S, H, W]   already softmax-normalized over the 9 axis

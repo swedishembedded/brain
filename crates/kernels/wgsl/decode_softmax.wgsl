@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Decode-step softmax: max-subtracted softmax over the `t` cached scores of each
 // query head, in place per row of a [n_heads, cap]-strided buffer. Matches the

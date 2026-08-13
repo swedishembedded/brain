@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-row softmax statistics for the cross-entropy backward: for each row,
 //   stats[2n] = max_v logits[n,v]

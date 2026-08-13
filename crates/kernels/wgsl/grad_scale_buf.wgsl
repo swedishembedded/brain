@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Scale a gradient buffer in place by a coefficient that lives in a GPU buffer
 // (written by clip_coef): grad[i] *= coef[0]. Lets the whole optimizer step run

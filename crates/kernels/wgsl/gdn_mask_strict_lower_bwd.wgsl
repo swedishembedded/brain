@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_mask_strict_lower.wgsl`'s
 //   attn0[idx] = raw[idx] * decay_mask[idx]   if j < i

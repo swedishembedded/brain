@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Batched matmul — the primitive every Gated DeltaNet (GDN) chunk-recurrence
 // step needs (`bmm_acc.wgsl` is its accumulating twin). Unlike `matmul.wgsl`

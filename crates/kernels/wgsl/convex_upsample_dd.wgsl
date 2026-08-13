@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Convex 3x3 upsample: gradient wrt the half-res DEPTH map.
 //   dy   : [N, 1,     H*S, W*S]

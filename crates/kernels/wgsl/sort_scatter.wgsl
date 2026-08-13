@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype n/a
 //
 // LSD radix sort, stage 2: stable per-chunk scatter. `hist` holds the
 // exclusive scan of the column-major histograms (sort_hist), so

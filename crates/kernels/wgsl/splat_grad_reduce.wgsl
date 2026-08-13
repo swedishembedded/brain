@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS backward, stage 4: per-gaussian segmented reduction over the
 // id-sorted gradient records. `ranges` comes from splat_tile_ranges run with

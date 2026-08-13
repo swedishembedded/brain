@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm backward w.r.t. gamma. One invocation per channel (C threads).
 //   dgamma[c] += sum_{n,h,w} dy * xhat,   xhat = (x-mean)/sqrt(var+eps), eps=1e-5

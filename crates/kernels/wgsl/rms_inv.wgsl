@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Helper: per-row inverse RMS,  inv[n] = 1/sqrt(mean_c(x[n,c]^2) + eps).
 // One invocation per row. Used by rmsnorm_dw.

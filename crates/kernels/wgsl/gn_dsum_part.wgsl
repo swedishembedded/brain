@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GroupNorm backward per-group reductions, STAGE 1 of 2 — partial sums
+// @what  GroupNorm backward per-group reductions, STAGE 1 of 2 - partial sums
 // @how   one thread per partial, strided serial reduction (no barrier)
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GroupNorm backward per-group reductions, STAGE 1 of 2 — partial sums.
 //

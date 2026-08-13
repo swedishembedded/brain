@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Table-driven interleaved rotary position embedding (Z-Image / multi-axis).
 //

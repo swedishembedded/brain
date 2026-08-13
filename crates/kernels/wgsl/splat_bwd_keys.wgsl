@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS backward, stage 3 prep: extract the gaussian-id sort keys from the
 // gradient records (slot 9 holds the id bit-cast to f32) and index payloads.

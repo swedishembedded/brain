@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // One step of the per-chunk-row cumulative sum
 // `g_cs[row,i] = sum_{j<=i} g[row,j]` (`torch_chunk_gated_delta_rule`'s

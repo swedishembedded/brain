@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Interleaved RoPE (forward, in place) on the FIRST `rope_dim` channels of each
 // head (a sub-slice of a `head_dim`-wide head), for the DSA indexer where each

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Adaptive/box average-pool INPUT gradient, NCHW.
 //   dy : [N, C, Ho, Wo]

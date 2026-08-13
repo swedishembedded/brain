@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS backward, stage 5: EWA projection VJP. Per gaussian, take the reduced
 // 2D gradients pgrad = {v_xy, v_conic(a,b,c), v_opacity, v_rgb(handled by

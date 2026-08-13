@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gradient of the CIoU loss L = 1 - CIoU w.r.t. the 4 predicted coords
 // pred[A,4] = (x1,y1,x2,y2). Target tgt[A,4] is constant. Output dpred[A,4].

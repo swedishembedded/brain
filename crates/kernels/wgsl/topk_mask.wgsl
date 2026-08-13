@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // DSA top-k selection mask (forward). Turn per-query indexer scores into an
 // additive attention mask: keep the top-`index_topk` causal keys per query

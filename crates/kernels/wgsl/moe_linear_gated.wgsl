@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Same contract as matmul.wgsl (`out = x @ W^T`) EXCEPT a row whose gate
 // weight for this expert is zero writes 0 and returns before the K-reduction,

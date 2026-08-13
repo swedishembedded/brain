@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  In-place ReLU (single read_write binding — wgpu usage-scope safe)
+// @what  In-place ReLU (single read_write binding - wgpu usage-scope safe)
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // In-place ReLU (single read_write binding — wgpu usage-scope safe).
 

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GroupNorm statistics for an NCHW tensor x[N,C,H,W] — spec
+// @what  GroupNorm statistics for an NCHW tensor x[N,C,H,W] - spec
 // @how   one thread per output element, 4 nested serial reductions
 // @opt   1
 // @cpu   native
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GroupNorm statistics for an NCHW tensor x[N,C,H,W]. One invocation per (n,g) group
 // (N*G threads): thread k has n = k/G, g = k%G, cpg = C/G, M = cpg*H*W.

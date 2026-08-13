@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Transformer-XL relative-position shift (NeMo / Conformer rel-pos attention).
 // Reproduces the pad → reshape → drop-first-row → reshape sequence:

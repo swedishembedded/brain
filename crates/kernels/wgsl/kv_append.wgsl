@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Append one token's projected K (or V) into a KV cache: write the length-`width`
 // source row into cache row `row`, i.e. dst[row*width + i] = src[i]. `dst` is the

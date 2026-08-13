@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32|bf16|f16
 // @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B4;
 //        header field, parsing deferred to B6)
 //

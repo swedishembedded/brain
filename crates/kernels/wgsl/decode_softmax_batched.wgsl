@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Batched decode softmax: per (sequence b, head h), max-subtracted softmax over
 // its seq_lens[b] scores in a [batch, n_heads, cap]-strided buffer.

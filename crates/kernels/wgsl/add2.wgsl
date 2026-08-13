@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Out-of-place add:  out[i] = a[i] + b[i].
 // Lets each residual write to a fresh buffer (which doubles as the activation

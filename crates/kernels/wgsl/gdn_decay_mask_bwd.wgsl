@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_decay_mask.wgsl`:
 //   decay_mask[row,i,j] = exp(g_cs[row,i] - g_cs[row,j])   if j <= i else 0

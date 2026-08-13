@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Bias gradient:  dbias[n] += sum_m dy[m,n].
 // One invocation per output feature n. Accumulates into the pre-zeroed buffer.

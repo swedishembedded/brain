@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // weighted_gap gradient wrt the WEIGHT MAP.
 //   dy : [N, C]

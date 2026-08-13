@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // GQA attention scores (materialised, for training), separate q/k buffers:
 //   scores[b,h,i,j] = (q[b,i,h,:] . k[b,j,hkv,:]) / sqrt(head_dim)   for j <= i

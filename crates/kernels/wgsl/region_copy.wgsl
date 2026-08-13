@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Strided-region copy between same-layout buffers: for each row, copy
 // `width` values at `off` within a `row_stride` row (e.g. the v region of a

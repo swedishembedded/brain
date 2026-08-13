@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Skinny-M INT8 matmul (out = dequant(x_q @ W_qᵀ)), one WORKGROUP per output COLUMN — the decode-regime int8 GEMM
+// @what  Skinny-M INT8 matmul (out = dequant(x_q @ W_qᵀ)), one WORKGROUP per output COLUMN - the decode-regime int8 GEMM
 // @how   DP4A packed int8, 64-thread workgroup tile, 1 barrier
 // @opt   5
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant int8
+// @dtype f32
 //
 // Skinny-M INT8 matmul (out = dequant(x_q @ W_qᵀ)), one WORKGROUP per output
 // COLUMN — the decode-regime int8 GEMM.

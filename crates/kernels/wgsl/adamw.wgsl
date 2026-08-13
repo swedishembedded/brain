@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // AdamW update (decoupled weight decay), matching torch.optim.AdamW.
 //   m = b1*m + (1-b1)*g

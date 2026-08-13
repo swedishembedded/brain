@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // `splice_add.wgsl`'s sibling for the opposite offset direction. That kernel's
 // `base` lands on `dst` only (`dst[base+i] += src[i]`) -- exactly right for

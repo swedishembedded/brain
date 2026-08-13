@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Table-driven 2D RoPE (DINOv3/WorldMirror "normalized" variant), in place on
 // the q or k region of a fused [rows, row_stride] buffer. The host precomputes

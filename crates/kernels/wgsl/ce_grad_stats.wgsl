@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Cross-entropy gradient using precomputed per-row softmax stats (see ce_stats):
 //   d_logits[n,v] = 0                                    if target[n]==IGNORE

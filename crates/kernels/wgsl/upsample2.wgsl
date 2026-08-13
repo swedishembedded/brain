@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Nearest-neighbour x2 upsample. One invocation per OUTPUT element. Output is
 // 2H x 2W; y[n,c,ho,wo] = x[n,c,ho/2,wo/2]. NCHW layout. Params carry the INPUT

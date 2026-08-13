@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Concatenate two NCHW tensors along the channel axis:
 //   y[N, Ca+Cb, H, W]  from  a[N,Ca,H,W] and b[N,Cb,H,W].

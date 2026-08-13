@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Depthwise 3D convolution (forward) — the PEG (position-encoding generator) of ST-ViViT tokenizers
+// @what  Depthwise 3D convolution (forward) - the PEG (position-encoding generator) of ST-ViViT tokenizers
 // @how   one thread per output element, 3 nested serial reductions
 // @opt   1
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Depthwise 3D convolution (forward) — the PEG (position-encoding generator)
 // of ST-ViViT tokenizers: a per-channel Conv3d over (T,H,W) with a K^3 kernel,

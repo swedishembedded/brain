@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Backward of out = x @ W^T w.r.t. W, with dY supplied ALREADY TRANSPOSED:
 //   dW[n,k] += sum_m dYt[n,m] * X[m,k].

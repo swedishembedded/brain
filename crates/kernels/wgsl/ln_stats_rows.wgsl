@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // LayerNorm per-row mean + inverse-std, one WORKGROUP per row.
 //

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Batched paged decode apply: context per (b,h,d) = probs-weighted sum of cached
 // values addressed through sequence b's block table. ctx : [batch, n_heads*head_dim].

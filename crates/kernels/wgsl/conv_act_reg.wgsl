@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Register-tiled fused conv -> per-channel affine -> activation. Each invocation
 // computes an 8x4 output tile = 8 output channels x 4 spatial positions, holding

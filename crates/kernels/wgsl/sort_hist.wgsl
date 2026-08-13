@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype n/a
 //
 // LSD radix sort, stage 1: per-chunk 256-bin digit histogram. Each invocation
 // owns one `chunk`-sized run of `keys` and counts the 8-bit digit at `shift`

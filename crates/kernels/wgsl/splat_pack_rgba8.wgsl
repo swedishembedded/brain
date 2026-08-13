@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Pack the RGBA f32 framebuffer into one u32 (r / g<<8 / b<<16 / a<<24) per pixel — quarters the demo readback bandwidth
+// @what  Pack the RGBA f32 framebuffer into one u32 (r / g<<8 / b<<16 / a<<24) per pixel - quarters the demo readback bandwidth
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Pack the RGBA f32 framebuffer into one u32 (r | g<<8 | b<<16 | a<<24) per
 // pixel — quarters the demo readback bandwidth. Manual packing (no

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Add learned absolute positional embeddings in place:
 //   x[row, c] += pos[(row % T) * D + c]

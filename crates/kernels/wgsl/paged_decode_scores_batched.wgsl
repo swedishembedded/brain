@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Batched paged decode scores: for each sequence b in the batch, its single query
 // attends all seq_lens[b] cached keys via that sequence's block table.

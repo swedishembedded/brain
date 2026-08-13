@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Sigmoid activation:  y = 1 / (1 + exp(-x)).
 // Elementwise. Matching derivative in sigmoid_bwd.wgsl.

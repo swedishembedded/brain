@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // `model::gdn::gdn_chunk_fwd` requires every per-token buffer (query/key/
 // value/decay-gate/beta) laid out CHUNK-MAJOR (`[n_chunks, B, H, C, D]`,

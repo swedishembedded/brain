@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Vector-quantization nearest-codebook assignment (Euclidean). For each of M
 // query vectors x[M,D], find the codebook entry cb[K,D] minimising squared

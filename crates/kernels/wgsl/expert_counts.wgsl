@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Load-balancing fractions used by the aux-loss gradient:
 //   f_e = (number of tokens routed to expert e) / (n_rows * top_k)

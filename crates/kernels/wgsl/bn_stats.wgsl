@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm training batch statistics for an NCHW tensor x[N,C,H,W].
 // Normalizes per-channel over (N,H,W): one invocation per channel c (C threads).

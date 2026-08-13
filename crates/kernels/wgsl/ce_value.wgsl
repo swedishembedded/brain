@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-position cross-entropy loss (for logging). out[n] = logsumexp - logit[target].
 // The host sums these and divides by n_rows to get the mean CE.

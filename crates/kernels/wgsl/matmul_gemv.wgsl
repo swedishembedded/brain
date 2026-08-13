@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Skinny-M matmul (out = x @ W^T), one WORKGROUP per output COLUMN — the decode-regime GEMM
+// @what  Skinny-M matmul (out = x @ W^T), one WORKGROUP per output COLUMN - the decode-regime GEMM
 // @how   64-thread workgroup tile, 1 barrier
 // @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32|bf16|f16
 // @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B4;
 //        header field, parsing deferred to B6)
 //

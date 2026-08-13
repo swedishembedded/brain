@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GroupNorm backward w.r.t. beta, NCHW — spec
+// @what  GroupNorm backward w.r.t. beta, NCHW - spec
 // @how   one thread per output element, 3 nested serial reductions
 // @opt   1
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GroupNorm backward w.r.t. beta, NCHW. One invocation per channel
 // (C threads):

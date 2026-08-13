@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Row softmax, one WORKGROUP per row — the long-context attention variant
+// @what  Row softmax, one WORKGROUP per row - the long-context attention variant
 // @how   64-thread workgroup tile, 3 barriers
 // @opt   4
 // @cpu   no
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row softmax, one WORKGROUP per row — the long-context attention variant.
 //

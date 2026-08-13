@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-mask reductions for the SAM-style segmentation objective (sigmoid focal
 // loss + dice loss), over `n_masks` masks of `hw` pixels each (row-major

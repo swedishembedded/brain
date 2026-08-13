@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  MoE combine backward, part 2 — gradient w.r.t
+// @what  MoE combine backward, part 2 - gradient w.r.t
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // MoE combine backward, part 2 — gradient w.r.t. the gate weight of one expert:
 //   d_gate[t, e_idx] = sum_c expert_out_e[t,c] * d_moe_acc[t,c]

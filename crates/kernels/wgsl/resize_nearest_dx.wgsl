@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Nearest-neighbour resize INPUT gradient, NCHW.
 //   dy : [N, C, Ho, Wo]

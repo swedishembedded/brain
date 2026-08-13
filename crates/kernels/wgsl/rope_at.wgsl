@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  RoPE (forward) at an EXPLICIT absolute position — the decode-step twin of rope_base
+// @what  RoPE (forward) at an EXPLICIT absolute position - the decode-step twin of rope_base
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // RoPE (forward) at an EXPLICIT absolute position — the decode-step twin of
 // rope_base. Identical math (HF/Qwen "half-split" GPT-NeoX, configurable base

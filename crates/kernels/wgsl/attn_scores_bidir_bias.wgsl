@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Bidirectional (non-causal) attention scores with an additive per-head bias and a CONFIGURABLE scalar scale — the spatial-attention primitive for GenieRedux's ST transformer
+// @what  Bidirectional (non-causal) attention scores with an additive per-head bias and a CONFIGURABLE scalar scale - the spatial-attention primitive for GenieRedux's ST transformer
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Bidirectional (non-causal) attention scores with an additive per-head bias
 // and a CONFIGURABLE scalar scale — the spatial-attention primitive for

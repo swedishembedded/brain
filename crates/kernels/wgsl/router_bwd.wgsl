@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Router backward: gradient w.r.t. the router logits, combining three paths.
 // One invocation per token row. No cap on E - `pr[e]`/`dp[e]` are recomputed

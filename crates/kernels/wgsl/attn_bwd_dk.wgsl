@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Attention backward, step 4 — gradient w.r.t
+// @what  Attention backward, step 4 - gradient w.r.t
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Attention backward, step 4 — gradient w.r.t. k (post-RoPE):
 //   d_k[b,j,h,d] = scale * sum_{i>=j} d_score[b,h,i,j] * q[b,i,h,d]

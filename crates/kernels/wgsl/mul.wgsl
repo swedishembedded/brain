@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Elementwise Hadamard product — spec
+// @what  Elementwise Hadamard product - spec
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Elementwise Hadamard product.
 //   y[i] = a[i] * b[i]         one invocation per element, i in [0, n)

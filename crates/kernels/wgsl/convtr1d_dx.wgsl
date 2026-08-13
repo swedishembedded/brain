@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 1D convolution input gradient (gather form). The adjoint of
 // convtr1d.wgsl: forward maps li -> lo = li*stride - pad + kw*dilation, so the

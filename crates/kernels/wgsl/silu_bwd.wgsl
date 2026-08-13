@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  SiLU backward — gradient w.r.t
+// @what  SiLU backward - gradient w.r.t
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // SiLU backward — gradient w.r.t. the pre-activation `x`.
 //   s    = sigmoid(x) = 1 / (1 + exp(-x))

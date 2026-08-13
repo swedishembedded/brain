@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Per-row (per-sample) scalar scale on a row-major [N, M] tensor — spec
+// @what  Per-row (per-sample) scalar scale on a row-major [N, M] tensor - spec
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-row (per-sample) scalar scale on a row-major [N, M] tensor. total =
 // N*M, m = M.

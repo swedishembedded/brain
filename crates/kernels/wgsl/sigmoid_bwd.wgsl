@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Sigmoid backward:  dx = dy * s * (1 - s),  s = sigmoid(x).
 // Takes the PRE-activation `x` (not the output `s`), matching the convention of

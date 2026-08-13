@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // MoE combine for one expert:
 //   accumulate == 0 :  acc[t, c]  = gate[t, e_idx] * src[t, c]   (initialise)

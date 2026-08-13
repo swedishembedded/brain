@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Fold `matmul_dw_reg_splitk`'s per-slice partials into the weight gradient:
 //   dW[i] += sum_{s} partial[s * rc + i]

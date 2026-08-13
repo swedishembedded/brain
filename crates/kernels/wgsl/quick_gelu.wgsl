@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // QuickGELU activation (OpenAI CLIP's sigmoid approximation):
 //   out[i] = x * sigmoid(1.702 * x)

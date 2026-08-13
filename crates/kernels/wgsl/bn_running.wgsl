@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm momentum update of running statistics. One invocation per channel.
 //   run_mean = (1-m)*run_mean + m*mean

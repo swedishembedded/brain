@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of arcface_margin.wgsl w.r.t. the cosine table.
 //

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Decomposed relative-position bias, step 2 - fold the hoisted intermediates
 // into an already-computed score slab, IN PLACE:

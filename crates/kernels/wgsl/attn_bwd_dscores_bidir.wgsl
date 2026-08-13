@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Bidirectional attention backward, step 1 — gradient through (probs @ v) and the softmax
+// @what  Bidirectional attention backward, step 1 - gradient through (probs @ v) and the softmax
 // @how   one thread per output element, 4 nested serial reductions
 // @opt   1
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Bidirectional attention backward, step 1 — gradient through (probs @ v) and the
 // softmax. Non-causal (loops over all j; cf. attn_bwd_dscores.wgsl j<=i).

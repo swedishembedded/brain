@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 2D convolution forward (ConvTranspose2d, bias-free), NCHW, square
 // KxK, WITH grouping + dilation. Used for decoder upsampling (SAM 2's mask

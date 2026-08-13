@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // SwiGLU activation (Kronos FFN): out = silu(a) * b, elementwise, where
 // silu(x) = x * sigmoid(x) and a = w1(x), b = w3(x). One invocation per element.

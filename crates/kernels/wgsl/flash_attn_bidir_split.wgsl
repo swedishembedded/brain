@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Flash attention (bidirectional self-attention), LANE-SPLIT across head_dim.
 // Same math as flash_attn_bidir.wgsl (online softmax, K/V streamed through

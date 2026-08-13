@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Register-tiled matmul — same math as matmul.wgsl (out = x @ Wᵀ), sized for a COMPUTE-bound discrete GPU
+// @what  Register-tiled matmul - same math as matmul.wgsl (out = x @ Wᵀ), sized for a COMPUTE-bound discrete GPU
 // @how   register block per thread, 256-thread workgroup tile, 2 barriers
 // @opt   5
 // @cpu   native-only
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Register-tiled matmul — same math as matmul.wgsl (out = x @ Wᵀ), sized for a
 // COMPUTE-bound discrete GPU.

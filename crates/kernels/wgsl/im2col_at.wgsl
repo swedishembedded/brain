@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  im2col over a RANGE of output positions — `im2col.wgsl` with a `[pos0, pos0+cnt)` window, so a conv can be lowered to a GEMM in spatial chunks
+// @what  im2col over a RANGE of output positions - `im2col.wgsl` with a `[pos0, pos0+cnt)` window, so a conv can be lowered to a GEMM in spatial chunks
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // im2col over a RANGE of output positions — `im2col.wgsl` with a `[pos0,
 // pos0+cnt)` window, so a conv can be lowered to a GEMM in spatial chunks.

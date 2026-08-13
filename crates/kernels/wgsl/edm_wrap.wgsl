@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // EDM output wrap for the DIAMOND sampler (denoiser.py::wrap_model_output):
 //   d[i] = quantize(clamp(coef[0]*x[i] + coef[1]*f[i], -1, 1))

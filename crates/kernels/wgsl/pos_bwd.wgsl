@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Positional-embedding backward (scatter):
 //   dpos[i, c] += sum_b d_x[(b*T + i)*D + c]      for i in 0..T

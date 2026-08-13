@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Row scatter by index — the inverse of the `embed` row-gather for UNIQUE indices
+// @what  Row scatter by index - the inverse of the `embed` row-gather for UNIQUE indices
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Row scatter by index — the inverse of the `embed` row-gather for UNIQUE
 // indices: out[idx[i], :] = src[i, :]. Rows of `out` not named by any index are

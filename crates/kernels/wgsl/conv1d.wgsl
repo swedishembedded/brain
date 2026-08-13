@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 1D convolution forward (bias-free), NCL layout, with grouping + dilation.
 // The workhorse for the TTS audio stack (codec conv encoder/decoder, ECAPA

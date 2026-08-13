@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 //   decay_mask[row,i,j] = exp(g_cs[row,i] - g_cs[row,j])   if j <= i
 //                       = 0                                 otherwise

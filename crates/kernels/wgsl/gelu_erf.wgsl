@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Exact (erf-based) GELU, matching torch's default `F.gelu`:
 //   gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))

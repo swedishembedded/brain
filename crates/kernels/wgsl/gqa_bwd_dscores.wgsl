@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GQA attention backward, step 1 — gradient through (probs @ v) and softmax
+// @what  GQA attention backward, step 1 - gradient through (probs @ v) and softmax
 // @how   one thread per output element, 3 nested serial reductions
 // @opt   1
 // @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // GQA attention backward, step 1 — gradient through (probs @ v) and softmax.
 // One invocation per (b,h,i):

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS backward, stage 1: per-pixel count of gradient-contributing gaussians
 // (same walk as the forward compositing: alpha >= 1/255, stop at T <= 1e-4).

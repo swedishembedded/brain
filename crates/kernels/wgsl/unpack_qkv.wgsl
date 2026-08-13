@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Inverse of pack_qkv: split one fused [seq, 3*d_model] gradient buffer (laid out
 // per token as [ q(d) | k(d) | v(d) ]) back into three contiguous [seq, d_model]

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Decomposed relative-position bias, step 1 - the q·R hoist.
 //

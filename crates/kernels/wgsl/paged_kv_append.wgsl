@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Write one token's projected K (or V) into a paged KV block pool at a physical
 // block + offset: pool[(block*block_size + offset)*kv_stride + c] = src[c].

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Embedding gather over a VOCAB TILE: x[t,c] = emb[token[t], c], but `emb` is
 // bound to a sub-range covering rows [v0, v0+v_count) of the full table, so a

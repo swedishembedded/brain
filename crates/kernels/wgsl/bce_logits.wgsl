@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Binary cross-entropy with logits, per (anchor, class), against a soft target
 // t in [0,1]. Numerically stable form:

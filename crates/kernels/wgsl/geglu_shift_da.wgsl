@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // geglu_shift backward w.r.t. `h`:
 //   dh[i] = dy[i] * (g[i] + 1) * gelu'(h[i])

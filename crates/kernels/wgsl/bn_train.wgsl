@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm forward using BATCH statistics, NCHW tensor x[N,C,H,W].
 //   y = (x - mean[c]) / sqrt(var[c] + eps) * gamma[c] + beta[c],  eps = 1e-5

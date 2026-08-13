@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Pack one attention operand head-major-contiguous for GEMM attention:
 //   out[ho*head_stride + i*hd + d] = src[i*src_stride + src_off + (ho/group)*hd + d] * scale

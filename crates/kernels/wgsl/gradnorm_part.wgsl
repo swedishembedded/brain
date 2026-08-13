@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-parameter sum of squares of its gradient, as a COOPERATIVE tree reduction:
 // `n_wg` workgroups of 64 threads split one gradient buffer, each writing one

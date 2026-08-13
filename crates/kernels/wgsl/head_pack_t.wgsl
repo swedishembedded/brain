@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // As head_pack but TRANSPOSED per head: out[ho*head_stride + d*rows + i] = src[...].
 // The apply GEMM `ctx = probs @ V` runs as A·Bᵀ with B = Vᵀ[hd, rows], so V

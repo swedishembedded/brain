@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Conv-as-GEMM epilogue: per-channel affine (BN-eval collapsed) + activation.
 //   dst[c, hw] = act( src[c, hw] * sb[2c] + sb[2c+1] )

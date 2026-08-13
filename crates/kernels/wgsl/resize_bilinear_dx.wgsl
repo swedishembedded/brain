@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Bilinear resize INPUT gradient, NCHW.
 //   dy : [N, C, Ho, Wo]

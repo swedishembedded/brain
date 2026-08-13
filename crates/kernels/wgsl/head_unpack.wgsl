@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Inverse of head_pack: scatter per-head [rows, hd] context blocks back into
 // the row-major [rows, d_model] stream the output projection consumes:

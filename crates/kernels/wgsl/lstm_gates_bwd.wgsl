@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of lstm_gates.wgsl. Given upstream grads dh (wrt h_out) and dc_next
 // (wrt c_out, from the next timestep), the pre-activations `pre`, previous cell

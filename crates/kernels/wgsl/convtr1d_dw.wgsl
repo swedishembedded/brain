@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 1D convolution weight gradient. ACCUMULATES into a pre-zeroed
 // buffer.

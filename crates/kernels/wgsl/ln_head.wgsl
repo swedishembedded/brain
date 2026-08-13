@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Strided per-head LayerNorm (QK-norm): normalize each length-`head_dim` head
 // vector inside the q or k region of a fused [rows, row_stride] buffer, in

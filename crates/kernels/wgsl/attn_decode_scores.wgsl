@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Decode-step attention scores: a SINGLE query (the new token) against all `t`
 // cached keys, GQA-aware. scores[h, j] = (q[h] . kcache[j, kvhead(h)]) * scale,

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS backward, stage 2: replay each pixel's compositing walk and emit one
 // gradient record per contributing gaussian (gsplat blend-backward math).

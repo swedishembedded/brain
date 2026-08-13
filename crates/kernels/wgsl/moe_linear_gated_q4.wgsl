@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant q4
+// @dtype f32
 //
 // The q4 counterpart of `moe_linear_gated_i8.wgsl`, in the SAME naive tier as
 // that kernel (one thread per output element, no workgroup tiling, no

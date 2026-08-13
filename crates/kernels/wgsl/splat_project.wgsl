@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // 3DGS projection (gsplat-parity EWA): one invocation per gaussian.
 // World mean -> camera -> 2D mean + 2D covariance (perspective Jacobian with

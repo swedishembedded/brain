@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // RMSNorm backward w.r.t. x, with a RUNTIME epsilon (eps-parameterized twin of
 // rmsnorm_dx, which hardcodes 1e-6). Forward: y_c = w_c·x_c·r, r=1/sqrt(mean(x²)+eps).

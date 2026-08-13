@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 //   out[i] = alpha * x[x_off + i] * s[s_off + i / m],   i in [0, total)
 //

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // `bmm.wgsl`'s accumulating twin: identical addressing and `Params` contract
 // (see that file's header for the full contract, including `trans_a`/

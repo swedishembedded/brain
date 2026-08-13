@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // t_mat[row,i,i] += 1.0, for every row in [0,bhc) and i in [0,c_len) — the
 // final step of `torch_chunk_gated_delta_rule`'s UT-transform, applied after

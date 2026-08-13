@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Residual add:  dst[i] += src[i].  Elementwise.
 

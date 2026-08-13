@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Software-pipelined register-tiled matmul (out = x @ Wᵀ). Same math and same
 // 128x128 / 8x8 tiling as matmul_reg.wgsl, but it HIDES global-load latency.

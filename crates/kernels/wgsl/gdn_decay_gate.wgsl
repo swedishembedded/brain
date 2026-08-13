@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gated DeltaNet's (Qwen3.5-35B-A3B linear-attention layer) raw log-decay
 // gate, `transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py`'s

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GLM/DeepSeek-V3 "noaux_tc" MoE router (forward). Per token row:
 //   s[e]      = sigmoid(logit[e])                     (combine score; -> probs)

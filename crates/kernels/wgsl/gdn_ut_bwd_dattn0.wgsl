@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Reverse-mode counterpart of `gdn_ut_step.wgsl`'s forward substitution row:
 //   t_mat[row,i,j] = attn0[row,i,j] + sum_{k=j+1}^{i-1} attn0[row,i,k]*t_mat[row,k,j]   for j < i

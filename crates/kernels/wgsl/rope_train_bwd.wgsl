@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // RoPE backward: gradient is the inverse (transpose) rotation, i.e. rotate by
 // -angle. Given d_out in the q/k region of d_qkv, overwrite it with d_in.

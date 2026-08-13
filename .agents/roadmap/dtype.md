@@ -1916,3 +1916,203 @@ matching B4's own bf16 deferral there); a machine-parsed `@tpl` kernel-header
 field (B6); native f16 COMPUTE (`enable f16;`, `NumericSupport.f16: true`,
 B11) - explicitly NOT this phase's job, confirmed still deferred.
 
+## B6 - @dtype header, CI matrix
+
+**Goal.** Turn "does this kernel support bf16/f16 weight STORAGE" into a
+STATED, machine-checked fact for all 400 kernels, not just the 3 B4/B5
+templatized - a new kernel landing without considering this becomes a CI
+failure, not a silent gap.
+
+**Value grammar** (`kernelmeta.DTYPE_VALUES`): `f32` (default - no float
+storage binding worth templatizing, or a tiny gain/bias vector where bf16/f16
+storage would be numerically-questionable and VRAM-irrelevant - norms,
+per-channel affine params); `n/a` (literally no templatable binding exists -
+every storage binding is already `array<u32>`, pure index/scan/sort kernels);
+`f32|bf16` / `f32|bf16|f16` (a real storage tier wired through
+`kernels::template::dtype_variant`, B4/B5).
+
+**Validation added to `kernelmeta.py`** (`dtype_errors`, called from
+`gen-kernel-table.py`'s existing `cross_check`, making this the FIFTH
+mechanically cross-checked field alongside `@cpu`/`@gpu`/`@quant`/`@opt 5`):
+
+- `n/a` is auto-verified by `has_f32_storage_binding` - every storage binding
+  in the comment-stripped source must already be `array<u32>`; a kernel with
+  even one `array<f32>` storage binding cannot claim `n/a`.
+- `f32|bf16[|f16]` is auto-verified by `templatable_bindings` - at least one
+  storage binding must be declared `array<f32>` AND every `<binding>[...]`
+  load of it must already index with a bare identifier (regex `^[A-Za-z_]\w*$`)
+  - the exact hard precondition `kernels::template::dtype_variant`'s
+  `rewrite_packed_loads` enforces at the Rust level (B4/B5), checked here in
+  Python ahead of any compile.
+- An unrecognised value is rejected outright.
+
+**Proof the validation is real, TDD-style (done BEFORE the bulk seed pass,
+per the task's own instruction).** Temporarily edited `scan_add.wgsl` (one of
+the 6 genuinely `n/a` kernels - only `array<u32>` storage bindings) to declare
+`// @dtype f32|bf16` and ran `python3 scripts/build/kernelmeta.py` directly
+(the module's own new `_self_check`/`__main__` entry point, added specifically
+so this script is runnable standalone, not just importable): **RED**, printed
+exactly `scan_add.wgsl: @dtype 'f32|bf16' claims a bf16/f16 storage tier but
+no storage binding is both declared array<f32> and indexed only by a bare
+identifier ...`. Reverted the file (confirmed byte-identical to HEAD via
+`git diff --stat`) and re-ran: **GREEN**, `kernelmeta @dtype validation: 400
+kernel(s) scanned, 0 problems`. Also spot-checked the three real templatized
+kernels' true `f32|bf16|f16` declarations pass (`dtype_errors` returns `[]`
+for `matmul`/`matmul_gemv`/`matmul_reg3`), and that `add.wgsl` (a real `f32`
+kernel) correctly REJECTS a false `n/a` claim and an unrecognised value.
+
+**Seeding pass** (`scripts/build/seed-kernel-meta.py`, extended, not
+rewritten). The script used to be all-or-nothing per file (skip entirely once
+`@what` exists); it is now idempotent FIELD BY FIELD: a file with no `@what`
+at all still gets the full 8-field block (the original bootstrap path,
+unaffected); a file with `@what` but missing `@dtype` (all 400 kernels, before
+this phase ran) gets ONLY `// @dtype <value>` inserted right after its
+existing `// @quant` line via the new `insert_dtype_field`, leaving every
+other line byte-identical. The value is `kernelmeta.dtype_value(name, text)`:
+`DTYPE_TEMPLATIZED[name]` (`matmul`/`matmul_gemv`/`matmul_reg3` -
+`"f32|bf16|f16"`, hand-set - this is a fact about what
+`crates/kernels/src/template.rs` is wired for, not derivable from a kernel's
+own source) if present, else the mechanical `dtype_default` (`n/a` if zero
+`array<f32>` storage bindings, `f32` otherwise). Ran for real (dry-run first
+to confirm the plan: `seeded 0, dtype-added 400, already tagged 0`, matching
+expectations exactly), then for real: `seeded 0, dtype-added 400, already
+tagged 0`. Counts landed: **`n/a` 6** (`decode_advance`, `scan_add`,
+`scan_block`, `sort_hist`, `sort_scatter`, `splat_tile_ranges` - confirmed by
+hand via `grep -L` for any `array<f32>` storage declaration across the whole
+`wgsl/` tree before writing any code, so the mechanical rule's target set was
+known, not guessed at), **`f32` 391**, **the 3 templatized kernels
+`f32|bf16|f16`** - 400 total.
+
+**`gen-kernel-table.py`**: `FIELDS` grew an eighth entry, `"dtype"`; the
+generated table gained a `dtype` column (escaped via the existing `esc()`,
+since `f32|bf16|f16`'s pipes would otherwise break a markdown table cell) plus
+a new prose paragraph explaining the column and its `n/a`/tiered counts (read
+live off the same `counts` dict the other column summaries already use, so
+they cannot drift from the real numbers). `docs/reference/kernels.md`
+regenerated; `gen-kernel-table.py --check` passes clean (0 stale, 0 invalid).
+
+**`crates/wgsl-cpu/tests/compile_all.rs`** extended with a second test,
+`dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason` - the
+cross-product this phase's brief asked for. For every kernel whose `@dtype`
+declares a tier beyond `f32`/`n/a`, it parses the binding name off the
+kernel's own `// @tpl <binding> -> ...` header line (B4 added this field and
+explicitly deferred parsing it "to B6" in its own comment - this is that
+parse), calls `kernels::template::dtype_variant` for each declared tier, and
+checks whether the CPU JIT actually produced runnable code. `Jit::new`'s own
+`Ok`/`Err` cannot answer that on its own - a >1-barrier kernel is a documented
+SOFT skip inside `Jit::new` (an `eprintln`, that kernel's slot left `None`),
+never a hard `Err` - so a small helper (`kernel_is_compiled`) calls the
+compiled function over an EMPTY invocation range (`start == end == 0`) and
+`catch_unwind`s the panic `Jit::run` raises for an uncompiled kernel; the
+entry block for both the plain and work-group CPU-JIT execution paths
+unconditionally loads each storage binding's base pointer before the
+per-invocation loop runs (checked by reading `crates/wgsl-cpu/src/lib.rs`
+directly, not assumed), so that needs real backing memory (16 null-pointer
+slots, comfortably above the documented <=8-storage-buffer ceiling), but
+nothing beyond that base pointer is ever read or written once the loop body
+itself never executes with an empty range - a safe way to probe true
+compiled-ness through the crate's existing public API alone (`index_of`/
+`run`), with no change to `crates/wgsl-cpu/src/lib.rs` itself (out of this
+phase's scoped file list). The expected result per variant is derived, not
+guessed: `dtype_variant` only rewrites a binding's declaration/loads, never
+control flow, so a variant's barrier count is always identical to its base
+kernel's - `matmul`/`matmul_gemv` (<=1 barrier) are expected to truly compile;
+`matmul_reg3` (3 barriers) is expected to hit the documented, harmless
+CPU-JIT limitation B4/B5 already proved via `select::candidates` filtering
+`RegisterTiled` out on CPU caps (`register_tiled_{bf16,f16}_is_not_reachable_
+on_the_cpu_backend`) - any OTHER mismatch fails the test. **RED->GREEN proven
+directly**: temporarily forced `expect_compiles = true` unconditionally,
+re-ran - failed with exactly the two expected lines (`matmul_reg3#w=bf16`/
+`#w=f16`, "expected it to compile but the JIT compiled = false"); reverted,
+re-ran - green. `all_kernels_compile` (the pre-existing base-kernel
+non-regression check, unchanged) still covers all 400 base variants.
+`brain-wgsl-cpu`'s `Cargo.toml` gained a test-only `brain-backend-api`
+dev-dependency (needed for `DType`; `brain-kernels` already depends on it
+directly, so this is a leaf edge, not a cycle).
+
+**`crates/kernels/src/lib.rs` module doc corrected.** The old text ("fp32-only
+... no atomics/subgroups/f16") was stale and misleading now that B4/B5 landed
+real storage-tier bf16/f16 support. Rewritten to state the accurate position
+precisely, per B1's established storage-vs-compute distinction: fp32 COMPUTE
+is the universal baseline every kernel supports; a small, explicitly-declared,
+machine-checked subset (the 3 kernels above) additionally supports bf16/f16
+WEIGHT STORAGE on top of that baseline, meaning the packed bytes can be held
+and decoded to f32 with plain integer WGSL, not that the device computes in
+that format natively; atomics and subgroups remain genuinely absent
+workspace-wide - not overclaimed either direction.
+
+**A real, pre-existing, out-of-band defect found and fixed while regenerating
+`docs/reference/kernels.md` (not otherwise in this phase's scope, but directly
+in the path of this phase's own required step 7).** `scripts/build/
+gen-kernel-table.py`'s own static prose strings (`LEVELS`, the cpu/gpu/npu/
+quant explanation paragraphs, `NPU_CELL`/`QUANT_CELL`'s blank-cell glyph) and
+106 individual kernels' `// @what`/`// @how` header lines already contained
+literal em dashes (U+2014) in the committed tree - a latent defect from an
+earlier phase that the checked-in `docs/reference/kernels.md` never exposed,
+because the table had not been regenerated since those em dashes were
+introduced (the CHECKED-IN doc still used plain hyphens throughout, confirmed
+via `git show HEAD:docs/reference/kernels.md | grep -cP '\x{2014}'` -> `0`).
+Regenerating the table as this phase's step 7 requires would have silently
+reintroduced ~106+ forbidden em dashes into a file this phase commits - caught
+by grepping the ACTUAL diff (not just file contents, matching B5's own
+"diff hunks, not whole-file" precedent), since `git diff -- docs/reference/
+kernels.md` showed rows changing from plain hyphens to em dashes even though
+the row's OWN text was untouched by this phase - a direct consequence of the
+generator replacing the whole table block verbatim. Fixed at the root: all 24
+pre-existing em dashes in `gen-kernel-table.py`'s own strings, all 4 in
+`kernelmeta.py`'s pre-existing docstrings, and the 1 in `seed-kernel-meta.py`'s
+docstring converted to plain `" - "` (or bare `"-"` for the two single-glyph
+table-cell placeholders); the 106 kernel `@what`/`@how` header lines fixed by
+a scripted character-only substitution (space + U+2014 + space -> ` - `,
+verified first that every occurrence was space-surrounded, nothing else on
+those lines touched).
+Left ALONE: any em dash in a kernel's free-form prose paragraph BELOW its
+header block (not pulled into any generated field, out of this phase's
+"header comments only" scope, matching B5's own precedent of leaving untouched
+pre-existing prose as-is) - confirmed zero em dashes in this phase's actual
+added diff lines (`git diff -- crates/kernels/wgsl/*.wgsl | grep '^\+' | grep
+-cP '\x{2014}'` -> `0`) and zero anywhere in the final `docs/reference/
+kernels.md` (`grep -cP '\x{2014}' docs/reference/kernels.md` -> `0`).
+
+**Verification (all scoped, no `make release`/`make test`/bare workspace
+build):**
+`bash -c 'python3 scripts/build/gen-kernel-table.py --check'` - "kernel table
+up to date (400 kernels, all fields declared)".
+`python3 scripts/build/kernelmeta.py` - "kernelmeta @dtype validation: 400
+kernel(s) scanned, 0 problems" (its own direct, standalone entry point, new
+this phase).
+`python3 scripts/build/seed-kernel-meta.py --dry-run` - "seeded 0,
+dtype-added 0, already tagged 400 (dry run)" (fully idempotent after the real
+pass).
+`cargo test -p brain-kernels` - 19/19 (unchanged from B5 - this phase touched
+only the module doc, no test/behaviour change).
+`cargo test -p brain-wgsl-cpu --test compile_all` - 2/2
+(`all_kernels_compile` unchanged;
+`dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason` new,
+exercises 6 variants - 2 tiers x 3 templatized kernels - RED->GREEN proven by
+hand as described above).
+`cargo build -p brain-kernels` - clean.
+`cargo clippy -p brain-kernels -p brain-wgsl-cpu --lib --tests --no-deps` -
+zero new warnings in this phase's own files (one `trim_split_whitespace` hit
+in `compile_all.rs`'s own new `tpl_binding` fixed before committing; the
+handful of pre-existing warnings in `crates/wgsl-cpu/tests/{math_builtins,
+workgroup_locals}.rs` predate this phase and were not touched).
+`grep -rP '\x{2014}'` on the actual staged diff (added lines only, across
+every file this phase touched) - **0** (checked repeatedly through the
+em-dash cleanup above; the very last full-diff sweep, `git diff | grep '^\+'
+| grep -cP '\x{2014}'`, returned `0`).
+`df -h .` before/after - 104G -> ~97G free (the ~7G delta is pre-existing
+cargo build-cache growth from compiling `brain-wgsl-cpu`'s dependency tree
+- naga/cranelift - for the FIRST time in this session, not from this phase's
+own file edits, which are 400 one-line text insertions plus a handful of
+small script/doc/test edits).
+
+**Deferred, explicitly out of scope** (per the plan): migrating any model
+crate's linear call sites onto the bf16/f16 storage tiers (B7); a fourth or
+later templatized kernel (whoever adds one must also hand-set its `@dtype`
+and `@tpl` binding - `dtype_errors`/the `compile_all.rs` cross-product will
+refuse a false claim, but nothing here AUTO-discovers a good templatization
+candidate); fixing em dashes in kernel header prose PARAGRAPHS below the
+`@`-tag block (out of this phase's "header comments only" scope, flagged
+above, left for whoever next touches those specific files' prose).
+

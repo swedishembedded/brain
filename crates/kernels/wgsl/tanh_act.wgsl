@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Tanh forward:  y = tanh(x). Final waveform activation in several vocoders.
 // Named tanh_act to avoid colliding with the WGSL builtin `tanh`. Backward in

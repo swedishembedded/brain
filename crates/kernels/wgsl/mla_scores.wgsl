@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // MLA (Multi-head Latent Attention) scores (forward), for GLM-5.2.
 //   scores[b,h,i,j] = scale * ( sum_dn q_pass[b,i,h,dn]*k_pass[b,j,h,dn]

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Paged decode-step attention apply: context = probs-weighted sum of the cached
 // values, each value addressed through the block table.

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Batched paged decode apply over an INT8 pool: like paged_decode_apply_batched
 // but each cached value is dequantised (int8 * per-(token,kv-head) scale) on read.

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Mean-squared-error gradient w.r.t. the predictions (analogue of ce_grad):
 //   d_pred[i] = 2 * (pred[i] - target[i]) / n

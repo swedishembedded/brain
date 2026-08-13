@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Bilinear resize forward, NCHW, arbitrary output size.
 //   x : [N, C, H,  W ]

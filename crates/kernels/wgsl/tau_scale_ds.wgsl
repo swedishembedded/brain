@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // tau_scale backward w.r.t. the per-(head,token) scale `s`:
 //   ds[h, row] = sum_d d_out[row, h, d] * in[row, h, d]

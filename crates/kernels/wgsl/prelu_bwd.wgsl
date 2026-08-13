@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  PReLU backward, NCHW — produces BOTH gradients in one pass
-// @how   one thread per channel, 2 nested serial loops (N x H*W) — the deliberately-naive CPU fallback of prelu_bwd_wg
+// @what  PReLU backward, NCHW - produces BOTH gradients in one pass
+// @how   one thread per channel, 2 nested serial loops (N x H*W) - the deliberately-naive CPU fallback of prelu_bwd_wg
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // PReLU backward, NCHW — produces BOTH gradients in one pass.
 // The PORTABLE reference: barrier-free, so it runs on every backend including

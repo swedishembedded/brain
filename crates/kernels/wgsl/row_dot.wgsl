@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Generic per-row dot product, with an independent flat offset into each
 // input and an `alpha` scale:

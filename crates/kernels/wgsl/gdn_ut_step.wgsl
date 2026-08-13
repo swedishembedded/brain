@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // One row `i` of `torch_chunk_gated_delta_rule`'s forward substitution:
 //   attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)

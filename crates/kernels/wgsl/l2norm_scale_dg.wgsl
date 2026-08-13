@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward w.r.t. the per-dim scale g for l2norm_scale. g is shared across rows,
 // so its gradient is the column sum of dy * normalized-x:

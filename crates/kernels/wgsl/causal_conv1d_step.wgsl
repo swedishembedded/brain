@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // One decode step of a causal depthwise Conv1d (`groups = C`, i.e. `Cin/G=1`,
 // matching `conv1d.wgsl`'s NCL layout specialised to `L=1`): given the current

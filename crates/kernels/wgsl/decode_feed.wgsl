@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Feed the greedy head's output back as the next decode step's input, on the
 // device (A4): tok[i] = u32(argmax[i]), and record the token into the window

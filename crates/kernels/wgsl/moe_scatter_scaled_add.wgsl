@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // The scatter half of row-compacted sparse MoE (see `model::moe`'s
 // `expert_fwd_compact`): `acc[idx[i], c] += gate[idx[i], e_idx] * src[i, c]`

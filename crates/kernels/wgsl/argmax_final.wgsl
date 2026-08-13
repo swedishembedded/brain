@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Row-wise argmax, FINAL stage: fold each row's P partial (value, index) pairs.
 //

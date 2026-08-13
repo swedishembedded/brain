@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 2D convolution INPUT gradient (gather form, no scatter/atomics).
 // The adjoint of convtr2d.wgsl.

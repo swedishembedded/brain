@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Append a batch of new tokens' K (or V) into the paged pool: sequence b writes
 // src[b, :] into pool at its per-sequence (blocks[b], offsets[b]).

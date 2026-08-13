@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Residual splice (forward): copy a compact `[n]` source block into `dst`
 // starting at flat element offset `base`:

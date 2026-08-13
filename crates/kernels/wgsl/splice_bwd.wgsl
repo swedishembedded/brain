@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Residual splice (backward): route the residual-stream gradient at the spliced
 // region into the compact image-embedding gradient, and ZERO it in the residual

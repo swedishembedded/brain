@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gradient of dfl_loss w.r.t. logits. The per-side loss is cross-entropy of the
 // softmax distribution against the two-hot soft target

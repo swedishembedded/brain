@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Distribution Focal Loss value per assigned anchor. For each of the 4 sides,
 // the continuous target distance t splits across adjacent bins:

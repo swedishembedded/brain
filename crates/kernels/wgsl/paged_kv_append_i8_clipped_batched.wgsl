@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Append a batch of new tokens' K (or V) into an INT8 paged pool, capping
 // each kv-head's per-token online absmax scale at a CALIBRATED ceiling

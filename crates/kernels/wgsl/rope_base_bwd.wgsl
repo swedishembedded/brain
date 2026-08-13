@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // RoPE backward for the half-split (HF/Qwen) convention (see `rope_base.wgsl`).
 // The gradient is the transpose (inverse) rotation, i.e. rotate by -θ. Given

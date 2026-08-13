@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Leaky ReLU forward:  y = x        if x >= 0
 //                      y = slope*x  otherwise.

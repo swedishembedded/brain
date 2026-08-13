@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm backward w.r.t. x. One invocation per element (N*C*H*W threads).
 // With M = N*H*W, xhat = (x-mean)/sqrt(var+eps):

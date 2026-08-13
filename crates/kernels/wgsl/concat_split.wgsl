@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Concat backward / channel-slice copy. Copies a contiguous channel range out of
 // a source-grad dy[N,Ctot,H,W] into da[N,Csrc,H,W], reading dy at channel

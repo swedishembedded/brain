@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward w.r.t. the additive score bias for attn_scores_{bidir,causal}_bias.
 // The bias is added directly to every score and is shared across the batch, so

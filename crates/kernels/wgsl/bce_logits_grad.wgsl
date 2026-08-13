@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gradient of bce_logits w.r.t. each logit z:
 //   dlogit = sigmoid(z) - t

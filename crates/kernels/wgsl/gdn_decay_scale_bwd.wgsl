@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_decay_scale.wgsl`:
 //   decay_scale[bh,i] = exp(g_cs[bh,c_len-1] - g_cs[bh,i])

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Nearest-neighbour x2 upsample backward, GATHER form. One invocation per INPUT
 // element (n,c,hi,wi). Each input pixel feeds the 2x2 output block

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Tiled 3DGS, stage 2: expand each visible gaussian into per-tile sort
 // instances at its scanned offset. Key = tile_id << depth_bits | depth_q,

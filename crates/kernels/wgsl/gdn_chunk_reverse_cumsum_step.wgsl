@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_chunk_cumsum_step.wgsl`'s per-chunk-row cumulative sum
 // `g_cs[row,i] = sum_{j<=i} g[row,j]`. The adjoint of a prefix sum is a

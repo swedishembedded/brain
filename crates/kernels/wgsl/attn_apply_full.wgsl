@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Attention output over ALL keys (non-causal), reading v from a SEPARATE value
 // buffer (not a fused qkv). Chronos-2 projects q/k/v into their own buffers.

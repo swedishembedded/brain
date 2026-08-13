@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Global grad-norm clip coefficient, computed on-device (no host round-trip):
 //   total = sqrt(sum_i norms[i]);  coef = min(1, max_norm/(total+1e-6)) * extra_scale

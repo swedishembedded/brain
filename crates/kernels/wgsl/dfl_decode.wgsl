@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // DFL decode: for each (anchor, side) softmax over `reg_max` logits then take
 // the expectation E = sum_i i * p_i. Logits laid out [A, 4, reg_max]; output

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype n/a
 //
 // Exclusive prefix scan, stage 2: add the (already exclusively scanned)
 // per-block totals back onto every element of the corresponding block.

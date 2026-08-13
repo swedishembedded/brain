@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Elementwise subtract:  out[i] = a[a_off + i] - b[b_off + i],  i in [0,total).
 // `a_off`/`b_off` let a caller subtract a CONTIGUOUS sub-range of a larger

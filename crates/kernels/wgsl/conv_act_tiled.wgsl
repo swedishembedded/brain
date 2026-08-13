@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Weight-staged fused conv -> per-channel affine -> activation. Same result as
 // conv_act.wgsl (including its `p.act` selector: 0 = identity, 1 = ReLU,

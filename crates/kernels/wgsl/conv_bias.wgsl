@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Fused conv2d + per-output-channel bias. Identical convolution to conv2d.wgsl
 // (bias-free, NCHW, square KxK, generic stride & implicit zero-pad), then adds

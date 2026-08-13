@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Paged decode-step attention scores: a single query vs all `t` cached keys,
 // where each key's physical address is resolved through the block table.

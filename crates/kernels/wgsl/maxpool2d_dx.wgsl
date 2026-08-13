@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Generic KxK max-pool INPUT gradient, NCHW, arbitrary STRIDE + symmetric pad.
 // GATHER form (no scatter / no atomics).

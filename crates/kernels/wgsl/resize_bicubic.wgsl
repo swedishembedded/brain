@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Bicubic resize forward (Catmull-Rom / cubic convolution, a = -0.75), NCHW.
 //   x : [N, C, H,  W ]   idx = ((n*C + c)*H  + hi)*W  + wi

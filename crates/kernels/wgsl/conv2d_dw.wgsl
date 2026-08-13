@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 2D convolution weight gradient. ACCUMULATES into a pre-zeroed buffer.
 //   dy : [N, Cout, Ho, Wo]

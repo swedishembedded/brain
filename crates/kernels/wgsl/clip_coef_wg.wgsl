@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Global grad-norm clip coefficient from `gradnorm_part`'s partial sums — the cooperative counterpart of `clip_coef.wgsl`
+// @what  Global grad-norm clip coefficient from `gradnorm_part`'s partial sums - the cooperative counterpart of `clip_coef.wgsl`
 // @how   64-thread workgroup tile, 1 barrier
 // @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Global grad-norm clip coefficient from `gradnorm_part`'s partial sums —
 // the cooperative counterpart of `clip_coef.wgsl`:

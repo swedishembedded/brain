@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Binary Spherical Quantization (Kronos), inference form. The reference
 // L2-normalizes the k-dim latent then takes the sign — but positive scaling

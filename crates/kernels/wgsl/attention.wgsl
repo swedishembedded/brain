@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Causal multi-head attention with online (numerically stable) softmax.
 // One invocation per (token t, head h): it streams over keys s = 0..=t,

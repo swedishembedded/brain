@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype n/a
 //
 // Advance the batched-decode metadata one sub-step, on the device (A4):
 // position and attended length grow by one, and the K/V write slot for the

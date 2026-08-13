@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Grouped+dilated 2D convolution WEIGHT gradient. ACCUMULATES into a pre-zeroed
 // buffer (same contract as conv2d_dw.wgsl).

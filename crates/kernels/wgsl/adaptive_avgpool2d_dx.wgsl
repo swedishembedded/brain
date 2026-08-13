@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // adaptive_avg_pool2d backward: scatter each output bin's gradient (divided by
 // its region size) back to the input pixels it covered. One invocation per INPUT

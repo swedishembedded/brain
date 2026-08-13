@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 2D convolution WEIGHT gradient. ACCUMULATES into a pre-zeroed
 // buffer (same contract as convtr1d_dw.wgsl / conv2d_gd_dw.wgsl).

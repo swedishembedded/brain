@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Softmax-over-strided-K backward.
 //   y  : [N, K, M]   the FORWARD OUTPUT (probabilities)

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Moondream partial RoPE (backward): the transpose of rope_partial, i.e. rotation
 // by -angle (a rotation's adjoint). Applied in place on the grad buffer; the

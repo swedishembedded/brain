@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Cross-entropy gradient w.r.t. logits, averaged over all positions:
 //   d_logits[n, v] = (softmax(logits[n])_v - [v == target[n]]) / n_rows

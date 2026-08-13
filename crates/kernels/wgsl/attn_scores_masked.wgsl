@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Attention scores with causal mask AND key-padding mask (no RoPE):
 //   scores[b,h,i,j] = -inf            if j > i              (causal)

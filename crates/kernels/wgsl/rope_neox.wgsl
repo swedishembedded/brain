@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Rotary position embedding, NeoX / half-split style (Chronos-2, GPT-NeoX,
 // Llama-HF): within a head the rotated pair is (j, j + head_dim/2), NOT the

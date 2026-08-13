@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Unpack the fit-time packed gaussian geometry [N*10] = {mean(3), scale(3),
 // quat(4)} into the separate forward-kernel buffers. One invocation per

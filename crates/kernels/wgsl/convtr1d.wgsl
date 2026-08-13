@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Transposed 1D convolution forward (ConvTranspose1d), NCL layout, grouping +
 // dilation. Used for codec-decoder / vocoder upsampling. PyTorch weight layout

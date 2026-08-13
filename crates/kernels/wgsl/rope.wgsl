@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Rotary position embedding, applied in place to either the q or k region of
 // the fused qkv buffer (select via base_off). Matches the Python apply_rope:

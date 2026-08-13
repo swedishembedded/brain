@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // GQA attention output, separate v buffer:
 //   ctx[b,i,h,d] = sum_{j<=i} probs[b,h,i,j] * v[b,j,hkv,d],  hkv = h / group.

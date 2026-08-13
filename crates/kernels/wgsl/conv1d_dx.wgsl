@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 1D convolution input gradient (gather form, no scatter / no atomics).
 //   dy : [N, Cout,     Lo]

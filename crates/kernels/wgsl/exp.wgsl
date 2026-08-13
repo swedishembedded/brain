@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Elementwise exponential:  y[i] = exp(x[i]).
 // Added for Gated DeltaNet's `exp(cumulative log-decay)` terms

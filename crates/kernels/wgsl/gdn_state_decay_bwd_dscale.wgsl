@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_state_decay.wgsl`'s `state[bh,dk,dv] *= decay_last` where
 // `decay_last = exp(g_cs[g_cs_off + bh*c_len + c_len-1])`. Two gradients flow

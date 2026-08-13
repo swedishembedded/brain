@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype n/a
 //
 // Exclusive prefix scan, stage 1 of the generic multi-pass scan: each
 // invocation owns one `block`-sized run of `data`, replaces it with its

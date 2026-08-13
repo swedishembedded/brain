@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Moondream per-(head, token) attention-temperature scale, broadcast over
 // head_dim:  out[row, h, d] = in[row, h, d] * s[h, row]

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Batched RoPE (forward). Rows are flattened [B*T, ...]; the rotation angle uses
 // the WITHIN-sequence position = row % T. Applied in place to the q or k region

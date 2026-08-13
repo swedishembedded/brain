@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Per-channel scale (forward) — the codec decoder's LayerScale and any elementwise per-channel gain
+// @what  Per-channel scale (forward) - the codec decoder's LayerScale and any elementwise per-channel gain
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-channel scale (forward) — the codec decoder's LayerScale and any
 // elementwise per-channel gain. y = x * scale[c], generic [rows, C, inner]

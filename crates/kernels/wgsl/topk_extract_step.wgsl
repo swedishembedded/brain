@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // One step of iterative top-K extraction: given this iteration's per-row
 // argmax index (from the existing argmax_part/argmax_final pair, run just

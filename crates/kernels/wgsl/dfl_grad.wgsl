@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // DFL decode gradient. Given upstream dE[A,4] = dL/dE for each expected
 // distance E, produce logit grads. Softmax-expectation Jacobian:

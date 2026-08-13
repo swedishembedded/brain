@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Convex 3x3 upsample: gradient wrt the MASK.
 //   dy   : [N, 1,     H*S, W*S]

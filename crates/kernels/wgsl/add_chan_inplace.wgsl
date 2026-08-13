@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // In-place per-channel bias over NCHW: out[n,c,hw] += v[c]. Single
 // read_write binding (no input aliasing — wgpu usage-scope safe), the

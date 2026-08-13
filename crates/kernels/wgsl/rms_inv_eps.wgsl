@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-row inverse RMS with a RUNTIME epsilon: inv[n] = 1/sqrt(mean_c(x²)+eps).
 // The eps-parameterized twin of rms_inv (which hardcodes 1e-6) — Z-Image's

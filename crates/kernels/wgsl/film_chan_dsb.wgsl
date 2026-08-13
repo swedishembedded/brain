@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  FiLM per-channel modulation, scale/shift gradient — spec
+// @what  FiLM per-channel modulation, scale/shift gradient - spec
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // FiLM per-channel modulation, scale/shift gradient. One invocation per (n,c) pair
 // (N*C threads): thread t has n = t/C, c = t%C. ONE sequential loop over

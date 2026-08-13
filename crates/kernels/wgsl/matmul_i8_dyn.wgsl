@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant int8
+// @dtype f32
 //
 // matmul_i8 with a DYNAMIC per-tensor activation scale (sx from a buffer, sw a
 //

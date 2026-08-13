@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // LayerNorm forward (matches torch.nn.LayerNorm):
 //   mean = mean_c(x);  var = mean_c((x-mean)^2)   (biased/population variance)

@@ -22,3 +22,7 @@ cranelift-native = "0.130"
 
 [dev-dependencies]
 brain-kernels.workspace = true
+# `tests/compile_all.rs`'s @dtype cross-product needs `backend_api::DType` to
+# call `kernels::template::dtype_variant` - test-only, `brain-kernels` already
+# depends on this crate for its own non-test code (a leaf edge, not a cycle).
+brain-backend-api.workspace = true

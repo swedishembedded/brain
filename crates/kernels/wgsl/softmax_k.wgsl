@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Softmax over a STRIDED axis of length K, NCHW-flattened.
 //   x, y : [N, K, M]   normalized over the K axis, independently per (n, m)

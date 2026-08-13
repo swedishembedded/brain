@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Per-sample weighted MSE gradient — spec
+// @what  Per-sample weighted MSE gradient - spec
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-sample weighted MSE gradient. Exact gradient of
 // L = scale * Σ_n out[n] (out from mse_value_w) w.r.t. pred. [N, M]

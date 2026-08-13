@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  RoPE (half-split, base theta) applied to a batch of single-token rows, each at its OWN absolute position `positions[row]` — the batched-decode twin of rope_at (which assumes pos_base+row)
+// @what  RoPE (half-split, base theta) applied to a batch of single-token rows, each at its OWN absolute position `positions[row]` - the batched-decode twin of rope_at (which assumes pos_base+row)
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // RoPE (half-split, base theta) applied to a batch of single-token rows, each at
 // its OWN absolute position `positions[row]` — the batched-decode twin of rope_at

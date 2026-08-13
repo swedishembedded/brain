@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Embedding gather: x[t, c] = emb[token[t], c].
 // One invocation per output element (seq_len * d_model).

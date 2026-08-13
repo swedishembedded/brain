@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Scale a gradient buffer in place:  grad[i] *= coef.
 // Used to apply the global grad-norm clip coefficient (and/or a 1/n_accum

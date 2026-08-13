@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Fused conv2d -> per-channel affine (BatchNorm-eval collapsed) -> activation.
 // Identical convolution to conv2d.wgsl (bias-free, NCHW, square KxK, generic

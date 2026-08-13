@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Moondream prefix-LM attention mask, added into the scores before softmax:
 //   allow(i,j) = (i < P && j < P) || (j <= i)

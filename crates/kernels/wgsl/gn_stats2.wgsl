@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GroupNorm statistics combine (stage 2 of 2, after gn_part): one invocation
 // per (n,g) group folds its P partial (sum, sumsq) pairs into

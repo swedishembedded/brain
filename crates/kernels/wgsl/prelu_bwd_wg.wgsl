@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  PReLU backward, one WORKGROUP per CHANNEL — the cooperative, COALESCED twin of prelu_bwd.wgsl
+// @what  PReLU backward, one WORKGROUP per CHANNEL - the cooperative, COALESCED twin of prelu_bwd.wgsl
 // @how   64-thread workgroup tile, 1 barrier
 // @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // PReLU backward, one WORKGROUP per CHANNEL — the cooperative, COALESCED twin
 // of prelu_bwd.wgsl. Identical bindings, identical Params, identical outputs;

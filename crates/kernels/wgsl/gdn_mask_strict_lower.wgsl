@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 //   attn0[idx] = raw[idx] * decay_mask[idx]   if j < i
 //              = 0                             otherwise

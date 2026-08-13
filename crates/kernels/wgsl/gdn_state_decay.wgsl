@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 //   state[bh,dk,dv] *= exp(g_cs[g_cs_off + bh*c_len + (c_len-1)])
 //

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Cross-attention backward, step 3 — gradient w.r.t
+// @what  Cross-attention backward, step 3 - gradient w.r.t
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Cross-attention backward, step 3 — gradient w.r.t. q (decoder):
 //   d_q[b,i,h,d] = scale * sum_{j<T_enc} d_score[b,h,i,j] * k[b,j,h,d]

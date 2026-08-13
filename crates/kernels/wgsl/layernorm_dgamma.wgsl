@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // LayerNorm backward w.r.t. gamma:
 //   dgamma[c] += sum_n dy[n,c] * xhat[n,c],   xhat = (x-mean)*inv

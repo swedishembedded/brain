@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row-wise causal softmax over the key axis, padding-safe. One invocation per
 // (b,h,i). Same as attn_softmax, but if the whole row is masked (mx == -inf,

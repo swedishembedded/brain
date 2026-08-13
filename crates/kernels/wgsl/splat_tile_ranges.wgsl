@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype n/a
 //
 // Tiled 3DGS, stage 4: per-tile [start, end) ranges over the SORTED keys, by
 // neighbor comparison (disjoint writes, no atomics). ranges must be

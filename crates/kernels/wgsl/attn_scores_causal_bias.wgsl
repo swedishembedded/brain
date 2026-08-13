@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Causal attention scores with an additive per-head bias and a CONFIGURABLE scalar scale — the temporal-attention primitive for GenieRedux's ST transformer
+// @what  Causal attention scores with an additive per-head bias and a CONFIGURABLE scalar scale - the temporal-attention primitive for GenieRedux's ST transformer
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Causal attention scores with an additive per-head bias and a CONFIGURABLE
 // scalar scale — the temporal-attention primitive for GenieRedux's ST

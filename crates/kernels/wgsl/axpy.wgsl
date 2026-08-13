@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Scaled accumulate:  out[i] = out[i] + s * in[i].
 // Used to fuse a LoRA adapter delta into a base projection's output

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Windowed decode-step attention scores: a SINGLE query (the new token) against
 // the cached keys, but only over the sliding window [w0, t); positions j < w0

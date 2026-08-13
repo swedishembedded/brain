@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant q4
+// @dtype f32
 //
 // Naive W4A8 matmul: 8-bit dynamic per-token activations times 4-bit
 // per-channel weights, out = dequant(x_q8 @ w_q4^T). The int4-weight sibling

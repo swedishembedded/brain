@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Quantize + pack an [M, K] f32 activation into [M, K/4] u32 (4 int8 per u32,
 // little-endian along K) using a dynamic per-tensor scale sx (from a buffer):

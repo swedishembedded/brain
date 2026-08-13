@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Gradient of add_chan_bcast wrt the per-(image, channel) scalar: sum the map.
 //   dy : [N, C, H, W]

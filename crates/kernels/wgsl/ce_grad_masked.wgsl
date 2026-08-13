@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Cross-entropy gradient over U_BINS with ignore_index, normalised by the count
 // of non-ignored positions (passed in as a float):

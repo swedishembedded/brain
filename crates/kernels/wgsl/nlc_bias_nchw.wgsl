@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  NLC -> NCHW with a per-channel bias — the epilogue of a conv lowered to a row-major GEMM
+// @what  NLC -> NCHW with a per-channel bias - the epilogue of a conv lowered to a row-major GEMM
 // @how   64-thread workgroup tile, 1 barrier
 // @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // NLC -> NCHW with a per-channel bias — the epilogue of a conv lowered to a
 // row-major GEMM.

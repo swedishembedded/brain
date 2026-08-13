@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // CIoU loss value per assigned anchor:  loss = 1 - CIoU
 //   CIoU = IoU - rho^2/c^2 - alpha * v

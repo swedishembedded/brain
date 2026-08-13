@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Per-ROW (per-token) max|x| → int8 scale, for outlier-robust activation
 // quantization: sx[m] = max|x[m,:]| / 127. One thread per row. Per-token scales

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Add a per-(image, channel) scalar to a full map, NCHW.
 //   x : [N, C, H, W]

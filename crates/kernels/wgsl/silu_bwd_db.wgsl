@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  SwiGLU backward, part 2 — gradient w.r.t
+// @what  SwiGLU backward, part 2 - gradient w.r.t
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // SwiGLU backward, part 2 — gradient w.r.t. the up projection `b`.
 //   h = SiLU(a) * b   =>   d_b = dH * SiLU(a)

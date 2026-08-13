@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GLM/DeepSeek-V3 "noaux_tc" MoE router (backward). Grad w.r.t. the router
 // logits through the sigmoid combine weights (NO aux/z-loss; the selection bias

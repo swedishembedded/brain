@@ -2,10 +2,19 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Raw WGSL compute kernels - the single source of truth for brain's GPU
-//! engine. fp32-only, core-compute-only (single bind group, <=8 storage
-//! buffers/kernel - the largest today binds 7,
-//! this header used to claim <=4 - no atomics/subgroups/f16) so the same
-//! text runs on old desktop GPUs and on WebGPU in the browser.
+//! engine. fp32 COMPUTE is the universal baseline every kernel supports
+//! (single bind group, <=8 storage buffers/kernel - the largest today binds
+//! 7, this header used to claim <=4), so the same text runs on old desktop
+//! GPUs and on WebGPU in the browser. A small, explicitly-declared,
+//! machine-checked subset additionally supports bf16/f16 WEIGHT STORAGE
+//! tiers on top of that baseline - `matmul`/`matmul_gemv`/`matmul_reg3` today,
+//! rewritten inline per variant by `kernels::template::dtype_variant` -
+//! every kernel's position stated in its own header's `@dtype` field and
+//! cross-checked by `scripts/build/gen-kernel-table.py` - storage means
+//! the packed bytes can be held and decoded to f32 with plain integer WGSL,
+//! not that the device computes in that format natively. Atomics and
+//! subgroups remain genuinely absent workspace-wide - no kernel here uses
+//! either.
 //!
 //! Workgroup size is `@workgroup_size(64)` everywhere except the register-tiled
 //! GEMMs (`matmul_reg*`), which need 256 invocations to hold a 128x128 output

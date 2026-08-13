@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Router gating: softmax over experts -> keep top_k -> optional renormalise,
 // then an optional constant scale. Produces a dense gate matrix

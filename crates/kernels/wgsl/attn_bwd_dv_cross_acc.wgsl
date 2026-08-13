@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Accumulating twin of attn_bwd_dv_cross for QUERY-CHUNKED backward: d_v sums
 // over ALL query rows; `acc_flag = 0` assigns (first chunk), `1` accumulates.

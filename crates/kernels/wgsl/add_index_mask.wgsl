@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Add the DSA per-(query,key) sparse mask into the MLA attention scores before
 // softmax: scores[b,h,i,j] += mask[b,i,j]  (the mask is shared across heads).

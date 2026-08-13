@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 2D convolution forward (bias-free), NCHW, square KxK, WITH grouping + dilation.
 //   x : [N, Cin,        H,  W]   idx = ((n*Cin + ci)*H + hi)*W + wi

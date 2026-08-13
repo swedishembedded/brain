@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // The other half of `gdn_ut_step.wgsl`'s reverse-mode derivative (see
 // `gdn_ut_bwd_dattn0.wgsl`'s header for the forward recurrence and the full

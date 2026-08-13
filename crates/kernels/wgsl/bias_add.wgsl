@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Add a per-output-feature bias in place:  out[m,n] += bias[n].
 // Used after every biased linear (qkv, attn-out, ffn value/gate/down, u_head).

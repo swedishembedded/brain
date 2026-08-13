@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // RMSNorm backward w.r.t. the gain weight:
 //   dW[c] += sum_n dY[n,c] * x[n,c] * inv[n]

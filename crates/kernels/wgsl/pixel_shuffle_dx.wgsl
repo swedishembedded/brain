@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Pixel shuffle INPUT gradient, NCHW. A pure permutation, so its adjoint is the
 // inverse permutation (space-to-depth) — no accumulation, no atomics.

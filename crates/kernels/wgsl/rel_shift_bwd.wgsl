@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward (transpose) of rel_shift.wgsl. The forward map output→input is
 // injective (a reindex of a padded grid), so each output scatters its grad to a

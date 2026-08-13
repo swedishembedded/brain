@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Masked L1 gradient:  d_pred = sign(pred - tgt) * mask * scale.
 //   pred, tgt, mask : [total]

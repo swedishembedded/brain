@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm forward for INFERENCE using RUNNING statistics, NCHW x[N,C,H,W].
 // Identical math/packing to bn_train (separate name for clarity); the caller

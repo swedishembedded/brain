@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GQA attention scores with a sliding-window causal mask — `gqa_scores` plus a lower key bound `i - j < window`
+// @what  GQA attention scores with a sliding-window causal mask - `gqa_scores` plus a lower key bound `i - j < window`
 // @how   one thread per output element, serial inner reduction
 // @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // GQA attention scores with a SLIDING-WINDOW causal mask (batched, full
 // sequence — the prefill/one-shot twin of `attn_decode_scores_win`'s single-

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // `rope2d.wgsl`'s table-driven rotation, but for a head whose rotated block is
 // SHORTER than the head itself (Qwen3.5's `partial_rotary_factor`: only

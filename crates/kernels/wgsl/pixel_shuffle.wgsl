@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Pixel shuffle (depth-to-space) forward, NCHW.
 //   x : [N, C*S*S, H,   W  ]

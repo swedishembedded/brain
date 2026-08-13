@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row-wise causal softmax over the key axis. One invocation per (b,h,i):
 // normalises scores[b,h,i, 0..=i] into probs; entries j>i become 0.

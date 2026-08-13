@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // LayerNorm backward w.r.t. beta:  dbeta[c] += sum_n dy[n,c].
 // One invocation per channel. Accumulates into the (pre-zeroed) grad buffer.

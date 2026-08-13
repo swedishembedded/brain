@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // torch adaptive_avg_pool2d (forward): average a variable [N,C,H,W] map into a
 // fixed [N,C,OH,OW] grid. Bin (oh,ow) spans input rows [floor(oh·H/OH),

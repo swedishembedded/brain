@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // RMSNorm:  out[t, c] = weight[c] * x[t, c] / sqrt(mean_c(x[t, c]^2) + eps)
 // One invocation per row (token). d_model is small, so the per-row loop is fine.

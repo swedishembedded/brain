@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // DSA indexer scores (forward, detached). For each (query s, key t<=s):
 //   index_scores[b,s,t] = sum_h (weights[b,s,h] * H^-0.5)

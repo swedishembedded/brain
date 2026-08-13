@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-parameter sum of squares of its gradient, written to norms[slot].
 // One single-thread dispatch per parameter buffer (numel small enough); the

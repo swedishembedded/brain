@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Strided per-head LayerNorm backward (input grad), the ln_head companion.
 // x is the CACHED pre-norm buffer (ln_head normalizes in place, so training

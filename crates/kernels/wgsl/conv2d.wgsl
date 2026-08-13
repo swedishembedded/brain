@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 2D convolution forward (bias-free), NCHW layout, square KxK kernel.
 //   x : [N, Cin,  H,  W]   row-major   idx = ((n*Cin + ci)*H + hi)*W + wi

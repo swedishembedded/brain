@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Embedding backward (also the tied lm_head's weight): scatter the residual-
 // stream gradient back into the rows that were looked up.

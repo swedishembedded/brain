@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // RMSNorm backward w.r.t. the input x. Forward: y_c = w_c * x_c * r,
 // r = 1/sqrt(mean(x^2)+eps). With A = sum_c dY_c * w_c * x_c,

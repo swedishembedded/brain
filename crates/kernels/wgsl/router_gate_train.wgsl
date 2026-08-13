@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Router gating (training variant): like `router_gate.wgsl` but also writes
 // the full softmax probabilities (needed by the backward pass). One

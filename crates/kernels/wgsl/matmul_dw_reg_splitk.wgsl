@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Split-K backward of out = x @ W^T w.r.t. W:
 //   partial[s][n,k] = sum_{m in slice s} dY[m,n]*X[m,k].

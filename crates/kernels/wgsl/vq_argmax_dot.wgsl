@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // Vector-quantization nearest-codebook assignment (COSINE similarity), used by
 // GenieRedux-style tokenizers with `use_cosine_sim=True`. Queries x[M,D] and

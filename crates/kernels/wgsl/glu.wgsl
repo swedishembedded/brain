@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Gated Linear Unit over the middle dim, matching torch `F.glu(x, dim=1)`:
 //   x   : [outer, 2*d, inner]  row-major

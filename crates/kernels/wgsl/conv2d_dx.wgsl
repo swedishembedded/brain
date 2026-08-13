@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // 2D convolution input gradient (transposed-conv GATHER form, no scatter).
 //   dy : [N, Cout, Ho, Wo]

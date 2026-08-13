@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Attention output: out[b,i,h,d] = sum_{j<=i} probs[b,h,i,j] * v[b,j,h,d].
 // v read from the qkv buffer; out written contiguous [B*T, d_model].

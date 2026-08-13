@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  EDM output mix D = c_skip*x + c_out*F — spec
+// @what  EDM output mix D = c_skip*x + c_out*F - spec
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // EDM output mix D = c_skip*x + c_out*F. Row-major [N, M], total = N*M;
 // ab is packed [N,2]: ab[2n] = a[n] (c_skip), ab[2n+1] = b[n] (c_out).

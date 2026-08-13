@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward w.r.t. q for the biased/configurable-scale scores kernels
 // (attn_scores_{bidir,causal}_bias). The additive bias does not depend on q, so

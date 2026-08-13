@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant int8
+// @dtype f32
 //
 // The int8 counterpart of `moe_linear_gated.wgsl`, in the SAME naive tier as
 // that kernel (one thread per output element, no workgroup tiling) rather

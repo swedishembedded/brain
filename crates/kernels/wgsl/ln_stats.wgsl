@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // LayerNorm helper: per-row mean and inverse-std.
 //   mean[n] = mean_c(x);  inv[n] = 1/sqrt(var+eps),  var = mean_c((x-mean)^2), eps a param

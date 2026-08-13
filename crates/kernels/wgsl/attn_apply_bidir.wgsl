@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Bidirectional attention output: out[b,i,h,d] = sum_{j<T} probs[b,h,i,j] * v[b,j,h,d].
 // Non-causal (sum over all j; cf. attn_apply.wgsl which sums j<=i). v read from

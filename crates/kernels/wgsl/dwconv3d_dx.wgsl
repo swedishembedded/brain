@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Depthwise 3D convolution, INPUT gradient (adjoint of dwconv3d). One
 // invocation per INPUT element x[n,c,t,h,w]; scatter-gather over the output

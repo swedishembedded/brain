@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Gradient of broadcast_add_hw wrt ONE strip: sum the full-map gradient over the
 // broadcast axis.

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm backward: per-channel reduced sums for the input-grad formula.
 // One invocation per channel (C threads). NCHW tensor x[N,C,H,W].

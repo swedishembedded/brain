@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant q4
+// @dtype f32
 //
 // Skinny-M W4A8 matmul (out = dequant(x_q8 @ w_q4^T)), one WORKGROUP per
 // output COLUMN -- the decode-regime q4 GEMM, mirroring

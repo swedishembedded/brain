@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // GQA head expansion into a fused attention buffer (LFM2.5 bidirectional path):
 // replicate each of the src's `heads_out/group` kv heads `group` times,

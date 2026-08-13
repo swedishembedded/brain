@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Fused LSTM cell gate activation (PyTorch nn.LSTM layout). Given the summed
 // pre-activations `pre = W_ih·x + b_ih + W_hh·h + b_hh` (computed with matmul) and

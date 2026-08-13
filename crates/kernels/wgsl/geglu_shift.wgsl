@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Moondream MoE expert activation — GeGLU with a +1 shift
+// @what  Moondream MoE expert activation - GeGLU with a +1 shift
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Moondream MoE expert activation — GeGLU with a +1 shift:
 //   out[i] = gelu_erf(h[i]) * (g[i] + 1)

@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Residual DeepStack add: accumulate a compact `[n]` source block into `dst`
 // starting at flat element offset `base`:

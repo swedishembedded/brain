@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row-wise cross-attention softmax over the encoder key axis. One invocation per
 // (b,h,i): normalises scores[b,h,i, 0..T_enc] into probs (non-causal). The row

@@ -8,6 +8,7 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant int8
+// @dtype f32
 //
 // INT8 register-tiled + software-pipelined GEMM via DP4A (dot4I8Packed).
 //

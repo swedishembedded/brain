@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // BatchNorm backward w.r.t. beta. One invocation per channel (C threads).
 //   dbeta[c] += sum_{n,h,w} dy

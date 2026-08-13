@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Row-blocked matmul, same contract as matmul.wgsl:  out = x @ W^T
 //   x : [M, K],  W : [N, K],  out : [M, N]   (all row-major)

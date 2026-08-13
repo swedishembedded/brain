@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // PReLU forward with a LEARNED slope, NCHW:  y = x         if x > 0
 //                                            y = a[ai] * x otherwise.

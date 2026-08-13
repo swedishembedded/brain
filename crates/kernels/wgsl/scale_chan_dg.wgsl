@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Per-channel scale backward (gain grad), the scale_chan companion:
 //   dscale[c] += Σ_{rows,inner} x[r,c,i] · dy[r,c,i]

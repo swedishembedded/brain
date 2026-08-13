@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Decode-step attention apply: the single query's context vector as the
 // probability-weighted sum of the cached values, GQA-aware.

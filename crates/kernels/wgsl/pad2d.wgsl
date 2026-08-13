@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Asymmetric zero-pad on NCHW (gather) — spec
+// @what  Asymmetric zero-pad on NCHW (gather) - spec
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Asymmetric zero-pad on NCHW (gather). Params carry the UNPADDED
 // dims h, w and pad amounts l/r/t/b (left/right/top/bottom, u32, each may be

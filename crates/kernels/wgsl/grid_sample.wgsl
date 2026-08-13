@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Bilinear grid sample forward — `torch.nn.functional.grid_sample(mode='bilinear', padding_mode='zeros')`
+// @what  Bilinear grid sample forward - `torch.nn.functional.grid_sample(mode='bilinear', padding_mode='zeros')`
 // @how   one thread per output element
 // @opt   3
 // @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Bilinear grid sample forward — `torch.nn.functional.grid_sample(mode='bilinear',
 // padding_mode='zeros')`. Resamples x at arbitrary, DATA-DEPENDENT coordinates.

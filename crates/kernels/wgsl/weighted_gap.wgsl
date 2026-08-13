@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Weighted global average pool: contract a feature map against a 1-channel
 // spatial weight map, per image.

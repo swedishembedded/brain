@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Split-K register-tiled matmul — matmul_reg3 for skinny-M shapes
+// @what  Split-K register-tiled matmul - matmul_reg3 for skinny-M shapes
 // @how   register block per thread, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // `matmul_reg3` with the CONTRACTION split across `slices` workgroups, each
 // writing its own `[m, n]` partial; `dw_splitk_reduce` folds them.

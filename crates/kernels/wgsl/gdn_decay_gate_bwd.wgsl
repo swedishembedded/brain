@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Backward of `gdn_decay_gate.wgsl`'s
 //   g[row,h] = -exp(A_log[h]) * softplus(a_proj[row,h] + dt_bias[h])

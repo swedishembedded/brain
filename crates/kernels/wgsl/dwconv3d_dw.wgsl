@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Depthwise 3D convolution, WEIGHT gradient. One invocation per weight element
 // wt[c,kt,kh,kw]; sum over all output positions (and batch) of the product of

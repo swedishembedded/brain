@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  GroupNorm partial reduction (stage 1 of 2) — the parallel replacement for gn_stats' serial per-group loop on wide GPUs
+// @what  GroupNorm partial reduction (stage 1 of 2) - the parallel replacement for gn_stats' serial per-group loop on wide GPUs
 // @how   one thread per output element
 // @opt   3
 // @cpu   native
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // GroupNorm partial reduction (stage 1 of 2) — the parallel replacement for
 // gn_stats' serial per-group loop on wide GPUs. P threads per (n,g) group

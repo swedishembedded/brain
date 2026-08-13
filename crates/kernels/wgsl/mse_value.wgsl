@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Mean-squared-error loss value (the Regression-head analogue of ce_value).
 //   out[i] = (pred[i] - target[i])^2 / n

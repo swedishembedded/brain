@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Batched RoPE (forward), HF/Qwen "half-split" (GPT-NeoX) convention, with a
 // configurable base theta. This differs from `rope_train.wgsl` (which rotates

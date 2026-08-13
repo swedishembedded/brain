@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // SwiGLU activation core:  out[i] = SiLU(a[i]) * b[i],  SiLU(x) = x * sigmoid(x).
 // Elementwise over seq_len * d_ff.

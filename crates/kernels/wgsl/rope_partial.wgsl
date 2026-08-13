@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Moondream partial RoPE (forward): rotate only the first `rot_dim` channels of
 // each `head_dim`-wide head; the remaining `head_dim - rot_dim` pass through.

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Flash attention (bidirectional self-attention), TILED with shared-memory K/V reuse + online softmax — Pascal-friendly (sm_61
+// @what  Flash attention (bidirectional self-attention), TILED with shared-memory K/V reuse + online softmax - Pascal-friendly (sm_61
 // @how   64-thread workgroup tile, 2 barriers
 // @opt   4
 // @cpu   no
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Flash attention (bidirectional self-attention), TILED with shared-memory K/V
 // reuse + online softmax — Pascal-friendly (sm_61: no subgroups, no f16, single

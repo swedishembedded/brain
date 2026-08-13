@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @dtype f32
 //
 // Generic KxK max-pool forward, NCHW, arbitrary STRIDE + symmetric zero-pad.
 //   x      : [N, C, H,  W ]   idx = ((n*C + c)*H  + hi)*W  + wi

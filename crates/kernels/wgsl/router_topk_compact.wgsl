@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // `router_gate.wgsl` (or `router_gate_train.wgsl`) already computes, per row,
 // exactly `top_k` nonzero columns in its dense `[rows, n_experts]` gate output

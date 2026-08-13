@@ -8,6 +8,7 @@
 // @gpu   yes
 // @npu   no
 // @quant none
+// @dtype f32
 //
 // Row-wise argmax:  out[m] = f32(argmax_n x[m, n])   (tie -> LOWEST n)
 //
