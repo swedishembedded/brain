@@ -41,7 +41,7 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     let mut streamed = Vec::new();
     let mut n_chunks = 0u32;
     let (text, wav, sample_rate) = inner
-        .speak("Say hello.", 8, "chelsie", |chunk| {
+        .speak("Say hello.", "Say hello.", 8, "chelsie", |chunk| {
             n_chunks += 1;
             streamed.extend_from_slice(chunk);
         })

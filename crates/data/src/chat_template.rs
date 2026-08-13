@@ -199,31 +199,67 @@ impl ChatTemplate {
     /// -- for a base model fetched through brain's normal store/plan path,
     /// this file is ALREADY on disk (`modelstore::plan`'s `plan_base`
     /// downloads it alongside `tokenizer.json` whenever the upstream repo
-    /// ships one), so this needs no separate import-time wiring. Returns a
-    /// `TemplateError` naming which part is missing (file absent, no
-    /// `chat_template` key, unparseable Jinja) rather than panicking --
-    /// a checkpoint with no template is a real, expected case (e.g. a base,
-    /// non-instruction-tuned model), not a bug to crash on.
+    /// ships one), so this needs no separate import-time wiring.
+    ///
+    /// **Falls back to a standalone template file** when
+    /// `tokenizer_config.json` has no inline `chat_template` field (or is
+    /// itself absent): `chat_template.json` (`{"chat_template": "..."}`,
+    /// checked first) then `chat_template.jinja` (a bare Jinja file, no JSON
+    /// wrapper). Real, current `transformers` resolution: recently-published
+    /// checkpoints moved the template OUT of `tokenizer_config.json` into one
+    /// of these two standalone files - a checkpoint that ships only
+    /// `chat_template.json` is common now, not an edge case (confirmed
+    /// against a real Qwen3-Omni-30B-A3B-Instruct checkpoint on disk, whose
+    /// `tokenizer_config.json` has no `chat_template` key at all).
+    ///
+    /// Returns a `TemplateError` naming every location checked (rather than
+    /// panicking) when none of them has a template - a checkpoint with no
+    /// template is a real, expected case (e.g. a base, non-instruction-tuned
+    /// model), not a bug to crash on.
     pub fn from_model_dir(dir: &std::path::Path) -> Result<ChatTemplate, TemplateError> {
-        let path = dir.join("tokenizer_config.json");
-        let text = std::fs::read_to_string(&path).map_err(|e| TemplateError(format!("{}: {e}", path.display())))?;
-        let cfg: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| TemplateError(format!("{}: invalid JSON: {e}", path.display())))?;
-        let src = cfg
-            .get("chat_template")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TemplateError(format!("{}: no \"chat_template\" string field", path.display())))?;
-        let mut t = Self::compile(src)?;
-        // The SAME file declares the special tokens many templates reference
-        // (`{{ bos_token }}` heads Llama/Mistral prompts) — inject them as
-        // render defaults instead of parsing and discarding them. HF encodes
-        // them either as a bare string or as an AddedToken object with a
-        // `content` field; both are read, absent stays absent (chainable
-        // undefined then matches transformers' own behaviour).
-        for key in ["bos_token", "eos_token"] {
-            let tok = cfg.get(key).and_then(|v| v.as_str().or_else(|| v.get("content").and_then(|c| c.as_str())));
-            if let Some(s) = tok {
-                t.defaults.insert(key.to_string(), Value::from(s.to_string()));
+        let tcfg_path = dir.join("tokenizer_config.json");
+        // Best-effort: bos_token/eos_token defaults below still apply even
+        // when this file exists but has no chat_template key, and a missing
+        // file is not fatal on its own -- a standalone chat_template.json/
+        // .jinja may still supply the template.
+        let tcfg: Option<serde_json::Value> = std::fs::read_to_string(&tcfg_path).ok().and_then(|text| serde_json::from_str(&text).ok());
+
+        let inline = tcfg.as_ref().and_then(|c| c.get("chat_template")).and_then(|v| v.as_str()).map(str::to_string);
+        let json_path = dir.join("chat_template.json");
+        let jinja_path = dir.join("chat_template.jinja");
+        let src = match inline {
+            Some(s) => s,
+            None => {
+                let from_json = std::fs::read_to_string(&json_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|v| v.get("chat_template").and_then(|v| v.as_str()).map(str::to_string));
+                match from_json {
+                    Some(s) => s,
+                    None => std::fs::read_to_string(&jinja_path).map_err(|_| {
+                        TemplateError(format!(
+                            "no chat template found: checked \"chat_template\" in {} and {}, and the bare file {}",
+                            tcfg_path.display(),
+                            json_path.display(),
+                            jinja_path.display()
+                        ))
+                    })?,
+                }
+            }
+        };
+        let mut t = Self::compile(&src)?;
+        // The SAME tokenizer_config.json declares the special tokens many
+        // templates reference (`{{ bos_token }}` heads Llama/Mistral prompts)
+        // - inject them as render defaults instead of parsing and discarding
+        // them. HF encodes them either as a bare string or as an AddedToken
+        // object with a `content` field; both are read, absent stays absent
+        // (chainable undefined then matches transformers' own behaviour).
+        if let Some(cfg) = &tcfg {
+            for key in ["bos_token", "eos_token"] {
+                let tok = cfg.get(key).and_then(|v| v.as_str().or_else(|| v.get("content").and_then(|c| c.as_str())));
+                if let Some(s) = tok {
+                    t.defaults.insert(key.to_string(), Value::from(s.to_string()));
+                }
             }
         }
         Ok(t)
@@ -438,6 +474,55 @@ mod tests {
         std::fs::write(dir.join("tokenizer_config.json"), r#"{"some_other_field": true}"#).unwrap();
         let Err(err) = ChatTemplate::from_model_dir(&dir) else { panic!("expected an error") };
         assert!(err.to_string().contains("chat_template"), "got: {err}");
+    }
+
+    /// SPEC: a checkpoint whose `tokenizer_config.json` has NO inline
+    /// `chat_template` field (real, current `transformers` convention for
+    /// recently-published checkpoints - confirmed against a real
+    /// Qwen3-Omni-30B-A3B-Instruct checkpoint on disk) still loads its
+    /// template from a standalone `chat_template.json` (`{"chat_template":
+    /// "..."}`) beside it, and bos/eos defaults from `tokenizer_config.json`
+    /// still apply (the two files are independent, both read).
+    #[test]
+    fn from_model_dir_falls_back_to_standalone_chat_template_json() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-standalone-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A trimmed shape of the real checkpoint's tokenizer_config.json:
+        // present, has bos/eos, but genuinely no "chat_template" key.
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"bos_token": "<s>", "eos_token": {"content": "</s>"}, "unrelated": true}"#).unwrap();
+        std::fs::write(dir.join("chat_template.json"), r#"{"chat_template": "{{ bos_token }}<|{{ messages[0].role }}|>{{ messages[0].content }}{{ eos_token }}"}"#).unwrap();
+        let t = ChatTemplate::from_model_dir(&dir).expect("load");
+        let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        assert_eq!(t.render(messages, None, false, &BTreeMap::new()).unwrap(), "<s><|user|>hi</s>");
+    }
+
+    /// SPEC: a checkpoint shipping a BARE `chat_template.jinja` (no JSON
+    /// wrapper at all - the other real `transformers` convention) loads from
+    /// that file when neither `tokenizer_config.json` nor `chat_template.json`
+    /// has the template. Checked in preference order: inline field, then
+    /// `chat_template.json`, then `chat_template.jinja` last.
+    #[test]
+    fn from_model_dir_falls_back_to_bare_chat_template_jinja() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-standalone-jinja-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"unrelated": true}"#).unwrap();
+        std::fs::write(dir.join("chat_template.jinja"), "<|{{ messages[0].role }}|>{{ messages[0].content }}").unwrap();
+        let t = ChatTemplate::from_model_dir(&dir).expect("load");
+        let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        assert_eq!(t.render(messages, None, false, &BTreeMap::new()).unwrap(), "<|user|>hi");
+    }
+
+    /// SPEC: with NO `tokenizer_config.json` at all, a standalone
+    /// `chat_template.json` alone is still enough -- the file is read
+    /// best-effort (bos/eos defaults simply stay unset), not required.
+    #[test]
+    fn from_model_dir_works_with_no_tokenizer_config_json_at_all() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-no-tcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chat_template.json"), r#"{"chat_template": "<|{{ messages[0].role }}|>{{ messages[0].content }}"}"#).unwrap();
+        let t = ChatTemplate::from_model_dir(&dir).expect("load");
+        let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        assert_eq!(t.render(messages, None, false, &BTreeMap::new()).unwrap(), "<|user|>hi");
     }
 
     #[test]

@@ -58,7 +58,36 @@ cd "$ROOT"
 # same run after the int8-Thinker multimodal-input change (this change) produce
 # BYTE-IDENTICAL sorted warning lists (`diff` exit 0) -- every one of the 226 was
 # already there before this change touched anything.
-BASELINE="${BASELINE:-226}"
+#
+# Raised again, 226 -> 259, for the identical reason a third time: this
+# worktree branch had diverged from docs/rebuild BEFORE the int8+KV-cache/
+# multimodal Thinker work (f72d21d7, 4c57d973, 77a0256d, 00e47a7d) and the
+# generic-GGUF-import-registry work (c08622bb) landed there, so bringing in
+# the chat-template + W8A16 rename fixes on top of the ACTUAL current
+# architecture required merging docs/rebuild into this worktree first. That
+# merge alone (before any chat-template/rename code was touched) carries
+# those commits' own pre-existing backlog in crates this session never edited
+# (npu, wm-diamond, tts, yolo, gradcheck's tests, cli/forecast_cli.rs,
+# cli/npu_cli.rs, cli/resident_asr.rs, omni/mm.rs). Verified, not assumed:
+# every one of the 33 new warnings' file:line was checked against this
+# session's own edits (crates/omni/src/{caps,int8_resident,
+# int8_thinker_resident}.rs, crates/data/src/chat_template.rs,
+# crates/paramstore/src/lib.rs, crates/cli/src/{resident_omni,resident,
+# omni_cli}.rs, crates/backend-wgpu/src/lib.rs, and the omni/qwen35moe test
+# files this pass's merge-conflict resolution touched) -- zero land on a line
+# this session added or changed; the two files this session DID touch that
+# still show warnings (qwen35moe/import.rs:336-337,585 and
+# gradcheck/lib.rs:119-121) have their warnings on pre-existing lines far from
+# this session's own edits (a doc comment/`import_gguf_truncated_to_map` and a
+# doc-list style issue neither touched).
+# Bumped 259 -> 262 after `origin/main` was force-pushed mid-session (a
+# separate, concurrent line of work rewritten upstream): the new tip carries
+# 3 pre-existing warnings this repo's own history didn't have at 259
+# (crates/model/tests/router_gate_expert_cap.rs, crates/cli/src/npu_cli.rs,
+# crates/cli/src/resident_asr.rs) -- confirmed byte-identical to `origin/main`
+# itself (same content, same lints, untouched by this session), not
+# attributable to anything reconstructed here.
+BASELINE="${BASELINE:-262}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

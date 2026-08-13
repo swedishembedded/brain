@@ -49,10 +49,29 @@ impl QwenBpe {
     }
 
     /// Build from a checkpoint DIRECTORY: `tokenizer.json` when present, else
-    /// the split `vocab.json` + `merges.txt` (+ `added_tokens.json`) layout
+    /// the split `vocab.json` + `merges.txt` (+ special-token source) layout
     /// some Qwen2-family repos ship (FastVLM). Same byte-level BPE either way
     /// - the split files are re-assembled into the unified shape and parsed by
     /// the ONE existing parser, so the formats cannot drift apart.
+    ///
+    /// The special-token source is checked in order: `added_tokens.json`
+    /// (`{content: id}`, the older convention), else `tokenizer_config.json`'s
+    /// `added_tokens_decoder` (`{id: {content, special, ...}}`, what a
+    /// checkpoint with no standalone `added_tokens.json` at all still
+    /// carries - confirmed against a real Qwen3-Omni-30B-A3B-Instruct
+    /// checkpoint on disk, whose directory has neither `tokenizer.json` nor
+    /// `added_tokens.json`, only `vocab.json`/`merges.txt`/
+    /// `tokenizer_config.json`). Skipping this fallback silently drops EVERY
+    /// special token (`<|im_end|>`, `<|endoftext|>`, …) for such a
+    /// checkpoint: `vocab.json` itself does not contain them (they are
+    /// allocated past the base vocab), so a caller's `special_id("<|im_end|>")`
+    /// would return `None` - no EOS ever matches, greedy generation runs to
+    /// `max_new_tokens` every time, and the chat template's own
+    /// `<|im_start|>`/`<|im_end|>` framing text gets BPE'd byte-by-byte
+    /// instead of encoded as the single token ids the checkpoint was trained
+    /// on. A checkpoint with none of the three sources still loads (`added`
+    /// stays empty, matching this function's prior behavior) since a base
+    /// tokenizer with no special tokens at all is a real, valid case.
     pub fn from_dir(dir: &str) -> Result<QwenBpe, String> {
         let unified = format!("{dir}/tokenizer.json");
         if std::path::Path::new(&unified).exists() {
@@ -70,27 +89,40 @@ impl QwenBpe {
             .filter(|l| !l.is_empty())
             .map(|l| serde_json::Value::String(l.to_string()))
             .collect();
-        let added: serde_json::Value = std::fs::read(format!("{dir}/added_tokens.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .map(|m| {
-                // added_tokens.json is { content: id }; unified wants records.
-                let arr: Vec<serde_json::Value> = m
-                    .as_object()
-                    .map(|o| {
-                        o.iter()
-                            .map(|(c, id)| serde_json::json!({"content": c, "id": id}))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                serde_json::Value::Array(arr)
-            })
-            .unwrap_or(serde_json::Value::Array(Vec::new()));
+        let from_added_tokens_json = std::fs::read(format!("{dir}/added_tokens.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).map(|m| {
+            // added_tokens.json is { content: id }; unified wants records.
+            let arr: Vec<serde_json::Value> =
+                m.as_object().map(|o| o.iter().map(|(c, id)| serde_json::json!({"content": c, "id": id})).collect()).unwrap_or_default();
+            serde_json::Value::Array(arr)
+        });
+        let added = from_added_tokens_json.or_else(|| Self::added_tokens_from_tokenizer_config(dir)).unwrap_or(serde_json::Value::Array(Vec::new()));
         let unified = serde_json::json!({
             "model": { "vocab": vocab, "merges": merges },
             "added_tokens": added,
         });
         Self::from_json_bytes(unified.to_string().as_bytes())
+    }
+
+    /// [`Self::from_dir`]'s fallback special-token source when
+    /// `added_tokens.json` is absent: `<dir>/tokenizer_config.json`'s
+    /// `added_tokens_decoder` (`{"151645": {"content": "<|im_end|>",
+    /// "special": true, ...}, ...}`), converted to the same `[{content, id}]`
+    /// record shape [`Self::from_json_bytes`] reads. `None` (never an error)
+    /// when the file is absent, unparseable, or has no such field - the
+    /// caller's own `unwrap_or(empty)` is the real fallback.
+    fn added_tokens_from_tokenizer_config(dir: &str) -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(format!("{dir}/tokenizer_config.json")).ok()?;
+        let cfg: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let decoder = cfg.get("added_tokens_decoder")?.as_object()?;
+        let arr: Vec<serde_json::Value> = decoder
+            .iter()
+            .filter_map(|(id_str, rec)| {
+                let id: u64 = id_str.parse().ok()?;
+                let content = rec.get("content")?.as_str()?;
+                Some(serde_json::json!({"content": content, "id": id}))
+            })
+            .collect();
+        Some(serde_json::Value::Array(arr))
     }
 
     /// Build from a GGUF's embedded `tokenizer.ggml.*` KV (see
@@ -829,5 +861,57 @@ mod tests {
         }
         let prompt = t.apply_chat_template(&[("user", "Hi")], true);
         assert_eq!(prompt, "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n");
+    }
+
+    /// SPEC: `from_dir`'s split-file layout (`vocab.json` + `merges.txt`, no
+    /// `tokenizer.json`) resolves special tokens from `tokenizer_config.json`'s
+    /// `added_tokens_decoder` when there is no standalone `added_tokens.json`
+    /// -- the real shape a Qwen3-Omni-30B-A3B-Instruct checkpoint on disk
+    /// ships (confirmed this session: it has neither `tokenizer.json` nor
+    /// `added_tokens.json`). Without this fallback `special_id("<|im_end|>")`
+    /// silently returns `None` (vocab.json itself has no entry for it), which
+    /// breaks EOS detection for every model built from such a directory.
+    #[test]
+    fn from_dir_resolves_specials_from_tokenizer_config_when_added_tokens_json_is_absent() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-tok-added-from-tcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A trimmed, real-shaped vocab: a few base BPE entries plus the
+        // special-token ids allocated PAST the base vocab (as a real
+        // checkpoint does) -- vocab.json itself never lists them.
+        std::fs::write(dir.join("vocab.json"), r#"{"a":0,"b":1,"ab":2}"#).unwrap();
+        std::fs::write(dir.join("merges.txt"), "#version: 0.1\na b\n").unwrap();
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            r#"{"added_tokens_decoder": {
+                "3": {"content": "<|endoftext|>", "special": true},
+                "4": {"content": "<|im_start|>", "special": true},
+                "5": {"content": "<|im_end|>", "special": true}
+            }}"#,
+        )
+        .unwrap();
+        // Deliberately no added_tokens.json and no tokenizer.json.
+        assert!(!dir.join("added_tokens.json").exists());
+        assert!(!dir.join("tokenizer.json").exists());
+
+        let t = QwenBpe::from_dir(dir.to_str().unwrap()).expect("load from split files + tokenizer_config.json fallback");
+        assert_eq!(t.special_id("<|im_end|>"), Some(5));
+        assert_eq!(t.special_id("<|endoftext|>"), Some(3));
+        assert_eq!(t.encode("<|im_start|>"), vec![4]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SPEC: with NEITHER `added_tokens.json` NOR a usable
+    /// `tokenizer_config.json`, `from_dir` still loads (a base tokenizer with
+    /// no special tokens is a real, valid case) rather than erroring --
+    /// `special_id` then correctly reports `None`, not a stale/wrong id.
+    #[test]
+    fn from_dir_loads_with_no_special_token_source_at_all() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-tok-no-specials-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vocab.json"), r#"{"a":0,"b":1,"ab":2}"#).unwrap();
+        std::fs::write(dir.join("merges.txt"), "#version: 0.1\na b\n").unwrap();
+        let t = QwenBpe::from_dir(dir.to_str().unwrap()).expect("load with no special-token source");
+        assert_eq!(t.special_id("<|im_end|>"), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

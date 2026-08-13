@@ -54,8 +54,8 @@ pub fn expert_name(l: usize, e: usize, leaf: &str) -> String {
 /// The capacity is found by ASKING the real planner rather than by an
 /// arithmetic guess: stage count falls monotonically as capacity rises, so
 /// the smallest capacity on a fine grid that yields exactly `n` stages is the
-/// one wanted. A closed-form `total/n + slack` looks right and quietly is not
-/// - it has to clear a whole layer's granularity plus the head weight, which
+/// one wanted. A closed-form `total/n + slack` looks right and quietly is not:
+/// it has to clear a whole layer's granularity plus the head weight, which
 /// depends on the fixture's shape, and when it fails to it produces a plan
 /// with the WRONG number of stages rather than an error.
 pub fn caps_for_split(path: &str, cfg: &MoeTextConfig, devices: &[residency::Device], n: usize) -> Vec<(residency::Device, u64)> {

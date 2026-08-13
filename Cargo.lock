@@ -1211,6 +1211,7 @@ dependencies = [
  "brain-residency",
  "brain-testutil",
  "brain-tts",
+ "minijinja",
  "safetensors",
  "serde_json",
 ]

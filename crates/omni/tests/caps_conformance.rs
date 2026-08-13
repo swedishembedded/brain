@@ -42,7 +42,7 @@ fn int8_thinker_manifest_is_chat_exposed() {
     let caps = api_caps(&r.manifest());
     assert!(
         caps.chat,
-        "brain/omni-int8-thinker-multi is not classified chat-capable by apiserve::catalog::api_caps -- \
+        "brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 is not classified chat-capable by apiserve::catalog::api_caps -- \
          /v1/chat/completions and /v1/messages would 404 it, leaving the fast path reachable only over D-Bus"
     );
 }
@@ -64,14 +64,14 @@ fn both_thinker_models_declare_the_same_chat_params() {
     for p in omni::caps::generate_spec().params {
         assert!(
             int8.params.iter().any(|q| q.name == p.name),
-            "brain/omni declares chat param '{}' but brain/omni-int8-thinker-multi does not",
+            "brain/omni declares chat param '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not",
             p.name
         );
     }
 }
 
 /// Spec: both Thinker-backed models declare the SAME media inputs on
-/// `generate` - `brain/omni-int8-thinker-multi` used to declare none at all
+/// `generate` - `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` used to declare none at all
 /// (multimodal input was silently dropped even though `apiserve::openai`
 /// attaches `image`/`audio` blobs to every request regardless of which model
 /// the caller addressed), which meant a client got a text-only answer with no
@@ -96,14 +96,14 @@ fn both_thinker_models_declare_the_same_media_inputs() {
         let got = int8.inputs.iter().find(|i| i.name == want.name);
         assert!(
             got.is_some(),
-            "brain/omni declares media input '{}' but brain/omni-int8-thinker-multi does not -- \
+            "brain/omni declares media input '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not -- \
              an attached blob would be silently dropped on the fast path",
             want.name
         );
         assert_eq!(
             got.unwrap().media,
             want.media,
-            "brain/omni's '{}' input is {:?} but brain/omni-int8-thinker-multi's is {:?}",
+            "brain/omni's '{}' input is {:?} but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16's is {:?}",
             want.name,
             want.media,
             got.unwrap().media

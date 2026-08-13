@@ -77,7 +77,7 @@ pub const MODEL: &str = "brain/omni";
 /// The chat-shaped `generate` schema every Thinker-backed model shares: the
 /// text params, `.streaming()`, and a `Media::Text` output.
 ///
-/// Extracted so `brain/omni-int8-thinker-multi` is reachable through the SAME
+/// Extracted so `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` is reachable through the SAME
 /// request contract as `brain/omni` without a second, hand-synced copy of this
 /// param list. That shape is not cosmetic: `apiserve::catalog::api_caps` gates
 /// `/v1/chat/completions` and `/v1/messages` exposure on exactly
@@ -107,7 +107,7 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
 
 /// The three real media inputs `generate` accepts, wherever a model's
 /// `generate` actually splices them in via `crate::mm::build_multimodal_prompt`
-/// (today: this model and `brain/omni-int8-thinker-multi`). Factored out so
+/// (today: this model and `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16`). Factored out so
 /// both declarations are built from the SAME `.input(...)` chain rather than
 /// two hand-synced copies that could silently drift apart -
 /// `tests/caps_conformance.rs` asserts the two models' declared inputs match,
@@ -180,6 +180,87 @@ pub fn manifest() -> Manifest {
 /// re-exported so existing `omni::caps::last_user_text` callers keep working.
 pub use capability::last_user_text;
 
+/// Compile this checkpoint's OWN chat template (`data::chat_template::
+/// ChatTemplate::from_model_dir`), so both the bf16 (`OmniInner`) and int8
+/// (`crate::int8_thinker_resident::Int8ThinkerInstance`) Thinker paths render
+/// requests through the real Jinja `<|im_start|>`/`<|im_end|>` turn framing
+/// the checkpoint was trained on, instead of [`last_user_text`]'s raw-text
+/// extraction (no system prompt, no role framing, no special tokens --
+/// directly observed this session to degrade output quality/coherence
+/// against this Qwen3-family instruct checkpoint).
+///
+/// `None` (never an error) when `dir` has no template -- a base,
+/// non-instruction-tuned checkpoint is a real, expected case, and a model
+/// that can't find one should degrade to [`last_user_text`], not fail to
+/// load. Logs why, once, at load time (not per request).
+pub fn load_chat_template(dir: &str) -> Option<data::chat_template::ChatTemplate> {
+    match data::chat_template::ChatTemplate::from_model_dir(Path::new(dir)) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("omni: no chat template in '{dir}' ({e}) -- falling back to last_user_text's raw-prompt extraction");
+            None
+        }
+    }
+}
+
+/// Render a chat-shaped [`Invocation`] (`messages` JSON array + optional
+/// `system` + `enable_thinking`, or a bare `prompt`) through `tmpl` -- the ONE
+/// implementation [`GenerateAction`]/[`SpeakAction`]/[`ConverseAction`]
+/// (bf16) and `Int8ThinkerInstance::generate_chat` (int8) all call, so Omni
+/// has a single chat-templating code path rather than two that could drift.
+///
+/// `messages` wins when present (`[{"role","content"}, ...]`, the same shape
+/// `capability::last_user_text` and `qwen3::chat::parse_chat_messages` read);
+/// `system` is prepended as a leading system turn UNLESS `messages` already
+/// opens with one (mirrors `qwen3::chat::parse_chat_messages`'s own rule).
+/// With no `messages`, the bare `prompt` becomes a single synthesized user
+/// turn -- the same fallback shape `last_user_text` and `qwen3::chat::
+/// parse_request` already accept, so callers that never adopted `messages`
+/// keep working. `add_generation_prompt` is always `true`: every caller here
+/// wants a completion, never a training-style full-conversation render.
+pub fn render_chat_prompt(tmpl: &data::chat_template::ChatTemplate, inv: &Invocation) -> Result<String, String> {
+    let mut messages: Vec<serde_json::Value> = match inv.get_str("messages").filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("omni: messages JSON: {e}"))?;
+            v.as_array().cloned().ok_or("omni: messages must be a JSON array")?
+        }
+        None => {
+            let prompt = inv.get_str("prompt").unwrap_or_default();
+            vec![json!({"role": "user", "content": prompt})]
+        }
+    };
+    if let Some(system) = inv.get_str("system").filter(|s| !s.is_empty()) {
+        let opens_with_system = messages.first().and_then(|m| m.get("role")).and_then(|r| r.as_str()) == Some("system");
+        if !opens_with_system {
+            messages.insert(0, json!({"role": "system", "content": system}));
+        }
+    }
+    let messages_text = serde_json::to_string(&messages).map_err(|e| format!("omni: messages: {e}"))?;
+    let messages_value = data::chat_template::parse_json_ordered(&messages_text).map_err(|e| format!("omni: chat template: {e}"))?;
+
+    let mut extra = std::collections::BTreeMap::new();
+    if let Some(t) = inv.get_bool("enable_thinking") {
+        extra.insert("enable_thinking".to_string(), minijinja::Value::from(t));
+    }
+    tmpl.render(messages_value, None, true, &extra).map_err(|e| format!("omni: chat template: {e}"))
+}
+
+/// [`render_chat_prompt`] when a template is available, else [`last_user_text`]
+/// -- the one call site both `Self::run`s and `generate_chat` use, so "does
+/// this model have a template" is decided in ONE place, not re-checked ad hoc
+/// at every action. Never errors on a missing template (that is the
+/// degrade-gracefully case [`load_chat_template`]'s doc describes); a
+/// template that IS present but fails to render (a malformed `messages`
+/// param, a template bug) still surfaces as a real error rather than
+/// silently falling back, since that would mask a genuine request/template
+/// problem behind degraded output quality.
+pub fn chat_prompt(tmpl: Option<&data::chat_template::ChatTemplate>, inv: &Invocation) -> Result<String, String> {
+    match tmpl {
+        Some(t) => render_chat_prompt(t, inv),
+        None => Ok(last_user_text(inv)),
+    }
+}
+
 /// A loaded Thinker, ready to generate.
 ///
 /// `gpus` is one handle per device the placement uses and `stack` is the
@@ -202,6 +283,10 @@ pub struct OmniInner {
     tok: QwenBpe,
     embed: EmbedTable,
     eos_ids: Vec<u32>,
+    /// This checkpoint's own Jinja chat template ([`load_chat_template`]),
+    /// `None` for a checkpoint that does not ship one (degrades to
+    /// [`last_user_text`] -- see [`chat_prompt`]).
+    chat_template: Option<data::chat_template::ChatTemplate>,
 }
 
 pub struct OmniProvider {
@@ -238,6 +323,7 @@ impl OmniProvider {
         let cfg = OmniConfig::from_json(&root);
         let tok = QwenBpe::from_dir(dir)?;
         let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].into_iter().filter_map(|s| tok.special_id(s)).collect();
+        let chat_template = load_chat_template(dir);
         let embed = EmbedTable::open(&reader)?;
         if embed.hidden() != cfg.thinker.text.hidden as usize {
             return Err(format!("omni: the embedding table is [_, {}] but the config says hidden={}", embed.hidden(), cfg.thinker.text.hidden));
@@ -255,7 +341,7 @@ impl OmniProvider {
             (gs, devices.iter().map(|&(_, c)| c).collect())
         };
         let stack = ThinkerStack::build(&reader, &cfg.thinker.text, &gpus, &caps)?;
-        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, stack, gpus, cfg, tok, embed, eos_ids }) })
+        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, stack, gpus, cfg, tok, embed, eos_ids, chat_template }) })
     }
 
     /// The shared inner state — the seam `cli::resident_omni`'s
@@ -405,9 +491,22 @@ impl OmniInner {
     /// wants the final reassembled waveform this still returns. Returns
     /// `(text, wav_samples, sample_rate)` — the SAME complete waveform
     /// regardless of whether `on_chunk` streamed it too.
-    pub fn speak(&self, prompt: &str, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
+    ///
+    /// `prompt` and `user_text` are DELIBERATELY separate strings, not one
+    /// reused twice: `prompt` (the full chat-templated conversation, via
+    /// [`chat_prompt`]/[`render_chat_prompt`] - see [`SpeakAction::run`]) is
+    /// what the Thinker actually generates from, but `user_text` (the bare
+    /// last-user-turn text, [`last_user_text`]) is what becomes the Talker's
+    /// user-segment token ids below - the Talker's voice/prosody context
+    /// wants the literal utterance a person spoke, not that utterance
+    /// wrapped in `<|im_start|>system\n...<|im_start|>user\n` framing.
+    /// Feeding the Talker the fully-templated text would be a silent
+    /// behavior change to `build_talker_prompt`'s tested contract, not a fix
+    /// to the Thinker's own text-completion bug this parameter split exists
+    /// to isolate.
+    pub fn speak(&self, prompt: &str, user_text: &str, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let (text, new_ids) = self.generate(prompt, max_new);
-        let user_ids = self.tok.encode(prompt);
+        let user_ids = self.tok.encode(user_text);
 
         let tc = &self.cfg.talker;
         let text_proj = crate::codec_bridge::load_talker_projection(&self.reader, tc, "text_projection")?;
@@ -528,10 +627,10 @@ impl Action for GenerateAction {
         generate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = last_user_text(inv);
-        if prompt.trim().is_empty() {
+        if last_user_text(inv).trim().is_empty() {
             return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
+        let prompt = chat_prompt(self.inner.chat_template.as_ref(), inv)?;
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
@@ -559,16 +658,21 @@ impl Action for SpeakAction {
         speak_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = last_user_text(inv);
-        if prompt.trim().is_empty() {
+        let user_text = last_user_text(inv);
+        if user_text.trim().is_empty() {
             return Err("omni speak: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
+        // The Thinker generates from the full chat-templated conversation
+        // (`prompt`); the Talker's user-segment context stays the bare
+        // utterance (`user_text`) -- see `OmniInner::speak`'s doc for why
+        // these are deliberately two different strings.
+        let prompt = chat_prompt(self.inner.chat_template.as_ref(), inv)?;
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
 
         progress(Progress::step(0, 2, "generating text"));
         let mut n_chunks = 0u32;
-        let (text, wav, sample_rate) = self.inner.speak(&prompt, max_new, &speaker, |chunk| {
+        let (text, wav, sample_rate) = self.inner.speak(&prompt, &user_text, max_new, &speaker, |chunk| {
             n_chunks += 1;
             let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
             let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));

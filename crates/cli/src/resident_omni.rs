@@ -265,7 +265,7 @@ impl Instance for OmniInstance {
 pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<omni::int8_thinker_resident::Int8ThinkerResident> {
     let checkpoint_path = std::env::var("BRAIN_OMNI_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
     if gpus.is_empty() {
-        eprintln!("brain: omni-int8-thinker-multi not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)");
+        eprintln!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", omni::int8_thinker_resident::MODEL);
         return None;
     }
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
@@ -280,8 +280,9 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path);
     if tokenizer_dir.is_none() {
         eprintln!(
-            "brain: omni-int8-thinker-multi has no tokenizer directory -- it will serve raw token ids only, \
-             NOT /v1/chat/completions. Set BRAIN_OMNI_INT8_TOKENIZER_DIR (or BRAIN_OMNI_HF_DIR)."
+            "brain: {} has no tokenizer directory -- it will serve raw token ids only, \
+             NOT /v1/chat/completions. Set BRAIN_OMNI_INT8_TOKENIZER_DIR (or BRAIN_OMNI_HF_DIR).",
+            omni::int8_thinker_resident::MODEL
         );
     }
     // Multimodal input needs a real HF checkpoint directory for the
@@ -292,7 +293,7 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // inventing a second one; unset ⇒ this model still serves text-only.
     let hf_dir = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty());
     if hf_dir.is_none() {
-        eprintln!("brain: omni-int8-thinker-multi has no BRAIN_OMNI_HF_DIR -- it will serve text-only generate (no audio/image/video input).");
+        eprintln!("brain: {} has no BRAIN_OMNI_HF_DIR -- it will serve text-only generate (no audio/image/video input).", omni::int8_thinker_resident::MODEL);
     }
     Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir).with_hf_dir(hf_dir))
 }

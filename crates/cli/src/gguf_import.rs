@@ -145,8 +145,8 @@ pub fn import_file(gguf_path: &str, out_path: Option<&str>, id: Option<&str>) ->
     Ok(out)
 }
 
-/// `brain import-gguf FILE [--out PATH] [--id NAME]` / `brain import-gguf --list`
-/// - the ONE generic conversion command, dispatching by the file's own
+/// `brain import-gguf FILE [--out PATH] [--id NAME]` / `brain import-gguf --list`:
+/// the ONE generic conversion command, dispatching by the file's own
 /// `general.architecture` through [`import_file`]. Replaces the per-model
 /// `brain qwen35moe import` (which still works, as a thin wrapper).
 pub fn run_import_gguf(args: &[String]) {

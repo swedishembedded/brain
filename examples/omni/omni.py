@@ -13,7 +13,7 @@ extract frames -- unlike speech/image, which stay zero-dependency by design,
 real video demuxing genuinely needs a decoder, so this `skip()`s cleanly
 (exit 77) rather than adding a hard requirement. This is true of BOTH served
 Thinker models -- `brain/omni` (streamed bf16 weights) and
-`brain/omni-int8-thinker-multi` (GPU-resident int8, layer-sharded across
+`brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` (GPU-resident int8, layer-sharded across
 however many GPUs it needs, ~25-50x brain/omni's tokens/second on the same
 hardware) -- since both build their multimodal prompt through the SAME
 `crate::mm::build_multimodal_prompt`; `--model` selects between them (see
@@ -30,7 +30,7 @@ doesn't take on, and speech OUTPUT needs Talker+Code2Wav, not wired into a
 generation loop yet. Generation is still validation-tier for weight I/O on
 `brain/omni` specifically (`crate::generate`'s own doc): the KV-cache makes
 attention O(cached length), but every layer's weights are still streamed
-fresh from the checkpoint per generated token; `brain/omni-int8-thinker-multi`
+fresh from the checkpoint per generated token; `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16`
 does not have this limitation -- its weights are GPU-resident.
 
 `--openai`/`--anthropic` reject ALL blob inputs (audio/image/video alike)
@@ -55,8 +55,8 @@ Examples:
   # The fast GPU-resident int8 path (needs `BRAIN_OMNI_INT8_CHECKPOINT=...
   # BRAIN_OMNI_INT8_TOKENIZER_DIR=... [BRAIN_OMNI_HF_DIR=... for multimodal]
   # brain serve --dbus` running):
-  python3 examples/omni/omni.py --dbus --model brain/omni-int8-thinker-multi --in-text "Say hello in French." --out-stdio
-  python3 examples/omni/omni.py --dbus --model brain/omni-int8-thinker-multi --in-image photo.ppm --in-text "What is this?" --out-stdio
+  python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-text "Say hello in French." --out-stdio
+  python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-image photo.ppm --in-text "What is this?" --out-stdio
 
   # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running,
   # with BRAIN_OMNI_HF_DIR set for that process):

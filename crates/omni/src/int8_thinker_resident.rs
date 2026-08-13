@@ -115,7 +115,16 @@ use crate::int8_resident::{expert_bytes, ThinkerInt8Store};
 use crate::mm::{build_multimodal_prompt, MultimodalPrompt};
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, thinker_pipelines, ThinkerLayerCache, ThinkerLayerWeights};
 
-pub const MODEL: &str = "brain/omni-int8-thinker-multi";
+/// `W8A16`, not `INT8`/GGUF's `Q8_0`: this checkpoint is per-output-channel
+/// symmetric INT8 WEIGHT-ONLY quantization (one f32 scale per output channel,
+/// MoE expert linears only -- attention/norms/embed/lm_head/vision-audio
+/// towers stay fp32) with full-precision activations at compute time
+/// (`crate::int8_resident`'s module doc has the exact scheme). That is
+/// Weight-8bit/Activation-16bit-or-higher, the current HF/vLLM-recognized tag
+/// for this class of scheme -- not GGUF's `Q8_0` (a different, 32-element
+/// block-quantization format llama.cpp uses) and not a bare "INT8" (which
+/// says nothing about activations staying full precision).
+pub const MODEL: &str = "brain/Qwen3-Omni-30B-A3B-Instruct-W8A16";
 
 /// A contiguous layer range `[start, end)` assigned to one device.
 type LayerRange = std::ops::Range<usize>;
@@ -421,6 +430,13 @@ pub struct Int8ThinkerInstance {
     /// not be read - the raw `ids` contract still works, so a missing
     /// tokenizer degrades one request shape instead of failing the load.
     tok: Option<(QwenBpe, Vec<u32>)>,
+    /// This checkpoint's own Jinja chat template (`crate::caps::
+    /// load_chat_template`, read from the SAME directory `tok` came from --
+    /// see `crate::caps::chat_prompt`'s doc for why a template-less checkpoint
+    /// degrades to `last_user_text` rather than failing). Shared with the bf16
+    /// `OmniInner` path (`crate::caps`) rather than a second templating
+    /// implementation -- see `crate::caps::render_chat_prompt`'s doc.
+    chat_template: Option<data::chat_template::ChatTemplate>,
     /// A REAL HF checkpoint directory's `WeightReader`, open ONLY to feed the
     /// vision/audio tower encoders for a multimodal `generate` request (see
     /// this module's doc, "Multimodal input", for why this is a second
@@ -659,10 +675,14 @@ impl Int8ThinkerInstance {
                  BRAIN_OMNI_HF_DIR) at a directory holding tokenizer.json, or vocab.json + merges.txt."
             ));
         };
-        let prompt = last_user_text(inv);
-        if prompt.trim().is_empty() {
+        if last_user_text(inv).trim().is_empty() {
             return Err(format!("{MODEL} generate: empty prompt (need 'messages' with a user turn, or 'prompt')"));
         }
+        // The real Jinja chat template when this checkpoint has one (see
+        // `chat_template`'s field doc) -- `crate::caps::render_chat_prompt`,
+        // the SAME implementation `omni::caps::GenerateAction` uses, not a
+        // second copy.
+        let prompt = crate::caps::chat_prompt(self.chat_template.as_ref(), inv)?;
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
@@ -1005,6 +1025,15 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
                 None
             }
         });
+        // The chat template lives beside the tokenizer (tokenizer_config.json
+        // or a standalone chat_template.json/chat_template.jinja, same
+        // directory) -- read from the SAME `tokenizer_dir`, not a second env
+        // var, so the two can never point at different checkpoints. A missing
+        // template degrades to `last_user_text` (see `crate::caps::
+        // chat_prompt`), same non-fatal shape as the tokenizer/mm_reader
+        // degrades above -- there is no tokenizer to read a template beside
+        // when `tokenizer_dir` is `None`.
+        let chat_template = self.tokenizer_dir.as_ref().and_then(|dir| crate::caps::load_chat_template(dir));
         // Same non-fatal degrade as the tokenizer above: a bad/missing HF dir
         // costs multimodal input only, not the whole activation.
         let mm_reader = self.hf_dir.as_ref().and_then(|dir| match WeightReader::open_hf_dir(std::path::Path::new(dir)) {
@@ -1014,6 +1043,6 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
                 None
             }
         });
-        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok, mm_reader }))
+        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok, chat_template, mm_reader }))
     }
 }
