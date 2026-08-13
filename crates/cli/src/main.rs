@@ -254,8 +254,8 @@ GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glm <train|finetune|infer|eval|import|export> ...
 
 QWEN3-OMNI (text/audio/image/video in, text + speech out)
-  brain omni import   --hf <dir> --out omni-int8.safetensors [--id VENDOR/REPO]
-      # brain-native int8 checkpoint for the GPU-resident sharded Thinker
+  brain omni import   --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
+      # brain-native W8A16 checkpoint for the GPU-resident sharded Thinker
       # (serve it with BRAIN_OMNI_INT8_CHECKPOINT=<out>)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)

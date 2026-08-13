@@ -3,11 +3,12 @@
 
 //! `brain omni …` - the Qwen3-Omni conversion step.
 //!
-//!   brain omni import --hf <HF checkpoint dir> --out omni-int8.safetensors
+//!   brain omni import --hf <HF checkpoint dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
 //!
-//! Produces the brain-native, int8-quantized checkpoint the GPU-resident
-//! sharded Thinker (`BRAIN_OMNI_INT8_CHECKPOINT`,
-//! `omni::int8_thinker_resident`) loads. The raw HF bf16 checkpoint the
+//! Produces the brain-native, W8A16 (int8 weight-only, MoE expert linears,
+//! full-precision activations) checkpoint the GPU-resident sharded Thinker
+//! (`BRAIN_OMNI_INT8_CHECKPOINT`, `omni::int8_thinker_resident`) loads. The
+//! raw HF bf16 checkpoint the
 //! validation-tier `BRAIN_OMNI_HF_DIR` path reads is NOT that format - it is
 //! ~2x the size and stores no packed int8 - so this conversion is the step
 //! between "downloaded the weights" and "the model is GPU-resident".
@@ -32,7 +33,7 @@ pub fn run_omni(argv: &[String]) {
 fn import(argv: &[String]) {
     let mut a = Args::new(argv);
     let hf = a.take_str("--hf");
-    let out = a.str_or("--out", "omni-int8.safetensors");
+    let out = a.str_or("--out", "Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors");
     let id = a.take_str("--id");
     a.finish();
     let Some(hf) = hf else {

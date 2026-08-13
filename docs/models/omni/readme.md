@@ -35,19 +35,23 @@ audio/image/video surface, but every decoder layer's weights - including all
 nothing stays on the GPU between calls. It is correct and slow.
 
 The **GPU-resident** path is a second, separately-gated model,
-`brain/omni-int8-thinker-multi`. Its weights live in VRAM across calls,
+`brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` -- named for what it actually is:
+per-output-channel symmetric INT8 WEIGHT-ONLY quantization (one f32 scale per
+output channel, MoE expert linears only) with full-precision activations,
+the current HF/vLLM-recognized tag for this scheme (not GGUF's `Q8_0`, a
+different, block-quantized format). Its weights live in VRAM across calls,
 layer-sharded across however many GPUs their real per-layer byte cost needs.
 It takes the same chat request as `brain/omni` (text only - no audio/image/
 video and no `speak`), and on two 24 GB P40s it is about **25x faster per
 token**: measured on the real checkpoint, 2.3 s/token against 57.6 s/token for
 the streaming path above, on the same prompt with the same output.
 
-It wants a brain-native int8 checkpoint, which is not the format you
+It wants a brain-native W8A16 checkpoint, which is not the format you
 downloaded - convert once (~8 minutes, 66 GB in, 33.6 GB out):
 
 ```bash
 brain omni import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
-                  --out /path/to/omni-int8.safetensors
+                  --out /path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
 ```
 
 The conversion streams one tensor at a time (peak host memory is roughly one
@@ -55,7 +59,7 @@ tensor's f32 expansion, never the whole ~70 GB checkpoint) and quantizes
 every rank-2 weight to int8. Then serve it:
 
 ```bash
-BRAIN_OMNI_INT8_CHECKPOINT=/path/to/omni-int8.safetensors \
+BRAIN_OMNI_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors \
 BRAIN_OMNI_INT8_TOKENIZER_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   brain serve --openai --dbus --device vulkan
 ```
@@ -171,9 +175,10 @@ speech, image and video input over both the D-Bus and HTTP transports.
   rather than living resident, so throughput is validation-tier, not
   production-grade - measured on two P40s, 89% of a request is re-reading the
   37 of 48 layers that do not fit (343 GiB per 4 tokens), against 2% in
-  kernels. The GPU-resident alternative is `brain/omni-int8-thinker-multi`
-  (see "GPU residency" above), which keeps the chat surface and trades only
-  the multimodal/`speak` half for weights that stay on the cards.
+  kernels. The GPU-resident alternative is
+  `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` (see "GPU residency" above),
+  which keeps the chat surface and trades only the multimodal/`speak` half
+  for weights that stay on the cards.
 - Only `Qwen3-Omni-30B-A3B-Instruct` is supported. The `-Thinking` and
   `-Captioner` variants have no Talker (speech-output) component and are out
   of scope for this model.

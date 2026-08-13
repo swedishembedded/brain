@@ -193,7 +193,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(t) = crate::resident_omni::int8_thinker_multi_from_env(gpus, reserved) {
         exec.register_multi(Arc::new(t));
     } else {
-        eprintln!("brain: omni-int8-thinker-multi not served over the scheduler (set BRAIN_OMNI_INT8_CHECKPOINT)");
+        eprintln!("brain: {} not served over the scheduler (set BRAIN_OMNI_INT8_CHECKPOINT)", omni::int8_thinker_resident::MODEL);
     }
     exec
 }
