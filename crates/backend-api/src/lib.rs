@@ -214,8 +214,8 @@ impl NumericSupport {
 
 /// The ONE numeric-tier enum for the engine: a checkpoint's on-disk element
 /// width (the input to [`DType::promote`]'s placement-budgeting decision),
-/// the kernel-selection key ([`select::OpShape::dtype`]), and — where the
-/// surrounding logic permits folding without a restructure — every other
+/// the kernel-selection key ([`select::OpShape::dtype`]), and - where the
+/// surrounding logic permits folding without a restructure - every other
 /// per-model precision tag. Deliberately extensible: a future FP8/NF4 tier
 /// is one more arm, nothing structural. No `Ord`: F16 and BF16 are the same
 /// width with no natural ordering between them, so "widens" is checked via
@@ -227,7 +227,7 @@ pub enum DType {
     BF16,
     /// Packed int8 (weights quantised per `qwen3::q8` / `matmul_i8`).
     I8,
-    /// Packed int4 weights, int8 activations (W4A8 — see `model::int4`'s
+    /// Packed int4 weights, int8 activations (W4A8 - see `model::int4`'s
     /// module doc: there is no int4 accelerator instruction in this engine,
     /// so activations stay on the existing int8 dynamic-quant path and only
     /// weights narrow further). Shares `I8`'s capability requirement for
@@ -247,7 +247,7 @@ impl DType {
         }
     }
 
-    /// Elements packed per 32-bit word — the inverse of [`Self::bits`],
+    /// Elements packed per 32-bit word - the inverse of [`Self::bits`],
     /// matching how the packed kernels (`matmul_i8*`/`matmul_q4*`) lay
     /// weights out in memory (4 int8 lanes or 8 int4 nibbles per `u32`).
     pub const fn per_word(self) -> u32 {
@@ -256,7 +256,7 @@ impl DType {
 
     /// Bytes per element on disk/in host memory for this dtype. For `Q4`
     /// this is a rounded-up 1 byte/element: nothing in the engine allocates
-    /// a sub-byte host buffer — the packed layout (8 nibbles/`u32`) is a
+    /// a sub-byte host buffer - the packed layout (8 nibbles/`u32`) is a
     /// property of [`Self::per_word`], not of this budgeting number, which
     /// exists for VRAM placement sizing, not physical packing.
     pub const fn bytes(self) -> u64 {
@@ -276,17 +276,17 @@ impl DType {
     /// always returns *some* dtype rather than an `Option`.
     ///
     /// A tier promotes to itself once the device can at least HOLD it
-    /// (`f16`/`bf16` fast compute, or their `*_storage` counterpart —
+    /// (`f16`/`bf16` fast compute, or their `*_storage` counterpart -
     /// see [`NumericSupport`]'s doc for why storage-only is sufficient
     /// here: placement budgeting only needs "the bytes fit and can be
     /// read back", not a fast compute path) and to `F32` otherwise. `I8`
-    /// and `Q4` promote on `int8_dot` (`Q4` is W4A8 — see `model::int4`'s
-    /// module doc — so it rides the same int8 activation/dot capability).
+    /// and `Q4` promote on `int8_dot` (`Q4` is W4A8 - see `model::int4`'s
+    /// module doc - so it rides the same int8 activation/dot capability).
     ///
     /// Today every real backend's `NumericSupport` reports every non-fp32
     /// flag `false` (see `crate::gguf`'s `deq_*` family and every model
     /// crate's `from_reader`, which all dequantize to fp32 on load), so
-    /// this still returns `F32` for every input in practice — honestly
+    /// this still returns `F32` for every input in practice - honestly
     /// reflecting that no execution path can compute anything else yet.
     /// The value here is the *placement budgeting* this makes correct now
     /// (a bf16 checkpoint promoted to fp32 costs 2x, not 1x); the value
