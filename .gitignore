@@ -22,9 +22,12 @@ __pycache__/
 *.pyc
 .mypy_cache
 
-# Architecture-eval results artifacts (`brain bench eval`/`scale` write here).
-# Run outputs are not committed; the directory is regenerated on demand.
-/results/*.json
+# Run-output artifacts: `brain bench eval`/`scale`, `brain perf run`/`compare`,
+# and ad-hoc script output (e.g. scripts/run_zimage_int8_e2e.sh) all write here.
+# Nothing under it is committed; the directory itself is kept via
+# results/.gitkeep so it exists in a fresh checkout without being regenerated.
+/results/*
+!/results/.gitkeep
 
 # Session-local agent machinery (worktrees, locks, loop state, workflows).
 .claude/*

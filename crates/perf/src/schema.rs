@@ -103,10 +103,21 @@ impl Artifact {
     }
 
     /// Default artifact path: `results/perf-<scenario>-<model>-<device>-<seed>.json`.
+    ///
+    /// `device` comes from `env.device_requested`, which for a resolved
+    /// multi-device compute set looks like `gpu[0] + npu[0] + cpu[22
+    /// core(s)]` - spaces, brackets and a plus sign, all awkward in a
+    /// filename (unquoted shell globs/word-splitting mangle them). Sanitized
+    /// here so a generated path is always safe to pass around unquoted; the
+    /// Makefile's `results/*.json` enumeration is still `find -print0` /
+    /// `xargs -0` as a second, independent line of defence.
     pub fn default_path(&self, seed: u64) -> String {
         format!(
             "results/perf-{}-{}-{}-{}.json",
-            self.scenario, self.target.model, self.env.device_requested, seed
+            self.scenario,
+            self.target.model,
+            sanitize_path_component(&self.env.device_requested),
+            seed
         )
     }
 
@@ -119,6 +130,16 @@ impl Artifact {
         let text = serde_json::to_string_pretty(&self.to_json()).map_err(std::io::Error::other)?;
         std::fs::write(path, text + "\n")
     }
+}
+
+/// Replace characters that are awkward in a filename - and require quoting
+/// or escaping in a shell glob - with `_`. Keeps `[A-Za-z0-9._-]` as-is, so a
+/// plain device string like `cpu` round-trips unchanged, while
+/// `gpu[0] + npu[0] + cpu[22 core(s)]` becomes `gpu_0___npu_0___cpu_22_core_s_`.
+fn sanitize_path_component(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect()
 }
 
 /// Engine counters merged into the `memory` block by a target that has them.
@@ -249,6 +270,21 @@ mod tests {
         assert_eq!(a.to_json()["schema"], SCHEMA);
         let p = a.default_path(1234);
         assert!(p.starts_with("results/perf-latency-qwen-cpu-1234"), "got {p}");
+    }
+
+    #[test]
+    fn default_path_sanitizes_a_multi_device_label_into_a_plain_filename() {
+        let a = Artifact::new(
+            "serve",
+            Env::capture("gpu[0] + npu[0] + cpu[22 core(s)]"),
+            TargetInfo::new("qwen", "token"),
+        );
+        let p = a.default_path(1234);
+        assert!(!p.contains('['), "got {p}");
+        assert!(!p.contains(' '), "got {p}");
+        assert!(!p.contains('+'), "got {p}");
+        assert!(!p.contains('('), "got {p}");
+        assert_eq!(p, "results/perf-serve-qwen-gpu_0____npu_0____cpu_22_core_s__-1234.json");
     }
 
     #[test]

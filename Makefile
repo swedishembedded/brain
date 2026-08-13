@@ -677,11 +677,12 @@ bench/advise: release
 # per-axis + per-benchmark scores, columns = architectures) over every artifact
 # under results/, so a new architecture is diffed against priors at a glance.
 bench/compare: release
-	@set -e; files="$$(ls results/*.json 2>/dev/null | grep -v '/scale-' || true)"; \
-	if [ -z "$$files" ]; then \
+	@set -e; \
+	n=$$(find results -maxdepth 1 -name '*.json' ! -name 'scale-*' -print0 2>/dev/null | tr -cd '\0' | wc -c); \
+	if [ "$$n" -eq 0 ]; then \
 		echo "no eval artifacts yet - run 'make bench/eval ARCH=<name>' first"; exit 2; \
 	fi; \
-	$(BRAIN) bench compare $$files
+	find results -maxdepth 1 -name '*.json' ! -name 'scale-*' -print0 | xargs -0 $(BRAIN) bench compare
 
 # Generic single-benchmark rule (`make bench/mqar`, …). The explicit bench/eval,
 # bench/compare, bench/scaling, bench/char targets above take precedence.
@@ -780,9 +781,10 @@ perf/flux2: release
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
 perf/compare: release
-	@set -e; files="$$(ls results/perf-*.json 2>/dev/null || true)"; \
-	if [ -z "$$files" ]; then echo "no perf artifacts yet - run 'make perf' first"; exit 2; fi; \
-	$(BRAIN) perf compare $$files
+	@set -e; \
+	n=$$(find results -maxdepth 1 -name 'perf-*.json' -print0 2>/dev/null | tr -cd '\0' | wc -c); \
+	if [ "$$n" -eq 0 ]; then echo "no perf artifacts yet - run 'make perf' first"; exit 2; fi; \
+	find results -maxdepth 1 -name 'perf-*.json' -print0 | xargs -0 $(BRAIN) perf compare
 
 # CI-sized: every scenario shrunk to seconds, on the CPU backend.
 perf/smoke: release
