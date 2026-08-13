@@ -1,36 +1,42 @@
-# brain
+# BRaiN
 
 ![brain](docs/banner.jpg)
 
-**Local AI training and inference, in pure Rust.** brain is a self-contained
-engine — hand-written GPU compute kernels instead of a bundled deep-learning
-framework, no Python required to build or run it, and backprop correctness
-gated by an in-repo gradient checker instead of a PyTorch reference. One
-engine runs identically - the same WGSL kernel source - on your GPU, your
-CPU, or inside a web browser via WebGPU. A subset of models additionally
-reaches an Intel NPU through a separate, per-model ONNX/OpenVINO export path,
-not the same kernels.
+Modern AI infrastructure is fragmented. Knowledge is spread across many frameworks. Nothing can be optimized all in one place. 
+
+Training usually means Python and PyTorch. Production inference means another
+runtime. Edge deployment means another toolchain. Browser inference means
+WebGPU. Intel NPUs mean OpenVINO. Distributed execution adds another layer
+again. Every new model arrives with its own assumptions, dependencies, code, and
+serving path.
+
+**BRaiN replaces that stack with one engine.**
+
+It trains and runs models locally, in pure Rust, across GPUs, CPUs, Intel NPUs,
+and WebGPU - without embedding Python, PyTorch, CUDA, or another deep-learning
+framework into the runtime.
+
+The same primitives, model definitions, execution graph, and interfaces are used
+from training through deployment. GPU kernels are implemented directly,
+backpropagation is verified independently with finite-difference gradient
+checking, and models are exposed uniformly through CLI, HTTP, and D-Bus.
 
 ## What brain solves today
 
-- **Run an LLM locally**, served behind an OpenAI/Anthropic/OpenRouter-compatible
-  API, with paged-KV continuous-batching serving.
-- **Train a model from scratch on the GPU** — forward, backward, and AdamW, all
-  hand-written WGSL, correctness-checked by finite differences on every
-  backend.
-- **LoRA fine-tune** a language model or a forecaster on your own data.
-- **See and edit images** — detection, depth, segmentation, face recognition,
-  restoration, upscaling, and text-to-image generation.
-- **Speech in and out** — voice cloning, text-to-speech, streaming and offline
-  speech-to-text.
-- **Forecast time series**, including your own OHLCV market data.
-- **Scale across GPUs** — data-parallel, pipeline-parallel, and (for the
-  primitives) tensor-parallel training, over a transport that works the same
-  whether your workers are threads on one box or processes on a network.
+* **One runtime from training to serving** - train, fine-tune, evaluate, and serve without moving the model between unrelated frameworks.
+* **One hardware abstraction** - run the same model code on GPUs, CPUs, Intel NPUs, or in the browser through WebGPU.
+* **One serving stack** - local models behind OpenAI-, Anthropic-, and OpenRouter-compatible APIs, with paged KV cache and continuous batching.
+* **Training without PyTorch** - forward pass, backward pass, optimizers, and GPU kernels implemented directly in brain.
+* **One interface across model types** - language, vision, speech, image generation, forecasting, and other models.
+* **Fine-tuning on your own data** - including LoRA (support pending for more models)
+* **Multimodal workloads without separate runtimes** - detection, depth, segmentation, recognition, restoration, upscaling, image generation, speech recognition, TTS, and voice cloning.
+* **Distributed execution built into the engine** - data parallelism, pipeline parallelism, and tensor-parallel primitives over the same transport abstraction whether workers are threads, local processes, or machines on a network.
+* **Weight streaming** - brain implements a residency engine that can efficiently stream weights and allows concurrent on demand model serving of multiple models at the same time with eviction control.
 
-Every model is reachable the same way — CLI, HTTP, and D-Bus — through one
-uniform interface (`brain caps` / `brain do`), not a bespoke integration per
-model.
+The goal of brain is to make model training and inference easily accessible, to
+make it run on absolutely anything, and to keep all knowledge in one place and
+to keep optimizing it relentless so that it becomes an extremely efficient AI
+workload runtime that scales across both accelerators and nodes.
 
 ## Quick start
 
