@@ -4,7 +4,7 @@
 // @what  MoE combine for one expert
 // @how   one thread per output element
 // @opt   3
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   yes
 // @quant none

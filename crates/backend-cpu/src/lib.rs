@@ -166,6 +166,8 @@ struct FastIdx {
     concat_split: Option<usize>,
     chan_place: Option<usize>,
     upsample2: Option<usize>,
+    silu_mul: Option<usize>,
+    scale_add: Option<usize>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -247,6 +249,8 @@ impl CpuBackend {
                 concat_split: find("concat_split"),
                 chan_place: find("chan_place"),
                 upsample2: find("upsample2"),
+                silu_mul: find("silu_mul"),
+                scale_add: find("scale_add"),
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
@@ -716,6 +720,20 @@ impl CpuBackend {
             }
             return;
         }
+        // silu_mul.wgsl: out[i] = SiLU(a[i]) * b[i]. params = [total];
+        // bufs = [a, b, out]. See fast_ops::silu_mul's own doc for why this
+        // (not just moe_linear_gated/matmul) was the decode loop's next
+        // promoted bottleneck.
+        if Some(kind) == f.silu_mul && bufs.len() >= 3 {
+            unsafe {
+                let total = *uniform as usize;
+                let a = std::slice::from_raw_parts(bufs[0] as *const f32, total);
+                let b = std::slice::from_raw_parts(bufs[1] as *const f32, total);
+                let out = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, total);
+                fast_ops::silu_mul(a, b, out);
+            }
+            return;
+        }
         if Some(kind) == f.gn_stats && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 6);
@@ -824,6 +842,22 @@ impl CpuBackend {
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, n * c * hw);
                 let y = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * c * 4 * hw);
                 fast_ops::upsample2(pu, x, y);
+            }
+            return;
+        }
+        // scale_add.wgsl: the MoE combine step for one expert. params =
+        // [seq_len, d_model, n_experts, e_idx, accumulate]; bufs = [gate, src,
+        // acc]. See fast_ops::scale_add's own doc - same finding/fix shape as
+        // silu_mul above.
+        if Some(kind) == f.scale_add && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 5);
+                let (seq_len, d_model, n_experts, e_idx, accumulate) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] != 0);
+                let gate = std::slice::from_raw_parts(bufs[0] as *const f32, seq_len * n_experts);
+                let src = std::slice::from_raw_parts(bufs[1] as *const f32, seq_len * d_model);
+                let acc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, seq_len * d_model);
+                fast_ops::scale_add(gate, src, acc, seq_len, d_model, n_experts, e_idx, accumulate);
             }
             return;
         }

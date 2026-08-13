@@ -27,7 +27,7 @@ a kernel can be 5/5 structurally and still be a defect at a given shape.
 `workgroupBarrier()` and no more; with two or more it does not fail cleanly, it
 **corrupts memory**, so those are `✗`
 (9 kernels) - cross-checked against the barrier count on every run.
-`native` marks the 42 kernels with a hand-written AVX2 path that runs instead
+`native` marks the 44 kernels with a hand-written AVX2 path that runs instead
 of the JIT; `native only` means that path is the *only* way it works there, because
 its WGSL has >1 barrier - under `BRAIN_NO_FASTCONV=1` or on a non-AVX2 host it would
 fall back to the JIT and corrupt memory. A `✓` says the JIT *can* run it, not that the
@@ -390,7 +390,7 @@ op (156 kernels), not that this file runs there.
 | [`router_topk_compact`](../../crates/kernels/wgsl/router_topk_compact.wgsl) | Compact a dense MoE gate matrix into the top_k expert ids each row selected | one thread per row, single scan (no local array, no barrier) | 1/5 | ✓ | ✓ | - | - |
 | [`row_dot`](../../crates/kernels/wgsl/row_dot.wgsl) | Generic per-row dot product: out[row] = alpha * sum_d a[row,d]*b[row,d] | one thread per output row, serial reduction over a Params-bounded axis | 2/5 | ✓ | ✓ | - | - |
 | [`row_scatter`](../../crates/kernels/wgsl/row_scatter.wgsl) | Row scatter by index - the inverse of the `embed` row-gather for UNIQUE indices | one thread per output element | 3/5 | ✓ | ✓ | - | - |
-| [`scale_add`](../../crates/kernels/wgsl/scale_add.wgsl) | MoE combine for one expert | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
+| [`scale_add`](../../crates/kernels/wgsl/scale_add.wgsl) | MoE combine for one expert | one thread per output element | 3/5 | native | ✓ | ✓ | - |
 | [`scale_add_dexp`](../../crates/kernels/wgsl/scale_add_dexp.wgsl) | MoE combine backward, part 1 - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
 | [`scale_add_dgate`](../../crates/kernels/wgsl/scale_add_dgate.wgsl) | MoE combine backward, part 2 - gradient w.r.t | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - |
 | [`scale_chan`](../../crates/kernels/wgsl/scale_chan.wgsl) | Per-channel scale (forward) - the codec decoder's LayerScale and any elementwise per-channel gain | one thread per output element | 3/5 | ✓ | ✓ | - | - |
@@ -405,7 +405,7 @@ op (156 kernels), not that this file runs there.
 | [`silu_bwd_da`](../../crates/kernels/wgsl/silu_bwd_da.wgsl) | SwiGLU backward, part 1 - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
 | [`silu_bwd_db`](../../crates/kernels/wgsl/silu_bwd_db.wgsl) | SwiGLU backward, part 2 - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
 | [`silu_gate`](../../crates/kernels/wgsl/silu_gate.wgsl) | SwiGLU activation (Kronos FFN) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
-| [`silu_mul`](../../crates/kernels/wgsl/silu_mul.wgsl) | SwiGLU activation core:  out[i] = SiLU(a[i]) * b[i],  SiLU(x) = x * sigmoid(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - |
+| [`silu_mul`](../../crates/kernels/wgsl/silu_mul.wgsl) | SwiGLU activation core:  out[i] = SiLU(a[i]) * b[i],  SiLU(x) = x * sigmoid(x) | one thread per output element | 3/5 | native | ✓ | ✓ | - |
 | [`snake_beta`](../../crates/kernels/wgsl/snake_beta.wgsl) | SnakeBeta activation (forward) - the periodic activation in the codec SEANet decoder / BigVGAN-style vocoder | one thread per output element | 3/5 | ✓ | ✓ | - | - |
 | [`softmax_k`](../../crates/kernels/wgsl/softmax_k.wgsl) | Softmax over a STRIDED axis of length K, NCHW-flattened | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - |
 | [`softmax_k_dx`](../../crates/kernels/wgsl/softmax_k_dx.wgsl) | Softmax-over-strided-K backward | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - |

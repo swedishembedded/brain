@@ -52,6 +52,61 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// `silu_mul` (`silu_mul.wgsl`): `out[i] = SiLU(a[i]) * b[i]` - the SwiGLU
+/// activation core every SwiGLU MLP calls (`gpt`'s GELU sibling aside, this is
+/// the one every MoE/dense decoder in this tree uses: `qwen3`, `glm`,
+/// `qwen35moe`, `deepseekv2`, `lfm`, ...). Unlike [`silu`] above this reads
+/// TWO operands, so it needed its own microkernel rather than reuse. A real
+/// DeepSeek-OCR resident-server run (`BRAIN_PROFILE`, quiet machine) found
+/// this at 15-16% of the decoder's own profiled CPU time - tens of thousands
+/// of decode-step calls, each a single row (`moe_ff` or `d_model` wide, a few
+/// hundred to ~1300 elements), previously falling through to the generic
+/// dispatch's rayon-chunked JIT path with no native fast path at all.
+pub fn silu_mul(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let n = a.len().min(b.len()).min(out.len());
+    let chunk = (n / (rayon::current_num_threads() * 4)).max(4096);
+    out[..n]
+        .par_chunks_mut(chunk)
+        .zip(a[..n].par_chunks(chunk))
+        .zip(b[..n].par_chunks(chunk))
+        .for_each(|((o, ai), bi)| {
+            #[cfg(target_arch = "x86_64")]
+            if crate::fast_conv::avx2_available() {
+                unsafe { silu_mul_avx2(ai, bi, o) };
+                return;
+            }
+            for ((oo, &av), &bv) in o.iter_mut().zip(ai).zip(bi) {
+                let s = av / (1.0 + (-av).exp());
+                *oo = s * bv;
+            }
+        });
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn silu_mul_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = a.len().min(b.len()).min(out.len());
+    let one = _mm256_set1_ps(1.0);
+    let neg = _mm256_set1_ps(-1.0);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let av = _mm256_loadu_ps(a.as_ptr().add(i));
+        let bv = _mm256_loadu_ps(b.as_ptr().add(i));
+        let e = exp256_ps(_mm256_mul_ps(av, neg));
+        let den = _mm256_add_ps(one, e);
+        let silu = _mm256_div_ps(av, den);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_mul_ps(silu, bv));
+        i += 8;
+    }
+    for j in i..n {
+        let av = *a.get_unchecked(j);
+        let bv = *b.get_unchecked(j);
+        let silu = av / (1.0 + (-av).exp());
+        *out.get_unchecked_mut(j) = silu * bv;
+    }
+}
+
 /// `matmul` (`matmul.wgsl`): `C[M,N] = sum_k A[M,K]·B[N,K]` - i.e. `A @ Bᵀ` with
 /// K contiguous in both operands. This is the transformer hot path (every q/k/v/o
 /// projection, FFN, and head), which otherwise runs as the scalar per-element JIT
@@ -804,6 +859,82 @@ unsafe fn axpy_avx2(dst: &mut [f32], scale: f32, src: &[f32]) {
     for j in i..n {
         *dst.get_unchecked_mut(j) += scale * *src.get_unchecked(j);
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn scale_set_avx2(dst: &mut [f32], scale: f32, src: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = dst.len().min(src.len());
+    let sv = _mm256_set1_ps(scale);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let s = _mm256_loadu_ps(src.as_ptr().add(i));
+        _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_mul_ps(sv, s));
+        i += 8;
+    }
+    for j in i..n {
+        *dst.get_unchecked_mut(j) = scale * *src.get_unchecked(j);
+    }
+}
+
+/// `scale_add` (`scale_add.wgsl`): the MoE combine step for one expert -
+///   `accumulate == false`: `acc[t,:] = gate[t,e_idx] * src[t,:]`
+///   `accumulate == true`:  `acc[t,:] += gate[t,e_idx] * src[t,:]`
+/// (a per-row scalar broadcast-multiply-add over `d_model` columns; `gate` is
+/// `[seq_len, n_experts]`). Every routed expert in every MoE layer calls this
+/// once per forward (this repo evaluates experts densely - see
+/// `moe_linear_gated.wgsl`'s own doc), so a decode step alone dispatches
+/// `n_routed_experts * n_moe_layers` calls, each covering ONE row. Same
+/// bug/fix shape as [`silu_mul`] above: no native path existed, so all of
+/// this ran through the generic rayon-chunked JIT dispatch every call.
+#[allow(clippy::too_many_arguments)]
+pub fn scale_add(
+    gate: &[f32],
+    src: &[f32],
+    acc: &mut [f32],
+    seq_len: usize,
+    d_model: usize,
+    n_experts: usize,
+    e_idx: usize,
+    accumulate: bool,
+) {
+    if seq_len == 0 || d_model == 0 {
+        return;
+    }
+    let row = |t: usize, srow: &[f32], arow: &mut [f32]| {
+        let g = gate[t * n_experts + e_idx];
+        if accumulate {
+            // `axpy`'s own `scale == 0.0` early exit is exactly the WGSL
+            // no-op this represents: acc += 0*src leaves acc untouched.
+            axpy(arow, g, srow);
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            if crate::fast_conv::avx2_available() {
+                unsafe { scale_set_avx2(arow, g, srow) };
+                return;
+            }
+            for (a, &s) in arow.iter_mut().zip(srow) {
+                *a = g * s;
+            }
+        }
+    };
+    let total = seq_len * d_model;
+    if total < 4096 {
+        for t in 0..seq_len {
+            row(t, &src[t * d_model..t * d_model + d_model], &mut acc[t * d_model..t * d_model + d_model]);
+        }
+        return;
+    }
+    let rows_per = (seq_len / (rayon::current_num_threads() * 4)).max(1);
+    acc.par_chunks_mut(rows_per * d_model).enumerate().for_each(|(ci, chunk)| {
+        let row0 = ci * rows_per;
+        let nrows = chunk.len() / d_model;
+        for r in 0..nrows {
+            let t = row0 + r;
+            row(t, &src[t * d_model..t * d_model + d_model], &mut chunk[r * d_model..r * d_model + d_model]);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2238,6 +2369,94 @@ mod tests {
             for j in 0..n {
                 let want: f32 = (0..k).map(|kk| a[kk] * b[j * k + kk]).sum();
                 assert!((c[j] - want).abs() / (want.abs() + 1e-3) < 2e-3, "row_abt_avx512 ({k},{n}) elem {j}");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // silu_mul / scale_add: a real DeepSeek-OCR resident-server run
+    // (BRAIN_PROFILE, quiet machine) found these two elementwise kernels at
+    // 15-16% EACH of the decoder's own profiled CPU time (matmul_reg3-sized,
+    // bigger than everything but matmul/moe_linear_gated) -- neither had a
+    // FastIdx entry, so every decode-step call (single row, d_model=1280 or
+    // moe_ff=896 elements) paid the generic dispatch's rayon-chunked-JIT path
+    // in full: `total.div_ceil(threads*8)` rounded up to a whole workgroup
+    // (64) spawns ~14 separate `par_iter` tasks for a ~900-element call. Same
+    // bug class as `moe_linear_gated` earlier this session (F.3/F.4: a hot
+    // kernel silently missing the native path its siblings already have).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn silu_mul_matches_scalar() {
+        let mut s = 11u32;
+        // Decode-shape (moe_ff=896, one row), a non-8-multiple width, and a
+        // multi-row (prefill-shape) case that crosses the chunk threshold.
+        for &n in &[896usize, 1280, 1, 5, 37, 4096 * 3 + 17] {
+            let a: Vec<f32> = (0..n).map(|_| lcg(&mut s) * 6.0).collect();
+            let b: Vec<f32> = (0..n).map(|_| lcg(&mut s) * 6.0).collect();
+            let mut o = vec![0.0f32; n];
+            silu_mul(&a, &b, &mut o);
+            for i in 0..n {
+                let want = (a[i] / (1.0 + (-a[i]).exp())) * b[i];
+                assert!((o[i] - want).abs() < 1e-4, "silu_mul n={n} i={i}: got {} want {want}", o[i]);
+            }
+        }
+    }
+
+    // Scalar reference mirroring `scale_add.wgsl` exactly (not `axpy` with a
+    // post-hoc mask - the set-vs-accumulate branch itself is under test).
+    fn scale_add_scalar_ref(
+        gate: &[f32],
+        src: &[f32],
+        acc: &mut [f32],
+        seq_len: usize,
+        d_model: usize,
+        n_experts: usize,
+        e_idx: usize,
+        accumulate: bool,
+    ) {
+        for t in 0..seq_len {
+            let g = gate[t * n_experts + e_idx];
+            for c in 0..d_model {
+                let idx = t * d_model + c;
+                let contrib = g * src[idx];
+                acc[idx] = if accumulate { acc[idx] + contrib } else { contrib };
+            }
+        }
+    }
+
+    #[test]
+    fn scale_add_matches_scalar() {
+        let mut s = 13u32;
+        // (seq_len, d_model, n_experts): a single decode row (the real hot
+        // shape), a non-8-multiple d_model, and a prefill-scale multi-row case
+        // that crosses the rayon chunk threshold. Both accumulate branches,
+        // including a zero-gate row (the accumulate-skip early exit).
+        for &(seq_len, d_model, n_experts) in &[(1usize, 896usize, 64usize), (1, 5, 3), (7, 37, 4), (600, 1280, 64)] {
+            let gate: Vec<f32> = (0..seq_len * n_experts).map(|_| lcg(&mut s).abs()).collect();
+            let mut gate = gate;
+            // Force at least one zero-gated row so the accumulate-skip path runs.
+            if seq_len > 1 {
+                for e in 0..n_experts {
+                    gate[e] = 0.0;
+                }
+            }
+            let src: Vec<f32> = (0..seq_len * d_model).map(|_| lcg(&mut s)).collect();
+            let e_idx = n_experts / 2;
+            for accumulate in [false, true] {
+                let init: Vec<f32> = (0..seq_len * d_model).map(|_| lcg(&mut s)).collect();
+                let mut got = init.clone();
+                let mut want = init.clone();
+                scale_add(&gate, &src, &mut got, seq_len, d_model, n_experts, e_idx, accumulate);
+                scale_add_scalar_ref(&gate, &src, &mut want, seq_len, d_model, n_experts, e_idx, accumulate);
+                for i in 0..got.len() {
+                    assert!(
+                        (got[i] - want[i]).abs() < 1e-5,
+                        "scale_add seq_len={seq_len} d_model={d_model} accumulate={accumulate} i={i}: got {} want {}",
+                        got[i],
+                        want[i]
+                    );
+                }
             }
         }
     }
