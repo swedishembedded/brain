@@ -263,14 +263,13 @@ fn apply_properties(core: &mut Core, device: &DeviceType<'static>, cfg: &NpuConf
     }
 }
 
-/// A model compiled to a device, ready to run.
+/// A model compiled to a device, ready to run. Thin wrapper over [`NpuGraph`]:
+/// keeps the vision-specific `[N,C,H,W]` shape validation and the `HeadOutputs`
+/// return shape callers depend on, delegates the actual compile/set/infer/read
+/// to the generic runner.
 pub struct NpuSession {
-    // `core` must outlive the compiled model / request (owns the plugin).
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     input_shape: [usize; 4],
-    output_names: Vec<String>,
-    device: String,
 }
 
 /// One named output tensor: `(name, shape, row-major f32 data)`.
@@ -287,17 +286,7 @@ impl NpuSession {
 
     /// Compile ONNX bytes directly (no temp file), e.g. an in-memory fp32 export.
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-
-        let avail: Vec<String> = core
-            .available_devices()
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?
-            .iter()
-            .map(dev_str)
-            .collect();
-        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
-        apply_properties(&mut core, &device, cfg);
-
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -318,22 +307,8 @@ impl NpuSession {
         }
         let input_shape = [d[0] as usize, d[1] as usize, d[2] as usize, d[3] as usize];
 
-        let nout = compiled.get_output_size().map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut output_names = Vec::with_capacity(nout);
-        for i in 0..nout {
-            let name = compiled
-                .get_output_by_index(i)
-                .and_then(|n| n.get_name())
-                .unwrap_or_else(|_| format!("output_{i}"));
-            output_names.push(name);
-        }
-
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-
-        Ok(NpuSession { _core: core, request, input_shape, output_names, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(NpuSession { graph, input_shape })
     }
 
     /// The static input shape `[N,C,H,W]` the compiled model expects.
@@ -343,7 +318,7 @@ impl NpuSession {
 
     /// The OpenVINO device the model was compiled for (e.g. "NPU", or a fallback).
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
 
     /// Run one inference on a preprocessed, letterboxed CHW f32 input and return
@@ -359,54 +334,26 @@ impl NpuSession {
             )));
         }
         let dims: Vec<i64> = shape.iter().map(|&x| x as i64).collect();
-        let ov_shape = Shape::new(&dims).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tensor =
-            Tensor::new(ElementType::F32, &ov_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        {
-            let dst = tensor.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
-            dst.copy_from_slice(input_chw);
-        }
-        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-
-        let mut tensors = Vec::with_capacity(self.output_names.len());
-        for (i, name) in self.output_names.iter().enumerate() {
-            let t = self
-                .request
-                .get_output_tensor_by_index(i)
-                .map_err(|e| NpuError::Other(format!("get_output {i}: {e:?}")))?;
-            let sh: Vec<usize> =
-                t.get_shape().map_err(|e| NpuError::Other(format!("{e:?}")))?.get_dimensions().iter().map(|&x| x as usize).collect();
-            let data = t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
-            tensors.push((name.clone(), sh, data));
-        }
+        let tensors = self.graph.run(&[("input", Feed::F32(input_chw, dims))])?;
         Ok(HeadOutputs { tensors })
     }
 }
 
 /// A compiled decoder graph: `input_ids:[1,T]` (int64) -> `logits:[1,T,vocab]`
-/// (f32). Separate from [`NpuSession`] (which is the YOLO 4-D-f32 shape).
+/// (f32). Separate from [`NpuSession`] (which is the YOLO 4-D-f32 shape). Thin
+/// wrapper over [`NpuGraph`]: keeps the typed `seq_len`/`vocab` metadata and
+/// `run_ids` signature callers depend on, delegates to the generic runner.
 pub struct DecoderSession {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     seq_len: usize,
     vocab: usize,
-    device: String,
 }
 
 impl DecoderSession {
     /// Compile a decoder ONNX from a file path. Required for models with ONNX
     /// external data (the reader resolves the sidecar relative to the model dir).
     pub fn load_path(onnx_path: &Path, cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let avail: Vec<String> = core
-            .available_devices()
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?
-            .iter()
-            .map(dev_str)
-            .collect();
-        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
-        apply_properties(&mut core, &device, cfg);
+        let (mut core, device) = open_device(cfg)?;
         // ONNX external-data is resolved relative to the model file's directory;
         // the IR weights_path is unused for ONNX, so pass "".
         let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
@@ -418,16 +365,7 @@ impl DecoderSession {
 
     /// Compile ONNX decoder bytes for the configured device (no external data).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let avail: Vec<String> = core
-            .available_devices()
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?
-            .iter()
-            .map(dev_str)
-            .collect();
-        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
-        apply_properties(&mut core, &device, cfg);
-
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -453,11 +391,8 @@ impl DecoderSession {
         let od = out_dims.get_dimensions();
         let vocab = *od.last().unwrap() as usize;
 
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(DecoderSession { _core: core, request, seq_len, vocab, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(DecoderSession { graph, seq_len, vocab })
     }
 
     pub fn seq_len(&self) -> usize {
@@ -467,7 +402,7 @@ impl DecoderSession {
         self.vocab
     }
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
 
     /// Run the prefill over `ids` (length must equal the compiled `seq_len`;
@@ -480,21 +415,9 @@ impl DecoderSession {
                 ids.len()
             )));
         }
-        let shape = Shape::new(&[1, self.seq_len as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tensor =
-            Tensor::new(ElementType::I64, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        {
-            let dst = tensor.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
-            dst.copy_from_slice(ids);
-        }
-        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        let data = out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
-        Ok(data)
+        let dims = vec![1, self.seq_len as i64];
+        let out = self.graph.run(&[("input_ids", Feed::I64(ids, dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
@@ -559,6 +482,16 @@ impl NpuGraph {
         let compiled = core
             .compile_model(&model, device.to_owned())
             .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        Self::from_compiled(core, compiled, device)
+    }
+
+    /// Wrap an already-compiled model (its shape/topology metadata was already
+    /// pulled out of `compiled` by the caller) as a generic named-I/O graph - the
+    /// shared tail every bespoke `*Session::compile` in this module also uses, so
+    /// a session that needs typed metadata (`seq_len`, `vocab`, ...) can extract it
+    /// from `compiled` itself and then hand the same compiled model here instead
+    /// of hand-rolling its own `create_infer_request`/name-introspection.
+    fn from_compiled(core: Core, compiled: openvino::CompiledModel, device: DeviceType<'static>) -> Result<NpuGraph, NpuError> {
         let nin = compiled.get_input_size().map_err(|e| NpuError::Other(format!("get_input_size: {e:?}")))?;
         let input_names = (0..nin)
             .map(|i| compiled.get_input_by_index(i).and_then(|n| n.get_name()).unwrap_or_else(|_| format!("input_{i}")))
@@ -629,20 +562,17 @@ fn open_device(cfg: &NpuConfig) -> Result<(Core, DeviceType<'static>), NpuError>
 /// loop pads the real context to `T` and reads the hidden row at the last real
 /// position (causal masking makes it independent of the zero padding).
 pub struct EmbedSession {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     seq_len: usize,
     d_in: usize,
     d_out: usize,
-    device: String,
 }
 
 impl EmbedSession {
     /// Compile from a file path (required for ONNX external data — the sidecar is
     /// resolved relative to the model dir).
     pub fn load_path(onnx_path: &Path, cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
         let model = core
             .read_model_from_file(path_str, "")
@@ -652,8 +582,7 @@ impl EmbedSession {
 
     /// Compile from ONNX bytes (no external data).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -679,11 +608,8 @@ impl EmbedSession {
             .and_then(|n| n.get_shape())
             .map_err(|e| NpuError::Other(format!("output shape: {e:?}")))?;
         let d_out = *od.get_dimensions().last().unwrap() as usize;
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(EmbedSession { _core: core, request, seq_len, d_in, d_out, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(EmbedSession { graph, seq_len, d_in, d_out })
     }
 
     pub fn seq_len(&self) -> usize {
@@ -696,7 +622,7 @@ impl EmbedSession {
         self.d_out
     }
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
 
     /// Run the prefill over `embeds` (length must equal `seq_len * d_in`; shorter
@@ -712,22 +638,9 @@ impl EmbedSession {
                 embeds.len()
             )));
         }
-        let shape = Shape::new(&[1, self.seq_len as i64, self.d_in as i64])
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tensor =
-            Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        {
-            let dst = tensor.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
-            dst.copy_from_slice(embeds);
-        }
-        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        let data = out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
-        Ok(data)
+        let dims = vec![1, self.seq_len as i64, self.d_in as i64];
+        let out = self.graph.run(&[("inputs_embeds", Feed::F32(embeds, dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
@@ -737,20 +650,17 @@ impl EmbedSession {
 /// scaler/patch/embed/REG assembly and the head rearrange/denorm around it. A
 /// graph is compiled per `(S, n_out)`.
 pub struct Chronos2Session {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     s: usize,
     d: usize,
     n_out: usize,
     head_out: usize,
-    device: String,
 }
 
 impl Chronos2Session {
     /// Compile the core ONNX (e.g. from [`crate::chronos2_export::export_onnx`]).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -778,15 +688,12 @@ impl Chronos2Session {
             .map_err(|e| NpuError::Other(format!("qhead output shape: {e:?}")))?;
         let odd = od.get_dimensions();
         let (n_out, head_out) = (odd[1] as usize, odd[2] as usize);
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(Chronos2Session { _core: core, request, s, d, n_out, head_out, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(Chronos2Session { graph, s, d, n_out, head_out })
     }
 
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
     pub fn seq_len(&self) -> usize {
         self.s
@@ -808,23 +715,10 @@ impl Chronos2Session {
         if kmask.len() != self.s {
             return Err(NpuError::Other(format!("kmask: expected {} f32, got {}", self.s, kmask.len())));
         }
-        let emb_shape = Shape::new(&[1, self.s as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut te = Tensor::new(ElementType::F32, &emb_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        te.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(emb);
-        self.request.set_tensor("emb", &te).map_err(|e| NpuError::Other(format!("set emb: {e:?}")))?;
-
-        let km_shape = Shape::new(&[1, 1, 1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tk = Tensor::new(ElementType::F32, &km_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        tk.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(kmask);
-        self.request.set_tensor("kmask", &tk).map_err(|e| NpuError::Other(format!("set kmask: {e:?}")))?;
-
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        // te/tk stay alive until here.
-        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        let emb_dims = vec![1, self.s as i64, self.d as i64];
+        let km_dims = vec![1, 1, 1, self.s as i64];
+        let out = self.graph.run(&[("emb", Feed::F32(emb, emb_dims)), ("kmask", Feed::F32(kmask, km_dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
@@ -833,19 +727,16 @@ impl Chronos2Session {
 /// output `hidden:[1,S,D]` (post embedding_norm). The tied MLM head runs on
 /// host over probe rows. Mirrors [`Chronos2Session`] with an i64 ids input.
 pub struct LfmSession {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     s: usize,
     d: usize,
-    device: String,
 }
 
 impl LfmSession {
     /// Compile in-memory ONNX bytes (small/test graphs; real checkpoints use
     /// [`Self::load_path`] — external-data models must load from a file).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -854,8 +745,7 @@ impl LfmSession {
 
     /// Compile from a model file (required for `finish_external` exports).
     pub fn load_path(path: &str, cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_file(path, "")
             .map_err(|e| NpuError::Other(format!("read_model {path}: {e:?}")))?;
@@ -875,15 +765,12 @@ impl LfmSession {
             return Err(NpuError::Other(format!("expected hidden [1,S,D], got {odd:?}")));
         }
         let (s, d) = (odd[1] as usize, odd[2] as usize);
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(LfmSession { _core: core, request, s, d, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(LfmSession { graph, s, d })
     }
 
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
     pub fn seq_len(&self) -> usize {
         self.s
@@ -901,22 +788,10 @@ impl LfmSession {
         if kmask.len() != self.s {
             return Err(NpuError::Other(format!("kmask: expected {} f32, got {}", self.s, kmask.len())));
         }
-        let id_shape = Shape::new(&[1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut ti = Tensor::new(ElementType::I64, &id_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        ti.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(ids);
-        self.request.set_tensor("ids", &ti).map_err(|e| NpuError::Other(format!("set ids: {e:?}")))?;
-
-        let km_shape = Shape::new(&[1, 1, 1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tk = Tensor::new(ElementType::F32, &km_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        tk.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(kmask);
-        self.request.set_tensor("kmask", &tk).map_err(|e| NpuError::Other(format!("set kmask: {e:?}")))?;
-
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        let id_dims = vec![1, self.s as i64];
+        let km_dims = vec![1, 1, 1, self.s as i64];
+        let out = self.graph.run(&[("ids", Feed::I64(ids, id_dims)), ("kmask", Feed::F32(kmask, km_dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
@@ -926,19 +801,16 @@ impl LfmSession {
 /// (FinCast is causal) and an in-graph top-2 MoE. The host does the patch
 /// embed/freq and the head rearrange/denorm.
 pub struct FincastSession {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     s: usize,
     d: usize,
     head_out: usize,
-    device: String,
 }
 
 impl FincastSession {
     /// Compile the core ONNX (from [`crate::fincast_export::export_onnx`]).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -951,8 +823,7 @@ impl FincastSession {
     /// path exports with a `.data` sidecar and loads it here (mirrors
     /// [`LfmSession::load_path`]).
     pub fn load_path(path: &str, cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_file(path, "")
             .map_err(|e| NpuError::Other(format!("read_model {path}: {e:?}")))?;
@@ -978,15 +849,12 @@ impl FincastSession {
             .map_err(|e| NpuError::Other(format!("qhead output shape: {e:?}")))?;
         let odd = od.get_dimensions();
         let head_out = odd[2] as usize;
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(FincastSession { _core: core, request, s, d, head_out, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(FincastSession { graph, s, d, head_out })
     }
 
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
     pub fn seq_len(&self) -> usize {
         self.s
@@ -1004,22 +872,10 @@ impl FincastSession {
         if amask.len() != self.s * self.s {
             return Err(NpuError::Other(format!("amask: expected {} f32, got {}", self.s * self.s, amask.len())));
         }
-        let emb_shape = Shape::new(&[1, self.s as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut te = Tensor::new(ElementType::F32, &emb_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        te.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(emb);
-        self.request.set_tensor("emb", &te).map_err(|e| NpuError::Other(format!("set emb: {e:?}")))?;
-
-        let am_shape = Shape::new(&[1, 1, self.s as i64, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut ta = Tensor::new(ElementType::F32, &am_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        ta.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(amask);
-        self.request.set_tensor("amask", &ta).map_err(|e| NpuError::Other(format!("set amask: {e:?}")))?;
-
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        let emb_dims = vec![1, self.s as i64, self.d as i64];
+        let am_dims = vec![1, 1, self.s as i64, self.s as i64];
+        let out = self.graph.run(&[("emb", Feed::F32(emb, emb_dims)), ("amask", Feed::F32(amask, am_dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
@@ -1027,20 +883,17 @@ impl FincastSession {
 /// two outputs `ctx:[1,T,D]` + `s1_logits:[1,T,s1_vocab]`. One AR step of the
 /// s1 head; the host embeds tokens, samples the last position, and slides.
 pub struct KronosS1Session {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     t: usize,
     d: usize,
     s1v: usize,
     ctx_idx: usize,
     s1_idx: usize,
-    device: String,
 }
 
 impl KronosS1Session {
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -1067,15 +920,12 @@ impl KronosS1Session {
         };
         let (l0, l1) = (last(0)?, last(1)?);
         let (ctx_idx, s1_idx, s1v) = if l0 == d { (0, 1, l1) } else { (1, 0, l0) };
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(KronosS1Session { _core: core, request, t, d, s1v, ctx_idx, s1_idx, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(KronosS1Session { graph, t, d, s1v, ctx_idx, s1_idx })
     }
 
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
     pub fn seq_len(&self) -> usize {
         self.t
@@ -1090,25 +940,12 @@ impl KronosS1Session {
         if x.len() != self.t * self.d {
             return Err(NpuError::Other(format!("x: expected {} f32, got {}", self.t * self.d, x.len())));
         }
-        let shape = Shape::new(&[1, self.t as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tx = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        tx.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(x);
-        self.request.set_tensor("x", &tx).map_err(|e| NpuError::Other(format!("set x: {e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let ctx = self
-            .request
-            .get_output_tensor_by_index(self.ctx_idx)
-            .map_err(|e| NpuError::Other(format!("get ctx: {e:?}")))?
-            .get_data::<f32>()
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?
-            .to_vec();
-        let s1 = self
-            .request
-            .get_output_tensor_by_index(self.s1_idx)
-            .map_err(|e| NpuError::Other(format!("get s1_logits: {e:?}")))?
-            .get_data::<f32>()
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?
-            .to_vec();
+        let dims = vec![1, self.t as i64, self.d as i64];
+        let mut out = self.graph.run(&[("x", Feed::F32(x, dims))])?;
+        // ctx_idx/s1_idx index into the same graph-output order NpuGraph::run
+        // returns (computed from the compiled model at load time above).
+        let s1 = std::mem::take(&mut out[self.s1_idx].2);
+        let ctx = std::mem::take(&mut out[self.ctx_idx].2);
         Ok((ctx, s1))
     }
 }
@@ -1116,18 +953,15 @@ impl KronosS1Session {
 /// The Kronos `decode_s2` dependency graph: inputs `ctx:[1,T,D]` + `sib:[1,T,D]`
 /// (RAW `emb_s1` of the sampled s1) → `s2_logits:[1,T,s2_vocab]`.
 pub struct KronosS2Session {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     t: usize,
     d: usize,
     s2v: usize,
-    device: String,
 }
 
 impl KronosS2Session {
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -1149,15 +983,12 @@ impl KronosS2Session {
             .and_then(|n| n.get_shape())
             .map_err(|e| NpuError::Other(format!("s2_logits output shape: {e:?}")))?;
         let s2v = *od.get_dimensions().last().unwrap() as usize;
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(KronosS2Session { _core: core, request, t, d, s2v, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(KronosS2Session { graph, t, d, s2v })
     }
 
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
     pub fn seq_len(&self) -> usize {
         self.t
@@ -1172,37 +1003,24 @@ impl KronosS2Session {
         if ctx.len() != self.t * self.d || sib.len() != self.t * self.d {
             return Err(NpuError::Other(format!("ctx/sib: expected {} f32 each", self.t * self.d)));
         }
-        let shape = Shape::new(&[1, self.t as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tc = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        tc.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(ctx);
-        self.request.set_tensor("ctx", &tc).map_err(|e| NpuError::Other(format!("set ctx: {e:?}")))?;
-        let mut ts = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        ts.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(sib);
-        self.request.set_tensor("sib", &ts).map_err(|e| NpuError::Other(format!("set sib: {e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get s2_logits: {e:?}")))?;
-        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        let dims = vec![1, self.t as i64, self.d as i64];
+        let out = self.graph.run(&[("ctx", Feed::F32(ctx, dims.clone())), ("sib", Feed::F32(sib, dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 }
 
 /// A compiled codec-decoder graph: int64 `codes:[nq,T]` (codebook-major) ->
 /// f32 `waveform:[1,1,L]`. Single whole-graph inference (no autoregression).
 pub struct CodecSession {
-    _core: Core,
-    request: openvino::InferRequest,
+    graph: NpuGraph,
     nq: usize,
     code_len: usize,
     out_len: usize,
-    device: String,
 }
 
 impl CodecSession {
     pub fn load_path(onnx_path: &Path, cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
         let model = core
             .read_model_from_file(path_str, "")
@@ -1211,8 +1029,7 @@ impl CodecSession {
     }
 
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
-        let mut core = new_core()?;
-        let device = pick_device(&mut core, cfg)?;
+        let (mut core, device) = open_device(cfg)?;
         let model = core
             .read_model_from_buffer(bytes, None)
             .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
@@ -1238,11 +1055,8 @@ impl CodecSession {
             .and_then(|n| n.get_shape())
             .map_err(|e| NpuError::Other(format!("output shape: {e:?}")))?;
         let out_len: usize = od.get_dimensions().iter().map(|&x| x as usize).product();
-        let mut compiled = compiled;
-        let request = compiled
-            .create_infer_request()
-            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
-        Ok(CodecSession { _core: core, request, nq, code_len, out_len, device: dev_str(&device) })
+        let graph = NpuGraph::from_compiled(core, compiled, device)?;
+        Ok(CodecSession { graph, nq, code_len, out_len })
     }
 
     pub fn nq(&self) -> usize {
@@ -1252,7 +1066,7 @@ impl CodecSession {
         self.code_len
     }
     pub fn device(&self) -> &str {
-        &self.device
+        self.graph.device()
     }
 
     /// Decode `codes` (length `nq * code_len`, codebook-major) to the waveform.
@@ -1266,22 +1080,9 @@ impl CodecSession {
                 codes.len()
             )));
         }
-        let shape = Shape::new(&[self.nq as i64, self.code_len as i64])
-            .map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        let mut tensor =
-            Tensor::new(ElementType::I64, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        {
-            let dst = tensor.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
-            dst.copy_from_slice(codes);
-        }
-        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
-        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
-        let out = self
-            .request
-            .get_output_tensor_by_index(0)
-            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
-        let data = out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
-        Ok(data)
+        let dims = vec![self.nq as i64, self.code_len as i64];
+        let out = self.graph.run(&[("codes", Feed::I64(codes, dims))])?;
+        Ok(out.into_iter().next().map(|(_, _, data)| data).unwrap_or_default())
     }
 
     pub fn out_len(&self) -> usize {
