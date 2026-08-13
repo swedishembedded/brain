@@ -1296,8 +1296,9 @@ a metric that isn't there was simply forgotten.
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),
-  generated `data/`, `out/`, `build/`, `results/*.json`, and the world-model
-  parity fixtures.
+  generated `data/`, `out/`, `build/`, `results/` (all `brain bench`/`brain perf`
+  artifacts and ad-hoc script output, dir kept via `results/.gitkeep`), and the
+  world-model parity fixtures.
 
 ---
 
