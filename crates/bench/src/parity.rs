@@ -24,7 +24,7 @@
 //! ## How it reuses the engine
 //! - **Tokens.** `NL` (sequence end), `SEP` (bits→answer separator, the mask
 //!   char `'='`), then bit tokens `0`/`1`. Written as a char dataset
-//!   (`SEP`→`'='`, `NL`→`'\n'`, bits → `'0'`/`'1'`) so `gpt::train` loads it
+//!   (`SEP`→`'='`, `NL`→`'\n'`, bits → `'0'`/`'1'`) so `gpt2::train` loads it
 //!   unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned
 //!   (`mask_before='='`, `mask_per_line`, `align_to_lines`) so the gradient

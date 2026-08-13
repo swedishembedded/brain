@@ -24,7 +24,7 @@
 //!   expansion, **derived**, cached beside the pair, and built on first use by
 //!   [`expand_lm`]. It is not a convenience: a `WeightReader` over it streams
 //!   one tensor at a time into the device buffers, whereas
-//!   `deepseekv2::import::import_map` would materialise the whole 11.7 GB as a
+//!   `deepseek2::import::import_map` would materialise the whole 11.7 GB as a
 //!   host `HashMap` *in addition to* the same bytes in the parameter store.
 //!   On a 30 GiB box that is the difference between building and being killed.
 //!
@@ -138,7 +138,7 @@ pub fn encoder_weights_from(mmproj: &Path) -> Result<HashMap<String, Vec<f32>>, 
 /// The LM's fp32 expansion, converting it on first use.
 ///
 /// Returns the path to use as a [`WeightReader`] source. The conversion streams
-/// one tensor at a time (`deepseekv2::import::import_file`), so it costs disk,
+/// one tensor at a time (`deepseek2::import::import_file`), so it costs disk,
 /// not 11.7 GB of RAM - but it costs minutes, which is why the result is cached
 /// beside the checkpoint and why this prints what it is doing.
 pub fn expand_lm(lm: &Path, expanded: &Path) -> Result<String, String> {
@@ -147,7 +147,7 @@ pub fn expand_lm(lm: &Path, expanded: &Path) -> Result<String, String> {
         return Ok(out);
     }
     eprintln!("brain: expanding {} -> {} (once, ~12 GB on disk)", lm.display(), expanded.display());
-    let stats = deepseekv2::import::import_file(utf8(lm)?, &out, None)?;
+    let stats = deepseek2::import::import_file(utf8(lm)?, &out, None)?;
     eprintln!("brain: deepseek-ocr decoder import: {stats}");
     Ok(out)
 }
@@ -171,7 +171,7 @@ pub fn config(files: &Files, block_size: u32) -> Result<DeepseekOcrConfig, Strin
     let cfg = DeepseekOcrConfig {
         sam: sam1::import::config_from_gguf(&mg)?,
         clip: ClipVisionConfig::from_gguf(&vision),
-        decoder: deepseekv2::import::config_from_file(utf8(&files.lm)?, block_size)?,
+        decoder: deepseek2::import::config_from_file(utf8(&files.lm)?, block_size)?,
         // No real-scale analogue; `check_real_scale_shaped` refuses it.
         patch_bypass: false,
     };

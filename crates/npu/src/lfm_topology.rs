@@ -26,7 +26,7 @@
 //!   materialize ~2 GB per layer. Never Concat directly into a graph output
 //!   (the mirror lesson): the concat lands in a temp, the final norm follows.
 
-use lfm::config::{LayerType, LfmConfig};
+use lfm2::config::{LayerType, LfmConfig};
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 

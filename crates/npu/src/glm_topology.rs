@@ -14,7 +14,7 @@
 
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
-use glm::config::GlmConfig;
+use glmdsa::config::GlmConfig;
 
 use crate::qwen_topology::Quant;
 use crate::topology::WeightSource;
@@ -332,8 +332,8 @@ mod tests {
     fn streaming_weight_source_matches_eager_hashmap() {
         let cfg = GlmConfig::tiny();
         let block = cfg.block_size;
-        let init = glm::init_weights(&cfg, 11);
-        let model = glm::Glm::new(cfg.clone(), 1, block, &init);
+        let init = glmdsa::init_weights(&cfg, 11);
+        let model = glmdsa::Glm::new(cfg.clone(), 1, block, &init);
         let dir = std::env::temp_dir().join(format!("brain_glm_topo_parity_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tiny.safetensors");

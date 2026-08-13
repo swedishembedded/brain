@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Token sampling from a vocab logit row — temperature + top-k, the same scheme
-//! as `gpt::sample`, lifted here so [`crate::StreamPump`] can run against any
+//! as `gpt2::sample`, lifted here so [`crate::StreamPump`] can run against any
 //! [`crate::InferModel`] (real GPT or a fake) without depending on gpt internals.
 
 /// A tiny deterministic PRNG (SplitMix64), so sampling is reproducible from a
@@ -29,7 +29,7 @@ impl Rng {
 }
 
 /// Sample a token index from `logits`. `temperature <= 0` → greedy argmax;
-/// `top_k == 0` disables top-k filtering. Mirrors `gpt::sample::sample_logits`.
+/// `top_k == 0` disables top-k filtering. Mirrors `gpt2::sample::sample_logits`.
 pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, rng: &mut Rng) -> u32 {
     if temperature <= 0.0 {
         return argmax(logits) as u32;

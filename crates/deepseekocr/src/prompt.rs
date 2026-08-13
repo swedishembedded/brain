@@ -35,7 +35,7 @@
 //!
 //! ## Scope: one contiguous run, global view only
 //!
-//! `deepseekv2::DeepseekV2::enable_mm_splice` takes ONE `(row0, n_rows)` run,
+//! `deepseek2::DeepseekV2::enable_mm_splice` takes ONE `(row0, n_rows)` run,
 //! so this builds the global (overview) view only -
 //! [`ViewGrid::global_only`], 273 rows at the real `tokens_per_side = 16`.
 //! Gundam/multi-tile prompts are a `rows`-level layout this decoder cannot

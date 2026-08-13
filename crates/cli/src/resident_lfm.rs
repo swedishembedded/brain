@@ -25,7 +25,7 @@ use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use lfm::model::Lfm;
+use lfm2::model::Lfm;
 
 /// Attention-slab budget per forward (chunk 2048 at T=8192, H=16).
 const SLAB_BUDGET: u64 = 512 << 20;
@@ -103,7 +103,7 @@ impl ResidentModel for LfmResident {
     fn manifest(&self) -> Manifest {
         // The shared resident manifest, re-keyed to this model's catalog id so
         // variants coexist.
-        let mut m = lfm::caps::manifest_resident();
+        let mut m = lfm2::caps::manifest_resident();
         m.model = self.id.clone();
         m
     }

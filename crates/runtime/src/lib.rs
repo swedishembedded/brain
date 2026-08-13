@@ -149,11 +149,11 @@ impl Control for () {
 
 // ---- GPT adapter ----------------------------------------------------------
 
-/// Wraps a loaded [`gpt::Gpt`] (sized for `B=1`) plus its char vocab as an
+/// Wraps a loaded [`gpt2::Gpt`] (sized for `B=1`) plus its char vocab as an
 /// [`InferModel`]. Construct via [`GptInfer::load`] (from a checkpoint path) or
 /// [`GptInfer::from_parts`].
 pub struct GptInfer {
-    model: gpt::Gpt,
+    model: gpt2::Gpt,
     itos: Option<Vec<char>>,
 }
 
@@ -161,17 +161,17 @@ impl GptInfer {
     /// Load a GPT checkpoint and its embedded `itos` (if char-level). The model is
     /// sized `B=1 × T=block_size` for single-sequence inference.
     pub fn load(path: &str) -> GptInfer {
-        let itos = gpt::Gpt::load_itos(path);
+        let itos = gpt2::Gpt::load_itos(path);
         // size T to the model's own block size by peeking the config.
         let block = {
             let c = checkpoint::load(path);
-            gpt::GptConfig::from_json(&c.header["config"]).block_size
+            gpt2::GptConfig::from_json(&c.header["config"]).block_size
         };
-        let model = gpt::Gpt::load(path, 1, block);
+        let model = gpt2::Gpt::load(path, 1, block);
         GptInfer { model, itos }
     }
 
-    pub fn from_parts(model: gpt::Gpt, itos: Option<Vec<char>>) -> GptInfer {
+    pub fn from_parts(model: gpt2::Gpt, itos: Option<Vec<char>>) -> GptInfer {
         GptInfer { model, itos }
     }
 }

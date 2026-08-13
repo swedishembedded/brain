@@ -22,12 +22,12 @@ use data::binio::Meta;
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use gpt::Gpt;
+use gpt2::Gpt;
 
 /// Block size recorded in a checkpoint header.
 fn block_of(weights: &str) -> u32 {
     let c = checkpoint::load(weights);
-    gpt::GptConfig::from_json(&c.header["config"]).block_size
+    gpt2::GptConfig::from_json(&c.header["config"]).block_size
 }
 
 /// Validation perplexity = `exp(mean CE)` over `batches` random val windows.

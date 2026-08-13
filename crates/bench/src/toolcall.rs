@@ -34,7 +34,7 @@
 //!   (sequence end), `SEP` (`=`, the mask char), then disjoint id ranges for
 //!   verbs, tool ids, field names (real + distractor), and argument *values*.
 //!   Written in brain's standard char-token layout
-//!   (`train.bin`/`val.bin`/`meta.json`) so `gpt::train` loads it unchanged — each
+//!   (`train.bin`/`val.bin`/`meta.json`) so `gpt2::train` loads it unchanged - each
 //!   id maps to a distinct Private-Use-Area char.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned
 //!   (`mask_before='='`, `mask_per_line`, `align_to_lines`). This is the **key

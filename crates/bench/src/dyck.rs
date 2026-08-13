@@ -22,7 +22,7 @@
 //! ## How it reuses the engine
 //! - **Tokens.** `NL` (sequence end), then `k` open-bracket tokens and `k`
 //!   matching close-bracket tokens. Written as a char dataset (`NL`→`'\n'`,
-//!   brackets → Private-Use-Area chars so any `k` fits) so `gpt::train` loads it
+//!   brackets → Private-Use-Area chars so any `k` fits) so `gpt2::train` loads it
 //!   unchanged.
 //! - **Masking.** No `=` separator: the whole word is supervised next-token
 //!   (`mask_before=None`), with windows **line-aligned** (`align_to_lines`) so

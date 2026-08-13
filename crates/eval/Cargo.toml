@@ -10,8 +10,8 @@ name = "eval"
 path = "src/lib.rs"
 
 [dependencies]
-brain-gpt.workspace = true
-brain-lfm.workspace = true
+brain-gpt2.workspace = true
+brain-lfm2.workspace = true
 brain-yolo.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true

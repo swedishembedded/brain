@@ -166,7 +166,7 @@ fn lfm_bench(args: &[String]) {
     }
 
     // Vocab (for in-range token ids) from the checkpoint config - cheap header read.
-    let cfg = lfm::config::LfmConfig::from_json(&checkpoint::load(&weights).header["config"]);
+    let cfg = lfm2::config::LfmConfig::from_json(&checkpoint::load(&weights).header["config"]);
     let vocab = cfg.vocab;
 
     // 1) Export the fixed-shape graph (external-data sidecar) - pure Rust, one-time.
@@ -241,7 +241,7 @@ fn lfm_bench(args: &[String]) {
 
     // 4) Parity gate: NPU output vs brain's own chunked forward on identical ids.
     if compare {
-        let m = lfm::model::Lfm::load_inference_chunked(&weights, 1, seq as u32, 512 << 20, 0);
+        let m = lfm2::model::Lfm::load_inference_chunked(&weights, 1, seq as u32, 512 << 20, 0);
         m.set_tokens(&ids_u32);
         m.forward();
         let reference = m.read_hidden();

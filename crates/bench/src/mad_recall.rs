@@ -24,7 +24,7 @@
 //!   `vocab_content` content tokens, split into a lower half (keys) and a
 //!   disjoint upper half (values) so a query key never collides with a value —
 //!   exactly the MQAR layout. Written as a char dataset (`SEP`→`'='`, `NL`→`'\n'`,
-//!   content → Private-Use-Area chars) so `gpt::train` loads it unchanged.
+//!   content → Private-Use-Area chars) so `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned
 //!   (`mask_before='='`, `mask_per_line`, `align_to_lines`) so the gradient
 //!   focuses on the single answer rather than memorizing the random bindings.

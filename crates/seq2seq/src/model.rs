@@ -44,7 +44,7 @@ use gpu_core::{f, Gpu, Step};
 use optim::Optim;
 use paramstore::ParamStore;
 
-/// Cross-entropy ignore index (masked label positions). Mirrors `gpt::IGNORE`.
+/// Cross-entropy ignore index (masked label positions). Mirrors `gpt2::IGNORE`.
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
 // ---- kernel indices (order matches PIPELINES) ----

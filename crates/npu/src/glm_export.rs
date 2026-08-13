@@ -5,7 +5,7 @@
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
 //! needed to produce the file.
 
-use glm::config::GlmConfig;
+use glmdsa::config::GlmConfig;
 use onnx::builder::GraphBuilder;
 
 /// Build the fp32 ONNX GLM decoder for `seq_len` and return `(bytes, config)`.

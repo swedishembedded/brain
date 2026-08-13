@@ -16,7 +16,7 @@
 //!                                          │
 //!                                Linear(clip_width + c_out, d_model)
 //!                                          ▼
-//!            deepseekv2::DeepseekV2, image rows spliced over the placeholder
+//!            deepseek2::DeepseekV2, image rows spliced over the placeholder
 //!            token embeddings (`model::vlm::splice_fwd`/`splice_bwd`)
 //! ```
 //!
@@ -62,8 +62,8 @@
 //!   fixture) base weight map with freshly-initialised adapter tensors for a
 //!   `cfg.decoder.lora`-configured composite. The adapter mechanism itself
 //!   (frozen base + trainable low-rank delta on the decoder's four attention
-//!   projections) lives in `deepseekv2::config::LoraCfg`/
-//!   `deepseekv2::model::DeepseekV2`, reused unchanged -- [`DeepseekOcr::new`]/
+//!   projections) lives in `deepseek2::config::LoraCfg`/
+//!   `deepseek2::model::DeepseekV2`, reused unchanged -- [`DeepseekOcr::new`]/
 //!   [`DeepseekOcr::new_split`] need no change at all to build a LoRA-adapted
 //!   composite once `cfg.decoder.lora` is set.
 //!
@@ -85,7 +85,7 @@
 //!   the global-view prompt over that one run; [`rows`]'s multi-view
 //!   (Base/Gundam) layouts still have no consumer, because they need one splice
 //!   call per run (`layout::RowGather` itself is already indifferent to that;
-//!   `deepseekv2::DeepseekV2::enable_mm_splice` is not).
+//!   `deepseek2::DeepseekV2::enable_mm_splice` is not).
 //! * **The real 273-row block is assembled, and the 256-row one is still the
 //!   parity path.** [`DeepseekOcr::new_with_prompt`] sizes the splice at
 //!   [`build_prompt`]'s own `n_rows` (273 at the real geometry) and fills it

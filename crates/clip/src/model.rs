@@ -582,7 +582,7 @@ impl ClipText {
             s.push(g.step(dx, &[&bw.d_res, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
             // Causal attention backward. The dscores/dv pair carries the v-region
             // params `[.., v_off, d_model]`, the dq/dk pair the q/k-region params
-            // `[.., q_off, k_off]` - the same split `gpt::model` dispatches. All
+            // `[.., q_off, k_off]` - the same split `gpt2::model` dispatches. All
             // four ASSIGN their region of `d_qkv`, which is why it needs no clear.
             // Note they read `probs` (per-layer cache), NOT `scores`.
             let pv = [b, c.heads, t, hd, 3 * h, 2 * h, h];

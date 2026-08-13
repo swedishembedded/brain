@@ -4,7 +4,7 @@
 //! LoRA training glue for the composite.
 //!
 //! The adapter mechanism itself lives one layer down, in
-//! `deepseekv2::config::LoraCfg` / `deepseekv2::model::DeepseekV2` (frozen
+//! `deepseek2::config::LoraCfg` / `deepseek2::model::DeepseekV2` (frozen
 //! base + trainable `.lora_a`/`.lora_b` on the decoder's four attention
 //! projections, composed entirely from the `matmul`/`matmul_dx`/`matmul_dw`/
 //! `axpy`/`grad_scale` kernels the decoder's own forward/backward already
@@ -39,7 +39,7 @@ use crate::config::DeepseekOcrConfig;
 pub fn lora_init_map(cfg: &DeepseekOcrConfig, base: &HashMap<String, Vec<f32>>, seed: u64) -> HashMap<String, Vec<f32>> {
     assert!(cfg.decoder.lora.is_some(), "lora_init_map: cfg.decoder.lora is None -- nothing to add");
     let mut init = base.clone();
-    for (name, data) in deepseekv2::init::init_adapters(&cfg.decoder, seed) {
+    for (name, data) in deepseek2::init::init_adapters(&cfg.decoder, seed) {
         assert!(
             init.insert(name.clone(), data).is_none(),
             "{name}: base already carries an adapter tensor -- checkpoint and fresh init collided"
@@ -58,11 +58,11 @@ mod tests {
     #[test]
     fn lora_init_map_adds_only_the_adapter_tensors_and_leaves_base_untouched() {
         let mut cfg = DeepseekOcrConfig::tiny();
-        cfg.decoder.lora = Some(deepseekv2::config::lora_cfg(2, 4.0));
+        cfg.decoder.lora = Some(deepseek2::config::lora_cfg(2, 4.0));
         let base: HashMap<String, Vec<f32>> =
             cfg.decoder.shape.param_list().into_iter().map(|(n, sz)| (n, vec![1.0f32; sz])).collect();
 
-        let adapters = deepseekv2::init::init_adapters(&cfg.decoder, 3);
+        let adapters = deepseek2::init::init_adapters(&cfg.decoder, 3);
         assert!(!adapters.is_empty(), "the tiny fixture's decoder must have LoRA-targetable attention leaves");
 
         let merged = lora_init_map(&cfg, &base, 3);

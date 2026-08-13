@@ -484,8 +484,8 @@ dependencies = [
  "brain-data",
  "brain-eval",
  "brain-fcbench",
- "brain-glm",
- "brain-gpt",
+ "brain-glmdsa",
+ "brain-gpt2",
  "brain-model",
  "brain-moe",
  "brain-qwen3",
@@ -559,14 +559,14 @@ dependencies = [
  "brain-fincast",
  "brain-flux2",
  "brain-forecast",
- "brain-glm",
- "brain-gpt",
+ "brain-glmdsa",
+ "brain-gpt2",
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-imaging",
  "brain-imgpipe",
  "brain-kronos",
- "brain-lfm",
+ "brain-lfm2",
  "brain-memauth",
  "brain-mirror",
  "brain-model",
@@ -690,28 +690,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-deepseekocr"
-version = "0.1.1"
-dependencies = [
- "brain-capability",
- "brain-checkpoint",
- "brain-clip",
- "brain-data",
- "brain-deepseekv2",
- "brain-gguf",
- "brain-gpu-core",
- "brain-imaging",
- "brain-kernels",
- "brain-model",
- "brain-paramstore",
- "brain-qwen3",
- "brain-sam1",
- "brain-testutil",
- "serde_json",
-]
-
-[[package]]
-name = "brain-deepseekv2"
+name = "brain-deepseek2"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
@@ -726,6 +705,27 @@ dependencies = [
  "brain-qwen3",
  "brain-testutil",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-deepseekocr"
+version = "0.1.1"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
+ "brain-deepseek2",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-sam1",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -769,8 +769,8 @@ dependencies = [
  "brain-audio",
  "brain-checkpoint",
  "brain-data",
- "brain-gpt",
- "brain-lfm",
+ "brain-gpt2",
+ "brain-lfm2",
  "brain-speaker",
  "brain-yolo",
  "serde_json",
@@ -905,7 +905,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-glm"
+name = "brain-glmdsa"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
@@ -920,7 +920,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-gpt"
+name = "brain-gpt2"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
@@ -958,11 +958,11 @@ dependencies = [
  "brain-data",
  "brain-facenet",
  "brain-flux2",
- "brain-glm",
- "brain-gpt",
+ "brain-glmdsa",
+ "brain-gpt2",
  "brain-gpu-core",
  "brain-kernels",
- "brain-lfm",
+ "brain-lfm2",
  "brain-model",
  "brain-moe",
  "brain-pid",
@@ -1045,7 +1045,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-lfm"
+name = "brain-lfm2"
 version = "0.1.1"
 dependencies = [
  "brain-audio",
@@ -1177,11 +1177,11 @@ dependencies = [
  "brain-eval",
  "brain-events",
  "brain-fincast",
- "brain-glm",
+ "brain-glmdsa",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kronos",
- "brain-lfm",
+ "brain-lfm2",
  "brain-mirror",
  "brain-model",
  "brain-nemotron",
@@ -1420,7 +1420,7 @@ dependencies = [
  "brain-events",
  "brain-fcbench",
  "brain-forecast",
- "brain-gpt",
+ "brain-gpt2",
  "brain-hfsm",
  "brain-yolo",
  "serde_json",

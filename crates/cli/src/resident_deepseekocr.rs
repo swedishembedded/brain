@@ -39,7 +39,7 @@
 //! decoder - via one `dev` closure, and calls it once per component
 //! (`DeepEncoder::new` already calls `dev(sam1::model::PIPELINES)`,
 //! `dev(CLIP_VISION_PIPELINES)`, and `dev(GLUE_PIPELINES)` separately from
-//! `DeepseekOcr::build`'s `dev(deepseekv2::PIPELINES)` for the decoder), so
+//! `DeepseekOcr::build`'s `dev(deepseek2::PIPELINES)` for the decoder), so
 //! giving the vision tower wgpu while leaving the decoder on the CPU is a
 //! small, well-scoped change to that one closure - but it requires editing
 //! `crates/deepseekocr`, which is outside this pass's assigned scope

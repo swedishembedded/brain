@@ -117,8 +117,8 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
 
     let result = match family {
         "qwen3" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
-        "glmdsa" => glm::import::import_as(hf_dir, out, Some(&id)),
-        "lfm2" => lfm::import::import_as(hf_dir, out, Some(&id)),
+        "glmdsa" => glmdsa::import::import_as(hf_dir, out, Some(&id)),
+        "lfm2" => lfm2::import::import_as(hf_dir, out, Some(&id)),
         // gpt2 is nanogpt-style, trained from scratch -- brain has never had
         // an HF importer for it (unlike glmdsa/qwen3/lfm2, all
         // production-tested). Writing one is real new-crate work, not "wire

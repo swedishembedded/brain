@@ -523,7 +523,7 @@ fn composite_backward_reaches_the_image_and_descends() {
 
 /// **LoRA descent smoke test.** Same fixture and the same shape of proof as
 /// [`composite_backward_reaches_the_image_and_descends`] above, but the
-/// decoder is built with `deepseekv2::config::LoraCfg` set: its own base
+/// decoder is built with `deepseek2::config::LoraCfg` set: its own base
 /// weights (embeddings, norms, the four attention projections, the MoE
 /// router/experts/shared expert, the untied head) are `Role::Frozen`, and the
 /// ONLY trainable tensors anywhere in the composite are the decoder's
@@ -533,7 +533,7 @@ fn composite_backward_reaches_the_image_and_descends() {
 /// 9's "LoRA finetune + descent smoke test": proving the parameter-efficient
 /// training path is wired correctly end to end, not proving it trains to
 /// convergence (see `crates/deepseekocr/src/train.rs` for the composite-level
-/// merge helper this test drives, and `deepseekv2::model`'s own doc for the
+/// merge helper this test drives, and `deepseek2::model`'s own doc for the
 /// adapter mechanism -- composed entirely from the SAME matmul/axpy/grad_scale
 /// kernels the base decoder's forward/backward already dispatch, no new
 /// kernel).
@@ -561,7 +561,7 @@ fn composite_lora_backward_freezes_the_base_and_descends() {
     let base_init = build_init(&cfg_base, &ck);
 
     let mut cfg = cfg_base.clone();
-    cfg.decoder.lora = Some(deepseekv2::config::lora_cfg(2, 4.0));
+    cfg.decoder.lora = Some(deepseek2::config::lora_cfg(2, 4.0));
     let init = deepseekocr::train::lora_init_map(&cfg, &base_init, 0x10_A_DEC);
 
     let ids: Vec<u32> = g["input_ids"].data.iter().map(|v| *v as u32).collect();
@@ -582,7 +582,7 @@ fn composite_lora_backward_freezes_the_base_and_descends() {
 
     // ---- warm up ONLY the decoder's own optimizer, a few steps ----
     //
-    // A fresh LoRA adapter starts with `B == 0` (see `deepseekv2::init::
+    // A fresh LoRA adapter starts with `B == 0` (see `deepseek2::init::
     // init_adapters`'s doc: "so the adapter starts as an exact no-op delta"),
     // which makes `A`'s OWN gradient degenerate at step 0: `dA = (d_out ·
     // B)ᵀ · x` is EXACTLY zero whenever `B` is, regardless of whether the

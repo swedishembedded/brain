@@ -3,7 +3,7 @@
 
 //! Synchronous one-token-per-`step` streaming pump.
 //!
-//! [`gpt::sample::generate`] runs the whole token loop and returns every token at
+//! [`gpt2::sample::generate`] runs the whole token loop and returns every token at
 //! once. The HSM controller instead needs *one* token per `step()` call so it can
 //! emit one `brain_text_chunk` per token under run-to-completion. [`StreamPump`]
 //! is that refactor: it holds the growing context + config and advances exactly

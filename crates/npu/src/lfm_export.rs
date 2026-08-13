@@ -6,7 +6,7 @@
 //! requirement — export one graph per sequence-length bucket and cache the
 //! compiled blobs (the qwen `precompile` pattern).
 
-use lfm::config::LfmConfig;
+use lfm2::config::LfmConfig;
 use onnx::builder::GraphBuilder;
 
 use crate::qwen_topology::Quant;

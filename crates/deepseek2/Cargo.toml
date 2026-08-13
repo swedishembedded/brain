@@ -1,0 +1,34 @@
+[package]
+name = "brain-deepseek2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek-V2-family MHA decoder (DeepSeek-OCR's language model): dense-then-MoE blocks, NEOX RoPE, fused unweighted shared experts; forward + backprop in WGSL."
+
+[lib]
+name = "deepseek2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-gguf.workspace = true
+brain-kernels.workspace = true
+brain-data.workspace = true
+# `qwen3::LoraCfg` -- the model-agnostic `{rank, alpha, targets}` LoRA config,
+# reused as-is rather than redeclared (the same choice `crates/qwen35moe`
+# already made for the same type).
+brain-qwen3.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+# `brain-gradcheck` depends on `brain-model` (and on the model crates it gates),
+# never on this crate, so using it as a DEV-dependency here introduces no build
+# cycle - the same arrangement `crates/model` and `crates/yolo` already use.
+[dev-dependencies]
+brain-gradcheck.workspace = true
+# `tests/parity.rs`: the shared testdata-path and cosine/max_abs report helpers.
+brain-testutil.workspace = true

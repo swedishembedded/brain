@@ -8,7 +8,7 @@
 //! * composites — [`Bottleneck`], [`C2f`], [`SPPF`], [`CXBlock`] (ConvNeXt).
 //! * stages — [`MaxPool`], [`LayerNorm2d`] (channels-first, composed).
 //!
-//! ## Block abstraction (the pattern, mirroring `gpt::Gpt`)
+//! ## Block abstraction (the pattern, mirroring `gpt2::Gpt`)
 //!
 //! Every block is constructed once ([`Conv::new`] etc.): it registers its
 //! parameters (see [`Conv::param_list`]) and pre-allocates its SSA activation +

@@ -5,7 +5,7 @@
 //! numbers, and the invariants that tie them together.
 //!
 //! Nothing is re-declared. `sam1::SamViTConfig`, `clip::config::ClipVisionConfig`
-//! and `deepseekv2::DeepseekV2Config` each already wrap the corresponding
+//! and `deepseek2::DeepseekV2Config` each already wrap the corresponding
 //! `crates/gguf` struct, so a checkpoint fact has exactly one home and this
 //! struct only owns what sits BETWEEN them:
 //!
@@ -27,7 +27,7 @@
 //! settable only by a fixture, and refused by `check_real_scale_shaped`.
 
 use clip::config::{ClipVisionConfig, TextAct};
-use deepseekv2::DeepseekV2Config;
+use deepseek2::DeepseekV2Config;
 use sam1::SamViTConfig;
 
 /// Parameter name of the projector's weight (`mm.model.fc` in the mmproj).

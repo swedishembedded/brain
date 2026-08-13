@@ -7,7 +7,7 @@
 //! to score it.
 //!
 //! Before this trait, each benchmark's `evaluate` hard-coded the GPT baseline:
-//! build a `GptConfig` + `TrainOpts`, call [`gpt::train`], `Gpt::load`, then
+//! build a `GptConfig` + `TrainOpts`, call [`gpt2::train`], `Gpt::load`, then
 //! `logits_all`. That boilerplate was duplicated across MQAR and every MAD
 //! benchmark, and named "GPT" inside otherwise model-agnostic scoring code. Now
 //! a benchmark depends only on [`DecoderLm`]: it hands over a [`TrainConfig`] and
@@ -24,8 +24,8 @@
 use std::path::Path;
 
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use gpt::model::Gpt;
-use gpt::GptConfig;
+use gpt2::model::Gpt;
+use gpt2::GptConfig;
 use model::{FitOpts, Model, ModelConfig};
 
 /// Architecture-independent training spec a benchmark hands to a [`DecoderLm`].
@@ -114,7 +114,7 @@ pub trait DecoderLm {
     fn load_scorer(&self, weights: &Path, block_size: u32) -> Box<dyn Scorer>;
 }
 
-/// The dense GPT baseline as a [`DecoderLm`] — wraps [`gpt::train`] / [`Gpt`].
+/// The dense GPT baseline as a [`DecoderLm`] - wraps [`gpt2::train`] / [`Gpt`].
 /// This is the default architecture every benchmark uses today.
 #[derive(Clone, Debug, Default)]
 pub struct GptDecoder;
@@ -141,7 +141,7 @@ impl DecoderLm for GptDecoder {
         };
         // Route through the architecture-agnostic generic trainer (ADR §2.4): the
         // `TrainConfig` -> `FitOpts` mapping below is the same hyperparameters the
-        // GPT-specific `gpt::train` used, so the benchmark behavior is unchanged.
+        // GPT-specific `gpt2::train` used, so the benchmark behavior is unchanged.
         let opts = FitOpts {
             steps: cfg.steps,
             batch_size: cfg.batch_size,

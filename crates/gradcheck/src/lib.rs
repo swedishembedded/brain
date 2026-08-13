@@ -288,9 +288,9 @@ impl<M: model::Model> CheckModel for M {
 
 /// Build a tiny GPT, set a fixed batch, and gradient-check it. Returns the report.
 pub fn check_gpt(seed: u64) -> Report {
-    use gpt::{Gpt, GptConfig};
+    use gpt2::{Gpt, GptConfig};
     let cfg = GptConfig { vocab: 23, block_size: 12, n_layers: 2, d_model: 16, n_heads: 2, d_ff: 32 };
-    let init = gpt::init_weights(&cfg, seed);
+    let init = gpt2::init_weights(&cfg, seed);
     let model = Gpt::new(cfg, 2, 6, &init);
     // Fixed batch (no masking → every position contributes).
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
@@ -326,9 +326,9 @@ pub fn check_qwen(seed: u64) -> Report {
 /// only some positions are supervised (the MLM label pattern), the rest are
 /// IGNORE, exercising the masking path.
 pub fn check_lfm(seed: u64) -> Report {
-    use lfm::{Lfm, LfmConfig};
+    use lfm2::{Lfm, LfmConfig};
     let cfg = LfmConfig::tiny();
-    let init = lfm::init::init_weights(&cfg, seed);
+    let init = lfm2::init::init_weights(&cfg, seed);
     let model = Lfm::new_train(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     // Unshifted MLM targets: supervise every other position with the original
@@ -336,7 +336,7 @@ pub fn check_lfm(seed: u64) -> Report {
     let y: Vec<u32> = x
         .iter()
         .enumerate()
-        .map(|(i, &t)| if i % 2 == 0 { t } else { lfm::model::IGNORE })
+        .map(|(i, &t)| if i % 2 == 0 { t } else { lfm2::model::IGNORE })
         .collect();
     model.set_batch(&x, &y);
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
@@ -533,9 +533,9 @@ pub fn check_moe(seed: u64) -> Report {
 /// selection bias is Frozen (never in the trainable/checked set), matching the
 /// reference where it is a load-balance heuristic, not a backprop target.
 pub fn check_glm(seed: u64) -> Report {
-    use glm::{Glm, GlmConfig};
+    use glmdsa::{Glm, GlmConfig};
     let cfg = GlmConfig { num_experts_per_tok: 3, ..GlmConfig::tiny() }; // top_k == n_routed_experts
-    let init = glm::init_weights(&cfg, seed);
+    let init = glmdsa::init_weights(&cfg, seed);
     let model = Glm::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
@@ -550,9 +550,9 @@ pub fn check_glm(seed: u64) -> Report {
 /// accumulation (main + MTP) - plus that the MTP grad correctly flows back into
 /// the final residual. `top_k == n_routed_experts` (smooth router).
 pub fn check_glm_mtp(seed: u64) -> Report {
-    use glm::{Glm, GlmConfig};
+    use glmdsa::{Glm, GlmConfig};
     let cfg = GlmConfig { mtp: true, num_experts_per_tok: 3, ..GlmConfig::tiny() };
-    let init = glm::init_weights(&cfg, seed);
+    let init = glmdsa::init_weights(&cfg, seed);
     let model = Glm::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();

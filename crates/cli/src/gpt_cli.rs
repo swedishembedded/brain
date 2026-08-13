@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use data::binio::Meta;
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use gpt::model::Gpt;
-use gpt::train::TrainOpts;
-use gpt::GptConfig;
+use gpt2::model::Gpt;
+use gpt2::train::TrainOpts;
+use gpt2::GptConfig;
 
 use crate::args::{canon_verb, Args};
 
@@ -87,7 +87,7 @@ fn train(args: &[String]) {
         "training gpt on {dir}: steps={} batch={} block={} layers={} d_model={} heads={}",
         o.steps, o.batch_size, o.block_size, cfg.n_layers, cfg.d_model, cfg.n_heads
     );
-    match gpt::train::train(Path::new(&dir), cfg, &o, out.as_deref()) {
+    match gpt2::train::train(Path::new(&dir), cfg, &o, out.as_deref()) {
         Ok((i0, i1)) => println!("done: train loss {i0:.4} -> {i1:.4}"),
         Err(e) => {
             eprintln!("error: {e}");
@@ -110,7 +110,7 @@ fn gen(args: &[String]) {
         eprintln!("usage: brain gpt infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
     }
-    let itos = match gpt::model::Gpt::load_itos(&weights) {
+    let itos = match gpt2::model::Gpt::load_itos(&weights) {
         Some(itos) => itos,
         None => {
             if data_dir.is_empty() {
@@ -135,7 +135,7 @@ fn gen(args: &[String]) {
     let prompt_text = if prompt.is_empty() { "\n" } else { prompt.as_str() };
     let prompt_ids: Vec<u32> = tok.encode(prompt_text);
     let mut rng = Rng::new(seed);
-    let gen = gpt::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, &mut rng);
+    let gen = gpt2::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, &mut rng);
     print!("{prompt_text}");
     print!("{}", tok.decode(&gen));
     println!();

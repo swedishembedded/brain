@@ -6,7 +6,7 @@
 //! `.safetensors` container, and load `.safetensors` back into the host tensor map.
 //!
 //! Names are the reference names with the `denoiser.inner_model.` prefix
-//! stripped. FULL-COVERAGE discipline (like `glm::import`): every expected
+//! stripped. FULL-COVERAGE discipline (like `glmdsa::import`): every expected
 //! tensor must be present with the right shape, and unexpected denoiser
 //! tensors are a hard error — layers are never silently skipped. The
 //! `rew_end_model.*` / `actor_critic.*` sub-models are not imported (not

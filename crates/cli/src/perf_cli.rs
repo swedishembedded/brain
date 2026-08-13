@@ -816,7 +816,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("text", serde_json::json!(text))
             .set("max_tokens", serde_json::json!(req.input_artifacts))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, lfm::caps::MODEL, "embed", "sequence", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, lfm2::caps::MODEL, "embed", "sequence", info, build)))
 }
 
 /// `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` (defaults 64 / 1) — the

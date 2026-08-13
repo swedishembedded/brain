@@ -14,7 +14,7 @@ use serde_json::Value;
 /// projections keep a frozen base weight plus trainable `A`/`B` adapters.
 ///
 /// `PartialEq` (on top of the `Clone, Debug` every other config-carried struct
-/// in this tree gets): `crates/deepseekv2::config::DeepseekV2Config` derives it
+/// in this tree gets): `crates/deepseek2::config::DeepseekV2Config` derives it
 /// and round-trips through JSON in its own tests, and reusing this struct as-is
 /// rather than redeclaring it (this crate's own `Qwen35Config`/`Qwen35`
 /// precedent) means the derive has to hold here too.

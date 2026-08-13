@@ -22,7 +22,7 @@ brain-paramstore.workspace = true
 brain-model.workspace = true
 brain-sam1.workspace = true
 brain-clip.workspace = true
-brain-deepseekv2.workspace = true
+brain-deepseek2.workspace = true
 brain-gguf.workspace = true
 brain-data.workspace = true
 # The image substrate: `preprocess` dispatches every per-pixel step (resize,

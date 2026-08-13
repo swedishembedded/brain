@@ -4,7 +4,7 @@
 //! Architecture-agnostic model seam (ADR 0001).
 //!
 //! This crate defines the [`Model`]/[`ModelConfig`] traits — the union of the
-//! surface `gpt::Gpt`, `moe::Trainer`, and `pid::Pid` already expose ad hoc —
+//! surface `gpt2::Gpt`, `moe::Trainer`, and `pid::Pid` already expose ad hoc -
 //! plus the [`Batch`] input enum and [`Head`] objective marker, and one generic
 //! trainer ([`train::fit`]) / sampler ([`train::generate`]) written over `Model`.
 //!
@@ -143,7 +143,7 @@ pub trait Model {
 
     /// Architecture-specific fresh weight initialization, deterministic for a
     /// fixed `seed`. The generic trainer needs this to construct a model from a
-    /// bare config (this is the model's own `init_weights`, e.g. `gpt::init`).
+    /// bare config (this is the model's own `init_weights`, e.g. `gpt2::init`).
     fn init_weights(cfg: &Self::Config, seed: u64) -> HashMap<String, Vec<f32>>
     where
         Self: Sized;

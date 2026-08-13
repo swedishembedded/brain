@@ -118,21 +118,21 @@ use Source::*;
 /// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
-/// `package` names the crate as it exists TODAY - several are pre-rename
-/// (`"brain-omni"` for `qwen3omnimoe`, `"brain-gpt"` for `gpt2`, …) because
-/// this table lands before the crate-rename migration completes; each
-/// rename updates its row in the same commit that moves the crate.
+/// `package` names the crate as it exists TODAY - several rows are still
+/// pre-rename (`"brain-omni"` for `qwen3omnimoe`, …) while the crate-rename
+/// migration is in flight, one domain group per commit; each rename updates
+/// its row in the same commit that moves the crate.
 pub const ARCHS: &[Arch] = &[
     // -- Text decoders --------------------------------------------------
-    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt", hf: &["GPT2LMHeadModel"]),
+    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
     // "qwen3" is the real config.json `model_type` fallback value (used when
     // `architectures[0]` is absent), alongside the real `architectures[0]`
     // class name.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"]),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: "qwen35moe"),
-    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glm"),
-    arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseekv2"),
-    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm"),
+    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
+    arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2"),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-omni", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwenvl"),

@@ -29,8 +29,8 @@
 
 use std::path::Path;
 
-use gpt::model::Gpt;
-use gpt::GptConfig;
+use gpt2::model::Gpt;
+use gpt2::GptConfig;
 use model::FitOpts;
 
 use crate::model::{DecoderLm, Scorer, TrainConfig};

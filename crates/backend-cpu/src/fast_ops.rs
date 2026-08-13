@@ -1674,7 +1674,7 @@ mod tests {
 
     // Perf microbench at DeepSeek-OCR's real decoder shape (12-layer MoE,
     // d_model=1280, moe_ff=896, 64 experts top_k=6 - see
-    // `deepseekv2::config::DeepseekV2Config::real`) - the kernel this repo's own
+    // `deepseek2::config::DeepseekV2Config::real`) - the kernel this repo's own
     // `BRAIN_PROFILE` run measured at 66.9% of the whole decode loop. `m=283`
     // is the real prompt-prefill row count that run used.
     //

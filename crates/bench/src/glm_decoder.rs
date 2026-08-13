@@ -5,7 +5,7 @@
 //! sigmoid `noaux_tc` MoE (shared expert + dense→MoE schedule), scored by the
 //! same benchmark battery as the dense/GQA/MoE baselines.
 //!
-//! `glm::Glm` implements the architecture-agnostic [`model::Model`] seam and
+//! `glmdsa::Glm` implements the architecture-agnostic [`model::Model`] seam and
 //! exposes `logits_all` on the trainer itself, so training routes through the
 //! generic `model::train::fit` and scoring loads an inference-only (frozen)
 //! instance from the saved checkpoint — exactly like the Qwen decoder.
@@ -16,8 +16,8 @@
 
 use std::path::Path;
 
-use glm::config::GlmConfig;
-use glm::model::Glm;
+use glmdsa::config::GlmConfig;
+use glmdsa::model::Glm;
 use model::FitOpts;
 
 use crate::model::{DecoderLm, Scorer, TrainConfig};

@@ -23,7 +23,7 @@
 //! ## How it reuses the engine
 //! - **Tokens.** `NL`, `SEP`, then three disjoint content bands: keys, values,
 //!   and noise. Written as a char dataset (`SEP`→`'='`, `NL`→`'\n'`, content →
-//!   Private-Use-Area chars) so `gpt::train` loads it unchanged.
+//!   Private-Use-Area chars) so `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned —
 //!   so the noisy bindings are never a training target, only the answer is.
 //! - **Scoring.** [`associative_recall`](crate::metrics::associative_recall) at

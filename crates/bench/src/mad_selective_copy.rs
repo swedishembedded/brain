@@ -25,7 +25,7 @@
 //!   band used for both the copyable tokens and the noise (noise is just content
 //!   tokens that are *not* preceded by `MARK`). Written as a char dataset
 //!   (`SEP`→`'='`, `NL`→`'\n'`, `MARK`/content → Private-Use-Area chars) so
-//!   `gpt::train` loads it unchanged.
+//!   `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned —
 //!   so only the copied-out region is a training target.
 //! - **Scoring.** [`exact_match`](crate::metrics::exact_match) over the whole

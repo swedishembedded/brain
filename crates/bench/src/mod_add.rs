@@ -33,7 +33,7 @@
 //! - **Tokens.** `NL` (sequence end), `SEP` (the `=` mask char), `PLUS` (the `+`
 //!   operator), then `p` residue tokens `0..p`. Written as a char dataset
 //!   (`SEP`→`'='`, `NL`→`'\n'`, `PLUS`→`'+'`, residues → Private-Use-Area chars
-//!   so any `p` fits) — `gpt::train` loads it unchanged.
+//!   so any `p` fits) - `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned
 //!   (`mask_before='='`, `mask_per_line`, `align_to_lines`) so the gradient
 //!   trains only the single answer residue `c`, not the (uniform) operands.

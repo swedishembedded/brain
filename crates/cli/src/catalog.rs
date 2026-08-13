@@ -188,8 +188,8 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
-            manifest: lfm::caps::manifest,
-            provider: always!(lfm::caps::LfmProvider::new()),
+            manifest: lfm2::caps::manifest,
+            provider: always!(lfm2::caps::LfmProvider::new()),
             resident: None,
         },
         ModelEntry {

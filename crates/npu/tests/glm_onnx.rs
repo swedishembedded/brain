@@ -13,13 +13,13 @@
 
 use std::collections::HashMap;
 
-use glm::config::GlmConfig;
+use glmdsa::config::GlmConfig;
 
 /// Write a checkpoint directly from freshly-initialised weights (no GPU/CPU
 /// backend needed — `init_weights`, `checkpoint::save`, and the ONNX export are
 /// all pure Rust).
 fn write_tiny_ckpt(dir: &std::path::Path, cfg: &GlmConfig) -> std::path::PathBuf {
-    let init: HashMap<String, Vec<f32>> = glm::init_weights(cfg, 3);
+    let init: HashMap<String, Vec<f32>> = glmdsa::init_weights(cfg, 3);
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
         .into_iter()
@@ -66,12 +66,12 @@ fn glm_onnx_matches_brain_forward() {
     if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    use glm::model::Glm;
+    use glmdsa::model::Glm;
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
 
     let cfg = GlmConfig::tiny(); // layer 0 dense, layer 1 MoE
     let vocab = cfg.vocab as usize;
-    let init = glm::init_weights(&cfg, 7);
+    let init = glmdsa::init_weights(&cfg, 7);
     let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
     let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let reference = model.logits_all(&ids); // [6 * vocab]
@@ -116,12 +116,12 @@ fn glm_onnx_runs_on_npu() {
     if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    use glm::model::Glm;
+    use glmdsa::model::Glm;
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
 
     let cfg = GlmConfig::tiny();
     let vocab = cfg.vocab as usize;
-    let init = glm::init_weights(&cfg, 7);
+    let init = glmdsa::init_weights(&cfg, 7);
     let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
     let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let reference = model.logits_all(&ids);
@@ -170,11 +170,11 @@ fn glm_onnx_int8_runs() {
     if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    use glm::model::Glm;
+    use glmdsa::model::Glm;
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
 
     let cfg = GlmConfig::tiny();
-    let init = glm::init_weights(&cfg, 7);
+    let init = glmdsa::init_weights(&cfg, 7);
     let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
     let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let reference = model.logits_all(&ids);

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! One generic training/eval/sample loop over any [`Model`](crate::Model)
-//! (ADR §3). [`fit`] is `gpt::train::train` lifted to `M: Model` — same control
+//! (ADR §3). [`fit`] is `gpt2::train::train` lifted to `M: Model` - same control
 //! flow (cosine-with-warmup LR, grad accumulation with averaging, periodic eval,
-//! resumable atomic checkpointing); [`generate`] is `gpt::sample::generate`
+//! resumable atomic checkpointing); [`generate`] is `gpt2::sample::generate`
 //! lifted to any token-head model.
 
 use data::rng::Rng;
@@ -21,11 +21,11 @@ use data::loader::{BatchConfig, TokenDataset};
 
 /// Cross-entropy ignore index (masked target positions). The data loader emits
 /// `-1` as `i32`; reinterpreted as `u32` that is exactly this value. Mirrors
-/// `gpt::model::IGNORE` so the masked-CE path is identical across models.
+/// `gpt2::model::IGNORE` so the masked-CE path is identical across models.
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
 /// Training-loop options (the CLI-facing hyperparameters), independent of any
-/// particular architecture. This is `gpt::train::TrainOpts` lifted to the model
+/// particular architecture. This is `gpt2::train::TrainOpts` lifted to the model
 /// crate.
 #[derive(Clone, Debug)]
 pub struct FitOpts {
@@ -79,7 +79,7 @@ impl Default for FitOpts {
 }
 
 /// Cosine LR schedule with linear warmup (nanogpt's `get_lr`). Moved verbatim
-/// from `gpt::train::cosine_lr`.
+/// from `gpt2::train::cosine_lr`.
 pub fn cosine_lr(it: u32, opts: &FitOpts) -> f32 {
     if it < opts.warmup {
         return opts.lr * (it + 1) as f32 / opts.warmup.max(1) as f32;
@@ -207,7 +207,7 @@ fn targets_to_u32(y: &[i32]) -> Vec<u32> {
 /// are overridden from the dataset and `opts`. Returns `(initial_loss,
 /// final_loss)`.
 ///
-/// This is `gpt::train::train` lifted to `M: Model` — same control flow, same
+/// This is `gpt2::train::train` lifted to `M: Model` - same control flow, same
 /// resume/eval/checkpoint semantics, no GPT-specific code.
 ///
 /// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
@@ -316,7 +316,7 @@ pub fn fit<M: Model>(
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
 /// Context is cropped to the model's block size. `temperature <= 0` selects
 /// greedy argmax; `top_k = 0` disables top-k filtering. Lifted from
-/// `gpt::sample::generate`; depends only on [`Model::logits_all`].
+/// `gpt2::sample::generate`; depends only on [`Model::logits_all`].
 pub fn generate<M: Model>(
     m: &M,
     prompt: &[u32],

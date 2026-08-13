@@ -18,8 +18,8 @@ use std::path::Path;
 use data::binio::Meta;
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use glm::config::GlmConfig;
-use glm::model::Glm;
+use glmdsa::config::GlmConfig;
+use glmdsa::model::Glm;
 
 use crate::args::{canon_verb, Args};
 
@@ -229,7 +229,7 @@ fn infer(args: &[String]) {
     }
     let model = Glm::load_inference(&weights, 1, model_block(&weights));
     let mut rng = Rng::new(seed);
-    let gen = glm::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, None, &mut rng);
+    let gen = glmdsa::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, None, &mut rng);
     print!("{prompt_text}");
     print!("{}", tok.decode(&gen));
     println!();
@@ -284,7 +284,7 @@ fn import(args: &[String]) {
         eprintln!("usage: brain glm import --hf <dir> --out glm.safetensors");
         return;
     }
-    match glm::import::import(&hf, &out) {
+    match glmdsa::import::import(&hf, &out) {
         Ok(()) => println!("ok: wrote {out}"),
         Err(e) => eprintln!("import failed: {e}"),
     }

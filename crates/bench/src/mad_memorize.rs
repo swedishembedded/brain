@@ -24,7 +24,7 @@
 //! - **Tokens.** `NL`, `SEP`, then two disjoint content bands: keys and values.
 //!   The global map binds each of `n_keys` distinct keys to a fixed value.
 //!   Written as a char dataset (`SEP`→`'='`, `NL`→`'\n'`, content → Private-Use-
-//!   Area chars) so `gpt::train` loads it unchanged.
+//!   Area chars) so `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned —
 //!   so the model is trained to emit the answer given only the key.
 //! - **Scoring.** [`associative_recall`](crate::metrics::associative_recall) at

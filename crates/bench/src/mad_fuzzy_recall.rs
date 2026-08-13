@@ -24,7 +24,7 @@
 //!   value band. A key/value group is a tuple of tokens drawn from its band. To
 //!   keep boundaries learnable from content alone (no explicit delimiter), keys
 //!   and values use disjoint bands so a key→value transition is always a band
-//!   change. Written as a char dataset so `gpt::train` loads it unchanged.
+//!   change. Written as a char dataset so `gpt2::train` loads it unchanged.
 //! - **Masking.** Loss masked up to & including `SEP`, per line, line-aligned —
 //!   so only the answer group is a training target.
 //! - **Scoring.** Exact-match over the **whole answer group**: a sequence counts

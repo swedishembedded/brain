@@ -151,17 +151,17 @@ impl ResidentModel for GptResident {
         // a whole-model f32 copy on top of the device weights. One reader serves
         // the vocab, the config, and the tensor upload.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("gpt: {e}"))?;
-        let itos = gpt::model::Gpt::itos_from_config(&reader.config())
+        let itos = gpt2::model::Gpt::itos_from_config(&reader.config())
             .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
-        let block = gpt::GptConfig::from_json(&reader.config()).block_size;
-        let model = on_device(device, || gpt::model::Gpt::from_reader(&reader, 1, block))?;
+        let block = gpt2::GptConfig::from_json(&reader.config()).block_size;
+        let model = on_device(device, || gpt2::model::Gpt::from_reader(&reader, 1, block))?;
         Ok(Box::new(GptInstance { model, tok }))
     }
 }
 
 struct GptInstance {
-    model: gpt::model::Gpt,
+    model: gpt2::model::Gpt,
     tok: CharTokenizer,
 }
 
@@ -173,7 +173,7 @@ impl Instance for GptInstance {
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
         progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = gpt::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng);
+        let gen = gpt2::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng);
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text))
@@ -215,17 +215,17 @@ impl ResidentModel for GlmResident {
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Stream weights from the mmap (see GptResident::activate).
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("glm: {e}"))?;
-        let itos = glm::model::Glm::itos_from_config(&reader.config())
+        let itos = glmdsa::model::Glm::itos_from_config(&reader.config())
             .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLM_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
-        let block = glm::config::GlmConfig::from_json(&reader.config()).block_size;
-        let model = on_device(device, || glm::model::Glm::from_reader_inference(&reader, 1, block))?;
+        let block = glmdsa::config::GlmConfig::from_json(&reader.config()).block_size;
+        let model = on_device(device, || glmdsa::model::Glm::from_reader_inference(&reader, 1, block))?;
         Ok(Box::new(GlmInstance { model, tok }))
     }
 }
 
 struct GlmInstance {
-    model: glm::model::Glm,
+    model: glmdsa::model::Glm,
     tok: CharTokenizer,
 }
 
@@ -237,7 +237,7 @@ impl Instance for GlmInstance {
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
         progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = glm::sample::generate(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
+        let gen = glmdsa::sample::generate(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text))

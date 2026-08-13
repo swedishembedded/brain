@@ -164,7 +164,7 @@ impl Yolo {
     /// Load a model from a `.safetensors` checkpoint, sized for batch `b`. The config
     /// (channels/depths/nc/input) is read from the checkpoint header; the `t`
     /// (sequence) seam is unused by detection so it is passed as 0. Mirrors
-    /// [`gpt::Gpt::load`].
+    /// [`gpt2::Gpt::load`].
     pub fn load(path: &str, b: u32) -> Yolo {
         let c = checkpoint::load(path);
         let cfg = YoloConfig::from_json(&c.header["config"]);

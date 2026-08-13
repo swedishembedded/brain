@@ -21,8 +21,8 @@ pub fn lfm_mlm_eval(
     seed: u64,
 ) -> std::io::Result<(f32, f32, usize)> {
     let val = data::binio::read_tokens_u32(&data_dir.join("val"))?;
-    let model = lfm::Lfm::load_inference(weights, b, t);
-    let loss = lfm::train::mlm_val_loss(&model, &val, mlm, batches, b, t, seed);
-    let (acc, n) = lfm::train::mlm_masked_accuracy(&model, &val, mlm, b, t, seed ^ 0xacc);
+    let model = lfm2::Lfm::load_inference(weights, b, t);
+    let loss = lfm2::train::mlm_val_loss(&model, &val, mlm, batches, b, t, seed);
+    let (acc, n) = lfm2::train::mlm_masked_accuracy(&model, &val, mlm, b, t, seed ^ 0xacc);
     Ok((loss.exp(), acc, n))
 }

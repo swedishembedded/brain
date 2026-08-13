@@ -12,7 +12,7 @@
 //! 1. synthesizes one fixed task (reusing an existing benchmark's dataset — the
 //!    [`Mqar`](crate::mqar::Mqar) recall task, which improves clearly with model
 //!    capacity),
-//! 2. trains a [`gpt::Gpt`] (via the architecture-agnostic
+//! 2. trains a [`gpt2::Gpt`] (via the architecture-agnostic
 //!    [`model::train::fit`]) at a grid of increasing sizes (n_layers / d_model),
 //! 3. records per size: **parameter count**, a **training-FLOPs proxy**
 //!    (`≈ 6 · params · tokens`, the Kaplan/Chinchilla compute estimate), and the
@@ -39,7 +39,7 @@ use std::path::Path;
 use crate::model::{DecoderLm, GptDecoder, TrainConfig};
 use crate::mqar::Mqar;
 use crate::Benchmark;
-use gpt::GptConfig;
+use gpt2::GptConfig;
 
 /// One (n_layers, d_model) point in the sweep, with its measured outcome.
 #[derive(Clone, Debug)]

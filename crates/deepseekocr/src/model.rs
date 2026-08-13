@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The composite: [`crate::DeepEncoder`] spliced into `deepseekv2::DeepseekV2`.
+//! The composite: [`crate::DeepEncoder`] spliced into `deepseek2::DeepseekV2`.
 //!
 //! ```text
 //! input_ids ──► token embedding ──► res[0]
@@ -32,7 +32,7 @@
 //! **Still one contiguous DECODER run** in both cases: the splice seam takes
 //! exactly one `(row0, n_rows)`. A multi-view (Base/Gundam) layout is several
 //! decoder runs and needs one splice call per run; `RowGather` itself is already
-//! indifferent to that, `deepseekv2::DeepseekV2::enable_mm_splice` is not.
+//! indifferent to that, `deepseek2::DeepseekV2::enable_mm_splice` is not.
 //!
 //! **The backward is real and end to end**: the decoder's cross-entropy gradient
 //! reaches the placeholder rows, the splice moves them into the encoder's
@@ -41,8 +41,8 @@
 //! projector, the concat, CLIP's injected-token seam and the whole SAM tower to
 //! the input pixels.
 
-use deepseekv2::model::DeepseekV2;
-use deepseekv2::IGNORE;
+use deepseek2::model::DeepseekV2;
+use deepseek2::IGNORE;
 
 use crate::config::DeepseekOcrConfig;
 use crate::encoder::DeepEncoder;
@@ -224,7 +224,7 @@ impl DeepseekOcr {
         }
 
         let t_jit = std::time::Instant::now();
-        let gpu = dev_decoder(deepseekv2::PIPELINES);
+        let gpu = dev_decoder(deepseek2::PIPELINES);
         crate::stage_time("build: decoder Gpu::new_cpu (Cranelift JIT compile)", t_jit);
 
         let t_dec = std::time::Instant::now();
@@ -383,7 +383,7 @@ impl DeepseekOcr {
     /// decode step instead of a full re-run over the whole sequence so far.
     /// Same contract otherwise (image run must be inside `prompt_ids`, same
     /// sized-context requirement), and produces the SAME tokens as
-    /// [`Self::generate_greedy`] (`deepseekv2::model::tests::
+    /// [`Self::generate_greedy`] (`deepseek2::model::tests::
     /// generate_greedy_kv_matches_recompute` gates the decoder half of that
     /// claim; this composite adds no further numerics on top of `write_img_embeds`).
     pub fn generate_greedy_kv(&self, image: &[f32], prompt_ids: &[u32], n_new: u32) -> Vec<u32> {

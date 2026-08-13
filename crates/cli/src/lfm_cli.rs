@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
-use lfm::model::Lfm;
+use lfm2::model::Lfm;
 
 use crate::args::{canon_verb, Args};
 
@@ -109,8 +109,8 @@ fn finetune(argv: &[String]) {
         Lfm::load_train(&weights, batch, seq)
     };
     eprintln!("loaded trainable model in {:.1}s (b={batch}, t={seq})", t0.elapsed().as_secs_f64());
-    let opts = lfm::train::MlmTrainOpts { steps, lr, seed, ..Default::default() };
-    let val_loss = lfm::train::finetune(&m, &train, &val, &mlm, batch, seq, &opts, &mut |line| eprintln!("{line}"));
+    let opts = lfm2::train::MlmTrainOpts { steps, lr, seed, ..Default::default() };
+    let val_loss = lfm2::train::finetune(&m, &train, &val, &mlm, batch, seq, &opts, &mut |line| eprintln!("{line}"));
     if let Some(parent) = std::path::Path::new(&out).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -155,7 +155,7 @@ fn import(argv: &[String]) {
     if let Some(parent) = std::path::Path::new(&out).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = lfm::import::import(&hf, &out) {
+    if let Err(e) = lfm2::import::import(&hf, &out) {
         eprintln!("lfm import: {e}");
         std::process::exit(1);
     }

@@ -154,7 +154,7 @@ fn qwen_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, i8
 }
 
 fn gpt_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, stages: usize, run: bool) {
-    use gpt::{init_weights, Gpt, GptConfig};
+    use gpt2::{init_weights, Gpt, GptConfig};
     let (cfg, init) = match weights {
         Some(_path) => {
             eprintln!("brain flops --model gpt --weights: use the tiny config (checkpoint costing not wired)");
@@ -190,9 +190,9 @@ fn gpt_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, sta
 }
 
 fn lfm_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, run: bool) {
-    use lfm::config::LfmConfig;
-    use lfm::init::init_weights;
-    use lfm::model::Lfm;
+    use lfm2::config::LfmConfig;
+    use lfm2::init::init_weights;
+    use lfm2::model::Lfm;
     let (m, t) = match weights {
         Some(path) => {
             let t = block.unwrap_or(512);

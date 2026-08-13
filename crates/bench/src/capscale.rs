@@ -425,7 +425,7 @@ pub fn run(arch_name: &str, cfg: &CapScaleConfig) -> std::io::Result<CapScaleRep
 /// Param count for a fixed [`Size`] at the eval artifact's representative basis
 /// (`vocab=64, block_size=32`), so capscale `N` lines up with eval `param_count`.
 fn size_param_count(size: &Size) -> u64 {
-    use gpt::GptConfig;
+    use gpt2::GptConfig;
     let d_model = size.d_model.unwrap_or(64);
     let cfg = GptConfig {
         vocab: 64,

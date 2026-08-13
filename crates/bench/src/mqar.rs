@@ -24,7 +24,7 @@
 //!   (the bindings→queries separator), then `vocab_content` interchangeable
 //!   content tokens used for both keys and values. The dataset is written in
 //!   brain's standard char-token layout (`train.bin`/`val.bin`/`meta.json`), so
-//!   `gpt::train` loads it unchanged — each token id maps to a distinct char in
+//!   `gpt2::train` loads it unchanged - each token id maps to a distinct char in
 //!   `meta.json` (`SEP`→`'='`, `NL`→`'\n'`, content→Private-Use-Area chars).
 //! - **Masking.** Training masks loss up to & including `SEP`, per line, via the
 //!   existing loader path (`mask_before = '='`, `mask_per_line = true`) — exactly

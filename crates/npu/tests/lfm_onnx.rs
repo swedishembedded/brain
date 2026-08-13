@@ -14,11 +14,11 @@
 
 use std::collections::HashMap;
 
-use lfm::config::LfmConfig;
+use lfm2::config::LfmConfig;
 
 fn write_tiny_ckpt(dir: &std::path::Path) -> (std::path::PathBuf, LfmConfig) {
     let cfg = LfmConfig::tiny(); // conv, attention, conv — both mixers
-    let init: HashMap<String, Vec<f32>> = lfm::init::init_weights(&cfg, 3);
+    let init: HashMap<String, Vec<f32>> = lfm2::init::init_weights(&cfg, 3);
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
         .into_iter()
@@ -75,7 +75,7 @@ fn lfm_onnx_matches_brain_forward() {
 
     let s = 8usize;
     let ids: Vec<u32> = (0..s as u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
-    let model = lfm::Lfm::new(cfg.clone(), 1, s as u32, &checkpoint::load(path.to_str().unwrap()).by_role(""));
+    let model = lfm2::Lfm::new(cfg.clone(), 1, s as u32, &checkpoint::load(path.to_str().unwrap()).by_role(""));
     model.set_tokens(&ids);
     model.forward();
     let reference = model.read_hidden();

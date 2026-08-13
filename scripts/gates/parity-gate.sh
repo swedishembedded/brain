@@ -51,7 +51,7 @@ run "model FD suites (MoE/ViT backward) — Vulkan backend" \
 # JIT is NOT execution, and the serving perf gate itself
 # runs on BRAIN_DEVICE=cpu, so this must be green before the default flips.
 run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
-                                       env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen --lib serve::
+                                       env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
 
 codec="${BRAIN_CODEC_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
 if [ -f "$codec" ]; then

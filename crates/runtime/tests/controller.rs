@@ -213,10 +213,10 @@ fn real_tiny_gpt_pumps_without_panicking() {
     }
     // Random-weight tiny GPT (no training): the pump must advance tokens and the
     // controller must terminate without panic. We don't assert the text.
-    use gpt::{Gpt, GptConfig};
+    use gpt2::{Gpt, GptConfig};
     let cfg = GptConfig::tiny();
     let itos: Vec<char> = (0..cfg.vocab).map(|i| char::from_u32(b'a' as u32 + i).unwrap_or('?')).collect();
-    let init = gpt::init_weights(&cfg, 1234);
+    let init = gpt2::init_weights(&cfg, 1234);
     let block = cfg.block_size;
     let model = Gpt::new(cfg, 1, block, &init);
     let infer = Box::new(runtime::GptInfer::from_parts(model, Some(itos)));
