@@ -62,16 +62,19 @@ mod tts_serve;
 mod wm_cli;
 mod yolo_cli;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Set when `--device npu` is requested. The NPU is a whole-graph (OpenVINO)
-/// path, not a `gpu_core` backend, so it is tracked separately and consumed by
-/// the commands that support it (today: `brain yolo detect`).
-static NPU_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// Whether the user asked for `--device npu`.
-pub(crate) fn npu_requested() -> bool {
-    NPU_REQUESTED.load(Ordering::Relaxed)
+/// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
+/// whole-graph (OpenVINO) path, not a `gpu_core` backend, so the commands that
+/// support it (`brain yolo detect`, `glm infer`, `wm play`, `qwen infer`,
+/// `tts clone`/`synth`/`design`) consult this instead of a `gpu_core` backend
+/// check. Reads the SAME resolved `ComputeSet` every other caller reads
+/// (`gpu_core::ambient_compute_set()` - published by `select_backend` below
+/// for the CLI path, lazily resolved from `BRAIN_DEVICE` otherwise) rather
+/// than tracking its own process-global sidecar: `explicit` excludes the
+/// ambient "everything, including an NPU that happens to be present" case, so
+/// an omitted `--device` never silently triggers the whole-graph NPU path.
+pub(crate) fn npu_explicit() -> bool {
+    let set = gpu_core::ambient_compute_set();
+    set.npu_enabled() && set.explicit
 }
 
 const HELP: &str = "\
@@ -370,7 +373,10 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     // no CLI in the loop). `apply()` still runs here either way for the
     // CLI-only half `ambient_compute_set()` deliberately skips (rayon pool
     // sizing / CPU affinity - see `ComputeSet::apply`'s doc).
-    let set = match spec_text {
+    // The resolved set is only needed for its side effects here (`apply()`,
+    // `publish_compute_set`) - callers read it back via
+    // `gpu_core::ambient_compute_set()`/`compute_set()`, not this binding.
+    let _set = match spec_text {
         Some(text) => {
             let spec = match gpu_core::DeviceSpec::parse(&text) {
                 Ok(s) => s,
@@ -405,9 +411,6 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             set.clone()
         }
     };
-    // The NPU is a whole-graph (OpenVINO) path rather than a gpu_core backend, so
-    // it is a separate flag the NPU-capable subcommands consult.
-    NPU_REQUESTED.store(set.npu_enabled() && set.explicit, Ordering::Relaxed);
     out
 }
 

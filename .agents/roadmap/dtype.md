@@ -979,3 +979,151 @@ program entirely - their per-step KV-cache state doesn't fit a single
 build-once `NpuModel::build` seam without a larger design change nobody has
 scoped yet.
 
+## C3 - delete NPU_REQUESTED
+
+**Problem.** A4 unified `--device`/`BRAIN_DEVICE` behind `DeviceSpec::parse`
++ `resolve` and `gpu_core::ambient_compute_set()`, but left one duplicate:
+`crates/cli/src/main.rs` still tracked a process-global `static NPU_REQUESTED:
+AtomicBool`, set once by `select_backend` (`NPU_REQUESTED.store(set.npu_enabled()
+&& set.explicit, ...)`) and read back through `pub(crate) fn npu_requested()`.
+Six call sites across five files consulted this sidecar instead of the
+resolved `ComputeSet` directly - a second, narrower "is NPU requested" state
+living alongside the one A4 had just made canonical.
+
+**Call sites migrated** (all `crate::npu_requested()` -> `crate::npu_explicit()`):
+
+- `crates/cli/src/yolo_cli.rs:355` (`brain yolo detect`)
+- `crates/cli/src/glm_cli.rs:218` (`brain glm infer`)
+- `crates/cli/src/wm_cli.rs:270` (`brain wm play`/`bench`, `--model diamond`)
+- `crates/cli/src/qwen_cli.rs:47` (`want_npu()`, used by `brain qwen infer`)
+- `crates/cli/src/tts_cli.rs:310,349,388` (`clone`/`synth`/`design`) - not
+  named in this phase's original file list, but unavoidably in scope: it had
+  three live call sites on the same global, so deleting `NPU_REQUESTED`
+  without migrating them would not compile.
+
+**`wm_cli.rs`'s dead disjunction removed.** `build_model`'s NPU-routing
+condition was `if crate::npu_requested() || device == Some("npu")`, where
+`device` is `wm_cli`'s own locally-parsed `--device` flag. Since A4,
+`select_backend` strips every `--device <value>` pair out of `argv` globally
+before any subcommand parser runs, so that local `--device` has been `None`
+on every invocation since A4 landed - the disjunction was dead weight kept
+around because the `NPU_REQUESTED` sidecar "wasn't fully trusted", per its own
+comment. Deleted outright; the comment above the `if` now explains why.
+
+**`qwen_cli.rs`'s `want_npu()` fixed** - the one documented exception in
+`scripts/gates/check-device-env-single-source.sh` (A4's note: "deleting that
+sidecar (phase C3) is what lets this exception be removed"). Was:
+
+```rust
+fn want_npu() -> bool {
+    crate::npu_requested()
+        || std::env::var("BRAIN_DEVICE").map(|v| v.eq_ignore_ascii_case("npu")).unwrap_or(false)
+}
+```
+
+Now:
+
+```rust
+fn want_npu() -> bool {
+    crate::npu_explicit()
+}
+```
+
+`scripts/gates/check-device-env-single-source.sh` updated to match: the
+`EXCEPTIONS` array and `crates/cli/src/qwen_cli.rs` carve-out are gone, the
+gate now asserts zero non-canonical `BRAIN_DEVICE` readers with no exceptions
+at all, and its header comment/final message no longer reference the removed
+exception.
+
+**`NPU_REQUESTED`/`npu_requested()` deleted from `main.rs`.** Replaced by a
+single stateless helper reading the same `ComputeSet` every other caller
+reads:
+
+```rust
+pub(crate) fn npu_explicit() -> bool {
+    let set = gpu_core::ambient_compute_set();
+    set.npu_enabled() && set.explicit
+}
+```
+
+`set.explicit` reproduces the sidecar's exact prior semantics - it is `false`
+for an omitted `--device`/`BRAIN_DEVICE` (the "schedule everything, including
+an NPU that happens to be present" case) even when `probe.npus > 0`, so the
+whole-graph OpenVINO path stays opt-in via an EXPLICIT `--device npu`/`npuN`,
+never triggered implicitly by ambient hardware presence. No new global: the
+helper queries `gpu_core::ambient_compute_set()`'s existing `OnceLock` fresh
+each call rather than caching a second copy of the same fact. `select_backend`
+no longer writes anything NPU-specific after resolving `--device`; the
+`AtomicBool`/`Ordering` import it only existed for is gone too, and the
+now-unused `set` binding at the end of `select_backend` was renamed `_set`
+(its resolved value is read back everywhere else via
+`gpu_core::ambient_compute_set()`/`compute_set()`, not that local binding).
+
+**`brain npu` device-error UX confirmed, not re-fixed.** A4 already deleted
+the `argv.get(1) == Some("npu")` bypass in `select_backend` and replaced it
+with a `--device` -> `--ov-device` in-place translation for exactly that
+subcommand (so the OpenVINO target-device grammar and brain's own
+`--device` grammar don't collide under the same flag name) - `brain npu ...`
+genuinely resolves `--device`/`BRAIN_DEVICE` through the same
+`DeviceSpec::resolve` path as every other subcommand, confirmed by reading
+`select_backend` (unchanged this phase beyond the `NPU_REQUESTED` removal) and
+exercised by this phase's own `brain_npu_subcommand_flows_through_the_same_device_resolution`
+test below. `DeviceSpec::resolve`'s NPU error branch
+(`crates/gpu-core/src/devices.rs:388-391`) already produces a clear,
+non-panicking diagnostic naming `/dev/accel/accel*` or the specific
+out-of-range index - no change needed there.
+
+**Environment note affecting the TDD gate.** This sandbox has exactly one
+`/dev/accel/accel*` node (`accel0`), so `Inventory::probe().npus == 1` here -
+per C2's finding, the firmware behind it is not functional and OpenVINO
+silently retargets to its GPU plugin at compile time, but `Inventory::probe`
+only counts device nodes and does not check firmware liveness, so a bare
+`--device npu` resolves successfully (not an error) on this machine. The
+"no NPU present" diagnostic therefore can't be exercised via a clean absence
+here; the gate below uses `--device npu5` (out of range regardless of how
+many accel nodes exist) instead, which reliably hits
+`DeviceSpec::resolve`'s NPU error path on any machine.
+
+**TDD.** `crates/cli/tests/device_routing.rs` (new):
+
+- `device_npu_out_of_range_index_reports_clear_diagnostic_and_exits_nonzero` -
+  `brain devices --device npu5` exits non-zero with `status.code()` set (never
+  a signal/panic termination) and stderr containing `"npu5 requested but this
+  machine has"`.
+- `brain_npu_subcommand_flows_through_the_same_device_resolution` -
+  `BRAIN_DEVICE=npu5 brain npu check` (env var, not `--device`, since
+  `--device` under `brain npu ...` is the separate deprecated-alias OpenVINO
+  grammar) hits the identical diagnostic, confirming the subcommand is not
+  exempt from the shared resolution path.
+- `npu_requested_sidecar_has_zero_occurrences` - walks every `.rs` file under
+  the repo (excluding `target/`, `.git/`, `.claude/worktrees/` sibling-agent
+  checkouts, and the test file itself) asserting zero occurrences of
+  `NPU_REQUESTED` or `npu_requested` anywhere. This is the test that was
+  actually RED at the start of this phase (confirmed by running it against
+  the pre-migration source via a scoped `git stash` of just this phase's
+  source edits); the other two were already GREEN under A4's existing
+  device-error path, which is expected - they test a property that should
+  hold regardless of which phase established it.
+
+**Verification.**
+`cargo build -p brain-cli`: clean, no warnings.
+`cargo test -p brain-cli --test device_routing`: 3/3 passed, run twice with no
+flakiness.
+`cargo test -p brain-gpu-core --test device_grammar`: 4 passed, 1 ignored
+(unchanged from A4 - no regression).
+`scripts/gates/check-device-env-single-source.sh`: passes with zero
+exceptions.
+`grep -rn "NPU_REQUESTED\|npu_requested" crates/ scripts/`: one hit, the
+historical note in `check-device-env-single-source.sh`'s own comment
+explaining why the exception it used to carve out is gone - no live code
+reference remains.
+
+**Out of scope, untouched** (per the plan): TTS's three `BRAIN_TTS_*`
+placement env vars and its four stateful sessions (`KvSession`,
+`PrefillSession`, `BackStreamSession`, `FusedMtpSession` - see C2's own "out
+of scope" note above) are unrelated to this sidecar-deletion phase and were
+not touched. `wm_cli.rs`'s local `--device` flag parsing and its downstream
+use for `wm_diamond::train::DiamondTrainer`/`DiamondUNet` construction
+(unrelated to NPU routing) is likewise untouched - only the dead NPU-routing
+disjunction was removed.
+

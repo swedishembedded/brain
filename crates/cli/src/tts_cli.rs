@@ -307,7 +307,7 @@ fn clone(args: &[String]) {
     } else {
         "x-vector-only"
     };
-    let npu = crate::npu_requested();
+    let npu = crate::npu_explicit();
     if npu {
         // Talker + codec run on the NPU; force any incidental gpu_core model (the
         // speaker x-vector encoder) onto the CPU JIT instead of the wgpu/GL default.
@@ -346,7 +346,7 @@ fn synth(args: &[String]) {
         eprintln!("usage: brain tts synth --text \"...\" --out out.wav [--lang english ...]");
         std::process::exit(2);
     }
-    let npu = crate::npu_requested();
+    let npu = crate::npu_explicit();
     if npu {
         gpu_core::set_default_backend(gpu_core::Backend::Cpu);
     }
@@ -385,7 +385,7 @@ fn design(args: &[String]) {
         eprintln!("usage: brain tts design --text \"...\" --instruct \"...\" [--speaker NAME] --out out.wav");
         std::process::exit(2);
     }
-    let npu = crate::npu_requested();
+    let npu = crate::npu_explicit();
     if npu {
         gpu_core::set_default_backend(gpu_core::Backend::Cpu);
     }

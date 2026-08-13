@@ -352,7 +352,7 @@ fn detect(args: &[String]) {
         return;
     }
     // `--device npu` routes through the OpenVINO NPU path (export fp32 -> compile).
-    if crate::npu_requested() {
+    if crate::npu_explicit() {
         return detect_via_npu(&weights, &image, conf, iou);
     }
     let model = Yolo::load(&weights, 1);

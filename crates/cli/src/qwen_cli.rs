@@ -44,8 +44,7 @@ pub fn run_qwen(args: &[String]) {
 
 /// Whether the NPU/OpenVINO path was requested (`--device npu` or BRAIN_DEVICE=npu).
 fn want_npu() -> bool {
-    crate::npu_requested()
-        || std::env::var("BRAIN_DEVICE").map(|v| v.eq_ignore_ascii_case("npu")).unwrap_or(false)
+    crate::npu_explicit()
 }
 
 /// `brain qwen export --weights F --out model.onnx --seq T` — emit the ONNX

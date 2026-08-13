@@ -215,7 +215,7 @@ fn infer(args: &[String]) {
     let prompt_text = if prompt.is_empty() { "\n" } else { prompt.as_str() };
     let prompt_ids: Vec<u32> = tok.encode(prompt_text);
     // NPU / OpenVINO whole-graph path (greedy): export -> compile -> decode.
-    if crate::npu_requested() {
+    if crate::npu_explicit() {
         match npu::glm_decode::generate(&weights, &prompt_ids, max_new, npu::openvino::NpuDevice::Npu, true, None, false) {
             Ok(run) => {
                 eprintln!("npu: ran on OpenVINO device {} (load_ms={:.1} gen_ms={:.1})", run.device, run.load_ms, run.gen_ms);

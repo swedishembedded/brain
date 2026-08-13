@@ -22,25 +22,17 @@
 # under crates/gpu-core/src/ (the canonical resolver) and NOWHERE else under
 # any crates/*/src/ - i.e. nothing re-derives its own second opinion.
 #
-# Known, accepted, DOCUMENTED exception (not fixed by this gate - a later
-# phase's job, see the A4 note above): crates/cli/src/qwen_cli.rs's
-# want_npu() re-reads BRAIN_DEVICE as a belt-and-suspenders check, because the
-# NPU_REQUESTED sidecar it also consults was not fully trusted. Deleting that
-# sidecar (phase C3) is what lets this exception be removed.
+# Phase C3 (see .agents/roadmap/dtype.md) deleted the `NPU_REQUESTED`
+# sidecar and the belt-and-suspenders BRAIN_DEVICE re-read it motivated in
+# crates/cli/src/qwen_cli.rs's want_npu() - want_npu() now reads
+# gpu_core::ambient_compute_set() exclusively, like every other NPU-capable
+# subcommand. No exceptions remain.
 #
 # Usage: scripts/gates/check-device-env-single-source.sh
 set -u
 cd "$(dirname "$0")/../.."
 
-EXCEPTIONS=(
-  "crates/cli/src/qwen_cli.rs"
-)
-
 is_exception() {
-  local f="$1" ex
-  for ex in "${EXCEPTIONS[@]}"; do
-    [ "$f" = "$ex" ] && return 0
-  done
   return 1
 }
 
@@ -83,4 +75,4 @@ if [ "$fail" -ne 0 ]; then
   echo "re-deriving its own resolution of the env var."
   exit 1
 fi
-echo "check-device-env-single-source: BRAIN_DEVICE is read in exactly one place (${canonical}), plus the documented qwen_cli.rs exception"
+echo "check-device-env-single-source: BRAIN_DEVICE is read in exactly one place (${canonical})"

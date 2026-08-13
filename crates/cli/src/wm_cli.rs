@@ -266,8 +266,13 @@ fn build_model(
             });
             // `--device npu` is consumed by main's select_backend (it is a
             // whole-graph OpenVINO path, not a gpu_core backend) and lands in
-            // crate::npu_requested(), like the yolo/glm/tts subcommands.
-            if crate::npu_requested() || device == Some("npu") {
+            // crate::npu_explicit(), like the yolo/glm/tts subcommands. The
+            // local `device == Some("npu")` fallback this used to OR against
+            // is gone: `select_backend` strips every `--device` occurrence
+            // from argv before any subcommand parser sees it, so this local
+            // `--device` was always `None` post-A4 and the disjunction was
+            // dead weight from when the global sidecar wasn't fully trusted.
+            if crate::npu_explicit() {
                 // Intel-NPU path: the UNet runs as a compiled OpenVINO graph,
                 // the sampler stays host-side (wm_diamond::npu).
                 let onnx_path = onnx.unwrap_or_else(|| {
