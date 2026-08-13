@@ -142,6 +142,9 @@ pub struct VkContext {
     /// Buffers whose Rust owner has dropped, waiting for a moment the device is
     /// provably done with them - see [`Self::bury`] / [`Self::reclaim_dead`].
     dead: std::sync::Mutex<Vec<VkBuffer>>,
+    /// Count of [`Self::reclaim_dead`] calls that actually freed something -
+    /// see [`Self::reclaim_event_count`]'s doc.
+    reclaim_events: std::sync::atomic::AtomicU64,
     /// Dispatches recorded against THIS DEVICE by any backend handle and not
     /// yet submitted. Device-wide rather than per-handle because
     /// `Backend::share`/`new_like` hand out sibling handles with their own
@@ -481,6 +484,7 @@ impl VkContext {
             mem_props,
             staging: std::sync::Mutex::new(None),
             dead: std::sync::Mutex::new(Vec::new()),
+            reclaim_events: std::sync::atomic::AtomicU64::new(0),
             pending_steps: std::sync::atomic::AtomicU64::new(0),
             submits: std::sync::atomic::AtomicU64::new(0),
             queue_lock: std::sync::Mutex::new(()),
@@ -868,6 +872,16 @@ impl VkContext {
         self.pending_steps.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
     }
 
+    /// Bytes currently buried (dropped, not yet `vkFreeMemory`'d) - a
+    /// read-only introspection, does NOT reclaim anything. Exists so a test
+    /// can assert deferred-reclaim accounting stays bounded (e.g. a
+    /// multi-layer forward pass must not leave O(layer count) worth of
+    /// scratch buried by the time it returns) without needing to measure
+    /// real OS-level VRAM.
+    pub fn buried_bytes(&self) -> u64 {
+        self.dead.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|b| b.size).sum()
+    }
+
     /// Destroy every buried buffer, returning the bytes released - but only
     /// when NOTHING is recorded against this device anywhere, which is what
     /// makes it safe: an unsubmitted dispatch is the one thing that can still
@@ -887,7 +901,23 @@ impl VkContext {
             freed += b.size;
             self.destroy_buffer(b);
         }
+        if freed > 0 {
+            self.reclaim_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         freed
+    }
+
+    /// How many times [`Self::reclaim_dead`] has actually freed something
+    /// (not counted when it ran but found nothing buried, or bailed early on
+    /// outstanding work) - unlike a raw queue-submit count, this is NOT
+    /// inflated by one-off staging submits (`upload`/`zero`/`download`, none
+    /// of which call `reclaim_dead`), so it isolates deferred-reclaim
+    /// activity specifically. A loop that only reclaims once, at its very
+    /// end, reports 1 here regardless of how many layers/steps it ran; a
+    /// loop that reclaims periodically reports roughly `iterations /
+    /// period`.
+    pub fn reclaim_event_count(&self) -> u64 {
+        self.reclaim_events.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

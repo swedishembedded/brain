@@ -510,6 +510,19 @@ impl Int8ThinkerInstance {
         self.run_shards(x_host, n, &cos_tab, &sin_tab, Pass::Batched { cache: None })
     }
 
+    /// Sum of every shard's `Gpu::reclaim_event_count()` - test-observability
+    /// for `run_shards`'s periodic-reclaim contract (see that function's
+    /// doc): on Vulkan this must scale with `n_layers / FLUSH_EVERY`, not
+    /// stay flat at ~1 regardless of layer count (which is what a
+    /// `run_shards` that only reclaims once, at its final `gpu.read`, would
+    /// show). Deliberately NOT `queue_submits`: that also counts one-off
+    /// staging submits (`upload`/`zero`/`download`, one per freshly
+    /// allocated scratch buffer) which scale with layer count on their own
+    /// and would swamp this signal.
+    pub fn total_reclaim_events(&self) -> u64 {
+        self.shards.iter().map(|s| s.gpu.reclaim_event_count()).sum()
+    }
+
     /// The M-RoPE cos/sin tables for `positions`, at this Thinker's section
     /// split / head dim / theta.
     fn mrope_tables(&self, positions: &[[u32; 3]]) -> (Vec<f32>, Vec<f32>) {
@@ -537,7 +550,28 @@ impl Int8ThinkerInstance {
             let cos = gpu.storage_init("cos", cos_tab);
             let sin = gpu.storage_init("sin", sin_tab);
             let mut h = gpu.storage_init("h", &h_host);
-            for l in shard.range.clone() {
+            // Each layer's attention (scores/probs/ctx) and MoE (router/gate/
+            // expert scratch) buffers are dropped at the end of the layer_fwd/
+            // layer_decode_step call below, but backend_vulkan's reclaim is
+            // deferred (`VkOwnedBuffer::drop` only buries them; the real
+            // `vkFreeMemory` happens later, inside `reclaim_dead`, itself only
+            // run from `flush`, which is also a full submit+fence-wait -- see
+            // `VulkanBackend::flush`'s doc). With nothing forcing a reclaim
+            // between layers, a long prefill (batched, `n` large) or a long
+            // decode (many steps) buries every prior layer's/step's scratch
+            // for the ENTIRE pass instead of reusing it -- VRAM grows with
+            // layer/step count instead of staying flat, reproduced as a real
+            // ERROR_OUT_OF_DEVICE_MEMORY on 2x Tesla P40 (the shard's card
+            // climbed steadily through the layer loop and OOM'd partway
+            // through). Flushing every single layer fixes that but forces a
+            // full fence-wait per layer, serializing what was previously
+            // pipelined GPU work across the whole shard -- reproduced as a
+            // >5x prefill slowdown (a 300s SSE idle timeout that never fired
+            // before). Flushing every FLUSH_EVERY layers instead bounds the
+            // worst case to that many layers' worth of buried scratch while
+            // still letting layers within a window pipeline together.
+            const FLUSH_EVERY: usize = 4;
+            for (i, l) in shard.range.clone().enumerate() {
                 let lb = &shard.layer_bufs[&l];
                 let w = weights(lb);
                 let experts8 = shard.store.layer(l);
@@ -550,6 +584,9 @@ impl Int8ThinkerInstance {
                         layer_decode_step(gpu, &self.cfg.text, &w, &cache.layer(l), &h, &cos, &sin, *pos, cache.cap, Some(experts8))
                     }
                 };
+                if (i + 1) % FLUSH_EVERY == 0 {
+                    gpu.flush();
+                }
             }
             // Host-mediated handoff to the next shard's device (a no-op
             // read+carry on the LAST shard -- still correct, just an extra
@@ -751,6 +788,17 @@ fn debug_log_top_candidates(label: &str, logits: &[f32]) {
 }
 
 impl Instance for Int8ThinkerInstance {
+    /// `total_reclaim_events`: sum of every shard's
+    /// `Gpu::reclaim_event_count()` - see [`Self::total_reclaim_events`]'s
+    /// doc. Reachable through the `dyn Instance` trait object the residency
+    /// manager hands out (the concrete `Int8ThinkerInstance` isn't
+    /// downcastable from there), which is also how a test exercises
+    /// `run_shards`'s real periodic-reclaim contract via `Instance::run`
+    /// alone.
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        vec![("total_reclaim_events".to_string(), serde_json::json!(self.total_reclaim_events()))]
+    }
+
     /// `forward`: input blob `x` (raw LE f32 `[n, d]`, meta `{"n": n}`),
     /// output blob `hidden` (same shape) — internal/validation action, not
     /// real generation, see this module's own doc.

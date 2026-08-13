@@ -934,6 +934,18 @@ impl VulkanBackend {
         self.recycle_transients(&steps);
     }
 
+    /// Bytes currently buried (dropped, not yet `vkFreeMemory`'d) on this
+    /// device - see [`VkContext::buried_bytes`]'s doc.
+    pub fn buried_bytes(&self) -> u64 {
+        self.ctx.buried_bytes()
+    }
+
+    /// Count of actual reclaim events on this device - see
+    /// [`VkContext::reclaim_event_count`]'s doc.
+    pub fn reclaim_event_count(&self) -> u64 {
+        self.ctx.reclaim_event_count()
+    }
+
     /// Recycle the flushed batch's TRANSIENT resources — the fence wait in
     /// `end_and_wait` has just proven them idle. Uniforms go back to the
     /// size-keyed pool, descriptor sets to the per-pipeline pool (deduped: the
@@ -1298,6 +1310,15 @@ impl Backend for VulkanBackend {
         // synchronous by design), so there is no overlap win here — but the
         // semantics ("all recorded work reaches the device") hold.
         VulkanBackend::flush(self);
+    }
+    fn buried_bytes(&self) -> u64 {
+        VulkanBackend::buried_bytes(self)
+    }
+    fn queue_submits(&self) -> u64 {
+        VulkanBackend::queue_submits(self)
+    }
+    fn reclaim_event_count(&self) -> u64 {
+        VulkanBackend::reclaim_event_count(self)
     }
 }
 

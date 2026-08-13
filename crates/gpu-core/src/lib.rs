@@ -669,6 +669,26 @@ mod native_facade {
         pub fn flush(&self) {
             self.inner.flush()
         }
+        /// Bytes currently buried (dropped, not yet actually freed on-device)
+        /// by a backend whose reclaim is deferred - see
+        /// `backend_api::Backend::buried_bytes`'s doc. 0 on backends that
+        /// reclaim eagerly.
+        pub fn buried_bytes(&self) -> u64 {
+            self.inner.buried_bytes()
+        }
+        /// Total queue submissions (each a blocking submit + fence wait) since
+        /// construction - see `backend_api::Backend::queue_submits`'s doc. 0 on
+        /// backends that don't count (CPU/eager backends have no separate
+        /// submit step).
+        pub fn queue_submits(&self) -> u64 {
+            self.inner.queue_submits()
+        }
+        /// Count of actual deferred-reclaim events since construction - see
+        /// `backend_api::Backend::reclaim_event_count`'s doc. 0 on backends
+        /// that reclaim eagerly.
+        pub fn reclaim_event_count(&self) -> u64 {
+            self.inner.reclaim_event_count()
+        }
         /// Record one dispatch of pipeline `kind`.
         ///
         /// `kind`/`threads` pass through [`crate::upgrade`] first: where a

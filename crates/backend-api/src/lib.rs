@@ -777,6 +777,35 @@ pub trait Backend: Send + Sync {
     /// `read`. Backends that execute eagerly at `submit` (CPU) have nothing
     /// pending, so the default no-op is correct for them.
     fn flush(&self) {}
+    /// Bytes currently buried (dropped by their Rust owner, not yet actually
+    /// freed on-device) by a backend whose reclaim is deferred - 0 for every
+    /// backend that reclaims eagerly at drop (the default is correct there,
+    /// not just a placeholder). Test-observability for the deferred-reclaim
+    /// accounting `flush`'s doc describes: a caller that isn't calling it
+    /// often enough leaves this growing unboundedly instead of staying
+    /// bounded, which is straightforward to assert on but invisible from the
+    /// public alloc/free API alone.
+    fn buried_bytes(&self) -> u64 {
+        0
+    }
+    /// Total queue submissions (each a blocking submit + fence wait) since
+    /// construction - 0 for every backend that doesn't count (the default is
+    /// correct there too: an eager/CPU backend has no separate "submit"
+    /// step). Test-observability for batching contracts: a caller that
+    /// forces a submit far more (or less) often than intended shows up here
+    /// without needing to measure wall-clock time.
+    fn queue_submits(&self) -> u64 {
+        0
+    }
+    /// Count of actual deferred-reclaim events (a batch of buried buffers
+    /// genuinely freed) since construction - 0 on every backend that
+    /// reclaims eagerly. Unlike `queue_submits`, NOT inflated by one-off
+    /// staging submits, so it isolates deferred-reclaim activity
+    /// specifically - see `vulkan::context::VkContext::reclaim_event_count`'s
+    /// doc for why that distinction matters.
+    fn reclaim_event_count(&self) -> u64 {
+        0
+    }
     /// The largest a single storage-buffer binding may be on this device, in
     /// bytes — the hardware limit a kernel's biggest buffer must fit under.
     /// Card-dependent (wgpu reports the adapter's value); the default is the
