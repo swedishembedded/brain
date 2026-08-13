@@ -1456,3 +1456,200 @@ deferred, unchanged by this phase, per the plan:**
   the ONNX graphs the sessions/`NpuModel`s compile, a different layer from
   the runtime seam this program addressed.
 
+## B4 - dtype_variant templater, bf16 storage tier
+
+**Goal.** ONE kernel source (`matmul.wgsl`) now produces both today's f32
+variant (unchanged) and a bf16-storage variant, decoding packed-2-per-`u32`
+bf16 weights to f32 inline with plain integer/bitcast WGSL - no device
+feature required, so it runs on the CPU JIT, a Pascal-class GPU, and in the
+browser identically.
+
+**`kernels::template::dtype_variant`** (`crates/kernels/src/template.rs`,
+new, alongside the existing `specialize`/`interned` tile-size machinery):
+`fn dtype_variant(name: &str, src: &'static str, binding: &str, dt:
+backend_api::DType) -> Result<Variant, String>`. Only `DType::BF16` is
+implemented (`F16` is a loud `Err`, deferred to B5; `F32`/`I8`/`Q4` have no
+storage-tier rewrite concept). On a comment-blanked copy of the source (same
+"scan the code, not the comments" contract `backend_api::workgroup_size_of`
+already established, generalised to a whole-source byte scan rather than a
+per-line one), it: (1) rewrites `var<storage, read> <binding>: array<f32>;`
+to `array<u32>;`; (2) rewrites every `<binding>[IDENT]` load into
+`bitcast<f32>(((<binding>[IDENT >> 1u] >> (16u * (IDENT & 1u))) & 0xFFFFu) <<
+16u)`, requiring `IDENT` to be a bare identifier (`^[A-Za-z_][A-Za-z0-9_]*$`)
+via bracket-depth-aware extraction, returning an `Err` naming the offending
+compound expression otherwise - never a silent double-evaluating rewrite.
+Variant naming reuses this module's `#k=v` convention with the binding as the
+key (`dtype_variant("matmul", MATMUL, "w", DType::BF16)` -> `"matmul#w=bf16"`),
+interned via a `(src ptr, name)`-keyed `OnceLock` cache identical in shape to
+`interned`'s, so a bf16 kernel flows through the existing kernel-registry/
+selector/autotuner machinery unchanged. Crate dependency: `brain-kernels`
+(previously dependency-free) now depends on `brain-backend-api` (itself
+dependency-free/std-only) for the `DType` enum - a leaf edge, not a cycle
+(`brain-gpu-core` already depends on both directly).
+
+**Kernels templatized** (2-3 as scoped): `matmul.wgsl` (`Reference`),
+`matmul_gemv.wgsl` (`WorkgroupPerOutput`), `matmul_reg3.wgsl`
+(`RegisterTiled` - NOT `matmul_reg2.wgsl`, which stays F32's untouched
+existing default; `matmul_reg3` is reg2's tiling with its bank-conflict
+patterns already removed, so it is the natural pick for a second physical
+kernel per dtype - already precedented by B3's `PackedInt8` i8-vs-q4 split).
+Each needed a bare-identifier hoist first, added by hand as a tiny,
+behaviour-preserving edit (verified by eye: identical arithmetic, only a
+named intermediate):
+
+- `matmul.wgsl`: `acc = acc + x[x_base + i] * w[w_base + i];` -> `let wi =
+  w_base + i; acc = acc + x[x_base + i] * w[wi];`.
+- `matmul_gemv.wgsl`: `let wv = w[wbase + k];` -> `let wi = wbase + k; let wv
+  = w[wi];`.
+- `matmul_reg3.wgsl`: two sites (the K-chunk-0 prime load and the
+  next-chunk-ahead load), both `... = w[brow_g[e] * p.k + gk];` -> `let wi =
+  brow_g[e] * p.k + gk; ... = w[wi];`.
+
+Each kernel also got a `// @tpl w -> bf16 storage variant (...)` header
+comment near its existing `@what`/`@how`/`@opt`/`@cpu`/`@gpu`/`@npu`/`@quant`
+fields - textually consistent with that convention, deliberately NOT a new
+machine-parsed field (that's B6's job).
+
+**`model::half`** (new): `f32_to_bf16(f: f32) -> u16` (round-to-nearest-even
+on the low 16 bits, NOT truncation - pinned at an exact tie via
+`0x3F80_8000`/`0x3F81_8000` and the halfway-plus-one case that actually
+distinguishes RNE from truncation) and `pack_bf16(f32s: &[f32]) -> Vec<u32>`
+(flat, two-per-word: element `2i` low half, `2i+1` high half). Bit layout
+matches `checkpoint::safetensors::bf16_to_f32`'s existing `f32::from_bits((h
+as u32) << 16)` exactly (pinned by a shared-fixture test: 1.0 -> 0x3F80, -4.0
+-> 0xC080, the same values `safetensors.rs`'s own `bf16_and_f32_roundtrip`
+uses) and matches `dtype_variant`'s decode (`IDENT & 1u` selects low/high
+half) by construction. `checkpoint::safetensors.rs` itself was NOT touched -
+no save path exists yet to need its own `f32_to_bf16`, and duplicating one
+there ahead of an actual writer would be dead code; `model::half::f32_to_bf16`
+is the one canonical implementation today.
+
+**`model::ops` extended** (not rewritten): `Weight::BF16 { w, n, k }` (packed
+flat over `[n*k]`, no per-row reshaping - the templated kernels already index
+`w` as one flat array via `row*k+col` arithmetic in WGSL, exactly like `F32`).
+`Weight::upload`'s assert widened to accept `Dtype::BF16`; its `Dtype::BF16`
+match arm calls `half::pack_bf16`, uploads as a `u32` buffer half the element
+count of an f32 upload. `Ops::bind` gains BF16-specific arms - `(Reference,
+BF16) -> "matmul#w=bf16"`, `(WorkgroupPerOutput, BF16) -> "matmul_gemv#w=bf16"`,
+`(RegisterTiled, BF16) -> "matmul_reg3#w=bf16"` - split out from the old
+combined `F32 | BF16 | F16` arms (which now read `F32 | F16` only), since a
+real `Weight::BF16` buffer holds packed u32 words and dispatching it through
+the plain f32 kernel would silently reinterpret those bits as garbage f32s.
+`kname`'s three new bf16 name constants are plain string literals (matching
+`dtype_variant`'s own naming convention by construction, not by calling it -
+this table must stay `const`-evaluable), with a dedicated regression test
+(`bf16_kname_literals_match_dtype_variant_naming`) pinning that the literals
+never drift from what `dtype_variant` actually produces for the real kernel
+sources. `Ops::matmul`'s dispatch body: `Weight::BF16` joins the `Weight::F32`
+arm (same activation, same `[m,k,n]` params, weight buffer offset always
+`(0,0)` for both - only `kind`/`Self::bind` differs). `Ops::threads` needed no
+change (BF16 only reaches `Reference`/`WorkgroupPerOutput`/`RegisterTiled`,
+none of which special-case dtype). `REQUIRED_KERNELS` grew by 3; every call
+site that builds a `Gpu`'s kernel list for `Ops` (the crate's own test module,
+`ops_facade_parity.rs`, the new `bf16_roundtrip.rs`) now also registers the
+three bf16 variants via `dtype_variant` itself, leaked to `'static` through a
+`OnceLock<Vec<_>>` (`gpu_core::testgpu::dev`/`Gpu::new_cpu`/`Gpu::new_wgpu`
+all want a `'static` kernel slice, and a specialised source is computed, not
+a `const`).
+
+**`backend-wgpu`**: `NumericSupport.bf16_storage: true` in `query_caps`
+(`crates/backend-wgpu/src/lib.rs`) - the `#w=bf16` kernels need no device
+feature, so this is a genuine capability, not a marketing flag (distinct from
+`f16`/`bf16` themselves, which mean FAST compute and stay `false` until S5
+measures a rate). `backend-cpu`/`backend-vulkan` untouched, per the phase's
+own scope: `backend-cpu` already reported `bf16_storage: true` BEFORE this
+phase (predates even B1 - commit `2366a978`'s "host RAM holds any byte
+layout" rationale, unrelated to the kernel templater), so it needed no flip;
+`backend-vulkan` still reports `bf16_storage: false` (out of scope, a
+follow-up for whoever wants the storage tier on that backend too - the WGSL
+itself would need no change, only the caps literal).
+
+**Dual-backend roundtrip** (`crates/model/tests/bf16_roundtrip.rs`, new).
+Three shapes chosen to route through all three templatized kernels via
+`select::candidates`'s real crossover constants (`DECODE_REGIME_MAX_ROWS=32`,
+`GEMM_TILE_MIN_COLS=128`): `m=8,n=128` -> `WorkgroupPerOutput`/
+`matmul_gemv#w=bf16`; `m=64,n=128` -> `RegisterTiled`/`matmul_reg3#w=bf16`;
+`m=64,n=64` -> `Reference`/`matmul#w=bf16`. Tolerance is derived explicitly
+per output element, not a flat epsilon: only the WEIGHT narrows to bf16 (7
+explicit mantissa bits, RNE, so each stored weight's relative error is at
+most `2^-8` of its own magnitude); for `out[m,n] = sum_k x[m,k]*w[n,k]` with
+exact `x`, the sum's absolute error is bounded by `2^-8 * sum_k
+|x[m,k]*w[n,k]|`, computed per element (plus a `1e-5` floor for near-zero
+outputs).
+
+**Results, both backends real (this sandbox has a real Intel Arc iGPU,
+reachable via wgpu):**
+
+- **GPU (`Gpu::new_wgpu`, real hardware, not skipped)**: all three shapes ran
+  for real. Worst observed err/tol ratio: GEMV 0.1487, RegisterTiled 0.1717,
+  Reference 0.1539 - comfortably inside the derived bound, and the
+  `matmul_reg3#w=bf16` kernel's own 3-`workgroupBarrier()` tiled structure
+  compiled and executed correctly through wgpu/naga.
+- **CPU (`Gpu::new_cpu`, Cranelift JIT)**: GEMV and Reference shapes ran the
+  REAL templated kernels through the JIT (single-barrier/no-barrier WGSL, so
+  it compiles) - same tolerance bound satisfied. **Real finding, checked by a
+  dedicated test, not just noted**: `matmul_reg3#w=bf16` (3 barriers) cannot
+  JIT-compile (`wgsl-cpu: kernel "matmul_reg3#w=bf16" not JIT-compiled (only
+  a single top-level workgroupBarrier() is supported)`), and unlike F32's
+  `matmul_reg2`/`matmul_i8_dyn` (which `backend-cpu`'s `dispatch` special-cases
+  by exact name to a native AVX2 GEMM), the new bf16-suffixed name is not in
+  that special-case table - but this is harmless, not a gap: `backend-cpu`'s
+  own `DeviceCaps.workgroup_reductions` is `false`, so `select::candidates`
+  filters `RegisterTiled` out before dispatch ever reaches it and silently
+  substitutes `Reference` instead. `register_tiled_bf16_is_not_reachable_on_
+  the_cpu_backend` asserts this directly (`select::DefaultSelector.select(...)`
+  against CPU-shaped caps returns `Reference`, not `RegisterTiled`, for the
+  `m=64,n=128` shape) rather than leaving it as an implicit, easy-to-misread
+  side effect. So the CPU run genuinely proves GEMV+Reference end to end; only
+  the GPU run proves RegisterTiled's bf16 kernel - which is fine, since that
+  is exactly the same pre-existing division of labour F32's own
+  `matmul_reg2`/`matmul_i8_dyn` already have on this backend (B2's ledger:
+  "on CPU all of them route to the AVX2 gemm... GPU-only").
+
+**`DType::promote`'s test** (`crates/backend-api/src/lib.rs`). B1's
+`promote_still_yields_f32_for_every_real_baseline_today` only ever exercised
+`NumericSupport::BASELINE` - renamed `promote_still_yields_f32_for_the_
+zero_support_baseline` with a doc comment that no longer claims this is true
+of "every real backend" (it already wasn't, even at B1 - `backend-cpu`'s
+storage flags predate B1 entirely). New
+`promote_reflects_backend_wgpus_real_bf16_storage_flag`: since this crate
+cannot depend on `brain-backend-wgpu` (the dependency runs the other way), it
+mirrors `WgpuBackend::query_caps`'s exact real numeric literal (`int8_dot:
+true, bf16_storage: true, ..BASELINE`) and asserts the real policy
+consequence - `DType::BF16.promote(&that)` now returns `BF16`, not `F32`
+(the actual, observable change this phase makes), while `I8`/`Q4` still
+promote (unrelated, pre-existing `int8_dot: true`) and `F16` still demotes to
+`F32` (untouched, B5's job).
+
+**Verification** (all scoped, no `make release`/`make test`/bare
+`cargo build --workspace`):
+`cargo test -p brain-kernels`: 12/12 (5 pre-existing `specialize`/`interned`
+tests + 1 pre-existing `src_roundtrips` + 6 new `dtype_variant` tests: bf16
+rewrite correctness, bare-identifier error case, unimplemented-tier error,
+missing-declaration error, interning stability, the real `matmul.wgsl`).
+`cargo test -p brain-model`: 114 lib tests (106 pre-existing/B3 + 7 new
+`half::tests` + 1 renamed... actually 4 new `ops::tests`: `bf16_kname_
+literals_match_dtype_variant_naming` plus the 3 pre-existing renamed to use
+`kernel_list()`) + every integration test green, including `ops_facade_parity`
+(updated to register the 3 bf16 kernels, otherwise unmodified - still
+bit-for-bit on `F32`/`I8`/`Q4`) and the new `bf16_roundtrip` (3/3: the two
+numeric checks plus the CPU-fallback assertion).
+`cargo test -p brain-backend-api --lib`: 27/27 (26 pre-existing + the new
+`promote_reflects_backend_wgpus_real_bf16_storage_flag`, `promote_still_
+yields_f32_for_the_zero_support_baseline` renamed but still green).
+`cargo test -p brain-checkpoint`: 69/69, unmodified (`safetensors.rs` was
+read for its bit-layout convention, not edited).
+`cargo build -p brain-backend-wgpu`: clean.
+`cargo clippy -p brain-kernels -p brain-model -p brain-backend-api -p
+brain-backend-wgpu --lib --no-deps`: zero new warnings (one pre-existing
+`unnecessary first().is_some()` in my own `template.rs` draft was fixed
+during this phase, not left; the remaining `doc_lazy_continuation` warnings
+in `ops.rs`/`moe.rs` are pre-existing, unmodified lines).
+
+**Deferred, explicitly out of scope** (per the plan): native f16 compute
+(B5 - real exponent re-biasing, not a bitcast); migrating any model crate's
+linear call sites onto `Weight::BF16` (B7, same as B3 left F32/I8/Q4
+unmigrated); `backend-vulkan`'s `bf16_storage` flag; a machine-parsed `@tpl`
+kernel-header field (B6); teaching `gemm_variant`/`mm8_rows_off`-style
+model-owned dispatch (as opposed to the `Ops` façade) about the bf16 tier.
+

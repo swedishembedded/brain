@@ -15,19 +15,20 @@
 //! kernel NAME is resolved once, at construction, via `Gpu::kernel_index`,
 //! rather than re-derived (or silently drifting) at every call site.
 //!
-//! **Scope of this phase (B3).** This module builds the façade and proves it
-//! reproduces today's `dispatch.rs`/`int8.rs`/`int4.rs` numeric behaviour
-//! exactly (`crates/model/tests/ops_facade_parity.rs`). It does **not**
-//! migrate any model crate's call sites onto it - `crates/qwen3`,
-//! `crates/flux1`, `crates/flux2` etc. are untouched; that migration is a
-//! later phase (B7). `Weight` supports exactly the three tiers this repo can
-//! actually dispatch today: `F32`, `I8` (DP4A, `model::int8`), `Q4` (W4A8,
-//! `model::int4`). **`BF16`/`F16` `Weight` arms are deliberately NOT added
-//! yet** - `DType::promote` can already report a device supports them, but no
-//! kernel varies its *load* by dtype (the "kernel templater", B4/B5's job);
-//! adding enum arms with no way to construct or dispatch them would be dead
-//! code. `Weight::upload` asserts loudly rather than silently miscompiling if
-//! ever asked for one.
+//! **Scope of B3/B4.** B3 built the façade and proved it reproduces today's
+//! `dispatch.rs`/`int8.rs`/`int4.rs` numeric behaviour exactly
+//! (`crates/model/tests/ops_facade_parity.rs`) for `F32`, `I8` (DP4A,
+//! `model::int8`), `Q4` (W4A8, `model::int4`). B4 adds the fourth tier,
+//! `BF16` (`model::half::pack_bf16` + the `#w=bf16` kernel variants
+//! `kernels::template::dtype_variant` produces - see `crates/model/tests/
+//! bf16_roundtrip.rs`). **No model crate's call sites were migrated by
+//! either phase** - `crates/qwen3`, `crates/flux1`, `crates/flux2` etc. are
+//! untouched; that migration is a later phase (B7). **`F16` is still
+//! deliberately absent** - unlike bf16 (whose 16 bits are exactly an f32's
+//! top 16 bits, so the decode is a bitcast with no rounding), f16 needs real
+//! 5-bit exponent re-biasing in the kernel decode expression, which is B5's
+//! job, not this phase's. `Weight::upload` asserts loudly rather than
+//! silently miscompiling if ever asked for one.
 //!
 //! **Selection.** `Ops::matmul` is the one place a shape turns into a kernel
 //! choice: it builds a `select::OpShape` from the weight's own `(n, k)` and
@@ -94,6 +95,28 @@ mod kname {
     pub const MATMUL_Q4_GEMV: &str = "matmul_q4_gemv";
     pub const MAX_ABS_ROW: &str = "max_abs_row";
     pub const QUANT_PACK: &str = "quant_pack";
+    /// bf16-storage kernel names (B4) - `kernels::template::dtype_variant`'s
+    /// own `variant_name` convention (`"{base}#{binding}={tag}"`), spelled
+    /// here as plain literals (not computed via a call to `dtype_variant`
+    /// itself) so this module stays a flat, `const`-evaluable name table like
+    /// every other entry in this list. `ops.rs`'s own test module has a
+    /// dedicated regression test (`bf16_kname_literals_match_dtype_variant_
+    /// naming`) pinning that these three literals never drift from what
+    /// `dtype_variant` actually produces for the real kernel sources - the
+    /// ONLY place that link is checked, since this table cannot call the
+    /// templater itself without becoming non-`const`.
+    pub const MATMUL_BF16: &str = "matmul#w=bf16";
+    pub const MATMUL_GEMV_BF16: &str = "matmul_gemv#w=bf16";
+    /// Register-tiled bf16: `matmul_reg3.wgsl`, NOT `matmul_reg2.wgsl` -
+    /// `MATMUL_REG2` stays F32's untouched existing default; `matmul_reg3` is
+    /// the kernel this phase templatized, since its own header already
+    /// describes it as `matmul_reg2`'s tiling with its two shared-memory
+    /// bank-conflict patterns removed - the natural pick for a second
+    /// physical kernel per dtype. Same `RegisterTiled` `KernelVariant`, two
+    /// physically different kernel FILES per dtype - already precedented by
+    /// `PackedInt8`'s `matmul_i8_dyn` vs `matmul_q4_dyn` split (see
+    /// `Ops::threads`'s doc comment).
+    pub const MATMUL_REG3_BF16: &str = "matmul_reg3#w=bf16";
     pub const ALL: &[&str] = &[
         MATMUL,
         MATMUL_GEMV,
@@ -104,6 +127,9 @@ mod kname {
         MATMUL_Q4_GEMV,
         MAX_ABS_ROW,
         QUANT_PACK,
+        MATMUL_BF16,
+        MATMUL_GEMV_BF16,
+        MATMUL_REG3_BF16,
     ];
 }
 
@@ -116,9 +142,18 @@ pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
 /// One linear layer's resident weight, at whichever tier
 /// [`Weight::upload`]'s `want.promote(caps)` landed on.
 ///
-/// `BF16`/`F16` arms are deliberately absent - see this module's doc comment.
+/// `F16` is deliberately absent - it needs real exponent re-biasing (B5), not
+/// just a bit-exact reinterpretation - see this module's doc comment.
 pub enum Weight {
     F32 { w: DeviceBuffer, n: u32, k: u32 },
+    /// bf16 storage tier (B4): `w` packed two-per-`u32` over the FLAT `[n*k]`
+    /// row-major weight (`model::half::pack_bf16`'s layout - no per-row
+    /// repacking, since the templated kernels index `w` as one flat array
+    /// exactly like the `F32` tier does). Decoded inline to f32 on load by
+    /// the `#w=bf16` kernel variant (`kernels::template::dtype_variant`) -
+    /// no device feature required, so this tier is available identically on
+    /// the CPU JIT, any GPU backend, and in the browser.
+    BF16 { w: DeviceBuffer, n: u32, k: u32 },
     /// DP4A int8: `w` packed `[n, k/4]` u32 (`model::int8::quantize_weight`'s
     /// layout), `s` the per-channel (per-row) scale `[n]`.
     I8 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
@@ -132,6 +167,7 @@ impl Weight {
     pub fn dtype(&self) -> Dtype {
         match self {
             Weight::F32 { .. } => Dtype::F32,
+            Weight::BF16 { .. } => Dtype::BF16,
             Weight::I8 { .. } => Dtype::I8,
             Weight::Q4 { .. } => Dtype::Q4,
         }
@@ -139,13 +175,13 @@ impl Weight {
 
     pub fn n(&self) -> u32 {
         match self {
-            Weight::F32 { n, .. } | Weight::I8 { n, .. } | Weight::Q4 { n, .. } => *n,
+            Weight::F32 { n, .. } | Weight::BF16 { n, .. } | Weight::I8 { n, .. } | Weight::Q4 { n, .. } => *n,
         }
     }
 
     pub fn k(&self) -> u32 {
         match self {
-            Weight::F32 { k, .. } | Weight::I8 { k, .. } | Weight::Q4 { k, .. } => *k,
+            Weight::F32 { k, .. } | Weight::BF16 { k, .. } | Weight::I8 { k, .. } | Weight::Q4 { k, .. } => *k,
         }
     }
 
@@ -154,19 +190,30 @@ impl Weight {
     /// asked for, never wider than what the device can execute - then
     /// uploads. A caller never hand-picks a buffer layout itself.
     ///
-    /// `want` must be `F32`, `I8`, or `Q4` - asserted loudly, since `BF16`/
-    /// `F16` have no `Weight` arm yet (see this module's doc comment).
+    /// `want` must be `F32`, `BF16`, `I8`, or `Q4` - asserted loudly, since
+    /// `F16` has no `Weight` arm yet (see this module's doc comment).
     pub fn upload(ops: &Ops, raw: &[f32], n: usize, k: usize, want: Dtype) -> Weight {
         assert_eq!(raw.len(), n * k, "Weight::upload: raw len {} != n*k ({n}*{k})", raw.len());
         assert!(
-            matches!(want, Dtype::F32 | Dtype::I8 | Dtype::Q4),
-            "Weight::upload: {want:?} weights are not implemented yet -- BF16/F16 need the kernel \
-             templater (B4/B5); see `model::ops`'s module doc comment"
+            matches!(want, Dtype::F32 | Dtype::BF16 | Dtype::I8 | Dtype::Q4),
+            "Weight::upload: {want:?} weights are not implemented yet -- F16 needs the kernel \
+             templater's real exponent re-biasing (B5); see `model::ops`'s module doc comment"
         );
         match want.promote(&ops.caps.numeric) {
             Dtype::F32 => {
                 let w = ops.gpu.storage_init("weight_f32", raw);
                 Weight::F32 { w, n: n as u32, k: k as u32 }
+            }
+            Dtype::BF16 => {
+                // Flat pack over the whole `[n*k]` row-major weight - the
+                // templated kernels index `w` as one flat array (row*k+col
+                // arithmetic happens in WGSL, not via any implicit per-row
+                // buffer stride), so no reshaping is needed here, unlike the
+                // I8/Q4 tiers below (which pack per output row).
+                let packed = crate::half::pack_bf16(raw);
+                let w = ops.gpu.storage(packed.len() as u64);
+                ops.gpu.write(&w, &packed);
+                Weight::BF16 { w, n: n as u32, k: k as u32 }
             }
             Dtype::I8 => {
                 let (packed, scales) = crate::int8::quantize_weight(raw, n, k);
@@ -266,16 +313,30 @@ impl Ops {
     /// (`F32`-family dtypes only ever offer `{Reference, WorkgroupPerOutput,
     /// RegisterTiled}`; `I8`/`Q4` only ever offer `{WorkgroupPerOutput,
     /// PackedInt8}` - see `backend_api::select::candidates`) crossed with
-    /// [`Weight::upload`]'s own `DType::promote` gate (an `I8`/`Q4` `Weight`
-    /// exists at all only on a device whose caps already promoted it there),
-    /// so a panic here means one of those two contracts broke, not a normal
-    /// runtime condition.
+    /// [`Weight::upload`]'s own `DType::promote` gate (an `I8`/`Q4`/`BF16`
+    /// `Weight` exists at all only on a device whose caps already promoted it
+    /// there), so a panic here means one of those two contracts broke, not a
+    /// normal runtime condition.
+    ///
+    /// `BF16` (B4) gets its OWN kernel names, distinct from `F32`'s - unlike
+    /// `F16` (still grouped with `F32`, since no `Weight::F16` exists yet to
+    /// ever reach this dtype in practice), a real `Weight::BF16` buffer holds
+    /// PACKED u32 words, not raw f32 values, so dispatching it through the
+    /// plain f32 kernel would silently reinterpret those bit patterns as
+    /// garbage f32s. `RegisterTiled`'s bf16 kernel is `matmul_reg3`, NOT the
+    /// `matmul_reg2` the `F32`/`F16` arm uses - see `kname::MATMUL_REG3_BF16`'s
+    /// own doc comment for why picking a different physical file per dtype
+    /// for the same `KernelVariant` is already precedented (`PackedInt8`'s
+    /// i8-vs-q4 split, see [`Ops::threads`]).
     fn bind(v: KernelVariant, dt: Dtype) -> &'static str {
         use KernelVariant::*;
         match (v, dt) {
-            (Reference, Dtype::F32 | Dtype::BF16 | Dtype::F16) => kname::MATMUL,
-            (WorkgroupPerOutput, Dtype::F32 | Dtype::BF16 | Dtype::F16) => kname::MATMUL_GEMV,
-            (RegisterTiled, Dtype::F32 | Dtype::BF16 | Dtype::F16) => kname::MATMUL_REG2,
+            (Reference, Dtype::F32 | Dtype::F16) => kname::MATMUL,
+            (Reference, Dtype::BF16) => kname::MATMUL_BF16,
+            (WorkgroupPerOutput, Dtype::F32 | Dtype::F16) => kname::MATMUL_GEMV,
+            (WorkgroupPerOutput, Dtype::BF16) => kname::MATMUL_GEMV_BF16,
+            (RegisterTiled, Dtype::F32 | Dtype::F16) => kname::MATMUL_REG2,
+            (RegisterTiled, Dtype::BF16) => kname::MATMUL_REG3_BF16,
             (WorkgroupPerOutput, Dtype::I8) => kname::MATMUL_I8_GEMV,
             (PackedInt8, Dtype::I8) => kname::MATMUL_I8_DYN,
             (WorkgroupPerOutput, Dtype::Q4) => kname::MATMUL_Q4_GEMV,
@@ -337,7 +398,14 @@ impl Ops {
         let kind = self.idx[Self::bind(variant, w.dtype())];
         let threads = Self::threads(variant, w.dtype(), m, n);
         match w {
-            Weight::F32 { w: wb, .. } => {
+            // `BF16` reads the SAME `act.x` (raw f32, never quantized - only
+            // the WEIGHT narrows for this tier) with the SAME `[m, k, n]`
+            // params `F32` uses; the weight buffer's own offset is always
+            // `(0, 0)` for both (whole-buffer, independent of which
+            // activation rows `m` covers), so only which physical kernel
+            // `kind`/`Self::bind` chose differs - the packed-vs-plain layout
+            // is entirely the kernel's own concern, not this dispatch site's.
+            Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
                 let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
                 let oo = (yoff, m as u64 * n as u64);
                 s.push(self.gpu.step_sliced(kind, &[&act.x, wb, y], &[xo, (0, 0), oo], &[m, k, n], threads));
@@ -388,29 +456,66 @@ impl Ops {
 mod tests {
     use super::*;
 
-    const KERNELS: &[(&str, &str)] = &[
-        ("matmul", kernels::MATMUL),
-        ("matmul_gemv", kernels::MATMUL_GEMV),
-        ("matmul_reg2", kernels::MATMUL_REG2),
-        ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-        ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
-        ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
-        ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
-        ("max_abs_row", kernels::MAX_ABS_ROW),
-        ("quant_pack", kernels::QUANT_PACK),
-    ];
+    /// The full façade kernel set, including the three bf16-storage variants
+    /// (B4) - built via [`kernels::template::dtype_variant`] rather than a
+    /// `const` list, since a specialised variant's source is computed, not a
+    /// plain `include_str!`. `gpu_core::testgpu::dev` wants a `'static`
+    /// slice, so this leaks the `Vec` once (via `OnceLock`) rather than
+    /// reallocating it per call - the same "tiny working set, leaking it is
+    /// fine" tradeoff `dtype_variant`'s own interning cache already makes.
+    fn kernel_list() -> &'static [(&'static str, &'static str)] {
+        static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+        LIST.get_or_init(|| {
+            let bf16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
+            let bf16_gemv =
+                kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
+            let bf16_reg3 =
+                kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
+            vec![
+                ("matmul", kernels::MATMUL),
+                ("matmul_gemv", kernels::MATMUL_GEMV),
+                ("matmul_reg2", kernels::MATMUL_REG2),
+                ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+                ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+                ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+                ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+                ("max_abs_row", kernels::MAX_ABS_ROW),
+                ("quant_pack", kernels::QUANT_PACK),
+                bf16_matmul,
+                bf16_gemv,
+                bf16_reg3,
+            ]
+        })
+    }
 
     #[test]
     fn required_kernels_matches_kname_all() {
-        // `REQUIRED_KERNELS` and this test module's own `KERNELS` list must
+        // `REQUIRED_KERNELS` and this test module's own `kernel_list()` must
         // name the exact same set -- if `Ops::new`'s check and a real
         // caller's `Gpu::new` kernel list ever disagree, this is where it
         // would first show up.
-        let mut want: Vec<&str> = KERNELS.iter().map(|(n, _)| *n).collect();
+        let mut want: Vec<&str> = kernel_list().iter().map(|(n, _)| *n).collect();
         let mut got: Vec<&str> = REQUIRED_KERNELS.to_vec();
         want.sort_unstable();
         got.sort_unstable();
         assert_eq!(want, got);
+    }
+
+    /// `kname`'s bf16 name literals are plain consts (see that module's doc
+    /// comment for why), not computed via `dtype_variant` -- this is the one
+    /// place their spelling is checked against what `dtype_variant` actually
+    /// produces for the REAL kernel sources, so the two can never silently
+    /// drift apart.
+    #[test]
+    fn bf16_kname_literals_match_dtype_variant_naming() {
+        let (n, _) = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
+        assert_eq!(n, kname::MATMUL_BF16);
+        let (n, _) =
+            kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
+        assert_eq!(n, kname::MATMUL_GEMV_BF16);
+        let (n, _) =
+            kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
+        assert_eq!(n, kname::MATMUL_REG3_BF16);
     }
 
     #[test]
@@ -427,7 +532,7 @@ mod tests {
 
     #[test]
     fn new_succeeds_when_every_required_kernel_is_present() {
-        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let gpu = gpu_core::testgpu::dev(kernel_list());
         Ops::new(gpu).expect("Ops::new should succeed with every required kernel registered");
     }
 }

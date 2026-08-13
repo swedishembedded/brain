@@ -387,17 +387,58 @@ mod dtype_tests {
         }
     }
 
-    /// Every REAL `NumericSupport` in the codebase today reports every
-    /// non-fp32 flag `false` -- this phase builds the promotion machinery
-    /// but activates no backend's capability flags (that is B4/B5/B11).
-    /// `NumericSupport::BASELINE` is the only real-world instance
-    /// constructible without a live device; every backend's actual `caps()`
-    /// starts from it and, as of this phase, never flips a non-fp32 flag on.
+    /// `NumericSupport::BASELINE` is the zero-support floor every device is
+    /// still guaranteed to fall back to for whatever it does NOT report - so
+    /// `promote` must always land on `F32` for it, regardless of which tiers
+    /// a later phase activates elsewhere. This is no longer a claim about
+    /// "every real backend" (see [`promote_reflects_backend_wgpus_real_bf16_storage_flag`]
+    /// below for why: B4 is the first phase where that stopped being true) -
+    /// it is a claim about the constant itself, which by construction never
+    /// changes.
     #[test]
-    fn promote_still_yields_f32_for_every_real_baseline_today() {
+    fn promote_still_yields_f32_for_the_zero_support_baseline() {
         for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
             assert_eq!(dtype.promote(&NumericSupport::BASELINE), DType::F32);
         }
+    }
+
+    /// B4 flips `backend-wgpu`'s real `NumericSupport.bf16_storage` to `true`
+    /// (`kernels::template::dtype_variant`'s `#w=bf16` kernel variants decode
+    /// packed bf16 with plain integer/bitcast WGSL - no device feature
+    /// needed, so this is a genuine capability, not a marketing flag). Before
+    /// this phase, EVERY real `NumericSupport` in the tree reported `bf16`/
+    /// `bf16_storage: false`
+    /// (`backend-cpu` was already the one exception for STORAGE, per its own
+    /// "host RAM holds any byte layout" rationale - a pre-existing fact,
+    /// unrelated to and predating this phase's own wgpu change), so
+    /// `DType::BF16.promote(..)` returned `F32` for every real backend's caps
+    /// in practice. This crate cannot depend on `brain-backend-wgpu` (the
+    /// dependency runs the other way - a backend depends on this crate, never
+    /// itself), so this test cannot construct the real `WgpuBackend::
+    /// query_caps` struct directly; it mirrors that function's exact numeric
+    /// literal instead (`int8_dot: true, bf16_storage: true`, everything else
+    /// `NumericSupport::BASELINE`) and asserts the real, observable policy
+    /// change that literal now causes - `BF16` genuinely promotes to itself
+    /// on a real backend's caps, not just "the machinery could do this one
+    /// day" (B1's framing, now true for real).
+    #[test]
+    fn promote_reflects_backend_wgpus_real_bf16_storage_flag() {
+        let wgpu_like = NumericSupport { int8_dot: true, bf16_storage: true, ..NumericSupport::BASELINE };
+        assert_eq!(
+            DType::BF16.promote(&wgpu_like),
+            DType::BF16,
+            "a real backend with bf16_storage now promotes BF16 to itself, not F32 -- see B4"
+        );
+        // Untouched by B4: I8/Q4 still promote (int8_dot was already true
+        // pre-B4); F16 still demotes to F32 (f16/f16_storage stay false on
+        // this backend until B5).
+        assert_eq!(DType::I8.promote(&wgpu_like), DType::I8);
+        assert_eq!(DType::Q4.promote(&wgpu_like), DType::Q4);
+        assert_eq!(
+            DType::F16.promote(&wgpu_like),
+            DType::F32,
+            "f16 storage/compute is not flipped by B4 (that's B5) -- must not promote yet"
+        );
     }
 
     #[test]

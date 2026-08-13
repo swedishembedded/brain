@@ -28,6 +28,8 @@ pub mod serve;
 pub mod distributed;
 pub mod gdn;
 pub mod grid;
+/// bf16 pack/unpack (B4's storage tier) - see this module's own doc comment.
+pub mod half;
 pub mod hostmath;
 pub mod int4;
 pub mod int8;

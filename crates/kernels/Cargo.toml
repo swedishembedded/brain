@@ -10,3 +10,9 @@ name = "kernels"
 path = "src/lib.rs"
 
 [dependencies]
+# `template::dtype_variant` (B4) keys its bf16-storage rewrite on the unified
+# numeric-tier enum rather than inventing a second one -- `brain-backend-api`
+# is itself dependency-free (std only), so this stays a leaf edge, not a cycle
+# (`brain-gpu-core` already depends on both this crate and `brain-backend-api`
+# directly).
+brain-backend-api.workspace = true

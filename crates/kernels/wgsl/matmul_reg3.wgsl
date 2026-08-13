@@ -8,6 +8,8 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
+// @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B4;
+//        header field, parsing deferred to B6)
 //
 // Register-tiled matmul (out = x @ Wᵀ), matmul_reg2's tiling with its two
 // shared-memory bank-conflict patterns removed. Same 128x128 tile, same 8x8
@@ -101,7 +103,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         let gk = skk[e];
         if (arow_g[e] < p.m && gk < p.k) { As[skk[e] * SP + sr[e]] = x[arow_g[e] * p.k + gk]; }
         else                             { As[skk[e] * SP + sr[e]] = 0.0; }
-        if (brow_g[e] < p.n && gk < p.k) { Bs[skk[e] * SP + sr[e]] = w[brow_g[e] * p.k + gk]; }
+        // Hoisted to a bare identifier (B4) -- see matmul.wgsl's comment on
+        // the same pattern: `dtype_variant`'s bf16 decode reads `wi` twice.
+        if (brow_g[e] < p.n && gk < p.k) { let wi = brow_g[e] * p.k + gk; Bs[skk[e] * SP + sr[e]] = w[wi]; }
         else                             { Bs[skk[e] * SP + sr[e]] = 0.0; }
     }
     workgroupBarrier();
@@ -113,7 +117,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             for (var e = 0u; e < 4u; e = e + 1u) {
                 let gk = k1 + skk[e];
                 if (arow_g[e] < p.m && gk < p.k) { rA[e] = x[arow_g[e] * p.k + gk]; } else { rA[e] = 0.0; }
-                if (brow_g[e] < p.n && gk < p.k) { rB[e] = w[brow_g[e] * p.k + gk]; } else { rB[e] = 0.0; }
+                if (brow_g[e] < p.n && gk < p.k) { let wi = brow_g[e] * p.k + gk; rB[e] = w[wi]; } else { rB[e] = 0.0; }
             }
         }
         for (var kk = 0u; kk < BK; kk = kk + 1u) {

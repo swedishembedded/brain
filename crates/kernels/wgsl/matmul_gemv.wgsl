@@ -8,6 +8,8 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B4;
+//        header field, parsing deferred to B6)
 //
 // Skinny-M matmul (out = x @ W^T), one WORKGROUP per output COLUMN — the
 // decode-regime GEMM.
@@ -56,7 +58,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     let wbase = col * p.k;
     for (var k = t; k < p.k; k = k + 64u) {
-        let wv = w[wbase + k];
+        // Hoisted to a bare identifier (B4) -- see matmul.wgsl's comment on
+        // the same pattern: `dtype_variant`'s bf16 decode reads `wi` twice.
+        let wi = wbase + k;
+        let wv = w[wi];
         for (var m = 0u; m < p.m; m = m + 1u) {
             partial[m * 64u + t] = partial[m * 64u + t] + x[m * p.k + k] * wv;
         }

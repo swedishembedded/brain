@@ -8,6 +8,8 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
+// @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B4;
+//        header field, parsing deferred to B6)
 //
 // Generic matmul matching PyTorch nn.Linear (no bias):  out = x @ W^T
 //   x : [M, K]   row-major
@@ -43,7 +45,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let w_base = col * p.k;
     var acc = 0.0;
     for (var i: u32 = 0u; i < p.k; i = i + 1u) {
-        acc = acc + x[x_base + i] * w[w_base + i];
+        // Hoisted to a bare identifier (B4): `dtype_variant`'s bf16 decode
+        // expands `w[wi]` to `w[wi >> 1u]` etc., which would double-evaluate
+        // a compound index like `w_base + i` if it were inlined here.
+        let wi = w_base + i;
+        acc = acc + x[x_base + i] * w[wi];
     }
     out[idx] = acc;
 }

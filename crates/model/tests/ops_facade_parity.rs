@@ -36,17 +36,37 @@ use model::int4::quantize_weight_q4;
 use model::int8::quantize_weight;
 use model::ops::{Ops, Weight};
 
-const KERNELS: &[(&str, &str)] = &[
-    ("matmul", kernels::MATMUL),
-    ("matmul_gemv", kernels::MATMUL_GEMV),
-    ("matmul_reg2", kernels::MATMUL_REG2),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
-    ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
-    ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-];
+/// The full façade kernel set, including the three bf16-storage variants
+/// (B4) - `Ops::new` requires all of them even for tests that only exercise
+/// `F32`/`I8`/`Q4` here (`crates/model/tests/bf16_roundtrip.rs` is what
+/// actually exercises the bf16 tier's own numerics). `gpu_core::testgpu::dev`
+/// keys its device pool by the kernel slice's pointer identity, so this
+/// leaks the `Vec` once (via `OnceLock`) rather than reallocating a fresh one
+/// per call - the same tradeoff `model::ops::tests::kernel_list` makes.
+fn kernel_list() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let bf16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
+        let bf16_gemv =
+            kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
+        let bf16_reg3 =
+            kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
+        vec![
+            ("matmul", kernels::MATMUL),
+            ("matmul_gemv", kernels::MATMUL_GEMV),
+            ("matmul_reg2", kernels::MATMUL_REG2),
+            ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+            ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+            ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+            ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+            ("max_abs_row", kernels::MAX_ABS_ROW),
+            ("quant_pack", kernels::QUANT_PACK),
+            bf16_matmul,
+            bf16_gemv,
+            bf16_reg3,
+        ]
+    })
+}
 
 fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
@@ -79,7 +99,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 /// `Ops::matmul` for an `F32` weight must be bit-identical to
 /// `dispatch::mm_rows_off` driven by hand on the same `x`/weight buffers.
 fn check_f32(m: usize, n: usize, k: usize) {
-    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let gpu = gpu_core::testgpu::dev(kernel_list());
     let ops = Ops::new(gpu).expect("Ops::new");
     let g = ops.gpu();
 
@@ -115,7 +135,7 @@ fn check_f32(m: usize, n: usize, k: usize) {
 /// `model::int8::quantize_weight` + `dispatch::I8Scratch` + `mm8_rows_off`
 /// driven by hand on the same `x`/weight buffers.
 fn check_i8(m: usize, n: usize, k: usize) {
-    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let gpu = gpu_core::testgpu::dev(kernel_list());
     let ops = Ops::new(gpu).expect("Ops::new");
     let g = ops.gpu();
 
@@ -168,7 +188,7 @@ fn check_i8(m: usize, n: usize, k: usize) {
 /// `model::int4::quantize_weight_q4` + `dispatch::I8Scratch` (the SAME int8
 /// activation quantizer - q4 is W4A8) + `mm8_rows_off` driven by hand.
 fn check_q4(m: usize, n: usize, k: usize) {
-    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let gpu = gpu_core::testgpu::dev(kernel_list());
     let ops = Ops::new(gpu).expect("Ops::new");
     let g = ops.gpu();
 
@@ -241,7 +261,7 @@ fn matmul_row_offset_is_correct_for_i8_and_q4() {
     let total_rows = xr0 as usize + m;
 
     for &tier in &[Dtype::I8, Dtype::Q4] {
-        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let gpu = gpu_core::testgpu::dev(kernel_list());
         let ops = Ops::new(gpu).expect("Ops::new");
         let g = ops.gpu();
 
