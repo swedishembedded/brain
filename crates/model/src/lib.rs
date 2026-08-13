@@ -33,6 +33,7 @@ pub mod int4;
 pub mod int8;
 pub mod lora;
 pub mod moe;
+pub mod ops;
 // wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no
 // business compiling into the browser build, and its `pub use` below broke
 // the wasm build the crate declares support for (the re-exports referenced

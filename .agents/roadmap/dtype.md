@@ -1127,3 +1127,332 @@ use for `wm_diamond::train::DiamondTrainer`/`DiamondUNet` construction
 (unrelated to NPU routing) is likewise untouched - only the dead NPU-routing
 disjunction was removed.
 
+## B3 - Ops/Weight façade (f32+I8+Q4)
+
+**Problem.** A model crate like `flux1`/`flux2` hand-numbers its own
+kernel-pipeline indices, hand-maintains a `LinW::{F32, I8}` enum, and forks
+`if let LinW::I8(wq, sw) = w { self.mm8(...) } else { self.mm_rows_at(...) }`
+at every linear layer. This phase builds a model-facing façade -
+`model::ops::{Ops, Weight, Act}` - that collapses that into one call
+(`ops.matmul(&mut s, &weight, &act, &y, yoff)`), with kernel-name resolution
+done ONCE at construction (`Gpu::kernel_index`) instead of hand-maintained
+per model. **No model crate's call sites were migrated this phase** - `qwen3`,
+`flux1`, `flux2` are untouched; that migration is B7. This phase only builds
+and proves the façade against the EXISTING `dispatch.rs`/`int8.rs`/`int4.rs`
+machinery.
+
+**`Weight`** (`crates/model/src/ops.rs`, new): `F32 { w, n, k }`, `I8 { w, s,
+n, k }` (DP4A, `model::int8`'s packed layout), `Q4 { w, s, n, k }` (W4A8,
+`model::int4`'s packed layout). `Weight::upload(ops, raw, n, k, want)` is the
+ONE construction path: quantizes/packs per `want.promote(ops.caps().numeric)`
+(never narrower than requested, never wider than the device can execute),
+uploads, returns the tagged enum. **`BF16`/`F16` arms deliberately absent** -
+`DType::promote` can already report a device supports them (B1), but no
+kernel varies its *load* by dtype yet (the kernel templater is B4/B5's job);
+adding dead enum arms with no dispatch path would be worse than the TODO
+`Weight::upload` prints when asked for one.
+
+**`Ops`**: `gpu: Gpu`, `caps: DeviceCaps` (from `gpu.caps()` - the REAL
+device, not `model::block`'s device-blind `fast_tier_caps()` stub, since an
+`I8`/`Q4` `Weight` only ever gets constructed on a device `promote()` actually
+cleared for that tier), `idx: HashMap<&'static str, usize>` (every façade
+kernel name resolved ONCE in `Ops::new`, erroring loudly - not panicking three
+linears deep into a forward - if the caller's `Gpu` is missing one),
+`selector: Box<dyn KernelSelector>` (`CachedSelector<DefaultSelector>` by
+default). `Ops::matmul`'s body is the entire policy in one place: build an
+`OpShape` from `w`'s own `(n, k)` and the activation's `m`, ask
+`self.selector`, `Ops::bind` the `(KernelVariant, Dtype)` pair to the ONE
+kernel-name spelling this façade recognizes (the only place a kernel-name
+string literal is chosen by a match arm - `kname`'s own const definitions are
+the only place one is spelled at all), look up its index, push one `Step`.
+
+**`Act`** - the "quantize once, share across q/k/v" invariant, made a type.
+`Ops::act(s, x, xr0, rows, k)` quantizes rows `[xr0, xr0+rows)` of `x` ONCE
+(eagerly, matching the phase brief's own `s: &mut Vec<Step>` signature),
+wrapping a fresh `model::dispatch::I8Scratch` sized for exactly this range -
+reusing `I8Scratch`'s own offset arithmetic (`quant_rows`/
+`dispatch::quant_rows_steps`), not reimplementing it. Every subsequent
+`Ops::matmul` call against the same `Act` - regardless of whether its paired
+`Weight` turns out `F32` (which reads `Act`'s raw buffer directly) or `I8`/
+`Q4` (which reads the quantized form) - reuses the SAME quantization, never
+re-dispatching `max_abs_row`/`quant_pack`. Deliberate simplification, called
+out explicitly: quantization is unconditional, so a call site that never
+pairs an activation with a quantized weight pays for a quantization it never
+reads; a real B7 call site already knows its precision tier statically before
+it ever calls `act`, so this cost is never paid on a pure-fp32 path in
+practice, and making it lazy/cached-on-first-use instead is a reasonable,
+explicitly deferred follow-up.
+
+**Offset arithmetic - the specific bug class this phase had to not
+introduce**, and the two real bugs it found doing so (see TDD below):
+`Ops::matmul`'s packed-activation buffer OFFSET always divides by
+`Dtype::I8.per_word()` (4), **never** `w.dtype().per_word()` - the activation
+is always int8-packed even for a `Q4` linear (W4A8: only the WEIGHT narrows
+further, `model::int4`'s own module doc), so using the weight's own
+`per_word()` there would silently divide a `Q4` linear's activation offset by
+8 instead of 4. This is computed in exactly one place inside `Ops::matmul`,
+never duplicated at a call site.
+
+**Bugs this phase's own TDD gate found and fixed** (both pre-existing latent
+gaps in `dispatch.rs`/`block.rs`, invisible until this phase drove Q4 through
+a model-shaped dispatch path for the first time):
+
+1. **`matmul_i8_{dyn,gemv}.wgsl` vs `matmul_q4_{dyn,gemv}.wgsl` disagree on
+   what their own `k` PARAM means** - the int8 kernels take the already-divided
+   packed word count (`kg = k/4`, confirmed via `mm8_rows_off`'s existing
+   `[m, k / 4, n]` params and the kernels' own `struct Params { m, kg, n }`),
+   but the q4 kernels take the RAW logical `k`, un-divided (confirmed via
+   `matmul_q4_dyn.wgsl`'s own header: "`k` is passed un-divided because x and w
+   have DIFFERENT word densities for the same K... a single shared `kg`... would
+   be ambiguous about which operand it counts"). `Ops::matmul`'s first draft
+   passed raw `k` to both, silently correct for Q4 and silently wrong for I8 -
+   caught immediately by the parity test at `m=1` (I8 output was mostly zero
+   past the first 16 elements). Fixed with an explicit `match w.dtype() { I8 =>
+   kg, _ => k }` at the ONE call site, documented inline.
+2. **`matmul_q4_dyn.wgsl` is the NAIVE, non-tiled q4 tier** (its own header:
+   "the correct-first, non-tiled q4 GEMM... deliberately NOT register-tiled...
+   A register-tiled `matmul_q4_dyn`... is the documented follow-on
+   optimization... not attempted here"), unlike `matmul_i8_dyn.wgsl` (128×128
+   tile, 256-thread workgroup, mirrors `matmul_reg3` - confirmed via both
+   kernels' own `@workgroup_size`/dispatch-shape header lines: q4 dyn uses
+   `@workgroup_size(64)` with `global_invocation_id`, i8 dyn uses
+   `@workgroup_size(256)` with `workgroup_id`). So `KernelVariant::PackedInt8`
+   is NOT one fixed dispatch geometry - `Ops::threads` now branches on `dt`
+   too: `I8 => tile formula` (`m.div_ceil(128)*n.div_ceil(128)*256`, same as
+   `RegisterTiled`), `Q4 => m*n` (same as `Reference`). The SAME bug existed in
+   `dispatch.rs`'s own `block::gemm_variant` (its `Fast{..}` arm's `_ => (tiled,
+   m.div_ceil(128)*n.div_ceil(128)*256)` fallback assumes ANY non-gemv choice
+   is the 128×128-tile family - true for `matmul_i8_dyn`, false for
+   `matmul_q4_dyn`) - since nothing in this repo drove `gemm_variant`/
+   `mm8_rows_off` with a `Q4` weight before this phase (`LinW` has no `Q4`
+   arm), this was a real, previously-unexercised latent gap, not something
+   this phase introduced. Caught by the parity test at `m=64` (Q4's oracle
+   output was correct for the first ~1/16th of the buffer, zero past it -
+   under-dispatch, not corruption).
+
+**`model::dispatch::mm4_rows_off`** (new, additive - `mm8_rows_off` itself is
+UNCHANGED, zero regression risk to its existing `flux1`/`flux2` callers): the
+q4 sibling of `mm8_rows_off`, needed because this phase's own parity test
+oracle has to drive "today's dispatch.rs helpers" correctly for Q4, and no
+such correct helper existed yet (`mm8_rows_off` hardcodes the int8 `k/4`
+param contract; nothing called it with a `Q4` weight before this phase, since
+`LinW` has no `Q4` arm). Fixes bug 1 (passes raw `k`, never `k/4`) and bug 2
+(detects which kernel slot `gemm_variant` actually chose via `kind == tiled`
+and overrides the thread count to `m*n` for that slot, rather than trusting
+`gemm_variant`'s tile-shaped guess). This is q4's first real
+`GemmVariants`/`gemm_variant`-routed dispatch helper in the codebase, and it
+is now correct for a future B7 caller to adopt directly (independent of
+`Ops`).
+
+**TDD.** `crates/model/tests/ops_facade_parity.rs` (new), written first -
+confirmed RED by temporarily commenting `pub mod ops;` out of `lib.rs`
+(`error[E0432]: unresolved import 'model::ops'`), then restored once `Ops`/
+`Weight` existed:
+
+- `matmul_matches_dispatch_rs_bit_identically_across_tiers_and_m` - for each
+  of `{F32, I8, Q4}` and `m ∈ {1, 8, 64, 512}` (decode-regime GEMV, the
+  GEMV/tile crossover, and the register-tiled/packed regime B2 fixed;
+  `n=64, k=128`, cheap synthetic weights, no real checkpoint), builds the
+  weight/activation via `Ops`, and asserts the output is **bit-for-bit
+  identical** (`assert_eq!` on the raw `Vec<f32>`, not a cosine tolerance) to
+  the SAME shape driven by hand through today's `dispatch::mm_rows_off`
+  (F32) / `dispatch::I8Scratch` + `model::int8::quantize_weight` +
+  `dispatch::mm8_rows_off` (I8) / `model::int4::quantize_weight_q4` +
+  `dispatch::mm4_rows_off` (Q4). This is the test that found both bugs above,
+  in the order listed (I8's param bug at `m=1` first, Q4's thread-count bug
+  at `m=64` second, after the first fix landed).
+- `matmul_row_offset_is_correct_for_i8_and_q4` - the offset-arithmetic gate
+  the phase brief specifically asked for: `xr0=64` (clears
+  `quant_rows_steps`'s own 64-row/256B alignment requirement), `m=8`, for
+  both `I8` and `Q4`. Asserts the offset dispatch is **bit-for-bit identical**
+  to a SECOND façade call on a FRESH buffer holding only the sliced rows at
+  offset 0 - the strong form: a wrong divisor reads the wrong byte range and
+  cannot coincidentally reproduce a zero-offset dispatch over the identical
+  data, whereas a similarity-only check could pass on a subtly-scaled wrong
+  answer. A secondary fp32-host-oracle cosine check is kept as a
+  belt-and-suspenders sanity bound (real quantization rounding, so not exact).
+- Three more inline unit tests in `ops.rs` itself (`Ops::new` fails loudly on
+  a missing kernel; succeeds when every kernel is present; `REQUIRED_KERNELS`
+  matches the test's own kernel-registration list) - the "panics/errors
+  LOUDLY, never silently at dispatch time" requirement, checked directly.
+
+This is also **Q4's first real model-facing dispatch exercise** outside
+`crates/model/tests/matmul_q4_gemm.rs` (which only drives the raw kernel by
+hand, not a `Weight`/`Ops`-shaped call) - a real milestone per the plan, and
+exactly what surfaced bug 2 above (nothing had exercised `GemmVariants`-routed
+q4 dispatch before).
+
+**Verification.** `cargo test -p brain-model`: **177 passed, 0 failed** across
+all 28 test binaries (lib unit tests: 106 = the 103 B2 reported plus this
+phase's 3 new `ops::tests` inline unit tests; the new `ops_facade_parity`
+integration binary: 2/2; every pre-existing integration suite - including
+`matmul_q4_gemm.rs`, `matmul_rows.rs`, and everything else B2 already had
+green - unchanged). `cargo build -p brain-model`:
+clean, no warnings on the new module. `cargo clippy -p brain-model
+--all-targets`: zero new warnings (`ops.rs`, `ops_facade_parity.rs`,
+`dispatch.rs` all clean; every warning in the run is pre-existing,
+attributed to `gradcheck`'s doc comments and
+`router_gate_expert_cap.rs`'s pre-existing `manual_clamp` lints, neither
+touched this phase). `cargo check -p brain-qwen3 -p brain-flux1 -p brain-flux2
+-p brain-cli`: clean (`brain-cli` pulls in essentially the whole workspace
+transitively) - confirms the additive `dispatch.rs` change and the new `ops`
+module disturb nothing downstream, matching the "no model crate migrated"
+claim above.
+
+**What's left (B7, separate phase, not started here):** migrate `qwen3`/
+`flux1`/`flux2`'s own linear call sites onto `Ops::matmul`/`Weight`, retiring
+their hand-maintained `LinW`/kernel-index tables in favour of this façade.
+BF16/F16 `Weight` arms wait on the kernel templater (B4/B5). The
+`gemm_variant`/`mm8_rows_off` thread-count assumption this phase's bug 2
+exposed (any non-gemv "tiled" slot is safe to dispatch at the 128×128-tile
+formula) is now known-false in general - `mm4_rows_off` works around it
+locally for q4; a more structural fix (teaching `gemm_variant` itself which
+of its registered kernels are truly tile-shaped) is left for whoever adopts
+`mm4_rows_off`/q4 dispatch more broadly, not required by this phase's own
+scope.
+
+## C4 - collapse bespoke OpenVINO sessions onto NpuGraph
+
+**Problem.** C1 named `NpuGraph` (`crates/npu/src/openvino/real.rs`) as the
+real generalized runner and deleted the fake `GraphBackend` trait; C2 proved
+the pattern end to end for Chronos-2/FinCast via the `NpuModel` trait seam,
+but explicitly left `real.rs`'s bespoke session types in place as
+"a separate, deliberate cleanup call". Before this phase, `real.rs` (1671
+lines) still hand-rolled `compile -> set N tensors -> infer -> read M
+tensors` via OpenVINO's raw `InferRequest` API in 9 separate session structs,
+each duplicating logic `NpuGraph::run(&[(&str, Feed)])` already does
+generically: `NpuSession` (YOLO 4-D vision), `DecoderSession` (Qwen/GLM
+cache-free prefill), `EmbedSession` (TTS Talker hidden-state), `LfmSession`
+(LFM2.5-Encoder), `Chronos2Session`, `FincastSession`, `KronosS1Session`,
+`KronosS2Session`, `CodecSession` (Mimi codec decode).
+
+**No dead code found - all 9 are live production paths, not orphans.**
+Grepped every caller across the whole workspace before touching anything.
+C2's own text speculated `Chronos2Session`/`FincastSession` "may have already
+[been] made dead" by its residency migration - checked and that is NOT the
+case: `resident_forecast.rs` (the residency adapter C2 migrated) stopped
+calling them, but `crates/cli/src/npu_cli.rs`'s `brain npu chronos2`/`brain
+npu fincast`/`brain npu kronos` bench subcommands (a SEPARATE, still-live
+call path, unaffected by C2's residency-only migration) still construct
+`Chronos2Session`/`FincastSession`/`KronosS1Session`/`KronosS2Session`
+directly (`npu_cli.rs:336,538,704,708`). `NpuSession` is live via
+`crates/npu/src/decode.rs` (YOLO NPU detect), `crates/cli/src/depth_cli.rs`
+(ZipDepth NPU), and `npu_cli.rs`'s own `run`/`bench`/`check`. `DecoderSession`
+is live via `crates/npu/src/{qwen_decode,glm_decode}.rs`. `EmbedSession`/
+`CodecSession` are live via `crates/tts/src/{npu_gen,serve}.rs`. `LfmSession`
+is live via `npu_cli.rs`'s `lfm` subcommand. So this phase collapsed all 9
+into thin wrappers rather than deleting any of them - "collapse", not
+"prune", is the accurate description of what actually happened.
+
+**Mechanical rewrite - same graph, same math, different plumbing.** Every
+one of the 9 keeps its exact public type name, constructor signatures
+(`load`/`load_bytes`/`load_path`), and typed accessor/run methods (`seq_len`,
+`vocab`, `d_in`/`d_out`, `n_out`/`head_out`, `s1_vocab`/`s2_vocab`, `nq`/
+`code_len`, `run`/`run_ids`/`run_embeds`/`run_codes`) - callers across
+`crates/cli`, `crates/npu`, and `crates/tts` needed zero changes. Internally,
+each struct now holds one `graph: NpuGraph` field (plus its own typed shape
+metadata extracted from the compiled model at construction time, exactly as
+before) instead of raw `_core: Core` + `request: openvino::InferRequest`.
+`compile()` still does its own `core.compile_model(...)` and shape
+introspection (`compiled.get_input_by_index(0).get_shape()` etc. -
+unchanged, this is genuinely per-session-shaped and does not belong in a
+generic runner), then hands the already-compiled model to a new private
+`NpuGraph::from_compiled(core, compiled, device)` constructor (`finish` was
+split into `compile_model` + `from_compiled` so both the top-level
+`NpuGraph::compile_bytes`/`compile_path` callers and these thin sessions
+share the same infer-request-creation/name-introspection tail without a
+second `compile_model` call). Each `run*` method now builds a `Feed` array
+with the exact same tensor names the hand-rolled code used
+(`"emb"`/`"kmask"`/`"ids"`/`"amask"`/`"ctx"`/`"sib"`/`"x"`/`"codes"`) and
+calls `self.graph.run(&feeds)`, then unpacks the named-tensor result into the
+session's typed return shape - for single-output sessions, `out.into_iter()
+.next().map(|(_, _, data)| data)`; for `NpuSession`, `HeadOutputs { tensors:
+out }` directly (its return type is already the same `Vec<(String,
+Vec<usize>, Vec<f32>)>` shape `NpuGraph::run` produces); for
+`KronosS1Session`'s two same-named-shape outputs, the `ctx_idx`/`s1_idx`
+disambiguation computed once at compile time (by matching each output's last
+dimension against `d`) still indexes correctly into `NpuGraph::run`'s result
+Vec, since it preserves the same graph-declared output order the disambig
+logic was computed against. The ONNX graph topology and the actual
+computation are unchanged - this is invocation plumbing only, confirmed by
+every numeric-comparison test below staying green unmodified.
+
+**Out of scope, confirmed byte-for-byte untouched.** `KvSession`,
+`PrefillSession`, `FusedMtpSession`, `BackStreamSession` (the four stateful
+TTS KV-cache/streaming sessions, explicitly out of scope per C1's own
+inventory and C2's "out of scope" note) - `git diff` on
+`crates/npu/src/openvino/real.rs` touches zero lines inside any of the four
+structs or impls (grepped the diff for all four names: no hits). They keep
+hand-rolling `_core`/`request` and their own `set_tensor`/`get_tensor` calls,
+per the pre-existing filed follow-up that their per-step ring-buffer state
+doesn't fit a single build-once `NpuModel::build`/`NpuGraph::run` seam
+without a larger design nobody has scoped yet.
+
+**Line count.** `crates/npu/src/openvino/real.rs`: **1671 -> 1472 lines**
+(199 lines removed, ~11.9%) - entirely from the 9 collapsed sessions; the
+diff's `git diff --stat` shows 98 insertions / 297 deletions, net -199,
+confirming this wasn't padding offset by wrapper boilerplate elsewhere.
+
+**Verification.**
+`cargo build -p brain-npu`: clean, no new warnings.
+`cargo clippy -p brain-npu --lib --no-deps`: zero warnings anywhere in
+`openvino/real.rs` (every warning the run reports is pre-existing, in
+`topo.rs`/`decode.rs`/`wm_topology.rs`/`qwenvl_topology.rs`, none of which
+this phase touched).
+`cargo test -p brain-npu --lib`: **19/19 passed, 1 pre-existing ignore** -
+UNCHANGED from C1/C2's own baseline, and this is not just "still compiles":
+`chronos2_export::chronos2_session_matches_core_forward`,
+`fincast_export::fincast_session_matches_core_forward`, and
+`kronos_export::kronos_sessions_match_core_forward` all actually compile and
+run the collapsed `Chronos2Session`/`FincastSession`/`KronosS1Session`/
+`KronosS2Session` through real OpenVINO (this sandbox's `/dev/accel/accel0`
+retargets to the GPU plugin per C2's own documented finding) and assert
+cosine similarity against the host reference forward - real numeric proof
+the `Feed`-based rewrite produces bit-for-bit-equivalent behavior, not just a
+green compile.
+`cargo test -p brain-npu --tests` (every test binary under
+`crates/npu/tests/`, 24 files): **all green, zero failures** - notably
+including runtime OpenVINO exercises of the other 5 collapsed sessions too:
+`npu_live::brain_onnx_runs_on_the_intel_npu` and
+`depth_onnx::{export_matches_brain_on_npu,export_matches_brain_on_openvino_cpu}`
+(`NpuSession`), `qwen_onnx::tiny_onnx_matches_brain_cpu` and
+`glm_onnx::{glm_onnx_runs_on_npu,glm_onnx_matches_brain_forward}`
+(`DecoderSession`), `lfm_onnx::lfm_onnx_matches_brain_forward`
+(`LfmSession`) - each compiles the collapsed session for real and compares
+its output against brain's own host forward. No test was weakened, skipped,
+or had its assertions loosened to reach green.
+`cargo test -p brain-cli --test npu_model_parity`: **7/7 passed** - unchanged
+from C2's own baseline, confirming the `NpuModel`/`NpuGraph` residency seam
+(a different code path from the 9 collapsed sessions, but sharing the same
+`NpuGraph::from_compiled` tail now) is undisturbed.
+`cargo check -p brain-cli -p brain-tts -p brain-omni -p brain-wm-diamond`:
+clean - the four workspace crates that depend on `brain-npu`
+(`crates/{cli,omni,tts,wm-diamond}/Cargo.toml`), confirming every caller of
+every touched session type still compiles unchanged.
+`git diff -- crates/npu/src/openvino/real.rs`: grepped for
+`KvSession|PrefillSession|FusedMtpSession|BackStreamSession` - zero matches,
+confirming the four stateful sessions are byte-for-byte untouched as
+required.
+
+**This closes out Group C (C1-C4)** - the whole "NPU as a first-class seam"
+workstream from the approved program plan: C1 deleted the fake
+non-object-safe `GraphBackend` trait, C2 named `NpuModel`/`NpuGraph` as the
+real seam and proved it for Chronos-2/FinCast, C3 deleted the
+`NPU_REQUESTED` global duplicate-state sidecar, C4 collapsed the remaining
+9 live bespoke sessions onto the same generic runner. **Explicitly still
+deferred, unchanged by this phase, per the plan:**
+- **ASR migration** (`resident_asr.rs`'s `NemotronNpuInstance`/
+  `QwenAsrNpuInstance` onto the `NpuModel` trait) - flagged by C2 as blocked
+  on `nemotron`/`qwen_asr` lacking a cheap `::tiny()` synthetic-checkpoint
+  constructor for an in-sandbox RED-then-GREEN parity test; still true, not
+  touched here (this phase's scope was `real.rs`'s bespoke sessions, not the
+  residency-adapter layer C2 already handled for chronos2/fincast).
+- **TTS's four stateful sessions** (`KvSession`/`PrefillSession`/
+  `FusedMtpSession`/`BackStreamSession`) - confirmed above, still need a
+  larger per-step-state design before they can adopt a build-once seam.
+- **The ~20 hand-written `*_topology.rs` ONNX emitters** (`chronos2_topology`,
+  `fincast_topology`, `kronos_topology`, `qwen_topology`, `glm_topology`,
+  `codec_topology`, etc.) - out of scope for the whole program: they build
+  the ONNX graphs the sessions/`NpuModel`s compile, a different layer from
+  the runtime seam this program addressed.
+
