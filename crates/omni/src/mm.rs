@@ -346,6 +346,7 @@ pub fn build_multimodal_prompt(
             n_rows: a.n_rows,
             grid: (a.n_rows, 1, 1), // 1-D, no spatial extent: diagonal on all three axes -- see get_rope_index_multi's doc
         });
+        reclaim_tower_vram(gpu);
     }
     if let Some((rgb, w, h)) = image {
         let im = encode_image(reader, gpu, rgb, w, h)?;
@@ -357,6 +358,7 @@ pub fn build_multimodal_prompt(
             n_rows: im.n_rows,
             grid: im.grid,
         });
+        reclaim_tower_vram(gpu);
     }
     if let Some(frames) = video {
         let v = encode_video_frames(reader, gpu, frames)?;
@@ -368,6 +370,7 @@ pub fn build_multimodal_prompt(
             n_rows: v.n_rows,
             grid: v.grid,
         });
+        reclaim_tower_vram(gpu);
     }
 
     let embed_row = |t: u32| embed_table[t as usize * d as usize..(t as usize + 1) * d as usize].to_vec();
@@ -397,6 +400,39 @@ pub fn build_multimodal_prompt(
     let positions = get_rope_index_multi(&token_ids, &placeholders);
 
     Ok(MultimodalPrompt { token_ids, x_host, positions })
+}
+
+/// Force this device's just-buried tower buffers (the encoder + merger
+/// weights and activation scratch [`encode_audio`]/[`encode_image`]/
+/// [`encode_video_frames`] allocate via `gpu.new_like` -- a handle sharing
+/// `gpu`'s own `VkContext`, see those functions' docs) to actually be freed
+/// before the NEXT medium's tower uploads its own weights onto the same
+/// device.
+///
+/// **Real bug this closes**: `crates/backend-vulkan`'s buffer reclaim is
+/// deferred by design (`VkOwnedBuffer::drop` -> `VkContext::bury`, a real
+/// device-memory free only happens later, at `VkContext::reclaim_dead` --
+/// see that function's own doc for why: a batched-but-unsubmitted dispatch
+/// may still name the buffer). Nothing called `reclaim_dead` between two
+/// back-to-back `encode_*` calls, so a request carrying BOTH audio and image
+/// stacked their tower weights+activations in VRAM simultaneously instead of
+/// the second reusing the first's just-freed space: measured against the
+/// real `Qwen3-Omni-30B-A3B-Instruct` HF checkpoint, the audio tower is
+/// ~1.2 GiB on disk (bf16) / ~2.4 GiB uploaded as f32, the vision tower
+/// ~1.0 GiB / ~2.0 GiB -- individually well inside a resident int8 shard's
+/// spare headroom (~7-8 GiB/card measured on 2x Tesla P40 after the real
+/// W8A16 checkpoint's placement), but their unreclaimed SUM plus activation
+/// scratch narrows that margin -- exactly the class of failure a real
+/// `ERROR_OUT_OF_DEVICE_MEMORY` from `crates/vulkan/src/context.rs`'s
+/// `allocate_memory` reports (a genuine `vkAllocateMemory` failure, not the
+/// unrelated wgpu-hal 4 GiB clamp `--device vulkan` already avoids). This is
+/// a real, verified accounting gap regardless of how much headroom a given
+/// card happens to have at request time: `Gpu::flush` on a handle with
+/// nothing of its own recorded degrades to exactly one `reclaim_dead` call
+/// (`VulkanBackend::flush`'s empty-batch branch) -- cheap, and a no-op on
+/// backends that reclaim eagerly already.
+fn reclaim_tower_vram(gpu: &Gpu) {
+    gpu.flush();
 }
 
 /// Overwrite `x_host`'s rows `[row0, row0+n_rows)` with `embeds`
