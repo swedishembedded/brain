@@ -6,11 +6,11 @@
 //! [`GptDecoder`](crate::GptDecoder).
 //!
 //! MoE training already implements the architecture-agnostic [`model::Model`]
-//! seam (`moe::Trainer`), so [`train_decoder`](MoeDecoder::train_decoder) routes
+//! seam (`toymoe::Trainer`), so [`train_decoder`](MoeDecoder::train_decoder) routes
 //! through the *same* generic trainer (`model::train::fit`) the GPT baseline
 //! uses — identical LR schedule / grad-accum / checkpoint semantics, only the
 //! architecture differs. Inference (per-position logits) lives in the standalone
-//! `moe::Engine` (the `Trainer` has no in-trainer token head), so the
+//! `toymoe::Engine` (the `Trainer` has no in-trainer token head), so the
 //! [`Scorer`] wraps an `Engine` loaded from the `fit`-saved checkpoint; the two
 //! share the checkpoint container format (tied `lm_head.weight` included), so a
 //! `fit`-saved MoE checkpoint loads in the `Engine` directly.
@@ -18,15 +18,15 @@
 use std::path::Path;
 
 use model::FitOpts;
-use moe::train::{Config as MoeConfig, Trainer};
-use moe::Engine;
+use toymoe::train::{Config as MoeConfig, Trainer};
+use toymoe::Engine;
 
 use crate::model::{DecoderLm, Scorer, TrainConfig};
 
 /// MoE-specific layout choices the benchmark's depth/width/heads don't carry.
 /// Kept here (not on `TrainConfig`, which stays architecture-neutral) so every
 /// benchmark scores MoE at the same sparse shape. 4 experts / top-2 is the
-/// established MoE default (matches `moe::train::train`);
+/// established MoE default (matches `toymoe::train::train`);
 /// `d_ff = 2 * d_model` keeps a single expert's FFN comparable to GPT's `4*d`
 /// dense MLP split across the routed experts.
 const N_EXPERTS: u32 = 4;

@@ -417,21 +417,6 @@ name = "brain-autodiff"
 version = "0.1.1"
 
 [[package]]
-name = "brain-autoencoder"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "bytemuck",
- "serde_json",
-]
-
-[[package]]
 name = "brain-backend-api"
 version = "0.1.1"
 
@@ -479,7 +464,6 @@ dependencies = [
 name = "brain-bench"
 version = "0.1.1"
 dependencies = [
- "brain-autoencoder",
  "brain-checkpoint",
  "brain-data",
  "brain-eval",
@@ -487,8 +471,9 @@ dependencies = [
  "brain-glmdsa",
  "brain-gpt2",
  "brain-model",
- "brain-moe",
  "brain-qwen3",
+ "brain-toyautoencoder",
+ "brain-toymoe",
  "serde_json",
 ]
 
@@ -573,13 +558,11 @@ dependencies = [
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
- "brain-moe",
  "brain-nemotronasr",
  "brain-npu",
  "brain-onnx",
  "brain-paramstore",
  "brain-perf",
- "brain-pid",
  "brain-qwen3",
  "brain-qwen35moe",
  "brain-qwen3asr",
@@ -594,6 +577,8 @@ dependencies = [
  "brain-server",
  "brain-shutdown",
  "brain-splat",
+ "brain-toymoe",
+ "brain-toypid",
  "brain-vision",
  "brain-vqgan",
  "brain-vulkan",
@@ -977,7 +962,6 @@ dependencies = [
 name = "brain-gradcheck"
 version = "0.1.1"
 dependencies = [
- "brain-autoencoder",
  "brain-clip",
  "brain-codeformer",
  "brain-data",
@@ -989,13 +973,14 @@ dependencies = [
  "brain-kernels",
  "brain-lfm2",
  "brain-model",
- "brain-moe",
- "brain-pid",
  "brain-qwen3",
  "brain-qwen35moe",
  "brain-sam2",
- "brain-seq2seq",
  "brain-t5encoder",
+ "brain-toyautoencoder",
+ "brain-toymoe",
+ "brain-toypid",
+ "brain-toyseq2seq",
  "brain-vae",
  "brain-vqgan",
 ]
@@ -1145,21 +1130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-moe"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "bytemuck",
- "serde_json",
-]
-
-[[package]]
 name = "brain-moondream3"
 version = "0.1.1"
 dependencies = [
@@ -1275,22 +1245,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "brain-pid"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "bytemuck",
- "pollster",
- "serde_json",
- "wgpu",
 ]
 
 [[package]]
@@ -1541,21 +1495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-seq2seq"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "bytemuck",
- "serde_json",
-]
-
-[[package]]
 name = "brain-server"
 version = "0.1.1"
 dependencies = [
@@ -1620,6 +1559,67 @@ name = "brain-timeseries"
 version = "0.1.1"
 
 [[package]]
+name = "brain-toyautoencoder"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-toymoe"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-toypid"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "pollster",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "brain-toyseq2seq"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-vae"
 version = "0.1.1"
 dependencies = [
@@ -1677,7 +1677,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-optim",
  "brain-paramstore",
- "brain-pid",
+ "brain-toypid",
  "console_error_panic_hook",
  "serde_json",
  "wasm-bindgen",

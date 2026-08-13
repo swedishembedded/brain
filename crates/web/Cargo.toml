@@ -21,7 +21,7 @@ brain-gpu-core.workspace = true
 brain-checkpoint.workspace = true
 brain-optim.workspace = true
 brain-paramstore.workspace = true
-brain-pid.workspace = true
+brain-toypid.workspace = true
 serde_json.workspace = true
 wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
 wasm-bindgen = { version = "0.2", optional = true }

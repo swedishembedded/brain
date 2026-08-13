@@ -10,7 +10,7 @@
 //! `SHARD_TEST_GPUS=1,1` pins both replicas to one card. Skipped under
 //! `MOE_SKIP_GPU_TESTS`.
 
-use autoencoder::{Autoencoder, AutoencoderConfig};
+use toyautoencoder::{Autoencoder, AutoencoderConfig};
 use model::{Batch, DataParallel, Model};
 
 fn gpu_disabled() -> bool {
@@ -43,7 +43,7 @@ fn dp_grad_parity_autoencoder() {
         return;
     }
     let cfg = AutoencoderConfig::tiny(); // in_dim 12, hidden 16, z_dim 4
-    let init = autoencoder::init_weights(&cfg, 7);
+    let init = toyautoencoder::init_weights(&cfg, 7);
     let (b, t) = (4u32, 1u32);
     let n = (b * cfg.in_dim) as usize;
     let k = 4usize;

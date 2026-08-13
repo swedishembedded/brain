@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use pid::{Pid, PidConfig, BOS, DECIDE};
-use pid::data::{self as pid_data, Rng};
+use toypid::{Pid, PidConfig, BOS, DECIDE};
+use toypid::data::{self as pid_data, Rng};
 
 pub fn run_pid(args: &[String]) {
     match args.first().map(|s| s.as_str()) {

@@ -649,7 +649,7 @@ impl model::Model for Trainer {
     fn set_batch(&self, batch: model::Batch) {
         match batch {
             model::Batch::Lm { tokens, targets } => Trainer::set_batch(self, tokens, targets),
-            _ => panic!("moe::Trainer only supports Batch::Lm"),
+            _ => panic!("toymoe::Trainer only supports Batch::Lm"),
         }
     }
 
@@ -685,7 +685,7 @@ impl model::Model for Trainer {
     }
 
     /// MoE inference (per-position logits) lives in the standalone `Engine`
-    /// (`moe::model`), not the `Trainer`; the generic trainer/gradcheck never
+    /// (`toymoe::model`), not the `Trainer`; the generic trainer/gradcheck never
     /// call this, so the `Model` seam reports "no in-trainer token head".
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None

@@ -30,7 +30,7 @@
 
 use data::rng::Rng;
 use model::{cosine_lr, Batch, FitOpts, Model};
-use seq2seq::{Seq2Seq, Seq2SeqConfig};
+use toyseq2seq::{Seq2Seq, Seq2SeqConfig};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -92,7 +92,7 @@ fn engine_learns_copy_via_cross_attention() {
     let steps = 400u32;
 
     let init = Seq2Seq::init_weights(&cfg, 1234);
-    let model = Seq2Seq::new_on(gpu_core::testgpu::dev(seq2seq::model::PIPELINES), cfg, b, task.len, &init);
+    let model = Seq2Seq::new_on(gpu_core::testgpu::dev(toyseq2seq::model::PIPELINES), cfg, b, task.len, &init);
 
     let opts = FitOpts {
         steps,

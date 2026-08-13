@@ -1,12 +1,12 @@
 [package]
-name = "brain-autoencoder"
+name = "brain-toyseq2seq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Bottleneck autoencoder (sequence -> single compressed representation -> MLP reconstruction): forward + backprop in WGSL, MSE Regression head."
+description = "Encoder-decoder Transformer (bidirectional encoder + causal/cross-attention decoder): forward + backprop in WGSL."
 
 [lib]
-name = "autoencoder"
+name = "toyseq2seq"
 path = "src/lib.rs"
 
 [dependencies]

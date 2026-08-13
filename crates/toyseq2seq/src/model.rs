@@ -951,7 +951,7 @@ impl model::Model for Seq2Seq {
     fn set_batch(&self, batch: model::Batch) {
         match batch {
             model::Batch::Seq2Seq { src, tgt, labels } => Seq2Seq::set_batch(self, src, tgt, labels),
-            _ => panic!("seq2seq::Seq2Seq only supports Batch::Seq2Seq"),
+            _ => panic!("toyseq2seq::Seq2Seq only supports Batch::Seq2Seq"),
         }
     }
 

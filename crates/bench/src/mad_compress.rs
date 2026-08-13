@@ -15,7 +15,7 @@
 //! - **Tokens → features.** Each token id maps to a fixed `FEAT`-dim codebook
 //!   vector (a deterministic per-seed random embedding). A length-`SEQ_LEN`
 //!   sequence becomes `in_dim = SEQ_LEN * FEAT` floats — the autoencoder input.
-//! - **Model.** [`autoencoder::Autoencoder`]: `x → GELU(enc) → z (bottleneck) →
+//! - **Model.** [`toyautoencoder::Autoencoder`]: `x → GELU(enc) → z (bottleneck) →
 //!   GELU(dec) → out`, trained with the **MSE** `Regression` head (the new
 //!   `mse_value`/`mse_grad` kernels). The bottleneck width `z_dim` is far smaller
 //!   than `in_dim`, so the whole sequence must pass through `z`.
@@ -44,7 +44,7 @@
 
 use std::path::Path;
 
-use autoencoder::{Autoencoder, AutoencoderConfig};
+use toyautoencoder::{Autoencoder, AutoencoderConfig};
 use data::binio;
 use data::rng::Rng;
 use model::Model;
@@ -177,7 +177,7 @@ impl Benchmark for MadCompress {
     }
 
     /// Non-LM objective: this benchmark trains its own bottleneck
-    /// [`autoencoder::Autoencoder`] (a `Regression`/MSE head), so it **ignores**
+    /// [`toyautoencoder::Autoencoder`] (a `Regression`/MSE head), so it **ignores**
     /// the supplied `lm` — a causal next-token decoder cannot express the
     /// compress-then-reconstruct objective (ADR §6). It is therefore reported in
     /// the eval battery but its score reflects the autoencoder, not `lm`'s

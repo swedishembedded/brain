@@ -486,7 +486,7 @@ pub fn check_vlm_splice(seed: u64) -> Report {
 /// closing the TESTING.md gap where only GPT was gradient-checked. Returns the
 /// report.
 pub fn check_moe(seed: u64) -> Report {
-    use moe::train::{Config, Trainer};
+    use toymoe::train::{Config, Trainer};
     // aux_coef/z_coef = 0: the FD check differentiates the model's scalar
     // `forward()`, which is the cross-entropy only (the load-balancing aux loss
     // and router z-loss are folded into the router gradient, not the returned
@@ -567,7 +567,7 @@ pub fn check_glm_mtp(seed: u64) -> Report {
 /// positions and IGNORE the rest. Now that PID implements `model::Model`, the
 /// blanket `CheckModel` impl makes it checkable - closing the TESTING.md gap.
 pub fn check_pid(seed: u64) -> Report {
-    use pid::{Pid, PidConfig, IGNORE};
+    use toypid::{Pid, PidConfig, IGNORE};
     let cfg = PidConfig {
         vocab: 20,
         block_size: 8,
@@ -577,7 +577,7 @@ pub fn check_pid(seed: u64) -> Report {
         d_ff: 32,
         u_bins: 8,
     };
-    let init = pid::data::init_weights(&cfg, seed);
+    let init = toypid::data::init_weights(&cfg, seed);
     let model = Pid::new(cfg, 2, 6, &init);
     // 2 sequences x 6 positions; label a few positions (rest IGNORE), no PAD so
     // every position is a valid attention key.
@@ -599,7 +599,7 @@ pub fn check_pid(seed: u64) -> Report {
 /// shared src/tgt embedding accumulation, and the masked-CE token head - all
 /// through the blanket `CheckModel for model::Model`. Returns the report.
 pub fn check_seq2seq(seed: u64) -> Report {
-    use seq2seq::{Seq2Seq, Seq2SeqConfig, IGNORE};
+    use toyseq2seq::{Seq2Seq, Seq2SeqConfig, IGNORE};
     let cfg = Seq2SeqConfig {
         vocab: 23,
         block_size: 6,     // decoder (target) length
@@ -610,7 +610,7 @@ pub fn check_seq2seq(seed: u64) -> Report {
         n_heads: 2,
         d_ff: 32,
     };
-    let init = seq2seq::init_weights(&cfg, seed);
+    let init = toyseq2seq::init_weights(&cfg, seed);
     // b=2 sequences; encoder length 5, decoder length 6.
     let model = Seq2Seq::new(cfg, 2, 6, &init);
     let src: Vec<u32> = (0..10).map(|i| (i * 7 + 1) % 23).collect(); // 2 x 5
@@ -863,9 +863,9 @@ pub fn check_qwen35_lora(seed: u64) -> Report {
 /// reconstruction error, so unlike the token-head models there is no masking -
 /// every output element contributes. Returns the report.
 pub fn check_autoencoder(seed: u64) -> Report {
-    use autoencoder::{Autoencoder, AutoencoderConfig};
+    use toyautoencoder::{Autoencoder, AutoencoderConfig};
     let cfg = AutoencoderConfig { in_dim: 12, hidden: 16, z_dim: 4 };
-    let init = autoencoder::init_weights(&cfg, seed);
+    let init = toyautoencoder::init_weights(&cfg, seed);
     // b=2 items; reconstruct each item against itself (inputs == targets).
     let model = Autoencoder::new(cfg.clone(), 2, &init);
     let x: Vec<f32> = (0..(2 * cfg.in_dim)).map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.13).collect();

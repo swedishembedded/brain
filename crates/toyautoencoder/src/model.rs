@@ -441,7 +441,7 @@ impl model::Model for Autoencoder {
     fn set_batch(&self, batch: model::Batch) {
         match batch {
             model::Batch::Tensor { inputs, targets, .. } => Autoencoder::set_batch(self, inputs, targets),
-            _ => panic!("autoencoder::Autoencoder only supports Batch::Tensor"),
+            _ => panic!("toyautoencoder::Autoencoder only supports Batch::Tensor"),
         }
     }
 

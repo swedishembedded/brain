@@ -29,7 +29,7 @@ default-members = [
     "crates/data",
     "crates/audio",
     "crates/model",
-    "crates/moe",
+    "crates/toymoe",
     "crates/gpt2",
     "crates/qwen3",
     "crates/qwen35moe",
@@ -42,8 +42,8 @@ default-members = [
     "crates/moondream3",
     "crates/glmdsa",
     "crates/deepseek2",
-    "crates/seq2seq",
-    "crates/autoencoder",
+    "crates/toyseq2seq",
+    "crates/toyautoencoder",
     "crates/diffusion",
     "crates/vae",
     "crates/dit",
@@ -58,7 +58,7 @@ default-members = [
     "crates/mimi",
     "crates/ecapatdnn",
     "crates/qwen3tts",
-    "crates/pid",
+    "crates/toypid",
     "crates/federated",
     "crates/eval",
     "crates/bench",
@@ -134,7 +134,7 @@ brain-optim = { path = "crates/optim" }
 brain-data = { path = "crates/data" }
 brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
-brain-moe = { path = "crates/moe" }
+brain-toymoe = { path = "crates/toymoe" }
 brain-gpt2 = { path = "crates/gpt2" }
 brain-qwen3 = { path = "crates/qwen3" }
 brain-qwen35moe = { path = "crates/qwen35moe" }
@@ -146,8 +146,8 @@ brain-qwen3omnimoe = { path = "crates/qwen3omnimoe" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-glmdsa = { path = "crates/glmdsa" }
 brain-deepseek2 = { path = "crates/deepseek2" }
-brain-seq2seq = { path = "crates/seq2seq" }
-brain-autoencoder = { path = "crates/autoencoder" }
+brain-toyseq2seq = { path = "crates/toyseq2seq" }
+brain-toyautoencoder = { path = "crates/toyautoencoder" }
 brain-diffusion = { path = "crates/diffusion" }
 brain-vae = { path = "crates/vae" }
 brain-dit = { path = "crates/dit" }
@@ -156,7 +156,7 @@ brain-flux2 = { path = "crates/flux2" }
 brain-mimi = { path = "crates/mimi" }
 brain-ecapatdnn = { path = "crates/ecapatdnn" }
 brain-qwen3tts = { path = "crates/qwen3tts" }
-brain-pid = { path = "crates/pid" }
+brain-toypid = { path = "crates/toypid" }
 brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }
 brain-bench = { path = "crates/bench" }

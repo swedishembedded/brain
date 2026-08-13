@@ -4,7 +4,7 @@
 //! Architecture-agnostic model seam (ADR 0001).
 //!
 //! This crate defines the [`Model`]/[`ModelConfig`] traits — the union of the
-//! surface `gpt2::Gpt`, `moe::Trainer`, and `pid::Pid` already expose ad hoc -
+//! surface `gpt2::Gpt`, `toymoe::Trainer`, and `toypid::Pid` already expose ad hoc -
 //! plus the [`Batch`] input enum and [`Head`] objective marker, and one generic
 //! trainer ([`train::fit`]) / sampler ([`train::generate`]) written over `Model`.
 //!

@@ -90,7 +90,7 @@ impl Arch {
         // GptConfig::param_list (which would undercount the experts).
         if self.name == "moe" {
             let n_heads = self.size.n_heads.unwrap_or(4);
-            let mcfg = moe::train::Config {
+            let mcfg = toymoe::train::Config {
                 vocab,
                 block_size,
                 n_layers,

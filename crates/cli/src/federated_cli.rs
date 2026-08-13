@@ -62,7 +62,7 @@ fn train_expert(args: &[String]) {
     // Train expert E (frozen backbone) -> a full updated checkpoint, then keep
     // only that expert's shard (+ shared) as an overlay dir for `assemble`.
     let tmp_full = out_dir.join(".worker_full.safetensors");
-    moe::train::train_expert(moe::train::ExpertTrainArgs {
+    toymoe::train::train_expert(toymoe::train::ExpertTrainArgs {
         base_weights: base,
         expert,
         out: tmp_full.to_string_lossy().into_owned(),

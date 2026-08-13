@@ -118,11 +118,11 @@ use Source::*;
 /// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
-/// `package` names the crate as it exists TODAY - the four toy
-/// architectures (`"brain-moe"` for `toymoe`, …) and `scrfd`/`arcface`
-/// (still one bundled `brain-facenet` crate, pending a real split) are
-/// still pre-rename while that migration finishes; each rename updates
-/// its row in the same commit that moves the crate.
+/// `package` names the crate as it exists TODAY - `scrfd` and `arcface`
+/// (still one bundled `brain-facenet` crate, pending a real split into two)
+/// are the one remaining pre-rename pair; the rest of the crate-rename
+/// migration is complete. Each rename updates its row in the same commit
+/// that moves the crate.
 pub const ARCHS: &[Arch] = &[
     // -- Text decoders --------------------------------------------------
     arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
@@ -178,10 +178,10 @@ pub const ARCHS: &[Arch] = &[
     arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
     arch!("genieredux", "GenieRedux-G ST-transformer world model", World, Brain, "brain-genieredux"),
     // -- Toy (brain's own, no upstream reference) ------------------------
-    arch!("toymoe", "Sparse-MoE toy task (64-symbol next-token rule)", Domain::Toy, Source::Toy, "brain-moe"),
-    arch!("toypid", "PID event/effect control transformer", Domain::Toy, Source::Toy, "brain-pid"),
-    arch!("toyseq2seq", "Encoder-decoder toy task", Domain::Toy, Source::Toy, "brain-seq2seq"),
-    arch!("toyautoencoder", "Bottleneck autoencoder toy task", Domain::Toy, Source::Toy, "brain-autoencoder"),
+    arch!("toymoe", "Sparse-MoE toy task (64-symbol next-token rule)", Domain::Toy, Source::Toy, "brain-toymoe"),
+    arch!("toypid", "PID event/effect control transformer", Domain::Toy, Source::Toy, "brain-toypid"),
+    arch!("toyseq2seq", "Encoder-decoder toy task", Domain::Toy, Source::Toy, "brain-toyseq2seq"),
+    arch!("toyautoencoder", "Bottleneck autoencoder toy task", Domain::Toy, Source::Toy, "brain-toyautoencoder"),
 ];
 
 /// The [`Arch`] with this canonical `id`, or `None`.

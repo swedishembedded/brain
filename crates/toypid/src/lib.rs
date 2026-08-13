@@ -8,8 +8,8 @@
 //!   trajectory/rollout generation.
 //!
 //! The model's types/constants are re-exported at the crate root so callers can
-//! write `pid::Pid`, `pid::PidConfig`, `pid::BOS`, …; the data pipeline stays
-//! under `pid::data`.
+//! write `toypid::Pid`, `toypid::PidConfig`, `toypid::BOS`, …; the data pipeline stays
+//! under `toypid::data`.
 
 pub mod data;
 pub mod model;

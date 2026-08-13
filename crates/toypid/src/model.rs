@@ -710,7 +710,7 @@ impl model::Model for Pid {
     fn set_batch(&self, batch: model::Batch) {
         match batch {
             model::Batch::Lm { tokens, targets } => Pid::set_batch(self, tokens, targets),
-            _ => panic!("pid::Pid only supports Batch::Lm"),
+            _ => panic!("toypid::Pid only supports Batch::Lm"),
         }
     }
 

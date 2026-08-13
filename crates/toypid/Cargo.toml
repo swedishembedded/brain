@@ -1,12 +1,12 @@
 [package]
-name = "brain-pid"
+name = "brain-toypid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "PID event/effect control Transformer (LayerNorm, learned positions, biased linears) + plant/oracle data. Drives the WebGPU demo."
 
 [lib]
-name = "pid"
+name = "toypid"
 path = "src/lib.rs"
 
 [dependencies]

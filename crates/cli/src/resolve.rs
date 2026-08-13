@@ -61,12 +61,12 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
 /// The bare sparse-MoE toy model used to be three unrelated top-level
 /// commands (`brain train`, `brain eval`, `brain generate`, no shared verb
 /// dispatch). Folded into one handler so it fits [`ARCH_HANDLERS`]'s shape;
-/// `moe::run_train`/`run_eval`/`run_generate` themselves are untouched.
+/// `toymoe::run_train`/`run_eval`/`run_generate` themselves are untouched.
 fn run_toymoe(args: &[String]) {
     match args.first().map(String::as_str) {
-        Some("train") => moe::run_train(&args[1..]),
-        Some("eval") => moe::run_eval(&args[1..]),
-        Some("infer" | "generate" | "gen" | "sample") => moe::run_generate(),
+        Some("train") => toymoe::run_train(&args[1..]),
+        Some("eval") => toymoe::run_eval(&args[1..]),
+        Some("infer" | "generate" | "gen" | "sample") => toymoe::run_generate(),
         other => eprintln!("usage: brain toymoe <train|eval|infer> ...  (got {other:?})"),
     }
 }

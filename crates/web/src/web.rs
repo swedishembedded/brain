@@ -14,8 +14,8 @@
 
 use wasm_bindgen::prelude::*;
 
-use pid::{Pid, PidConfig, BOS, DECIDE};
-use pid::data::{
+use toypid::{Pid, PidConfig, BOS, DECIDE};
+use toypid::data::{
     dequantize_u, encode_effect_bin, encode_event, eval_step_schedule, pole_place_pi,
     velocity_pi_bin, Plant, PlantSpec,
 };
