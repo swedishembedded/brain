@@ -34,15 +34,15 @@ brain npu quantize --weights out/yolo.safetensors --calib calib/ --out out/yolo.
                    [--input S --num-calib 300 --scales-out out/scales.json]
 
 # structural ONNX check (always) + compile/op-coverage check on a device (needs OpenVINO)
-brain npu check    --onnx out/yolo.int8.onnx [--device NPU]
+brain npu check    --onnx out/yolo.int8.onnx [--ov-device NPU]
 
 # run on the NPU; output format identical to `brain yolo detect`
-brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --device NPU \
+brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --ov-device NPU \
                    [--conf 0.25 --iou 0.45 --nc 80 --reg-max 16 --cache-dir out/npu-cache \
                     --hint latency|throughput --turbo --allow-fallback]
 
 # latency p50/p99 + throughput
-brain npu bench    --onnx out/yolo.int8.onnx --device NPU --hint throughput [--iters 200 --warmup 20]
+brain npu bench    --onnx out/yolo.int8.onnx --ov-device NPU --hint throughput [--iters 200 --warmup 20]
 
 # fp32 vs INT8 mAP@0.5 with no NPU present (fake-quant simulation) — the accuracy gate
 brain npu sim      --weights out/yolo.safetensors --data data/detect [--calib calib/ --num-calib 300]
@@ -59,7 +59,7 @@ brain yolo detect  --weights out/yolo.safetensors --image sample.ppm --device np
 2. Source the OpenVINO environment so the runtime loader can find it:
    `source /opt/intel/openvino_2024/setupvars.sh`.
 3. Build and run brain normally — no special flags needed. Verify the NPU is
-   visible with `brain npu check --onnx out/yolo.onnx --device NPU` (it lists
+   visible with `brain npu check --onnx out/yolo.onnx --ov-device NPU` (it lists
    the OpenVINO devices and tries to compile).
 
 ## Constraints

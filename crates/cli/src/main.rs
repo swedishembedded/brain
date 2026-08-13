@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The `brain` native CLI — one binary over every model in the workspace.
+//! The `brain` native CLI - one binary over every model in the workspace.
 //! The model is chosen by the subcommand (no global "model type" flag).
 //!
-//!   * `gpt`        — dense GPT decoder baseline (nanogpt parity).
-//!   * `generate`/`train`/`eval` — the sparse-MoE Transformer.
-//!   * `federated`  — sharded-MoE shard split/assemble.
-//!   * `data`       — dataset generation; `gradcheck` — backprop correctness gate.
-//!   * `pid`        — event/effect control Transformer (the WebGPU demo).
+//!   * `gpt`        - dense GPT decoder baseline (nanogpt parity).
+//!   * `generate`/`train`/`eval` - the sparse-MoE Transformer.
+//!   * `federated`  - sharded-MoE shard split/assemble.
+//!   * `data`       - dataset generation; `gradcheck` - backprop correctness gate.
+//!   * `pid`        - event/effect control Transformer (the WebGPU demo).
 //!
 //! Run `brain help` for the full usage with examples.
 
@@ -75,13 +75,13 @@ pub(crate) fn npu_requested() -> bool {
 }
 
 const HELP: &str = "\
-brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
+brain - train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
 
 USAGE: brain <command> [options]
 The model is selected by the command.
 
 --device selects WHICH COMPUTE IS SCHEDULABLE. Omit it and brain uses every
-device on the machine — all GPUs, the CPU, and an NPU if present — scheduling
+device on the machine - all GPUs, the CPU, and an NPU if present - scheduling
 models across them. Name devices to restrict the set (BRAIN_DEVICE does the same
 without a flag):
 
@@ -164,13 +164,14 @@ YOLO (from-scratch anchor-free object detector)
 INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
   brain npu export   --weights F --out model.onnx [--input S --opset N]    # fp32 ONNX
   brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]
-  brain npu check    --onnx M [--device NPU]              # ONNX op histogram + compile/coverage
-  brain npu run      --onnx M --image <P6|dir> [--device NPU --conf X --iou X --nc C --reg-max R]
-  brain npu bench    --onnx M [--input S --device NPU --iters N --hint latency|throughput]
+  brain npu check    --onnx M [--ov-device NPU]              # ONNX op histogram + compile/coverage
+  brain npu run      --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --nc C --reg-max R]
+  brain npu bench    --onnx M [--input S --ov-device NPU --iters N --hint latency|throughput]
   brain npu sim      --weights F --data <dir> [--calib <dir>]   # fp32 vs INT8 mAP, no NPU
       export/quantize/sim are pure Rust (any machine); run/bench/check-compile need
-      OpenVINO + an Intel NPU. The whole-graph NPU path is separate from --device
-      cpu|gpu.
+      OpenVINO + an Intel NPU. --ov-device selects the OpenVINO target device
+      (NPU|CPU|GPU|AUTO) - unrelated to brain's own --device cpu|gpu grammar
+      (--device is still accepted here as a deprecated alias for --ov-device).
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
@@ -238,7 +239,7 @@ FLOP/OPS ACCOUNTING
   brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
               [--train] [--i8] [--stages N] [--run]
       OFFLINE per-kernel FLOP/int-OPS/bytes for the recorded forward (and
-      backward with --train) — no execution. --run also executes one pass and
+      backward with --train) - no execution. --run also executes one pass and
       prints the ONLINE counters (accumulated at dispatch; int8 kernels count
       integer OPS). --stages N reports per-stage = per-device numbers.
 
@@ -315,10 +316,30 @@ Or drive everything via the Makefile:  make data/calculator train/gpt/calculator
 /// same without a flag. Both backends are compiled into every build; this only
 /// chooses which one each model instantiates at runtime.
 fn select_backend(argv: Vec<String>) -> Vec<String> {
-    // `brain npu …` subcommands parse their OWN `--device` (the OpenVINO target
-    // device, e.g. NPU/CPU/GPU as OpenVINO names them); don't consume it here.
+    let mut argv = argv;
+    // `brain npu …` subcommands used to have their OWN `--device` (the
+    // OpenVINO target device, e.g. NPU/CPU/GPU as OpenVINO names them) -
+    // a different grammar under the same flag name as brain's own `--device`.
+    // That flag is now `--ov-device`; translate the deprecated `--device`
+    // alias here (with a one-line note) before the generic loop below runs,
+    // so an old invocation still reaches `npu_cli`'s OpenVINO parsing instead
+    // of being silently swallowed as a brain compute-device request - or,
+    // worse, misinterpreted as one for tokens that happen to overlap the
+    // grammar (`--device cpu`/`gpu`/`npu` all parse as valid brain tokens,
+    // just meaning something else entirely).
     if argv.get(1).map(|s| s == "npu").unwrap_or(false) {
-        return argv;
+        let mut warned = false;
+        for a in argv.iter_mut() {
+            if a == "--device" {
+                if !warned {
+                    eprintln!(
+                        "brain npu: --device is deprecated for the OpenVINO target device; use --ov-device instead"
+                    );
+                    warned = true;
+                }
+                *a = "--ov-device".to_string();
+            }
+        }
     }
     let mut out = Vec::with_capacity(argv.len());
     let mut spec_text: Option<String> = None;
@@ -341,49 +362,61 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
         }
     }
 
-    // No flag and no BRAIN_DEVICE => the empty spec, which resolves to every
-    // device on the machine (GPUs + CPU + NPU), scheduled together.
-    let text = spec_text
-        .or_else(|| std::env::var("BRAIN_DEVICE").ok())
-        .unwrap_or_default();
-    let spec = match gpu_core::DeviceSpec::parse(&text) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("brain: --device: {e}");
-            std::process::exit(2);
+    // An explicit `--device` flag takes precedence over `BRAIN_DEVICE` and is
+    // resolved directly (still hard-exiting on a bad value - the user just
+    // typed it). With no flag, `BRAIN_DEVICE` - if any - is resolved by
+    // `gpu_core::ambient_compute_set()`, the ONE place `BRAIN_DEVICE` is read
+    // (shared with every non-CLI caller: test binaries, library callers with
+    // no CLI in the loop). `apply()` still runs here either way for the
+    // CLI-only half `ambient_compute_set()` deliberately skips (rayon pool
+    // sizing / CPU affinity - see `ComputeSet::apply`'s doc).
+    let set = match spec_text {
+        Some(text) => {
+            let spec = match gpu_core::DeviceSpec::parse(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("brain: --device: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let set = match spec.resolve(&gpu_core::Inventory::probe()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("brain: --device: {e}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(e) = set.apply() {
+                eprintln!("brain: --device: {e}");
+                std::process::exit(2);
+            }
+            // Publish explicitly: `ambient_compute_set()` was never called
+            // above (an explicit --device skips its BRAIN_DEVICE read), so
+            // its OnceLock still needs this process's actual resolution.
+            gpu_core::publish_compute_set(set.clone());
+            set
+        }
+        None => {
+            let set = gpu_core::ambient_compute_set();
+            if let Err(e) = set.apply() {
+                eprintln!("brain: --device: {e}");
+                std::process::exit(2);
+            }
+            set.clone()
         }
     };
-    let set = match spec.resolve(&gpu_core::Inventory::probe()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("brain: --device: {e}");
-            std::process::exit(2);
-        }
-    };
-    if let Err(e) = set.apply() {
-        eprintln!("brain: --device: {e}");
-        std::process::exit(2);
-    }
     // The NPU is a whole-graph (OpenVINO) path rather than a gpu_core backend, so
     // it is a separate flag the NPU-capable subcommands consult.
     NPU_REQUESTED.store(set.npu_enabled() && set.explicit, Ordering::Relaxed);
-    // Deliberately do NOT rewrite BRAIN_DEVICE: it is recorded verbatim in perf
-    // artifacts, and `gpu_core`'s own fallback parses it as a bare backend name,
-    // which an indexed spec like "gpu0" is not. The resolved set is published
-    // in-process instead.
-    COMPUTE.set(set).ok();
     out
 }
 
-/// The resolved compute set for this process, available to every subcommand.
-static COMPUTE: std::sync::OnceLock<gpu_core::ComputeSet> = std::sync::OnceLock::new();
-
 /// What `--device` resolved to. `None` only before `select_backend` has run.
 pub fn compute_set() -> Option<&'static gpu_core::ComputeSet> {
-    COMPUTE.get()
+    gpu_core::published_compute_set()
 }
 
-/// `brain bench [<name>] [--seed S]` — run the architecture-evaluation suite.
+/// `brain bench [<name>] [--seed S]` - run the architecture-evaluation suite.
 /// With no name, runs every registered benchmark and prints one comparison
 /// table; with a name, runs just that benchmark. Exits non-zero on any failure.
 fn run_bench(args: &[String]) {
@@ -414,7 +447,7 @@ fn run_bench(args: &[String]) {
     }
 
     // `scaling` is a separate entry point (a multi-size sweep + power-law fit),
-    // not a registry Benchmark — route it here before the registry lookup.
+    // not a registry Benchmark - route it here before the registry lookup.
     if name == Some("scaling") {
         run_scaling(seed);
         return;
@@ -437,7 +470,7 @@ fn run_bench(args: &[String]) {
     }
 }
 
-/// `brain bench scaling [--seed S]` — the multi-scale scaling-law sweep: train
+/// `brain bench scaling [--seed S]` - the multi-scale scaling-law sweep: train
 /// the MQAR task at several model sizes, then fit `L(N) ≈ E + A·N^(−α)` and print
 /// the per-size table + fitted exponent. The foundation the later per-capability
 /// predictive-scaling work builds on.
@@ -461,7 +494,7 @@ fn run_scaling(seed: u64) {
     }
 }
 
-/// `brain bench eval --arch <name> [--seed S] [--out <path>] [--smoke]` — the
+/// `brain bench eval --arch <name> [--seed S] [--out <path>] [--smoke]` - the
 /// turn-key architecture-eval harness: run EVERY registered benchmark against the
 /// named architecture, aggregate per capability axis, write a results artifact
 /// under `results/<arch>-<seed>.json` (or `--out`), and print the table + axes.
@@ -529,7 +562,7 @@ fn run_bench_eval(args: &[String]) {
     }
 }
 
-/// `brain bench scale --arch <name> [--seed S] [--out <path>]` — the
+/// `brain bench scale --arch <name> [--seed S] [--out <path>]` - the
 /// per-capability predictive-scaling sweep: train+score one representative
 /// benchmark per capability axis across a small SIZE grid, fit how each axis's
 /// score scales with params N, extrapolate the predicted score at 2×/4× the
@@ -582,7 +615,7 @@ fn run_bench_scale(args: &[String]) {
     println!("wrote scaling artifact: {}", path.display());
 }
 
-/// `brain bench advise <eval.json> [<scale.json>]` — load an eval artifact (and,
+/// `brain bench advise <eval.json> [<scale.json>]` - load an eval artifact (and,
 /// optionally, a per-capability scaling artifact) and print a RANKED, concrete set
 /// of tuning recommendations for what to tune to improve in the best capability
 /// direction.
@@ -612,7 +645,7 @@ fn run_bench_advise(args: &[String]) {
     bench::advisor::print_advice(&advice);
 }
 
-/// `brain bench compare <results.json> <results.json> ...` — load ≥2 artifacts
+/// `brain bench compare <results.json> <results.json> ...` - load ≥2 artifacts
 /// and print a side-by-side leaderboard (overall pass-rate + per-axis +
 /// per-benchmark scores, columns = architectures).
 fn run_bench_compare(args: &[String]) {

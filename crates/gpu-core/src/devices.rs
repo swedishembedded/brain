@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `--device` — **which compute is schedulable**.
+//! `--device` - **which compute is schedulable**.
 //!
 //! The flag does not pick "a backend"; it declares the set of compute units
 //! brain may schedule work onto. Everything else (which `Gpu` a model builds,
@@ -9,7 +9,7 @@
 //! is allowed) follows from that set.
 //!
 //! ```text
-//! (absent)        every device present — GPUs + CPU + NPU, scheduled together
+//! (absent)        every device present - GPUs + CPU + NPU, scheduled together
 //! cpu             CPU only (all cores)
 //! gpu             every GPU, and nothing else
 //! npu             NPU only
@@ -21,7 +21,7 @@
 //! gpu1,cpu0-3     one GPU plus four cores
 //! ```
 //!
-//! Host RAM and disk are always available as *cache/spill* tiers — restricting
+//! Host RAM and disk are always available as *cache/spill* tiers - restricting
 //! compute to the GPU does not stop weights from spilling to RAM or being
 //! memory-mapped from disk. `--device` bounds **where work executes**, not where
 //! bytes may rest.
@@ -32,7 +32,7 @@
 //! reaching it is a separate export → quantise → compile → run path
 //! (`crates/npu`) that a model must be explicitly built for. This module
 //! therefore *inventories* NPUs and honours `npu` in a spec, but a plain `brain
-//! <cmd>` with no `--device` will not silently route work there — only an
+//! <cmd>` with no `--device` will not silently route work there - only an
 //! explicit request does. Transparent NPU scheduling needs the per-model
 //! export path first.
 //!
@@ -50,20 +50,20 @@ pub use backend_api::GpuIdentity;
 // identity. Canonical index = position after sorting by PCI bus id (stable
 // across boots and shared with NVML/nvidia-smi), so `gpu0`/`gpu1` in --device,
 // `Shard.gpu_index`, and `residency::Device::Gpu(i)` all name the same physical
-// card — and nvidia-smi order maps to it via PCI bus id, never by assumption.
+// card - and nvidia-smi order maps to it via PCI bus id, never by assumption.
 //
 // Identity comes from the ash (native Vulkan) enumeration when an ICD is
 // present: PCI bus id (VK_EXT_pci_bus_info) and deviceUUID (Vulkan 1.1 core;
 // equals the NVML GPU UUID on NVIDIA). Without an ICD the wgpu enumeration
 // fills in, with identity read through the `Adapter::as_hal` escape hatch where
 // its backend is Vulkan and the fallback key (vendor:device, ordinal) elsewhere.
-// Backends select adapters by matching these identities — never by enumeration
+// Backends select adapters by matching these identities - never by enumeration
 // position across independent enumerations, and never via env mutation.
 
 /// One physical GPU in the canonical registry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceId {
-    /// Canonical index — what `gpu<i>` means everywhere in brain.
+    /// Canonical index - what `gpu<i>` means everywhere in brain.
     pub index: u32,
     pub identity: GpuIdentity,
 }
@@ -93,7 +93,7 @@ impl DeviceRegistry {
         // Physical cards only: a software rasteriser (llvmpipe) is not a card
         // and must never occupy a canonical index.
         ids.retain(|d| d.class != DeviceClass::Cpu);
-        // When any discrete GPU exists, indices cover only discrete cards —
+        // When any discrete GPU exists, indices cover only discrete cards -
         // the set `--device gpu` schedules and `Inventory::probe` counts.
         if ids.iter().any(|d| d.class == DeviceClass::DiscreteGpu) {
             ids.retain(|d| d.class == DeviceClass::DiscreteGpu);
@@ -153,10 +153,10 @@ pub fn device_by_pci(pci: &str) -> Option<&'static DeviceId> {
 // ---- ambient + scoped selection --------------------------------------------
 //
 // Placement inputs, strongest first:
-//   1. a scoped selection (`with_gpu`) — thread-local, race-free; what the
+//   1. a scoped selection (`with_gpu`) - thread-local, race-free; what the
 //      residency executor and the multi-GPU helpers use;
 //   2. the pin `ComputeSet::apply` recorded from `--device gpu<i>`;
-//   3. `BRAIN_GPU_INDEX` — user input only, parsed ONCE at first use;
+//   3. `BRAIN_GPU_INDEX` - user input only, parsed ONCE at first use;
 //   4. none: canonical device 0 when the registry has cards, else the
 //      backend's own default (the software-rasteriser fallback path).
 
@@ -216,7 +216,7 @@ pub fn current_gpu() -> Option<u32> {
 
 /// The registry entry a `Gpu::new` on this thread builds on, or `None` when no
 /// physical card exists (backend default / software fallback applies). Panics
-/// on an out-of-range explicit selection — never a silent clamp.
+/// on an out-of-range explicit selection - never a silent clamp.
 pub fn selected_device() -> Option<&'static DeviceId> {
     let devs = gpus();
     match current_gpu() {
@@ -287,7 +287,7 @@ impl DeviceSpec {
         Ok(DeviceSpec { requests, source })
     }
 
-    /// True when nothing was requested — schedule on everything available.
+    /// True when nothing was requested - schedule on everything available.
     pub fn is_all(&self) -> bool {
         self.requests.is_empty()
     }
@@ -443,7 +443,7 @@ fn parse_token(tok: &str) -> Result<Request, String> {
         return Ok(Request::WgpuBackend);
     }
     Err(format!(
-        "unknown device {tok:?} — expected cpu | gpu | npu | vulkan | wgpu, \
+        "unknown device {tok:?} - expected cpu | gpu | npu | vulkan | wgpu, \
          each optionally indexed (gpu0, cpu21, cpu0-7)"
     ))
 }
@@ -539,7 +539,7 @@ impl ComputeSet {
     pub fn cpu_pinned(&self, total_cores: usize) -> bool {
         self.cpu_enabled() && self.cpu_cores.len() < total_cores
     }
-    /// A single GPU index when exactly one is schedulable — what pins the
+    /// A single GPU index when exactly one is schedulable - what pins the
     /// registry's ambient device selection (see [`set_ambient_gpu`]).
     pub fn single_gpu(&self) -> Option<u32> {
         (self.gpus.len() == 1).then(|| self.gpus[0])
@@ -547,22 +547,18 @@ impl ComputeSet {
 }
 
 impl ComputeSet {
-    /// Make this set the process's actual schedulable compute.
-    ///
-    /// Called once at start-up, before any model is built, so every later
-    /// `Gpu::new()` and every rayon pool observes it:
+    /// The backend + ambient GPU pin half of [`Self::apply`] - side-effect
+    /// light and safe to call from a library/test context (e.g. from
+    /// [`ambient_compute_set`] when a plain `cargo test` binary lazily
+    /// resolves `BRAIN_DEVICE` with no CLI in the loop): it never touches
+    /// the process-wide rayon pool size or CPU affinity, so a library caller
+    /// building a `Gpu` never triggers those as a side effect.
     ///
     /// * selects the host backend;
     /// * pins the registry's ambient GPU selection when exactly one card is
-    ///   schedulable, so every later `Gpu::new` binds that physical card;
-    /// * sizes the rayon pool to the selected core count and pins the process's
-    ///   CPU affinity to those cores, so `cpu21` really is one core rather than
-    ///   one core's worth of threads spread over the machine.
-    ///
-    /// Note this bounds **compute**, not memory: host RAM and disk remain
-    /// available as cache/spill tiers regardless.
+    ///   schedulable, so every later `Gpu::new` binds that physical card.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn apply(&self) -> Result<(), String> {
+    pub fn apply_backend(&self) -> Result<(), String> {
         crate::set_default_backend(match self.backend {
             Backend::Wgpu => crate::Backend::Wgpu,
             Backend::Cpu => crate::Backend::Cpu,
@@ -571,8 +567,23 @@ impl ComputeSet {
 
         // One card selected: pin it in the registry's ambient selection. Multi-
         // GPU scheduling picks cards per job (scoped `with_gpu`) instead, so
-        // the pin is cleared there — including an inherited BRAIN_GPU_INDEX.
+        // the pin is cleared there - including an inherited BRAIN_GPU_INDEX.
         set_ambient_gpu(self.single_gpu());
+        Ok(())
+    }
+
+    /// Make this set the process's actual schedulable compute. CLI-only: on
+    /// top of [`Self::apply_backend`], sizes the rayon pool to the selected
+    /// core count and pins the process's CPU affinity to those cores, so
+    /// `cpu21` really is one core rather than one core's worth of threads
+    /// spread over the machine. Called once at start-up, before any model is
+    /// built, so every later `Gpu::new()` and every rayon pool observes it.
+    ///
+    /// Note this bounds **compute**, not memory: host RAM and disk remain
+    /// available as cache/spill tiers regardless.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn apply(&self) -> Result<(), String> {
+        self.apply_backend()?;
 
         if self.cpu_enabled() {
             // Only override when the user narrowed the CPU; otherwise respect an
@@ -587,12 +598,85 @@ impl ComputeSet {
     }
 }
 
+// ---- process-wide ambient compute set --------------------------------------
+
+/// The process's resolved `--device`/`BRAIN_DEVICE` compute set: published
+/// explicitly by the CLI ([`publish_compute_set`]), or lazily resolved by
+/// [`ambient_compute_set`] on first use by any other caller. Exactly one
+/// `OnceLock`, so there is exactly one resolution no matter which path gets
+/// there first - a second `publish_compute_set` (or a lazy resolution that
+/// loses the race to an explicit publish) is a no-op, first writer wins.
+static AMBIENT_COMPUTE: std::sync::OnceLock<ComputeSet> = std::sync::OnceLock::new();
+
+/// Publish the CLI's resolved `--device` set as the process-wide ambient
+/// compute set. Called once by `crates/cli`'s `select_backend`, before any
+/// model is built, so [`ambient_compute_set`] returns exactly what the CLI
+/// resolved rather than re-deriving it from `BRAIN_DEVICE` a second time.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn publish_compute_set(set: ComputeSet) {
+    let _ = AMBIENT_COMPUTE.set(set);
+}
+
+/// The set the CLI already published via [`publish_compute_set`], or `None`
+/// before that has happened (a process with no CLI in the loop at all, or a
+/// caller running before `select_backend` - use [`ambient_compute_set`]
+/// there instead, which always resolves to something).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn published_compute_set() -> Option<&'static ComputeSet> {
+    AMBIENT_COMPUTE.get()
+}
+
+/// The process's ambient compute set - the single source of truth every
+/// non-CLI caller (a test binary, a library caller that never goes through
+/// `crates/cli`) now resolves `--device`/`BRAIN_DEVICE` through, instead of
+/// re-deriving it with a second, weaker parser.
+///
+/// Returns whatever [`publish_compute_set`] already recorded (the CLI path);
+/// otherwise resolves `BRAIN_DEVICE` through the exact same strong grammar
+/// `--device` uses ([`DeviceSpec::parse`] + [`DeviceSpec::resolve`] against
+/// [`Inventory::probe`]), applies only the backend/GPU-pin half
+/// ([`ComputeSet::apply_backend`] - never the CLI-only thread-pool/affinity
+/// side effects of [`ComputeSet::apply`]), and caches the result for the
+/// process lifetime (deliberately - the same one-shot-per-process treatment
+/// this module already gives `BRAIN_GPU_INDEX`, see [`ambient_gpu`]'s doc).
+///
+/// A `BRAIN_DEVICE` value that fails to parse or fails to resolve against
+/// this machine's real hardware (an out-of-range `gpu99`, an NPU request on
+/// a box with none, …) prints ONE warning to stderr and falls back to the
+/// default "all devices" set - this never panics, and never silently
+/// reinterprets an unrecognised token as "just use wgpu, ambient card" the
+/// way the old weak ladder did.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ambient_compute_set() -> &'static ComputeSet {
+    AMBIENT_COMPUTE.get_or_init(|| {
+        let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
+        let probe = Inventory::probe();
+        let resolved = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&probe));
+        let set = match resolved {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "brain: BRAIN_DEVICE={text:?}: {e}; falling back to the default all-devices set"
+                );
+                DeviceSpec::default()
+                    .resolve(&probe)
+                    .expect("the empty/default device spec always resolves")
+            }
+        };
+        // Best-effort: only the backend/GPU-pin half applies here (see the
+        // doc above); a failure has nothing more to do than leave the
+        // process on whatever backend it already had.
+        let _ = set.apply_backend();
+        set
+    })
+}
+
 /// Restrict this process to `cores` via `sched_setaffinity`.
 ///
 /// Uses the `libc` crate rather than a hand-rolled `extern "C"`. brain's build
 /// constraint is *no `bindgen`/libclang in the build path* (see
 /// `crates/capture/src/v4l2.rs`, which avoids `v4l`/`nokhwa` for exactly that
-/// reason) — `libc` is pure Rust with no build-time C toolchain and is already
+/// reason) - `libc` is pure Rust with no build-time C toolchain and is already
 /// a transitive dependency here via `cranelift-jit` and `wgpu-hal`, so it costs
 /// nothing and gets `cpu_set_t`'s real size and proper errno reporting right.
 #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
@@ -891,7 +975,7 @@ mod tests {
         use backend_api::DeviceClass::DiscreteGpu;
         let mut a = ident("P40", Some("0000:04:00.0"), 0, DiscreteGpu);
         let mut b = ident("P40", Some("0000:82:00.0"), 1, DiscreteGpu);
-        // Twins: same (vendor,device), different PCI — must not match.
+        // Twins: same (vendor,device), different PCI - must not match.
         assert!(!a.same_device(&b));
         // UUID wins over PCI when both sides carry one.
         a.uuid = Some([1; 16]);

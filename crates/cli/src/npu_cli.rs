@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain npu …` — deploy the YOLO detector to the Intel NPU via OpenVINO.
+//! `brain npu …` - deploy the YOLO detector to the Intel NPU via OpenVINO.
 //!
 //!   brain npu export   --weights F --out model.onnx [--input S --opset N]
 //!   brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]
-//!   brain npu check    --onnx M [--device NPU]
-//!   brain npu run      --onnx M --image <P6|dir> [--device NPU --conf X --iou X --cache-dir D ...]
-//!   brain npu bench    --onnx M [--input S --device NPU --iters N --warmup W --hint latency|throughput ...]
+//!   brain npu check    --onnx M [--ov-device NPU]
+//!   brain npu run      --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --cache-dir D ...]
+//!   brain npu bench    --onnx M [--input S --ov-device NPU --iters N --warmup W --hint latency|throughput ...]
 //!   brain npu sim      --weights F --calib <dir> --data <dir>   # fp32 vs INT8 mAP, no NPU
 //!   brain npu omni     --hf-dir DIR [--out-dir out/omni] [--n-audio N --grid-h H --grid-w W --code-len T]
 //!
@@ -16,7 +16,7 @@
 //! they print a clear diagnostic.
 //!
 //! `omni` exports omni's three NPU-eligible pieces (audio tower, vision tower,
-//! Code2Wav vocoder — NOT the 30B-parameter MoE Thinker decoder, not an NPU
+//! Code2Wav vocoder - NOT the 30B-parameter MoE Thinker decoder, not an NPU
 //! target) as fp32 ONNX and runs the same structural + (where available)
 //! OpenVINO-compile check `check` does on each. See `omni::npu_export`'s
 //! module doc for the exact scope (single-merger vision path, no DeepStack). Output of `run` matches `brain yolo detect`.
@@ -57,12 +57,12 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     })
 }
 
-/// `brain npu chronos2` — forecast a context series with the Chronos-2 transformer
+/// `brain npu chronos2` - forecast a context series with the Chronos-2 transformer
 /// core running on the NPU. The host (this model's compute backend) does the
 /// scaler/patch/embed/REG assembly and the head rearrange/denorm; the exported
 /// ONNX core (`emb`+`kmask` → `qhead`) runs on the accelerator via the pluggable
 /// core seam. `--compare` also runs the pure device path and reports the max diff.
-/// `brain npu lfm --weights F --seq S --out model.onnx [--int8]` — export the
+/// `brain npu lfm --weights F --seq S --out model.onnx [--int8]` - export the
 /// LFM2.5-Encoder at a fixed sequence-length bucket for OpenVINO compilation
 /// (static shapes; one graph per bucket).
 fn lfm(args: &[String]) {
@@ -101,12 +101,12 @@ fn cosine_f32(a: &[f32], b: &[f32]) -> (f64, f32) {
     (model::hostmath::cosine(a, b) as f64, max_abs)
 }
 
-/// `brain npu lfm-bench` — export the LFM2.5-Encoder at a fixed sequence bucket,
+/// `brain npu lfm-bench` - export the LFM2.5-Encoder at a fixed sequence bucket,
 /// compile it on the accelerator (no CPU/GPU fallback), and time the encoder's
 /// one-shot forward: `--warmup` runs excluded, then `--iters` timed `sess.run()`
 /// calls → p50/p99/mean ms. **Compile time is reported separately** from
 /// inference (never mixed). `--compare` also runs brain's own chunked forward on
-/// the *same* fixed token ids and reports cosine — the NPU-fp16 vs brain-fp32
+/// the *same* fixed token ids and reports cosine - the NPU-fp16 vs brain-fp32
 /// parity gate (≥ 0.999; the NPU executes fp16 internally so we gate on cosine,
 /// not max-abs). The device is asserted to be exactly the requested one so a
 /// silent fallback is never reported as an NPU number.
@@ -160,16 +160,16 @@ fn lfm_bench(args: &[String]) {
     if weights.is_empty() || iters == 0 {
         eprintln!(
             "usage: brain npu lfm-bench --weights F [--seq S --iters N --warmup W \
-             --device NPU --quant f16|int8|int4 --compare]"
+             --ov-device NPU --quant f16|int8|int4 --compare]"
         );
         std::process::exit(2);
     }
 
-    // Vocab (for in-range token ids) from the checkpoint config — cheap header read.
+    // Vocab (for in-range token ids) from the checkpoint config - cheap header read.
     let cfg = lfm::config::LfmConfig::from_json(&checkpoint::load(&weights).header["config"]);
     let vocab = cfg.vocab;
 
-    // 1) Export the fixed-shape graph (external-data sidecar) — pure Rust, one-time.
+    // 1) Export the fixed-shape graph (external-data sidecar) - pure Rust, one-time.
     if let Some(p) = Path::new(&out).parent() {
         let _ = std::fs::create_dir_all(p);
     }
@@ -181,7 +181,7 @@ fn lfm_bench(args: &[String]) {
     let export_ms = t_exp.elapsed().as_secs_f64() * 1e3;
 
     // 2) Compile on the accelerator (no fallback). Compile time is measured and
-    //    reported on its own line — it is a one-time cost, not per-inference.
+    //    reported on its own line - it is a one-time cost, not per-inference.
     let ncfg = opts.to_config();
     let t_c = Instant::now();
     let mut sess = match LfmSession::load_path(&out, &ncfg) {
@@ -200,7 +200,7 @@ fn lfm_bench(args: &[String]) {
     };
     if !want.is_empty() && dev != want {
         eprintln!(
-            "brain npu lfm-bench: compiled on {dev}, not {want} (allow_fallback off) — \
+            "brain npu lfm-bench: compiled on {dev}, not {want} (allow_fallback off) - \
              refusing to report a non-{want} number"
         );
         std::process::exit(1);
@@ -289,7 +289,7 @@ fn chronos2(args: &[String]) {
     if weights.is_empty() {
         eprintln!(
             "usage: brain npu chronos2 --weights W [--context-len N] [--horizon H] \
-             [--series file] [--compare] [--device NPU]"
+             [--series file] [--compare] [--ov-device NPU]"
         );
         return;
     }
@@ -370,11 +370,11 @@ fn chronos2(args: &[String]) {
     }
 }
 
-/// `brain npu omni` — export omni's audio tower, vision tower and Code2Wav
+/// `brain npu omni` - export omni's audio tower, vision tower and Code2Wav
 /// vocoder as fp32 ONNX graphs and run the same structural (+ where an
 /// OpenVINO device is present, compile) check `check` does on each. Pure
 /// Rust export, runs anywhere; the compile step needs OpenVINO. No NPU
-/// device run is attempted here — none is available on this box (see
+/// device run is attempted here - none is available on this box (see
 /// `omni::npu_export`'s module doc).
 fn omni(args: &[String]) {
     let mut hf_dir = String::new();
@@ -404,7 +404,7 @@ fn omni(args: &[String]) {
     if hf_dir.is_empty() {
         eprintln!(
             "usage: brain npu omni --hf-dir DIR [--out-dir out/omni] [--n-audio 100] \
-             [--grid-h 16 --grid-w 16] [--code-len 32] [--device NPU]"
+             [--grid-h 16 --grid-w 16] [--code-len 32] [--ov-device NPU]"
         );
         return;
     }
@@ -461,7 +461,7 @@ fn omni(args: &[String]) {
     }
 }
 
-/// `brain npu fincast` — forecast a context series with the FinCast decoder+MoE
+/// `brain npu fincast` - forecast a context series with the FinCast decoder+MoE
 /// transformer core running on the NPU. The host (this model's compute backend)
 /// does the patch-embed/freq assembly and the head rearrange/denorm; the exported
 /// ONNX core (`emb`+`amask` → `qhead`) runs on the accelerator via the pluggable
@@ -496,7 +496,7 @@ fn fincast(args: &[String]) {
     if weights.is_empty() {
         eprintln!(
             "usage: brain npu fincast --weights W [--freq 0|1|2] [--horizon H] \
-             [--series file] [--compare] [--device NPU]"
+             [--series file] [--compare] [--ov-device NPU]"
         );
         return;
     }
@@ -622,7 +622,7 @@ where
     (s1[ctx_len..].to_vec(), s2[ctx_len..].to_vec())
 }
 
-/// `brain npu kronos` — autoregressive Kronos forecast with both decoder graphs
+/// `brain npu kronos` - autoregressive Kronos forecast with both decoder graphs
 /// (`decode_s1` → s1, `decode_s2` → s2) running on the NPU. The host does BSQ
 /// tokenization, token embedding, argmax, and the sliding window. `--compare`
 /// also runs the identical rollout on the device core and reports token
@@ -656,7 +656,7 @@ fn kronos(args: &[String]) {
     if tok_dir.is_empty() || dec_dir.is_empty() {
         eprintln!(
             "usage: brain npu kronos --kronos-tokenizer T --kronos-decoder D \
-             [--context-len N] [--horizon H] [--device NPU] [--compare]"
+             [--context-len N] [--horizon H] [--ov-device NPU] [--compare]"
         );
         return;
     }
@@ -798,7 +798,24 @@ impl NpuOpts {
     /// Parse a recognised NPU flag at `args[*i]`; returns true if consumed.
     fn parse_flag(&mut self, args: &[String], i: &mut usize) -> bool {
         match args[*i].as_str() {
+            "--ov-device" => {
+                let d = val(args, i, "--ov-device");
+                self.device = NpuDevice::parse(&d).unwrap_or_else(|| {
+                    eprintln!("brain npu: --ov-device expects npu|cpu|gpu|auto (got {d:?})");
+                    std::process::exit(2);
+                });
+            }
+            // Deprecated alias for `--ov-device` (the OpenVINO target device),
+            // kept for ONE release. `main.rs`'s `select_backend` already
+            // translates `brain npu … --device X` to `--ov-device X` (with its
+            // own deprecation note) before this parser ever runs, so this arm
+            // is normally unreachable from the `brain` binary; it stays here
+            // for direct callers of `run_npu`/`NpuOpts::parse_flag` (tests,
+            // library use) that bypass that translation.
             "--device" => {
+                eprintln!(
+                    "brain npu: --device is deprecated for the OpenVINO target device; use --ov-device instead"
+                );
                 let d = val(args, i, "--device");
                 self.device = NpuDevice::parse(&d).unwrap_or_else(|| {
                     eprintln!("brain npu: --device expects npu|cpu|gpu|auto (got {d:?})");
@@ -923,14 +940,14 @@ fn check(args: &[String]) {
         i += 1;
     }
     if onnx_path.is_empty() {
-        eprintln!("usage: brain npu check --onnx M [--device NPU]");
+        eprintln!("usage: brain npu check --onnx M [--ov-device NPU]");
         return;
     }
     structural_check(&onnx_path, &opts);
 }
 
 /// Structural ONNX validation (always available: decode + op histogram) plus
-/// — where an OpenVINO device is present — an attempted compile. Pure
+/// - where an OpenVINO device is present - an attempted compile. Pure
 /// diagnostic printing, no process exit on failure (callers that export
 /// several graphs in one run, e.g. `brain npu omni`, want to see every
 /// graph's result, not abort at the first).
@@ -1006,7 +1023,7 @@ fn run(args: &[String]) {
         i += 1;
     }
     if onnx_path.is_empty() || image.is_empty() {
-        eprintln!("usage: brain npu run --onnx M --image <P6|dir> [--device NPU --conf X --iou X --nc C --reg-max R --input S]");
+        eprintln!("usage: brain npu run --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --nc C --reg-max R --input S]");
         return;
     }
     let (hwc, w, h) = match crate::image_io::load_image(&image) {
@@ -1073,7 +1090,7 @@ fn bench(args: &[String]) {
         i += 1;
     }
     if onnx_path.is_empty() {
-        eprintln!("usage: brain npu bench --onnx M [--input S --device NPU --iters N --warmup W --hint throughput]");
+        eprintln!("usage: brain npu bench --onnx M [--input S --ov-device NPU --iters N --warmup W --hint throughput]");
         return;
     }
     let mut session = match NpuSession::load(Path::new(&onnx_path), &opts.to_config()) {

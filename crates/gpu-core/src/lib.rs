@@ -3,7 +3,7 @@
 
 //! Compute-device facade.
 //!
-//! `Gpu` is a thin wrapper over a [`backend_api::Backend`] — the eager, per-step
+//! `Gpu` is a thin wrapper over a [`backend_api::Backend`] - the eager, per-step
 //! compute contract. Model code holds a `Gpu` and calls `storage`/`step`/`submit`/
 //! `read` without knowing which backend is behind it. The concrete backends live
 //! in their own crates (`brain-backend-wgpu`, `brain-backend-cpu`,
@@ -36,12 +36,12 @@ pub mod cost;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tune;
 
-/// The device's own measured roofline — the denominator every "% of peak"
+/// The device's own measured roofline - the denominator every "% of peak"
 /// claim in this engine divides by, so that claim is about the device that ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
 
-/// Per-kernel-kind profiling of a recorded pass — the one implementation the
+/// Per-kernel-kind profiling of a recorded pass - the one implementation the
 /// model benches share.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod profile;
@@ -53,7 +53,10 @@ mod upgrade;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
-pub use devices::{ComputeSet, DeviceSpec, Inventory};
+pub use devices::{
+    ambient_compute_set, publish_compute_set, published_compute_set, ComputeSet, DeviceSpec,
+    Inventory,
+};
 
 /// Declare that the process is exiting, after which GPU devices are leaked
 /// rather than destroyed - see `backend_wgpu::set_process_exiting` for the
@@ -65,7 +68,7 @@ pub fn set_process_exiting() {
 }
 
 
-/// A process-wide device fixture for **test binaries** — explicit, documented,
+/// A process-wide device fixture for **test binaries** - explicit, documented,
 /// and torn down before exit.
 ///
 /// libtest runs tests concurrently in one process, and each GPU test that
@@ -73,11 +76,11 @@ pub fn set_process_exiting() {
 /// driver this box runs, that shape fails two ways, both measured:
 /// many concurrent devices deadlock (~50% of runs, every thread in futex
 /// wait), and a device *leaked in a static* at process exit segfaults the
-/// driver's worker thread during teardown — after every test has passed.
+/// driver's worker thread during teardown - after every test has passed.
 ///
 /// So: one parent device per test binary, one handle per kernel set via
 /// [`Gpu::new_like`], and an `atexit` hook that drops everything in an orderly
-/// fashion (drain, destroy pipelines, destroy device — under the same lock as
+/// fashion (drain, destroy pipelines, destroy device - under the same lock as
 /// creation) before the process tears the driver's threads down.
 ///
 /// Production code must NOT use this: it states its sharing explicitly at its
@@ -97,7 +100,7 @@ pub mod testgpu {
     ///
     /// The pool holds only **weak** references: the device stays alive exactly
     /// as long as some test holds a handle, and dies in an orderly in-process
-    /// destruction with the last one. That lifecycle is the entire point — a
+    /// destruction with the last one. That lifecycle is the entire point - a
     /// device that survives into process exit (leaked static) crashed the
     /// driver's worker threads intermittently, and tearing one down from an
     /// `atexit` hook crashed every run. Overlapping tests share one device;
@@ -131,7 +134,7 @@ mod native_facade {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::{Arc, Mutex};
 
-    /// Which compute backend a `Gpu` uses. A selection enum for the CLI — distinct
+    /// Which compute backend a `Gpu` uses. A selection enum for the CLI - distinct
     /// from the [`backend_api::Backend`] *trait* the backends implement.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Backend {
@@ -166,7 +169,7 @@ mod native_facade {
         DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
     }
 
-    /// The registry name of the backend that will be (or was) selected —
+    /// The registry name of the backend that will be (or was) selected -
     /// `"wgpu" | "cpu" | "vulkan"`. Public so callers that record *what actually
     /// ran* (the perf suite's result fingerprint) don't have to re-derive it.
     pub fn backend_name() -> &'static str {
@@ -176,7 +179,7 @@ mod native_facade {
     /// How many distinct physical discrete GPUs this machine has. `0` on a
     /// GPU-less box (where `--device gpu` still works, via a software
     /// rasteriser). Multi-GPU tests gate on this so they skip instead of
-    /// faulting inside the driver. Answered by the canonical device registry —
+    /// faulting inside the driver. Answered by the canonical device registry -
     /// one enumeration, cached.
     pub fn discrete_gpu_count() -> usize {
         crate::devices::gpus()
@@ -185,12 +188,12 @@ mod native_facade {
             .count()
     }
 
-    /// How many GPUs the wgpu backend can actually schedule work on — discrete
+    /// How many GPUs the wgpu backend can actually schedule work on - discrete
     /// cards, or (only when no discrete card is present) the integrated GPU.
     /// This is the canonical device registry's own count, which already applies
     /// that discrete-preferred precedence (see `devices::DeviceRegistry`).
     /// Unlike [`discrete_gpu_count`], an integrated-only box (e.g. Intel Arc on
-    /// Meteor Lake) reports 1 here, not 0 — use this wherever "is there GPU
+    /// Meteor Lake) reports 1 here, not 0 - use this wherever "is there GPU
     /// hardware brain should schedule on" is the real question (the `--device`
     /// default set, the no-nvidia-smi budgeting fallback); keep
     /// `discrete_gpu_count` where multi-GPU sharding specifically needs distinct
@@ -200,7 +203,7 @@ mod native_facade {
     }
 
     /// Identities of the physical GPUs the wgpu backend can bind, in its own
-    /// enumeration order — for `brain devices` to report per-card backend
+    /// enumeration order - for `brain devices` to report per-card backend
     /// visibility against the canonical registry (matched by identity).
     pub fn wgpu_visible_gpus() -> Vec<backend_api::GpuIdentity> {
         backend_wgpu::enumerate_gpus()
@@ -216,7 +219,7 @@ mod native_facade {
         backend_wgpu::adapter_desc().map(|a| (a.description, a.software))
     }
 
-    /// The capabilities of the first device this process built, if any — the
+    /// The capabilities of the first device this process built, if any - the
     /// machine-readable sibling of [`adapter_info`], for result fingerprints
     /// (`brain perf`'s env block). Per-handle callers use [`Gpu::caps`].
     pub fn device_caps() -> Option<backend_api::DeviceCaps> {
@@ -232,22 +235,25 @@ mod native_facade {
     }
 
     /// The registry name of the selected backend.
+    ///
+    /// When no backend was explicitly selected via [`set_default_backend`]
+    /// (the CLI's `--device` path), this goes through
+    /// [`crate::devices::ambient_compute_set`] - the single, strong-grammar
+    /// resolution of `BRAIN_DEVICE` shared with `--device`'s own parser -
+    /// rather than re-deriving a second, weaker interpretation here. See
+    /// `ambient_compute_set`'s doc for why: a bare env re-parse used to
+    /// understand only `"cpu"`/`"vulkan"` and silently mangled everything
+    /// else (`gpu0`, `npu`, `cpu0-7`, …) to "just use wgpu, ambient card".
     fn resolve_backend_name() -> &'static str {
         match DEFAULT_BACKEND.load(Ordering::Relaxed) {
             1 => "wgpu",
             2 => "cpu",
             3 => "vulkan",
-            _ => {
-                if let Ok(v) = std::env::var("BRAIN_DEVICE") {
-                    if v.eq_ignore_ascii_case("cpu") {
-                        return "cpu";
-                    }
-                    if v.eq_ignore_ascii_case("vulkan") {
-                        return "vulkan";
-                    }
-                }
-                "wgpu"
-            }
+            _ => match crate::devices::ambient_compute_set().backend {
+                crate::devices::Backend::Wgpu => "wgpu",
+                crate::devices::Backend::Cpu => "cpu",
+                crate::devices::Backend::Vulkan => "vulkan",
+            },
         }
     }
 
@@ -264,7 +270,7 @@ mod native_facade {
 
     /// A weak `Gpu` handle: holds the device's compiled state without keeping it
     /// alive. The point is lifecycle: a pooled device must die with its **last
-    /// real handle** — an orderly in-process destruction — because a device that
+    /// real handle** - an orderly in-process destruction - because a device that
     /// survives into process exit (leaked in a static, or torn down from an
     /// `atexit` hook) crashes the NVIDIA driver's worker threads during
     /// teardown. Measured on the test suite: in-test drops never crash; a
@@ -283,11 +289,11 @@ mod native_facade {
 
     /// The compute device: a runtime-selected eager backend behind a trait object.
     /// All are compiled in; a given instance uses exactly one. Adding a backend
-    /// never touches this type — the dispatch just forwards to `self.inner`.
+    /// never touches this type - the dispatch just forwards to `self.inner`.
     pub struct Gpu {
         inner: Box<dyn backend_api::Backend>,
         /// Kernel names of this handle's pipeline set, index-aligned with the
-        /// `kind` passed to `step*` — what resolves a recorded step back to a
+        /// `kind` passed to `step*` - what resolves a recorded step back to a
         /// cost formula.
         names: Arc<Vec<String>>,
         /// Online OPS counters for THIS handle, folded in at `submit`. Handles
@@ -297,7 +303,7 @@ mod native_facade {
         /// Whether `submit` folds steps into `counters` at all. OFF by default:
         /// the online tally is a mutex lock + a ~110-arm string match PER
         /// DISPATCH, which a production decode loop must not pay for a ledger
-        /// nothing reads. Armed by [`Gpu::reset_ops_counters`] — the call every
+        /// nothing reads. Armed by [`Gpu::reset_ops_counters`] - the call every
         /// measuring consumer (flops CLI, flops tests, benches) already makes
         /// before its measured run, so measurement flows are unchanged.
         cost_enabled: std::sync::atomic::AtomicBool,
@@ -321,7 +327,7 @@ mod native_facade {
 
         /// The caller's kernel list with any drop-in fast variants **appended**
         /// (see [`crate::upgrade`]). Every constructor funnels through this, so
-        /// a model inherits the faster kernel by registering the slow one —
+        /// a model inherits the faster kernel by registering the slow one -
         /// which is what `crates/vae` did not get when `gn_stats` was fixed
         /// for DIAMOND.
         /// Returns a borrowed view when there is nothing to add.
@@ -380,7 +386,7 @@ mod native_facade {
             })
         }
 
-        /// Build on the specific physical card `dev` — explicit placement, no
+        /// Build on the specific physical card `dev` - explicit placement, no
         /// ambient/env input consulted. Respects the selected backend *class*:
         /// under `--device cpu` / `BRAIN_DEVICE=cpu` this still builds the CPU
         /// backend (there is one CPU; the card is moot), so device-plumbing
@@ -403,11 +409,11 @@ mod native_facade {
             Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
-        /// [`Gpu::new_on`] by canonical index — the common call shape where the
+        /// [`Gpu::new_on`] by canonical index - the common call shape where the
         /// index came from a `Shard`, `residency::Device::Gpu(i)`, or a parsed
         /// user string. Errors on an out-of-range index when the machine has
         /// cards; on a GPU-less box it falls back to [`Gpu::new`] (the CPU or
-        /// software path — placement is moot there).
+        /// software path - placement is moot there).
         pub fn new_on_index(index: u32, kernels: &[(&str, &str)]) -> Result<Gpu, String> {
             if crate::devices::gpus().is_empty() {
                 return Ok(Gpu::new(kernels));
@@ -420,8 +426,8 @@ mod native_facade {
         ///
         /// Building a device costs seconds (device init + one shader compile per
         /// kernel), and several concurrent devices on one card are hostile to the
-        /// driver. A process that needs many `Gpu`s — a server running several
-        /// models, a test binary — should build one and `share()` it, rather than
+        /// driver. A process that needs many `Gpu`s - a server running several
+        /// models, a test binary - should build one and `share()` it, rather than
         /// calling `new()` per model. Sharing is explicit so the number of real
         /// devices stays answerable by reading the code.
         ///
@@ -437,7 +443,7 @@ mod native_facade {
         }
 
         /// [`Gpu::share`] when the backend supports it, else a fresh build of
-        /// `kernels` — for callers that must work on every backend (the CPU JIT
+        /// `kernels` - for callers that must work on every backend (the CPU JIT
         /// has no shareable device; building fresh there is cheap and correct).
         pub fn share_or_new(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.inner.share() {
@@ -446,7 +452,7 @@ mod native_facade {
             }
         }
 
-        /// A `Gpu` for a **different kernel set** on the **same device** — how a
+        /// A `Gpu` for a **different kernel set** on the **same device** - how a
         /// process holds many models on one card. Backends without a shareable
         /// device (the CPU JIT compiles per kernel set anyway) just build fresh,
         /// which is correct and cheap there.
@@ -463,11 +469,11 @@ mod native_facade {
             self.inner.kind()
         }
 
-        /// What this device can actually do — class, limits, numeric tiers.
+        /// What this device can actually do - class, limits, numeric tiers.
         /// Cached at backend construction; reading it is free.
         ///
         /// The two roofline fields are overlaid from whatever
-        /// [`crate::roof`] has already *measured* — reading caps never has the
+        /// [`crate::roof`] has already *measured* - reading caps never has the
         /// side effect of running probe kernels, so they stay `None` until a
         /// caller asks for them with `roof::ensure`. An unknown capability is
         /// never assumed present.
@@ -492,7 +498,7 @@ mod native_facade {
         /// This is the ONLY honest source for attributing time BETWEEN kernels.
         /// Host wall-clock around a drained slice measures launch + execute +
         /// fence, whose floor is roughly constant and therefore inflates small
-        /// kernels in inverse proportion to their size — up to 29x measured,
+        /// kernels in inverse proportion to their size - up to 29x measured,
         /// enough to invert a ranking.
         pub fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
             self.inner.kernel_times()
@@ -504,19 +510,19 @@ mod native_facade {
         }
 
         /// Device-op accounting for this handle (submits/dispatches/readbacks)
-        /// since creation. `None` where the backend does not count — report
+        /// since creation. `None` where the backend does not count - report
         /// null, never zero.
         pub fn stats(&self) -> Option<backend_api::DeviceStats> {
             self.inner.stats()
         }
 
-        /// Print the per-kernel `BRAIN_PROFILE` table now — the resident-model
+        /// Print the per-kernel `BRAIN_PROFILE` table now - the resident-model
         /// escape hatch for a profile that otherwise only prints at drop.
         pub fn dump_profile(&self) {
             self.inner.dump_profile()
         }
 
-        /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
+        /// A weak handle for pools/fixtures - see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {
             self.inner.downgrade().map(|weak| WeakGpu { weak, names: self.names.clone() })
@@ -540,7 +546,7 @@ mod native_facade {
             Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
-        /// Build `count` wgpu devices on DISTINCT physical GPUs — canonical
+        /// Build `count` wgpu devices on DISTINCT physical GPUs - canonical
         /// cards `0..count`, each selected by identity through the registry
         /// (identity matching is what makes repeated builds collision-free;
         /// position-indexed enumeration was observed to reorder between calls).
@@ -590,14 +596,14 @@ mod native_facade {
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
             self.inner.write(buf, data)
         }
-        /// [`Self::write`] for a host `f32` slice — the bit reinterpretation the
+        /// [`Self::write`] for a host `f32` slice - the bit reinterpretation the
         /// backend's `u32` upload wants.
         ///
         /// The inverse of [`Self::read`], which already returns `Vec<f32>`; this
         /// side was missing, so every model that uploads host floats re-derived
         /// `data.iter().map(f32::to_bits).collect()` at its call site. Two of
         /// those had congealed into byte-identical private `fn write` helpers
-        /// (`unet::model`, `controlnet::model`) — AGENTS.md's "one
+        /// (`unet::model`, `controlnet::model`) - AGENTS.md's "one
         /// implementation" rule, and the reason this lives on the device facade
         /// that owns the `u32` half rather than in any model crate.
         pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {
@@ -645,7 +651,7 @@ mod native_facade {
         pub fn poll_wait_timeout(&self, timeout: std::time::Duration) -> bool {
             self.inner.poll_wait_timeout(timeout)
         }
-        /// Largest single storage-buffer binding this device allows, in bytes —
+        /// Largest single storage-buffer binding this device allows, in bytes -
         /// the hardware ceiling a kernel's biggest buffer must fit under. Used to
         /// pick attention backends per-card instead of assuming a fixed limit.
         pub fn max_storage_binding_bytes(&self) -> u64 {
@@ -674,7 +680,7 @@ mod native_facade {
         /// leak into the caller's index space: profilers and cost harnesses map
         /// `meta.kernel` through *their own* kernel list (`flux2_bench` does
         /// exactly that), and an appended pipeline slot would index past the end
-        /// of it. Which kernel physically ran is the backend's record —
+        /// of it. Which kernel physically ran is the backend's record -
         /// `BRAIN_PROFILE=1` names the real pipeline.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
@@ -685,7 +691,7 @@ mod native_facade {
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
-            // here, so no alias check — wgpu validates the concrete ranges.
+            // here, so no alias check - wgpu validates the concrete ranges.
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
             self.inner
                 .step_sliced(k, bufs, offsets, params, t)
@@ -701,7 +707,7 @@ mod native_facade {
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Only when armed (see `cost_enabled`): tallying is a mutex lock
-            // plus a per-dispatch string match — measurement machinery, not a
+            // plus a per-dispatch string match - measurement machinery, not a
             // cost every production decode step should pay.
             if !steps.is_empty() && self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
@@ -712,7 +718,7 @@ mod native_facade {
 
         // ---- FLOP/OPS accounting (see `gpu_core::cost`) ---------------------
 
-        /// OFFLINE cost of a recorded step list — no execution. The steps must
+        /// OFFLINE cost of a recorded step list - no execution. The steps must
         /// have been recorded through a handle of this kernel set (kernel
         /// indices resolve through this handle's pipeline names).
         pub fn cost_of(&self, steps: &[Step]) -> crate::cost::CostReport {
@@ -722,7 +728,7 @@ mod native_facade {
         }
 
         /// ONLINE counters: everything submitted through THIS handle since the
-        /// last [`Gpu::reset_ops_counters`] — which is also what ARMS the
+        /// last [`Gpu::reset_ops_counters`] - which is also what ARMS the
         /// tally (it is off by default; see `cost_enabled`). One handle is one
         /// device context, so a sharded pipeline reads per-stage numbers from
         /// each stage's handle.
@@ -731,7 +737,7 @@ mod native_facade {
         }
 
         /// Reset the online counters and ENABLE per-submit tallying on this
-        /// handle (after warm-up, before a measured run — the call every
+        /// handle (after warm-up, before a measured run - the call every
         /// measuring consumer already makes first). Tallying starts disabled
         /// so production serving never pays for a ledger nothing reads.
         pub fn reset_ops_counters(&self) {
@@ -745,7 +751,7 @@ mod native_facade {
         }
 
         /// The name of the pipeline a dispatch of slot `kind` PHYSICALLY runs
-        /// on this device — the redirected slot's name when a transparent
+        /// on this device - the redirected slot's name when a transparent
         /// [`crate::upgrade`] applies, otherwise `kind`'s own name. Backend
         /// device-timing maps ([`Gpu::kernel_times`]) are keyed by physical
         /// names, so profile attribution translates through this; everything
@@ -763,7 +769,7 @@ mod native_facade {
         /// every model's `KernelIds` literal to grow a field: the builder asks
         /// whether the variant is present and falls back when it is not, so a
         /// model opts in purely by adding the kernel to its PIPELINES list.
-        /// A model with fixed indices should still pass them explicitly — this
+        /// A model with fixed indices should still pass them explicitly - this
         /// is for the shared builders, not for hot per-element lookups.
         pub fn kernel_index(&self, name: &str) -> Option<usize> {
             self.names.iter().position(|n| n == name)
@@ -850,7 +856,7 @@ mod wasm_facade {
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
-            // Off until armed — see the native facade's `submit`.
+            // Off until armed - see the native facade's `submit`.
             if !steps.is_empty() && self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                 crate::cost::tally(&mut ctr, &self.names, steps);
@@ -858,19 +864,19 @@ mod wasm_facade {
             Backend::submit(&self.inner, clears, steps)
         }
 
-        /// OFFLINE cost of a recorded step list — see the native facade.
+        /// OFFLINE cost of a recorded step list - see the native facade.
         pub fn cost_of(&self, steps: &[Step]) -> crate::cost::CostReport {
             let mut r = crate::cost::CostReport::default();
             crate::cost::tally(&mut r, &self.names, steps);
             r
         }
 
-        /// ONLINE counters accumulated at `submit` — see the native facade.
+        /// ONLINE counters accumulated at `submit` - see the native facade.
         pub fn ops_counters(&self) -> crate::cost::CostReport {
             self.counters.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
 
-        /// Reset the online counters and arm tallying — see the native facade.
+        /// Reset the online counters and arm tallying - see the native facade.
         pub fn reset_ops_counters(&self) {
             self.cost_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
             *self.counters.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
@@ -891,7 +897,7 @@ mod wasm_facade {
             self.names.get(kind).map(|s| s.as_str())
         }
 
-        /// The pipeline slot a kernel name occupies — see the native facade's
+        /// The pipeline slot a kernel name occupies - see the native facade's
         /// `kernel_index`; shared block builders use it to pick an optional
         /// kernel variant without changing every model's `KernelIds`.
         pub fn kernel_index(&self, name: &str) -> Option<usize> {
@@ -907,7 +913,7 @@ pub use wasm_facade::Gpu;
 ///
 /// wgpu treats `STORAGE_READ_WRITE` as exclusive within one dispatch, so
 /// `f(x, y, x)` is a validation error there even though the CPU backend would
-/// happily run it — the failure then shows up only on GPU, often surfacing at
+/// happily run it - the failure then shows up only on GPU, often surfacing at
 /// an unrelated later call. Binding a buffer twice READ-ONLY is fine (the
 /// chunked-attention trio deliberately binds one fused qkv buffer as both the
 /// q and kv views), so only the output slot is checked. Kernels that must
@@ -947,7 +953,7 @@ mod tests {
         let gpu = Gpu::new_cpu(&[("add2", kernels::ADD2)]);
         let c = gpu.caps();
         assert_eq!(c.class, DeviceClass::Cpu);
-        assert!(c.numeric.f32, "fp32 is the portable baseline — always true");
+        assert!(c.numeric.f32, "fp32 is the portable baseline - always true");
         assert!(c.compute_units.unwrap_or(0) >= 1);
         assert!(c.unified_memory, "host memory IS device memory on the CPU");
         // The CPU JIT cannot run the multi-barrier packed-int8 GEMMs, and

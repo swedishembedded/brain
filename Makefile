@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# brain — top-level workflow.
+# brain - top-level workflow.
 #
 # Pure Rust + WGSL training/eval engine. These targets generate datasets, train
 # the GPT baseline, evaluate it (perplexity + task exact-match), run the
@@ -149,14 +149,14 @@ deb/release: release
 #  1. `cargo test` defaults to the DEBUG profile, so it recompiled the whole
 #     workspace even right after `make release`. Tests now run `--release` and
 #     reuse that build.
-#  2. Doc-tests link one binary per crate against the full graph — ~18s per
+#  2. Doc-tests link one binary per crate against the full graph - ~18s per
 #     crate for ~30 examples, most of them `no_run`. They are real coverage but
 #     they are not fast feedback, so they get their own lane.
 #  3. Many concurrent GPU DEVICES in one process deadlock the NVIDIA driver
 #     (~50% of parallel runs), and a device leaked into process exit crashes
 #     it. FIXED at the root: models share one device (Gpu::share/new_like) and
 #     test binaries use the weak-pool fixture gpu_core::testgpu, whose device
-#     dies with its last in-process handle — kronos is proven clean at
+#     dies with its last in-process handle - kronos is proven clean at
 #     --test-threads=48, and after the fixture migration every GPU-test crate
 #     either shares the pooled device (qwen/gpt/tts/speaker/glm/moe/pid/
 #     seq2seq/autoencoder/chronos2/fincast/splat/model/wm-core/yolo), pins the
@@ -169,7 +169,7 @@ deb/release: release
 TEST_THREADS ?= 8
 # The guard is a DEADLOCK detector, not a performance target: it must sit above
 # the measured run time so a completing suite never reads as a hang. The VLM
-# crates (fastvlm/qwenvl/moondream) grew the suite past the old 1500s budget —
+# crates (fastvlm/qwenvl/moondream) grew the suite past the old 1500s budget -
 # 266 suites / 1492 tests now complete at TEST_THREADS=8 inside ~2000s wall on
 # the 2xP40 box, so the guard sits at 2400. Making the suite faster is real
 # work (slow-lane moves), not a tighter timeout.
@@ -177,10 +177,10 @@ TEST_TIMEOUT ?= 2400
 CARGO_TEST   ?= cargo test --release --offline
 
 # Build first WITHOUT the timeout, then run WITH it. The deadlock guard is a
-# statement about *running tests* — a cold rebuild after an engine change takes
+# statement about *running tests* - a cold rebuild after an engine change takes
 # minutes on its own, and letting it eat the budget turns "compiling" into a
 # false "TIMED OUT" that reads like a hang.
-# The clippy gate — a ratchet. Checks that clippy EXITS 0 (it stops at the first
+# The clippy gate - a ratchet. Checks that clippy EXITS 0 (it stops at the first
 # deny-by-default lint and then silently reports nothing about everything after
 # it) and that the warning count has not grown. See scripts/gates/clippy-gate.sh.
 clippy:
@@ -192,7 +192,7 @@ test:
 	@timeout $(TEST_TIMEOUT) $(CARGO_TEST) --lib --bins --tests -- --test-threads=$(TEST_THREADS); \
 	rc=$$?; \
 	if [ $$rc -eq 124 ]; then \
-		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s of RUNNING — almost certainly a deadlock."; \
+		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s of RUNNING - almost certainly a deadlock."; \
 		echo "Find it with:  scripts/gates/test-times.sh --top 10"; \
 	fi; \
 	exit $$rc
@@ -202,31 +202,36 @@ test:
 test/doc:
 	$(CARGO_TEST) --doc
 
-# Tests marked `#[ignore = "slow: ..."]` — long training/parity runs that do not
+# Tests marked `#[ignore = "slow: ..."]` - long training/parity runs that do not
 # belong in fast feedback.
 test/slow:
 	$(CARGO_TEST) --lib --bins --tests -- --ignored --test-threads=$(TEST_THREADS)
 
 # Self-validation for scripts/ and tools/: every one parses, every one is named
 # somewhere else in the repo (Makefile target / bats test / crate doc comment /
-# doc — an orphan gate), and no non-overridable absolute machine path. See
+# doc - an orphan gate), and no non-overridable absolute machine path. See
 # scripts/gates/check-scripts.sh for the full rationale. check-env-docs.sh
 # additionally requires every BRAIN_* env var read anywhere in crates/ to be
 # documented in docs/using/configuration.md, a docs/models/<model>.md page, or
 # .agents/rules/testing.md (env-only config MUST have a reference).
 # check-no-doc-citations.sh additionally requires that crates/, scripts/,
-# tools/, and examples/ never cite a docs/ or .agents/ file path — see that
+# tools/, and examples/ never cite a docs/ or .agents/ file path - see that
 # script for why (also wired as a pre-commit hook, so this is a slow-path
 # backstop for anything pre-commit was bypassed for).
 # check-no-perf-numbers.sh additionally denies a bare number next to a
 # performance unit/claim (ms, s, fps, tok/s, % of peak, Nx speedup, ...)
 # anywhere in docs/**/*.md unless reviewed via a `<!-- perf-number: ... -->`
 # comment - see that script for the full rationale and escape-hatch syntax.
+# check-device-env-single-source.sh additionally requires BRAIN_DEVICE be read
+# via std::env::var in exactly one file (crates/gpu-core/src/devices.rs's
+# ambient_compute_set) rather than a second, independently-drifting parser -
+# see A4 in .agents/roadmap/dtype.md for the bug this keeps fixed.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
 	bash scripts/gates/check-no-doc-citations.sh
 	bash scripts/gates/check-no-perf-numbers.sh
+	bash scripts/gates/check-device-env-single-source.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
@@ -237,7 +242,7 @@ check/scripts:
 check/spdx:
 	python3 scripts/spdx/check.py $$(git ls-files)
 
-# Install the local git hooks into .git/hooks — a one-time-per-clone step,
+# Install the local git hooks into .git/hooks - a one-time-per-clone step,
 # not run automatically, since it writes outside version control:
 #   pre-commit  - the check/spdx gate above, plus check-no-doc-citations.sh
 #                 (crates/scripts/tools/examples must never cite a docs/ or
@@ -274,7 +279,7 @@ test/e2e/claude-code: release
 	bats tests/e2e/claude_code.bats
 
 # End-to-end: HTTP API conformance over a real socket against a single `brain serve`
-# backed by the built-in deterministic mock model (BRAIN_MOCK=1) — no weights, no GPU,
+# backed by the built-in deterministic mock model (BRAIN_MOCK=1) - no weights, no GPU,
 # no `claude`. Validates every provider dialect (OpenAI/Anthropic/OpenRouter) against
 # the vendored OpenAPI specs. Fast + deterministic. Needs only a debug/release brain
 # binary + jq (+ optional Python jsonschema for full schema validation).
@@ -290,7 +295,7 @@ test/e2e/api-conformance: build
 test/e2e/shutdown: build
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
 
-# End-to-end: every example under examples/ is actually exercised — the harness
+# End-to-end: every example under examples/ is actually exercised - the harness
 # that did not exist when they all silently rotted after the P19 brain-py rewrite.
 # ONE shared BRAIN_MOCK=1 server (D-Bus + Anthropic HTTP); each example that CAN
 # run against the weight-free mock does so for real, the rest skip honestly with
@@ -305,14 +310,14 @@ test/e2e/examples: build
 
 # Heavy, opt-in: brain's residency scheduler (batching/eviction) + the generate ->
 # detect -> annotate demo against REAL model weights and a GPU. NOT part of
-# test/e2e (that's test/e2e/examples' job, against the mock) — see
+# test/e2e (that's test/e2e/examples' job, against the mock) - see
 # tests/e2e/scheduler.bats for the required env vars.
 test/e2e/scheduler:
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/scheduler.bats
 
 # End-to-end: `brain serve --ready-file PATH` fires only once EVERY requested
 # surface (HTTP dialects + D-Bus) has actually bound, never on a failed or
-# partial bind, and strictly AFTER --api-keys-out is written — so a script can
+# partial bind, and strictly AFTER --api-keys-out is written - so a script can
 # wait on PATH alone and then read the keys with no retry. BRAIN_MOCK=1,
 # CPU-only, no real weights. Needs a debug/release binary + jq + curl (+
 # dbus-daemon/busctl for the D-Bus cases, which skip cleanly without them).
@@ -324,7 +329,7 @@ test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine
-# needs none of these — this is for tools/ and the `--device npu` runtime.
+# needs none of these - this is for tools/ and the `--device npu` runtime.
 requirements:
 	$(PIP) install --upgrade pip
 	$(PIP) install -r requirements.txt
@@ -380,7 +385,7 @@ kernels-regen:
 
 # Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by
-# hand — and `kernels-table/check` is what stops it drifting silently, which
+# hand - and `kernels-table/check` is what stops it drifting silently, which
 # is the failure mode .agents/rules/lessons.md #29 records for the generator above.
 kernels-table:
 	scripts/build/gen-kernel-table.py
@@ -388,7 +393,7 @@ kernels-table:
 kernels-table/check:
 	scripts/build/gen-kernel-table.py --check
 
-# Regenerate the DIAMOND parity fixtures (gitignored — never committed) from
+# Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation in resources/world-models/repos/diamond.
 # Needs python3 + torch; see docs/world-models/FIXTURES.md for provenance.
 wm-fixtures:
@@ -442,7 +447,7 @@ data/tts: release
 	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) --seed $(SEED)
 
 # Populate the gitignored testdata/ tree (checkpoints/goldens/audio) that parity
-# and integration tests read from $BRAIN_TESTDATA. Idempotent — fetches only what
+# and integration tests read from $BRAIN_TESTDATA. Idempotent - fetches only what
 # is missing, from a local mirror (hard-linked) or a URL. See scripts/data/fetch-testdata.sh.
 fetch/testdata:
 	bash scripts/data/fetch-testdata.sh
@@ -577,7 +582,7 @@ train/zipdepth: release
 # `export/yolo-onnx` and `quantize/yolo` are PURE RUST (run on any machine);
 # `sim/yolo-int8` measures fp32-vs-INT8 mAP with NO NPU. `run/yolo-npu` and
 # `bench/yolo-npu` REQUIRE OpenVINO 2024.x + an Intel NPU (3720 / Meteor Lake) at
-# run time — they are NOT part of `make build`/`make test`. The NPU is a
+# run time - they are NOT part of `make build`/`make test`. The NPU is a
 # whole-graph compiler, separate from --device cpu|gpu; see docs/yolo/NPU.md.
 ONNX        ?= $(OUT)/yolo.onnx
 ONNX_INT8   ?= $(OUT)/yolo.int8.onnx
@@ -611,7 +616,7 @@ bench/yolo-npu: release
 # `make bench` runs every registered benchmark (crates/bench) and prints one
 # comparison table (benchmark | score | threshold | pass/fail). `make bench/<name>`
 # runs a single benchmark, e.g. `make bench/mqar` (multi-query associative recall).
-# Add new benchmarks by registering them in crates/bench/src/lib.rs::registry —
+# Add new benchmarks by registering them in crates/bench/src/lib.rs::registry -
 # the generic `bench/%` rule runs any registered name with no Makefile change.
 bench: release
 	$(BRAIN) bench --seed $(SEED)
@@ -663,7 +668,7 @@ bench/scale: release
 bench/advise: release
 	@set -e; ev="results/$(ARCH)-$(SEED).json"; sc="results/scale-$(ARCH)-$(SEED).json"; \
 	if [ ! -f "$$ev" ]; then \
-		echo "no $$ev — run 'make bench/eval ARCH=$(ARCH)' first"; exit 2; \
+		echo "no $$ev - run 'make bench/eval ARCH=$(ARCH)' first"; exit 2; \
 	fi; \
 	if [ -f "$$sc" ]; then $(BRAIN) bench advise "$$ev" "$$sc"; \
 	else $(BRAIN) bench advise "$$ev"; fi
@@ -674,7 +679,7 @@ bench/advise: release
 bench/compare: release
 	@set -e; files="$$(ls results/*.json 2>/dev/null | grep -v '/scale-' || true)"; \
 	if [ -z "$$files" ]; then \
-		echo "no eval artifacts yet — run 'make bench/eval ARCH=<name>' first"; exit 2; \
+		echo "no eval artifacts yet - run 'make bench/eval ARCH=<name>' first"; exit 2; \
 	fi; \
 	$(BRAIN) bench compare $$files
 
@@ -686,7 +691,7 @@ bench/%: release
 # ---- shared GPT char-dataset benchmark (legacy) ---------------------------
 # Train + eval the GPT baseline on the same char datasets, fixed seed/splits,
 # so results are comparable. (MoE-on-char-data + federated rows are a documented
-# follow-up — the MoE engine currently trains on its own 64-symbol rule task.)
+# follow-up - the MoE engine currently trains on its own 64-symbol rule task.)
 bench/char: release
 	@for d in calculator reverser; do \
 		echo "=== dataset: $$d ==="; \
@@ -723,7 +728,7 @@ clean:
 # TARGET selects what is measured. There is no synthetic-harness stand-in --
 # every target exercises a real engine. Default is `qwen-synth:<L>x<D>x<H>x<V>x
 # <HeadDim>x<NKvHeads>` at Qwen3-0.6B's REAL KV geometry (the REAL paged
-# serving engine on random weights — same kernels, KV traffic and batching, so
+# serving engine on random weights - same kernels, KV traffic and batching, so
 # hardware comparison works with no checkpoint on the machine); override with
 # `qwen:<weights>` to measure a real checkpoint.
 PERF_TARGET ?= qwen-synth:28x1024x16x151936x128x8
@@ -760,7 +765,7 @@ perf/lfm: release
 # FLUX.2 Klein denoise-step benchmark, standalone: the residency-executor
 # target (real scheduler + budgets + lanes) on klein-4b; weights from the
 # BRAIN_FLUX2_* env (same as flux2/generate). One denoise step is MINUTES on a
-# CPU backend, so the request count is a knob and defaults tiny — size the run,
+# CPU backend, so the request count is a knob and defaults tiny - size the run,
 # don't let it size you. FLUX2_SIZE is <W>x<H>x<steps>; --output mirrors the
 # step count so the workload's requested artifacts match what a request emits.
 FLUX2_SIZE ?= 512x512x4
@@ -776,7 +781,7 @@ perf/flux2: release
 # excludes runs whose correctness gate failed, and warns on differing axes.
 perf/compare: release
 	@set -e; files="$$(ls results/perf-*.json 2>/dev/null || true)"; \
-	if [ -z "$$files" ]; then echo "no perf artifacts yet — run 'make perf' first"; exit 2; fi; \
+	if [ -z "$$files" ]; then echo "no perf artifacts yet - run 'make perf' first"; exit 2; fi; \
 	$(BRAIN) perf compare $$files
 
 # CI-sized: every scenario shrunk to seconds, on the CPU backend.
@@ -793,7 +798,7 @@ docs:
 	python3 docs/pandoc/build-docs.py
 
 # Real end-to-end z-image int8 generation (256x256) against the fetched
-# checkpoint under out/models/ — the no-OOM regression run from fa7b576.
+# checkpoint under out/models/ - the no-OOM regression run from fa7b576.
 # Heavy: real weights + a GPU; writes results/zimage-int8-e2e.log.
 zimage/int8-e2e:
 	bash scripts/run_zimage_int8_e2e.sh
