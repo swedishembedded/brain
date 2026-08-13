@@ -212,25 +212,59 @@ impl NumericSupport {
     };
 }
 
-/// A checkpoint's on-disk/in-memory element width -- the input to
-/// [`DType::promote`]'s placement-budgeting decision. Deliberately separate
-/// from any per-backend storage type; this is what a *checkpoint* declares,
-/// not what a kernel computes in. No `Ord`: F16 and BF16 are the same width
-/// with no natural ordering between them, so "widens" is checked via
+/// The ONE numeric-tier enum for the engine: a checkpoint's on-disk element
+/// width (the input to [`DType::promote`]'s placement-budgeting decision),
+/// the kernel-selection key ([`select::OpShape::dtype`]), and — where the
+/// surrounding logic permits folding without a restructure — every other
+/// per-model precision tag. Deliberately extensible: a future FP8/NF4 tier
+/// is one more arm, nothing structural. No `Ord`: F16 and BF16 are the same
+/// width with no natural ordering between them, so "widens" is checked via
 /// [`DType::bytes`], not variant order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DType {
     F32,
     F16,
     BF16,
+    /// Packed int8 (weights quantised per `qwen3::q8` / `matmul_i8`).
+    I8,
+    /// Packed int4 weights, int8 activations (W4A8 — see `model::int4`'s
+    /// module doc: there is no int4 accelerator instruction in this engine,
+    /// so activations stay on the existing int8 dynamic-quant path and only
+    /// weights narrow further). Shares `I8`'s capability requirement for
+    /// exactly that reason.
+    Q4,
 }
 
 impl DType {
-    /// Bytes per element on disk/in host memory for this dtype.
+    /// Bits per element. The single source every other width query derives
+    /// from, so a new tier only ever adds one match arm.
+    pub const fn bits(self) -> u32 {
+        match self {
+            DType::F32 => 32,
+            DType::F16 | DType::BF16 => 16,
+            DType::I8 => 8,
+            DType::Q4 => 4,
+        }
+    }
+
+    /// Elements packed per 32-bit word — the inverse of [`Self::bits`],
+    /// matching how the packed kernels (`matmul_i8*`/`matmul_q4*`) lay
+    /// weights out in memory (4 int8 lanes or 8 int4 nibbles per `u32`).
+    pub const fn per_word(self) -> u32 {
+        32 / self.bits()
+    }
+
+    /// Bytes per element on disk/in host memory for this dtype. For `Q4`
+    /// this is a rounded-up 1 byte/element: nothing in the engine allocates
+    /// a sub-byte host buffer — the packed layout (8 nibbles/`u32`) is a
+    /// property of [`Self::per_word`], not of this budgeting number, which
+    /// exists for VRAM placement sizing, not physical packing.
     pub const fn bytes(self) -> u64 {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
+            DType::I8 => 1,
+            DType::Q4 => 1,
         }
     }
 
@@ -241,17 +275,55 @@ impl DType {
     /// fp32 is the guaranteed ceiling (every device supports it), so this
     /// always returns *some* dtype rather than an `Option`.
     ///
-    /// Today every backend dequantizes to fp32 on load (see `crate::gguf`'s
-    /// `deq_*` family and every model crate's `from_reader`), so this
-    /// currently returns `F32` for every input regardless of `numeric` --
-    /// honestly reflecting that no execution path can compute f16/bf16 yet.
+    /// A tier promotes to itself once the device can at least HOLD it
+    /// (`f16`/`bf16` fast compute, or their `*_storage` counterpart —
+    /// see [`NumericSupport`]'s doc for why storage-only is sufficient
+    /// here: placement budgeting only needs "the bytes fit and can be
+    /// read back", not a fast compute path) and to `F32` otherwise. `I8`
+    /// and `Q4` promote on `int8_dot` (`Q4` is W4A8 — see `model::int4`'s
+    /// module doc — so it rides the same int8 activation/dot capability).
+    ///
+    /// Today every real backend's `NumericSupport` reports every non-fp32
+    /// flag `false` (see `crate::gguf`'s `deq_*` family and every model
+    /// crate's `from_reader`, which all dequantize to fp32 on load), so
+    /// this still returns `F32` for every input in practice — honestly
+    /// reflecting that no execution path can compute anything else yet.
     /// The value here is the *placement budgeting* this makes correct now
     /// (a bf16 checkpoint promoted to fp32 costs 2x, not 1x); the value
-    /// later is that a real f16/bf16 compute path landing cannot silently
-    /// mis-budget or mis-execute on a card that lacks it.
+    /// later is that a real f16/bf16/int8/q4 compute path landing cannot
+    /// silently mis-budget or mis-execute on a card that lacks it.
     pub fn promote(self, numeric: &NumericSupport) -> DType {
-        let _ = numeric;
-        DType::F32
+        match self {
+            DType::F32 => DType::F32,
+            DType::BF16 => {
+                if numeric.bf16 || numeric.bf16_storage {
+                    DType::BF16
+                } else {
+                    DType::F32
+                }
+            }
+            DType::F16 => {
+                if numeric.f16 || numeric.f16_storage {
+                    DType::F16
+                } else {
+                    DType::F32
+                }
+            }
+            DType::I8 => {
+                if numeric.int8_dot {
+                    DType::I8
+                } else {
+                    DType::F32
+                }
+            }
+            DType::Q4 => {
+                if numeric.int8_dot {
+                    DType::Q4
+                } else {
+                    DType::F32
+                }
+            }
+        }
     }
 }
 
@@ -262,9 +334,16 @@ mod dtype_tests {
     #[test]
     fn promote_never_narrows_and_always_lands_at_or_above_the_input() {
         let none = NumericSupport::BASELINE;
-        let full = NumericSupport { f16: true, bf16: true, f16_storage: true, bf16_storage: true, ..NumericSupport::BASELINE };
+        let full = NumericSupport {
+            f16: true,
+            bf16: true,
+            f16_storage: true,
+            bf16_storage: true,
+            int8_dot: true,
+            ..NumericSupport::BASELINE
+        };
         for numeric in [none, full] {
-            for dtype in [DType::F32, DType::F16, DType::BF16] {
+            for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
                 let promoted = dtype.promote(&numeric);
                 assert!(
                     promoted.bytes() >= dtype.bytes(),
@@ -276,11 +355,47 @@ mod dtype_tests {
         }
     }
 
+    /// `promote` never invents a THIRD dtype: for every tier and every
+    /// support combination the result is either the requested tier itself
+    /// (support present) or `F32` (support absent, the guaranteed ceiling).
+    /// This replaces the old `fp32_is_the_guaranteed_ceiling`, which pinned
+    /// `promote` as a CONSTANT function (always F32, `numeric` ignored) --
+    /// true of the pre-B1 stub, false the moment `promote` actually reads
+    /// its argument. Going red here, immediately after `promote`'s body
+    /// changed, is the visible moment the policy changes: capability now
+    /// really gates the result instead of a doc-comment promising it will
+    /// one day.
     #[test]
-    fn fp32_is_the_guaranteed_ceiling() {
-        // Every promotion lands at F32 today (see promote's doc comment for
-        // why); this pins that honestly rather than asserting an aspiration.
-        for dtype in [DType::F32, DType::F16, DType::BF16] {
+    fn promote_only_ever_returns_f32_or_the_requested_tier() {
+        let full = NumericSupport {
+            f16: true,
+            bf16: true,
+            f16_storage: true,
+            bf16_storage: true,
+            int8_dot: true,
+            ..NumericSupport::BASELINE
+        };
+        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+            // Full support: promotes to itself.
+            assert_eq!(dtype.promote(&full), dtype, "{dtype:?} with full support must promote to itself");
+            // Zero support: promotes to F32 (F32 is already F32).
+            assert_eq!(
+                dtype.promote(&NumericSupport::BASELINE),
+                DType::F32,
+                "{dtype:?} with no support must promote to F32"
+            );
+        }
+    }
+
+    /// Every REAL `NumericSupport` in the codebase today reports every
+    /// non-fp32 flag `false` -- this phase builds the promotion machinery
+    /// but activates no backend's capability flags (that is B4/B5/B11).
+    /// `NumericSupport::BASELINE` is the only real-world instance
+    /// constructible without a live device; every backend's actual `caps()`
+    /// starts from it and, as of this phase, never flips a non-fp32 flag on.
+    #[test]
+    fn promote_still_yields_f32_for_every_real_baseline_today() {
+        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
             assert_eq!(dtype.promote(&NumericSupport::BASELINE), DType::F32);
         }
     }
@@ -290,6 +405,22 @@ mod dtype_tests {
         assert_eq!(DType::F32.bytes(), 4);
         assert_eq!(DType::F16.bytes(), 2);
         assert_eq!(DType::BF16.bytes(), 2);
+        assert_eq!(DType::I8.bytes(), 1);
+        assert_eq!(DType::Q4.bytes(), 1);
+    }
+
+    #[test]
+    fn bits_and_per_word_agree() {
+        assert_eq!(DType::F32.bits(), 32);
+        assert_eq!(DType::F32.per_word(), 1);
+        assert_eq!(DType::F16.bits(), 16);
+        assert_eq!(DType::F16.per_word(), 2);
+        assert_eq!(DType::BF16.bits(), 16);
+        assert_eq!(DType::BF16.per_word(), 2);
+        assert_eq!(DType::I8.bits(), 8);
+        assert_eq!(DType::I8.per_word(), 4);
+        assert_eq!(DType::Q4.bits(), 4);
+        assert_eq!(DType::Q4.per_word(), 8);
     }
 }
 

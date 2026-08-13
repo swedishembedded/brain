@@ -48,13 +48,11 @@ pub enum Op {
     MaxAbsRow,
 }
 
-/// Element type an op runs over.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Dtype {
-    F32,
-    /// Packed int8 (weights quantised per `qwen3::q8` / `matmul_i8`).
-    I8,
-}
+/// Element type an op runs over — an alias for the engine's ONE dtype enum
+/// ([`crate::DType`]). This used to be a separate `{F32, I8}` enum; unifying
+/// it means a checkpoint's declared width and a kernel's selection key are
+/// the same type by construction, not two enums a caller could let drift.
+pub type Dtype = crate::DType;
 
 /// The shape that decides which variant wins. For a GEMM, `m×k @ k×n`; for a
 /// row-wise op, `m` rows of `n` elements (`k` unused, 0).
@@ -83,6 +81,92 @@ pub enum KernelVariant {
     /// The packed-int8 register-tiled GEMM (`matmul_i8*`). Requires
     /// `caps.numeric.int8_dot`.
     PackedInt8,
+}
+
+/// What a [`KernelVariant`] needs from the device to correctly execute a
+/// given [`Dtype`] — data, checked in ONE place ([`Requirement::satisfied_by`]),
+/// rather than scattered `if caps.numeric.int8_dot` conditions inline in
+/// [`candidates`]'s match arms. Every field defaults to `false` (no
+/// constraint); [`KernelVariant::requires`] sets only the ones that matter
+/// for a given (variant, dtype) pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Requirement {
+    /// The packed-int8 dot kernels execute (`caps.numeric.int8_dot`).
+    pub int8_dot: bool,
+    /// *Fast* f16 arithmetic (`caps.numeric.f16`).
+    pub f16_compute: bool,
+    /// *Fast* bf16 arithmetic (`caps.numeric.bf16`).
+    pub bf16_compute: bool,
+    /// f16 bytes merely storable (`caps.numeric.f16_storage`) — also
+    /// satisfied by fast f16 compute, since a device that computes f16 can
+    /// certainly hold it (see [`Requirement::satisfied_by`]).
+    pub f16_storage: bool,
+    /// bf16 bytes merely storable (`caps.numeric.bf16_storage`), same rule.
+    pub bf16_storage: bool,
+    /// Workgroup-barrier reductions execute *correctly* on this device
+    /// (`caps.workgroup_reductions`) — the CPU JIT's split-at-barrier
+    /// execution model mis-executes these, so this is a correctness gate,
+    /// not a preference.
+    pub workgroup_reductions: bool,
+}
+
+impl Requirement {
+    /// Whether every flag this requirement sets is actually true on `caps`.
+    /// An unset flag imposes no constraint, so [`Requirement::default`]
+    /// (nothing set) is always satisfied.
+    pub fn satisfied_by(&self, caps: &DeviceCaps) -> bool {
+        let n = &caps.numeric;
+        (!self.int8_dot || n.int8_dot)
+            && (!self.f16_compute || n.f16)
+            && (!self.bf16_compute || n.bf16)
+            && (!self.f16_storage || n.f16 || n.f16_storage)
+            && (!self.bf16_storage || n.bf16 || n.bf16_storage)
+            && (!self.workgroup_reductions || caps.workgroup_reductions)
+    }
+}
+
+/// What it takes to merely HOLD/read `dt`'s bytes — the capability a
+/// storage-tiled variant (today: `WorkgroupPerOutput` reusing F32's tiling,
+/// see [`candidates`]'s `Op::MatMul` arm) needs regardless of which variant
+/// carries it. `F32` needs nothing (the universal floor). `I8`/`Q4` key on
+/// `int8_dot`: `Q4` is W4A8 (see `model::int4`'s module doc — activations
+/// stay on the existing int8 dynamic-quant path, only weights narrow
+/// further), so it rides the exact same capability as `I8`.
+fn dtype_storage_requirement(dt: Dtype) -> Requirement {
+    match dt {
+        Dtype::F32 => Requirement::default(),
+        Dtype::BF16 => Requirement { bf16_storage: true, ..Requirement::default() },
+        Dtype::F16 => Requirement { f16_storage: true, ..Requirement::default() },
+        Dtype::I8 | Dtype::Q4 => Requirement { int8_dot: true, ..Requirement::default() },
+    }
+}
+
+impl KernelVariant {
+    /// What this variant needs from the device to correctly execute over
+    /// `dt` — the single source [`candidates`]'s uniform filter consults.
+    ///
+    /// `Reference` never requires anything (the always-correct portable
+    /// baseline, by construction). `SplitReduction`'s BLANKET requirement is
+    /// also empty — its barrier-or-not correctness varies by OP, which a
+    /// (variant, dtype) pair alone cannot express: `Op::ArgMaxRow`'s split
+    /// kernels are genuinely barrier-free (no `caps.workgroup_reductions`
+    /// check anywhere in that arm), while `Op::GradNorm`'s are not (that
+    /// arm keeps its own explicit `caps.workgroup_reductions` guard rather
+    /// than being force-fit into this table). `WorkgroupPerOutput` always
+    /// needs `workgroup_reductions` PLUS whatever it takes to merely hold
+    /// `dt`'s bytes (today's storage-tiled variants reuse F32's tiling).
+    /// `PackedInt8` always needs `int8_dot` — it is, physically, the
+    /// packed-int8 kernel regardless of the shape's nominal dtype tag.
+    pub fn requires(self, dt: Dtype) -> Requirement {
+        match self {
+            KernelVariant::Reference => Requirement::default(),
+            KernelVariant::SplitReduction => Requirement::default(),
+            KernelVariant::WorkgroupPerOutput => {
+                Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
+            }
+            KernelVariant::PackedInt8 => Requirement { int8_dot: true, ..Requirement::default() },
+        }
+    }
 }
 
 /// Picks a [`KernelVariant`] for an op/shape on a device.
@@ -136,22 +220,48 @@ fn no_coop_gradnorm() -> bool {
 /// This is both the default policy (its head) and the autotuner's probe list
 /// (its tail): a measuring selector times exactly these — never a variant the
 /// device cannot run, which is what keeps tuning a refinement rather than a
-/// correctness risk. Ordering rules are either correctness gates (a capability
-/// the variant requires) or measured regime boundaries; nothing keys on a
-/// backend name.
+/// correctness risk.
+///
+/// Two layers: the match below enumerates what variants COULD apply for an
+/// (op, dtype) shape-regime — ordering preference (measured regime
+/// boundaries) only, no capability checks — and the uniform filter at the
+/// end (`v.requires(shape.dtype).satisfied_by(caps)`) is the SINGLE
+/// correctness gate, replacing what used to be scattered inline
+/// `if caps.numeric.int8_dot` conditions per match arm. A shape-regime whose
+/// every variant gets filtered out (e.g. int8 dtype on a device without
+/// `int8_dot`) falls back to `Reference`, preserving the "never empty"
+/// invariant. The one exception is `Op::GradNorm`'s own
+/// `caps.workgroup_reductions` guard, kept inline rather than folded into
+/// [`KernelVariant::requires`] — see that type's doc for why a (variant,
+/// dtype)-only table cannot express it.
 pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVariant> {
     use KernelVariant::*;
-    match op {
+    let raw: Vec<KernelVariant> = match op {
         Op::MatMul => match shape.dtype {
-            // Int8 GEMMs only where the packed-dot kernels execute; a device
-            // without them gets the fp32 reference (the caller keeps fp32
-            // weights in that case — see qwen3::serve). Within int8, the split
-            // mirrors fp32: the 128x128 tile is mostly idle at decode row
+            // F32 and the storage-tier dtypes (BF16/F16) share the SAME
+            // regime split today: they use the SAME tiling as F32, just a
+            // different load once a real bf16/f16 decode path lands (a
+            // dedicated register-tiled storage-tier GEMM is B2's job, not
+            // this phase's). The GEMV requires m <= 32 (its accumulator
+            // bound).
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 => {
+                if shape.m <= DECODE_REGIME_MAX_ROWS {
+                    vec![WorkgroupPerOutput, Reference]
+                } else {
+                    vec![Reference]
+                }
+            }
+            // Packed/quantized weight tiers. Q4 is W4A8 (`model::int4`'s
+            // module doc: activations stay on the existing int8
+            // dynamic-quant path, only weights narrow further), so it
+            // mirrors I8's shape exactly — same regime split, same
+            // `int8_dot` requirement via `KernelVariant::requires`. Within
+            // this regime, the 128x128 tile is mostly idle at decode row
             // counts, but the packed GEMV's workgroup-memory accumulation
-            // grows per-row — the measured P40 crossover is m≈8, and refining
-            // it per device is exactly what the autotuner probes this tail
-            // for. The GEMV requires m <= 32 (its accumulator bound).
-            Dtype::I8 if caps.numeric.int8_dot => {
+            // grows per-row — the measured P40 crossover is m≈8, and
+            // refining it per device is exactly what the autotuner probes
+            // this tail for.
+            Dtype::I8 | Dtype::Q4 => {
                 if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
                     vec![PackedInt8]
                 } else if shape.m <= I8_GEMV_MAX_ROWS {
@@ -160,11 +270,6 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                     vec![PackedInt8, WorkgroupPerOutput]
                 }
             }
-            Dtype::I8 => vec![Reference],
-            Dtype::F32 if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions => {
-                vec![WorkgroupPerOutput, Reference]
-            }
-            Dtype::F32 => vec![Reference],
         },
         // RmsNorm's crossover is NOT a row count. The per-element kernel gives
         // thread t row t, so a warp's loads are `n` floats apart and each
@@ -175,25 +280,20 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // (19.4x at n=128/m=36864, 2.5x at n=1024, 11.2x at n=9216; see
         // `rmsnorm_rows.wgsl`). The old `m <= DECODE_REGIME_MAX_ROWS` gate was
         // therefore leaving 2-20x on the table for every prefill/encoder shape.
-        // Reference stays in the list (and first without workgroup barriers)
-        // because the CPU JIT cannot run the barrier.
+        // Reference stays in the list (and first without workgroup barriers,
+        // via the uniform filter below) because the CPU JIT cannot run the
+        // barrier.
         // LayerNorm is the same kernel family with the same bug: `layernorm`,
         // `ln_stats` and `layernorm_dx` all give thread t row t (and
         // `layernorm_dx` walks its row FOUR times that way). The `*_rows`
         // variants walk a row with 64 threads. Measured on a P40 — see
         // `layernorm_rows.wgsl` and `brain-gpu-core`'s `bench_layernorm`.
-        Op::RmsNorm => {
-            if caps.workgroup_reductions {
-                vec![WorkgroupPerOutput, Reference]
-            } else {
-                vec![Reference]
-            }
-        }
+        Op::RmsNorm => vec![WorkgroupPerOutput, Reference],
         Op::LayerNorm => {
-            if caps.workgroup_reductions && !no_coop_layernorm() {
-                vec![WorkgroupPerOutput, Reference]
-            } else {
+            if no_coop_layernorm() {
                 vec![Reference]
+            } else {
+                vec![WorkgroupPerOutput, Reference]
             }
         }
         // The optimiser's grad-norm. `gradnorm_sq` is not merely uncoalesced —
@@ -205,9 +305,11 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // a P40 the split reduction wins at every size in the GPT/Qwen
         // distribution (see `bench_gradnorm`), so `n` must never gate this —
         // exactly the mistake `Op::RmsNorm`'s old `m <= 32` gate made.
-        // `workgroup_reductions` is a correctness gate, not a preference: the
-        // CPU JIT mis-executes the barrier, and its native fast paths own that
-        // regime.
+        // `workgroup_reductions` is a correctness gate here, not a
+        // preference — but, unlike `Op::ArgMaxRow`'s split kernels, this
+        // op's `SplitReduction` genuinely is barrier-bound, so this stays an
+        // inline guard rather than moving into `KernelVariant::requires`
+        // (see that type's doc comment for why).
         Op::GradNorm => {
             if caps.workgroup_reductions && !no_coop_gradnorm() {
                 vec![SplitReduction, Reference]
@@ -224,13 +326,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // (max is exact under reassociation), so there is no accuracy side to
         // trade either. `workgroup_reductions` is the correctness gate: the CPU
         // JIT mis-executes the barrier.
-        Op::MaxAbsRow => {
-            if caps.workgroup_reductions {
-                vec![WorkgroupPerOutput, Reference]
-            } else {
-                vec![Reference]
-            }
-        }
+        Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
         // Device-independent: the split kernels have no barrier, so the
         // boundary is purely the row length.
         Op::ArgMaxRow => {
@@ -240,6 +336,13 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                 vec![Reference, SplitReduction]
             }
         }
+    };
+    let filtered: Vec<KernelVariant> =
+        raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();
+    if filtered.is_empty() {
+        vec![Reference]
+    } else {
+        filtered
     }
 }
 
@@ -652,5 +755,72 @@ mod tests {
         s.select(Op::MatMul, sh, &caps);
         s.select(Op::MatMul, shape(9, 512, 512, Dtype::F32), &caps);
         assert_eq!(s.inner.0.load(Ordering::Relaxed), 2, "one call per distinct shape");
+    }
+
+    /// The exhaustive proof: for every reachable `NumericSupport` combination
+    /// (all 6 independent bools it carries, `f32` is always true) crossed
+    /// with `workgroup_reductions`, every `Op`, every [`Dtype`] and a
+    /// representative row-count sample, no variant [`candidates`] returns
+    /// ever fails its own [`KernelVariant::requires`] check against the caps
+    /// it was computed from. This is the whole point of the (variant, dtype)
+    /// `Requirement` table: capability-gating becomes something a test can
+    /// PROVE across the whole input space, not something a reviewer has to
+    /// trust from reading scattered `if caps.numeric.X` conditions.
+    #[test]
+    fn no_candidate_ever_requires_an_unsupported_capability() {
+        let ops =
+            [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm, Op::MaxAbsRow];
+        let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4];
+        // 6 independent bools -> 64 combinations (f32 is always true, not
+        // varied) crossed with workgroup_reductions (2), covering baseline
+        // (all false), int8_dot-only, full-everything, and every
+        // single-flag-true combination along the way.
+        for bits in 0u8..64 {
+            let numeric = NumericSupport {
+                f32: true,
+                int8_dot: bits & 1 != 0,
+                f16: bits & 2 != 0,
+                bf16: bits & 4 != 0,
+                f16_storage: bits & 8 != 0,
+                bf16_storage: bits & 16 != 0,
+                coop_matrix: bits & 32 != 0,
+            };
+            for workgroup_reductions in [false, true] {
+                let mut caps = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
+                caps.numeric = numeric;
+                caps.workgroup_reductions = workgroup_reductions;
+                for &op in &ops {
+                    for &dtype in &dtypes {
+                        for &m in &[1u32, 8, 9, 33, 4096] {
+                            let shape = OpShape { m, n: 8192, k: 512, dtype };
+                            for v in candidates(op, shape, &caps) {
+                                assert!(
+                                    v.requires(dtype).satisfied_by(&caps),
+                                    "{op:?}/{dtype:?}/m={m} on {numeric:?} \
+                                     (workgroup_reductions={workgroup_reductions}) -> {v:?} \
+                                     but capability not satisfied"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The persisted tune-cache key must not collide across dtype tiers —
+    /// `AutoTuner::key` formats `{:?}` of the (now-unified) `DType`/`Dtype`
+    /// into the key string, so this pins that BF16 and F16 (same byte width,
+    /// no natural ordering between them per `DType`'s doc) still produce
+    /// distinct keys, and so do every other pair.
+    #[test]
+    fn cache_key_distinguishes_every_dtype_tier() {
+        let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4];
+        let mut seen = std::collections::HashSet::new();
+        for dtype in dtypes {
+            let key = AutoTuner::key(Op::MatMul, shape(4, 512, 512, dtype));
+            assert!(seen.insert(key.clone()), "duplicate cache key for {dtype:?}: {key}");
+        }
+        assert_eq!(seen.len(), dtypes.len());
     }
 }

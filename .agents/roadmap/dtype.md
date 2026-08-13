@@ -428,3 +428,196 @@ including this test; `cargo build -p brain-npu` and `cargo test -p brain-npu
 --lib` ran 19 passed, 1 pre-existing ignore; `cargo test -p brain-npu --test
 npugraph` ran 1 passed (self-skips without real OpenVINO hardware, per its
 own `npu_present()` guard).
+
+## B1 - unified DType, capability as data
+
+**Problem.** Four separate dtype enums did overlapping jobs: `backend_api::DType`
+(`{F32, F16, BF16}`, VRAM placement budgeting, `promote()` a CONSTANT function
+always returning F32), `backend_api::select::Dtype` (`{F32, I8}`, the kernel-
+selection key), `checkpoint::weightio::Dtype` (`{F32, U32}`, the safetensors
+writer's on-disk element tag), `model::dispatch::Precision` (`{F32, Int8}`,
+the DiT numeric-tier map). And `select::candidates()`'s capability gating was
+scattered inline (`Dtype::I8 if caps.numeric.int8_dot => { … }` mixed into
+match arms) rather than checkable in one place.
+
+**Unified.** `backend_api::DType` (`crates/backend-api/src/lib.rs`) is now the
+ONE enum: `{F32, F16, BF16, I8, Q4}`, with `bits()`/`per_word()`/`bytes()` as
+the single source every width query derives from (a future FP8/NF4 tier is
+one more `bits()` arm, nothing structural). `select::Dtype` is now
+`pub type Dtype = crate::DType;` — a type alias, not a second enum — and
+`OpShape`/`candidates`/every call site in `select.rs` use it unchanged
+(`Dtype::F32`/`Dtype::I8` etc. still resolve, since the alias re-exports the
+same variants).
+
+**Deliberately left alone** (folding would force touching files outside this
+phase's scope, or restructuring surrounding logic the task explicitly said
+not to touch this phase):
+
+- `checkpoint::weightio::Dtype` (`{F32, U32}`). This is a wire/byte-width TAG
+  for the safetensors writer's byte-range planner, not a numeric family — `U32`
+  means "already-packed opaque bytes, write as-is" and has no counterpart in
+  `DType` (folding it would mean inventing a fifth `DType` arm with no numeric
+  meaning, or leaving `weightio`'s `tag()`/`check_slot`/header-writing logic to
+  branch on a type that doesn't fit its domain). Left as a follow-up judgment
+  call for B2/B3.
+- `model::dispatch::Precision` (`{F32, Int8}`). Conceptually maps onto
+  `DType::F32`/`DType::I8` directly, but `Precision::from_name`/`::name()` and
+  matches on it are used in `crates/flux1`, `crates/flux2`, and
+  `crates/cli/src/flux2_cli.rs` (41 call sites total) — all outside this
+  phase's scope (`crates/backend-api`, `crates/gpu-core`, and "reasonable to
+  touch minimally" `crates/checkpoint`/`crates/model`). Folding it would mean
+  either touching flux1/flux2/cli (out of scope) or leaving `dispatch.rs`
+  half-migrated (worse than not migrating). Flagged as a B2/B3 follow-up.
+
+**`Requirement`/`KernelVariant::requires()`** (`select.rs`): capability
+gating as data, not scattered conditions.
+
+```rust
+pub struct Requirement {
+    pub int8_dot: bool,
+    pub f16_compute: bool,
+    pub bf16_compute: bool,
+    pub f16_storage: bool,
+    pub bf16_storage: bool,
+    pub workgroup_reductions: bool,
+}
+impl Requirement {
+    pub fn satisfied_by(&self, caps: &DeviceCaps) -> bool { /* storage
+        requirements also accept the corresponding fast-compute flag */ }
+}
+impl KernelVariant {
+    pub fn requires(self, dt: Dtype) -> Requirement { /* one match, per
+        (variant, dtype) */ }
+}
+```
+
+`Reference` and `SplitReduction` both have a BLANKET-empty requirement
+(always satisfied) — deliberately, not an oversight. `SplitReduction`'s case
+is a genuine limitation worth recording: `Op::ArgMaxRow`'s split kernels are
+truly barrier-free (no `caps.workgroup_reductions` check anywhere in that
+match arm, on purpose), but `Op::GradNorm`'s `SplitReduction` kernels are NOT
+— that op's own match arm keeps its explicit `caps.workgroup_reductions &&
+!no_coop_gradnorm()` guard rather than being forced into the (variant, dtype)
+table, because `requires()` has no `Op` parameter and this is a real
+per-op fact, not a per-(variant, dtype) one. `WorkgroupPerOutput` always
+requires `workgroup_reductions` PLUS whatever it takes to merely hold `dt`'s
+bytes (`dtype_storage_requirement`: nothing for `F32`, `bf16_storage` for
+`BF16`, `f16_storage` for `F16`, `int8_dot` for `I8`/`Q4`). `PackedInt8`
+always requires `int8_dot` regardless of `dt` — it is, physically, the
+packed-int8 kernel.
+
+`candidates()` was rewritten to end with ONE uniform filter:
+`raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps))`,
+falling back to `vec![Reference]` if everything gets filtered out (preserving
+the "never empty" invariant that used to be guaranteed by a per-branch
+`Dtype::I8 => vec![Reference]` fallback arm). The match arms above the filter
+now enumerate shape-regime preference only (`DECODE_REGIME_MAX_ROWS`,
+`I8_GEMV_MAX_ROWS`, `ARGMAX_SPLIT_MIN_VOCAB` boundaries) — the
+`if caps.numeric.int8_dot` guard that used to gate the whole `Dtype::I8` match
+arm, and the `if caps.workgroup_reductions` guards that used to gate
+`Op::RmsNorm`/`Op::MaxAbsRow`/`Op::LayerNorm`'s `WorkgroupPerOutput` arms, are
+gone from the match — the filter is now the only reason those variants get
+dropped. `Op::GradNorm`'s own `caps.workgroup_reductions` guard is the one
+exception, kept inline per the limitation above. New `Op::MatMul` arms for
+`DType::BF16`/`DType::F16` (combined with `F32` in one match arm: identical
+regime split, since storage-tier dtypes ride the SAME tiling as F32 today —
+only the load differs once a real decode path lands; a dedicated
+register-tiled storage-tier GEMM, `RegisterTiled`, is explicitly B2's job,
+not built here) and `DType::Q4` (combined with `I8`: confirmed via
+`crates/model/src/int4.rs`'s module doc that q4 is W4A8 — activations stay on
+the existing int8 dynamic-quant path, only weights narrow further — so `Q4`
+shares `I8`'s exact shape and `int8_dot` requirement).
+
+**`DType::promote`** (`crates/backend-api/src/lib.rs`) stops being a constant
+function:
+
+```rust
+pub fn promote(self, n: &NumericSupport) -> DType {
+    match self {
+        DType::F32  => DType::F32,
+        DType::BF16 => if n.bf16 || n.bf16_storage { DType::BF16 } else { DType::F32 },
+        DType::F16  => if n.f16  || n.f16_storage  { DType::F16  } else { DType::F32 },
+        DType::I8   => if n.int8_dot { DType::I8 } else { DType::F32 },
+        DType::Q4   => if n.int8_dot { DType::Q4 } else { DType::F32 },
+    }
+}
+```
+
+The old test `fp32_is_the_guaranteed_ceiling` only ever exercised
+`NumericSupport::BASELINE` (all flags false), which the new `promote` also
+maps to `F32` for every input — so that specific test does NOT go red on its
+own; it was renamed to `promote_still_yields_f32_for_every_real_baseline_today`
+and kept as a real-backend-today check (every real `NumericSupport` in the
+codebase is `BASELINE` or built from it with every non-fp32 flag still
+`false` — no backend crate's capability construction was touched this phase).
+The test that DOES distinguish "constant stub" from "real policy" is the new
+`promote_only_ever_returns_f32_or_the_requested_tier`: under full support
+(`f16`/`bf16`/`f16_storage`/`bf16_storage`/`int8_dot` all `true`), it asserts
+each tier promotes to ITSELF, not `F32`. Verified the RED→GREEN sequence by
+hand: temporarily restored the old constant-stub body (`let _ = numeric;
+DType::F32`), ran `cargo test -p brain-backend-api dtype_tests`, and got
+exactly one failure —
+`promote_only_ever_returns_f32_or_the_requested_tier: F16 with full support
+must promote to itself: left: F32, right: F16` — then restored the real
+implementation and confirmed all `dtype_tests` green. That failure message
+is the visible moment the policy changed, per the phase's intent.
+
+**Exhaustive gate test** (`select.rs`,
+`no_candidate_ever_requires_an_unsupported_capability`): crosses all 64
+reachable `NumericSupport` combinations (6 independent bools; `f32` is always
+`true`) with `workgroup_reductions` (2), every `Op` (6), every `Dtype` (5),
+and `m` in `[1, 8, 9, 33, 4096]` (the same representative row-count sample
+`candidates_head_is_the_default_policy` already used) — 24,576 `(caps, op,
+shape)` combinations, asserting every variant `candidates()` returns actually
+satisfies its own `requires(dtype).satisfied_by(caps)`. Confirmed RED first:
+temporarily short-circuited the filter to `let filtered = raw;` (bypassing
+`KernelVariant::requires` entirely) and got `MatMul/F32/m=1 on … workgroup_
+reductions=false -> WorkgroupPerOutput but capability not satisfied` — then
+restored the real filter and confirmed green (23 tests passing in
+`select.rs`+`dtype_tests`, excluding the one pre-existing unrelated failure
+noted below).
+
+**AutoTuner cache key**: `AutoTuner::key` already just formats `{:?}` of
+`shape.dtype`, so it needed no change for the unified `DType` to keep working
+— confirmed with a new test, `cache_key_distinguishes_every_dtype_tier`,
+asserting all five tiers produce distinct persisted-cache-key strings for the
+same `(op, m, n, k)` (guards specifically against `BF16`/`F16` collapsing to
+the same string, since they share byte width and have no `Ord`).
+
+**Verification**: `cargo test -p brain-backend-api --lib` — 23/23 relevant
+tests green (19 pre-existing + `bits_and_per_word_agree`,
+`promote_only_ever_returns_f32_or_the_requested_tier`,
+`promote_still_yields_f32_for_every_real_baseline_today` [renamed from
+`fp32_is_the_guaranteed_ceiling`], `no_candidate_ever_requires_an_
+unsupported_capability`, `cache_key_distinguishes_every_dtype_tier`).
+`cargo check` clean across every crate that reaches `backend_api::select` or
+`backend_api::DType` transitively: `brain-gpu-core`, `brain-model`,
+`brain-checkpoint`, `brain-qwen3`, `brain-apiserve`, `brain-modelstore`,
+`brain-omni`, `brain-modelref`, and `brain-cli` (which pulls in essentially
+the whole workspace transitively — confirmed clean rather than doing a full
+`cargo check --workspace`, since disk was already at 690G/935G from concurrent
+activity).
+
+**One pre-existing, unrelated test failure noted, not fixed**: while this
+phase was in flight, a concurrent, DIFFERENT change landed in
+`crates/backend-api/src/lib.rs` (not present when this phase started reading
+the file) adding a `no_graph_concept::backend_api_names_no_graph_concept`
+gate test whose doc comment says `GraphBackend` "was deleted" — but the
+`GraphBackend` trait (and its `onnx`-bytes parameter) is still present in the
+file, so that test fails on a plain `cargo test -p brain-backend-api` today.
+Confirmed this is unrelated to and predates this phase's edits (the trait and
+its "onnx" text sit outside every region B1 touched, at
+`crates/backend-api/src/lib.rs:13,873,882`; the module itself did not exist
+in this file when this phase's work began). Left alone per this task's own
+instruction to not step on concurrent in-flight work in files it doesn't
+own — flagging here since it happens to share this phase's file. Run
+`cargo test -p brain-backend-api --lib -- --skip no_graph_concept` to see
+this phase's own 23 tests green in isolation.
+
+**What's left (B2/B3, separate tasks)**: fold `checkpoint::weightio::Dtype`
+and `model::dispatch::Precision` into `DType` (noted above); add the
+`RegisterTiled` kernel variant for a real storage-tier GEMM distinct from
+F32's tiling; everything needed to flip a real backend's `f16`/`bf16`/
+`f16_storage`/`bf16_storage` capability flags to `true` (B4/B5/B11) — this
+phase only built the promotion/selection machinery, it activates nothing.
+
