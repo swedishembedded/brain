@@ -113,7 +113,7 @@ impl DeepseekOcr {
         train: bool,
     ) -> DeepseekOcr {
         let n_rows = cfg.image_tokens();
-        DeepseekOcr::build(dev, cfg, vision, decoder, seed, seq, row0, n_rows, None, train)
+        DeepseekOcr::build(dev, dev, cfg, vision, decoder, seed, seq, row0, n_rows, None, train)
     }
 
     /// The **real-layout** composite: the splice is sized and filled from a
@@ -142,6 +142,30 @@ impl DeepseekOcr {
         prompt: &Prompt,
         train: bool,
     ) -> DeepseekOcr {
+        Self::new_with_prompt_devices(dev, dev, cfg, vision, decoder, seed, seq, prompt, train)
+    }
+
+    /// [`Self::new_with_prompt`] with the vision encoder (SAM+CLIP+glue) and the
+    /// decoder built on INDEPENDENTLY chosen devices, instead of one factory for
+    /// both. This is what lets a caller put the vision tower on wgpu (fast, and
+    /// no longer known-corrupting at production scale -- `crates/sam1`'s
+    /// 3-or-more-block wgpu bug is fixed, see that crate's own tests) while
+    /// leaving the decoder on the CPU backend it has no reason to move off yet.
+    /// `caps::Session::load` is the one production caller; every other caller
+    /// keeps using [`Self::new_with_prompt`] (equivalent to passing `dev` twice
+    /// here, unchanged behaviour).
+    #[allow(clippy::too_many_arguments)] // same knobs as new_with_prompt, split into two devices
+    pub fn new_with_prompt_devices(
+        dev_vision: DeviceFactory<'_>,
+        dev_decoder: DeviceFactory<'_>,
+        cfg: DeepseekOcrConfig,
+        vision: &dyn checkpoint::TensorSource,
+        decoder: &dyn checkpoint::TensorSource,
+        seed: u64,
+        seq: u32,
+        prompt: &Prompt,
+        train: bool,
+    ) -> DeepseekOcr {
         assert_eq!(
             prompt.n_rows as usize,
             prompt.plan.rows.len(),
@@ -151,15 +175,23 @@ impl DeepseekOcr {
         );
         assert!(prompt.len() <= seq as usize, "the prompt's {} ids do not fit a {seq}-token sequence", prompt.len());
         let (row0, n_rows) = prompt.image_run();
-        DeepseekOcr::build(dev, cfg, vision, decoder, seed, seq, row0, n_rows, Some(&prompt.plan.rows), train)
+        DeepseekOcr::build(dev_vision, dev_decoder, cfg, vision, decoder, seed, seq, row0, n_rows, Some(&prompt.plan.rows), train)
     }
 
     /// The one constructor both public ones funnel through. `layout` decides
     /// which of the two fill paths this composite uses; everything else is
     /// identical, which is what keeps the parity path bit-identical.
+    ///
+    /// `dev_vision`/`dev_decoder` are independent factories -- see
+    /// [`Self::new_with_prompt_devices`]'s doc for why the composite needs two,
+    /// not one: the vision tower and the decoder are already separate `Gpu`
+    /// handles (the splice crosses them as a host `Vec<f32>`, never a raw
+    /// device buffer), so picking different backends for each is a
+    /// device-selection change only, not an architectural one.
     #[allow(clippy::too_many_arguments)]
     fn build(
-        dev: DeviceFactory<'_>,
+        dev_vision: DeviceFactory<'_>,
+        dev_decoder: DeviceFactory<'_>,
         cfg: DeepseekOcrConfig,
         vision: &dyn checkpoint::TensorSource,
         decoder: &dyn checkpoint::TensorSource,
@@ -176,14 +208,14 @@ impl DeepseekOcr {
         // Finer brackets inside `caps::Session::load`'s single "weight upload +
         // tape build" bracket -- that bracket alone was 20-25s of the load's
         // 20-28s total and had never been profiled below the crate boundary.
-        // Split into the two candidate costs: Cranelift JIT compilation (one
-        // `Gpu::new_cpu` per sub-model, each compiling its whole `PIPELINES`
-        // list up front) vs the actual weight stream/upload
-        // (`ParamStore::new_with_roles_src` plus this decoder's own scratch
-        // buffer allocation). `crate::stage_time` is the same gate/format
-        // `caps.rs` and `encoder.rs` already print through.
+        // Split into the two candidate costs: JIT/pipeline compilation (one
+        // `Gpu` per sub-model, each compiling its whole `PIPELINES` list up
+        // front) vs the actual weight stream/upload (`ParamStore::
+        // new_with_roles_src` plus this decoder's own scratch buffer
+        // allocation). `crate::stage_time` is the same gate/format `caps.rs`
+        // and `encoder.rs` already print through.
         let t_enc = std::time::Instant::now();
-        let enc = DeepEncoder::new(dev, cfg.clone(), vision, seed, train);
+        let enc = DeepEncoder::new(dev_vision, cfg.clone(), vision, seed, train);
         crate::stage_time("build: encoder (SAM+CLIP+glue: JIT compile + weight upload)", t_enc);
 
         let rows = layout.map(|l| enc.row_gather(l));
@@ -192,7 +224,7 @@ impl DeepseekOcr {
         }
 
         let t_jit = std::time::Instant::now();
-        let gpu = dev(deepseekv2::PIPELINES);
+        let gpu = dev_decoder(deepseekv2::PIPELINES);
         crate::stage_time("build: decoder Gpu::new_cpu (Cranelift JIT compile)", t_jit);
 
         let t_dec = std::time::Instant::now();

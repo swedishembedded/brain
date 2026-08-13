@@ -801,3 +801,82 @@ fn the_real_layout_splices_the_learned_rows_verbatim_and_trains_them() {
         assert!(best < 5e-2, "{name}: best relative gradient error {best:e}");
     }
 }
+
+/// **Phase 8 split-device wiring gate**: `caps::Session::load` now builds the
+/// vision encoder (SAM+CLIP+glue) on `Gpu::new_wgpu` and the decoder on
+/// `Gpu::new_cpu` via [`DeepseekOcr::new_with_prompt_devices`], instead of one
+/// `Gpu::new_cpu` factory for both (`crates/sam1`'s wgpu corruption at
+/// 1024x1024/3+ blocks -- what forced the single CPU factory originally -- is
+/// fixed and confirmed at real-weight scale, see `crates/sam1/tests/
+/// wgpu_real_weight_parity.rs`). This is NOT a re-verification of wgpu's SAM
+/// correctness -- that is that test's job. It is a wiring gate: build the SAME
+/// tiny checkpoint-free fixture two ways, all-CPU
+/// ([`DeepseekOcr::new_with_prompt`]) and split-device
+/// ([`DeepseekOcr::new_with_prompt_devices`], vision on wgpu / decoder on
+/// CPU), and assert the two forward outputs agree -- so a future edit that
+/// crosses the wires (e.g. hands the decoder's `PIPELINES` to the vision
+/// factory, or vice versa) fails loudly here instead of silently shipping.
+#[test]
+fn split_device_vision_wgpu_decoder_cpu_matches_all_cpu() {
+    let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
+    let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
+    if !ckpt.exists() || !golden_path.exists() {
+        eprintln!("SKIP: fixtures absent");
+        return;
+    }
+    let ck = load(&ckpt);
+    let g = load(&golden_path);
+    let cfg = DeepseekOcrConfig::tiny();
+    let init = build_init(&cfg, &ck);
+    let (gh, gw) = cfg.token_grid();
+
+    // Same interleaved real-layout construction as
+    // `the_real_layout_splices_the_learned_rows_verbatim_and_trains_them`
+    // above -- the shape `caps::Session::load` actually builds in production,
+    // not the contiguous parity-only path.
+    let mut plan_rows: Vec<Src> = Vec::new();
+    for y in 0..gh {
+        plan_rows.extend((0..gw).map(|x| Src::Projector(y * gw + x)));
+        plan_rows.push(Src::Newline);
+    }
+    plan_rows.push(Src::Separator);
+    let n_rows = plan_rows.len() as u32;
+
+    let row0 = 1u32;
+    let seq = row0 + n_rows + 2;
+    let image_token_id = 0u32;
+    let mut ids: Vec<u32> = vec![1];
+    ids.extend(std::iter::repeat_n(image_token_id, n_rows as usize));
+    ids.extend([2, 3]);
+    let prompt = Prompt {
+        ids: ids.clone(),
+        row0,
+        n_rows,
+        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, grid: ViewGrid::global_only() },
+    };
+
+    let cpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(p);
+    let wgpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(p);
+
+    let m_cpu = DeepseekOcr::new_with_prompt(&cpu_dev, cfg.clone(), &init, &init, 7, seq, &prompt, false);
+    m_cpu.set_tokens_unsupervised(&ids);
+    let loss_cpu = m_cpu.forward(&g["image"].data);
+    assert!(loss_cpu.is_finite());
+    let logits_cpu = m_cpu.read_logits();
+    let dec_in_cpu = m_cpu.read_decoder_input();
+
+    let m_split = DeepseekOcr::new_with_prompt_devices(&wgpu_dev, &cpu_dev, cfg.clone(), &init, &init, 7, seq, &prompt, false);
+    m_split.set_tokens_unsupervised(&ids);
+    let loss_split = m_split.forward(&g["image"].data);
+    assert!(loss_split.is_finite());
+    let logits_split = m_split.read_logits();
+    let dec_in_split = m_split.read_decoder_input();
+
+    let (cos_logits, max_abs_logits) = compare(&logits_cpu, &logits_split);
+    let (cos_dec_in, max_abs_dec_in) = compare(&dec_in_cpu, &dec_in_split);
+    println!("split-device (vision=wgpu, decoder=cpu) vs all-cpu:");
+    println!("  decoder_input cos {cos_dec_in:.10}  max_abs {max_abs_dec_in:.3e}");
+    println!("  logits        cos {cos_logits:.10}  max_abs {max_abs_logits:.3e}");
+    assert!(cos_dec_in > 0.9999, "the spliced decoder input diverges between backends (cos {cos_dec_in}) -- vision half disagrees");
+    assert!(cos_logits > 0.9999, "final logits diverge between backends (cos {cos_logits})");
+}

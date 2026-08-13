@@ -48,10 +48,13 @@
 //!   decode IS now KV-cached (`DeepseekV2::generate_greedy_kv`) - the prompt
 //!   pays one batched forward, every generated token after that is one
 //!   incremental step, not a full re-run of the whole sequence so far.
-//! * **CPU backend.** `crates/sam1`'s tower is known to corrupt its per-block
-//!   buffers on wgpu at 1024x1024 with three or more blocks, so [`Session::load`]
-//!   builds every stage on `gpu_core::Gpu::new_cpu` regardless of the ambient
-//!   device selection.
+//! * **Split backend.** [`Session::load`] builds the vision encoder
+//!   (SAM+CLIP+glue) on `gpu_core::Gpu::new_wgpu` and the decoder on
+//!   `gpu_core::Gpu::new_cpu`, regardless of the ambient device selection.
+//!   `crates/sam1`'s tower used to corrupt its per-block buffers on wgpu at
+//!   1024x1024 with three or more blocks; that is fixed and confirmed at
+//!   real-weight scale (see `crates/sam1/tests/wgpu_real_weight_parity.rs`),
+//!   which is what let the vision half move off the CPU backend.
 
 use std::sync::Mutex;
 
@@ -124,7 +127,7 @@ pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "DeepSeek-OCR -- document image in, text/markdown out. DeepEncoder (SAM ViT-B + 16x compressor \
-         -> CLIP-L) spliced into a DeepSeek-V2 MoE decoder. Greedy, batch 1, CPU backend.",
+         -> CLIP-L) spliced into a DeepSeek-V2 MoE decoder. Greedy, batch 1, vision on wgpu, decoder on CPU.",
         vec![generate_spec()],
     )
     .with_max_context_tokens(SEQ_LEN as u64)
@@ -151,12 +154,25 @@ impl Session {
     /// Build the whole composite from a checkpoint directory. Minutes, and a
     /// ~22 GiB peak - this is the call `ResidentModel::activate` makes once.
     ///
-    /// **The CPU backend is forced here**, with `Gpu::new_cpu`, not by mutating
-    /// `BRAIN_DEVICE`: this object lives for the life of a server process, and
-    /// a process-global env write from inside one model's activation would
-    /// silently change the backend every *other* resident builds on afterwards.
-    /// The reason it must be the CPU at all is `crates/sam1`'s known, tracked
-    /// wgpu corruption at 1024x1024 with three or more blocks.
+    /// **The decoder is forced onto the CPU backend**, with `Gpu::new_cpu`, not
+    /// by mutating `BRAIN_DEVICE`: this object lives for the life of a server
+    /// process, and a process-global env write from inside one model's
+    /// activation would silently change the backend every *other* resident
+    /// builds on afterwards. It has no wgpu-corruption reason to move (that bug
+    /// was `crates/sam1`'s tower, not the decoder) and no measured wgpu benefit
+    /// either, so it stays put.
+    ///
+    /// **The vision encoder (SAM+CLIP+glue) now builds on `Gpu::new_wgpu`.**
+    /// `crates/sam1`'s known wgpu corruption at 1024x1024 with three or more
+    /// blocks (what pinned this whole model to the CPU backend originally) is
+    /// fixed and confirmed at real-weight scale (`crates/sam1/tests/
+    /// wgpu_real_weight_parity.rs`, `wgpu_block_count_corruption.rs`) - a prior
+    /// pass measured the isolated CPU-vs-wgpu gap on this tower at ~3.6x, so
+    /// moving it is a real per-page win, not a defensive no-op. The vision
+    /// tower and the decoder are already separate `Gpu` handles - the splice
+    /// crosses them as a host `Vec<f32>` (`DeepseekOcr::encode_block`), never a
+    /// raw device buffer - so giving them different backends is a
+    /// device-selection change, not an architectural one.
     pub fn load(dir: &str) -> Result<Session, String> {
         let t0 = std::time::Instant::now();
         let files = Files::locate(dir)?;
@@ -173,17 +189,18 @@ impl Session {
         stage_time("load: config+tokenizer+prompt", t0);
 
         let t1 = std::time::Instant::now();
-        let dev = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
+        let dev_vision = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(k);
+        let dev_decoder = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
         let vision = import::encoder_weights_from(&files.mmproj)?;
         stage_time("load: mmproj import (encoder weights)", t1);
         let t2 = std::time::Instant::now();
         let decoder = import::decoder_reader(&files)?;
         stage_time("load: decoder_reader open", t2);
         let t3 = std::time::Instant::now();
-        let model = DeepseekOcr::new_with_prompt(&dev, cfg.clone(), &vision, &decoder, 0, SEQ_LEN, &shape, false);
+        let model = DeepseekOcr::new_with_prompt_devices(&dev_vision, &dev_decoder, cfg.clone(), &vision, &decoder, 0, SEQ_LEN, &shape, false);
         drop(decoder);
         drop(vision);
-        stage_time("load: DeepseekOcr::new_with_prompt (weight upload + tape build)", t3);
+        stage_time("load: DeepseekOcr::new_with_prompt_devices (weight upload + tape build)", t3);
 
         let pre = gpu_core::Gpu::new_cpu(preprocess::PIPELINES);
         stage_time("load: TOTAL", t0);
