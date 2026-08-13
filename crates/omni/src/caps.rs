@@ -105,14 +105,25 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
-/// The `generate` action schema - see this module's doc for why it mirrors
-/// `MockResident::generate_spec()`'s param list exactly. [`chat_generate_spec`]
-/// plus this path's real audio/image/video inputs.
-pub fn generate_spec() -> ActionSpec {
-    chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)")
-        .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
+/// The three real media inputs `generate` accepts, wherever a model's
+/// `generate` actually splices them in via `crate::mm::build_multimodal_prompt`
+/// (today: this model and `brain/omni-int8-thinker-multi`). Factored out so
+/// both declarations are built from the SAME `.input(...)` chain rather than
+/// two hand-synced copies that could silently drift apart -
+/// `tests/caps_conformance.rs` asserts the two models' declared inputs match,
+/// but a shared builder is what makes that assertion something other than a
+/// convention.
+pub fn with_multimodal_inputs(spec: ActionSpec) -> ActionSpec {
+    spec.input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
         .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
+}
+
+/// The `generate` action schema - see this module's doc for why it mirrors
+/// `MockResident::generate_spec()`'s param list exactly. [`chat_generate_spec`]
+/// plus this path's real audio/image/video inputs ([`with_multimodal_inputs`]).
+pub fn generate_spec() -> ActionSpec {
+    with_multimodal_inputs(chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)"))
 }
 
 /// The `speak` action schema: text in, spoken text + a real waveform out.

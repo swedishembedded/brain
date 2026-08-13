@@ -36,7 +36,7 @@ fn int8_thinker_manifest_is_chat_exposed() {
     // Manifest construction is pure: no checkpoint is opened, no GPU touched.
     let r = omni::int8_thinker_resident::Int8ThinkerResident::new(
         "/nonexistent.safetensors".to_string(),
-        omni::config::MoeTextConfig::thinker_defaults(),
+        omni::config::ThinkerConfig::defaults(),
         vec![(Device::Gpu(0), 1 << 34)],
     );
     let caps = api_caps(&r.manifest());
@@ -56,7 +56,7 @@ fn both_thinker_models_declare_the_same_chat_params() {
     use residency::{Device, ResidentModel};
     let r = omni::int8_thinker_resident::Int8ThinkerResident::new(
         "/nonexistent.safetensors".to_string(),
-        omni::config::MoeTextConfig::thinker_defaults(),
+        omni::config::ThinkerConfig::defaults(),
         vec![(Device::Gpu(0), 1 << 34)],
     );
     let m = r.manifest();
@@ -66,6 +66,47 @@ fn both_thinker_models_declare_the_same_chat_params() {
             int8.params.iter().any(|q| q.name == p.name),
             "brain/omni declares chat param '{}' but brain/omni-int8-thinker-multi does not",
             p.name
+        );
+    }
+}
+
+/// Spec: both Thinker-backed models declare the SAME media inputs on
+/// `generate` - `brain/omni-int8-thinker-multi` used to declare none at all
+/// (multimodal input was silently dropped even though `apiserve::openai`
+/// attaches `image`/`audio` blobs to every request regardless of which model
+/// the caller addressed), which meant a client got a text-only answer with no
+/// error telling it why. A mismatch here (a name only one model declares, or
+/// a different `Media` kind for the same name) is exactly the kind of drift
+/// `omni::caps::with_multimodal_inputs` exists to make impossible by
+/// construction; this test is the mechanical guard in case a future edit
+/// still manages it (e.g. by not routing through that helper).
+#[test]
+fn both_thinker_models_declare_the_same_media_inputs() {
+    use residency::{Device, ResidentModel};
+    let r = omni::int8_thinker_resident::Int8ThinkerResident::new(
+        "/nonexistent.safetensors".to_string(),
+        omni::config::ThinkerConfig::defaults(),
+        vec![(Device::Gpu(0), 1 << 34)],
+    );
+    let m = r.manifest();
+    let int8 = m.actions.iter().find(|a| a.name == "generate").expect("int8 must declare generate");
+    let bf16_inputs = omni::caps::generate_spec().inputs;
+    assert!(!bf16_inputs.is_empty(), "brain/omni's generate_spec must declare at least one media input (audio/image/video)");
+    for want in &bf16_inputs {
+        let got = int8.inputs.iter().find(|i| i.name == want.name);
+        assert!(
+            got.is_some(),
+            "brain/omni declares media input '{}' but brain/omni-int8-thinker-multi does not -- \
+             an attached blob would be silently dropped on the fast path",
+            want.name
+        );
+        assert_eq!(
+            got.unwrap().media,
+            want.media,
+            "brain/omni's '{}' input is {:?} but brain/omni-int8-thinker-multi's is {:?}",
+            want.name,
+            want.media,
+            got.unwrap().media
         );
     }
 }

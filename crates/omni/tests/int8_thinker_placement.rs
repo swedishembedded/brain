@@ -89,7 +89,7 @@ fn the_estimate_accounts_for_every_tensor_the_loader_uploads() {
     let ck = checkpoint("accounting", &cfg, 90210);
 
     let caps = caps_for_split(&ck.path, &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2);
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), caps);
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps);
     let cost = resident.estimate_multi(&key());
 
     assert_eq!(
@@ -111,12 +111,12 @@ fn the_estimate_accounts_for_every_tensor_the_loader_uploads() {
 fn the_total_is_the_same_however_many_devices_it_is_split_across() {
     let cfg = tiny_cfg(6);
     let ck = checkpoint("invariant", &cfg, 4242);
-    let total = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), Vec::new()).total_device_bytes().expect("measurable");
+    let total = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
     for n in 1..=3usize {
         let devices: Vec<Device> = (0..n as u32).map(Device::Gpu).collect();
         let caps = caps_for_split(&ck.path, &cfg, &devices, n);
-        let cost = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), caps).estimate_multi(&key());
+        let cost = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps).estimate_multi(&key());
         assert_eq!(cost.devices().count(), n, "{n}-way capacity should produce {n} stages");
         assert_eq!(cost.total_accelerator_bytes(), total, "sharding must not change what the model costs, only where it sits");
     }
@@ -128,12 +128,12 @@ fn the_total_is_the_same_however_many_devices_it_is_split_across() {
 fn uneven_capacity_puts_more_layers_on_the_bigger_card() {
     let cfg = tiny_cfg(8);
     let ck = checkpoint("uneven", &cfg, 31337);
-    let total = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), Vec::new()).total_device_bytes().expect("measurable");
+    let total = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
     // Card 0 is ~3x card 1, and neither alone can hold the model.
     let big = total * 3 / 4;
     let small = total / 2;
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), vec![(Device::Gpu(0), big), (Device::Gpu(1), small)]);
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), vec![(Device::Gpu(0), big), (Device::Gpu(1), small)]);
     let cost = resident.estimate_multi(&key());
 
     assert_eq!(cost.devices().count(), 2, "neither card alone fits, so it must shard");
@@ -148,11 +148,11 @@ fn uneven_capacity_puts_more_layers_on_the_bigger_card() {
 fn three_devices_with_three_capacities_all_get_a_fitting_share() {
     let cfg = tiny_cfg(9);
     let ck = checkpoint("three", &cfg, 5150);
-    let total = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), Vec::new()).total_device_bytes().expect("measurable");
+    let total = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
     // Deliberately lopsided, and no two of them together can hold it.
     let caps = vec![(Device::Gpu(0), total / 2), (Device::Gpu(1), total * 2 / 5), (Device::Gpu(2), total / 4)];
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), caps.clone());
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps.clone());
     let cost = resident.estimate_multi(&key());
 
     assert_eq!(cost.devices().count(), 3, "must use all three when no prefix of them fits");
@@ -169,10 +169,10 @@ fn three_devices_with_three_capacities_all_get_a_fitting_share() {
 fn a_model_that_fits_one_card_stays_on_one_card() {
     let cfg = tiny_cfg(4);
     let ck = checkpoint("onecard", &cfg, 606);
-    let total = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), Vec::new()).total_device_bytes().expect("measurable");
+    let total = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
     let caps = vec![(Device::Gpu(0), total * 4), (Device::Gpu(1), total * 4), (Device::Gpu(2), total * 4)];
-    let cost = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), caps).estimate_multi(&key());
+    let cost = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps).estimate_multi(&key());
     assert_eq!(cost.devices().count(), 1);
     assert_eq!(cost.on(Device::Gpu(0)), total);
 }
@@ -185,10 +185,10 @@ fn a_model_that_fits_one_card_stays_on_one_card() {
 fn a_model_that_fits_nowhere_reports_zero_devices_rather_than_overrunning() {
     let cfg = tiny_cfg(4);
     let ck = checkpoint("nofit", &cfg, 1);
-    let total = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), Vec::new()).total_device_bytes().expect("measurable");
+    let total = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
     let caps = vec![(Device::Gpu(0), total / 8), (Device::Gpu(1), total / 8)];
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg.clone(), caps);
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps);
     let cost = resident.estimate_multi(&key());
     assert_eq!(cost.devices().count(), 0, "an unplaceable model must report zero devices");
 
@@ -199,7 +199,7 @@ fn a_model_that_fits_nowhere_reports_zero_devices_rather_than_overrunning() {
 
 #[test]
 fn an_unreadable_checkpoint_reports_zero_devices_rather_than_panicking() {
-    let resident = Int8ThinkerResident::new("/nonexistent/thinker.safetensors".to_string(), tiny_cfg(2), vec![(Device::Gpu(0), 1 << 40)]);
+    let resident = Int8ThinkerResident::new("/nonexistent/thinker.safetensors".to_string(), omni::config::ThinkerConfig::defaults().with_text(tiny_cfg(2)), vec![(Device::Gpu(0), 1 << 40)]);
     assert_eq!(resident.estimate_multi(&key()).devices().count(), 0);
     assert!(resident.total_device_bytes().is_err());
 }
@@ -208,7 +208,7 @@ fn an_unreadable_checkpoint_reports_zero_devices_rather_than_panicking() {
 fn no_budgeted_devices_reports_zero_devices() {
     let cfg = tiny_cfg(2);
     let ck = checkpoint("nodev", &cfg, 7);
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg, Vec::new());
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg), Vec::new());
     assert_eq!(resident.estimate_multi(&key()).devices().count(), 0);
 }
 
@@ -220,7 +220,7 @@ fn activate_refuses_a_device_set_the_plan_did_not_choose() {
     let cfg = tiny_cfg(4);
     let ck = checkpoint("mismatch", &cfg, 8080);
     let caps = caps_for_split(&ck.path, &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2);
-    let resident = Int8ThinkerResident::new(ck.path.clone(), cfg, caps);
+    let resident = Int8ThinkerResident::new(ck.path.clone(), omni::config::ThinkerConfig::defaults().with_text(cfg), caps);
     assert_eq!(resident.estimate_multi(&key()).devices().count(), 2);
 
     let err = resident.activate_multi(&key(), &[Device::Gpu(0)]).err().expect("a one-device set must be refused");

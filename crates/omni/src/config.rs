@@ -274,6 +274,31 @@ pub struct ThinkerConfig {
 }
 
 impl ThinkerConfig {
+    /// The real released defaults (see this module's doc), with no
+    /// `config.json` to read from - every field of [`Self::from_json`] falls
+    /// back to its default when the corresponding key is absent, so parsing
+    /// `Value::Null` (indexing it with anything yields `Value::Null` again,
+    /// never a panic) produces exactly the same numbers
+    /// `MoeTextConfig::thinker_defaults()` hand-rolls for its own field
+    /// subset, without a second hand-synced copy of the special-token ids
+    /// (`audio_token_id` etc.) that `crate::mm::build_multimodal_prompt`
+    /// needs - a caller with no checkpoint directory on hand yet (e.g. an
+    /// int8-only deployment, whose checkpoint is a single `.safetensors`
+    /// with no `config.json` sibling) still gets a real, complete config.
+    pub fn defaults() -> ThinkerConfig {
+        Self::from_json(&Value::Null)
+    }
+
+    /// `self` with `text` replaced - a caller that already has a
+    /// `MoeTextConfig` (real, imported from `config.json`, or a test's tiny
+    /// synthetic shape) and just needs it wrapped in a full `ThinkerConfig`
+    /// (special media token ids etc.) rather than re-deriving one field at a
+    /// time.
+    pub fn with_text(mut self, text: MoeTextConfig) -> ThinkerConfig {
+        self.text = text;
+        self
+    }
+
     pub fn from_json(root: &Value) -> ThinkerConfig {
         let t = &root["thinker_config"];
         ThinkerConfig {

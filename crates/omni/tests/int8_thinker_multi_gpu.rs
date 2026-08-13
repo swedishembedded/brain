@@ -61,7 +61,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     budgets.set(Device::Gpu(1), 8 << 30, 0);
     let mut mgr = ResidencyManager::new(budgets);
     let caps = caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2);
-    let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps));
+    let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps));
     mgr.register_multi(resident);
 
     let (claimed, devices, key) = mgr.claim_multi(omni::int8_thinker_resident::MODEL, "forward", &capability::Invocation::new(), &Default::default()).expect("claim_multi");
@@ -142,8 +142,8 @@ fn sharded_generate_matches_unsharded_generate() {
     // one card too small to hold the model (so it must shard across both),
     // and one card big enough (so it must not). Placement is capacity-driven,
     // so this is how a test asks for a specific split.
-    let sharded_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
-    let whole_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1));
+    let sharded_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0), Device::Gpu(1)], 2));
+    let whole_resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1));
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
 
     let prompt_ids: Vec<u32> = vec![2, 9, 4];
@@ -203,7 +203,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
     write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, 313131);
 
     let caps1 = caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1);
-    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps1.clone());
+    let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps1.clone());
     let key = InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
     let prompt_ids: Vec<u32> = vec![3, 7, 1];
 
@@ -230,7 +230,7 @@ fn generate_first_token_matches_independently_assembled_reference() {
         x_host.extend_from_slice(&embed_table[t as usize * d..(t as usize + 1) * d]);
     }
 
-    let resident2 = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), cfg.clone(), caps1);
+    let resident2 = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), omni::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps1);
     let mut instance2 = resident2.activate_multi(&key, &[Device::Gpu(0)]).expect("activate_multi (reference)");
     let bytes2: Vec<u8> = x_host.iter().flat_map(|f| f.to_le_bytes()).collect();
     let inv2 = capability::Invocation::new().blob("x", capability::Blob::new(capability::Media::Bytes, bytes2).with_meta(serde_json::json!({"n": prompt_ids.len() as u32})));

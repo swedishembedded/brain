@@ -60,14 +60,15 @@ pub fn expert_name(l: usize, e: usize, leaf: &str) -> String {
 /// with the WRONG number of stages rather than an error.
 pub fn caps_for_split(path: &str, cfg: &MoeTextConfig, devices: &[residency::Device], n: usize) -> Vec<(residency::Device, u64)> {
     use residency::MultiDeviceResidentModel;
-    let probe = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), cfg.clone(), Vec::new());
+    let full_cfg = omni::config::ThinkerConfig::defaults().with_text(cfg.clone());
+    let probe = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), full_cfg.clone(), Vec::new());
     let total = probe.total_device_bytes().expect("synthetic checkpoint must be measurable");
     let key = residency::InstanceKey::new(omni::int8_thinker_resident::MODEL, "default");
     const STEPS: u64 = 128;
     for i in 1..=STEPS {
         let cap = (total * i).div_ceil(STEPS);
         let caps: Vec<(residency::Device, u64)> = devices.iter().map(|&d| (d, cap)).collect();
-        let r = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), cfg.clone(), caps.clone());
+        let r = omni::int8_thinker_resident::Int8ThinkerResident::new(path.to_string(), full_cfg.clone(), caps.clone());
         if r.estimate_multi(&key).devices().count() == n {
             return caps;
         }

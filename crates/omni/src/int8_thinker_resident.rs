@@ -57,13 +57,48 @@
 //! int8_thinker_multi_from_env`). Without one the model still serves the raw
 //! `ids` contract and says so on a chat request, rather than failing to load.
 //!
-//! Still out of scope, deliberately: multimodal input and speech output - this
-//! serves Thinker TEXT generation only, and `brain/omni` remains the path with
-//! the audio/image/video splice and `speak`.
+//! # Multimodal input
+//!
+//! `generate`'s chat shape also accepts real audio/image/video, spliced in by
+//! the SAME `crate::mm::build_multimodal_prompt` (+ `qwenvl::mrope::
+//! get_rope_index_multi` for the real per-axis M-RoPE positions) `brain/omni`
+//! uses - not a second copy of that splicing/position logic. This is why
+//! [`Int8ThinkerInstance`] carries a [`crate::config::ThinkerConfig`] rather
+//! than the bare [`MoeTextConfig`] `thinker::layer_fwd` et al. actually
+//! consume (`cfg.text`): `build_multimodal_prompt` needs the special media
+//! token ids (`audio_token_id` etc.) that only `ThinkerConfig` carries, and
+//! carrying them alongside a second hand-maintained copy on this struct is
+//! exactly the kind of drift-prone duplication this codebase avoids.
+//!
+//! **Weight source for the vision/audio towers, decided honestly**: the real
+//! int8 checkpoint DOES contain `audio.*`/`vision.*` tensors, quantized
+//! (`.weight.scale` siblings present) - but `crate::mm::encode_audio`/
+//! `encode_image` only know how to read PLAIN f32 tower weights (there is no
+//! quantized-execution path through `qwen_asr::encoder`/`qwenvl::encoder`,
+//! only through the Thinker's own MoE experts via `model::moe::expert_fwd_i8`).
+//! Building one would mean writing new quantized vision/audio kernels - real,
+//! separable follow-up work, not attempted here. So this path reuses the
+//! encoders EXACTLY as `brain/omni` does, reading the towers' fp32 weights
+//! from a real HF checkpoint directory (`BRAIN_OMNI_HF_DIR`, the same
+//! directory the tokenizer is often read from already) - see
+//! [`Int8ThinkerInstance::generate_chat`]'s multimodal branch. The
+//! int8-quantized `audio.*`/`vision.*` tensors already sitting in the int8
+//! checkpoint are consequently dead weight today, not a blocker: a deployment
+//! that wants multimodal input still needs the full HF checkpoint on disk
+//! (~66 GB) alongside the small int8 one, which undercuts a "small quantized
+//! deployment" story but is correct and reuses 100% of the validated fp32
+//! encoder code. Teaching the encoders to read `audio.*`/`vision.*` straight
+//! out of the int8 checkpoint (dequantizing with `model::int8::
+//! dequantize_weight`, the same primitive [`load_mat_host`] already uses) is
+//! real, scoped follow-up, not this pass's job.
+//!
+//! Speech output (`speak`) remains out of scope - `brain/omni` remains the
+//! only path with Thinker->Talker->MTP->Code2Wav.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use capability::blob::{decode_image, decode_video_hwc};
 use capability::{last_user_text, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
@@ -75,8 +110,9 @@ use paramstore::upload::Uploader;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::config::MoeTextConfig;
+use crate::config::{MoeTextConfig, ThinkerConfig};
 use crate::int8_resident::{expert_bytes, ThinkerInt8Store};
+use crate::mm::{build_multimodal_prompt, MultimodalPrompt};
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, thinker_pipelines, ThinkerLayerCache, ThinkerLayerWeights};
 
 pub const MODEL: &str = "brain/omni-int8-thinker-multi";
@@ -332,6 +368,26 @@ impl EmbedTable {
             EmbedTable::Host { table, k } => table[t * k..(t + 1) * k].to_vec(),
         }
     }
+
+    /// The WHOLE table as f32 (~1.2 GB at the real Thinker shape) - what
+    /// [`crate::mm::build_multimodal_prompt`] needs to embed the media
+    /// start/end/text tokens it wraps around each spliced block. Only ever
+    /// called on a multimodal request (see [`Int8ThinkerInstance::generate_chat`]),
+    /// never on the plain-text path this type exists to keep cheap for.
+    /// `Host` is already materialized (built once at [`Self::open`]) so this
+    /// just clones it rather than re-reading/re-dequantizing; the other two
+    /// variants go through [`load_mat_host`] - the same dequant primitive
+    /// [`Self::open`]'s own `Host` fallback and [`load_mat_host`]'s other
+    /// callers already use, not a second implementation of it.
+    fn to_host(&self, reader: &WeightReader) -> Vec<f32> {
+        match self {
+            EmbedTable::Host { table, .. } => table.clone(),
+            EmbedTable::Plain { .. } | EmbedTable::Packed { .. } => {
+                let (n, k) = logical_shape(reader, EMBED_TENSOR).expect("EmbedTable::open already validated this tensor's shape");
+                load_mat_host(reader, EMBED_TENSOR, n as u32, k as u32)
+            }
+        }
+    }
 }
 
 /// One device's shard: its own `Gpu`, the absolute layer range it owns, the
@@ -345,7 +401,12 @@ struct DeviceShard {
 }
 
 pub struct Int8ThinkerInstance {
-    cfg: MoeTextConfig,
+    /// The FULL Thinker config, not just the text-decoder subset most call
+    /// sites here need (`cfg.text`) - carried whole so the special media
+    /// token ids `crate::mm::build_multimodal_prompt` needs never live as a
+    /// second, independently-maintained copy on this struct (see this
+    /// module's own doc, "Multimodal input").
+    cfg: ThinkerConfig,
     shards: Vec<DeviceShard>,
     /// Kept open for the lifetime of the instance so embedding rows can be
     /// read on demand. This is the header-only mmap handle, not data.
@@ -360,6 +421,15 @@ pub struct Int8ThinkerInstance {
     /// not be read - the raw `ids` contract still works, so a missing
     /// tokenizer degrades one request shape instead of failing the load.
     tok: Option<(QwenBpe, Vec<u32>)>,
+    /// A REAL HF checkpoint directory's `WeightReader`, open ONLY to feed the
+    /// vision/audio tower encoders for a multimodal `generate` request (see
+    /// this module's doc, "Multimodal input", for why this is a second
+    /// reader rather than reading `audio.*`/`vision.*` out of `reader`
+    /// above). `None` when no `BRAIN_OMNI_HF_DIR`-equivalent was configured
+    /// or it could not be opened - text-only `generate` is unaffected; an
+    /// audio/image/video blob is then rejected with a clear error rather
+    /// than silently ignored.
+    mm_reader: Option<WeightReader>,
 }
 
 /// What one walk through the sharded stack does at each layer.
@@ -427,8 +497,8 @@ impl Int8ThinkerInstance {
     /// The M-RoPE cos/sin tables for `positions`, at this Thinker's section
     /// split / head dim / theta.
     fn mrope_tables(&self, positions: &[[u32; 3]]) -> (Vec<f32>, Vec<f32>) {
-        let section: [u32; 3] = [self.cfg.mrope_section[0], self.cfg.mrope_section[1], self.cfg.mrope_section[2]];
-        qwenvl::mrope::mrope_tables(positions, section, self.cfg.head_dim, self.cfg.rope_theta)
+        let section: [u32; 3] = [self.cfg.text.mrope_section[0], self.cfg.text.mrope_section[1], self.cfg.text.mrope_section[2]];
+        qwenvl::mrope::mrope_tables(positions, section, self.cfg.text.head_dim, self.cfg.text.rope_theta)
     }
 
     /// Every owned layer, in absolute layer order, across every device shard,
@@ -440,7 +510,7 @@ impl Int8ThinkerInstance {
     /// stack is traversed - so cross-device handoff is written and reasoned
     /// about once.
     fn run_shards(&self, x_host: &[f32], n: u32, cos_tab: &[f32], sin_tab: &[f32], pass: Pass) -> Vec<f32> {
-        let d = self.cfg.hidden;
+        let d = self.cfg.text.hidden;
         assert_eq!(x_host.len(), (n * d) as usize, "x must be [n, d]");
         let mut h_host = x_host.to_vec();
         for shard in &self.shards {
@@ -458,10 +528,10 @@ impl Int8ThinkerInstance {
                 h = match &pass {
                     Pass::Batched { cache } => {
                         let lc = cache.map(|c| c.layer(l));
-                        layer_fwd(gpu, &self.cfg, &w, &h, &cos, &sin, n, lc.as_ref(), Some(experts8)).0
+                        layer_fwd(gpu, &self.cfg.text, &w, &h, &cos, &sin, n, lc.as_ref(), Some(experts8)).0
                     }
                     Pass::Decode { cache, pos } => {
-                        layer_decode_step(gpu, &self.cfg, &w, &cache.layer(l), &h, &cos, &sin, *pos, cache.cap, Some(experts8))
+                        layer_decode_step(gpu, &self.cfg.text, &w, &cache.layer(l), &h, &cos, &sin, *pos, cache.cap, Some(experts8))
                     }
                 };
             }
@@ -486,8 +556,34 @@ impl Int8ThinkerInstance {
     /// `int8_experts` argument. Each layer's cache lives on the device that
     /// owns that layer ([`Int8KvCache`]), so nothing crosses a card.
     pub fn generate(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-        let d = self.cfg.hidden as usize;
+        if prompt_ids.is_empty() {
+            return Vec::new();
+        }
+        let positions = qwenvl::mrope::get_rope_index(prompt_ids, u32::MAX, &[]);
+        self.generate_with_embeds(prompt_ids, None, &positions, max_new_tokens, eos_ids)
+    }
+
+    /// [`Self::generate`], multimodal: `prompt.x_host` already has real
+    /// audio/image/video embeddings spliced in
+    /// (`crate::mm::build_multimodal_prompt`), and `prompt.positions` are the
+    /// real per-axis M-RoPE positions that splice implies - this method does
+    /// no splicing or positioning of its own, only the prefill/decode/sample
+    /// loop [`Self::generate_with_embeds`] shares with the plain-text path.
+    pub fn generate_multimodal(&self, prompt: &MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
+        self.generate_with_embeds(&prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, max_new_tokens, eos_ids)
+    }
+
+    /// The shared implementation behind [`Self::generate`]/[`Self::generate_multimodal`]:
+    /// `x_host_override`, when `Some`, is used as the prompt's embedding
+    /// buffer verbatim (already spliced with media, `crate::mm::splice_host`);
+    /// when `None`, it's built by a plain per-token gather from `self.embed`
+    /// (the pure-text case). Mirrors `crate::generate::generate_greedy_with_embeds`'s
+    /// shape exactly - same reason the bf16 path has that split: one loop
+    /// serving both request shapes rather than two copies that could drift.
+    fn generate_with_embeds(&self, prompt_ids: &[u32], x_host_override: Option<Vec<f32>>, positions: &[[u32; 3]], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
+        let d = self.cfg.text.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
+        assert_eq!(positions.len(), prompt_ids.len(), "generate: positions/prompt_ids length mismatch");
 
         let mut out = Vec::with_capacity(max_new_tokens as usize);
         if prompt_ids.is_empty() || max_new_tokens == 0 {
@@ -495,15 +591,17 @@ impl Int8ThinkerInstance {
         }
 
         let n0 = prompt_ids.len() as u32;
-        let cache = Int8KvCache::new(&self.shards, &self.cfg, n0 + max_new_tokens);
+        let cache = Int8KvCache::new(&self.shards, &self.cfg.text, n0 + max_new_tokens);
 
         // Prefill: the whole prompt through the stack once, filling the cache.
-        let positions = qwenvl::mrope::get_rope_index(prompt_ids, u32::MAX, &[]);
-        let (cos_tab, sin_tab) = self.mrope_tables(&positions);
-        let mut x_host = Vec::with_capacity(prompt_ids.len() * d);
-        for &t in prompt_ids {
-            x_host.extend_from_slice(&self.embed.row(&self.reader, t));
-        }
+        let (cos_tab, sin_tab) = self.mrope_tables(positions);
+        let x_host = x_host_override.unwrap_or_else(|| {
+            let mut x = Vec::with_capacity(prompt_ids.len() * d);
+            for &t in prompt_ids {
+                x.extend_from_slice(&self.embed.row(&self.reader, t));
+            }
+            x
+        });
         let hidden = self.run_shards(&x_host, n0, &cos_tab, &sin_tab, Pass::Batched { cache: Some(&cache) });
         let mut next = self.head_argmax(last, &hidden[(n0 as usize - 1) * d..n0 as usize * d]);
 
@@ -534,20 +632,25 @@ impl Int8ThinkerInstance {
     fn head_argmax(&self, last: &DeviceShard, row: &[f32]) -> u32 {
         let gpu = &last.gpu;
         let h1 = gpu.storage_init("h1", row);
-        let normed = final_norm(gpu, &self.cfg, &self.final_norm_w, &h1, 1);
-        let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.hidden, self.cfg.vocab);
-        argmax(&gpu.read(&logits, self.cfg.vocab as usize))
+        let normed = final_norm(gpu, &self.cfg.text, &self.final_norm_w, &h1, 1);
+        let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.text.hidden, self.cfg.text.vocab);
+        argmax(&gpu.read(&logits, self.cfg.text.vocab as usize))
     }
 }
 
 impl Int8ThinkerInstance {
     /// The chat request shape: `messages`/`prompt` in, generated `text` out.
     ///
-    /// Deliberately the same three steps `omni::caps::OmniInner::generate`
-    /// takes - `last_user_text` (the shared messages-array extraction, not a
-    /// second parser), `encode`, greedy generate, `decode` - so the two models
+    /// Deliberately the same steps `omni::caps::GenerateAction::run`/
+    /// `OmniInner::generate`/`generate_multimodal` take - `last_user_text`
+    /// (the shared messages-array extraction, not a second parser), decode
+    /// the same three optional blobs the SAME way (`audio::asr_caps::
+    /// wav_from_blob`, `capability::blob::decode_image`/`decode_video_hwc`),
+    /// splice via the SAME `crate::mm::build_multimodal_prompt` when any are
+    /// present, greedy generate, `decode` - so the two Thinker-backed models
     /// answer an identical request the same way and differ only in how the
-    /// weights are stored and placed.
+    /// weights are stored/placed and (for multimodal) which checkpoint the
+    /// vision/audio towers read from (see this module's doc).
     fn generate_chat(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let Some((tok, eos_ids)) = &self.tok else {
             return Err(format!(
@@ -561,11 +664,32 @@ impl Int8ThinkerInstance {
             return Err(format!("{MODEL} generate: empty prompt (need 'messages' with a user turn, or 'prompt')"));
         }
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
-        let prompt_ids = tok.encode(&prompt);
+
+        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
+        let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
 
         progress(Progress::step(0, max_new, "generating"));
         let t0 = std::time::Instant::now();
-        let new_ids = self.generate(&prompt_ids, max_new, eos_ids);
+        let new_ids = if audio.is_some() || image.is_some() || video.is_some() {
+            let Some(mm_reader) = &self.mm_reader else {
+                return Err(format!(
+                    "{MODEL}: got audio/image/video input but no HF checkpoint directory is configured for the \
+                     vision/audio towers (the int8 checkpoint's own audio.*/vision.* tensors are quantized and this \
+                     model's encoders only read plain f32 -- see this module's own doc). Set BRAIN_OMNI_HF_DIR."
+                ));
+            };
+            let text_ids = tok.encode(&prompt);
+            let embed_host = self.embed.to_host(&self.reader);
+            let gpu = &self.shards[0].gpu;
+            let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
+            let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref())
+                .map_err(|e| format!("{MODEL}: {e}"))?;
+            self.generate_multimodal(&mm_prompt, max_new, eos_ids)
+        } else {
+            let prompt_ids = tok.encode(&prompt);
+            self.generate(&prompt_ids, max_new, eos_ids)
+        };
         gpu_core::profile::stage_time("omni-int8 generate", t0);
         for shard in &self.shards {
             shard.gpu.dump_profile();
@@ -646,7 +770,7 @@ struct Plan {
 /// `activate_multi` (streams each shard's real weights onto its card).
 pub struct Int8ThinkerResident {
     pub checkpoint_path: String,
-    pub cfg: MoeTextConfig,
+    pub cfg: ThinkerConfig,
     /// The candidate devices and each one's USABLE byte capacity - a real
     /// number the caller queried (`nvidia-smi` total minus the configured
     /// reserve), not an assumption.
@@ -671,14 +795,23 @@ pub struct Int8ThinkerResident {
     /// brain-native int8 checkpoint is a single file with no tokenizer
     /// sibling. `None` ⇒ raw token-ids contract only.
     tokenizer_dir: Option<String>,
+    /// A real HF checkpoint DIRECTORY (`BRAIN_OMNI_HF_DIR`) to read the
+    /// vision/audio tower weights from for multimodal `generate` requests -
+    /// see this module's doc, "Multimodal input", for why: the int8
+    /// checkpoint's own `audio.*`/`vision.*` tensors are quantized, and
+    /// `crate::mm::encode_audio`/`encode_image` only read plain f32. `None`
+    /// ⇒ `generate` still works for text, but an attached audio/image/video
+    /// blob is rejected with a clear error instead of silently ignored.
+    hf_dir: Option<String>,
 }
 
 impl Int8ThinkerResident {
     /// `devices` is `(device, usable bytes)` - see the field's own doc for
-    /// why the capacity travels with the identity. No tokenizer: the raw
-    /// token-ids contract only; see [`Self::with_tokenizer_dir`].
-    pub fn new(checkpoint_path: String, cfg: MoeTextConfig, devices: Vec<(Device, u64)>) -> Int8ThinkerResident {
-        Int8ThinkerResident { checkpoint_path, cfg, devices, plan: OnceLock::new(), tokenizer_dir: None }
+    /// why the capacity travels with the identity. No tokenizer, no
+    /// multimodal HF dir: the raw token-ids (text-only) contract only; see
+    /// [`Self::with_tokenizer_dir`]/[`Self::with_hf_dir`].
+    pub fn new(checkpoint_path: String, cfg: ThinkerConfig, devices: Vec<(Device, u64)>) -> Int8ThinkerResident {
+        Int8ThinkerResident { checkpoint_path, cfg, devices, plan: OnceLock::new(), tokenizer_dir: None, hf_dir: None }
     }
 
     /// Read the tokenizer for the CHAT request shape from `dir`
@@ -689,13 +822,22 @@ impl Int8ThinkerResident {
         self
     }
 
+    /// Read the vision/audio tower weights for multimodal `generate` requests
+    /// from a real HF checkpoint directory - see this struct's `hf_dir` field
+    /// doc. Without it the model still loads and still serves text-only
+    /// `generate`.
+    pub fn with_hf_dir(mut self, dir: Option<String>) -> Int8ThinkerResident {
+        self.hf_dir = dir;
+        self
+    }
+
     /// Total device bytes this checkpoint needs, whatever the split - the sum
     /// of every layer plus the head. Useful to a caller sizing budgets, and
     /// the honest answer to "will this fit at all?" when compared against the
     /// sum of the available cards.
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let reader = WeightReader::open(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
-        let cost = layer_cost(&reader, &self.cfg).ok_or_else(|| format!("{MODEL}: '{}' is missing tensors this model needs", self.checkpoint_path))?;
+        let cost = layer_cost(&reader, &self.cfg.text).ok_or_else(|| format!("{MODEL}: '{}' is missing tensors this model needs", self.checkpoint_path))?;
         Ok(cost.total())
     }
 
@@ -730,7 +872,7 @@ impl Int8ThinkerResident {
                 return Plan::default();
             }
         };
-        let Some(cost) = layer_cost(&reader, &self.cfg) else {
+        let Some(cost) = layer_cost(&reader, &self.cfg.text) else {
             eprintln!("{MODEL}: '{}' is missing tensors this model loads -- reporting zero devices so the claim fails placement instead of panicking", self.checkpoint_path);
             return Plan::default();
         };
@@ -775,16 +917,18 @@ impl ResidentModel for Int8ThinkerResident {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             MODEL,
-            "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/omni (text only -- no audio/image/video input and no speak), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache.",
+            "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/omni, including real audio/image/video input (splice via crate::mm::build_multimodal_prompt, the same code brain/omni uses -- see this module's doc for the vision/audio tower weight source), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache. Still no speak (see this module's doc).",
             vec![
                 ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob"),
-                // The SAME builder brain/omni's generate uses -- what makes
-                // this model reachable over /v1/chat/completions and
-                // /v1/messages rather than D-Bus-only. Adding the raw `ids`
-                // blob keeps the original token-ids contract advertised too.
-                crate::caps::chat_generate_spec(
-                    "Qwen3-Omni Thinker (int8, GPU-resident): greedy text completion. Also accepts the raw contract -- an 'ids' blob of LE u32 token ids with meta max_new_tokens/eos_ids, answered with an 'ids' blob.",
-                )
+                // The SAME builder brain/omni's generate uses (chat params +
+                // the three media inputs) -- what makes this model reachable
+                // over /v1/chat/completions and /v1/messages with the SAME
+                // multimodal contract, rather than a second hand-synced copy
+                // of either. Adding the raw `ids` blob keeps the original
+                // token-ids contract advertised too.
+                crate::caps::with_multimodal_inputs(crate::caps::chat_generate_spec(
+                    "Qwen3-Omni Thinker (int8, GPU-resident): greedy text completion, with real audio/image/video input. Also accepts the raw contract -- an 'ids' blob of LE u32 token ids with meta max_new_tokens/eos_ids, answered with an 'ids' blob.",
+                ))
                 .input(BlobSpec::new("ids", Media::Bytes, "optional raw prompt token ids (LE u32), meta {max_new_tokens, eos_ids}; when present it replaces messages/prompt and the reply is an 'ids' blob"))
                 .output(BlobSpec::new("ids", Media::Bytes, "generated token ids (LE u32), prompt excluded -- only for a request that supplied the 'ids' blob")),
             ],
@@ -835,7 +979,7 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
             // budget spans every tensor, which is the part that keeps a
             // multi-GB load from accruing a shadow copy of itself.
             let mut up = Uploader::new(&gpu);
-            let store = ThinkerInt8Store::build(&mut up, &reader, range.clone(), &self.cfg);
+            let store = ThinkerInt8Store::build(&mut up, &reader, range.clone(), &self.cfg.text);
             let layer_bufs = range.clone().map(|l| (l, load_layer_bufs(&mut up, &reader, l))).collect();
             shards.push(DeviceShard { gpu, range: range.clone(), store, layer_bufs });
         }
@@ -845,8 +989,8 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
         let lm_head_w = load_mat(&mut up, &reader, "thinker.lm_head.weight");
 
         let embed = EmbedTable::open(&reader)?;
-        if embed.hidden() != self.cfg.hidden as usize {
-            return Err(format!("{MODEL}: {EMBED_TENSOR} is [_, {}] but the config says hidden={}", embed.hidden(), self.cfg.hidden));
+        if embed.hidden() != self.cfg.text.hidden as usize {
+            return Err(format!("{MODEL}: {EMBED_TENSOR} is [_, {}] but the config says hidden={}", embed.hidden(), self.cfg.text.hidden));
         }
         // A tokenizer that will not load is reported and dropped, not fatal:
         // it costs one request shape, and failing the whole activation over it
@@ -861,6 +1005,15 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
                 None
             }
         });
-        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok }))
+        // Same non-fatal degrade as the tokenizer above: a bad/missing HF dir
+        // costs multimodal input only, not the whole activation.
+        let mm_reader = self.hf_dir.as_ref().and_then(|dir| match WeightReader::open_hf_dir(std::path::Path::new(dir)) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("{MODEL}: cannot open HF dir '{dir}' for multimodal input: {e} -- serving text-only generate");
+                None
+            }
+        });
+        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok, mm_reader }))
     }
 }

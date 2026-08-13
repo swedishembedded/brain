@@ -271,8 +271,12 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     // Real numbers confirmed against the real checkpoint's config (not
     // assumed) -- validated end to end on two physically separate GPUs
-    // during the int8 dual-GPU residency work.
-    let cfg = omni::config::MoeTextConfig::thinker_defaults();
+    // during the int8 dual-GPU residency work. `ThinkerConfig::defaults()`
+    // carries the same text-decoder numbers `MoeTextConfig::thinker_defaults()`
+    // did, plus the special media token ids `crate::mm::build_multimodal_prompt`
+    // needs -- see that function's own doc for why this is one config, not
+    // two independently-maintained copies of the same numbers.
+    let cfg = omni::config::ThinkerConfig::defaults();
     let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path);
     if tokenizer_dir.is_none() {
         eprintln!(
@@ -280,7 +284,17 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
              NOT /v1/chat/completions. Set BRAIN_OMNI_INT8_TOKENIZER_DIR (or BRAIN_OMNI_HF_DIR)."
         );
     }
-    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir))
+    // Multimodal input needs a real HF checkpoint directory for the
+    // vision/audio tower weights (the int8 checkpoint's own audio.*/vision.*
+    // tensors are quantized; see omni::int8_thinker_resident's module doc for
+    // why this model does not read them). Reuses BRAIN_OMNI_HF_DIR -- the
+    // same variable brain/omni itself is configured from -- rather than
+    // inventing a second one; unset ⇒ this model still serves text-only.
+    let hf_dir = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty());
+    if hf_dir.is_none() {
+        eprintln!("brain: omni-int8-thinker-multi has no BRAIN_OMNI_HF_DIR -- it will serve text-only generate (no audio/image/video input).");
+    }
+    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir).with_hf_dir(hf_dir))
 }
 
 /// Where the int8 resident reads its tokenizer from, in preference order:

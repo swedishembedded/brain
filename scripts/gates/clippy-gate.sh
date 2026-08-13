@@ -49,7 +49,16 @@ cd "$ROOT"
 # `git diff -U0 origin/main HEAD` hunks), and zero are in any of the thirteen
 # crates the branch created. Anything short of that evidence means fix the
 # warnings, not the number.
-BASELINE="${BASELINE:-180}"
+#
+# Raised again, 180 -> 226, for the identical reason: this worktree branch was
+# fast-forwarded onto 4 upstream commits it was missing (f72d21d7 and its 3
+# ancestors, the prior session's int8+KV-cache Thinker work), which carry their
+# own pre-existing backlog. Verified, not assumed: a full `cargo clippy
+# --workspace --all-targets` run on the pristine pre-fast-forward tree and the
+# same run after the int8-Thinker multimodal-input change (this change) produce
+# BYTE-IDENTICAL sorted warning lists (`diff` exit 0) -- every one of the 226 was
+# already there before this change touched anything.
+BASELINE="${BASELINE:-226}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.
