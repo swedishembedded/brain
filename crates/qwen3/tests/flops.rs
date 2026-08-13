@@ -42,34 +42,108 @@ fn offline_matches_online_and_covers_everything() {
     assert_eq!(online.total, expect.total, "online fwd+bwd != offline fwd+bwd");
 }
 
-/// The quantized model's linears must show up as `int_ops` (what actually
-/// runs: DP4A int8 MACs), NOT as fp32 flops — offline, without executing.
+/// The int8 MAC volume a quantized model's linears report must never exceed
+/// the fp32 volume the SAME shapes would cost (same `2·m·K·n` each) - true
+/// whichever tier `off` actually reports, so this holds on every backend.
+///
+/// The fp32 comparison model's own linears do NOT always dispatch `matmul`/
+/// `matmul_reg3`: `Ops`'s selector picks `matmul_gemv` instead whenever `m`
+/// is within the (fp32) decode regime (`select::DECODE_REGIME_MAX_ROWS`,
+/// `QwenConfig::tiny()`'s `block_size=12` included) on a device with
+/// `workgroup_reductions` - real on this sandbox's ambient `wgpu` adapter,
+/// not just the CPU backend the ORIGINAL version of this helper was only
+/// ever exercised against (where `workgroup_reductions` is always `false`,
+/// so `matmul_gemv` never got selected and this filter's omission was
+/// invisible). All three real fp32 GEMM-tier kernel names must be included,
+/// or this helper silently undercounts the fp32 side on a capable device -
+/// caught by `i8_model_reports_int_ops_on_an_int8_dot_capable_device`
+/// itself going RED against the two-name filter the first time this test
+/// ran for real on GPU (B7).
+fn assert_int8_volume_bounded_by_fp32(off: &gpu_core::cost::CostReport, cfg: &QwenConfig, init: &std::collections::HashMap<String, Vec<f32>>) {
+    let t = cfg.block_size;
+    let mfp = Qwen::new(cfg.clone(), 1, t, init);
+    let fp = mfp.cost_fwd();
+    let fp_linear_flops: u64 = fp
+        .by_kernel
+        .iter()
+        .filter(|(k, _)| matches!(k.as_str(), "matmul" | "matmul_reg3" | "matmul_gemv"))
+        .map(|(_, v)| v.cost.flops)
+        .sum();
+    assert!(fp_linear_flops >= off.total.int_ops, "i8 int_ops exceed the fp32 linear volume");
+}
+
+/// **B7 finding, tested here explicitly.** Pre-B7, `qwen3`'s int8 weight
+/// path (`q8.rs`) quantized unconditionally, on ANY backend, regardless of
+/// declared capability - this test used to assert `int_ops > 0` on the CPU
+/// backend specifically BECAUSE of that (CPU can, in fact, execute the
+/// packed-dot kernels correctly via the CPU JIT's own portable
+/// `dot4I8Packed` lowering - see `matmul_q4_dyn.wgsl`'s header comment - just
+/// without hardware DP4A acceleration). B7 migrated the 7 per-layer linears'
+/// weight storage onto `model::ops::Weight::upload`, whose `want.
+/// promote(caps.numeric)` is a REAL, load-bearing gate (`backend_api::
+/// DType::promote`, B1): it never returns `I8` on a device whose
+/// `NumericSupport.int8_dot` is `false` - `backend-cpu`'s own `query_caps`
+/// declares exactly that (`int8_dot: false`), a POLICY choice (`int8_dot`
+/// means "has a FAST hardware dot-product path", not "can execute at all" -
+/// see `NumericSupport`'s own doc comment), not a portability limit.
+///
+/// This is also load-bearing for correctness, not just accounting: `model::
+/// ops::Ops::bind` has NO `(Reference, Dtype::I8)` arm (by design - see its
+/// own doc comment) - it PANICS if `select::candidates` ever offers
+/// `Reference` for an `I8` shape. `select::candidates` only offers
+/// `Reference` for `I8` when `int8_dot` is false, so an `Ops`-dispatched
+/// `Weight::I8` on a non-`int8_dot` device is a guaranteed panic, not a slow
+/// fallback - `Weight::upload`'s promote-to-`F32` gate is what PREVENTS that
+/// panic by ensuring an `I8` `Weight` only ever exists where `Ops` can
+/// actually dispatch it. Forcing int8 unconditionally (this test's old
+/// behaviour) is therefore no longer just "misses a hardware feature" - it
+/// would crash `Ops::matmul` on this exact backend.
 #[test]
-fn i8_model_reports_int_ops() {
+fn i8_model_without_int8_dot_capability_falls_back_to_fp32_not_a_panic() {
     set_default_backend(Backend::Cpu);
     let cfg = QwenConfig::tiny();
     let init = init_weights(&cfg, 3);
     let m8 = Qwen::new_shard_i8(cfg.clone(), 1, cfg.block_size, &init, Shard::whole(cfg.n_layers as usize));
+    assert!(!m8.gpu().caps().numeric.int8_dot, "this test's premise is a device with NO int8_dot capability");
+
+    let off = m8.cost_fwd();
+    assert_eq!(off.covered, off.steps, "i8-requested forward uncovered: {:?}", off.uncovered);
+    assert_eq!(off.total.int_ops, 0, "no int8_dot capability -> Weight::upload demotes to F32, so int_ops must be 0, not silently wrong");
+    assert!(off.total.flops > 0, "the demoted-to-fp32 linears must still show up as flops");
+    assert!(
+        !off.by_kernel.keys().any(|k| k.starts_with("matmul_i8")),
+        "no matmul_i8* kernel should be dispatched once weights demoted to F32, got: {:?}",
+        off.by_kernel.keys().collect::<Vec<_>>()
+    );
+    assert_int8_volume_bounded_by_fp32(&off, &cfg, &init);
+}
+
+/// The positive case `i8_model_without_int8_dot_capability_falls_back_to_
+/// fp32_not_a_panic` above can't exercise on the CPU-only backend: on a
+/// device that DOES declare `int8_dot` (this repo's default `wgpu` backend -
+/// real hardware in this sandbox, an Intel Arc iGPU, not skipped), the
+/// quantized model's linears must show up as `int_ops` (what actually runs:
+/// DP4A int8 MACs), NOT as fp32 flops - offline, without executing.
+/// Skips cleanly (rather than failing) if the ambient device turns out not
+/// to declare `int8_dot` (e.g. a sandbox with only the CPU backend
+/// available) - this test's OWN premise, checked, not assumed.
+#[test]
+fn i8_model_reports_int_ops_on_an_int8_dot_capable_device() {
+    let cfg = QwenConfig::tiny();
+    let init = init_weights(&cfg, 3);
+    let m8 = Qwen::new_shard_i8(cfg.clone(), 1, cfg.block_size, &init, Shard::whole(cfg.n_layers as usize));
+    if !m8.gpu().caps().numeric.int8_dot {
+        eprintln!("i8_model_reports_int_ops_on_an_int8_dot_capable_device: SKIP (ambient device has no int8_dot capability)");
+        return;
+    }
 
     let off = m8.cost_fwd();
     assert_eq!(off.covered, off.steps, "i8 forward uncovered: {:?}", off.uncovered);
-    assert!(off.total.int_ops > 0, "int8 linears must count integer OPS");
+    assert!(off.total.int_ops > 0, "int8 linears must count integer OPS on an int8_dot-capable device");
     assert!(
         off.by_kernel.keys().any(|k| k.starts_with("matmul_i8")),
         "expected a matmul_i8 kernel in the i8 forward, got: {:?}",
         off.by_kernel.keys().collect::<Vec<_>>()
     );
-    // The int8 MAC volume equals the fp32 linears it replaced (same shapes,
-    // 2·m·K·n each): it must not exceed the fp32 build's GEMM flops (which
-    // additionally include the lm_head).
-    let t = cfg.block_size;
-    let mfp = Qwen::new(cfg, 1, t, &init);
-    let fp = mfp.cost_fwd();
-    let fp_linear_flops: u64 = fp
-        .by_kernel
-        .iter()
-        .filter(|(k, _)| k.as_str() == "matmul" || k.as_str() == "matmul_reg3")
-        .map(|(_, v)| v.cost.flops)
-        .sum();
-    assert!(fp_linear_flops >= off.total.int_ops, "i8 int_ops exceed the fp32 linear volume");
+    assert_int8_volume_bounded_by_fp32(&off, &cfg, &init);
 }

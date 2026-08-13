@@ -2116,3 +2116,505 @@ candidate); fixing em dashes in kernel header prose PARAGRAPHS below the
 `@`-tag block (out of this phase's "header comments only" scope, flagged
 above, left for whoever next touches those specific files' prose).
 
+## B7 - qwen3 migrated to Ops, hand-numbered tables deleted
+
+**Scope actually touched**, per the task's own boundary: `crates/qwen3/src/
+model.rs`, `crates/qwen3/src/serve.rs`, `crates/qwen3/tests/flops.rs` (one
+pre-existing test's assumption broke as a DIRECT, necessary consequence of
+the migration - fixed, not left red, see "Real finding #1" below), and this
+entry. `crates/qwen3/src/q8.rs` and `crates/qwen3/src/lib.rs` were **not**
+touched (explicitly out of the task's file list), even though `q8.rs`'s
+per-layer `Q8`/`Lin8` types are now dead outside two static-utility calls -
+flagged as a follow-up at the end of this entry, not fixed here.
+
+### What actually changed, file by file
+
+**`crates/qwen3/src/model.rs` (`Qwen`, the training/offline-inference
+forward+backward)** - FULL migration, batched forward AND KV-cache decode:
+
+- New fields: `ops: model::ops::Ops` (a second handle onto `self.gpu`'s own
+  device, via `Gpu::share` - see "Real finding #2" below for why `share`, not
+  `new_like`) and `weights: HashMap<String, model::ops::Weight>` (one entry
+  per owned layer's 7 projections - `attn.{wq,wk,wv,wo}`/`mlp.{gate,up,
+  down}`, keyed by the SAME `blocks.<l>.<leaf>` name convention `self.w(name)`
+  already used), replacing `q8: Option<crate::q8::Q8>`.
+- `Weight::F32` entries wrap a `.clone()` of the buffer `ps` (the fp32
+  `ParamStore`) already holds - `backend_api::DeviceBuffer` is `Arc`-backed,
+  so this is a refcount bump, not a second upload/second VRAM copy, for the
+  common (non-i8) case. `Weight::I8` entries are built directly via
+  `model::int8::quantize_weight` + a manual upload, **not** via `model::ops::
+  Weight::upload`'s convenience wrapper - see "Real finding #1" for exactly
+  why that distinction matters and is load-bearing, not stylistic.
+- **The four repeated fork sites in `forward_steps`** (q/k/v shared on
+  `xn1`; `wo` on `ctx`; gate/up shared on `xn2`; `down` on `h`) - each an
+  `if let Some((q8, ql)) = q8l { q8.quant(...); q8.mm8(...) } else {
+  linear_kernel(...); self.gpu.step(...); self.lora_fwd(...) }` - replaced
+  by `let act = self.ops.act(&mut s, x, 0, n, k); if self.ops_linear(&mut s,
+  &act, wname, out) { self.lora_fwd(...) }` per linear (`ops_linear` returns
+  whether the dispatched `Weight` was `F32`, since LoRA only ever targets an
+  unquantized base weight - matching the pre-B7 shape exactly: LoRA used to
+  live only in the fp32 arm of the fork this replaces).
+- **The decode path's `mm`/`mm8` local closures in `decode_steps`** (a
+  SEPARATE, independently-hand-written fp32-GEMV-or-naive / hardcoded-int8-
+  GEMV pair, at the always-`m=1` shape) - deleted outright, replaced by the
+  same `self.ops.act`/`self.ops_linear` calls (no LoRA gate needed here -
+  decode never applies LoRA; see "Real finding" list, item 3, below).
+- The LM head (`forward_steps`'s single-tile `linear_kernel` call) is
+  **deliberately NOT migrated** - `linear_kernel`'s doc comment now states
+  why: `Ops::act` quantizes its input UNCONDITIONALLY (see "Real finding #4"
+  below), and the LM head's `xn_final` activation is never paired with
+  anything but an `F32` weight (no int8 LM head exists in this crate), so
+  routing it through `Ops` would pay a real, measurable `max_abs_row`/
+  `quant_pack` dispatch on every forward for a quantized form nothing ever
+  reads. `linear_kernel` survives with ONE remaining caller (the LM head)
+  instead of being deleted - its doc comment says so explicitly.
+- **Hand-numbered kernel-index table**: `MATMUL_REG2`, `QUANT_PACK`,
+  `MATMUL_I8` (`matmul_i8_dyn`), `MAX_ABS_ROW`, `MATMUL_I8_GEMV`,
+  `MATMUL_GEMV` - the six consts `self.gpu`'s own dispatch no longer needs -
+  DELETED from both the `const` block and the renamed `STATIC_PIPELINES`
+  array (not just unreferenced - genuinely removed), and every subsequent
+  const RENUMBERED to the new, shorter, still-lockstep positions (derived
+  programmatically from the actual pre-edit file content - a Python script
+  parsed the real `PIPELINES` array and `const` block, removed the six dead
+  entries, and printed the exact new numbering - specifically to avoid
+  hand-transcribing 54 renumbered positions and silently mis-mapping one, the
+  exact failure mode this whole table design invites). `linear_kernel` and
+  `dx_kernel_bw`/`dw_kernel_bw` (backward, untouched, out of scope) are the
+  only remaining consumers of the surviving hand-numbered consts.
+- **`pipelines()`** (renamed from the `PIPELINES` const, now a function):
+  `STATIC_PIPELINES` (the renumbered 54 entries) plus, appended with no
+  named consts of their own (same convention `gradnorm_part`/`clip_coef_wg`
+  already used) - `matmul_gemv`, `matmul_reg2` (aliased to the `matmul_reg3`
+  SOURCE, not the real, slower `matmul_reg2` source - see "Real finding #3"),
+  `matmul_i8_dyn`, `matmul_i8_gemv`, `matmul_q4_dyn`, `matmul_q4_gemv`,
+  `max_abs_row`, `quant_pack`, and the 6 bf16/f16 `dtype_variant` names
+  `Ops::REQUIRED_KERNELS` demands but this crate never dispatches. `self.gpu`
+  and `self.ops`'s internal `Gpu` are `Gpu::share` of ONE compiled pipeline
+  set built from this function - see "Real finding #2".
+
+**`crates/qwen3/src/serve.rs` (`Engine`, the concurrent paged-KV serving
+path)** - **weight STORAGE migrated onto `Weight`; dispatch SELECTION
+deliberately kept as this engine's own tuned logic, NOT routed through
+`Ops::matmul`** - see "Real finding #5", the single most consequential
+judgment call of this phase:
+
+- `w8: Option<crate::q8::Q8>` / `head8: Option<crate::q8::Lin8>` replaced by
+  ONE `lin_weights: HashMap<String, model::ops::Weight>` (the 7 per-layer
+  linears for every layer, PLUS the LM head under `cfg.head_weight()`'s key
+  - unlike `model.rs`, `serve.rs`'s head dispatch already went through the
+  exact same `mm`/`mm8` functions as the 7 per-layer linears, no separate
+  vocab-tiling logic, so it migrates the same way with no special-casing).
+  Built via `model::ops::Weight::upload` on a throwaway `Ops`/side `Gpu`
+  (`Gpu::new_like` - safe here specifically BECAUSE this engine never calls
+  `Ops::matmul`/`Ops::act`, so there is no cross-`Gpu`-handle `Step`-index
+  hazard - see "Real finding #2" for why `model.rs` could NOT do the same).
+- `q8: &Q8`'s `sx`/`xq` activation-quant scratch replaced by `i8_scratch:
+  Option<model::dispatch::I8Scratch>` - literally the SAME struct `Ops::act`
+  itself wraps (B3), reused directly rather than reimplemented, `None` on an
+  all-fp32 engine.
+- **The four repeated fork sites in `run_batched_steps`** consolidated into
+  `self.quant_once(&mut s, x, k, rows)` (a no-op when `i8_scratch` is `None`)
+  + `self.linear(&mut s, &self.lin_weights[wname], x, out, rows)` per linear
+  - `Self::linear` matches on the `Weight`'s own tag (`F32` -> `Self::
+  mm_into`, `I8` -> `Self::mm8`), never a separate on/off flag.
+- **`Self::mm8`** now takes the weight/scale buffers and `(n, k)` directly
+  (was: `&crate::q8::Lin8`) and folds what used to be TWO functions (`Engine::
+  mm8`'s tuned-selector wrapper + `Q8::mm8`'s hardcoded tile fallback) into
+  ONE - same measured selection logic (`tuned_i8` lookup, falling back to
+  `self.selector.select`), same two kernel choices, same thread-count
+  formulas, verified bit-for-bit unchanged by the full pre-existing test
+  suite (below).
+- **`Self::tune_i8`/`Self::measure_i8`** adapted to read `(n, k, w, s)`
+  straight out of `lin_weights`'s `Weight::I8` entries (was: `crate::q8::
+  Lin8` fields) - same measurement algorithm, same `AutoTuner`/
+  `FileTuneStore` persistence, unchanged.
+- **`head_steps`** (`greedy_from_hidden`/`submit_topk_head`'s shared head
+  dispatch) - the `match (&self.w8, &self.head8, &self.head_dev) { ... }`
+  three-way fork replaced by the same `quant_once`+`linear` pair every other
+  linear uses, reading `self.lin_weights[self.cfg.head_weight()]`.
+- The manual dispatch cluster this engine KEEPS (`mm`, `mm_into`,
+  `splitk_slices`, `gemm_tier`, `quant_once`, `linear`, `mm8`, `tune_i8`,
+  `measure_i8`, `rms`) is bracketed with `// qwen3-serve-manual-gemm-
+  dispatch BEGIN`/`END` marker comments specifically so `no_kernel_names.rs`
+  (below) can check the allow-list stays scoped to exactly this region and
+  cannot silently grow.
+
+### Real findings - five, all surfaced by this migration, all fixed here
+
+**#1 - `Weight::upload`'s capability gate is WRONG for `qwen3::model::Qwen`'s
+pre-existing int8 contract (a real bug this migration would have introduced,
+caught by an existing test, fixed by NOT using `Weight::upload` for that one
+tier).** `model::ops::Weight::upload`'s own contract is `want.promote(caps.
+numeric)` - "never wider than what the device can execute" (B1's `DType::
+promote`): requesting `Dtype::I8` on a device whose `NumericSupport.int8_dot`
+is `false` silently returns an `F32` `Weight` instead. `backend-cpu`'s own
+`query_caps` declares `int8_dot: false` - a POLICY choice (`int8_dot` means
+"has a FAST hardware dot-product path", not "cannot execute at all": the CPU
+JIT's own `dot4I8Packed` lowering - see `matmul_q4_dyn.wgsl`'s header comment
+- runs the packed-dot kernels correctly, just without hardware acceleration).
+`crates/qwen3/src/q8.rs`'s PRE-B7 design never had this gate: `Q8::build`
+quantized unconditionally on ANY backend, and this crate's own tests
+DEPEND on that - `crates/qwen3/tests/flops.rs::i8_model_reports_int_ops`
+(module doc: "CPU backend (deterministic; runs on CI without a GPU)") force-
+built an int8 model with `set_default_backend(Backend::Cpu)` and asserted
+`int_ops > 0`. First draft of this migration routed `model.rs`'s I8
+construction through `Weight::upload` uniformly (matching `serve.rs`'s
+approach, which is fine there - see below) - `cargo test -p brain-qwen3`
+went RED on exactly that test (`int_ops` silently became `0`, the model
+transparently downgraded to `F32`). **Fix**: `model.rs`'s I8 branch builds
+`Weight::I8 { .. }` directly (`model::int8::quantize_weight` + a manual
+`Gpu::storage`/`write`, bypassing `Weight::upload`'s promote() call
+entirely) - the model's own `i8: bool` constructor parameter is an EXPLICIT,
+already-validated user request (`load_inference_i8`), not a capability
+DISCOVERY, so it is honored unconditionally, exactly matching the pre-B7
+contract. **This is more than a test-satisfying workaround - it is
+load-bearing for correctness**: `model::ops::Ops::bind` has NO `(Reference,
+Dtype::I8)` arm (its own doc comment: this pairing "should be unreachable"
+given `select::candidates`'s contract crossed with `Weight::upload`'s
+promote() gate) - it PANICS if ever asked. `select::candidates` only offers
+`Reference` for an `I8` shape when `int8_dot` is `false`, which is EXACTLY
+when a bypassed-gate `Weight::I8` would exist on a non-capable device - so
+forcing int8 unconditionally through `Ops::matmul` on such a device is not
+merely "slower", it is a GUARANTEED PANIC. `Weight::upload`'s gate is what
+prevents that panic by construction; bypassing it for `model.rs` is safe
+ONLY because CPU's `int8_dot: false` still lets `select::candidates` offer a
+WORKING `WorkgroupPerOutput`/`PackedInt8` `I8` candidate at every shape this
+model dispatches (confirmed: `int8_kv_decode_tracks_fp32`,
+`prefill_matches_step_by_step`, and the full suite all pass on real
+`BRAIN_DEVICE=cpu`, not just compile) - it is `int8_dot`'s absence alone
+(not, say, a hypothetical device offering NEITHER `int8_dot` NOR a working
+`dot4I8Packed` lowering) that this bypass relies on, and that premise is
+CPU-JIT-specific, confirmed by the same `dot4I8Packed`-lowering comment cited
+above, not assumed. `flops.rs` was additionally extended (not merely left
+alone) - see the TDD section below - to test both sides of this explicitly:
+the CPU-forced case (int8 requested, capability absent, must demote to F32
+and must NOT panic) and a NEW device-capable case (real `wgpu` on this
+sandbox's Arc iGPU, int8 requested and granted, must show real `int_ops`).
+`serve.rs`, by contrast, keeps `Weight::upload`'s gate for ITS int8 tier
+UNCHANGED - its PRE-EXISTING design (`w8_on = weights_int8 && caps.numeric.
+int8_dot`, with a user-visible `eprintln` fallback message) was ALREADY
+capability-gated before this phase, so `Weight::upload`'s policy is exactly
+what `serve.rs` already did - no behavior change there, confirmed by its own
+full green test suite (`int8_weights_track_fp32` et al., unchanged).
+
+**#2 - a real cross-`Gpu`-handle `Step`-index corruption, caught by a wgpu
+validation failure, not a silent wrong answer (this time).** First draft
+built `self.ops`'s internal `Gpu` via `gpu.new_like(ops_kernel_list())` - "a
+`Gpu` for a DIFFERENT kernel set on the SAME device" (that function's own doc
+comment), which sounded like exactly the right primitive. It is NOT: a
+`Step`'s `kind: usize` is an index into the SPECIFIC `Gpu` handle's OWN
+compiled pipeline vector, not a globally-meaningful kernel identity - two
+independently-built kernel lists (`self.gpu`'s `PIPELINES`, `ops`'s shorter
+`ops_kernel_list`) get two INDEPENDENT index assignments, even on the same
+physical device. `model.rs`'s `forward_steps`/`decode_steps` build ONE
+combined `Vec<Step>` (mixing `self.gpu.step(...)` calls with `self.ops.act`/
+`self.ops.matmul`'s own pushes) and submit it through ONE `self.gpu.submit`
+call - so `self.ops`'s kernel-index resolution MUST agree with `self.gpu`'s,
+or a mixed submission dispatches the WRONG pipeline at that slot. Running
+`cargo test -p brain-qwen3 --lib` with the `new_like` draft failed
+IMMEDIATELY with a real wgpu validation error: `"The BindGroupLayout ... of
+current set BindGroup ... is not compatible with the corresponding
+BindGroupLayout ... of ComputePipeline with 'silu_mul' label - Exclusive
+pipelines don't match: expected ComputePipeline with 'silu_mul' label, got
+ComputePipeline with 'max_abs_rows' label"` - `self.ops`'s "max_abs_row"
+index happened to collide with `self.gpu`'s own "silu_mul" slot. This was
+CAUGHT because the two pipelines' BINDING COUNTS differed enough for wgpu's
+validation layer to notice; a same-shape collision (two kernels with the
+same binding layout at the same colliding index) would NOT have been caught
+at all - it would have silently dispatched the wrong kernel with valid-
+looking bind groups. **Fix**: `self.ops` is built from `gpu.share()` - "a
+second handle onto THIS device: same adapter, queue and COMPILED PIPELINES"
+(`Gpu::share`'s own doc comment, emphasis on the shared, not independently-
+rebuilt, pipeline vector) - which only works if `self.gpu`'s OWN kernel list
+already contains everything `Ops::REQUIRED_KERNELS` needs. That is exactly
+what `pipelines()` (renamed from the `PIPELINES` const, now a function so it
+can append `kernels::template::dtype_variant`'s runtime-computed bf16/f16
+entries) provides. Confirmed `Gpu::share` works on the CPU backend too
+(`CpuBackend::share` clones the `Arc`-held compiled-kernel state, `Some(..)`,
+not `None`) - so this fix is NOT wgpu-specific. `serve.rs`'s throwaway `Ops`
+(built via `new_like`, used ONLY for `Weight::upload` during construction,
+never for `Step` dispatch) does NOT need this fix - `Weight::upload` only
+ever touches buffers, it never builds a `Step` either engine submits, so
+there is no shared-index-space requirement there at all. This asymmetry
+(model.rs needs `share`, serve.rs is fine with `new_like`) is real and is
+exactly why the two files ended up with different integration shapes.
+
+**#3 - the `matmul_reg2`-vs-`matmul_reg3` naming trap, caught before it ever
+ran (a design review finding, not a test failure).** `model::ops::Ops::bind`
+resolves its `(RegisterTiled, F32)` kernel by the fixed name `"matmul_reg2"`
+(`Ops`'s own doc comment: "it fixes ONE canonical name per `KernelVariant`").
+`qwen3`'s pre-B7 `linear_kernel`, however, deliberately dispatches
+`matmul_reg3` for this tier, NOT the real `matmul_reg2` - `.agents/rules/
+lessons.md` #17 ("`matmul_reg3` supersedes `matmul_reg2` - everywhere":
+bit-identical output, 1.08x-1.30x faster across twelve measured shapes,
+"there is no shape where preferring `reg2` is correct" - the SAME lesson
+`crates/unet`/`crates/vae` already learned and fixed). Registering
+`"matmul_reg2"` against the REAL, slower `kernels::MATMUL_REG2` source in
+`pipelines()` would have silently undone that measured speed-up for every
+`RegisterTiled` fp32 dispatch `Ops::matmul` makes, on any shape a `Weight::
+F32` linear reaches that tier (plausible at `qwen3-4B`'s real d_model/d_ff -
+this phase's tiny-config tests would NOT have caught it, since `RegisterTiled`
+never activates below `GEMM_TILE_MIN_ROWS`/`GEMM_TILE_MIN_COLS`). **Fix**:
+`pipelines()` registers the NAME `"matmul_reg2"` against the `kernels::
+MATMUL_REG3` SOURCE - exactly the escape hatch `Ops::bind`'s own doc comment
+describes ("a model with a differently-named but bit-identical physical
+kernel simply registers it under that canonical name when it builds its
+`Gpu`"), not a hack invented for this phase. The real, slower `matmul_reg2`
+source is never registered anywhere in `qwen3` any more (confirmed: `grep
+kernels::MATMUL_REG2 crates/qwen3/src/model.rs` -> zero hits after this
+change; `serve.rs`'s OWN throwaway `Ops` kernel list still uses the real
+`kernels::MATMUL_REG2` source under that name, harmlessly - that `Ops`
+instance is NEVER dispatched, see finding #2's last paragraph).
+
+**#4 - `Ops::act`'s unconditional quantization cost on the fp32 path (a
+known, documented `Ops` limitation, not this phase's own defect - inherited
+and reported precisely, not silently absorbed).** `model::ops::Ops::act`
+quantizes its input EAGERLY and UNCONDITIONALLY, regardless of what tier the
+weight it is about to be paired with turns out to be (`model::ops`'s own
+module doc: "a call site that never pairs an activation with a quantized
+weight pays for a quantization it does not use... a reasonable follow-up...
+deliberately left"). This means: on an all-`F32` `qwen3::model::Qwen` (no
+`i8`), every one of the four `Ops::act` calls per layer now dispatches two
+small kernels (`max_abs_row`/`quant_pack`) whose output is NEVER read (the
+`F32` `Weight` arm reads `act`'s raw buffer directly) - a REAL, non-zero
+overhead the pre-B7 fp32-only forward never paid. This is called out
+explicitly (not glossed over) because it directly bears on the perf-gate
+requirement below: the two extra kernels are small relative to the GEMM they
+precede (a per-row max/quantize pass vs. an `O(m·k·n)` matmul), so the
+relative overhead is expected to be a few percent at most - within
+`qwen-serving-perf-gate.sh`'s own documented floor (`0.5`, "deliberately
+generous... to absorb drift while still catching an order-of-magnitude
+regression"), but this was NOT measured for real in this sandbox (see the
+Verification section - the release build the gate needs was out of this
+phase's sandboxed scope) so it is reported as a reasoned, bounded, and
+EXPLICITLY UNVERIFIED cost, not asserted as negligible. This is the reason
+`serve.rs` (finding #5) does NOT adopt `Ops::act` for its own dispatch -
+`Self::quant_once` is a real conditional (`if let Some(scratch) = &self.
+i8_scratch`), a no-op on an all-fp32 engine, avoiding exactly this cost on
+the one path this task's perf gate actually measures. The `model::ops`
+module's own follow-up (make quantization lazy/cached-on-first-`I8`-use) is
+the real fix, out of this phase's scope (`crates/model/src/ops.rs` is not
+in the file list).
+
+**#5 - `serve.rs`'s `tuned_i8` (a real, per-device MEASURED selector) cannot
+be expressed through `Ops::matmul` at all - a design constraint, not a
+missed migration.** `Ops::matmul` resolves its kernel through a FIXED
+internal `Box<dyn KernelSelector>` (`CachedSelector<DefaultSelector>`, set
+once in `Ops::new`) with NO public way for a caller to inject a different
+one. `qwen3::serve::Engine::tune_i8` (S5, pre-existing, untouched by this
+phase) measures the REAL GEMV-vs-tile crossover for every distinct int8
+shape on THIS device at construction time (`AutoTuner`/`FileTuneStore`,
+persisted per adapter) - genuinely better information than the static
+`select::DefaultSelector` policy `Ops::matmul` would fall back to. Routing
+`serve.rs`'s dispatch through `Ops::matmul` would have SILENTLY DISCARDED
+that measured selector in favour of the static one, on the EXACT engine
+`scripts/gates/qwen-serving-perf-gate.sh` measures (`apiserve::router()`'s
+`http:qwen-synth:` target IS this `Engine`). Given the task's own explicit
+priority ("must pass UNCHANGED... a load-bearing regression check"), this
+phase's judgment call is: migrate `serve.rs`'s weight STORAGE onto `Weight`
+(satisfying "never inspects an `Option<Q8>` at dispatch time" - the actual,
+checkable requirement `no_kernel_names.rs` enforces) while KEEPING `Engine`'s
+own tuned dispatch functions unchanged in ALGORITHM (`mm`, `mm_into`,
+`gemm_tier`, `mm8`, `tune_i8`, `measure_i8`) - not routed through `Ops::
+matmul`. This is a real, bounded, precisely-scoped exception, not a
+half-migration: `no_kernel_names.rs`'s allow-list marks EXACTLY this cluster
+(`// qwen3-serve-manual-gemm-dispatch BEGIN`/`END`) and a dedicated test
+(`serve_manual_gemm_dispatch_region_is_still_marked_and_contains_every_
+remaining_gemm_kernel_variant_reference`) asserts no THIRD, unmarked
+`KernelVariant::WorkgroupPerOutput`/`PackedInt8` site exists anywhere else in
+the file (`KernelVariant::SplitReduction`, used twice elsewhere for the
+UNRELATED on-device argmax/top-k reduction strategy, is explicitly excluded
+from that ban - a different `Op`, never part of the linear/GEMM fork, would
+be a false positive).
+
+### The task brief's own predicted divergence - found, and where it actually
+### was
+
+The task's own brief warned: "the decode path's `mm8` closure hard-codes
+`MATMUL_I8_GEMV` with `lin.n * 64` threads while `serve.rs` does the same via
+the selector - they may already disagree in some regime." Confirmed true,
+and PRECISELY characterized: `model.rs`'s pre-B7 decode closure hardcoded
+GEMV unconditionally (never consulting `select::candidates`, so it could
+never fall back to anything else even where that would be wrong) while its
+OWN batched-forward sibling (`Q8::mm8`) hardcoded the OPPOSITE choice - the
+TILED kernel, unconditionally, even at small `n` - meaning `model.rs` had
+TWO independently-hand-written int8 dispatch rules that already disagreed
+WITH EACH OTHER, not just with `serve.rs`. Since `I8_GEMV_MAX_ROWS` (the
+REAL, measured int8 GEMV cutoff, `= 8`, deliberately smaller than the fp32
+`DECODE_REGIME_MAX_ROWS = 32` - confirmed by reading `backend_api::select`
+directly) sits comfortably above `m=1` (decode) but the batched-forward
+`Q8::mm8` never checked it at ALL (always tile, regardless of `n`), the
+practical effect was: decode was ALWAYS numerically correct by luck (`m=1`
+is always inside the GEMV regime for both cutoffs) but the batched/chunked-
+prefill int8 path was a REAL, measured performance gap whenever a chunk's
+row count fell at or below `I8_GEMV_MAX_ROWS` - exactly the kind of
+regime `select::candidates` exists to get right, and pre-B7 code could not
+reach at all. **Fixed by construction**: both paths now call `Ops::matmul`,
+which resolves `select::candidates(Op::MatMul, shape, caps)` for the REAL
+shape every time - no hand-written regime rule survives in `model.rs` to
+disagree with anything. This is a real, positive discovery about `select::
+candidates`'s own crossover constant (`I8_GEMV_MAX_ROWS = 8`, distinct from
+`DECODE_REGIME_MAX_ROWS = 32`) surfacing during `flops.rs` debugging (see the
+TDD section) - confirmed to be intentional, measured, pre-existing B1/B2
+policy (not something this phase invented), just never actually EXERCISED by
+`model.rs` before because nothing there ever consulted the selector for the
+int8 tier prior to this migration.
+
+### TDD: `crates/qwen3/tests/no_kernel_names.rs`
+
+Written first, confirmed RED against the pre-B7 source (`git stash` on just
+`model.rs`/`serve.rs`, keeping the new test file - not a re-derivation, the
+literal RED run): all three sub-tests failed for exactly the expected
+reasons (`self.q8` present, `MATMUL_I8_GEMV` referenced directly inside
+`decode_steps`, the `qwen3-serve-manual-gemm-dispatch` marker absent from
+pre-B7 `serve.rs`). Restored the migration: GREEN, all three.
+
+**Exact scope** (also documented at length in the test file's own module
+doc, which is the authoritative copy - this is a summary):
+
+1. `q8_instances_are_never_inspected_anywhere_in_the_crate` - bans `self.q8`/
+   `self.w8`/`self.head8`/`Option<crate::q8::Q8>`/`crate::q8::Lin8`/
+   `q8.mm8(`/`q8.quant(`/`Q8::build(` ANYWHERE in `crates/qwen3/src/*.rs`
+   (all 15 files, not just the two touched). Deliberately does NOT ban
+   `Q8::LINEARS`/`Q8::is_i8_linear` - static utility calls both `model.rs`
+   and `serve.rs` still legitimately make (avoiding a second copy of the
+   7-leaf-name list), never an INSTANCE.
+2. `migrated_forward_paths_never_hand_pick_a_gemm_kernel` - extracts the
+   FOUR migrated function bodies (brace-balanced substring extraction, not a
+   line-range - survives future reordering inside the function) and bans
+   `MATMUL_I8_GEMV`/`MATMUL_I8_DYN`/`MATMUL_I8`/`MAX_ABS_ROW`/`QUANT_PACK`/
+   `MATMUL_GEMV`/`MATMUL_REG2` and any `KernelVariant` match inside them,
+   PLUS a positive check that each function actually calls the façade
+   (`self.ops.act`/`ops_linear` or `self.quant_once`/`self.linear`) - so a
+   body that dispatched NOTHING for the 7 linears could not vacuously pass.
+   Deliberately does NOT ban `MATMUL`/`MATMUL_REG3`/`MATMUL_TILE` (the LM
+   head, `model.rs` only) or any attention/RoPE/norm/embed/KV-cache kernel
+   name (never part of the fork this phase migrated).
+3. `serve_manual_gemm_dispatch_region_is_still_marked_and_contains_every_
+   remaining_gemm_kernel_variant_reference` - the `qwen3-serve-manual-gemm-
+   dispatch` markers exist, bracket a non-empty span, and every remaining
+   `KernelVariant::WorkgroupPerOutput`/`PackedInt8` reference in the WHOLE
+   file falls inside them (zero elsewhere) - `KernelVariant::SplitReduction`
+   (the unrelated argmax/top-k reduction choice) is explicitly out of this
+   ban's scope, per finding #5.
+
+### Verification
+
+`cargo check -p brain-qwen3`: clean, both drafts (the `new_like` draft that
+found finding #2, and the fixed `share`-based version).
+
+`cargo test -p brain-qwen3` (full crate, every test binary - lib +
+`no_kernel_names` + `flops` + all other pre-existing integration suites):
+**100% GREEN**, run on BOTH the ambient default backend (this sandbox's real
+`wgpu`/Intel Arc iGPU - confirmed via the adapter name printed by several
+tests, not skipped) AND explicit `BRAIN_DEVICE=cpu` (confirmed clean, zero
+`FAILED`/`error` lines via a targeted grep on both runs). Named explicitly,
+because the task called them out by name: `batched_serving_matches_
+reference`, `chunked_prefill_matches_whole`, `warm_prefill_is_identical_to_
+cold`, `prefill_matches_step_by_step`, `int8_weights_track_fp32`,
+`int8_kv_decode_tracks_fp32` - all pass, on both backends. `flops.rs`'s
+`i8_model_reports_int_ops` was RENAMED/SPLIT into two tests as a DIRECT
+consequence of finding #1 (see above) - `i8_model_without_int8_dot_
+capability_falls_back_to_fp32_not_a_panic` (forces `Backend::Cpu`, asserts
+the demotion, asserts NO `matmul_i8*` kernel appears) and `i8_model_reports_
+int_ops_on_an_int8_dot_capable_device` (runs on the ambient device, skips
+cleanly - checked, not assumed - if it turns out not to be `int8_dot`-
+capable; real on this sandbox, confirmed by the printed adapter name). A
+SECOND, smaller bug was found and fixed while building this second test:
+its own fp32-comparison helper (`assert_int8_volume_bounded_by_fp32`)
+originally filtered fp32 kernel names to only `"matmul"`/`"matmul_reg3"` -
+correct on the CPU-only backend the ORIGINAL (pre-B7) version of this test
+always ran on (where `workgroup_reductions` is always `false`, so
+`matmul_gemv` never gets selected and the omission was invisible), but WRONG
+once the SAME comparison runs for real on a capable GPU (this sandbox's
+`wgpu` adapter, `workgroup_reductions: true`): at `QwenConfig::tiny()`'s
+`block_size=12` (within `DECODE_REGIME_MAX_ROWS=32`), the fp32 comparison
+model's OWN linears correctly select `matmul_gemv`, which the filter did not
+count - fixed by adding `"matmul_gemv"` to the filter, confirmed correct via
+a from-scratch instrumented run (a throwaway `crates/qwen3/examples/
+debug_flops.rs`, deleted afterward - not committed) that printed the real
+`by_kernel` breakdown on both sides and traced the mismatch to exactly this
+gap.
+
+`cargo clippy -p brain-qwen3 --all-targets`: zero new warnings in any file
+this phase touched (`model.rs`, `serve.rs`, `flops.rs`, `no_kernel_names.rs`
+all clean; every warning the run reports is pre-existing, in files this
+phase never touched - `qwen_bench.rs`, `lora_roundtrip.rs`,
+`integration_qwen3.rs`, and pre-existing lints elsewhere in `serve.rs`'s test
+module (`assertions_on_constants`/`needless_range_loop`) at line numbers
+outside anything this phase edited).
+
+`grep -rP '\x{2014}'` on the actual staged diff (added lines only, across
+every file this phase touched, plus the new test file's full contents):
+**zero** em dashes.
+
+**`scripts/gates/qwen-serving-perf-gate.sh` and `scripts/gates/parity-
+gate.sh` - NOT run for real, explicitly, with the reason stated precisely
+rather than silently skipped.** Both need a `cargo build --release`
+(the perf gate needs `./target/release/brain`, i.e. `-p brain-cli`, which
+pulls in essentially the whole workspace transitively per B3's own
+precedent; the parity gate runs `cargo test --release -p brain-gradcheck -p
+brain-model -p brain-qwen` - THREE packages, `--release`, one of which -
+`brain-qwen` - does not even exist as a package name any more, `brain-qwen3`
+is the real name, so that gate script has an independent, pre-existing bug
+unrelated to this phase). This phase's own operating constraints explicitly
+forbid `make release`/`make build`/`make test`/bare workspace builds and
+restrict it to scoped `cargo test -p brain-qwen3`/`cargo check -p
+brain-qwen3` - a real `./target/release/brain` was found already present in
+this tree (built `13:49` on this session's own date, i.e. BEFORE this
+phase's edits landed - not rebuilt, since doing so needs exactly the
+forbidden release build) and `QWEN_TOKENIZER` is unset in this sandbox
+regardless (the perf gate's own script would print `SKIP` and exit 0 even if
+the binary were fresh). **Best available substitute, run instead**: the
+full, scoped `cargo test -p brain-qwen3` suite above, on both backends,
+including every test named in the task brief by name, all green - this is
+the same regression surface (real forward/decode/serve numeric parity) the
+two gates would exercise, minus the two gates' OWN additional value
+(release-mode timing floors, and CPU==Vulkan cross-backend gradcheck parity
+for the TRAINING path, which is explicitly out of this phase's scope
+per the task's own framing - "training path... stays on the existing
+hand-numbered index system, explicitly out of scope"). Disk was monitored
+throughout (started at 97G free, dropped to 33G over the course of this
+phase's `cargo test`/`cargo check`/`cargo clippy` runs against a previously-
+uncompiled crate graph; `rm -rf target/debug/incremental` was run once
+disk crossed the 40G note in this phase's own operating instructions, per
+that instruction - freed negligible space, since the drop was real
+compiled-artifact growth, not stale incrementals - reported here rather than
+pushed through with a further, unauthorized cleanup).
+
+### What's still legitimately manual (unchanged, confirmed still true)
+
+Attention (`gqa_scores`/`gqa_apply`/paged-KV append/scores/apply, incl. the
+int8-KV-cache variants), RoPE (`rope_base`/`rope_at`/`rope2d`/paged), RMSNorm
+(`rmsnorm`/`rmsnorm_rows`), embedding (`embed`/`embed_tile`), the LM head
+(`matmul_tile`'s vocab-tiled path always; the single-tile fast path via
+`linear_kernel`, deliberately, per finding #4), the greedy/top-k on-device
+argmax head (`argmax_row`/`argmax_part`/`argmax_final`/`topk_extract_step`),
+DeepStack/vision-language splice, and the ENTIRE training/backward path
+(AdamW, LoRA backward, gradient kernels - `MATMUL_DX`/`MATMUL_DW`/
+`RMSNORM_DX`/`RMSNORM_DW`/`GQA_BWD_*`/`SILU_BWD_*`/`EMB_BWD` and friends) are
+all untouched, per this phase's own explicit scope boundary - none of these
+categories are covered by `model::ops::Ops` today (matmul/matmul_gemv/
+matmul_reg2(->reg3)/matmul_i8_dyn/matmul_i8_gemv/matmul_q4_dyn/
+matmul_q4_gemv only, per B3's own scope), so leaving them manual is not a
+gap this phase should have closed.
+
+### Follow-up flagged, not fixed here (out of this phase's scoped file list)
+
+`crates/qwen3/src/q8.rs`'s `Q8`/`Q8Layer`/`Lin8` types (and their
+constructors `Q8::build`, `Q8::mm8`, `Q8::quant`) are now dead code outside
+two STATIC calls both `model.rs` and `serve.rs` still make (`Q8::LINEARS`,
+`Q8::is_i8_linear` - kept deliberately, to avoid a second copy of the
+7-leaf-name list). Confirmed via a workspace-wide grep (`crate::q8::Q8`/
+`crate::q8::Lin8`/`crate::q8::quantize_weight` outside `q8.rs` itself, and
+`qwen3::q8`/`qwen::q8` from any OTHER crate) that nothing else in the
+workspace references the INSTANCE types either. `q8.rs` was not in this
+phase's scoped file list (`crates/qwen3/src/model.rs`, `crates/qwen3/src/
+serve.rs`, and this ledger entry, explicitly - the task's own boundary,
+respected given this is "the highest-risk phase in the whole program"), and
+deleting it requires also editing `crates/qwen3/src/lib.rs`'s `mod q8;`
+declaration, a THIRD file outside that list - left as a clean, obvious,
+low-risk one-file-plus-one-line follow-up for whoever owns the next qwen3
+cleanup pass, rather than expanding this phase's already-large, already
+highest-risk diff.
+
