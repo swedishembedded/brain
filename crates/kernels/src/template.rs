@@ -702,6 +702,157 @@ fn rewrite_workgroup_size(src: &str, value: u32) -> Result<String, String> {
     Ok(format!("{}{}{}{}", &src[..at], attr, value, &rest[lit_len..]))
 }
 
+/// Native f16 COMPUTE tier (B11) - a DIFFERENT mechanism from
+/// [`dtype_variant`]/[`dtype_variant_store`]'s storage tier, not a third mode
+/// bolted onto them. The storage tier decodes packed bf16/f16 BYTES to f32
+/// with plain integer/bitcast WGSL - no device feature, runs everywhere
+/// including the CPU JIT, because the arithmetic stays fp32 the whole time.
+/// This tier is the opposite: the WGSL body already does its arithmetic in
+/// the `f16` TYPE, in registers - genuinely narrower ALU ops, not
+/// decode-then-fp32-compute. That requires the WGSL `enable f16;` extension,
+/// gated on `wgpu::Features::SHADER_F16` (requested by `backend-wgpu`
+/// wherever the adapter reports it, a no-op everywhere else).
+///
+/// This function's whole job is the ONE textual step a hand-written native-f16
+/// kernel body needs to become a registrable `Variant`: prepending the
+/// `enable f16;` directive `wgpu`/naga require before any `f16`-typed
+/// declaration is legal, and giving it the same `(name, source)` shape
+/// [`interned`]/[`dtype_variant`] already use, so it flows through the same
+/// kernel-registry/selector machinery as any other kernel. Deliberately NOT a
+/// general rewrite engine (unlike `dtype_variant`, which rewrites an existing
+/// f32 kernel's storage declaration and every load): a correct, general
+/// f32-local-var-to-f16 source transform would have to reason about which
+/// locals are safe to narrow, which is exactly the "third `Ops` dispatch
+/// class" this phase deliberately did not attempt to build. `body` is
+/// expected to already be a complete, self-contained kernel written with
+/// real `f16`-typed locals; this function does not inspect or validate
+/// that, only wraps it.
+///
+/// Deliberately wgpu-only, and the REAL reason is worse than "cannot
+/// compile" - checked, not assumed, and the check found a more dangerous
+/// failure mode than a loud rejection. This repo's CPU JIT (`wgsl-cpu`) has
+/// no `f16` entry in its own `Ty` lattice (`{F32, U32, I32, Bool}`), but its
+/// `Ty::from_scalar` maps EVERY `naga::ScalarKind::Float` - f16 (2-byte) and
+/// f32 (4-byte) alike - to the SAME `Ty::F32` arm, because naga's
+/// `ScalarKind` does not carry width and `from_scalar` never inspects the
+/// scalar's own `width` field. The practical result, confirmed by actually
+/// compiling AND RUNNING [`native_f16_poc::ELEMENTWISE_FMA`] through
+/// `wgsl_cpu::Jit::new`: it compiles WITHOUT ERROR and runs EVERY `f16`
+/// operation as fp32 - e.g. `60000.0 * 1.0 + 6000.0` (which a real f16 ALU
+/// saturates to `+inf`, past f16's 65504 max) comes back as the plain fp32
+/// sum `66000.0`. So the CPU backend is not merely unable to run this tier -
+/// it will silently RUN IT WRONG if ever asked to, which is exactly why
+/// `caps.numeric.f16` staying structurally `false` on `backend-cpu`
+/// (unconditionally, independent of anything wgpu measures - see
+/// `crates/backend-wgpu/tests/native_f16.rs`'s
+/// `numeric_f16_never_entangles_across_backends`) is the ONLY thing standing
+/// between this tier and a silent wrong-answer bug, not any compile-time
+/// rejection this crate could rely on. See
+/// `crates/backend-wgpu/tests/native_f16.rs`'s
+/// `native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
+/// rejected` for the real compile-and-run proof.
+pub fn native_f16_variant(name: &'static str, body: &'static str) -> Variant {
+    let source = format!("enable f16;\n{body}");
+    (name, Box::leak(source.into_boxed_str()))
+}
+
+/// The B11 proof-of-concept native-f16 kernel bodies. Neither is wired into
+/// [`dtype_variant`]/`model::ops::Weight` - see [`native_f16_variant`]'s own
+/// doc comment for why a real `Weight::F16Native` dispatch tier is explicitly
+/// out of this phase's scope. Both need [`native_f16_variant`] to become a
+/// compilable `Variant` (they are not `enable f16;`-prefixed themselves, so
+/// pasting either directly into a kernel list without that wrapper fails to
+/// compile - deliberately, so the `enable` directive can never be forgotten
+/// at a call site).
+pub mod native_f16_poc {
+    /// Correctness PoC: ONE native f16 fused-multiply-add per output element
+    /// (`out = a*b+c`, computed entirely in `f16` registers - the `f32`
+    /// storage arrays are I/O only, converted at the boundary). Deliberately
+    /// the SIMPLEST possible native-arithmetic kernel - an elementwise op,
+    /// not a reduction - so a wrong result can only come from the `f16`
+    /// arithmetic itself, never from a reduction's summation order.
+    pub const ELEMENTWISE_FMA: &str = r#"
+struct Params { n: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read>       a:   array<f32>;
+@group(0) @binding(2) var<storage, read>       b:   array<f32>;
+@group(0) @binding(3) var<storage, read>       c:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    let idx = gid.y * (nwg.x * 64u) + gid.x;
+    if (idx >= p.n) { return; }
+
+    let ah: f16 = f16(a[idx]);
+    let bh: f16 = f16(b[idx]);
+    let ch: f16 = f16(c[idx]);
+    let rh: f16 = ah * bh + ch;
+    out[idx] = f32(rh);
+}
+"#;
+
+    /// Throughput PoC: byte-for-byte the same dependency-free, register-only
+    /// FMA-chain SHAPE `kernels::ROOF_FMA` (`roof_fma.wgsl`) uses to measure
+    /// the silicon's fp32 rate - eight independent accumulators so the
+    /// pipeline is never dependency-stalled, `c`/`d` arriving through the
+    /// uniform (bitcast from `u32`) so nothing constant-folds, `c=d=0.5h`
+    /// (fixed point `1.0h`, no overflow/denormals in steady state) - with
+    /// every accumulator declared `f16` instead of `f32`. Reusing the exact
+    /// shape is deliberate: it is what makes a timing comparison against
+    /// `ROOF_FMA` apples-to-apples (identical dispatch geometry, identical
+    /// amount of arithmetic per thread-iteration; the ONLY difference is the
+    /// register width the shader compiler emits ALU ops for), rather than
+    /// comparing two kernels that also differ in memory traffic or thread
+    /// occupancy for unrelated reasons.
+    pub const ROOF_FMA: &str = r#"
+struct Params {
+    n: u32,      // active threads
+    iters: u32,  // FMA-loop trip count (the caller calibrates this for duration)
+    c: u32,      // bitcast<f32> multiplier, narrowed to f16 on load
+    d: u32,      // bitcast<f32> addend, narrowed to f16 on load
+};
+
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read>       inp: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    let idx = gid.y * (nwg.x * 64u) + gid.x;
+    if (idx >= p.n) { return; }
+
+    let c: f16 = f16(bitcast<f32>(p.c));
+    let d: f16 = f16(bitcast<f32>(p.d));
+    let s: f16 = f16(inp[idx]);
+
+    var a0 = s;
+    var a1 = s + 1.0h;
+    var a2 = s + 2.0h;
+    var a3 = s + 3.0h;
+    var a4 = s + 4.0h;
+    var a5 = s + 5.0h;
+    var a6 = s + 6.0h;
+    var a7 = s + 7.0h;
+
+    for (var i: u32 = 0u; i < p.iters; i = i + 1u) {
+        a0 = a0 * c + d;
+        a1 = a1 * c + d;
+        a2 = a2 * c + d;
+        a3 = a3 * c + d;
+        a4 = a4 * c + d;
+        a5 = a5 * c + d;
+        a6 = a6 * c + d;
+        a7 = a7 * c + d;
+    }
+
+    out[idx] = f32(((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7)));
+}
+"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,5 +1352,26 @@ fn main() {
             // there is no further rounding on the second pack).
             assert_eq!(bf16_pack_bits_wgsl_mirror(decoded), packed, "f={f} decoded={decoded}");
         }
+    }
+
+    /// [`native_f16_variant`] does exactly one textual thing: prepend
+    /// `enable f16;` as its own first line, leaving the body byte-identical
+    /// otherwise - no rewrite of the kind [`dtype_variant`] performs.
+    #[test]
+    fn native_f16_variant_prepends_enable_f16_and_leaves_the_body_untouched() {
+        let (name, src) = native_f16_variant("poc", native_f16_poc::ELEMENTWISE_FMA);
+        assert_eq!(name, "poc");
+        let mut lines = src.lines();
+        assert_eq!(lines.next(), Some("enable f16;"));
+        assert!(src.ends_with(native_f16_poc::ELEMENTWISE_FMA));
+        assert!(!native_f16_poc::ELEMENTWISE_FMA.contains("enable f16;"));
+    }
+
+    #[test]
+    fn native_f16_variant_wraps_the_roof_fma_body_too() {
+        let (name, src) = native_f16_variant("roof_fma_f16", native_f16_poc::ROOF_FMA);
+        assert_eq!(name, "roof_fma_f16");
+        assert!(src.starts_with("enable f16;\n"));
+        assert!(src.contains("var a0 = s;"));
     }
 }

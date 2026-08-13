@@ -30,3 +30,14 @@ web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
 brain-kernels.workspace = true
+# B11 native-f16 tests: an independent host reference for the correctness
+# check (`half::f16`) and a real compile attempt against the CPU JIT's own
+# `Ty` lattice, to CONFIRM (not assume) it has no f16 lowering. Test-only -
+# `wgsl-cpu` has no dependency back on this crate, so this is a leaf edge,
+# not a cycle.
+half.workspace = true
+brain-wgsl-cpu.workspace = true
+# B11: proves `NumericSupport.f16` never entangles across backends (CPU stays
+# `false` regardless of what this backend measures) - test-only, no
+# dependency back onto this crate.
+brain-backend-cpu.workspace = true

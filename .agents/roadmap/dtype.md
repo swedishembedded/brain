@@ -3556,3 +3556,295 @@ deliberate limit of this phase's scope, not an oversight.
   actual production shape mixed-precision training would need, deliberately
   not built here.
 
+## B11 - native f16 compute (final phase)
+
+**Goal, and the plan's own bar for it.** Every prior phase (B4/B5/B9)
+deferred native f16 COMPUTE (`enable f16;`, real `f16`-typed registers) as
+distinct from the storage-tier `#w=bf16`/`#w=f16` decode they actually
+built - "decode to fp32 and compute" needs no device feature; "compute IN
+f16" is a genuine WGSL extension gated on `wgpu::Features::SHADER_F16`. The
+approved plan's own verdict was explicit: on a P40 this phase is *negative
+value* (Pascal's f16 rate is 1/64), so it must be **built and measured, never
+assumed** - the deliverable is machinery plus an honest number, not a
+predetermined outcome either way. This sandbox's real adapter turned out to
+be an Intel Arc iGPU (MTL), not a P40, so the measurement genuinely could
+have gone either direction; it did not go the P40 direction (see Results).
+
+### What was built
+
+1. **`Features::SHADER_F16` requested conditionally**
+   (`crates/backend-wgpu/src/lib.rs`, `from_adapter`, next to the existing
+   `TIMESTAMP_QUERY`/`PIPELINE_CACHE` conditional adds): `if
+   adapter.features().contains(wgpu::Features::SHADER_F16) { required_features
+   |= wgpu::Features::SHADER_F16; }` - a no-op everywhere the adapter lacks
+   it, confirmed by every pre-existing `backend-wgpu` test staying green
+   unmodified (see Verification). A new `WgpuBackend::supports_shader_f16()`
+   reads back what the DEVICE actually got granted (`device.features()`),
+   distinct from `caps().numeric.f16` (see point 3) - a caller deciding
+   whether to even attempt compiling `enable f16;` source asks this, never
+   `caps()`.
+2. **ONE proof-of-concept native-f16 kernel family**
+   (`crates/kernels/src/template.rs`, `native_f16_variant` +
+   `native_f16_poc::{ELEMENTWISE_FMA, ROOF_FMA}`) - deliberately NOT wired
+   into `dtype_variant`/`model::ops::Weight`, matching every prior phase's
+   "façade first, migrate later" precedent (B3/B4/B5/B9/B10 all landed the
+   same way). `native_f16_variant` does exactly one textual thing: prepend
+   `enable f16;` to a kernel body already written with real `f16`-typed
+   locals - a genuinely different mechanism from `dtype_variant`'s storage
+   rewrite (which edits an *existing* f32 declaration/loads; this wraps a
+   *hand-written* native-f16 body, since a correct general f32-local-to-f16
+   rewrite would need to reason about which locals are safe to narrow - the
+   "third `Ops` dispatch class" explicitly out of scope). Two bodies:
+   `ELEMENTWISE_FMA` (`out = f16(a)*f16(b)+f16(c)`, one native FMA per
+   element - the correctness PoC) and `ROOF_FMA` (byte-for-byte the same
+   dependency-free, eight-accumulator, register-only FMA-chain shape
+   `roof_fma.wgsl` uses for the SILICON's fp32 rate, with every accumulator
+   declared `f16` instead - the throughput PoC, chosen specifically so a
+   timing comparison against `kernels::ROOF_FMA` is apples-to-apples:
+   identical dispatch geometry and arithmetic volume, only the register width
+   differs).
+3. **The roofline gate** (`crates/backend-wgpu/src/lib.rs`,
+   `WgpuBackend::f16_worth_enabling` + `F16_COMPUTE_MIN_SPEEDUP = 1.2`): a
+   pure function over two already-measured times, `f32_secs / f16_secs >=
+   1.2` - a real 20% margin, not merely "not slower", chosen because two
+   dispatches of the identical shape on an idle device already vary by
+   several percent from scheduling/driver/clock noise (documented inline).
+   Fails closed on non-finite/non-positive inputs. Lives in `backend-wgpu`,
+   not `crates/gpu-core/src/roof.rs`: `roof.rs` exists and was read in full,
+   but its `Roofs`/`measure_compute`/`best_of` machinery is scoped to the
+   device's own fp32/int8 SILICON roofline (one measurement per adapter,
+   answering "% of peak"), not an A/B comparison between two named kernel
+   variants of a NEW capability tier - and structurally `backend-wgpu`
+   cannot depend on `gpu-core` (the dependency runs the other way: `gpu-core`
+   depends on `backend-wgpu`), so reusing `roof.rs`'s private `best_of`
+   directly was never possible for a backend-local capability decision. Per
+   the phase brief's own explicit allowance ("if [roof.rs] doesn't fit, this
+   is a sign to scope down and measure inline in a test"), the actual timing
+   is a self-calibrating `calibrated_seconds_per_iter` reimplemented locally
+   in `crates/backend-wgpu/tests/native_f16.rs`, mirroring
+   `roof::measure_compute`'s own discipline (grow `iters` until the timed
+   region clears a floor, `poll_wait`-bracketed so host-side recording is
+   never mistaken for device time).
+4. **`caps().numeric.f16` stays a hard-coded `false` in production
+   `query_caps`, deliberately not wired to the measurement.** This mirrors an
+   EXISTING precedent in the very same function: `peak_bandwidth_gbs`/
+   `peak_gflops` also stay `None` at construction and are filled in LATER,
+   lazily, by `gpu_core::roof::ensure()` - never measured inline in
+   `query_caps`, which runs on every device construction and must stay cheap.
+   A roofline-grade native-f16-vs-f32 comparison (calibrated dispatches,
+   several hundred ms to a few seconds per the real runs below) is exactly
+   the kind of cost `roof.rs`'s own doc comment says does not belong on that
+   hot path. Wiring `numeric.f16` to a real measurement the way
+   `peak_bandwidth_gbs`/`peak_gflops` eventually could is a natural,
+   named follow-up (see below) - not built here, per the same
+   "prove the capability, defer full wiring" landing B3/B4/B5/B9/B10 all
+   chose.
+
+### Correctness - real hardware, both directions checked
+
+`native_f16_elementwise_fma_matches_f32_reference_on_real_gpu`
+(`crates/backend-wgpu/tests/native_f16.rs`), run for real on this sandbox's
+adapter (`Intel(R) Arc(tm) Graphics (MTL) (IntegratedGpu, Vulkan)`, printed on
+every run, `MOE_SKIP_GPU_TESTS` never set), skips cleanly if
+`supports_shader_f16()` is false (checked here, not assumed available).
+Compares the native-f16 elementwise FMA kernel against an INDEPENDENT host
+reference (`half::f16`'s own arithmetic, a second implementation from the
+shader's) across the same three magnitude regimes B5's ledger established for
+the storage-tier decode:
+
+| case | got | want | verdict |
+|---|---|---|---|
+| subnormal (`6e-6`) | `0` | `6.02e-6` | **flushed to zero** |
+| negative subnormal | `0` | `-6.02e-6` | **flushed to zero** |
+| overflow (`60000*1+6000`) | `+inf` | `+inf` | exact (correct IEEE saturation) |
+| mid-range (`1.5*-2.25+0.75`) | `-2.625` | `-2.625` | exact |
+| zero | `0` | `0` | exact |
+| mid-range (`100.25*4-1.5`) | `399.5` | `399.5` | exact |
+
+**A real finding, not assumed either way**: this adapter's native f16 ALU
+**flushes subnormal results to zero**, the same class of hardware behaviour
+B5's ledger found in the storage-tier DECODE path (there, a different root
+cause - an intermediate bit pattern that happened to be a subnormal f32 -
+but the same underlying fact: this GPU's compute-shader path treats
+subnormal float OPERANDS/RESULTS as zero). The correctness test's tolerance
+logic accepts either the exact subnormal value or a flush to zero for a
+target in that magnitude range (documented inline) precisely because both
+are legitimate ALU behaviours and this sandbox's real answer is FTZ - a
+`Weight::F16Native`-style follow-up computing near-zero activations/gradients
+in native f16 would need to know this, exactly as B5's own storage-tier
+finding was load-bearing for anyone decoding near-zero weights.
+
+**A second, more serious finding from actually trying to verify the phase
+brief's own "CPU JIT cannot lower `enable f16;`" claim rather than assuming
+it** (`native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
+rejected`): the claim, taken literally, is **false** on this toolchain, and
+the truth is more dangerous than what was assumed. `wgsl_cpu::Jit::new`
+**succeeds** on the native-f16 kernel source - naga's `ScalarKind::Float`
+does not carry bit width, so `wgsl-cpu`'s `Ty::from_scalar` maps f16 (width
+2) and f32 (width 4) to the identical `Ty::F32` arm, and the CPU JIT silently
+executes every `f16` operation as plain fp32. Proven numerically, not just by
+inspecting the enum: dispatching the overflow case (`60000.0*1.0+6000.0`,
+which a real f16 ALU must saturate to `+inf`) through the CPU JIT returns the
+**un-saturated fp32 sum `66000.0`** - a silently WRONG answer, not a compile
+error. This means the CPU backend is not merely *unable* to run this tier -
+it will *silently run it wrong* if a dispatch ever reaches it by mistake.
+Consequently `caps.numeric.f16` staying unconditionally `false` on
+`backend-cpu` is **structural insurance against a real correctness bug**, not
+redundant belt-and-suspenders: nothing in this toolchain will refuse a
+native-f16 dispatch at the CPU JIT itself, so the capability gate is the
+*only* thing standing between this tier and a wrong answer, not a compiler
+error a future caller could lean on instead. `numeric_f16_never_entangles_
+across_backends` checks this directly against both backends' REAL, live
+`caps()` (`backend_cpu::CpuBackend::caps().numeric.f16 == false` and
+`backend_wgpu::WgpuBackend::caps().numeric.f16 == false`, independent of
+anything this phase measured), so a future change that DOES wire the wgpu
+measurement into `numeric.f16` is forced to keep the CPU side false rather
+than silently starting to entangle the two backends' capability structs.
+`template.rs`'s own doc comment on `native_f16_variant` was written to match
+this corrected finding, not the assumption the phase brief started from.
+
+### The roofline measurement - the actual heart of this phase
+
+`native_f16_roof_fma_throughput_vs_f32_one_shot`, real hardware, same
+adapter, `kernels::ROOF_FMA` (fp32) vs `native_f16_poc::ROOF_FMA` wrapped
+through `native_f16_variant` (native f16), identical `THREADS = 1<<18`
+dispatch geometry, both self-calibrated to clear a 50ms timed-region floor
+(best-of-3, `poll_wait`-bracketed). Run six times across this session (this
+is a shared sandbox; run-to-run variance is real, not a bug, and is reported
+rather than hidden behind a single cherry-picked number):
+
+```
+fp32 15477 ns/iter, f16  8421 ns/iter, ratio 1.838x
+fp32 10252 ns/iter, f16  5536 ns/iter, ratio 1.852x
+fp32 22836 ns/iter, f16  6068 ns/iter, ratio 3.763x
+fp32 21216 ns/iter, f16  6649 ns/iter, ratio 3.191x
+fp32  2881 ns/iter, f16  1304 ns/iter, ratio 2.210x
+fp32 23782 ns/iter, f16 17196 ns/iter, ratio 1.383x
+```
+
+Ratio range **1.38x - 3.76x**, median around **1.9x**, `f16_worth_enabling`
+(threshold `1.2x`) said **`true` on every single run**, including the
+noisiest one. This is a real, repeated margin, not a one-shot fluke sitting
+on the threshold's edge.
+
+**What this means for whether native f16 compute is worth it on this
+hardware**: yes, clearly, on this Intel Arc iGPU (MTL) - the plan's own
+P40-pessimistic framing does not apply here, exactly as the task predicted
+might be the case for genuinely modern silicon. `NumericSupport.f16` did
+**not** get flipped to `true` in production `query_caps` this phase (see
+point 4 above for why - the parallel to `peak_bandwidth_gbs`/`peak_gflops`
+staying `None` until measured lazily, not a disagreement with the
+measurement's own verdict).
+
+### Confirming this is a proof-of-concept landing, not a production dispatch tier
+
+No `Weight::F16Native` variant, no `Ops::bind` arm, no `model::ops` change of
+any kind - `crates/model` was not touched this phase. The two PoC kernel
+bodies are reachable only via `kernels::template::native_f16_poc` and
+`native_f16_variant`, exercised only by this phase's own test file. A real
+follow-up wiring this into `Ops`/`Weight` for production use would need, at
+minimum: (a) deciding whether `numeric.f16` becomes a real, lazily-measured-
+and-cached fact (the `gpu_core::roof`-style follow-up sketched in point 4),
+(b) a THIRD `Ops` dispatch class beyond today's "read-decode"
+(`dtype_variant`) and "read-modify-write pack" (`dtype_variant_store`), since
+neither existing mechanism fits "compute natively in the narrower type" -
+the same scope call B3's own module doc already anticipated when it said a
+`BF16`/`F16` `Weight` arm was deliberately absent until "the kernel
+templater" grew this capability, (c) extending the templated kernel set
+past the two hand-written PoC bodies to something a real linear layer
+actually dispatches (`matmul_gemv`/`matmul_reg3`-shaped, not a synthetic FMA
+chain or a single elementwise op), and (d) deciding what a caller does about
+this phase's own subnormal-flush-to-zero finding for near-zero
+activations/gradients. None of that is attempted here, matching every prior
+phase in this program's own explicit "façade first, migrate later" landing.
+
+### Verification (all scoped, no `make release`/`make build`/`make test`/bare
+### workspace build)
+
+- `cargo test -p brain-kernels` - **32/32 passed** (30 pre-existing +
+  `native_f16_variant_prepends_enable_f16_and_leaves_the_body_untouched`,
+  `native_f16_variant_wraps_the_roof_fma_body_too`).
+- `cargo test -p brain-backend-wgpu` - **5/5 passed** in the new
+  `tests/native_f16.rs` (`f16_worth_enabling_gate_logic`,
+  `native_f16_elementwise_fma_matches_f32_reference_on_real_gpu`,
+  `native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
+  rejected`, `numeric_f16_never_entangles_across_backends`,
+  `native_f16_roof_fma_throughput_vs_f32_one_shot`), plus the pre-existing
+  `bench_conv*` suites unaffected (still `#[ignore]`d by default). **Both GPU
+  and CPU paths confirmed real, not skipped**: every GPU test printed the
+  real adapter name; the CPU-JIT test actually compiled and ran a dispatch
+  through `backend_cpu::CpuBackend`, not just `wgsl_cpu::Jit::new`'s
+  `Result`.
+- `cargo build -p brain-gpu-core` - clean (this phase read `roof.rs` in full
+  but made no changes to it - see the gate-placement reasoning above).
+- `cargo test -p brain-backend-api --lib` - **27/27 passed**, unchanged
+  (this phase confirmed `NumericSupport`'s `f16` field and
+  `DType::promote`'s existing `f16`-aware match arm, both already built in
+  B1, were sufficient - no `storage_dt`/`read_dt` trait method or any other
+  `backend-api` change was needed).
+- `cargo clippy -p brain-backend-wgpu -p brain-kernels --all-targets
+  --no-deps` - **zero new warnings** (the 4 `doc_lazy_continuation` hits
+  `template.rs` reports are pre-existing - confirmed via `git stash`,
+  identical count before this phase's edits - at different line numbers only
+  because this phase's own additions shifted the file; two warnings this
+  phase's OWN draft test code introduced, `doc_lazy_continuation` from a
+  paragraph accidentally starting a line with `- ` and an `assert_eq!(...,
+  true)`, were found and fixed before considering the phase done, not left).
+- `grep -rP '\x{2014}'` on the actual staged diff (added lines only, across
+  every file this phase touched, plus the new test file's full contents) -
+  **zero** em dashes (the first draft introduced roughly 30, all converted
+  to plain hyphens with `perl -CSD -pi -e 's/\x{2014}/-/g'` before checking
+  again, per this program's own repeatedly-stated lesson about this exact
+  hook).
+- Disk/build scope: only `cargo test -p brain-kernels`, `cargo test -p
+  brain-backend-wgpu`, `cargo build -p brain-gpu-core`, and `cargo test -p
+  brain-backend-api --lib` were run - no `make release`/`make build`/`make
+  test`/bare workspace build.
+
+### What's left (a real follow-up, not this phase's job)
+
+- Wiring `numeric.f16` to a real, lazily-measured-and-cached fact (mirroring
+  `gpu_core::roof`'s own "measured once, cached per adapter" discipline for
+  `peak_bandwidth_gbs`/`peak_gflops`) rather than a permanent `false` -
+  needs `DeviceCaps`'s numeric struct to become fillable-after-construction
+  the same way those two fields already are, which this phase did not
+  attempt.
+- A production `Weight::F16Native`/`Ops` dispatch tier - the third dispatch
+  class described above, plus real templated linear-layer kernels (not the
+  synthetic FMA-chain/single-FMA PoC bodies this phase wrote), plus a
+  decision about the subnormal-flush-to-zero finding.
+- Whether `wgsl-cpu` should grow real f16 awareness (an actual `Ty::F16`
+  entry, distinguishing it from `Ty::F32`) so it can either correctly execute
+  narrower arithmetic or - more consistent with this program's own
+  "CPU/browser get the portable baseline" philosophy - reject `enable f16;`
+  outright instead of silently mis-executing it. Flagged as a real gap this
+  phase found, not fixed here (`crates/wgsl-cpu` was not in this phase's
+  scoped file list).
+- `backend-vulkan`'s own `SHADER_F16`-equivalent feature request and
+  `numeric.f16` measurement - out of scope, matching every prior phase's own
+  wgpu-only landing for a new numeric tier (B4/B5 both left `backend-vulkan`
+  untouched for the same reason).
+- Native BF16 compute (`NumericSupport.bf16`) - B5's own ledger linked f16
+  and bf16 native compute together as "both deferred to B11"; this phase's
+  title and scope were f16 specifically, so bf16 native compute is UNCHANGED
+  (still `false`, still unmeasured) and remains open. Unlike f16, WGSL has no
+  native `bf16` scalar type at all today (no `enable bf16;` extension exists
+  in the language) - so a future bf16-compute phase would need naga/WGSL to
+  grow the type first, a real prerequisite this phase's own f16 work did not
+  need to solve.
+
+### Program-closing consistency pass
+
+Read `.agents/roadmap/dtype.md` in full, start to end, as the closing phase's
+own explicit instruction requires. Every phase's own "deferred to B11"/
+"native f16 compute...B11" forward reference (B1's promotion-machinery
+summary, B5's `f16_storage` vs `f16` distinction, B5's own closing "still
+deferred to B11" note, B9's "unrelated to the storage-tier decode above")
+reads correctly now that B11 exists and landed as a measurement-gated
+proof-of-concept, not a production tier - none of them claimed B11 would ship
+a production dispatch path, so none contradict what actually landed. No
+dangling "TODO: see B11" text was found (grepped `B11` above; every hit is a
+deferral that this entry now resolves). No other structural inconsistency
+found in the ledger itself - this pass does not re-verify any prior phase's
+own numeric claims, per this phase's own explicit scope limit.
+

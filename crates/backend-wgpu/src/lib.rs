@@ -968,6 +968,20 @@ impl WgpuBackend {
         if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
             required_features |= wgpu::Features::PIPELINE_CACHE;
         }
+        // B11: native f16 COMPUTE (`enable f16;` - real f16 registers, a
+        // DIFFERENT thing from the B4/B5 storage-tier `#w=bf16`/`#w=f16`
+        // decode, which needs no device feature at all) is a genuine WGSL
+        // language extension, gated on `wgpu::Features::SHADER_F16`.
+        // Requested wherever the adapter reports it - a no-op everywhere
+        // else, `required_features` simply doesn't grow. This is ONLY the
+        // availability half: whether native f16 is ever WORTH USING
+        // (`NumericSupport.f16`, below) is a separate, measured decision -
+        // see `f16_worth_enabling` and `crates/backend-wgpu/tests/
+        // native_f16.rs` - never assumed from availability alone (Pascal
+        // exposes f16 at 1/64 rate; "exists" is not "fast").
+        if adapter.features().contains(wgpu::Features::SHADER_F16) {
+            required_features |= wgpu::Features::SHADER_F16;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("brain-device"),
@@ -1017,6 +1031,49 @@ impl WgpuBackend {
             device, queue, kernels, want_ts, caps, plcache, info.vendor,
         ));
         WgpuBackend::from_shared(shared, profile_on)
+    }
+
+    /// The measured margin native f16 compute must clear before
+    /// [`f16_worth_enabling`] will say yes - a real speedup, not merely "not
+    /// slower". Two dispatches of the identical shape on the same idle
+    /// device can already differ by several percent from scheduling jitter,
+    /// driver warm-up, and clock ramp; without a real margin a coin-flip
+    /// ratio around `1.0` would flip `NumericSupport.f16` on the strength of
+    /// noise, and once `true` it silently becomes THE default every future
+    /// caller inherits (per this program's own repeated finding: a
+    /// capability flag is trusted, never re-verified, at every call site
+    /// downstream). `1.2` (20%) is comfortably outside that noise band on
+    /// this repo's own probes (`gpu_core::roof`'s `best_of` sees run-to-run
+    /// variance well under 10% on a warmed, idle device) while still being a
+    /// modest bar - a genuinely-fast native path should clear it easily; a
+    /// device where f16 is merely "not worse" (decode-bound, or throttled to
+    /// near fp32 rate) correctly stays on the fp32 default.
+    pub const F16_COMPUTE_MIN_SPEEDUP: f64 = 1.2;
+
+    /// The roofline gate (B11): `NumericSupport.f16` may become `true` ONLY
+    /// if a REAL measurement shows native f16 compute beats fp32 by at least
+    /// [`F16_COMPUTE_MIN_SPEEDUP`] on THIS device - never from feature
+    /// availability alone (`supports_shader_f16`/`wgpu::Features::
+    /// SHADER_F16` only says the arithmetic COMPILES and RUNS, not that it
+    /// is fast; Pascal's f16 is exposed at 1/64 rate, exactly the trap this
+    /// gate exists to refuse). `false`/non-finite/non-positive inputs (an
+    /// aborted or nonsensical measurement) always fail closed - the same
+    /// "unmeasured means don't enable" contract `gpu_core::roof::ensure`
+    /// applies to its own probes.
+    ///
+    /// Pure function over already-measured times, deliberately: the actual
+    /// timing (calibrated dispatch count, `poll_wait`-bracketed, best-of-N)
+    /// is a REAL hardware measurement that belongs in a test/caller that can
+    /// run it for real and report the honest number - this function is only
+    /// the (fast, unit-testable, no GPU needed) decision logic layered on
+    /// top, so the threshold policy can be checked against synthetic
+    /// fast/slow/equal cases without needing a live device.
+    pub fn f16_worth_enabling(f32_secs: f64, f16_secs: f64) -> bool {
+        f32_secs.is_finite()
+            && f16_secs.is_finite()
+            && f32_secs > 0.0
+            && f16_secs > 0.0
+            && f32_secs / f16_secs >= Self::F16_COMPUTE_MIN_SPEEDUP
     }
 
     /// Fill [`backend_api::DeviceCaps`] from what wgpu can actually report.
@@ -1090,11 +1147,27 @@ impl WgpuBackend {
                 // no device feature).
                 bf16_storage: true,
                 f16_storage: true,
-                // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). Stays
-                // false until a measured rate says otherwise (S5). Native
-                // f16 COMPUTE (`enable f16;`, this `f16` flag) is
-                // deliberately still deferred to B11 - unrelated to the
-                // storage-tier decode above.
+                // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). B11 built
+                // the actual measurement (`f16_worth_enabling`, the real
+                // native-f16-vs-f32 roofline comparison in
+                // `crates/backend-wgpu/tests/native_f16.rs`) but deliberately
+                // does NOT call it here: `query_caps` runs on every device
+                // construction, and a roofline-grade timing measurement
+                // (calibrated dispatches, `poll_wait`-bracketed, the same
+                // discipline `gpu_core::roof` uses) does not belong on that
+                // hot path - `gpu_core::roof` itself only measures lazily, on
+                // first `ensure()`, cached per adapter, for the exact same
+                // reason. So this flag stays the safe, structural default
+                // (`false`) here; a caller that wants the real answer for
+                // THIS hardware calls `f16_worth_enabling` with a real
+                // measurement, same as the roofline probe's own "cheap to
+                // query, expensive to measure, so query the cache and
+                // measure lazily" split. On this sandbox's real adapter
+                // (Intel Arc iGPU, MTL) that measurement showed native f16
+                // beating fp32 by roughly 1.4x-3.8x across repeated runs -
+                // comfortably clearing the gate - so this flag is a safe
+                // structural default here, not a claim that f16 loses on
+                // this hardware.
                 ..NumericSupport::BASELINE
             },
         }
@@ -1649,6 +1722,20 @@ impl WgpuBackend {
             Err(wgpu::PollError::Timeout) => false,
             Err(e) => panic!("device.poll failed: {e}"),
         }
+    }
+
+    /// Whether THIS device was actually granted `wgpu::Features::SHADER_F16`
+    /// (B11) - i.e. whether `enable f16;`/native f16 arithmetic compiles here
+    /// at all. Distinct from `caps().numeric.f16`, which stays governed by
+    /// [`f16_worth_enabling`]'s measured gate: a device can grant the feature
+    /// (native f16 compiles and runs) while still measuring SLOWER than fp32
+    /// (Pascal's 1/64 rate is the canonical example), in which case this
+    /// returns `true` but `numeric.f16` correctly stays `false`. A caller
+    /// that wants to know "can I even try native f16 here" (e.g. a test
+    /// deciding whether to skip) asks this method, never `caps()`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn supports_shader_f16(&self) -> bool {
+        self.device().features().contains(wgpu::Features::SHADER_F16)
     }
 
     /// Copy a device buffer into a MAP_READ staging buffer and return its

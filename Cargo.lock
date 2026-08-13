@@ -460,9 +460,12 @@ version = "0.1.1"
 dependencies = [
  "ash",
  "brain-backend-api",
+ "brain-backend-cpu",
  "brain-kernels",
+ "brain-wgsl-cpu",
  "bytemuck",
  "futures-channel",
+ "half",
  "pollster",
  "web-sys",
  "wgpu",
