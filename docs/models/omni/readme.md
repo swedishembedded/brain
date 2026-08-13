@@ -42,9 +42,11 @@ the current HF/vLLM-recognized tag for this scheme (not GGUF's `Q8_0`, a
 different, block-quantized format). Its weights live in VRAM across calls,
 layer-sharded across however many GPUs their real per-layer byte cost needs.
 It takes the same chat request as `brain/omni` (text only - no audio/image/
-video and no `speak`), and on two 24 GB P40s it is about **25x faster per
-token**: measured on the real checkpoint, 2.3 s/token against 57.6 s/token for
-the streaming path above, on the same prompt with the same output.
+video and no `speak`), and is dramatically faster per token than the
+streaming path above, on the same prompt with the same output, since the
+weights never leave VRAM between calls. Measure the actual ratio on your own
+hardware with `brain perf run`; a number here would describe one specific
+machine at one point in time.
 
 It wants a brain-native W8A16 checkpoint, which is not the format you
 downloaded - convert once (~8 minutes, 66 GB in, 33.6 GB out):
@@ -95,10 +97,10 @@ rows are read on demand.
 Two limits worth knowing before you point it at real weights:
 
 - **Use `--device vulkan`.** On the default wgpu backend a non-ReBAR Pascal
-  card holds ~2x each uploaded buffer resident - measured, not inferred
-  (`crates/gpu-core/tests/vram_overhead.rs`). brain's own Vulkan backend
-  measures a clean 1.00x. At the real Thinker shape the difference decides
-  whether the model fits two 24 GB cards at all.
+  card holds roughly double each uploaded buffer resident, measured by the
+  committed regression test `crates/gpu-core/tests/vram_overhead.rs`; brain's
+  own Vulkan backend does not carry that overhead. At the real Thinker shape
+  the difference decides whether the model fits two 24 GB cards at all.
 - **This path is Thinker text only.** It has no multimodal splice and no
   `speak`, so an image, an audio clip or a spoken reply still needs
   `brain/omni`. It IS on `/v1/chat/completions`, `/v1/messages` and D-Bus with
@@ -173,9 +175,10 @@ speech, image and video input over both the D-Bus and HTTP transports.
   context).
 - On `brain/omni`, weights stream from the checkpoint per generated token
   rather than living resident, so throughput is validation-tier, not
-  production-grade - measured on two P40s, 89% of a request is re-reading the
-  37 of 48 layers that do not fit (343 GiB per 4 tokens), against 2% in
-  kernels. The GPU-resident alternative is
+  production-grade - the large majority of a request's wall time is
+  re-reading the layers that do not fit in VRAM, not kernel execution.
+  Measure the actual split on your hardware with `brain perf run`. The
+  GPU-resident alternative is
   `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` (see "GPU residency" above),
   which keeps the chat surface and trades only the multimodal/`speak` half
   for weights that stay on the cards.
