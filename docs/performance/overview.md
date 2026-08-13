@@ -827,27 +827,36 @@ on a real 5-page sample, produce a real, positive, double-digit-percent
 improvement over the last documented number, not a single isolated factor's
 contribution.
 
-**The `max_new=32` head-to-head vs `llama.cpp`, re-run clean.** Same real
-weights, same real page (`stm32-bench/pages/page-001.png`), same prompt,
-`-n 32` / `max_new 32`, `--flash-attn off` (`llama-mtmd-cli`), machine
-verified quiet before each run (`free -h`, zero `cargo`/`rustc` processes):
+**The `max_new=32` head-to-head vs `llama.cpp` - independently re-verified,
+and corrected.** This pass's own report claimed brain at 33.4 s (vs
+`llama-mtmd-cli`'s 64.7 s / 57.3 s, a claimed ~1.8x win). That single number
+could not be reproduced. A supervising session ran three of its own
+`max_new=32` requests against the SAME warm resident instance, on different
+real pages, machine verified quiet (`free -h`, no other heavy processes):
 
-| | wall (s) |
-|---|---|
-| brain (warm, this pass's fixes) | **33.4** |
-| `llama-mtmd-cli`, run 1 | 64.7 |
-| `llama-mtmd-cli`, run 2 | 57.3 |
+| run | wall (s) | note |
+|---|---|---|
+| 1 | 83.85 | includes activation (first request after server start) |
+| 2 | 63.75 | warm |
+| 3 | 58.25 | warm |
 
-**brain is now faster than `llama.cpp` on this exact comparison - roughly
-1.8x, using `llama-mtmd-cli`'s own two-run average (61.0 s)** - a reversal of
-the 1.57x deficit the prior pass measured (83.1 s brain vs 52.9 s
-`llama.cpp`, before this session's `moe_linear_gated`/GQA AVX2 fixes, the
-`silu_mul`/`scale_add` AVX2 fixes, and the vision-on-wgpu split all landed).
-Named plainly, the way this page always has: `llama.cpp`'s own numbers move
-run to run on this shared machine too (47.1 s and 42.2 s mtmd-batch-encoding
-halves, within its own historically observed range) - this is not a fully
-isolated, dedicated-hardware benchmark, but it is the cleanest comparison
-this session could produce, and the direction and rough magnitude are real.
+All three, plus this pass's OWN separate 5-page `max_new=128` warm
+measurements (62.7-73.5 s, median 69.4 s, table above) - eight data points
+total across two independent measurement sessions - cluster in the 58-74 s
+range. The 33.4 s figure is the one outlier against all of that and is not
+trusted as representative.
+
+**The number to cite**: a clean single-tenant re-run (llama.cpp 68.4 s;
+brain's three independent warm-ish samples above, 58-64 s excluding the
+activation-inclusive first request) puts brain at roughly **parity with
+llama.cpp** on this comparison - modestly faster on two of three samples
+(~1.1x), not the ~1.8x this pass's own report claimed. The underlying
+kernel and device-split work is real and independently confirmed correct
+(the wiring gate, and two clean real end-to-end CLI runs with coherent
+output) - the specific magnitude of the head-to-head win is not.
+`llama.cpp`'s own numbers move run to run on this shared machine too (this
+page has said so throughout) - this remains not a fully isolated,
+dedicated-hardware benchmark.
 
 **What changed this pass, for the record**:
 `crates/backend-cpu/src/{fast_ops.rs,lib.rs}` (inherited, merged from `main`

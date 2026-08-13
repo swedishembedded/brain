@@ -2136,15 +2136,29 @@ token fails loudly.
       split TOGETHER (both landed together this pass; not cleanly
       separable).
 
-      **The `max_new=32` head-to-head vs `llama.cpp`, re-run clean**, same
-      real weights, same real page, same prompt, `-n 32`, `--flash-attn
-      off`, machine verified quiet before each run: brain **33.4 s** vs
-      `llama-mtmd-cli` 64.7 s and 57.3 s (two runs, average 61.0 s).
-      **brain is now roughly 1.8x FASTER than `llama.cpp` on this
-      comparison** - a reversal of the 1.57x deficit the prior pass measured
-      (83.1 s brain vs 52.9 s `llama.cpp`), before this session's
-      `moe_linear_gated`/GQA AVX2 fixes, the `silu_mul`/`scale_add` AVX2
-      fixes, and the vision-on-wgpu split all landed.
+      **The `max_new=32` head-to-head vs `llama.cpp`, INDEPENDENTLY
+      RE-VERIFIED and corrected.** This pass's own report claimed brain at
+      33.4 s (vs `llama-mtmd-cli`'s 64.7 s / 57.3 s, a claimed ~1.8x win).
+      That single number could not be reproduced: a supervising session ran
+      three of its own `max_new=32` requests against the SAME warm resident
+      instance, on different real pages, machine verified quiet
+      (`free -h`, no other heavy processes) - 83.85 s (first request,
+      includes activation), 63.75 s, 58.25 s. All three, plus this pass's
+      OWN separate 5-page `max_new=128` warm measurements (62.7-73.5 s,
+      median 69.4 s) - eight data points total across two independent
+      measurement sessions - cluster in the 58-74 s range. The 33.4 s figure
+      is the one outlier against all of that and is NOT trusted as
+      representative; it is left here as a recorded, unreplicated data point,
+      not the number to cite.
+
+      **The number to cite**: a clean re-run, same conditions (llama.cpp
+      68.4 s single run this time; brain's own three independent warm-ish
+      samples above) puts brain at roughly PARITY with `llama.cpp` on this
+      comparison - modestly faster on two of three samples (58-64 s vs
+      68.4 s, ~1.1x), not the ~1.8x this pass's own report claimed. The
+      underlying kernel/device-split work is real and independently
+      confirmed correct (see below); the specific magnitude of the
+      head-to-head win is not.
 
       **What changed this pass**: `crates/backend-cpu/src/{fast_ops.rs,
       lib.rs}` (inherited via `main`, the `silu_mul`/`scale_add` AVX2 fast
