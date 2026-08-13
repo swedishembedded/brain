@@ -3,7 +3,7 @@
 
 //! Qwen3-VL / Qwen3-Omni ViT vision tower + main `PatchMerger` as an
 //! OpenVINO-compilable ONNX graph (**single-merger path only** — see the
-//! DeepStack note below). Op-for-op with `qwenvl::encoder::VisionEncoder::encode`
+//! DeepStack note below). Op-for-op with `qwen3vl::encoder::VisionEncoder::encode`
 //! + `PatchMerger::merge` (main merger, pre-shuffle LayerNorm), same split as
 //! [`crate::qwen_asr_topology`]: patch packing (data-dependent, host-side) and
 //! the learned pos-embed's bilinear resample stay off-graph; the patch-embed
@@ -18,7 +18,7 @@
 //! sequence [`crate::codec_topology`]'s transformer already uses — table
 //! values differ (h/w split vs. 1-D), not the op graph.
 //!
-//! **DeepStack is out of scope**: `omni::mm::encode_image`'s own host path
+//! **DeepStack is out of scope**: `qwen3omnimoe::mm::encode_image`'s own host path
 //! does not exercise the 3 DeepStack taps / per-tap mergers either (see its
 //! doc comment on `deepstack_merger.*` weights) — this graph mirrors the code
 //! actually served, not a gap unique to the NPU path. This is a named scope
@@ -30,7 +30,7 @@ use crate::nemotron_topology::{add_t, layernorm_onnx, linear_nb, reshape, transp
 use crate::qwen_asr_topology::{gelu_erf, linear_bias, slice_cols};
 use crate::topology::WeightSource;
 
-/// Config subset the ViT head needs (mirrors `qwenvl::config::VisionConfig`,
+/// Config subset the ViT head needs (mirrors `qwen3vl::config::VisionConfig`,
 /// duplicated rather than depending on the `qwenvl` crate — same
 /// self-contained-topology convention `codec_topology.rs` follows for its own
 /// RoPE table math).
@@ -53,7 +53,7 @@ impl VitTopo {
 }
 
 /// Per-patch `(h, w)` grid positions in spatial-merge-block order — ports
-/// `qwenvl::vision::vision_position_ids` (duplicated, see module doc).
+/// `qwen3vl::vision::vision_position_ids` (duplicated, see module doc).
 fn vision_position_ids_host(hp: u32, wp: u32, merge: u32) -> Vec<(u32, u32)> {
     assert!(hp.is_multiple_of(merge) && wp.is_multiple_of(merge), "grid must be a multiple of merge size");
     let mut out = Vec::with_capacity((hp * wp) as usize);
@@ -70,7 +70,7 @@ fn vision_position_ids_host(hp: u32, wp: u32, merge: u32) -> Vec<(u32, u32)> {
 }
 
 /// Build the 2-D vision-RoPE `[n, head_dim]` cos/sin tables, duplicated across
-/// the two rotate-half halves — ports `qwenvl::vision::vision_rope_tables`
+/// the two rotate-half halves - ports `qwen3vl::vision::vision_rope_tables`
 /// (which returns `[n, head_dim/2]`), pre-duplicated here so the in-graph
 /// rotation can use the plain 1-D `x·cos + rotate_half(x)·sin` op sequence:
 /// the `rope2d` WGSL kernel indexes both `x1=buf[d]` and `x2=buf[d+half]` at
@@ -106,7 +106,7 @@ fn vision_rope_tables_host(positions: &[(u32, u32)], head_dim: u32, theta: f32) 
 
 /// Bilinear-resample the learned `side×side` pos-embed table onto a
 /// `grid_h×grid_w` patch grid (merge-block order) — ports
-/// `qwenvl::vision::pos_embed_bilinear` fused with the gather/weighted-sum it
+/// `qwen3vl::vision::pos_embed_bilinear` fused with the gather/weighted-sum it
 /// feeds, since the export only needs the resampled `[n, hidden]` result
 /// (baked as an initializer, not a graph op — same reasoning as the window
 /// mask in [`crate::qwen_asr_topology::build_qwen_asr_head`]).

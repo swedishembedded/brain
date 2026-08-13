@@ -18,7 +18,7 @@
 //! dropping the image as before. At most ONE image and ONE audio clip are
 //! extracted per request (the first found, scanning all messages in
 //! order) — matches the single-image/single-audio-input shape
-//! `omni::caps::generate_spec()`'s `audio`/`image` blob inputs already
+//! `qwen3omnimoe::caps::generate_spec()`'s `audio`/`image` blob inputs already
 //! declare; a model that wants more would need a richer wire shape this
 //! module doesn't attempt to invent.
 

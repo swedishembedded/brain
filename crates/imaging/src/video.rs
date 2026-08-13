@@ -3,7 +3,7 @@
 
 //! Video file → RGB frames, via the `ffmpeg` CLI (subprocess, not a build
 //! dependency). The workspace has no video-container/codec crate at all
-//! (`omni::mm::encode_video_frames` already took already-decoded frames, but
+//! (`qwen3omnimoe::mm::encode_video_frames` already took already-decoded frames, but
 //! nothing turned a real video FILE into them until this) -- pure-Rust
 //! demuxers/decoders for real containers are
 //! immature or absent, and this repo is deliberately dependency-light
@@ -47,14 +47,14 @@ pub struct VideoDecodeOpts {
 impl Default for VideoDecodeOpts {
     /// A short clip at a low frame rate — sane for a multimodal prompt (a
     /// few seconds of video, not a full-length feature), matching the scale
-    /// `omni::mm::encode_video_frames` is validated at.
+    /// `qwen3omnimoe::mm::encode_video_frames` is validated at.
     fn default() -> VideoDecodeOpts {
         VideoDecodeOpts { fps: Some(1.0), max_frames: 32 }
     }
 }
 
 /// Decode a video file to RGB frames: one `(hwc_f32_unit, w, h)` tuple per
-/// frame, in order — the exact shape `omni::mm::encode_video_frames` takes
+/// frame, in order - the exact shape `qwen3omnimoe::mm::encode_video_frames` takes
 /// (`Rgb8::to_hwc_unit`'s output, `capability::blob::decode_video_hwc`'s wire
 /// convention). Returns a clear error (not a panic) when `ffmpeg` is absent,
 /// the path doesn't exist, ffmpeg fails, or it produces zero frames.

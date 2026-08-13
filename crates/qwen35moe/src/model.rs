@@ -361,7 +361,7 @@ const ROUTER_TOPK_COMPACT: usize = 93;
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
 /// dispatches `block::rope_fwd`/`rope_bwd` (it uses the M-RoPE table-driven
 /// `rope2d_partial_{fwd,bwd}` instead, which take their own kernel index, not
-/// a [`KernelIds`] field) - harmless, matching `omni::thinker::kernel_ids`'s
+/// a [`KernelIds`] field) - harmless, matching `qwen3omnimoe::thinker::kernel_ids`'s
 /// own convention for a slot this model genuinely never dispatches.
 fn kernel_ids() -> KernelIds {
     KernelIds {
@@ -938,10 +938,10 @@ pub struct Qwen35 {
     /// .wgsl`'s per-dim scale so its learnably-scaled L2-norm computes the
     /// reference's bare `l2norm(x)` (GDN's q/k norm has no learnable scale).
     ones_khd: DeviceBuffer,
-    /// M-RoPE `cos`/`sin` tables (`qwenvl::mrope::mrope_tables`), built once
+    /// M-RoPE `cos`/`sin` tables (`qwen3vl::mrope::mrope_tables`), built once
     /// at construction for the fixed `(b,t)` this instance decodes: text-only,
     /// so every axis carries the same plain sequential position per sequence
-    /// (`qwenvl::mrope`'s own tests prove this collapses exactly to ordinary
+    /// (`qwen3vl::mrope`'s own tests prove this collapses exactly to ordinary
     /// half-split RoPE).
     cos: DeviceBuffer,
     sin: DeviceBuffer,
@@ -1272,7 +1272,7 @@ impl Qwen35 {
         // Text-only: every axis of the M-RoPE table carries the same plain
         // sequential position, reset per sequence (row = batch*t + pos).
         let positions: Vec<[u32; 3]> = (0..b).flat_map(|_| (0..t).map(|ti| [ti, ti, ti])).collect();
-        let (cos, sin) = qwenvl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
+        let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
         let cos = gpu.storage_init("qwen35.rope_cos", &cos);
         let sin = gpu.storage_init("qwen35.rope_sin", &sin);
 
@@ -1519,7 +1519,7 @@ impl Qwen35 {
 
     /// Overwrite the M-RoPE `cos`/`sin` tables (`[b·t, rotary_dim/2]` row-major
     /// - see the `cos`/`sin` fields' own doc, and
-    /// `qwenvl::mrope::{get_rope_index, mrope_tables}` for how to build them
+    /// `qwen3vl::mrope::{get_rope_index, mrope_tables}` for how to build them
     /// from real 2-D image-grid positions) for the next `forward()`. RoPE here
     /// is unconditionally table-driven already (no `enable_mrope` gating
     /// needed, unlike `qwen3::Qwen`) - this simply replaces the plain-
@@ -3094,7 +3094,7 @@ impl Qwen35 {
     /// table, no frame-repeat") -- at `rows=1` that is always table row 0, so
     /// a slice into the construction-time whole-sequence `Self::cos`/`Self
     /// ::sin` table at row `pos` cannot be addressed this way. Instead this
-    /// recomputes a fresh 1-row table for `pos` (`qwenvl::mrope::mrope_tables`
+    /// recomputes a fresh 1-row table for `pos` (`qwen3vl::mrope::mrope_tables`
     /// with `[pos,pos,pos]`, mirroring this file's own text-only construction
     /// convention) into the persistent `Self::dec_cos`/`Self::dec_sin`
     /// buffers and rewrites it every call -- exactly `qwen3::Qwen::step_mrope`
@@ -3152,7 +3152,7 @@ impl Qwen35 {
 
         // Single-position partial M-RoPE -- see this function's own doc.
         let half = c.rotary_dim() / 2;
-        let (cos_row, sin_row) = qwenvl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
+        let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
         g.write_f32(&self.dec_cos, &cos_row);
         g.write_f32(&self.dec_sin, &sin_row);
         g.submit(

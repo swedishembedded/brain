@@ -36,7 +36,7 @@ brain-moe.workspace = true
 brain-gpt2.workspace = true
 brain-qwen3.workspace = true
 brain-qwen35moe.workspace = true
-brain-qwenvl.workspace = true
+brain-qwen3vl.workspace = true
 brain-fastvlm.workspace = true
 brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
@@ -44,9 +44,9 @@ brain-tts.workspace = true
 brain-codec.workspace = true
 brain-speaker.workspace = true
 brain-audio.workspace = true
-brain-nemotron.workspace = true
-brain-qwen-asr.workspace = true
-brain-omni.workspace = true
+brain-nemotronasr.workspace = true
+brain-qwen3asr.workspace = true
+brain-qwen3omnimoe.workspace = true
 brain-pid.workspace = true
 brain-yolo.workspace = true
 brain-depth.workspace = true
@@ -88,7 +88,7 @@ brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
 # DeepSeek-OCR: `deepseekocr::caps` (the manifest + the served `generate`) and
 # `deepseekocr::import` (the checkpoint layout `resident_deepseekocr` locates).
-brain-deepseekocr.workspace = true
+brain-deepseek2ocr.workspace = true
 brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.

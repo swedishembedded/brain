@@ -134,7 +134,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // (two open naming gaps); Thinker-only generation
         // (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not this
         // converted-checkpoint path) is unaffected by either gap.
-        "qwen3omnimoe" => omni::import::import_as(hf_dir, out, Some(&id)),
+        "qwen3omnimoe" => qwen3omnimoe::import::import_as(hf_dir, out, Some(&id)),
         other => Err(format!("architecture {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
     result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))?;

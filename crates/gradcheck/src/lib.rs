@@ -384,7 +384,7 @@ pub fn check_qwen2(seed: u64) -> Report {
 /// Gradient-check the interleaved-M-RoPE decoder path (`Qwen::enable_mrope`),
 /// which swaps the analytic rope_base for the table-driven `rope2d` on q/k. Uses
 /// simple diagonal per-token position tables (so the rotation is non-trivial but
-/// the interleaving - validated separately in `qwenvl::mrope` - is not needed
+/// the interleaving - validated separately in `qwen3vl::mrope` - is not needed
 /// here); the check confirms `rope2d`'s forward and its sign=-1 backward are
 /// correctly wired into the decoder's parameter gradients. Returns the report.
 pub fn check_qwen_mrope(seed: u64) -> Report {

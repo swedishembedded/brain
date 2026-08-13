@@ -59,7 +59,7 @@ pub fn decode_plane(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32)
 /// Decode a multi-frame video blob: `frames` interleaved-HWC f32 RGB planes
 /// (each `w×h×3`) concatenated into ONE payload, with `{"frames","w","h","c"}`
 /// metadata. Returns one `(hwc, w, h)` tuple per frame, in order — the exact
-/// shape `omni::mm::encode_video_frames` takes.
+/// shape `qwen3omnimoe::mm::encode_video_frames` takes.
 ///
 /// This is `decode_hwc` with `c` read from metadata rather than inferred from
 /// the payload length: an N-frame video and a single `(3N)`-channel image are

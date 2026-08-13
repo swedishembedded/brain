@@ -3,7 +3,7 @@
 
 //! Parity gate for the Qwen3-ASR audio-encoder **head** (the 24 windowed ViT
 //! blocks + ln_post + multi-modal projector) as an OpenVINO ONNX graph. Ported
-//! op-for-op from `qwen_asr::encoder::AudioEncoder::encode_packed`. Self-contained:
+//! op-for-op from `qwen3asr::encoder::AudioEncoder::encode_packed`. Self-contained:
 //! a tiny random-weight head is run through both the reference (device) and the
 //! ONNX graph on the OpenVINO **CPU** device, and the audio embeds must agree.
 //! The conv stem + valid-position packing stay on host (like build_nemotron_head).
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use npu::{build_qwen_asr_head, QwenAsrTopo};
-use qwen_asr::config::AudioEncoderConfig;
-use qwen_asr::encoder::{audio_pipelines, AudioEncoder};
+use qwen3asr::config::AudioEncoderConfig;
+use qwen3asr::encoder::{audio_pipelines, AudioEncoder};
 
 fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     // The unified deterministic LCG (audit F39/F40) — one premix keeps

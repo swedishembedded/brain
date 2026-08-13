@@ -4,7 +4,7 @@
 //! Throwaway diagnostic, not a correctness gate: which of two candidate costs
 //! explains `ParamStore::new_with_roles_src`'s ~35 s "read+write" bracket when
 //! streaming the real DeepSeek-OCR decoder's cached fp32 expansion (~11.7 GB,
-//! 2234 tensors) -- the dominant share of `deepseekocr::caps::Session::load`'s
+//! 2234 tensors) -- the dominant share of `deepseek2ocr::caps::Session::load`'s
 //! 20-28 s model-construction cost, isolated by real per-stage timers this
 //! same investigation added to
 //! `crates/paramstore`/`crates/deepseekv2`/`crates/wgsl-cpu`.

@@ -29,7 +29,7 @@
 //! | [`Shape`] | `vision::net` | **re-exported**; no second NCHW type |
 //! | [`device::NONE`] | `vision::ids` | **re-exported**; one sentinel |
 //! | [`Ctx`], [`mask`], [`tiling`], [`Normalization`] | - | net-new, or a kernel dispatch replacing host code |
-//! | [`video::decode_frames`] | - | net-new: no video-file decoder existed anywhere in the workspace (`omni::mm::encode_video_frames` took already-decoded frames only) |
+//! | [`video::decode_frames`] | - | net-new: no video-file decoder existed anywhere in the workspace (`qwen3omnimoe::mm::encode_video_frames` took already-decoded frames only) |
 //! | [`host::resize_bilinear_hwc`] | `depth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
 //! | [`color::yuyv_to_rgb`] | `capture::convert` | **moved**; `crates/capture` is V4L2-only again |
 //! | [`pixels::chw_to_hwc`] / [`pixels::hwc_to_chw`] | `cli::image_io`, `npu::{calib,sim}`, `wm-display`, tests | **moved**; one generic pair |
@@ -98,14 +98,14 @@
 //!
 //! * **A UNIFIED model target-size policy.** `depth::predict::target_size`,
 //!   `mirror::preprocess::{resize_dims, adaptive_target}` and
-//!   `qwenvl::preprocess::smart_resize` are different reference models'
+//!   `qwen3vl::preprocess::smart_resize` are different reference models'
 //!   contracts. They may be hosted here side by side as NAMED policies, but
 //!   they must never be unified - and copying them here while the originals
 //!   still exist would add duplicates, not remove any. They move when their
 //!   callers move.
 //!
 //!   Two have made that move: [`tiling::moondream_select_tiling`] (moved out of
-//!   `moondream::preprocess`, which now re-exports it - one definition) and
+//!   `moondream3::preprocess`, which now re-exports it - one definition) and
 //!   [`tiling::internvl_grid`] (net-new, InternVL/DeepSeek-OCR's discrete
 //!   candidate-ratio grid). They sit next to each other and share no code,
 //!   which is the point.

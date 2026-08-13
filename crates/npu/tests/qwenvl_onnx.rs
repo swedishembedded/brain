@@ -3,7 +3,7 @@
 
 //! Parity gate for the Qwen3-VL/Omni vision-tower **head** (patch-embed +
 //! `depth`× ViT block + main `PatchMerger`) as an OpenVINO ONNX graph. Ported
-//! op-for-op from `qwenvl::encoder::VisionEncoder::encode` +
+//! op-for-op from `qwen3vl::encoder::VisionEncoder::encode` +
 //! `PatchMerger::merge` (single-merger path — see `crate::qwenvl_topology`'s
 //! module doc for the DeepStack scope note). Self-contained: a tiny
 //! random-weight head is run through both the reference (device) and the
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use npu::{build_vit_head, VitTopo};
-use qwenvl::config::VisionConfig;
-use qwenvl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
+use qwen3vl::config::VisionConfig;
+use qwen3vl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
 
 fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     // The unified deterministic LCG (audit F39/F40) — one premix keeps
@@ -58,7 +58,7 @@ fn topo_from(cfg: &VisionConfig) -> VitTopo {
 }
 
 /// Encoder weights (`patch_embed`, `pos_embed`, `blocks.N.*`) — same layout
-/// `qwenvl::encoder`'s own `rand_weights` test helper builds.
+/// `qwen3vl::encoder`'s own `rand_weights` test helper builds.
 fn encoder_weights(cfg: &VisionConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     let (c, pv, mlp) = (cfg.hidden as usize, cfg.patch_vec_dim() as usize, cfg.intermediate as usize);
     let mut w = HashMap::new();
@@ -135,7 +135,7 @@ fn vision_head_matches_reference_on_cpu() {
     assert_eq!(reference.len(), mrows * cfg.out_hidden_size as usize);
 
     // ONNX head: combine encoder + merger (merger keys under "merger." — see
-    // `omni::npu_export::export_vision_onnx`'s same convention).
+    // `qwen3omnimoe::npu_export::export_vision_onnx`'s same convention).
     let mut w = enc_w;
     for (k, v) in mrg_w {
         w.insert(format!("merger.{k}"), v);

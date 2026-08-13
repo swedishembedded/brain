@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `Qwen35Vl` end-to-end smoke tests: vision tower (`qwenvl::VisionEncoder` +
+//! `Qwen35Vl` end-to-end smoke tests: vision tower (`qwen3vl::VisionEncoder` +
 //! `PatchMerger`, reused as-is) → embedding splice → hybrid decoder, mirroring
 //! `crates/qwenvl/src/model.rs`'s own `Qwen3Vl` test module pattern (tiny
 //! configs with the merger boundary matched, a text/image/text token stream
@@ -25,8 +25,8 @@ use data::rng::Rng;
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::init::init_weights;
 use qwen35moe::vl::Qwen35Vl;
-use qwenvl::config::VisionConfig;
-use qwenvl::mrope::get_rope_index;
+use qwen3vl::config::VisionConfig;
+use qwen3vl::mrope::get_rope_index;
 
 const IMG: u32 = 7;
 
@@ -40,7 +40,7 @@ fn rand_map(mut rng: Rng, specs: &[(&str, usize, bool)]) -> HashMap<String, Vec<
 }
 
 /// Tiny vision config whose merger output width matches `Qwen35Config::
-/// tiny()`'s `d_model` (24) at the merger boundary, mirroring `qwenvl::
+/// tiny()`'s `d_model` (24) at the merger boundary, mirroring `qwen3vl::
 /// model::tests`'s own tiny-fixture pattern (`crates/qwenvl/src/model.rs`).
 fn tiny_vcfg() -> VisionConfig {
     VisionConfig {

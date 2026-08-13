@@ -1352,7 +1352,7 @@ fn build_nemotron(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
         exec,
-        nemotron::caps::MODEL,
+        nemotronasr::caps::MODEL,
         "transcribe",
         info,
         build,
@@ -1376,7 +1376,7 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
         exec,
-        qwen_asr::caps::MODEL,
+        qwen3asr::caps::MODEL,
         "transcribe",
         info,
         build,

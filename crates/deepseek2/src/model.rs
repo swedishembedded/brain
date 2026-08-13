@@ -516,13 +516,13 @@ impl DeepseekV2 {
                 (n, c, role)
             })
             .collect();
-        // Split the two candidate costs inside what `deepseekocr::model::build`
+        // Split the two candidate costs inside what `deepseek2ocr::model::build`
         // brackets as one "decoder new_on" stage: streaming/uploading the real
         // checkpoint's weights (`ParamStore::new_with_roles_src`, one
         // `raw_words`/`with_tensor_chunks` pull per tensor) vs this
         // constructor's OWN scratch-buffer allocation below (`res`/`dres`,
         // the per-layer attention/MoE buffers, LoRA scratch). Gated on the
-        // same `BRAIN_PROFILE` convention `deepseekocr::stage_time` and
+        // same `BRAIN_PROFILE` convention `deepseek2ocr::stage_time` and
         // `wgsl-cpu::Jit::new` already print through, so a load-time profile
         // shows all three brackets on one timeline.
         let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
@@ -1135,7 +1135,7 @@ impl DeepseekV2 {
 
     /// [`Self::generate_greedy`] with a per-token callback - the seam a served
     /// path emits REAL streaming deltas from, instead of one emission around
-    /// the whole decode (`qwenvl::Qwen3Vl::generate_cb` is the same seam on the
+    /// the whole decode (`qwen3vl::Qwen3Vl::generate_cb` is the same seam on the
     /// same argument).
     ///
     /// `on_token` fires **once per generated token**, immediately after that
@@ -1472,7 +1472,7 @@ impl DeepseekV2 {
     ///
     /// One contiguous run only, which is the single-view scope this decoder is
     /// gated at; a multi-view layout emits one call per run and is a `rows`-level
-    /// change (`deepseekocr::rows`), not a change here.
+    /// change (`deepseek2ocr::rows`), not a change here.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
         let n = self.b * self.t;
         assert!(row0 + n_rows <= n, "splice rows [{row0}, {}) exceed the {n}-row residual stream", row0 + n_rows);

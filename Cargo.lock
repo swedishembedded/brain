@@ -548,7 +548,7 @@ dependencies = [
  "brain-codec",
  "brain-data",
  "brain-dbus",
- "brain-deepseekocr",
+ "brain-deepseek2ocr",
  "brain-depth",
  "brain-eval",
  "brain-events",
@@ -573,17 +573,17 @@ dependencies = [
  "brain-modelref",
  "brain-modelstore",
  "brain-moe",
- "brain-nemotron",
+ "brain-nemotronasr",
  "brain-npu",
- "brain-omni",
  "brain-onnx",
  "brain-paramstore",
  "brain-perf",
  "brain-pid",
- "brain-qwen-asr",
  "brain-qwen3",
  "brain-qwen35moe",
- "brain-qwenvl",
+ "brain-qwen3asr",
+ "brain-qwen3omnimoe",
+ "brain-qwen3vl",
  "brain-residency",
  "brain-restore",
  "brain-runtime",
@@ -709,7 +709,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-deepseekocr"
+name = "brain-deepseek2ocr"
 version = "0.1.1"
 dependencies = [
  "brain-capability",
@@ -1134,7 +1134,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-moondream"
+name = "brain-moondream3"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
@@ -1150,7 +1150,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-nemotron"
+name = "brain-nemotronasr"
 version = "0.1.1"
 dependencies = [
  "brain-audio",
@@ -1184,47 +1184,19 @@ dependencies = [
  "brain-lfm2",
  "brain-mirror",
  "brain-model",
- "brain-nemotron",
+ "brain-nemotronasr",
  "brain-onnx",
  "brain-paramstore",
- "brain-qwen-asr",
  "brain-qwen3",
  "brain-qwen35moe",
- "brain-qwenvl",
+ "brain-qwen3asr",
+ "brain-qwen3vl",
  "brain-testutil",
  "brain-vision",
  "brain-wm-diamond",
  "brain-yolo",
  "bytemuck",
  "openvino",
- "serde_json",
-]
-
-[[package]]
-name = "brain-omni"
-version = "0.1.1"
-dependencies = [
- "brain-apiserve",
- "brain-audio",
- "brain-capability",
- "brain-checkpoint",
- "brain-codec",
- "brain-data",
- "brain-gpu-core",
- "brain-imaging",
- "brain-kernels",
- "brain-model",
- "brain-npu",
- "brain-onnx",
- "brain-paramstore",
- "brain-qwen-asr",
- "brain-qwen3",
- "brain-qwenvl",
- "brain-residency",
- "brain-testutil",
- "brain-tts",
- "minijinja",
- "safetensors",
  "serde_json",
 ]
 
@@ -1310,22 +1282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-qwen-asr"
-version = "0.1.1"
-dependencies = [
- "brain-audio",
- "brain-capability",
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-qwen3",
- "brain-testutil",
- "serde_json",
-]
-
-[[package]]
 name = "brain-qwen3"
 version = "0.1.1"
 dependencies = [
@@ -1359,7 +1315,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-qwen3",
- "brain-qwenvl",
+ "brain-qwen3vl",
  "brain-testutil",
  "bytemuck",
  "pollster",
@@ -1368,7 +1324,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-qwenvl"
+name = "brain-qwen3asr"
+version = "0.1.1"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen3",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-qwen3omnimoe"
+version = "0.1.1"
+dependencies = [
+ "brain-apiserve",
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-codec",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-npu",
+ "brain-onnx",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-qwen3asr",
+ "brain-qwen3vl",
+ "brain-residency",
+ "brain-testutil",
+ "brain-tts",
+ "minijinja",
+ "safetensors",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-qwen3vl"
 version = "0.1.1"
 dependencies = [
  "brain-capability",

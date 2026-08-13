@@ -4,7 +4,7 @@
 //! Parity gate for the Nemotron FastConformer encoder **head** (stages 2–3: the
 //! macaron Conformer blocks + prompt/encoder projectors) as an OpenVINO ONNX graph.
 //! Self-contained: a tiny random-weight encoder is run through both
-//! `nemotron::reference::encode_pooler` (the host f32 oracle) and the ONNX graph
+//! `nemotronasr::reference::encode_pooler` (the host f32 oracle) and the ONNX graph
 //! compiled on the OpenVINO **CPU** device, and the two poolers must agree on the
 //! valid rows (padding rows are allowed to differ — a fully-masked padding query's
 //! softmax is uniform in ONNX vs zeroed in the reference, but causal/ masked ops
@@ -15,8 +15,8 @@
 
 use std::collections::HashMap;
 
-use nemotron::config::NemotronConfig;
-use nemotron::reference::encode_pooler;
+use nemotronasr::config::NemotronConfig;
+use nemotronasr::reference::encode_pooler;
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use npu::{build_nemotron_head, NemotronTopo};
 

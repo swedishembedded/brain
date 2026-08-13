@@ -11,15 +11,15 @@
 //!   2. macaron Conformer blocks (rel-pos attention + GLU conv)  (next)
 //!   3. prompt + encoder projectors
 //!
-//! Design mirrors the host reference (`nemotron::reference`) and the device encoder
-//! (`nemotron::encoder`) op-for-op so the same goldens gate all three. Weights arrive
+//! Design mirrors the host reference (`nemotronasr::reference`) and the device encoder
+//! (`nemotronasr::encoder`) op-for-op so the same goldens gate all three. Weights arrive
 //! through the shared `crate::topology::WeightSource` (a name→f32 map).
 
 use onnx::{GraphBuilder, Node};
 
 use crate::topology::WeightSource;
 
-/// Config subset the encoder graph needs (mirrors `nemotron::NemotronConfig`).
+/// Config subset the encoder graph needs (mirrors `nemotronasr::NemotronConfig`).
 #[derive(Clone, Copy, Debug)]
 pub struct NemotronTopo {
     pub num_mel_bins: u32,
@@ -241,7 +241,7 @@ fn transpose_2d(a: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 
 // ===================== stage 2: Conformer blocks =====================
 //
-// Op-for-op with `nemotron::reference::conformer_block`. Everything that is
+// Op-for-op with `nemotronasr::reference::conformer_block`. Everything that is
 // constant for a fixed `(t, valid)` — the relative-position ladder `pe`, the
 // per-layer `rel_k = pe @ relative_k_proj^T`, and the chunked_limited+padding
 // attention mask — is precomputed in Rust and baked as an initializer, so the
@@ -250,7 +250,7 @@ fn transpose_2d(a: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 const NEG_MASK: f32 = -1.0e9;
 
 /// Relative-position rows `[positions, C]`: interleaved sin/cos,
-/// `inv_freq[i] = 10000^(-2i/C)` — mirrors `nemotron::reference::rel_pos_rows`.
+/// `inv_freq[i] = 10000^(-2i/C)` - mirrors `nemotronasr::reference::rel_pos_rows`.
 fn rel_pos_encoding_host(t: usize, c: usize) -> Vec<f32> {
     let half = c / 2;
     let inv: Vec<f32> = (0..half).map(|i| (10000f32).powf(-(2.0 * i as f32) / c as f32)).collect();
@@ -610,7 +610,7 @@ fn projectors_onnx(g: &mut GraphBuilder, topo: &NemotronTopo, w: &dyn WeightSour
 /// Stages 2–3 only: the Conformer stack + projectors on a subsampled input
 /// `[t, hidden]` (named `input_name`) → pooler `[t, decoder_hidden]` (`out_name`).
 /// `valid` is the valid subsampled length. This is exactly
-/// `nemotron::reference::encode_pooler`, so the parity gate feeds it a random
+/// `nemotronasr::reference::encode_pooler`, so the parity gate feeds it a random
 /// `sub` and diffs the two.
 #[allow(clippy::too_many_arguments)]
 pub fn build_nemotron_head(g: &mut GraphBuilder, topo: &NemotronTopo, w: &dyn WeightSource, t: u32, valid: u32, prompt_id: u32, input_name: &str, out_name: &str) {

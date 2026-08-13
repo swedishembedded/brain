@@ -45,7 +45,7 @@ pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
 /// The exact host-side inverse of [`quantize_weight`]: unpack `[n, k/4]` u32
 /// words back to `[n, k]` f32 via `sw[r]` (the same per-row scale
 /// `quantize_weight` wrote). Used where a real checkpoint quantized a weight
-/// (`omni::import::should_quantize`) that the consuming forward pass still
+/// (`qwen3omnimoe::import::should_quantize`) that the consuming forward pass still
 /// wants as plain f32 — e.g. attention/router projections, which meet the
 /// same rank-2/`k%4==0` shape test as the MoE experts but have no int8
 /// dispatch path of their own (only the experts do, `model::moe::
@@ -242,7 +242,7 @@ mod tests {
     /// [`round_trips_within_one_step`] checks inline, per-element, over
     /// multiple rows (distinct per-row scales) and a `k` that isn't a
     /// multiple of the packing group in a suspicious way (12, not 4 or 8) —
-    /// the real caller of this function (`omni::int8_thinker_resident::
+    /// the real caller of this function (`qwen3omnimoe::int8_thinker_resident::
     /// load_mat`) needs it for arbitrary real weight shapes, not just the
     /// one `quantize_weight`'s own test happens to use.
     #[test]

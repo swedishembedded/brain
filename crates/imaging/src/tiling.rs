@@ -416,7 +416,7 @@ mod tests {
         }
     }
 
-    // ---- moondream_select_tiling (moved here from moondream::preprocess) ----
+    // ---- moondream_select_tiling (moved here from moondream3::preprocess) ----
 
     #[test]
     fn moondream_select_tiling_matches_reference() {

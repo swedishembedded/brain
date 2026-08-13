@@ -40,7 +40,7 @@ pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 ///
 /// One type covers every normalisation in the workspace, because they differ
 /// only in their numbers: ImageNet ([`Normalization::IMAGENET`]),
-/// `qwenvl::preprocess::normalize_unit`'s `(x - 0.5) / 0.5`
+/// `qwen3vl::preprocess::normalize_unit`'s `(x - 0.5) / 0.5`
 /// ([`Normalization::HALF`], the `[0,1] -> [-1,1]` map), and the pass-through
 /// used by models that normalise internally ([`Normalization::IDENTITY`]).
 ///
@@ -61,7 +61,7 @@ impl Normalization {
     pub const IMAGENET: Normalization =
         Normalization { mean: IMAGENET_MEAN, std: IMAGENET_STD };
     /// `(x - 0.5) / 0.5`, i.e. the `[0, 1] -> [-1, 1]` value-range map that
-    /// `flux2::finetune`, `zimage::finetune` and `qwenvl::preprocess` each write
+    /// `flux2::finetune`, `zimage::finetune` and `qwen3vl::preprocess` each write
     /// out by hand. It is a normalisation, not a separate concept.
     pub const HALF: Normalization = Normalization { mean: [0.5; 3], std: [0.5; 3] };
 

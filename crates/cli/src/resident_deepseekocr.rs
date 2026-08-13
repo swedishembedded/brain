@@ -5,9 +5,9 @@
 //!
 //! `activate` builds the whole composite ONCE - the mmproj import, the decoder's
 //! streamed fp32 expansion, and the 273-row splice sized from the prompt - and
-//! the [`Instance`] owns the resulting [`deepseekocr::caps::Session`], so
+//! the [`Instance`] owns the resulting [`deepseek2ocr::caps::Session`], so
 //! dropping it frees every buffer. One action, `generate`; its schema and all of
-//! its work come from `deepseekocr::caps`, so this file holds no second copy of
+//! its work come from `deepseek2ocr::caps`, so this file holds no second copy of
 //! the preprocessing, the prompt assembly or the token accounting.
 //!
 //! # This model is CPU-resident, and that is declared, not enforced by hand
@@ -33,7 +33,7 @@
 //!
 //! **The CPU pin below is UNCHANGED regardless** - not because doubt remains
 //! about `sam1`'s wgpu correctness, but because the code that actually
-//! selects the device is NOT in this file: `crates/deepseekocr::caps::
+//! selects the device is NOT in this file: `crates/deepseek2ocr::caps::
 //! Session::load` (`crates/deepseekocr/src/caps.rs`) hardcodes
 //! `gpu_core::Gpu::new_cpu` for every stage - vision (SAM/CLIP/glue) AND the
 //! decoder - via one `dev` closure, and calls it once per component
@@ -56,7 +56,7 @@
 //! That is expressed as a **RAM-only [`MemCost`]** - `vram == 0` - which is the
 //! scheduler's own vocabulary for "not a GPU model": `residency::place::
 //! pick_device` skips the whole GPU class when `cost.vram == 0` and falls
-//! through to the CPU/RAM pool. [`deepseekocr::caps::Session::load`] then builds
+//! through to the CPU/RAM pool. [`deepseek2ocr::caps::Session::load`] then builds
 //! every stage with `gpu_core::Gpu::new_cpu`. Neither half touches
 //! `BRAIN_DEVICE`: a resident lives for the life of the server process, and a
 //! process-global env write from inside one model's activation would change the
@@ -73,7 +73,7 @@
 //! performance phase of its own, not a wrapper this file could write.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use deepseekocr::caps::{Session, DIR_VAR, MODEL};
+use deepseek2ocr::caps::{Session, DIR_VAR, MODEL};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// DeepSeek-OCR behind the scheduler. `BRAIN_DEEPSEEK_OCR_DIR` names the
@@ -97,7 +97,7 @@ impl DeepseekOcrResident {
     /// `crate::resident_facenet::FacenetResident::new`'s rationale.
     pub fn new(dir: impl Into<String>) -> Option<DeepseekOcrResident> {
         let dir = dir.into();
-        match deepseekocr::import::Files::locate(&dir) {
+        match deepseek2ocr::import::Files::locate(&dir) {
             Ok(_) => Some(DeepseekOcrResident { dir }),
             Err(e) => {
                 eprintln!("brain: deepseek-ocr not served ({e})");
@@ -109,7 +109,7 @@ impl DeepseekOcrResident {
 
 impl ResidentModel for DeepseekOcrResident {
     fn manifest(&self) -> Manifest {
-        deepseekocr::caps::manifest()
+        deepseek2ocr::caps::manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {

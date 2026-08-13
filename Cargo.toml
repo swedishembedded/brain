@@ -34,12 +34,12 @@ default-members = [
     "crates/qwen3",
     "crates/qwen35moe",
     "crates/lfm2",
-    "crates/qwenvl",
-    "crates/qwen-asr",
-    "crates/omni",
-    "crates/nemotron",
+    "crates/qwen3vl",
+    "crates/qwen3asr",
+    "crates/qwen3omnimoe",
+    "crates/nemotronasr",
     "crates/fastvlm",
-    "crates/moondream",
+    "crates/moondream3",
     "crates/glmdsa",
     "crates/deepseek2",
     "crates/seq2seq",
@@ -81,7 +81,7 @@ default-members = [
     "crates/facenet",
     "crates/vqgan",
     "crates/clip",
-    "crates/deepseekocr",
+    "crates/deepseek2ocr",
     "crates/t5",
     "crates/flux1",
     "crates/restore",
@@ -139,10 +139,10 @@ brain-gpt2 = { path = "crates/gpt2" }
 brain-qwen3 = { path = "crates/qwen3" }
 brain-qwen35moe = { path = "crates/qwen35moe" }
 brain-lfm2 = { path = "crates/lfm2" }
-brain-nemotron = { path = "crates/nemotron" }
-brain-qwen-asr = { path = "crates/qwen-asr" }
-brain-qwenvl = { path = "crates/qwenvl" }
-brain-omni = { path = "crates/omni" }
+brain-nemotronasr = { path = "crates/nemotronasr" }
+brain-qwen3asr = { path = "crates/qwen3asr" }
+brain-qwen3vl = { path = "crates/qwen3vl" }
+brain-qwen3omnimoe = { path = "crates/qwen3omnimoe" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-glmdsa = { path = "crates/glmdsa" }
 brain-deepseek2 = { path = "crates/deepseek2" }
@@ -187,7 +187,7 @@ brain-sam1 = { path = "crates/sam1" }
 brain-facenet = { path = "crates/facenet" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
-brain-deepseekocr = { path = "crates/deepseekocr" }
+brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
 brain-t5 = { path = "crates/t5" }
 brain-flux1 = { path = "crates/flux1" }
 brain-restore = { path = "crates/restore" }

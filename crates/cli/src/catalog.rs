@@ -198,8 +198,8 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
-            manifest: qwenvl::caps::manifest,
-            provider: always!(qwenvl::caps::QwenVlProvider::new()),
+            manifest: qwen3vl::caps::manifest,
+            provider: always!(qwen3vl::caps::QwenVlProvider::new()),
             resident: None, // no residency adapter yet -- brain caps/brain do only, matching fastvlm's own state
         },
         ModelEntry {
@@ -268,9 +268,9 @@ pub fn models() -> Vec<ModelEntry> {
         // facenet's and clip's. CPU-resident by declaration - see
         // `crate::resident_deepseekocr`'s header.
         ModelEntry {
-            manifest: deepseekocr::caps::manifest,
+            manifest: deepseek2ocr::caps::manifest,
             provider: from_env!(
-                deepseekocr::caps::DeepseekOcrProvider::from_env,
+                deepseek2ocr::caps::DeepseekOcrProvider::from_env,
                 "set BRAIN_DEEPSEEK_OCR_DIR to a directory holding mmproj-DeepSeek-OCR-Q8_0.gguf + DeepSeek-OCR-Q8_0.gguf"
             ),
             resident: resident!(crate::resident_deepseekocr::DeepseekOcrResident::from_env),
@@ -290,13 +290,13 @@ pub fn models() -> Vec<ModelEntry> {
         // [`LazyProvider`] so construction stays cheap; the residency adapters
         // are the same ones `brain serve` used to register from its own list.
         ModelEntry {
-            manifest: nemotron::caps::manifest,
+            manifest: nemotronasr::caps::manifest,
             provider: || {
                 let dir = env_path("BRAIN_NEMOTRON", "a Nemotron 3.5 ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
-                    nemotron::caps::manifest,
+                    nemotronasr::caps::manifest,
                     Box::new(move || {
-                        nemotron::caps::NemotronProvider::load(&dir, nemotron::NemotronConfig::nemotron_3_5_asr_0_6b())
+                        nemotronasr::caps::NemotronProvider::load(&dir, nemotronasr::NemotronConfig::nemotron_3_5_asr_0_6b())
                             .map(|p| Arc::new(p) as Arc<dyn Provider>)
                     }),
                 )) as Arc<dyn Provider>)
@@ -304,14 +304,14 @@ pub fn models() -> Vec<ModelEntry> {
             resident: resident!(crate::resident_asr::NemotronResident::from_env),
         },
         ModelEntry {
-            manifest: qwen_asr::caps::manifest,
+            manifest: qwen3asr::caps::manifest,
             provider: || {
                 let dir = env_path("BRAIN_QWEN_ASR", "a Qwen3-ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
-                    qwen_asr::caps::manifest,
+                    qwen3asr::caps::manifest,
                     Box::new(move || {
                         let (window_secs, max_new) = crate::resident_asr::qwen_asr_tuning();
-                        qwen_asr::caps::QwenAsrProvider::load(&dir, qwen_asr::config::QwenAsrConfig::qwen3_asr_1_7b(), window_secs, max_new)
+                        qwen3asr::caps::QwenAsrProvider::load(&dir, qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b(), window_secs, max_new)
                             .map(|p| Arc::new(p) as Arc<dyn Provider>)
                     }),
                 )) as Arc<dyn Provider>)

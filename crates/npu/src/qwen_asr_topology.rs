@@ -5,7 +5,7 @@
 //! transformer HEAD (the compute-dominant part): the 24 windowed ViT blocks +
 //! `ln_post` + the multi-modal projector, over already-packed post-CNN tokens
 //! `[n_audio, d_model]` → `audio_embeds [n_audio, output_dim]`. Op-for-op with
-//! `qwen_asr::encoder::AudioEncoder::encode_packed`.
+//! `qwen3asr::encoder::AudioEncoder::encode_packed`.
 //!
 //! The conv stem + valid-position packing (data-dependent gather) stay on host —
 //! exactly the `build_nemotron_head` vs `build_nemotron_encoder` split. The block

@@ -18,7 +18,7 @@
 //! `omni` exports omni's three NPU-eligible pieces (audio tower, vision tower,
 //! Code2Wav vocoder - NOT the 30B-parameter MoE Thinker decoder, not an NPU
 //! target) as fp32 ONNX and runs the same structural + (where available)
-//! OpenVINO-compile check `check` does on each. See `omni::npu_export`'s
+//! OpenVINO-compile check `check` does on each. See `qwen3omnimoe::npu_export`'s
 //! module doc for the exact scope (single-merger vision path, no DeepStack). Output of `run` matches `brain yolo detect`.
 
 use std::path::Path;
@@ -375,7 +375,7 @@ fn chronos2(args: &[String]) {
 /// OpenVINO device is present, compile) check `check` does on each. Pure
 /// Rust export, runs anywhere; the compile step needs OpenVINO. No NPU
 /// device run is attempted here - none is available on this box (see
-/// `omni::npu_export`'s module doc).
+/// `qwen3omnimoe::npu_export`'s module doc).
 fn omni(args: &[String]) {
     let mut hf_dir = String::new();
     let mut out_dir = "out/omni".to_string();
@@ -433,10 +433,10 @@ fn omni(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let cfg = omni::config::OmniConfig::from_json(&root);
+    let cfg = qwen3omnimoe::config::OmniConfig::from_json(&root);
 
     let audio_path = format!("{out_dir}/audio_tower.onnx");
-    match omni::npu_export::export_audio_onnx(&reader, &audio_path, n_audio) {
+    match qwen3omnimoe::npu_export::export_audio_onnx(&reader, &audio_path, n_audio) {
         Ok(()) => {
             println!("== audio tower -> {audio_path} (n_audio={n_audio}) ==");
             structural_check(&audio_path, &opts);
@@ -444,7 +444,7 @@ fn omni(args: &[String]) {
         Err(e) => eprintln!("audio tower export failed: {e}"),
     }
     let vision_path = format!("{out_dir}/vision_tower.onnx");
-    match omni::npu_export::export_vision_onnx(&reader, &vision_path, grid_h, grid_w) {
+    match qwen3omnimoe::npu_export::export_vision_onnx(&reader, &vision_path, grid_h, grid_w) {
         Ok(()) => {
             println!("== vision tower -> {vision_path} (grid {grid_h}x{grid_w}) ==");
             structural_check(&vision_path, &opts);
@@ -452,7 +452,7 @@ fn omni(args: &[String]) {
         Err(e) => eprintln!("vision tower export failed: {e}"),
     }
     let codec_path = format!("{out_dir}/codec_decoder.onnx");
-    match omni::npu_export::export_codec_onnx(&reader, &cfg.code2wav, &codec_path, code_len) {
+    match qwen3omnimoe::npu_export::export_codec_onnx(&reader, &cfg.code2wav, &codec_path, code_len) {
         Ok(()) => {
             println!("== codec decoder -> {codec_path} (code_len={code_len}) ==");
             structural_check(&codec_path, &opts);

@@ -426,7 +426,7 @@ pub struct Qwen {
     // sliced from `mrope_cos`/`mrope_sin` above -- those are sized for the
     // batched forward's whole KNOWN sequence, but decode generates tokens
     // beyond it one at a time, so each new token needs its OWN freshly
-    // written table (mirrors `omni::thinker::layer_decode_step`'s pattern:
+    // written table (mirrors `qwen3omnimoe::thinker::layer_decode_step`'s pattern:
     // a 1-row table needs no separate "decode" kernel, just `rope2d`'s
     // existing `tmod`-driven table indexing at `rows = tmod = 1`). Always
     // allocated (cheap: `head_dim/2` floats) so `step_mrope` needs no
@@ -965,7 +965,7 @@ impl Qwen {
 
     /// Kernel-index map for [`block::gqa_decode_step`] - the hoisted twin of
     /// this struct's own original inline KV-cache decode dispatch (`decode_steps`
-    /// below), migrated onto `model::block` so `omni::thinker` (the primitive's
+    /// below), migrated onto `model::block` so `qwen3omnimoe::thinker` (the primitive's
     /// second user) and this, its original owner, share one implementation
     /// instead of two copies that can drift apart.
     fn decode_ids() -> block::GqaDecodeIds {
@@ -1535,7 +1535,7 @@ impl Qwen {
     /// rope_base). Allocates the `[b·t, head_dim/2]` cos/sin tables and rebuilds
     /// the fwd/bwd graphs - call once after construction, then supply the tables
     /// each batch via [`Self::write_mrope_tables`] (computed by
-    /// `qwenvl::mrope::{get_rope_index, mrope_tables}`).
+    /// `qwen3vl::mrope::{get_rope_index, mrope_tables}`).
     pub fn enable_mrope(&mut self) {
         let sz = (self.b * self.t * self.cfg.head_dim / 2) as u64;
         self.mrope_cos = self.gpu.storage(sz);
@@ -2003,7 +2003,7 @@ impl Qwen {
             };
             // M-RoPE decode: table-driven rope2d over a 1-row table this
             // step's caller already wrote (write_decode_mrope_table),
-            // mirroring omni::thinker::layer_decode_step's pattern -- a
+            // mirroring qwen3omnimoe::thinker::layer_decode_step's pattern -- a
             // 1-row table needs no separate "decode" kernel. `None` (every
             // existing caller) is bit-for-bit the prior ROPE_AT dispatch.
             match mrope {
@@ -2018,7 +2018,7 @@ impl Qwen {
             }
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
-            // shared with omni::thinker instead of duplicated.
+            // shared with qwen3omnimoe::thinker instead of duplicated.
             s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &self.kcache[l], &self.vcache[l], &self.scores, &lb.probs, &lb.ctx));
             let act_o = self.ops.act(&mut s, &lb.ctx, 0, 1, hq);
             self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
@@ -2683,7 +2683,7 @@ mod kv_tests {
     /// case above does. Positions are a synthetic multimodal-splice-shaped
     /// sequence (T=H=W plain text, THEN a block with varying H/W simulating
     /// an image, THEN more plain text) -- NOT computed via
-    /// `qwenvl::mrope::get_rope_index_multi`/`mrope_tables` (this crate does
+    /// `qwen3vl::mrope::get_rope_index_multi`/`mrope_tables` (this crate does
     /// not depend on `qwenvl` -- `qwenvl` depends on `qwen`, the other
     /// direction), but via the identical formula, inlined: `qwen3::Qwen`'s
     /// M-RoPE API (`enable_mrope`/`write_mrope_tables`/`step_mrope`) only
@@ -2728,7 +2728,7 @@ mod kv_tests {
 
         // mrope_section = [half/2, half/4, half/4]-ish split (T/H/W channel
         // counts summing to `half`) -- any real split works; this is the
-        // same axis_map qwenvl::mrope::axis_map builds, inlined.
+        // same axis_map qwen3vl::mrope::axis_map builds, inlined.
         let section = [half / 2, half / 4, half - half / 2 - half / 4];
         let axis_of = |d: usize| -> usize {
             if d < section[0] {
@@ -2785,7 +2785,7 @@ mod kv_tests {
 
     /// [`mrope_step_matches_full_recompute`], but for DeepStack too:
     /// `decode_steps`'s `deepstack_row` parameter (this session's addition -
-    /// before it existed, `qwenvl::Qwen3Vl::generate()` called
+    /// before it existed, `qwen3vl::Qwen3Vl::generate()` called
     /// `write_deepstack` into buffers the incremental path never read, a
     /// real silent bug, fixed by adding `deepstack_row`)
     /// must reproduce `enable_deepstack`'s whole-sequence `SPLICE_ADD` in

@@ -5,17 +5,17 @@
 //! spliced into a Qwen3.5 hybrid decoder via the M-RoPE + embedding-splice
 //! seam `crate::model::Qwen35` exposes.
 //!
-//! Mirrors `qwenvl::model::Qwen3Vl` almost exactly (same field shape, same
+//! Mirrors `qwen3vl::model::Qwen3Vl` almost exactly (same field shape, same
 //! `forward` contract) — the difference is what it wraps, not how it's wired:
 //! Qwen3.5's vision config is numerically IDENTICAL to
-//! `qwenvl::VisionConfig::qwen3_omni()` except `deepstack_indexes` is EMPTY
+//! `qwen3vl::VisionConfig::qwen3_omni()` except `deepstack_indexes` is EMPTY
 //! (a deliberate vision-tower reuse decision), so
 //! there is no DeepStack here at all (no tap-feature encode, no per-level
 //! merger, no `write_deepstack` call) — a config-level reuse, not a fork of
 //! `crates/qwenvl`.
 //!
 //! Scope: single image, prefill/training-loss-shaped forward only (matching
-//! `qwenvl::model::Qwen3Vl::forward`'s own scope) — no video (multi-frame),
+//! `qwen3vl::model::Qwen3Vl::forward`'s own scope) - no video (multi-frame),
 //! and no incremental (KV-cache) decode-time image splice yet. The latter
 //! would need a `step_embed_mrope`-equivalent on `Qwen35` (a raw-embedding-row
 //! decode step taking a per-position M-RoPE table, mirroring `Qwen35::step`'s
@@ -25,19 +25,19 @@
 //! doc for the existing (image-unaware) single-sequence decode this would
 //! extend.
 //!
-//! Vision runs on its own CPU-backed `Gpu` (matching `qwenvl::model::Qwen3Vl`'s
+//! Vision runs on its own CPU-backed `Gpu` (matching `qwen3vl::model::Qwen3Vl`'s
 //! own choice); visual tokens cross to the decoder's `Gpu` host-side via
 //! `Qwen35::write_img_embeds` (a fused single-device path, and a vision-tower
 //! backward for full-tower finetune, are later steps — matching
-//! `qwenvl::model::Qwen3Vl`'s own documented scope for the same gaps).
+//! `qwen3vl::model::Qwen3Vl`'s own documented scope for the same gaps).
 
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
 
-use qwenvl::config::VisionConfig;
-use qwenvl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
-use qwenvl::mrope::{get_rope_index, mrope_tables};
+use qwen3vl::config::VisionConfig;
+use qwen3vl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
+use qwen3vl::mrope::{get_rope_index, mrope_tables};
 
 use crate::config::Qwen35Config;
 use crate::model::Qwen35;
@@ -62,7 +62,7 @@ impl Qwen35Vl {
     /// image placement. `enable_mm_splice` is wired on the decoder here; the
     /// decoder's M-RoPE is always table-driven (no `enable_mrope` gating to
     /// call, unlike `qwen3::Qwen`). Decoder batch is fixed at 1, matching
-    /// `qwenvl::model::Qwen3Vl::new`'s own choice.
+    /// `qwen3vl::model::Qwen3Vl::new`'s own choice.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         vcfg: VisionConfig,

@@ -105,12 +105,12 @@ pub fn rope_fwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32
 /// Table-driven interleaved M-RoPE (forward), in place on a contiguous q/k
 /// buffer: the same half-split rotation `rope_fwd` applies, but the per-token
 /// angle comes from a precomputed `[rows, head_dim/2]` `cos`/`sin` table
-/// (`qwenvl::mrope::mrope_tables`) instead of a single scalar position - the
+/// (`qwen3vl::mrope::mrope_tables`) instead of a single scalar position - the
 /// seam that lets a caller feed genuinely divergent per-axis (text/image/
 /// video/audio) positions, or the degenerate all-axes-equal case (which
-/// `qwenvl::mrope`'s own test proves collapses to identical output). `qwen3::
+/// `qwen3vl::mrope`'s own test proves collapses to identical output). `qwen3::
 /// Qwen::rope2d_step` already dispatches this exact kernel for Qwen3-VL;
-/// hoisted here so a second model (`omni::thinker`) doesn't re-wire it.
+/// hoisted here so a second model (`qwen3omnimoe::thinker`) doesn't re-wire it.
 ///
 /// `kernel` is `kernels::ROPE2D`'s pipeline index in the caller's own table -
 /// not a [`KernelIds`] field, since it pairs with two extra buffer bindings
@@ -134,7 +134,7 @@ pub fn rope2d_fwd(g: &Gpu, kernel: usize, buf: &DeviceBuffer, cos: &DeviceBuffer
 /// interchangeable at a partial rotary factor (see the kernel's header for
 /// why a plain `rope2d` dispatch would corrupt every head after the first).
 /// `half` is the table width (`rot_dim/2`), built by
-/// `qwenvl::mrope::mrope_tables` called with `head_dim = rot_dim`.
+/// `qwen3vl::mrope::mrope_tables` called with `head_dim = rot_dim`.
 #[allow(clippy::too_many_arguments)]
 pub fn rope2d_partial_fwd(
     g: &Gpu,
@@ -268,7 +268,7 @@ pub fn gqa_fwd_win(
 /// Kernel-pipeline indices for incremental KV-cache decode attention - the
 /// O(cached length) twin of [`gqa_fwd`]'s O(T²) full recompute. Hoisted from
 /// `qwen3::Qwen`'s `decode_steps` (`crates/qwen3/src/model.rs`) so a second
-/// model (`omni::thinker`, a 48-layer MoE decoder) reuses the exact same
+/// model (`qwen3omnimoe::thinker`, a 48-layer MoE decoder) reuses the exact same
 /// dispatch sequence instead of re-deriving it - the "one implementation,
 /// migrate existing users" rule this crate exists to enforce.
 #[derive(Clone, Copy)]
@@ -342,7 +342,7 @@ pub fn kv_cache_fill(g: &Gpu, kv_append: usize, src: &DeviceBuffer, cache: &Devi
 }
 
 // ---- the full GQA attention SUBLAYER (norm -> QKV -> QK-norm -> RoPE ->
-// attend -> out-proj -> residual), hoisted from omni::thinker/omni::talker ---
+// attend -> out-proj -> residual), hoisted from qwen3omnimoe::thinker/qwen3omnimoe::talker ---
 //
 // The two omni decoders carried byte-identical copies of this whole sequence
 // (batched AND decode-step variants), and the copy already cost a real
@@ -1525,7 +1525,7 @@ pub fn swiglu_bwd(
 /// sees from the cache. This is the `model::block` twin of `qwen3::Qwen`'s own
 /// `cache_matches_full_recompute` test, proving the hoisted primitive (not
 /// just qwen's original inline copy) is algebraically exact before a second
-/// model (`omni::thinker`) builds on it.
+/// model (`qwen3omnimoe::thinker`) builds on it.
 #[cfg(test)]
 mod kv_cache_tests {
     use super::*;

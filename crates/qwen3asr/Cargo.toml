@@ -1,0 +1,25 @@
+[package]
+name = "brain-qwen3asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3-ASR: Whisper-style audio encoder + multimodal projector over a spliced Qwen3 decoder."
+
+[lib]
+name = "qwen3asr"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen3.workspace = true
+brain-model.workspace = true
+brain-audio.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-capability.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-data.workspace = true

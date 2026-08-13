@@ -12,7 +12,7 @@ use crate::topology::WeightSource;
 
 /// Build the fp32 ONNX codec decoder directly from an in-memory config +
 /// weight source (no checkpoint file to open) and return the raw ONNX bytes.
-/// For callers that already have both loaded (e.g. `omni::npu_export`, whose
+/// For callers that already have both loaded (e.g. `qwen3omnimoe::npu_export`, whose
 /// `Code2WavConfig` maps 1:1 onto `CodecConfig` and whose weights come from an
 /// already-open `WeightReader`) — mirrors [`build_codec_fp32_bytes`] minus the
 /// file-open + `CodecConfig::from_json` step; the graph topology itself

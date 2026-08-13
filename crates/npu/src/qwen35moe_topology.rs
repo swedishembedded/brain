@@ -252,7 +252,7 @@ impl<'a> Topo<'a> {
     /// of each head rotate (`partial_rotary_factor`), the rest pass through
     /// unrotated. Qwen3.5's text-only degenerate M-RoPE (all three position
     /// axes equal for every token, since there is no vision splice in this
-    /// export) collapses `qwenvl::mrope::mrope_tables` to plain 1-D RoPE -
+    /// export) collapses `qwen3vl::mrope::mrope_tables` to plain 1-D RoPE -
     /// this collapse is exact, not approximate - so a single `theta`-based table
     /// is exactly right here, no per-axis section bookkeeping needed.
     fn rope_partial(&mut self, x: &str, hd: usize, rot: usize, t: usize, theta: f32) -> String {

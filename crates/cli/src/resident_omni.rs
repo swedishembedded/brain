@@ -15,10 +15,10 @@
 //! and at the real 30B shape it walked a 24 GB card to `wgpu error: Out of
 //! Memory` inside one request. Now [`OmniResident`] computes a real placement
 //! from the checkpoint's own per-tensor byte costs
-//! (`omni::thinker_plan`/`model::shard`), reports it through
+//! (`qwen3omnimoe::thinker_plan`/`model::shard`), reports it through
 //! [`MultiDeviceResidentModel::estimate_multi`], and activates on exactly the
 //! devices that reservation named - the same discipline
-//! [`omni::int8_thinker_resident::Int8ThinkerResident`] follows, now shared
+//! [`qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident`] follows, now shared
 //! rather than being a property of the int8 path specifically.
 //!
 //! Weight PRECISION is a separate axis from placement, and stays as the
@@ -37,7 +37,7 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use checkpoint::weightio::WeightReader;
-use omni::caps::OmniProvider;
+use qwen3omnimoe::caps::OmniProvider;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use std::sync::{Arc, OnceLock};
@@ -60,7 +60,7 @@ struct Plan {
 
 /// Qwen3-Omni behind the scheduler, placed across as many GPUs as its real
 /// per-layer bytes need. Dispatches both declared actions (`generate`,
-/// `speak`) through `omni::caps::run_action`.
+/// `speak`) through `qwen3omnimoe::caps::run_action`.
 ///
 /// Reachable ONLY via `Executor::register_multi` - see [`Self::activate`],
 /// which refuses the single-device path rather than silently building a GPU
@@ -141,18 +141,18 @@ impl OmniResident {
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         {
-            Some(root) => omni::config::OmniConfig::from_json(&root).thinker.text,
+            Some(root) => qwen3omnimoe::config::OmniConfig::from_json(&root).thinker.text,
             None => {
                 eprintln!("brain/omni: cannot read '{}/config.json' -- reporting zero devices", self.hf_dir);
                 return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
             }
         };
-        let Some(cost) = omni::thinker_plan::layer_cost(&reader, &cfg) else {
+        let Some(cost) = qwen3omnimoe::thinker_plan::layer_cost(&reader, &cfg) else {
             eprintln!("brain/omni: '{}' is missing Thinker tensors this model loads -- reporting zero devices", self.hf_dir);
             return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
         };
         let caps: Vec<(usize, u64)> = self.devices.iter().map(|&(_, c)| c).enumerate().collect();
-        let Some(placement) = omni::thinker_plan::place_fewest_devices(&cost, &caps) else {
+        let Some(placement) = qwen3omnimoe::thinker_plan::place_fewest_devices(&cost, &caps) else {
             eprintln!(
                 "brain/omni: does not fit the {} budgeted device(s) even streamed ({} bytes available) -- reporting zero devices",
                 caps.len(),
@@ -168,11 +168,11 @@ impl OmniResident {
 
 impl ResidentModel for OmniResident {
     fn manifest(&self) -> Manifest {
-        omni::caps::manifest()
+        qwen3omnimoe::caps::manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(omni::caps::MODEL, "default")
+        InstanceKey::new(qwen3omnimoe::caps::MODEL, "default")
     }
 
     /// Deliberately unusable: this model is registered via `register_multi`
@@ -215,22 +215,22 @@ impl MultiDeviceResidentModel for OmniResident {
 }
 
 struct OmniInstance {
-    inner: Arc<omni::caps::OmniInner>,
+    inner: Arc<qwen3omnimoe::caps::OmniInner>,
 }
 
 impl Instance for OmniInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        // Single dispatch path shared with `omni::caps::OmniProvider` -- this
+        // Single dispatch path shared with `qwen3omnimoe::caps::OmniProvider` -- this
         // resident (not that Provider) is what `brain serve` actually routes
         // D-Bus/HTTP requests through, and it previously IGNORED the action
         // name: an advertised `speak` silently ran `generate` (text out, no
         // audio, no error). `run_action` matches on the action and errors on
         // anything the manifest doesn't declare.
-        omni::caps::run_action(&self.inner, action, inv, progress)
+        qwen3omnimoe::caps::run_action(&self.inner, action, inv, progress)
     }
 }
 
-/// The int8 GPU-sharded Thinker (`omni::int8_thinker_resident::
+/// The int8 GPU-sharded Thinker (`qwen3omnimoe::int8_thinker_resident::
 /// Int8ThinkerResident`) - layer-sharded across as many budgeted GPUs as its
 /// real per-layer bytes need, streamed straight from a pre-quantized
 /// brain-native checkpoint. Reachable ONLY via `Executor::register_multi`
@@ -242,7 +242,7 @@ impl Instance for OmniInstance {
 ///
 /// Config is env-only:
 ///   * `BRAIN_OMNI_INT8_CHECKPOINT` — a brain-native int8-quantized checkpoint
-///     (the output of `omni::import`'s int8-native path, which
+///     (the output of `qwen3omnimoe::import`'s int8-native path, which
 ///     `brain omni import` produces from a raw HF directory). Unset ⇒ not
 ///     served.
 ///   * `BRAIN_OMNI_INT8_TOKENIZER_DIR` - where to read `tokenizer.json` (or
@@ -262,10 +262,10 @@ impl Instance for OmniInstance {
 /// them is reported as unplaceable instead of OOMing mid-load. Deriving the
 /// device list from `gpus` (rather than hardcoding `[Gpu(0), Gpu(1)]`) is
 /// also what keeps it correct on a 1-GPU box and on a 3+-GPU one.
-pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<omni::int8_thinker_resident::Int8ThinkerResident> {
+pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident> {
     let checkpoint_path = std::env::var("BRAIN_OMNI_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
     if gpus.is_empty() {
-        eprintln!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", omni::int8_thinker_resident::MODEL);
+        eprintln!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", qwen3omnimoe::int8_thinker_resident::MODEL);
         return None;
     }
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
@@ -276,26 +276,26 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // did, plus the special media token ids `crate::mm::build_multimodal_prompt`
     // needs -- see that function's own doc for why this is one config, not
     // two independently-maintained copies of the same numbers.
-    let cfg = omni::config::ThinkerConfig::defaults();
+    let cfg = qwen3omnimoe::config::ThinkerConfig::defaults();
     let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path);
     if tokenizer_dir.is_none() {
         eprintln!(
             "brain: {} has no tokenizer directory -- it will serve raw token ids only, \
              NOT /v1/chat/completions. Set BRAIN_OMNI_INT8_TOKENIZER_DIR (or BRAIN_OMNI_HF_DIR).",
-            omni::int8_thinker_resident::MODEL
+            qwen3omnimoe::int8_thinker_resident::MODEL
         );
     }
     // Multimodal input needs a real HF checkpoint directory for the
     // vision/audio tower weights (the int8 checkpoint's own audio.*/vision.*
-    // tensors are quantized; see omni::int8_thinker_resident's module doc for
+    // tensors are quantized; see qwen3omnimoe::int8_thinker_resident's module doc for
     // why this model does not read them). Reuses BRAIN_OMNI_HF_DIR -- the
     // same variable brain/omni itself is configured from -- rather than
     // inventing a second one; unset ⇒ this model still serves text-only.
     let hf_dir = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty());
     if hf_dir.is_none() {
-        eprintln!("brain: {} has no BRAIN_OMNI_HF_DIR -- it will serve text-only generate (no audio/image/video input).", omni::int8_thinker_resident::MODEL);
+        eprintln!("brain: {} has no BRAIN_OMNI_HF_DIR -- it will serve text-only generate (no audio/image/video input).", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
-    Some(omni::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir).with_hf_dir(hf_dir))
+    Some(qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir).with_hf_dir(hf_dir))
 }
 
 /// Where the int8 resident reads its tokenizer from, in preference order:

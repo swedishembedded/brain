@@ -4,7 +4,7 @@
 //! FastVLM composite: FastViTHD encoder → mlp2x_gelu projector → spliced Qwen2
 //! decoder (LLaVA-style, image token id -200 expanded to `n_visual` slots).
 //!
-//! Mirrors `qwenvl::Qwen3Vl` but simpler: the Qwen2 decoder uses plain RoPE (no
+//! Mirrors `qwen3vl::Qwen3Vl` but simpler: the Qwen2 decoder uses plain RoPE (no
 //! M-RoPE) and there's no DeepStack. The vision tower runs on its own `Gpu`; the
 //! projected image tokens cross to the decoder host-side via `write_img_embeds`.
 //! The projector runs host-side here (a 2-layer MLP); an on-device/trainable

@@ -108,7 +108,7 @@
 //! **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is UNCHANGED**
 //! despite this confirmation -- not because doubt remains about `sam1`'s wgpu
 //! correctness, but because the actual device selection for the vision
-//! encoder is hardcoded in `crates/deepseekocr::caps::Session::load` (a
+//! encoder is hardcoded in `crates/deepseek2ocr::caps::Session::load` (a
 //! crate this pass's scope explicitly excludes, to avoid colliding with a
 //! concurrent sibling pass on Phase 8 performance in that same crate
 //! family). See that file's header comment for the precise, narrowly-scoped
