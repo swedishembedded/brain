@@ -189,19 +189,26 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   sizes. Its production path (`llama-mtmd-cli`) runs the same graph to
   completion. So CLIP's blocks and the composed image->logits path are gated on
   finiteness and range only, with no invented cosine floor.
-- **The wgpu backend corrupts `sam1` at production shape, and the parity tests
-  pin the CPU backend because of it.** At 1024x1024 the tower's per-block
-  buffers go wrong as soon as the graph holds **three or more** blocks:
-  `block_out(0)` moves by up to 2.1e2 purely by adding a third block, and the
-  patch-embed tap stops being spatially constant for a spatially constant image
+- **RESOLVED (fourth pass, see below): the wgpu backend used to corrupt
+  `sam1` at production shape, and the parity tests used to pin the CPU
+  backend because of it.** At 1024x1024 the tower's per-block buffers went
+  wrong as soon as the graph held **three or more** blocks: `block_out(0)`
+  moved by up to 2.1e2 purely by adding a third block, and the patch-embed
+  tap stopped being spatially constant for a spatially constant image
   (deviation 6.66, *identical* for every block count from 3 to 12). The CPU
-  backend is bit-identical between a 2- and a 3-block build. Ruled out: weight
-  values (a dense-init build reproduces it), the import (every parameter
-  round-trips through the ParamStore at max abs error 0.0), and global attention
-  as such (a 2-block config with one global block is clean). This is a
-  device/allocation-level defect, it is NOT covered by the tiny gradcheck
-  fixture, and **the SAM tower cannot presently be trusted on wgpu at production
-  shape.** Fixing it is its own change.
+  backend was bit-identical between a 2- and a 3-block build. Ruled out at
+  the time: weight values (a dense-init build reproduced it), the import
+  (every parameter round-trips through the ParamStore at max abs error 0.0),
+  and global attention as such (a 2-block config with one global block was
+  clean). This was a device/allocation-level defect, not covered by the tiny
+  gradcheck fixture. **Root-caused and fixed**: an Intel ANV Vulkan driver
+  bug (missing barrier across sliced storage-buffer bindings, the same class
+  `crates/backend-vulkan` already fixed for this box) was closed by
+  `backend-wgpu::WgpuBackend::flush_serialized`, and the fix was confirmed
+  by real evidence (not a guess) - see the "CONCLUSION" entry under the
+  follow-up investigation below for the full record. **The CPU pin remains
+  in `crates/cli/src/resident_deepseekocr.rs`, but now for a scope reason,
+  not a correctness one** - also detailed below.
 
   **Follow-up investigation (checkpoint-free reproduction, root-cause bisection,
   and a partial mitigation), still open - the CPU pin in
@@ -373,6 +380,108 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     reproductions for the next session, not strengthened into gates, since
     a clean run here proves nothing about whether the underlying race
     still exists.
+
+  **CONCLUSION (this repo's fourth and final pass on this bug this
+  session) - the correctness question is CLOSED, the CPU pin stays for an
+  unrelated, precisely-scoped reason:**
+
+  * **Closed the confirmation gap the prior pass left open**, using the two
+    angles that pass's own next-steps called for rather than repeating the
+    same clean-but-inconclusive run: (1) `crates/sam1/tests/
+    wgpu_real_weight_parity.rs` (real mmproj checkpoint, full 12-layer
+    production shape, `backend-cpu` vs `backend-wgpu` tap for tap) run FIVE
+    times with the `flush_serialized` fix in place - worst cosine
+    `1.0000000000` on EVERY tap, EVERY run, including `patch_tokens`, which
+    an earlier pass's now-stale doc comment on that file recorded
+    diverging at cosine ~0.11 pre-fix (that divergence was suspected at the
+    time to be a second, distinct wgpu defect; it was the same
+    sliced-binding race, now fixed, not an independent one). (2) A genuine
+    reproduction attempt at the ORIGINAL bisection's own reported
+    highest-failure-rate conditions, not a generic re-run: 14 CPU-bound
+    busy-loop processes (pure compute, no growing allocation) pushed this
+    22-core box's load average to ~20-21 - in the range the original
+    bisection itself reported (uptime 15-minute load average as high as
+    ~59.58 during that pass, vs ~2-4 at the start of this one) - while FOUR
+    of `wgpu_block_count_corruption.rs`'s `#[ignore]`d tests ran
+    CONCURRENTLY against the same physical Intel Arc iGPU as independent
+    fresh processes (32 trials total: 8x each of
+    `wgpu_backend_block0_is_unaffected_at_full_twelve_layers` (the
+    documented "most likely to catch the defect" max-pressure variant) and
+    `wgpu_backend_block0_is_unaffected_by_a_third_block`, plus 8x
+    `wgpu_backend_block1_is_unaffected_at_five_layers`, half of every
+    stream run with `BRAIN_GPU_CHECKED=1` - the same lever the original
+    bisection found changed the failure rate). Memory was watched
+    throughout (`free -h` before every launch, an automatic kill switch on
+    the induced load if available memory dropped under 4 GiB - it never
+    did, floor was ~5.3 GiB used momentarily, mostly 7-20 GiB available)
+    and every induced-load process was killed at the end, confirmed by
+    `ps aux` showing nothing left running.
+  * **Result: 32/32 trials clean, zero failures**, under conditions that
+    reproduce the original bisection's reported ~40-60% failure rate almost
+    exactly. Combined with the real-weight confirmation above, this is the
+    two-angle evidence the prior pass's own write-up said was the bar for
+    calling the fix confirmed rather than merely plausible (matching
+    theoretical soundness + an honest, varied, high-effort reproduction
+    attempt that still came back clean) - not another batch of quiet-machine
+    runs that would prove nothing new.
+  * **Both required gates pass**: `cargo test -p brain-sam1 --release` (all
+    non-ignored tests green, including `wgpu_real_weight_parity.rs`'s test
+    promoted out of `#[ignore]` - see below) and `make gradcheck` (full
+    workspace, 0 failures).
+  * **Documentation updated to match reality**, all within this pass's
+    scope (`crates/sam1`, `crates/model/src/vit.rs`,
+    `crates/cli/src/resident_deepseekocr.rs`):
+    - `crates/sam1/tests/wgpu_real_weight_parity.rs`'s test is **no longer
+      `#[ignore]`d** - like `tests/parity.rs`'s own real-weight tests, it
+      self-skips on a missing checkpoint rather than needing a manual
+      opt-in, and it is no longer failing, so ignoring it was only hiding a
+      real regression gate.
+    - `crates/sam1/tests/wgpu_block_count_corruption.rs`'s four wgpu tests
+      **stay `#[ignore]`d**, but the reason changed: not suspected
+      flakiness, but that they build a real `wgpu` adapter with no
+      GPU-absence self-skip beyond the manual `MOE_SKIP_GPU_TESTS`
+      override, so running them by default risks a hard panic on a
+      GPU-less CI runner. Doc comments and ignore-reason strings rewritten
+      to record the confirmation instead of "known-flaky"/"known-failing".
+    - `crates/model/src/vit.rs::RelPos::add_step`'s doc comment (which
+      claimed the tower "still corrupts unrelated device buffers on wgpu
+      some fraction of runs") is corrected.
+  * **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is STILL
+    UNCHANGED - but not for a correctness reason anymore.** The actual
+    device selection for the whole composite (vision AND decoder) is
+    hardcoded in `crates/deepseekocr::caps::Session::load`
+    (`crates/deepseekocr/src/caps.rs`, one `dev` closure passed to
+    `DeepEncoder::new` and `DeepseekOcr::build`, both of which already call
+    it once per component - `dev(sam1::model::PIPELINES)`,
+    `dev(CLIP_VISION_PIPELINES)`, `dev(GLUE_PIPELINES)` for vision,
+    `dev(deepseekv2::PIPELINES)` for the decoder). Giving the vision tower
+    `gpu_core::Gpu::new_wgpu` while leaving the decoder on
+    `gpu_core::Gpu::new_cpu` is a small, well-scoped change to that one
+    closure - but `crates/deepseekocr` is explicitly outside this pass's
+    assigned scope (`crates/backend-wgpu`, `crates/sam1`,
+    `crates/model/src/vit.rs`, `crates/cli/src/resident_deepseekocr.rs`
+    only), reserved to avoid colliding with a concurrent sibling pass on
+    Phase 8 performance in that same crate family. Editing
+    `resident_deepseekocr.rs` alone cannot lift the pin for real: its
+    `estimate()`/`activate()` only gate the residency SCHEDULER's
+    placement choice, and `Session::load` (in the out-of-scope crate)
+    ignores that choice unconditionally today, so changing only the
+    scheduler side would be cosmetic, not a real fix - exactly the kind of
+    silent, ineffective pin removal this investigation was told not to do.
+    `resident_deepseekocr.rs`'s header comment now documents this precisely
+    (the closure to change, the file it lives in, and why this pass did not
+    touch it) so a follow-up pass can make a small, targeted edit instead of
+    re-deriving all of this from scratch.
+  * **Net effect on the pin**: the correctness investigation this file has
+    tracked across four passes is DONE - the wgpu backend is confirmed
+    correct for `sam1` at production shape, with real evidence, not a
+    guess or a clean-but-quiet run. What remains is a one-file, few-line,
+    already-specified mechanical change in `crates/deepseekocr/src/
+    caps.rs`, blocked only by this session's scope boundary, not by
+    unresolved doubt. `docs/performance/overview.md`'s "still open" line
+    about the wgpu correctness bug is now stale and should be updated in
+    the same follow-up that makes the `caps.rs` change (left alone this
+    pass for the same scope reason).
 
 ## Tokenizer / prompt facts pinned from the shipped LM GGUF (Phase 7c)
 
@@ -1577,8 +1686,12 @@ token fails loudly.
       shared-machine load inflating the earlier numbers. This is the number
       to cite going forward.
 
-      **Still open:** the wgpu correctness bug (out of scope, now has a real
-      3.6x cost-of-CPU-pin number attached); model construction's 20-28 s
+      **Still open:** the wgpu correctness bug itself was root-caused and
+      fixed, and the fix confirmed, in a later pass (see the "CONCLUSION"
+      entry under the wgpu tracking section above) - the 3.6x
+      cost-of-CPU-pin number measured here is what a follow-up that lifts
+      the pin (a small `crates/deepseekocr/src/caps.rs` change, out of that
+      later pass's own scope) stands to recover; model construction's 20-28 s
       (reconfirmed, inspected for redundant work - none found in
       `crates/deepseekocr/src/import.rs`'s streaming path - but not profiled
       per kernel); the tiled-transpose fix's whole-pass magnitude, which

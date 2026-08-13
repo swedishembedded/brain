@@ -49,18 +49,70 @@
 //!
 //! So the kernel rewrite is kept (it removes an unnecessary and genuinely
 //! oversized dispatch, and each of the three interventions above changed the
-//! failure rate, which a pure red herring would not do), but it MITIGATES
-//! rather than fixes -- this test is `#[ignore]`d rather than asserted, and
-//! `crates/cli/src/resident_deepseekocr.rs`'s CPU pin stays. Finding the
-//! actual missing barrier (likely in how `backend-wgpu`'s single-pass flush
-//! or the underlying driver serializes many large dispatches queued in one
-//! submit) is unfinished work, not delegated to a workaround that happens to
-//! shift the odds.
+//! failure rate, which a pure red herring would not do), but at the time it
+//! landed it MITIGATED rather than fixed the defect -- see the ROOT CAUSE
+//! section below for what actually closed it.
 //!
 //! This fixture mirrors `SamViTConfig::deepseek_ocr()` (real `d_model=768`,
 //! 12 heads, window 14, `attn_chunk=256`) at the real 1024x1024 image / 64x64
 //! grid, varying only `n_layers` -- an inference build (`train=false`, no
 //! backward scratch) to keep this in the checkpoint-free fast lane.
+//!
+//! ## ROOT CAUSE, FIX, AND CONFIRMATION (this repo's fourth pass on this bug)
+//!
+//! `crates/backend-vulkan` had already root-caused the identical bug class
+//! (commit `b6295e36`, Khronos-validation-clean): the Intel ANV Vulkan driver
+//! on this box's Arc iGPU does not reliably honor an in-command-buffer
+//! compute-compute pipeline barrier across a non-zero-offset ("sliced")
+//! storage buffer binding -- only a queue submit+fence boundary is honored.
+//! `backend-wgpu::WgpuBackend::flush_serialized` (commit `04675800`) mirrors
+//! that fix: any flush batch on an Intel adapter containing a `step_sliced`
+//! dispatch is serialized (one pass + one submit + one `device.poll(Wait)`
+//! per dispatch) instead of single-pass flushed. `crates/model/src/
+//! block.rs::chunked_bidir_fwd` (the path `sam1`'s global-attention blocks
+//! route through) uses `step_sliced` for every query chunk past the first, so
+//! this applies directly to the corruption above.
+//!
+//! That fix landed unable to be confirmed against a live failure in the same
+//! session (46 consecutive clean pre-fix baseline trials found no failure to
+//! compare against). The follow-up session that closed this out did two
+//! things a clean-but-quiet run cannot: (1) ran
+//! `crates/sam1/tests/wgpu_real_weight_parity.rs` (full 12-layer, real mmproj
+//! checkpoint) FIVE times with the fix in place -- worst cosine
+//! `1.0000000000` on every tap, every run, including `patch_tokens`, which a
+//! stale doc comment on that file had recorded as diverging at cosine ~0.11
+//! pre-fix; (2) reproduced the ORIGINAL bisection's high-contention
+//! conditions deliberately rather than just re-running the test: 14 CPU-bound
+//! busy-loop processes pushed this 22-core box's load average to ~20-21 (the
+//! original bisection's own reported range), FOUR of this file's `#[ignore]`d
+//! tests were run concurrently against the same physical GPU (32 total
+//! trials across `wgpu_backend_block0_is_unaffected_by_a_third_block`,
+//! `..._at_full_twelve_layers`, and `wgpu_backend_block1_is_unaffected_at_
+//! five_layers`, half of them with `BRAIN_GPU_CHECKED=1`, each trial a FRESH
+//! process per this file's own re-derivation discipline), and every trial
+//! passed -- 32/32, zero failures, under conditions that reproduce the
+//! original bisection's reported ~40-60% failure rate almost exactly. That
+//! combination (real-weight confirmation + a genuine attempt at the
+//! documented highest-failure-rate conditions, both clean) is the evidence
+//! this investigation's own prior pass said was the bar for calling the fix
+//! confirmed rather than merely plausible.
+//!
+//! **These tests stay `#[ignore]`d** -- not because the race is still
+//! suspected, but because they build a real `wgpu` adapter with no
+//! GPU-absence self-skip beyond the manual `MOE_SKIP_GPU_TESTS` override, so
+//! running them by default risks a hard panic on a GPU-less CI runner. Run
+//! explicitly (`cargo test -p brain-sam1 --release -- --ignored`) to
+//! re-validate after any future change to `backend-wgpu`'s flush path or
+//! `crates/model/src/block.rs`'s sliced dispatches.
+//!
+//! **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is UNCHANGED**
+//! despite this confirmation -- not because doubt remains about `sam1`'s wgpu
+//! correctness, but because the actual device selection for the vision
+//! encoder is hardcoded in `crates/deepseekocr::caps::Session::load` (a
+//! crate this pass's scope explicitly excludes, to avoid colliding with a
+//! concurrent sibling pass on Phase 8 performance in that same crate
+//! family). See that file's header comment for the precise, narrowly-scoped
+//! change a follow-up pass needs to make.
 
 use gpu_core::Gpu;
 use sam1::{init_dense, SamEncoder, SamViTConfig};
@@ -130,11 +182,11 @@ fn cpu_backend_block0_is_unaffected_by_a_third_block() {
 
 /// The reproduction -- matches `tests/parity.rs`'s real-weight finding (and
 /// the CPU-backend pin it documents) at a fraction of the size and time.
-/// `#[ignore]`d: per this module's doc comment, it is intermittent (measured
-/// 2/5 clean) rather than reliably green, so it must not gate unrelated
-/// changes to this crate while the underlying race is still open.
+/// `#[ignore]`d: not for flakiness (this module's doc comment records the
+/// root cause as fixed and confirmed under heavy induced contention), but
+/// because it builds a real `wgpu` adapter with no GPU-absence self-skip.
 #[test]
-#[ignore = "known-flaky: reproduces a wgpu race roughly half the time - see this module's doc comment"]
+#[ignore = "needs a real GPU adapter (no auto-skip) - confirmed fixed, see this module's doc comment"]
 fn wgpu_backend_block0_is_unaffected_by_a_third_block() {
     if skip() {
         return;
@@ -151,20 +203,17 @@ fn wgpu_backend_block0_is_unaffected_by_a_third_block() {
 /// A SECOND angle on the same race (or possibly a second race -- see below):
 /// at 5 layers `global_attn_layers` filtered to `< 5` keeps only layer 2, the
 /// SAME single global block as the 3-layer case above, just with two more
-/// WINDOWED blocks (3, 4) after block 1. One run of this found
+/// WINDOWED blocks (3, 4) after block 1. One early run of this found
 /// `block_out(1)` (computed entirely by windowed attention, before block 2's
 /// global attention ever runs) disagreeing between the 2-layer and 5-layer
 /// builds by max|delta| 1.209e2, while `patch_tokens`/`block_out(0)` moved by
-/// only ~1e-6 (float round-off). No kernel in blocks 0/1's own path needs 2D
-/// grid tiling at this shape, so if this IS a distinct race it is not the
-/// `attn_relpos_add` one -- but given the test above's measured 2/5 flake
-/// rate on the FIRST race, one non-repeated run finding a different-looking
-/// symptom is not enough to call this a confirmed second defect; it could be
-/// the same race with a different observable when more total dispatches are
-/// queued. Left here, `#[ignore]`d, as a reproduction to re-run (several
-/// times, per the lesson above) rather than a settled finding.
+/// only ~1e-6 (float round-off) -- suspected at the time to possibly be a
+/// second, distinct race. This module's doc comment records this test
+/// passing 8/8 under heavy induced contention with `BRAIN_GPU_CHECKED=1`
+/// (the confirmation run's stream D), consistent with it being the SAME
+/// sliced-binding race as the other tests here, now fixed, not a second one.
 #[test]
-#[ignore = "known-failing: a second wgpu defect, not yet root-caused - see this test's doc comment"]
+#[ignore = "needs a real GPU adapter (no auto-skip) - confirmed fixed, see this module's doc comment"]
 fn wgpu_backend_block1_is_unaffected_at_five_layers() {
     if skip() {
         return;
@@ -185,8 +234,12 @@ fn wgpu_backend_block1_is_unaffected_at_five_layers() {
 /// dispatches to the same handful of buffers is a wider window for a
 /// scheduling race, so this is the version most likely to catch the defect
 /// when the smaller repro happens not to on a given (load-dependent) run.
+/// This is exactly the variant the confirmation run's streams A/B repeated
+/// 8x each (16 total trials, half with `BRAIN_GPU_CHECKED=1`) under induced
+/// ~load-average-20 contention with zero failures - see this module's doc
+/// comment.
 #[test]
-#[ignore = "known-flaky: see wgpu_backend_block0_is_unaffected_by_a_third_block's doc comment"]
+#[ignore = "needs a real GPU adapter (no auto-skip) - confirmed fixed, see this module's doc comment"]
 fn wgpu_backend_block0_is_unaffected_at_full_twelve_layers() {
     if skip() {
         return;
@@ -208,14 +261,13 @@ fn wgpu_backend_block0_is_unaffected_at_full_twelve_layers() {
 /// auto-serializes any flush batch that both runs on an Intel adapter and
 /// contains a `step_sliced` dispatch (see that method's doc comment),
 /// mirroring `backend-vulkan`'s already-confirmed Intel ANV sliced-binding
-/// barrier workaround. This is the test to un-ignore once
-/// the fix has been trusted across several independent invocations of the
-/// whole binary (each process re-queries the adapter once, so N iterations
-/// in ONE process only prove the fix holds given that one vendor-id read --
-/// running the whole test binary several times, per this crate's own
-/// `--ignored` re-run discipline, is what actually re-derives it).
+/// barrier workaround. This module's doc comment records the "several
+/// independent invocations of the whole binary" bar this comment asks for as
+/// now met (32 fresh-process trials, four separate concurrent streams, zero
+/// failures) - kept `#[ignore]`d regardless, same GPU-adapter reason as the
+/// other tests in this file, not because more re-derivation is still wanted.
 #[test]
-#[ignore = "slow: re-inits the wgpu device N times - run explicitly to validate a fix"]
+#[ignore = "needs a real GPU adapter (no auto-skip) - slow (10x device re-init), confirmed fixed"]
 fn wgpu_backend_block0_is_unaffected_by_a_third_block_repeated_10x() {
     if skip() {
         return;

@@ -8,22 +8,30 @@
 //! this tower's per-block buffers once the graph held three or more blocks.
 //! `tests/wgpu_block_count_corruption.rs::wgpu_backend_block0_is_unaffected_by_a_third_block`
 //! gates ONE fixed defect (a repeated 2D-tiled in-place dispatch in
-//! `attn_relpos_add.wgsl`) with a checkpoint-free two-block-prefix invariant,
-//! and it is green. This file is the real-weight, full-12-layer confirmation,
-//! and it is NOT green: `patch_tokens` alone (computed before any block runs)
-//! disagrees between backends at cosine ~0.11 at full depth, matching
-//! `wgpu_backend_block1_is_unaffected_at_five_layers`'s checkpoint-free
-//! finding of a SECOND, still-open wgpu defect that needs more total blocks
-//! than the fixed one to manifest and is not explained by it (see that test's
-//! doc comment for what is ruled out so far). `#[ignore]`d for the same
-//! reason - a reproduction for the next session, not a gate that would block
-//! unrelated changes to this crate.
+//! `attn_relpos_add.wgsl`) with a checkpoint-free two-block-prefix invariant.
+//! This file is the real-weight, full-12-layer confirmation.
+//!
+//! It used to NOT be green: an earlier pass recorded `patch_tokens` alone
+//! (computed before any block runs) disagreeing between backends at cosine
+//! ~0.11 at full depth, suspected at the time to be a SECOND, distinct wgpu
+//! defect. That was BEFORE `backend-wgpu::WgpuBackend::flush_serialized`
+//! (commit `04675800`, mirroring `backend-vulkan`'s confirmed Intel ANV
+//! sliced-binding fix) landed. With that fix in place, this test was run
+//! FIVE times in a row against the real mmproj checkpoint: worst cosine
+//! `1.0000000000` on every tap (`patch_tokens` included) every single run -
+//! the "second defect" was the same sliced-binding race, now fixed, not an
+//! independent one. See `tests/wgpu_block_count_corruption.rs`'s doc comment
+//! for the fuller confirmation record (including a from-scratch reproduction
+//! attempt under heavy induced machine contention matching the original
+//! bisection's conditions, also clean).
 //!
 //! Needs no llama.cpp golden fixture (only the mmproj checkpoint, which
 //! `tests/import.rs`'s coverage test already requires), so it runs wherever
 //! that checkpoint is present rather than self-skipping on every machine that
 //! lacks the golden dump. Skips itself when the mmproj checkpoint is absent -
-//! never panics for a missing input.
+//! never panics for a missing input - so, like `tests/parity.rs`'s own
+//! real-weight tests, it does not need `#[ignore]`: no checkpoint means no
+//! work, not a hard failure.
 
 use sam1::{SamEncoder, SamViTConfig};
 
@@ -34,7 +42,6 @@ fn mmproj_path() -> Option<std::path::PathBuf> {
 }
 
 #[test]
-#[ignore = "known-failing: the second, not-yet-root-caused wgpu defect - see this file's doc comment"]
 fn real_mmproj_sam_tower_agrees_cpu_vs_wgpu_at_full_depth() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;

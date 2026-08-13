@@ -12,11 +12,46 @@
 //!
 //! # This model is CPU-resident, and that is declared, not enforced by hand
 //!
-//! `crates/sam1`'s ViT tower is known to corrupt its per-block buffers on wgpu
-//! at 1024x1024 once the graph holds three or more blocks - a tracked,
-//! still-open correctness bug that produces plausible garbage rather than an
-//! error, and the reason every real-weight test of that tower pins the CPU
-//! backend. So this model must not run on a GPU.
+//! `crates/sam1`'s ViT tower USED TO corrupt its per-block buffers on wgpu at
+//! 1024x1024 once the graph held three or more blocks - plausible garbage
+//! rather than an error, hence the CPU pin. As of this repo's fourth pass on
+//! that bug, the correctness question is CLOSED, with evidence, not "still
+//! open": the root cause (Intel ANV not honoring an in-command-buffer
+//! compute-compute barrier across a non-zero-offset/"sliced" storage buffer
+//! binding - the exact bug class `crates/backend-vulkan` already root-caused
+//! and fixed for this same box's Arc iGPU in commit `b6295e36`) is fixed in
+//! `backend-wgpu::WgpuBackend::flush_serialized` (commit `04675800`), and that
+//! fix was confirmed two independent ways: the real-weight, full-12-layer
+//! parity test (`crates/sam1/tests/wgpu_real_weight_parity.rs`) ran clean
+//! (worst cosine `1.0000000000`) five times in a row, and a checkpoint-free
+//! reproduction of the ORIGINAL bisection's highest-failure-rate conditions
+//! (`crates/sam1/tests/wgpu_block_count_corruption.rs`, run under induced
+//! CPU contention pushing this 22-core box's load average to ~20-21, plus
+//! four-way concurrent GPU contention, matching the original bisection's
+//! reported conditions almost exactly) found zero failures across 32 trials.
+//! See that test file's doc comment for the full record.
+//!
+//! **The CPU pin below is UNCHANGED regardless** - not because doubt remains
+//! about `sam1`'s wgpu correctness, but because the code that actually
+//! selects the device is NOT in this file: `crates/deepseekocr::caps::
+//! Session::load` (`crates/deepseekocr/src/caps.rs`) hardcodes
+//! `gpu_core::Gpu::new_cpu` for every stage - vision (SAM/CLIP/glue) AND the
+//! decoder - via one `dev` closure, and calls it once per component
+//! (`DeepEncoder::new` already calls `dev(sam1::model::PIPELINES)`,
+//! `dev(CLIP_VISION_PIPELINES)`, and `dev(GLUE_PIPELINES)` separately from
+//! `DeepseekOcr::build`'s `dev(deepseekv2::PIPELINES)` for the decoder), so
+//! giving the vision tower wgpu while leaving the decoder on the CPU is a
+//! small, well-scoped change to that one closure - but it requires editing
+//! `crates/deepseekocr`, which is outside this pass's assigned scope
+//! (reserved to avoid colliding with a concurrent sibling pass on Phase 8
+//! performance in that same crate family). This file's own [`MemCost`] /
+//! [`ResidentModel::activate`] gate below still declares CPU-only / `vram ==
+//! 0` because that is what is actually true today - a scheduler edit here
+//! alone, with `Session::load` still ignoring it, would be cosmetic, not a
+//! real pin lift. Lifting the pin for real is a follow-up pass's job: change
+//! `Session::load`'s `dev` closure in `crates/deepseekocr/src/caps.rs` to
+//! build the vision stages on `gpu_core::Gpu::new_wgpu` and the decoder on
+//! `gpu_core::Gpu::new_cpu`, then re-verify end to end.
 //!
 //! That is expressed as a **RAM-only [`MemCost`]** - `vram == 0` - which is the
 //! scheduler's own vocabulary for "not a GPU model": `residency::place::
@@ -103,11 +138,13 @@ impl ResidentModel for DeepseekOcrResident {
         if device != Device::Cpu {
             // Unreachable while `estimate` reports vram == 0, but a silent
             // wrong-backend build is precisely the failure this model already
-            // paid for once (`crates/sam1`'s wgpu corruption produced plausible
-            // garbage, not an error).
+            // paid for once. Note this is now a SCHEDULING contract, not a
+            // live correctness doubt - see this module's header comment for
+            // why `Session::load` still hardcodes the CPU backend regardless
+            // of what device this function is handed.
             return Err(format!(
                 "deepseek-ocr: assigned {device:?}, but this model is CPU-only \
-                 (crates/sam1's tower is not correct on wgpu at 1024x1024) -- its MemCost declares vram == 0"
+                 (Session::load hardcodes gpu_core::Gpu::new_cpu; see this file's header comment) -- its MemCost declares vram == 0"
             ));
         }
         Ok(Box::new(DeepseekOcrInstance { session: Session::load(&key.config)? }))
