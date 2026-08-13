@@ -20,6 +20,8 @@ use gpu_core::select::{
 };
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
+use model::dispatch::I8Scratch;
+use model::ops::{Ops, Weight};
 use model::paged::{BlockAllocator, BlockTable, PrefixCache};
 use paramstore::ParamStore;
 
@@ -120,6 +122,45 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
 ];
+
+/// The `model::ops::Ops` façade's required kernel set (B7), registered on a
+/// throwaway side `Gpu` (`Gpu::new_like`) purely so `from_map_with_gpu` can
+/// call `Weight::upload` for its capability-aware quantize+upload - this
+/// engine's own dispatch (`Engine::linear`/`Engine::mm8`/`Engine::tune_i8`)
+/// never routes through `Ops::matmul`, so - unlike `qwen3::model::Qwen`'s
+/// `self.ops` (built via `Gpu::share`, see that crate's `pipelines()` doc
+/// comment) - this side `Gpu` never needs index-space compatibility with
+/// `self.gpu`: `Weight::upload` only ever touches buffers, never builds a
+/// `Step` this engine submits.
+fn ops_kernel_list() -> &'static [(&'static str, &'static str)] {
+    use gpu_core::select::Dtype as OpsDtype;
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = vec![
+            ("matmul", kernels::MATMUL),
+            ("matmul_gemv", kernels::MATMUL_GEMV),
+            ("matmul_reg2", kernels::MATMUL_REG2),
+            ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+            ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+            ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+            ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+            ("max_abs_row", kernels::MAX_ABS_ROW),
+            ("quant_pack", kernels::QUANT_PACK),
+        ];
+        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
+        // variants (B4/B5) even though this crate never builds a
+        // `Weight::BF16`/`Weight::F16` - see `Ops::new`'s own doc comment
+        // ("every model that builds an `Ops` must register the full façade
+        // kernel set, not just the tiers it plans to use"). Compiled, never
+        // dispatched.
+        for dt in [OpsDtype::BF16, OpsDtype::F16] {
+            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
+        }
+        v
+    })
+}
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
 /// picks `min(this, tokens remaining)`; the window trades one readback per
@@ -394,13 +435,29 @@ pub struct Engine {
     /// `kv_int8`; MAX-sentinel-filled until a real calibration is installed).
     clip_k: Vec<DeviceBuffer>,
     clip_v: Vec<DeviceBuffer>,
-    /// Int8 WEIGHT path (A0): the 7 per-layer linears quantized per-channel and
-    /// packed 4/u32 (~4x fewer weight bytes in the bandwidth-bound decode
-    /// regime), with per-token dynamic activation quant. `None` = fp32 weights
-    /// — always the case on a device whose caps report no packed-int8 path.
-    w8: Option<crate::q8::Q8>,
-    /// The int8-packed LM head (present iff `w8` is).
-    head8: Option<crate::q8::Lin8>,
+    /// Int8 WEIGHT path (A0): every linear this engine dispatches - the 7
+    /// per-layer projections (`blocks.<l>.<leaf>`) plus the LM head
+    /// (`cfg.head_weight()`) - as a `model::ops::Weight` (B7), packed 4/u32
+    /// (~4x fewer weight bytes in the bandwidth-bound decode regime) when
+    /// `weights_int8` was requested AND the device's `int8_dot` capability
+    /// allows it (`Weight::upload`'s own `want.promote(caps.numeric)` gate -
+    /// never the case on a device whose caps report no packed-int8 path),
+    /// else `F32`. Replaces the old `w8`/`head8` pair (an `Option` wrapping
+    /// `q8`'s own `Q8`, and one wrapping its `Lin8`, respectively):
+    /// dispatch (`Self::linear`, below) reads whatever tier a `Weight` value
+    /// carries, never a separate on/off flag.
+    /// Named `lin_weights` (not `weights`) to stay distinct from this
+    /// module's own `weights: &HashMap<String, Vec<f32>>` constructor
+    /// parameter (the raw host checkpoint tensors this is built FROM).
+    lin_weights: HashMap<String, Weight>,
+    /// Int8 activation-quantization scratch (`model::dispatch::I8Scratch` -
+    /// the SAME struct `model::ops::Ops::act` wraps, B3's façade) - `Some`
+    /// only when at least one `Weight` in `weights` is `I8` (mirrors the old
+    /// `w8.is_some()` gate); nothing ever reads it otherwise, so there is
+    /// nothing to allocate. Sized once for this engine's widest row count and
+    /// re-quantized (overwritten in place) every layer's forward, exactly
+    /// like the old `Q8::sx`/`Q8::xq` it replaces.
+    i8_scratch: Option<I8Scratch>,
     /// Measured GEMV/tile choices for the int8 linears (S5), keyed by
     /// `(row bucket, n, k)` — tuned once at build on THIS device (persisted
     /// per adapter), so the hot path never measures. Empty on fp32 engines.
@@ -409,10 +466,6 @@ pub struct Engine {
     /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
     /// (applied once per request) and for callers that need full logits.
     head: Vec<f32>,
-    /// The same head resident on the device (fp32), for the batched decode
-    /// path. `None` when the head lives on the device as int8 (`head8`) —
-    /// keeping both resident would forfeit the memory the quantisation buys.
-    head_dev: Option<DeviceBuffer>,
     /// `[max_batch, vocab]` decode logits, and `[max_batch]` argmax indices.
     logits_dev: DeviceBuffer,
     argmax_dev: DeviceBuffer,
@@ -563,59 +616,84 @@ impl Engine {
             sched_buf: st((DECODE_WINDOW as u64 - 1) * max_batch as u64 * 3),
             hist_buf: st(DECODE_WINDOW as u64 * max_batch as u64),
         };
-        // Int8 weight bank: the 7 per-layer linears + the head, quantized once
-        // at build (per-channel scales) and packed 4/u32. Activation-quant
-        // scratch is sized for the widest input rows the forward ever sees —
-        // prefill chunks run through the same path as decode.
-        let (w8, head8) = if w8_on {
-            let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
-            let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
-            let dims = move |leaf: &str| -> (usize, usize) {
-                match leaf {
-                    "attn.wq.weight" => (hqm, dm),
-                    "attn.wk.weight" | "attn.wv.weight" => (hkvm, dm),
-                    "attn.wo.weight" => (dm, hqm),
-                    "mlp.gate.weight" | "mlp.up.weight" => (ffm, dm),
-                    "mlp.down.weight" => (dm, ffm),
-                    other => panic!("q8 dims: unknown linear {other}"),
-                }
-            };
-            let q8 = crate::q8::Q8::build(
-                &gpu,
-                weights,
-                0..cfg.n_layers as usize,
-                dims,
-                b as u32,
-                ff.max(hq).max(d) as u32,
-                MAX_ABS_ROW,
-                QUANT_PACK,
-                MATMUL_I8_DYN,
-            );
-            let (packed, sw) = crate::q8::quantize_weight(&head, cfg.vocab as usize, cfg.d_model as usize);
-            let pb = gpu.storage(packed.len() as u64);
-            gpu.write(&pb, &packed);
-            gpu.poll_wait();
-            let sb = gpu.storage(sw.len() as u64);
-            gpu.write(&sb, &sw.iter().map(|v| v.to_bits()).collect::<Vec<u32>>());
-            gpu.poll_wait();
-            let h8 = crate::q8::Lin8 { packed: pb, scale: sb, k: cfg.d_model, n: cfg.vocab };
-            (Some(q8), Some(h8))
-        } else {
-            (None, None)
+        // Per-linear weights (B7): every layer's 7 projections plus the LM
+        // head, as `model::ops::Weight` - `Weight::upload`'s own `want.
+        // promote(caps.numeric)` is the ONE capability gate for int8 (agrees
+        // with `w8_on` above by construction: both read the SAME `caps.
+        // numeric.int8_dot`). Built via a throwaway `Ops` on a side `Gpu`
+        // (`Gpu::new_like`) purely for `Weight::upload`'s convenience
+        // (capability-aware quantize+upload) - this engine keeps its OWN
+        // tuned dispatch (`Self::linear`/`Self::mm8`/`Self::tune_i8`, below)
+        // rather than routing through `Ops::matmul`, so - unlike `qwen3::
+        // model::Qwen`'s `self.ops` (see that crate's `pipelines()` doc
+        // comment) - index-space compatibility with `self.gpu` is NOT
+        // required: `Weight::upload` only touches buffers, it never builds a
+        // `Step` this engine would submit.
+        //
+        // **Why this engine does NOT route dispatch through `Ops::matmul`,
+        // unlike `qwen3::model::Qwen` (B7).** `Ops::matmul` always resolves
+        // its kernel via a FIXED internal `CachedSelector<DefaultSelector>` -
+        // there is no way for a caller to inject a different one. This
+        // engine's `tuned_i8` (below) is a REAL, per-device MEASURED
+        // selector (`Self::tune_i8`/`AutoTuner`/`FileTuneStore`) that the
+        // serving-performance regression gate this phase must not regress
+        // directly depends on - routing through `Ops::matmul` would silently
+        // discard it in favour of the static policy.
+        let want = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
+        let ops = Ops::new(gpu.new_like(ops_kernel_list())).unwrap_or_else(|e| panic!("serve: Ops::new: {e}"));
+        let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
+        let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
+        let dims = move |leaf: &str| -> (usize, usize) {
+            match leaf {
+                "attn.wq.weight" => (hqm, dm),
+                "attn.wk.weight" | "attn.wv.weight" => (hkvm, dm),
+                "attn.wo.weight" => (dm, hqm),
+                "mlp.gate.weight" | "mlp.up.weight" => (ffm, dm),
+                "mlp.down.weight" => (dm, ffm),
+                other => panic!("serve: unknown linear {other}"),
+            }
         };
+        let mut lin_weights: HashMap<String, Weight> = HashMap::new();
+        for l in 0..cfg.n_layers as usize {
+            for leaf in crate::q8::Q8::LINEARS {
+                let name = format!("blocks.{l}.{leaf}");
+                let (wn, wk) = dims(leaf);
+                let w = if w8_on {
+                    let raw = weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}"));
+                    Weight::upload(&ops, raw, wn, wk, Dtype::I8)
+                } else {
+                    Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
+                };
+                lin_weights.insert(name, w);
+            }
+        }
+        let head_name = cfg.head_weight().to_string();
+        // The head never lived in `ps` (untied models have no `lm_head.
+        // weight` in `decoder_param_list` at all), so - unlike the 7
+        // per-layer linears above - there is no existing buffer to `.clone()`
+        // for the `F32` tier either; `Weight::upload` always uploads it
+        // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
+        // this replaces already paid.
+        lin_weights.insert(head_name, Weight::upload(&ops, &head, cfg.vocab as usize, cfg.d_model as usize, want));
+        // Int8 activation-quantization scratch (`model::dispatch::I8Scratch`,
+        // the same struct `Ops::act` wraps) - one slot per distinct K width
+        // among the 7 linears (`d`/`hq`/`ff`; the head shares `d`), reused
+        // (re-quantized in place) every layer's forward, exactly like the
+        // old `Q8::sx`/`Q8::xq` this replaces. `None` on an all-fp32 engine:
+        // nothing ever reads it, so nothing is allocated.
+        let i8_scratch = if w8_on { Some(I8Scratch::new(&gpu, b, b, &[d as u32, hq as u32, ff as u32])) } else { None };
         // S5: measure the GEMV/tile crossover for THIS device's int8 shapes at
         // build time (a few ms; persisted per adapter + kernel sources), so
         // the hot path only ever looks the choice up. Row counts vary freely
         // at runtime, so choices are keyed by power-of-two bucket.
-        let tuned_i8 = match (&w8, &head8) {
-            (Some(q8), Some(h8)) => Self::tune_i8(&gpu, &caps, q8, h8, b as u32),
-            _ => HashMap::new(),
+        let tuned_i8 = match &i8_scratch {
+            Some(scratch) => Self::tune_i8(&gpu, &caps, &lin_weights, scratch, b as u32),
+            None => HashMap::new(),
         };
-        // Decode-side head. Sized by max_batch (NOT the prefill row count): only
-        // decode rows need logits, and [max_prefill, vocab] would be gigabytes.
-        // fp32 head only when the int8 head is absent — never both resident.
+        // Decode-side head/logits. Sized by max_batch (NOT the prefill row
+        // count): only decode rows need logits, and [max_prefill, vocab]
+        // would be gigabytes.
         let vocab = cfg.vocab as u64;
-        let head_dev = if w8_on { None } else { Some(gpu.storage_init("lm_head", &head)) };
         let logits_dev = st(max_batch as u64 * vocab);
         let argmax_dev = st(max_batch as u64);
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
@@ -647,12 +725,11 @@ impl Engine {
             kv_calib: None,
             clip_k,
             clip_v,
-            w8,
-            head8,
+            lin_weights,
+            i8_scratch,
             tuned_i8,
             sc,
             head,
-            head_dev,
             logits_dev,
             argmax_dev,
             argmax_part_dev,
@@ -719,7 +796,7 @@ impl Engine {
     /// device capability gate). What a caller should report, rather than what
     /// was asked for.
     pub fn weights_int8(&self) -> bool {
-        self.w8.is_some()
+        self.i8_scratch.is_some()
     }
 
     /// True when the KV cache is packed int8 rather than fp32 (unlike
@@ -828,6 +905,16 @@ impl Engine {
     /// accumulated lazily and flushed on the next read, so a caller that appends
     /// more device work (the greedy head) still pays one flush per step rather
     /// than two. Returns the row count.
+    // qwen3-serve-manual-gemm-dispatch BEGIN (B7, `no_kernel_names.rs`'s own
+    // allow-list) - this engine's own tuned fp32/int8 GEMM selection, kept
+    // OFF the `model::ops::Ops` façade deliberately: `Ops::matmul` always
+    // resolves through a FIXED internal `CachedSelector<DefaultSelector>`
+    // with no way to inject a different one, but `tuned_i8` (below) is a
+    // REAL, per-device MEASURED selector (`Self::tune_i8`/`AutoTuner`/
+    // `FileTuneStore`) the qwen-serving-perf-gate directly depends on -
+    // routing through `Ops::matmul` would silently discard it. See
+    // `no_kernel_names.rs`'s own module doc for exactly what this allow-lists
+    // and why.
     /// `out = x @ W^T`, choosing the decode-regime GEMV (one workgroup per
     /// output column, W streamed once across all rows) when the selector says
     /// the shape is in that regime. Same contract, same result.
@@ -912,16 +999,45 @@ impl Engine {
         }
     }
 
+    /// Quantize `x`'s rows `[0, rows)` once (`model::dispatch::I8Scratch`),
+    /// shared by every linear reading it this layer (e.g. xn1 -> q/k/v) - a
+    /// no-op on an all-fp32 engine (`self.i8_scratch` is `None`), unlike
+    /// `qwen3::model::Qwen::ops.act`'s unconditional cost (see that crate's
+    /// B7 ledger note): this engine's own `Self::linear` KNOWS which weights
+    /// are `I8` before it ever quantizes, since the tier is a per-engine
+    /// build-time choice, not inspected per call.
+    fn quant_once(&self, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, rows: u32) {
+        if let Some(scratch) = &self.i8_scratch {
+            scratch.quant_rows(&self.gpu, [MAX_ABS_ROW, QUANT_PACK], s, x, 0, rows, k);
+        }
+    }
+
+    /// Dispatch one linear `out = x @ Wᵀ` by `w`'s own tag (B7) - `self.
+    /// lin_weights`'s tier, never a separate on/off flag inspected here.
+    /// `x` must already be quantized (`Self::quant_once`) when `w` is `I8`.
+    fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
+        match w {
+            Weight::F32 { w, n, k } => self.mm_into(s, x, w, out, rows, *k, *n),
+            Weight::I8 { w, s: sw, n, k } => {
+                let scratch = self.i8_scratch.as_ref().expect("qwen3 serve: I8 weight built without i8_scratch");
+                self.mm8(s, scratch, w, sw, *n, *k, out, rows);
+            }
+            _ => unreachable!("qwen3 serve only ever builds F32/I8 weights (Weight::upload's `want` is always one of the two - see `from_map_with_gpu`)"),
+        }
+    }
+
     /// One int8 linear: the MEASURED choice for this device where one exists
     /// (S5, tuned at build, keyed by row bucket), else the static policy. The
     /// packed GEMV owns few rows, the 128x128 tile owns prefill shapes; the
-    /// crossover is per-device. Must be preceded by a matching `Q8::quant`.
-    fn mm8(&self, q8: &crate::q8::Q8, s: &mut Vec<Step>, w: &crate::q8::Lin8, out: &DeviceBuffer, rows: u32) {
-        let shape = OpShape { m: rows, n: w.n, k: w.k, dtype: Dtype::I8 };
+    /// crossover is per-device. Must be preceded by a matching `Self::
+    /// quant_once` writing into `scratch`.
+    #[allow(clippy::too_many_arguments)]
+    fn mm8(&self, s: &mut Vec<Step>, scratch: &I8Scratch, w: &DeviceBuffer, sw: &DeviceBuffer, n: u32, k: u32, out: &DeviceBuffer, rows: u32) {
+        let shape = OpShape { m: rows, n, k, dtype: Dtype::I8 };
         let variant = if rows <= DECODE_REGIME_MAX_ROWS {
             let bucket = rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
             self.tuned_i8
-                .get(&(bucket, w.n, w.k))
+                .get(&(bucket, n, k))
                 .copied()
                 .unwrap_or_else(|| self.selector.select(Op::MatMul, shape, &self.caps))
         } else {
@@ -930,11 +1046,16 @@ impl Engine {
         match variant {
             KernelVariant::WorkgroupPerOutput => s.push(self.gpu.step(
                 MATMUL_I8_GEMV,
-                &[&q8.xq, &w.packed, &q8.sx, &w.scale, out],
-                &[rows, w.k / 4, w.n],
-                w.n * 64,
+                &[scratch.xq_for(k), w, &scratch.sx, sw, out],
+                &[rows, k / 4, n],
+                n * 64,
             )),
-            _ => q8.mm8(&self.gpu, s, w, out, rows),
+            _ => s.push(self.gpu.step(
+                MATMUL_I8_DYN,
+                &[scratch.xq_for(k), w, &scratch.sx, sw, out],
+                &[rows, k / 4, n],
+                rows.div_ceil(128) * n.div_ceil(128) * 256,
+            )),
         }
     }
 
@@ -943,38 +1064,31 @@ impl Engine {
     /// the engine's real buffers — REPS dispatches per timing so submit/poll
     /// overhead amortises — and the winner persists per adapter + kernel
     /// sources. `BRAIN_NO_AUTOTUNE=1` skips every measurement (static policy).
-    fn tune_i8(
-        gpu: &Gpu,
-        caps: &DeviceCaps,
-        q8: &crate::q8::Q8,
-        head: &crate::q8::Lin8,
-        max_rows: u32,
-    ) -> HashMap<(u32, u32, u32), KernelVariant> {
+    fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN]);
         let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
             .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
         let tuner = AutoTuner::new(store);
-        // Distinct (n, k) shapes: every layer shares them, so layer 0 + head
-        // covers the whole model.
-        let mut shapes: Vec<(u32, u32, &crate::q8::Lin8)> = Vec::new();
-        if let Some(lay) = q8.layers.values().next() {
-            for lin in [&lay.wq, &lay.wk, &lay.wv, &lay.wo, &lay.gate, &lay.up, &lay.down] {
-                if !shapes.iter().any(|&(n, k, _)| n == lin.n && k == lin.k) {
-                    shapes.push((lin.n, lin.k, lin));
+        // Distinct (n, k) shapes across every `I8` weight this engine holds
+        // (every layer shares the same 7 shapes; the head is usually a
+        // distinct one).
+        let mut shapes: Vec<(u32, u32, &DeviceBuffer, &DeviceBuffer)> = Vec::new();
+        for w in weights.values() {
+            if let Weight::I8 { w: wb, s: sw, n, k } = w {
+                if !shapes.iter().any(|&(sn, sk, _, _)| sn == *n && sk == *k) {
+                    shapes.push((*n, *k, wb, sw));
                 }
             }
         }
-        shapes.push((head.n, head.k, head));
         let mut out = HashMap::new();
         let cap_bucket = max_rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
         for &m in &[1u32, 2, 4, 8, 16, 32] {
             if m > cap_bucket {
                 break;
             }
-            for &(n, k, lin) in &shapes {
+            for &(n, k, wb, sw) in &shapes {
                 let shape = OpShape { m, n, k, dtype: Dtype::I8 };
-                let mut measure =
-                    |v: KernelVariant| Self::measure_i8(gpu, q8, lin, m, v);
+                let mut measure = |v: KernelVariant| Self::measure_i8(gpu, scratch, wb, sw, n, k, m, v);
                 let choice = tuner.resolve(Op::MatMul, shape, caps, &mut measure);
                 out.insert((m, n, k), choice);
             }
@@ -984,27 +1098,22 @@ impl Engine {
 
     /// Time one int8 GEMM variant on real buffers: REPS dispatches in one
     /// submission, mean milliseconds per dispatch. `None` = not measurable.
-    fn measure_i8(
-        gpu: &Gpu,
-        q8: &crate::q8::Q8,
-        lin: &crate::q8::Lin8,
-        m: u32,
-        variant: KernelVariant,
-    ) -> Option<f64> {
+    #[allow(clippy::too_many_arguments)]
+    fn measure_i8(gpu: &Gpu, scratch: &I8Scratch, w: &DeviceBuffer, sw: &DeviceBuffer, n: u32, k: u32, m: u32, variant: KernelVariant) -> Option<f64> {
         const REPS: usize = 8;
-        let out = gpu.storage(m as u64 * lin.n as u64);
+        let out = gpu.storage(m as u64 * n as u64);
         let step = |_: usize| match variant {
             KernelVariant::WorkgroupPerOutput => gpu.step(
                 MATMUL_I8_GEMV,
-                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, &out],
-                &[m, lin.k / 4, lin.n],
-                lin.n * 64,
+                &[scratch.xq_for(k), w, &scratch.sx, sw, &out],
+                &[m, k / 4, n],
+                n * 64,
             ),
             KernelVariant::PackedInt8 => gpu.step(
                 MATMUL_I8_DYN,
-                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, &out],
-                &[m, lin.k / 4, lin.n],
-                m.div_ceil(128) * lin.n.div_ceil(128) * 256,
+                &[scratch.xq_for(k), w, &scratch.sx, sw, &out],
+                &[m, k / 4, n],
+                m.div_ceil(128) * n.div_ceil(128) * 256,
             ),
             other => unreachable!("int8 candidates are GEMV or tile, got {other:?}"),
         };
@@ -1029,6 +1138,7 @@ impl Engine {
             _ => g.step(RMSNORM, &[x, w, out], &[d, rows], rows),
         }
     }
+    // qwen3-serve-manual-gemm-dispatch END
 
     #[allow(clippy::too_many_arguments)]
     fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> (Vec<Step>, u32) {
@@ -1077,20 +1187,14 @@ impl Engine {
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
-            let l8 = self.w8.as_ref().map(|q8| (q8, &q8.layers[&l]));
             s.push(self.rms(&sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
-            if let Some((q8, lay)) = l8 {
-                // One activation quant per distinct input, shared by every
-                // linear reading it (xn1 -> q/k/v).
-                q8.quant(g, &mut s, &sc.xn1, d, b);
-                self.mm8(q8, &mut s, &lay.wq, &sc.q_pre, b);
-                self.mm8(q8, &mut s, &lay.wk, &sc.k_pre, b);
-                self.mm8(q8, &mut s, &lay.wv, &sc.v, b);
-            } else {
-                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq);
-                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv);
-                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv);
-            }
+            // One activation quant per distinct input (B7: `Self::
+            // quant_once`, a no-op on an all-fp32 engine), shared by every
+            // linear reading it (xn1 -> q/k/v).
+            self.quant_once(&mut s, &sc.xn1, d, b);
+            self.linear(&mut s, &self.lin_weights[&p("attn.wq.weight")], &sc.xn1, &sc.q_pre, b);
+            self.linear(&mut s, &self.lin_weights[&p("attn.wk.weight")], &sc.xn1, &sc.k_pre, b);
+            self.linear(&mut s, &self.lin_weights[&p("attn.wv.weight")], &sc.xn1, &sc.v, b);
             // QK-norm goes through `self.rms` like every other norm in this
             // tape. It used to call `block::rmsnorm_fwd` directly — the
             // per-element kernel, one thread per row — which is the coalescing
@@ -1132,27 +1236,16 @@ impl Engine {
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             }
-            if let Some((q8, lay)) = l8 {
-                q8.quant(g, &mut s, &sc.ctx, hq, b);
-                self.mm8(q8, &mut s, &lay.wo, &sc.proj, b);
-            } else {
-                self.mm_into(&mut s, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d);
-            }
+            self.quant_once(&mut s, &sc.ctx, hq, b);
+            self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b);
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
             s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
-            if let Some((q8, lay)) = l8 {
-                q8.quant(g, &mut s, &sc.xn2, d, b);
-                self.mm8(q8, &mut s, &lay.gate, &sc.gate_pre, b);
-                self.mm8(q8, &mut s, &lay.up, &sc.up, b);
-                s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-                q8.quant(g, &mut s, &sc.h, ff, b);
-                self.mm8(q8, &mut s, &lay.down, &sc.mlp_out, b);
-            } else {
-                self.mm_into(&mut s, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff);
-                self.mm_into(&mut s, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff);
-                s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-                self.mm_into(&mut s, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d);
-            }
+            self.quant_once(&mut s, &sc.xn2, d, b);
+            self.linear(&mut s, &self.lin_weights[&p("mlp.gate.weight")], &sc.xn2, &sc.gate_pre, b);
+            self.linear(&mut s, &self.lin_weights[&p("mlp.up.weight")], &sc.xn2, &sc.up, b);
+            s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
+            self.quant_once(&mut s, &sc.h, ff, b);
+            self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b);
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
         }
         let last = c.n_layers as usize;
@@ -1215,19 +1308,13 @@ impl Engine {
     /// [`Self::submit_greedy_head`] and [`Self::submit_topk_head`], which
     /// otherwise diverge only in what they do with the resulting logits.
     fn head_steps(&self, steps: &mut Vec<Step>, bsz: u32) {
-        let g = &self.gpu;
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        match (&self.w8, &self.head8, &self.head_dev) {
-            // Int8 head: quantize the final hidden rows, DP4A GEMM into logits.
-            (Some(q8), Some(h8), _) => {
-                q8.quant(g, steps, &self.sc.xn_final, d, bsz);
-                self.mm8(q8, steps, h8, &self.logits_dev, bsz);
-            }
-            (_, _, Some(head_dev)) => {
-                steps.push(self.mm(&self.sc.xn_final, head_dev, &self.logits_dev, bsz, d, v));
-            }
-            _ => unreachable!("engine holds either an fp32 or an int8 head"),
-        }
+        let d = self.cfg.d_model;
+        // The head is just one more `Weight` in `lin_weights` (B7) - int8 or
+        // fp32, whichever `weights_int8`/the device's capability landed on -
+        // dispatched through the SAME `Self::quant_once`/`Self::linear` pair
+        // every per-layer projection uses, no separate int8-head branch.
+        self.quant_once(steps, &self.sc.xn_final, d, bsz);
+        self.linear(steps, &self.lin_weights[self.cfg.head_weight()], &self.sc.xn_final, &self.logits_dev, bsz);
     }
 
     /// Record + submit the greedy head (logits + row argmax into
