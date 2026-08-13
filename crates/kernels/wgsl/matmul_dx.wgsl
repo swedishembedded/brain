@@ -8,7 +8,11 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16
+// @tpl   w -> bf16 storage variant (kernels::template::dtype_variant, B10) -
+//        the SAME read-direction mechanism B4 built for the forward
+//        `matmul.wgsl`, so dX stays consistent with whichever weight value
+//        the forward pass actually multiplied by
 //
 // Backward of  out = x @ W^T  w.r.t. x:
 //   dX[m, k] = sum_n dY[m, n] * W[n, k]
@@ -40,7 +44,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let col = idx % p.k;   // k
     var acc = 0.0;
     for (var nn: u32 = 0u; nn < p.n; nn = nn + 1u) {
-        acc = acc + dy[row * p.n + nn] * w[nn * p.k + col];
+        let wi = nn * p.k + col;
+        acc = acc + dy[row * p.n + nn] * w[wi];
     }
     if (p.accumulate == 0u) { dx[idx] = acc; }
     else                    { dx[idx] = dx[idx] + acc; }

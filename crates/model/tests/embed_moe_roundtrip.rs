@@ -62,6 +62,9 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
         dv("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", Dtype::BF16).unwrap();
     let bf16_decode_apply =
         dv("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", Dtype::BF16).unwrap();
+    // B10: matmul_dx's bf16-weight-read backward variant. matmul_dw has no
+    // bf16 variant at all (it never reads the weight).
+    let bf16_matmul_dx = dv("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
     vec![
         ("matmul", kernels::MATMUL),
         ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -90,6 +93,9 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
         bf16_decode_scores,
         ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
         bf16_decode_apply,
+        ("matmul_dx", kernels::MATMUL_DX),
+        ("matmul_dw", kernels::MATMUL_DW),
+        bf16_matmul_dx,
     ]
 }
 

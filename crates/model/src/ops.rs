@@ -27,6 +27,25 @@
 //! migrated by any of these phases** - `crates/qwen3`, `crates/flux1`,
 //! `crates/flux2` etc. are untouched; that migration is a later phase (B7).
 //!
+//! **B10 - bf16 training tier.** [`Ops::matmul_dx`]/[`Ops::matmul_dw`] extend
+//! ONE kernel family (`matmul.wgsl`'s `Reference` variant + its `matmul_dx.
+//! wgsl` backward) so the SAME `Weight::BF16` a caller already builds for
+//! forward (B4) can also drive the backward-of-x. `matmul_dw` (gradient
+//! w.r.t. the weight) is deliberately NOT extended - it has no `Weight`
+//! parameter at all, since `matmul_dw.wgsl` never reads the weight buffer,
+//! only `dy`/`x` (both always f32). This is the standard mixed-precision-
+//! training split: the weight is READ at reduced precision in forward and in
+//! the x-backward, but the WEIGHT'S OWN gradient is always computed/
+//! accumulated in f32 and feeds an f32 AdamW step over an f32 master copy
+//! (`crates/paramstore`/`crates/optim`, untouched by this phase). Gated
+//! behind an explicit `Weight::BF16` exactly like every other bf16 tier in
+//! this façade - a caller gets `Weight::F32` (today's existing behaviour)
+//! unless it explicitly asks `Weight::upload` for `Dtype::BF16`, so nothing
+//! existing changes without an opt-in. Gradient-checked by `gradcheck::
+//! check_matmul_bf16_weight`. **Not wired into any model crate's training
+//! loop** - same "build the façade, prove it, migrate later" precedent B3/
+//! B4/B5/B8/B9 all followed.
+//!
 //! **Selection.** `Ops::matmul` is the one place a shape turns into a kernel
 //! choice: it builds a `select::OpShape` from the weight's own `(n, k)` and
 //! the call's `m`, asks `self.selector` (a `CachedSelector<DefaultSelector>`
@@ -151,6 +170,25 @@ mod kname {
     pub const PAGED_DECODE_APPLY_BATCHED: &str = "paged_decode_apply_batched";
     pub const PAGED_DECODE_APPLY_BATCHED_BF16: &str = "paged_decode_apply_batched#pool_v=bf16";
 
+    // --- B10: bf16 training tier - matmul_dx (weight-READ, gated) / matmul_dw
+    // (never touches the weight at all, so it has no BF16 name to bind) -----
+    pub const MATMUL_DX: &str = "matmul_dx";
+    /// `matmul_dx.wgsl`'s bf16-weight-read variant - the SAME `dtype_variant`
+    /// mechanism `MATMUL_BF16` (forward) already uses, applied to the
+    /// backward-of-x kernel this phase templatized. There is no
+    /// `MATMUL_DX_F16`/`_I8`/`_Q4`: B10's own scope is deliberately narrowed
+    /// to ONE kernel family, forward + dx, bf16 only (see this module's B10
+    /// doc section).
+    pub const MATMUL_DX_BF16: &str = "matmul_dx#w=bf16";
+    /// `matmul_dw.wgsl` NEVER reads the weight buffer (its only inputs are
+    /// `dy`/`x`, both always-f32 activations - see that kernel's own
+    /// source) - so unlike every other name in this table, there is no
+    /// per-dtype variant here AT ALL. This is B10's structural enforcement
+    /// of "dW's accumulation is ALWAYS f32, regardless of the weight's
+    /// storage tier": the ONE physical kernel this name binds to has no
+    /// dtype knob to get wrong.
+    pub const MATMUL_DW: &str = "matmul_dw";
+
     pub const ALL: &[&str] = &[
         MATMUL,
         MATMUL_GEMV,
@@ -179,6 +217,9 @@ mod kname {
         PAGED_DECODE_SCORES_BATCHED_BF16,
         PAGED_DECODE_APPLY_BATCHED,
         PAGED_DECODE_APPLY_BATCHED_BF16,
+        MATMUL_DX,
+        MATMUL_DX_BF16,
+        MATMUL_DW,
     ];
 }
 
@@ -915,6 +956,92 @@ impl Ops {
             threads,
         ));
     }
+
+    // --- B10: bf16 training tier - ONE kernel family (matmul's `Reference`
+    // variant), forward + backward, gated behind an explicit `Weight::BF16`,
+    // default OFF -----------------------------------------------------------
+    //
+    // Standard mixed-precision-training pattern: the WEIGHT is stored/read at
+    // bf16 (a real VRAM/bandwidth win on the READ side, both directions this
+    // phase touches), but the master copy that AdamW actually updates stays
+    // f32 (`crates/paramstore`/`crates/optim`, untouched by this phase) and
+    // the weight GRADIENT (`dW`) is always computed and accumulated in f32 -
+    // never narrowed, never read back through a packed buffer. `Self::
+    // matmul_dw` below enforces that second half structurally: it has no
+    // `Weight`/`Dtype` parameter at all, so there is no argument a caller
+    // could pass to make it read a packed buffer even by mistake.
+    //
+    // Deliberately narrow scope: only `matmul.wgsl`'s `Reference` variant and
+    // its `matmul_dx.wgsl` backward are extended this phase - NOT `matmul_
+    // gemv`/`matmul_reg3`'s dx siblings (`matmul_dx_reg.wgsl` was read but
+    // not templatized), and NOT wired into any model crate's actual training
+    // loop (`crates/qwen3`, `crates/gpt`, ... untouched - same "build the
+    // façade, prove it, migrate later" precedent B3/B4/B5/B8/B9 all followed).
+    // `crates/gradcheck::check_matmul_bf16_weight` is this phase's
+    // correctness gate.
+
+    /// `(dtype) -> matmul_dx kernel name`. Only `F32`/`BF16` are implemented -
+    /// B10's own deliberately scoped-down deliverable is ONE kernel family,
+    /// not full dtype parity with [`Self::bind`]. `F16`/`I8`/`Q4` backward-
+    /// through-the-weight is a real, reachable follow-up, not attempted here.
+    fn bind_matmul_dx(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::F32 => kname::MATMUL_DX,
+            Dtype::BF16 => kname::MATMUL_DX_BF16,
+            other => panic!(
+                "Ops::matmul_dx: no matmul_dx kernel for dtype {other:?} -- B10 deliberately scoped \
+                 this façade method to F32/BF16 only (one kernel family, forward + dx); F16/I8/Q4 \
+                 backward-through-the-weight is an unimplemented follow-up, not a normal runtime path"
+            ),
+        }
+    }
+
+    /// `dX[m, k] = sum_n dY[m, n] * W[n, k]` (`accumulate` selects overwrite
+    /// vs add, matching `matmul_dx.wgsl`'s own `Params.accumulate` field) -
+    /// the gradient w.r.t. the ACTIVATION input of a linear whose weight is
+    /// `w`. `w` may be `Weight::F32` (today's existing training path,
+    /// unaffected) or `Weight::BF16` (B10, opt-in): a bf16 weight is read
+    /// through the SAME inline-bitcast-decode `dtype_variant` machinery
+    /// [`Self::matmul`]'s forward dispatch already uses for `(Reference,
+    /// BF16)`, applied to `matmul_dx.wgsl` this phase - `dX` therefore stays
+    /// numerically consistent with whichever weight value the forward pass
+    /// actually multiplied by. This is a READ-tier for the weight, exactly
+    /// like forward: `w` itself is never written here. No `KernelVariant`
+    /// selection (unlike [`Self::matmul`]) - only the `Reference`-shaped
+    /// kernel is templatized this phase, so this binds directly by dtype.
+    pub fn matmul_dx(&self, s: &mut Vec<Step>, w: &Weight, dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, accumulate: bool) {
+        let (n, k) = (w.n(), w.k());
+        let kind = self.idx[Self::bind_matmul_dx(w.dtype())];
+        let threads = m * k;
+        match w {
+            Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
+                s.push(self.gpu.step(kind, &[dy, wb, dx], &[m, k, n, accumulate as u32], threads));
+            }
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } => {
+                unreachable!("Ops::matmul_dx: bind_matmul_dx already panicked for this dtype above")
+            }
+        }
+    }
+
+    /// `dW[n, k] += sum_m dY[m, n] * X[m, k]` - the gradient w.r.t. the
+    /// WEIGHT of a linear, dispatched through the plain f32 `matmul_dw.wgsl`
+    /// kernel UNCONDITIONALLY. There is no `Weight`/`Dtype` parameter on this
+    /// method at all, by design: `matmul_dw.wgsl` never reads `w` (its only
+    /// inputs are `dy` and `x`, both always-f32 activations), so a weight's
+    /// storage tier has NO EFFECT on this computation - narrowing it further
+    /// would be a change to a kernel that structurally cannot express one.
+    /// This is B10's "dW's accumulation is ALWAYS f32" invariant enforced by
+    /// the type signature, not by a caller's discipline. Accumulates
+    /// (matching `matmul_dw.wgsl`'s own always-add contract) - a caller
+    /// zeroes `dw` once before a backward pass, exactly like every other `dw`
+    /// kernel in this codebase already does (e.g. via `Gpu::submit`'s
+    /// `clears` list).
+    #[allow(clippy::too_many_arguments)]
+    pub fn matmul_dw(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer) {
+        let kind = self.idx[kname::MATMUL_DW];
+        let threads = n * k;
+        s.push(self.gpu.step(kind, &[dy, x, dw], &[m, k, n], threads));
+    }
 }
 
 #[cfg(test)]
@@ -983,6 +1110,12 @@ mod tests {
                 Dtype::BF16,
             )
             .unwrap();
+            // B10: matmul_dx's bf16-weight-read backward variant. matmul_dw
+            // has no bf16 variant at all (it never reads the weight - see
+            // `kname::MATMUL_DW`'s own doc comment), so only one extra entry
+            // is needed here versus B4's own three-kernel trio.
+            let bf16_matmul_dx =
+                kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
             vec![
                 ("matmul", kernels::MATMUL),
                 ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -1011,6 +1144,9 @@ mod tests {
                 bf16_decode_scores,
                 ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
                 bf16_decode_apply,
+                ("matmul_dx", kernels::MATMUL_DX),
+                ("matmul_dw", kernels::MATMUL_DW),
+                bf16_matmul_dx,
             ]
         })
     }
@@ -1106,6 +1242,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(n, kname::PAGED_DECODE_APPLY_BATCHED_BF16);
+    }
+
+    /// The B10 kname literal (`matmul_dx`'s bf16-weight-read backward tier),
+    /// same contract as [`b9_kname_literals_match_dtype_variant_naming`]
+    /// above. `matmul_dw` has no literal to pin here - it has no bf16 name at
+    /// all (see `kname::MATMUL_DW`'s own doc comment).
+    #[test]
+    fn b10_kname_literal_matches_dtype_variant_naming() {
+        let (n, _) = kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
+        assert_eq!(n, kname::MATMUL_DX_BF16);
     }
 
     /// [`KvPage::word_count`] - the actual allocation-size logic

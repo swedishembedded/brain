@@ -40,6 +40,13 @@ pub use restore::check_codeformer;
 pub mod deepseekocr;
 pub use deepseekocr::{check_deepseekocr_relpos, check_deepseekocr_relpos_elementwise};
 
+/// B10: the bf16 mixed-precision training tier - `model::ops::Ops::matmul`'s
+/// `Reference` variant (forward, B4) paired with the new `Ops::matmul_dx`/
+/// `Ops::matmul_dw` backward. Greenfield, same "harness IS the fixture"
+/// shape as [`deepseekocr`] - no model crate consumes this yet.
+pub mod bf16_train;
+pub use bf16_train::{check_matmul_bf16_weight, check_matmul_bf16_weight_eps_sweep};
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;
