@@ -13,17 +13,19 @@
 //! (`MemCost::with_npu`), so `place::pick_device` auto-schedules them on the NPU
 //! when one is budgeted. `activate(Device::Npu)` wraps the model's pluggable-core
 //! seam (`forecast_quantiles_with_core` / `forecast_full_with_core`) onto the
-//! bespoke OpenVINO session (`Chronos2Session` / `FincastSession`), caching a
-//! compiled session per context-length bucket. Every other device runs the exact
-//! same math on `gpu_core` (`forecast_quantiles` / `forecast_full`), so the NPU
-//! and CPU/GPU paths are bit-comparable. kronos (autoregressive OHLCV rollout)
-//! is served on CPU/GPU here; its two-graph NPU rollout is a follow-up.
+//! generic `npu::NpuModel` seam (`Chronos2NpuModel` / `FincastNpuModel`, below -
+//! the same seam `resident_depth.rs`'s `DepthNpuModel` proves), compiling through
+//! `npu::openvino::NpuGraph` and caching the compiled graph per context-length
+//! bucket. Every other device runs the exact same math on `gpu_core`
+//! (`forecast_quantiles` / `forecast_full`), so the NPU and CPU/GPU paths are
+//! bit-comparable. kronos (autoregressive OHLCV rollout) is served on CPU/GPU
+//! here; its two-graph NPU rollout is a follow-up.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
-use npu::openvino::{Chronos2Session, Feed, FincastSession, NpuConfig, NpuDevice, NpuGraph};
+use npu::openvino::{Feed, NpuConfig, NpuDevice, NpuGraph};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
@@ -182,14 +184,63 @@ impl Instance for Chronos2CpuInstance {
     }
 }
 
-/// chronos2 on the NPU: the transformer core runs on OpenVINO via the pluggable
-/// seam; the host does scaler/patch/embed + head/denorm. Sessions are cached per
-/// `(context_len, n_out)` so repeated same-shape requests skip recompilation.
+/// The Chronos-2 transformer core as a generic [`npu::NpuModel`]: the exact same
+/// ONNX topology `npu::chronos2_export::export_onnx` builds
+/// (`npu::chronos2_topology::build_chronos2_graph_quant`), reached through the
+/// trait seam instead of a bespoke session - mirrors `resident_depth.rs`'s
+/// `DepthNpuModel`. `parity_ref` is the model's own device `core_forward`, the
+/// exact function the ONNX graph was built to reproduce.
+///
+/// `pub(crate)`: `crates/cli/tests/npu_model_parity.rs` pulls this file in via
+/// `#[path]` and constructs this type directly - `brain-cli` is a bin-only
+/// crate (no `[lib]` target an external integration test could depend on
+/// instead), so `#[path]` inclusion is the only way to unit-test a private
+/// `main.rs` module from `tests/`.
+pub(crate) struct Chronos2NpuModel<'a> {
+    model: &'a chronos2::model::Chronos2,
+    path: &'a str,
+    s: usize,
+    n_out: usize,
+}
+
+impl<'a> Chronos2NpuModel<'a> {
+    /// `pub(crate)`, not just used internally, so
+    /// `crates/cli/tests/npu_model_parity.rs` (see the struct doc) can construct
+    /// one without the private fields being visible at its call site.
+    pub(crate) fn new(model: &'a chronos2::model::Chronos2, path: &'a str, s: usize, n_out: usize) -> Chronos2NpuModel<'a> {
+        Chronos2NpuModel { model, path, s, n_out }
+    }
+}
+
+impl npu::NpuModel for Chronos2NpuModel<'_> {
+    fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String> {
+        let reader = checkpoint::weightio::WeightReader::open(self.path).map_err(|e| format!("open {}: {e}", self.path))?;
+        let cfg = chronos2::Chronos2Config::from_hf(&reader.config())?;
+        npu::chronos2_topology::build_chronos2_graph_quant(&cfg, &reader, self.s, self.n_out, g, npu::qwen_topology::Quant::F32);
+        Ok(())
+    }
+    fn cache_key(&self) -> String {
+        format!("chronos2-s{}-n{}", self.s, self.n_out)
+    }
+    /// `inputs` are named exactly like [`build`](npu::NpuModel::build)'s graph
+    /// inputs (`emb`, `kmask`); the reference is `Chronos2::core_forward` with
+    /// this model's fixed `n_out` - the same forward the graph was exported from.
+    fn parity_ref(&self, inputs: &[(&str, Vec<f32>)]) -> Option<Vec<Vec<f32>>> {
+        let emb = inputs.iter().find(|(n, _)| *n == "emb")?.1.as_slice();
+        let kmask = inputs.iter().find(|(n, _)| *n == "kmask")?.1.as_slice();
+        Some(vec![self.model.core_forward(emb, kmask, self.n_out)])
+    }
+}
+
+/// chronos2 on the NPU: the transformer core runs on OpenVINO via the generic
+/// `npu::NpuModel` seam (`Chronos2NpuModel`); the host does scaler/patch/embed +
+/// head/denorm. Compiled graphs are cached per `(context_len, n_out)` so repeated
+/// same-shape requests skip recompilation.
 struct Chronos2NpuInstance {
     model: chronos2::model::Chronos2,
     path: String,
     cfg: NpuConfig,
-    cache: RefCell<HashMap<(usize, usize), Chronos2Session>>,
+    cache: RefCell<HashMap<(usize, usize), NpuGraph>>,
     device: RefCell<String>,
 }
 
@@ -198,18 +249,21 @@ impl Instance for Chronos2NpuInstance {
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let d = self.model.config().d_model;
-        let (model, path, cfg, cache, devcell) = (&self.model, &self.path, &self.cfg, &self.cache, &self.device);
+        let (model, path, cfg, cache, devcell) = (&self.model, self.path.as_str(), &self.cfg, &self.cache, &self.device);
         let q = guard_npu(|| {
             model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
                 let s = emb.len() / d;
                 let mut c = cache.borrow_mut();
-                let sess = c.entry((s, n_out)).or_insert_with(|| {
-                    let bytes = npu::chronos2_export::export_onnx(path, s, n_out, npu::qwen_topology::Quant::F32)
-                        .expect("chronos2 NPU export");
-                    Chronos2Session::load_bytes(&bytes, cfg).expect("chronos2 NPU compile")
+                let graph = c.entry((s, n_out)).or_insert_with(|| {
+                    let m = Chronos2NpuModel::new(model, path, s, n_out);
+                    <Chronos2NpuModel as npu::NpuModel>::compile(&m, cfg).expect("chronos2 NPU compile")
                 });
-                *devcell.borrow_mut() = sess.device().to_string();
-                sess.run(emb, mask).expect("chronos2 NPU infer")
+                *devcell.borrow_mut() = graph.device().to_string();
+                let (si, di) = (s as i64, d as i64);
+                let out = graph
+                    .run(&[("emb", Feed::F32(emb, vec![1, si, di])), ("kmask", Feed::F32(mask, vec![1, 1, 1, si]))])
+                    .expect("chronos2 NPU infer");
+                out.into_iter().next().map(|(_, _, data)| data).expect("chronos2 NPU: no output")
             })
         })?;
         let dev = self.device.borrow().clone();
@@ -302,11 +356,73 @@ impl Instance for FincastCpuInstance {
     }
 }
 
+/// The FinCast transformer core as a generic [`npu::NpuModel`]: the exact same
+/// ONNX topology `npu::fincast_export::export_external` builds
+/// (`npu::fincast_topology::build_fincast_graph_quant`), reached through the
+/// trait seam. `parity_ref` is `Fincast::core_forward_amask`, which takes the
+/// explicit `[s,s]` additive mask the graph itself consumes (unlike
+/// `core_forward`, which derives it from a padding mask) - the exact function
+/// the ONNX graph was built to reproduce.
+///
+/// `pub(crate)` for the same reason as [`Chronos2NpuModel`] (see its doc):
+/// `crates/cli/tests/npu_model_parity.rs` reaches it via `#[path]` inclusion.
+pub(crate) struct FincastNpuModel<'a> {
+    model: &'a fincast::model::Fincast,
+    path: &'a str,
+    s: usize,
+}
+
+impl<'a> FincastNpuModel<'a> {
+    /// `pub(crate)` for the same reason as [`Chronos2NpuModel::new`].
+    pub(crate) fn new(model: &'a fincast::model::Fincast, path: &'a str, s: usize) -> FincastNpuModel<'a> {
+        FincastNpuModel { model, path, s }
+    }
+}
+
+impl npu::NpuModel for FincastNpuModel<'_> {
+    fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String> {
+        let reader = checkpoint::weightio::WeightReader::open(self.path).map_err(|e| format!("open {}: {e}", self.path))?;
+        let cfg = fincast::FincastConfig::from_json(&reader.config())?;
+        npu::fincast_topology::build_fincast_graph_quant(&cfg, &reader, self.s, g, npu::qwen_topology::Quant::F32);
+        Ok(())
+    }
+    fn cache_key(&self) -> String {
+        format!("fincast-s{}", self.s)
+    }
+    fn parity_ref(&self, inputs: &[(&str, Vec<f32>)]) -> Option<Vec<Vec<f32>>> {
+        let emb = inputs.iter().find(|(n, _)| *n == "emb")?.1.as_slice();
+        let amask = inputs.iter().find(|(n, _)| *n == "amask")?.1.as_slice();
+        Some(vec![self.model.core_forward_amask(emb, amask)])
+    }
+    /// FinCast's ~1 B-param core's single-protobuf ONNX exceeds protobuf's 2 GB
+    /// read-from-buffer limit, so - unlike the trait's default (`onnx_bytes` +
+    /// `NpuGraph::compile_bytes`) - this writes an external-data sidecar
+    /// (`GraphBuilder::finish_external`) and compiles from the file, then drops
+    /// the sidecar; the compiled graph owns the weights (mirrors the
+    /// pre-migration `fincast_export::export_external` +
+    /// `FincastSession::load_path` path).
+    fn compile(&self, cfg: &npu::openvino::NpuConfig) -> Result<npu::openvino::NpuGraph, String> {
+        let dir = std::env::temp_dir().join(format!("brain-fincast-npumodel-{}-{}", std::process::id(), self.cache_key()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let onnx_path = dir.join("model.onnx");
+        let op = onnx_path.to_str().ok_or("non-utf8 temp path")?;
+        let mut g = onnx::GraphBuilder::new(&self.cache_key());
+        self.build(&mut g)?;
+        g.finish_external(op, 1 << 20).map_err(|e| e.to_string())?;
+        let graph = npu::openvino::NpuGraph::compile_path(&onnx_path, cfg).map_err(|e| e.to_string());
+        std::fs::remove_dir_all(&dir).ok();
+        graph
+    }
+}
+
+/// fincast on the NPU: the transformer core runs on OpenVINO via the generic
+/// `npu::NpuModel` seam (`FincastNpuModel`). Compiled graphs are cached per
+/// context length `s` so repeated same-shape requests skip recompilation.
 struct FincastNpuInstance {
     model: fincast::model::Fincast,
     path: String,
     cfg: NpuConfig,
-    cache: RefCell<HashMap<usize, FincastSession>>,
+    cache: RefCell<HashMap<usize, NpuGraph>>,
     device: RefCell<String>,
 }
 
@@ -315,26 +431,21 @@ impl Instance for FincastNpuInstance {
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let freq = inv.get_i64("freq").unwrap_or(0).max(0) as usize;
-        let (model, path, cfg, cache, devcell) = (&self.model, &self.path, &self.cfg, &self.cache, &self.device);
+        let (model, path, cfg, cache, devcell) = (&self.model, self.path.as_str(), &self.cfg, &self.cache, &self.device);
         let out = guard_npu(|| {
             model.forecast_full_with_core(&context, freq, horizon, |emb, amask| {
                 let s = (amask.len() as f64).sqrt() as usize;
                 let mut c = cache.borrow_mut();
-                let sess = c.entry(s).or_insert_with(|| {
-                    // External-data export (large model) → compile from file, then
-                    // drop the sidecar; the compiled blob owns the weights.
-                    let dir = std::env::temp_dir().join(format!("brain-fincast-{}-{s}", std::process::id()));
-                    std::fs::create_dir_all(&dir).ok();
-                    let onnx = dir.join("model.onnx");
-                    let op = onnx.to_str().expect("utf8 temp path");
-                    npu::fincast_export::export_external(path, s, npu::qwen_topology::Quant::F32, op)
-                        .expect("fincast NPU export");
-                    let sess = FincastSession::load_path(op, cfg).expect("fincast NPU compile");
-                    std::fs::remove_dir_all(&dir).ok();
-                    sess
+                let graph = c.entry(s).or_insert_with(|| {
+                    let m = FincastNpuModel::new(model, path, s);
+                    <FincastNpuModel as npu::NpuModel>::compile(&m, cfg).expect("fincast NPU compile")
                 });
-                *devcell.borrow_mut() = sess.device().to_string();
-                sess.run(emb, amask).expect("fincast NPU infer")
+                *devcell.borrow_mut() = graph.device().to_string();
+                let (si, di) = (s as i64, (emb.len() / s) as i64);
+                let out = graph
+                    .run(&[("emb", Feed::F32(emb, vec![1, si, di])), ("amask", Feed::F32(amask, vec![1, 1, si, si]))])
+                    .expect("fincast NPU infer");
+                out.into_iter().next().map(|(_, _, data)| data).expect("fincast NPU: no output")
             })
         })?;
         let dev = self.device.borrow().clone();

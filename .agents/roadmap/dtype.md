@@ -769,3 +769,213 @@ side effect - see the renamed `large_m_and_wide_n_gets_the_register_tiled_gemm`
 test). Every OTHER shape's default choice is byte-for-byte identical to
 pre-B2, proven by the equivalence test above plus the full green test suites.
 
+## C2 - NpuModel is the only seam (forecast migrated; ASR deferred)
+
+**Problem.** C1 deleted the fake `backend_api::GraphBackend` trait and named
+the real generalized seam: `npu::NpuModel` (`crates/npu/src/lib.rs`) - a model
+implements `build`/`cache_key`, the trait's defaulted `compile` does
+`onnx_bytes` + `openvino::NpuGraph::compile_bytes`. Before this phase it had
+exactly one production implementor, `DepthNpuModel`
+(`crates/cli/src/resident_depth.rs`). `resident_forecast.rs`'s chronos2 and
+fincast NPU paths were drift from that proven pattern, not a different
+design: they called `npu::openvino::{Chronos2Session, FincastSession}`
+directly - bespoke hand-rolled `set_tensor`/`get_output_tensor` session types
+in `crates/npu/src/openvino/real.rs` (~290 lines) duplicating exactly what
+the generic, object-safe `NpuGraph::run(&[(&str, Feed)])` (also in
+`real.rs`) already does generically.
+
+**`NpuModel` extended** (`crates/npu/src/lib.rs`) with one new defaulted
+method:
+
+```rust
+fn parity_ref(&self, inputs: &[(&str, Vec<f32>)]) -> Option<Vec<Vec<f32>>> {
+    let _ = inputs;
+    None
+}
+```
+
+The host/`gpu_core` reference forward for the same named inputs `build`
+declared as graph inputs - the parity oracle for a model's NPU graph, so a
+caller with real hardware can gate on cosine similarity against a
+device-independent reference instead of just "it ran". Defaulted to `None` so
+`DepthNpuModel` (untouched this phase - out of scope, not required) keeps
+compiling unchanged.
+
+**Migrated** (`crates/cli/src/resident_forecast.rs`): `Chronos2NpuModel` and
+`FincastNpuModel`, two new small structs implementing `NpuModel`, following
+`DepthNpuModel`'s exact placement convention (defined directly in the
+resident's own file, not a new module).
+
+- `build()` opens the checkpoint via `checkpoint::weightio::WeightReader`
+  (streamed, no whole-checkpoint host copy) and calls the SAME topology
+  builder the pre-migration bespoke export used
+  (`npu::chronos2_topology::build_chronos2_graph_quant` /
+  `npu::fincast_topology::build_fincast_graph_quant`) - byte-identical ONNX
+  topology, only the seam it's reached through changed.
+- `cache_key()` mirrors the cache keys `resident_forecast.rs`'s own
+  `RefCell<HashMap<_, NpuGraph>>` instance caches already used
+  (`(context_len, n_out)` for chronos2, `context_len` for fincast).
+- `parity_ref()` calls `Chronos2::core_forward` / `Fincast::core_forward_amask`
+  - the exact device-side functions the ONNX graphs were built to reproduce
+  (confirmed by reading their own doc comments: "this is exactly what the
+  ONNX / NPU graph computes, so it is the parity reference for the NPU
+  export").
+- `FincastNpuModel` overrides `compile()` (the trait's only other overridable
+  method): FinCast's ~1B-param core's single-protobuf ONNX exceeds
+  protobuf's 2 GB read-from-buffer limit, so - unlike the default
+  (`onnx_bytes` + `compile_bytes`) - it writes an external-data sidecar
+  (`GraphBuilder::finish_external`) and compiles from the file via
+  `NpuGraph::compile_path`, exactly mirroring the pre-migration
+  `fincast_export::export_external` + `FincastSession::load_path` path.
+  `Chronos2NpuModel` uses the trait's default `compile()` unchanged (its core
+  fits comfortably in one protobuf buffer, matching the old
+  `Chronos2Session::load_bytes` path).
+- Both structs get a `pub(crate) fn new(...)` constructor (fields stay
+  private) specifically so `crates/cli/tests/npu_model_parity.rs` can
+  construct one directly - see that test file's own module doc for why.
+
+`Chronos2NpuInstance`/`FincastNpuInstance`'s compiled-graph caches changed
+type from `HashMap<_, Chronos2Session>` / `HashMap<_, FincastSession>` to
+`HashMap<_, NpuGraph>`; their `run()` bodies changed from
+`sess.run(emb, mask)` to `graph.run(&[("emb", Feed::F32(...)), ("kmask",
+Feed::F32(...))])` (chronos2) / `("amask", ...)` (fincast) - same named
+tensors the bespoke sessions used internally, now passed explicitly through
+the generic runner. `guard_npu`'s panic-catching contract (an OpenVINO
+compile/infer failure becomes a clean `Result::Err`, never unwinds past the
+NPU lane) is unchanged - the `.expect()` calls that trip it just moved from
+inside `Chronos2Session`/`FincastSession`'s methods to inside the
+`or_insert_with` closures that now call `NpuModel::compile`/`NpuGraph::run`
+directly.
+
+**`Chronos2Session`/`FincastSession`** (`crates/npu/src/openvino/real.rs`)
+are left in place, unused by `resident_forecast.rs` after this migration but
+still exercised by their own crate's tests
+(`chronos2_export.rs::chronos2_session_matches_core_forward`,
+`fincast_export.rs::fincast_session_matches_core_forward`, both still green -
+see Verification). Not deleted this phase: `real.rs` was explicitly listed as
+read-only reference for this task, and deleting a still-tested public type is
+a separate, deliberate cleanup call for whoever owns that file next, not a
+side effect of a residency-adapter migration.
+
+**TDD**: `crates/cli/tests/npu_model_parity.rs` (new). `brain-cli` is a
+**bin-only** crate (no `[lib]` target), so an external integration test
+cannot `use brain_cli::...`; the test pulls `resident_forecast.rs` in
+directly via `#[path = "../src/resident_forecast.rs"] mod resident_forecast;`
+- a second, independent compilation of that file as part of the test
+binary's own crate, which is why `pub(crate)` items in it (the two new
+`NpuModel` structs) are reachable from the test despite `main.rs` never
+exporting them. Written and run BEFORE the migration existed (`Chronos2NpuModel`
+didn't exist yet - a real compile-error RED), then the migration landed and
+the suite went GREEN:
+
+- `chronos2_npu_model_builds_and_parity_ref_matches_core_forward` /
+  `fincast_npu_model_builds_and_parity_ref_matches_core_forward_amask` -
+  hardware-independent (pure ONNX graph construction + host math, no
+  OpenVINO/NPU needed at all): builds the ONNX bytes via `NpuModel::onnx_bytes`
+  against a `Chronos2Config::tiny()`/`FincastConfig::tiny()` checkpoint, and
+  asserts `parity_ref` returns exactly (`assert_eq!`, not a cosine tolerance -
+  it's the same function called twice) what `core_forward`/`core_forward_amask`
+  compute directly. This is the real always-green RED-then-GREEN half of the
+  gate.
+- `chronos2_npu_graph_output_matches_parity_ref_when_openvino_available` /
+  `fincast_npu_graph_output_matches_parity_ref_when_openvino_available` -
+  hardware-gated: actually compiles via `NpuModel::compile` (CPU-OpenVINO,
+  `allow_fallback: true`) and runs the graph, asserting its output matches
+  `parity_ref` at cosine >= 0.999 (documented rationale: fp32-vs-fp32 through
+  the same math should be near-exact; 0.999 leaves headroom for OpenVINO's
+  own float reduction-order differences, not a hardware-precision fudge).
+  Skips cleanly (mirrors `chronos2_export.rs`'s own existing skip guard) if no
+  OpenVINO runtime is reachable at all.
+- `forecast_residents_advertise_npu_and_never_panic_on_npu_activation` - the
+  `ResidentModel`-level contract test: `estimate().npu > 0` for both
+  residents; `activate(Device::Npu(0))` succeeds (see note below on why `Ok`
+  here is correct, not a laxer check); `run()` wrapped in
+  `catch_unwind(AssertUnwindSafe(..))` never panics regardless of hardware; on
+  `Err`, the error is a plain typed `String` (accepted, expected without
+  working NPU hardware); on `Ok`, additionally cross-checks the NPU-resident
+  forecast output against the SAME resident activated on `Device::Cpu` for
+  the identical input, at the same 0.999 cosine floor - the "pluggable core,
+  bit-comparable" contract this module's own doc comment promises, now
+  checked through the public `ResidentModel`/`Instance` surface end to end,
+  not just at the `NpuModel` unit level.
+
+  Unlike `DepthNpuModel` (compiled INSIDE `activate()`, so a bad NPU fails
+  `activate` directly), the forecast residents defer compilation to the
+  first `run()` call - the compiled-graph cache lives in the `Instance`,
+  keyed on the request's actual context length, which isn't known until a
+  request arrives. So `activate(Device::Npu)` returning `Ok` unconditionally
+  is the correct, PRE-EXISTING contract (this migration didn't change it),
+  not a gap this phase should have closed.
+
+**What this sandbox could actually verify (real finding, not a guess).** This
+box's `/dev/accel/accel0` node makes `gpu_core::devices::Inventory::probe().npus
+== 1`, but per this repo's own prior investigation the NPU firmware is not
+functional here. `NpuConfig { allow_fallback: true, .. }` means OpenVINO's
+compiler silently retargets to its GPU plugin instead of erroring when the
+box also exposes a usable GPU - which this one does (an Intel Arc iGPU, also
+reachable through brain's own separate wgpu/Vulkan backend). Consequence:
+`chronos2_npu_graph_output_matches_parity_ref_when_openvino_available` /
+`fincast_npu_graph_output_matches_parity_ref_when_openvino_available` /
+`forecast_residents_advertise_npu_and_never_panic_on_npu_activation` did NOT
+hit their documented skip/Err branches - they ran the real OpenVINO compile
++ infer path (on OpenVINO's GPU plugin, not the NPU plugin) and got cosine
+`1.000000` in every case, both at the `NpuModel`/`NpuGraph` level and at the
+full `ResidentModel` end-to-end level (NPU-resident output vs the same
+resident on `Device::Cpu`). Stable across repeated runs. This is real
+evidence the migrated wiring (topology, named I/O, cache keys, external-data
+compile path for fincast) is correct - genuinely stronger evidence than "it
+returned a clean Err", though still not proof against Intel-NPU-specific fp16
+rounding/plugin behavior, which needs the actual NPU plugin (blocked on
+firmware, per this repo's existing hardware note) to close out.
+
+**Verification.**
+`cargo build -p brain-cli -p brain-npu`: clean.
+`cargo test -p brain-cli --test npu_model_parity`: **7/7 passed** (run 3x in
+a row with no flakiness after fixing a same-process temp-checkpoint-path
+collision - `cargo test` runs every `#[test]` fn on its own thread within one
+process, and two different tests in this file both called `tiny_fincast()`;
+a bare-pid temp filename let one test's cleanup delete another still-running
+test's checkpoint out from under it - fixed with a per-call
+`AtomicU64`-backed unique id, not just the pid).
+`cargo test -p brain-npu --lib`: **19/19 passed, 1 pre-existing ignore**
+(unchanged from before this phase - includes the still-green, still-exercised
+`Chronos2Session`/`FincastSession` tests noted above).
+`cargo test -p brain-cli --bin brain resident_forecast`: 2/2 passed (the
+file's own pre-existing schema/codec unit tests, unaffected by the migration).
+
+**Deferred - ASR (nemotron + qwen-asr), explicitly not done this phase.**
+`crates/cli/src/resident_asr.rs`'s `NemotronNpuInstance`/`QwenAsrNpuInstance`
+have the SAME drift (`onnx::GraphBuilder` + `NpuGraph::compile_bytes`/
+`compile_path` called directly, not through `NpuModel`) and the mechanical
+migration is straightforward - sketched and judged low-risk during this
+phase (two new structs, `NemotronEncoderNpuModel`/`QwenAsrHeadNpuModel`,
+following the exact same pattern as `Chronos2NpuModel`/`FincastNpuModel`
+above). Deliberately NOT landed this phase for one reason: unlike
+chronos2/fincast, neither `nemotron`'s nor `qwen_asr`'s config carries a
+cheap `::tiny()` synthetic-checkpoint helper the way `Chronos2Config`/
+`FincastConfig` do, so there is no equivalent low-cost way to write a real
+RED-then-GREEN parity test for this migration in-sandbox (both models load
+from a full HF-format checkpoint directory - tokenizer files, sharded
+weights - not a single small `.safetensors` a test can synthesize inline).
+Landing the ASR migration without a test would violate this repo's own TDD
+mandate more than deferring it does; per this task's own explicit guidance
+("a smaller, correct C2 commit is better than a larger, risky one"), it is
+left as a clean, scoped follow-up: build the same two `NpuModel` structs in
+`resident_asr.rs`, and either (a) add minimal `::tiny()`-style config
+constructors to `nemotron`/`qwen_asr` first (the more durable fix, also
+useful beyond this test), or (b) gate the parity test on real
+`BRAIN_NEMOTRON`/`BRAIN_QWEN_ASR` checkpoints the way
+`chronos2_export.rs::export_real_checkpoint_to_onnx` already does for its own
+env-gated real-checkpoint tests.
+
+**Also explicitly out of scope for this whole program** (per the approved
+plan, unchanged by this phase): kronos's two-graph NPU rollout already goes
+through `NpuGraph` directly (not a bespoke session) so it wasn't drift to fix,
+and its own module doc already flags a stale "kronos NPU is a follow-up"
+comment as a separate, pre-existing cleanup item; the four stateful TTS
+sessions (`KvSession`, `PrefillSession`, `BackStreamSession`, `FusedMtpSession`
+per C1's own inventory) are out of scope for this NpuModel-unification
+program entirely - their per-step KV-cache state doesn't fit a single
+build-once `NpuModel::build` seam without a larger design change nobody has
+scoped yet.
+

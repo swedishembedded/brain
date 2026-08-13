@@ -95,7 +95,24 @@ pub trait NpuModel: Send + Sync {
 
     /// Compile this model onto `cfg.device` (NPU by default), returning the generic
     /// named-tensor runner — the single call a residency NPU instance makes.
+    /// Overridable for a model whose graph can't go through the default in-memory
+    /// path (e.g. an external-data export for a checkpoint that would exceed
+    /// protobuf's 2 GB single-buffer limit).
     fn compile(&self, cfg: &openvino::NpuConfig) -> Result<openvino::NpuGraph, String> {
         openvino::NpuGraph::compile_bytes(&self.onnx_bytes()?, cfg).map_err(|e| e.to_string())
+    }
+
+    /// The host/`gpu_core` reference forward for the same named inputs
+    /// [`compile`](NpuModel::compile)'s graph consumes (e.g. `[("emb", ...),
+    /// ("kmask", ...)]`, matching whatever [`build`](NpuModel::build) declared as
+    /// graph inputs) - the parity oracle for this model's NPU graph, so a caller
+    /// with real NPU hardware can gate on cosine similarity against a device-
+    /// independent reference rather than just "it ran". Defaulted to `None` (no
+    /// reference wired up) so every existing implementor keeps compiling
+    /// unchanged; a model that already has a device-side `core_forward` (Chronos-2,
+    /// FinCast, ...) should override this.
+    fn parity_ref(&self, inputs: &[(&str, Vec<f32>)]) -> Option<Vec<Vec<f32>>> {
+        let _ = inputs;
+        None
     }
 }
