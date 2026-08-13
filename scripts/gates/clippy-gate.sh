@@ -87,7 +87,17 @@ cd "$ROOT"
 # crates/cli/src/resident_asr.rs) -- confirmed byte-identical to `origin/main`
 # itself (same content, same lints, untouched by this session), not
 # attributable to anything reconstructed here.
-BASELINE="${BASELINE:-262}"
+#
+# Bumped 262 -> 279 rebasing this branch's 5 own commits onto a much later
+# `origin/main` (28 commits ahead: the B1-B11 dtype-tier work, an NPU
+# GraphBackend/session-seam refactor, a kernel-selection facade, and assorted
+# docs/naming cleanup -- none of it touched by this branch's own commits, per
+# `git rebase origin/main`'s own clean, zero-conflict result). Verified, not
+# assumed: a `git worktree add` checkout of `origin/main` alone (no rebase, no
+# branch commits applied at all) independently runs this SAME gate and reports
+# exactly 279 -- the entire 17-warning delta is upstream's own, inherited by
+# the rebase, not introduced by anything this branch added.
+BASELINE="${BASELINE:-279}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.
