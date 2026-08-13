@@ -76,6 +76,7 @@ help:
 	@echo "                               claude-code + scheduler are heavier, opt-in)"
 	@echo "  make clippy                  the clippy ratchet gate (exit 0 + no new warnings)"
 	@echo "  make check/scripts           scripts/tools self-validation + env-var doc gate"
+	@echo "                               + no-doc-citations + no-perf-numbers gates"
 	@echo "  make check/spdx              SPDX-License-Identifier + copyright header gate"
 	@echo "  make hooks/install           install the local git hooks (SPDX check, commit"
 	@echo "                               trailer cleanup/gate)"
@@ -217,10 +218,15 @@ test/slow:
 # tools/, and examples/ never cite a docs/ or .agents/ file path — see that
 # script for why (also wired as a pre-commit hook, so this is a slow-path
 # backstop for anything pre-commit was bypassed for).
+# check-no-perf-numbers.sh additionally denies a bare number next to a
+# performance unit/claim (ms, s, fps, tok/s, % of peak, Nx speedup, ...)
+# anywhere in docs/**/*.md unless reviewed via a `<!-- perf-number: ... -->`
+# comment - see that script for the full rationale and escape-hatch syntax.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
 	bash scripts/gates/check-no-doc-citations.sh
+	bash scripts/gates/check-no-perf-numbers.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
