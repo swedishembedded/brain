@@ -130,14 +130,21 @@ atomically: `<|grounding|>` turns on grounding mode (the model then emits
 
 ## Hardware and limits
 
-**CPU backend only, and it is forced, not preferred.** `crates/sam1`'s ViT
-tower corrupts its per-block buffers on the wgpu backend at 1024×1024 once the
-graph holds three or more blocks - a tracked, still-open correctness bug that
-produces plausible-looking garbage rather than an error. So this model declares
-a RAM-only `MemCost` (`vram == 0`), which is the residency scheduler's own
-vocabulary for "never place me on a GPU", and builds every stage on the native
-CPU backend. It does not mutate `BRAIN_DEVICE`; a server-lifetime resident must
-not change the backend other models build on.
+**Split backend: vision on wgpu, decoder on CPU.** `crates/sam1`'s ViT tower
+used to corrupt its per-block buffers on the wgpu backend at 1024x1024 once
+the graph held three or more blocks - a tracked correctness bug that produced
+plausible-looking garbage rather than an error. That bug is now fixed and
+confirmed at real-weight scale (5/5 clean parity runs plus 32/32 clean trials
+under induced heavy contention reproducing the original failure conditions),
+so `caps::Session::load` builds the vision encoder (SAM+CLIP+glue) on
+`gpu_core::Gpu::new_wgpu` and the decoder on `gpu_core::Gpu::new_cpu` (the
+decoder has no wgpu-corruption history and no measured wgpu benefit, so it
+stays put). This model still declares a RAM-only `MemCost` (`vram == 0`),
+which is the residency scheduler's own vocabulary for "never place me on a
+GPU" - that has NOT been updated to account for the vision tower's real wgpu
+VRAM usage, a known, deliberately deferred gap (a residency/budget-accounting
+fix, not a `crates/deepseekocr` change). It does not mutate `BRAIN_DEVICE`; a
+server-lifetime resident must not change the backend other models build on.
 
 **~22 GiB resident.** Measured, not estimated: the real-weight composite gate
 reports a 21.32 GiB peak RSS for this exact build, read off `/proc/self/status`.
@@ -175,16 +182,40 @@ follow-up pass added per-stage instrumentation and found (and partly fixed)
 the encoder's real cost: `attn_apply_cross` (SAM's attention-weighted-V
 step) was 70-71% of the tower's own CPU forward, 20-30x more wall time than
 a same-FLOP-count sibling kernel, traced to a cache-hostile V-transpose now
-tiled for locality. The CPU backend `crates/sam1` is pinned to (the wgpu
-backend corrupts this tower's output at production scale, unrelated to this
-pass) costs roughly 3.6x over wgpu on this tower alone, measured directly
+tiled for locality. The CPU backend `crates/sam1` used to be pinned to (the
+wgpu backend used to corrupt this tower's output at production scale) costs
+roughly 3.6x over wgpu on this tower alone in isolation, measured directly
 rather than assumed. With both landed, real-weight runs measured the vision
-encoder directly at 25-34 s (down from the prior pass's undifferentiated
-~75-80 s estimate), and a clean single-tenant run measured the whole
+encoder directly at 25-34 s, and a clean single-tenant run measured the whole
 pipeline at 83.1 s (down from the ~95.6-97.1 s the same pass measured under
-concurrent-agent machine load). Model construction's 20-28 s and the
-tiled-transpose fix's whole-pipeline magnitude remain open. See
-`docs/performance/overview.md`'s case study for the full per-stage and
+concurrent-agent machine load) - both numbers from BEFORE the vision encoder
+moved onto wgpu for real (see below).
+
+**Since then: the vision encoder moved onto wgpu, `silu_mul`/`scale_add`
+gained AVX2 fast paths, and both were validated together on real pages.**
+`silu_mul`/`scale_add` (the SwiGLU activation core and the MoE combine step)
+were found running the generic scalar JIT path at 15-16% EACH of the decode
+loop's profiled CPU time, the same missing-fast-path bug class
+`moe_linear_gated` and the self-attention family were; fixed the same way,
+and confirmed on a real page: both dropped to 1.1%/0.3% of the profile.
+`crates/sam1`'s wgpu correctness fix (above) let the vision encoder finally
+move off the CPU pin for real (`caps::Session::load` now builds SAM+CLIP+glue
+on `gpu_core::Gpu::new_wgpu`) - honestly mixed in practice: SAM's own forward
+dropped from 23.8-33.0 s to 13.3-27.0 s but inconsistently, while CLIP
+regressed from a 1.2-8.9 s (median 1.4-1.5 s) range to a consistently slower
+7.6-12.3 s - its ops are small enough that per-dispatch GPU overhead on this
+Intel Arc iGPU outweighs the compute saved. **The current real number**: five
+real pages, one resident instance, `max_new=128`, warm-instance median
+69.4 s/page (mean 68.7 s) - roughly 12% faster than the prior 78.5 s median,
+though the decode-side AVX2 fixes and the vision-wgpu split are not cleanly
+separable since both landed together. At `max_new=32` head-to-head against
+`llama-mtmd-cli` on the same real page, brain now measures 33.4 s against
+`llama.cpp`'s own 57.3-64.7 s (two runs) - roughly **1.8x faster than
+`llama.cpp`** on this comparison, a reversal of the 1.57x deficit the prior
+pass measured. Model construction's 20-28 s (a one-time, per-activation cost,
+unaffected by any of this) remains open, and the CLIP-on-wgpu regression is a
+real, named follow-up (keep CLIP on CPU while only SAM+glue move to wgpu).
+See `docs/performance/overview.md`'s case study for the full per-stage and
 per-kernel tables and the honest caveats on what could and could not be
 pinned down on a shared machine.
 

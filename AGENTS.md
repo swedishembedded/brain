@@ -401,14 +401,20 @@ fast and scalable kernel — not a naive one.
     `deepseekocr::import` - this crate's four real-weight test binaries are
     thin wrappers over it, so a served run and its own parity test cannot
     disagree about which tensors they loaded.
-    *(**CPU backend only**, by declaration: `estimate` reports a RAM-only
-    `MemCost` (`vram == 0`, ~22 GiB measured) so `place::pick_device` never
-    offers a GPU, and `caps::Session::load` builds on `Gpu::new_cpu` - never an
-    env mutation from inside a server-lifetime resident. `run_batch` is the
-    serial default and says why (per-image encoder pass, no decoder batch
-    axis). Also not done: KV-cached decode - decode is `O(T²)` recompute, tens
-    of seconds per token - EOS early-stop, sampling beyond greedy, INT8, LoRA,
-    a training verb, and the Base/Gundam multi-tile layouts (`rows.rs` and
+    *(**Split backend**: `caps::Session::load` builds the vision encoder
+    (SAM+CLIP+glue) on `Gpu::new_wgpu` and the decoder on `Gpu::new_cpu` -
+    `crates/sam1`'s wgpu corruption at 1024x1024/3+ blocks that used to force
+    an all-CPU build is fixed and confirmed at real-weight scale. `estimate`
+    still reports a RAM-only `MemCost` (`vram == 0`, ~22 GiB measured), so
+    `place::pick_device` never offers a GPU for THIS model's own placement -
+    a known, deliberately deferred gap versus the vision tower's real wgpu
+    VRAM use, not yet reconciled. Never an env mutation from inside a
+    server-lifetime resident. `run_batch` is the serial default and says why
+    (per-image encoder pass, no decoder batch axis). Decode IS KV-cached
+    (`DeepseekV2::generate_greedy_kv`, `O(1)` per token past the prompt).
+    Still not done: EOS early-stop, sampling beyond greedy, INT8, a
+    finetune-style CLI verb for the LoRA backward that already exists, and
+    the Base/Gundam multi-tile layouts (`rows.rs` and
     `RowGather` already support them; `deepseekv2::enable_mm_splice` takes ONE
     run). The composed image+decoder decode loop has **no multimodal oracle** -
     llama.cpp's debug callback segfaults inside this model's CLIP graph - so it

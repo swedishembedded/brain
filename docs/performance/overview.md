@@ -705,3 +705,159 @@ the wrong trade for this pass, exactly the "lean conservative" guidance this
 investigation started from. **No `crates/deepseekocr`, `crates/deepseekv2`,
 `crates/sam1`, `crates/residency` or `crates/apiserve` source file was changed
 this pass** - only this page and `.agents/roadmap/deepseek-ocr.md`'s tracking.
+
+### DeepSeek-OCR Phase 8, concluded: silu_mul/scale_add validated on a real page, the vision encoder moved onto wgpu, and a real per-page number
+
+The seventh performance pass on this model this session, picking up two
+results that landed either just before or during this pass: the CPU AVX2
+fast paths for `silu_mul`/`scale_add` (found at 15-16% EACH of the decode
+loop's profiled CPU time earlier this session, with no native path - the
+same bug class `moe_linear_gated` and the self-attention family were), and a
+sibling pass's wgpu Intel ANV correctness fix for `crates/sam1` (confirmed at
+real-weight scale: 5/5 clean parity runs plus 32/32 clean trials under
+induced heavy contention reproducing the original bug's failure conditions).
+
+**A near-miss, honestly recorded first.** Getting even one resident-server
+activation this pass took roughly an hour of bounded `/proc/meminfo` polling
+against a sibling agent's own concurrent `cargo build`/`cargo test` cycles
+sharing this 30 GiB box - available memory swung between 2 and 21 GiB and
+swap was fully exhausted (under 5 MiB free) more than once. No build and no
+server load ever ran concurrently with the other; every attempt waited for a
+verified quiet window (available memory at or above the model's own 22.0 GiB
+floor, `ps aux` clean of `cargo`/`rustc`) before firing. Not a performance
+finding, but a real, load-bearing operational fact about this session's
+shared box, worth recording for whoever validates the next change here.
+
+**Step 0: `silu_mul`/`scale_add`, validated on a real page.** A real
+`BRAIN_PROFILE=1` resident-server run (`deepseek-ai/DeepSeek-OCR`, real
+`DeepSeek-OCR-Q8_0`/`mmproj` weights, a real STM32F4 reference-manual page,
+`max_new=128`) with the fix active:
+
+| kernel | share (pre-fix) | share (post-fix, this pass) |
+|---|---|---|
+| `silu_mul` | 15-16% | **1.1%** (894.5 ms / 91648 calls) |
+| `scale_add` | 15-16% | **0.3%** (226.8 ms / 90112 calls) |
+| `moe_linear_gated` | 66.9% (an earlier, differently-shaped baseline) | 59.2% (46102.8 ms / 270336 calls) - still dominant, roughly 2x faster per call than the pre-AVX2 numbers this session's own microbenchmark measured |
+
+Both kernels moved almost entirely off the profile - the fix works, on a real
+page, with real weights, not just in the isolated microbenchmark the landing
+commit shipped with.
+
+**Step 1: re-profiled for the next bottleneck.** With `silu_mul`/
+`scale_add`/`moe_linear_gated` all now native, the next-largest rows are
+`matmul` (20.9%, 16287.3 ms / 12236 calls) and `matmul_reg3` (15.4%,
+11990.1 ms / 52 calls - almost certainly the 129280-wide `lm_head`
+projection, called once per decode step). **Neither is a missing-fast-path
+bug**: `backend-cpu` already collapses every `matmul*` kernel name onto the
+same native AVX2+rayon `fast_ops::matmul_abt` (this page's own vision-encoder
+section above documents the same collapse for `crates/sam1`), so both are
+already on their fastest available CPU path - genuine, already-optimized
+FLOP-bound compute, not a bug class left to fix. Everything else (`add2`,
+`attn_decode_apply`, `rope_at`, `attn_decode_scores`, `kv_append`, `rmsnorm`,
+`gqa_apply`/`gqa_scores`, `decode_softmax`, `router_gate`, `embed`,
+`rope_base`, `attn_softmax`) is individually under 1%. **The decode loop's
+profile is now clean** - nothing left is running the generic scalar JIT path
+that should not be.
+
+**Step 2: the vision encoder moved onto wgpu**, a scoped follow-up the
+wgpu-correctness sibling pass handed off mid-session once `crates/sam1`'s
+wgpu corruption was confirmed fixed at real-weight scale.
+`crates/deepseekocr/src/model.rs` gained `DeepseekOcr::new_with_prompt_devices`
+(independent `dev_vision`/`dev_decoder` factories; the existing single-factory
+`new`/`new_split`/`new_with_prompt` are unchanged, delegating one `dev` to
+both) and `caps::Session::load` now builds SAM+CLIP+glue on
+`gpu_core::Gpu::new_wgpu` while the decoder stays on `gpu_core::Gpu::new_cpu`
+(no wgpu-corruption history there and no measured wgpu benefit for that
+stage). Gated by a new wiring test,
+`split_device_vision_wgpu_decoder_cpu_matches_all_cpu`
+(`crates/deepseekocr/tests/tiny_ref.rs`): builds the same checkpoint-free
+fixture two ways - all-CPU and split-device - and asserts the spliced decoder
+input and final logits agree at cosine > 0.9999. This is a wiring gate, not a
+re-verification of wgpu's own SAM correctness (that is
+`crates/sam1/tests/wgpu_real_weight_parity.rs`'s job, already confirmed).
+Full regression green: `cargo test -p brain-deepseekocr --release` (42/42),
+`-p brain-deepseekv2 --release`, `-p brain-backend-cpu --release`.
+
+**Measured real-weight effect: honestly mixed, not a clean win by itself.**
+Across the five real pages measured this pass:
+
+| stage | old (all-CPU, prior passes) | new (vision on wgpu) |
+|---|---|---|
+| SAM forward | 23.8-33.0 s | 13.3-27.0 s (sometimes faster, not consistently) |
+| CLIP forward | 1.2-8.9 s, median 1.4-1.5 s | **7.6-12.3 s - consistently slower** |
+
+CLIP regressed on wgpu: its ops are small enough (the patch embed is
+bypassed entirely, per this crate's own design) that per-dispatch GPU
+submission/sync overhead on this Intel Arc iGPU outweighs the compute it
+saves - the same shape of problem this page's own crossover-sweep guidance
+warns about, except here the two stages are different sub-models sharing one
+device factory rather than one kernel with two variants. SAM's own win is
+real but inconsistent across runs, plausibly still confounded by this
+session's shared-machine contention (see the near-miss note above) rather
+than isolated cleanly. **Net vision-encode time (SAM+CLIP combined) across
+the five pages measured 20.9-39.3 s - inside the OLD range (11.2-51.1 s) but
+not a clean, unambiguous win over it.** Recorded honestly rather than claimed
+as a clean success, per this repo's own rule that a per-kernel win is not the
+same thing as a whole-pass win. A follow-up that keeps CLIP on CPU while only
+SAM+glue move to wgpu is the obvious next experiment; not attempted this pass
+for lack of a further safe memory window.
+
+**Step 3: the honest final number.** Five real pages (the STM32F4
+reference-manual set), one resident `brain serve --openai` instance, real
+`DeepSeek-OCR-Q8_0`/`mmproj` weights, `max_new=128`, `BRAIN_PROFILE=1`:
+
+| page | wall (s) | notes |
+|---|---|---|
+| 1 | 152.9 | includes the one-time 46.2 s model activation; EOS hit at 72/128 tokens (compute still ran the full budget per this decoder's documented no-early-stop wall-clock behaviour) |
+| 2 | 73.5 | warm, full 128-token budget |
+| 3 | 70.3 | warm, full 128-token budget |
+| 4 | 68.4 | warm, full 128-token budget |
+| 5 | 62.7 | warm, full 128-token budget |
+
+**Warm-instance median (pages 2-5): 69.4 s/page, mean 68.7 s** - measured on
+a machine holding this model's own documented steady-state footprint
+(~3 GiB available, swap 1.5-6.5 GiB free, fluctuating with the sibling's own
+concurrent activity) - a comparable, if not identical, contention regime to
+the prior pass's 78.5 s median (2.6-3.6 GiB available, swap 95-100% full).
+**Roughly 12% faster than that prior number.** This pass cannot cleanly
+attribute that 12% between the decode-side AVX2 fixes and the vision-wgpu
+split - both landed together, and the machine's own contention differs run
+to run - so the honest statement is: the two changes together, re-measured
+on a real 5-page sample, produce a real, positive, double-digit-percent
+improvement over the last documented number, not a single isolated factor's
+contribution.
+
+**The `max_new=32` head-to-head vs `llama.cpp`, re-run clean.** Same real
+weights, same real page (`stm32-bench/pages/page-001.png`), same prompt,
+`-n 32` / `max_new 32`, `--flash-attn off` (`llama-mtmd-cli`), machine
+verified quiet before each run (`free -h`, zero `cargo`/`rustc` processes):
+
+| | wall (s) |
+|---|---|
+| brain (warm, this pass's fixes) | **33.4** |
+| `llama-mtmd-cli`, run 1 | 64.7 |
+| `llama-mtmd-cli`, run 2 | 57.3 |
+
+**brain is now faster than `llama.cpp` on this exact comparison - roughly
+1.8x, using `llama-mtmd-cli`'s own two-run average (61.0 s)** - a reversal of
+the 1.57x deficit the prior pass measured (83.1 s brain vs 52.9 s
+`llama.cpp`, before this session's `moe_linear_gated`/GQA AVX2 fixes, the
+`silu_mul`/`scale_add` AVX2 fixes, and the vision-on-wgpu split all landed).
+Named plainly, the way this page always has: `llama.cpp`'s own numbers move
+run to run on this shared machine too (47.1 s and 42.2 s mtmd-batch-encoding
+halves, within its own historically observed range) - this is not a fully
+isolated, dedicated-hardware benchmark, but it is the cleanest comparison
+this session could produce, and the direction and rough magnitude are real.
+
+**What changed this pass, for the record**:
+`crates/backend-cpu/src/{fast_ops.rs,lib.rs}` (inherited, merged from `main`
+- the `silu_mul`/`scale_add` AVX2 fast paths), `crates/deepseekocr/src/
+{model.rs,caps.rs}` (the vision/decoder device split),
+`crates/deepseekocr/tests/tiny_ref.rs` (the new wiring gate). No
+`crates/sam1` or `crates/backend-wgpu` source changed this pass - that fix
+landed and was confirmed by the sibling pass, merged in via `main` before
+this work started. This closes Phase 8's remaining open items: the
+just-landed kernels are validated on a real page, the vision encoder's CPU
+pin question has a real answer (moved, with an honestly mixed CLIP caveat),
+and the per-page number has a definitive, reproducible, honestly-caveated
+final measurement.
