@@ -242,16 +242,55 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("max_abs_row", kernels::MAX_ABS_ROW));
         v.push(("quant_pack", kernels::QUANT_PACK));
         // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
-        // variants (B4/B5) even though this crate never builds a
-        // `Weight::BF16`/`Weight::F16` - see `Ops::new`'s own doc comment
-        // ("every model that builds an `Ops` must register the full façade
-        // kernel set, not just the tiers it plans to use"). Compiled, never
-        // dispatched.
+        // variants (B4/B5/B8/B9/B10) even though this crate never builds a
+        // `Weight::BF16`/`Weight::F16` and has its own KV-cache mechanism
+        // (never dispatches the generic `paged_*_batched` family at all) -
+        // see `Ops::new`'s own doc comment ("every model that builds an
+        // `Ops` must register the full façade kernel set, not just the
+        // tiers it plans to use"). Compiled, never dispatched. Mirrors
+        // `model::ops`'s own test-only `kernel_list()` exactly (see that
+        // function - this is the same list, kept in sync by hand since
+        // there is no single shared source both a model crate and
+        // `model::ops`'s test module can pull from).
         for dt in [Dtype::BF16, Dtype::F16] {
             v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
         }
+        v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
+        v.push(("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED));
+        v.push(
+            kernels::template::dtype_variant_store(
+                "paged_kv_append_batched_word",
+                kernels::PAGED_KV_APPEND_BATCHED_WORD,
+                "pool",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_scores_batched",
+                kernels::PAGED_DECODE_SCORES_BATCHED,
+                "pool_k",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_apply_batched",
+                kernels::PAGED_DECODE_APPLY_BATCHED,
+                "pool_v",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
         v
     })
 }
