@@ -469,7 +469,14 @@ impl OmniInner {
         max_new: u32,
     ) -> Result<(String, Vec<u32>), String> {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video)?;
+        // Leading "\n": the template's own system-turn closer is the single
+        // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
+        // in `text_ids` belongs to the system turn's own close, not to the
+        // user turn's open tag - `next_turn_open` must include it to match
+        // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
+        let user_open = self.tok.encode("\n<|im_start|>user\n");
+        let splice_at = crate::mm::media_splice_point(prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len();
         let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt..].to_vec();
@@ -567,7 +574,14 @@ impl OmniInner {
     #[allow(clippy::too_many_arguments)]
     pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
         let text_ids = self.tok.encode(prompt);
-        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video)?;
+        // Leading "\n": the template's own system-turn closer is the single
+        // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
+        // in `text_ids` belongs to the system turn's own close, not to the
+        // user turn's open tag - `next_turn_open` must include it to match
+        // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
+        let user_open = self.tok.encode("\n<|im_start|>user\n");
+        let splice_at = crate::mm::media_splice_point(prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len() as u32;
         let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
         let new_ids = out_ids[n_prompt as usize..].to_vec();

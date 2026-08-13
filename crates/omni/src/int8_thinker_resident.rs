@@ -742,7 +742,14 @@ impl Int8ThinkerInstance {
             let embed_host = self.embed.to_host(&self.reader);
             let gpu = &self.shards[0].gpu;
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref())
+            // Splice media right after a leading system turn rather than
+            // before it -- see `crate::mm::media_splice_point`'s doc for the
+            // real-hardware failure (a long system prompt + media producing
+            // exactly one bogus `<|im_start|>` token then immediate EOS) this closes.
+            // Leading "\n" -- see the matching comment in caps.rs's call sites.
+            let user_open = tok.encode("\n<|im_start|>user\n");
+            let splice_at = crate::mm::media_splice_point(&prompt, &text_ids, tok.special_id("<|im_end|>"), Some(&user_open));
+            let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref(), splice_at)
                 .map_err(|e| format!("{MODEL}: {e}"))?;
             if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_ok() {
                 let n = mm_prompt.token_ids.len();

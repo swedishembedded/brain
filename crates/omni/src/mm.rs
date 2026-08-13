@@ -35,6 +35,11 @@
 //! function's doc for the audio/video grid-shape convention and its one
 //! documented approximation: wall-clock audio-timestamp scaling is not
 //! ported, only frame-ordinal T-axis advance).
+//!
+//! **Splice point**: [`build_multimodal_prompt`] does not always put media at
+//! the very front of `text_ids` anymore - see [`media_splice_point`]'s doc
+//! for the real-hardware failure that motivated placing it right after a
+//! leading system turn instead, when one is present.
 
 use checkpoint::weightio::WeightReader;
 use gpu_core::Gpu;
@@ -288,10 +293,11 @@ pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>
 }
 
 /// One resolved multimodal prompt: the full token id sequence (media blocks,
-/// each wrapped in its start/end token, followed by the user's text — see
-/// [`build_multimodal_prompt`]'s doc for the exact layout), its already-
-/// spliced `[n, hidden]` host embedding buffer, and its real 3-axis M-RoPE
-/// positions — everything `crate::generate::generate_greedy_multimodal` needs.
+/// each wrapped in its start/end token, spliced into `text_ids` at the
+/// caller-chosen [`media_splice_point`] - see [`build_multimodal_prompt`]'s
+/// doc for the exact layout), its already-spliced `[n, hidden]` host
+/// embedding buffer, and its real 3-axis M-RoPE positions - everything
+/// `crate::generate::generate_greedy_multimodal` needs.
 pub struct MultimodalPrompt {
     pub token_ids: Vec<u32>,
     pub x_host: Vec<f32>,
@@ -307,14 +313,65 @@ struct MediaBlock {
     grid: (u32, u32, u32),
 }
 
+/// Where a caller should splice real media embeddings into `text_ids`: right
+/// after a leading system turn's closing `<|im_end|>` when the rendered
+/// prompt opens with one (`<|im_start|>system\n...`) - and, when the caller
+/// also knows the NEXT turn's own opening tag token sequence (typically
+/// `<|im_start|>user\n`, via `next_turn_open`), past THAT too, so media lands
+/// at the very first token of that turn's own content rather than in front of
+/// its role tag. Falls back to index 0 (the original, still-correct behavior
+/// for a system-less prompt) whenever there is no leading system turn.
+///
+/// **Real bug this closes**: [`build_multimodal_prompt`] used to always place
+/// media at index 0 - before the ENTIRE rendered conversation, including the
+/// system turn. That is a plausible position when there is no system turn (a
+/// short, system-less prompt puts media right where the user's own turn
+/// starts, close to the model's trained distribution), but for a real caller
+/// with a long system prompt (e.g. an agent's own operating instructions),
+/// prepending shoves the system/user role tags hundreds or thousands of
+/// tokens further from their trained relative position than the model
+/// expects. Confirmed on real hardware (2x Tesla P40, the real
+/// Qwen3-Omni-30B-A3B-Instruct W8A16 checkpoint): with a long system prompt +
+/// image + audio, the model's own top logit at the very first decode step was
+/// a confident `<|im_start|>` (not a corrupted/NaN logit - a real, decisive
+/// preference), and its next-step top logit after that was EOS, so generation
+/// stopped after exactly one bogus token. Moving the same media blocks to
+/// right after the system turn fixed that (verified end-to-end: real,
+/// substantively correct generated content instead of one bogus token +
+/// stop) but left a smaller remaining artifact - a stray `<|im_start|>` still
+/// occasionally leads the real content, because the media block still sits in
+/// front of the user turn's OWN role tag rather than inside it. Skipping past
+/// `next_turn_open` too closes that gap: media then starts exactly where the
+/// user's own turn content would have started, matching the model's trained
+/// distribution even more closely. Still a heuristic, not a byte-exact port
+/// of HF's own inline per-content-part splice (which needs the chat-template
+/// renderer to keep typed content parts instead of flattening them to plain
+/// text before splicing has any position to target) - a caller whose media
+/// reference sits in the MIDDLE of a long user turn, rather than at its
+/// start, is not fully addressed by this.
+pub fn media_splice_point(prompt: &str, text_ids: &[u32], im_end_id: Option<u32>, next_turn_open: Option<&[u32]>) -> usize {
+    if !prompt.starts_with("<|im_start|>system\n") {
+        return 0;
+    }
+    let Some(after_system) = im_end_id.and_then(|id| text_ids.iter().position(|&t| t == id)).map(|i| i + 1) else {
+        return 0;
+    };
+    match next_turn_open {
+        Some(open) if !open.is_empty() && text_ids[after_system..].starts_with(open) => after_system + open.len(),
+        _ => after_system,
+    }
+}
+
 /// Assemble a multimodal prompt: media blocks (audio, then image, then video
 /// frames — in that fixed order; any subset may be absent) each wrapped in
 /// its start/end token exactly as HF's own chat template does
 /// (`<|audio_start|>`..audio placeholders..`<|audio_end|>`,
-/// `<|vision_start|>`..image/video placeholders..`<|vision_end|>`), followed
-/// by `text_ids` (the user's own already-tokenized text). This is a real but
-/// simplified convention — one block per medium, media always before text,
-/// not a fully general interleaved multi-turn processor.
+/// `<|vision_start|>`..image/video placeholders..`<|vision_end|>`), spliced
+/// into `text_ids` (the whole rendered conversation, already tokenized) at
+/// `splice_at` - see [`media_splice_point`] for how a caller should pick that
+/// index. This is a real but simplified convention - one block per medium,
+/// all media at ONE point in the sequence, not a fully general interleaved
+/// multi-turn processor.
 ///
 /// Real embeddings come from [`encode_audio`]/[`encode_image`]/
 /// [`encode_video_frames`], spliced host-side ([`splice_host`]); real 3-axis
@@ -333,7 +390,9 @@ pub fn build_multimodal_prompt(
     audio: Option<&[f32]>,
     image: Option<(&[f32], u32, u32)>,
     video: Option<&[(Vec<f32>, u32, u32)]>,
+    splice_at: usize,
 ) -> Result<MultimodalPrompt, String> {
+    let splice_at = splice_at.min(text_ids.len());
     let d = cfg.text.hidden;
     let mut blocks = Vec::new();
     if let Some(samples) = audio {
@@ -378,6 +437,13 @@ pub fn build_multimodal_prompt(
     let mut x_host = Vec::new();
     let mut placeholder_grids: Vec<(u32, Vec<(u32, u32, u32)>)> = Vec::new();
 
+    // Text BEFORE the splice point (a leading system turn, when present -
+    // see `media_splice_point`) is unaffected: media lands after it, not
+    // before it.
+    for &t in &text_ids[..splice_at] {
+        token_ids.push(t);
+        x_host.extend_from_slice(&embed_row(t));
+    }
     for b in &blocks {
         token_ids.push(b.start_token);
         x_host.extend_from_slice(&embed_row(b.start_token));
@@ -391,7 +457,7 @@ pub fn build_multimodal_prompt(
         token_ids.push(b.end_token);
         x_host.extend_from_slice(&embed_row(b.end_token));
     }
-    for &t in text_ids {
+    for &t in &text_ids[splice_at..] {
         token_ids.push(t);
         x_host.extend_from_slice(&embed_row(t));
     }
@@ -444,4 +510,119 @@ pub fn splice_host(x_host: &mut [f32], embeds: &[f32], row0: u32, n_rows: u32, h
     let n = (n_rows * hidden) as usize;
     assert_eq!(embeds.len(), n, "splice_host: embeds has {} elems, expected {n} ({n_rows} rows x {hidden})", embeds.len());
     x_host[base..base + n].copy_from_slice(embeds);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real ids from the real Qwen3-Omni tokenizer (`tokenizer_config.json`/
+    // `vocab.json`, verified directly against the actual checkpoint's
+    // tokenizer this session): <|im_start|>=151644, <|im_end|>=151645,
+    // "\n"=198, "user"=872, "system"=8948, "assistant"=77091.
+    const IM_START: u32 = 151644;
+    const IM_END: u32 = 151645;
+    const NL: u32 = 198;
+    const USER: u32 = 872;
+
+    /// A prompt with no leading system turn keeps the original behavior --
+    /// media at index 0 -- the shape the earlier (system-less, short-prompt)
+    /// real-hardware tests already validated as correct.
+    #[test]
+    fn splice_point_no_system_turn_is_zero() {
+        let prompt = "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n";
+        let text_ids = [IM_START, USER, 9906, IM_END, NL, IM_START, 77091, NL];
+        let user_open = [NL, IM_START, USER, NL];
+        assert_eq!(media_splice_point(prompt, &text_ids, Some(IM_END), Some(&user_open)), 0);
+    }
+
+    /// A prompt that DOES open with a system turn, but the caller has no
+    /// `next_turn_open` to check, splices right after the system turn's
+    /// closing `<|im_end|>` -- the first real fix: this is what used to be
+    /// index 0 (media before the ENTIRE conversation, system turn included),
+    /// reproduced on real hardware as a request that generates exactly one
+    /// bogus `<|im_start|>` token then stops (see `media_splice_point`'s doc).
+    #[test]
+    fn splice_point_after_leading_system_turn_without_next_turn_open() {
+        let prompt = "<|im_start|>system\nbe helpful<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n";
+        // system turn: [<|im_start|>, "system", "\n", "be", "helpful", <|im_end|>] -- IM_END at index 5.
+        let text_ids = [IM_START, 8948, NL, 1055, 10950, IM_END, NL, IM_START, USER, 6023, IM_END, NL, IM_START, 77091, NL];
+        assert_eq!(media_splice_point(prompt, &text_ids, Some(IM_END), None), 6);
+    }
+
+    /// The full fix: with `next_turn_open` supplied (`"\n<|im_start|>user\n"`,
+    /// tokenized -- the leading "\n" belongs to the system turn's own
+    /// `<|im_end|>\n` closer, so it must be included to match starting right
+    /// at `im_end_id`'s position), the splice point lands at the very FIRST
+    /// token of the user turn's own content, not merely after the system
+    /// turn. This is what closed the remaining "stray `<|im_start|>` before
+    /// otherwise-correct content" artifact the system-turn-only fix left
+    /// behind (see `media_splice_point`'s doc + the real end-to-end
+    /// `bbox_check.py` pass this fix produced).
+    #[test]
+    fn splice_point_after_leading_system_and_user_open_tag() {
+        let prompt = "<|im_start|>system\nbe helpful<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n";
+        let text_ids = [IM_START, 8948, NL, 1055, 10950, IM_END, NL, IM_START, USER, NL, 6023, IM_END, NL, IM_START, 77091, NL];
+        let user_open = [NL, IM_START, USER, NL];
+        // after_system = 6 (right after IM_END at index 5); text_ids[6..10] ==
+        // user_open, so splice_at = 6 + 4 = 10 -- the "hi" token's own index.
+        assert_eq!(media_splice_point(prompt, &text_ids, Some(IM_END), Some(&user_open)), 10);
+        assert_eq!(text_ids[10], 6023, "sanity: index 10 really is the user turn's own first content token");
+    }
+
+    /// When the NEXT turn's tokens don't actually match `next_turn_open`
+    /// (an unexpected shape - not a real "user" turn immediately after
+    /// system, or a tokenizer quirk), fall back to splicing right after the
+    /// system turn instead of picking a wrong/misaligned index.
+    #[test]
+    fn splice_point_falls_back_when_next_turn_open_does_not_match() {
+        let prompt = "<|im_start|>system\nbe helpful<|im_end|>\n<|im_start|>tool\nhi<|im_end|>\n";
+        let text_ids = [IM_START, 8948, NL, 1055, 10950, IM_END, NL, IM_START, 14172, NL, 6023, IM_END, NL];
+        let user_open = [NL, IM_START, USER, NL]; // does not match the real "tool" turn here
+        assert_eq!(media_splice_point(prompt, &text_ids, Some(IM_END), Some(&user_open)), 6);
+    }
+
+    /// A missing `im_end_id` (e.g. a tokenizer with no such special token, or
+    /// a future format change) degrades to the old always-prepend behavior
+    /// rather than panicking or picking a bogus index -- never worse than
+    /// before this fix.
+    #[test]
+    fn splice_point_falls_back_to_zero_without_im_end_id() {
+        let prompt = "<|im_start|>system\nbe helpful<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n";
+        let text_ids = [IM_START, 8948, NL, 1055, 10950, IM_END, NL];
+        assert_eq!(media_splice_point(prompt, &text_ids, None, None), 0);
+    }
+
+    /// `build_multimodal_prompt`'s splice loop itself: a fake single-block
+    /// splice at a mid-sequence index puts the block's tokens between the
+    /// "before" and "after" text runs, not merely appended/prepended.
+    #[test]
+    fn splice_at_mid_sequence_orders_tokens_correctly() {
+        let d = 2usize;
+        // Reproduce just the token/embedding assembly loop `build_multimodal_prompt`
+        // uses internally (a real `MediaBlock` needs a real GPU encode to build --
+        // this exercises the same splice arithmetic without one).
+        let text_ids = [10u32, 11, 12, 13];
+        let splice_at = 2usize.min(text_ids.len());
+        let block_tokens = [900u32, 901, 902];
+        let embed_row = |t: u32| vec![t as f32, t as f32 + 0.5];
+
+        let mut token_ids = Vec::new();
+        let mut x_host = Vec::new();
+        for &t in &text_ids[..splice_at] {
+            token_ids.push(t);
+            x_host.extend(embed_row(t));
+        }
+        for &t in &block_tokens {
+            token_ids.push(t);
+            x_host.extend(embed_row(t));
+        }
+        for &t in &text_ids[splice_at..] {
+            token_ids.push(t);
+            x_host.extend(embed_row(t));
+        }
+
+        assert_eq!(token_ids, vec![10, 11, 900, 901, 902, 12, 13]);
+        assert_eq!(x_host.len(), token_ids.len() * d);
+    }
 }
