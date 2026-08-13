@@ -24,8 +24,10 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::ops::{Act, Ops, Weight};
 pub use model::Shard;
 use optim::Optim;
 use paramstore::ParamStore;
@@ -36,7 +38,18 @@ use crate::config::QwenConfig;
 /// reinterpreted as `u32`.
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
-// ---- kernel indices (order matches PIPELINES) ----
+// ---- kernel indices (order matches STATIC_PIPELINES) ----
+// B7: the per-layer linears (attn q/k/v/o, mlp gate/up/down) no longer
+// dispatch through a hand-numbered index here at all - they go through
+// `model::ops::Ops` (see `self.ops`/`Weight`/`self.weights` below), which
+// resolves its own kernel set BY NAME on a `Gpu` handle sharing this table's
+// FULL compiled pipeline set (`pipelines()`, below `STATIC_PIPELINES`). That
+// retired six entries this table used to carry positionally (`matmul_reg2`,
+// `quant_pack`, `matmul_i8_dyn`, `max_abs_row`, `matmul_i8_gemv`,
+// `matmul_gemv`) - deleted here, not just unreferenced,
+// since nothing on `self.gpu` needs them any more. Everything else
+// (attention/RoPE/norms/embed/LM-head/training backward) is legitimately
+// still manual - `Ops` doesn't cover those kernel categories.
 /// Plain (untiled) embedding gather - kept in PIPELINES at index 0 for stable
 /// indexing; the forward uses the vocab-tiled `EMBED_TILE` instead.
 #[allow(dead_code)]
@@ -73,59 +86,48 @@ const GRAD_SCALE_BUF: usize = 28;
 const AXPY: usize = 29;
 const EMBED_TILE: usize = 30;
 const MATMUL_TILE: usize = 31;
-// Kept registered (and A/B-able) though `linear_kernel` now picks its
-// bit-identical, conflict-free twin `matmul_reg3`.
-#[allow(dead_code)]
-const MATMUL_REG2: usize = 32;
-const MATMUL_DX_REG: usize = 33;
-const MATMUL_DW_REG: usize = 34;
-const CE_STATS: usize = 35;
-const CE_GRAD_STATS: usize = 36;
-// int8 (DP4A) inference path for the encoder linears - GPU only.
-const QUANT_PACK: usize = 37;
-const MATMUL_I8: usize = 38;
-const MAX_ABS_ROW: usize = 39;
+const MATMUL_DX_REG: usize = 32;
+const MATMUL_DW_REG: usize = 33;
+const CE_STATS: usize = 34;
+const CE_GRAD_STATS: usize = 35;
 // Incremental KV-cache decode kernels (single new token vs the growing cache).
-const ATTN_DECODE_SCORES: usize = 40;
-const DECODE_SOFTMAX: usize = 41;
-const ATTN_DECODE_APPLY: usize = 42;
-const KV_APPEND: usize = 43;
-const ROPE_AT: usize = 44;
+const ATTN_DECODE_SCORES: usize = 36;
+const DECODE_SOFTMAX: usize = 37;
+const ATTN_DECODE_APPLY: usize = 38;
+const KV_APPEND: usize = 39;
+const ROPE_AT: usize = 40;
 // Vision-language residual splice (image-embedding injection). Off unless
 // `enable_mm_splice` was called; see `model::vlm`.
-const SPLICE: usize = 45;
-const SPLICE_BWD: usize = 46;
+const SPLICE: usize = 41;
+const SPLICE_BWD: usize = 42;
 // Table-driven RoPE for the interleaved M-RoPE path (Qwen3-VL). Off unless
 // `enable_mrope` was called; replaces the analytic rope_base on q/k.
-const ROPE2D: usize = 47;
+const ROPE2D: usize = 43;
 // DeepStack residual add (Qwen3-VL): adds a level's merged vision features into
 // the residual at the image rows after a layer. Off unless `enable_deepstack`.
-const SPLICE_ADD: usize = 48;
+const SPLICE_ADD: usize = 44;
 // Qwen2 q/k/v projection bias (add fwd, row-sum grad bwd). Used only when
 // `cfg.attn_bias` (FastVLM's Qwen2 decoder); Qwen3 is bias-free.
-const BIAS_ADD: usize = 49;
-const BIAS_GRAD: usize = 50;
-// Decode-regime int8 GEMV (single-barrier; the m=1 shape KV decode dispatches).
-const MATMUL_I8_GEMV: usize = 51;
-// Decode-regime fp32 kernels (A1/A2): workgroup-per-row rmsnorm and the
-// workgroup-per-column GEMV - the m=1 shapes KV decode is made of.
-const RMSNORM_ROWS: usize = 52;
-const MATMUL_GEMV: usize = 53;
+const BIAS_ADD: usize = 45;
+const BIAS_GRAD: usize = 46;
+// Decode-regime fp32 kernel (A1/A2): workgroup-per-row rmsnorm - the m=1
+// shapes KV decode is made of (the matching GEMV now lives behind `Ops`).
+const RMSNORM_ROWS: usize = 47;
 // Encoder right-padding key mask (FLUX.2 text-encoder parity).
-const GQA_SCORES_KMASK: usize = 54;
+const GQA_SCORES_KMASK: usize = 48;
 // Workgroup-per-row softmax over the [B*H*T, T] score slab - the coalesced twin
 // of `attn_softmax` (see the kmask attention below).
-const SOFTMAX_ROWS: usize = 55;
+const SOFTMAX_ROWS: usize = 49;
 // `matmul_reg2` with its shared-memory bank conflicts removed; bit-identical
-// output, so it is a pure speed swap (see `linear_kernel`).
-const MATMUL_REG3: usize = 56;
+// output, so it is a pure speed swap (see `linear_kernel`, now LM-head-only).
+const MATMUL_REG3: usize = 50;
 // DeepStack decode's own add: `splice_add`'s `base` lands on `dst` only, but
 // decode needs to read `deepstack_bufs[level]` at an offset (`local_row * d`)
 // while writing this step's own zero-offset residual row -- see
 // `decode_steps`'s own call site.
-const SPLICE_ADD_OFFSET_SRC: usize = 59;
+const SPLICE_ADD_OFFSET_SRC: usize = 53;
 
-const PIPELINES: &[(&str, &str)] = &[
+const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
@@ -158,14 +160,10 @@ const PIPELINES: &[(&str, &str)] = &[
     ("axpy", kernels::AXPY),
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul_tile", kernels::MATMUL_TILE),
-    ("matmul_reg2", kernels::MATMUL_REG2),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ("ce_stats", kernels::CE_STATS),
     ("ce_grad_stats", kernels::CE_GRAD_STATS),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("max_abs_row", kernels::MAX_ABS_ROW),
     ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
     ("decode_softmax", kernels::DECODE_SOFTMAX),
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
@@ -177,9 +175,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("splice_add", kernels::SPLICE_ADD),
     ("bias_add", kernels::BIAS_ADD),
     ("bias_grad", kernels::BIAS_GRAD),
-    ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
-    ("matmul_gemv", kernels::MATMUL_GEMV),
     ("gqa_scores_kmask", kernels::GQA_SCORES_KMASK),
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("matmul_reg3", kernels::MATMUL_REG3),
@@ -191,6 +187,75 @@ const PIPELINES: &[(&str, &str)] = &[
     ("splice_add_offset_src", kernels::SPLICE_ADD_OFFSET_SRC),
 ];
 
+/// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
+/// const above indexes into this - unchanged positions 0..53) followed by
+/// the `model::ops::Ops` façade's own required kernels (B7), appended with
+/// NO named consts of their own - exactly like `gradnorm_part`/`clip_coef_wg`
+/// above, resolved by `Ops::new` purely BY NAME (`Gpu::kernel_index`), never
+/// by position.
+///
+/// **Why these live on `self.gpu`'s own list instead of a second `Gpu` (e.g.
+/// `Gpu::new_like`).** A `Step`'s `kind` is an index into the SPECIFIC `Gpu`
+/// handle's own compiled pipeline vector - it is NOT portable across two
+/// different handles, even two `new_like`d handles on the same physical
+/// device, because each independently-built kernel list gets its own
+/// pipeline vector with its own index assignment. `forward_steps`/
+/// `decode_steps` build ONE combined `Vec<Step>` (mixing `self.gpu.step(...)`
+/// calls with `self.ops.act`/`self.ops.matmul`'s own pushes) and submit it
+/// through ONE `self.gpu.submit(...)` call - so `self.ops`'s internal `Gpu`
+/// MUST resolve every kernel name to the SAME index `self.gpu` would, or a
+/// mixed submission dispatches the wrong pipeline at that slot (confirmed the
+/// hard way: `Gpu::new_like` initially used here produced exactly that -
+/// `self.ops`'s `max_abs_row` index collided with `self.gpu`'s own `silu_mul`
+/// slot, a wgpu bind-group-layout validation failure at test time, not a
+/// silent corruption, but only because the two pipelines' binding COUNTS
+/// happened to differ - a same-shape collision would NOT have been caught by
+/// the backend at all). `Ops` is therefore built from `gpu.share()` - "same
+/// adapter, queue and compiled pipelines" (`Gpu::share`'s own doc) - which
+/// only works if the ORIGINAL handle already compiled every name `Ops::new`
+/// looks up; hence this function, not a second kernel list.
+fn pipelines() -> &'static [(&'static str, &'static str)] {
+    use gpu_core::select::Dtype;
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = STATIC_PIPELINES.to_vec();
+        v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the NAME
+        // "matmul_reg2" - but `matmul_reg3` is the bit-identical, measurably
+        // faster twin (identical `Params`, identical tiling, only the
+        // shared-memory bank conflicts removed - swept across a wide shape
+        // range with zero max|Δ| and a consistent speedup, no shape where
+        // preferring `matmul_reg2` is correct) this crate's own
+        // `linear_kernel` already prefers. Registering the NAME "matmul_reg2"
+        // against the `matmul_reg3` SOURCE is exactly the sanctioned escape
+        // hatch `Ops::bind`'s own doc comment describes: "a model with a
+        // differently-named but bit-identical physical kernel simply
+        // registers it under that canonical name when it builds its `Gpu`."
+        // Using the real (slower) `matmul_reg2` source here would silently
+        // undo that speed-up for every RegisterTiled fp32 dispatch this
+        // façade makes.
+        v.push(("matmul_reg2", kernels::MATMUL_REG3));
+        v.push(("matmul_i8_dyn", kernels::MATMUL_I8_DYN));
+        v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
+        v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
+        v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
+        v.push(("max_abs_row", kernels::MAX_ABS_ROW));
+        v.push(("quant_pack", kernels::QUANT_PACK));
+        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
+        // variants (B4/B5) even though this crate never builds a
+        // `Weight::BF16`/`Weight::F16` - see `Ops::new`'s own doc comment
+        // ("every model that builds an `Ops` must register the full façade
+        // kernel set, not just the tiers it plans to use"). Compiled, never
+        // dispatched.
+        for dt in [Dtype::BF16, Dtype::F16] {
+            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
+        }
+        v
+    })
+}
+
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
 /// `[m,k]·[n,k]ᵀ`. Delegates to `model::block::pick_gemm` (B2: a thin adapter
 /// over `backend_api::select::candidates`, whose `GEMM_TILE_MIN_ROWS`/
@@ -198,6 +263,19 @@ const PIPELINES: &[(&str, &str)] = &[
 /// here) - same math either way (parity gated by `tests/backend_parity` +
 /// gradcheck), so this only changes speed. `BRAIN_QWEN_NAIVE_MM=1` forces the
 /// naive kernel.
+///
+/// B7: the seven per-layer linears (attention q/k/v/o, SwiGLU gate/up/down)
+/// no longer call this - they go through `Ops::matmul` (`self.ops`/
+/// `self.weights`), which owns its own kernel selection. This function's ONE
+/// remaining caller is the LM head (`forward_steps`'s single-tile case):
+/// deliberately NOT migrated onto `Ops` (see the B7 ledger entry) - `Ops::act`
+/// always quantizes its input eagerly and unconditionally, and the LM head's
+/// activation (`xn_final`) is never paired with anything but an `F32` weight
+/// (there is no int8 LM head in this crate), so routing it through `Ops`
+/// would pay a real `max_abs_row`/`quant_pack` dispatch on every forward for
+/// a quantized form nothing ever reads - a measurable prefill-throughput
+/// regression for zero benefit. Embedding/LM-head dispatch is explicitly
+/// listed as still-legitimately-manual in B7's own scope.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     // `matmul_reg3` = `matmul_reg2` with the shared-memory bank conflicts
@@ -373,10 +451,24 @@ pub struct Qwen {
     kcache: Vec<DeviceBuffer>,
     vcache: Vec<DeviceBuffer>,
     dec_pos: Cell<u32>,
-    /// Int8 (DP4A) linears for inference. When present, the 7 per-layer linears
-    /// run in int8 (weights ~4× smaller - fits the fp32-encoder-too-big case on
-    /// one card) and are absent from the fp32 `ps`. None ⇒ all-fp32 path.
-    q8: Option<crate::q8::Q8>,
+    /// The `Ops` façade (B3/B7) this model dispatches its per-layer linears
+    /// through - a second handle onto the SAME device AND compiled pipeline
+    /// set as `gpu` (`Gpu::share` - see `pipelines()`'s own doc comment for
+    /// why sharing, not a second independent kernel list, is required),
+    /// resolving kernels by name rather than a hand-numbered index.
+    ops: Ops,
+    /// Every one of the 7 per-layer linears (`attn.{wq,wk,wv,wo}`/
+    /// `mlp.{gate,up,down}`, keyed `blocks.<l>.<leaf>`) this shard owns, as a
+    /// `model::ops::Weight` - uniformly `F32` or (when this model was built
+    /// int8 AND the device's `int8_dot` capability allows it - `Weight::
+    /// upload`'s own `want.promote(caps.numeric)` gate) `I8`. Replaces the
+    /// old per-model `q8` field (an `Option` wrapping `crate::q8::Q8`): the
+    /// forward dispatches whatever tier a `Weight` value itself carries,
+    /// never a separate on/off flag inspected at dispatch time. The `F32` tier costs no extra
+    /// VRAM over the pre-B7 path - it wraps a `.clone()` of the SAME
+    /// `DeviceBuffer` `ps` already holds (a cheap `Arc` bump, not a second
+    /// upload).
+    weights: HashMap<String, Weight>,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
     /// a single token and `scores`/`probs` for `n_heads·ctx` (KV-cache decode
     /// only - the KV cache is the only ctx-scaled allocation). The batched
@@ -457,8 +549,9 @@ impl Qwen {
     /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
     /// at a time - peak host ≈ one tensor of f32, never the whole-model
     /// `checkpoint::load` + `by_role("")` host copy on top of the device copy.
-    /// The int8 tier reads + quantizes one linear at a time (the reader is passed
-    /// to `Q8::build` as the [`TensorSource`](checkpoint::TensorSource)).
+    /// The int8 tier reads + quantizes one linear at a time (`src.with_tensor`,
+    /// the reader as a [`TensorSource`](checkpoint::TensorSource), feeding
+    /// `Weight::upload` per leaf - see `new_impl`'s `weights` construction).
     fn load_inference_with(path: &str, b: u32, t: u32, i8: bool) -> Qwen {
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
@@ -506,15 +599,22 @@ impl Qwen {
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
         // the ambient selection (`--device` / scoped `with_gpu`).
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(PIPELINES)
+            Gpu::new(pipelines())
         } else {
-            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES)
+            Gpu::new_on_index(shard.gpu_index as u32, pipelines())
                 .unwrap_or_else(|e| panic!("qwen shard placement: {e}"))
         };
+        // A second handle onto the SAME device AND the SAME compiled
+        // pipeline set (`Gpu::share`, not `Gpu::new_like` - see `pipelines`'s
+        // own doc comment for why index-space compatibility, not just
+        // physical-device sharing, is required here) for the `Ops` façade
+        // (B7).
+        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
-        // In int8 mode the 7 per-layer linears live in `q8` (packed int8), NOT the
-        // fp32 store - filter them out so no fp32 copy is ever uploaded.
+        // In int8 mode the 7 per-layer linears live in `weights` (packed int8
+        // `Weight`s), NOT the fp32 store - filter them out so no fp32 copy is
+        // ever uploaded.
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(name, _)| !(i8 && crate::q8::Q8::is_i8_linear(name)))
@@ -638,36 +738,49 @@ impl Qwen {
         let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
         let bwd = |x: u64| if decode_only { st(1) } else { st(x) };
 
-        // Int8 linears (inference): quantize+upload the owned layers' 7 matmul
-        // weights from `init`; the fp32 store already excludes them (plist filter).
-        let q8 = if i8 {
-            let (dd, hqd, hkvd, ffd) = (d as usize, hq as usize, hkv as usize, ff as usize);
-            let dims = |leaf: &str| -> (usize, usize) {
-                match leaf {
-                    "attn.wq.weight" => (hqd, dd),
-                    "attn.wk.weight" => (hkvd, dd),
-                    "attn.wv.weight" => (hkvd, dd),
-                    "attn.wo.weight" => (dd, hqd),
-                    "mlp.gate.weight" => (ffd, dd),
-                    "mlp.up.weight" => (ffd, dd),
-                    "mlp.down.weight" => (dd, ffd),
-                    other => panic!("q8: unexpected linear leaf {other}"),
-                }
-            };
-            Some(crate::q8::Q8::build(
-                &gpu,
-                src,
-                shard.start..shard.end,
-                dims,
-                n as u32,
-                ff as u32,
-                MAX_ABS_ROW,
-                QUANT_PACK,
-                MATMUL_I8,
-            ))
-        } else {
-            None
+        // Per-layer linear weights (B7): every layer this shard owns gets its 7
+        // projections as a `model::ops::Weight`, built ONCE here. `i8` asks
+        // `Weight::upload` for `Dtype::I8` - its own `want.promote(ops.caps().
+        // numeric)` is the ONE capability gate (never blindly sending int8
+        // dispatch work to a device that can't execute it, unlike the old
+        // `q8.rs` path, which quantized unconditionally regardless of
+        // backend). The `else` (fp32) arm does NOT go through `Weight::
+        // upload` - it wraps a `.clone()` of the buffer `ps` already holds
+        // (a cheap `Arc` bump, `backend_api::DeviceBuffer`'s own doc comment),
+        // so the common non-i8 case costs no extra VRAM or re-upload.
+        let (dd, hqd, hkvd, ffd) = (d as usize, hq as usize, hkv as usize, ff as usize);
+        let dims = |leaf: &str| -> (usize, usize) {
+            match leaf {
+                "attn.wq.weight" => (hqd, dd),
+                "attn.wk.weight" => (hkvd, dd),
+                "attn.wv.weight" => (hkvd, dd),
+                "attn.wo.weight" => (dd, hqd),
+                "mlp.gate.weight" => (ffd, dd),
+                "mlp.up.weight" => (ffd, dd),
+                "mlp.down.weight" => (dd, ffd),
+                other => panic!("qwen: unexpected linear leaf {other}"),
+            }
         };
+        let mut weights: HashMap<String, Weight> = HashMap::new();
+        for l in shard.start..shard.end {
+            for leaf in crate::q8::Q8::LINEARS {
+                let name = format!("blocks.{l}.{leaf}");
+                let (wn, wk) = dims(leaf);
+                let w = if i8 {
+                    let mut built: Option<Weight> = None;
+                    let found = src.with_tensor(&name, &mut |raw| {
+                        built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
+                    });
+                    if !found {
+                        panic!("qwen: missing init weight {name}");
+                    }
+                    built.unwrap()
+                } else {
+                    Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
+                };
+                weights.insert(name, w);
+            }
+        }
 
         // Incremental-decode KV cache: one [t, kv_dim] key/value buffer per layer.
         // Only meaningful for a whole (single-device) model - `step` asserts that -
@@ -742,7 +855,8 @@ impl Qwen {
             kcache,
             vcache,
             dec_pos: Cell::new(0),
-            q8,
+            ops,
+            weights,
             decode_only,
             gpu,
         };
@@ -906,6 +1020,24 @@ impl Qwen {
             .map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
     }
 
+    /// Dispatch one per-layer linear `out = act @ Wᵀ` through the `Ops`
+    /// façade (B7): `self.weights[wname]` carries whichever tier `Weight::
+    /// upload` picked for this model at construction (uniformly `F32` unless
+    /// this model was built int8 AND the device's capability allowed it, in
+    /// which case every one of the 7 per-layer linears is `I8`) - the
+    /// forward never branches on a separate int8-on/off flag itself, only on
+    /// what `self.weights` actually holds. Returns whether the dispatch was
+    /// `F32` (LoRA only ever targets an unquantized base weight - `q8.rs`'s
+    /// former module doc: "Inference-only (frozen, no LoRA, no backward)" -
+    /// so a caller only runs `lora_fwd` when this is `true`, matching this
+    /// function's pre-B7 shape exactly: LoRA used to live only in the fp32
+    /// arm of the fp32-vs-int8 fork this replaces).
+    fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
+        let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen: no Ops weight for {wname}"));
+        self.ops.matmul(s, w, act, out, 0);
+        matches!(w, Weight::F32 { .. })
+    }
+
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
     /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output.
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
@@ -1008,26 +1140,28 @@ impl Qwen {
         for l in self.shard.start..self.shard.end {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
-            // Int8 linears for this layer, if any (inference path: no LoRA/bias).
-            let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
             // --- attention --- (projections stay here: they carry LoRA/bias;
             // norms/RoPE/attention-core come from the shared block builders)
             s.push(self.rms_step(&self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
-            if let Some((q8, ql)) = q8l {
-                // xn1 quantized once, shared by q/k/v (DP4A GEMM per projection).
-                q8.quant(&self.gpu, &mut s, &lb.xn1, d, n);
-                q8.mm8(&self.gpu, &mut s, &ql.wq, &lb.q_pre, n);
-                q8.mm8(&self.gpu, &mut s, &ql.wk, &lb.k_pre, n);
-                q8.mm8(&self.gpu, &mut s, &ql.wv, &lb.v, n);
-            } else {
-                let (mk, mt) = linear_kernel(n as usize, hq as usize);
-                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], mt));
+            // xn1 quantized once (B7: `Ops::act`), shared by q/k/v.
+            // NOTE - `Ops::act` quantizes UNCONDITIONALLY, unlike the pre-B7
+            // `q8.quant` call this replaces (which only ever ran inside the
+            // int8 fork): on an all-`F32` model, this dispatches two small
+            // kernels (`max_abs_row`/`quant_pack`) whose output nothing
+            // reads. This is `Ops`'s own documented, deliberate limitation
+            // (`model::ops`'s module doc: "a call site that never pairs an
+            // activation with a quantized weight pays for a quantization it
+            // does not use... a reasonable follow-up... deliberately left"),
+            // not something introduced here - see the B7 ledger entry for
+            // the sizing/measurement discussion.
+            let act1 = self.ops.act(&mut s, &lb.xn1, 0, n, d);
+            if self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre) {
                 self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
-                let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], mt));
+            }
+            if self.ops_linear(&mut s, &act1, &p("attn.wk.weight"), &lb.k_pre) {
                 self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
-                let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], mt));
+            }
+            if self.ops_linear(&mut s, &act1, &p("attn.wv.weight"), &lb.v) {
                 self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
             }
             // Qwen2 q/k/v projection bias (Qwen3 is bias-free).
@@ -1057,37 +1191,24 @@ impl Qwen {
             } else {
                 s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             }
-            if let Some((q8, ql)) = q8l {
-                q8.quant(&self.gpu, &mut s, &lb.ctx, hq, n);
-                q8.mm8(&self.gpu, &mut s, &ql.wo, &self.proj, n);
-            } else {
-                let (mk, mt) = linear_kernel(n as usize, d as usize);
-                s.push(self.gpu.step(mk, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], mt));
+            let act_o = self.ops.act(&mut s, &lb.ctx, 0, n, hq);
+            if self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj) {
                 self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
             }
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // --- SwiGLU MLP ---
             s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
-            if let Some((q8, ql)) = q8l {
-                // xn2 quantized once, shared by gate/up.
-                q8.quant(&self.gpu, &mut s, &lb.xn2, d, n);
-                q8.mm8(&self.gpu, &mut s, &ql.gate, &lb.gate_pre, n);
-                q8.mm8(&self.gpu, &mut s, &ql.up, &lb.up, n);
-            } else {
-                let (mk, mt) = linear_kernel(n as usize, ff as usize);
-                s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], mt));
+            // xn2 quantized once, shared by gate/up.
+            let act2 = self.ops.act(&mut s, &lb.xn2, 0, n, d);
+            if self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre) {
                 self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
-                let (mk, mt) = linear_kernel(n as usize, ff as usize);
-                s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], mt));
+            }
+            if self.ops_linear(&mut s, &act2, &p("mlp.up.weight"), &lb.up) {
                 self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
             }
             s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
-            if let Some((q8, ql)) = q8l {
-                q8.quant(&self.gpu, &mut s, &lb.h, ff, n);
-                q8.mm8(&self.gpu, &mut s, &ql.down, &self.mlp_out, n);
-            } else {
-                let (mk, mt) = linear_kernel(n as usize, d as usize);
-                s.push(self.gpu.step(mk, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], mt));
+            let act_h = self.ops.act(&mut s, &lb.h, 0, n, ff);
+            if self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out) {
                 self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
             }
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
@@ -1785,13 +1906,22 @@ impl Qwen {
                 s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows));
             }
         };
-        let mm = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
-            if fast {
-                s.push(g.step(MATMUL_GEMV, &[x, wt, out], &[1, k, n], n * 64));
-            } else {
-                s.push(g.step(MATMUL, &[x, wt, out], &[1, k, n], n));
-            }
-        };
+        // B7: the fp32-vs-int8 GEMV pick used to be a SECOND, independent
+        // copy of the selection a (now-deleted) local `mm` closure made by
+        // hand (a bare `fast ? <gemv kernel> : <naive kernel>` branch), with
+        // a matching (now-deleted) local `mm8` closure hardcoding the
+        // decode-regime int8 GEMV kernel unconditionally and NEVER going
+        // through any selector at all - a real, structural divergence from
+        // both the batched forward's own int8 path (which - pre-B7 - always
+        // dispatched the TILED int8 kernel, even at small `n`) and from
+        // `serve.rs`'s tuned selector. `self.ops_linear` (below) now drives
+        // EVERY decode-path linear through the same `Ops::matmul` call the
+        // batched forward uses, which resolves `select::candidates` for the
+        // real `m=1` shape - `WorkgroupPerOutput`/GEMV whenever the device's
+        // `workgroup_reductions` capability allows it (true on every real
+        // GPU backend, false on the CPU JIT, exactly the `fast` split the
+        // hand-written `mm` closure this replaces used to encode), never the
+        // tiled kernel at this row count.
 
         // Embed the token id into res[0] row 0 via the tied table (non-tiled
         // gather); `None` = the caller already wrote a raw embedding there
@@ -1801,35 +1931,22 @@ impl Qwen {
             g.write(&self.tokens, &[token_id]);
             s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
         }
-        // Int8 (m=1): quantize the input row once per distinct input, then the
-        // single-barrier packed GEMV - the exact decode-regime shape the
-        // serving engine measured (runs on the CPU JIT too, unlike the tiled
-        // GEMM, so int8 KV decode is not GPU-only).
-        let mm8 = |s: &mut Vec<Step>, q8: &crate::q8::Q8, lin: &crate::q8::Lin8, x: &DeviceBuffer, out: &DeviceBuffer, k: u32| {
-            q8.quant(g, s, x, k, 1);
-            s.push(g.step(
-                MATMUL_I8_GEMV,
-                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, out],
-                &[1, k / 4, lin.n],
-                lin.n * 64,
-            ));
-        };
 
         for l in 0..c.n_layers as usize {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
             rms(&mut s, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1);
-            let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
-            if let Some((q8, lay)) = q8l {
-                mm8(&mut s, q8, &lay.wq, &lb.xn1, &lb.q_pre, d);
-                mm8(&mut s, q8, &lay.wk, &lb.xn1, &lb.k_pre, d);
-                mm8(&mut s, q8, &lay.wv, &lb.xn1, &lb.v, d);
-            } else {
-                mm(&mut s, &lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre, d, hq);
-                mm(&mut s, &lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre, d, hkv);
-                mm(&mut s, &lb.xn1, w(&p("attn.wv.weight")), &lb.v, d, hkv);
-            }
+            // Int8 (m=1): quantize the input row once per distinct input
+            // (`Ops::act`), then every linear reading it - decode never
+            // applies LoRA (a decode-only build's adapter, if any, was
+            // already folded into the base weights before construction -
+            // `Self::from_tensors_decode`'s own doc), so `ops_linear`'s
+            // returned "was this F32" bool is intentionally unused here.
+            let act1 = self.ops.act(&mut s, &lb.xn1, 0, 1, d);
+            self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre);
+            self.ops_linear(&mut s, &act1, &p("attn.wk.weight"), &lb.k_pre);
+            self.ops_linear(&mut s, &act1, &p("attn.wv.weight"), &lb.v);
             // Qwen2-style biased projections and Qwen3-style QK-norm, gated
             // exactly as the batched forward gates them.
             if c.attn_bias {
@@ -1864,25 +1981,17 @@ impl Qwen {
             // append+decode-attend dispatch this function always did, now
             // shared with omni::thinker instead of duplicated.
             s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &self.kcache[l], &self.vcache[l], &self.scores, &lb.probs, &lb.ctx));
-            if let Some((q8, lay)) = q8l {
-                mm8(&mut s, q8, &lay.wo, &lb.ctx, &self.proj, hq);
-            } else {
-                mm(&mut s, &lb.ctx, w(&p("attn.wo.weight")), &self.proj, hq, d);
-            }
+            let act_o = self.ops.act(&mut s, &lb.ctx, 0, 1, hq);
+            self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
             // --- SwiGLU MLP ---
             rms(&mut s, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1);
-            if let Some((q8, lay)) = q8l {
-                mm8(&mut s, q8, &lay.gate, &lb.xn2, &lb.gate_pre, d);
-                mm8(&mut s, q8, &lay.up, &lb.xn2, &lb.up, d);
-                s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
-                mm8(&mut s, q8, &lay.down, &lb.h, &self.mlp_out, ff);
-            } else {
-                mm(&mut s, &lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre, d, ff);
-                mm(&mut s, &lb.xn2, w(&p("mlp.up.weight")), &lb.up, d, ff);
-                s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
-                mm(&mut s, &lb.h, w(&p("mlp.down.weight")), &self.mlp_out, ff, d);
-            }
+            let act2 = self.ops.act(&mut s, &lb.xn2, 0, 1, d);
+            self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre);
+            self.ops_linear(&mut s, &act2, &p("mlp.up.weight"), &lb.up);
+            s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
+            let act_h = self.ops.act(&mut s, &lb.h, 0, 1, ff);
+            self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out);
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
             // DeepStack decode: this step's row IS one of the image rows
             // (`deepstack_row = Some(local_row)`, the row's 0-based offset
@@ -2282,10 +2391,10 @@ mod tests {
     }
 
     /// Every kernel this model can dispatch has a cost formula - pins the
-    /// FLOP/OPS accounting against silent drift when PIPELINES grows.
+    /// FLOP/OPS accounting against silent drift when `pipelines()` grows.
     #[test]
     fn pipelines_fully_costed() {
-        for (name, _) in PIPELINES {
+        for (name, _) in pipelines() {
             assert!(
                 gpu_core::cost::covers(name),
                 "kernel '{name}' has no formula in gpu_core::cost::kernel_cost; \
