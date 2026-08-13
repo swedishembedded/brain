@@ -5,7 +5,7 @@
 //! code length) for OpenVINO whole-graph compilation. Pure Rust — no NPU needed
 //! to produce the file. Mirrors [`crate::qwen_export`] for the conv-heavy codec.
 
-use codec::CodecConfig;
+use mimi::CodecConfig;
 use onnx::builder::GraphBuilder;
 
 use crate::topology::WeightSource;

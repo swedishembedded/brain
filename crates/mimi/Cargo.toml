@@ -1,12 +1,12 @@
 [package]
-name = "brain-codec"
+name = "brain-mimi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Qwen3-TTS 12Hz neural audio codec (Mimi-style): RVQ dequant + transformer + SEANet conv-transpose decoder. Forward (decode) + import + training, in WGSL."
 
 [lib]
-name = "codec"
+name = "mimi"
 path = "src/lib.rs"
 
 [dependencies]

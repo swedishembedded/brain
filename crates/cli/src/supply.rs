@@ -130,7 +130,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // though its class name contains "qwen" as a substring. The importer
         // itself streams from the sharded HF dir fine (M3) -- what is NOT yet
         // true is that the resulting unified checkpoint is directly loadable
-        // by tts::mtp::MtpModel/codec::Codec for the Talker/Code2Wav pieces
+        // by qwen3tts::mtp::MtpModel/mimi::Codec for the Talker/Code2Wav pieces
         // (two open naming gaps); Thinker-only generation
         // (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not this
         // converted-checkpoint path) is unaffected by either gap.

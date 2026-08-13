@@ -26,7 +26,7 @@
 use std::time::Instant;
 
 use gpu_core::{set_default_backend, Backend};
-use tts::{config::TalkerConfig, TalkerModel};
+use qwen3tts::{config::TalkerConfig, TalkerModel};
 
 /// The real 0.6B Talker: 28 layers, d_model 1024, q_dim 2048 (16×128), 8 KV
 /// heads, d_ff 3072, codebook-0 vocab 3072.

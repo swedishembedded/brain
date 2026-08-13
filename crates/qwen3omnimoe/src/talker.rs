@@ -10,7 +10,7 @@
 //! Thinker's MoE block. `Qwen3OmniMoeTalkerTextSparseMoeBlock.forward`:
 //! `expert_output + sigmoid(shared_expert_gate(x)) * shared_expert(x)`.
 //!
-//! Not built by converting `tts::talker`'s existing `TalkerModel` (the
+//! Not built by converting `qwen3tts::talker`'s existing `TalkerModel` (the
 //! Qwen3-TTS dense Talker, wrapping [`qwen3::Qwen`] with `tie_embeddings =
 //! false`) to MoE: that model is a genuinely different, already-shipping
 //! architecture, and `qwen3::Qwen` has the same missing MoE seam
@@ -23,7 +23,7 @@
 //! `accept_hidden_layer` (Talker consumes Thinker's hidden state at a given
 //! layer, not just its own token embeddings), the codec-id sampling loop,
 //! and the code predictor (`crate::code_predictor` /
-//! `tts::mtp`) are a caller's job, layered on top of [`decode`].
+//! `qwen3tts::mtp`) are a caller's job, layered on top of [`decode`].
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{gqa_attn_sublayer_decode_step, gqa_attn_sublayer_fwd, rmsnorm_fwd, GqaAttnDims, GqaAttnIds, GqaAttnWeights, GqaDecodeIds, KernelIds};

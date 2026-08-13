@@ -159,7 +159,7 @@ impl StreamConvTr1d {
 }
 
 /// Streaming causal `ConvTranspose1d` with the SYMMETRIC crop convention
-/// `codec::model::Codec::causal_convtr_sym` uses for Qwen3-Omni's Code2Wav
+/// `mimi::model::Codec::causal_convtr_sym` uses for Qwen3-Omni's Code2Wav
 /// SEANet decoder (`(l-1)*stride` output length, cropping `pad` samples off
 /// BOTH sides of the raw `(l-1)*stride+k` buffer) — [`StreamConvTr1d`] above
 /// implements the DIFFERENT `pad=0` convention the standalone Qwen3-TTS
@@ -350,7 +350,7 @@ mod tests {
     /// `StreamConvTr1dSym`'s ONE-SHOT call (not just its own chunked-vs-full
     /// self-consistency, which `stream_convtr1d_sym_chunked_equals_full`
     /// already proves) against the REAL GPU kernel dispatch
-    /// (`audio::conv::convtr1d_fwd`, the exact call `codec::model::Codec::
+    /// (`audio::conv::convtr1d_fwd`, the exact call `mimi::model::Codec::
     /// causal_convtr_sym` makes) on the SAME weights -- an independent
     /// witness, not a self-check, so this test cannot pass merely because
     /// the streaming primitive and its own oracle share a bug.

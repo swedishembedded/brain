@@ -11,7 +11,7 @@
 //! not a guess: this file is the single place those numbers are
 //! recorded as code, everything else derives from it.
 //!
-//! `code_predictor_config` is parsed by `tts::config::MtpConfig::from_json`
+//! `code_predictor_config` is parsed by `qwen3tts::config::MtpConfig::from_json`
 //! unchanged — Omni's code predictor is a 5-layer/16-codebook block, the same
 //! shape `crates/tts` already models, at `talker_config.code_predictor_config`,
 //! the exact path that parser already reads.
@@ -323,7 +323,7 @@ impl ThinkerConfig {
 #[derive(Clone, Debug)]
 pub struct TalkerConfig {
     pub text: MoeTextConfig,
-    pub code_predictor: tts::config::MtpConfig,
+    pub code_predictor: qwen3tts::config::MtpConfig,
     pub accept_hidden_layer: u32, // 24 — which Thinker decoder layer's hidden state the Talker consumes
     pub audio_start_token_id: u32,
     pub audio_end_token_id: u32,
@@ -357,7 +357,7 @@ impl TalkerConfig {
             });
         TalkerConfig {
             text: MoeTextConfig::talker_from_json(root),
-            code_predictor: tts::config::MtpConfig::from_json(t),
+            code_predictor: qwen3tts::config::MtpConfig::from_json(t),
             accept_hidden_layer: gu(t, "accept_hidden_layer", 24),
             audio_start_token_id: gu(t, "audio_start_token_id", 151669),
             audio_end_token_id: gu(t, "audio_end_token_id", 151670),
@@ -382,7 +382,7 @@ impl TalkerConfig {
 }
 
 /// `code2wav_config` — RVQ decode + SEANet vocoder. Same shape
-/// `codec::config::CodecConfig` already models (Qwen3-TTS-12Hz codec decode
+/// `mimi::config::CodecConfig` already models (Qwen3-TTS-12Hz codec decode
 /// path), extended for Omni's wider pre-transformer (`hidden_size` 1024 vs
 /// 512, `intermediate_size` 3072 vs 1024) and mean-pooled multi-codebook
 /// input (`code_embedding` over `codebook_size * num_quantizers`, summed/

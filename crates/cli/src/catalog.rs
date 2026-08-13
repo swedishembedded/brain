@@ -281,8 +281,8 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
-            manifest: tts::caps::manifest,
-            provider: always!(tts::caps::TtsProvider::new()),
+            manifest: qwen3tts::caps::manifest,
+            provider: always!(qwen3tts::caps::TtsProvider::new()),
             resident: resident!(crate::resident_tts::TtsResident::from_env),
         },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the

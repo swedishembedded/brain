@@ -142,9 +142,9 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr"),
     arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr"),
     // -- Audio / TTS ------------------------------------------------------
-    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-tts"),
-    arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-codec"),
-    arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-speaker"),
+    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts"),
+    arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
+    arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolo"),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),

@@ -8,7 +8,7 @@
 //! SwiGLU + the (untied) codec head backprop through the shared `model::block`
 //! builders — the same parity-exact path as `crate::qwen`.
 
-use tts::{TalkerConfig, TalkerModel};
+use qwen3tts::{TalkerConfig, TalkerModel};
 
 fn gpu_disabled() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -101,7 +101,7 @@ fn talker_real_import_and_forward() {
     }
     let out = std::env::temp_dir().join("brain_talker_test.safetensors");
     let out = out.to_str().unwrap();
-    tts::import::import_talker(&dir, out).expect("talker import");
+    qwen3tts::import::import_talker(&dir, out).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, 32);
     assert_eq!(model.vocab(), 3072);
     assert!(model.text.is_some(), "text_projection should load");

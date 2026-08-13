@@ -16,5 +16,5 @@ brain-yolo.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-audio.workspace = true
-brain-speaker.workspace = true
+brain-ecapatdnn.workspace = true
 serde_json.workspace = true

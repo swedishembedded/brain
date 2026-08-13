@@ -1,12 +1,12 @@
 [package]
-name = "brain-speaker"
+name = "brain-ecapatdnn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "ECAPA-TDNN speaker encoder for Qwen3-TTS voice cloning: mel front-end + TDNN/Res2Net/SE blocks + attentive statistics pooling, forward + import in WGSL."
 
 [lib]
-name = "speaker"
+name = "ecapatdnn"
 path = "src/lib.rs"
 
 [dependencies]

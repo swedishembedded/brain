@@ -13,7 +13,7 @@
 use data::rng::Lcg;
 use std::collections::HashMap;
 
-use codec::CodecConfig;
+use mimi::CodecConfig;
 
 /// A deliberately tiny decoder config exercising every stage.
 fn tiny_cfg() -> CodecConfig {

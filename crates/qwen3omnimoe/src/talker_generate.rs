@@ -3,12 +3,12 @@
 
 //! Talker generation: the codec-id sampling loop chaining Talker's own
 //! KV-cache decode (`crate::talker`) with the MTP code predictor
-//! (`tts::mtp::MtpModel::generate_residuals`, already built and validated
+//! (`qwen3tts::mtp::MtpModel::generate_residuals`, already built and validated
 //! against real Omni weights — M7b — reused unchanged). Mirrors
-//! `tts::pipeline::generate_codes`'s already-working loop shape exactly
+//! `qwen3tts::pipeline::generate_codes`'s already-working loop shape exactly
 //! (same `sample_cb0` suppressed-token-set logic, same feedback-sum-then-
 //! decode-step pattern), adapted for Talker's MoE decoder instead of
-//! `tts::talker`'s dense one and for this crate's per-token weight-streaming
+//! `qwen3tts::talker`'s dense one and for this crate's per-token weight-streaming
 //! pattern (`crate::generate`'s module doc — the same tradeoff applies here:
 //! correct, not fast, every layer's weights re-read from `reader` on every
 //! prefill call and every decode step).
@@ -17,7 +17,7 @@ use checkpoint::weightio::WeightReader;
 use data::rng::Rng;
 use gpu_core::{DeviceBuffer, Gpu};
 use qwen3vl::mrope::{get_rope_index, mrope_tables};
-use tts::mtp::MtpModel;
+use qwen3tts::mtp::MtpModel;
 
 use crate::config::MoeTextConfig;
 use crate::talker::{layer_decode_step, layer_fwd, TalkerLayerCache, TalkerLayerWeights};
@@ -150,7 +150,7 @@ fn decode_step(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, x_host: &[
     Ok(final_norm(gpu, cfg, &norm_w, &h, 1))
 }
 
-/// Sampling / length controls — identical defaults to `tts::pipeline::
+/// Sampling / length controls - identical defaults to `qwen3tts::pipeline::
 /// GenOpts` (the reference `Qwen3TTSModel._merge_generate_kwargs`'s
 /// `do_sample=True, top_k=50, temperature=0.9`; greedy collapses codebook-0
 /// into a repeating token after a few frames, per that module's own doc).
@@ -171,9 +171,9 @@ impl Default for GenOpts {
 
 /// Sample codebook-0 from `logits` with the reference's `suppress_tokens`:
 /// the top-1024 vocab entries are masked except the codec EOS, itself masked
-/// unless `allow_eos` — identical logic to `tts::pipeline::sample_cb0`
+/// unless `allow_eos` - identical logic to `qwen3tts::pipeline::sample_cb0`
 /// (kept as a second, small copy rather than a shared crate dependency
-/// since `tts::pipeline::sample_cb0` is `pub(crate)` there; if a THIRD
+/// since `qwen3tts::pipeline::sample_cb0` is `pub(crate)` there; if a THIRD
 /// caller ever needs this, hoist it to `model::` or `data::` instead of
 /// adding a fourth).
 fn sample_cb0(mut logits: Vec<f32>, eos: u32, allow_eos: bool, temperature: f32, top_k: usize, rng: &mut Rng) -> u32 {
@@ -242,7 +242,7 @@ pub fn generate_codes(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextConfig, cod
 /// (`[cb0, residual_1, .., residual_15]`) as soon as it's sampled, instead
 /// of building one `Vec` and returning it at the end — so code generation
 /// can overlap with vocoding (`crate::codec_bridge::load_codec` +
-/// `codec::model::Codec::decode_omni_chunked`) rather than waiting for
+/// `mimi::model::Codec::decode_omni_chunked`) rather than waiting for
 /// every frame before the first sample can be decoded to audio.
 ///
 /// No new KV-cache work was needed for this: the Talker's own

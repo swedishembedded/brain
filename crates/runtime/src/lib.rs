@@ -100,9 +100,9 @@ pub struct SynthRequest {
 /// [`InferModel`]). The controller calls [`synth`](SynthModel::synth) once per
 /// request to produce the whole waveform, which is then streamed out in chunks.
 ///
-/// A real Qwen3-TTS model plugs in here by wrapping [`tts::pipeline`]: an adapter
-/// holds the loaded [`tts::TtsPaths`] + [`tts::GenOpts`] and, in `synth`, calls
-/// `tts::pipeline::synth` (no reference) or `tts::pipeline::clone` (with
+/// A real Qwen3-TTS model plugs in here by wrapping [`qwen3tts::pipeline`]: an adapter
+/// holds the loaded [`qwen3tts::TtsPaths`] + [`qwen3tts::GenOpts`] and, in `synth`, calls
+/// `qwen3tts::pipeline::synth` (no reference) or `qwen3tts::pipeline::clone` (with
 /// `ref_audio`/`ref_text`), returning the 24 kHz waveform. It is intentionally
 /// NOT wired into `brain run` here to keep the runtime's build/deps light (the
 /// TTS stack pulls the whole codec+speaker+talker graph); the seam + a

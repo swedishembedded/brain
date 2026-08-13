@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Loading `tts::mtp::MtpModel` (the code predictor) and `codec::Codec`
+//! Loading `qwen3tts::mtp::MtpModel` (the code predictor) and `mimi::Codec`
 //! (Code2Wav) straight from the real HF checkpoint via `reader` — the same
 //! recipe `crates/omni/tests/code_predictor_parity.rs` and `code2wav_parity.rs`
 //! already validated against real weights (cosine 1.000000 each), lifted out
@@ -12,22 +12,22 @@
 use std::collections::HashMap;
 
 use checkpoint::weightio::WeightReader;
-use codec::config::CodecConfig;
-use codec::model::Codec;
+use mimi::config::CodecConfig;
+use mimi::model::Codec;
 use gpu_core::Gpu;
-use tts::import::mtp_hf_to_brain;
-use tts::mtp::MtpModel;
+use qwen3tts::import::mtp_hf_to_brain;
+use qwen3tts::mtp::MtpModel;
 
 use crate::config::{Code2WavConfig, TalkerConfig};
 use crate::talker_prompt::TalkerPromptSpecials;
 
 /// Build an [`MtpModel`] from `talker.code_predictor.*` real HF tensors,
-/// renamed via `tts::import::mtp_hf_to_brain` (already correct — see
+/// renamed via `qwen3tts::import::mtp_hf_to_brain` (already correct - see
 /// `crate::import::map_code_predictor`'s doc, which now delegates to the
 /// same function) and built directly with `MtpModel::build_on` — no
 /// `ParamStore`/checkpoint-file round trip, same pattern
 /// `code_predictor_parity.rs` uses.
-pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &tts::config::MtpConfig) -> Result<MtpModel, String> {
+pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &qwen3tts::config::MtpConfig) -> Result<MtpModel, String> {
     // Errors, not panics: this loader runs at REQUEST time inside the serving
     // daemon (omni streams weights per request), so a missing/renamed tensor
     // in a checkpoint must fail the one request, not kill the process.
@@ -53,7 +53,7 @@ pub fn load_mtp(reader: &WeightReader, gpu: Gpu, cfg: &tts::config::MtpConfig) -
     Ok(MtpModel::build_on(gpu, cfg.clone(), decoder, codec_embedding, lm_head))
 }
 
-/// `oc` -> `codec::CodecConfig`, the 1:1 field mapping `load_codec` and
+/// `oc` -> `mimi::CodecConfig`, the 1:1 field mapping `load_codec` and
 /// `crate::npu_export`'s Code2Wav export both need.
 pub(crate) fn codec_config_from(oc: &Code2WavConfig) -> CodecConfig {
     CodecConfig {
@@ -106,16 +106,16 @@ pub fn load_codec(reader: &WeightReader, oc: &Code2WavConfig) -> Result<Codec, S
     Ok(Codec::from_weights(codec_config_from(oc), codec_weights(reader)?))
 }
 
-/// `talker.text_projection`/`talker.hidden_projection` as `tts::talker::
+/// `talker.text_projection`/`talker.hidden_projection` as `qwen3tts::talker::
 /// TextProjection` (reused unchanged, `text_embedding: None` — see
 /// `crate::talker_prompt`'s doc). `which` is `"text_projection"` or
 /// `"hidden_projection"`.
-pub fn load_talker_projection(reader: &WeightReader, cfg: &TalkerConfig, which: &str) -> Result<tts::talker::TextProjection, String> {
+pub fn load_talker_projection(reader: &WeightReader, cfg: &TalkerConfig, which: &str) -> Result<qwen3tts::talker::TextProjection, String> {
     let get = |leaf: &str| {
         let name = format!("talker.{which}.{leaf}");
         reader.tensor(&name).ok_or_else(|| format!("omni: missing tensor {name}"))
     };
-    Ok(tts::talker::TextProjection {
+    Ok(qwen3tts::talker::TextProjection {
         text_embedding: None,
         fc1_w: get("linear_fc1.weight")?,
         fc1_b: get("linear_fc1.bias")?,

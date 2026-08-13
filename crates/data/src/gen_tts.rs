@@ -22,7 +22,7 @@
 //! its codec frames) at toy scale.
 //!
 //! The same generator also exposes [`codes_frame`] used by the multi-codebook
-//! alignment tests in `crates/tts` (see `tts::sft`).
+//! alignment tests in `crates/tts` (see `qwen3tts::sft`).
 
 use std::io;
 use std::path::Path;

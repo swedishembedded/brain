@@ -563,7 +563,7 @@ impl OmniInner {
 
         let prompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_host(), self.cfg.thinker.text.hidden as usize, &user_ids, &new_ids, None);
 
-        let mtp_gpu = self.gpus[0].new_like(tts::mtp::PIPELINES);
+        let mtp_gpu = self.gpus[0].new_like(qwen3tts::mtp::PIPELINES);
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
 
@@ -647,7 +647,7 @@ impl OmniInner {
 
         let tprompt = build_talker_prompt(&text_proj, &codec_embed, &specials, speaker_id, &self.embed_host(), self.cfg.thinker.text.hidden as usize, &mm_prompt.token_ids, &new_ids, Some(splice));
 
-        let mtp_gpu = self.gpus[0].new_like(tts::mtp::PIPELINES);
+        let mtp_gpu = self.gpus[0].new_like(qwen3tts::mtp::PIPELINES);
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
         let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());

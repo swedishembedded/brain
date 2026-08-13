@@ -32,7 +32,7 @@
 //! why each row is what it is; do not "simplify" this shape, it is copied
 //! from the reference bit for bit, not derived.
 
-use tts::talker::TextProjection;
+use qwen3tts::talker::TextProjection;
 
 /// Special token ids `build_talker_prompt` needs beyond `speaker_id` itself —
 /// all read from `qwen3omnimoe::config::{OmniConfig, TalkerConfig}` (real checkpoint
@@ -77,7 +77,7 @@ pub struct TalkerPrompt {
 /// through — it's simply skipped).
 pub struct UserMediaSplice<'a> {
     /// `talker.hidden_projection` — same shape as `talker.text_projection`
-    /// (`tts::talker::TextProjection`, `codec_bridge::load_talker_projection`
+    /// (`qwen3tts::talker::TextProjection`, `codec_bridge::load_talker_projection`
     /// already loads it by name), a DIFFERENT set of weights from `text_proj`.
     pub hidden_proj: &'a TextProjection,
     /// Thinker's hidden state at `TalkerConfig::accept_hidden_layer`, `[n_user,
@@ -93,7 +93,7 @@ pub struct UserMediaSplice<'a> {
 /// Build the Talker prefill for ONE user turn + the current assistant turn.
 ///
 /// `text_proj` is `talker.text_projection` (a 2-layer `fc2(silu(fc1(x)))`
-/// MLP, `thinker_hidden_size -> talker_d`; `tts::talker::TextProjection`
+/// MLP, `thinker_hidden_size -> talker_d`; `qwen3tts::talker::TextProjection`
 /// reused unchanged — same shape, per `crate::config::TalkerConfig`'s doc).
 /// `codec_embed(id)` looks up Talker's OWN `codec_embedding` table (a plain
 /// row gather, not a projection). `thinker_embed_table`/`thinker_d` are

@@ -92,7 +92,7 @@ pub fn export_vision_onnx(reader: &WeightReader, out_path: &str, grid_h: u32, gr
 }
 
 /// Export the Code2Wav vocoder decoder for `code_len` frames — the exact same
-/// graph shape `crate::codec_bridge::load_codec`'s `codec::Codec` decodes,
+/// graph shape `crate::codec_bridge::load_codec`'s `mimi::Codec` decodes,
 /// built from `oc` (`OmniConfig::code2wav`) + `reader` directly (no
 /// checkpoint-file round trip). Writes `out_path` (+ `.data` sidecar).
 pub fn export_codec_onnx(reader: &WeightReader, oc: &Code2WavConfig, out_path: &str, code_len: usize) -> std::io::Result<()> {

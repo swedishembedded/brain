@@ -13,12 +13,12 @@
 //! Run: `BRAIN_DEVICE=cpu cargo test -p brain-tts --test cached_parity -- --nocapture`
 
 use data::tokenizer::Tokenizer;
-use tts::gen::TalkerGen;
-use tts::gen_kv::CpuTalker;
-use tts::gen_kv_mtp::CpuMtp;
-use tts::mtp::MtpModel;
-use tts::pipeline::{generate_codes, generate_codes_cached, GenOpts};
-use tts::prompt::{self, TtsSpecials};
+use qwen3tts::gen::TalkerGen;
+use qwen3tts::gen_kv::CpuTalker;
+use qwen3tts::gen_kv_mtp::CpuMtp;
+use qwen3tts::mtp::MtpModel;
+use qwen3tts::pipeline::{generate_codes, generate_codes_cached, GenOpts};
+use qwen3tts::prompt::{self, TtsSpecials};
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
@@ -60,7 +60,7 @@ fn cached_matches_cachefree() {
 
     // x-vector from the reference wav.
     let wav = audio::wav::read(&REF_WAV).unwrap();
-    let speaker = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), &SPEAKER);
+    let speaker = ecapatdnn::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(ecapatdnn::model::PIPELINES), &SPEAKER);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     // short text via the assistant chat template (mirror pipeline::clone).
@@ -77,8 +77,8 @@ fn cached_matches_cachefree() {
         min_new: 2,
     };
 
-    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), &TALKER, 16 + 32);
-    let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), &MTP);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(qwen3tts::gen::PIPELINES), &TALKER, 16 + 32);
+    let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(qwen3tts::mtp::PIPELINES), &MTP);
     let prompt =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 
@@ -188,7 +188,7 @@ fn cached_clone_audio_quality() {
         eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
         return;
     }
-    let paths = tts::pipeline::TtsPaths {
+    let paths = qwen3tts::pipeline::TtsPaths {
         talker: TALKER.to_string(),
         mtp: MTP.to_string(),
         codec: CODEC.to_string(),
@@ -209,7 +209,7 @@ fn cached_clone_audio_quality() {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        let gw = tts::pipeline::decode_codes(&paths.codec, &gcodes).unwrap();
+        let gw = qwen3tts::pipeline::decode_codes(&paths.codec, &gcodes).unwrap();
         eprintln!(
             "CODEC-SANITY: golden codes [{} frames] -> rms={:.4} (codec ok if ~0.05+)",
             gcodes.len() / 16,
@@ -222,7 +222,7 @@ fn cached_clone_audio_quality() {
     let tok = prompt::load_tokenizer(&CKPT).unwrap();
     let language_id = sp.language_id("english");
     let refwav = audio::wav::read(&REF_WAV).unwrap();
-    let spk = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), &SPEAKER);
+    let spk = ecapatdnn::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(ecapatdnn::model::PIPELINES), &SPEAKER);
     let xvec = spk.embed_wav(&refwav.samples, refwav.sample_rate);
     eprintln!(
         "x-vector: len={}, rms={:.4}, any_nan={}",
@@ -233,7 +233,7 @@ fn cached_clone_audio_quality() {
     let ids = tok.encode("<|im_start|>assistant\nTesting one two three.<|im_end|>\n<|im_start|>assistant\n");
     let role_ids = ids[..3].to_vec();
     let text_ids = ids[3..ids.len() - 5].to_vec();
-    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), &TALKER, 24 + 32);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(qwen3tts::gen::PIPELINES), &TALKER, 24 + 32);
     let promptx =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 
@@ -246,7 +246,7 @@ fn cached_clone_audio_quality() {
     eprintln!("cb0 per frame = {cb0:?}");
     eprintln!("frame0 all 16 = {:?}", &codes[..16.min(codes.len())]);
 
-    let wav = tts::pipeline::decode_codes(&paths.codec, &codes).unwrap();
+    let wav = qwen3tts::pipeline::decode_codes(&paths.codec, &codes).unwrap();
     audio::wav::write(std::env::temp_dir().join("verify.wav").to_string_lossy().as_ref(), &wav, 24000).unwrap();
     let r = rms(&wav);
 
@@ -272,7 +272,7 @@ fn cached_clone_audio_quality() {
     let codes_s = generate_codes_cached(&mut cpu_s, &mut cpu_mtp_s, &sp, &promptx, &opts_s);
     let cb0_s: Vec<u32> = (0..codes_s.len() / 16).map(|f| codes_s[f * 16]).collect();
     eprintln!("sampled cb0 per frame = {cb0_s:?}");
-    let wav_s = tts::pipeline::decode_codes(&paths.codec, &codes_s).unwrap();
+    let wav_s = qwen3tts::pipeline::decode_codes(&paths.codec, &codes_s).unwrap();
     audio::wav::write(std::env::temp_dir().join("verify_sampled.wav").to_string_lossy().as_ref(), &wav_s, 24000).unwrap();
     let xv_s = spk.embed_wav(&wav_s, 24000);
     eprintln!(

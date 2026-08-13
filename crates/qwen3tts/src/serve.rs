@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codec::decode_stream::StreamingCodecDecoder;
+use mimi::decode_stream::StreamingCodecDecoder;
 use data::tokenizer::Tokenizer;
 use npu::openvino::{CodecSession, NpuDevice};
 
@@ -164,7 +164,7 @@ impl TtsEngine {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
             let rt = cfg.ref_text.clone().unwrap_or_default();
             let wav = audio::wav::read(rw).map_err(|e| format!("read {rw}: {e}"))?;
-            let speaker = speaker::SpeakerEncoder::load_inference(&format!("{}/speaker.safetensors", cfg.weights_dir));
+            let speaker = ecapatdnn::SpeakerEncoder::load_inference(&format!("{}/speaker.safetensors", cfg.weights_dir));
             let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
             let codec_path = format!("{}/codec.safetensors", cfg.weights_dir);
             let ref_code = pipeline::ref_codes_cached(&codec_path, &wav, rw, Some(&cfg.npu_cache));

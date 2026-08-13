@@ -49,7 +49,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &dyn WeightSource, t: usize, g: &mu
 /// norm hidden states). This is the shape the autoregressive Talker loop needs —
 /// it feeds the text/codec/speaker-conditioned embedding stream straight into the
 /// residual stream (no token-id Gather) and reads back the per-position hidden
-/// state, exactly mirroring [`tts::gen::TalkerGen::forward`]. The codebook-0 head
+/// state, exactly mirroring [`qwen3tts::gen::TalkerGen::forward`]. The codebook-0 head
 /// (`codec_head_logits`) and the MTP residual fill stay on the host, so this
 /// graph stops at the final RMSNorm and emits the hidden state, not logits.
 pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &dyn WeightSource, t: usize, quant: bool, g: &mut GraphBuilder) {

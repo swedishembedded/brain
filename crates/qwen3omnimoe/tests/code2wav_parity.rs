@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-Omni's Code2Wav vocoder (`code2wav.*`) vs. the real transformers
-//! reference, on real weights. Validates `codec::Codec::decode_omni`: the
+//! reference, on real weights. Validates `mimi::Codec::decode_omni`: the
 //! `code_embedding`-mean input path, the reused pre-transformer/upsample/
-//! SEANet decoder (a `codec::CodecConfig` shape bump — `hidden_size`
+//! SEANet decoder (a `mimi::CodecConfig` shape bump - `hidden_size`
 //! 512→1024, `intermediate_size` 1024→3072 — from the standalone Qwen3-TTS
 //! codec this crate already implements), and the symmetric-crop transposed
 //! conv the SEANet decoder's upsampling stages need (see
@@ -13,15 +13,15 @@
 //! this test's `T=8` golden).
 //!
 //! Weights are read straight from the real HF checkpoint via mmap, keeping
-//! their HF-relative names unchanged (`codec::Codec::from_weights` and
-//! `codec::Codec::transformer` key their `ParamStore` lookups by the exact
+//! their HF-relative names unchanged (`mimi::Codec::from_weights` and
+//! `mimi::Codec::transformer` key their `ParamStore` lookups by the exact
 //! HF-style leaf names — `pre_transformer.layers.N.self_attn.q_proj.weight`,
 //! not a renamed `blocks.N.attn.wq.weight`), bypassing `qwen3omnimoe::import::
 //! map_code2wav` (still true for this test — it reads the shard directly,
 //! same pattern every real-weight test in this crate uses). The loader-side
 //! naming mismatch this comment used to describe (`map_code2wav` renaming
 //! `pre_transformer.layers.N` onto the dense-attention convention, which
-//! `codec::Codec`'s own `ParamStore` lookups never expected) is FIXED as of
+//! `mimi::Codec`'s own `ParamStore` lookups never expected) is FIXED as of
 //! the M9b follow-up: `map_code2wav` is now a plain prefix strip, matching
 //! what this test already proves is correct.
 //!
@@ -35,8 +35,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use checkpoint::mmap::MmapSafetensors;
-use codec::config::CodecConfig;
-use codec::model::Codec;
+use mimi::config::CodecConfig;
+use mimi::model::Codec;
 use qwen3omnimoe::config::OmniConfig;
 
 fn shard_for(dir: &std::path::Path, tensor: &str) -> Option<PathBuf> {

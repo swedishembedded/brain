@@ -7,7 +7,7 @@
 //! using a line-delimited JSON (JSONL) protocol, so back-to-back generations skip
 //! the per-process graph-load. Architecture:
 //!
-//!  * a single **executor thread** owns the resident [`tts::serve::TtsEngine`]s
+//!  * a single **executor thread** owns the resident [`qwen3tts::serve::TtsEngine`]s
 //!    (OpenVINO infer requests are not shared across threads) and pulls **jobs**
 //!    from a channel — work to the accelerator is a queued effect, scheduled here;
 //!  * one **connection handler thread** per client reads a request line, enqueues
@@ -30,8 +30,8 @@ use std::thread;
 use std::time::Instant;
 
 use events::base64;
-use tts::serve::{EngineCfg, Kind, Req, TtsEngine};
-use tts::GenOpts;
+use qwen3tts::serve::{EngineCfg, Kind, Req, TtsEngine};
+use qwen3tts::GenOpts;
 
 const SAMPLE_RATE: u32 = 24000;
 

@@ -545,11 +545,11 @@ dependencies = [
  "brain-checkpoint",
  "brain-chronos2",
  "brain-clip",
- "brain-codec",
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
  "brain-depth",
+ "brain-ecapatdnn",
  "brain-eval",
  "brain-events",
  "brain-facenet",
@@ -568,6 +568,7 @@ dependencies = [
  "brain-kronos",
  "brain-lfm2",
  "brain-memauth",
+ "brain-mimi",
  "brain-mirror",
  "brain-model",
  "brain-modelref",
@@ -583,6 +584,7 @@ dependencies = [
  "brain-qwen35moe",
  "brain-qwen3asr",
  "brain-qwen3omnimoe",
+ "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-residency",
  "brain-restore",
@@ -590,9 +592,7 @@ dependencies = [
  "brain-sam2",
  "brain-server",
  "brain-shutdown",
- "brain-speaker",
  "brain-splat",
- "brain-tts",
  "brain-upscale",
  "brain-vision",
  "brain-vqgan",
@@ -625,24 +625,6 @@ dependencies = [
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
- "serde_json",
-]
-
-[[package]]
-name = "brain-codec"
-version = "0.1.1"
-dependencies = [
- "brain-audio",
- "brain-backend-cpu",
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "brain-testutil",
- "bytemuck",
  "serde_json",
 ]
 
@@ -763,15 +745,31 @@ name = "brain-dit"
 version = "0.1.1"
 
 [[package]]
+name = "brain-ecapatdnn"
+version = "0.1.1"
+dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-testutil",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-eval"
 version = "0.1.1"
 dependencies = [
  "brain-audio",
  "brain-checkpoint",
  "brain-data",
+ "brain-ecapatdnn",
  "brain-gpt2",
  "brain-lfm2",
- "brain-speaker",
  "brain-yolo",
  "serde_json",
 ]
@@ -1066,6 +1064,24 @@ name = "brain-memauth"
 version = "0.1.1"
 
 [[package]]
+name = "brain-mimi"
+version = "0.1.1"
+dependencies = [
+ "brain-audio",
+ "brain-backend-cpu",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-testutil",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-mirror"
 version = "0.1.1"
 dependencies = [
@@ -1171,7 +1187,6 @@ version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
  "brain-chronos2",
- "brain-codec",
  "brain-data",
  "brain-depth",
  "brain-eval",
@@ -1182,6 +1197,7 @@ dependencies = [
  "brain-imaging",
  "brain-kronos",
  "brain-lfm2",
+ "brain-mimi",
  "brain-mirror",
  "brain-model",
  "brain-nemotronasr",
@@ -1347,23 +1363,47 @@ dependencies = [
  "brain-audio",
  "brain-capability",
  "brain-checkpoint",
- "brain-codec",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
+ "brain-mimi",
  "brain-model",
  "brain-npu",
  "brain-onnx",
  "brain-paramstore",
  "brain-qwen3",
  "brain-qwen3asr",
+ "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-residency",
  "brain-testutil",
- "brain-tts",
  "minijinja",
  "safetensors",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-qwen3tts"
+version = "0.1.1"
+dependencies = [
+ "brain-audio",
+ "brain-backend-cpu",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-ecapatdnn",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-kernels",
+ "brain-mimi",
+ "brain-model",
+ "brain-npu",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-testutil",
+ "bytemuck",
  "serde_json",
 ]
 
@@ -1494,22 +1534,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-speaker"
-version = "0.1.1"
-dependencies = [
- "brain-audio",
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-paramstore",
- "brain-testutil",
- "bytemuck",
- "serde_json",
-]
-
-[[package]]
 name = "brain-splat"
 version = "0.1.1"
 dependencies = [
@@ -1553,30 +1577,6 @@ dependencies = [
 [[package]]
 name = "brain-timeseries"
 version = "0.1.1"
-
-[[package]]
-name = "brain-tts"
-version = "0.1.1"
-dependencies = [
- "brain-audio",
- "brain-backend-cpu",
- "brain-capability",
- "brain-checkpoint",
- "brain-codec",
- "brain-data",
- "brain-gpu-core",
- "brain-gradcheck",
- "brain-kernels",
- "brain-model",
- "brain-npu",
- "brain-optim",
- "brain-paramstore",
- "brain-qwen3",
- "brain-speaker",
- "brain-testutil",
- "bytemuck",
- "serde_json",
-]
 
 [[package]]
 name = "brain-unet"

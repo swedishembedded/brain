@@ -55,9 +55,9 @@ default-members = [
     "crates/kronos",
     "crates/fincast",
     "crates/timeseries",
-    "crates/codec",
-    "crates/speaker",
-    "crates/tts",
+    "crates/mimi",
+    "crates/ecapatdnn",
+    "crates/qwen3tts",
     "crates/pid",
     "crates/federated",
     "crates/eval",
@@ -153,9 +153,9 @@ brain-vae = { path = "crates/vae" }
 brain-dit = { path = "crates/dit" }
 brain-zimage = { path = "crates/zimage" }
 brain-flux2 = { path = "crates/flux2" }
-brain-codec = { path = "crates/codec" }
-brain-speaker = { path = "crates/speaker" }
-brain-tts = { path = "crates/tts" }
+brain-mimi = { path = "crates/mimi" }
+brain-ecapatdnn = { path = "crates/ecapatdnn" }
+brain-qwen3tts = { path = "crates/qwen3tts" }
 brain-pid = { path = "crates/pid" }
 brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }

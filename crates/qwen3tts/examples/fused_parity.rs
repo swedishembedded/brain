@@ -11,8 +11,8 @@
 
 use data::rng::Lcg;
 use npu::openvino::NpuDevice;
-use tts::npu_gen::{FusedMtp, MtpEngine};
-use tts::CpuMtp;
+use qwen3tts::npu_gen::{FusedMtp, MtpEngine};
+use qwen3tts::CpuMtp;
 
 
 

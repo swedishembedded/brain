@@ -388,7 +388,7 @@ fn verify(o: &Opts, cfg: &QwenConfig) -> bool {
     }
 
     // Candidate: the KV decode-step graph at `o.verify_quant`, driven exactly
-    // like `tts::npu_gen::KvTalker::feed1` (the existing generic driver).
+    // like `qwen3tts::npu_gen::KvTalker::feed1` (the existing generic driver).
     let decode_path = o.out.join(format!("qwen-decode-verify-{cap}.onnx"));
     std::fs::create_dir_all(&o.out).ok();
     let export_result = match o.verify_quant {

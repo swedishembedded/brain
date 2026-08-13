@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Build the Qwen3-TTS 12 Hz **codec decoder** as an ONNX graph (fixed code
-//! length `T`), mirroring `codec::Codec::decode` op-for-op with standard ONNX
+//! length `T`), mirroring `mimi::Codec::decode` op-for-op with standard ONNX
 //! ops plus the new `ConvTranspose` (see [`onnx::conv`]). Pure Rust — no NPU /
 //! runtime needed to *produce* the graph.
 //!
@@ -27,7 +27,7 @@
 //! `[in,out]` for `MatMul`. Layouts: conv stages NCL `[1,C,L]`, transformer /
 //! pointwise token-major `[1,L,C]`, flipped with `Transpose`.
 
-use codec::CodecConfig;
+use mimi::CodecConfig;
 use onnx::builder::GraphBuilder;
 use onnx::conv::ConvTranspose1d;
 use onnx::graph::Node;

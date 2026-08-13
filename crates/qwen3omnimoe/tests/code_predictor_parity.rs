@@ -2,15 +2,15 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-Omni's Talker code predictor (`talker.code_predictor.*`) vs. the
-//! real transformers reference, on real weights. `tts::mtp::MtpModel` is
+//! real transformers reference, on real weights. `qwen3tts::mtp::MtpModel` is
 //! near-exact reuse (dense, 5-layer, 16 code groups, same GQA+QK-norm+RoPE
 //! block as the Talker) per the plan -- this test proves that reuse is
 //! actually correct against real Omni weights, not just against the
 //! standalone Qwen3-TTS shape it was built for.
 //!
 //! Weights are read straight from the real HF checkpoint via mmap and
-//! renamed with `tts::import::mtp_hf_to_brain` (the exact rename
-//! `tts::import::import_mtp` already applies for standalone Qwen3-TTS, and
+//! renamed with `qwen3tts::import::mtp_hf_to_brain` (the exact rename
+//! `qwen3tts::import::import_mtp` already applies for standalone Qwen3-TTS, and
 //! that `qwen3omnimoe::import::map_code_predictor`'s doc comment claims -- currently
 //! incorrectly -- is not
 //! needed again), then built directly with `MtpModel::build_on` -- no
@@ -37,8 +37,8 @@ use std::path::PathBuf;
 
 use checkpoint::mmap::MmapSafetensors;
 use qwen3omnimoe::config::OmniConfig;
-use tts::import::mtp_hf_to_brain;
-use tts::mtp::MtpModel;
+use qwen3tts::import::mtp_hf_to_brain;
+use qwen3tts::mtp::MtpModel;
 
 fn shard_for(dir: &std::path::Path, tensor: &str) -> Option<PathBuf> {
     let idx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("model.safetensors.index.json")).ok()?).ok()?;
@@ -100,7 +100,7 @@ fn matches_the_real_code_predictor() {
     let codec_embedding: Vec<Vec<f32>> = (0..n_residual).map(|i| get(&format!("talker.code_predictor.model.codec_embedding.{i}.weight"))).collect();
     let lm_head: Vec<Vec<f32>> = (0..n_residual).map(|i| get(&format!("talker.code_predictor.lm_head.{i}.weight"))).collect();
 
-    let gpu = gpu_core::Gpu::new(tts::mtp::PIPELINES);
+    let gpu = gpu_core::Gpu::new(qwen3tts::mtp::PIPELINES);
     let model = MtpModel::build_on(gpu, cfg.clone(), decoder, codec_embedding, lm_head);
 
     let golden = MmapSafetensors::open(&golden_path).expect("open golden");

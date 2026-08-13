@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use data::gen_tts::TtsGenConfig;
-use tts::{FinetuneOpts, TalkerConfig};
+use qwen3tts::{FinetuneOpts, TalkerConfig};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -96,7 +96,7 @@ fn talker_lora_finetune_decreases_loss() {
     // unambiguous even with the embeddings/head frozen.
     let fopts = FinetuneOpts { steps: 500, batch: 32, block, lr: 5e-3, rank: 16, alpha: 16.0, seed: 9 };
     let (initial, final_loss) =
-        tts::sft::finetune_lora(base.to_str().unwrap(), &dir, out.to_str().unwrap(), &fopts).expect("finetune");
+        qwen3tts::sft::finetune_lora(base.to_str().unwrap(), &dir, out.to_str().unwrap(), &fopts).expect("finetune");
     eprintln!("lora finetune: initial {initial:.4} -> final {final_loss:.4}");
     assert!(final_loss < initial - 0.1, "LoRA finetune did not reduce loss: {initial:.3} -> {final_loss:.3}");
     assert!(out.exists(), "adapter checkpoint not written");

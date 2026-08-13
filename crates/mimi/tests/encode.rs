@@ -8,7 +8,7 @@
 //! committed). Run on the CPU backend:
 //!   BRAIN_DEVICE=cpu cargo test -p brain-codec --test encode
 
-use codec::Codec;
+use mimi::Codec;
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
@@ -32,7 +32,7 @@ fn import_to_temp() -> String {
                 .join(format!("codec_encode_{}.safetensors", std::process::id()))
                 .to_string_lossy()
                 .into_owned();
-            codec::import(&CKPT_DIR, &out).expect("import failed");
+            mimi::import(&CKPT_DIR, &out).expect("import failed");
             out
         })
         .clone()

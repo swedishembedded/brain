@@ -21,8 +21,8 @@ fn main() {
     let mtp_path = format!("{dir}/mtp.safetensors");
     let talker_path = format!("{dir}/talker.safetensors");
     eprintln!("loading MTP {mtp_path} + TalkerTables {talker_path} …");
-    let mut mtp = tts::CpuMtp::load(&mtp_path);
-    let tables = tts::npu_gen::TalkerTables::load(&talker_path);
+    let mut mtp = qwen3tts::CpuMtp::load(&mtp_path);
+    let tables = qwen3tts::npu_gen::TalkerTables::load(&talker_path);
     let emb = mtp.cfg.embedding_dim as usize;
     let d = tables.d();
     eprintln!("MTP embedding_dim={emb} d_model(MTP)={} ; talker d={d} vocab={}", mtp.cfg.d_model, tables.cfg.vocab);

@@ -26,9 +26,9 @@
 //!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 //!       LoRA fine-tune (single-speaker SFT) the Talker on a `text->codes`
 //!       dataset (e.g. `make data/tts`). Freezes the base; trains the attention
-//!       adapters only. See `tts::sft` for the aligned multi-codebook loss.
+//!       adapters only. See `qwen3tts::sft` for the aligned multi-codebook loss.
 
-use tts::{GenOpts, TtsPaths};
+use qwen3tts::{GenOpts, TtsPaths};
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
@@ -62,7 +62,7 @@ fn finetune(args: &[String]) {
     let mut base = "out/tts/talker.safetensors".to_string();
     let mut data_dir = "data/tts".to_string();
     let mut out = "out/tts/talker_lora.safetensors".to_string();
-    let mut o = tts::FinetuneOpts::default();
+    let mut o = qwen3tts::FinetuneOpts::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -84,7 +84,7 @@ fn finetune(args: &[String]) {
         "tts finetune [LoRA r={} α={}]: base={base} data={data_dir} steps={} lr={} -> {out}",
         o.rank, o.alpha, o.steps, o.lr
     );
-    match tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o) {
+    match qwen3tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o) {
         Ok((i0, i1)) => println!("finetune done: loss {i0:.4} -> {i1:.4}  saved -> {out}"),
         Err(e) => {
             eprintln!("finetune failed: {e}");
@@ -121,7 +121,7 @@ fn sim(args: &[String]) {
     // Force the speaker encoder onto the CPU JIT (it's a small gpu_core model; avoids
     // the wgpu/GL default when the user isn't otherwise on the GPU).
     gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-    let enc = speaker::SpeakerEncoder::load_inference(&speaker);
+    let enc = ecapatdnn::SpeakerEncoder::load_inference(&speaker);
     let ea = enc.embed_wav(&wa.samples, wa.sample_rate);
     let eb = enc.embed_wav(&wb.samples, wb.sample_rate);
     let dot: f32 = ea.iter().zip(&eb).map(|(x, y)| x * y).sum();
@@ -168,13 +168,13 @@ fn import(args: &[String]) {
     let codec_out = format!("{out_dir}/codec.safetensors");
     let speaker_out = format!("{out_dir}/speaker.safetensors");
 
-    run_step("talker", tts::import::import_talker(&ckpt, &talker));
-    run_step("mtp", tts::import::import_mtp(&ckpt, &mtp));
-    run_step("codec", codec::import::import(&codec_ckpt, &codec_out));
+    run_step("talker", qwen3tts::import::import_talker(&ckpt, &talker));
+    run_step("mtp", qwen3tts::import::import_mtp(&ckpt, &mtp));
+    run_step("codec", mimi::import::import(&codec_ckpt, &codec_out));
     // The CustomVoice / VoiceDesign (instruct) checkpoints have no speaker encoder
     // (tts_model_type != base) — they don't clone from reference audio. Skip it with
     // a warning rather than failing the whole import.
-    match speaker::import::import(&speaker_ckpt, &speaker_out) {
+    match ecapatdnn::import::import(&speaker_ckpt, &speaker_out) {
         Ok(()) => {}
         Err(e) => eprintln!("import speaker: skipped ({e}) — fine for CustomVoice/VoiceDesign"),
     }
@@ -323,11 +323,11 @@ fn clone(args: &[String]) {
     );
     let result = if npu {
         let cache = format!("{}/npu-cache", c.weights_dir);
-        tts::pipeline::clone_npu(
+        qwen3tts::pipeline::clone_npu(
             &paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
         )
     } else {
-        tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code)
+        qwen3tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code)
     };
     let wav = match result {
         Ok(w) => w,
@@ -359,9 +359,9 @@ fn synth(args: &[String]) {
     );
     let result = if npu {
         let cache = format!("{}/npu-cache", c.weights_dir);
-        tts::pipeline::synth_npu(&paths(&c), &c.opts, &text, &c.lang, Some(&cache))
+        qwen3tts::pipeline::synth_npu(&paths(&c), &c.opts, &text, &c.lang, Some(&cache))
     } else {
-        tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang)
+        qwen3tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang)
     };
     let wav = match result {
         Ok(w) => w,
@@ -400,9 +400,9 @@ fn design(args: &[String]) {
     );
     let result = if npu {
         let cache = format!("{}/npu-cache", c.weights_dir);
-        tts::pipeline::design_npu(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
+        qwen3tts::pipeline::design_npu(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
     } else {
-        tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker)
+        qwen3tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker)
     };
     let wav = match result {
         Ok(w) => w,

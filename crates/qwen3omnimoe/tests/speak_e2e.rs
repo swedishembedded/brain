@@ -5,7 +5,7 @@
 //! round built — Thinker text generation, `crate::talker_prompt`'s Thinker
 //! -> Talker prefill assembly, Talker's own KV-cache decode
 //! (`crate::talker`), the MTP code predictor
-//! (`tts::mtp::MtpModel::generate_residuals`), and `codec::Codec::decode_omni`
+//! (`qwen3tts::mtp::MtpModel::generate_residuals`), and `mimi::Codec::decode_omni`
 //! — run together for the first time against real weights, no stubs
 //! anywhere in the chain.
 //!

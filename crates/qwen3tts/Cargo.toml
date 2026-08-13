@@ -1,12 +1,12 @@
 [package]
-name = "brain-tts"
+name = "brain-qwen3tts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Qwen3-TTS Talker (multi-codebook dual-track Qwen3 decoder) + 5-layer MTP code predictor: forward + import + training, in WGSL."
 
 [lib]
-name = "tts"
+name = "qwen3tts"
 path = "src/lib.rs"
 
 [dependencies]
@@ -20,9 +20,9 @@ brain-paramstore.workspace = true
 brain-optim.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
-brain-codec.workspace = true
+brain-mimi.workspace = true
 brain-npu.workspace = true
-brain-speaker.workspace = true
+brain-ecapatdnn.workspace = true
 brain-audio.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true

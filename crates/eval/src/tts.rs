@@ -14,7 +14,7 @@
 //!   is averaged and scaled by the conventional `10/ln(10) * sqrt(2)` constant.
 //!   See [`mel_cepstral_distortion`] for the **frame-alignment** choice.
 //! - [`speaker_similarity`] — cosine similarity of the two utterances'
-//!   ECAPA x-vectors (reusing [`speaker::SpeakerEncoder::embed_wav`]). The honest
+//!   ECAPA x-vectors (reusing [`ecapatdnn::SpeakerEncoder::embed_wav`]). The honest
 //!   "is it the same voice" number for voice-clone evaluation. Requires a loaded
 //!   speaker checkpoint (GPU), so it is the only metric that is not model-free.
 //! - [`log_mel_l1`] — a simple structural distance: mean absolute difference of
@@ -175,11 +175,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Loads the inference speaker encoder from `speaker_weights` (a brain
 /// checkpoint, GPU), embeds both waveforms via
-/// [`speaker::SpeakerEncoder::embed_wav`] (which resamples internally), and
+/// [`ecapatdnn::SpeakerEncoder::embed_wav`] (which resamples internally), and
 /// returns their cosine similarity. `1.0` for identical audio. This is the one
 /// metric requiring a checkpoint; gate any test of it on GPU availability.
 pub fn speaker_similarity(pred_wav: &[f32], ref_wav: &[f32], speaker_weights: &str, sr: u32) -> f32 {
-    let enc = speaker::SpeakerEncoder::load_inference(speaker_weights);
+    let enc = ecapatdnn::SpeakerEncoder::load_inference(speaker_weights);
     let ep = enc.embed_wav(pred_wav, sr);
     let er = enc.embed_wav(ref_wav, sr);
     cosine_similarity(&ep, &er)

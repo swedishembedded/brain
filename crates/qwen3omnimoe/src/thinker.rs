@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-Omni's Thinker text decoder: a Qwen3-style GQA+QK-norm+RoPE
-//! attention stack (identical shape to `qwen3::Qwen`'s, and to `tts::talker`'s
+//! attention stack (identical shape to `qwen3::Qwen`'s, and to `qwen3tts::talker`'s
 //! reuse of it) over a sparse top-k MoE FFN (`model::moe`, no shared
 //! expert).
 //!

@@ -1380,7 +1380,7 @@ mod stream_codec_tests {
         let mut npu_wav = Vec::new();
         npu.decode(&codes, &mut |pcm, _| npu_wav.extend_from_slice(pcm)).unwrap();
 
-        let cpu = codec::decode_stream::StreamingCodecDecoder::load(&path);
+        let cpu = mimi::decode_stream::StreamingCodecDecoder::load(&path);
         let cpu_wav = cpu.decode_streaming(&codes, chunk);
 
         let n = npu_wav.len().min(cpu_wav.len());

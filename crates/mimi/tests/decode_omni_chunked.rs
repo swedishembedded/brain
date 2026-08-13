@@ -19,8 +19,8 @@
 
 use std::collections::HashMap;
 
-use codec::config::CodecConfig;
-use codec::model::Codec;
+use mimi::config::CodecConfig;
+use mimi::model::Codec;
 use data::rng::Lcg;
 
 fn fill(w: &mut HashMap<String, Vec<f32>>, name: &str, n: usize, seed: &mut Lcg) {

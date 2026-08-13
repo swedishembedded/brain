@@ -10,7 +10,7 @@
 //! on both the real checkpoint and the dump being present (large external
 //! artifacts). Run: `BRAIN_DEVICE=cpu cargo test -p brain-tts --test parity`.
 
-use tts::TalkerModel;
+use qwen3tts::TalkerModel;
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
@@ -55,7 +55,7 @@ fn talker_logits_match_reference() {
 
     let out = std::env::temp_dir().join("brain_talker_parity.safetensors");
     let out = out.to_str().unwrap();
-    tts::import::import_talker(&CKPT, out).expect("talker import");
+    qwen3tts::import::import_talker(&CKPT, out).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, t as u32);
     let got = model.logits_all(&tokens);
     assert_eq!(got.len(), t * vocab);

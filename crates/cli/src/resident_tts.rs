@@ -5,7 +5,7 @@
 //! residency [`Executor`], mirroring the yolo adapter in [`crate::resident`].
 //!
 //! The Talker + MTP decode runs CPU-side in brain (the bit-exact `CpuTalker` /
-//! `CpuMtp` KV-cache path that [`tts::pipeline::synth`]/[`tts::pipeline::clone`]
+//! `CpuMtp` KV-cache path that [`qwen3tts::pipeline::synth`]/[`qwen3tts::pipeline::clone`]
 //! use by default), so the instance's Hot footprint is RAM, not VRAM, and
 //! `activate` ignores the assigned `device`. One action, `speak`.
 //!
@@ -25,9 +25,9 @@ use capability::{
 };
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
-use tts::{GenOpts, TtsPaths};
+use qwen3tts::{GenOpts, TtsPaths};
 
-/// Qwen3-TTS 24 kHz output sample rate (see `tts::pipeline` / `brain tts synth`).
+/// Qwen3-TTS 24 kHz output sample rate (see `qwen3tts::pipeline` / `brain tts synth`).
 const SAMPLE_RATE: u32 = 24_000;
 
 /// Text-to-speech behind the scheduler. Loads brain-format Qwen3-TTS checkpoints
@@ -84,13 +84,13 @@ impl TtsResident {
 
 impl ResidentModel for TtsResident {
     fn manifest(&self) -> Manifest {
-        // The spec lives in tts::caps, next to the catalog's `synth` spec,
+        // The spec lives in qwen3tts::caps, next to the catalog's `synth` spec,
         // so the two surfaces cannot silently diverge.
-        tts::caps::resident_manifest()
+        qwen3tts::caps::resident_manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(tts::caps::MODEL, "default")
+        InstanceKey::new(qwen3tts::caps::MODEL, "default")
     }
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
@@ -161,8 +161,8 @@ impl Instance for TtsInstance {
         // Speaker-free synth by default; voice-clone the configured reference when
         // `BRAIN_TTS_REF` is set (ICL when a transcript is also given).
         let wav = match &self.ref_wav {
-            Some(refw) => tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
-            None => tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
+            Some(refw) => qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
+            None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
         };
 
         // Emit raw little-endian f32 PCM (mono, 24 kHz), as the tts_serve protocol

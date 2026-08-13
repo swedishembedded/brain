@@ -277,9 +277,9 @@ pub fn map_talker(hf: &str) -> Option<String> {
 }
 
 // -------------------------------------------------------------- talker.code_predictor
-/// `talker.code_predictor.*` -> `tts::import::mtp_hf_to_brain`'s UNPREFIXED
+/// `talker.code_predictor.*` -> `qwen3tts::import::mtp_hf_to_brain`'s UNPREFIXED
 /// `blocks.N.*`/`norm.weight`/`codec_embedding.N.weight`/`lm_head.N.weight`
-/// convention -- exactly what `tts::mtp::MtpModel::load_inference`'s
+/// convention -- exactly what `qwen3tts::mtp::MtpModel::load_inference`'s
 /// `ParamStore` lookups expect, so a real served speech-output action can
 /// load the code predictor straight out of this unified checkpoint, the
 /// same way it loads everything else.
@@ -293,17 +293,17 @@ pub fn map_talker(hf: &str) -> Option<String> {
 /// anything else in this flat unified namespace; the "namespace collision"
 /// concern the old comment raised didn't hold. Reusing `mtp_hf_to_brain`
 /// (rather than re-deriving the same rename here) is the "one
-/// implementation" answer -- `tts::import::import_mtp` already validated it
+/// implementation" answer -- `qwen3tts::import::import_mtp` already validated it
 /// for the standalone Qwen3-TTS MTP, and `crates/omni/tests/
 /// code_predictor_parity.rs` already validated `MtpModel`'s forward pass
 /// against real Omni weights renamed this exact way.
 pub fn map_code_predictor(hf: &str) -> Option<String> {
-    tts::import::mtp_hf_to_brain(hf)
+    qwen3tts::import::mtp_hf_to_brain(hf)
 }
 
 // ----------------------------------------------------------------- code2wav
 /// `code2wav.*` -> a plain PREFIX STRIP, identity otherwise — exactly what
-/// `codec::Codec::transformer`/`decode_omni`'s `self.w(name)`/`self.host[name]`
+/// `mimi::Codec::transformer`/`decode_omni`'s `self.w(name)`/`self.host[name]`
 /// lookups expect: raw HF leaf names (`pre_transformer.layers.{l}.self_attn.
 /// q_proj.weight`, `input_layernorm.weight`, `mlp.gate_proj.weight`,
 /// `self_attn_layer_scale.scale`, …), `layers` not `blocks`, no dense-attn
@@ -312,11 +312,11 @@ pub fn map_code_predictor(hf: &str) -> Option<String> {
 /// FIXED (M9b follow-up, 2026-08-08): this used to rename `pre_transformer.
 /// layers.N.*` onto the shared dense-attention convention (`blocks.N.attn.
 /// wq.weight` etc., via `dense_attn_leaf`) to match Thinker/Talker's own
-/// style — but `codec::Codec` (read directly from `crates/codec/src/
+/// style - but `mimi::Codec` (read directly from `crates/mimi/src/
 /// model.rs`'s `transformer()`, lines 507-552) was never given that
 /// convention; it reads the untouched HF leaf names straight off its
 /// `ParamStore`. The rename made this unified checkpoint's code2wav tensors
-/// unloadable by their own consumer. `crates/omni/tests/code2wav_parity.rs`
+/// unloadable by their own consumer. `crates/qwen3omnimoe/tests/code2wav_parity.rs`
 /// already validated `Codec`'s forward pass against real Omni weights read
 /// this exact (prefix-stripped, otherwise untouched) way.
 pub fn map_code2wav(hf: &str) -> Option<String> {
@@ -507,7 +507,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
 #[cfg(test)]
 mod import_as_tests {
     //! `import_as` end to end against a synthetic HF checkpoint (matching
-    //! `tts::import`'s own precedent — a small but structurally real fixture,
+    //! `qwen3tts::import`'s own precedent - a small but structurally real fixture,
     //! not the full 70.5 GB checkpoint) — proves the streaming mechanism
     //! (qkv fuse, the quantize-or-keep-f32 decision, int8-native writing)
     //! rather than re-proving names (`import.rs`'s other tests already cover
@@ -651,7 +651,7 @@ mod import_as_tests {
         assert_eq!(norm_f32, src_data["thinker.model.norm.weight"]);
         assert!(meta.tensors().iter().find(|(n, _)| *n == "thinker.norm.weight.scale").is_none(), "a 1-D tensor must not get a scale sibling");
 
-        // code_predictor's rename (tts::import::mtp_hf_to_brain) reached the
+        // code_predictor's rename (qwen3tts::import::mtp_hf_to_brain) reached the
         // output under its unprefixed MtpModel-loader-compatible name.
         assert!(meta.tensors().iter().any(|(n, _)| n == "blocks.0.attn.wq.weight"));
 
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn code_predictor_matches_tts_mtp_hf_to_brain() {
-        // Delegates to tts::import::mtp_hf_to_brain -- MtpModel::load_inference's
+        // Delegates to qwen3tts::import::mtp_hf_to_brain -- MtpModel::load_inference's
         // ParamStore-compatible, unprefixed naming, not an identity mapping.
         assert_eq!(
             map_code_predictor("talker.code_predictor.model.layers.0.self_attn.q_proj.weight").unwrap(),
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn code2wav_names() {
-        // A plain prefix strip -- codec::Codec's own ParamStore lookups (see
+        // A plain prefix strip -- mimi::Codec's own ParamStore lookups (see
         // map_code2wav's doc) read raw HF leaf names, "layers" not "blocks".
         assert_eq!(map_code2wav("code2wav.code_embedding.weight").unwrap(), "code_embedding.weight");
         assert_eq!(map_code2wav("code2wav.decoder.2.block.1.conv1.conv.weight").unwrap(), "decoder.2.block.1.conv1.conv.weight");
@@ -989,7 +989,7 @@ mod tests {
     /// and `code2wav.*` are the two deliberate exceptions (see
     /// `map_code_predictor`/`map_code2wav`'s docs): both map to their
     /// consumer's own unprefixed `ParamStore` convention
-    /// (`tts::mtp::MtpModel`, `codec::Codec`), verified not to collide with
+    /// (`qwen3tts::mtp::MtpModel`, `mimi::Codec`), verified not to collide with
     /// anything else in this flat namespace by
     /// `unprefixed_components_dont_collide_with_anything` below.
     #[test]

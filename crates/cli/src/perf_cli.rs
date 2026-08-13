@@ -1235,7 +1235,7 @@ fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
         exec,
-        tts::caps::MODEL,
+        qwen3tts::caps::MODEL,
         "speak",
         info,
         build,

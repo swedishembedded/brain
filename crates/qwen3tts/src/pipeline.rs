@@ -10,9 +10,9 @@
 //!   2. the Talker ([`crate::gen::TalkerGen`]) autoregressively samples codebook-0
 //!      per frame; the MTP ([`crate::mtp::MtpModel`]) fills codebooks 1..15;
 //!   3. stop at the codec EOS (or a frame cap), then the codec
-//!      ([`codec::Codec`]) decodes the `[T,16]` codes to a waveform.
+//!      ([`mimi::Codec`]) decodes the `[T,16]` codes to a waveform.
 //!
-//! Speaker x-vectors come from [`speaker::SpeakerEncoder`]; audio I/O from
+//! Speaker x-vectors come from [`ecapatdnn::SpeakerEncoder`]; audio I/O from
 //! [`audio`].
 
 use data::rng::Rng;
@@ -360,7 +360,7 @@ pub(crate) fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_
             }
         }
     }
-    let codec = codec::Codec::load_inference(codec_path);
+    let codec = mimi::Codec::load_inference(codec_path);
     let sr = codec.cfg.input_sample_rate;
     let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
     let codes = codec.encode(&wav24);
@@ -382,7 +382,7 @@ pub(crate) fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_
 /// **Voice clone** — synthesize `target_text` in the timbre of `ref_wav_path`.
 ///
 /// When `ref_text` is non-empty, this uses the **ICL** path: the reference wav is
-/// encoded to `[T,16]` codec codes in-tree ([`codec::Codec::encode`]) and the
+/// encoded to `[T,16]` codec codes in-tree ([`mimi::Codec::encode`]) and the
 /// Talker is conditioned on `ref_text` + those reference codes (plus the
 /// x-vector). An explicit `ref_code` (e.g. an external dump) still overrides the
 /// auto-encode. With an empty `ref_text` and no `ref_code`, the **x-vector-only**
@@ -403,7 +403,7 @@ pub fn clone(
 
     // speaker x-vector from the reference audio.
     let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
-    let speaker = speaker::SpeakerEncoder::load_inference(&paths.speaker);
+    let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     // ICL reference codes: an explicit dump wins; otherwise, when `ref_text` is
@@ -411,7 +411,7 @@ pub fn clone(
     let ref_code = match ref_code {
         Some(c) => Some(c),
         None if !ref_text.trim().is_empty() => {
-            let codec = codec::Codec::load_inference(&paths.codec);
+            let codec = mimi::Codec::load_inference(&paths.codec);
             let sr = codec.cfg.input_sample_rate;
             let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
             Some(codec.encode(&wav24))
@@ -495,7 +495,7 @@ pub fn clone_npu(
     let language_id = sp.language_id(language);
 
     let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
-    let speaker = speaker::SpeakerEncoder::load_inference(&paths.speaker);
+    let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     let ref_code = match ref_code {
@@ -776,7 +776,7 @@ pub fn decode_codes(codec_path: &str, codes: &[u32]) -> Result<Vec<f32>, String>
     if codes.is_empty() {
         return Err("no codec frames were generated".to_string());
     }
-    let codec = codec::Codec::load_inference(codec_path);
+    let codec = mimi::Codec::load_inference(codec_path);
     if std::env::var("TTS_PROFILE").is_ok() {
         let t0 = std::time::Instant::now();
         let wav = codec.decode(codes);
