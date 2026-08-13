@@ -396,6 +396,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-arch"
+version = "0.1.1"
+
+[[package]]
 name = "brain-audio"
 version = "0.1.1"
 dependencies = [

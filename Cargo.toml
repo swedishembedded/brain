@@ -20,6 +20,7 @@ default-members = [
     "crates/wgsl-cpu",
     "crates/gpu-core",
     "crates/kernels",
+    "crates/arch",
     "crates/checkpoint",
     "crates/gguf",
     "crates/paramstore",
@@ -125,6 +126,7 @@ brain-backend-cpu = { path = "crates/backend-cpu" }
 brain-backend-vulkan = { path = "crates/backend-vulkan" }
 brain-gpu-core = { path = "crates/gpu-core" }
 brain-kernels = { path = "crates/kernels" }
+brain-arch = { path = "crates/arch" }
 brain-checkpoint = { path = "crates/checkpoint" }
 brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }

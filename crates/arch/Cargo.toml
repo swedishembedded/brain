@@ -1,0 +1,12 @@
+[package]
+name = "brain-arch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The canonical model-architecture registry: one row per architecture brain supports (or is named for, unimplemented), giving every other seam -- the CLI, GGUF import, HF-checkpoint fetch/convert, and ModelCard -- the same id instead of four that drift. A leaf crate: no fs, no network, no dependency on any other brain crate -- wasm-safe."
+
+[lib]
+name = "brain_arch"
+path = "src/lib.rs"
+
+[dependencies]

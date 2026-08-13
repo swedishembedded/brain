@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The canonical model-architecture registry.
+//!
+//! brain used to have **four separate, drifting** answers to "which
+//! architecture is this": the CLI's hand-written subcommand names, the
+//! substring-matching HF-class-name scan in `modelstore::plan`, the GGUF
+//! importer table in `cli::gguf_import`, and `ModelCard::family`. All four
+//! read this crate's [`ARCHS`] table instead.
+//!
+//! ## The naming rule
+//!
+//! Every architecture gets one canonical `id`, restricted to `[a-z0-9]+` (no
+//! underscores, no hyphens):
+//!
+//! - **[`Source::LlamaCpp`]** - llama.cpp's `LLM_ARCH_*` vocabulary, the enum
+//!   name lowercased with the `LLM_ARCH_` prefix dropped and underscores
+//!   removed (`LLM_ARCH_GLM_DSA` -> `glmdsa`).
+//! - **[`Source::Brain`]** - architectures llama.cpp has no entry for (vision,
+//!   diffusion, 3D, forecasting, world models): named after the upstream
+//!   paper/repo's own architecture name, same `[a-z0-9]+` restriction
+//!   (`yolov8`, `zipdepth`, `sdxlunet`, `s3dit`).
+//! - **[`Source::Toy`]** - brain's own architectures with no upstream
+//!   reference to parity-check against (the sparse-MoE toy task, the PID
+//!   control transformer, …). Named, registered, gradient-checked and
+//!   benchmarked like any other architecture, but excluded from `brain caps`,
+//!   `brain --help` and the docs model list - see `Domain::Toy`.
+//!
+//! `id` is simultaneously: the crate directory name under `crates/`, the
+//! package name's suffix (`brain-<id>`), the CLI word (`brain <id> <verb>` /
+//! `brain <verb> <id>`), `ModelCard.architecture`, the GGUF importer key
+//! ([`Arch::gguf`], when it differs from `id`), the fetch-recipe family key,
+//! and the model's own docs page filename.
+//!
+//! A repo-wide gate keeps all of those in sync, and porting a new
+//! architecture starts by adding its row here, before any other code.
+
+/// The broad kind of task an architecture performs - used to group
+/// `brain caps` output and the README quick-start, and to decide what a
+/// generic `infer` verb should even mean for a given architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Domain {
+    Text,
+    Multimodal,
+    Audio,
+    Vision,
+    Image,
+    ThreeD,
+    Forecast,
+    World,
+    /// brain's own architecture, no upstream reference. Real (gradient-checked,
+    /// benchmarked) but excluded from `brain caps`, `brain --help` and the
+    /// docs model list - see the [`Source::Toy`] naming rule above.
+    Toy,
+}
+
+/// Where an architecture's canonical name comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// llama.cpp's `LLM_ARCH_*` vocabulary (lowercased, prefix dropped).
+    LlamaCpp,
+    /// brain-defined: llama.cpp has no entry for this architecture's domain
+    /// (vision, diffusion, 3D, forecasting, world models).
+    Brain,
+    /// brain's own architecture, no upstream reference - see [`Domain::Toy`].
+    Toy,
+}
+
+/// One row: a single architecture brain supports (or is named for, whether or
+/// not the port is complete - an entry here is a name reservation, not a
+/// completeness claim; each architecture's own status is tracked separately).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arch {
+    /// The canonical id. `[a-z0-9]+`, unique across [`ARCHS`].
+    pub id: &'static str,
+    /// Human-readable name for `--help` / docs / `brain caps` output.
+    pub display: &'static str,
+    pub domain: Domain,
+    pub source: Source,
+    /// The crate's package name, e.g. `"brain-qwen3"`. Must name a real
+    /// workspace member once the crate-rename migration reaches each row -
+    /// some rows still name their pre-rename package while that migration is
+    /// in flight, one commit at a time, one domain group per commit.
+    pub package: &'static str,
+    /// GGUF `general.architecture` value, when it differs from `id` (e.g.
+    /// `deepseek2ocr`'s is `"deepseek2-ocr"` - llama.cpp's own spelling keeps
+    /// the hyphen brain's id grammar forbids). `None` means `id` itself is
+    /// the GGUF spelling, or this architecture has no GGUF importer.
+    pub gguf: Option<&'static str>,
+    /// Exact HF `config.json` `architectures[0]` class name(s) this id
+    /// covers. Exact string match only - no substring/prefix matching, which
+    /// is the defect this table replaces (a naive scan matching `"qwen"`
+    /// before `"omni"` would route `Qwen3OmniMoeForConditionalGeneration` to
+    /// the dense Qwen3 importer). Empty when no HF-checkpoint fetch path
+    /// exists yet for this architecture.
+    pub hf: &'static [&'static str],
+}
+
+macro_rules! arch {
+    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr) => {
+        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: None, hf: &[] }
+    };
+    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr, gguf: $gguf:expr) => {
+        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: Some($gguf), hf: &[] }
+    };
+    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr, hf: $hf:expr) => {
+        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: None, hf: $hf }
+    };
+}
+
+use Domain::*;
+use Source::*;
+
+/// The registry. Order is presentation order for `brain caps` / `--help` -
+/// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
+/// audio, vision, image generation, 3D, forecasting, world models, toy).
+///
+/// `package` names the crate as it exists TODAY - several are pre-rename
+/// (`"brain-omni"` for `qwen3omnimoe`, `"brain-gpt"` for `gpt2`, …) because
+/// this table lands before the crate-rename migration completes; each
+/// rename updates its row in the same commit that moves the crate.
+pub const ARCHS: &[Arch] = &[
+    // -- Text decoders --------------------------------------------------
+    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt"),
+    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM"]),
+    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: "qwen35moe"),
+    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glm"),
+    arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseekv2"),
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm"),
+    // -- Multimodal (VLM / omni / ASR) -----------------------------------
+    arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-omni", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
+    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwenvl"),
+    arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm"),
+    arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream"),
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseekocr", gguf: "deepseek2-ocr"),
+    arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen-asr"),
+    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotron"),
+    // -- Audio / TTS ------------------------------------------------------
+    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-tts"),
+    arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-codec"),
+    arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-speaker"),
+    // -- Vision: detection / segmentation / face / depth -------------------
+    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolo"),
+    arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
+    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2"),
+    arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-facenet"),
+    arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-facenet"),
+    arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
+    arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-depth"),
+    // -- Image generation / restoration --------------------------------
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-zimage"),
+    arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
+    arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
+    arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5"),
+    arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-unet"),
+    arch!("controlnet", "ControlNet (backbone-agnostic seam + SDXL producer)", Image, Brain, "brain-controlnet"),
+    arch!("pulid", "PuLID-FLUX identity conditioning", Image, Brain, "brain-pulid"),
+    arch!("instantid", "InstantID (SDXL + IP-Adapter-FaceID)", Image, Brain, "brain-instantid"),
+    arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
+    arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
+    arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-restore"),
+    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-upscale"),
+    // -- 3D -----------------------------------------------------------
+    arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-mirror"),
+    arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
+    // -- Forecasting ----------------------------------------------------
+    arch!("chronos2", "Chronos-2 encoder-only patch transformer", Forecast, Brain, "brain-chronos2"),
+    arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos"),
+    arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
+    // -- World models ---------------------------------------------------
+    arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-wm-diamond"),
+    arch!("genieredux", "GenieRedux-G ST-transformer world model", World, Brain, "brain-wm-genie"),
+    // -- Toy (brain's own, no upstream reference) ------------------------
+    arch!("toymoe", "Sparse-MoE toy task (64-symbol next-token rule)", Domain::Toy, Source::Toy, "brain-moe"),
+    arch!("toypid", "PID event/effect control transformer", Domain::Toy, Source::Toy, "brain-pid"),
+    arch!("toyseq2seq", "Encoder-decoder toy task", Domain::Toy, Source::Toy, "brain-seq2seq"),
+    arch!("toyautoencoder", "Bottleneck autoencoder toy task", Domain::Toy, Source::Toy, "brain-autoencoder"),
+];
+
+/// The [`Arch`] with this canonical `id`, or `None`.
+pub fn by_id(id: &str) -> Option<&'static Arch> {
+    ARCHS.iter().find(|a| a.id == id)
+}
+
+/// The [`Arch`] whose [`Arch::hf`] list contains this EXACT HF
+/// `architectures[0]` class name, or `None`. Exact match only - see
+/// [`Arch::hf`]'s doc for why a substring scan is the defect this replaces.
+pub fn by_hf(class_name: &str) -> Option<&'static Arch> {
+    ARCHS.iter().find(|a| a.hf.contains(&class_name))
+}
+
+/// The [`Arch`] whose GGUF `general.architecture` spelling is `architecture`.
+/// Checks [`Arch::gguf`] first, then falls back to `id` for architectures
+/// whose GGUF spelling equals their canonical id.
+pub fn by_gguf(architecture: &str) -> Option<&'static Arch> {
+    ARCHS.iter().find(|a| a.gguf.unwrap_or(a.id) == architecture)
+}
+
+/// Every non-toy architecture, in registry order - what `brain caps`,
+/// `brain --help` and the docs model list show.
+pub fn public() -> impl Iterator<Item = &'static Arch> {
+    ARCHS.iter().filter(|a| a.domain != Domain::Toy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn ids_are_lowercase_alphanumeric_only() {
+        for a in ARCHS {
+            assert!(!a.id.is_empty(), "empty id");
+            assert!(a.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()), "{:?}: id must be [a-z0-9]+, no `-`/`_`", a.id);
+        }
+    }
+
+    #[test]
+    fn ids_are_unique() {
+        let mut seen = HashSet::new();
+        for a in ARCHS {
+            assert!(seen.insert(a.id), "duplicate id {:?}", a.id);
+        }
+    }
+
+    #[test]
+    fn hf_class_names_are_unique_across_archs() {
+        let mut seen = HashSet::new();
+        for a in ARCHS {
+            for hf in a.hf {
+                assert!(seen.insert(*hf), "{:?}: hf class name {:?} claimed by more than one arch", a.id, hf);
+            }
+        }
+    }
+
+    #[test]
+    fn gguf_spellings_are_unique_across_archs() {
+        let mut seen = HashSet::new();
+        for a in ARCHS {
+            let spelling = a.gguf.unwrap_or(a.id);
+            assert!(seen.insert(spelling), "{:?}: gguf spelling {:?} claimed by more than one arch", a.id, spelling);
+        }
+    }
+
+    #[test]
+    fn package_names_are_nonempty_and_prefixed() {
+        for a in ARCHS {
+            assert!(a.package.starts_with("brain-"), "{:?}: package {:?} should start with brain-", a.id, a.package);
+        }
+    }
+
+    #[test]
+    fn by_id_finds_a_known_row_and_none_for_unknown() {
+        assert_eq!(by_id("qwen3").map(|a| a.id), Some("qwen3"));
+        assert_eq!(by_id("totally-unknown"), None);
+    }
+
+    #[test]
+    fn by_hf_omni_does_not_fall_through_to_dense_qwen3() {
+        // The real defect this table replaces: a substring scan checking
+        // "qwen" before "omni" would route Qwen3-Omni's real HF class name
+        // (which CONTAINS "qwen" as a substring) to the dense qwen3 importer.
+        // Exact match makes that class of bug structurally impossible.
+        assert_eq!(by_hf("Qwen3OmniMoeForConditionalGeneration").map(|a| a.id), Some("qwen3omnimoe"));
+        assert_eq!(by_hf("Qwen3ForCausalLM").map(|a| a.id), Some("qwen3"));
+        assert_eq!(by_hf("totally-unknown"), None);
+    }
+
+    #[test]
+    fn by_gguf_falls_back_to_id_when_no_explicit_spelling() {
+        assert_eq!(by_gguf("qwen35moe").map(|a| a.id), Some("qwen35moe"));
+        assert_eq!(by_gguf("deepseek2-ocr").map(|a| a.id), Some("deepseek2ocr"));
+        assert_eq!(by_gguf("deepseek2ocr"), None); // the id itself is NOT the gguf spelling here
+    }
+
+    #[test]
+    fn public_excludes_only_toy_domain() {
+        let toy_ids: HashSet<&str> = ARCHS.iter().filter(|a| a.domain == Domain::Toy).map(|a| a.id).collect();
+        assert_eq!(toy_ids, HashSet::from(["toymoe", "toypid", "toyseq2seq", "toyautoencoder"]));
+        for a in public() {
+            assert!(!toy_ids.contains(a.id));
+        }
+        assert_eq!(public().count() + toy_ids.len(), ARCHS.len());
+    }
+}
