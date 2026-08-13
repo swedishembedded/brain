@@ -89,7 +89,9 @@ pub struct Arch {
     /// the GGUF spelling, or this architecture has no GGUF importer.
     pub gguf: Option<&'static str>,
     /// Exact HF `config.json` `architectures[0]` class name(s) this id
-    /// covers. Exact string match only - no substring/prefix matching, which
+    /// covers, plus the real `model_type` slug when a config lacking
+    /// `architectures` needs that fallback spelling too (documented per
+    /// entry). Exact string match only - no substring/prefix matching, which
     /// is the defect this table replaces (a naive scan matching `"qwen"`
     /// before `"omni"` would route `Qwen3OmniMoeForConditionalGeneration` to
     /// the dense Qwen3 importer). Empty when no HF-checkpoint fetch path
@@ -122,8 +124,11 @@ use Source::*;
 /// rename updates its row in the same commit that moves the crate.
 pub const ARCHS: &[Arch] = &[
     // -- Text decoders --------------------------------------------------
-    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt"),
-    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM"]),
+    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt", hf: &["GPT2LMHeadModel"]),
+    // "qwen3" is the real config.json `model_type` fallback value (used when
+    // `architectures[0]` is absent), alongside the real `architectures[0]`
+    // class name.
+    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"]),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: "qwen35moe"),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glm"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseekv2"),

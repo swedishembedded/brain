@@ -212,22 +212,24 @@ pub fn declared_architecture(config: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The brain family (`crates/cli/src/model_dir.rs`'s `resident_for` dispatch
-/// key) an HF `architecture` string maps to, or `None` if unsupported. An
-/// approximation (substring match on the family name), documented as such --
-/// tightening it to an exact HF class-name table is future work once more
-/// families are wired. Public so the Convert-step dispatcher picks the exact
-/// same family `plan()` already gated the fetch on -- one implementation of
-/// "which families brain can serve today", not two.
+/// The canonical `brain_arch` architecture id an HF `architecture` string
+/// maps to, or `None` if unsupported. Exact match against
+/// [`brain_arch::Arch::hf`] -- no substring/prefix scan, so a class name that
+/// happens to CONTAIN another architecture's id as a substring (Qwen3-Omni's
+/// real HF class name is `Qwen3OmniMoeForConditionalGeneration`, which
+/// contains `"qwen"`) cannot be mis-routed regardless of table order. Public
+/// so the Convert-step dispatcher (`crates/cli/src/supply.rs`) picks the
+/// exact same id `plan()` already gated the fetch on -- one implementation of
+/// "which architectures brain can fetch today", not two.
+///
+/// Narrower than the substring scan it replaces in one respect: `Arch::hf`
+/// carries `declared_architecture`'s `model_type` fallback spelling only for
+/// architectures that document it (`qwen3`'s `"qwen3"` row); a repo lacking
+/// `architectures[0]` whose `model_type` isn't registered will not match,
+/// where the old substring scan might have. Add the real `model_type` value
+/// to that architecture's `Arch::hf` row when a repo needs it.
 pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
-    let lower = arch.to_ascii_lowercase();
-    // "omni" MUST be checked before "qwen": Qwen3-Omni's HF class name is
-    // `Qwen3OmniMoeForConditionalGeneration`, which contains "qwen" as a
-    // substring too — a plain first-match-wins scan in the other order would
-    // silently route it to the dense qwen importer, which would download the
-    // full 70.5 GB checkpoint and then fail (or worse, partially import) on a
-    // family it cannot represent.
-    ["omni", "gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
+    brain_arch::by_hf(arch).map(|a| a.id)
 }
 
 pub(crate) fn is_supported_architecture(arch: &str) -> bool {
@@ -283,13 +285,19 @@ mod tests {
     fn omni_architecture_does_not_fall_through_to_qwen() {
         // Qwen3-Omni's real HF class name contains "qwen" as a substring
         // ("Qwen3OmniMoeForConditionalGeneration"), so a naive first-match
-        // scan checking "qwen" before "omni" would silently route it to the
-        // dense qwen importer. "omni" must win.
-        assert_eq!(family_of_architecture("Qwen3OmniMoeForConditionalGeneration"), Some("omni"));
-        assert_eq!(family_of_architecture("qwen3_omni_moe"), Some("omni"));
-        // Plain Qwen3 architectures are unaffected.
-        assert_eq!(family_of_architecture("Qwen3ForCausalLM"), Some("qwen"));
-        assert_eq!(family_of_architecture("Qwen3MoeForCausalLM"), Some("qwen"));
+        // substring scan checking "qwen" before "omni" would silently route
+        // it to the dense qwen3 importer. Exact matching against
+        // brain_arch::Arch::hf makes that class of bug structurally
+        // impossible regardless of table order.
+        assert_eq!(family_of_architecture("Qwen3OmniMoeForConditionalGeneration"), Some("qwen3omnimoe"));
+        // Plain dense Qwen3 is unaffected.
+        assert_eq!(family_of_architecture("Qwen3ForCausalLM"), Some("qwen3"));
+        // A near-miss (not an exact registered class name) is correctly
+        // unsupported, not fuzzily routed to the nearest substring match --
+        // brain's qwen3 crate is dense-only, so "Qwen3MoeForCausalLM" (the
+        // sparse variant) has no importer to route to yet.
+        assert_eq!(family_of_architecture("Qwen3MoeForCausalLM"), None);
+        assert_eq!(family_of_architecture("qwen3_omni_moe"), None);
     }
 
     #[test]
@@ -389,7 +397,7 @@ mod tests {
     fn base_ref_with_sharded_weights_plans_index_then_each_shard_sorted() {
         let st = store("modelstore-plan-test-base-sharded");
         let mut hub = FakeHub::new();
-        hub.add_file("nvidia", "big-model", "main", "config.json", br#"{"model_type":"glm"}"#.to_vec());
+        hub.add_file("nvidia", "big-model", "main", "config.json", br#"{"model_type":"qwen3"}"#.to_vec());
         hub.add_file("nvidia", "big-model", "main", "model.safetensors.index.json", b"{}".to_vec());
         hub.add_file("nvidia", "big-model", "main", "model-00002-of-00002.safetensors", vec![0u8; 4]);
         hub.add_file("nvidia", "big-model", "main", "model-00001-of-00002.safetensors", vec![0u8; 4]);

@@ -136,6 +136,12 @@ pub fn import_file(gguf_path: &str, out_path: Option<&str>, id: Option<&str>) ->
         let known = architectures().join(", ");
         if arch.is_empty() {
             format!("{gguf_path}: no 'general.architecture' in the GGUF metadata (registered architectures: {known})")
+        } else if let Some(a) = brain_arch::by_gguf(arch) {
+            // brain names this architecture (it has a canonical id) but no
+            // GgufArchitectureImporter claims it yet -- a real gap, not an
+            // unrecognized file, so say so precisely instead of the generic
+            // "no importer registered" wording.
+            format!("{gguf_path}: architecture {arch:?} is brain's {:?} ({}), but has no GGUF importer yet (registered: {known})", a.id, a.display)
         } else {
             format!("{gguf_path}: no importer registered for GGUF architecture {arch:?} (registered: {known})")
         }
@@ -231,6 +237,32 @@ mod tests {
         assert_eq!(importer_for("qwen35moe").map(|i| i.architecture()), Some(qwen35moe::import::GGUF_ARCHITECTURE));
         assert!(importer_for("llama").is_none());
         assert!(architectures().contains(&"qwen35moe"));
+    }
+
+    /// Every `GgufArchitectureImporter` claims a spelling `brain_arch` also
+    /// knows -- this and `brain_arch`'s own table cannot drift apart, which is
+    /// what lets `import_file`'s error message tell "brain has a name for
+    /// this but no importer" apart from "brain has never heard of this".
+    #[test]
+    fn every_registered_importer_matches_a_brain_arch_row() {
+        for i in IMPORTERS {
+            let arch = i.architecture();
+            assert_eq!(brain_arch::by_gguf(arch).map(|a| a.id), Some("qwen35moe"), "importer {arch:?} has no matching brain_arch row");
+        }
+    }
+
+    #[test]
+    fn a_named_but_unimported_architecture_gets_a_more_specific_error() {
+        let dir = tmp("named-unimported");
+        // deepseek2ocr's GGUF spelling ("deepseek2-ocr") is a real brain_arch
+        // row with no GgufArchitectureImporter yet -- the error should say so
+        // by name, not just "no importer registered".
+        let src = dir.join("named.gguf").to_string_lossy().into_owned();
+        write_gguf(&src, "deepseek2-ocr");
+        let err = import_file(&src, None, None).unwrap_err();
+        assert!(err.contains("deepseek2ocr"), "must name the known brain_arch id: {err}");
+        assert!(err.contains("no GGUF importer"), "must say it is a known-but-unimported gap: {err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Dispatch routes a `general.architecture = "qwen35moe"` file to the

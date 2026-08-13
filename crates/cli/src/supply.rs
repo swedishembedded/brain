@@ -116,24 +116,26 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let id = format!("{vendor}/{repo}");
 
     let result = match family {
-        "qwen" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
-        "glm" => glm::import::import_as(hf_dir, out, Some(&id)),
-        "lfm" => lfm::import::import_as(hf_dir, out, Some(&id)),
-        // gpt is nanogpt-style, trained from scratch -- brain has never had an
-        // HF importer for it (unlike glm/qwen/lfm, all production-tested).
-        // Writing one is real new-crate work, not "wire the dispatch", so
-        // this fails cleanly instead of guessing at a Conv1D-transpose import.
-        "gpt" => Err("gpt has no HF import path yet -- fetch and convert manually".to_string()),
-        // omni (Qwen3-Omni) is recognized (family_of_architecture checks it
-        // before "qwen" specifically so it is never silently mis-routed
-        // there). The importer itself streams from the sharded HF dir fine
-        // (M3) -- what is NOT yet true is that the resulting unified
-        // checkpoint is directly loadable by tts::mtp::MtpModel/codec::Codec
-        // for the Talker/Code2Wav pieces (two open naming gaps); Thinker-only
-        // generation (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not
-        // this converted-checkpoint path) is unaffected by either gap.
-        "omni" => omni::import::import_as(hf_dir, out, Some(&id)),
-        other => Err(format!("family {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
+        "qwen3" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
+        "glmdsa" => glm::import::import_as(hf_dir, out, Some(&id)),
+        "lfm2" => lfm::import::import_as(hf_dir, out, Some(&id)),
+        // gpt2 is nanogpt-style, trained from scratch -- brain has never had
+        // an HF importer for it (unlike glmdsa/qwen3/lfm2, all
+        // production-tested). Writing one is real new-crate work, not "wire
+        // the dispatch", so this fails cleanly instead of guessing at a
+        // Conv1D-transpose import.
+        "gpt2" => Err("gpt2 has no HF import path yet -- fetch and convert manually".to_string()),
+        // qwen3omnimoe (Qwen3-Omni) is recognized via an exact HF class-name
+        // match, so it is never mis-routed to the dense qwen3 importer even
+        // though its class name contains "qwen" as a substring. The importer
+        // itself streams from the sharded HF dir fine (M3) -- what is NOT yet
+        // true is that the resulting unified checkpoint is directly loadable
+        // by tts::mtp::MtpModel/codec::Codec for the Talker/Code2Wav pieces
+        // (two open naming gaps); Thinker-only generation
+        // (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not this
+        // converted-checkpoint path) is unaffected by either gap.
+        "qwen3omnimoe" => omni::import::import_as(hf_dir, out, Some(&id)),
+        other => Err(format!("architecture {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
     result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))?;
     // The upstream weights (single model.safetensors, or a model-*-of-*.safetensors
@@ -461,8 +463,8 @@ mod tests {
 
     #[test]
     fn ensure_fails_cleanly_when_the_family_has_no_import_path_yet() {
-        // gpt is a `family_of_architecture` match (so `plan()` accepts it and
-        // schedules a Convert step) but has no HF importer -- `convert`
+        // gpt2 is a `family_of_architecture` match (so `plan()` accepts it
+        // and schedules a Convert step) but has no HF importer -- `convert`
         // dispatches to an explicit error rather than silently skipping or
         // guessing at an unwritten Conv1D-transpose import.
         let mut hub = FakeHub::new();

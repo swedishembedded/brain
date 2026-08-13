@@ -10,6 +10,7 @@ name = "brain_modelstore"
 path = "src/lib.rs"
 
 [dependencies]
+brain-arch.workspace = true
 brain-modelref.workspace = true
 brain-checkpoint.workspace = true
 serde.workspace = true

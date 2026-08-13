@@ -21,6 +21,7 @@ fault-injection = ["brain-qwen3/fault-injection"]
 # always works, but only served when the `--dbus` flag is passed.
 brain-dbus.workspace = true
 brain-shutdown.workspace = true
+brain-arch.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-apiserve.workspace = true
