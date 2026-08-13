@@ -14,22 +14,22 @@
 //!
 //! * [`adapter`] — [`InjectionPoint`], [`Residuals`], the [`ControlAdapter`]
 //!   (backbone) / [`ControlSource`] (control model) pair, and the by-name
-//!   matching that is the whole seam. `unet::Unet` is the first
+//!   matching that is the whole seam. `sdxlunet::Unet` is the first
 //!   [`ControlAdapter`]; the FLUX DiTs are the intended second.
 //! * [`config`] — [`ControlNetConfig`], which **holds** a `UNetConfig` rather
 //!   than restating it, plus the canonical tensor manifest.
 //! * [`import`] — diffusers `ControlNetModel` import, two-way covered, reusing
-//!   `unet::import::remap_manifest`.
+//!   `sdxlunet::import::remap_manifest`.
 //! * [`cond`] — preparing the conditioning image (including from a ZipDepth
 //!   map).
 //! * [`init`] — deterministic synthetic weights for the smoke test.
 //! * [`model`] — the forward graph.
 //!
 //! **Adds no block, and one kernel *slot* rather than one kernel.** The
-//! trainable copy is `unet::model::Rec` verbatim; the conditioning embedder and
+//! trainable copy is `sdxlunet::model::Rec` verbatim; the conditioning embedder and
 //! the zero-convs are `vae::blocks::Builder` convolutions; `conditioning_scale`
 //! is the existing `scale_chan` with `c = 1`. [`model::KERNELS`] is
-//! `unet::model::KERNELS` plus that one entry, and being a strict
+//! `sdxlunet::model::KERNELS` plus that one entry, and being a strict
 //! prefix-extension is what lets ONE device drive a UNet and a ControlNet
 //! together.
 //!

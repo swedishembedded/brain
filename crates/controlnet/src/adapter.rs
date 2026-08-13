@@ -211,14 +211,14 @@ pub fn order_for(backbone: &dyn ControlAdapter, r: &Residuals) -> Result<Vec<Vec
 /// `crates/unet`'s `UNet2DConditionModel` is the first [`ControlAdapter`].
 ///
 /// The impl lives here rather than in `crates/unet` because the trait does:
-/// `unet` must not depend on this crate (this crate composes `unet::model::Rec`
+/// `unet` must not depend on this crate (this crate composes `sdxlunet::model::Rec`
 /// for the trainable copy, so the dependency runs one way). Rust's orphan rule
 /// permits it exactly because the trait is local.
 ///
 /// The point names are derived from the UNet's own control input order —
 /// `UNetConfig::skip_stack()` finest-first, then the mid block — so they cannot
 /// drift from what `Unet::run_with_control` writes.
-impl ControlAdapter for unet::Unet {
+impl ControlAdapter for sdxlunet::Unet {
     fn injection_points(&self) -> Vec<InjectionPoint> {
         let shapes = self.control_shapes();
         shapes
@@ -233,7 +233,7 @@ impl ControlAdapter for unet::Unet {
     }
 
     fn accepts_control(&self) -> bool {
-        unet::Unet::accepts_control(self)
+        sdxlunet::Unet::accepts_control(self)
     }
 }
 

@@ -20,7 +20,7 @@ brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step
 brain-kernels.workspace = true    # scale_chan — the one kernel appended to unet's set
 brain-model.workspace = true      # model::hostmath::timestep_embedding
 brain-checkpoint.workspace = true # safetensors reader (import + parity fixtures)
-brain-unet.workspace = true       # unet::model::Rec — the trainable copy IS the UNet's blocks
+brain-sdxlunet.workspace = true       # sdxlunet::model::Rec - the trainable copy IS the UNet's blocks
 brain-data.workspace = true       # data::rng::Rng for init.rs
 # `imaging::pixels::{u8_to_unit, hwc_to_chw}` — the workspace's ONE home for the
 # u8->[0,1] cast and the HWC->CHW permutation `src/cond.rs` needs. Hand-rolling

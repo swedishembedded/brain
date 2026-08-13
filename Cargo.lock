@@ -545,6 +545,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-chronos2",
  "brain-clip",
+ "brain-codeformer",
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
@@ -586,13 +587,13 @@ dependencies = [
  "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-residency",
- "brain-restore",
+ "brain-rrdbnet",
  "brain-runtime",
+ "brain-s3dit",
  "brain-sam2",
  "brain-server",
  "brain-shutdown",
  "brain-splat",
- "brain-upscale",
  "brain-vision",
  "brain-vqgan",
  "brain-vulkan",
@@ -600,7 +601,6 @@ dependencies = [
  "brain-wm-diamond",
  "brain-wm-display",
  "brain-yolov8",
- "brain-zimage",
  "brain-zipdepth",
  "clap",
  "serde_json",
@@ -629,6 +629,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-codeformer"
+version = "0.1.1"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-facenet",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-vae",
+ "brain-vision",
+ "brain-vqgan",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-controlnet"
 version = "0.1.1"
 dependencies = [
@@ -638,7 +657,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
- "brain-unet",
+ "brain-sdxlunet",
 ]
 
 [[package]]
@@ -933,6 +952,7 @@ version = "0.1.1"
 dependencies = [
  "brain-autoencoder",
  "brain-clip",
+ "brain-codeformer",
  "brain-data",
  "brain-facenet",
  "brain-flux2",
@@ -946,7 +966,6 @@ dependencies = [
  "brain-pid",
  "brain-qwen3",
  "brain-qwen35moe",
- "brain-restore",
  "brain-sam2",
  "brain-seq2seq",
  "brain-t5encoder",
@@ -995,7 +1014,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
- "brain-unet",
+ "brain-sdxlunet",
 ]
 
 [[package]]
@@ -1413,21 +1432,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-restore"
+name = "brain-rrdbnet"
 version = "0.1.1"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
- "brain-data",
- "brain-facenet",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
- "brain-model",
- "brain-paramstore",
+ "brain-testutil",
  "brain-vae",
- "brain-vision",
- "brain-vqgan",
  "serde_json",
 ]
 
@@ -1443,6 +1457,26 @@ dependencies = [
  "brain-gpt2",
  "brain-hfsm",
  "brain-yolov8",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-s3dit"
+version = "0.1.1"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-testutil",
+ "brain-vae",
+ "brain-weightset",
  "serde_json",
 ]
 
@@ -1476,6 +1510,22 @@ dependencies = [
  "brain-testutil",
  "brain-vision",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-sdxlunet"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
+ "brain-diffusion",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vae",
  "serde_json",
 ]
 
@@ -1557,36 +1607,6 @@ dependencies = [
 [[package]]
 name = "brain-timeseries"
 version = "0.1.1"
-
-[[package]]
-name = "brain-unet"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-clip",
- "brain-data",
- "brain-diffusion",
- "brain-gpu-core",
- "brain-imaging",
- "brain-kernels",
- "brain-model",
- "brain-vae",
- "serde_json",
-]
-
-[[package]]
-name = "brain-upscale"
-version = "0.1.1"
-dependencies = [
- "brain-capability",
- "brain-checkpoint",
- "brain-gpu-core",
- "brain-imaging",
- "brain-kernels",
- "brain-testutil",
- "brain-vae",
- "serde_json",
-]
 
 [[package]]
 name = "brain-vae"
@@ -1734,26 +1754,6 @@ dependencies = [
  "brain-paramstore",
  "brain-vision",
  "bytemuck",
- "serde_json",
-]
-
-[[package]]
-name = "brain-zimage"
-version = "0.1.1"
-dependencies = [
- "brain-capability",
- "brain-checkpoint",
- "brain-data",
- "brain-diffusion",
- "brain-dit",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-paramstore",
- "brain-qwen3",
- "brain-testutil",
- "brain-vae",
- "brain-weightset",
  "serde_json",
 ]
 

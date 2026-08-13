@@ -94,7 +94,7 @@ pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &st
 }
 
 /// `W[o,i] += scale * sum_k B[o,k] * A[k,i]`, `A` is `[r,in]`, `B` is
-/// `[out,r]`, both row-major -- the same convention `zimage::lora::Pair`
+/// `[out,r]`, both row-major -- the same convention `s3dit::lora::Pair`
 /// uses, and what `qwen3::model::Qwen::lora_fwd`'s unfolded forward computes.
 fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, scale: f32) {
     let inn = a.len() / r;

@@ -67,7 +67,7 @@ pub(crate) struct Upgrade {
 /// The table. Keep it short; see the bar above.
 pub(crate) const UPGRADES: &[Upgrade] = &[Upgrade {
     // The int8 dynamic-activation-quant path: every int8 linear in
-    // `qwen3::q8`, `zimage::int8`/`block`, and the FLUX.2 int8 DiT quantizes
+    // `qwen3::q8`, `s3dit::int8`/`block`, and the FLUX.2 int8 DiT quantizes
     // its activations with `max_abs_row` -> `quant_pack` -> `matmul_i8_dyn`.
     // `max_abs_row` walks a whole row from one invocation (checklist §C2).
     slow: "max_abs_row",

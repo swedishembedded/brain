@@ -79,7 +79,7 @@ fn unchanged_dispatch_site_gets_correct_scales() {
         let x = fill(m, k);
         let xb = gpu.storage_init("x", &x);
         let sx = gpu.storage((m * 4) as u64);
-        // Verbatim the shape of `qwen3::q8` / `zimage::block` / flux2's call.
+        // Verbatim the shape of `qwen3::q8` / `s3dit::block` / flux2's call.
         let s = gpu.step(0, &[&xb, &sx], &[m, k], m);
         gpu.submit(&[], &[s]);
         assert_close(&gpu.read(&sx, m as usize), &host_scales(&x, m, k), &format!("{m}x{k}"));

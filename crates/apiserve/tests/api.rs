@@ -1124,7 +1124,7 @@ async fn openai_images_n_and_url_format_return_b64() {
 }
 
 /// `precision` is a non-standard, optional field (mirroring `seed`) forwarded
-/// to the resident model as an Invocation param (`zimage::caps` reads it to
+/// to the resident model as an Invocation param (`s3dit::caps` reads it to
 /// pick int8 vs. fp32 DiT precision) -- both accepted enum values must 200,
 /// and omitting it entirely must still work exactly as before this field
 /// existed (already covered by `openai_images_nonstream_validates_and_decodes_to_png`).

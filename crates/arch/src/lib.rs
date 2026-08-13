@@ -119,7 +119,7 @@ use Source::*;
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
 /// `package` names the crate as it exists TODAY - several rows are still
-/// pre-rename (`"brain-zimage"` for `s3dit`, …) while the crate-rename
+/// pre-rename (`"brain-mirror"` for `worldmirror2`, …) while the crate-rename
 /// migration is in flight, one domain group per commit; each rename updates
 /// its row in the same commit that moves the crate.
 pub const ARCHS: &[Arch] = &[
@@ -154,18 +154,18 @@ pub const ARCHS: &[Arch] = &[
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-zimage"),
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit"),
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
-    arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-unet"),
+    arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-sdxlunet"),
     arch!("controlnet", "ControlNet (backbone-agnostic seam + SDXL producer)", Image, Brain, "brain-controlnet"),
     arch!("pulid", "PuLID-FLUX identity conditioning", Image, Brain, "brain-pulid"),
     arch!("instantid", "InstantID (SDXL + IP-Adapter-FaceID)", Image, Brain, "brain-instantid"),
     arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
-    arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-restore"),
-    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-upscale"),
+    arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
+    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet"),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-mirror"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),

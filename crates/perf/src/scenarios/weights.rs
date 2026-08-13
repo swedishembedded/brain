@@ -63,7 +63,7 @@ fn drive(policy_name: &str, plan: Box<dyn weightset::ResidencyPlan + Send + Sync
 }
 
 /// Z-Image-Turbo's real block count: 30 main layers + 2 noise + 2 context
-/// refiners = 34 groups (see `zimage::ZImageConfig::turbo`). `budget`/
+/// refiners = 34 groups (see `s3dit::ZImageConfig::turbo`). `budget`/
 /// `passes` are the caller's scenario knobs — `budget` is the window size
 /// (device slots), `passes` the number of denoise steps simulated.
 pub fn run(budget: u32, passes: u32) -> Result<Vec<Run>, String> {

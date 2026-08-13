@@ -25,7 +25,7 @@ use onnx::GraphBuilder;
 use crate::topo::TopoBase;
 use crate::topology::WeightSource;
 
-/// The shape numbers the graph needs, mirroring `upscale::RrdbConfig` without
+/// The shape numbers the graph needs, mirroring `rrdbnet::RrdbConfig` without
 /// depending on that crate (the `npu` crate stays free of model crates, the
 /// same way every other `*_topology` here does).
 #[derive(Clone, Copy, Debug)]

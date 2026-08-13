@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Finite-difference gate for **CodeFormer's code-prediction Transformer**
-//! (`restore::train::CodeTransformerTrainer`).
+//! (`codeformer::train::CodeTransformerTrainer`).
 //!
 //! ## What this check covers, and what is frozen
 //!
-//! Covered — every tensor `restore::train::transformer_manifest` names, i.e.
+//! Covered - every tensor `codeformer::train::transformer_manifest` names, i.e.
 //! the whole of CodeFormer's stage II:
 //!
 //! | tensor | what its gradient exercises |
@@ -32,7 +32,7 @@
 //! pre-trained VQGAN is fixed and only the transformer is trained on the
 //! code-token loss. What is **not** yet gated is the two composed end to end
 //! (a gradient flowing from the CE back through `feat_emb` into the encoder);
-//! that is listed as remaining work in `restore::train`'s header.
+//! that is listed as remaining work in `codeformer::train`'s header.
 //!
 //! ## The objective, and the non-differentiable argmin
 //!
@@ -98,8 +98,8 @@
 
 use std::cell::Cell;
 
-use restore::config::CodeFormerConfig;
-use restore::train::{CodeTransformerTrainer, TRAIN_PIPELINES};
+use codeformer::config::CodeFormerConfig;
+use codeformer::train::{CodeTransformerTrainer, TRAIN_PIPELINES};
 
 use crate::{directional_check, CheckModel, Report};
 
@@ -115,8 +115,8 @@ impl CodeHarness {
     /// a fresh `Gpu::new` — a device per model object is the pattern AGENTS.md
     /// bans.
     fn new(cfg: CodeFormerConfig, seed: u64) -> CodeHarness {
-        let init = restore::train::init_weights(&cfg, seed);
-        let (latent, targets) = restore::train::fixed_batch(&cfg, seed);
+        let init = codeformer::train::init_weights(&cfg, seed);
+        let (latent, targets) = codeformer::train::fixed_batch(&cfg, seed);
         let m = CodeTransformerTrainer::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg, &init);
         m.set_latent(&latent);
         m.set_targets(&targets);
@@ -159,7 +159,7 @@ impl CheckModel for CodeHarness {
 /// codebook. Two layers because that is the minimum that makes
 /// `position_emb`'s cross-layer gradient accumulation observable.
 pub fn check_codeformer(seed: u64) -> Report {
-    let h = CodeHarness::new(restore::train::tiny_config(), seed);
+    let h = CodeHarness::new(codeformer::train::tiny_config(), seed);
     directional_check(&h, 5e-4, 4, seed ^ 0x1234)
 }
 
@@ -167,7 +167,7 @@ pub fn check_codeformer(seed: u64) -> Report {
 /// [`check_codeformer`] localises the fault to the cross-layer `position_emb`
 /// accumulation rather than to the layer backward.
 pub fn check_codeformer_one_layer(seed: u64) -> Report {
-    let cfg = CodeFormerConfig { n_layers: 1, ..restore::train::tiny_config() };
+    let cfg = CodeFormerConfig { n_layers: 1, ..codeformer::train::tiny_config() };
     let h = CodeHarness::new(cfg, seed);
     directional_check(&h, 5e-4, 4, seed ^ 0x1234)
 }
@@ -175,7 +175,7 @@ pub fn check_codeformer_one_layer(seed: u64) -> Report {
 /// The eps/error table on this graph, measured rather than assumed — the probe
 /// AGENTS.md asks for in place of widening a bound.
 pub fn check_codeformer_eps_sweep(seed: u64) -> Vec<(f32, f32)> {
-    let h = CodeHarness::new(restore::train::tiny_config(), seed);
+    let h = CodeHarness::new(codeformer::train::tiny_config(), seed);
     [5e-3f32, 2e-3, 1e-3, 5e-4, 2e-4, 1e-4, 5e-5]
         .iter()
         .map(|&eps| (eps, directional_check(&h, eps, 4, seed ^ 0x1234).max_rel()))

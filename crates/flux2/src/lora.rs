@@ -5,7 +5,7 @@
 //!
 //! Each targeted linear `W [out×in]` gets `W_eff = W + (α/r)·B·A` with
 //! `A [r×in]`, `B [out×r]`. The **base is frozen**; only `A,B` train. Design:
-//! zimage::lora's `Pair { a, b, project }` scheme — rebuild the effective
+//! s3dit::lora's `Pair { a, b, project }` scheme - rebuild the effective
 //! weights, run the gradchecked host trainer ([`crate::modelgrad::grads`]) to
 //! get `dL/dW_eff`, then *project* onto the adapter grads
 //! (`dA = (α/r)·Bᵀ·dW`, `dB = (α/r)·dW·Aᵀ`) and Adam-step `A,B`. Chosen over

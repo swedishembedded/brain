@@ -4,7 +4,7 @@
 //! Import a diffusers `ControlNetModel` checkpoint, with **two-way** coverage
 //! validation.
 //!
-//! The remap loop itself is **`unet::import::remap_manifest`** — a ControlNet
+//! The remap loop itself is **`sdxlunet::import::remap_manifest`** - a ControlNet
 //! checkpoint is a UNet-family checkpoint carrying the same three fused leaves
 //! (`attn1`'s q/k/v, `attn2`'s k/v, the GEGLU `ff.net.0.proj`) under the same
 //! module names, and a second copy here would be a second place those fusions
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::config::ControlNetConfig;
 
 /// Host tensors by brain-side name: `(shape, row-major f32 data)`.
-pub type Tensors = unet::import::Tensors;
+pub type Tensors = sdxlunet::import::Tensors;
 
 /// Read `<dir>/diffusion_pytorch_model*.safetensors` (or the exact file when
 /// `path` names one) and remap it onto `cfg`'s manifest.
@@ -52,5 +52,5 @@ pub fn remap(
     raw: HashMap<String, (Vec<usize>, Vec<f32>)>,
     cfg: &ControlNetConfig,
 ) -> Result<Tensors, String> {
-    unet::import::remap_manifest("controlnet", raw, &cfg.tensor_manifest())
+    sdxlunet::import::remap_manifest("controlnet", raw, &cfg.tensor_manifest())
 }

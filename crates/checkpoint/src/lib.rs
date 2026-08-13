@@ -116,7 +116,7 @@ impl TensorSource for HashMap<String, Vec<f32>> {
 }
 
 /// The shape-carrying eager map several model crates use for a small,
-/// wholly-materialized checkpoint (`zimage::block::Tensors`, `vae`'s import
+/// wholly-materialized checkpoint (`s3dit::block::Tensors`, `vae`'s import
 /// map) — the same role as `HashMap<String, Vec<f32>>` above, plus a shape
 /// alongside each tensor's data. Defined here, not in each of those crates,
 /// because the orphan rule blocks a foreign crate from implementing a

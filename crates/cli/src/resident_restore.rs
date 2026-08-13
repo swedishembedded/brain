@@ -14,7 +14,7 @@
 //!
 //! `activate` imports once and the [`Instance`] owns the built graph, so
 //! dropping it frees the device memory. The schemas and the work come from
-//! `restore::caps` / `vqgan::caps`; this file holds no second copy of the
+//! `codeformer::caps` / `vqgan::caps`; this file holds no second copy of the
 //! `[0,1] <-> [-1,1]` conversion or the code packing.
 //!
 //! # Batching: deliberately serial, and here is why
@@ -56,36 +56,36 @@ impl RestoreResident {
     /// `crate::resident_facenet::FacenetResident::new`'s rationale.
     pub fn new(path: impl Into<String>) -> Option<RestoreResident> {
         let path = path.into();
-        std::path::Path::new(&restore::caps::checkpoint_path(&path)).exists().then_some(RestoreResident { path })
+        std::path::Path::new(&codeformer::caps::checkpoint_path(&path)).exists().then_some(RestoreResident { path })
     }
 }
 
 impl ResidentModel for RestoreResident {
     fn manifest(&self) -> Manifest {
-        restore::caps::manifest()
+        codeformer::caps::manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         // The graph is fixed at 512² and `w` is a buffer write, so every request
         // shares one build — which is exactly what makes a `w` sweep cheap.
-        InstanceKey::new(restore::caps::MODEL, "512")
+        InstanceKey::new(codeformer::caps::MODEL, "512")
     }
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // `codeformer.pth` is ~377 MB of fp32 params, all uploaded; the 512²
         // generator's activations dominate the rest.
-        let file = std::fs::metadata(restore::caps::checkpoint_path(&self.path)).map(|m| m.len()).unwrap_or(0);
+        let file = std::fs::metadata(codeformer::caps::checkpoint_path(&self.path)).map(|m| m.len()).unwrap_or(0);
         MemCost::new(file.saturating_mul(12) / 10 + (3u64 << 30), 0)
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&restore::caps::SERVING_PIPELINES))?;
-        Ok(Box::new(RestoreInstance { session: restore::caps::Session::new(restore::caps::load(&self.path, gpu)?) }))
+        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&codeformer::caps::SERVING_PIPELINES))?;
+        Ok(Box::new(RestoreInstance { session: codeformer::caps::Session::new(codeformer::caps::load(&self.path, gpu)?) }))
     }
 }
 
 struct RestoreInstance {
-    session: restore::caps::Session,
+    session: codeformer::caps::Session,
 }
 
 impl Instance for RestoreInstance {

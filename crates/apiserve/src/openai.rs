@@ -702,7 +702,7 @@ struct ImageRequest {
     seed: i64,
     stream: bool,
     /// Non-standard, like `seed`: `"int8"` (default) or `"fp32"` — see
-    /// `zimage::caps`'s `precision` param (`Opts::hifi`). `None` when the
+    /// `s3dit::caps`'s `precision` param (`Opts::hifi`). `None` when the
     /// caller omitted it, so the resident model's own default applies
     /// unchanged rather than this endpoint silently pinning one.
     precision: Option<String>,

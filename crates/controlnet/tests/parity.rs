@@ -177,7 +177,7 @@ fn run_parity(rel: &str) {
     let mut r = Report { rows: Vec::new(), failures: Vec::new() };
 
     // ---- host conditioning first: it is byte-for-byte the UNet's, so a
-    // failure here is a `model::hostmath` / `unet::hostemb` failure and
+    // failure here is a `model::hostmath` / `sdxlunet::hostemb` failure and
     // explains every stage below it.
     let te = model::hostmath::timestep_embedding(
         timestep,
@@ -187,7 +187,7 @@ fn run_parity(rel: &str) {
         10_000.0,
     );
     r.check("time_proj", &te, gold.need("time_proj"));
-    let add = unet::hostemb::added_cond(
+    let add = sdxlunet::hostemb::added_cond(
         &pooled,
         &time_ids,
         bb.addition_time_embed_dim,

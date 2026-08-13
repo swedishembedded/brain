@@ -311,13 +311,13 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
     }
 }
 
-/// Build a `zimage::pipeline::Paths` from a compound manifest's roles --
+/// Build a `s3dit::pipeline::Paths` from a compound manifest's roles --
 /// reads the SAME role names `brain_modelstore::recipe::ZimageRecipe::ROLES`
 /// writes, from a `brain.manifest.json` this crate's `supply::convert`
 /// (`"zimage"` arm) produced.
-fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<zimage::pipeline::Paths, String> {
+fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<s3dit::pipeline::Paths, String> {
     let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
-    Ok(zimage::pipeline::Paths { dit: get("dit")?, vae: get("vae")?, qwen: get("text_encoder")?, tokenizer: get("tokenizer")? })
+    Ok(s3dit::pipeline::Paths { dit: get("dit")?, vae: get("vae")?, qwen: get("text_encoder")?, tokenizer: get("tokenizer")? })
 }
 
 #[cfg(test)]

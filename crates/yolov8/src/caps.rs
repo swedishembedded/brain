@@ -9,7 +9,7 @@
 //! ([`Yolo::load`] + [`Yolo::detect`], letterbox → forward → DFL decode → NMS).
 //! One-shot: no `Progress` stream — the detections are the single artifact. The
 //! manifest is static (no weights); the model loads lazily on the first run and
-//! stays resident across calls (keyed by weights path), mirroring `zimage::caps`.
+//! stays resident across calls (keyed by weights path), mirroring `s3dit::caps`.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

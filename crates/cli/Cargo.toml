@@ -53,8 +53,8 @@ brain-zipdepth.workspace = true
 brain-sam2.workspace = true
 brain-facenet.workspace = true
 brain-vqgan.workspace = true
-brain-restore.workspace = true
-brain-upscale.workspace = true
+brain-codeformer.workspace = true
+brain-rrdbnet.workspace = true
 brain-mirror.workspace = true
 brain-splat.workspace = true
 brain-paramstore.workspace = true
@@ -71,7 +71,7 @@ brain-perf.workspace = true
 brain-checkpoint.workspace = true
 brain-capability.workspace = true
 clap.workspace = true
-brain-zimage.workspace = true
+brain-s3dit.workspace = true
 brain-flux2.workspace = true
 brain-events.workspace = true
 brain-runtime.workspace = true
@@ -86,8 +86,8 @@ brain-npu.workspace = true
 serde_json.workspace = true
 brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
-# DeepSeek-OCR: `deepseekocr::caps` (the manifest + the served `generate`) and
-# `deepseekocr::import` (the checkpoint layout `resident_deepseekocr` locates).
+# DeepSeek-OCR: `deepseek2ocr::caps` (the manifest + the served `generate`) and
+# `deepseek2ocr::import` (the checkpoint layout `resident_deepseekocr` locates).
 brain-deepseek2ocr.workspace = true
 brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)

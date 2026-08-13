@@ -20,7 +20,7 @@
 //! `[1, 2, 4]` imports cleanly, runs, and produces residuals that are wrong
 //! everywhere below level 1.
 
-use unet::config::UNetConfig;
+use sdxlunet::config::UNetConfig;
 
 use crate::adapter::InjectionPoint;
 
@@ -148,7 +148,7 @@ impl ControlNetConfig {
     ///
     /// Part 1 being a filter rather than a re-derivation is the point: the
     /// three host-side fusions (`attn1.qkv`, `attn2.kv`, the split GEGLU) are
-    /// the backbone's, described once, in `unet::config`.
+    /// the backbone's, described once, in `sdxlunet::config`.
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
         let mut v: Vec<(String, Vec<usize>)> = self
             .backbone
@@ -206,12 +206,12 @@ impl ControlNetConfig {
 
 /// The kind of a backbone level, re-exported so a caller configuring a
 /// ControlNet does not have to depend on `crates/unet` directly.
-pub use unet::config::BlockKind as LevelKind;
+pub use sdxlunet::config::BlockKind as LevelKind;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unet::config::BlockKind;
+    use sdxlunet::config::BlockKind;
 
     #[test]
     fn sdxl_conditioning_embedder_downsamples_by_the_vae_factor() {

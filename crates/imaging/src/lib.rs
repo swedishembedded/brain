@@ -42,12 +42,12 @@
 //! preprocesses differently from inference) as its own gated fix.
 //!
 //! Still owed, each blocked on a numeric gate rather than on effort:
-//! `zimage::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
+//! `s3dit::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
 //! metric to gate the ramp against - see [`mask`]),
-//! `zimage::caps::build_outpaint_canvas` (needs `pad2d.wgsl` to grow a
+//! `s3dit::caps::build_outpaint_canvas` (needs `pad2d.wgsl` to grow a
 //! `pad_mode` word before edge-replication can be expressed), and
-//! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `zimage::finetune` /
-//! `zimage::pipeline` (host per-pixel arithmetic, which this crate deliberately
+//! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `s3dit::finetune` /
+//! `s3dit::pipeline` (host per-pixel arithmetic, which this crate deliberately
 //! does not offer a host entry point for - see the table above).
 //!
 //! `data::{imageset, gen_detect}` cannot migrate at all: `imaging` -> `vision`

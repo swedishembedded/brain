@@ -310,7 +310,7 @@ impl<'g> Ctx<'g> {
     /// kernel, so this works for any batch/channel count.
     ///
     /// Zero is the only fill this kernel can produce. A grey letterbox border or
-    /// an edge-replicated outpaint canvas (`zimage::caps::build_outpaint_canvas`)
+    /// an edge-replicated outpaint canvas (`s3dit::caps::build_outpaint_canvas`)
     /// needs a `pad_value` / `pad_mode` word added to `pad2d.wgsl` — one uniform
     /// word, not a second kernel. Until then, do not pretend: pad with zero and
     /// composite the fill, or stay on the host.

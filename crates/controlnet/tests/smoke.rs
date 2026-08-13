@@ -171,10 +171,10 @@ fn the_seam_matches_a_real_unet_and_the_unet_consumes_it() {
     );
     // ONE device for both models: `controlnet::model::KERNELS` is a strict
     // prefix-extension of the UNet's set.
-    let un = unet::Unet::new_controlled(
+    let un = sdxlunet::Unet::new_controlled(
         gpu,
         cfg.backbone.clone(),
-        &unet::init::init_weights(&cfg.backbone, 5),
+        &sdxlunet::init::init_weights(&cfg.backbone, 5),
         h,
         w,
         t_enc,
@@ -236,10 +236,10 @@ fn a_down_residual_reaches_the_output_only_through_the_up_path() {
     let cfg = ControlNetConfig::tiny();
     let (h, w, t_enc) = (8u32, 8u32, 5u32);
     let b = &cfg.backbone;
-    let un = unet::Unet::new_controlled(
+    let un = sdxlunet::Unet::new_controlled(
         gpu_core::testgpu::dev(&KERNELS),
         b.clone(),
-        &unet::init::init_weights(b, 5),
+        &sdxlunet::init::init_weights(b, 5),
         h,
         w,
         t_enc,
@@ -299,10 +299,10 @@ fn a_mismatched_backbone_is_rejected_by_name() {
         5,
         false,
     );
-    let un = unet::Unet::new_controlled(
+    let un = sdxlunet::Unet::new_controlled(
         gpu,
         cfg.backbone.clone(),
-        &unet::init::init_weights(&cfg.backbone, 5),
+        &sdxlunet::init::init_weights(&cfg.backbone, 5),
         16,
         16,
         5,

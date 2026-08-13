@@ -1,0 +1,27 @@
+[package]
+name = "brain-codeformer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CodeFormer face restoration: the code-prediction transformer and controllable feature transformation over crates/vqgan, with the identity-fidelity dial w."
+
+[lib]
+name = "codeformer"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-vae.workspace = true
+brain-vqgan.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-facenet.workspace = true
+# `caps.rs` — the serving contract's capability surface.
+brain-capability.workspace = true
+# `train.rs` — trainable params + grads, and the workspace's test PRNG.
+brain-paramstore.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true

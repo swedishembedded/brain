@@ -33,7 +33,7 @@ brain-clip.workspace = true
 # `check_t5` (src/t5.rs) - the T5 encoder training graph.
 brain-t5encoder.workspace = true
 # `check_codeformer` (src/restore.rs) - CodeFormer's code-prediction Transformer.
-brain-restore.workspace = true
+brain-codeformer.workspace = true
 brain-data.workspace = true
 # `check_deepseekocr_relpos` (src/deepseekocr.rs) - the SAM rel-pos kernels have
 # no model crate yet, so this check registers their WGSL directly.

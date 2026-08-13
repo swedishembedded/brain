@@ -603,7 +603,7 @@ mod native_facade {
         /// side was missing, so every model that uploads host floats re-derived
         /// `data.iter().map(f32::to_bits).collect()` at its call site. Two of
         /// those had congealed into byte-identical private `fn write` helpers
-        /// (`unet::model`, `controlnet::model`) - AGENTS.md's "one
+        /// (`sdxlunet::model`, `controlnet::model`) - AGENTS.md's "one
         /// implementation" rule, and the reason this lives on the device facade
         /// that owns the `u32` half rather than in any model crate.
         pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {

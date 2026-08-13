@@ -7,7 +7,7 @@
 //! graph can be exercised at toy dims ([`ControlNetConfig::tiny`]) in ~a second
 //! — the porting playbook's §4 rung.
 //!
-//! One deliberate difference from `unet::init`: the **zero-convs are not
+//! One deliberate difference from `sdxlunet::init`: the **zero-convs are not
 //! zero here**. A freshly-initialised ControlNet has `controlnet_*` weights and
 //! biases at exactly 0 (that is what makes it a no-op at the start of
 //! training), and a smoke test built on that would pass with *any* down/mid

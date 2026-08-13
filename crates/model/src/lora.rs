@@ -4,7 +4,7 @@
 //! Shared host-side LoRA (low-rank adapter) machinery: the generic
 //! `W_eff = W + (α/r)·B·A` pair — init, delta apply (plain and
 //! strided-into-fused-tensor), the `dW → (dA, dB)` projection, and the Adam
-//! moments — hoisted from `flux2::lora` / `zimage::lora`, which carried it as
+//! moments - hoisted from `flux2::lora` / `s3dit::lora`, which carried it as
 //! two near-verbatim copies (the next `chw_to_hwc`, per the hoist-and-migrate
 //! policy). Each model keeps only what genuinely differs: its block walk
 //! (which linears are targeted, fused-tensor offsets), serialization naming,
@@ -146,7 +146,7 @@ pub fn proj_step(p: &mut Pair, dw: &[f32], scale: f32, lr: f32, t: u64) {
 }
 
 /// A cheap deterministic standard-normal (xorshift + Box–Muller half) — the
-/// init distribution `zimage::lora` seeds `A` with.
+/// init distribution `s3dit::lora` seeds `A` with.
 pub fn randn(s: &mut u64) -> f64 {
     let mut nx = || {
         *s ^= *s << 13;

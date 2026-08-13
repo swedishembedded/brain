@@ -17,7 +17,7 @@ use capability::{ActionResult, Invocation, Manifest, Media, Outcome, Progress};
 use residency::bridge::ProviderResident;
 use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel, Tier};
 use serde_json::{json, Value};
-use zimage::pipeline::{HotPipeline, Image, Paths};
+use s3dit::pipeline::{HotPipeline, Image, Paths};
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
@@ -344,16 +344,16 @@ impl Instance for YoloInstance {
 pub struct ZImageResident {
     id: String,
     paths: Paths,
-    provider: Arc<zimage::caps::ZImageProvider>,
+    provider: Arc<s3dit::caps::ZImageProvider>,
 }
 
 impl ZImageResident {
     pub fn from_env() -> Result<ZImageResident, String> {
-        Self::from_paths(zimage::caps::MODEL, Paths::from_env()?)
+        Self::from_paths(s3dit::caps::MODEL, Paths::from_env()?)
     }
 
     /// Built from an already-resolved [`Paths`] rather than the environment,
-    /// under `id` rather than the compiled-in `zimage::caps::MODEL` -- what
+    /// under `id` rather than the compiled-in `s3dit::caps::MODEL` -- what
     /// `crate::model_dir::resident_for_local` uses for a compound
     /// (multi-file) model found on disk or just auto-fetched, whose four
     /// component paths come from a `brain.manifest.json`'s roles and whose id
@@ -362,13 +362,13 @@ impl ZImageResident {
     /// constant instead would silently strand the request that triggered the
     /// fetch (it named the fetched ref, not `brain/z-image`).
     pub fn from_paths(id: impl Into<String>, paths: Paths) -> Result<ZImageResident, String> {
-        Ok(ZImageResident { id: id.into(), paths, provider: Arc::new(zimage::caps::ZImageProvider::load()?) })
+        Ok(ZImageResident { id: id.into(), paths, provider: Arc::new(s3dit::caps::ZImageProvider::load()?) })
     }
 }
 
 impl ResidentModel for ZImageResident {
     fn manifest(&self) -> Manifest {
-        let mut m = zimage::caps::manifest();
+        let mut m = s3dit::caps::manifest();
         m.model = self.id.clone();
         m
     }
@@ -389,7 +389,7 @@ impl ResidentModel for ZImageResident {
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         // int8 DiT (~13 GB); edit builds are transient and small-footprint
         // (they build + drop within the call). fp32 delegates to
-        // `zimage::pipeline::hifi_cost_bytes`, which picks between the
+        // `s3dit::pipeline::hifi_cost_bytes`, which picks between the
         // 2-GPU-shard estimate and the real windowed-engine estimate from
         // the SAME machine-shape decision (`gpu_core::devices::gpus().len()`)
         // `DitEngine::build_from_source` itself makes — the number budgeted
@@ -397,7 +397,7 @@ impl ResidentModel for ZImageResident {
         // expression, or this estimate silently outlives whichever engine
         // it was written for.
         if key.config.contains(":fp32:") {
-            let (vram, ram) = zimage::pipeline::hifi_cost_bytes(gpu_core::devices::gpus().len());
+            let (vram, ram) = s3dit::pipeline::hifi_cost_bytes(gpu_core::devices::gpus().len());
             return MemCost::new(vram, ram);
         }
         let vram = if key.config.starts_with("edit:") { 2u64 << 30 } else { 14u64 << 30 };
@@ -406,10 +406,10 @@ impl ResidentModel for ZImageResident {
 
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
         // The shape is `ZImageConfig::turbo()` because that IS the only config
-        // the pipeline ever builds (`zimage::pipeline` hardcodes turbo() at
+        // the pipeline ever builds (`s3dit::pipeline` hardcodes turbo() at
         // every build site); deriving it per-checkpoint belongs with the model
         // crate growing a second config, not here.
-        let cache_ram = || zimage::pipeline::int8_cache_bytes_estimate(&zimage::ZImageConfig::turbo());
+        let cache_ram = || s3dit::pipeline::int8_cache_bytes_estimate(&s3dit::ZImageConfig::turbo());
         match tier {
             // A cache-retaining build holds the multi-GB host `DitI8Cache`
             // ALONGSIDE the hot pipeline — charging Hot only the VRAM left
@@ -461,7 +461,7 @@ impl ResidentModel for ZImageResident {
 }
 
 /// Whether an `activate` for `(hifi, adapter)` should retain a
-/// [`zimage::DitI8Cache`] alongside the built pipeline — real, permanent
+/// [`s3dit::DitI8Cache`] alongside the built pipeline - real, permanent
 /// extra host RAM (see [`ZImageDitI8::build_from_source_with_cache`]'s
 /// doc), so opt-in only (`BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`) and only for
 /// the one shape a cache can even be built for: plain int8, no adapter.
@@ -478,8 +478,8 @@ fn retains_int8_cache(hifi: bool, adapter: Option<&str>) -> bool {
 /// what makes `demote`/`promote` real instead of the default `Err`.
 struct ZImageInstance {
     pipe: Option<HotPipeline>,
-    dit_cache: Option<zimage::DitI8Cache>,
-    provider: Arc<zimage::caps::ZImageProvider>,
+    dit_cache: Option<s3dit::DitI8Cache>,
+    provider: Arc<s3dit::caps::ZImageProvider>,
     paths: Paths,
     width: u32,
     height: u32,
@@ -528,7 +528,7 @@ impl Instance for ZImageInstance {
 
     /// The inverse: rebuild the pipeline from `dit_cache` on `device` — no
     /// DiT checkpoint read, no re-quantization (see
-    /// `zimage::ZImageDitI8::rebuild_from_cache`'s doc). Only reachable
+    /// `s3dit::ZImageDitI8::rebuild_from_cache`'s doc). Only reachable
     /// after a successful `demote`, so `dit_cache` is always `Some` here.
     fn promote(&mut self, device: Device) -> Result<(), String> {
         let cache = self.dit_cache.as_ref().ok_or("z-image: promote called on an instance with no retained cache")?;
@@ -580,7 +580,7 @@ mod tests {
                 return;
             }
         };
-        let key = InstanceKey::new(zimage::caps::MODEL, "256x256:int8:");
+        let key = InstanceKey::new(s3dit::caps::MODEL, "256x256:int8:");
 
         let t0 = std::time::Instant::now();
         let mut inst = model.activate(&key, Device::Gpu(0)).expect("activate");

@@ -620,7 +620,7 @@ impl<'a> Builder<'a> {
     ///
     /// **Not `storage_init`**, and both departures are load-bearing on a P40
     /// (`paramstore`'s upload loop, and
-    /// `zimage::BlockWeights::upload` both record the same two):
+    /// `s3dit::BlockWeights::upload` both record the same two):
     ///
     /// 1. `create_buffer_init`'s mapped-at-creation path forces weights into an
     ///    inefficient memory type on a card without resizable BAR, inflating a

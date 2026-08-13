@@ -4,7 +4,7 @@
 //! The SDXL ControlNet forward graph.
 //!
 //! **Composition, not new math, and not even a new block set.** The trainable
-//! copy of the backbone's early blocks IS `unet::model::Rec` — the same
+//! copy of the backbone's early blocks IS `sdxlunet::model::Rec` - the same
 //! conditioning chain, the same `down_path`, the same `mid_block`, recorded
 //! from the same tensor prefixes with the same tap names. This crate adds
 //! exactly three things:
@@ -53,30 +53,30 @@
 //! permutes running at 14–33 % of the roofline.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
-use unet::model::Rec;
+use sdxlunet::model::Rec;
 
 use crate::adapter::{ControlSource, InjectionPoint, Residuals};
 use crate::config::ControlNetConfig;
 use crate::import::Tensors;
 
-/// The one kernel slot appended to `unet::model::KERNELS`.
-const K_SCALE: usize = unet::model::KERNELS.len();
+/// The one kernel slot appended to `sdxlunet::model::KERNELS`.
+const K_SCALE: usize = sdxlunet::model::KERNELS.len();
 
-/// This model's kernel set: **`unet::model::KERNELS` verbatim** (so the
+/// This model's kernel set: **`sdxlunet::model::KERNELS` verbatim** (so the
 /// backbone's block recorder finds every slot at the index it resolved) plus
 /// `scale_chan` for `conditioning_scale`.
 ///
 /// Being a strict prefix-extension is what lets one `Gpu` drive both models:
-/// `unet::Unet::new` requires only that its own slots are a prefix, exactly as
-/// `unet::model::KERNELS` extends `vae::blocks::KERNELS`. A UNet + ControlNet
+/// `sdxlunet::Unet::new` requires only that its own slots are a prefix, exactly as
+/// `sdxlunet::model::KERNELS` extends `vae::blocks::KERNELS`. A UNet + ControlNet
 /// pipeline therefore builds ONE device with THIS set, not two devices.
-pub const KERNELS: [(&str, &str); unet::model::KERNELS.len() + 1] = kernel_set();
+pub const KERNELS: [(&str, &str); sdxlunet::model::KERNELS.len() + 1] = kernel_set();
 
-const fn kernel_set() -> [(&'static str, &'static str); unet::model::KERNELS.len() + 1] {
-    let mut k = [("", ""); unet::model::KERNELS.len() + 1];
+const fn kernel_set() -> [(&'static str, &'static str); sdxlunet::model::KERNELS.len() + 1] {
+    let mut k = [("", ""); sdxlunet::model::KERNELS.len() + 1];
     let mut i = 0;
-    while i < unet::model::KERNELS.len() {
-        k[i] = unet::model::KERNELS[i];
+    while i < sdxlunet::model::KERNELS.len() {
+        k[i] = sdxlunet::model::KERNELS[i];
         i += 1;
     }
     // `scale_chan` with `c = 1, inner = 1` is `out[i] = x[i] * scale[0]` — an
@@ -148,7 +148,7 @@ impl ControlNet {
         let scale_in = gpu.storage(1);
 
         // No up path, so the up term must not even be indexed.
-        let s_words = unet::model::attn_slab_words(&bb, h, w, false);
+        let s_words = sdxlunet::model::attn_slab_words(&bb, h, w, false);
         let mut r = Rec::new(&gpu, &bb, tensors, t_enc, s_words, taps);
 
         r.conditioning(&bb, &temb_in, &aug_in);
@@ -326,7 +326,7 @@ impl ControlNet {
         );
         assert_eq!(enc.len(), (self.t_enc * c.cross_attention_dim) as usize, "controlnet: encoder_hidden_states size");
         assert_eq!(pooled.len(), c.pooled_dim() as usize, "controlnet: pooled text size");
-        assert_eq!(time_ids.len(), unet::config::N_TIME_IDS as usize, "controlnet: time_ids count");
+        assert_eq!(time_ids.len(), sdxlunet::config::N_TIME_IDS as usize, "controlnet: time_ids count");
 
         let temb = model::hostmath::timestep_embedding(
             timestep,
@@ -335,10 +335,10 @@ impl ControlNet {
             c.freq_shift as f64,
             10_000.0,
         );
-        // The added-conditioning concat is `unet::hostemb::added_cond` — the
+        // The added-conditioning concat is `sdxlunet::hostemb::added_cond` - the
         // ControlNet's `text_time` chain is the UNet's, module for module.
         let aug =
-            unet::hostemb::added_cond(pooled, time_ids, c.addition_time_embed_dim, c.flip_sin_to_cos, c.freq_shift);
+            sdxlunet::hostemb::added_cond(pooled, time_ids, c.addition_time_embed_dim, c.flip_sin_to_cos, c.freq_shift);
         self.gpu.write_f32(&self.sample_in, sample);
         self.gpu.write_f32(&self.cond_in, cond);
         self.gpu.write_f32(&self.enc_in, enc);
@@ -384,13 +384,13 @@ fn scale_buf(r: &mut Rec<'_>, x: &DeviceBuffer, n: u32, scale: &DeviceBuffer) ->
 #[cfg(test)]
 mod tests {
     /// The appended slot holds the kernel its constant names, every inherited
-    /// slot is still the UNet's, and nothing is empty. `unet::model::KERNELS`
+    /// slot is still the UNet's, and nothing is empty. `sdxlunet::model::KERNELS`
     /// is copied by index here; an off-by-one would resolve `layernorm` to some
     /// other pipeline and only fail deep inside a recorded graph.
     #[test]
     fn the_kernel_set_extends_the_unets_exactly() {
-        assert_eq!(super::KERNELS.len(), unet::model::KERNELS.len() + 1);
-        for (i, k) in unet::model::KERNELS.iter().enumerate() {
+        assert_eq!(super::KERNELS.len(), sdxlunet::model::KERNELS.len() + 1);
+        for (i, k) in sdxlunet::model::KERNELS.iter().enumerate() {
             assert_eq!(super::KERNELS[i], *k, "slot {i}");
         }
         assert_eq!(super::KERNELS[super::K_SCALE].0, "scale_chan");

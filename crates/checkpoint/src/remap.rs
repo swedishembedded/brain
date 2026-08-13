@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A [`TensorSource`] that renames and reslices an inner source's tensors on
-//! the fly, so a name-mapping/qkv-splitting import (`zimage::import::import_comfy`,
+//! the fly, so a name-mapping/qkv-splitting import (`s3dit::import::import_comfy`,
 //! `qwen3::import::brain_init_from_hf`) can be expressed as a *plan* over a
 //! streaming source instead of an eager pass that materializes every renamed
 //! tensor into a second, owned `HashMap<String, Vec<f32>>`.
@@ -253,7 +253,7 @@ mod tests {
     }
 
     /// The real-world case this exists for: a fused `qkv.weight` split into
-    /// three destination tensors, matching `zimage::import::import_comfy`'s
+    /// three destination tensors, matching `s3dit::import::import_comfy`'s
     /// `to_q`/`to_k`/`to_v` split byte-for-byte but via a plan instead of an
     /// eager rewrite of the whole tensor map.
     #[test]

@@ -61,7 +61,7 @@ impl Normalization {
     pub const IMAGENET: Normalization =
         Normalization { mean: IMAGENET_MEAN, std: IMAGENET_STD };
     /// `(x - 0.5) / 0.5`, i.e. the `[0, 1] -> [-1, 1]` value-range map that
-    /// `flux2::finetune`, `zimage::finetune` and `qwen3vl::preprocess` each write
+    /// `flux2::finetune`, `s3dit::finetune` and `qwen3vl::preprocess` each write
     /// out by hand. It is a normalisation, not a separate concept.
     pub const HALF: Normalization = Normalization { mean: [0.5; 3], std: [0.5; 3] };
 

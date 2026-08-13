@@ -88,7 +88,7 @@ pub const DEFAULT_W: f32 = 0.5;
 
 /// The catalog id the `upscale` tail dispatches to.
 ///
-/// A string, not `upscale::caps::MODEL`, because this crate deliberately links
+/// A string, not `rrdbnet::caps::MODEL`, because this crate deliberately links
 /// NO model crate — the whole point of dispatching through
 /// [`capability::Registry`] is that the pipeline composes capabilities without
 /// depending on their implementations. `crates/cli` sees both and asserts they

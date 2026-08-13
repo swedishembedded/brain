@@ -10,7 +10,7 @@
 //! `Progress` emitted **per generated token** so a streaming harness gets a
 //! real TTFT/ITL timeline. The manifest is static (no weights needed); the
 //! model loads lazily on the first run and stays resident across calls (keyed
-//! by weights path + context capacity), mirroring `zimage::caps`.
+//! by weights path + context capacity), mirroring `s3dit::caps`.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

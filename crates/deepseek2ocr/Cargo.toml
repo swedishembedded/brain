@@ -37,7 +37,7 @@ brain-checkpoint.workspace = true
 # image-blob codec (`capability::blob`) every provider decodes through.
 brain-capability.workspace = true
 # `qwen3::chat::stream_delta` -- the UTF-8-safe streaming-delta rule, ONE
-# implementation shared with `qwenvl::caps` rather than a fourth copy of
+# implementation shared with `qwen3vl::caps` rather than a fourth copy of
 # "strip a trailing replacement char, emit the suffix". Nothing else of
 # `crates/qwen3` is used here.
 brain-qwen3.workspace = true

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Captioned-image folder dataset (LoRA/finetune training): a folder of images
-//! each paired with a text prompt. Hoisted from `zimage::dataset` so every
+//! each paired with a text prompt. Hoisted from `s3dit::dataset` so every
 //! image-conditioned trainer (Z-Image, FLUX.2, …) shares the ONE loader;
-//! `zimage::dataset` re-exports this module unchanged.
+//! `s3dit::dataset` re-exports this module unchanged.
 //!
 //! Prompts come from a caption file in the folder. Two formats, in priority order:
 //!  1. **`captions.yaml`** (primary — easy to hand-edit): a flat mapping of

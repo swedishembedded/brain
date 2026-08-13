@@ -47,7 +47,7 @@ default-members = [
     "crates/diffusion",
     "crates/vae",
     "crates/dit",
-    "crates/zimage",
+    "crates/s3dit",
     "crates/flux2",
     "crates/forecast",
     "crates/fcbench",
@@ -84,9 +84,9 @@ default-members = [
     "crates/deepseek2ocr",
     "crates/t5encoder",
     "crates/flux1",
-    "crates/restore",
-    "crates/upscale",
-    "crates/unet",
+    "crates/codeformer",
+    "crates/rrdbnet",
+    "crates/sdxlunet",
     "crates/controlnet",
     "crates/pulid",
     "crates/instantid",
@@ -151,7 +151,7 @@ brain-autoencoder = { path = "crates/autoencoder" }
 brain-diffusion = { path = "crates/diffusion" }
 brain-vae = { path = "crates/vae" }
 brain-dit = { path = "crates/dit" }
-brain-zimage = { path = "crates/zimage" }
+brain-s3dit = { path = "crates/s3dit" }
 brain-flux2 = { path = "crates/flux2" }
 brain-mimi = { path = "crates/mimi" }
 brain-ecapatdnn = { path = "crates/ecapatdnn" }
@@ -190,9 +190,9 @@ brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
 brain-t5encoder = { path = "crates/t5encoder" }
 brain-flux1 = { path = "crates/flux1" }
-brain-restore = { path = "crates/restore" }
-brain-upscale = { path = "crates/upscale" }
-brain-unet = { path = "crates/unet" }
+brain-codeformer = { path = "crates/codeformer" }
+brain-rrdbnet = { path = "crates/rrdbnet" }
+brain-sdxlunet = { path = "crates/sdxlunet" }
 brain-controlnet = { path = "crates/controlnet" }
 brain-pulid = { path = "crates/pulid" }
 brain-instantid = { path = "crates/instantid" }

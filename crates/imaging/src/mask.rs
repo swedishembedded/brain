@@ -37,13 +37,13 @@
 //!   `binary_erosion(border_value=0)` would erode it. Neither is wrong; they are
 //!   different conventions, and this is the one you get.
 //! * [`feather`]: `conv2d_gd` zero-pads, so the ramp darkens towards the border.
-//!   `zimage::pipeline::feather_mask` clamps at the border (replicate) instead.
+//!   `s3dit::pipeline::feather_mask` clamps at the border (replicate) instead.
 //!   **Those are different functions** — migrating that call site here changes
 //!   the inpaint boundary ramp. It needs a `pad_mode` word on the conv, or the
 //!   caller must accept the change deliberately.
 //! * [`downsample`]: `avgpool2d` implements torch's *adaptive* rule, which
 //!   reduces to a plain box pool bit-for-bit when the ratio divides exactly.
-//!   That strictly generalises `zimage::pipeline::downsample_mask`, whose
+//!   That strictly generalises `s3dit::pipeline::downsample_mask`, whose
 //!   integer `w/lw` silently drops the remainder and is only correct for exact
 //!   ratios (survey §6.9). Migrating that call site is safe and fixes a latent
 //!   bug; the VAE-8x sizes it uses today divide exactly, so the numbers do not

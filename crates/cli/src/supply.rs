@@ -74,7 +74,7 @@ fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The zimage recipe: no tensor rewrite is needed (`zimage::import::
+/// The zimage recipe: no tensor rewrite is needed (`s3dit::import::
 /// import_comfy` already remaps names in memory at load time), so "finish"
 /// is just writing the `brain.manifest.json` `Store::local` reads back --
 /// naming the SAME four role paths `ZimageRecipe::artifacts` just downloaded,

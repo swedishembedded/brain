@@ -162,8 +162,8 @@ macro_rules! resident {
 pub fn models() -> Vec<ModelEntry> {
     vec![
         ModelEntry {
-            manifest: zimage::caps::manifest,
-            provider: || zimage::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
+            manifest: s3dit::caps::manifest,
+            provider: || s3dit::caps::ZImageProvider::load().map(|p| Arc::new(p) as Arc<dyn Provider>),
             resident: None, // ZImageResident::from_env is Result-shaped; see resident.rs
         },
         ModelEntry {
@@ -240,17 +240,17 @@ pub fn models() -> Vec<ModelEntry> {
             resident: resident!(crate::resident_restore::VqganResident::from_env),
         },
         ModelEntry {
-            manifest: restore::caps::manifest,
+            manifest: codeformer::caps::manifest,
             provider: from_env!(
-                restore::caps::RestoreProvider::from_env,
+                codeformer::caps::RestoreProvider::from_env,
                 "set BRAIN_RESTORE_WEIGHTS to an existing codeformer.pth (or its directory)"
             ),
             resident: resident!(crate::resident_restore::RestoreResident::from_env),
         },
         ModelEntry {
-            manifest: upscale::caps::manifest,
+            manifest: rrdbnet::caps::manifest,
             provider: from_env!(
-                upscale::caps::UpscaleProvider::from_env,
+                rrdbnet::caps::UpscaleProvider::from_env,
                 "set BRAIN_ESRGAN_WEIGHTS to an existing RealESRGAN_x4plus.pth"
             ),
             resident: resident!(crate::resident_upscale::UpscaleResident::from_env),
@@ -462,8 +462,8 @@ mod tests {
         for stage in [imgpipe::SEGMENT_MODEL, imgpipe::RESTORE_MODEL, imgpipe::UPSCALE_MODEL] {
             assert!(ids.contains(stage), "imgpipe dispatches to '{stage}', which is not a catalog model");
         }
-        assert_eq!(imgpipe::UPSCALE_MODEL, upscale::caps::MODEL);
-        assert_eq!(imgpipe::RESTORE_MODEL, restore::caps::MODEL);
+        assert_eq!(imgpipe::UPSCALE_MODEL, rrdbnet::caps::MODEL);
+        assert_eq!(imgpipe::RESTORE_MODEL, codeformer::caps::MODEL);
         assert_eq!(imgpipe::SEGMENT_MODEL, sam2::caps::MODEL);
     }
 

@@ -348,7 +348,7 @@ pub fn run_serve(args: &[String]) {
 
     // Expose the generic capability providers over the event API (manifest_request
     // / action_request) — the same actions `brain do` runs, now network-reachable.
-    ctrl.register_provider(std::sync::Arc::new(zimage::caps::ZImageProvider::load().expect("z-image provider")));
+    ctrl.register_provider(std::sync::Arc::new(s3dit::caps::ZImageProvider::load().expect("z-image provider")));
     ctrl.register_provider(std::sync::Arc::new(lfm2::caps::LfmProvider::new()));
 
     let stdin = std::io::stdin();

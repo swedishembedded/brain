@@ -1706,7 +1706,7 @@ impl Qwen {
 
     /// Arm the per-key pad mask (`tokens[content_len..]` excluded as keys)
     /// for the next forward(s) - public so a SPLIT encoder (two `Qwen`
-    /// shards run back to back, e.g. `zimage::pipeline::Encoder::Split`) can
+    /// shards run back to back, e.g. `s3dit::pipeline::Encoder::Split`) can
     /// arm both halves around its manual `run_forward` sequence. Pair with
     /// [`Self::disarm_kmask`].
     pub fn arm_pad_kmask(&self, tokens: &[u32], content_len: usize) {

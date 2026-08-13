@@ -16,7 +16,7 @@
 //! leaving the DiT its own card. The encode then runs on-GPU (~1-2 s) instead of
 //! ~38 s on the CPU — the point of a hot, resident pipeline.
 //!
-//! Same recipe as the DiT's `zimage::int8`: weights quantized once at build;
+//! Same recipe as the DiT's `s3dit::int8`: weights quantized once at build;
 //! activations quantized on-device each forward with a dynamic per-token scale
 //! (`max_abs_row` → `quant_pack`), then the DP4A GEMM (`matmul_i8`, ~4× the fp32
 //! rate on Pascal) dequantizes with `sx·sw`. Norms/RoPE/attention stay f32 (not

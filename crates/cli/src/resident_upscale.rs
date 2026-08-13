@@ -10,7 +10,7 @@
 //! **The instance key carries the input size**, because the graph is recorded
 //! for one `(h, w)`: two different image sizes are two different builds, and
 //! pretending otherwise would silently hand the second one a graph shaped for
-//! the first. `upscale::caps::Session` also caches its most recent build
+//! the first. `rrdbnet::caps::Session` also caches its most recent build
 //! internally, so a run of same-sized images does not rebuild even within one
 //! instance — the key exists so the SCHEDULER's memory accounting is right, not
 //! to force a rebuild.
@@ -58,7 +58,7 @@ fn request_size(inv: &Invocation) -> (u32, u32) {
 
 impl ResidentModel for UpscaleResident {
     fn manifest(&self) -> Manifest {
-        upscale::caps::manifest()
+        rrdbnet::caps::manifest()
     }
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
@@ -68,12 +68,12 @@ impl ResidentModel for UpscaleResident {
         // the pictures are.
         let tile = inv.get_i64("tile").unwrap_or(0).max(0) as u32;
         let key = if tile > 0 {
-            let side = tile + 2 * upscale::caps::TILE_HALO;
+            let side = tile + 2 * rrdbnet::caps::TILE_HALO;
             format!("tile{side}")
         } else {
             format!("{w}x{h}")
         };
-        InstanceKey::new(upscale::caps::MODEL, key)
+        InstanceKey::new(rrdbnet::caps::MODEL, key)
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -95,19 +95,19 @@ impl ResidentModel for UpscaleResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&upscale::KERNELS))?;
-        Ok(Box::new(UpscaleInstance { session: upscale::caps::load(&self.path, gpu)? }))
+        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&rrdbnet::KERNELS))?;
+        Ok(Box::new(UpscaleInstance { session: rrdbnet::caps::load(&self.path, gpu)? }))
     }
 }
 
 struct UpscaleInstance {
-    session: upscale::caps::Session,
+    session: rrdbnet::caps::Session,
 }
 
 impl Instance for UpscaleInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "upscale" => upscale::caps::run_upscale(&self.session, inv),
+            "upscale" => rrdbnet::caps::run_upscale(&self.session, inv),
             other => Err(format!("upscale: unknown action '{other}'")),
         }
     }

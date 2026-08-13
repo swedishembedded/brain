@@ -1279,7 +1279,7 @@ fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
         exec,
-        zimage::caps::MODEL,
+        s3dit::caps::MODEL,
         "text2image",
         info,
         build,
@@ -1300,7 +1300,7 @@ fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     let build = Box::new(|_req: &perf::target::PerfRequest| {
         capability::Invocation::new().blob("image", synth_image_blob(256, 256))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, upscale::caps::MODEL, "upscale", "image", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, rrdbnet::caps::MODEL, "upscale", "image", info, build)))
 }
 
 /// `restore:<weights>` — CodeFormer blind face restoration behind the
@@ -1315,7 +1315,7 @@ fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     let build = Box::new(|_req: &perf::target::PerfRequest| {
         capability::Invocation::new().blob("image", synth_image_blob(512, 512)).set("w", serde_json::json!(0.5))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, restore::caps::MODEL, "restore_face", "image", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, codeformer::caps::MODEL, "restore_face", "image", info, build)))
 }
 
 /// `vqgan:<weights>` — the CodeFormer VQ autoencoder's encode half behind the

@@ -105,7 +105,7 @@ impl ArtifactRecipe for YoloRecipe {
 /// `Tongyi-MAI/Z-Image`, confirmed live via the HF API): `model_index.json`
 /// at the root (no root `config.json`, so [`TransformersRecipe`] would
 /// otherwise reject it) plus four role subdirectories. No tensor rewrite is
-/// needed to serve one -- `zimage::import::import_comfy` already remaps
+/// needed to serve one -- `s3dit::import::import_comfy` already remaps
 /// tensor names in memory at load time -- so this recipe's "artifacts" are
 /// just "download every file under the four role dirs plus the pipeline
 /// manifest"; the finish step (`crates/cli/src/supply.rs::convert`, `"zimage"`
@@ -116,7 +116,7 @@ pub struct ZimageRecipe;
 impl ZimageRecipe {
     /// Role name -> the path (relative to the repo dir) that role's loader
     /// accepts: a directory for the two sharded components
-    /// (`zimage::pipeline::read_component_tensors` is dir-or-file-aware), a
+    /// (`s3dit::pipeline::read_component_tensors` is dir-or-file-aware), a
     /// specific file for the two that are always exactly one file upstream.
     /// The single source of truth for z-image's role layout -- this recipe's
     /// [`matches_listing`](ArtifactRecipe::matches_listing) probes it, and
