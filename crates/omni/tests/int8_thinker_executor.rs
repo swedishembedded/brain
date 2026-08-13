@@ -19,49 +19,31 @@
 //! **New interaction, previously untested**: every prior `residency::Executor`
 //! test in this tree (`crates/residency/src/executor.rs`'s own unit tests) uses
 //! fake, non-GPU `ResidentModel`s, so `Executor`'s background dispatcher/lane
-//! THREADS (spawned by `Executor::start`, never joined — by design, since a
-//! server-lifetime `Executor` is never meant to be torn down mid-process) had
-//! never before been combined with REAL Vulkan device handles inside a
-//! short-lived test process. Found here: dropping the last `Executor` handle at
-//! the end of a test starts an async teardown cascade (dispatcher's `rx.recv()`
-//! returns `Err` → its `lanes` map drops → each lane's `rx.recv()` returns `Err`
-//! → the lane thread exits, dropping whatever `Gpu`/`Instance` it was holding)
-//! that is NOT complete by the time the test function returns — if the test
-//! binary then proceeds straight to process exit, it can race a lane thread
-//! still mid-teardown on a live Vulkan device, observed as a SIGSEGV in this
-//! sandbox specifically in `a_second_generate_reuses_the_hot_sharded_instance`
-//! (the one test whose Executor had done the MOST real GPU work — two full
-//! `generate()` round trips — before teardown, widening the race window).
-//! `settle_teardown` below is the pragmatic mitigation (drop + a bounded
-//! sleep); a real fix would give `Executor` an explicit, joinable shutdown
-//! (stop accepting new work, signal every lane, and join their thread
-//! handles, currently discarded at `Executor::start`) — out of scope for
-//! this change, a known follow-up. This is a DIFFERENT symptom of the same
-//! general class of real Vulkan device lifecycle edge case investigated
-//! previously in this sandbox (concurrent device creation hangs), not a
-//! correctness bug in the scheduling logic under test — every assertion
-//! above the `drop` already passed by the time this runs.
+//! THREADS (spawned by `Executor::start`) had never before been combined with
+//! REAL Vulkan device handles inside a short-lived test process. Found here:
+//! dropping the last `Executor` handle at the end of a test starts an async
+//! teardown cascade (dispatcher's `rx.recv()` returns `Err` → its `lanes` map
+//! drops → each lane's `rx.recv()` returns `Err` → the lane thread exits,
+//! dropping whatever `Gpu`/`Instance` it was holding) that used to NOT be
+//! complete by the time the test function returned - the test binary would
+//! proceed straight to process exit and could race a lane thread still
+//! mid-teardown on a live Vulkan device, observed as an exit-time SIGSEGV in
+//! this sandbox specifically in `a_second_generate_reuses_the_hot_sharded_
+//! instance` (the one test whose Executor had done the MOST real GPU work -
+//! two full `generate()` round trips - before teardown, widening the race
+//! window). This is a DIFFERENT symptom of the same general class of real
+//! Vulkan device lifecycle edge case investigated previously in this sandbox
+//! (concurrent device creation hangs), not a correctness bug in the
+//! scheduling logic under test - every assertion above the `drop` always
+//! passed even on a run that went on to crash.
 //!
-//! **Confirmed, and confirmed to remain intermittent**: `settle_teardown`
-//! reduces but does NOT eliminate the exit-time SIGSEGV — measured over
-//! repeated `--exact` reruns of a single test, in ISOLATION, later in a long
-//! session that had already built and torn down many real Vulkan devices
-//! across earlier `cargo test` invocations: some runs exit cleanly, some
-//! SIGSEGV, with no code change between them (confirmed by immediate
-//! back-to-back reruns of the identical binary/test). Running the WHOLE FILE
-//! together (even `--test-threads=1`, sequential) is worse odds, but
-//! isolation is not a guarantee either — this is genuinely cumulative,
-//! session-wide Vulkan/ICD teardown state, not a per-test-file property.
-//! **In every observed run, every test's own assertions report `ok` BEFORE
-//! any crash** — this is exit-time driver churn, never a wrong answer, and
-//! `nvidia-smi` shows both cards healthy (idle, 0 MiB used) throughout. If
-//! `cargo test` reports this crate's tests as failed, check whether the
-//! failure is this SIGSEGV specifically (vs. an actual `FAILED` test line)
-//! before concluding anything regressed; rerunning the same test often
-//! passes. Root-causing this fully would need driver-level tracing tools not
-//! available in this sandbox — the same wall `vulkan-concurrent-device-
-//! creation-hang.md`'s own residual investigation hit for a related (not
-//! identical) symptom.
+//! **Fixed**: `Executor::shutdown` (`crates/residency/src/executor.rs`) now
+//! keeps every spawned thread's `JoinHandle` (dispatcher + one per lane,
+//! previously discarded at `start`) and `join`s all of them - a real,
+//! deterministic guarantee that every lane's Vulkan device teardown has
+//! actually finished, not the fixed-sleep heuristic (`settle_teardown`) this
+//! file used before. Call it (not `drop`) at the end of every test in this
+//! file.
 
 use omni::int8_thinker_resident::{Int8ThinkerResident, MODEL};
 use residency::budget::Budgets;
@@ -82,15 +64,6 @@ fn skip() -> bool {
         return true;
     }
     false
-}
-
-/// Drop the last `Executor` handle and give its background dispatcher/lane
-/// threads time to actually finish tearing down their real Vulkan device
-/// handles before the test function returns — see this module's own doc for
-/// why. Call at the end of every test in this file.
-fn settle_teardown(exec: Executor) {
-    drop(exec);
-    std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
 fn generate_inv(prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> capability::Invocation {
@@ -149,7 +122,7 @@ fn generate_through_the_executor_matches_a_direct_activate_multi_reference() {
     assert_eq!(executor_out.len(), max_new_tokens as usize, "expected exactly max_new_tokens generated (eos_ids is deliberately empty)");
     assert_eq!(executor_out, reference_out, "Executor-dispatched generate() diverged from a direct activate_multi reference: executor={executor_out:?} reference={reference_out:?}");
 
-    settle_teardown(exec);
+    exec.shutdown();
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -194,7 +167,7 @@ fn executor_reports_real_per_device_bytes_for_the_multi_resident() {
         assert!(b.used > 0, "{d:?}.used should reflect the resident shard, got 0");
     }
 
-    settle_teardown(exec);
+    exec.shutdown();
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -260,7 +233,7 @@ fn a_single_device_model_still_schedules_beside_a_resident_multi_device_thinker(
     let r2 = exec.run_blocking("trivial", "run", capability::Invocation::new(), |_| {});
     assert!(r2.is_ok(), "single-device model failed to run beside a resident multi-device Thinker: {r2:?}");
 
-    settle_teardown(exec);
+    exec.shutdown();
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -290,6 +263,6 @@ fn a_second_generate_reuses_the_hot_sharded_instance() {
     assert_eq!(exec.stats().builds, 1, "second generate must reuse the hot instance, not rebuild/re-stream");
     assert_eq!(exec.stats().resident_multi, 1);
 
-    settle_teardown(exec);
+    exec.shutdown();
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -182,6 +182,14 @@ enum Msg {
     InFlight(Sender<Vec<InFlightJob>>),
     /// Demote a resident multi-device instance — see [`Executor::evict_multi`].
     EvictMulti { key: InstanceKey, reply: Sender<bool> },
+    /// Stop the dispatcher - see [`Executor::shutdown`]'s doc for why this
+    /// has to be an explicit message rather than relying on `rx.recv()`
+    /// erroring once every sender is dropped: every lane thread holds its
+    /// OWN clone of this same channel's sender (`done`, used to send
+    /// [`Msg::Done`]/[`Msg::DoneMulti`] back), so dropping only the
+    /// [`Executor`] handle's clone never actually closes the channel - the
+    /// dispatcher and every lane would wait on each other forever.
+    Shutdown,
 }
 
 /// What a [`RunReq`] runs — either a single-device claim (today's shape,
@@ -212,6 +220,10 @@ pub struct Executor {
     tx: Sender<Msg>,
     manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
     stats: Arc<Mutex<Stats>>,
+    /// The dispatcher thread's handle plus one per lane, spawned in
+    /// [`Self::start`] - see [`Self::shutdown`]'s doc for why a real,
+    /// deterministic join (not a fixed sleep) needs these kept.
+    join_handles: Arc<Mutex<Option<Vec<std::thread::JoinHandle<()>>>>>,
 }
 
 impl Executor {
@@ -230,23 +242,75 @@ impl Executor {
 
         // One lane per device; each returns completions to the dispatcher via `tx`.
         let mut lanes: HashMap<Device, Sender<RunReq>> = HashMap::new();
+        let mut join_handles = Vec::new();
         for d in devices {
             let (ltx, lrx) = channel::<RunReq>();
             let done = tx.clone();
-            std::thread::Builder::new()
+            let h = std::thread::Builder::new()
                 .name(format!("brain-lane-{d:?}"))
                 .spawn(move || lane_loop(lrx, done))
                 .expect("spawn lane");
+            join_handles.push(h);
             lanes.insert(d, ltx);
         }
 
         let disp_stats = stats.clone();
-        std::thread::Builder::new()
+        let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
             .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats))
             .expect("spawn dispatcher");
+        join_handles.push(h);
 
-        Executor { tx, manifests: Arc::new(RwLock::new(Arc::new(manifests))), stats }
+        Executor {
+            tx,
+            manifests: Arc::new(RwLock::new(Arc::new(manifests))),
+            stats,
+            join_handles: Arc::new(Mutex::new(Some(join_handles))),
+        }
+    }
+
+    /// Block until every background thread this `Executor` started (the
+    /// dispatcher plus one lane per device) has ACTUALLY finished - not a
+    /// fixed sleep, a real join.
+    ///
+    /// This exists because plain `drop(exec)` starts a teardown cascade
+    /// (dispatch thread exits -> its `lanes` map drops -> each lane's
+    /// channel closes -> lane thread notices and exits, dropping whatever
+    /// `Gpu`/`Instance` it was holding) with no built-in signal for "now
+    /// it's actually done" - a caller that tears down a process (or a test)
+    /// right after `drop` without waiting can race a lane thread still
+    /// mid-teardown on a live Vulkan device, observed as an exit-time
+    /// SIGSEGV in this sandbox (`crates/omni/tests/int8_thinker_executor.rs`,
+    /// whose own doc has the full investigation).
+    ///
+    /// Sends [`Msg::Shutdown`] rather than just dropping `self` and waiting
+    /// for the dispatcher's `rx.recv()` to error: every lane thread holds
+    /// its OWN clone of that same `Msg` channel's sender (`done`, used to
+    /// report [`Msg::Done`]/[`Msg::DoneMulti`] back), so dropping only this
+    /// `Executor` handle's clone never actually closes the channel on its
+    /// own - the dispatcher would then wait forever for a `rx.recv()` error
+    /// that can only happen after the lanes exit, and the lanes only exit
+    /// once the dispatcher drops their channel on its way out, a real
+    /// deadlock (caught in this sandbox: the first version of this method
+    /// tried the drop-and-wait shape and hung the whole test binary).
+    /// `Shutdown` breaks that cycle by telling the dispatcher to exit
+    /// directly, which is what then drops `lanes` and unblocks every lane.
+    ///
+    /// `join`ing every spawned thread's handle afterward is a real guarantee
+    /// (Rust: every one of that thread's stack-local `Drop` calls has
+    /// already run by the time `JoinHandle::join` returns), not a heuristic
+    /// delay - replaces `int8_thinker_executor.rs`'s old `settle_teardown`
+    /// sleep. Idempotent: a second call (or a call on a clone after another
+    /// clone already shut down) finds the handles already taken and returns
+    /// immediately.
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(Msg::Shutdown);
+        let taken = self.join_handles.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(handles) = taken {
+            for h in handles {
+                let _ = h.join();
+            }
+        }
     }
 
     pub fn submit(&self, job: Job) {
@@ -424,6 +488,16 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         let mut msgs = vec![first];
         while let Ok(msg) = rx.try_recv() {
             msgs.push(msg);
+        }
+        // Shutdown takes priority over anything else drained alongside it -
+        // an executor going away has nothing left to usefully do with a
+        // trailing Submit/Report/etc. `return` here drops `lanes` (closing
+        // every lane's channel, which is what makes each lane thread notice
+        // and exit) - see `Msg::Shutdown`'s doc for why this explicit
+        // message, not relying on `rx.recv()` erroring, is the only thing
+        // that reliably unblocks this.
+        if msgs.iter().any(|m| matches!(m, Msg::Shutdown)) {
+            return;
         }
         // EACH message gets its OWN catch_unwind, for the SAME reason
         // `lane_loop` isolates each lane: a dropped `InstanceHandle` (e.g.
@@ -612,6 +686,12 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             }
             let _ = reply.send(ok);
         }
+        // Unreachable: dispatch_loop checks the drained batch for this
+        // variant and returns before ever calling on_msg - see
+        // Msg::Shutdown's doc. Still matched (not `_`) so a future Msg
+        // variant added here fails exhaustiveness instead of silently
+        // falling through the wildcard.
+        Msg::Shutdown => {}
     }
 }
 
@@ -1082,6 +1162,44 @@ mod tests {
         let elapsed = submit_wait(&exec, &["a", "b"]);
         assert!(elapsed < Duration::from_millis(210), "expected parallel (<210ms), took {elapsed:?}");
         assert!(exec.stats().max_parallel >= 2, "expected 2 lanes at once, stats={:?}", exec.stats());
+    }
+
+    /// Regression test for a real deadlock in an earlier version of
+    /// `Executor::shutdown`: it dropped the `Executor` handle's own `tx`
+    /// clone and then waited for the dispatcher's `rx.recv()` to error out
+    /// -- but every lane thread ALSO holds a clone of that same sender
+    /// (`done`, used to report `Msg::Done` back), so dropping only the
+    /// `Executor`'s clone never actually closed the channel: the dispatcher
+    /// waited forever for lanes to exit, and the lanes waited forever for
+    /// the dispatcher to drop their own channel first. `shutdown` now sends
+    /// an explicit `Msg::Shutdown` instead of relying on that never-firing
+    /// auto-close -- this test would hang (and eventually be killed by the
+    /// test harness's timeout) if that regressed.
+    #[test]
+    fn shutdown_returns_promptly_and_is_idempotent() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Slow { name: "a".into(), vram: GB, ms: 10, builds })];
+        let exec = Executor::start(models, budgets, Policy::default());
+        submit_wait(&exec, &["a"]); // real GPU-lane work before teardown, like a_second_generate_reuses_the_hot_sharded_instance
+
+        let t = Instant::now();
+        exec.shutdown();
+        assert!(t.elapsed() < Duration::from_secs(5), "shutdown took {:?} -- looks hung, not just slow", t.elapsed());
+
+        // Idempotent: a second call must not hang or panic either (the
+        // handles are already taken, so this is a no-op join of nothing).
+        exec.shutdown();
+
+        // The dispatcher is genuinely gone: a submit after shutdown must not
+        // panic (Executor::submit already swallows a closed-channel send
+        // error), and must never receive a reply.
+        let (tx, rx) = channel();
+        exec.submit(Job::new("a", "run", Invocation::new()).reply(move |r| {
+            let _ = tx.send(r);
+        }));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "a submit after shutdown must never be scheduled");
     }
 
     #[test]
