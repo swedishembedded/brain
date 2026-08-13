@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# moe-rs — web (WebGPU/wasm) developer workflow.
+# brain - web (WebGPU/wasm) developer workflow.
 #
 # The browser demo is a Next.js (App Router) app in web/app that runs the PID
 # control transformer (compiled to wasm/WebGPU) and compares it against the

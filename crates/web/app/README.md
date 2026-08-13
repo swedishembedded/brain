@@ -32,7 +32,7 @@ npx serve out    # or any static file server
 
 > The whole app is a static client-side bundle (`output: 'export'` in
 > `next.config.mjs`) — there is no server runtime, exactly like the old Vite
-> build. `make web/dev` / `make web/build` (in `moe-rs/`) wrap these and also
+> build. `make web/dev` / `make web/build` (in `crates/web/`) wrap these and also
 > rebuild the wasm.
 
 ## How it works

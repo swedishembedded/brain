@@ -225,7 +225,7 @@ impl VkContext {
     unsafe fn new_inner(select: Option<&PhysicalDeviceSelect<'_>>) -> Result<VkContext, String> {
         let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
 
-        let app_name = CString::new("moe-rs-vk").unwrap();
+        let app_name = CString::new("brain-vk").unwrap();
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(0)

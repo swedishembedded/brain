@@ -970,7 +970,7 @@ impl WgpuBackend {
         }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("moe-rs-device"),
+                label: Some("brain-device"),
                 required_features,
                 required_limits: limits,
                 // MemoryUsage (tight suballocation) not Performance (large blocks):
