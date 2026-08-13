@@ -155,14 +155,26 @@ def quant(name, st):
 
 DTYPE_VALUES = ("f32", "n/a", "f32|bf16", "f32|bf16|f16")
 
-# The 3 kernels B4/B5 actually wired through `kernels::template::dtype_variant`
-# - a fact about what `crates/kernels/src/template.rs` is wired for, not
+# The kernels actually wired through `kernels::template::dtype_variant` - a
+# fact about what `crates/kernels/src/template.rs` is wired for, not
 # something derivable from the kernel's own source text, so it is recorded by
-# hand instead of guessed at.
+# hand instead of guessed at. B4/B5: the 3 matmul-family kernels. B8: the
+# highest-value remaining weight-consuming inference kernels - embedding
+# table gather (`embed`/`embed_tile`), the sparse-MoE expert linear
+# (`moe_linear_gated`), and the 3 forward conv kernels whose own `w_idx` was
+# already a bare identifier (`conv2d`/`conv1d`/`conv_bias` - see B8's ledger
+# entry for why the register-tiled/grouped-dilated/workgroup-staged conv
+# siblings were deliberately left `f32` instead).
 DTYPE_TEMPLATIZED = {
     "matmul": "f32|bf16|f16",
     "matmul_gemv": "f32|bf16|f16",
     "matmul_reg3": "f32|bf16|f16",
+    "embed": "f32|bf16|f16",
+    "embed_tile": "f32|bf16|f16",
+    "moe_linear_gated": "f32|bf16|f16",
+    "conv2d": "f32|bf16|f16",
+    "conv1d": "f32|bf16|f16",
+    "conv_bias": "f32|bf16|f16",
 }
 
 _STORAGE_DECL = re.compile(r"var<storage,\s*(?:read|read_write)>\s+(\w+)\s*:\s*array<(\w+)>")

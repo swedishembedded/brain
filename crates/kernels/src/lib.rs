@@ -7,8 +7,11 @@
 //! 7, this header used to claim <=4), so the same text runs on old desktop
 //! GPUs and on WebGPU in the browser. A small, explicitly-declared,
 //! machine-checked subset additionally supports bf16/f16 WEIGHT STORAGE
-//! tiers on top of that baseline - `matmul`/`matmul_gemv`/`matmul_reg3` today,
-//! rewritten inline per variant by `kernels::template::dtype_variant` -
+//! tiers on top of that baseline - the matmul family (`matmul`/`matmul_gemv`/
+//! `matmul_reg3`, B4/B5), embedding-table gather (`embed`/`embed_tile`), the
+//! sparse-MoE expert linear (`moe_linear_gated`), and 3 forward conv kernels
+//! (`conv2d`/`conv1d`/`conv_bias`, B8) today, rewritten inline per variant by
+//! `kernels::template::dtype_variant` -
 //! every kernel's position stated in its own header's `@dtype` field and
 //! cross-checked by `scripts/build/gen-kernel-table.py` - storage means
 //! the packed bytes can be held and decoded to f32 with plain integer WGSL,

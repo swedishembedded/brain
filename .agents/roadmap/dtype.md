@@ -2618,3 +2618,302 @@ low-risk one-file-plus-one-line follow-up for whoever owns the next qwen3
 cleanup pass, rather than expanding this phase's already-large, already
 highest-risk diff.
 
+## B8 - full float-kernel dtype coverage
+
+**Goal.** B6's inventory said roughly ~14 weight-consuming inference kernels
+are genuinely worth a bf16/f16 storage tier - 3 done (B4/B5's matmul family).
+This phase's job was to find the REMAINING genuine candidates among the
+~136 kernels B6 seeded as a plain `@dtype f32` default, and make a
+DELIBERATE, DOCUMENTED decision for everything else - not to templatize
+kernels just to inflate a count.
+
+**Honest result: 6 new candidates found, not ~11.** Final counts across all
+400 kernels: **9 now `f32|bf16|f16`** (the 3 from B4/B5 plus this phase's 6),
+**6 `n/a`** (unchanged), **385 plain `f32`** (unchanged in count, though which
+385 shifted as the 6 moved out). The B6 inventory's "~11 remain" estimate
+assumed most of the conv family (`conv2d`/`conv1d`/`conv_bias` AND their
+register-tiled/grouped-dilated/workgroup-staged siblings) would qualify;
+having read every one of them, only the 3 PLAIN forward conv kernels turned
+out to be both genuine weight-storage candidates AND mechanically simple
+(their `w_idx`/`wi` index was already, or trivially, a bare identifier). The
+rest were surveyed and deliberately left `f32` for concrete, kernel-specific
+reasons below, not silence.
+
+### Newly templatized (6 kernels, all forward-only, all real per-model weight
+### tensors)
+
+- **`embed`/`embed_tile`** (`crates/kernels/wgsl/embed{,_tile}.wgsl`) - the
+  embedding table gather. `emb[token[t]*d_model+c]`/`emb[(tok-v0)*d_model+c]`
+  were compound indices, hoisted to `let wi = ...;` (the exact same pattern
+  B4 used for `matmul.wgsl`'s `wi`), then templated on the `emb` binding. An
+  embedding table is `[vocab, d_model]` - genuinely large (a modern
+  tokenizer's vocab easily puts this at hundreds of MB to low GB at fp32),
+  and, unlike a norm's gain vector, there is no numerical-stability argument
+  against narrowing it (a gather has no reduction to accumulate error into -
+  the ONLY error is the stored value's own rounding, proven directly by
+  `embed_moe_roundtrip.rs`'s per-element tolerance derivation below).
+  `embed_tile` (the vocab-chunked sibling used when a table exceeds one
+  binding's size limit) got the identical hoist/dtype treatment - same
+  reasoning, same kernel shape, minus the `v0`/`v_count` tiling window.
+- **`moe_linear_gated`** (`crates/kernels/wgsl/moe_linear_gated.wgsl`) - the
+  sparse-MoE expert linear (`matmul.wgsl`'s math plus a per-row gate
+  early-exit). `w[w_base+i]` hoisted to `let wi = w_base+i;`, identical to
+  `matmul.wgsl`'s own B4 hoist (this kernel literally shares that source's
+  math). A 256-expert MoE (`crates/qwen35moe`) holds 256 independent
+  gate/up/down projections - a bf16/f16 storage tier here is a real,
+  multiplicative VRAM win, not a per-layer rounding error. `moe_linear_gated_i8.wgsl`/
+  `_q4.wgsl` (the pre-existing packed-int8/int4 siblings) were NOT touched -
+  their storage bindings are already `array<u32>` (no `array<f32>` weight
+  binding to templatize), so `@dtype n/a` would be the mechanically correct
+  value for them too, but they were seeded `f32` by B6 before this phase's
+  `dtype_default` rule existed in its current form and are out of THIS
+  phase's scope to relabel (a pure `@dtype` bookkeeping fix, not a real
+  templatization gap - flagged here, not fixed, since it touches files
+  outside anything this phase's diff needs to change).
+- **`conv2d`/`conv1d`/`conv_bias`** (`crates/kernels/wgsl/{conv2d,conv1d,conv_bias}.wgsl`)
+  - the plain (non-tiled, non-grouped, non-register-blocked) forward
+  convolutions. All three ALREADY named their weight index via a bare-identifier
+  `let w_idx = ...;` before this phase touched them (unlike the matmul
+  family, no hoist was needed - only the `@dtype`/`@tpl` header changed).
+  Confirmed by inspection that `backend-cpu`'s exact-kernel-name AVX2 fast-path
+  routing (`FastIdx`, matched by the literal string `"conv2d"`/`"conv1d"`/
+  `"conv_bias"`) does NOT match a `#w=bf16`/`#w=f16`-suffixed variant name, so
+  - exactly like B4/B5 found for `matmul`/`matmul_gemv` - the templated
+  variant falls through to the generic CPU JIT and runs for real (proven by
+  `conv_dtype_roundtrip.rs`'s CPU-backend tests actually exercising the
+  templated kernel, not silently substituting the native fast path).
+
+### Deliberately left `f32` - the category-level reasoning
+
+- **The rest of the conv family** (`conv2d_gd`/`conv2d_gd_reg`/`conv2d_tiled`/
+  `conv_bias_reg`/`conv_act`/`conv_act_reg`/`conv_act_tiled`/`convtr1d`/
+  `convtr2d`/`dwconv3d`/`causal_conv1d_step`/`conv_epilogue`/
+  `convex_upsample*`) - surveyed individually, not skipped by pattern-match:
+  - `conv2d_gd`/`conv2d_gd_reg` (grouped+dilated) and `conv2d_gd_reg`/
+    `conv_bias_reg` (register-tiled, 8-way-unrolled) all read their weight
+    binding through EIGHT separate compound expressions per tap (`w[co0*kg+wbase]`,
+    `w[(co0+1u)*kg+wbase]`, ... `w[(co0+7u)*kg+wbase]`) - mechanically
+    templatable in principle (each would need its own `let wiN = ...;` hoist,
+    which `dtype_variant` already supports per-occurrence), but eight hoists
+    across intricate register-blocked math is a meaningfully higher-risk edit
+    than the single-hoist kernels above, and the task brief explicitly warned
+    against inflating scope. Left `f32`, flagged as a good target for a
+    dedicated follow-up phase specifically scoped to register-tiled conv.
+  - `conv2d_tiled` (workgroup-staged: cooperatively loads `w[co*kg+i]` into a
+    `var<workgroup>` array behind ONE barrier, then computes from that staged
+    copy) needs only a single hoist and would very likely templatize cleanly
+    (single-barrier kernels compile on the CPU JIT per B4/B5's own finding),
+    but was deprioritized alongside its `_reg` siblings above for the same
+    "keep this phase's diff reviewable" reason - not a mechanical
+    impossibility, a scope call.
+  - `conv_act`/`conv_act_reg`/`conv_act_tiled` (conv fused with a
+    BN-affine+activation epilogue) have the exact same weight-binding shape
+    as `conv_bias`/`conv_bias_reg`/`conv2d_tiled` respectively - same
+    reasoning as those siblings applies verbatim.
+  - `convtr1d`/`convtr2d` (transposed conv, forward) - real weight bindings,
+    plausible future candidates, simply not reached given this phase's time
+    budget after the higher-confidence targets above; no disqualifying
+    reason found, just not gotten to.
+  - `dwconv3d`/`causal_conv1d_step` (depthwise) - weight tensor is a small
+    per-channel kernel (`[C, 1, K, K, K]`/`[C,1,K]`), not a large shared
+    matrix - VRAM-irrelevant in the same sense a norm's gain vector is, so
+    left `f32` on the same reasoning as norms, not merely "not gotten to".
+  - `conv_epilogue` - its only float storage binding (`sb`) is a per-channel
+    affine (BN-eval collapsed scale+bias), the exact norm-shaped "tiny
+    gain/bias vector" case, not a weight matrix.
+  - `convex_upsample*` - no weight binding at all (mask + depth map, both
+    activations).
+- **Norms** (~31 kernels: `rmsnorm`/`layernorm`/`groupnorm`/`batchnorm` and
+  their `_rows`/backward variants) - deliberately `f32`. Their gain/bias
+  vector is kilobytes (`[d_model]` or `[C]`), VRAM-irrelevant regardless of
+  dtype, and - the load-bearing reason, not just "small" - narrowing it would
+  put a bf16/f16-rounded value INSIDE a reduction (`rmsnorm`'s own `ss = ss +
+  v*v` sum, `layernorm`'s mean/variance), which is a correctness regression
+  for numerical stability, not an optimization. `crates/kernels/tests/
+  dtype_restraint.rs`'s `rmsnorm_gain_vector_is_mechanically_eligible_despite_staying_f32`
+  proves this was a considered judgment call, not a limitation of the
+  templater: `rmsnorm.wgsl`'s `weight[c]` binding IS mechanically eligible
+  (bare-identifier indexed) - `dtype_variant("rmsnorm", ..., "weight",
+  DType::BF16)` genuinely succeeds - so leaving it `f32` required a human
+  decision, and this test pins that the decision stays visible.
+- **Attention/GQA/paged-KV** (~62 kernels) - deliberately `f32`, deferred to
+  B9 (explicitly out of THIS phase's scope per the task brief: these operate
+  on Q/K/V/KV-cache ACTIVATIONS, not a static per-model weight, so a bf16/f16
+  tier here is a real but SEPARATE, LATER win). `dtype_restraint.rs`'s
+  `paged_decode_scores_q_binding_is_not_mechanically_eligible_either` records
+  the CATEGORY reason (activation, not weight - a distinction `dtype_variant`
+  cannot see on its own) and, as it happens, ALSO the mechanical one
+  (`paged_decode_scores.wgsl`'s `q[qb+d]` is a genuine compound index, so
+  even the templater's own hard precondition refuses it today, independent
+  of the category judgment).
+- **The remaining ~254 elementwise/activation/resize/index/sort/gdn/splat/
+  backward kernels** - deliberately `f32`. Either no float storage binding
+  worth a tier at all (most), or backward-pass-only (training stays `f32` per
+  this program's explicit scoping - B10 is the separate, opt-in bf16 TRAINING
+  tier). Not individually re-surveyed beyond the conv/norm/attention families
+  above and the 6 pure-`n/a` kernels B6 already found - the task brief's own
+  framing ("very likely the RIGHT answer... do not templatize things that
+  don't need it just to inflate a count") is exactly the position this phase
+  takes for this bucket.
+
+### `template.rs`/`Op`/`Ops` extensions
+
+**No `kernels::template::dtype_variant` changes were needed.** Every new
+kernel had exactly ONE templatable binding (`emb` or `w`), so the existing
+single-binding signature (`dtype_variant(name, src, binding, dt)`) covered
+all 6 - the "two separate weight bindings in one kernel" extension case the
+task brief anticipated never came up. `crates/wgsl-cpu/tests/compile_all.rs`
+needed NO changes either - confirmed it is genuinely `@dtype`-header-driven
+(`declared_dtype_tiers`/`tpl_binding` parse every kernel's own header, not a
+hardcoded 3-kernel list), so it picked up all 6 new kernels' cross-product
+automatically the first time it was run after the WGSL edits, without a
+single line of test-harness change.
+
+**`model::ops::{Ops, Weight}` extended with two new façade methods**,
+`Ops::embed` and `Ops::moe_linear` (`crates/model/src/ops.rs`) - no new
+`select::Op` variant was needed, and none was forced in: neither operation
+has a `KernelVariant` CHOICE to make (`embed.wgsl`/`moe_linear_gated.wgsl`
+are each exactly one fixed dispatch shape per dtype - no GEMV/RegisterTiled
+alternative the way GEMM has), so both methods bypass `select::candidates`
+entirely and bind directly via a small private `bind_embed`/`bind_moe_linear`
+match, mirroring `Ops::bind`'s shape without pretending there is a selection
+policy where none exists. `Weight` itself needed NO new variant - an
+embedding table and an MoE expert's weight are both just `[n, k]` row-major
+matrices, the exact shape `Weight::upload`/`Weight::{F32,BF16,F16}` already
+builds for a GEMM weight; only the OPERATION differs (gather vs. gated
+reduction), which is exactly why `embed`/`moe_linear` needed their own
+dispatch methods rather than reusing `Ops::matmul`. `I8`/`Q4` embedding
+tables and quantized MoE dispatch through this façade are explicitly NOT
+implemented - `bind_embed`/`bind_moe_linear` panic loudly naming the real
+reason (no `embed_i8`/`embed_q4` kernel exists at all; `moe_linear_gated_i8.wgsl`/
+`_q4.wgsl` already have their own, DIFFERENT buffer/param shape and are
+dispatched by `model::moe::MoeIds8` directly, not through `Ops`) rather than
+silently demoting or mis-dispatching. `kname`/`REQUIRED_KERNELS` grew by 6
+names (`embed`, `embed#emb=bf16`, `embed#emb=f16`, `moe_linear_gated`,
+`moe_linear_gated#w=bf16`, `moe_linear_gated#w=f16`), pinned against
+`dtype_variant`'s real output by the new `b8_kname_literals_match_dtype_variant_naming`
+test, same pattern as B4/B5's own `bf16_and_f16_kname_literals_match_dtype_variant_naming`.
+
+**No model crate's call sites were migrated** - `qwen3`/`qwen35moe`/`deepseekv2`/
+`omni`'s own hand-dispatched `EMBED`/`moe_linear_gated` kernel indices and
+`model::moe`'s shared `MoeIds`-based dispatch are all untouched, matching B3's
+own "build the façade, prove it, migrate later" precedent (B7 is what
+eventually migrated `qwen3`'s matmul call sites; no analogous migration phase
+for embed/moe_linear exists yet).
+
+**`Ops::REQUIRED_KERNELS` grew, so every OTHER test file that builds its own
+kernel list for `Ops::new` needed the same mechanical, additive fix** B4/B5's
+own ledgers already describe for their own tier additions -
+`bf16_roundtrip.rs`, `f16_roundtrip.rs`, and `ops_facade_parity.rs` each
+gained the same 6 `dtype_variant(..)` registrations (confirmed RED first: ran
+`cargo test -p brain-model` before this fix and got `Ops::new: kernel 'embed'
+is not registered on this Gpu` from both `bf16_roundtrip.rs` tests that build
+an `Ops`; fixed, re-ran, GREEN).
+
+### TDD
+
+**`crates/model/tests/embed_moe_roundtrip.rs`** (new) - `bf16_roundtrip.rs`/
+`f16_roundtrip.rs`'s exact dual-backend structure, for `Ops::embed`,
+`embed_tile` (dispatched directly - see below), and `Ops::moe_linear`, each
+across BOTH the `BF16` and `F16` tier in one file (unlike the matmul family's
+separate bf16/f16 files - these three kernels have no `RegisterTiled` tier to
+also sweep, so one combined file covers the full cross-product without the
+matmul family's per-tier file split). `embed` gets its own derived
+tolerance (a pure gather has no reduction - the only error is the stored
+value's own rounding, `<= 2^-(bits+1) * |value|`); `moe_linear_gated` reuses
+the matmul family's exact per-output-element sum-of-absolute-terms bound (a
+gated row's live arithmetic IS `matmul.wgsl`'s, byte for byte - the gate only
+ever ZEROES a row, never changes a live row's math). `embed_tile` is
+dispatched directly against the raw kernel index (not through `Ops`, which
+only wraps the single-binding `embed.wgsl` - see `model::ops`'s own module
+doc for why `embed_tile`'s extra `v0`/`v_count` tiling parameters make it a
+poor fit for that one generic method) - proves the SECOND templated kernel
+shares the `emb` decode correctly, the same "prove the templated KERNEL
+itself round-trips" standard applied without forcing an `Ops` wrapper it
+does not need.
+
+**`crates/model/tests/conv_dtype_roundtrip.rs`** (new) - `conv2d`/`conv1d`/
+`conv_bias`, dispatched directly (no `Ops::conv2d` facade exists - see the
+`Ops` extension section above for why one was not built). Host references
+mirror the kernel's OWN zero-pad boundary loop tap-for-tap (not a closed-form
+output-size formula), so the derived tolerance can never silently omit a tap
+the kernel did include or vice versa; same `2^-(bits+1) * sum(|x*w|)`
+per-output-element bound as the matmul family.
+
+**RED confirmed for real** (not asserted from memory): before `model::ops`
+gained `Ops::embed`/`Ops::moe_linear`, `embed_moe_roundtrip.rs` failed to
+COMPILE (`E0599: no method named 'embed' found for struct 'Ops'` /
+`no method named 'moe_linear'`) - exactly the "write the test first, watch it
+fail to compile" gate the task brief asked for. Implemented the two methods,
+re-ran: GREEN.
+
+### Verification (all scoped, no `make release`/`make build`/`make test`/
+### bare workspace build)
+
+- `cargo test -p brain-kernels`: **22/22** (19 pre-existing unit tests
+  unchanged + 3 new `dtype_restraint.rs` integration tests, all green).
+- `cargo test -p brain-model`: **every test binary green** - 130 lib tests
+  (128 pre-existing/B7 + `b8_kname_literals_match_dtype_variant_naming` +
+  `required_kernels_matches_kname_all` re-verified with the grown list), the
+  6 new `embed_moe_roundtrip.rs` tests, the 6 new `conv_dtype_roundtrip.rs`
+  tests, and every pre-existing integration suite unaffected - including
+  `bf16_roundtrip.rs`/`f16_roundtrip.rs`/`ops_facade_parity.rs` after their
+  mechanical kernel-list fix (RED->GREEN confirmed above), `matmul_q4_gemm.rs`
+  (untouched - it never calls `Ops::new`), and all `moe_*`/`router_*`/
+  `tensor_parallel`/`vit_*` suites.
+- `cargo test -p brain-wgsl-cpu --test compile_all`: **2/2**, the generalized
+  cross-product now exercising 18 dtype-variant compiles (2 tiers x 9
+  templatized kernels, up from B6's 6 = 2 tiers x 3) with zero test-harness
+  changes needed, confirmed genuinely `@dtype`-driven per the extensions
+  section above.
+- **Both CPU and real GPU confirmed for real, not skipped** (this sandbox's
+  Intel Arc iGPU via wgpu/Vulkan, `MOE_SKIP_GPU_TESTS` never set): every new
+  GPU test printed `running on a real wgpu device` and the real adapter name;
+  worst observed err/tol ratios across every new test: embed bf16 0.9705,
+  embed f16 0.8954 (gather - error dominated by rounding of near-zero
+  synthetic values, still comfortably `< 1.0`), moe_linear bf16 0.3611/f16
+  0.3254, conv2d bf16 0.3185/f16 0.2640, conv1d bf16 0.4013/f16 0.3060,
+  conv_bias bf16 0.3887/f16 0.2220 - all well inside the derived bound, CPU
+  and GPU numbers matching closely (as expected, both compute the same math).
+- `python3 scripts/build/kernelmeta.py`: **"kernelmeta @dtype validation: 400
+  kernel(s) scanned, 0 problems"**.
+- `python3 scripts/build/seed-kernel-meta.py --dry-run`: **"seeded 0,
+  dtype-added 0, already tagged 400 (dry run)"** - confirms the 6 hand-edited
+  `@dtype` lines are stable against the seeder (it only inserts a MISSING
+  field, never overwrites an existing one - verified by reading
+  `insert_dtype_field`'s own guard directly, not assumed).
+- `scripts/build/gen-kernel-table.py --check`: clean after regenerating
+  `docs/reference/kernels.md` (7 rows changed: the 6 new kernels' `dtype`
+  column plus the summary paragraph's templatized-kernel count, 3 -> 9;
+  diffed the regenerated file's ADDED lines for em dashes specifically, per
+  B6's own precedent that a table regen can silently reintroduce pre-existing
+  ones elsewhere in the file - zero found).
+- `cargo clippy -p brain-kernels -p brain-model -p brain-wgsl-cpu --lib
+  --tests --no-deps`: zero new warnings in any file this phase touched (one
+  `manual_is_multiple_of` in this phase's own `embed_moe_roundtrip.rs` draft
+  was fixed before committing, not left; the `doc_lazy_continuation` hits in
+  `ops.rs:15-16`/`template.rs:762-764`/`moe.rs` and the `manual_clamp` hits in
+  `router_gate_expert_cap.rs` are pre-existing, unmodified lines - the same
+  ones B3/B4/B5's own ledgers already flagged).
+- `grep -rP '\x{2014}'` on the actual staged diff (added lines only, across
+  every file this phase touched): **zero** em dashes.
+- Disk monitored throughout: `df -h .` stayed in the 293-301G-free range
+  across this phase's `cargo test`/`cargo clippy` runs against an
+  already-compiled crate graph; `target/debug/incremental` (927M) was cleared
+  once mid-phase per this task's own instruction, `target/debug` itself
+  stayed under 15G throughout - no `make release`/`make build`/`make test`/
+  bare workspace build was ever run.
+
+### What's left (follow-ups, not this phase's job)
+
+- Register-tiled/grouped-dilated/workgroup-staged conv (`conv2d_gd*`/
+  `conv_bias_reg`/`conv_act*`/`conv2d_tiled`) and transposed conv
+  (`convtr1d`/`convtr2d`) - real candidates, deliberately deferred (see
+  above), a good scope for a dedicated follow-up phase.
+- `moe_linear_gated_i8.wgsl`/`_q4.wgsl`'s `@dtype f32` is mechanically stale
+  (should be `n/a` - no `array<f32>` storage binding exists) - a pure
+  bookkeeping fix outside this phase's own diff, flagged not fixed.
+- B9 (KV-cache/attention storage tier) and B10 (opt-in bf16 TRAINING tier)
+  remain separate, later phases, exactly as this program has scoped them
+  since B6.
+

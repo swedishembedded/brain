@@ -8,7 +8,9 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   w -> bf16/f16 storage variant (kernels::template::dtype_variant, B8;
+//        `w_idx` was already a bare-identifier `let`, no hoist needed)
 //
 // 1D convolution forward (bias-free), NCL layout, with grouping + dilation.
 // The workhorse for the TTS audio stack (codec conv encoder/decoder, ECAPA

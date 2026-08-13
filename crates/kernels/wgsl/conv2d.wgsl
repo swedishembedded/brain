@@ -8,7 +8,9 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   w -> bf16/f16 storage variant (kernels::template::dtype_variant, B8;
+//        `w_idx` was already a bare-identifier `let`, no hoist needed)
 //
 // 2D convolution forward (bias-free), NCHW layout, square KxK kernel.
 //   x : [N, Cin,  H,  W]   row-major   idx = ((n*Cin + ci)*H + hi)*W + wi

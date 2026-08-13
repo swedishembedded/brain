@@ -8,7 +8,8 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   emb -> bf16/f16 storage variant (kernels::template::dtype_variant, B8)
 //
 // Embedding gather over a VOCAB TILE: x[t,c] = emb[token[t], c], but `emb` is
 // bound to a sub-range covering rows [v0, v0+v_count) of the full table, so a
@@ -41,5 +42,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let c = idx % p.d_model;
     let tok = tokens[t];
     if (tok < p.v0 || tok >= p.v0 + p.v_count) { return; }
-    x[idx] = emb[(tok - p.v0) * p.d_model + c];
+    // Hoisted to a bare identifier (B8) - same reason as embed.wgsl's `wi`.
+    let wi = (tok - p.v0) * p.d_model + c;
+    x[idx] = emb[wi];
 }

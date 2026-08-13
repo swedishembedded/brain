@@ -8,7 +8,8 @@
 // @gpu   yes
 // @npu   no
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   w -> bf16/f16 storage variant (kernels::template::dtype_variant, B8)
 //
 // Same contract as matmul.wgsl (`out = x @ W^T`) EXCEPT a row whose gate
 // weight for this expert is zero writes 0 and returns before the K-reduction,
@@ -64,7 +65,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let w_base = col * p.k;
     var acc = 0.0;
     for (var i: u32 = 0u; i < p.k; i = i + 1u) {
-        acc = acc + x[x_base + i] * w[w_base + i];
+        // Hoisted to a bare identifier (B8, same reason as matmul.wgsl's
+        // `wi`, B4).
+        let wi = w_base + i;
+        acc = acc + x[x_base + i] * w[wi];
     }
     out[idx] = acc;
 }

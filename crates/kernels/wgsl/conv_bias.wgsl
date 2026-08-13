@@ -8,7 +8,9 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   w -> bf16/f16 storage variant (kernels::template::dtype_variant, B8;
+//        `w_idx` was already a bare-identifier `let`, no hoist needed)
 //
 // Fused conv2d + per-output-channel bias. Identical convolution to conv2d.wgsl
 // (bias-free, NCHW, square KxK, generic stride & implicit zero-pad), then adds

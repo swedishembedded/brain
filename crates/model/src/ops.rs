@@ -123,6 +123,15 @@ mod kname {
     /// tier reuses - see [`MATMUL_REG3_BF16`]'s own doc comment for why a
     /// second physical file for a `RegisterTiled` tier is precedented.
     pub const MATMUL_REG3_F16: &str = "matmul_reg3#w=f16";
+
+    // --- B8: embed / moe_linear_gated storage tiers -------------------------
+    pub const EMBED: &str = "embed";
+    pub const EMBED_BF16: &str = "embed#emb=bf16";
+    pub const EMBED_F16: &str = "embed#emb=f16";
+    pub const MOE_LINEAR_GATED: &str = "moe_linear_gated";
+    pub const MOE_LINEAR_GATED_BF16: &str = "moe_linear_gated#w=bf16";
+    pub const MOE_LINEAR_GATED_F16: &str = "moe_linear_gated#w=f16";
+
     pub const ALL: &[&str] = &[
         MATMUL,
         MATMUL_GEMV,
@@ -139,6 +148,12 @@ mod kname {
         MATMUL_F16,
         MATMUL_GEMV_F16,
         MATMUL_REG3_F16,
+        EMBED,
+        EMBED_BF16,
+        EMBED_F16,
+        MOE_LINEAR_GATED,
+        MOE_LINEAR_GATED_BF16,
+        MOE_LINEAR_GATED_F16,
     ];
 }
 
@@ -484,6 +499,118 @@ impl Ops {
             }
         }
     }
+
+    /// `(dtype) -> embed kernel name`. Unlike [`Self::bind`], there is no
+    /// `KernelVariant` choice to make here - `embed.wgsl` has exactly one
+    /// dispatch shape per dtype (a plain gather, no GEMV/tiled alternative),
+    /// so this façade method bypasses `select::candidates` entirely and binds
+    /// directly. `I8`/`Q4` have no embed kernel at all (no quantized
+    /// embedding table exists in this tree) - a panic here means a caller
+    /// asked [`Weight::upload`] for a tier this method cannot serve, which
+    /// should never happen given `Weight::upload`'s own tier assertion.
+    fn bind_embed(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::F32 => kname::EMBED,
+            Dtype::BF16 => kname::EMBED_BF16,
+            Dtype::F16 => kname::EMBED_F16,
+            other => panic!(
+                "Ops::embed: no embed kernel for dtype {other:?} -- only F32/BF16/F16 embedding \
+                 tables are implemented (no embed_i8/embed_q4 kernel exists in this tree)"
+            ),
+        }
+    }
+
+    /// `x[t, c] = table[token[t], c]` for `seq_len` tokens - the same
+    /// contract every model's own hand-dispatched `EMBED` kernel index
+    /// already uses (e.g. `qwen3::model::Qwen`'s
+    /// `g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]],
+    /// &[d, 1], d)`), but `table` can be `Weight::{F32,BF16,F16}` - a bf16/f16
+    /// embedding table is a genuine VRAM win (`[vocab, d_model]` scales with
+    /// vocabulary size, easily hundreds of MB to low GB at fp32 for a modern
+    /// tokenizer). `table`'s own `n`/`k` are `(vocab_rows, d_model)` - the
+    /// SAME `[n, k]` row-major shape [`Weight::upload`] already builds for a
+    /// GEMM weight, since an embedding table IS just a `[vocab, d_model]`
+    /// matrix; only the OPERATION (gather, not a reduction) differs, which is
+    /// exactly why this needs its own method rather than reusing
+    /// [`Self::matmul`]. No model crate's call sites are migrated by this
+    /// method's addition - see this crate's `ops` module doc for why that is
+    /// deliberate (matching B3's own "build the façade, prove it, migrate
+    /// later" precedent).
+    pub fn embed(&self, s: &mut Vec<Step>, table: &Weight, tokens: &DeviceBuffer, seq_len: u32, out: &DeviceBuffer) {
+        let d_model = table.k();
+        // `bind_embed` already panics loudly for `I8`/`Q4` before the match
+        // below is ever reached, so those two arms there are unreachable by
+        // construction, not merely by convention.
+        let kind = self.idx[Self::bind_embed(table.dtype())];
+        let threads = seq_len * d_model;
+        match table {
+            Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => {
+                s.push(self.gpu.step(kind, &[tokens, w, out], &[d_model, seq_len], threads));
+            }
+            Weight::I8 { .. } | Weight::Q4 { .. } => {
+                unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
+            }
+        }
+    }
+
+    /// `(dtype) -> moe_linear_gated kernel name`, mirroring [`Self::bind_embed`]:
+    /// no `KernelVariant` choice (`moe_linear_gated.wgsl` is one fixed
+    /// one-thread-per-output-element dispatch shape per dtype - the
+    /// register-tiled alternative every OTHER GEMM variant offers cannot
+    /// safely early-exit per row under a workgroup barrier, see that kernel's
+    /// own header). `I8`/`Q4` route through `model::moe::MoeIds8`'s own
+    /// `moe_linear_gated_i8.wgsl`/`_q4.wgsl` directly - DIFFERENT buffer/param
+    /// shapes (packed activation + two scales, not a plain `[x, w, gate,
+    /// out]`), so this façade does not attempt to unify them here.
+    fn bind_moe_linear(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::F32 => kname::MOE_LINEAR_GATED,
+            Dtype::BF16 => kname::MOE_LINEAR_GATED_BF16,
+            Dtype::F16 => kname::MOE_LINEAR_GATED_F16,
+            other => panic!(
+                "Ops::moe_linear: {other:?} experts are dispatched via model::moe::MoeIds8/MoeIds4 \
+                 directly (moe_linear_gated_i8.wgsl/_q4.wgsl have a different buffer/param shape), \
+                 not through this method"
+            ),
+        }
+    }
+
+    /// `out[row, :] = 0` for a row not routed to this expert (`gate[row,
+    /// e_idx] <= 0`), else `out = x @ Wᵀ` - the same contract
+    /// `model::moe::expert_fwd`'s own `g.step(ids.linear_gated, &[x, w, gate,
+    /// out], &[m, k, n, e, e_idx], m * n)` dispatches by hand, but `w` can be
+    /// `Weight::{F32,BF16,F16}`. Sparse-MoE expert weights are one of this
+    /// program's genuinely large weight-storage candidates: a 256-expert MoE
+    /// (e.g. `crates/qwen35moe`) holds 256 independent gate/up/down
+    /// projections, so a bf16/f16 storage tier on the expert bank is a real,
+    /// multiplicative VRAM win, not a per-layer rounding error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_linear(
+        &self,
+        s: &mut Vec<Step>,
+        w: &Weight,
+        x: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        n_experts: u32,
+        e_idx: u32,
+        m: u32,
+        out: &DeviceBuffer,
+    ) {
+        let (n, k) = (w.n(), w.k());
+        // `bind_moe_linear` already panics loudly for `I8`/`Q4` before the
+        // match below is ever reached, so that arm there is unreachable by
+        // construction, not merely by convention.
+        let kind = self.idx[Self::bind_moe_linear(w.dtype())];
+        let threads = m * n;
+        match w {
+            Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } | Weight::F16 { w: wb, .. } => {
+                s.push(self.gpu.step(kind, &[x, wb, gate, out], &[m, k, n, n_experts, e_idx], threads));
+            }
+            Weight::I8 { .. } | Weight::Q4 { .. } => {
+                unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +638,22 @@ mod tests {
                 kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
             let f16_reg3 =
                 kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
+            let bf16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::BF16).unwrap();
+            let f16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
+            let bf16_moe = kernels::template::dtype_variant(
+                "moe_linear_gated",
+                kernels::MOE_LINEAR_GATED,
+                "w",
+                Dtype::BF16,
+            )
+            .unwrap();
+            let f16_moe = kernels::template::dtype_variant(
+                "moe_linear_gated",
+                kernels::MOE_LINEAR_GATED,
+                "w",
+                Dtype::F16,
+            )
+            .unwrap();
             vec![
                 ("matmul", kernels::MATMUL),
                 ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -527,6 +670,12 @@ mod tests {
                 f16_matmul,
                 f16_gemv,
                 f16_reg3,
+                ("embed", kernels::EMBED),
+                bf16_embed,
+                f16_embed,
+                ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
+                bf16_moe,
+                f16_moe,
             ]
         })
     }
@@ -568,6 +717,27 @@ mod tests {
         let (n, _) =
             kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
         assert_eq!(n, kname::MATMUL_REG3_F16);
+    }
+
+    /// The B8 kname literals (`embed`/`moe_linear_gated` storage tiers), same
+    /// contract as [`bf16_and_f16_kname_literals_match_dtype_variant_naming`]
+    /// above - pinned against the real kernel sources so `kname`'s plain
+    /// string literals can never silently drift from what `dtype_variant`
+    /// actually produces.
+    #[test]
+    fn b8_kname_literals_match_dtype_variant_naming() {
+        let (n, _) = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::BF16).unwrap();
+        assert_eq!(n, kname::EMBED_BF16);
+        let (n, _) = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
+        assert_eq!(n, kname::EMBED_F16);
+        let (n, _) =
+            kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16)
+                .unwrap();
+        assert_eq!(n, kname::MOE_LINEAR_GATED_BF16);
+        let (n, _) =
+            kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16)
+                .unwrap();
+        assert_eq!(n, kname::MOE_LINEAR_GATED_F16);
     }
 
     #[test]

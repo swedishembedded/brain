@@ -8,7 +8,8 @@
 // @gpu   yes
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16|f16
+// @tpl   emb -> bf16/f16 storage variant (kernels::template::dtype_variant, B8)
 //
 // Embedding gather: x[t, c] = emb[token[t], c].
 // One invocation per output element (seq_len * d_model).
@@ -33,5 +34,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (idx >= total) { return; }
     let t = idx / p.d_model;
     let c = idx % p.d_model;
-    x[idx] = emb[tokens[t] * p.d_model + c];
+    // Hoisted to a bare identifier (B8, same reason as matmul.wgsl's `wi`,
+    // B4): `dtype_variant`'s decode expansion reads the index multiple
+    // times, which would double-evaluate a compound expression like
+    // `tokens[t] * p.d_model + c` if it were inlined at the load site.
+    let wi = tokens[t] * p.d_model + c;
+    x[idx] = emb[wi];
 }

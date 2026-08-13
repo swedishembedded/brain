@@ -45,7 +45,7 @@ held and decoded to f32 with plain integer WGSL), not native COMPUTE in that for
 `f32` is the default (no float storage binding worth templatizing);
 `n/a` means literally none exists at all (6 kernels - every storage
 binding is already `array<u32>`, auto-verified); `f32|bf16`/`f32|bf16|f16` means the
-kernel is wired through `kernels::template::dtype_variant` (3
+kernel is wired through `kernels::template::dtype_variant` (9
 kernels today) - also auto-verified: a binding must be declared `array<f32>` and every
 load of it must already be bare-identifier-indexed.
 
@@ -146,10 +146,10 @@ load of it must already be bare-identifier-indexed.
 | [`col2im`](../../crates/kernels/wgsl/col2im.wgsl) | col2im as a GATHER - the input gradient of a conv, given the gradient of its im2col matrix | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`concat2`](../../crates/kernels/wgsl/concat2.wgsl) | Concatenate two NCHW tensors along the channel axis | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
 | [`concat_split`](../../crates/kernels/wgsl/concat_split.wgsl) | Concat backward / channel-slice copy | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
-| [`conv1d`](../../crates/kernels/wgsl/conv1d.wgsl) | 1D convolution forward (bias-free), NCL layout, with grouping + dilation | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`conv1d`](../../crates/kernels/wgsl/conv1d.wgsl) | 1D convolution forward (bias-free), NCL layout, with grouping + dilation | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`conv1d_dw`](../../crates/kernels/wgsl/conv1d_dw.wgsl) | 1D convolution weight gradient | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`conv1d_dx`](../../crates/kernels/wgsl/conv1d_dx.wgsl) | 1D convolution input gradient (gather form, no scatter / no atomics) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
-| [`conv2d`](../../crates/kernels/wgsl/conv2d.wgsl) | 2D convolution forward (bias-free), NCHW layout, square KxK kernel | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32 |
+| [`conv2d`](../../crates/kernels/wgsl/conv2d.wgsl) | 2D convolution forward (bias-free), NCHW layout, square KxK kernel | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`conv2d_dw`](../../crates/kernels/wgsl/conv2d_dw.wgsl) | 2D convolution weight gradient | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`conv2d_dx`](../../crates/kernels/wgsl/conv2d_dx.wgsl) | 2D convolution input gradient (transposed-conv GATHER form, no scatter) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`conv2d_gd`](../../crates/kernels/wgsl/conv2d_gd.wgsl) | 2D convolution forward (bias-free), NCHW, square KxK, WITH grouping + dilation | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32 |
@@ -160,7 +160,7 @@ load of it must already be bare-identifier-indexed.
 | [`conv_act`](../../crates/kernels/wgsl/conv_act.wgsl) | Fused conv2d -> per-channel affine (BatchNorm-eval collapsed) -> activation | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32 |
 | [`conv_act_reg`](../../crates/kernels/wgsl/conv_act_reg.wgsl) | Register-tiled fused conv -> per-channel affine -> activation | register block per thread | 5/5 | native | ✓ | ✓ | - | f32 |
 | [`conv_act_tiled`](../../crates/kernels/wgsl/conv_act_tiled.wgsl) | Weight-staged fused conv -> per-channel affine -> activation | 64-thread workgroup tile, 1 barrier | 4/5 | native | ✓ | ✓ | - | f32 |
-| [`conv_bias`](../../crates/kernels/wgsl/conv_bias.wgsl) | Fused conv2d + per-output-channel bias | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32 |
+| [`conv_bias`](../../crates/kernels/wgsl/conv_bias.wgsl) | Fused conv2d + per-output-channel bias | one thread per output element, 3 nested serial reductions | 1/5 | native | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`conv_bias_reg`](../../crates/kernels/wgsl/conv_bias_reg.wgsl) | Register-tiled conv + per-output-channel bias - conv_act_reg's 8x4 tile (8 output channels x 4 coalesced spatial positions in scalar registers, (kh,kw)-outer/ci-inner loop) with a PLAIN BIAS epilogue instead of the BN-affine+SiLU one | register block per thread | 5/5 | native | ✓ | ✓ | - | f32 |
 | [`conv_epilogue`](../../crates/kernels/wgsl/conv_epilogue.wgsl) | Conv-as-GEMM epilogue: per-channel affine (BN-eval collapsed) + activation | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`convex_upsample`](../../crates/kernels/wgsl/convex_upsample.wgsl) | Convex 3x3 upsample forward (ZipDepth's FastConvexUpsample, unfold path) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
@@ -188,8 +188,8 @@ load of it must already be bare-identifier-indexed.
 | [`edm_mix`](../../crates/kernels/wgsl/edm_mix.wgsl) | EDM output mix D = c_skip*x + c_out*F - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`edm_wrap`](../../crates/kernels/wgsl/edm_wrap.wgsl) | EDM output wrap for the DIAMOND sampler (denoiser.py::wrap_model_output) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`emb_bwd`](../../crates/kernels/wgsl/emb_bwd.wgsl) | Embedding backward (also the tied lm_head's weight) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
-| [`embed`](../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
-| [`embed_tile`](../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`embed`](../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
+| [`embed_tile`](../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`exp`](../../crates/kernels/wgsl/exp.wgsl) | Elementwise exponential | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`expert_counts`](../../crates/kernels/wgsl/expert_counts.wgsl) | Load-balancing fractions used by the aux-loss gradient | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`film_chan`](../../crates/kernels/wgsl/film_chan.wgsl) | FiLM per-channel modulation (forward) for NCHW - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
@@ -320,7 +320,7 @@ load of it must already be bare-identifier-indexed.
 | [`mla_bwd_dq_rope`](../../crates/kernels/wgsl/mla_bwd_dq_rope.wgsl) | MLA backward - grad w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`mla_index_scores`](../../crates/kernels/wgsl/mla_index_scores.wgsl) | DSA indexer scores (forward, detached) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`mla_scores`](../../crates/kernels/wgsl/mla_scores.wgsl) | MLA (Multi-head Latent Attention) scores (forward), for GLM-5.2 | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
-| [`moe_linear_gated`](../../crates/kernels/wgsl/moe_linear_gated.wgsl) | Sparse-MoE expert linear: matmul.wgsl, but skips non-routed rows | one thread per output element, serial inner reduction, early exit | 2/5 | native | ✓ | - | - | f32 |
+| [`moe_linear_gated`](../../crates/kernels/wgsl/moe_linear_gated.wgsl) | Sparse-MoE expert linear: matmul.wgsl, but skips non-routed rows | one thread per output element, serial inner reduction, early exit | 2/5 | native | ✓ | - | - | f32\|bf16\|f16 |
 | [`moe_linear_gated_dw`](../../crates/kernels/wgsl/moe_linear_gated_dw.wgsl) | Sparse-MoE expert linear backward w.r.t. W: matmul_dw.wgsl, gated | one thread per output element, in-loop skip on the gate | 2/5 | native | ✓ | - | - | f32 |
 | [`moe_linear_gated_dx`](../../crates/kernels/wgsl/moe_linear_gated_dx.wgsl) | Sparse-MoE expert linear backward w.r.t. x: matmul_dx.wgsl, gated | one thread per output element, pre-reduction early exit on the gate | 2/5 | native | ✓ | - | - | f32 |
 | [`moe_linear_gated_i8`](../../crates/kernels/wgsl/moe_linear_gated_i8.wgsl) | Sparse-MoE expert linear, int8 (DP4A): moe_linear_gated.wgsl's row skip, packed weights | DP4A packed int8, one thread per output element, serial inner reduction, early exit | 2/5 | ✓ | ✓ | - | int8 | f32 |

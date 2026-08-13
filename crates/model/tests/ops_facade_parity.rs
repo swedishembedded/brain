@@ -57,6 +57,19 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
         let f16_reg3 =
             kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
+        // B8: `Ops::REQUIRED_KERNELS` grew by the embed/moe_linear_gated
+        // storage tiers - additive, mechanical, same fix this file's own
+        // comment above already flags for the bf16/f16 trio (`Ops::new`
+        // requires the FULL façade kernel set even for a test, like this
+        // one, that only exercises `F32`/`I8`/`Q4`).
+        let bf16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::BF16).unwrap();
+        let f16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
+        let bf16_moe =
+            kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16)
+                .unwrap();
+        let f16_moe =
+            kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16)
+                .unwrap();
         vec![
             ("matmul", kernels::MATMUL),
             ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -73,6 +86,12 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             f16_matmul,
             f16_gemv,
             f16_reg3,
+            ("embed", kernels::EMBED),
+            bf16_embed,
+            f16_embed,
+            ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
+            bf16_moe,
+            f16_moe,
         ]
     })
 }
