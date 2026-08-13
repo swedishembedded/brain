@@ -87,14 +87,25 @@ pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u
 /// appearance) exactly as the single-type version does for images.
 ///
 /// An audio run's "grid" has no real 2-D spatial extent — model it as
-/// `(n_audio, 1, 1)`: the meshgrid loop already degenerates to advancing only
-/// the T axis (one step per audio embedding row) with H/W pinned at the
-/// anchor when `h = w = 1`. A video run is `(n_frames, h, w)` — the SAME
-/// meshgrid math images use, just with `t > 1` (one real frame per T step,
-/// each frame's own merged patch grid on H/W). This is a documented
-/// approximation of HF's exact reference (which additionally scales audio's T
-/// axis by wall-clock seconds via `position_id_per_seconds`), not a byte-exact
-/// port — see `crate::generate`'s module doc.
+/// `(n_audio, 1, 1)`. HF's real reference (`Qwen3OmniMoeThinker*.get_rope_index`)
+/// gives every audio row THE SAME position on all three axes,
+/// `torch.arange(audio_len).view(1, -1).expand(3, -1) + st_idx` -- a plain
+/// diagonal run, exactly like text, just anchored at `st_idx` instead of 0.
+/// So a `(t, 1, 1)` grid is handled as a special case BEFORE the general
+/// meshgrid: all three axes advance together, `[st+k, st+k, st+k]` for `k` in
+/// `0..t`, not "T advances, H/W pinned" (an earlier version of this function
+/// did exactly that, degenerately pinning H/W at the anchor for the whole
+/// run -- real audio input on real hardware showed the resulting position
+/// collision across every audio row's H/W rotary channels corrupts decoding
+/// enough to leak the chat template's own generation-prompt tokens into the
+/// output; text-only and image-only requests were unaffected since neither
+/// exercises this code path). A video run is `(n_frames, h, w)` with real
+/// `h > 1`/`w > 1` -- the SAME meshgrid math images use (unaffected by this
+/// special case), just with `t > 1` (one real frame per T step, each frame's
+/// own merged patch grid on H/W). This is still a documented approximation of
+/// HF's exact reference (which additionally scales audio's and video's T axis
+/// by wall-clock seconds via `position_id_per_seconds`/`seconds_per_chunk`),
+/// not a byte-exact port -- see `crate::generate`'s module doc.
 ///
 /// The post-run anchor advance is `max(t, h, w)` (not `max(h, w)` — the
 /// single-type version's original formula, which only ever saw `t = 1`
@@ -128,10 +139,20 @@ pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[(u32, &[(u32, u32, u
                     let (t, h, w) = placeholders[pi].1[gi[pi]];
                     gi[pi] += 1;
                     let st = cp;
-                    for ti in 0..t {
-                        for hi in 0..h {
-                            for wi in 0..w {
-                                pos.push([st + ti, st + hi, st + wi]);
+                    if h == 1 && w == 1 {
+                        // No real spatial extent (audio) -- a plain diagonal
+                        // run on all three axes, matching HF's real
+                        // `arange(t).expand(3, -1) + st_idx`, not a meshgrid
+                        // that pins H/W at the anchor (see this function's doc).
+                        for ti in 0..t {
+                            pos.push([st + ti, st + ti, st + ti]);
+                        }
+                    } else {
+                        for ti in 0..t {
+                            for hi in 0..h {
+                                for wi in 0..w {
+                                    pos.push([st + ti, st + hi, st + wi]);
+                                }
                             }
                         }
                     }
@@ -239,9 +260,11 @@ mod tests {
 
     #[test]
     fn multi_text_audio_text_advances_by_audio_duration() {
-        // 1 text, then a 3-frame audio run (grid (3,1,1): T advances, H/W pinned),
-        // then 1 text. Audio's post-run advance is max(3,1,1)=3, NOT max(1,1)=1 --
-        // the bug the single-type formula (`h.max(w)`) would have hit.
+        // 1 text, then a 3-frame audio run (grid (3,1,1): a plain diagonal run
+        // on all three axes, matching HF's real `arange(t).expand(3,-1) +
+        // st_idx` -- NOT a meshgrid that pins H/W at the anchor), then 1 text.
+        // Audio's post-run advance is max(3,1,1)=3, NOT max(1,1)=1 -- the bug
+        // the single-type formula (`h.max(w)`) would have hit.
         const AUDIO: u32 = 500;
         let tokens = [7, AUDIO, AUDIO, AUDIO, 7];
         let pos = get_rope_index_multi(&tokens, &[(AUDIO, &[(3, 1, 1)])]);
@@ -249,10 +272,10 @@ mod tests {
             pos,
             vec![
                 [0, 0, 0],
-                // audio anchored at cp=1: T advances 1..4, H/W pinned at 1.
+                // audio anchored at cp=1: all three axes advance together, 1..4.
                 [1, 1, 1],
-                [2, 1, 1],
-                [3, 1, 1],
+                [2, 2, 2],
+                [3, 3, 3],
                 // next text starts past the full audio duration: cp = 1 + max(3,1,1) = 4
                 [4, 4, 4],
             ]
@@ -274,22 +297,24 @@ mod tests {
                 // image at cp=0: [0,0,0],[0,0,1]; advance cp += max(1,1,2)=2.
                 [0, 0, 0],
                 [0, 0, 1],
-                // audio at cp=2: T advances 2..4, H/W pinned at 2.
+                // audio at cp=2: diagonal on all three axes, 2..4.
                 [2, 2, 2],
-                [3, 2, 2],
+                [3, 3, 3],
             ]
         );
     }
 
     #[test]
-    fn multi_video_run_is_a_t_h_w_meshgrid_like_a_multiframe_image() {
-        // A 2-frame video, each frame a 1x1 merged patch grid: grid (2,1,1) --
-        // same shape as the audio case, proving video needs no separate code
-        // path (it's the existing meshgrid with t>1, matching real frames).
+    fn multi_video_run_with_no_spatial_extent_is_diagonal_like_audio() {
+        // A 2-frame video whose merged patch grid degenerates to 1x1 (h=w=1)
+        // -- the same "no real spatial extent" shape audio always uses, so it
+        // takes the same diagonal special case rather than a meshgrid that
+        // would pin H/W at the anchor (this function doesn't track WHICH
+        // medium a grid came from, only its shape).
         const VIDEO: u32 = 600;
         let tokens = [VIDEO, VIDEO];
         let pos = get_rope_index_multi(&tokens, &[(VIDEO, &[(2, 1, 1)])]);
-        assert_eq!(pos, vec![[0, 0, 0], [1, 0, 0]]);
+        assert_eq!(pos, vec![[0, 0, 0], [1, 1, 1]]);
     }
 
     #[test]

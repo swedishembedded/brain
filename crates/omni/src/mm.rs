@@ -344,7 +344,7 @@ pub fn build_multimodal_prompt(
             end_token: cfg.audio_end_token_id,
             embeds: a.embeds,
             n_rows: a.n_rows,
-            grid: (a.n_rows, 1, 1), // 1-D: T advances, H/W pinned -- see get_rope_index_multi's doc
+            grid: (a.n_rows, 1, 1), // 1-D, no spatial extent: diagonal on all three axes -- see get_rope_index_multi's doc
         });
     }
     if let Some((rgb, w, h)) = image {

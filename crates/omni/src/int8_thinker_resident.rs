@@ -650,7 +650,9 @@ impl Int8ThinkerInstance {
         let h1 = gpu.storage_init("h1", row);
         let normed = final_norm(gpu, &self.cfg.text, &self.final_norm_w, &h1, 1);
         let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.text.hidden, self.cfg.text.vocab);
-        argmax(&gpu.read(&logits, self.cfg.text.vocab as usize))
+        let logits = gpu.read(&logits, self.cfg.text.vocab as usize);
+        debug_log_top_candidates("first-generated-token", &logits);
+        argmax(&logits)
     }
 }
 
@@ -705,6 +707,12 @@ impl Int8ThinkerInstance {
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
             let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref())
                 .map_err(|e| format!("{MODEL}: {e}"))?;
+            if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_ok() {
+                let n = mm_prompt.token_ids.len();
+                let tail = &mm_prompt.token_ids[n.saturating_sub(8)..];
+                let tail_pos = &mm_prompt.positions[n.saturating_sub(8)..];
+                eprintln!("{MODEL}: multimodal prompt: {n} token(s), last 8 ids={tail:?} positions={tail_pos:?}");
+            }
             self.generate_multimodal(&mm_prompt, max_new, eos_ids)
         } else {
             let prompt_ids = tok.encode(&prompt);
@@ -725,6 +733,21 @@ impl Int8ThinkerInstance {
 
 fn argmax(row: &[f32]) -> u32 {
     row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab")
+}
+
+/// Opt-in (`BRAIN_OMNI_DEBUG_LOGITS=1`) top-3 logit dump, mirroring
+/// `crate::generate::debug_log_top_candidates` for the int8 path -- the
+/// diagnostic this module's own real-hardware audio-splice investigation
+/// used to confirm WHICH token the sharded stack's own logits actually
+/// prefer at a given decode step, as opposed to guessing from decoded text
+/// alone. Costs nothing when unset.
+fn debug_log_top_candidates(label: &str, logits: &[f32]) {
+    if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_err() {
+        return;
+    }
+    let mut sorted: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("{MODEL}: {label}: top3 (token_id, logit) = {:?}", &sorted[..3.min(sorted.len())]);
 }
 
 impl Instance for Int8ThinkerInstance {
