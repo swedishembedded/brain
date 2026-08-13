@@ -1078,16 +1078,23 @@ impl WgpuBackend {
                 // kernels execute either way and the 4x weight-byte saving
                 // holds regardless.
                 int8_dot: true,
-                // Storage-tier bf16 (B4): the `#w=bf16` kernel variants
-                // (`kernels::template::dtype_variant`) decode packed bf16
-                // words to f32 with plain integer/bitcast WGSL - core WGSL,
-                // no device feature required, so this genuinely runs on
-                // every wgpu target (this backend), not a measured-rate claim
-                // like `f16`/`bf16` below (those mean FAST compute, which
-                // this is not - the decode still computes in fp32).
+                // Storage-tier bf16 (B4) and f16 (B5): the `#w=bf16`/`#w=f16`
+                // kernel variants (`kernels::template::dtype_variant`) decode
+                // packed bf16/f16 words to f32 with plain integer/bitcast
+                // WGSL - core WGSL, no device feature required, so both
+                // genuinely run on every wgpu target (this backend), not a
+                // measured-rate claim like `f16`/`bf16` below (those mean
+                // FAST compute, which this is not - the decode still
+                // computes in fp32; f16's decode is a real magic-multiply
+                // exponent re-bias, still just integer/bitcast arithmetic,
+                // no device feature).
                 bf16_storage: true,
+                f16_storage: true,
                 // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). Stays
-                // false until a measured rate says otherwise (S5).
+                // false until a measured rate says otherwise (S5). Native
+                // f16 COMPUTE (`enable f16;`, this `f16` flag) is
+                // deliberately still deferred to B11 - unrelated to the
+                // storage-tier decode above.
                 ..NumericSupport::BASELINE
             },
         }

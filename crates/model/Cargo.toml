@@ -17,6 +17,13 @@ brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true
+# `half::f32_to_f16` (B5) reuses the `half` crate's well-tested f32<->f16
+# conversion for the HOST-side pack/unpack rather than hand-rolling a second
+# round-to-nearest-even/overflow/subnormal routine - already a workspace
+# dependency (`crates/checkpoint` uses it for the safetensors f16/bf16
+# reader). The WGSL DEVICE-side decode (`kernels::template::dtype_variant`'s
+# f16 arm) still has to be hand-written -- no crate can help there.
+half.workspace = true
 
 # The CPU scheduler's parallel primitives (host reductions). Native-only:
 # backend-cpu (Cranelift JIT) does not build on wasm, and the modules using it

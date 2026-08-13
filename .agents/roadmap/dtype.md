@@ -1653,3 +1653,266 @@ unmigrated); `backend-vulkan`'s `bf16_storage` flag; a machine-parsed `@tpl`
 kernel-header field (B6); teaching `gemm_variant`/`mm8_rows_off`-style
 model-owned dispatch (as opposed to the `Ops` façade) about the bf16 tier.
 
+## B5 - f16 storage tier
+
+**Goal.** The same `dtype_variant`/`Weight`/`Ops` machinery B4 built for bf16,
+extended to REAL binary16 (f16) - the harder tier, since f16's 5-bit exponent
+(vs f32's/bf16's matching 8-bit) needs actual re-biasing, not a bitcast, and
+must handle subnormals/inf/NaN/overflow/underflow correctly.
+
+**Verified BEFORE writing any WGSL, per the phase's own TDD gate.** Before
+touching a shader, the exact bit math (the phase brief's own "magic multiply"
+formula) was prototyped in a throwaway host-side Rust program and checked
+against an independent, non-bit-trick reference (direct sign/exponent/
+mantissa reconstruction, scaled by an exact power-of-two float multiply) over
+ALL 65536 possible f16 bit patterns - zero mismatches, including every NaN
+pattern decoding to some NaN on both sides. Spot-checked the phase brief's own
+edge-case table by hand at that stage too: `0.0`/`-0.0` (sign preserved),
+`1.0`/`-1.0`, `2^-14` (smallest normal), `65504.0` (largest normal), `2^-24`
+(smallest subnormal), `70000.0` (overflow -> `+inf`, not wraparound), `2^-25`
+(underflow -> `0.0`), `+-inf`, NaN. All correct on the FIRST formula draft -
+this initial verification is real but, as the next paragraph shows, was not
+sufficient on its own.
+
+**A real bug the dual-backend test caught that the host-side-only check could
+not: GPU flush-to-zero (FTZ) on subnormal f16 decode.** The phase brief's
+literal magic-multiply formula, ported unchanged into
+`kernels::template::f16_decode_expr` and run through
+`crates/model/tests/f16_roundtrip.rs`'s dual-backend test (which deliberately
+includes an injected subnormal-magnitude weight row - see that file's
+`inject_f16_edge_case_rows`), passed on the CPU JIT but FAILED on real wgpu
+hardware (this sandbox's Intel Arc iGPU): a real subnormal f16 weight decoded
+to exactly `0.0` instead of its true value. Root cause, confirmed by hand:
+for a SUBNORMAL `h` (exponent field `0`), the formula's own intermediate
+`(h & 0x7FFF) << 13` is ITSELF a subnormal f32 bit pattern (its own exponent
+field is `0` too, since a subnormal `h`'s value never reaches `0x0080_0000`
+after the shift) - and this GPU's compute-shader path flushes subnormal float
+OPERANDS to zero, so multiplying that intermediate by the magic constant
+silently produced `0.0`. Host Rust float arithmetic never flushes subnormals,
+which is exactly why the 65536-pattern exhaustive check above did not (and
+structurally COULD not) catch this - it is a hardware behaviour, not an
+algorithm bug in the abstract bit math. **Fixed** with the standard FTZ-safe
+"magic bias" technique for the subnormal branch only (normal and inf/NaN keep
+their original branches, now selected via a three-way nested `select`):
+build a NORMAL float `a = bitcast<f32>(0x3880_0000 | (mantissa << 13))`
+(exponent field fixed at `113`, i.e. `(1 + mantissa/1024) * 2^-14` - always
+normal, nonzero exponent field by construction) and subtract the matching
+constant `b = bitcast<f32>(0x3880_0000) == 2^-14` (also normal): `a - b ==
+mantissa * 2^-24`, the exact target value, computed as the difference of two
+NORMAL floats whose exact mathematical result (`<= 1023 * 2^-24 ≈ 6.1e-5`) is
+itself far above f32's own subnormal threshold (`2^-126`) - so neither
+operand nor the result is ever a subnormal f32, on any hardware.
+`mantissa == 0` (true zero) falls out of the same formula for free (`a == b`,
+so `a - b == 0.0` exactly). Re-ran the exhaustive 65536-pattern host-side
+check against the fixed formula (still zero mismatches - the fix does not
+change any of the correct outputs, only how the subnormal ones are computed),
+then re-ran the dual-backend roundtrip test: GREEN on both CPU and real GPU
+(see Results below). **This is the concrete reason the phase brief called for
+BOTH a host-side bit-math table AND a real dual-backend test with an actual
+subnormal weight row** - one alone would have missed this class of bug
+entirely (the host-side check cannot see hardware FTZ behaviour; a
+dual-backend test without a deliberately-injected subnormal weight would very
+likely never happen to exercise the exact subnormal magnitude that trips it).
+
+**`kernels::template::dtype_variant`** (`crates/kernels/src/template.rs`)
+extended to accept `DType::F16` (was: only `BF16` implemented, `F16` a loud
+`Err`). The declaration rewrite (`array<f32>` -> `array<u32>`, `rewrite_bf16_
+declaration` renamed `rewrite_packed_declaration`) and the bare-identifier
+hoist/extraction machinery (`rewrite_bf16_loads` renamed `rewrite_packed_
+loads`, now taking a `dt: DType` parameter) are SHARED verbatim between bf16
+and f16 - only the decode expression differs, dispatched by a new `decode_
+expr(binding, ident, dt)` to either `bf16_decode_expr` (unchanged) or the new
+`f16_decode_expr`. Variant naming: `dtype_variant("matmul", MATMUL, "w",
+DType::F16)` -> `"matmul#w=f16"`. `dtype_tag`'s error message updated to name
+both implemented tiers; `F32`/`I8`/`Q4` remain loud `Err`s (no storage-tier
+rewrite concept, unchanged from B4).
+
+**The verified decode expression** (see [`f16_decode_expr`]'s own doc comment
+for the full derivation, and the "GPU flush-to-zero" paragraph above for why
+it has three branches, not the two the phase brief's literal formula had):
+
+```wgsl
+// h = the 16-bit f16 pattern, extracted via the same
+// (IDENT>>1u)/(IDENT&1u) selection dtype_variant's bf16 arm uses
+bitcast<f32>(
+  bitcast<u32>(select(
+      select(
+        bitcast<f32>(0x38800000u | ((h & 0x3FFu) << 13u)) - bitcast<f32>(0x38800000u), // subnormal (FTZ-safe magic bias)
+        bitcast<f32>((h & 0x7FFFu) << 13u) * bitcast<f32>(0x77800000u),                 // normal (magic multiply by 2^112)
+        ((h >> 10u) & 0x1Fu) != 0u),
+      bitcast<f32>(0x7F800000u | ((h & 0x3FFu) << 13u)),                                 // exponent==31: inf/NaN
+      ((h >> 10u) & 0x1Fu) == 31u))
+  | ((h & 0x8000u) << 16u))
+```
+
+Pure integer/bitcast/`select` WGSL (all core WGSL) - no `enable f16;`, no
+native half type, no `unpack2x16float`/`extractBits`/user-defined function
+calls (this repo's CPU JIT has no lowering for any of those, confirmed again
+this phase: the JIT DOES accept `select`/`bitcast`, and DOES accept a
+single-top-level-barrier kernel like `matmul_gemv#w=f16`, but still refuses
+`matmul_reg3#w=f16`'s 3 barriers - the same limitation B4 found for bf16,
+unrelated to dtype).
+
+**Same three kernels templatized as B4** (`matmul.wgsl`/`matmul_gemv.wgsl`/
+`matmul_reg3.wgsl`) - no new hoists needed, since B4's `let wi = ...;` hoists
+in all three files are dtype-agnostic (the hoist only names the index
+expression; `dtype_variant` picks the decode by its own `dt` parameter, not
+by anything in the kernel source). Only each file's `@tpl` header comment
+already said "w -> bf16 storage variant" generically enough to not need
+editing (it names the mechanism, not the dtype).
+
+**`model::half`** (`crates/model/src/half.rs`) extended: `f32_to_f16(f: f32)
+-> u16` and `pack_f16(f32s: &[f32]) -> Vec<u32>`. **Checked first, per the
+phase brief's own instruction, whether the `half` crate was already vendored
+before hand-rolling anything**: `half = "2"` is already a `[workspace.
+dependencies]` entry (`Cargo.toml:246`) and already a direct dependency of
+`crates/checkpoint` (used for the safetensors f16/bf16 reader/writer). Added
+`half.workspace = true` to `crates/model/Cargo.toml` and delegated
+`f32_to_f16` to `::half::f16::from_f32(f).to_bits()` - a well-tested library
+implementation of this real, fiddly conversion (round-to-nearest-even,
+correct overflow-to-infinity, correct underflow-to-subnormal/zero) is
+strictly preferable to a second hand-rolled one for the HOST side, per the
+phase brief's own explicit preference. **`pack_f16`** uses the SAME low-half-
+is-even-index/high-half-is-odd-index packed-`u32` convention `pack_bf16`
+already established, for consistency - checked against `dtype_variant`'s
+`IDENT >> 1u`/`IDENT & 1u` selection by construction (both tiers share the
+same extraction code). The WGSL DEVICE-side decode is still 100% hand-written
+(no crate can help inside a shader) and independently verified as described
+above.
+
+**`model::ops::Weight::F16`** (`crates/model/src/ops.rs`), following B4's
+`BF16` arm exactly: `{ w: DeviceBuffer, n: u32, k: u32 }`, packed flat over
+`[n*k]` (no per-row reshaping, same as `BF16`/`F32`). `Weight::upload`'s
+`Dtype::F16` arm calls `half::pack_f16`, uploads as a `u32` buffer half the
+f32 element count. `kname` gains `MATMUL_F16`/`MATMUL_GEMV_F16`/`MATMUL_REG3_
+F16` (`"matmul#w=f16"`/`"matmul_gemv#w=f16"`/`"matmul_reg3#w=f16"`), pinned
+against `dtype_variant`'s real output by `bf16_and_f16_kname_literals_match_
+dtype_variant_naming` (renamed from B4's `bf16_kname_literals_match_...`, now
+covers both tiers). `Ops::bind`'s old `(Reference, F32 | F16) -> MATMUL`
+grouping (a leftover from when no `Weight::F16` existed, so `F16` could never
+actually reach `bind` in practice) is split into its own three arms, exactly
+mirroring `BF16`'s: a real `Weight::F16` buffer holds packed `u32` words, so
+routing it through the plain f32 kernel would silently reinterpret those bits
+as garbage. `Ops::matmul`'s dispatch match arm (`Weight::F32 | Weight::BF16`)
+grows a third pattern, `Weight::F16` - same raw-f32-activation, same `[m,k,n]`
+params, only `kind`/`Self::bind`'s kernel choice differs, exactly as it
+already did for `BF16`. `Weight::upload`'s trailing `Dtype` match is now
+EXHAUSTIVE over all five tiers (`F32`/`BF16`/`F16`/`I8`/`Q4`), so the old
+catch-all `unreachable!()` arm was deleted rather than left as now-dead code
+(`cargo clippy` confirmed it via a fresh `unreachable pattern` warning,
+fixed before committing - a real, if trivial, TDD-adjacent catch: the compiler
+is the test here).
+
+**`backend-wgpu`**: `NumericSupport.f16_storage: true` in `query_caps`
+(`crates/backend-wgpu/src/lib.rs`) - the `#w=f16` kernels need no device
+feature (same reasoning as B4's `bf16_storage: true`), so this is a genuine
+capability. `f16` itself (fast NATIVE f16 compute, `enable f16;`) stays
+`false`, untouched - deliberately deferred to B11, confirmed still correct:
+`f16_storage`/`bf16_storage` mean "can hold/decode the packed bytes with
+plain integer WGSL"; `f16`/`bf16` mean "the device has a fast native compute
+path" - two different, independently-gated facts, per B1's own `NumericSupport`
+doc comment. `backend-cpu`/`backend-vulkan` untouched, out of scope (same as
+B4 left them for bf16).
+
+**Dual-backend roundtrip** (`crates/model/tests/f16_roundtrip.rs`, new,
+following `bf16_roundtrip.rs`'s structure exactly). Same three shapes as B4
+(`m=8,n=128` -> `matmul_gemv#w=f16`; `m=64,n=128` -> `matmul_reg3#w=f16`;
+`m=64,n=64` -> `matmul#w=f16`), tolerance derived the same way but with f16's
+tighter mantissa (`2^-11` per-element relative bound instead of bf16's
+`2^-8`, since f16 keeps 10 explicit mantissa bits vs bf16's 7). **Every
+shape's weight matrix has row 0 forced to subnormal magnitude (multiples of
+`2^-20`, inside `(0, 2^-14)`) and row 1 forced to near-f16-ceiling magnitude
+(~60000, near `65504.0`)** via `inject_f16_edge_case_rows` - the phase brief's
+own explicit requirement, and the exact mechanism that caught the FTZ bug
+above. Also asserts every output element is finite (`is_finite()`) before the
+tolerance check, so a silent NaN/Inf corruption cannot slip past a loose
+tolerance bound.
+
+**Results, both backends real** (same sandbox Intel Arc iGPU B4 used, real
+wgpu, not skipped):
+
+- **GPU (`Gpu::new_wgpu`)**: all three shapes, INCLUDING the injected
+  subnormal/near-ceiling rows, passed after the FTZ fix. Worst observed
+  err/tol ratio: GEMV `0.1388`, RegisterTiled `0.1758`, Reference `0.1797` -
+  comfortably inside the derived bound, and `matmul_reg3#w=f16`'s 3-barrier
+  tiled structure compiled and executed correctly through wgpu/naga.
+- **CPU (`Gpu::new_cpu`, Cranelift JIT)**: GEMV and Reference shapes ran the
+  REAL templated f16 kernels through the JIT; `matmul_reg3#w=f16` (3
+  barriers) cannot JIT-compile, same limitation B4 found for its bf16
+  sibling (`register_tiled_f16_is_not_reachable_on_the_cpu_backend` asserts
+  this directly, mirroring B4's `register_tiled_bf16_is_not_reachable_on_
+  the_cpu_backend`) - `select::candidates` filters `RegisterTiled` out on
+  CPU caps (`workgroup_reductions: false`) and substitutes `Reference`
+  before dispatch ever reaches it, so the CPU run is not silently broken,
+  just not proof of the tiled kernel specifically. Worst observed err/tol
+  ratio: GEMV `0.1389`, RegisterTiled(->Reference) `0.1758`, Reference
+  `0.1797` - matches the GPU numbers closely (tiny float differences from
+  reduction order), as expected since both compute the same math.
+
+**Ledger housekeeping - existing tests that needed updating because
+`Ops::REQUIRED_KERNELS` grew.** `Ops::new` requires the FULL façade kernel
+set regardless of which tiers a given test exercises (by design - see
+`ops.rs`'s own doc comment). Adding the three `#w=f16` names to `kname::ALL`
+meant every test file that builds its own kernel list for `Ops::new` needed
+the same three `dtype_variant(.., DType::F16)` registrations B4 already added
+for bf16, or `Ops::new` would fail loudly (confirmed RED first: ran `cargo
+test -p brain-model --test ops_facade_parity` before this fix and got
+`Ops::new: kernel 'matmul#w=f16' is not registered`). Fixed in
+`crates/model/tests/ops_facade_parity.rs` and `crates/model/tests/
+bf16_roundtrip.rs` (both mechanical, additive - three more `dtype_variant`
+calls in each file's own `kernel_list()`, same pattern already used for the
+bf16 trio) - neither file's own test LOGIC changed, both still exercise
+exactly the tiers they exercised before (`F32`/`I8`/`Q4` and `BF16`
+respectively).
+
+**Verification** (all scoped, no `make release`/`make test`/bare `cargo
+build --workspace`):
+`cargo test -p brain-kernels`: **19/19** (12 pre-existing/B4 + 7 new: 5
+`dtype_variant_*_for_f16` structural tests, `f16_decode_matches_an_
+independent_reference_for_every_possible_bit_pattern` [exhaustive, all 65536
+patterns], `f16_decode_matches_known_values` [the phase brief's edge-case
+table, pinned]; `dtype_variant_rejects_unimplemented_tiers` updated to drop
+`F16` from its loop, now implemented).
+`cargo test -p brain-model`: **129 lib tests** (half.rs gained 4 new f16
+tests: edge-case-table round-trip, RNE tie, pack low/high convention, pack
+round-trip precision; ops.rs's bf16-naming test renamed/extended to cover
+f16 too) + **every integration test green across all 28 test binaries**,
+including the new `f16_roundtrip` (3/3), the updated `bf16_roundtrip` (3/3,
+unaffected numerically) and `ops_facade_parity` (2/2, unaffected numerically)
+after their kernel-list fix above.
+`cargo test -p brain-backend-api --lib`: **27/27**, unaffected (this phase
+never touched `backend-api`; `promote`'s existing `F16` test coverage was
+already exercising the demote-to-F32-under-BASELINE-caps path from B1/B4 and
+needed no change since `backend-wgpu`'s own `NumericSupport` literal, which
+this crate cannot depend on, is what actually changed).
+`cargo build -p brain-backend-wgpu`: clean.
+`cargo clippy -p brain-kernels -p brain-model -p brain-backend-api -p
+brain-backend-wgpu --lib --no-deps`: zero new warnings (the two `ops.rs:15-16`
+`doc_lazy_continuation` hits are the same pre-existing lines B4's own ledger
+already flagged, untouched this phase; the `unreachable!()` arm this phase's
+own edit made genuinely dead was found and removed, not left).
+`grep -rP '\x{2014}' <every file this phase touched or the diff of>`: zero
+em dashes introduced (checked the actual diff hunks, not just the touched
+files' full contents, since `template.rs`/`backend-wgpu/src/lib.rs` carry
+many pre-existing em dashes in prose this phase did not write).
+
+**GPU path explicitly confirmed real, not skipped** (per the task's own
+instruction to report this explicitly): `bf16_matmul_matches_f32_reference_
+on_gpu`'s B4-established pattern repeated verbatim for
+`f16_matmul_matches_f32_reference_on_gpu` - printed `"running on a real wgpu
+device"` and `"adapter: Intel(R) Arc(tm) Graphics (MTL) (IntegratedGpu,
+Vulkan)"` on every run in this sandbox; `MOE_SKIP_GPU_TESTS` was never set.
+
+**Native f16 compute still deliberately deferred to B11**, unchanged from
+B4's own deferral of native bf16 compute: this phase's `f16` (as opposed to
+`f16_storage`) `NumericSupport` flag stays `false`; `enable f16;` and a real
+native-half compute kernel are out of scope here, same as bf16's own compute
+tier.
+
+**What's left (B6/B7/B11, separate phases, not started here):** migrating any
+model crate's linear call sites onto `Weight::F16` (B7, same as bf16/i8/q4
+remain unmigrated); `backend-vulkan`'s `f16_storage` flag (out of scope,
+matching B4's own bf16 deferral there); a machine-parsed `@tpl` kernel-header
+field (B6); native f16 COMPUTE (`enable f16;`, `NumericSupport.f16: true`,
+B11) - explicitly NOT this phase's job, confirmed still deferred.
+

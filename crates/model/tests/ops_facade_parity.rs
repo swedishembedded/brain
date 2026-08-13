@@ -37,9 +37,10 @@ use model::int8::quantize_weight;
 use model::ops::{Ops, Weight};
 
 /// The full façade kernel set, including the three bf16-storage variants
-/// (B4) - `Ops::new` requires all of them even for tests that only exercise
-/// `F32`/`I8`/`Q4` here (`crates/model/tests/bf16_roundtrip.rs` is what
-/// actually exercises the bf16 tier's own numerics). `gpu_core::testgpu::dev`
+/// (B4) and three f16-storage variants (B5) - `Ops::new` requires all of them
+/// even for tests that only exercise `F32`/`I8`/`Q4` here
+/// (`crates/model/tests/bf16_roundtrip.rs`/`f16_roundtrip.rs` are what
+/// actually exercise those tiers' own numerics). `gpu_core::testgpu::dev`
 /// keys its device pool by the kernel slice's pointer identity, so this
 /// leaks the `Vec` once (via `OnceLock`) rather than reallocating a fresh one
 /// per call - the same tradeoff `model::ops::tests::kernel_list` makes.
@@ -51,6 +52,11 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
         let bf16_reg3 =
             kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
+        let f16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::F16).unwrap();
+        let f16_gemv =
+            kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
+        let f16_reg3 =
+            kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
         vec![
             ("matmul", kernels::MATMUL),
             ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -64,6 +70,9 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             bf16_matmul,
             bf16_gemv,
             bf16_reg3,
+            f16_matmul,
+            f16_gemv,
+            f16_reg3,
         ]
     })
 }

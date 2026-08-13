@@ -1086,6 +1086,7 @@ dependencies = [
  "brain-kernels",
  "brain-optim",
  "brain-paramstore",
+ "half",
  "serde_json",
 ]
 

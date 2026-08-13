@@ -44,16 +44,21 @@ use gpu_core::Gpu;
 use model::ops::{Ops, Weight};
 
 /// Every kernel `Ops::new` requires, plus the three bf16-storage variants
-/// this test exercises - mirrors `model::ops::tests::kernel_list` (a private
-/// test-only helper in the crate under test, so it can't be shared directly;
-/// duplicated here the same way `ops_facade_parity.rs`'s own `KERNELS`
-/// already duplicates that list for the `F32`/`I8`/`Q4` tiers).
+/// this test exercises and the three f16-storage variants (B5) `Ops::new`
+/// requires regardless of which tier a given test dispatches - mirrors
+/// `model::ops::tests::kernel_list` (a private test-only helper in the crate
+/// under test, so it can't be shared directly; duplicated here the same way
+/// `ops_facade_parity.rs`'s own `KERNELS` already duplicates that list for
+/// the `F32`/`I8`/`Q4` tiers).
 fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let bf16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
     let bf16_gemv =
         kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
     let bf16_reg3 =
         kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
+    let f16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::F16).unwrap();
+    let f16_gemv = kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
+    let f16_reg3 = kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
     vec![
         ("matmul", kernels::MATMUL),
         ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -67,6 +72,9 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
         bf16_matmul,
         bf16_gemv,
         bf16_reg3,
+        f16_matmul,
+        f16_gemv,
+        f16_reg3,
     ]
 }
 
