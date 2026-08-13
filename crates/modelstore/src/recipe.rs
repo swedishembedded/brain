@@ -69,7 +69,7 @@ pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
 /// exactly one file (the nano variant if present, else whichever `.pt` sorts
 /// first, so a differently-curated repo still resolves to something); the
 /// finish step (`crates/cli/src/supply.rs::convert`, `"yolo"` arm) runs
-/// `yolo::import::import_yolov8n` to produce `model.brain.safetensors` --
+/// `yolov8::import::import_yolov8n` to produce `model.brain.safetensors` --
 /// this recipe fits the store's existing single-file convention, unlike
 /// [`ZimageRecipe`], so no compound-manifest machinery is needed here.
 pub struct YoloRecipe;

@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
-use depth::{Predictor, ZipConfig};
+use zipdepth::{Predictor, ZipConfig};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -45,7 +45,7 @@ impl DepthResident {
     /// Construct under the card's id. `_tokenizer` is unused -- depth has no
     /// text vocab. The checkpoint's real variant (base vs npu-blend) is
     /// auto-detected from its own tensor shapes at `activate()` time
-    /// (`depth::cfg_for_checkpoint`), not from anything carried here.
+    /// (`zipdepth::cfg_for_checkpoint`), not from anything carried here.
     pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, _tokenizer: Option<&str>) -> DepthResident {
         DepthResident { id: card.id.clone(), path: path.to_string() }
     }
@@ -80,10 +80,10 @@ impl ResidentModel for DepthResident {
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Auto-detect the checkpoint variant from its own tensor names, exactly like
-        // `brain depth` (see `depth::cfg_for_checkpoint`), so the strict importer's
+        // `brain depth` (see `zipdepth::cfg_for_checkpoint`), so the strict importer's
         // shapes match without the caller passing a variant.
-        let cfg = depth::cfg_for_checkpoint(&self.path).unwrap_or_else(|_| ZipConfig::base());
-        let init = depth::import::load(&self.path, &cfg)?;
+        let cfg = zipdepth::cfg_for_checkpoint(&self.path).unwrap_or_else(|_| ZipConfig::base());
+        let init = zipdepth::import::load(&self.path, &cfg)?;
 
         // Placed on the NPU → compile the ZipDepth ONNX graph ONCE (via the generic
         // `npu::NpuModel` seam) for a fixed square input and run it through the
@@ -106,7 +106,7 @@ impl ResidentModel for DepthResident {
         // adapter (`resident_facenet.rs`, `resident_upscale.rs`, ...) — a bare
         // `Gpu::new` here bound whatever the thread-local default card was,
         // so the manager could budget depth against a device it wasn't on.
-        let gpu = crate::resident_llm::on_device(device, || Gpu::new(depth::net::PIPELINES))?;
+        let gpu = crate::resident_llm::on_device(device, || Gpu::new(zipdepth::net::PIPELINES))?;
         Ok(Box::new(DepthInstance { gpu, init, cfg }))
     }
 }

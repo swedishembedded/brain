@@ -5,8 +5,8 @@
 //! colorized depth, so the NPU output can be eyeballed. Env-gated (ZIPDEPTH_NPU_PTH
 //! + DEPTH_RENDER_IMG + DEPTH_RENDER_OUT).
 use std::collections::HashMap;
-use depth::import;
-use depth::viz::{colorize, Bounds, Colormap};
+use zipdepth::import;
+use zipdepth::viz::{colorize, Bounds, Colormap};
 use npu::build_depth_graph;
 use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
 use onnx::GraphBuilder;
@@ -21,7 +21,7 @@ fn render() {
         eprintln!("SKIP");
         return;
     };
-    let cfg = depth::ZipConfig { upsample_unfold: false, ..depth::ZipConfig::base() };
+    let cfg = zipdepth::ZipConfig { upsample_unfold: false, ..zipdepth::ZipConfig::base() };
     let sz = cfg.input as usize;
     let init: HashMap<String, Vec<f32>> = import::load(&pth, &cfg).unwrap();
     let mut g = GraphBuilder::new("zipdepth");

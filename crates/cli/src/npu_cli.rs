@@ -1052,8 +1052,8 @@ fn run(args: &[String]) {
 
 /// Build a `YoloConfig` for decode from explicit flags (the ONNX doesn't carry
 /// nc/reg_max). Defaults are yolov8n (nc 80, reg_max 16); input from the model.
-fn infer_cfg(session: &NpuSession, nc: Option<u32>, reg_max: Option<u32>, input: Option<u32>) -> yolo::YoloConfig {
-    let mut cfg = yolo::YoloConfig::yolov8n();
+fn infer_cfg(session: &NpuSession, nc: Option<u32>, reg_max: Option<u32>, input: Option<u32>) -> yolov8::YoloConfig {
+    let mut cfg = yolov8::YoloConfig::yolov8n();
     let s = session.input_shape();
     cfg.input = input.unwrap_or(s[2] as u32);
     if let Some(n) = nc {
@@ -1106,7 +1106,7 @@ fn bench(args: &[String]) {
         match crate::image_io::load_image(&image) {
             Ok((hwc, w, h)) => {
                 let cfg = infer_cfg(&session, None, None, Some(shape[2] as u32));
-                let (chw, _) = yolo::boxmath::letterbox_rgb(&hwc, w, h, cfg.input, 114.0 / 255.0);
+                let (chw, _) = yolov8::boxmath::letterbox_rgb(&hwc, w, h, cfg.input, 114.0 / 255.0);
                 chw
             }
             Err(e) => {

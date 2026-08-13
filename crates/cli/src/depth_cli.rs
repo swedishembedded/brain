@@ -11,11 +11,11 @@
 //!
 //! `brain depth --camera` adds the realtime V4L2 webcam path (Linux, YUYV): a
 //! capture thread fills a single-slot latest-frame buffer, the main loop takes the
-//! latest frame, runs the same [`depth::Predictor`], EMA-smooths the depth window,
+//! latest frame, runs the same [`zipdepth::Predictor`], EMA-smooths the depth window,
 //! and shows it — Esc quits, `[`/`]` cycle colormaps live.
 
-use depth::viz::{colorize, composite_side_by_side, Bounds, Colormap};
-use depth::{import, Predictor, ZipConfig};
+use zipdepth::viz::{colorize, composite_side_by_side, Bounds, Colormap};
+use zipdepth::{import, Predictor, ZipConfig};
 use gpu_core::Gpu;
 use wm_display::sink::{FrameSink, Hud};
 
@@ -98,7 +98,7 @@ fn render_view(
     mode: ViewMode,
     bounds: Bounds,
     colormap: Colormap,
-    stereo: &depth::StereoOpts,
+    stereo: &zipdepth::StereoOpts,
 ) -> Vec<u8> {
     match mode {
         ViewMode::Side => {
@@ -106,18 +106,18 @@ fn render_view(
             composite_side_by_side(rgb8, w, h, &dcol, w, h).0
         }
         ViewMode::Depth => colorize(depth, bounds, colormap),
-        ViewMode::Stereo => depth::autostereogram(depth, w, h, bounds, stereo),
-        ViewMode::StereoTex => depth::autostereogram_textured(depth, w, h, bounds, stereo, rgb8),
+        ViewMode::Stereo => zipdepth::autostereogram(depth, w, h, bounds, stereo),
+        ViewMode::StereoTex => zipdepth::autostereogram_textured(depth, w, h, bounds, stereo, rgb8),
         ViewMode::StereoDual => {
             // Peak disparity ~ 1/25 of the width — enough relief to fuse, small
             // enough that disocclusion holes stay tiny.
             let max_disp = (w / 25).clamp(8, 40);
-            depth::stereo_pair(rgb8, depth, w, h, bounds, max_disp, stereo.near_is_high)
+            zipdepth::stereo_pair(rgb8, depth, w, h, bounds, max_disp, stereo.near_is_high)
         }
-        ViewMode::Fog => depth::fog(rgb8, depth, w, h, bounds, [210, 216, 226], 3.5, stereo.near_is_high),
+        ViewMode::Fog => zipdepth::fog(rgb8, depth, w, h, bounds, [210, 216, 226], 3.5, stereo.near_is_high),
         ViewMode::Blur => {
             let max_radius = (w / 40).clamp(3, 20);
-            depth::depth_blur(rgb8, depth, w, h, bounds, max_radius, stereo.near_is_high)
+            zipdepth::depth_blur(rgb8, depth, w, h, bounds, max_radius, stereo.near_is_high)
         }
     }
 }
@@ -263,10 +263,10 @@ fn parse(args: &[String]) -> Opts {
 
 
 /// Pick the ZipConfig by inspecting the checkpoint's own tensor names (see
-/// [`depth::cfg_for_checkpoint`]); an unreadable file falls back to the base
+/// [`zipdepth::cfg_for_checkpoint`]); an unreadable file falls back to the base
 /// variant so the strict importer reports the real error.
 fn cfg_for_checkpoint(weights: &str) -> ZipConfig {
-    depth::cfg_for_checkpoint(weights).unwrap_or_else(|_| ZipConfig::base())
+    zipdepth::cfg_for_checkpoint(weights).unwrap_or_else(|_| ZipConfig::base())
 }
 
 fn run_image(args: &[String]) {
@@ -285,7 +285,7 @@ fn run_image(args: &[String]) {
     // Gpu::new honours the process backend (`--device cpu|vulkan` / BRAIN_DEVICE),
     // which main.rs::select_backend already parsed out of argv — so the same demo
     // runs on the CPU JIT or a real GPU with no code change here.
-    let gpu = Gpu::new(depth::net::PIPELINES);
+    let gpu = Gpu::new(zipdepth::net::PIPELINES);
     let ps = import::load_into(&gpu, &o.weights, &cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {}: {e}", o.weights);
         std::process::exit(1);
@@ -328,7 +328,7 @@ fn run_image(args: &[String]) {
     let mut mode = ViewMode::parse(&o.view);
     // The stereogram's eye separation is sized to the frame width and stripe count,
     // so it keeps the camera aspect and shows `--stripes` repeats.
-    let stereo = depth::StereoOpts::with_stripes(w, o.stripes);
+    let stereo = zipdepth::StereoOpts::with_stripes(w, o.stripes);
     let render = |mode: ViewMode, map: Colormap| render_view(&rgb8, &depth, w, h, mode, bounds, map, &stereo);
 
     if o.headless {
@@ -530,8 +530,8 @@ fn run_camera(args: &[String]) {
     // Build the inference backend once: brain's engine, or a compiled NPU session
     // sized for this camera's target (aspect-preserving, ×32).
     let use_npu = infer == "npu";
-    let (cam_th, cam_tw) = depth::predict::target_size(cw, ch, cfg.input);
-    let gpu = Gpu::new(depth::net::PIPELINES);
+    let (cam_th, cam_tw) = zipdepth::predict::target_size(cw, ch, cfg.input);
+    let gpu = Gpu::new(zipdepth::net::PIPELINES);
     let mut npu_sess = if use_npu { Some(build_npu_session(&weights, &cfg, cam_th, cam_tw)) } else { None };
     let predictor = if use_npu {
         None
@@ -546,7 +546,7 @@ fn run_camera(args: &[String]) {
 
     // Each view renders at its natural size; the window resizes to match when `v`
     // cycles. Sized from the actual frame dims (cw/ch = the camera's negotiated res).
-    let stereo = depth::StereoOpts::with_stripes(cw, stripes);
+    let stereo = zipdepth::StereoOpts::with_stripes(cw, stripes);
     let mut mode = ViewMode::parse(&view);
     let (mut win_w, mut win_h) = mode.canvas(cw, ch);
     let mut win = match wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale) {
@@ -633,7 +633,7 @@ fn run_camera(args: &[String]) {
         let backend = if use_npu { "NPU" } else { "ENGINE" };
         // In-frame HUD so it reads on the image, not just the window title.
         let line = format!("ZIPDEPTH {backend} {} {fps:.0}FPS {infer_ms:.0}MS DROP:{}", mode.label(), st.dropped);
-        depth::viz::draw_text(&mut canvas, ww, hh, 6, 6, &line, 2, [0, 255, 0]);
+        zipdepth::viz::draw_text(&mut canvas, ww, hh, 6, 6, &line, 2, [0, 255, 0]);
         let hud = Hud {
             model: format!("zipdepth {backend} {}  {fps:.0} fps  {infer_ms:.0} ms  drop {}", mode.label(), st.dropped),
             fps,
@@ -658,7 +658,7 @@ fn run_camera(_args: &[String]) {
 // ---------------------------------------------------------------------------
 
 /// `brain depth train` — the end-to-end loop on synthetic RGB->inverse-depth
-/// pairs: forward -> masked L1 -> backward -> AdamW (see `depth::train`).
+/// pairs: forward -> masked L1 -> backward -> AdamW (see `zipdepth::train`).
 /// Placeholder-grade data, real loop; `--weights <ckpt.pth>` seeds from a
 /// released checkpoint (fine-tune), otherwise fresh `init_weights`.
 fn run_train(args: &[String]) {
@@ -712,9 +712,9 @@ fn run_train(args: &[String]) {
     // training defaults to the base (unfold-upsampler) layout.
     let cfg = if weights.is_empty() { ZipConfig::base() } else { cfg_for_checkpoint(&weights) };
     let init = if weights.is_empty() {
-        depth::init_weights(&cfg, seed)
+        zipdepth::init_weights(&cfg, seed)
     } else {
-        match depth::load_checkpoint(&weights, &cfg) {
+        match zipdepth::load_checkpoint(&weights, &cfg) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("brain depth train: loading {weights}: {e}");
@@ -724,13 +724,13 @@ fn run_train(args: &[String]) {
     };
 
     let upsample_unfold = cfg.upsample_unfold; // captured before cfg moves into train_loop below
-    let gpu = Gpu::new(depth::net::PIPELINES);
-    let t = depth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false };
+    let gpu = Gpu::new(zipdepth::net::PIPELINES);
+    let t = zipdepth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false };
     println!(
         "training zipdepth on synthetic pairs: {w}x{h} batch={batch} steps={steps} lr={lr} ({})",
         if weights.is_empty() { "fresh init" } else { &weights }
     );
-    let (ps, res) = depth::train::train_loop(&gpu, cfg, &t, &init, |step, loss| {
+    let (ps, res) = zipdepth::train::train_loop(&gpu, cfg, &t, &init, |step, loss| {
         if step == 0 || (step + 1) % 10 == 0 || step + 1 == steps {
             println!("step {:>5}/{steps}  loss {loss:.4}", step + 1);
         }
@@ -750,7 +750,7 @@ fn run_train(args: &[String]) {
     // is auto-discoverable by crates/cli/src/model_dir.rs without requiring
     // BRAIN_DEPTH_WEIGHTS to be set. The "variant" field is informational
     // only (DepthResident::activate auto-detects the real variant from the
-    // checkpoint's own tensor shapes via depth::cfg_for_checkpoint, never
+    // checkpoint's own tensor shapes via zipdepth::cfg_for_checkpoint, never
     // reads this back) -- previously hardcoded "base" regardless of which
     // cfg was actually used; derive it from cfg instead so the metadata is
     // at least honest about what got trained.
@@ -815,24 +815,24 @@ fn run_calib(args: &[String]) {
         eprintln!("calibrating on {} images, {} distinct input shapes: {}{more}...", imgs.len(), shapes.len(), shown.join(", "));
     }
 
-    let gpu = Gpu::new(depth::net::PIPELINES);
+    let gpu = Gpu::new(zipdepth::net::PIPELINES);
     let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {weights}: {e}");
         std::process::exit(1);
     });
-    let stats = depth::collect_activation_stats_sized(&gpu, &cfg, &ps, &imgs);
+    let stats = zipdepth::collect_activation_stats_sized(&gpu, &cfg, &ps, &imgs);
     let report = stats.report();
 
     // Encoder vs decoder summary — the QuartDepth question.
-    let mean = |it: &[&depth::LayerReport]| -> f32 {
+    let mean = |it: &[&zipdepth::LayerReport]| -> f32 {
         if it.is_empty() {
             0.0
         } else {
             it.iter().map(|r| r.outlier_ratio).sum::<f32>() / it.len() as f32
         }
     };
-    let enc: Vec<&depth::LayerReport> = report.iter().filter(|r| r.is_encoder()).collect();
-    let dec: Vec<&depth::LayerReport> = report.iter().filter(|r| !r.is_encoder()).collect();
+    let enc: Vec<&zipdepth::LayerReport> = report.iter().filter(|r| r.is_encoder()).collect();
+    let dec: Vec<&zipdepth::LayerReport> = report.iter().filter(|r| !r.is_encoder()).collect();
 
     println!("\nper-layer activation outlier_ratio = absmax / p99.99 (higher = more INT8-hostile)\n");
     println!("{:<48} {:>10} {:>10} {:>8}", "layer", "absmax", "p99.99", "ratio");
@@ -851,15 +851,15 @@ fn run_calib(args: &[String]) {
 
 /// Load up to `max_n` PPM images from `dir`, letterboxed to `[3,size,size]` CHW.
 /// Load calibration images and preprocess each one **exactly as the predictor
-/// does**: `depth::predict::preprocess_chw` — aspect-preserving bilinear resize
+/// does**: `zipdepth::predict::preprocess_chw` - aspect-preserving bilinear resize
 /// so the shorter side is `input`, both dims rounded to a multiple of 32, no pad.
 ///
 /// This used to letterbox to a padded square with a 0.5 grey fill, so
 /// calibration fitted INT8 scales to a resampler, a geometry and a border the
-/// model never sees at inference (and which `depth::predict`'s own module docs
+/// model never sees at inference (and which `zipdepth::predict`'s own module docs
 /// record as having been REMOVED because it visibly degrades the depth). Each
 /// image therefore now carries its own `(h, w)`.
-fn load_calib_images(dir: &str, input: u32, max_n: usize) -> Vec<depth::CalibImage> {
+fn load_calib_images(dir: &str, input: u32, max_n: usize) -> Vec<zipdepth::CalibImage> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
@@ -876,8 +876,8 @@ fn load_calib_images(dir: &str, input: u32, max_n: usize) -> Vec<depth::CalibIma
         }
         let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) else { continue };
         let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-        let (chw, th, tw) = depth::predict::preprocess_chw(&hwc, w, h, input);
-        out.push(depth::CalibImage { chw, h: th, w: tw });
+        let (chw, th, tw) = zipdepth::predict::preprocess_chw(&hwc, w, h, input);
+        out.push(zipdepth::CalibImage { chw, h: th, w: tw });
     }
     out
 }
@@ -891,7 +891,7 @@ fn load_calib_images(dir: &str, input: u32, max_n: usize) -> Vec<depth::CalibIma
 fn build_npu_session(weights: &str, cfg: &ZipConfig, th: u32, tw: u32) -> npu::openvino::NpuSession {
     use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
     assert!(!cfg.upsample_unfold, "--infer npu needs the blend (npu) checkpoint");
-    let init = depth::import::load(weights, cfg).unwrap_or_else(|e| {
+    let init = zipdepth::import::load(weights, cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {weights}: {e}");
         std::process::exit(1);
     });
@@ -909,7 +909,7 @@ fn build_npu_session(weights: &str, cfg: &ZipConfig, th: u32, tw: u32) -> npu::o
 /// One-shot NPU predict for the image path: compile at the aspect-preserving target
 /// size, run, resize the depth back to the frame grid.
 fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
-    let (th, tw) = depth::predict::target_size(w0, h0, cfg.input);
+    let (th, tw) = zipdepth::predict::target_size(w0, h0, cfg.input);
     let mut sess = build_npu_session(weights, cfg, th, tw);
     run_npu_session(&mut sess, hwc, w0, h0, th, tw)
 }

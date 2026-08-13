@@ -23,7 +23,7 @@
 //! The default serial [`Instance::run_batch`] therefore stands. The batch
 //! axis exists in the architecture — `crates/facenet/src/train.rs` trains
 //! ArcFace at batch > 1 — so widening the *inference* graphs to a configurable
-//! N (as `yolo::Yolo::load(path, batch)` does) is the follow-up that would make
+//! N (as `yolov8::Yolo::load(path, batch)` does) is the follow-up that would make
 //! a genuine `run_batch` possible, and it belongs in `crates/facenet`, not here.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};

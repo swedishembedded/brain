@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use yolo::net::ActTap;
-use yolo::Yolo;
+use yolov8::net::ActTap;
+use yolov8::Yolo;
 
 use crate::fold::{fold_bn, quantize_weight_per_channel, BN_EPS};
 use crate::quant::Quant;
@@ -108,7 +108,7 @@ pub use model::hostmath::cosine;
 /// Mean-absolute fp32-vs-INT8-sim mAP@0.5 over a brain detection dataset. Returns
 /// `(map_fp32, map_int8_sim)`. Reuses the shared decode tail + `eval::detection`.
 pub fn simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: f32, iou: f32) -> (f32, f32) {
-    use yolo::boxmath::{letterbox_rgb, xywhn_to_xyxy};
+    use yolov8::boxmath::{letterbox_rgb, xywhn_to_xyxy};
 
     let ds = data::gen_detect::load_dataset(std::path::Path::new(dataset_dir)).expect("load dataset");
     let cfg = checkpoint_cfg(weights_path);
@@ -152,7 +152,7 @@ pub fn simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: 
     (m_fp32, m_int8)
 }
 
-fn push_dets(out: &mut Vec<yolo::nms::Detection>, x_off: f32, dets: &[yolo::nms::Detection]) {
+fn push_dets(out: &mut Vec<yolov8::nms::Detection>, x_off: f32, dets: &[yolov8::nms::Detection]) {
     for d in dets {
         out.push([d[0] + x_off, d[1], d[2] + x_off, d[3], d[4], d[5]]);
     }
@@ -162,14 +162,14 @@ fn push_dets(out: &mut Vec<yolo::nms::Detection>, x_off: f32, dets: &[yolo::nms:
 fn decode_one(
     model: &Yolo,
     chw: &[f32],
-    lb: &yolo::boxmath::Letterbox,
+    lb: &yolov8::boxmath::Letterbox,
     w0: u32,
     h0: u32,
-    cfg: &yolo::YoloConfig,
+    cfg: &yolov8::YoloConfig,
     conf: f32,
     iou: f32,
     tap: Option<&FakeQuantTap>,
-) -> Vec<yolo::nms::Detection> {
+) -> Vec<yolov8::nms::Detection> {
     model.set_image(chw);
     match tap {
         Some(t) => model.forward_net_tapped(t),
@@ -177,15 +177,15 @@ fn decode_one(
     }
     let (cls, boxl) = model.raw_logits();
     let a = model.num_anchors() as usize;
-    let dist = yolo::infer::dfl_decode_cpu(&boxl, a, cfg.reg_max as usize);
+    let dist = yolov8::infer::dfl_decode_cpu(&boxl, a, cfg.reg_max as usize);
     let anchors = model.anchor_geometry();
-    let mut out = yolo::infer::decode_detections(
+    let mut out = yolov8::infer::decode_detections(
         &cls, &dist, &anchors, 1, a, cfg.nc as usize, &[*lb], &[(w0, h0)], conf, iou, 300,
     );
     out.pop().unwrap_or_default()
 }
 
-fn checkpoint_cfg(weights_path: &str) -> yolo::YoloConfig {
+fn checkpoint_cfg(weights_path: &str) -> yolov8::YoloConfig {
     let c = checkpoint::load(weights_path);
-    yolo::YoloConfig::from_json(&c.header["config"])
+    yolov8::YoloConfig::from_json(&c.header["config"])
 }

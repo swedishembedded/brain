@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use onnx::onnx::ModelProto;
-use yolo::{Yolo, YoloConfig};
+use yolov8::{Yolo, YoloConfig};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
@@ -31,7 +31,7 @@ fn op_counts(m: &ModelProto) -> HashMap<String, usize> {
 
 fn save_tiny(path: &str) -> YoloConfig {
     let cfg = YoloConfig::tiny(3);
-    let init = yolo::init_weights(&cfg, 7);
+    let init = yolov8::init_weights(&cfg, 7);
     let model = Yolo::new(cfg.clone(), 1, 0, &init);
     model.save(path);
     cfg

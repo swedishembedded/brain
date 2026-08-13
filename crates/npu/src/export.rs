@@ -9,16 +9,16 @@ use crate::quant::Quant;
 use crate::topology::build_graph;
 
 /// The model config stored in a checkpoint header.
-pub fn config_of(weights_path: &str) -> yolo::YoloConfig {
+pub fn config_of(weights_path: &str) -> yolov8::YoloConfig {
     let r = checkpoint::weightio::WeightReader::open(weights_path).unwrap_or_else(|e| panic!("open {weights_path}: {e}"));
-    yolo::YoloConfig::from_json(&r.config())
+    yolov8::YoloConfig::from_json(&r.config())
 }
 
 /// Open the checkpoint (header only) + config, optionally overriding the
 /// (square) input size.
-fn load(weights_path: &str, input: Option<u32>) -> (yolo::YoloConfig, checkpoint::weightio::WeightReader) {
+fn load(weights_path: &str, input: Option<u32>) -> (yolov8::YoloConfig, checkpoint::weightio::WeightReader) {
     let r = checkpoint::weightio::WeightReader::open(weights_path).unwrap_or_else(|e| panic!("open {weights_path}: {e}"));
-    let mut cfg = yolo::YoloConfig::from_json(&r.config());
+    let mut cfg = yolov8::YoloConfig::from_json(&r.config());
     if let Some(s) = input {
         cfg.input = s;
     }

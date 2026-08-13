@@ -15,7 +15,7 @@
 //! the resolution of the bulk under a single absmax-derived scale.
 //!
 //! Originally written for ZipDepth's INT8 decoder-vs-encoder ablation
-//! (`depth::quant`, still the home of the vision-specific `ActTap`/`Ctx`
+//! (`zipdepth::quant`, still the home of the vision-specific `ActTap`/`Ctx`
 //! wiring and calibration-image plumbing); extracted here so a second
 //! caller (Qwen's KV-cache calibration) doesn't reimplement the same
 //! bounded-reservoir/percentile math.
@@ -40,7 +40,7 @@ struct StreamAcc {
 /// Accumulates a bounded subsample of `|x|` magnitudes per named stream.
 /// Observes only — never mutates its input. Cheap to hold behind a shared
 /// reference (`observe` takes `&self`, interior-mutable), so it composes with
-/// tap-style callback seams the same way `depth::quant::ActStatsCollector`
+/// tap-style callback seams the same way `zipdepth::quant::ActStatsCollector`
 /// (now a thin wrapper over this) does.
 #[derive(Default)]
 pub struct Collector {

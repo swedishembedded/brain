@@ -15,10 +15,10 @@ fn real_tiny_yolo_emits_object_detected() {
     }
     // Random-weight tiny YOLO (no training): we only assert the controller emits
     // an `object_detected` event with finite box coordinates (not the contents).
-    let cfg = yolo::YoloConfig::tiny(3);
+    let cfg = yolov8::YoloConfig::tiny(3);
     let side = cfg.input; // square model input
-    let init = yolo::init_weights(&cfg, 1234);
-    let m = yolo::Yolo::new(cfg, 1, 0, &init);
+    let init = yolov8::init_weights(&cfg, 1234);
+    let m = yolov8::Yolo::new(cfg, 1, 0, &init);
     let detect = Box::new(YoloDetect::from_model(m).with_thresholds(0.0, 0.45));
 
     let infer = Box::new(FakeInferModel::echoing("x"));

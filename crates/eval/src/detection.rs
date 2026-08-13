@@ -37,8 +37,8 @@
 //! predictions contributes AP=0 (it is included). If no class has any GT, `map50`
 //! returns 0.
 
-use yolo::boxmath::iou;
-use yolo::Detection;
+use yolov8::boxmath::iou;
+use yolov8::Detection;
 
 /// A ground-truth box for one image: class id + pixel `xyxy`.
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +48,7 @@ pub struct GtBox {
 }
 
 /// Pairwise IoU between a prediction box and a GT box (re-exported convenience;
-/// uses [`yolo::boxmath::iou`] so the metric and the detector share one IoU).
+/// uses [`yolov8::boxmath::iou`] so the metric and the detector share one IoU).
 pub fn pairwise_iou(a: [f32; 4], b: [f32; 4]) -> f32 {
     iou(a, b)
 }

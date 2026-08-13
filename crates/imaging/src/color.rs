@@ -4,12 +4,12 @@
 //! Colour normalisation as **data**.
 //!
 //! `IMAGENET_MEAN` / `IMAGENET_STD` were declared byte-identically in
-//! `depth::init` and `mirror::preprocess`. Hoisting the constants is safe; what
+//! `zipdepth::init` and `mirror::preprocess`. Hoisting the constants is safe; what
 //! is *not* safe is unifying where they are applied, and that is worth stating
 //! at the point where the constants live:
 //!
 //! * `depth` folds mean/std into the **first BatchNorm's** parameters at import
-//!   (`depth::init`), so the model consumes `[0, 1]` directly and its predictor
+//!   (`zipdepth::init`), so the model consumes `[0, 1]` directly and its predictor
 //!   never normalises. Nothing to migrate there but the two arrays.
 //! * `mirror` applies them **per frame** inside `mirror::model::forward`, for
 //!   reference parity. `mirror::preprocess::preprocess` also applies them and

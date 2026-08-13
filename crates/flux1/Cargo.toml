@@ -18,7 +18,7 @@ brain-dit.workspace = true
 brain-vae.workspace = true
 brain-diffusion.workspace = true
 brain-clip.workspace = true
-brain-t5.workspace = true
+brain-t5encoder.workspace = true
 brain-imaging.workspace = true
 bytemuck.workspace = true
 

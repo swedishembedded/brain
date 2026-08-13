@@ -203,13 +203,13 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None, // no residency adapter yet -- brain caps/brain do only, matching fastvlm's own state
         },
         ModelEntry {
-            manifest: yolo::caps::manifest,
-            provider: always!(yolo::caps::YoloProvider::new()),
+            manifest: yolov8::caps::manifest,
+            provider: always!(yolov8::caps::YoloProvider::new()),
             resident: None,
         },
         ModelEntry {
-            manifest: depth::caps::manifest,
-            provider: always!(depth::caps::DepthProvider::new()),
+            manifest: zipdepth::caps::manifest,
+            provider: always!(zipdepth::caps::DepthProvider::new()),
             resident: None,
         },
         // The imaging models carry their weights path in the provider (from a

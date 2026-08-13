@@ -11,8 +11,8 @@
 //! present). Choose the device with `BRAIN_NPU_DEVICE` (default `NPU`); set it to
 //! `CPU` to validate the graph on the OpenVINO CPU plugin without an NPU.
 
-use yolo::head::repack_heads_to_flat;
-use yolo::{Yolo, YoloConfig};
+use yolov8::head::repack_heads_to_flat;
+use yolov8::{Yolo, YoloConfig};
 
 use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
 
@@ -38,7 +38,7 @@ fn npu_fp32_matches_engine() {
     let wpath = std::env::temp_dir().join(format!("brain_npu_tierb_{}.safetensors", std::process::id()));
     let wpath = wpath.to_string_lossy().into_owned();
 
-    let init = yolo::init_weights(&cfg, 0x1234);
+    let init = yolov8::init_weights(&cfg, 0x1234);
     Yolo::new(cfg.clone(), 1, 0, &init).save(&wpath);
 
     let chw = rand_chw(side, 42);

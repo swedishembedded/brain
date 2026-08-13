@@ -259,7 +259,7 @@ pub fn broadcast_channels(ctx: &Ctx, x: &DeviceBuffer, s: Shape, c: u32) -> (Dev
 /// [`intersect`], so it agrees with them on hard masks exactly.
 ///
 /// Two empty masks are defined as IoU `1.0` (identical), matching
-/// `yolo::boxmath::iou`'s degenerate convention of "identical inputs score 1".
+/// `yolov8::boxmath::iou`'s degenerate convention of "identical inputs score 1".
 pub fn iou(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "iou: masks must have the same length");
     let mut inter = 0f64;

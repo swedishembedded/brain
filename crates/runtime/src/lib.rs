@@ -193,13 +193,13 @@ impl InferModel for GptInfer {
 
 // ---- YOLO adapter ---------------------------------------------------------
 
-/// Wraps a loaded [`yolo::Yolo`] (sized for `B=1`) as a [`DetectModel`]. The
+/// Wraps a loaded [`yolov8::Yolo`] (sized for `B=1`) as a [`DetectModel`]. The
 /// controller hands it an RGB8 frame; the adapter normalises it to `[0,1]` HWC
-/// floats and calls [`yolo::Yolo::detect`], which letterboxes to the model's
+/// floats and calls [`yolov8::Yolo::detect`], which letterboxes to the model's
 /// input, runs the eval-mode forward, decodes + NMS, and returns boxes in the
 /// frame's own pixel coordinates. Construct via [`YoloDetect::load`].
 pub struct YoloDetect {
-    model: yolo::Yolo,
+    model: yolov8::Yolo,
     labels: Vec<String>,
     conf: f32,
     iou: f32,
@@ -209,12 +209,12 @@ impl YoloDetect {
     /// Load a YOLO checkpoint, sized `B=1` for single-frame inference. Labels are
     /// numeric (`"0".."nc-1"`) — the synthetic detector carries no class names.
     pub fn load(path: &str) -> YoloDetect {
-        let model = yolo::Yolo::load(path, 1);
+        let model = yolov8::Yolo::load(path, 1);
         YoloDetect::from_model(model)
     }
 
     /// Wrap an already-built model (used by tests with a random-weight tiny YOLO).
-    pub fn from_model(model: yolo::Yolo) -> YoloDetect {
+    pub fn from_model(model: yolov8::Yolo) -> YoloDetect {
         let labels = (0..model.cfg.nc).map(|c| c.to_string()).collect();
         // Inference is eval-only: pin eval mode so the per-Conv BatchNorm-eval
         // collapse (`sb`) is computed ONCE and reused, instead of being

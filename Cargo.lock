@@ -548,7 +548,6 @@ dependencies = [
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
- "brain-depth",
  "brain-ecapatdnn",
  "brain-eval",
  "brain-events",
@@ -600,8 +599,9 @@ dependencies = [
  "brain-wm-core",
  "brain-wm-diamond",
  "brain-wm-display",
- "brain-yolo",
+ "brain-yolov8",
  "brain-zimage",
+ "brain-zipdepth",
  "clap",
  "serde_json",
  "sha2",
@@ -712,26 +712,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-depth"
-version = "0.1.1"
-dependencies = [
- "brain-backend-cpu",
- "brain-capability",
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-gradcheck",
- "brain-imaging",
- "brain-kernels",
- "brain-model",
- "brain-optim",
- "brain-paramstore",
- "brain-vision",
- "bytemuck",
- "serde_json",
-]
-
-[[package]]
 name = "brain-diffusion"
 version = "0.1.1"
 dependencies = [
@@ -770,7 +750,7 @@ dependencies = [
  "brain-ecapatdnn",
  "brain-gpt2",
  "brain-lfm2",
- "brain-yolo",
+ "brain-yolov8",
  "serde_json",
 ]
 
@@ -861,7 +841,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
- "brain-t5",
+ "brain-t5encoder",
  "brain-vae",
  "bytemuck",
  "serde_json",
@@ -969,7 +949,7 @@ dependencies = [
  "brain-restore",
  "brain-sam2",
  "brain-seq2seq",
- "brain-t5",
+ "brain-t5encoder",
  "brain-vae",
  "brain-vqgan",
 ]
@@ -1188,7 +1168,6 @@ dependencies = [
  "brain-checkpoint",
  "brain-chronos2",
  "brain-data",
- "brain-depth",
  "brain-eval",
  "brain-events",
  "brain-fincast",
@@ -1210,7 +1189,8 @@ dependencies = [
  "brain-testutil",
  "brain-vision",
  "brain-wm-diamond",
- "brain-yolo",
+ "brain-yolov8",
+ "brain-zipdepth",
  "bytemuck",
  "openvino",
  "serde_json",
@@ -1462,7 +1442,7 @@ dependencies = [
  "brain-forecast",
  "brain-gpt2",
  "brain-hfsm",
- "brain-yolo",
+ "brain-yolov8",
  "serde_json",
 ]
 
@@ -1554,7 +1534,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-t5"
+name = "brain-t5encoder"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
@@ -1738,7 +1718,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-yolo"
+name = "brain-yolov8"
 version = "0.1.1"
 dependencies = [
  "brain-capability",
@@ -1774,6 +1754,26 @@ dependencies = [
  "brain-testutil",
  "brain-vae",
  "brain-weightset",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-zipdepth"
+version = "0.1.1"
+dependencies = [
+ "brain-backend-cpu",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-vision",
+ "bytemuck",
  "serde_json",
 ]
 

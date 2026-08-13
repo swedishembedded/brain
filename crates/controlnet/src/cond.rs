@@ -22,7 +22,7 @@
 //!
 //! It is deliberately a **function over an already-computed map, not a
 //! dependency on `crates/depth`**. The cost of wiring the crate itself is not
-//! the code (a `depth::Predictor` call is a few lines); it is that there is no
+//! the code (a `zipdepth::Predictor` call is a few lines); it is that there is no
 //! depth-conditioned SDXL ControlNet checkpoint on this machine, so such a path
 //! could not be parity-gated and would ship as untested plumbing behind a
 //! `depth` → `vision` → `model` dependency edge. This module is the part that
@@ -79,7 +79,7 @@ pub fn from_map(map: &[f32], h: u32, w: u32, range: Option<(f32, f32)>) -> Vec<f
 /// A ZipDepth (`crates/depth`) prediction as a control image: per-image
 /// min/max normalisation, replicated to three channels.
 ///
-/// Takes the map rather than a `depth::Predictor` on purpose — see the module
+/// Takes the map rather than a `zipdepth::Predictor` on purpose - see the module
 /// header.
 pub fn from_depth(depth: &[f32], h: u32, w: u32) -> Vec<f32> {
     from_map(depth, h, w, None)

@@ -6,7 +6,7 @@
 //! ## Why this crate exists
 //!
 //! Image handling in brain was ~60 sites across 24 crates: three byte-identical
-//! host bilinear resizes (`depth::predict`, `cli::depth_cli`, `cli::resident_depth`),
+//! host bilinear resizes (`zipdepth::predict`, `cli::depth_cli`, `cli::resident_depth`),
 //! two independent P6 parsers, two letterboxes, fifteen CHW/HWC permutations, and
 //! four inline `[0,1] <-> [-1,1]` maps. That is the `rmsnorm`-was-seven-times
 //! failure mode from `AGENTS.md`, applied to pixels: every copy is a place the
@@ -24,16 +24,16 @@
 //!
 //! | item | previous site | state |
 //! |---|---|---|
-//! | [`letterbox::Letterbox`] / [`letterbox_rgb`] | `yolo::boxmath` | **moved**; `boxmath` re-exports, one definition |
+//! | [`letterbox::Letterbox`] / [`letterbox_rgb`] | `yolov8::boxmath` | **moved**; `boxmath` re-exports, one definition |
 //! | [`codec::decode_p6`] / [`codec::encode_p6`] | `events::ppm` | **re-exported**; `events` keeps the definition (it is wasm-reachable and must not gain `image`) |
 //! | [`Shape`] | `vision::net` | **re-exported**; no second NCHW type |
 //! | [`device::NONE`] | `vision::ids` | **re-exported**; one sentinel |
 //! | [`Ctx`], [`mask`], [`tiling`], [`Normalization`] | - | net-new, or a kernel dispatch replacing host code |
 //! | [`video::decode_frames`] | - | net-new: no video-file decoder existed anywhere in the workspace (`qwen3omnimoe::mm::encode_video_frames` took already-decoded frames only) |
-//! | [`host::resize_bilinear_hwc`] | `depth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
+//! | [`host::resize_bilinear_hwc`] | `zipdepth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
 //! | [`color::yuyv_to_rgb`] | `capture::convert` | **moved**; `crates/capture` is V4L2-only again |
 //! | [`pixels::chw_to_hwc`] / [`pixels::hwc_to_chw`] | `cli::image_io`, `npu::{calib,sim}`, `wm-display`, tests | **moved**; one generic pair |
-//! | [`IMAGENET_MEAN`] / [`IMAGENET_STD`] | `depth::init`, `mirror::preprocess` | **moved**; one pair of arrays |
+//! | [`IMAGENET_MEAN`] / [`IMAGENET_STD`] | `zipdepth::init`, `mirror::preprocess` | **moved**; one pair of arrays |
 //! | [`Rgb8`] / [`codec::load`] | `mirror::preprocess::{RgbImage, load_ppm}` | **moved**; the second P6 parser is gone |
 //!
 //! `cli::depth_cli`'s calibration letterbox now calls [`letterbox_rgb`] with
@@ -96,7 +96,7 @@
 //!
 //! ## What this crate deliberately does NOT contain
 //!
-//! * **A UNIFIED model target-size policy.** `depth::predict::target_size`,
+//! * **A UNIFIED model target-size policy.** `zipdepth::predict::target_size`,
 //!   `mirror::preprocess::{resize_dims, adaptive_target}` and
 //!   `qwen3vl::preprocess::smart_resize` are different reference models'
 //!   contracts. They may be hosted here side by side as NAMED policies, but

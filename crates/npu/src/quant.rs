@@ -5,7 +5,7 @@
 //!
 //! Activations are quantized **per-tensor, symmetric** (zero-point 0); the scale
 //! for each quantized conv is keyed by the conv's prefix (which is both the
-//! `yolo::net::ActTap` name and the exported ONNX node prefix). Weights are
+//! `yolov8::net::ActTap` name and the exported ONNX node prefix). Weights are
 //! quantized per-output-channel directly from the folded weights in
 //! [`crate::fold::quantize_weight_per_channel`] (data-independent), so they are
 //! NOT stored here.

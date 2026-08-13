@@ -3,13 +3,13 @@
 
 //! INT8 calibration: run brain's own fp32 YOLO over representative images and
 //! collect each quantized conv's input-activation range, then derive symmetric
-//! per-tensor scales. Reuses the `yolo::net::ActTap` seam.
+//! per-tensor scales. Reuses the `yolov8::net::ActTap` seam.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use yolo::net::ActTap;
-use yolo::Yolo;
+use yolov8::net::ActTap;
+use yolov8::Yolo;
 
 use crate::quant::{symmetric_act_scale, Quant};
 
@@ -82,7 +82,7 @@ pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result
         for i in 0..ds.n.min(max_n) {
             let chw = &ds.images[i * stride..(i + 1) * stride];
             let hwc = imaging::pixels::chw_to_hwc(chw, 3, ds.h as usize, ds.w as usize);
-            let (lbchw, _) = yolo::boxmath::letterbox_rgb(&hwc, ds.w, ds.h, input, 114.0 / 255.0);
+            let (lbchw, _) = yolov8::boxmath::letterbox_rgb(&hwc, ds.w, ds.h, input, 114.0 / 255.0);
             out.push(lbchw);
         }
     } else {
@@ -96,7 +96,7 @@ pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result
             let bytes = std::fs::read(&f)?;
             if let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) {
                 let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-                let (lbchw, _) = yolo::boxmath::letterbox_rgb(&hwc, w, h, input, 114.0 / 255.0);
+                let (lbchw, _) = yolov8::boxmath::letterbox_rgb(&hwc, w, h, input, 114.0 / 255.0);
                 out.push(lbchw);
             }
         }

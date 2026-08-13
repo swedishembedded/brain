@@ -46,7 +46,7 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
 
 /// The yolo recipe: `YoloRecipe::artifacts` downloaded exactly one
 /// `yolov8*.pt` file into the repo dir; run the pure-Rust importer
-/// (`yolo::import::import_yolov8n`, built on `checkpoint::torchpt`) and write
+/// (`yolov8::import::import_yolov8n`, built on `checkpoint::torchpt`) and write
 /// the remapped tensors as `model.brain.safetensors` -- the same single-file
 /// convention every transformers-family model already uses, so no store or
 /// `resident_for` changes were needed for this family.
@@ -60,11 +60,11 @@ fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
         .ok_or_else(|| format!("{vendor}/{repo}: convert: no downloaded yolov8*.pt file in {}", dir.display()))?;
     let pt_str = pt.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", pt.display()))?;
 
-    let tensors = yolo::import::import_yolov8n(pt_str)?;
+    let tensors = yolov8::import::import_yolov8n(pt_str)?;
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().map(|(name, shape, data)| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
     let card = checkpoint::st::ModelCard::for_ref(&format!("{vendor}/{repo}"), vendor, repo, None, "yolo");
     let out = dir.join("model.brain.safetensors");
-    checkpoint::st::save_safetensors(out.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 store path"))?, &tensors, &yolo::config::YoloConfig::yolov8n().to_json(), Some(&card))
+    checkpoint::st::save_safetensors(out.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 store path"))?, &tensors, &yolov8::config::YoloConfig::yolov8n().to_json(), Some(&card))
         .map_err(|e| format!("{vendor}/{repo}: convert: write model.brain.safetensors: {e}"))?;
     // The upstream .pt is never read again -- Store::local/scan only ever load
     // model.brain.safetensors (see modelstore::BASE_WEIGHTS_FILE) -- so keeping

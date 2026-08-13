@@ -168,7 +168,7 @@ pub enum Filter {
     Nearest,
     /// `resize_bilinear.wgsl`. The default, and bit-equivalent (under
     /// [`AlignCorners::HalfPixel`]) to the three host bilinear copies in
-    /// `depth::predict` / `cli::depth_cli` / `cli::resident_depth`.
+    /// `zipdepth::predict` / `cli::depth_cli` / `cli::resident_depth`.
     #[default]
     Bilinear,
     /// `resize_bicubic.wgsl` — PyTorch's **non-antialiased** cubic convolution,

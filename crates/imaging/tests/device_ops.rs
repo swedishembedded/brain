@@ -41,7 +41,7 @@ fn bilinear_half_pixel_matches_the_host_formula_the_survey_calls_equivalent() {
     let (y, ys) = c.resize(&x, s, th, tw, Filter::Bilinear, AlignCorners::HalfPixel);
     let got = c.download(&y, ys.numel());
 
-    // `depth::predict::resize_map`, verbatim in structure.
+    // `zipdepth::predict::resize_map`, verbatim in structure.
     let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
     for oy in 0..th {
         for ox in 0..tw {

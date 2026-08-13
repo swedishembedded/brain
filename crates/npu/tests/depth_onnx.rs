@@ -8,7 +8,7 @@
 //! the blend/where_conv variant this exporter emits). Skips cleanly when unset.
 use std::collections::HashMap;
 
-use depth::{import, Predictor, ZipConfig};
+use zipdepth::{import, Predictor, ZipConfig};
 use gpu_core::Gpu;
 use npu::build_depth_graph;
 use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
@@ -32,7 +32,7 @@ fn export_and_run(device: NpuDevice) {
     // brain's own weights + CPU reference depth (letterbox-free: a centred square
     // input at exactly the model resolution, so the predictor's letterbox is the
     // identity and the ONNX 'input' gets the same CHW).
-    let gpu = Gpu::new_cpu(depth::net::PIPELINES);
+    let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
     let init: HashMap<String, Vec<f32>> = import::load(&path, &cfg).expect("import npu checkpoint");
     let ps = import::load_into(&gpu, &path, &cfg).expect("load_into");
     let predictor = Predictor::new(&gpu, cfg.clone(), ps);

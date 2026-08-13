@@ -3,19 +3,19 @@
 
 //! ZipDepth -> ONNX, for the Intel NPU (the `blend`/`where_conv` upsampler variant).
 //!
-//! Walks the exact graph `depth::ZipDepth::build` constructs, in the same op order,
+//! Walks the exact graph `zipdepth::ZipDepth::build` constructs, in the same op order,
 //! and emits it as fp32 ONNX. The NPU (blend) variant is chosen deliberately: its
 //! upsampler is Conv/BN/Relu/Sigmoid/Resize/Mul/Add only — no `unfold`, no
 //! softmax-over-9, no `pixel_shuffle` — so every op maps to a standard, NPU-friendly
-//! ONNX node. `depth::fuse_qarep` collapses each RepVGG block to one biased 3x3
+//! ONNX node. `zipdepth::fuse_qarep` collapses each RepVGG block to one biased 3x3
 //! before export, and BN is folded into every conv, matching the fused inference
 //! form the checkpoint's 6.1M headline refers to.
 //!
-//! Parity is checked in `tests/depth_onnx.rs` against `depth::ZipDepth`'s own CPU
+//! Parity is checked in `tests/depth_onnx.rs` against `zipdepth::ZipDepth`'s own CPU
 //! forward, on OpenVINO-CPU and on the real NPU.
 
-use depth::config::{pick_groups, GlobalMode, ZipConfig};
-use depth::fuse::{fuse_qarep, Branch};
+use zipdepth::config::{pick_groups, GlobalMode, ZipConfig};
+use zipdepth::fuse::{fuse_qarep, Branch};
 use onnx::{GraphBuilder, Node};
 use vision::{fold_bn, BN_EPS};
 
@@ -408,7 +408,7 @@ pub fn build_depth_graph(cfg: &ZipConfig, w: &dyn WeightSource, g: &mut GraphBui
 /// As [`build_depth_graph`], for an arbitrary `h × w` input (both multiples of 32).
 /// The reference feeds an aspect-preserving rectangular input, not a padded square,
 /// so the NPU path exports at the resized frame size to match — see
-/// `depth::predict::target_size`.
+/// `zipdepth::predict::target_size`.
 pub fn build_depth_graph_hw(cfg: &ZipConfig, w: &dyn WeightSource, in_h: u32, in_w: u32, g: &mut GraphBuilder) {
     assert!(!cfg.upsample_unfold, "the NPU exporter emits the blend (where_conv) upsampler; set upsample_unfold=false");
     assert_ne!(cfg.global_mode, GlobalMode::Full, "GlobalMode::Full (EGA) is not exported");

@@ -17,7 +17,7 @@ brain-capability.workspace = true
 brain-events.workspace = true
 brain-hfsm.workspace = true
 brain-gpt2.workspace = true
-brain-yolo.workspace = true
+brain-yolov8.workspace = true
 brain-checkpoint.workspace = true
 brain-forecast.workspace = true
 brain-fcbench.workspace = true
@@ -27,6 +27,6 @@ serde_json.workspace = true
 # Integration tests drive the controller with a real tiny GPT, a real tiny YOLO,
 # and the codec helpers (base64/PPM) for synthetic frames.
 brain-gpt2.workspace = true
-brain-yolo.workspace = true
+brain-yolov8.workspace = true
 brain-capability.workspace = true
 brain-events.workspace = true

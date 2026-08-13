@@ -82,7 +82,7 @@ default-members = [
     "crates/vqgan",
     "crates/clip",
     "crates/deepseek2ocr",
-    "crates/t5",
+    "crates/t5encoder",
     "crates/flux1",
     "crates/restore",
     "crates/upscale",
@@ -91,11 +91,11 @@ default-members = [
     "crates/pulid",
     "crates/instantid",
     "crates/imgpipe",
-    "crates/depth",
+    "crates/zipdepth",
     "crates/splat",
     "crates/mirror",
     "crates/capture",
-    "crates/yolo",
+    "crates/yolov8",
     "crates/onnx",
     "crates/npu",
     "crates/runtime",
@@ -188,7 +188,7 @@ brain-facenet = { path = "crates/facenet" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
-brain-t5 = { path = "crates/t5" }
+brain-t5encoder = { path = "crates/t5encoder" }
 brain-flux1 = { path = "crates/flux1" }
 brain-restore = { path = "crates/restore" }
 brain-upscale = { path = "crates/upscale" }
@@ -197,11 +197,11 @@ brain-controlnet = { path = "crates/controlnet" }
 brain-pulid = { path = "crates/pulid" }
 brain-instantid = { path = "crates/instantid" }
 brain-imgpipe = { path = "crates/imgpipe" }
-brain-depth = { path = "crates/depth" }
+brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
 brain-mirror = { path = "crates/mirror" }
 brain-capture = { path = "crates/capture" }
-brain-yolo = { path = "crates/yolo" }
+brain-yolov8 = { path = "crates/yolov8" }
 brain-onnx = { path = "crates/onnx" }
 brain-npu = { path = "crates/npu" }
 brain-forecast = { path = "crates/forecast" }

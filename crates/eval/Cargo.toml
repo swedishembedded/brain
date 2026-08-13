@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpt2.workspace = true
 brain-lfm2.workspace = true
-brain-yolo.workspace = true
+brain-yolov8.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-audio.workspace = true

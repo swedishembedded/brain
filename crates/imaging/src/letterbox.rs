@@ -3,9 +3,9 @@
 
 //! Aspect-preserving fit onto a square input, with centre padding.
 //!
-//! **This is the workspace's only letterbox.** It was `yolo::boxmath`'s until
+//! **This is the workspace's only letterbox.** It was `yolov8::boxmath`'s until
 //! this crate existed; `boxmath` now re-exports these items, so
-//! `yolo::boxmath::{Letterbox, letterbox_rgb}` still name them and no detection
+//! `yolov8::boxmath::{Letterbox, letterbox_rgb}` still name them and no detection
 //! call site moved. The code was not *copied* here — it was moved, because the
 //! pad fill, the `pad_y as usize` truncation and the half-pixel nearest rule
 //! below are baked into the trained yolo weights and into every reported
@@ -55,8 +55,8 @@ use crate::pixels::Rect;
 
 /// An `xyxy` box in pixels.
 ///
-/// The same `[f32; 4]` that `yolo::boxmath::Xyxy` names. Box *math* (IoU, CIoU,
-/// NMS) stays in `yolo::boxmath` — `crates/eval` already re-exports yolo's IoU
+/// The same `[f32; 4]` that `yolov8::boxmath::Xyxy` names. Box *math* (IoU, CIoU,
+/// NMS) stays in `yolov8::boxmath` - `crates/eval` already re-exports yolo's IoU
 /// rather than owning a second one — and only the letterbox geometry is
 /// image-substrate work. A `type` alias carries no behaviour, so the two names
 /// for one primitive cannot drift; a second `struct` would have.
@@ -147,7 +147,7 @@ pub fn letterbox_rgb(src: &[f32], w0: u32, h0: u32, size: u32, pad: f32) -> (Vec
         let sy = ((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0) as usize;
         // TRUNCATION, not rounding: see the module header. `apply_box` uses the
         // float pad, so on an odd pad the image and its coordinate frame differ
-        // by half a pixel. Unchanged by the move out of `yolo::boxmath`.
+        // by half a pixel. Unchanged by the move out of `yolov8::boxmath`.
         let dy = yi + lb.pad_y as usize;
         for xi in 0..lb.new_w as usize {
             let sx = ((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0) as usize;

@@ -13,7 +13,7 @@
 //!   (`AGENTS.md`), so `--device npu` genuinely has no device handle to dispatch
 //!   a `resize_bilinear` on, and building a `Gpu` just to resize would violate
 //!   the one-device-per-process rule.
-//! * `depth::predict` resizes the incoming frame *before* the model's input
+//! * `zipdepth::predict` resizes the incoming frame *before* the model's input
 //!   buffer exists, on whichever device the predictor was built for.
 //!
 //! Those three sites each carried a byte-identical copy of the same two

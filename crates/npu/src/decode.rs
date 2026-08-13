@@ -6,12 +6,12 @@
 //! `decode_detections`) so the NPU path produces byte-identical boxes to the
 //! engine path. No GPU / no `Yolo` instance needed.
 
-use yolo::assign::Anchor;
-use yolo::boxmath::Letterbox;
-use yolo::head::repack_heads_to_flat;
-use yolo::infer::{decode_detections, dfl_decode_cpu};
-use yolo::nms::Detection;
-use yolo::YoloConfig;
+use yolov8::assign::Anchor;
+use yolov8::boxmath::Letterbox;
+use yolov8::head::repack_heads_to_flat;
+use yolov8::infer::{decode_detections, dfl_decode_cpu};
+use yolov8::nms::Detection;
+use yolov8::YoloConfig;
 
 use crate::openvino::{HeadOutputs, NpuConfig, NpuError, NpuSession};
 
@@ -51,7 +51,7 @@ pub fn detect_image(
     conf: f32,
     iou: f32,
 ) -> Result<Vec<Detection>, NpuError> {
-    let (chw, lb) = yolo::boxmath::letterbox_rgb(hwc, w0, h0, cfg.input, 114.0 / 255.0);
+    let (chw, lb) = yolov8::boxmath::letterbox_rgb(hwc, w0, h0, cfg.input, 114.0 / 255.0);
     let shape = [1usize, 3, cfg.input as usize, cfg.input as usize];
     let heads = session.run(&chw, shape)?;
     Ok(decode_npu_outputs(&heads, cfg, &lb, w0, h0, conf, iou))

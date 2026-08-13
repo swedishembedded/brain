@@ -261,12 +261,12 @@ impl ResidentModel for YoloResident {
         // `BRAIN_YOLO_BATCH` (default 1) sets the forward batch: >1 enables a TRUE
         // batched forward (one detect over N images) when the scheduler groups jobs.
         let batch = std::env::var("BRAIN_YOLO_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1u32).max(1);
-        Ok(Box::new(YoloInstance { yolo: yolo::Yolo::load(&self.path, batch), batch: batch as usize }))
+        Ok(Box::new(YoloInstance { yolo: yolov8::Yolo::load(&self.path, batch), batch: batch as usize }))
     }
 }
 
 struct YoloInstance {
-    yolo: yolo::Yolo,
+    yolo: yolov8::Yolo,
     batch: usize,
 }
 

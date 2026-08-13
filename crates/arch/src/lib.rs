@@ -119,7 +119,7 @@ use Source::*;
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
 /// `package` names the crate as it exists TODAY - several rows are still
-/// pre-rename (`"brain-yolo"` for `yolov8`, …) while the crate-rename
+/// pre-rename (`"brain-zimage"` for `s3dit`, …) while the crate-rename
 /// migration is in flight, one domain group per commit; each rename updates
 /// its row in the same commit that moves the crate.
 pub const ARCHS: &[Arch] = &[
@@ -146,18 +146,18 @@ pub const ARCHS: &[Arch] = &[
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // -- Vision: detection / segmentation / face / depth -------------------
-    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolo"),
+    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8"),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2"),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-facenet"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-facenet"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
-    arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-depth"),
+    arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
     arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-zimage"),
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
-    arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5"),
+    arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
     arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-unet"),
     arch!("controlnet", "ControlNet (backbone-agnostic seam + SDXL producer)", Image, Brain, "brain-controlnet"),
     arch!("pulid", "PuLID-FLUX identity conditioning", Image, Brain, "brain-pulid"),

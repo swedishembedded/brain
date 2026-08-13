@@ -37,7 +37,7 @@ check!(clip_backward, gradcheck::check_clip, "check_clip");
 
 // ---- phase 4c: the four newer models ----
 //
-// `check_t5` is the T5 encoder backward (`t5::train::T5Trainer`). The two
+// `check_t5` is the T5 encoder backward (`t5encoder::train::T5Trainer`). The two
 // siblings are run because each isolates a failure mode the main gate cannot:
 // `check_t5_one_block` removes the cross-block accumulation of the shared
 // relative-position bias, and `check_t5_tiled` forces `block::pick_gemm` onto

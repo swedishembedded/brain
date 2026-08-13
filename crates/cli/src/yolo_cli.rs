@@ -22,8 +22,8 @@ use std::path::Path;
 
 use data::gen_detect::{load_dataset, DetectData};
 use eval::detection::{self, GtBox as EvalGt};
-use yolo::model::{GtBox, LossMode, Yolo};
-use yolo::YoloConfig;
+use yolov8::model::{GtBox, LossMode, Yolo};
+use yolov8::YoloConfig;
 
 pub fn run_yolo(args: &[String]) {
     match args.first().map(|s| s.as_str()) {

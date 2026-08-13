@@ -176,7 +176,7 @@ fn reject_trailing(path: &Path, len: usize, width: usize) -> io::Result<()> {
 }
 
 /// A normalized ground-truth box for object detection: class id + center-xywh in
-/// `[0,1]` of image size. Mirrors `yolo::GtBox` (minus the per-batch `img`
+/// `[0,1]` of image size. Mirrors `yolov8::GtBox` (minus the per-batch `img`
 /// index, which the loader assigns when batching).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectBox {

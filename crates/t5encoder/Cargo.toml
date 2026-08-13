@@ -1,0 +1,20 @@
+[package]
+name = "brain-t5encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T5-XXL encoder — the text conditioning FLUX.1 needs alongside CLIP-L."
+
+[lib]
+name = "t5encoder"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-checkpoint.workspace = true
+# `train` — the workspace's only test/gradcheck PRNG (`data::rng::Rng`).
+brain-data.workspace = true
+

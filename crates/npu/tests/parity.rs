@@ -7,7 +7,7 @@
 //! similarity proves the brain-native quantization scheme is faithful — measured
 //! entirely on the CPU backend, no NPU / no OpenVINO.
 
-use yolo::{Yolo, YoloConfig};
+use yolov8::{Yolo, YoloConfig};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
@@ -39,7 +39,7 @@ fn int8_sim_tracks_fp32() {
     // A trained-ish model would be ideal, but quantization fidelity is a property
     // of the weights' dynamic range, not their task accuracy; an init model is a
     // valid (and fast) probe. Save it.
-    let init = yolo::init_weights(&cfg, 0x5151);
+    let init = yolov8::init_weights(&cfg, 0x5151);
     Yolo::new(cfg.clone(), 1, 0, &init).save(&wpath);
 
     // Calibrate over a handful of images.

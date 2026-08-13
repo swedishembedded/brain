@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Finite-difference gate for the **T5 encoder**'s backward
-//! (`t5::train::T5Trainer`).
+//! (`t5encoder::train::T5Trainer`).
 //!
 //! ## What this check covers, and what is frozen
 //!
 //! **Nothing is frozen.** The harness walks `ParamStore`'s full parameter list,
-//! which is exactly [`t5::config::T5Config::tensor_manifest`] — for
-//! [`t5::train::tiny_config`] that is 17 tensors:
+//! which is exactly [`t5encoder::config::T5Config::tensor_manifest`] - for
+//! [`t5encoder::train::tiny_config`] that is 17 tensors:
 //!
 //! | tensor | shape | what its gradient exercises |
 //! |---|---|---|
@@ -87,8 +87,8 @@ use std::cell::Cell;
 
 use data::rng::Rng;
 
-use t5::config::T5Config;
-use t5::train::{T5Trainer, TRAIN_PIPELINES};
+use t5encoder::config::T5Config;
+use t5encoder::train::{T5Trainer, TRAIN_PIPELINES};
 
 use crate::{directional_check, CheckModel, Report};
 
@@ -109,8 +109,8 @@ impl T5Harness {
     /// a fresh `Gpu::new`: several entry points share one test binary, and a
     /// device per model object is the pattern AGENTS.md bans.
     fn new(cfg: T5Config, b: u32, t: u32, seed: u64) -> T5Harness {
-        let init = t5::train::init_weights(&cfg, seed);
-        let ids = t5::train::fixed_tokens(&cfg, b, t);
+        let init = t5encoder::train::init_weights(&cfg, seed);
+        let ids = t5encoder::train::fixed_tokens(&cfg, b, t);
         let n = (b * t) as usize * cfg.d_model as usize;
         let m = T5Trainer::new_on(gpu_core::testgpu::dev(TRAIN_PIPELINES), cfg, b, t, &init);
         m.set_tokens(&ids);
@@ -161,7 +161,7 @@ impl CheckModel for T5Harness {
 /// T=6, and dims chosen so `heads ≠ d_kv` and `heads·d_kv ≠ d_model` (3, 6, 16)
 /// — at XXL all three are 64/64/4096 and a swapped index would be invisible.
 pub fn check_t5(seed: u64) -> Report {
-    let h = T5Harness::new(t5::train::tiny_config(), 2, 6, seed);
+    let h = T5Harness::new(t5encoder::train::tiny_config(), 2, 6, seed);
     directional_check(&h, 5e-4, 4, seed ^ 0x1234)
 }
 
@@ -173,7 +173,7 @@ pub fn check_t5(seed: u64) -> Report {
 /// broken fold either (see the module header). [`check_t5_rel_bias_elementwise`]
 /// is the detector.
 pub fn check_t5_one_block(seed: u64) -> Report {
-    let cfg = T5Config { layers: 1, ..t5::train::tiny_config() };
+    let cfg = T5Config { layers: 1, ..t5encoder::train::tiny_config() };
     let h = T5Harness::new(cfg, 2, 6, seed);
     directional_check(&h, 5e-4, 4, seed ^ 0x1234)
 }
@@ -206,7 +206,7 @@ pub fn check_t5_tiled(seed: u64) -> Report {
 /// gradient is summed over the whole block stack.
 ///
 /// [`check_t5`] does NOT cover that fold, and this is measured, not assumed:
-/// deleting the `axpy` in `t5::train::build_bwd_steps` — so `attn_bwd_dbias`
+/// deleting the `axpy` in `t5encoder::train::build_bwd_steps` - so `attn_bwd_dbias`
 /// assigns straight into the accumulator and only the last-written block
 /// survives — leaves a **33 %** error in this tensor's gradient (L2 of the
 /// difference 0.672 against a gradient norm of 2.044 at seed 7) and
@@ -233,13 +233,13 @@ pub fn check_t5_tiled(seed: u64) -> Report {
 /// itself is `Check::within(4e-3, 8e-2)`, whose absolute floor is what those
 /// entries are actually judged on.
 pub fn check_t5_rel_bias_elementwise(seed: u64) -> Report {
-    let h = T5Harness::new(t5::train::tiny_config(), 2, 6, seed);
+    let h = T5Harness::new(t5encoder::train::tiny_config(), 2, 6, seed);
     crate::elementwise_check(&h, "rel_bias.weight", 1e-2)
 }
 
 /// The eps table behind [`check_t5_rel_bias_elementwise`]'s `5e-3`.
 pub fn check_t5_rel_bias_eps_sweep(seed: u64) -> Vec<(f32, f32)> {
-    let h = T5Harness::new(t5::train::tiny_config(), 2, 6, seed);
+    let h = T5Harness::new(t5encoder::train::tiny_config(), 2, 6, seed);
     [2e-2f32, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4]
         .iter()
         .map(|&eps| (eps, crate::elementwise_check(&h, "rel_bias.weight", eps).max_rel()))
@@ -254,7 +254,7 @@ pub fn check_t5_rel_bias_eps_sweep(seed: u64) -> Vec<(f32, f32)> {
 /// sit above the finite-difference truncation knee for some graphs, and the
 /// only way to know is to measure.
 pub fn check_t5_eps_sweep(seed: u64) -> Vec<(f32, f32)> {
-    let h = T5Harness::new(t5::train::tiny_config(), 2, 6, seed);
+    let h = T5Harness::new(t5encoder::train::tiny_config(), 2, 6, seed);
     [5e-3f32, 2e-3, 1e-3, 5e-4, 2e-4, 1e-4, 5e-5]
         .iter()
         .map(|&eps| (eps, directional_check(&h, eps, 4, seed ^ 0x1234).max_rel()))

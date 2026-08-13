@@ -3,7 +3,7 @@
 
 //! YOLOv8 → ONNX topology builder.
 //!
-//! Walks the exact graph that `yolo::model::Yolo::new` constructs (same op order
+//! Walks the exact graph that `yolov8::model::Yolo::new` constructs (same op order
 //! as `YoloConfig::full_param_list`), emitting ONNX nodes + initializers. BN is
 //! folded into each conv ([`crate::fold`]); SiLU becomes `Sigmoid`+`Mul`; the
 //! graph outputs the 6 raw head tensors (per-scale cls/reg, NCHW) — DFL decode +
@@ -158,7 +158,7 @@ impl<'a> Exporter<'a> {
     }
 
     /// Bottleneck: two K3 convs, optional residual `Add` (matches
-    /// `yolo::blocks::Bottleneck`: shortcut only when `shortcut && cin == cout`).
+    /// `yolov8::blocks::Bottleneck`: shortcut only when `shortcut && cin == cout`).
     fn bottleneck(&mut self, prefix: &str, x: &Feat, cout: u32, shortcut: bool) -> Feat {
         let a = self.conv(&format!("{prefix}.cv1"), x, cout, 3, 1);
         let b = self.conv(&format!("{prefix}.cv2"), &a, cout, 3, 1);
@@ -286,7 +286,7 @@ impl<'a> Exporter<'a> {
 /// Build the full YOLOv8 ONNX graph into `g`. `quant = None` ⇒ fp32; `Some` ⇒
 /// INT8 Q/DQ. The graph has one static input `images:[1,3,input,input]` and 6
 /// outputs `head.{0,1,2}.{cls,reg}` (NCHW).
-pub fn build_graph(cfg: &yolo::YoloConfig, w: &dyn WeightSource, quant: Option<&Quant>, g: &mut GraphBuilder) {
+pub fn build_graph(cfg: &yolov8::YoloConfig, w: &dyn WeightSource, quant: Option<&Quant>, g: &mut GraphBuilder) {
     let s = cfg.input as i64;
     g.input_f32("images", &[1, 3, s, s]);
 

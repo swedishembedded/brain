@@ -361,7 +361,7 @@ pub fn run_viewer(
             fly.pos[2],
             if captured { " | MOUSE (M RELEASES)" } else { "" },
         );
-        depth::viz::draw_text(&mut rgb, rw, rh, 6, 6, &hudline, 1, [0, 255, 0]);
+        zipdepth::viz::draw_text(&mut rgb, rw, rh, 6, 6, &hudline, 1, [0, 255, 0]);
         if input.ux.contains(&UxKey::Screenshot) {
             let p = format!("out/splat-shot-{shot_no:03}.ppm");
             write_ppm_rgb(&p, &rgb, rw as usize, rh as usize);
