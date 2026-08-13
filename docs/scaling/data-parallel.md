@@ -85,13 +85,11 @@ in the combine step.
 **Speed** depends on your interconnect and GPU count. The gradient combine is
 a fixed per-step cost, so the achievable speedup grows as you increase how
 much compute happens between combines (i.e. more micro-batches per optimizer
-step) and shrinks the tighter your interconnect is. In one measured
-configuration (two GPUs, no fast GPU-to-GPU interconnect, training a 0.6B
-model), end-to-end speedup ranged from roughly 1.3x to 1.6x depending on
-micro-batch count, while the forward-and-backward compute itself parallelized
-close to linearly across the two cards — the gap between those two numbers is
-exactly the fixed combine cost being amortized over more compute. Treat that
-as one data point, not a guarantee — see
-[Hardware notes](../performance/hardware-notes.md) for why numbers from one
-machine don't transfer to yours: actual speedup depends on your interconnect
-and GPU count.
+step) and shrinks the tighter your interconnect is; the forward-and-backward
+compute itself parallelizes close to linearly across cards, and the gap
+between that and your end-to-end speedup is the fixed combine cost being
+amortized over more compute. There is no fixed number to cite here - it
+depends on your interconnect, GPU count, and micro-batch count. See
+[Performance](../performance/overview.md) for how to profile and measure your
+own configuration rather than trust a number measured on different
+hardware.

@@ -7,18 +7,37 @@ device for your workload.
 
 ## Why one binary runs everywhere
 
-brain's kernels are written once, in WGSL, and run unchanged on every
-backend. That's only possible because the kernels are deliberately kept to a
-conservative subset of GPU features: fp32 only (no f16), no atomics, no
-subgroup operations, and no kernels that need a large number of bindings.
-None of those features are exotic, but they vary enough across old desktop
-cards, current-generation GPUs, CPUs, and browsers that relying on any of
-them would break portability somewhere. Staying inside the common subset is
-what lets the exact same kernel source run on a decade-old GPU, a modern
-one, a CPU, or in WebGPU in a browser tab. This restraint is brain's core
-hardware-portability pitch — it's also why a specific kernel occasionally
-looks less clever than it could be on any one backend: it's optimized to be
-correct and fast everywhere, not maximal on one target.
+brain's architecture is a **portable baseline plus capability-gated fast
+tiers, with automatic fallback** - not a single fixed set of GPU features.
+Every kernel is written once, in WGSL, against a portable fp32 baseline that
+every backend (old desktop cards, current-generation GPUs, CPUs, and
+browsers alike) can run unchanged. Faster numeric tiers - bf16, f16, INT8,
+and block-quantized formats - are declared per kernel and dispatched only on
+a device that actually supports them; a device that can't run a given tier
+correctly falls back to the fp32 baseline rather than producing wrong
+results or failing outright. brain's capability layer
+(`backend-api::NumericSupport`) is what makes that selection mechanical
+instead of guessed: it records what a backend measured, not what a device's
+marketing claims, and a runtime selector reads it to pick the fastest tier
+that's actually safe on the hardware present.
+
+Today, that baseline is also the whole story on the compute side: every
+backend executes fp32 only, so `NumericSupport`'s faster-tier fields all
+report unsupported and every dtype currently promotes to fp32 regardless of
+what a checkpoint declares. Wiring real bf16/f16/INT8/q4 compute paths
+through the kernel set is in progress (tracked separately); this page
+describes the direction the capability layer is built for, not a claim that
+those faster tiers execute today.
+
+Within that fp32 baseline, the kernels also stay off a further set of GPU
+features - no atomics, no subgroup operations, no kernel that needs a large
+number of bindings - because those vary enough across old desktop cards,
+current GPUs, CPUs, and browsers that relying on any of them would break
+portability somewhere. That's a deliberately chosen baseline, not a ceiling
+on what brain will ever compute in: it's what lets the exact same baseline
+kernel source run on a decade-old GPU, a modern one, a CPU, or in WebGPU in a
+browser tab today, while the capability-gated tiers above it are where
+device-specific speed is meant to come from as they land.
 
 ## Listing your hardware
 

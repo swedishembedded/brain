@@ -44,7 +44,7 @@ framework. This is its full documentation — what's on the website and what
 ## Scaling and performance
 
 - [Scaling across GPUs](scaling/overview.md) — [data parallel](scaling/data-parallel.md), [pipeline parallel](scaling/pipeline.md), [tensor parallel](scaling/tensor-parallel.md).
-- [Performance](performance/overview.md) — [benchmarking your setup](performance/benchmarking.md), [hardware notes](performance/hardware-notes.md).
+- [Performance](performance/overview.md) - [benchmarking your setup](performance/benchmarking.md).
 
 ## Reference
 

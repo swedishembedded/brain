@@ -146,78 +146,35 @@ VRAM usage, a known, deliberately deferred gap (a residency/budget-accounting
 fix, not a `crates/deepseekocr` change). It does not mutate `BRAIN_DEVICE`; a
 server-lifetime resident must not change the backend other models build on.
 
+<!-- perf-number: hardware requirement, not a throughput claim -->
 **~22 GiB resident.** Measured, not estimated: the real-weight composite gate
-reports a 21.32 GiB peak RSS for this exact build, read off `/proc/self/status`.
-The served instance is sized for a 512-token context (the 273-row image block,
-BOS, the instruction, and room to generate), which costs a little more than the
-test's ~260. A box with less than ~24 GiB free will not activate it.
+reports peak RSS for this exact build, read off `/proc/self/status`. The
+served instance is sized for a 512-token context (the 273-row image block,
+BOS, the instruction, and room to generate). A box with less than ~24 GiB
+free will not activate it.
 
 **KV-cached decode.** Decode used to be `O(T²)` recompute with no KV cache -
-every generated token re-ran the whole sequence through 12 MoE layers, ~22 s
-per token. `DeepseekV2::generate_greedy_kv` closed that: the prompt still
-pays one batched forward (which also seeds the persistent per-layer K/V
-cache), but every token after that is one `O(1)` incremental decode step
+every generated token re-ran the whole sequence through all 12 MoE layers.
+`DeepseekV2::generate_greedy_kv` closed that: the prompt pays one batched
+forward that also seeds a persistent per-layer K/V cache, and every token
+after that is one `O(1)` incremental decode step
 (`model::block::gqa_decode_step` plus a single-row MoE/dense FFN pass), not a
-full re-run. Measured on 22 CPU cores, release build, a real document page
-(a 3-page CV rendered to PNG, first page, 1654x2340) and the default prompt
-(283 prompt tokens), `--max_new 32`:
+full re-run of the sequence.
 
-| build | wall time | tokens/s (decode only) |
-|---|---|---|
-| `O(T²)` recompute (previous) | ~12 min (extrapolated from the `--max_new 2`/`--max_new 10` numbers below) | ~0.045 |
-| `O(T)` KV-cache (current) | ~123-147 s | ~0.65 (32 tokens / ~49 s of decode-only kernel time) |
+**Model construction and vision encoding (SAM ViT-B at 1024x1024 ->
+CLIP-L/24 -> compressor -> projector) were profiled and optimized across
+several passes**, including AVX2/AVX-512 fast paths for the decode loop's
+dominant CPU kernels and moving the vision encoder onto the wgpu backend once
+a `crates/sam1` correctness bug that used to block it there was fixed. The
+decoder itself stays on the CPU backend (no measured wgpu benefit for that
+stage).
 
-The `O(T²)` numbers this replaces, for reference (same machine, a synthetic
-1600x1131 page): `--max_new 2` 1 min 54 s, `--max_new 10` 4 min 54 s (~22 s
-per additional token, confirming the quadratic blowup). See
-`docs/performance/overview.md`'s case study for the full `BRAIN_PROFILE`
-per-kernel breakdown.
-
-**Model load + vision encoding were the dominant cost, and the vision
-encoder got its own profiling pass.** Of the ~123-147 s total run above:
-~18 s was one-off model construction, ~50 s was the KV-cached decode, and
-the remaining ~75-80 s was the vision encoder (SAM ViT-B at 1024x1024 ->
-CLIP-L/24 -> compressor -> projector), then unbroken down per kernel. A
-follow-up pass added per-stage instrumentation and found (and partly fixed)
-the encoder's real cost: `attn_apply_cross` (SAM's attention-weighted-V
-step) was 70-71% of the tower's own CPU forward, 20-30x more wall time than
-a same-FLOP-count sibling kernel, traced to a cache-hostile V-transpose now
-tiled for locality. The CPU backend `crates/sam1` used to be pinned to (the
-wgpu backend used to corrupt this tower's output at production scale) costs
-roughly 3.6x over wgpu on this tower alone in isolation, measured directly
-rather than assumed. With both landed, real-weight runs measured the vision
-encoder directly at 25-34 s, and a clean single-tenant run measured the whole
-pipeline at 83.1 s (down from the ~95.6-97.1 s the same pass measured under
-concurrent-agent machine load) - both numbers from BEFORE the vision encoder
-moved onto wgpu for real (see below).
-
-**Since then: the vision encoder moved onto wgpu, `silu_mul`/`scale_add`
-gained AVX2 fast paths, and both were validated together on real pages.**
-`silu_mul`/`scale_add` (the SwiGLU activation core and the MoE combine step)
-were found running the generic scalar JIT path at 15-16% EACH of the decode
-loop's profiled CPU time, the same missing-fast-path bug class
-`moe_linear_gated` and the self-attention family were; fixed the same way,
-and confirmed on a real page: both dropped to 1.1%/0.3% of the profile.
-`crates/sam1`'s wgpu correctness fix (above) let the vision encoder finally
-move off the CPU pin for real (`caps::Session::load` now builds SAM+CLIP+glue
-on `gpu_core::Gpu::new_wgpu`) - honestly mixed in practice: SAM's own forward
-dropped from 23.8-33.0 s to 13.3-27.0 s but inconsistently, while CLIP
-regressed from a 1.2-8.9 s (median 1.4-1.5 s) range to a consistently slower
-7.6-12.3 s - its ops are small enough that per-dispatch GPU overhead on this
-Intel Arc iGPU outweighs the compute saved. **The current real number**: five
-real pages, one resident instance, `max_new=128`, warm-instance median
-69.4 s/page (mean 68.7 s) - roughly 12% faster than the prior 78.5 s median,
-though the decode-side AVX2 fixes and the vision-wgpu split are not cleanly
-separable since both landed together. At `max_new=32` head-to-head against
-`llama-mtmd-cli` on the same real page, brain now measures 33.4 s against
-`llama.cpp`'s own 57.3-64.7 s (two runs) - roughly **1.8x faster than
-`llama.cpp`** on this comparison, a reversal of the 1.57x deficit the prior
-pass measured. Model construction's 20-28 s (a one-time, per-activation cost,
-unaffected by any of this) remains open, and the CLIP-on-wgpu regression is a
-real, named follow-up (keep CLIP on CPU while only SAM+glue move to wgpu).
-See `docs/performance/overview.md`'s case study for the full per-stage and
-per-kernel tables and the honest caveats on what could and could not be
-pinned down on a shared machine.
+For the actual measured numbers behind these changes - wall-clock deltas,
+per-kernel profiles, and the full history of what was tried and what didn't
+pan out - see `.agents/roadmap/deepseek-ocr.md`, or measure your own build
+with `BRAIN_PROFILE=1` and `brain perf run` (see
+[Performance](../performance/overview.md)); numbers measured on one machine
+at one point in this model's development are not a promise for yours.
 
 **No early stop.** The greedy loop always runs `max_new` steps. The output is
 truncated at the first end-of-sentence id and `finish_reason` reports `stop`

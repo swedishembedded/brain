@@ -17,9 +17,16 @@ static-shape compiler can actually run.
 
 ## What works today
 
-fp32 export is implemented and validated on real NPU hardware (graph
-compiles, runs, and its output matches brain's own CPU/GPU forward). Wiring
-that exported graph into `brain glm infer --device npu` — and an INT8 export
-path — are not done yet; today `export` produces a graph you can run through
-OpenVINO yourself, but `infer --device npu` does not yet exist. `--device
-cpu`/`--device gpu` are fully supported for GLM today.
+`brain glm infer --device npu` exists and runs an fp32 greedy decode end to
+end: it exports the graph, compiles it with OpenVINO, and decodes through it
+directly - no separate `export` step needed to use the NPU from `infer`.
+Sampling beyond greedy (temperature/top-k/top-p) is not available on this
+path, same as GLM's CPU/GPU decode.
+
+`brain glm export --int8` also works, producing a weight-only INT8 ONNX graph
+(~4x smaller than the fp32 export) that compiles and runs correctly through
+OpenVINO - but `infer --device npu` does not yet expose an `--int8` flag, so
+today INT8 is reachable only via `export` (run the exported graph through
+OpenVINO yourself), not through `infer` end to end.
+
+`--device cpu`/`--device gpu` are fully supported for GLM today.

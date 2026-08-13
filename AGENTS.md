@@ -582,7 +582,8 @@ front-end to depend on.
 | Testing strategy + gradient-check gate | `.agents/rules/testing.md` |
 | **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`.agents/rules/porting.md`** — read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
-| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/hardware-notes.md` |
+| Performance: methodology (profiling, kernel selection, INT8, where numbers live) | `docs/performance/overview.md` |
+| Performance: session-specific findings (what sped a given model up + why, with real numbers) | `.agents/roadmap/<model>.md` |
 | **Performance benchmarking** (`brain perf`): design | `docs/performance/benchmarking.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
 | Perf regression gate (hard floors vs a committed baseline) | `brain perf gate`; `crates/perf/src/gate.rs` |
 | Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |

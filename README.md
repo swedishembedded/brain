@@ -6,8 +6,10 @@
 engine — hand-written GPU compute kernels instead of a bundled deep-learning
 framework, no Python required to build or run it, and backprop correctness
 gated by an in-repo gradient checker instead of a PyTorch reference. One
-engine runs identically on your GPU, your CPU, an Intel NPU, or inside a web
-browser via WebGPU.
+engine runs identically - the same WGSL kernel source - on your GPU, your
+CPU, or inside a web browser via WebGPU. A subset of models additionally
+reaches an Intel NPU through a separate, per-model ONNX/OpenVINO export path,
+not the same kernels.
 
 ## What brain solves today
 

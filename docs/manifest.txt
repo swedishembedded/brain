@@ -74,7 +74,6 @@ scaling/pipeline.md
 scaling/tensor-parallel.md
 performance/overview.md
 performance/benchmarking.md
-performance/hardware-notes.md
 
 == Reference
 reference/kernels.md

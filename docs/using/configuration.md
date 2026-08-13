@@ -37,11 +37,17 @@ Most users never need these — they exist for GPU-driver quirks and profiling.
 **NPU capability boundary.** brain can run a subset of models on an Intel NPU
 through a separate export -> compile -> run path (ONNX export, OpenVINO
 compile, named-tensor inference), with fp16 as the default precision and
-INT8/INT4 as opt-in. This path is **not** automatically scheduled by
-`brain serve` the way GPU/CPU placement is — the residency scheduler does not
-yet place jobs on the NPU on its own. To use it today, pass `--device npu` (or
-a model's own NPU-specific flags/vars) on the relevant model's own command;
-see that model's page under `docs/models/` for the exact flags.
+INT8/INT4 as opt-in. The residency scheduler (`residency::place::pick_device`)
+**does** auto-place a model on the NPU whenever that model advertises an NPU
+footprint (`MemCost::with_npu`) - NPU is tried before GPU and CPU whenever a
+model declares one. Today that covers ZipDepth (depth), the two ASR models
+(Nemotron, Qwen3-ASR), and the forecasting models (chronos2, fincast, kronos)
+- check a given model's own resident wiring (or its page under `docs/models/`)
+for whether it declares an NPU footprint, since this is per-model, not every
+served model. `--device npu` does not bypass this: it constrains/forces the
+*schedulable device set* for a request rather than being the only way to
+reach the NPU, so it is how you force NPU placement (or rule it out) rather
+than the sole trigger for ever using it.
 
 ## Model weights & gating
 

@@ -82,10 +82,8 @@ model's forward loss and gradients exactly.
 **Speed**: sharding alone doesn't speed anything up — it only adds capacity,
 since only one stage is doing useful work at a time in the naive schedule.
 Micro-batching recovers overlap between stages, and the achievable speedup
-from that grows with how many stages you have — in one measured configuration
-(two stages, four micro-batches, a 0.6B model), overlapping the stages
-brought step time down to about 0.8x of the naive sequential pipeline, and
-the win grows with pipeline depth. Treat that as one data point, not a
-guarantee — see [Hardware notes](../performance/hardware-notes.md) for why
-numbers from one machine don't transfer to yours: actual speedup depends on
-your interconnect and GPU count.
+from that grows with how many stages and how many micro-batches you run.
+There is no fixed number to cite here - it depends on your interconnect, GPU
+count, and pipeline depth. See [Performance](../performance/overview.md) for
+how to profile and measure your own configuration rather than trust a number
+measured on different hardware.

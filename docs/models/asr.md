@@ -79,9 +79,10 @@ BRAIN_NEMOTRON=/path/to/nemotron/hf dbus-run-session -- bash -c '
 
 - No LoRA/fine-tuning or from-scratch training command for either model
   today.
-- Qwen3-ASR transcribes a fixed window per call (default 30s); longer clips
-  are truncated rather than chunked — use Nemotron's streaming path for
-  clips longer than the window.
+<!-- perf-number: fixed capability limit (config default), not a measured result -->
+- Qwen3-ASR transcribes a fixed window per call (default 30s, `BRAIN_QWEN_ASR_WINDOW`);
+  longer clips are truncated rather than chunked - use Nemotron's streaming
+  path for clips longer than the window.
 - Qwen3-ASR processes one request at a time; Nemotron batches concurrent
   streaming windows that share a language prompt into a single forward pass.
 - No HTTP endpoint for either model — CLI (`brain do`) and D-Bus only.

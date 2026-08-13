@@ -1,8 +1,10 @@
 # Kernel checklist — read before writing, dispatching, or optimizing one
 
 Every rule here was paid for with a real defect in this engine. This page is
-the pre-flight; `docs/performance/overview.md` (where it exists for a given
-model) has the "why" behind specific case studies.
+the pre-flight; `docs/performance/overview.md` is number-free methodology
+only (profiling, the runtime selector, INT8, `brain flops`) - the "why"
+behind a specific case study, with real measured numbers, lives in that
+model's own `.agents/roadmap/<model>.md`.
 
 **Trigger**: you are about to add a `.wgsl`, dispatch an existing kernel from a
 new model, or make something faster. Read the matching section first.
@@ -335,8 +337,24 @@ sees it.
 ## The meta-rule
 
 Several of the biggest wins in this engine's history were **one
-already-known bug class, re-appearing in a model written later**. Cross-model
-findings therefore belong in `docs/performance/overview.md` under a
-`Cross-model finding:` heading the moment they are measured — and, where
-possible, the fix belongs in the *selector* so the next model inherits it
-without knowing it exists.
+already-known bug class, re-appearing in a model written later**. Where each
+kind of finding belongs, so it stays found instead of being re-discovered:
+
+- **The generalizable finding/lesson itself** (a bug class, a kernel-selection
+  fix, an insight that applies beyond one model) belongs in this file (or
+  `.agents/rules/lessons.md` if it's cross-cutting beyond kernels) the moment
+  it's confirmed - that is what the next author actually reads before writing
+  a kernel.
+- **The session log with the real measured numbers behind it** (before/after
+  timings, per-kernel profiles, what was tried and killed) belongs in that
+  model's own `.agents/roadmap/<model>.md`, never in `docs/`.
+- **`docs/` gets zero measured numbers, ever** - `docs/performance/overview.md`
+  is methodology only, exactly to keep a documented finding from silently
+  going stale the moment the hardware, driver, or kernel path it was measured
+  on changes. This is also why a specific case study does not belong there
+  even as an illustration: it accumulates the same way this rule's own
+  `docs/performance/overview.md` case-study section once did, and had to be
+  cut back out.
+
+Where possible, the fix itself belongs in the *selector* so the next model
+inherits it without knowing it exists.

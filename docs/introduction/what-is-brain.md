@@ -4,19 +4,32 @@ brain trains and runs neural networks **locally** — pure Rust, with hand-writt
 WGSL GPU kernels doing the compute. There's no PyTorch and no Python required to
 build it, run it, or even to check that it learns correctly.
 
-## One engine, three backends
+## One engine, three eager backends, plus a separate NPU path
 
 brain is a self-contained engine of a few hundred WGSL compute kernels. The same
-kernel source runs, unchanged, on:
+kernel source runs, unchanged, on three eager backends that all compile into
+every native build and are selected at runtime:
 
-- a **GPU**, through [wgpu](https://wgpu.rs) — covering Vulkan, Metal, DX12, and
+- **wgpu** (the default GPU backend) - covering Vulkan, Metal, DX12, and
   WebGPU;
-- a **CPU**, where the same WGSL is JIT-compiled to native code and runs across
-  all your cores, no GPU required at all;
-- and inside a **web browser**, via WebGPU — the same kernels, compiled to wasm.
+- **CPU-JIT**, where the same WGSL is JIT-compiled to native code via a
+  Cranelift backend and runs across all your cores, no GPU required at all;
+- **native Vulkan**, a separate eager backend targeting Vulkan directly
+  (coopmat / tensor-core paths included).
 
-Nothing is duplicated per backend. There is one implementation of each op, and
-it either runs correctly everywhere or it's a bug.
+A **web browser** is a build target of the wgpu backend, not a fourth
+backend: compiled to wasm32, a wasm build carries only wgpu/WebGPU, running
+the identical kernel source as the native wgpu backend.
+
+Nothing is duplicated across these three: there is one implementation of each
+op, and it either runs correctly everywhere or it's a bug.
+
+Separately, an **Intel NPU** path exists for a subset of models
+(`crates/npu`). It is not one of the three eager backends and does not share
+the WGSL kernels - OpenVINO is a whole-graph compiler, so reaching the NPU
+means exporting a model to ONNX, compiling it with OpenVINO, and running the
+compiled graph, rather than dispatching brain's own kernels op by op. See
+[Hardware](hardware.md) for which models have an NPU path today.
 
 ## Correctness without a Python oracle
 

@@ -14,7 +14,8 @@
 //! # What makes this brain's suite rather than a generic LLM harness
 //!
 //! brain serves detection, depth, TTS, image generation, forecasting, 3D and
-//! world models from one engine across four backends, so the harness cannot be
+//! world models from one engine across three backends (plus a separate
+//! whole-graph NPU compiler path), so the harness cannot be
 //! written in terms of "tokens". It measures **artifacts arriving over time**
 //! along the timeline `submit → admit → first → … → done`, which specialises to
 //! TTFT/ITL/TPOT for a decoder and collapses cleanly to a single latency for a
