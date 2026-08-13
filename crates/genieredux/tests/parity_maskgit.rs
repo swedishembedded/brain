@@ -10,8 +10,8 @@
 //!   python scripts/parity-dump/genie_maskgit.py
 //!   cargo test -p brain-wm-genie --test parity_maskgit -- --ignored --nocapture
 use gpu_core::Gpu;
-use wm_genie::import::{import_dynamics, import_tokenizer};
-use wm_genie::{decode_indices, kernel_sources, maskgit_sample};
+use genieredux::import::{import_dynamics, import_tokenizer};
+use genieredux::{decode_indices, kernel_sources, maskgit_sample};
 
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {

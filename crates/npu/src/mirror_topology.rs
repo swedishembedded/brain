@@ -327,7 +327,7 @@ pub fn build_trunk_graph(
 ) {
     const VGT: &str = "visual_geometry_transformer";
     let patches = (hp * wp) as i64;
-    let td = mirror::model::PATCH_START as i64 + patches;
+    let td = worldmirror2::model::PATCH_START as i64 + patches;
     let sb = s as i64;
     g.input_f32("patch_tokens", &[sb, patches, C]);
     g.init_f32("mir_eps5", &[1], vec![1e-5]);
@@ -339,7 +339,7 @@ pub fn build_trunk_graph(
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), w };
     // special head rows [s, 7, C]: cam+reg variant 0 for frame 0, variant 1
     // for later frames; pose/ray rows zero (no-prior path).
-    let ps = mirror::model::PATCH_START;
+    let ps = worldmirror2::model::PATCH_START;
     let cam_t = tp.host(&format!("{VGT}.cam_token")).clone();
     let reg_t = tp.host(&format!("{VGT}.reg_token")).clone();
     let c = C as usize;
@@ -363,7 +363,7 @@ pub fn build_trunk_graph(
 
     // RoPE tables: frame span [1,1,td,32]; global span tiles them s times.
     let periods = tp.host(&format!("{VGT}.frame_blocks.0.attn.rope.periods")).clone();
-    let (cos, sin) = mirror::rope2d::rope_tables(&periods, hp, wp, ps);
+    let (cos, sin) = worldmirror2::rope2d::rope_tables(&periods, hp, wp, ps);
     let mut gcos = Vec::with_capacity(s * cos.len());
     let mut gsin = Vec::with_capacity(s * sin.len());
     for _ in 0..s {
@@ -422,7 +422,7 @@ pub fn build_trunk_graph(
 pub fn build_dpt_head_graph(
     w: &W,
     g: &mut GraphBuilder,
-    cfg: &mirror::config::MirrorConfig,
+    cfg: &worldmirror2::config::MirrorConfig,
     prefix: &str,
     out_ch: i64,
     hp: usize,
@@ -514,7 +514,7 @@ pub fn build_dpt_head_graph(
         let oc = cfg.dpt_proj[i] as i64;
         let proj = conv(&mut tp, &feat, &nm(&format!("projects.{i}.weight")), Some(&nm(&format!("projects.{i}.bias"))), &[oc, c2, 1, 1], 1, 1, 0);
         let pos_name = format!("mir_{prefix}_pos{i}");
-        tp.g.init_f32(&pos_name, &[1, oc, ph, pw], mirror::dpt::pos_embed_chw(oc as usize, hp, wp, 0.1));
+        tp.g.init_f32(&pos_name, &[1, oc, ph, pw], worldmirror2::dpt::pos_embed_chw(oc as usize, hp, wp, 0.1));
         let posed = tp.binary("Add", &proj, &pos_name, "pos");
         let resized = match i {
             0 => deconv(&mut tp, &posed, &nm("resize_layers.0.weight"), &nm("resize_layers.0.bias"), oc, oc, 4),
@@ -543,7 +543,7 @@ pub fn build_dpt_head_graph(
     // output_conv1 -> full-res align-corners resize -> +pos_full
     let oc1 = conv(&mut tp, &fused, &nm("scratch.output_conv1.weight"), Some(&nm("scratch.output_conv1.bias")), &[f2 / 2, f2, 3, 3], 3, 1, 1);
     let full = resize_ac(&mut tp, &oc1, f2 / 2, h, wdt);
-    tp.g.init_f32(&format!("mir_{prefix}_pos_full"), &[1, f2 / 2, h, wdt], mirror::dpt::pos_embed_chw((f2 / 2) as usize, (h) as usize, wdt as usize, 0.1));
+    tp.g.init_f32(&format!("mir_{prefix}_pos_full"), &[1, f2 / 2, h, wdt], worldmirror2::dpt::pos_embed_chw((f2 / 2) as usize, (h) as usize, wdt as usize, 0.1));
     let full = tp.binary("Add", &full, &format!("mir_{prefix}_pos_full"), "pos_full");
 
     // output_conv2: conv3 -> relu -> conv1 -> head_out

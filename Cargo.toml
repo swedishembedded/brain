@@ -72,8 +72,8 @@ default-members = [
     "crates/hfsm",
     "crates/wm-core",
     "crates/wm-display",
-    "crates/wm-diamond",
-    "crates/wm-genie",
+    "crates/diamond",
+    "crates/genieredux",
     "crates/vision",
     "crates/imaging",
     "crates/sam2",
@@ -93,7 +93,7 @@ default-members = [
     "crates/imgpipe",
     "crates/zipdepth",
     "crates/splat",
-    "crates/mirror",
+    "crates/worldmirror2",
     "crates/capture",
     "crates/yolov8",
     "crates/onnx",
@@ -178,8 +178,8 @@ brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-wm-core = { path = "crates/wm-core" }
 brain-wm-display = { path = "crates/wm-display" }
-brain-wm-diamond = { path = "crates/wm-diamond" }
-brain-wm-genie = { path = "crates/wm-genie" }
+brain-diamond = { path = "crates/diamond" }
+brain-genieredux = { path = "crates/genieredux" }
 brain-vision = { path = "crates/vision" }
 brain-imaging = { path = "crates/imaging" }
 brain-sam2 = { path = "crates/sam2" }
@@ -199,7 +199,7 @@ brain-instantid = { path = "crates/instantid" }
 brain-imgpipe = { path = "crates/imgpipe" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
-brain-mirror = { path = "crates/mirror" }
+brain-worldmirror2 = { path = "crates/worldmirror2" }
 brain-capture = { path = "crates/capture" }
 brain-yolov8 = { path = "crates/yolov8" }
 brain-onnx = { path = "crates/onnx" }

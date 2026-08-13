@@ -4,7 +4,7 @@
 //! Patch-embed and to_pixels (the video <-> token boundary) vs host references.
 //! Patchify is 4x4x3=48 with feature order (c p1 p2); LN/Linear carry bias.
 use gpu_core::Gpu;
-use wm_genie::{kernel_sources, patch_embed, to_pixels, PatchEmbedWeights, ToPixelsWeights};
+use genieredux::{kernel_sources, patch_embed, to_pixels, PatchEmbedWeights, ToPixelsWeights};
 
 fn rand(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed;

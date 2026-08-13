@@ -13,10 +13,10 @@
 //! bicubic-interpolated for non-native grids, reference semantics).
 
 use gpu_core::Gpu;
-use mirror::config::MirrorConfig;
-use mirror::gaussians::{assemble, frame_maps, AssembleOpts};
-use mirror::model::Mirror;
-use mirror::preprocess;
+use worldmirror2::config::MirrorConfig;
+use worldmirror2::gaussians::{assemble, frame_maps, AssembleOpts};
+use worldmirror2::model::Mirror;
+use worldmirror2::preprocess;
 use splat::types::Splats;
 
 use crate::args::Args;
@@ -100,13 +100,13 @@ fn with_scene<R>(
     let (frames, s, hp, wp) = load_frames(images, &cfg);
     let (w, h) = ((wp * cfg.patch) as u32, (hp * cfg.patch) as u32);
     eprintln!("loading {weights} …");
-    let init = mirror::import::load_weights(weights, &cfg).unwrap_or_else(|e| {
+    let init = worldmirror2::import::load_weights(weights, &cfg).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
     // model + splat pipelines share one Gpu (the demo renders the result)
     let pipes: Vec<(&str, &str)> =
-        mirror::model::PIPELINES.iter().chain(splat::PIPELINES.iter()).copied().collect();
+        worldmirror2::model::PIPELINES.iter().chain(splat::PIPELINES.iter()).copied().collect();
     let gpu = Gpu::new(&pipes);
     let mut model = Mirror::new(&gpu, cfg, &init, 0);
     drop(init);
@@ -185,7 +185,7 @@ fn export_npu(argv: &[String]) {
     let tap_spec = a.take_str("--tap-levels");
     a.finish();
     eprintln!("loading {weights} …");
-    let init = mirror::import::load_weights(&weights, &cfg).unwrap_or_else(|e| {
+    let init = worldmirror2::import::load_weights(&weights, &cfg).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
@@ -312,7 +312,7 @@ fn import(argv: &[String]) {
 
     let cfg = MirrorConfig::default();
     println!("importing {src} ({} tensors expected) …", cfg.param_list().len());
-    match mirror::import::convert(&src, &out, &cfg) {
+    match worldmirror2::import::convert(&src, &out, &cfg) {
         Ok(n) => println!("wrote {out}: {n} tensors, all consumed, shapes verified"),
         Err(e) => {
             eprintln!("import failed: {e}");

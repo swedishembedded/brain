@@ -5,7 +5,7 @@
 //! -> argmax cosine against the normalized codebook -> gather codebook[idx] ->
 //! project_out. Checks the quantized output and the chosen indices.
 use gpu_core::Gpu;
-use wm_genie::{kernel_sources, vq_quantize, VqWeights};
+use genieredux::{kernel_sources, vq_quantize, VqWeights};
 
 fn rand(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed;

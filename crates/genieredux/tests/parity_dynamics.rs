@@ -9,8 +9,8 @@
 //!   python scripts/parity-dump/genie_dynamics.py
 //!   cargo test -p brain-wm-genie --test parity_dynamics -- --ignored --nocapture
 use gpu_core::Gpu;
-use wm_genie::import::{import_dynamics, import_tokenizer};
-use wm_genie::{dynamics_forward, kernel_sources};
+use genieredux::import::{import_dynamics, import_tokenizer};
+use genieredux::{dynamics_forward, kernel_sources};
 
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {

@@ -10,9 +10,9 @@
 //!
 //! T2 needs the real 5 GB checkpoint → gated on MIRROR_CKPT.
 
-use mirror::config::MirrorConfig;
+use worldmirror2::config::MirrorConfig;
 use imaging::{Rgb8, IMAGENET_MEAN, IMAGENET_STD};
-use mirror::preprocess::{resize_bicubic, resize_dims};
+use worldmirror2::preprocess::{resize_bicubic, resize_dims};
 
 fn synth_image(w: usize, h: usize) -> Rgb8 {
     let mut rgb = vec![0u8; w * h * 3];
@@ -155,9 +155,9 @@ fn t2_dinov2_patch_tokens() {
     }
 
     let cfg = MirrorConfig::default();
-    let init = mirror::import::load(&ckpt, &cfg).expect("import");
-    let gpu = gpu_core::Gpu::new_cpu(mirror::model::PIPELINES);
-    let mut model = mirror::model::Mirror::new(&gpu, cfg, &init, 0);
+    let init = worldmirror2::import::load(&ckpt, &cfg).expect("import");
+    let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
+    let mut model = worldmirror2::model::Mirror::new(&gpu, cfg, &init, 0);
     drop(init);
     model.forward(&chw, 1, 37, 37);
     let got = gpu.read(model.patch_tokens(), 1369 * 1024);
@@ -171,7 +171,7 @@ fn t2_dinov2_patch_tokens() {
             errs.push(e);
         }
     }
-    use mirror::model::Head;
+    use worldmirror2::model::Head;
     let px = 518 * 518;
     for (key, head, ch) in [
         ("t5_depth_head", Head::Depth, 3usize),

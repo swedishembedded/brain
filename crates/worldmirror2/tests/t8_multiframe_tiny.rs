@@ -13,9 +13,9 @@
 //!     `param_list` says `feat/8`, so non-default configs read out of bounds.
 
 use data::rng::Lcg;
-use mirror::config::MirrorConfig;
-use mirror::gaussians::{assemble, AssembleOpts};
-use mirror::model::{Head, Mirror};
+use worldmirror2::config::MirrorConfig;
+use worldmirror2::gaussians::{assemble, AssembleOpts};
+use worldmirror2::model::{Head, Mirror};
 use std::collections::HashMap;
 #[test]
 fn s3_forward_is_finite() {
@@ -55,11 +55,11 @@ fn s3_forward_is_finite() {
     let (h, w) = (hp * cfg.patch, wp * cfg.patch);
     let frames: Vec<f32> = (0..s * 3 * h * w).map(|_| 0.5 + 0.4 * r.scaled(0.5)).collect();
 
-    let gpu = gpu_core::Gpu::new_cpu(mirror::model::PIPELINES);
+    let gpu = gpu_core::Gpu::new_cpu(worldmirror2::model::PIPELINES);
     let mut model = Mirror::new(&gpu, cfg, &init, 0);
     model.forward(&frames, s, hp, wp);
 
-    let td = mirror::model::PATCH_START + hp * wp;
+    let td = worldmirror2::model::PATCH_START + hp * wp;
     // DINOv2 per frame
     let po = gpu.read(model.patch_tokens(), s * hp * wp * 64);
     for fi in 0..s {

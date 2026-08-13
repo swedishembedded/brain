@@ -22,7 +22,7 @@ use crate::config::ZipConfig;
 /// with the weights because normalization happens INSIDE the model.
 ///
 /// The arrays themselves come from `imaging` — they were declared byte-identically
-/// here and in `mirror::preprocess`. Only the arrays are shared: WHERE they are
+/// here and in `worldmirror2::preprocess`. Only the arrays are shared: WHERE they are
 /// applied is model-specific and deliberately not unified. ZipDepth folds them
 /// into the first BatchNorm below, so its predictor feeds the model `[0,1]` and
 /// never normalizes; `mirror` applies them per frame on the host.

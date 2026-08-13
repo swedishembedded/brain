@@ -8,8 +8,8 @@
 //! weights generated in-test (no fixtures needed).
 
 use std::collections::HashMap;
-use wm_diamond::train::{trainable_list, DiamondTrainer};
-use wm_diamond::{DiamondConfig, DiamondUNet, Tensors};
+use diamond::train::{trainable_list, DiamondTrainer};
+use diamond::{DiamondConfig, DiamondUNet, Tensors};
 
 fn h2_cfg() -> DiamondConfig {
     // channels 16 (attn heads=2) but still 1 GN group (16<32); to force
@@ -115,7 +115,7 @@ fn train_forward_matches_inference_graph() {
 
     // Same math through the INFERENCE graph.
     let unet = DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
-    let cs = wm_diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
+    let cs = diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
     let s_eff =
         (fx.sigma * fx.sigma + cfg.sigma_offset_noise * cfg.sigma_offset_noise).sqrt();
     let noisy: Vec<f32> = fx.clean.iter().zip(&fx.noise).map(|(c, n)| c + s_eff * n).collect();
@@ -231,7 +231,7 @@ fn train_backward_is_repeatable() {
 #[ignore]
 fn train_gradcheck_real_config() {
     let (cfg, tensors) =
-        wm_diamond::import::load("../../out/diamond-breakout.safetensors").expect("import first");
+        diamond::import::load("../../out/diamond-breakout.safetensors").expect("import first");
     let tr = DiamondTrainer::from_tensors(cfg.clone(), &tensors, Some("cpu"));
     let n_px = (cfg.img_channels * cfg.h * cfg.w) as usize;
     let nsc = cfg.num_steps_conditioning as usize;
@@ -323,7 +323,7 @@ fn train_forward_matches_inference_depth2() {
     let _ = tr.forward_loss();
     let f_train = tr.read_output();
     let unet = DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
-    let cs = wm_diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
+    let cs = diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
     let s_eff = (fx.sigma*fx.sigma + cfg.sigma_offset_noise*cfg.sigma_offset_noise).sqrt();
     let noisy: Vec<f32> = fx.clean.iter().zip(&fx.noise).map(|(c,n)| c + s_eff*n).collect();
     let x_scaled: Vec<f32> = noisy.iter().map(|v| v*cs.c_in).collect();
@@ -368,7 +368,7 @@ fn train_forward_matches_inference_with_attention_and_changing_widths() {
     let f_train = tr.read_output();
 
     let unet = DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
-    let cs = wm_diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
+    let cs = diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
     let s_eff = (fx.sigma*fx.sigma + cfg.sigma_offset_noise*cfg.sigma_offset_noise).sqrt();
     let noisy: Vec<f32> = fx.clean.iter().zip(&fx.noise).map(|(c,n)| c + s_eff*n).collect();
     let x_scaled: Vec<f32> = noisy.iter().map(|v| v*cs.c_in).collect();

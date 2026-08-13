@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
-use mirror::config::MirrorConfig;
-use mirror::dpt::{DptCtx, DptScratch, HeadWeights};
+use worldmirror2::config::MirrorConfig;
+use worldmirror2::dpt::{DptCtx, DptScratch, HeadWeights};
 
 fn read_bin(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -19,8 +19,8 @@ fn read_bin(path: &str) -> Vec<f32> {
 
 #[test]
 fn resize_bilinear_matches_torch() {
-    let gpu = Gpu::new_cpu(mirror::model::PIPELINES);
-    let dk = mirror::model::dpt_kernels(0);
+    let gpu = Gpu::new_cpu(worldmirror2::model::PIPELINES);
+    let dk = worldmirror2::model::dpt_kernels(0);
     let x = gpu.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
     let y = gpu.storage(16);
     let s = gpu.step(dk.resize_bilinear, &[&x, &y], &[1, 1, 2, 2, 4, 4, 1], 16);
@@ -62,7 +62,7 @@ fn dpt_tiny_stages() {
             plist.push((name, numel));
         }
     }
-    let gpu = Gpu::new_cpu(mirror::model::PIPELINES);
+    let gpu = Gpu::new_cpu(worldmirror2::model::PIPELINES);
     let ps = paramstore::ParamStore::new(&gpu, plist, &init);
 
     let tokens = read_bin(&format!("{dir}/tokens.bin"));
@@ -71,7 +71,7 @@ fn dpt_tiny_stages() {
         (0..4).map(|_| gpu.storage_init("tap", &tokens)).collect();
 
     let scr = DptScratch::new(&gpu, &cfg, ph, pw);
-    let dk = mirror::model::dpt_kernels(0);
+    let dk = worldmirror2::model::dpt_kernels(0);
     let ctx = DptCtx { gpu: &gpu, k: dk, cfg: &cfg, scr: &scr, eps: 1e-5 };
     let out = gpu.storage((3 * h * w) as u64);
     let hw = HeadWeights { ps: &ps, prefix: "depth_head" };

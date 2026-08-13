@@ -9,7 +9,7 @@
 //! `events::ppm::{encode_p6, decode_p6}` is the workspace's canonical binary-PPM
 //! codec: a full ASCII header tokenizer (`#` comments, arbitrary whitespace),
 //! maxval checked, and it never panics. There were two independent P6 parsers
-//! (`events` and `mirror::preprocess::load_ppm`) plus six inline
+//! (`events` and `worldmirror2::preprocess::load_ppm`) plus six inline
 //! `format!("P6\n{w} {h}\n255\n")` header writers. This module adds a
 //! **zero**th: it re-exports the codec, so `imaging` is the front door while
 //! `events` remains the implementation.

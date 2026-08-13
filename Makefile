@@ -397,7 +397,7 @@ kernels-table/check:
 # the reference implementation in resources/world-models/repos/diamond.
 # Needs python3 + torch; see docs/world-models/FIXTURES.md for provenance.
 wm-fixtures:
-	python3 scripts/parity-dump/diamond.py --out crates/wm-diamond/tests/fixtures/diamond
+	python3 scripts/parity-dump/diamond.py --out crates/diamond/tests/fixtures/diamond
 
 # Play the deterministic fake world model in an SDL window (WASD; Esc quits).
 # The SDL window is always compiled into the standard build (needs system

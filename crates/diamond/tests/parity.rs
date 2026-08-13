@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use wm_diamond::{DiamondConfig, DiamondUNet, Tensors};
+use diamond::{DiamondConfig, DiamondUNet, Tensors};
 
 fn fixture_dir() -> PathBuf {
     if let Ok(d) = std::env::var("WM_FIXTURE_DIR") {
@@ -132,7 +132,7 @@ fn parity_host_cond_path_matches_reference() {
     let cfg = fx.config();
     let weights = fx.weights();
     let get = |n: &str| weights.get(n).unwrap().1.clone();
-    let cond = wm_diamond::cond::CondNet {
+    let cond = diamond::cond::CondNet {
         cond_channels: cfg.cond_channels as usize,
         num_steps_conditioning: cfg.num_steps_conditioning as usize,
         fourier_w: get("noise_emb.weight"),

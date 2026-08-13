@@ -9,7 +9,7 @@
 use crate::args::Args;
 use data::episode::EpisodeDataset;
 use wm_core::{FakeWorldModel, WorldModel};
-use wm_diamond::DiamondWorldModel;
+use diamond::DiamondWorldModel;
 use wm_display::keymap::{Key, KeyChordMap, KeySet};
 use wm_display::pacing::{FixedTimestep, WallClock};
 use wm_display::record::RecorderSink;
@@ -89,7 +89,7 @@ fn run_finetune(rest: &[String]) {
     let seed = a.u64_or("--seed", 7);
     let device = a.take_str("--device");
 
-    let (cfg, tensors) = wm_diamond::import::load(&weights).unwrap_or_else(|e| {
+    let (cfg, tensors) = diamond::import::load(&weights).unwrap_or_else(|e| {
         eprintln!("cannot load {weights}: {e}");
         std::process::exit(1);
     });
@@ -100,13 +100,13 @@ fn run_finetune(rest: &[String]) {
     let nsc = cfg.num_steps_conditioning as usize;
     let frame_len = (cfg.img_channels * cfg.h * cfg.w) as usize;
 
-    let tr = wm_diamond::train::DiamondTrainer::from_tensors(cfg.clone(), &tensors, device.as_deref());
+    let tr = diamond::train::DiamondTrainer::from_tensors(cfg.clone(), &tensors, device.as_deref());
     println!(
         "fine-tuning {} trainable conv tensors on {data_dir} ({steps} steps, lr {lr})",
-        wm_diamond::train::trainable_list(&cfg).len()
+        diamond::train::trainable_list(&cfg).len()
     );
     let mut drng = data::rng::Rng::new(seed ^ 0xD5);
-    let sampler = move |_: &mut wm_diamond::play::NormalRng| {
+    let sampler = move |_: &mut diamond::play::NormalRng| {
         let w = ds
             .sample_window(&mut drng, nsc + 1)
             .expect("dataset has no episode long enough for nsc+1 frames");
@@ -114,14 +114,14 @@ fn run_finetune(rest: &[String]) {
         // the action that PRODUCED frame i, so context actions (the action
         // taken AT each context frame) are actions[1..=nsc].
         let to_pm1 = |v: &f32| v * 2.0 - 1.0;
-        wm_diamond::train::Transition {
+        diamond::train::Transition {
             obs: w.frames_f32[..nsc * frame_len].iter().map(to_pm1).collect(),
             clean: w.frames_f32[nsc * frame_len..].iter().map(to_pm1).collect(),
             actions: w.actions[1..=nsc].to_vec(),
         }
     };
     let t0 = std::time::Instant::now();
-    let (first, last) = wm_diamond::train::finetune(
+    let (first, last) = diamond::train::finetune(
         &tr,
         sampler,
         steps,
@@ -163,7 +163,7 @@ fn run_import(rest: &[String]) {
         std::process::exit(2);
     });
     let actions = a.u32_or("--actions-count", 4);
-    match wm_diamond::import::import(&src, &out, actions) {
+    match diamond::import::import(&src, &out, actions) {
         Ok(cfg) => println!(
             "imported {} denoiser tensors -> {out} ({}x{} img, {} actions)",
             cfg.param_list().len(),
@@ -195,7 +195,7 @@ fn run_export(rest: &[String]) {
         eprintln!("wm export needs --onnx <F.onnx>");
         std::process::exit(2);
     });
-    match wm_diamond::npu::export_onnx(&weights, &onnx) {
+    match diamond::npu::export_onnx(&weights, &onnx) {
         Ok(cfg) => println!(
             "exported diamond UNet -> {onnx} ({}x{} img, {} ctx frames, cond {}, fp32)",
             cfg.h, cfg.w, cfg.num_steps_conditioning, cfg.cond_channels
@@ -274,7 +274,7 @@ fn build_model(
             // dead weight from when the global sidecar wasn't fully trusted.
             if crate::npu_explicit() {
                 // Intel-NPU path: the UNet runs as a compiled OpenVINO graph,
-                // the sampler stays host-side (wm_diamond::npu).
+                // the sampler stays host-side (diamond::npu).
                 let onnx_path = onnx.unwrap_or_else(|| {
                     eprintln!(
                         "--model diamond --device npu needs --onnx <F.onnx> \
@@ -282,7 +282,7 @@ fn build_model(
                     );
                     std::process::exit(2);
                 });
-                let mut m = match wm_diamond::npu::DiamondNpuWorldModel::load(path, onnx_path, seed)
+                let mut m = match diamond::npu::DiamondNpuWorldModel::load(path, onnx_path, seed)
                 {
                     Ok(m) => Box::new(m),
                     Err(e) => {
@@ -296,11 +296,11 @@ fn build_model(
                 m.reset(&[], &[]);
                 return m;
             }
-            let (cfg, tensors) = wm_diamond::import::load(path).unwrap_or_else(|e| {
+            let (cfg, tensors) = diamond::import::load(path).unwrap_or_else(|e| {
                 eprintln!("cannot load {path}: {e}");
                 std::process::exit(1);
             });
-            let unet = wm_diamond::DiamondUNet::new(cfg, &tensors, device);
+            let unet = diamond::DiamondUNet::new(cfg, &tensors, device);
             let mut m = Box::new(DiamondWorldModel::new(unet, seed));
             m.reset(&[], &[]);
             m
@@ -367,7 +367,7 @@ fn run_play(rest: &[String]) {
         build_model(&model_name, seed, weights.as_deref(), device.as_deref(), onnx.as_deref());
     if denoise_steps > 0 {
         // WorldModel::set_nfe quality codes: 0 = default (3 steps), 1 = 2
-        // steps, >=2 = 1 step (see wm_diamond::play).
+        // steps, >=2 = 1 step (see diamond::play).
         model.set_nfe(match denoise_steps {
             n if n >= 3 => 0,
             2 => 1,
@@ -614,8 +614,8 @@ fn run_bench(rest: &[String]) {
         }
         let weights = a.take_str("--weights").expect("--profile needs --weights");
         let device = a.take_str("--device");
-        let (cfg, tensors) = wm_diamond::import::load(&weights).unwrap();
-        let unet = wm_diamond::DiamondUNet::new(cfg.clone(), &tensors, device.as_deref());
+        let (cfg, tensors) = diamond::import::load(&weights).unwrap();
+        let unet = diamond::DiamondUNet::new(cfg.clone(), &tensors, device.as_deref());
         let n = (cfg.img_channels * cfg.h * cfg.w) as usize;
         let noisy = vec![0.1f32; n];
         let obs = vec![0.0f32; n * cfg.num_steps_conditioning as usize];

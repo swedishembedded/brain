@@ -118,9 +118,10 @@ use Source::*;
 /// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
-/// `package` names the crate as it exists TODAY - several rows are still
-/// pre-rename (`"brain-mirror"` for `worldmirror2`, …) while the crate-rename
-/// migration is in flight, one domain group per commit; each rename updates
+/// `package` names the crate as it exists TODAY - the four toy
+/// architectures (`"brain-moe"` for `toymoe`, …) and `scrfd`/`arcface`
+/// (still one bundled `brain-facenet` crate, pending a real split) are
+/// still pre-rename while that migration finishes; each rename updates
 /// its row in the same commit that moves the crate.
 pub const ARCHS: &[Arch] = &[
     // -- Text decoders --------------------------------------------------
@@ -167,15 +168,15 @@ pub const ARCHS: &[Arch] = &[
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
     arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet"),
     // -- 3D -----------------------------------------------------------
-    arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-mirror"),
+    arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
     // -- Forecasting ----------------------------------------------------
     arch!("chronos2", "Chronos-2 encoder-only patch transformer", Forecast, Brain, "brain-chronos2"),
     arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos"),
     arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
     // -- World models ---------------------------------------------------
-    arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-wm-diamond"),
-    arch!("genieredux", "GenieRedux-G ST-transformer world model", World, Brain, "brain-wm-genie"),
+    arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
+    arch!("genieredux", "GenieRedux-G ST-transformer world model", World, Brain, "brain-genieredux"),
     // -- Toy (brain's own, no upstream reference) ------------------------
     arch!("toymoe", "Sparse-MoE toy task (64-symbol next-token rule)", Domain::Toy, Source::Toy, "brain-moe"),
     arch!("toypid", "PID event/effect control transformer", Domain::Toy, Source::Toy, "brain-pid"),

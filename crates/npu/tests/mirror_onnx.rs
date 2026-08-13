@@ -130,7 +130,7 @@ fn trunk_graph_structure() {
 fn dpt_head_graph_structure() {
     // tiny config (same shape family as mirror's t8 test), gs head with the
     // rgb merge branch
-    let cfg = mirror::config::MirrorConfig {
+    let cfg = worldmirror2::config::MirrorConfig {
         depth: 4,
         dim: 64,
         heads: 2,

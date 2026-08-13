@@ -5,7 +5,7 @@
 //! Import the real GenieRedux tokenizer checkpoint (gitignored scratch) with
 //! full-coverage validation. Ignored by default; run manually with the file:
 //!   cargo test -p brain-wm-genie --test import -- --ignored --nocapture
-use wm_genie::import::import_tokenizer;
+use genieredux::import::import_tokenizer;
 
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {

@@ -5,7 +5,7 @@
 //! by comparing a 2-layer stack against manually chaining the (already
 //! host-verified) stblock_forward twice and applying the same final norm.
 use gpu_core::Gpu;
-use wm_genie::{
+use genieredux::{
     ff_inner, kernel_sources, stblock_forward, sttransformer_forward, AttnWeights, FfWeights,
     PegWeights, StBlockWeights, StTransformerWeights,
 };

@@ -549,6 +549,7 @@ dependencies = [
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
+ "brain-diamond",
  "brain-ecapatdnn",
  "brain-eval",
  "brain-events",
@@ -569,7 +570,6 @@ dependencies = [
  "brain-lfm2",
  "brain-memauth",
  "brain-mimi",
- "brain-mirror",
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
@@ -598,8 +598,8 @@ dependencies = [
  "brain-vqgan",
  "brain-vulkan",
  "brain-wm-core",
- "brain-wm-diamond",
  "brain-wm-display",
+ "brain-worldmirror2",
  "brain-yolov8",
  "brain-zipdepth",
  "clap",
@@ -727,6 +727,23 @@ dependencies = [
  "brain-qwen3",
  "brain-sam1",
  "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-diamond"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-npu",
+ "brain-onnx",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-vae",
+ "brain-wm-core",
  "serde_json",
 ]
 
@@ -890,6 +907,16 @@ name = "brain-forecast"
 version = "0.1.1"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "brain-genieredux"
+version = "0.1.1"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-wm-core",
 ]
 
 [[package]]
@@ -1081,22 +1108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-mirror"
-version = "0.1.1"
-dependencies = [
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-imaging",
- "brain-kernels",
- "brain-model",
- "brain-paramstore",
- "brain-splat",
- "brain-vision",
- "serde_json",
-]
-
-[[package]]
 name = "brain-model"
 version = "0.1.1"
 dependencies = [
@@ -1187,6 +1198,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-chronos2",
  "brain-data",
+ "brain-diamond",
  "brain-eval",
  "brain-events",
  "brain-fincast",
@@ -1196,7 +1208,6 @@ dependencies = [
  "brain-kronos",
  "brain-lfm2",
  "brain-mimi",
- "brain-mirror",
  "brain-model",
  "brain-nemotronasr",
  "brain-onnx",
@@ -1207,7 +1218,7 @@ dependencies = [
  "brain-qwen3vl",
  "brain-testutil",
  "brain-vision",
- "brain-wm-diamond",
+ "brain-worldmirror2",
  "brain-yolov8",
  "brain-zipdepth",
  "bytemuck",
@@ -1702,23 +1713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-wm-diamond"
-version = "0.1.0"
-dependencies = [
- "brain-checkpoint",
- "brain-gpu-core",
- "brain-kernels",
- "brain-model",
- "brain-npu",
- "brain-onnx",
- "brain-optim",
- "brain-paramstore",
- "brain-vae",
- "brain-wm-core",
- "serde_json",
-]
-
-[[package]]
 name = "brain-wm-display"
 version = "0.1.1"
 dependencies = [
@@ -1728,13 +1722,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-wm-genie"
+name = "brain-worldmirror2"
 version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
- "brain-wm-core",
+ "brain-model",
+ "brain-paramstore",
+ "brain-splat",
+ "brain-vision",
+ "serde_json",
 ]
 
 [[package]]

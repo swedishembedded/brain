@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Build the DIAMOND conditional EDM UNet denoiser (the *inner model* of
-//! `wm_diamond::model::DiamondUNet`) as an fp32 ONNX graph for OpenVINO
+//! `diamond::model::DiamondUNet`) as an fp32 ONNX graph for OpenVINO
 //! whole-graph compilation, plus the [`WmSession`] that compiles/runs it.
 //! Pure Rust to *produce* the graph — no NPU / OpenVINO needed.
 //!
 //! The graph starts AFTER the host conditioning (Fourier + action embedding +
-//! cond MLP stay on the host, see `wm_diamond::cond`) and ends at the inner
+//! cond MLP stay on the host, see `diamond::cond`) and ends at the inner
 //! model output `F` — the EDM wrap (c_skip/c_out + quantize) and the Euler
 //! step stay host-side too. Inputs:
 //!   - `noisy_scaled` `[1,ic,H,W]`   (c_in pre-multiplied on the host)
@@ -15,7 +15,7 @@
 //!   - `cond`         `[1,cond_channels]`
 //! Output: `model_out` `[1,ic,H,W]`.
 //!
-//! Semantics mirror `wm_diamond::model` 1:1:
+//! Semantics mirror `diamond::model` 1:1:
 //!   - AdaGroupNorm = non-affine GroupNorm (eps 1e-5 INSIDE the sqrt), then
 //!     `y = xhat*(1+scale) + shift` with `[scale||shift] = Gemm(cond)` per site.
 //!   - SiLU = Sigmoid+Mul; skip concat = `Concat(x, skip)` axis 1; the up path
@@ -24,15 +24,15 @@
 //!     1x1 conv, and the residual adds the NORMED input (reference quirk).
 //!
 //! brain-npu does not depend on brain-wm-diamond: [`WmUnetConfig`] mirrors the
-//! graph-relevant fields of `wm_diamond::DiamondConfig` and the host glue in
-//! `wm_diamond::npu` converts.
+//! graph-relevant fields of `diamond::DiamondConfig` and the host glue in
+//! `diamond::npu` converts.
 
 use std::collections::HashMap;
 
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 
-/// UNet architecture parameters (see `wm_diamond::DiamondConfig`).
+/// UNet architecture parameters (see `diamond::DiamondConfig`).
 #[derive(Clone, Debug)]
 pub struct WmUnetConfig {
     pub img_channels: u32,
@@ -48,11 +48,11 @@ pub struct WmUnetConfig {
 }
 
 /// Host tensors by (stripped) reference name: `name -> (shape, data)` — the
-/// same shape as `wm_diamond::Tensors`.
+/// same shape as `diamond::Tensors`.
 pub type W = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 const GN_EPS: f32 = 1e-5;
-/// Fixed attention head dim (matches `wm_diamond::model::ATTN_HEAD_DIM`).
+/// Fixed attention head dim (matches `diamond::model::ATTN_HEAD_DIM`).
 const ATTN_HEAD_DIM: i64 = 8;
 
 fn num_groups(c: i64) -> i64 {

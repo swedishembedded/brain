@@ -33,8 +33,8 @@
 //! | [`host::resize_bilinear_hwc`] | `zipdepth::predict`, `cli::depth_cli`, `cli::resident_depth` | **moved**; six functions became one |
 //! | [`color::yuyv_to_rgb`] | `capture::convert` | **moved**; `crates/capture` is V4L2-only again |
 //! | [`pixels::chw_to_hwc`] / [`pixels::hwc_to_chw`] | `cli::image_io`, `npu::{calib,sim}`, `wm-display`, tests | **moved**; one generic pair |
-//! | [`IMAGENET_MEAN`] / [`IMAGENET_STD`] | `zipdepth::init`, `mirror::preprocess` | **moved**; one pair of arrays |
-//! | [`Rgb8`] / [`codec::load`] | `mirror::preprocess::{RgbImage, load_ppm}` | **moved**; the second P6 parser is gone |
+//! | [`IMAGENET_MEAN`] / [`IMAGENET_STD`] | `zipdepth::init`, `worldmirror2::preprocess` | **moved**; one pair of arrays |
+//! | [`Rgb8`] / [`codec::load`] | `worldmirror2::preprocess::{RgbImage, load_ppm}` | **moved**; the second P6 parser is gone |
 //!
 //! `cli::depth_cli`'s calibration letterbox now calls [`letterbox_rgb`] with
 //! `pad = 0.5` - bit-identical to the copy it replaced, which deliberately keeps
@@ -85,7 +85,7 @@
 //! * [`Filter`] - nearest / bilinear / bicubic, each naming the exact reference
 //!   function it reproduces. Note in particular that `Filter::Bicubic` is
 //!   PyTorch's non-antialiased `a = -0.75` cubic and is **not** the same function
-//!   as `mirror::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
+//!   as `worldmirror2::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
 //!   `a = -0.5`) or `resize_bicubic_torch` (antialiased, f64). Antialiased
 //!   downsampling has no kernel; this crate does not pretend otherwise.
 //! * [`ChannelPolicy`] - what a 1-channel buffer means when RGB8 is wanted.
@@ -97,7 +97,7 @@
 //! ## What this crate deliberately does NOT contain
 //!
 //! * **A UNIFIED model target-size policy.** `zipdepth::predict::target_size`,
-//!   `mirror::preprocess::{resize_dims, adaptive_target}` and
+//!   `worldmirror2::preprocess::{resize_dims, adaptive_target}` and
 //!   `qwen3vl::preprocess::smart_resize` are different reference models'
 //!   contracts. They may be hosted here side by side as NAMED policies, but
 //!   they must never be unified - and copying them here while the originals

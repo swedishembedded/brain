@@ -26,7 +26,7 @@ brain-vision.workspace = true
 brain-zipdepth.workspace = true
 brain-yolov8.workspace = true
 brain-imaging.workspace = true
-brain-mirror.workspace = true
+brain-worldmirror2.workspace = true
 brain-data.workspace = true
 brain-eval.workspace = true
 brain-events.workspace = true
@@ -48,7 +48,7 @@ openvino.workspace = true
 # dependency direction stays brain-wm-diamond -> brain-npu.
 [dev-dependencies]
 brain-testutil.workspace = true
-brain-wm-diamond.workspace = true
+brain-diamond.workspace = true
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
 brain-nemotronasr.workspace = true

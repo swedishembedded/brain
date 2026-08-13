@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use mirror::config::MirrorConfig;
+use worldmirror2::config::MirrorConfig;
 
 fn fixture() -> HashMap<String, Vec<usize>> {
     let raw = include_str!("golden/header.json");
@@ -59,6 +59,6 @@ fn total_params_are_1_26b() {
 fn live_import_strict() {
     let Ok(path) = std::env::var("MIRROR_CKPT") else { return };
     let cfg = MirrorConfig::default();
-    let map = mirror::import::load(&path, &cfg).expect("strict import");
+    let map = worldmirror2::import::load(&path, &cfg).expect("strict import");
     assert_eq!(map.len(), 1545);
 }

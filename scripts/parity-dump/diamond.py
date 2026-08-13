@@ -10,7 +10,7 @@ per-module activations as raw little-endian f32 blobs + manifest.json.
 
 This script is resource-prep tooling: it is NEVER part of brain's build/test
 path. Output is copied into
-crates/wm-diamond/tests/fixtures/diamond/ and committed.
+crates/diamond/tests/fixtures/diamond/ and committed.
 
 Usage:
   python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond

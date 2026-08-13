@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Position-bias helpers: ALiBi structure + ContinuousPositionBias invariants.
-use wm_genie::bias::{alibi_bias, cpb_bias, CpbLayer};
+use genieredux::bias::{alibi_bias, cpb_bias, CpbLayer};
 
 #[test]
 fn alibi_has_expected_structure() {

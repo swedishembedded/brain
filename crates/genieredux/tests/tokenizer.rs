@@ -6,8 +6,8 @@
 //! this checks the end-to-end wiring: output shape, finiteness, determinism,
 //! and that the VQ produces in-range codebook indices.
 use gpu_core::Gpu;
-use wm_genie::bias::CpbLayer;
-use wm_genie::{
+use genieredux::bias::CpbLayer;
+use genieredux::{
     kernel_sources, tokenizer_forward, AttnWeights, FfWeights, PatchEmbedWeights, PegWeights,
     StBlockWeights, StTransformerWeights, ToPixelsWeights, TokenizerWeights, VqWeights, ff_inner,
 };

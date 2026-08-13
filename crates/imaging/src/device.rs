@@ -174,9 +174,9 @@ pub enum Filter {
     /// `resize_bicubic.wgsl` — PyTorch's **non-antialiased** cubic convolution,
     /// `a = -0.75`, fixed 4x4 support, clamp-to-edge taps.
     ///
-    /// NOT `mirror::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
+    /// NOT `worldmirror2::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
     /// `a = -0.5`, bit-exact against a PIL golden) and NOT
-    /// `mirror::preprocess::resize_bicubic_torch` (antialiased, f64 accumulate).
+    /// `worldmirror2::preprocess::resize_bicubic_torch` (antialiased, f64 accumulate).
     /// Those are different mathematical functions, not other implementations of
     /// this one, and antialiased downsampling still has no kernel. Pointing
     /// mirror at this variant would break `t1_pil_bicubic_exact`.
@@ -193,7 +193,7 @@ pub enum AlignCorners {
     #[default]
     HalfPixel,
     /// `src = dst * (in-1)/(out-1)`. Corner samples land on corner pixels; ONNX
-    /// `"align_corners"`. `mirror::dpt`'s upsampler and ZipDepth's final
+    /// `"align_corners"`. `worldmirror2::dpt`'s upsampler and ZipDepth's final
     /// upsample back to source resolution use this one.
     Corners,
 }

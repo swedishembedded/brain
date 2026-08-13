@@ -33,7 +33,7 @@ __pycache__/
 
 # Generated world-model artifacts: parity fixtures (regenerate with
 # `make wm-fixtures`) and demo output.
-crates/wm-diamond/tests/fixtures/
+crates/diamond/tests/fixtures/
 /out/wm-demos/
 
 # depth demo test artifacts (never commit — regenerable)

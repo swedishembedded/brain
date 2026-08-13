@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use wm_diamond::{DiamondConfig, DiamondUNet, Tensors};
+use diamond::{DiamondConfig, DiamondUNet, Tensors};
 
 /// Deliberately irregular: channels that differ per level (so a schedule walked
 /// the wrong way cannot pass), attention on only the second level, and a

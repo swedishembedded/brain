@@ -14,7 +14,7 @@
 //! (BRAIN_OV_PROBE needs OpenVINO installed; MOE_SKIP_GPU_TESTS skips the
 //! backend-dependent reference).
 
-use wm_diamond::{DiamondConfig, Tensors};
+use diamond::{DiamondConfig, Tensors};
 
 /// The fixture architecture: 2 levels, attention on the deep level (so the
 /// export exercises downsample/upsample, skip concats, AdaGN, and attention).
@@ -123,7 +123,7 @@ fn dims_of(v: &onnx::onnx::ValueInfoProto) -> Vec<i64> {
 fn wm_onnx_graph_is_well_formed() {
     let cfg = tiny_cfg();
     let tensors = rand_tensors(&cfg, 7);
-    let bytes = wm_diamond::npu::build_onnx_bytes(&cfg, &tensors);
+    let bytes = diamond::npu::build_onnx_bytes(&cfg, &tensors);
     assert!(bytes.len() > 1000, "onnx export suspiciously small: {} bytes", bytes.len());
 
     let model = onnx::decode_model(&bytes).expect("export must decode as a valid ONNX ModelProto");
@@ -194,12 +194,12 @@ fn wm_onnx_matches_brain_forward() {
     let c_noise = 0.1f32;
 
     // Reference: brain's own engine on the cpu device.
-    let unet = wm_diamond::DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
+    let unet = diamond::DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
     unet.set_context(&obs);
     let reference = unet.forward(&noisy, c_noise, &actions);
 
     // Exported graph through OpenVINO; cond computed by the same host path.
-    let bytes = wm_diamond::npu::build_onnx_bytes(&cfg, &tensors);
+    let bytes = diamond::npu::build_onnx_bytes(&cfg, &tensors);
     let mut sess = WmSession::load_bytes(
         &bytes,
         &NpuConfig { device: NpuDevice::Cpu, allow_fallback: true, ..Default::default() },
@@ -241,16 +241,16 @@ fn wm_onnx_runs_on_npu() {
     let actions: Vec<u32> = vec![1, 3];
     let c_noise = 0.1f32;
 
-    let unet = wm_diamond::DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
+    let unet = diamond::DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
     unet.set_context(&obs);
     let reference = unet.forward(&noisy, c_noise, &actions);
 
     let dir = std::env::temp_dir().join(format!("brain-wm-onnx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let opath = dir.join("diamond-tiny.onnx");
-    std::fs::write(&opath, wm_diamond::npu::build_onnx_bytes(&cfg, &tensors)).unwrap();
+    std::fs::write(&opath, diamond::npu::build_onnx_bytes(&cfg, &tensors)).unwrap();
 
-    let mut dn = wm_diamond::npu::DiamondNpu::new(
+    let mut dn = diamond::npu::DiamondNpu::new(
         cfg.clone(),
         &tensors,
         opath.to_str().unwrap(),
@@ -271,10 +271,10 @@ fn wm_onnx_runs_on_npu() {
     assert!(max_abs < tol, "inner-model output mismatch too large on {}: {max_abs}", dn.device());
 }
 
-/// Host-side cond vector, mirroring `wm_diamond::cond::CondNet` construction.
+/// Host-side cond vector, mirroring `diamond::cond::CondNet` construction.
 fn cond_of(cfg: &DiamondConfig, tensors: &Tensors, c_noise: f32, actions: &[u32]) -> Vec<f32> {
     let get = |n: &str| tensors[n].1.clone();
-    let net = wm_diamond::cond::CondNet {
+    let net = diamond::cond::CondNet {
         cond_channels: cfg.cond_channels as usize,
         num_steps_conditioning: cfg.num_steps_conditioning as usize,
         fourier_w: get("noise_emb.weight"),

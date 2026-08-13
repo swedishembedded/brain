@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use wm_core::WorldModel;
-use wm_diamond::{DiamondConfig, DiamondUNet, DiamondWorldModel, Tensors};
+use diamond::{DiamondConfig, DiamondUNet, DiamondWorldModel, Tensors};
 
 fn cfg() -> DiamondConfig {
     DiamondConfig {

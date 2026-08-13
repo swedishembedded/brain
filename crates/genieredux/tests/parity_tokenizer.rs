@@ -10,8 +10,8 @@
 //!   python scripts/parity-dump/genie_tokenizer.py
 //!   cargo test -p brain-wm-genie --test parity_tokenizer -- --ignored --nocapture
 use gpu_core::Gpu;
-use wm_genie::import::import_tokenizer;
-use wm_genie::{kernel_sources, tokenizer_forward};
+use genieredux::import::import_tokenizer;
+use genieredux::{kernel_sources, tokenizer_forward};
 
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {

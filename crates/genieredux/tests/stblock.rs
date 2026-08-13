@@ -7,7 +7,7 @@
 //! causal (temporal pad (2,0)). Confirms the reshape/PEG/residual wiring, not
 //! just the sub-modules.
 use gpu_core::Gpu;
-use wm_genie::{
+use genieredux::{
     ff_inner, kernel_sources, stblock_forward, AttnWeights, FfWeights, PegWeights, StBlockWeights,
 };
 

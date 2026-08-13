@@ -5,7 +5,7 @@
 //! reference forward (models/components/attention.py): the QK-normalized biased
 //! Attention (num_null_kv=0, bidir + causal) and the GEGLU FeedForward.
 use gpu_core::Gpu;
-use wm_genie::{attn_forward, geglu_forward, kernel_sources, AttnWeights, FfWeights};
+use genieredux::{attn_forward, geglu_forward, kernel_sources, AttnWeights, FfWeights};
 
 fn rand(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed;

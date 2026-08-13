@@ -1,12 +1,12 @@
 [package]
-name = "brain-mirror"
+name = "brain-worldmirror2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "WorldMirror-2 multi-view 3D reconstruction: DINOv2 ViT-L patch encoder + alternating frame/global attention trunk + DPT/camera/Gaussian heads, imported exactly from the reference checkpoint and run on the brain engine (CPU/GPU/NPU)."
 
 [lib]
-name = "mirror"
+name = "worldmirror2"
 path = "src/lib.rs"
 
 [dependencies]
