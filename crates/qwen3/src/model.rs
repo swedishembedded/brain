@@ -192,12 +192,12 @@ const PIPELINES: &[(&str, &str)] = &[
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
-/// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg3` (128×128 tile, 256
-/// threads, ~4 TFLOP/s on a P40) wins from `m = 8` up - it bounds-guards its
-/// tile, so a short M costs only the idle rows, while the naive
-/// one-thread-per-output `matmul` collapses on a wide N. Same math either way
-/// (parity gated by `tests/backend_parity` + gradcheck), so this only changes
-/// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
+/// `[m,k]·[n,k]ᵀ`. Delegates to `model::block::pick_gemm` (B2: a thin adapter
+/// over `backend_api::select::candidates`, whose `GEMM_TILE_MIN_ROWS`/
+/// `GEMM_TILE_MIN_COLS` carry the measured P40 crossover this used to restate
+/// here) - same math either way (parity gated by `tests/backend_parity` +
+/// gradcheck), so this only changes speed. `BRAIN_QWEN_NAIVE_MM=1` forces the
+/// naive kernel.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     // `matmul_reg3` = `matmul_reg2` with the shared-memory bank conflicts

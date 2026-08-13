@@ -890,13 +890,16 @@ impl Engine {
     /// The fp32 GEMM tier for this device — the SAME rule `flux1`, `flux2` and
     /// `model::rowemit` use, so the serving engine stops having a private one.
     ///
-    /// It used to select through `backend_api::select`, whose `KernelVariant`
-    /// set has no register-tiled member: the only two answers available were
-    /// the decode GEMV and the naive reference, so every prefill chunk above
-    /// `DECODE_REGIME_MAX_ROWS` took the naive kernel. `gemm_variant`'s `m <= 32`
-    /// GEMV cutoff is the same number as `DECODE_REGIME_MAX_ROWS`, so the decode
-    /// regime is unchanged; only the rows above it move, and they move onto the
-    /// kernel the batched forward was already using.
+    /// `mm` picks the actual kernel by calling `block::gemm_variant(self.
+    /// gemm_tier(), m, n)`, which is now (B2) a thin adapter over
+    /// `backend_api::select::candidates` - including its `RegisterTiled`
+    /// member, so every prefill chunk above `DECODE_REGIME_MAX_ROWS` reaches
+    /// `MATMUL_REG3` instead of falling through to the naive reference the way
+    /// it used to before that member existed. `gemm_variant`'s decode-regime
+    /// cutoff is `DECODE_REGIME_MAX_ROWS` itself now (not a private `m <= 32`
+    /// copy), so the decode regime this engine already tuned for is unchanged;
+    /// only the rows above it move, onto the kernel the batched forward was
+    /// already using.
     ///
     /// Gated on the queried `workgroup_reductions`: both fast kernels cooperate
     /// across a workgroup, so a device without it keeps the naive reference

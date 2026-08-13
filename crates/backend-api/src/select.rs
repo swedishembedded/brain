@@ -81,6 +81,15 @@ pub enum KernelVariant {
     /// The packed-int8 register-tiled GEMM (`matmul_i8*`). Requires
     /// `caps.numeric.int8_dot`.
     PackedInt8,
+    /// The fp32/storage-tier 128×128 register-tiled GEMM (`matmul_reg`/
+    /// `matmul_reg2`/`matmul_reg3` - call sites map this to whichever of the
+    /// three they registered; all three are bit-identical by construction,
+    /// see `matmul_reg3.wgsl`'s header comment). Wins once there is enough
+    /// work to fill a tile - see [`GEMM_TILE_MIN_ROWS`]/[`GEMM_TILE_MIN_COLS`]
+    /// for the measured crossover. Requires `caps.workgroup_reductions` (the
+    /// kernel stages its tile in workgroup memory behind
+    /// `workgroupBarrier()`).
+    RegisterTiled,
 }
 
 /// What a [`KernelVariant`] needs from the device to correctly execute a
@@ -165,6 +174,9 @@ impl KernelVariant {
                 Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
             }
             KernelVariant::PackedInt8 => Requirement { int8_dot: true, ..Requirement::default() },
+            KernelVariant::RegisterTiled => {
+                Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
+            }
         }
     }
 }
@@ -195,6 +207,32 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// tok/s at m=4, tile 753 vs GEMV 592 at m=16. A per-device autotuner (S5)
 /// owns refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
+
+/// The fp32/storage-tier register-tiled GEMM ([`KernelVariant::RegisterTiled`])
+/// needs at least this many rows to be worth it - below it the 128×128 tile is
+/// mostly idle and the naive one-thread-per-output kernel wins outright.
+///
+/// Migrated from `model::block::pick_gemm`'s doc comment (B2), which measured
+/// it directly rather than assuming the tile's own 128-row dimension is the
+/// threshold - requiring a full tile cost 22x. Measured on a P40, `k = 2048`,
+/// `n = 2560`:
+///
+/// | m | naive | tiled |
+/// |---|---|---|
+/// | 1 | **0.19 ms** | 0.48 ms |
+/// | 2 | **0.37** | 0.73 |
+/// | 4 | **0.43** | 0.77 |
+/// | 8 | 0.89 | **0.77** |
+/// | 12 | 1.08 | **0.78** |
+/// | 77 | 18.67 | **0.84**  (22x) |
+///
+/// So the crossover is `m = 8`, not 128.
+pub const GEMM_TILE_MIN_ROWS: u32 = 8;
+
+/// Companion to [`GEMM_TILE_MIN_ROWS`]: below this output width the tile's
+/// columns are mostly idle too, so the naive kernel wins regardless of `m`.
+/// Also migrated from `model::block::pick_gemm`'s old `m < 8 || n < 128` rule.
+pub const GEMM_TILE_MIN_COLS: u32 = 128;
 
 /// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
 /// switch the end-to-end speedup was measured with, and the fallback if a
@@ -240,13 +278,34 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::MatMul => match shape.dtype {
             // F32 and the storage-tier dtypes (BF16/F16) share the SAME
             // regime split today: they use the SAME tiling as F32, just a
-            // different load once a real bf16/f16 decode path lands (a
-            // dedicated register-tiled storage-tier GEMM is B2's job, not
-            // this phase's). The GEMV requires m <= 32 (its accumulator
-            // bound).
+            // different load once a real bf16/f16 decode path lands. The
+            // GEMV requires m <= 32 (its accumulator bound) and, where
+            // registered, always wins the decode regime - the HEAD of both
+            // branches below is therefore unchanged from before B2.
+            //
+            // `RegisterTiled` fills two gaps `WorkgroupPerOutput`/`Reference`
+            // alone could not express (B2): within the decode regime, a
+            // caller with no GEMV kernel at all (`model::block::pick_gemm`'s
+            // callers - see `GEMM_TILE_MIN_ROWS`'s doc) still needs a
+            // tiled-vs-naive answer once `m` clears the tile-fill threshold;
+            // above the decode regime, EVERY caller needs it - that used to
+            // fall through to `Reference` unconditionally, which is exactly
+            // the "every prefill chunk above 32 rows takes the naive kernel"
+            // hole `qwen3::serve::Engine::gemm_tier`'s old doc comment
+            // flagged. Appending it after `WorkgroupPerOutput` (rather than
+            // before) keeps every existing `DefaultSelector`/`AutoTuner`
+            // consumer's head choice identical - only a caller that walks
+            // past `WorkgroupPerOutput` (because it has no GEMV kernel) ever
+            // reaches it.
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => {
                 if shape.m <= DECODE_REGIME_MAX_ROWS {
-                    vec![WorkgroupPerOutput, Reference]
+                    if shape.m >= GEMM_TILE_MIN_ROWS && shape.n >= GEMM_TILE_MIN_COLS {
+                        vec![WorkgroupPerOutput, RegisterTiled, Reference]
+                    } else {
+                        vec![WorkgroupPerOutput, Reference]
+                    }
+                } else if shape.n >= GEMM_TILE_MIN_COLS {
+                    vec![RegisterTiled, Reference]
                 } else {
                     vec![Reference]
                 }
@@ -365,6 +424,7 @@ impl KernelVariant {
             KernelVariant::WorkgroupPerOutput => "workgroup_per_output",
             KernelVariant::SplitReduction => "split_reduction",
             KernelVariant::PackedInt8 => "packed_int8",
+            KernelVariant::RegisterTiled => "register_tiled",
         }
     }
     /// Inverse of [`KernelVariant::as_str`]. Deliberately NOT `from_str`:
@@ -376,6 +436,7 @@ impl KernelVariant {
             "workgroup_per_output" => KernelVariant::WorkgroupPerOutput,
             "split_reduction" => KernelVariant::SplitReduction,
             "packed_int8" => KernelVariant::PackedInt8,
+            "register_tiled" => KernelVariant::RegisterTiled,
             _ => return None,
         })
     }
@@ -532,13 +593,22 @@ mod tests {
         assert_eq!(s.select(Op::RmsNorm, decode, &cpu_caps()), KernelVariant::Reference);
     }
 
-    /// Training-sized M keeps the reference MatMul — for a GEMM the regime
-    /// boundary really is a row count (the 128x128 tile is idle at m<=32).
+    /// Training-sized M takes the register-tiled GEMM once `n` clears the
+    /// tile-fill threshold (B2) - the naive kernel used to win this shape by
+    /// default, which was the exact "every prefill chunk above 32 rows takes
+    /// the naive kernel" hole `RegisterTiled` exists to close. A narrow `n`
+    /// (below [`GEMM_TILE_MIN_COLS`]) still keeps the naive kernel - the tile
+    /// would be mostly idle there too.
     #[test]
-    fn large_m_keeps_reference_matmul() {
+    fn large_m_and_wide_n_gets_the_register_tiled_gemm() {
         let s = DefaultSelector;
-        let train = shape(4096, 512, 512, Dtype::F32);
-        assert_eq!(s.select(Op::MatMul, train, &gpu_caps()), KernelVariant::Reference);
+        let wide = shape(4096, 512, 512, Dtype::F32);
+        assert_eq!(s.select(Op::MatMul, wide, &gpu_caps()), KernelVariant::RegisterTiled);
+        let narrow = shape(4096, 64, 512, Dtype::F32);
+        assert_eq!(s.select(Op::MatMul, narrow, &gpu_caps()), KernelVariant::Reference);
+        // No workgroup barriers (the CPU JIT) -> the reference, always, even
+        // at a shape that would otherwise fill a tile.
+        assert_eq!(s.select(Op::MatMul, wide, &cpu_caps()), KernelVariant::Reference);
     }
 
     /// …but RmsNorm does NOT: the per-element kernel's loss is uncoalesced
@@ -805,6 +875,88 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// B2: `candidates()`'s default policy (its head) must agree with the two
+    /// pre-B2 GEMM pickers this phase unifies - `model::block::pick_gemm`
+    /// (training-shaped: `m < GEMM_TILE_MIN_ROWS || n < GEMM_TILE_MIN_COLS`
+    /// picks the naive kernel, else the register-tiled one - no GEMV concept
+    /// at all) and `model::block::gemm_variant` (inference-shaped: `m <=
+    /// DECODE_REGIME_MAX_ROWS` picks the GEMV kernel when the model registered
+    /// one, else the tiled kernel at every M > 32 regardless of N). This crate
+    /// cannot depend on `brain-model`, so the two rules are reproduced inline
+    /// - the measured (m, n) pairs are `block::pick_gemm`'s own doc table
+    /// (P40, k=2048, n=2560): naive wins at m in {1,2,4}, the tile wins from
+    /// m=8. Before `KernelVariant::RegisterTiled` exists this does not even
+    /// compile - `candidates()` has no way to express the tiled choice, which
+    /// is exactly the gap `qwen3::serve::Engine::gemm_tier`'s doc comment
+    /// complains about.
+    #[test]
+    fn candidates_agrees_with_the_pre_b2_gemm_pickers() {
+        let caps = gpu_caps();
+
+        // `pick_gemm`'s callers never register a GEMV kernel (the function
+        // has no such parameter), so its adapter skips `WorkgroupPerOutput`
+        // and takes the first variant it CAN express (naive or tiled).
+        for &(m, n) in &[
+            (1u32, 2560u32),
+            (2, 2560),
+            (4, 2560),
+            (7, 2560),
+            (8, 2560),
+            (9, 2560),
+            (12, 2560),
+            (32, 2560),
+            (33, 2560),
+            (77, 2560),
+            (512, 2560),
+            (8, 64),
+            (33, 64),
+            (512, 127),
+            (512, 128),
+        ] {
+            let want = if m < GEMM_TILE_MIN_ROWS || n < GEMM_TILE_MIN_COLS {
+                KernelVariant::Reference
+            } else {
+                KernelVariant::RegisterTiled
+            };
+            let sh = shape(m, n, 512, Dtype::F32);
+            let got = candidates(Op::MatMul, sh, &caps)
+                .into_iter()
+                .find(|v| *v != KernelVariant::WorkgroupPerOutput)
+                .expect("candidates() is never empty, and Reference is always in it");
+            assert_eq!(got, want, "pick_gemm parity at m={m} n={n}");
+        }
+
+        // `gemm_variant`'s Fast tier: GEMV owns `m <= 32` when registered,
+        // the tiled kernel owns every M above that regardless of N (no naive
+        // kernel exists in that API shape at all).
+        for &m in &[1u32, 8, 32, 33, 512] {
+            let sh = shape(m, 3072, 512, Dtype::F32);
+            let head = candidates(Op::MatMul, sh, &caps)[0];
+            let want = if m <= DECODE_REGIME_MAX_ROWS {
+                KernelVariant::WorkgroupPerOutput
+            } else {
+                KernelVariant::RegisterTiled
+            };
+            assert_eq!(head, want, "gemm_variant parity at m={m}");
+        }
+    }
+
+    /// Persistence round-trips every variant - a variant added to the enum
+    /// without a matching `as_str`/`parse_str` pair would silently lose tuned
+    /// choices back to the static default on the next process start.
+    #[test]
+    fn every_kernel_variant_round_trips_through_persistence() {
+        for v in [
+            KernelVariant::Reference,
+            KernelVariant::WorkgroupPerOutput,
+            KernelVariant::SplitReduction,
+            KernelVariant::PackedInt8,
+            KernelVariant::RegisterTiled,
+        ] {
+            assert_eq!(KernelVariant::parse_str(v.as_str()), Some(v), "{v:?}");
         }
     }
 

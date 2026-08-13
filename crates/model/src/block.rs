@@ -22,7 +22,8 @@
 // is a failure mode worth preventing.
 #![allow(clippy::too_many_arguments)]
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::select::{self, KernelVariant};
+use gpu_core::{f, DeviceBuffer, DeviceCaps, DeviceClass, Gpu, Step};
 
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list. Only
 /// the kernels a given helper uses need valid indices.
@@ -1317,6 +1318,28 @@ fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
     out
 }
 
+/// A device with every capability [`pick_gemm`]/[`gemm_variant`] can ever act
+/// on already reported present - `workgroup_reductions: true`, from
+/// [`DeviceCaps::portable_baseline`]'s WebGPU-conformant floor.
+///
+/// Neither function takes a device/caps parameter (their signatures predate
+/// `backend_api::select` and are preserved as-is this phase), so they were
+/// always device-BLIND: every caller got the fast tiers regardless of what
+/// actually ran the dispatch. That was never a correctness bug because it
+/// never actually mattered on the one backend it theoretically could -
+/// `backend-cpu`'s own `dispatch` (`crates/backend-cpu/src/lib.rs`)
+/// special-cases `matmul`/`matmul_reg`/`matmul_reg2`/`matmul_reg3` BY KERNEL
+/// IDENTITY and routes all of them to the same native AVX2 GEMM regardless of
+/// the WGSL kernel's nominal `workgroupBarrier()` - so filtering
+/// `RegisterTiled` out on a real CPU JIT caps struct (`workgroup_reductions:
+/// false`) would silently CHANGE behaviour these two functions never had, not
+/// preserve it. Querying `select::candidates` against this always-capable
+/// caps reproduces the two functions' historical device-blind behaviour
+/// exactly.
+fn fast_tier_caps() -> DeviceCaps {
+    DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu)
+}
+
 /// Pick the GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`: the
 /// register-tiled kernel (128×128 tile, 256 threads) when there is enough work
 /// to fill tiles, else the naive one-thread-per-output kernel. Same math either
@@ -1324,36 +1347,25 @@ fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
 /// `max|Δ| = 0`), so this only changes speed. `force_naive` is a model's env
 /// escape.
 ///
-/// # `M` is NOT required to fill a tile, and requiring it cost 22x
-///
-/// The rule used to be `m < 128 || n < 128 -> naive`, on the reading that a
-/// partial tile is wasted. The tiled kernel bounds-guards its tile, so a short
-/// `M` costs only the unused rows - while the naive kernel gives one thread per
-/// output element, each walking `k` serially, which collapses on a wide `N`.
-///
-/// SDXL's cross-attention `kv` projection is `[77, 2048, 2560]`: 77 text tokens
-/// is under the old threshold, so 60 of those per forward took the naive path at
-/// **43 GFLOP/s - 0.4% of a P40's 11.76 TFLOP/s peak, and 49% of the entire UNet
-/// forward**. Measured on a P40, `k = 2048`, `n = 2560`:
-///
-/// | m | naive | tiled |
-/// |---|---|---|
-/// | 1 | **0.19 ms** | 0.48 ms |
-/// | 2 | **0.37** | 0.73 |
-/// | 4 | **0.43** | 0.77 |
-/// | 8 | 0.89 | **0.77** |
-/// | 12 | 1.08 | **0.78** |
-/// | 77 | 18.67 | **0.84**  (22x) |
-///
-/// So the crossover is `m = 8`, not 128. Below it the tile genuinely is mostly
-/// idle and naive wins; at `m = 1` the right kernel is neither - it is
-/// `matmul_gemv` (one workgroup per output column), which `gemm_variant`
-/// selects for models that register it.
+/// A thin adapter over `backend_api::select::candidates` (B2) - the crossover
+/// constants (`GEMM_TILE_MIN_ROWS`/`GEMM_TILE_MIN_COLS`, with the measured P40
+/// table that justifies them) now live there, as the one source every GEMM
+/// picker in the workspace reads. This function's own callers never register a
+/// GEMV kernel (there is no such parameter here), so the adapter skips
+/// `WorkgroupPerOutput` in the candidate list and takes the first variant it
+/// CAN express - `RegisterTiled` maps to `reg2`, anything else (`Reference`,
+/// or every candidate filtered out) maps to `naive`.
 pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
-    if force_naive || m < 8 || n < 128 {
-        (naive, (m * n) as u32)
-    } else {
-        (reg2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)
+    if force_naive {
+        return (naive, (m * n) as u32);
+    }
+    let shape = select::OpShape { m: m as u32, n: n as u32, k: 0, dtype: select::Dtype::F32 };
+    let chosen = select::candidates(select::Op::MatMul, shape, &fast_tier_caps())
+        .into_iter()
+        .find(|v| *v != KernelVariant::WorkgroupPerOutput);
+    match chosen {
+        Some(KernelVariant::RegisterTiled) => (reg2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32),
+        _ => (naive, (m * n) as u32),
     }
 }
 
@@ -1403,11 +1415,30 @@ pub enum GemmVariants {
 /// reason [`rms_variant`] does: callers bind whole buffers (`Gpu::step`) or
 /// sub-ranges (`Gpu::step_sliced`) and both must share one selection rule.
 /// Every arm computes the same math - this only changes speed.
+///
+/// A thin adapter over `backend_api::select::candidates` (B2), delegating the
+/// decode-regime cutoff (`m <= DECODE_REGIME_MAX_ROWS`) to the SAME rule
+/// `pick_gemm` and `qwen3::serve::Engine::mm8`'s int8 path use, instead of its
+/// own `m <= 32` copy. `GemmVariants::Fast` has no naive/reference kernel slot
+/// at all (a model on this tier committed to the fast kernels), so unlike
+/// `pick_gemm` there is nothing to fall back to but `tiled` - the adapter only
+/// ever takes the GEMV branch when `select::candidates`'s head is actually
+/// `WorkgroupPerOutput` AND the model registered a GEMV kernel; every other
+/// case (no GEMV registered, or `m` past the decode regime, regardless of `n`)
+/// uses `tiled`, exactly as before.
 pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
     match v {
         GemmVariants::Reference(k) => (k, m * n),
-        GemmVariants::Fast { gemv: Some(g), .. } if m <= 32 => (g, n * 64),
-        GemmVariants::Fast { tiled, .. } => (tiled, m.div_ceil(128) * n.div_ceil(128) * 256),
+        GemmVariants::Fast { gemv, tiled } => {
+            let shape = select::OpShape { m, n, k: 0, dtype: select::Dtype::F32 };
+            let head = select::candidates(select::Op::MatMul, shape, &fast_tier_caps())
+                .into_iter()
+                .next();
+            match (gemv, head) {
+                (Some(g), Some(KernelVariant::WorkgroupPerOutput)) => (g, n * 64),
+                _ => (tiled, m.div_ceil(128) * n.div_ceil(128) * 256),
+            }
+        }
     }
 }
 
@@ -1548,7 +1579,32 @@ mod kv_cache_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{gemm_variant, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
+    use super::{gemm_variant, pick_gemm, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
+
+    /// Pins `pick_gemm`'s measured crossover (now delegated to
+    /// `backend_api::select::candidates` - see that module's
+    /// `GEMM_TILE_MIN_ROWS`/`GEMM_TILE_MIN_COLS`, B2) at the table's own
+    /// (m, n) points, `force_naive`, and the narrow-`n` case the row count
+    /// alone does not cover. This function had no dedicated test before B2 -
+    /// its crossover was only pinned indirectly by whatever shapes each
+    /// caller happened to exercise.
+    #[test]
+    fn pick_gemm_routes_by_the_measured_crossover() {
+        let (naive, reg2) = (2usize, 9usize);
+        // Below GEMM_TILE_MIN_ROWS (8): naive, at the table's own m values.
+        for m in [1usize, 2, 4, 7] {
+            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (naive, (m * 2560) as u32), "m={m}");
+        }
+        // At and above it: the tile.
+        for m in [8usize, 12, 32, 33, 77, 512] {
+            let want_threads = (m.div_ceil(128) * 2560usize.div_ceil(128) * 256) as u32;
+            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (reg2, want_threads), "m={m}");
+        }
+        // A narrow n keeps the naive kernel even at a large m.
+        assert_eq!(pick_gemm(512, 64, naive, reg2, false), (naive, (512 * 64) as u32));
+        // `force_naive` overrides the shape entirely.
+        assert_eq!(pick_gemm(512, 2560, naive, reg2, true), (naive, (512 * 2560) as u32));
+    }
 
     /// Pins the three arms and, in particular, the `m <= 32` precondition the
     /// GEMV kernels state in their headers: violating it is silently wrong

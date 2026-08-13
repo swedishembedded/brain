@@ -636,3 +636,136 @@ F32's tiling; everything needed to flip a real backend's `f16`/`bf16`/
 `f16_storage`/`bf16_storage` capability flags to `true` (B4/B5/B11) - this
 phase only built the promotion/selection machinery, it activates nothing.
 
+## B2 - RegisterTiled variant, unified GEMM pickers
+
+**Problem.** Three DIFFERENT, drifted rules decided GEMM tiling:
+`model::block::pick_gemm` (training-shaped: `m < 8 || n < 128` → naive),
+`model::block::gemm_variant` (inference-shaped: `m <= 32` → GEMV else the
+tiled kernel, regardless of `n`), and `qwen3::serve::Engine::gemm_tier` (a
+third copy whose own doc comment admitted `select::KernelVariant` had no
+tiled-GEMM member, so every prefill chunk above `DECODE_REGIME_MAX_ROWS`
+fell through to the naive kernel - a live performance hole).
+
+**`KernelVariant::RegisterTiled`** (`crates/backend-api/src/select.rs`): the
+fp32/storage-tier 128×128 register-tiled GEMM. Maps to `matmul_reg`/
+`matmul_reg2`/`matmul_reg3` - confirmed via `crates/backend-cpu/src/lib.rs`'s
+`dispatch`, which special-cases all three plus `matmul`/`matmul_tiled` by
+kernel identity and routes them to one native AVX2 GEMM on CPU (bit-identical,
+that crate's own comment: "the tiled/register-tiled kernels are GPU-only …
+so on CPU all of them route to the AVX2 gemm"); call sites map `RegisterTiled`
+to whichever of the three they registered, exactly as `WorkgroupPerOutput`
+already does for the several different GEMV kernel names. `requires()`:
+`{ workgroup_reductions: true, ..dtype_storage_requirement(dt) }` - confirmed
+by grepping `matmul_reg2.wgsl`/`matmul_reg3.wgsl` for `workgroupBarrier()`
+(both stage their tile in workgroup memory behind one), the same rule
+`WorkgroupPerOutput` already uses.
+
+**Migrated measured constants** (`select.rs`, next to `DECODE_REGIME_MAX_ROWS`/
+`I8_GEMV_MAX_ROWS`): `GEMM_TILE_MIN_ROWS: u32 = 8`, `GEMM_TILE_MIN_COLS: u32 =
+128`, carrying `pick_gemm`'s old doc-comment table verbatim (P40, `k=2048`,
+`n=2560`: naive wins at `m` ∈ {1,2,4} at 0.19/0.37/0.43 ms vs 0.48/0.73/0.77 ms
+tiled; the tile wins from `m=8` at 0.77 ms vs 0.89 ms naive, and by 22× at
+`m=77`: 0.84 ms vs 18.67 ms).
+
+**`candidates()`'s `Op::MatMul` arm** (`F32`/`BF16`/`F16`, shared): the decode
+regime (`m <= DECODE_REGIME_MAX_ROWS`) keeps `WorkgroupPerOutput` FIRST,
+unchanged - but now appends `RegisterTiled` before `Reference` once `m >=
+GEMM_TILE_MIN_ROWS && n >= GEMM_TILE_MIN_COLS` (serves `pick_gemm`'s callers,
+which never register a GEMV kernel and so skip past `WorkgroupPerOutput`).
+Above the decode regime, the old unconditional `vec![Reference]` becomes
+`vec![RegisterTiled, Reference]` when `n >= GEMM_TILE_MIN_COLS`, else stays
+`vec![Reference]` - this is the actual gap closed: every prefill/training
+shape above 32 rows now gets the tiled GEMM instead of silently falling back
+to the naive one-thread-per-output kernel.
+
+**RED→GREEN.** `select::tests::candidates_agrees_with_the_pre_b2_gemm_pickers`
+written first, reproducing `pick_gemm`'s and `gemm_variant`'s exact pre-B2
+rules inline (this crate cannot depend on `brain-model`) and asserting
+`candidates()` agrees at the measured table's own (m, n) points plus every
+crossover boundary (`m` ∈ {7,8,9}, `n` ∈ {127,128}) and a `gemv`-available
+sweep (`m` ∈ {1,8,32,33,512}). Confirmed RED by writing the test against
+`KernelVariant::RegisterTiled`/`GEMM_TILE_MIN_ROWS`/`GEMM_TILE_MIN_COLS`
+before they existed: `cargo test -p brain-backend-api --lib
+candidates_agrees_with_the_pre_b2_gemm_pickers` failed to COMPILE (`E0425`
+"cannot find value `GEMM_TILE_MIN_ROWS`", `E0599` "no variant … `RegisterTiled`
+found") - `candidates()` was, as intended, literally unable to express the
+tiled choice. Added the variant + constants + arm, re-ran: GREEN. Also updated
+`large_m_keeps_reference_matmul` (renamed
+`large_m_and_wide_n_gets_the_register_tiled_gemm`) since its old assertion -
+training-sized `m` keeps `Reference` - encoded the exact bug this phase fixes;
+added `every_kernel_variant_round_trips_through_persistence` (a variant added
+to the enum without a matching `as_str`/`parse_str` pair silently loses tuned
+choices on the next process start - cheap, real regression coverage). `cargo
+test -p brain-backend-api --lib`: **26/26 passed** (24 pre-existing + these 2;
+`no_graph_concept` - flagged as a pre-existing unrelated failure in B1's own
+entry above - now also passes, since the concurrent `GraphBackend` deletion
+referenced there has since landed for real).
+
+**`pick_gemm`/`gemm_variant` now delegate, not duplicate.**
+`model::block::fast_tier_caps()` (new, private): both functions predate
+`backend_api::select` and take no device/caps parameter at all, so they were
+always device-BLIND - every caller got the fast tiers regardless of what
+actually ran the dispatch. That was never a live correctness bug because
+`backend-cpu`'s `dispatch` already routes the register-tiled kernel names to
+native AVX2 by identity regardless of their nominal barrier requirement (see
+above) - so querying `select::candidates` against a REAL CPU caps struct
+(`workgroup_reductions: false`) would have SILENTLY CHANGED old behaviour
+(filtering `RegisterTiled` out), not preserved it. `fast_tier_caps()` returns
+`DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu)` (`workgroup_
+reductions: true` by construction) specifically to reproduce the two
+functions' historical device-blind behaviour exactly.
+
+- `pick_gemm`: builds an `OpShape`, calls `select::candidates`, skips
+  `WorkgroupPerOutput` (no GEMV parameter exists in this API), and maps
+  `RegisterTiled → reg2` / anything else → `naive`. `force_naive` still
+  short-circuits before any of that, unchanged.
+- `gemm_variant`'s `Fast` arm: calls `select::candidates` for the shape,
+  takes the GEMV kernel only when the head is `WorkgroupPerOutput` AND the
+  model registered one (`Some(g)`); every other case (no GEMV registered, or
+  past the decode regime regardless of `n`) uses `tiled` - `GemmVariants::
+  Fast` has no naive/reference kernel slot at all, so unlike `pick_gemm`
+  there is nothing else it could fall back to, and this is exactly its old
+  behaviour (verified by the untouched `gemm_variant_routes_skinny_m_to_the_
+  gemv_kernel` test, which still passes unmodified). `GemmVariants::
+  Reference(k)` is untouched (a per-model tier switch, not a shape decision).
+- Added `block::tests::pick_gemm_routes_by_the_measured_crossover` - `pick_gemm`
+  had no dedicated unit test before this phase; it pins the table's own (m, n)
+  points, the narrow-`n` case, and `force_naive`.
+- `qwen3::model::linear_kernel` and `qwen3::serve::Engine::gemm_tier`: both
+  already called `block::pick_gemm`/fed into `block::gemm_variant` - the
+  actual duplicated REGIME logic lived only in `block.rs`'s two functions, now
+  fixed there. Both docs comments were stale (one restated the crossover
+  table `select.rs` now owns; the other's "no register-tiled member" note was
+  the literal bug this phase closes) and were rewritten to point at the real
+  current mechanism instead of leaving a claim this phase makes false.
+  `BRAIN_QWEN_NAIVE_MM` is unaffected - `linear_kernel` still reads it and
+  passes the resulting bool straight through as `pick_gemm`'s `force_naive`,
+  which still short-circuits before `select::candidates` is even called.
+
+**Verification.** `cargo test -p brain-backend-api --lib`: 26/26 passed.
+`cargo test -p brain-model --lib`: **103/103 passed** (includes the new
+`pick_gemm`/renamed `gemm_variant` tests and every existing `rowemit`/`paged`/
+`serve` test). `cargo check -p brain-qwen3`: clean. `cargo test -p brain-qwen3
+--lib`: **71/71 passed, 1 pre-existing ignore** - notably this exercises
+`gemm_variant`'s `Fast` arm end-to-end on real forward passes on the CPU
+backend (`batched_serving_matches_reference`, `chunked_prefill_matches_whole`,
+`warm_prefill_is_identical_to_cold`, `prefill_matches_step_by_step`, …),
+across both the decode and the newly-reachable prefill regime, with no output
+difference. `cargo check` also run clean for every other `pick_gemm`/
+`gemm_variant` caller in the workspace in one batch: `brain-glm`, `brain-clip`,
+`brain-deepseekv2`, `brain-unet`, `brain-sam1`, `brain-t5`, `brain-restore`,
+`brain-lfm`, `brain-gpt`, `brain-moe`, `brain-flux2`. `cargo test -p
+brain-flux2 --lib`: 6/6 passed (its `gemm_variant`-exercising checks live in
+`tests/batch_parity.rs`, an integration test needing real checkpoint weights
+not available in this sandbox - not run, per this phase's own "cheap enough"
+allowance; `gemm_variant`'s `Fast{gemv:None,..}` arm is unit-pinned in
+`block.rs`'s own `gemm_variant_routes_skinny_m_to_the_gemv_kernel`, unmodified
+and still green).
+
+**Deliberate behaviour change, called out explicitly.** Training-shaped GEMMs
+above `DECODE_REGIME_MAX_ROWS` with `n >= GEMM_TILE_MIN_COLS` now select
+`RegisterTiled` where they used to select `Reference` (this is the fix, not a
+side effect - see the renamed `large_m_and_wide_n_gets_the_register_tiled_gemm`
+test). Every OTHER shape's default choice is byte-for-byte identical to
+pre-B2, proven by the equivalence test above plus the full green test suites.
+
