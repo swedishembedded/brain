@@ -3,16 +3,18 @@
 
 //! Backend abstraction API — the seam every brain compute backend plugs into.
 //!
-//! Two contracts live here:
+//! The one contract here is [`Backend`] - the *eager, per-step* compute
+//! device (wgpu, native CPU JIT, native Vulkan). It mirrors the historical
+//! `gpu_core::Gpu` method surface: allocate buffers, record dispatches
+//! (`step*`), and run them (`submit`) with blocking read-back.
+//! `brain-gpu-core` is a thin facade over a `Box<dyn Backend>`.
 //!
-//! * [`Backend`] — the *eager, per-step* compute device (wgpu, native CPU JIT,
-//!   native Vulkan). It mirrors the historical `gpu_core::Gpu` method surface:
-//!   allocate buffers, record dispatches (`step*`), and run them (`submit`) with
-//!   blocking read-back. `brain-gpu-core` is a thin facade over a
-//!   `Box<dyn Backend>`.
-//! * [`GraphBackend`] — the *whole-graph compile→run* contract (the OpenVINO NPU
-//!   path). A serialized graph (ONNX bytes) is compiled once for a target device
-//!   and then run; nothing here is per-step.
+//! (A second, whole-graph compile-then-run contract scoped to one
+//! accelerator's runtime lived here briefly but was deleted: it was never
+//! object-safe, had exactly one implementation and one call site, and its
+//! fixed 4-D float shape could not express named multi-tensor I/O anyway.
+//! The accelerator's own crate covers that ground directly now, with no
+//! trait indirection through this crate.)
 //!
 //! The neutral handle types [`DeviceBuffer`] and [`Step`] are opaque: each
 //! backend stores its native buffer / dispatch record inside and downcasts on
@@ -149,7 +151,7 @@ pub enum DeviceClass {
     Cpu,
     IntegratedGpu,
     DiscreteGpu,
-    /// Whole-graph compiled accelerator (OpenVINO NPU). Not an eager
+    /// Whole-graph compiled accelerator (the Intel NPU). Not an eager
     /// [`Backend`]; the class exists so caps recorded from that path share the
     /// same vocabulary.
     Npu,
@@ -763,26 +765,6 @@ pub trait Backend {
     }
 }
 
-/// The whole-graph compile→run contract (the OpenVINO NPU path). A serialized
-/// graph is compiled once for a target device, then run. Not object-safe by
-/// design (associated IO types differ per backend); selected concretely.
-pub trait GraphBackend: Sized {
-    /// Backend-specific compile/run configuration (e.g. target device, perf hint).
-    type Config;
-    /// One inference's outputs (e.g. the raw model head tensors).
-    type Output;
-    /// Backend-specific error type.
-    type Error: std::error::Error;
-
-    /// Compile a serialized graph (ONNX bytes) for the configured device.
-    fn compile(onnx: &[u8], cfg: &Self::Config) -> Result<Self, Self::Error>;
-    /// Run one inference over `input` with the NCHW `shape`.
-    fn run(&mut self, input: &[f32], shape: [usize; 4]) -> Result<Self::Output, Self::Error>;
-    /// The device this session actually resolved to (e.g. "NPU", or a fallback).
-    fn device(&self) -> &str;
-}
-
-
 /// A weak reference to a backend's shared device state — see [`Backend::downgrade`].
 pub trait WeakBackend: ThreadSafe {
     /// A fresh strong handle, if the device is still alive.
@@ -922,5 +904,40 @@ fn main() {}\n";
     fn grid_ws_tiles_into_y_past_the_limit() {
         let (gx, gy) = grid_ws(MAX_GROUPS_PER_DIM * 256 + 256, 256);
         assert_eq!((gx, gy), (MAX_GROUPS_PER_DIM, 2));
+    }
+}
+
+/// Structural gate: `backend-api` is the eager, per-step `Backend` contract
+/// only - it must never again carry a whole-graph compile-then-run concept
+/// scoped to one accelerator vendor's runtime or serialized-graph format.
+/// That concept was tried once, proved not object-safe, had exactly one
+/// implementation and one call site, and was deleted. This test scans the
+/// crate's own `src/` so it cannot silently creep back in without a
+/// reviewer noticing the failure.
+#[cfg(test)]
+mod no_graph_concept {
+    #[test]
+    fn backend_api_names_no_graph_concept() {
+        let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        // Split so this array's own source text never spells a banned word
+        // contiguously - otherwise the scan below would flag this very file.
+        let banned = [concat!("on", "nx"), concat!("open", "vino"), concat!("graph", "back", "end")];
+        for entry in std::fs::read_dir(src_dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source file");
+            let lower = text.to_lowercase();
+            for term in banned {
+                assert!(
+                    !lower.contains(term),
+                    "{}: contains banned term {term:?} - backend-api must stay \
+                     the eager per-step `Backend` contract only, with no \
+                     whole-graph, single-vendor-runtime concept",
+                    path.display()
+                );
+            }
+        }
     }
 }

@@ -336,3 +336,95 @@ citations. Grepped the whole repo for `hardware-notes` and
 `performance/flops.md` - both clean of dangling references outside this
 file's own historical A1 baseline table (left as-is, it documents what the
 gate found at the time, not a live link).
+
+## C1 - delete GraphBackend
+
+**Deleted.** `backend_api::GraphBackend` (`crates/backend-api/src/lib.rs`) -
+the whole-graph compile-then-run trait meant to abstract the OpenVINO NPU
+path, parallel to the eager per-dispatch `Backend` trait wgpu/CPU-JIT/native-
+Vulkan implement:
+
+```rust
+pub trait GraphBackend: Sized {
+    type Config; type Output; type Error: std::error::Error;
+    fn compile(onnx: &[u8], cfg: &Self::Config) -> Result<Self, Self::Error>;
+    fn run(&mut self, input: &[f32], shape: [usize; 4]) -> Result<Self::Output, Self::Error>;
+    fn device(&self) -> &str;
+}
+```
+
+Along with its sole implementation, `impl backend_api::GraphBackend for
+NpuSession` (`crates/npu/src/openvino/mod.rs`), and its sole call site
+(`crates/npu/src/decode.rs`, `detect_weights_on_npu`).
+
+**Why this is progress, not a regression.** A `git log` reader seeing NPU
+code shrink and its dependency on `backend-api` disappear (the direct
+`brain-backend-api` dependency edge in `crates/npu/Cargo.toml` is gone too,
+since nothing under `crates/npu/src` referenced it once the trait impl and
+its call site were gone) could mistake this for backing off the "make the
+NPU a first-class backend" goal. The opposite is true:
+
+- The trait was never object-safe (`Sized` + associated types forbid
+  `Box<dyn GraphBackend>`), so it could never be used polymorphically the way
+  `Box<dyn Backend>` is - it was fake integration, a trait that LOOKED like
+  part of the backend abstraction but could not actually participate in it.
+- It had exactly one implementation and exactly one call site - grepped the
+  whole workspace (`grep -rn GraphBackend crates/`, excluding other agents'
+  `.claude/worktrees/` checkouts) before deleting anything; confirmed no
+  other site depended on it.
+- Its `run(&[f32], [usize; 4])` signature is NCHW-vision-shaped and cannot
+  express any LLM decode session's, ASR session's, or forecast session's real
+  I/O (named multi-tensor inputs/outputs of varying rank), so it was never
+  going to generalize past the one YOLO caller it had.
+- The real generalized runner already exists one layer down and needed none
+  of this: `NpuGraph` (`crates/npu/src/openvino/real.rs`) with
+  `compile_bytes`/`compile_path`, `input_names()`/`output_names()`,
+  `run(&[(&str, Feed)]) -> Vec<(String, Vec<usize>, Vec<f32>)>` and
+  `Feed::{F32, I64}` - object-safe-shaped and already handling named,
+  multi-tensor, variable-rank I/O. Every other NPU session type in the
+  codebase (`DecoderSession`, `Chronos2Session`, `FincastSession`,
+  `KronosS1Session`/`KronosS2Session`, `EmbedSession`, `LfmSession`,
+  `CodecSession`, `KvSession`, `PrefillSession`, `BackStreamSession`,
+  `FusedMtpSession`) already goes through `NpuGraph` or its own direct
+  inherent methods, never through `GraphBackend` - `NpuSession`'s trait impl
+  was genuinely isolated.
+
+Deleting a trait that could not be used polymorphically, had one caller, and
+was superseded by a real generalized runner INCREASES the NPU's actual
+first-classness: what's left is code that either really is the eager
+`Backend` contract (untouched) or really is the NPU's own concrete,
+purpose-built session/graph API (`NpuSession`, `NpuGraph`, and the rest of
+`openvino::real`), with no more trait that only pretended to be an
+abstraction layer.
+
+**Mechanical rewrite.** `decode.rs`'s `detect_weights_on_npu` called
+`<NpuSession as backend_api::GraphBackend>::compile(&bytes, npu_cfg)?`; the
+trait impl's own `compile` body was already just `NpuSession::load_bytes(onnx,
+cfg)`, so the call site now calls `NpuSession::load_bytes(&bytes, npu_cfg)?`
+directly - same inputs, same `Result<NpuSession, NpuError>`, one layer of
+indirection removed. `crates/npu/Cargo.toml`'s now-unused
+`brain-backend-api.workspace = true` dependency line was also removed
+(confirmed via `grep -rn backend_api crates/npu/` returning nothing once the
+impl and call site were gone).
+
+**New structural test.** `crates/backend-api/src/lib.rs`,
+`no_graph_concept::backend_api_names_no_graph_concept`: scans every `.rs`
+file in the crate's own `src/` for a small banned-term list (the trait's
+name, plus the two vendor/format identifiers its doc mentioned) and fails if
+any file's source (case-insensitive) contains one. The banned-term array is
+built with `concat!` fragments specifically so the array's own source text
+never spells a banned word contiguously - otherwise the test would fail on
+itself. TDD: written first against the pre-deletion tree (confirmed RED,
+since the trait's own doc comment and body trip the scan) inside an isolated
+scratch copy of the crate seeded from `git show HEAD:...` (the crate's real
+`select.rs`/`lib.rs` in the working tree were mid-flight-broken by a
+concurrent, unrelated DType-unification task at the time this test was
+written, and `select.rs` is explicitly out of this phase's scope, so the
+RED/GREEN cycle was proven in isolation rather than by touching or waiting
+on that file); then the trait/impl were deleted and the same test went
+GREEN. Re-ran for real once the concurrent task's `select.rs` became
+buildable again: `cargo test -p brain-backend-api` ran 24 passed (0 failed),
+including this test; `cargo build -p brain-npu` and `cargo test -p brain-npu
+--lib` ran 19 passed, 1 pre-existing ignore; `cargo test -p brain-npu --test
+npugraph` ran 1 passed (self-skips without real OpenVINO hardware, per its
+own `npu_present()` guard).

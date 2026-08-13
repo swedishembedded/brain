@@ -1156,7 +1156,6 @@ dependencies = [
 name = "brain-npu"
 version = "0.1.1"
 dependencies = [
- "brain-backend-api",
  "brain-checkpoint",
  "brain-chronos2",
  "brain-codec",
