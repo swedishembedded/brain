@@ -2917,3 +2917,345 @@ re-ran: GREEN.
   remain separate, later phases, exactly as this program has scoped them
   since B6.
 
+## B9 - bf16 KV-cache
+
+**Goal.** A bf16 storage tier for the paged-KV-cache pool, applying the SAME
+inline-bitcast-decode mechanism B4 built for weights to cache PAGES instead of
+static weights - exact preservation of range (no clip+quantize, unlike the
+existing int8 KV tier), half the VRAM of fp32.
+
+**Kernel family read in full first** (fp32 append/scores/apply, both single
+and batched, plus the int8-clipped-batched append and the `_wg` coalesced
+scores variant, per the task's own instruction). Closest precedent confirmed:
+qwen3's B7-era int8 KV tier dispatches EXACTLY the batched trio
+(`paged_kv_append_i8_clipped_batched`/`paged_decode_scores_i8_batched`/
+`paged_decode_apply_i8_batched`), so this phase templatizes the fp32 BATCHED
+trio (`paged_kv_append_batched`/`paged_decode_scores_batched`/
+`paged_decode_apply_batched`), not the non-batched singles - matching the
+real integration point, and batch=1 covers the single-sequence case anyway.
+Bare-identifier hoists needed: `paged_decode_scores_batched.wgsl`'s
+`pool_k[slot+d]` (compound, hoisted to `let ki = slot+d;`);
+`paged_decode_apply_batched.wgsl`'s `pool_v[slot]` was ALREADY bare (`slot`
+is a pre-existing `let`), no hoist needed. `paged_kv_append_batched.wgsl`'s
+own `pool[...]  = src[...]` assignment is untouched (see the real bug below
+for why it did NOT get a hoist after all).
+
+### The write-direction extension: `kernels::template::dtype_variant_store`
+
+B4/B5/B8's `dtype_variant`/`rewrite_packed_loads` only ever rewrites READS
+(`<binding>[IDENT]` as an r-value) - every kernel they've templatized so far
+(matmul, embed, moe_linear_gated, the plain convs) only ever reads a packed
+weight, uploaded once by the host. A KV-cache append WRITES a freshly computed
+value on every decode step; there is no host-side pack step to reuse, and
+"decode 16 bits back to f32" is the opposite transform from "round an f32 down
+to 16 bits and write it into a shared word without disturbing the sibling
+half" - a genuinely new capability, exactly as the task predicted.
+
+**`crates/kernels/src/template.rs` additions** (all shared with the read
+direction where the operation is actually direction-agnostic):
+
+- `rewrite_packed_declaration`'s marker widened from `"var<storage, read>"` to
+  `"var<storage, read"` (matches BOTH `read>` and `read_write>`) - a KV pool
+  binding a PACK variant writes is declared `read_write` (the RMW needs to
+  read the very word it is about to write), which the old read-only marker
+  never had to match.
+- `rewrite_packed_stores(src, binding, dt)`: finds every `<binding>[IDENT] =
+  <expr>;` ASSIGNMENT (distinguishing `=` from `==` and from a bare read by
+  inspecting what follows the closing `]`), requires `IDENT` to be a bare
+  identifier (same hard precondition as the read direction, same reason - the
+  pack expansion references the index twice), and rewrites the WHOLE
+  STATEMENT into a compound block that (1) hoists the value expression into a
+  named `let` FIRST so it is evaluated exactly once even though the pack math
+  references it, (2) computes the target word/half from `IDENT`, (3) does the
+  actual read-modify-write: `pool[_pw] = (pool[_pw] & ~(0xFFFFu << _ps)) |
+  (_pb << _ps)` - clearing EXACTLY the target half's bits via the mask, then
+  OR-ing in the new bits shifted into position. The sibling half's bits are
+  never referenced by the mask at all, so they survive by construction, not
+  by care at each call site.
+- `bf16_pack_expr(value_ident)`: the standard add-rounding-bias-then-truncate
+  f32→bf16 pack (`bias = 0x7FFF + ((bits>>16)&1)`, `packed = (bits+bias)>>16`)
+  - round-to-nearest-EVEN, not truncation, matching `model::half::
+  f32_to_bf16`'s host algorithm (checked against the SAME edge-case table B4's
+  own ledger used: `1.0→0x3F80`, `-4.0→0xC080`, an exact tie with an EVEN
+  truncated mantissa staying down, an exact tie with an ODD truncated mantissa
+  rounding up to even, and the halfway-plus-one case rounding up regardless).
+- `dtype_variant_store(name, src, binding, dt)`: the public entry point,
+  mirroring `dtype_variant`'s shape (same caching, same `"{name}#{binding}=
+  {tag}"` naming convention) but gated to `DType::BF16` ONLY - `F16`'s real
+  re-biased pack direction is a follow-up, not attempted here (matching the
+  task's own "bf16 KV-cache" framing, not "bf16/f16").
+- `crates/kernels/src/template.rs`'s own test module: 3 new tests for the read
+  side (`bf16_pack_matches_known_values_and_rounds_to_nearest_even`,
+  `bf16_pack_then_decode_reproduces_the_packed_pattern`) plus 8 new tests for
+  the store direction (declaration+store rewrite shape, interning stability,
+  the real in-tree kernel, compound-index rejection, "no assignment found"
+  rejection, "a plain read of the same binding is left untouched", every
+  unimplemented tier rejected).
+
+### A real bug the dual-backend test caught: per-element bf16 append races on a real GPU
+
+**Confirmed RED on real hardware, GREEN on the CPU JIT - the exact class of
+finding B5's own FTZ discovery predicted this program would keep hitting.**
+First draft templated `paged_kv_append_batched.wgsl` directly (one thread per
+`(b, c)` output ELEMENT, matching its own established parallelism). The
+long-context parity test and the read-modify-write stress test BOTH passed on
+`Gpu::new_cpu` and BOTH failed on real wgpu (`kv_bf16_append_rmw_shared_word_
+preserves_both_adjacent_slots_on_gpu`: "got 0 want 0.47349453"; the long-
+context test's very first scores element already diverged by ~10x its
+tolerance). Root cause, confirmed by hand: bf16 packs 2 elements per `u32`
+word, so for ANY 2-per-word packing dispatched ONE THREAD PER ELEMENT, every
+adjacent pair of elements - not merely the odd-`kv_stride` cross-TOKEN
+boundary this phase had already scoped as a caveat - is written by TWO
+DIFFERENT CONCURRENT THREADS doing a non-atomic read-modify-write on the SAME
+word. This is a genuine data race REGARDLESS of `kv_stride`'s parity: even a
+realistic EVEN `kv_stride` has every token's own adjacent element pairs
+(`c=0,1`), (`c=2,3`), ... each written by two threads of the SAME dispatch.
+The CPU JIT's serial execution model masked it completely (whichever thread
+"wins" the race happens deterministically in program order there); a real
+GPU's actual parallelism exposed it immediately - the same lesson B5's ledger
+already drew about the CPU JIT hiding hardware-specific behaviour, this time a
+genuine concurrency defect instead of a numeric one.
+
+**Fix: a SECOND physical kernel, not a rewrite of the first** - the
+`matmul_reg3`-vs-`matmul_reg2` precedent B4 already established for
+`RegisterTiled` (`model::ops::kname::MATMUL_REG3_BF16`'s own doc comment: same
+`KernelVariant`-shaped role, two physically different files, dispatched
+differently per dtype). New `crates/kernels/wgsl/paged_kv_append_batched_word.wgsl`:
+same contract, but ONE THREAD PER TOKEN with a serial inner loop over
+`kv_stride`, instead of one thread per element. Under this dispatch, every
+packed word a token's own append touches is private to exactly ONE thread -
+no two concurrent threads in the SAME dispatch ever target the same word for
+a realistic (even) `kv_stride`; only a genuinely shared word between TWO
+DIFFERENT tokens in the SAME BATCHED call (only possible with an odd
+`kv_stride`) can still race, exactly the pre-existing, already-documented
+caveat, avoided in this phase's own tests by using separate sequential
+dispatches for that case (matching how a real decode loop already appends one
+token per step, never multiple tokens of one sequence in one batched call).
+`paged_kv_append_batched.wgsl` itself is UNCHANGED - it stays the F32 tier's
+own best-parallelism kernel (one thread per element, `@opt 3`), never
+receiving the hoist or the `dtype_variant_store` treatment; `model::ops::
+Ops::kv_append_batched` dispatches the ORIGINAL kernel for `Weight::F32`
+(`batch*kv_stride` threads) and the NEW word-granularity kernel for `BF16`
+(`batch` threads), via a widened `bind_kv_append(dt, batch, kv_stride) ->
+(name, threads)` that - unlike every other `bind_*` method in this façade -
+returns a per-dtype THREAD COUNT, not just a kernel name, because the two
+dtypes here have genuinely different dispatch geometries, not just different
+names at the same geometry.
+
+**Mutation-tested, not just asserted fixed.** Per the task's own instruction:
+temporarily removed the `& ~(0xFFFFu << _ps)` mask from `pack_stmt`'s
+generated RMW (so a pack unconditionally zeroes the sibling half instead of
+preserving it), re-ran the full `kv_bf16_roundtrip.rs` suite - **all 4 tests
+failed, on BOTH backends** (`cpu RMW stress slot=0 d=0: got 0 want
+0.47349453`; the long-context test's own scores also diverged, confirming the
+fix is load-bearing for the REALISTIC even-`kv_stride` case too, not merely
+the deliberately-odd stress shape). Reverted the mask removal, re-ran: GREEN
+on all 4, both backends, confirming the revert is exact (`git diff --stat`
+showed only the intended 390-insertion/6-deletion net, no stray leftover).
+
+### `crates/model/src/ops.rs` extension
+
+**`KvPage`** (new, NOT a `Weight` variant, per the task's own explicit
+guidance): `F32 { buf }` / `BF16 { buf }`. A KV-cache page has no `(n, k)`
+GEMM shape and no "load once from a checkpoint" story - `Weight::upload`'s
+whole contract is packing a value known entirely on the host before the
+device ever sees it, whereas a paged-KV pool starts EMPTY and is grown one
+token at a time BY THE DEVICE. Forcing it into `Weight`'s enum would add an
+unreachable case to every existing `Weight` match arm (`Ops::matmul`,
+`Ops::embed`, `Ops::moe_linear`) for a variant with a completely different
+shape and lifecycle. `KvPage::zeros(ops, num_blocks, block_size, kv_stride,
+want)` allocates a zero-initialized pool; the actual word-count arithmetic is
+factored into a separate, directly testable `KvPage::word_count(...)` (not
+just re-derived in a test) so the VRAM-halving claim is checked against the
+REAL allocation logic, not a duplicate formula.
+
+**`PagedDecodeShape`** (new): the 9-field `Params` struct
+`decode_scores_batched`/`decode_apply_batched` share, grouped so a call site
+passes one value instead of nine positional arguments (`decode_apply_batched`
+ignores the struct's `scale` field, since that kernel's own `Params` has none
+- documented, not silently mismatched).
+
+**Three new `Ops` methods**: `kv_append_batched`, `decode_scores_batched`,
+`decode_apply_batched` - same shape as `Ops::embed`/`Ops::moe_linear` (no
+`KernelVariant` selection, `bind_*` resolves directly per dtype, since none of
+these three kernels has a GEMV/tiled alternative to choose between). Six new
+`kname` constants (`PAGED_KV_APPEND_BATCHED`/`_WORD_BF16`,
+`PAGED_DECODE_SCORES_BATCHED`/`_BF16`, `PAGED_DECODE_APPLY_BATCHED`/`_BF16`),
+`REQUIRED_KERNELS` grew by 6, pinned against `dtype_variant`/
+`dtype_variant_store`'s real output by `b9_kname_literals_match_dtype_
+variant_naming` (same pattern as B4/B5/B8's own `*_kname_literals_match_
+dtype_variant_naming` tests). Every OTHER test file that builds its own
+kernel list for `Ops::new` (`bf16_roundtrip.rs`, `f16_roundtrip.rs`,
+`ops_facade_parity.rs`, `embed_moe_roundtrip.rs`) needed the same mechanical,
+additive fix B4/B5/B8's own ledgers already describe - confirmed RED first
+(`Ops::new: kernel 'paged_decode_scores_batched' is not registered` before the
+fix), fixed, GREEN after.
+
+### WGSL `@dtype`/`@tpl` header decisions - a deliberate asymmetry
+
+`paged_decode_scores_batched.wgsl`/`paged_decode_apply_batched.wgsl`
+(READ direction) got `@dtype f32|bf16` + `@tpl pool_k -> .../pool_v -> ...`
+headers, matching B4's established convention - confirmed SAFE by actually
+running `python3 scripts/build/kernelmeta.py` (still "401 kernel(s) scanned, 0
+problems": `templatable_bindings`'s regex only checks the BRACKET PATTERN
+`binding[bare_ident]`, not whether it is a load or a store, so it validates a
+read-direction claim correctly regardless) and `cargo test -p brain-wgsl-cpu
+--test compile_all` (both new kernels auto-discovered and compiled cleanly,
+zero test-harness changes, matching B8's own "genuinely `@dtype`-header-
+driven" finding).
+
+`paged_kv_append_batched.wgsl` and the new `paged_kv_append_batched_word.wgsl`
+(WRITE direction) DELIBERATELY kept `@dtype f32` (undeclared) - checked, not
+assumed, that declaring `f32|bf16` here would be WRONG given today's tooling:
+`crates/wgsl-cpu/tests/compile_all.rs`'s automatic cross-product and
+`kernelmeta.py`'s seeder both only know how to call the READ-direction
+`dtype_variant` for a declared tier, never `dtype_variant_store` - pointing
+either at a write-only binding would either silently generate INVALID WGSL
+(assigning to a decoded r-value expression) or require teaching that tooling
+about a second rewrite direction, both outside this phase's scoped file list
+(`scripts/build/kernelmeta.py`, `crates/wgsl-cpu/tests/compile_all.rs` are not
+in it). Documented in both kernels' own header comments and here, not silently
+left inconsistent - a precise, scoped follow-up for whoever next touches that
+tooling, matching B8's own "moe_linear_gated_i8.wgsl's stale @dtype, flagged
+not fixed" precedent.
+
+### qwen3 serving path: NOT wired up, by deliberate choice
+
+Per the task's own explicit permission to stop at "proven-but-unwired" if
+wiring in `crates/qwen3/` would be disproportionate: this phase built and
+proved the bf16 KV tier at the KERNEL and `Ops` levels ONLY.
+`crates/qwen3/src/serve.rs`'s `Engine` still exclusively dispatches its own
+fp32/int8 paged-KV tiers by hand (B7's own ledger already explains why
+`serve.rs` was deliberately NOT migrated onto the `Ops` façade even for its
+EXISTING int8 tier: a real, per-device MEASURED selector `Ops::matmul` cannot
+express). Adding a THIRD hand-dispatched tier to that engine, choosing a
+selection mechanism (env var? CLI flag?), and re-running qwen3's full
+(heavy, unscoped-for-this-sandbox) test suite would have been a materially
+larger, riskier change than this phase's own scope asked for - the same
+"build the façade, prove it, migrate later" precedent B3 set for the very
+first `Ops`/`Weight` tiers, B4/B5 repeated for bf16/f16 weights, and B8
+repeated for embed/moe_linear. `crates/qwen3/` was NOT touched by this phase;
+`cargo test -p brain-qwen3` was correctly NOT run (per the task's own scoped
+verification list).
+
+### TDD: `crates/model/tests/kv_bf16_roundtrip.rs`
+
+**Long-context parity** (`kv_bf16_long_context_parity_on_{cpu,gpu}`): a REAL
+`model::paged::{BlockAllocator, BlockTable}` sequence of 37 tokens at
+`block_size=4` (spanning 10 physical blocks, the last partially filled -
+genuinely exercising paging granularity, not a single-block toy shape),
+`n_heads=4, n_kv=2, head_dim=8`. Appended through BOTH the `F32` and `BF16`
+tiers in one batched dispatch each (safe at this EVEN `kv_stride=16` - no
+cross-token word sharing regardless of thread granularity). Tolerance derived
+and checked in THREE separate stages, isolating the nonlinear softmax step
+rather than fighting its error-amplification analysis for one combined bound:
+
+1. **Scores** (K-only bf16 narrowing): `|Δscore| <= scale * 2^-8 * sum_d
+   |q[h,d]*k[j,d]|` per `(h,j)`, exactly B4's own per-output-element
+   derivation applied to a cache read. Worst observed err/tol ratio **0.5198**
+   on both CPU and real GPU (bit-identical between backends, as expected).
+2. **Apply, isolated from softmax** (V-only bf16 narrowing, at a SHARED
+   reference `probs` computed once from the exact fp32-K scores and fed into
+   BOTH the fp32-V and bf16-V apply dispatch): `|Δctx| <= 2^-8 * sum_j
+   |probs[h,j]*v[j,d]|` per `(h,d)`. Worst observed ratio **0.1773**, both
+   backends.
+3. **Full pipeline sanity check** (bf16 K AND V, its OWN softmax over its own
+   perturbed scores) - a deliberately GENEROUS bound (`apply_tol + 2 *
+   worst-per-head-score-tolerance * sum_j|v[j,d]|`, a crude but explicitly
+   reasoned first-order softmax-sensitivity term), NOT the rigor gate -
+   worst observed ratio **0.0033**, both backends.
+
+Also asserts, on the REAL allocation (not just the pure-arithmetic unit test
+in `model::ops::tests`), that `KvPage::word_count(..., BF16) * 2 ==
+KvPage::word_count(..., F32)` for this shape - the VRAM-halving claim, proven
+against the actual function `KvPage::zeros` calls, not re-derived.
+
+**Read-modify-write stress test**
+(`kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_{cpu,gpu}`):
+`n_heads=1, head_dim=3` (kv_stride=3, deliberately ODD - every real head_dim
+in this tree is even, so this forces the cross-token-word-sharing case),
+`block_size=2`, ONE physical block holding two token slots. Appends token A to
+slot 0, then (a SEPARATE, sequential `g.submit`) token B to slot 1 - slot 0's
+LAST element and slot 1's FIRST element land in the SAME packed `u32` word by
+construction. Reads BOTH tokens back via `Ops::decode_apply_batched` with a
+one-hot `probs` vector (`ctx = sum_j probs[j]*pool_v[j]` with a single `1.0`
+entry reads exactly one token's raw vector) and checks each element within
+bf16 tolerance. **Green on both backends, and confirmed to actually catch the
+bug it exists to catch** (see the mutation-test paragraph above).
+
+**RED confirmed for real before the fix** (not asserted from memory): the
+first templated draft (per-element `paged_kv_append_batched.wgsl`) made BOTH
+new test functions fail on real wgpu while passing on the CPU JIT - the exact
+divergence that led to discovering and fixing the concurrency bug above,
+rather than a compile-time RED (the feature already existed by the time this
+test file was written, since the bug was found DURING this test's own first
+run, not before it).
+
+### Verification (all scoped, no `make release`/`make build`/`make test`/
+### bare workspace build)
+
+- `cargo test -p brain-kernels`: **31/31** (28 lib tests - 12 pre-existing
+  bf16/f16 read-direction + 8 new store-direction structural tests + 2 new
+  pack-correctness tests + the pre-existing `src_roundtrips` - + 3
+  pre-existing `dtype_restraint.rs` integration tests, unaffected).
+- `cargo test -p brain-model`: **every test binary green** (132 lib tests + 4
+  new `kv_bf16_roundtrip.rs` tests + every pre-existing integration suite
+  unaffected, including `bf16_roundtrip.rs`/`f16_roundtrip.rs`/
+  `ops_facade_parity.rs`/`embed_moe_roundtrip.rs` after their mechanical
+  kernel-list fix, `paged::gpu_tests`/`paged::batched_tests` unaffected).
+  **Both CPU and real GPU confirmed for real, not skipped**
+  (`MOE_SKIP_GPU_TESTS` never set; every GPU test printed "running on a real
+  wgpu device" and the real adapter name, `Intel(R) Arc(tm) Graphics (MTL)`).
+- `cargo test -p brain-wgsl-cpu --test compile_all`: **2/2**, the two new
+  READ-direction bf16 kernels (`paged_decode_scores_batched`/
+  `paged_decode_apply_batched`) auto-discovered via their `@dtype`/`@tpl`
+  headers with zero test-harness changes, matching B8's own precedent.
+- `python3 scripts/build/kernelmeta.py`: **"401 kernel(s) scanned, 0
+  problems"** (400 pre-existing + the new `paged_kv_append_batched_word.wgsl`,
+  correctly left at the mechanical `f32` default since it has no `@dtype`
+  override and its own `pool` binding, after the hoist, IS mechanically
+  read-eligible-shaped even though this phase deliberately does not claim
+  that - see the header-decision section above for why).
+- `crates/qwen3/` untouched; `cargo test -p brain-qwen3` correctly NOT run.
+- `cargo clippy -p brain-kernels -p brain-model --lib --tests --no-deps`:
+  zero new warnings in any file this phase touched (two `doc_lazy_
+  continuation` hits and two `approx_constant`/`excessive_precision` hits in
+  this phase's OWN draft test code were found and fixed before considering
+  the phase done, not left; the remaining warnings - `template.rs:977-980`,
+  `int8.rs:145`, `moe.rs:44-49`, `ops.rs:15-16`, `shard.rs:289`,
+  `router_gate_expert_cap.rs:92/112` - are pre-existing, unmodified lines,
+  several already flagged by B4/B5/B8's own ledgers).
+- `grep -rP '\x{2014}'` on the actual staged diff (added lines only, across
+  every file this phase touched): **zero** em dashes.
+- Disk monitored throughout: `df -h .` stayed in the 278-288G-free range
+  across this phase's `cargo test`/`cargo clippy` runs against an
+  already-compiled crate graph; `target/debug` stayed at ~16G throughout - no
+  `make release`/`make build`/`make test`/bare workspace build was ever run.
+
+### What's left (follow-ups, not this phase's job)
+
+- Teaching `scripts/build/kernelmeta.py`/`crates/wgsl-cpu/tests/compile_all.rs`
+  about the write direction (`dtype_variant_store`) so `paged_kv_append_
+  batched_word.wgsl` can honestly declare `@dtype f32|bf16` and be swept by
+  the automatic cross-product - flagged, not fixed, out of this phase's scoped
+  file list.
+- F16 packing for the KV-cache write direction (`dtype_variant_store` is
+  BF16-only, matching this phase's own "bf16 KV-cache" framing) - a real,
+  reachable follow-up (the read direction already has `f16_decode_expr`), not
+  attempted here.
+- Wiring the bf16 KV tier into `qwen3::serve::Engine` as a THIRD selectable
+  tier alongside its existing fp32/int8 ones (env var or CLI flag, matching
+  how `--kv-fp32`/`BRAIN_QWEN_KV_INT8` already select) - deliberately left
+  unwired this phase, see the "qwen3 serving path" section above for the full
+  reasoning.
+- The non-batched `paged_kv_append`/`paged_decode_scores`/`paged_decode_apply`
+  singles were never touched - the batched trio was the closest, actually-used
+  precedent (qwen3's own int8 tier); the singles are a plausible but
+  unexplored follow-up if a non-batched call site ever needs this tier.
+- `paged_decode_scores_wg.wgsl` (the coalesced workgroup-per-score variant,
+  autotuned in on `workgroup_reductions`-capable devices) was read but not
+  templatized - real candidate, simply not reached given this phase's scope
+  (the plain `paged_decode_scores_batched` this phase DID templatize is what
+  `select::candidates` falls back to on devices where `_wg` is not offered,
+  so the bf16 tier is not unreachable, just not on the fastest kernel yet).
+

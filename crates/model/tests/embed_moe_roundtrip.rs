@@ -48,6 +48,20 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let f16_embed = dv("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
     let bf16_moe = dv("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16).unwrap();
     let f16_moe = dv("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16).unwrap();
+    // B9: paged-KV append (write direction)/scores/apply (read direction)
+    // bf16 tiers - additive, mechanical, same fix this file's own comment
+    // above already needed when B8 landed.
+    let bf16_kv_append = kernels::template::dtype_variant_store(
+        "paged_kv_append_batched_word",
+        kernels::PAGED_KV_APPEND_BATCHED_WORD,
+        "pool",
+        Dtype::BF16,
+    )
+    .unwrap();
+    let bf16_decode_scores =
+        dv("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", Dtype::BF16).unwrap();
+    let bf16_decode_apply =
+        dv("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", Dtype::BF16).unwrap();
     vec![
         ("matmul", kernels::MATMUL),
         ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -70,6 +84,12 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
         ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
         bf16_moe,
         f16_moe,
+        ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
+        bf16_kv_append,
+        ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+        bf16_decode_scores,
+        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+        bf16_decode_apply,
     ]
 }
 

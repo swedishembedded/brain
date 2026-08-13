@@ -168,6 +168,69 @@ pub fn dtype_variant(
     Ok(entry)
 }
 
+/// The WRITE-direction sibling of [`dtype_variant`] (B9): rewrites a storage
+/// binding declared `array<f32>` into a packed-2-per-`u32` array whose
+/// `<binding>[IDENT] = <expr>;` ASSIGNMENT statements become a genuine
+/// read-modify-write PACK of `<expr>` into the half of the shared `u32` word
+/// `IDENT` selects - leaving the OTHER half's bits untouched.
+///
+/// **Why this exists as a separate function, not a mode flag on
+/// [`dtype_variant`].** Every kernel B4/B5/B8 templatized (`matmul`/`embed`/
+/// `moe_linear_gated`/the plain convs) only ever READS a packed weight - the
+/// host uploads it once (`Weight::upload`), the device never writes it back.
+/// A paged-KV-cache pool is different: `paged_kv_append*` WRITES a freshly
+/// computed K/V value into the pool on every decode step, for the life of a
+/// sequence - there is no host-side pack step to reuse. Packing on WRITE needs
+/// the opposite transform from decoding on READ (`bf16_pack_expr` rounds an
+/// f32 DOWN to 16 bits; [`bf16_decode_expr`] widens 16 bits back to f32
+/// exactly), and - the genuinely new part - it needs to PRESERVE the sibling
+/// half's existing bits, since two logically unrelated cache slots can share
+/// one packed word (see this function's own `rewrite_packed_stores` for
+/// exactly when that happens and why the rewrite is safe even then).
+///
+/// Shares [`rewrite_packed_declaration`] with [`dtype_variant`] (the
+/// `array<f32>` → `array<u32>` rewrite is identical either direction) but
+/// calls [`rewrite_packed_stores`], not [`rewrite_packed_loads`], for the body
+/// rewrite. Naming convention is IDENTICAL to [`dtype_variant`]'s
+/// (`"{name}#{binding}={tag}"`) - a store-direction variant is still just
+/// another `(name, source)` pair to the kernel registry/selector, so it needs
+/// no separate namespace.
+///
+/// Only [`DType::BF16`] is implemented (matching this phase's own scope,
+/// "bf16 KV-cache" - B9); `F16`'s real re-biasing PACK direction (as opposed
+/// to its already-implemented DECODE direction) is a follow-up, not attempted
+/// here. `F32`/`I8`/`Q4` have no storage-tier rewrite concept at all, same as
+/// [`dtype_variant`].
+pub fn dtype_variant_store(
+    name: &str,
+    src: &'static str,
+    binding: &str,
+    dt: DType,
+) -> Result<Variant, String> {
+    if dt != DType::BF16 {
+        return Err(format!(
+            "dtype_variant_store: no storage-tier PACK expression for {dt:?} yet -- only DType::BF16 \
+             (B9) is implemented for the write direction; DType::F16's real re-biased pack is a \
+             follow-up, and F32/I8/Q4 have no storage-tier rewrite concept at all"
+        ));
+    }
+    let vname = format!("{name}#{binding}=bf16");
+
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
+    let key = (src.as_ptr() as usize, vname.clone());
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(&hit) = cache.get(&key) {
+        return Ok(hit);
+    }
+
+    let with_decl = rewrite_packed_declaration(src, binding)?;
+    let rewritten = rewrite_packed_stores(&with_decl, binding, dt)?;
+
+    let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
+    cache.insert(key, entry);
+    Ok(entry)
+}
+
 /// The `#k=v` tag [`dtype_variant`] uses for `dt` - `BF16`/`F16` are
 /// implemented; every other tier is a loud `Err` (see [`dtype_variant`]'s doc
 /// comment for why).
@@ -232,14 +295,19 @@ fn find_word_all(hay: &str, needle: &str) -> Vec<usize> {
     out
 }
 
-/// Rewrite `var<storage, read> <binding>: array<f32>;` (arbitrary whitespace)
-/// to `array<u32>;`, leaving every other binding's declaration untouched.
-/// Shared by both the bf16 and f16 storage tiers - both pack 2 elements per
-/// `u32`, so the declaration rewrite is identical; only [`rewrite_packed_loads`]'s
-/// decode expression differs per `dt`.
+/// Rewrite `var<storage, read> <binding>: array<f32>;` OR `var<storage,
+/// read_write> <binding>: array<f32>;` (arbitrary whitespace) to `array<u32>;`,
+/// leaving every other binding's declaration untouched. Shared by the bf16/f16
+/// READ tiers ([`rewrite_packed_loads`]) and the bf16 WRITE tier (B9,
+/// [`rewrite_packed_stores`]) - all three pack 2 elements per `u32`, so the
+/// declaration rewrite is identical; only the load/store expansion differs.
+/// `read_write` (not just `read`) matters for B9: a KV-cache pool binding a
+/// PACK variant writes is declared `read_write` in its f32 source too (the
+/// read-modify-write the pack needs reads the very same storage binding it
+/// writes), so the marker must match both access modes, not just `read`.
 fn rewrite_packed_declaration(src: &str, binding: &str) -> Result<String, String> {
     let code = blank_comments(src);
-    let marker = "var<storage, read>";
+    let marker = "var<storage, read"; // matches both `read>` and `read_write>`
     let want = format!("{binding}:");
     let mut search_from = 0;
     while let Some(rel) = code.get(search_from..).and_then(|s| s.find(marker)) {
@@ -330,6 +398,154 @@ fn rewrite_packed_loads(src: &str, binding: &str, dt: DType) -> Result<String, S
     }
     out.push_str(&src[cursor..]);
     Ok(out)
+}
+
+/// Rewrite every `<binding>[IDENT] = <expr>;` ASSIGNMENT statement (B9's write
+/// direction) into a read-modify-write PACK of `<expr>` into the half of the
+/// shared `u32` word `IDENT` selects, preserving the sibling half's bits.
+/// `IDENT` must be a bare identifier, same hard precondition as
+/// [`rewrite_packed_loads`] (the generated block references it twice - once
+/// for the word index, once for the half selector).
+///
+/// **A `<binding>[IDENT]` occurrence that is NOT immediately followed by `=`
+/// (skipping whitespace) is left untouched** - this function only rewrites
+/// STORES; a kernel that both reads and writes the same binding (none in this
+/// tree today) would need [`rewrite_packed_loads`] run first for its reads.
+/// `==` is explicitly excluded from counting as an assignment (a comparison,
+/// not a store).
+///
+/// **Why the read-modify-write is safe even when two DIFFERENT cache slots
+/// share one packed word.** The pool's flat layout is `slot*kv_stride + c`;
+/// packing 2-per-`u32` over that flat index means a word's two halves belong
+/// to the SAME slot whenever `kv_stride` is even (every real head_dim in this
+/// tree is even, so this is the common case and no cross-slot sharing ever
+/// happens) - but when `kv_stride` is ODD, consecutive slots' packed words DO
+/// straddle a slot boundary, so an append to slot `s+1` can share a word with
+/// slot `s`'s already-committed last element. The generated code below reads
+/// the word FRESH (`{binding}[_pw]`) immediately before writing it back with
+/// only the target half's bits changed (`& ~mask` clears exactly the target
+/// half, `| (bits << shift)` sets only that half) - so a call that runs AFTER
+/// a previous append to the sibling half has fully completed (i.e. the two
+/// dispatches are sequenced, not concurrent - the normal case for KV-cache
+/// append, one token appended at a time) always preserves that committed
+/// value exactly. Two THREADS writing the SAME word inside one dispatch
+/// (e.g. two different sequences in one batched call landing on adjacent
+/// slots of an odd-`kv_stride` pool) would race, same as any non-atomic
+/// read-modify-write across concurrent GPU threads - not a defect this
+/// rewrite introduces, but a real caveat for an odd-`kv_stride` config, worth
+/// stating rather than leaving implicit.
+fn rewrite_packed_stores(src: &str, binding: &str, dt: DType) -> Result<String, String> {
+    let code = blank_comments(src);
+    let bytes = code.as_bytes();
+    let needle = format!("{binding}[");
+
+    // (pos of `binding[`, bare ident text, byte offset of the value expr's
+    // start, byte offset of the terminating `;`) for every ASSIGNMENT
+    // occurrence, validated before any rewrite - same "report every offender,
+    // not just the first" discipline as `rewrite_packed_loads`.
+    let mut spans: Vec<(usize, String, usize, usize)> = Vec::new();
+    for pos in find_word_all(&code, &needle) {
+        let open = pos + binding.len();
+        let mut depth = 1i32;
+        let mut i = open + 1;
+        let close = loop {
+            if i >= bytes.len() {
+                return Err(format!(
+                    "dtype_variant: unbalanced `[` for `{binding}[` in kernel source (no matching `]`)"
+                ));
+            }
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        };
+        let idx_text = code[open + 1..close].trim().to_string();
+
+        // Is this occurrence an assignment target? Skip whitespace after `]`;
+        // require a bare `=` (not `==`).
+        let mut j = close + 1;
+        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b'=' || bytes.get(j + 1) == Some(&b'=') {
+            continue; // a READ occurrence -- rewrite_packed_loads's concern, not this function's
+        }
+        if !is_bare_ident(&idx_text) {
+            return Err(format!(
+                "dtype_variant: `{binding}[{idx_text}] = ...` store index is not a bare identifier -- \
+                 the pack expansion reads the index twice (once for the packed word, once for the half \
+                 selector), so a compound index would be double-evaluated. Hoist it to `let wi = \
+                 {idx_text};` in the kernel source first, then write `{binding}[wi] = ...;`."
+            ));
+        }
+        let value_start = j + 1;
+        let semi = code.get(value_start..).and_then(|s| s.find(';')).map(|p| value_start + p).ok_or_else(
+            || format!("dtype_variant: unterminated assignment to `{binding}[{idx_text}]` (no `;`)"),
+        )?;
+        spans.push((pos, idx_text, value_start, semi));
+    }
+
+    if spans.is_empty() {
+        return Err(format!(
+            "dtype_variant_store: no `{binding}[IDENT] = ...;` assignment statement found in kernel \
+             source -- the write-direction templater needs at least one store to pack"
+        ));
+    }
+
+    let mut out = String::with_capacity(src.len() + spans.len() * 256);
+    let mut cursor = 0usize;
+    for (pos, ident, value_start, semi) in &spans {
+        out.push_str(&src[cursor..*pos]);
+        let value_expr = src[*value_start..*semi].trim();
+        out.push_str(&pack_stmt(binding, ident, value_expr, dt));
+        cursor = semi + 1; // consume the trailing `;` too -- pack_stmt supplies its own
+    }
+    out.push_str(&src[cursor..]);
+    Ok(out)
+}
+
+/// The compound statement replacing `<binding>[<ident>] = <value_expr>;` -
+/// hoists `value_expr` and `ident` into named `let`s FIRST (so each is
+/// evaluated exactly once, even though the pack/word/half math below
+/// references them more than once), then does the actual read-modify-write:
+/// read the word, clear exactly the target half's bits (`& ~(0xFFFFu <<
+/// shift)`), OR in the new packed bits shifted into that half. The sibling
+/// half's bits are never touched - they are simply not part of `mask`.
+fn pack_stmt(binding: &str, ident: &str, value_expr: &str, dt: DType) -> String {
+    let bits = match dt {
+        DType::BF16 => bf16_pack_expr("_pf"),
+        other => unreachable!(
+            "pack_stmt: dtype_variant_store already rejected {other:?} before this point was reached"
+        ),
+    };
+    format!(
+        "{{ let _pf = {value_expr}; let _pi = {ident}; let _pw = _pi >> 1u; let _ps = 16u * (_pi & 1u); \
+         let _pb = {bits}; {binding}[_pw] = ({binding}[_pw] & ~(0xFFFFu << _ps)) | (_pb << _ps); }}"
+    )
+}
+
+/// The inline f32→bf16 PACK for the already-hoisted `let`-bound value named
+/// `value_ident`: round-to-nearest-even on the low 16 bits (the standard
+/// "add a rounding bias, then truncate" bf16 technique - matches
+/// `model::half::f32_to_bf16`'s host algorithm, NOT plain truncation, so a
+/// device-packed cache value and a host-packed weight round the SAME way).
+/// `rounding_bias = 0x7FFF + ((bits >> 16) & 1)` - the extra `+1` when the
+/// bit BELOW the rounding point is already 1 implements ties-to-even (a
+/// value exactly halfway between two representable bf16s rounds toward the
+/// one with an even low mantissa bit, not always up). Returns the packed
+/// 16-bit pattern in the LOW 16 bits of a `u32` - [`pack_stmt`] shifts it
+/// into position for whichever half `IDENT` selects.
+fn bf16_pack_expr(value_ident: &str) -> String {
+    format!(
+        "(((bitcast<u32>({value_ident}) + (0x7FFFu + ((bitcast<u32>({value_ident}) >> 16u) & 1u))) >> 16u) & 0xFFFFu)"
+    )
 }
 
 /// `<binding>[<ident>]`'s inline decode expression for `dt` - [`dtype_tag`]
@@ -817,5 +1033,173 @@ fn main() { let v = w[base + i]; }
         assert_eq!(dec(0xFC00), f32::NEG_INFINITY);
         assert!(dec(0x7E00).is_nan());
         assert!(dec(0xFE00).is_nan());
+    }
+
+    // --- B9: write-direction (pack) storage tier ----------------------------
+
+    /// A tiny kernel shaped like `paged_kv_append_batched_word.wgsl` after
+    /// its own bare-identifier hoist - `src` untouched (f32 activation),
+    /// `pool` storage-tier-templatable on the WRITE side.
+    const APPEND_SHAPED: &str = "\
+@group(0) @binding(1) var<storage, read>       src:  array<f32>;
+@group(0) @binding(2) var<storage, read_write> pool: array<f32>;
+fn main() {
+    let wi = 3u;
+    pool[wi] = src[0];
+}
+";
+
+    #[test]
+    fn dtype_variant_store_rewrites_declaration_and_store() {
+        let (name, src) = dtype_variant_store("append", APPEND_SHAPED, "pool", DType::BF16).unwrap();
+        assert_eq!(name, "append#pool=bf16");
+        // `pool` narrows to a packed u32 array, `read_write` preserved (the
+        // pack needs to READ the word it is about to write)...
+        assert!(src.contains("var<storage, read_write> pool: array<u32>;"), "{src}");
+        // ...`src` is completely untouched (still f32, no rewrite at all).
+        assert!(src.contains("var<storage, read>       src:  array<f32>;"), "{src}");
+        // The value expression is hoisted exactly once (no double evaluation
+        // even though the pack math below references it more than once).
+        assert!(src.contains("let _pf = src[0];"), "{src}");
+        assert!(src.contains("let _pi = wi;"), "{src}");
+        // Read-modify-write: read the word, clear exactly the target half via
+        // a mask, OR in the new bits shifted into that half.
+        assert!(src.contains("pool[_pw]"), "{src}");
+        assert!(src.contains("~(0xFFFFu << _ps)"), "{src}");
+        // The original compact store is gone.
+        assert!(!src.contains("pool[wi] = src[0];"), "{src}");
+    }
+
+    #[test]
+    fn dtype_variant_store_is_stable_across_calls() {
+        let a = dtype_variant_store("append", APPEND_SHAPED, "pool", DType::BF16).unwrap();
+        let b = dtype_variant_store("append", APPEND_SHAPED, "pool", DType::BF16).unwrap();
+        assert!(std::ptr::eq(a.0, b.0) && std::ptr::eq(a.1, b.1));
+    }
+
+    /// The real in-tree kernel (after its own B9 hoist) templates cleanly
+    /// too, the same proof `dtype_variant_handles_the_real_matmul_kernel`
+    /// gives for the read direction.
+    #[test]
+    fn dtype_variant_store_handles_the_real_paged_kv_append_batched_word_kernel() {
+        let (name, src) = dtype_variant_store(
+            "paged_kv_append_batched_word",
+            crate::PAGED_KV_APPEND_BATCHED_WORD,
+            "pool",
+            DType::BF16,
+        )
+        .unwrap();
+        assert_eq!(name, "paged_kv_append_batched_word#pool=bf16");
+        assert!(src.contains("array<u32>"), "{src}");
+        assert!(src.contains("let _pi = wi;"), "{src}");
+        assert!(src.contains("pool[_pw]"), "{src}");
+    }
+
+    /// A compound store index (no bare-identifier hoist) is a loud `Err`,
+    /// never a silent double-evaluating rewrite - same discipline as the read
+    /// direction.
+    #[test]
+    fn dtype_variant_store_rejects_a_compound_index() {
+        const UNHOISTED: &str = "\
+@group(0) @binding(2) var<storage, read_write> pool: array<f32>;
+fn main() { pool[base + i] = 1.0; }
+";
+        let err = dtype_variant_store("u", UNHOISTED, "pool", DType::BF16).unwrap_err();
+        assert!(err.contains("bare identifier"), "{err}");
+        assert!(err.contains("base + i"), "{err}");
+    }
+
+    /// A binding that is only ever READ (no `binding[IDENT] = ...;` anywhere)
+    /// is a loud `Err`, not a silent no-op that returns an unrewritten kernel
+    /// under a bf16 name.
+    #[test]
+    fn dtype_variant_store_errors_when_no_assignment_is_found() {
+        const READ_ONLY: &str = "\
+@group(0) @binding(1) var<storage, read> pool: array<f32>;
+fn main() { let v = pool[wi]; }
+";
+        let err = dtype_variant_store("u", READ_ONLY, "pool", DType::BF16).unwrap_err();
+        assert!(err.contains("no `pool[IDENT] = ...;`"), "{err}");
+    }
+
+    /// A plain READ occurrence (`let v = pool[wi];`) sitting alongside a
+    /// genuine store in the SAME source is left untouched by the store
+    /// rewriter - it only rewrites assignment targets, distinguishing `=`
+    /// from `==` and from a bare load.
+    #[test]
+    fn dtype_variant_store_leaves_reads_of_the_same_binding_untouched() {
+        const MIXED: &str = "\
+@group(0) @binding(2) var<storage, read_write> pool: array<f32>;
+fn main() {
+    let old = pool[wi];
+    pool[wi] = 2.0;
+}
+";
+        let (_, src) = dtype_variant_store("u", MIXED, "pool", DType::BF16).unwrap();
+        // The read is untouched - still a plain packed-u32 word load (no
+        // decode expression was requested for it).
+        assert!(src.contains("let old = pool[wi];"), "{src}");
+        // The store is rewritten.
+        assert!(src.contains("let _pf = 2.0;"), "{src}");
+    }
+
+    /// Only `DType::BF16` is implemented for the write direction (B9) -
+    /// `F16`'s real re-biased pack is a follow-up, and `F32`/`I8`/`Q4` have no
+    /// storage-tier rewrite concept at all, same as the read direction.
+    #[test]
+    fn dtype_variant_store_rejects_unimplemented_tiers() {
+        for dt in [DType::F32, DType::F16, DType::I8, DType::Q4] {
+            let err = dtype_variant_store("append", APPEND_SHAPED, "pool", dt).unwrap_err();
+            assert!(err.contains("BF16"), "{dt:?}: {err}");
+        }
+    }
+
+    /// Host mirror of [`bf16_pack_expr`]'s WGSL text - the exact same
+    /// add-rounding-bias-then-truncate technique, checked directly in Rust
+    /// rather than trusted from the generated text alone.
+    fn bf16_pack_bits_wgsl_mirror(f: f32) -> u16 {
+        let bits = f.to_bits();
+        let bias = 0x7FFFu32 + ((bits >> 16) & 1);
+        (bits.wrapping_add(bias) >> 16) as u16
+    }
+
+    /// Round-to-nearest-EVEN, not truncation - the same distinction B4's own
+    /// `model::half::f32_to_bf16` ledger entry pinned for the host packer,
+    /// checked here for the WGSL device packer's mirror: an exact tie rounds
+    /// toward the EVEN low mantissa bit (down when the truncated value is
+    /// already even, up when it is odd), and a value strictly past the
+    /// halfway point always rounds up regardless of parity.
+    #[test]
+    fn bf16_pack_matches_known_values_and_rounds_to_nearest_even() {
+        assert_eq!(bf16_pack_bits_wgsl_mirror(1.0), 0x3F80);
+        assert_eq!(bf16_pack_bits_wgsl_mirror(-4.0), 0xC080);
+        // Exact tie, truncated mantissa 0x3F80 is EVEN -> rounds DOWN (stays).
+        assert_eq!(bf16_pack_bits_wgsl_mirror(f32::from_bits(0x3F80_8000)), 0x3F80);
+        // Just past the halfway point -> rounds UP regardless of parity.
+        assert_eq!(bf16_pack_bits_wgsl_mirror(f32::from_bits(0x3F80_8001)), 0x3F81);
+        // Exact tie, truncated mantissa 0x3F81 is ODD -> rounds UP to EVEN (0x3F82).
+        assert_eq!(bf16_pack_bits_wgsl_mirror(f32::from_bits(0x3F81_8000)), 0x3F82);
+    }
+
+    /// Pack-then-decode round-trips within bf16's own precision: the decoded
+    /// value's top 16 bits equal the packed pattern (decode is exact bit
+    /// widening - see [`bf16_decode_expr`]'s own doc comment), so packing then
+    /// decoding must reproduce EXACTLY what the pack step chose, for a sweep
+    /// of representative magnitudes/signs (not exhaustive - bf16's pack step
+    /// is a plain rounding of a much larger f32 space, unlike f16's fully
+    /// enumerable 65536-pattern decode space).
+    #[test]
+    fn bf16_pack_then_decode_reproduces_the_packed_pattern() {
+        let samples: &[f32] =
+            &[0.0, -0.0, 1.0, -1.0, 3.14285, -2.71993, 1e-30, -1e30, 65504.0, 123_456.79, -0.000123];
+        for &f in samples {
+            let packed = bf16_pack_bits_wgsl_mirror(f);
+            // Decode: bf16 is exact bit widening (top 16 bits of an f32).
+            let decoded = f32::from_bits((packed as u32) << 16);
+            // Re-packing the decoded value must reproduce the SAME 16-bit
+            // pattern (a bf16 value is already exactly representable, so
+            // there is no further rounding on the second pack).
+            assert_eq!(bf16_pack_bits_wgsl_mirror(decoded), packed, "f={f} decoded={decoded}");
+        }
     }
 }

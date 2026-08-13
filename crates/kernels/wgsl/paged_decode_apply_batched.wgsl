@@ -8,7 +8,11 @@
 // @gpu   yes
 // @npu   no
 // @quant none
-// @dtype f32
+// @dtype f32|bf16
+// @tpl   pool_v -> bf16 storage variant (B9: exact-shift decode, same mechanism
+//        as the weight-consuming kernels, applied here to a KV-cache page
+//        instead of a static weight; `slot` was already a bare identifier, no
+//        hoist needed)
 //
 // Batched paged decode apply: context per (b,h,d) = probs-weighted sum of cached
 // values addressed through sequence b's block table. ctx : [batch, n_heads*head_dim].

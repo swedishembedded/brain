@@ -132,6 +132,25 @@ mod kname {
     pub const MOE_LINEAR_GATED_BF16: &str = "moe_linear_gated#w=bf16";
     pub const MOE_LINEAR_GATED_F16: &str = "moe_linear_gated#w=f16";
 
+    // --- B9: paged-KV-cache append/scores/apply bf16 storage tier -----------
+    // `#pool=bf16` (append, WRITE direction - `kernels::template::
+    // dtype_variant_store`) and `#pool_k=bf16`/`#pool_v=bf16` (scores/apply,
+    // READ direction - `kernels::template::dtype_variant`, same naming
+    // convention as every other tier in this table).
+    pub const PAGED_KV_APPEND_BATCHED: &str = "paged_kv_append_batched";
+    /// The BF16 append tier binds to a DIFFERENT physical kernel
+    /// (`paged_kv_append_batched_word.wgsl`, one thread per TOKEN with a
+    /// serial inner loop), not a `dtype_variant_store` rewrite of the plain
+    /// per-element `paged_kv_append_batched.wgsl` above - see that word-
+    /// granularity kernel's own doc comment for the real race a per-element
+    /// bf16 pack dispatch has (caught by this crate's own dual-backend test:
+    /// green on the CPU JIT, red on real wgpu).
+    pub const PAGED_KV_APPEND_BATCHED_WORD_BF16: &str = "paged_kv_append_batched_word#pool=bf16";
+    pub const PAGED_DECODE_SCORES_BATCHED: &str = "paged_decode_scores_batched";
+    pub const PAGED_DECODE_SCORES_BATCHED_BF16: &str = "paged_decode_scores_batched#pool_k=bf16";
+    pub const PAGED_DECODE_APPLY_BATCHED: &str = "paged_decode_apply_batched";
+    pub const PAGED_DECODE_APPLY_BATCHED_BF16: &str = "paged_decode_apply_batched#pool_v=bf16";
+
     pub const ALL: &[&str] = &[
         MATMUL,
         MATMUL_GEMV,
@@ -154,6 +173,12 @@ mod kname {
         MOE_LINEAR_GATED,
         MOE_LINEAR_GATED_BF16,
         MOE_LINEAR_GATED_F16,
+        PAGED_KV_APPEND_BATCHED,
+        PAGED_KV_APPEND_BATCHED_WORD_BF16,
+        PAGED_DECODE_SCORES_BATCHED,
+        PAGED_DECODE_SCORES_BATCHED_BF16,
+        PAGED_DECODE_APPLY_BATCHED,
+        PAGED_DECODE_APPLY_BATCHED_BF16,
     ];
 }
 
@@ -281,6 +306,127 @@ impl Weight {
             // compile error here, not a silent `unreachable!` at runtime).
         }
     }
+}
+
+/// One paged-KV-cache pool buffer (B9) - `Weight`'s sibling for CACHE PAGES,
+/// deliberately NOT a `Weight` variant. A KV page has no `(n, k)` GEMM shape
+/// and no "load once from a checkpoint" story: `Weight::upload` packs a value
+/// known entirely on the host, once, before the device ever sees it; a
+/// paged-KV pool starts EMPTY and is grown one token at a time BY the device,
+/// through [`Ops::kv_append_batched`] - the write direction `Weight` never
+/// needed at all. Forcing it into `Weight`'s enum would mean every `Weight`
+/// match arm elsewhere in this crate (`Ops::matmul`, `Ops::embed`, `Ops::
+/// moe_linear`) grows an unreachable case for a variant with a completely
+/// different shape and lifecycle - a poor fit, not a missing convenience.
+///
+/// Addressed the SAME way `pool_k`/`pool_v`/`pool` are addressed in the WGSL
+/// kernels this wraps: one FLAT `[num_blocks * block_size * kv_stride]`
+/// array, `slot*kv_stride + c` indexing done entirely in WGSL (no per-block
+/// reshaping on the Rust side, exactly like `Weight`'s own flat `[n*k]`
+/// layout leaves row/col arithmetic to the kernel).
+pub enum KvPage {
+    F32 { buf: DeviceBuffer },
+    /// bf16 storage tier (B9): packed two-per-`u32` over the flat pool, same
+    /// low-half-even/high-half-odd convention `Weight::BF16`/`model::half::
+    /// pack_bf16` already established. Decoded inline on READ by
+    /// `paged_decode_scores_batched#pool_k=bf16`/`paged_decode_apply_batched
+    /// #pool_v=bf16` (`kernels::template::dtype_variant` - exact bit
+    /// widening, same as every other bf16 READ tier). PACKED inline on WRITE
+    /// by `paged_kv_append_batched_word#pool=bf16`
+    /// (`kernels::template::dtype_variant_store`, B9's new capability, over a
+    /// SEPARATE word-granularity physical kernel - see `kname::
+    /// PAGED_KV_APPEND_BATCHED_WORD_BF16`'s own doc comment for why) - a
+    /// genuine read-modify-write of the shared `u32` word that preserves the
+    /// sibling half untouched; see that function's own doc comment for the
+    /// exact correctness argument, including the case where two DIFFERENT
+    /// cache slots share one word (only possible when `kv_stride` is odd -
+    /// every real head_dim in this tree is even, so this is a deliberately
+    /// exercised edge case in the tests, not the common path).
+    BF16 { buf: DeviceBuffer },
+}
+
+impl KvPage {
+    pub fn dtype(&self) -> Dtype {
+        match self {
+            KvPage::F32 { .. } => Dtype::F32,
+            KvPage::BF16 { .. } => Dtype::BF16,
+        }
+    }
+
+    pub fn buf(&self) -> &DeviceBuffer {
+        match self {
+            KvPage::F32 { buf } | KvPage::BF16 { buf } => buf,
+        }
+    }
+
+    /// A zero-initialized pool for `num_blocks` blocks of `block_size` tokens
+    /// each, `kv_stride` elements per token (`n_kv_heads * head_dim`) - the
+    /// SAME total logical element count `num_blocks * block_size *
+    /// kv_stride` either dtype addresses, but `BF16` allocates HALF as many
+    /// `u32` words (packed 2-per-word, `div_ceil` so an odd total element
+    /// count - only possible with an odd `kv_stride`, deliberately exercised
+    /// by this phase's read-modify-write stress test - still gets a whole
+    /// trailing word rather than truncating). `want` must be `F32` or `BF16`;
+    /// every other `Dtype` is a loud panic, matching `Weight::upload`'s own
+    /// "never a silent wrong tier" discipline. Unlike `Weight::upload`, this
+    /// does NOT consult `DeviceCaps.numeric` to promote/demote: a caller that
+    /// wants the capability-aware policy checks `ops.caps().numeric.
+    /// bf16_storage` itself before choosing `want`, since (unlike a GEMM
+    /// weight) there is no host-side f32 source to fall back to packing from
+    /// here - the pool starts empty.
+    pub fn zeros(ops: &Ops, num_blocks: u32, block_size: u32, kv_stride: u32, want: Dtype) -> KvPage {
+        let words = Self::word_count(num_blocks, block_size, kv_stride, want);
+        match want {
+            Dtype::F32 => KvPage::F32 { buf: ops.gpu.storage(words) },
+            Dtype::BF16 => KvPage::BF16 { buf: ops.gpu.storage(words) },
+            other => panic!(
+                "KvPage::zeros: {other:?} is not an implemented KV-cache storage tier (only F32/BF16 \
+                 exist - see KvPage's own doc comment for why this is a distinct type from Weight)"
+            ),
+        }
+    }
+
+    /// The `u32`-word allocation [`Self::zeros`] requests from the device for
+    /// `num_blocks` blocks of `block_size` tokens, `kv_stride` elements each -
+    /// factored out of `zeros` so the VRAM-halving claim (`BF16` allocates
+    /// HALF the words `F32` does, for the SAME logical pool shape) is a
+    /// pure, directly testable function rather than something only provable
+    /// by re-deriving the same arithmetic in a test. `F32` is one word
+    /// (4 bytes) per element; `BF16` packs 2 elements per word, `div_ceil` so
+    /// an ODD total element count (only possible with an odd `kv_stride` -
+    /// every real head_dim in this tree is even, but this phase's own
+    /// read-modify-write stress test deliberately uses one) still gets a
+    /// whole trailing word rather than truncating and losing the last
+    /// element. `want` other than `F32`/`BF16` returns 0 - `zeros`'s own
+    /// match is what actually panics for those, this function is a pure size
+    /// calculator with no side effects to gate.
+    pub fn word_count(num_blocks: u32, block_size: u32, kv_stride: u32, want: Dtype) -> u64 {
+        let total = num_blocks as u64 * block_size as u64 * kv_stride as u64;
+        match want {
+            Dtype::F32 => total,
+            Dtype::BF16 => total.div_ceil(2),
+            _ => 0,
+        }
+    }
+}
+
+/// Shape shared by [`Ops::decode_scores_batched`]/[`Ops::decode_apply_batched`]:
+/// the batched paged-decode-attention `Params` both WGSL kernels declare,
+/// grouped so a call site passes one value instead of nine positional
+/// arguments. `scale` is meaningful only to `decode_scores_batched`;
+/// `decode_apply_batched`'s own `Params` has no `scale` field at all, so its
+/// kernel ignores this struct's `scale`.
+#[derive(Clone, Copy, Debug)]
+pub struct PagedDecodeShape {
+    pub batch: u32,
+    pub n_heads: u32,
+    pub group: u32,
+    pub head_dim: u32,
+    pub block_size: u32,
+    pub kv_stride: u32,
+    pub cap: u32,
+    pub max_bt: u32,
+    pub scale: f32,
 }
 
 /// A quantized-once activation slice: rows `[xr0, xr0+rows)` of a `[.., k]`
@@ -611,6 +757,164 @@ impl Ops {
             }
         }
     }
+
+    // --- B9: paged-KV-cache append/scores/apply, batched family -------------
+    //
+    // `qwen3::serve::Engine`'s existing int8 KV-cache tier
+    // (`paged_kv_append_i8_clipped_batched`/`paged_decode_scores_i8_batched`/
+    // `paged_decode_apply_i8_batched`) is this façade's closest precedent -
+    // same three-operation family, same batched dispatch shape - but that
+    // engine dispatches its own tuned kernel selection by hand (`Ops::matmul`'s
+    // own doc comment explains why `serve.rs` was deliberately NOT migrated
+    // onto `Ops::matmul` in B7: a real, measured per-device selector `Ops`
+    // cannot express). These three methods are the `Ops`-level, kernel-proven
+    // bf16 KV-cache tier - NOT wired into `qwen3::serve::Engine` by this
+    // phase: adding a third hand-dispatched tier to that engine and
+    // re-running its own full test suite was judged a materially larger,
+    // riskier change than proving the tier at the kernel/`Ops` level alone,
+    // matching the "build the façade, prove it, migrate later" precedent
+    // this whole program has followed since B3.
+
+    /// `(dtype) -> (kernel name, threads)` for [`Ops::kv_append_batched`].
+    /// UNLIKE every other `bind_*` method in this façade, the two dtypes here
+    /// bind to genuinely DIFFERENT PHYSICAL KERNELS with different dispatch
+    /// GEOMETRIES, not just different kernel names at the SAME geometry - see
+    /// `kname::PAGED_KV_APPEND_BATCHED_WORD_BF16`'s own doc comment for why
+    /// (a per-element bf16 pack dispatch races; the word-granularity sibling
+    /// kernel does not). `F32` stays one thread per (token, element)
+    /// (`batch * kv_stride`, this kernel's own established parallelism);
+    /// `BF16` is one thread per TOKEN (`batch`), each thread looping over its
+    /// own `kv_stride` elements serially.
+    fn bind_kv_append(dt: Dtype, batch: u32, kv_stride: u32) -> (&'static str, u32) {
+        match dt {
+            Dtype::F32 => (kname::PAGED_KV_APPEND_BATCHED, batch * kv_stride),
+            Dtype::BF16 => (kname::PAGED_KV_APPEND_BATCHED_WORD_BF16, batch),
+            other => panic!(
+                "Ops::kv_append_batched: no paged-KV append kernel for dtype {other:?} -- only F32/BF16 \
+                 KV-cache pages are implemented (see KvPage's own doc comment)"
+            ),
+        }
+    }
+
+    fn bind_decode_scores(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::F32 => kname::PAGED_DECODE_SCORES_BATCHED,
+            Dtype::BF16 => kname::PAGED_DECODE_SCORES_BATCHED_BF16,
+            other => panic!(
+                "Ops::decode_scores_batched: no paged-decode-scores kernel for dtype {other:?} -- only \
+                 F32/BF16 KV-cache pages are implemented"
+            ),
+        }
+    }
+
+    fn bind_decode_apply(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::F32 => kname::PAGED_DECODE_APPLY_BATCHED,
+            Dtype::BF16 => kname::PAGED_DECODE_APPLY_BATCHED_BF16,
+            other => panic!(
+                "Ops::decode_apply_batched: no paged-decode-apply kernel for dtype {other:?} -- only \
+                 F32/BF16 KV-cache pages are implemented"
+            ),
+        }
+    }
+
+    /// Append one token's projected K (or V) per sequence in the batch into
+    /// `pool` at that sequence's `(blocks[b], offsets[b])` -
+    /// `paged_kv_append_batched`'s contract exactly, but `pool` is now a
+    /// [`KvPage`] instead of a raw [`DeviceBuffer`], so the SAME call works
+    /// whether `pool` is `F32` (a plain write) or `BF16` (B9: a genuine
+    /// read-modify-write pack of the shared `u32` word - see `KvPage`'s own
+    /// doc comment). `src` is always f32 (the projected activation this
+    /// token's K/V came from) - only the CACHE narrows, exactly like the
+    /// weight-tier methods above leave the ACTIVATION at f32 and narrow only
+    /// the weight/table/expert-bank side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append_batched(
+        &self,
+        s: &mut Vec<Step>,
+        pool: &KvPage,
+        src: &DeviceBuffer,
+        blocks: &DeviceBuffer,
+        offsets: &DeviceBuffer,
+        batch: u32,
+        kv_stride: u32,
+        block_size: u32,
+    ) {
+        let (name, threads) = Self::bind_kv_append(pool.dtype(), batch, kv_stride);
+        let kind = self.idx[name];
+        s.push(self.gpu.step(kind, &[src, blocks, offsets, pool.buf()], &[batch, kv_stride, block_size], threads));
+    }
+
+    /// `scores[b,h,j] = (q[b,h,:] . pool_k[...]) * scale` for every sequence
+    /// `b` in the batch - `paged_decode_scores_batched`'s contract, `pool_k` a
+    /// [`KvPage`] instead of a raw buffer. `q` stays f32 always (an
+    /// ACTIVATION, never narrowed - matching every other `Ops` method's own
+    /// asymmetry between the narrowed STORAGE side and the exact activation
+    /// side).
+    pub fn decode_scores_batched(
+        &self,
+        s: &mut Vec<Step>,
+        q: &DeviceBuffer,
+        pool_k: &KvPage,
+        block_tables: &DeviceBuffer,
+        seq_lens: &DeviceBuffer,
+        scores: &DeviceBuffer,
+        shape: PagedDecodeShape,
+    ) {
+        let kind = self.idx[Self::bind_decode_scores(pool_k.dtype())];
+        let threads = shape.batch * shape.n_heads * shape.cap;
+        s.push(self.gpu.step(
+            kind,
+            &[q, pool_k.buf(), block_tables, seq_lens, scores],
+            &[
+                shape.batch,
+                shape.n_heads,
+                shape.group,
+                shape.head_dim,
+                shape.block_size,
+                shape.kv_stride,
+                shape.cap,
+                shape.max_bt,
+                shape.scale.to_bits(),
+            ],
+            threads,
+        ));
+    }
+
+    /// `ctx[b,h,d] = sum_j probs[b,h,j] * pool_v[...]` for every sequence `b`
+    /// in the batch - `paged_decode_apply_batched`'s contract, `pool_v` a
+    /// [`KvPage`] instead of a raw buffer. `probs` stays f32 always (an
+    /// activation). `shape.scale` is unused here - `decode_apply_batched`'s
+    /// own kernel `Params` has no `scale` field at all (see
+    /// [`PagedDecodeShape`]'s own doc comment).
+    pub fn decode_apply_batched(
+        &self,
+        s: &mut Vec<Step>,
+        probs: &DeviceBuffer,
+        pool_v: &KvPage,
+        block_tables: &DeviceBuffer,
+        seq_lens: &DeviceBuffer,
+        ctx: &DeviceBuffer,
+        shape: PagedDecodeShape,
+    ) {
+        let kind = self.idx[Self::bind_decode_apply(pool_v.dtype())];
+        let threads = shape.batch * shape.n_heads * shape.head_dim;
+        s.push(self.gpu.step(
+            kind,
+            &[probs, pool_v.buf(), block_tables, seq_lens, ctx],
+            &[
+                shape.batch,
+                shape.n_heads,
+                shape.group,
+                shape.head_dim,
+                shape.block_size,
+                shape.kv_stride,
+                shape.cap,
+                shape.max_bt,
+            ],
+            threads,
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +958,31 @@ mod tests {
                 Dtype::F16,
             )
             .unwrap();
+            // B9: paged-KV append (WRITE direction, `dtype_variant_store`,
+            // over the word-granularity sibling kernel - see `kname::
+            // PAGED_KV_APPEND_BATCHED_WORD_BF16`'s own doc comment) / scores
+            // / apply (READ direction, `dtype_variant`) bf16 tiers.
+            let bf16_kv_append = kernels::template::dtype_variant_store(
+                "paged_kv_append_batched_word",
+                kernels::PAGED_KV_APPEND_BATCHED_WORD,
+                "pool",
+                Dtype::BF16,
+            )
+            .unwrap();
+            let bf16_decode_scores = kernels::template::dtype_variant(
+                "paged_decode_scores_batched",
+                kernels::PAGED_DECODE_SCORES_BATCHED,
+                "pool_k",
+                Dtype::BF16,
+            )
+            .unwrap();
+            let bf16_decode_apply = kernels::template::dtype_variant(
+                "paged_decode_apply_batched",
+                kernels::PAGED_DECODE_APPLY_BATCHED,
+                "pool_v",
+                Dtype::BF16,
+            )
+            .unwrap();
             vec![
                 ("matmul", kernels::MATMUL),
                 ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -676,6 +1005,12 @@ mod tests {
                 ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
                 bf16_moe,
                 f16_moe,
+                ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
+                bf16_kv_append,
+                ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+                bf16_decode_scores,
+                ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+                bf16_decode_apply,
             ]
         })
     }
@@ -738,6 +1073,63 @@ mod tests {
             kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16)
                 .unwrap();
         assert_eq!(n, kname::MOE_LINEAR_GATED_F16);
+    }
+
+    /// The B9 kname literals (paged-KV append/scores/apply bf16 tiers), same
+    /// contract as [`b8_kname_literals_match_dtype_variant_naming`] above -
+    /// pinned against the real kernel sources, including the WRITE-direction
+    /// `dtype_variant_store` naming (append), not just the READ-direction
+    /// `dtype_variant` naming (scores/apply).
+    #[test]
+    fn b9_kname_literals_match_dtype_variant_naming() {
+        let (n, _) = kernels::template::dtype_variant_store(
+            "paged_kv_append_batched_word",
+            kernels::PAGED_KV_APPEND_BATCHED_WORD,
+            "pool",
+            Dtype::BF16,
+        )
+        .unwrap();
+        assert_eq!(n, kname::PAGED_KV_APPEND_BATCHED_WORD_BF16);
+        let (n, _) = kernels::template::dtype_variant(
+            "paged_decode_scores_batched",
+            kernels::PAGED_DECODE_SCORES_BATCHED,
+            "pool_k",
+            Dtype::BF16,
+        )
+        .unwrap();
+        assert_eq!(n, kname::PAGED_DECODE_SCORES_BATCHED_BF16);
+        let (n, _) = kernels::template::dtype_variant(
+            "paged_decode_apply_batched",
+            kernels::PAGED_DECODE_APPLY_BATCHED,
+            "pool_v",
+            Dtype::BF16,
+        )
+        .unwrap();
+        assert_eq!(n, kname::PAGED_DECODE_APPLY_BATCHED_BF16);
+    }
+
+    /// [`KvPage::word_count`] - the actual allocation-size logic
+    /// [`KvPage::zeros`] calls - is genuinely half for `BF16` at an EVEN
+    /// total element count (the realistic case: every real head_dim in this
+    /// tree is even), and still strictly less than `F32`'s word count
+    /// (rounded up, never down) at an ODD one (this phase's own
+    /// read-modify-write stress test's shape).
+    #[test]
+    fn bf16_kv_page_word_count_is_half_the_f32_word_count() {
+        // Even total (16 blocks * 16 tokens * 128 kv_stride = 32768, even).
+        let f32_words = KvPage::word_count(16, 16, 128, Dtype::F32);
+        let bf16_words = KvPage::word_count(16, 16, 128, Dtype::BF16);
+        assert_eq!(f32_words, 32768);
+        assert_eq!(bf16_words, 16384, "bf16 must be EXACTLY half the f32 word count at an even total");
+        assert_eq!(bf16_words * 4, f32_words * 4 / 2, "byte size: bf16 must be exactly half of f32's");
+
+        // Odd total (1 block * 2 tokens * 3 kv_stride = 6, even actually --
+        // use an odd kv_stride directly: 1 block * 1 token * 3 = 3, odd).
+        let f32_odd = KvPage::word_count(1, 1, 3, Dtype::F32);
+        let bf16_odd = KvPage::word_count(1, 1, 3, Dtype::BF16);
+        assert_eq!(f32_odd, 3);
+        assert_eq!(bf16_odd, 2, "div_ceil(3, 2) = 2 -- rounds UP so the trailing element still gets a word");
+        assert!(bf16_odd * 4 < f32_odd * 4, "bf16 must still be strictly smaller even when not exactly halvable");
     }
 
     #[test]

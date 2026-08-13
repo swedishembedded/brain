@@ -10,6 +10,17 @@
 // @quant none
 // @dtype f32
 //
+// B9: `paged_kv_append_batched_word.wgsl` is this kernel's WRITE-direction
+// bf16-tier sibling (`model::ops::Ops::kv_append_batched`'s `BF16` arm) - a
+// SEPARATE physical kernel, not a `dtype_variant_store` rewrite of THIS file.
+// This one-thread-per-ELEMENT dispatch stays untouched at its own best
+// parallelism (`@opt 3`) because a bf16-packed pool's 2-per-word layout makes
+// per-element dispatch genuinely racy for a write (two concurrent threads can
+// target the same packed word for ANY adjacent pair, not just the odd-
+// `kv_stride` cross-token edge case) - see `paged_kv_append_batched_word.wgsl`'s
+// own doc comment for the real, dual-backend-test-caught finding that
+// motivated the split.
+//
 // Append a batch of new tokens' K (or V) into the paged pool: sequence b writes
 // src[b, :] into pool at its per-sequence (blocks[b], offsets[b]).
 struct Params { batch: u32, kv_stride: u32, block_size: u32 };
