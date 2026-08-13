@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain caps` / `brain do` — the generalized capability interface on the CLI.
+//! `brain caps` - the generalized capability interface's discovery half, and
+//! [`run_do`] - its execution half, reached from the CLI as
+//! `brain <architecture> <action>` (or `brain <action> <architecture>`; see
+//! `crate::resolve`) for every architecture with no dedicated `_cli.rs`
+//! module of its own. `run_do` itself is architecture-agnostic - it always
+//! took `(model id, action name, ...flags)`, unchanged since the days it was
+//! reachable as the standalone `brain do <model> <action>` command.
 //!
-//! `brain caps [model] [--json]` lists what every supported model can do (static
-//! manifests — no weights loaded). `brain do <model> <action> [--param value]…
-//! [--in name=path]… [--out name=path]… [--json]` validates the arguments against
-//! the action's schema, runs it, and writes the output blobs to files.
+//! `brain caps [model-or-arch-id] [--json]` lists what every supported
+//! architecture can do (static manifests - no weights loaded); an id from
+//! `brain_arch` resolves through the same table `crate::resolve` dispatches
+//! with (`crate::resolve::model_for_arch`), so discovery and execution agree
+//! on what names an architecture.
 //!
 //! Neither command knows anything model-specific: both go through
 //! `capability::Registry`. A new model shows up here the moment it provides a
@@ -30,7 +37,12 @@ const DEMO_MODEL: &str = "brain/demo";
 
 pub fn run_caps(argv: &[String]) -> i32 {
     let json_out = argv.iter().any(|a| a == "--json");
-    let model = argv.iter().find(|a| !a.starts_with("--")).cloned();
+    // A `brain_arch` id (e.g. "scrfd") resolves through the same table
+    // `brain <arch id> <action>` uses, so discovery and dispatch agree on
+    // what names an architecture -- a filter that isn't a known arch id is
+    // tried as a literal model id unchanged (the common case: most already
+    // match, e.g. "brain/yolo").
+    let model = argv.iter().find(|a| !a.starts_with("--")).map(|m| crate::resolve::model_for_arch(m).map(str::to_string).unwrap_or_else(|| m.clone()));
     let mans: Vec<Manifest> = crate::catalog::manifests().into_iter().filter(|m| model.as_deref().is_none_or(|w| w == m.model)).collect();
     if mans.is_empty() {
         eprintln!("no such model '{}' (try `brain caps`)", model.unwrap_or_default());
@@ -64,17 +76,20 @@ pub fn run_caps(argv: &[String]) -> i32 {
         }
         println!();
     }
-    println!("run one with:  brain do <model> <action> [--param value]… [--in name=path]… [--out name=path]…");
+    println!("run one with:  brain <architecture> <action> [--param value]… [--in name=path]… [--out name=path]…");
     0
 }
 
-// ---------------------------------------------------------------- brain do
+// -------------------------------------------------------- generic dispatch
 
+/// `argv` is `[model id, action, ...flags]` - what `crate::resolve` builds
+/// from `brain <architecture> <action> ...` (the arch id translated to its
+/// model id first) before calling this.
 pub fn run_do(argv: &[String]) -> i32 {
     let (model, action) = match (argv.first(), argv.get(1)) {
         (Some(m), Some(a)) if !m.starts_with("--") && !a.starts_with("--") => (m.clone(), a.clone()),
         _ => {
-            eprintln!("usage: brain do <model> <action> [--param value]… [--in name=path]… [--out name=path]…");
+            eprintln!("usage: brain <architecture> <action> [--param value]… [--in name=path]… [--out name=path]…");
             return 2;
         }
     };
@@ -89,14 +104,14 @@ pub fn run_do(argv: &[String]) -> i32 {
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("brain do: {e}");
+            eprintln!("brain: {e}");
             return 1;
         }
     };
     let act = match reg.find(&model, &action) {
         Some(a) => a,
         None => {
-            eprintln!("brain do: model '{model}' has no action '{action}' (see `brain caps {model}`)");
+            eprintln!("brain: model {model:?} has no action {action:?} (see `brain caps {model}`)");
             return 1;
         }
     };
@@ -120,13 +135,13 @@ pub fn run_do(argv: &[String]) -> i32 {
     }
     for spec_val in matches.get_many::<String>("in").unwrap_or_default() {
         let Some((name, path)) = spec_val.split_once('=') else {
-            eprintln!("brain do: --in must be name=path (got '{spec_val}')");
+            eprintln!("brain: --in must be name=path (got {spec_val:?})");
             return 2;
         };
         match load_blob(&spec, name, path) {
             Ok(b) => inv = inv.blob(name, b),
             Err(e) => {
-                eprintln!("brain do: {e}");
+                eprintln!("brain: {e}");
                 return 1;
             }
         }
@@ -134,7 +149,7 @@ pub fn run_do(argv: &[String]) -> i32 {
     let mut out_paths: Vec<(String, String)> = Vec::new();
     for spec_val in matches.get_many::<String>("out").unwrap_or_default() {
         let Some((name, path)) = spec_val.split_once('=') else {
-            eprintln!("brain do: --out must be name=path (got '{spec_val}')");
+            eprintln!("brain: --out must be name=path (got {spec_val:?})");
             return 2;
         };
         out_paths.push((name.to_string(), path.to_string()));
@@ -151,7 +166,7 @@ pub fn run_do(argv: &[String]) -> i32 {
     let outcome = match reg.run(&model, &action, inv, &mut progress) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("\nbrain do: {e}");
+            eprintln!("\nbrain: {e}");
             return 1;
         }
     };
@@ -162,12 +177,12 @@ pub fn run_do(argv: &[String]) -> i32 {
         match outcome.blobs.get(name) {
             Some(b) => {
                 if let Err(e) = save_blob(b, path) {
-                    eprintln!("brain do: writing {path}: {e}");
+                    eprintln!("brain: writing {path}: {e}");
                     return 1;
                 }
                 eprintln!("wrote {name} → {path} ({} bytes)", b.bytes.len());
             }
-            None => eprintln!("brain do: action produced no output '{name}'"),
+            None => eprintln!("brain: action produced no output {name:?}"),
         }
     }
     // scalar outputs
@@ -185,7 +200,7 @@ pub fn run_do(argv: &[String]) -> i32 {
 /// param (required/enum/bool honoured by clap), plus repeatable `--in`/`--out
 /// name=path` and `--json`. All argument parsing goes through clap — no bespoke loop.
 fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
-    let mut cmd = Command::new(format!("brain do {model} {action}")).no_binary_name(true).about(spec.summary.clone());
+    let mut cmd = Command::new(format!("brain {model} {action}")).no_binary_name(true).about(spec.summary.clone());
     for p in &spec.params {
         let mut arg = Arg::new(p.name.clone()).long(p.name.clone()).help(p.help.clone());
         if p.ty == ParamType::Bool {
@@ -288,8 +303,9 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- built-in demo provider
 
-/// A trivial always-available model so `brain do` (and the tests) work with no
-/// weights — and as a worked example of the [`Provider`]/[`Action`] pattern.
+/// A trivial always-available model so the generic dispatch path (and the
+/// tests) work with no weights - and as a worked example of the
+/// [`Provider`]/[`Action`] pattern.
 pub(crate) struct DemoModel;
 struct EchoAction;
 

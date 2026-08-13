@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain run` / `brain serve` — the event-driven stdio controller loop.
+//! `brain serve --stdio` - the event-driven stdio controller loop.
 //!
 //! Reads JSONL [`events::Event`] lines from stdin (a blocking read is the idle
 //! wait), feeds each to a [`runtime::Controller`], and writes every emitted event
@@ -34,7 +34,7 @@ use runtime::{
 };
 
 /// A live [`Emit`] sink over a stdout writer: encodes each envelope to a JSONL
-/// line and flushes it immediately, so `brain run` streams token-by-token as the
+/// line and flushes it immediately, so `brain serve --stdio` streams token-by-token as the
 /// controller produces them (not one batch at the end of the turn). `ok` latches
 /// false once the pipe closes so the loop can stop.
 struct StdoutSink<'a, W: Write> {
@@ -56,11 +56,12 @@ impl<W: Write> Emit for StdoutSink<'_, W> {
 }
 
 const HELP: &str = "\
-brain serve — serve brain's models over HTTP, D-Bus, or stdio  (alias: brain run)
+brain serve - serve brain's models over HTTP, D-Bus, or stdio
 
 USAGE:
   brain serve [SURFACE ...] [options]     # one or more serving surfaces
-  brain serve                             # NO surface flag: the stdio JSONL loop
+  brain serve --stdio                     # the event-driven stdio JSONL loop
+  brain serve                             # NO surface flag: same as --stdio
 
 HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
   --openai [PORT]        OpenAI-compatible dialect       (default port 8788)
@@ -118,7 +119,7 @@ STDIO CONTROLLER  (the default, with no surface flag)
   --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
   --max-new N  --temp X  --top-k K  --seed S      generation config
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
-  Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
+  Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
 MODEL CONFIGURATION (env-only — there is no config file)
   Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
@@ -232,6 +233,10 @@ pub fn run_serve(args: &[String]) {
             "--top-k" => cfg.top_k = parsed(args, &mut i, "--top-k"),
             "--seed" => cfg.seed = parsed(args, &mut i, "--seed"),
             "--conf" => conf = Some(parsed(args, &mut i, "--conf")),
+            // The stdio JSONL controller is what runs when no surface flag
+            // is given below; `--stdio` names that path explicitly rather
+            // than leaving it as a silent default a reader has to infer.
+            "--stdio" => {}
             "--dbus" => dbus = true,
             "--dbus-system" => {
                 dbus = true;
@@ -314,13 +319,13 @@ pub fn run_serve(args: &[String]) {
     // model so the loop runs end-to-end without a trained model.
     let infer: Box<dyn runtime::InferModel> = match &gpt_path {
         Some(path) => {
-            eprintln!("brain run: loading GPT checkpoint {path}");
+            eprintln!("brain serve --stdio: loading GPT checkpoint {path}");
             // Char models embed itos; the pump uses it for the EOS-less stop at
             // max_new. We leave eos as configured (None unless the user sets one).
             Box::new(GptInfer::load(path))
         }
         None => {
-            eprintln!("brain run: no --gpt checkpoint; using fake echo model");
+            eprintln!("brain serve --stdio: no --gpt checkpoint; using fake echo model");
             // The fake echoes a fixed greeting and terminates at its EOS sentinel.
             cfg.eos = Some(256);
             Box::new(FakeInferModel::echoing("hello from brain"))
@@ -329,17 +334,17 @@ pub fn run_serve(args: &[String]) {
     // A real YOLO if a checkpoint was given, else the fixed-box fake detector.
     let detect: Box<dyn DetectModel> = match &yolo_path {
         Some(path) => {
-            eprintln!("brain run: loading YOLO checkpoint {path}");
+            eprintln!("brain serve --stdio: loading YOLO checkpoint {path}");
             let mut det = YoloDetect::load(path);
             if let Some(c) = conf {
-                eprintln!("brain run: detection confidence threshold {c}");
+                eprintln!("brain serve --stdio: detection confidence threshold {c}");
                 // Keep the default IoU (0.45); only override the confidence gate.
                 det = det.with_thresholds(c, 0.45);
             }
             Box::new(det)
         }
         None => {
-            eprintln!("brain run: no --yolo checkpoint; using fake detector");
+            eprintln!("brain serve --stdio: no --yolo checkpoint; using fake detector");
             Box::new(FakeDetectModel::default())
         }
     };
@@ -365,7 +370,7 @@ pub fn run_serve(args: &[String]) {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("brain run: stdin error: {e}");
+                eprintln!("brain serve --stdio: stdin error: {e}");
                 break;
             }
         };

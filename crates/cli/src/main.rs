@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The `brain` native CLI - one binary over every model in the workspace.
-//! The model is chosen by the subcommand (no global "model type" flag).
 //!
-//!   * `gpt`        - dense GPT decoder baseline (nanogpt parity).
-//!   * `generate`/`train`/`eval` - the sparse-MoE Transformer.
-//!   * `federated`  - sharded-MoE shard split/assemble.
-//!   * `data`       - dataset generation; `gradcheck` - backprop correctness gate.
-//!   * `pid`        - event/effect control Transformer (the WebGPU demo).
+//! `brain <verb> <architecture>` and `brain <architecture> <verb>` are the
+//! same command ([`resolve::dispatch`]) - the architecture is chosen by
+//! whichever token names one of `brain_arch::ARCHS`, in either position.
+//! Infrastructure commands (`data`, `devices`, `npu`, `federated`, `bench`,
+//! `perf`, `forecast`, `caps`, `serve`, `gradcheck`, `flops`) are matched
+//! first and never go through that resolver.
 //!
 //! Run `brain help` for the full usage with examples.
 
@@ -54,6 +54,7 @@ mod resident_clip;
 mod resident_facenet;
 mod resident_sam2;
 mod resident_restore;
+mod resolve;
 mod run_cli;
 mod splat_cli;
 mod supply;
@@ -80,8 +81,17 @@ pub(crate) fn npu_explicit() -> bool {
 const HELP: &str = "\
 brain - train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
 
-USAGE: brain <command> [options]
-The model is selected by the command.
+USAGE: brain <verb> <architecture> [options]   OR   brain <architecture> <verb> [options]
+Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
+train ...` dispatch identically. `brain caps` lists every architecture brain
+knows about, along with its actions (its \"verbs\"). An architecture with its
+own dedicated flags (gpt2, qwen3, qwen35moe, glmdsa, lfm2, qwen3tts, yolov8,
+zipdepth, flux2, worldmirror2, splat, qwen3omnimoe, diamond, toypid, toymoe)
+is documented below; every other one (`brain caps` shows the full list -
+s3dit, fastvlm, qwen3vl, sam2, scrfd, arcface, vqgan, codeformer, rrdbnet,
+clip, deepseek2ocr, nemotronasr, qwen3asr, chronos2, fincast, kronos, ...) is
+reached the same way, its verb being the exact action name `brain caps <id>`
+prints (e.g. `brain scrfd detect --in image=photo.ppm`).
 
 --device selects WHICH COMPUTE IS SCHEDULABLE. Omit it and brain uses every
 device on the machine - all GPUs, the CPU, and an NPU if present - scheduling
@@ -111,11 +121,11 @@ DATA
   brain data gen <name> [--out DIR --n N --seed S]
       names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
 
-GPT (dense baseline)
-  brain gpt train <data_dir> [--out F --steps N --batch B --block T
+GPT2 (dense baseline)
+  brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
                               --layers L --d-model D --heads H --lr X --mask = --align]
-  brain gpt eval  --weights F --data <dir> [--batches N --samples M]
-  brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
+  brain gpt2 eval  --weights F --data <dir> [--batches N --samples M]
+  brain gpt2 infer --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
 
 FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
@@ -125,24 +135,24 @@ FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
       [--ref in.ppm]...           # reference images => editing mode
       weights via env: BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
       served generically as model `flux2-klein`: brain caps flux2-klein,
-      brain do flux2-klein text2image|edit|lora_train, and D-Bus (examples/imagegen);
+      brain flux2 text2image|edit|lora_train, and D-Bus (examples/imagegen);
       9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
 
 World models (playable action-conditioned video models; docs/models/world-models/)
-  brain wm play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
-  brain wm play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
+  brain diamond play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
+  brain diamond play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
-  brain wm bench --model fake [--frames N]          # ms/frame + fps
+  brain diamond bench --model fake [--frames N]          # ms/frame + fps
 
 WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mirror/)
-  brain mirror import <model.safetensors|hf_dir> --out mirror.safetensors
+  brain worldmirror2 import <model.safetensors|hf_dir> --out mirror.safetensors
       One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
       1:1, every tensor verified).
-  brain mirror infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
+  brain worldmirror2 infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
       [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X] [--prune VOXEL]
       Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
       maps). Any aspect ratio; --prune 0.002 voxel-merges multi-view duplicates.
-  brain mirror demo  --weights F --images <…> [--width N --height N --fov D]
+  brain worldmirror2 demo  --weights F --images <…> [--width N --height N --fov D]
       infer + interactive fly-through of the reconstructed world.
 
 3D GAUSSIAN SPLATTING (scene viewer/renderer; crates/splat)
@@ -154,15 +164,15 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mi
         m mouse-look, arrows look, [ ] quality, v depth view, p screenshot,
         Enter reset, Esc quit.
 
-YOLO (from-scratch anchor-free object detector)
-  brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C
+YOLOv8 (from-scratch anchor-free object detector)
+  brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
                                        --input S --seed S]
-  brain yolo eval  --weights F --data <dir> [--conf X --iou X]   # mAP/precision/recall
-  brain yolo detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
+  brain yolov8 eval  --weights F --data <dir> [--conf X --iou X]   # mAP/precision/recall
+  brain yolov8 detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
                                                                 # prints [x1,y1,x2,y2,conf,class] JSON lines
-  brain yolo fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
+  brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
       Trains the tiny YOLOv8 graph on a `data gen detect` dataset (CPU backend).
-  brain yolo detect --weights F --image <...> --device npu     # run on the Intel NPU
+  brain yolov8 detect --weights F --image <...> --device npu     # run on the Intel NPU
 
 INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
   brain npu export   --weights F --out model.onnx [--input S --opset N]    # fp32 ONNX
@@ -176,10 +186,11 @@ INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
       (NPU|CPU|GPU|AUTO) - unrelated to brain's own --device cpu|gpu grammar
       (--device is still accepted here as a deprecated alias for --ov-device).
 
-SPARSE MoE
-  brain train [--steps N --batch-size B --block-size T --lr X --out F]
-  brain generate --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
-  brain eval     --weights F [--samples N]
+TOY ARCHITECTURES (brain's own, no upstream reference - toy tasks, not served)
+  brain toymoe train [--steps N --batch-size B --block-size T --lr X --out F]
+  brain toymoe infer --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
+  brain toymoe eval  --weights F [--samples N]
+  brain toypid <train|rollout|profile> ...   # the WebGPU browser demo's model
 
 FEDERATED MoE (train experts separately, then assemble)
   brain federated split    <base.safetensors> <out_dir>
@@ -217,12 +228,12 @@ HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
       brain serve --help
 
 EVENT/STDIO CONTROLLER
-  brain run [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
+  brain serve --stdio [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
       Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
       on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT),
       a fake echo model runs; with no --yolo (or BRAIN_YOLO), a fake detector runs,
       so the loop is usable without a trained checkpoint.
-      Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
+      Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
 PERFORMANCE BENCHMARKING (how fast, at what cost)
   brain perf list                          # scenarios + the standard workload matrix
@@ -247,67 +258,70 @@ FLOP/OPS ACCOUNTING
       integer OPS). --stages N reports per-stage = per-device numbers.
 
 QWEN3 (dense decoder; paged continuous-batching serving)
-  brain qwen import <hf_dir|safetensors> --out F
-  brain qwen infer  --weights F --tokenizer T --prompt \"...\" [--max-new N --temp X --top-k K]
-  brain qwen serve  --weights F --tokenizer T --prompt \"...\" [--prompt ...] [--max-new N
+  brain qwen3 import <hf_dir|safetensors> --out F
+  brain qwen3 infer  --weights F --tokenizer T --prompt \"...\" [--max-new N --temp X --top-k K]
+  brain qwen3 serve  --weights F --tokenizer T --prompt \"...\" [--prompt ...] [--max-new N
                     --block-size B --kv-fp32]     # paged KV + continuous batching;
                                                   # int8 KV on by default, --kv-fp32 opts out
-  brain qwen train|finetune|export|precompile|toolcall|eval|calib ...
+  brain qwen3 train|finetune|export|precompile|toolcall|eval|calib ...
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
-  brain glm <train|finetune|infer|eval|import|export> ...
+  brain glmdsa <train|finetune|infer|eval|import|export> ...
 
 QWEN3-OMNI (text/audio/image/video in, text + speech out)
-  brain omni import   --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
+  brain qwen3omnimoe import --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
       # brain-native W8A16 checkpoint for the GPU-resident sharded Thinker
       # (serve it with BRAIN_OMNI_INT8_CHECKPOINT=<out>)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
-  brain lfm import    --hf <dir> --out lfm.safetensors
-  brain lfm fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
-  brain lfm embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
-  brain lfm data      --input corpus.txt --tokenizer T --out data/lfm
-  brain lfm finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T]
-  brain lfm eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
-  brain npu lfm       --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
-  brain do lfm <fill_mask|embed> …   # capability surface; also served over D-Bus
+  brain lfm2 import    --hf <dir> --out lfm.safetensors
+  brain lfm2 fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
+  brain lfm2 embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
+  brain lfm2 data      --input corpus.txt --tokenizer T --out data/lfm
+  brain lfm2 finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T]
+  brain lfm2 eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
+  brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
   make perf/lfm                      # standalone concurrency benchmark (scheduler+residency)
 
 QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
-  brain tts <import|clone|synth|design|serve|sim|finetune> ...
+  brain qwen3tts <import|clone|synth|design|serve|sim|finetune> ...
 
 MONOCULAR DEPTH (ZipDepth)
-  brain depth --image <P6.ppm> [...]       # single image
-  brain depth --camera                     # realtime V4L2 webcam (Linux)
-  brain depth <calib|train> ...
+  brain zipdepth --image <P6.ppm> [...]       # single image
+  brain zipdepth --camera                     # realtime V4L2 webcam (Linux)
+  brain zipdepth <calib|train> ...
 
 FORECASTING (chronos2 / kronos / fincast behind one seam)
   brain forecast <compare|serve|import|finetune> ...
+      chronos2/fincast/kronos are also individually listed by `brain caps`,
+      but have no direct per-action CLI path yet - serve them instead.
 
-CAPABILITIES (typed actions; one dispatch path for CLI + event API)
-  brain caps                               # every model's action manifest
-  brain do <model> <action> [--param v ...]
+CAPABILITIES (typed actions; one dispatch path for the CLI, D-Bus and HTTP)
+  brain caps                               # every architecture's action manifest
+  brain <architecture> <action> [--param v ...] [--in name=path ...] [--out name=path ...]
+      Any architecture without its own dedicated flags above (`brain caps`
+      lists them all) dispatches this way - the action name IS the verb.
+      Example: brain scrfd detect --in image=photo.ppm --json
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
-  brain import-gguf FILE [--out PATH] [--id VENDOR/REPO]
+  brain import FILE [--out PATH] [--id VENDOR/REPO]
       Convert a GGUF checkpoint to brain-native safetensors, choosing the
       importer by the file's own `general.architecture`. Defaults to a sibling
       <stem>.brain.safetensors, which the model-dir scan then serves on its own.
-      brain import-gguf --list                # registered architectures
+      brain import --list                # registered architectures
 
 OTHER
-  brain gradcheck                          # finite-difference backprop check (GPT)
-  brain pid <train|rollout|profile> ...
+  brain gradcheck                          # finite-difference backprop check (GPT2)
   brain help
   brain --version
 
 EXAMPLES
   brain data gen calculator --out data/calculator --n 100000
-  brain gpt train data/calculator --out out/gpt.safetensors --steps 2000 --mask =
-  brain gpt eval  --weights out/gpt.safetensors --data data/calculator
-  brain gpt gen   --weights out/gpt.safetensors --data data/calculator --prompt \"12+7=\" --max-new 8
-  brain train --steps 2000 --out moe.safetensors
-  brain generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
+  brain gpt2 train data/calculator --out out/gpt2.safetensors --steps 2000 --mask =
+  brain gpt2 eval  --weights out/gpt2.safetensors --data data/calculator
+  brain gpt2 infer --weights out/gpt2.safetensors --data data/calculator --prompt \"12+7=\" --max-new 8
+  brain toymoe train --steps 2000 --out moe.safetensors
+  brain toymoe infer --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
   brain federated split moe.safetensors out/shards && brain federated verify out/shards
   brain gradcheck
 
@@ -674,20 +688,6 @@ fn main() {
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
-        Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
-        Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
-        Some("qwen35moe") => qwen35moe_cli::run_qwen35moe(&argv[2..]),
-        Some("import-gguf") => gguf_import::run_import_gguf(&argv[2..]),
-        Some("omni") => omni_cli::run_omni(&argv[2..]),
-        Some("glm") => glm_cli::run_glm(&argv[2..]),
-        Some("lfm") => lfm_cli::run_lfm(&argv[2..]),
-        Some("tts") => tts_cli::run_tts(&argv[2..]),
-        Some("wm") => wm_cli::run_wm(&argv[2..]),
-        Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
-        Some("depth") => depth_cli::run_depth(&argv[2..]),
-        Some("flux2") => flux2_cli::run_flux2(&argv[2..]),
-        Some("mirror") => mirror_cli::run_mirror(&argv[2..]),
-        Some("splat") => splat_cli::run_splat(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("flops") => flops_cli::run_flops(&argv[2..]),
@@ -705,19 +705,10 @@ fn main() {
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
-        Some("caps") | Some("capabilities") => std::process::exit(caps_cli::run_caps(&argv[2..])),
-        Some("do") => std::process::exit(caps_cli::run_do(&argv[2..])),
-        Some("run") | Some("serve") => run_cli::run_serve(&argv[2..]),
-        Some("pid") => pid_cli::run_pid(&argv[2..]),
-        Some("train") => moe::run_train(&argv[2..]),
-        Some("eval") => moe::run_eval(&argv[2..]),
-        Some("generate") => moe::run_generate(),
+        Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
+        Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
-        Some(other) => {
-            eprintln!("brain: unknown command '{other}'\n");
-            print!("{HELP}");
-            std::process::exit(2);
-        }
+        Some(_) => resolve::dispatch(&argv[1..], HELP),
     }
 }
 

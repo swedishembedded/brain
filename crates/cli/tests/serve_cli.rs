@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Process-level tests for `brain serve` / `brain run`'s flag parsing: unknown
-//! flags must be a hard error (not the old warn-and-continue), and `--help`
-//! must actually print usage instead of falling into the blocking stdio loop.
+//! Process-level tests for `brain serve`'s flag parsing: unknown flags must
+//! be a hard error (not the old warn-and-continue), and `--help` must
+//! actually print usage instead of falling into the blocking stdio loop.
+//! `brain run` used to be an alias for this same command; it is now freed up
+//! (see `the_former_run_alias_is_no_longer_a_recognized_command` below).
 //!
 //! Regression coverage for an incident where `brain serve --listen HOST:PORT`
 //! (a flag that never existed) used to be silently ignored, exit 0, and
@@ -50,11 +52,16 @@ fn unknown_flag_is_a_hard_error_with_usage() {
     assert!(stderr.contains("--openai"), "stderr: {stderr}");
 }
 
+/// `brain run` used to be an alias for `brain serve`; the stdio controller it
+/// selected by default is now reached explicitly via `brain serve --stdio`
+/// (see `run_cli`'s module doc), which frees "run" to mean nothing special --
+/// it is not a verb any architecture recognizes and not an architecture id,
+/// so it falls through to the generic "unknown command" path.
 #[test]
-fn unknown_flag_is_a_hard_error_for_the_run_alias() {
+fn the_former_run_alias_is_no_longer_a_recognized_command() {
     let out = run(&["run", "--nope"]);
     assert_eq!(out.status.code(), Some(2), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--nope"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown command 'run'"));
 }
 
 #[test]
@@ -100,9 +107,12 @@ fn serve_help_exits_zero_with_usage_on_stdout() {
     }
 }
 
+/// `--stdio` is the explicit spelling of the event-driven controller `brain
+/// serve` used to fall into implicitly whenever no surface flag was given;
+/// it must be a recognized flag, not "unknown flag --stdio".
 #[test]
-fn run_help_alias_also_exits_zero_with_usage() {
-    let out = run(&["run", "--help"]);
-    assert!(out.status.success());
+fn stdio_flag_is_recognized_and_still_reaches_help() {
+    let out = run(&["serve", "--stdio", "--help"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("--openai"));
 }
