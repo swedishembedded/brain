@@ -41,7 +41,7 @@
 //!
 //! Real-weight-adjacent, real-golden-adjacent: skips cleanly when
 //! `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset or the golden (`tools/goldens/
-//! omni_dump_generate.py`'s output) is missing.
+//! qwen3omnimoe_dump_generate.py`'s output) is missing.
 //!
 //! Expected to be SLOW — `crate::generate`'s own module doc: every layer's
 //! weights are streamed fresh from the checkpoint on every prefill call and
@@ -70,7 +70,7 @@ fn matches_the_real_hf_greedy_generation() {
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_generate.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run tools/goldens/omni_dump_generate.py against the real checkpoint)");
+        eprintln!("skip: {golden_path:?} missing (run tools/goldens/qwen3omnimoe_dump_generate.py against the real checkpoint)");
         return;
     }
 
@@ -89,7 +89,7 @@ fn matches_the_real_hf_greedy_generation() {
     // The golden was dumped from the bare `Thinker` class directly
     // (`Qwen3OmniMoeThinkerForConditionalGeneration.from_pretrained`, not the
     // full `Qwen3OmniMoeForConditionalGeneration` wrapper), which carries no
-    // bundled `generation_config.eos_token_id` -- `omni_dump_generate.py`'s
+    // bundled `generation_config.eos_token_id` -- `qwen3omnimoe_dump_generate.py`'s
     // own `model.generate(...)` call passes none either, so HF ran all
     // `MAX_NEW` steps unconditionally (confirmed: the golden's own generated
     // ids contain 151645, `<|im_end|>`, mid-sequence, not just at the tail).

@@ -11,7 +11,7 @@ stage: the post-embedding residual, every layer output, the final hidden state
 (post embedding_norm), MLM logits at three probe rows, and a fill-mask top-5.
 Fixed token ids isolate forward parity from tokenizer parity. Dev-time only.
 
-usage: lfm_dump_reference.py <hf_checkpoint_dir> [out.safetensors]
+usage: lfm2_dump_reference.py <hf_checkpoint_dir> [out.safetensors]
 """
 import importlib.util
 import json
@@ -26,7 +26,7 @@ if len(sys.argv) < 2:
 HF_DIR = sys.argv[1]
 NAME = os.path.basename(HF_DIR.rstrip("/")).lower().replace(".", "").replace("-", "_")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-    os.path.dirname(__file__), "..", "..", "crates", "lfm", "tests", "golden", f"{NAME}.safetensors")
+    os.path.dirname(__file__), "..", "..", "crates", "lfm2", "tests", "golden", f"{NAME}.safetensors")
 
 # A fixed, arbitrary token sequence (valid ids < vocab 65536); id 16 = <|mask|>.
 # "<|startoftext|>The capital of France is<|mask|>." tokenized by HF tokenizers.

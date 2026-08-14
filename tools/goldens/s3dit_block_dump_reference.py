@@ -16,7 +16,7 @@ import torch
 from safetensors.torch import save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformerBlock, RopeEmbedder
 
-# testdata/golden/zimage/... -- where crates/zimage/tests/block_parity.rs's
+# testdata/golden/zimage/... -- where crates/s3dit/tests/block_parity.rs's
 # testdata("golden/zimage/zimage_block.safetensors") actually looks.
 TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = str(Path(TESTDATA) / "golden" / "zimage" / "zimage_block.safetensors")

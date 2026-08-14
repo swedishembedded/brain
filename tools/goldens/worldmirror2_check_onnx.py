@@ -6,14 +6,14 @@
 
 Runs each graph on the deterministic T2/T4 inputs (same as the Rust parity
 tests) and compares against the committed golden samples in
-crates/mirror/tests/golden/golden_meta.json.
+crates/worldmirror2/tests/golden/golden_meta.json.
 
-  python3 tools/goldens/mirror_check_onnx.py out/mirror-dino.onnx  [CPU|NPU]
-  python3 tools/goldens/mirror_check_onnx.py out/mirror-trunk.onnx [CPU|NPU] --stage trunk
-      (trunk input = crates/mirror/tests/golden/t2_patch_tokens.npy from the
+  python3 tools/goldens/worldmirror2_check_onnx.py out/mirror-dino.onnx  [CPU|NPU]
+  python3 tools/goldens/worldmirror2_check_onnx.py out/mirror-trunk.onnx [CPU|NPU] --stage trunk
+      (trunk input = crates/worldmirror2/tests/golden/t2_patch_tokens.npy from the
        dump script; taps compared vs the t4_tap goldens — export with
        --frames 1 --hp 37 --wp 37)
-  python3 tools/goldens/mirror_check_onnx.py out [CPU|NPU] --stage heads
+  python3 tools/goldens/worldmirror2_check_onnx.py out [CPU|NPU] --stage heads
       (chains out/mirror-trunk.onnx -> out/mirror-{depth,pts,norm,gs}_head.onnx
        and compares every head + gs_params against the t5 goldens)
 """
@@ -50,9 +50,9 @@ def synth_image(w=600, h=400):
 def check_trunk(path, device):
     core = ov.Core()
     model = core.compile_model(path, device)
-    toks = np.load("crates/mirror/tests/golden/t2_patch_tokens.npy")  # [1369,1024]
+    toks = np.load("crates/worldmirror2/tests/golden/t2_patch_tokens.npy")  # [1369,1024]
     out = model({"patch_tokens": toks[None]})
-    meta = json.load(open("crates/mirror/tests/golden/golden_meta.json"))
+    meta = json.load(open("crates/worldmirror2/tests/golden/golden_meta.json"))
     fail = False
     for i in range(4):
         # the graph emits the frame/global halves separately; concatenate here
@@ -77,9 +77,9 @@ def check_trunk(path, device):
 def check_heads(outdir, device):
     core = ov.Core()
     trunk = core.compile_model(f"{outdir}/mirror-trunk.onnx", device)
-    toks = np.load("crates/mirror/tests/golden/t2_patch_tokens.npy")
+    toks = np.load("crates/worldmirror2/tests/golden/t2_patch_tokens.npy")
     taps = trunk({"patch_tokens": toks[None]})
-    meta = json.load(open("crates/mirror/tests/golden/golden_meta.json"))
+    meta = json.load(open("crates/worldmirror2/tests/golden/golden_meta.json"))
     # head inputs = the PATCH rows (skip the 7 special tokens)
     feed = {
         f"tap{i}": np.concatenate(
@@ -140,7 +140,7 @@ def main():
     model = core.compile_model(path, device)
     out = model({"frame": x})["patch_tokens"][0]  # [1369,1024]
 
-    meta = json.load(open("crates/mirror/tests/golden/golden_meta.json"))
+    meta = json.load(open("crates/worldmirror2/tests/golden/golden_meta.json"))
     s = meta["t2_patch_tokens"]
     flat = out.reshape(-1)
     rms = float(np.sqrt(np.mean(flat.astype(np.float64) ** 2)))

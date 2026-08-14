@@ -18,10 +18,10 @@ from safetensors.torch import load_file, save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
 if len(sys.argv) < 2:
-    sys.exit("usage: zimage_real_dump_reference.py <z_image_turbo_bf16.safetensors> [out.safetensors]")
+    sys.exit("usage: s3dit_real_dump_reference.py <z_image_turbo_bf16.safetensors> [out.safetensors]")
 COMFY = sys.argv[1]
 # testdata/golden/zimage/... by default -- where
-# crates/zimage/tests/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
+# crates/s3dit/tests/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real.safetensors")

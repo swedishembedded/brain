@@ -11,7 +11,7 @@ Per the plan of record, parity is validated
 component needs straight out of the sharded safetensors files (via
 `model.safetensors.index.json`), builds the real upstream HF module for that
 component, and runs one fixed, synthetic, fp32, CPU forward. This is the same
-selective-load pattern `qwenvl_decoder_dump_reference.py` uses for the (also
+selective-load pattern `qwen3vl_decoder_dump_reference.py` uses for the (also
 oversized) Qwen3-VL-4B decoder.
 
 No random inputs — every input below is deterministic (arange/fixed lists),
@@ -27,7 +27,7 @@ Components dumped:
   talkcp   talker.code_predictor (5L)            -> omni_code_predictor.safetensors
   code2wav code2wav (RVQ decode -> waveform)      -> omni_code2wav.safetensors
 
-usage: omni_dump_reference.py <hf_checkpoint_dir> [out_dir] [component ...]
+usage: qwen3omnimoe_dump_reference.py <hf_checkpoint_dir> [out_dir] [component ...]
   (no component args => dump all of them)
 
 env:
@@ -202,7 +202,7 @@ def dump_layer0(cfg):
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextModel
 
     tcfg = cfg.thinker_config.text_config
-    # Truncate to 1 layer (qwenvl_decoder_dump_reference.py's pattern) so only
+    # Truncate to 1 layer (qwen3vl_decoder_dump_reference.py's pattern) so only
     # layer 0's 128 experts (~605 M params) are ever materialized, not all 48.
     tcfg.num_hidden_layers = 1
     model = Qwen3OmniMoeThinkerTextModel(tcfg)

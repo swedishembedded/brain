@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from safetensors import safe_open
 
-SRC = os.environ.get("BRAIN_MOONDREAM_CKPT") or sys.exit("set BRAIN_MOONDREAM_CKPT=<moondream3-preview hf checkpoint dir> (no baked-in default: this path is machine-specific)")
+SRC = os.environ.get("BRAIN_MOONDREAM3_CKPT") or sys.exit("set BRAIN_MOONDREAM3_CKPT=<moondream3-preview hf checkpoint dir> (no baked-in default: this path is machine-specific)")
 OUT = os.environ.get("BRAIN_VL_PARITY_OUT") or sys.exit("set BRAIN_VL_PARITY_OUT=<parity output dir> (no baked-in default: this path is machine-specific)")
 os.makedirs(OUT, exist_ok=True)
 N = 4  # dense blocks (0-3, before MoE start_layer=4)

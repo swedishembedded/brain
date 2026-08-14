@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity for the SDXL `UNet2DConditionModel` against
-//! the goldens dumped by `tools/goldens/sdxl_dump_reference.py`.
+//! the goldens dumped by `tools/goldens/sdxlunet_dump_reference.py`.
 //!
 //! Fixtures live under `$BRAIN_TESTDATA` (default `<repo>/testdata`) in
 //! `sdxl/`; the reference WEIGHTS are named by env var. The test **SKIPS
@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! BRAIN_SDXL=/path/to/stable-diffusion-xl-base-1.0
-//! python3 tools/goldens/sdxl_dump_reference.py --sdxl $BRAIN_SDXL --out testdata/sdxl
+//! python3 tools/goldens/sdxlunet_dump_reference.py --sdxl $BRAIN_SDXL --out testdata/sdxl
 //! ```
 //!
 //! VRAM: the UNet is 2.567 G parameters, so **fp32 weights are ~10.3 GB** and
@@ -111,7 +111,7 @@ impl Report {
 fn sdxl_unet_forward_matches_diffusers() {
     let g = testdata("sdxl/unet/stages.safetensors");
     if !g.exists() {
-        eprintln!("SKIP: {} absent (run tools/goldens/sdxl_dump_reference.py)", g.display());
+        eprintln!("SKIP: {} absent (run tools/goldens/sdxlunet_dump_reference.py)", g.display());
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_SDXL") else {

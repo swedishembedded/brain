@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-Omni's Talker decoder — one MoE layer, with its shared expert — vs.
+//! Qwen3-Omni's Talker decoder - one MoE layer, with its shared expert - vs.
 //! the real transformers reference, on real weights. Validates
 //! `qwen3omnimoe::talker::layer_fwd`: RMSNorm + GQA (QK-norm, table-driven M-RoPE) +
 //! sparse MoE FFN + the always-active shared expert
-//! (`model::moe::shared_expert_fwd`) — the one architectural difference from
+//! (`model::moe::shared_expert_fwd`) - the one architectural difference from
 //! `qwen3omnimoe::thinker::layer_fwd`. See `crates/omni/src/talker.rs`'s module doc.
 //!
 //! Same `layer_out`-not-`hidden` comparison-target subtlety as
 //! `thinker_layer_parity.rs` (`Qwen3OmniMoeTalkerModel.forward` also applies
 //! a top-level final RMSNorm after the layer loop, even truncated to 1
-//! layer) — `tools/goldens/omni_dump_reference.py`'s `dump_talker_layer0`
+//! layer) - `tools/goldens/qwen3omnimoe_dump_reference.py`'s `dump_talker_layer0`
 //! hooks `model.norm`'s input for the same reason.
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard holding

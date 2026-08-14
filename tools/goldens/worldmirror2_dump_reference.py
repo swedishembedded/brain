@@ -6,10 +6,10 @@
 
 Run manually (never in the build) against the reference repo + checkpoint:
 
-  python3 tools/goldens/mirror_dump_reference.py \
+  python3 tools/goldens/worldmirror2_dump_reference.py \
       --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
       --ckpt <HY-WorldMirror-2.0 checkpoint>/model.safetensors \
-      --out crates/mirror/tests/golden
+      --out crates/worldmirror2/tests/golden
 
 Stages dumped (each as .npy + a small committed sample in golden_meta.json):
   t1: synthetic 600x400 image -> PIL bicubic resize + crop + ToTensor (u8 + normalized CHW)

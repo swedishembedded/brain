@@ -4,7 +4,7 @@
 //! Single ZImageTransformerBlock forward parity vs diffusers.
 //!
 //! Golden (`tests/golden/zimage_block.safetensors`, committed, baked by
-//! `tools/goldens/zimage_block_dump_reference.py`): a small block
+//! `tools/goldens/s3dit_block_dump_reference.py`): a small block
 //! (dim 48, 2 heads, T 8) with random weights + inputs and its reference output.
 //! Exercises adaLN folding, the double-RMSNorm sandwich, QK-norm attention with
 //! multi-axis interleaved RoPE, and SwiGLU. No external weights needed — the

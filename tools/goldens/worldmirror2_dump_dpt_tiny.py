@@ -6,14 +6,14 @@
 
 Random seeded weights with the REAL channel widths but a 4x4 patch grid
 (56x56 image) — runs in seconds. Dumps per-stage intermediates so the Rust
-test (crates/mirror/tests/t3_dpt_tiny.rs) can pinpoint the first divergence:
+test (crates/worldmirror2/tests/t3_dpt_tiny.rs) can pinpoint the first divergence:
 rn[0..3] (post projects/pos/resize/rn-conv), fused (post refinenet1),
 full (post output_conv1+bilinear+pos), out (post output_conv2).
 
 Run from the repo root with the reference repo importable:
-  python3 tools/goldens/mirror_dump_dpt_tiny.py \
+  python3 tools/goldens/worldmirror2_dump_dpt_tiny.py \
       --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
-      --out crates/mirror/tests/golden/dpt_tiny.json
+      --out crates/worldmirror2/tests/golden/dpt_tiny.json
 """
 import argparse
 import json

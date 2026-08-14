@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! End-to-end test of `brain qwen finetune --lora ...`: the "simple command
+//! End-to-end test of `brain qwen3 finetune --lora ...`: the "simple command
 //! to fully retrain and overwrite the lora checkpoint" from the training
 //! benchmark's Definition of Done. Runs the actual compiled
 //! `brain` binary against a real Qwen3-0.6B checkpoint symlinked into a
@@ -94,7 +94,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
 
     let out = Command::new(bin())
         .args([
-            "qwen",
+            "qwen3",
             "finetune",
             "--lora",
             "4",
@@ -117,10 +117,10 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
         ])
         .env("BRAIN_DEVICE", "cpu")
         .output()
-        .expect("run brain qwen finetune --lora");
+        .expect("run brain qwen3 finetune --lora");
     assert!(
         out.status.success(),
-        "brain qwen finetune --lora failed:\nstdout: {}\nstderr: {}",
+        "brain qwen3 finetune --lora failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -144,7 +144,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     // create a second copy -- the "fully retrain and overwrite" requirement.
     let out2 = Command::new(bin())
         .args([
-            "qwen",
+            "qwen3",
             "finetune",
             "--lora",
             "4",
@@ -165,7 +165,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
         ])
         .env("BRAIN_DEVICE", "cpu")
         .output()
-        .expect("run brain qwen finetune --lora a second time");
+        .expect("run brain qwen3 finetune --lora a second time");
     assert!(out2.status.success(), "retrain-and-overwrite failed: {}", String::from_utf8_lossy(&out2.stderr));
     assert!(adapter_path.is_file(), "adapter file must still be there after overwrite");
 }

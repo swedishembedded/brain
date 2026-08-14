@@ -6,7 +6,7 @@
 //!
 //! Golden (`tests/golden/zimage_real.safetensors`, committed - small: inputs +
 //! output only): a forward of the turbo-config model loaded from the real Comfy
-//! weights, baked by `tools/goldens/zimage_real_dump_reference.py`. brain
+//! weights, baked by `tools/goldens/s3dit_real_dump_reference.py`. brain
 //! imports the SAME weights (`import_comfy`) and must match. The 12 GB weights
 //! are NOT committed - set `BRAIN_S3DIT_DIT` (a resources default is tried);
 //! skips if absent. Heavy (loads ~24 GB fp32, 30-layer CPU forward).

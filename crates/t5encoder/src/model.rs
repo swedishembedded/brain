@@ -20,7 +20,7 @@
 //!
 //! The four ways T5 differs from every decoder in this workspace, and what each
 //! costs if it is assumed instead of checked (each was verified against the
-//! reference by `tools/goldens/t5_dump_reference.py`, which records the numbers in its
+//! reference by `tools/goldens/t5encoder_dump_reference.py`, which records the numbers in its
 //! manifest):
 //!
 //! 1. **RMSNorm, no bias, no residual rescale.** `rmsnorm_eps` is exactly

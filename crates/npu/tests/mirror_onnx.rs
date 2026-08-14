@@ -4,8 +4,8 @@
 //! Structural test for the WorldMirror-2 DINOv2 ONNX export: build a
 //! 2-block graph from zero weights with the real shapes, decode it, and
 //! assert the IO signature and op inventory. (Numerical parity vs the
-//! reference goldens is the manual `tools/goldens/mirror_check_onnx.py` step —
-//! OpenVINO CPU/NPU — since the full 24-block graph carries 1.2 GB of
+//! reference goldens is the manual `tools/goldens/worldmirror2_check_onnx.py` step -
+//! OpenVINO CPU/NPU - since the full 24-block graph carries 1.2 GB of
 //! weights.)
 
 use std::collections::HashMap;
@@ -109,7 +109,7 @@ fn trunk_graph_structure() {
     let graph = model.graph.expect("graph");
     assert_eq!(graph.input.len(), 1);
     assert_eq!(graph.input[0].name, "patch_tokens");
-    // taps are emitted as separate frame/global halves — Concat(a, f(a)) whose
+    // taps are emitted as separate frame/global halves - Concat(a, f(a)) whose
     // result is a graph output miscompiles on the Intel NPU (see topology).
     let outs: Vec<&str> = graph.output.iter().map(|o| o.name.as_str()).collect();
     assert_eq!(outs, ["tap0_frame", "tap0_global", "tap1_frame", "tap1_global"]);

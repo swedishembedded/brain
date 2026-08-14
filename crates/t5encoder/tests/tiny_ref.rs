@@ -19,7 +19,7 @@
 //! `parity.rs` is the expensive one. Regenerate the fixture with:
 //!
 //! ```text
-//! python3 tools/goldens/t5_dump_reference.py --out testdata/t5      # no --model needed
+//! python3 tools/goldens/t5encoder_dump_reference.py --out testdata/t5      # no --model needed
 //! ```
 //!
 //! Fixtures resolve from `$BRAIN_TESTDATA` (default `<repo>/testdata`); the

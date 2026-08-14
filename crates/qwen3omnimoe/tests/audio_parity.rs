@@ -37,7 +37,7 @@ fn shard_with_audio_tower() -> Option<PathBuf> {
 }
 
 /// The exact golden-generation formula from
-/// `tools/goldens/omni_dump_reference.py`'s `dump_audio`: a fixed,
+/// `tools/goldens/qwen3omnimoe_dump_reference.py`'s `dump_audio`: a fixed,
 /// deterministic, bounded, non-trivial mel pattern (never random, per the
 /// engine's test-PRNG convention) so this reproduces the SAME input the
 /// golden was dumped against.

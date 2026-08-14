@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! T1 — PIL-exact preprocessing parity; T2 — DINOv2 patch-token parity.
+//! T1 - PIL-exact preprocessing parity; T2 - DINOv2 patch-token parity.
 //!
-//! Goldens come from `tools/goldens/mirror_dump_reference.py` (run manually against
+//! Goldens come from `tools/goldens/worldmirror2_dump_reference.py` (run manually against
 //! the reference repo + checkpoint); the committed `golden_meta.json` holds
 //! shape + rms + 64–256 sampled values per stage. The synthetic input image
 //! is regenerated here bit-for-bit (same integer formula as the dump script).
@@ -106,7 +106,7 @@ fn t1_pil_bicubic_exact() {
     assert_eq!(resize_dims(600, 400, 518, 14), (nw, nh));
     let resized = resize_bicubic(&img, nw, nh);
 
-    // resized u8: golden sampled from HWC u8 — BIT-exact (tol < 1)
+    // resized u8: golden sampled from HWC u8 - BIT-exact (tol < 1)
     let got: Vec<f32> = resized.px.iter().map(|&b| b as f32).collect();
     check_sample("t1_resized_u8", &got, &get_sample(&m, "t1_resized_u8"), 0.5);
 
@@ -128,7 +128,7 @@ fn t1_pil_bicubic_exact() {
 #[test]
 fn t2_dinov2_patch_tokens() {
     let Ok(ckpt) = std::env::var("MIRROR_CKPT") else {
-        eprintln!("MIRROR_CKPT not set — skipping");
+        eprintln!("MIRROR_CKPT not set - skipping");
         return;
     };
     let m = meta();
@@ -193,7 +193,7 @@ fn t2_dinov2_patch_tokens() {
     }
     assert!(errs.is_empty(), "stage mismatches:\n{}", errs.join("\n"));
 
-    // ---- T7: rectangular input (392x518, grid 28x37) — pos-embed
+    // ---- T7: rectangular input (392x518, grid 28x37) - pos-embed
     // interpolation + rect trunk/RoPE/DPT, reusing the loaded weights ----
     if m.get("t7_tap0").is_some() {
         let mut crop = Rgb8 { w: 400, h: 400, px: vec![0; 400 * 400 * 3] };
@@ -235,6 +235,6 @@ fn t2_dinov2_patch_tokens() {
         }
         assert!(errs7.is_empty(), "T7 rect mismatches:\n{}", errs7.join("\n"));
     } else {
-        eprintln!("no t7 goldens in meta — regenerate with tools/goldens/mirror_dump_reference.py");
+        eprintln!("no t7 goldens in meta - regenerate with tools/goldens/worldmirror2_dump_reference.py");
     }
 }

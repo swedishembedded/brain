@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Gate B of the Definition of Done's "a way to validate that model has
-//! learned ideas from the dataset": `brain qwen eval` against a REAL
+//! learned ideas from the dataset": `brain qwen3 eval` against a REAL
 //! Qwen3-0.6B checkpoint and a real bench-shaped `validation.jsonl`, base
 //! score alone and base+adapter side by side. Complements
 //! `crates/qwen3/tests/lora_learning_gate.rs` (Gate A: synthetic, no
 //! checkpoint, always runs) -- this proves the CLI/store/real-model WIRING
-//! (`qwen3::eval::score_chat`, `brain qwen eval`'s adapter resolution)
+//! (`qwen3::eval::score_chat`, `brain qwen3 eval`'s adapter resolution)
 //! rather than re-litigating whether LoRA training converges, which Gate A
 //! and `crates/cli/tests/qwen_lora_finetune.rs` already cover. Trains only a
 //! handful of steps -- enough to prove the adapter changes the reported
@@ -91,20 +91,20 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
     // eval WIRING, not convergence; convergence is Gate A's job).
     let train_out = Command::new(bin())
         .args([
-            "qwen", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--dataset",
+            "qwen3", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--dataset",
             dataset_dir.to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--steps", "2", "--batch", "1", "--block", "48",
         ])
         .env("BRAIN_DEVICE", "cpu")
         .output()
-        .expect("run brain qwen finetune --lora");
+        .expect("run brain qwen3 finetune --lora");
     assert!(train_out.status.success(), "training the adapter failed: {}", String::from_utf8_lossy(&train_out.stderr));
 
     // Base score alone.
     let base_only = Command::new(bin())
-        .args(["qwen", "eval", "--weights", "Qwen/Qwen3-0.6B", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--block", "48"])
+        .args(["qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--block", "48"])
         .env("BRAIN_DEVICE", "cpu")
         .output()
-        .expect("run brain qwen eval (base only)");
+        .expect("run brain qwen3 eval (base only)");
     assert!(base_only.status.success(), "base-only eval failed: {}", String::from_utf8_lossy(&base_only.stderr));
     let base_stdout = String::from_utf8_lossy(&base_only.stdout).into_owned();
     assert!(base_stdout.contains("base Qwen/Qwen3-0.6B: loss"), "unexpected base-only output: {base_stdout}");
@@ -113,12 +113,12 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
     // Base + adapter side by side.
     let with_adapter = Command::new(bin())
         .args([
-            "qwen", "eval", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir",
+            "qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir",
             store_dir.to_str().unwrap(), "--block", "48",
         ])
         .env("BRAIN_DEVICE", "cpu")
         .output()
-        .expect("run brain qwen eval (with adapter)");
+        .expect("run brain qwen3 eval (with adapter)");
     assert!(with_adapter.status.success(), "with-adapter eval failed: {}", String::from_utf8_lossy(&with_adapter.stderr));
     let stdout = String::from_utf8_lossy(&with_adapter.stdout).into_owned();
     assert!(stdout.contains("base Qwen/Qwen3-0.6B: loss"), "missing base line: {stdout}");

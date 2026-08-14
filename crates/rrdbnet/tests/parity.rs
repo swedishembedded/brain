@@ -3,18 +3,18 @@
 
 //! RRDBNet forward parity, stage by stage, against the reference.
 //!
-//! Goldens come from `tools/goldens/esrgan_dump_reference.py`, which prefers
-//! basicsr's own `RRDBNet` and otherwise reconstructs it from the paper — never
+//! Goldens come from `tools/goldens/rrdbnet_dump_reference.py`, which prefers
+//! basicsr's own `RRDBNet` and otherwise reconstructs it from the paper - never
 //! from a second reading of brain's code.
 //!
 //! TWO gates, deliberately:
 //!
-//! * **`tiny_*`** — a small config whose weights travel WITH the goldens, so it
+//! * **`tiny_*`** - a small config whose weights travel WITH the goldens, so it
 //!   runs anywhere `make fetch/testdata` has run, with no 67 MB checkpoint and
 //!   no network. Its dims are chosen so `num_feat` (16), `num_grow_ch` (8) and
 //!   the image side (32) all differ: a degenerate config would hide a
 //!   width-for-width swap.
-//! * **`x4plus_*`** — the released checkpoint at its real 64/32/23 shape, which
+//! * **`x4plus_*`** - the released checkpoint at its real 64/32/23 shape, which
 //!   is the thing anyone actually runs. Skips unless `BRAIN_ESRGAN` names it.
 //!
 //! Run:
@@ -64,7 +64,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 fn goldens() -> Option<Vec<checkpoint::safetensors::StTensor>> {
     let p = testdata("golden/esrgan/rrdbnet.safetensors");
     if !std::path::Path::new(&p).exists() {
-        eprintln!("SKIP: {p} absent — run `make fetch/testdata` (or tools/goldens/esrgan_dump_reference.py)");
+        eprintln!("SKIP: {p} absent - run `make fetch/testdata` (or tools/goldens/rrdbnet_dump_reference.py)");
         return None;
     }
     Some(checkpoint::safetensors::read(&p).expect("read goldens"))
@@ -92,7 +92,7 @@ fn ladder(m: &Rrdb, g: &[checkpoint::safetensors::StTensor], prefix: &str) -> us
         }
         compared += 1;
     }
-    assert!(compared >= 5, "only {compared} rungs compared — the goldens are incomplete");
+    assert!(compared >= 5, "only {compared} rungs compared - the goldens are incomplete");
     eprintln!("{prefix}: {compared} rungs, {failed} failed, worst {worst_at} at cosine {worst:.10}");
     failed
 }
@@ -165,7 +165,7 @@ fn x4plus_forward_matches_the_reference() {
     assert_eq!(ladder(&m, &g, "x4plus_"), 0, "x4plus ladder");
 }
 
-/// How the tile seam responds to the halo — the measurement that makes
+/// How the tile seam responds to the halo - the measurement that makes
 /// `TILE_HALO` a number rather than a guess.
 ///
 /// The comparison is tiled-vs-**one-tile-covering-everything**, not
@@ -194,7 +194,7 @@ fn the_tile_seam_shrinks_with_the_halo() {
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let s = rrdbnet::caps::Session::new(gpu, cfg, w);
 
-    // Reference: ONE tile covering the whole image, at the halo under test —
+    // Reference: ONE tile covering the whole image, at the halo under test -
     // same border regime, no interior seam.
     let mut prev = f32::INFINITY;
     for halo in [4u32, 8, 16, 32] {
@@ -209,13 +209,13 @@ fn the_tile_seam_shrinks_with_the_halo() {
     }
     eprintln!("tiny seam at halo=32: {prev:.3e}");
     // On the 2-block toy a large halo DOES clear an 8-bit step. That is a fact
-    // about this fixture, not about the released net — see
+    // about this fixture, not about the released net - see
     // `the_tile_seam_on_the_released_net`, where the same halo does not.
     assert!(prev < 1.0 / 255.0, "seam {prev:.3e} exceeds an 8-bit step at the largest halo tried");
 }
 
 /// The same seam measurement on the RELEASED net, whose 23 blocks give a far
-/// larger receptive field than the 2-block tiny config — so a halo that is
+/// larger receptive field than the 2-block tiny config - so a halo that is
 /// ample there can be far too small here. Measuring only the toy would be
 /// exactly the degenerate-fixture mistake of measuring only a toy config.
 #[test]

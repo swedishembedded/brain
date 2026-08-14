@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Real-weight greedy-generation golden for Qwen3-Omni-30B-A3B-Instruct's
-Thinker text decoder — deliberately SEPARATE from `omni_dump_reference.py`,
+Thinker text decoder - deliberately SEPARATE from `qwen3omnimoe_dump_reference.py`,
 whose own header commits to "component-scoped only, the full checkpoint is
 too large to load wholesale even once." This script does exactly that
 (loads the whole Thinker, all 48 layers / 128 experts, real weights) and is
@@ -13,7 +13,7 @@ sweep.
 
 Uses `Qwen3OmniMoeThinkerForConditionalGeneration.from_pretrained(...,
 torch_dtype=bfloat16, low_cpu_mem_usage=True)` rather than the manual
-state_dict/`.float()` loading `omni_dump_reference.py`'s component dumps use:
+state_dict/`.float()` loading `qwen3omnimoe_dump_reference.py`'s component dumps use:
 `from_pretrained` streams each shard's tensors directly into a meta-device-
 initialized model (no full-fp32-random-init pass, no double allocation), and
 `base_model_prefix = "thinker"` on this class makes it match the checkpoint's
@@ -29,7 +29,7 @@ could theoretically flip the argmax, but everything downstream has already
 been validated to cosine 1.000000, so this is a loop-control check, not a
 new numerics check).
 
-usage: omni_dump_generate.py <hf_checkpoint_dir> [out_dir] [--max-new N]
+usage: qwen3omnimoe_dump_generate.py <hf_checkpoint_dir> [out_dir] [--max-new N]
 """
 import os
 import sys

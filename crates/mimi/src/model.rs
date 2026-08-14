@@ -362,7 +362,7 @@ impl Codec {
     /// (`convtr1d.wgsl`'s `pad` param already matches PyTorch `ConvTranspose1d`'s
     /// native symmetric `padding` semantics -- confirmed by reading the kernel;
     /// no new device math). Verified against a real golden
-    /// (`tools/goldens/omni_dump_reference.py`'s `code2wav`): the naive
+    /// (`tools/goldens/qwen3omnimoe_dump_reference.py`'s `code2wav`): the naive
     /// `Lo = L*stride` assumption produces the wrong waveform LENGTH (15360 vs
     /// the golden's 14805 samples for `T=8`), which is what surfaced this.
     ///

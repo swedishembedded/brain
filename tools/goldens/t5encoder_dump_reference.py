@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Dump T5 encoder reference goldens for brain's `crates/t5` parity ladder.
+"""Dump T5 encoder reference goldens for brain's `crates/t5encoder` parity ladder.
 
 The model is the **T5-XXL encoder** FLUX.1 uses as its second text encoder
 (`FLUX.1-*/text_encoder_2`, HF `T5EncoderModel`, 24 layers x 4096, 64 heads of
@@ -49,7 +49,7 @@ Two semantic questions are SETTLED HERE by measurement rather than by argument
     clamp to `num_buckets - 1`.
 
 Usage:
-  python3 tools/goldens/t5_dump_reference.py \
+  python3 tools/goldens/t5encoder_dump_reference.py \
       --model     /path/to/FLUX.1-Kontext-dev/text_encoder_2 \
       --tokenizer /path/to/FLUX.1-Kontext-dev/tokenizer_2 \
       --out       testdata/t5 [--seq-len 128]

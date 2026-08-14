@@ -30,7 +30,7 @@ setup_file() {
   command -v busctl >/dev/null || skip "busctl not available"
   command -v dbus-run-session >/dev/null || skip "dbus-run-session not available"
   python3 -c "import jeepney" 2>/dev/null || skip "python jeepney not installed (pip install -e brain-py)"
-  [ -n "${BRAIN_S3DIT_DIT:-}" ] || skip "set BRAIN_ZIMAGE_* to the z-image weights"
+  [ -n "${BRAIN_S3DIT_DIT:-}" ] || skip "set BRAIN_S3DIT_* to the z-image weights"
   [ -n "${BRAIN_YOLOV8:-}" ] || skip "set BRAIN_YOLOV8 (detect_pipeline.py hard-requires both models)"
   command -v nvidia-smi >/dev/null || skip "no GPU (nvidia-smi)"
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"

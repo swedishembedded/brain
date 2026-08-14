@@ -17,7 +17,7 @@
 //! `ParamStore`/checkpoint-file round trip, same pattern as every other
 //! real-weight test in this crate.
 //!
-//! The golden (`tools/goldens/omni_dump_reference.py`'s `talkcp`) is a
+//! The golden (`tools/goldens/qwen3omnimoe_dump_reference.py`'s `talkcp`) is a
 //! 2-position "prefill" (position 0 = an arbitrary but fixed hidden-state
 //! stand-in, position 1 = codebook-0's embedding) predicting codebook 1's
 //! logits -- the smallest real forward the reference model supports.

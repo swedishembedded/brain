@@ -15,7 +15,7 @@ import torch
 from safetensors.torch import save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
-# testdata/golden/zimage/... -- where crates/zimage/tests/model_parity.rs's
+# testdata/golden/zimage/... -- where crates/s3dit/tests/model_parity.rs's
 # testdata("golden/zimage/zimage_model.safetensors") actually looks.
 TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = str(Path(TESTDATA) / "golden" / "zimage" / "zimage_model.safetensors")

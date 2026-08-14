@@ -6,7 +6,7 @@
 //! One config-driven encoder stack (`T5EncoderModel` in transformers' terms),
 //! imported 1:1 from the released `FLUX.1-*/text_encoder_2/` safetensors shards
 //! and gated stage by stage against goldens dumped by
-//! `tools/goldens/t5_dump_reference.py`.
+//! `tools/goldens/t5encoder_dump_reference.py`.
 //!
 //! T5 is unlike every decoder already in this workspace, and each difference is
 //! a correctness trap rather than a stylistic one. All four are verified in the

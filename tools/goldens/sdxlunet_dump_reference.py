@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Dump SDXL reference goldens for brain's `crates/unet` + `crates/diffusion`
+"""Dump SDXL reference goldens for brain's `crates/sdxlunet` + `crates/diffusion`
 parity ladder.
 
 Two independent golden sets, because they gate two independent pieces:
@@ -30,7 +30,7 @@ gates the composition; it does NOT gate the 128x128 latent SDXL actually
 generates at, and the test says so.
 
 Usage:
-  python3 tools/goldens/sdxl_dump_reference.py \
+  python3 tools/goldens/sdxlunet_dump_reference.py \
       --sdxl /path/to/sdxl-base-1.0 \
       --out  testdata/sdxl [--latent 32] [--skip-unet] [--skip-schedulers]
 """

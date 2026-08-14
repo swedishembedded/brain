@@ -4,7 +4,7 @@
 //! Full Z-Image S³-DiT forward parity vs diffusers (small config).
 //!
 //! Golden (`tests/golden/zimage_model.safetensors`, committed, baked by
-//! `tools/goldens/zimage_model_dump_reference.py`): a small model (dim 48,
+//! `tools/goldens/s3dit_model_dump_reference.py`): a small model (dim 48,
 //! 2 layers, 1 refiner, cap_feat_dim 16) with random weights + inputs and its
 //! reference output. Validates the whole assembly — timestep/x/cap embedders,
 //! patchify, noise/context refiners, [image, caption] unified sequence, main

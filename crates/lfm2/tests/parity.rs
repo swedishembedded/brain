@@ -6,7 +6,7 @@
 //! every layer output, final hidden, MLM-logit probe rows, fill-mask top-1).
 //!
 //! Golden fixtures (`testdata/golden/lfm/lfm25_encoder_{230m,350m}.safetensors`,
-//! fetched via `make fetch/testdata`, never committed) are baked by `tools/goldens/lfm_dump_reference.py` from the released fp32
+//! fetched via `make fetch/testdata`, never committed) are baked by `tools/goldens/lfm2_dump_reference.py` from the released fp32
 //! checkpoints with FIXED token ids — tokenizer parity is tested separately in
 //! `crates/data`. The ~1–1.4 GB weights are NOT committed: set
 //! `BRAIN_LFM25_230M` / `BRAIN_LFM25_350M` to the HF checkpoint dirs; the tests
