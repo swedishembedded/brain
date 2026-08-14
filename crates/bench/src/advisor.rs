@@ -379,7 +379,7 @@ mod tests {
 
     fn eval_with(axis_scores: Value, benches: Value) -> Value {
         json!({
-            "arch": "gpt",
+            "arch": "gpt2",
             "param_count": 110336u64,
             "axis_scores": axis_scores,
             "benchmarks": benches,

@@ -51,7 +51,8 @@ mod resident_qwen35moe;
 mod resident_tts;
 mod resident_upscale;
 mod resident_clip;
-mod resident_facenet;
+mod resident_scrfd;
+mod resident_arcface;
 mod resident_sam2;
 mod resident_restore;
 mod resolve;
@@ -207,7 +208,7 @@ BENCHMARK SUITE (architecture evaluation)
   brain bench eval --arch <name> [--seed S --out F --smoke]
                                            # run the WHOLE battery against one architecture,
                                            # aggregate per capability axis, write
-                                           # results/<arch>-<seed>.json  (archs: gpt, gpt-small, gpt-wide, moe)
+                                           # results/<arch>-<seed>.json  (archs: gpt2, gpt2-small, gpt2-wide, toymoe)
                                            # + prints a 'top tuning recommendations' footer (advisor)
   brain bench scale --arch <name> [--seed S --out F]
                                            # PREDICTIVE per-capability scaling: sweep model SIZE,
@@ -516,7 +517,7 @@ fn run_scaling(seed: u64) {
 /// named architecture, aggregate per capability axis, write a results artifact
 /// under `results/<arch>-<seed>.json` (or `--out`), and print the table + axes.
 fn run_bench_eval(args: &[String]) {
-    let mut arch = "gpt".to_string();
+    let mut arch = "gpt2".to_string();
     let mut seed = 1337u64;
     let mut out: Option<String> = None;
     let mut smoke = false;
@@ -586,7 +587,7 @@ fn run_bench_eval(args: &[String]) {
 /// largest N, print the per-axis curves, and write
 /// `results/scale-<arch>-<seed>.json`.
 fn run_bench_scale(args: &[String]) {
-    let mut arch = "gpt".to_string();
+    let mut arch = "gpt2".to_string();
     let mut seed = 1337u64;
     let mut out: Option<String> = None;
     let mut i = 0;

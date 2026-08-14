@@ -21,9 +21,9 @@
 //!    `results/<name>-<seed>.json`. Then `make bench/compare` to diff it against
 //!    every prior architecture.
 //!
-//! The GPT baseline is registered as `gpt`; `gpt-small` and `gpt-wide` are size
-//! variants registered today so `compare` is demonstrable immediately. Because
-//! benchmarks set their own requested depth/width, a size variant is a
+//! The GPT baseline is registered as `gpt2`; `gpt2-small` and `gpt2-wide` are
+//! size variants registered today so `compare` is demonstrable immediately.
+//! Because benchmarks set their own requested depth/width, a size variant is a
 //! [`DecoderLm`] that **overrides** the requested size to a fixed shape — see
 //! [`ScaledGpt`].
 
@@ -38,7 +38,7 @@ use crate::model::{DecoderLm, Scorer, TrainConfig};
 /// A size descriptor for an architecture: the hyperparameters that dominate its
 /// parameter count. Kept architecture-neutral (depth / width / heads); the
 /// concrete model maps them in its own terms. `None` fields mean "let the
-/// benchmark choose" (the baseline `gpt` does this).
+/// benchmark choose" (the baseline `gpt2` does this).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Size {
     pub n_layers: Option<u32>,
@@ -88,7 +88,7 @@ impl Arch {
         // MoE's parameter layout differs from dense GPT (per-expert FFNs + a
         // router), so count it from the MoE config's own param list rather than
         // GptConfig::param_list (which would undercount the experts).
-        if self.name == "moe" {
+        if self.name == "toymoe" {
             let n_heads = self.size.n_heads.unwrap_or(4);
             let mcfg = toymoe::train::Config {
                 vocab,
@@ -136,37 +136,37 @@ impl Arch {
 /// The architecture registry: every [`Arch`] the eval harness can score.
 ///
 /// **Adding a NEW architecture is one line here** (after implementing
-/// [`DecoderLm`] for it). The baseline `gpt` uses the benchmark's own requested
-/// size; `gpt-small` / `gpt-wide` are fixed-shape variants so `compare` shows a
+/// [`DecoderLm`] for it). The baseline `gpt2` uses the benchmark's own requested
+/// size; `gpt2-small` / `gpt2-wide` are fixed-shape variants so `compare` shows a
 /// real spread today.
 pub fn arch_registry() -> Vec<Arch> {
     vec![
         Arch {
-            name: "gpt",
+            name: "gpt2",
             description: "dense GPT decoder baseline (size per benchmark)",
             size: Size::default(),
             factory: || Box::new(crate::GptDecoder),
         },
         Arch {
-            name: "gpt-small",
+            name: "gpt2-small",
             description: "GPT, fixed small shape (1 layer / d_model 32)",
             size: Size::fixed(1, 32, 2),
             factory: || Box::new(ScaledGpt(Size::fixed(1, 32, 2))),
         },
         Arch {
-            name: "gpt-wide",
+            name: "gpt2-wide",
             description: "GPT, fixed wide shape (2 layers / d_model 96)",
             size: Size::fixed(2, 96, 4),
             factory: || Box::new(ScaledGpt(Size::fixed(2, 96, 4))),
         },
         Arch {
-            name: "moe",
+            name: "toymoe",
             description: "sparse Mixture-of-Experts decoder (4 experts, top-2; size per benchmark)",
             size: Size::default(),
             factory: || Box::new(crate::MoeDecoder),
         },
         Arch {
-            name: "qwen",
+            name: "qwen3",
             description: "Qwen3 dense decoder (GQA + QK-norm + RoPE + SwiGLU; size per benchmark)",
             size: Size::default(),
             factory: || Box::new(crate::QwenDecoder),
@@ -212,8 +212,8 @@ pub fn arch_names() -> Vec<&'static str> {
 /// A GPT [`DecoderLm`] that **overrides** the depth/width/heads a benchmark
 /// requests with a fixed [`Size`], so a registered size variant trains at *its*
 /// shape regardless of the benchmark's defaults. (The baseline [`GptDecoder`]
-/// honors the benchmark's requested size.) This is what makes `gpt-small` /
-/// `gpt-wide` distinct architectures the same battery can score.
+/// honors the benchmark's requested size.) This is what makes `gpt2-small` /
+/// `gpt2-wide` distinct architectures the same battery can score.
 #[derive(Clone, Copy, Debug)]
 pub struct ScaledGpt(pub Size);
 
@@ -221,7 +221,7 @@ impl DecoderLm for ScaledGpt {
     fn arch_name(&self) -> &'static str {
         // Variants share the GPT engine; the registry name distinguishes them in
         // artifacts. A static name keeps the trait object simple.
-        "gpt"
+        "gpt2"
     }
 
     fn train_decoder(
@@ -281,7 +281,7 @@ fn scaled_cfg(size: Size, steps_cap: u32, cfg: &TrainConfig) -> TrainConfig {
 pub struct ScaledQwen(pub Size, pub u32);
 impl DecoderLm for ScaledQwen {
     fn arch_name(&self) -> &'static str {
-        "qwen"
+        "qwen3"
     }
     fn train_decoder(&self, dir: &Path, block_size: u32, cfg: &TrainConfig, out: &Path) -> std::io::Result<(f32, f32)> {
         crate::QwenDecoder.train_decoder(dir, block_size, &scaled_cfg(self.0, self.1, cfg), out)
@@ -312,23 +312,23 @@ mod tests {
     #[test]
     fn registry_has_gpt_and_variants() {
         let names = arch_names();
-        assert!(names.contains(&"gpt"));
-        assert!(names.contains(&"gpt-small"));
-        assert!(names.contains(&"gpt-wide"));
+        assert!(names.contains(&"gpt2"));
+        assert!(names.contains(&"gpt2-small"));
+        assert!(names.contains(&"gpt2-wide"));
     }
 
     #[test]
     fn get_arch_builds_a_decoder() {
-        let a = get_arch("gpt-wide").expect("gpt-wide registered");
+        let a = get_arch("gpt2-wide").expect("gpt2-wide registered");
         assert_eq!(a.size.d_model, Some(96));
         let lm = (a.factory)();
-        assert_eq!(lm.arch_name(), "gpt");
+        assert_eq!(lm.arch_name(), "gpt2");
     }
 
     #[test]
     fn param_count_grows_with_width() {
-        let small = get_arch("gpt-small").unwrap().param_count(32, 32);
-        let wide = get_arch("gpt-wide").unwrap().param_count(32, 32);
+        let small = get_arch("gpt2-small").unwrap().param_count(32, 32);
+        let wide = get_arch("gpt2-wide").unwrap().param_count(32, 32);
         assert!(wide > small, "wider arch must have more params: {wide} vs {small}");
     }
 

@@ -475,8 +475,8 @@ mod tests {
 
     #[test]
     fn default_out_path_shape() {
-        let p = default_out_path("gpt", 1234);
-        assert_eq!(p, PathBuf::from("results/gpt-1234.json"));
+        let p = default_out_path("gpt2", 1234);
+        assert_eq!(p, PathBuf::from("results/gpt2-1234.json"));
     }
 
     #[test]

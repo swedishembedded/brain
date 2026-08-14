@@ -62,7 +62,7 @@ impl MoeDecoder {
 
 impl DecoderLm for MoeDecoder {
     fn arch_name(&self) -> &'static str {
-        "moe"
+        "toymoe"
     }
 
     fn train_decoder(
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn moe_decoder_arch_name() {
-        assert_eq!(MoeDecoder.arch_name(), "moe");
+        assert_eq!(MoeDecoder.arch_name(), "toymoe");
     }
 
     #[test]

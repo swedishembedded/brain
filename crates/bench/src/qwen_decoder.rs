@@ -51,7 +51,7 @@ impl QwenDecoder {
 
 impl DecoderLm for QwenDecoder {
     fn arch_name(&self) -> &'static str {
-        "qwen"
+        "qwen3"
     }
 
     fn train_decoder(
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn qwen_decoder_arch_name_and_config() {
-        assert_eq!(QwenDecoder.arch_name(), "qwen");
+        assert_eq!(QwenDecoder.arch_name(), "qwen3");
         let tc = TrainConfig { n_layers: 2, d_model: 64, n_heads: 4, ..Default::default() };
         let c = QwenDecoder.qwen_config(32, &tc);
         assert_eq!(c.n_layers, 2);

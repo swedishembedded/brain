@@ -78,7 +78,8 @@ fast and scalable kernel - not a naive one.
    CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO, cosine 0.99998).
    *(Depth Anything 3 was planned as a second arch behind the same contract and
    is **dropped** - see `crates/zipdepth/src/lib.rs`.)*
-9b. **Face recognition** (`crates/facenet`) - the insightface *antelopev2* stack:
+9b. **Face recognition** (`crates/scrfd` + `crates/arcface`) - the insightface
+    *antelopev2* stack, split into its two architectures:
     **SCRFD-10GF** detector (ResNet-D backbone + PAFPN + 3-stride anchor head) →
     **5-point similarity alignment** (Umeyama solve on the host, applied with the
     `grid_sample` kernel) → the **ArcFace IResNet-100** 512-d embedding (PReLU
@@ -86,10 +87,13 @@ fast and scalable kernel - not a naive one.
     release). Imported from **ONNX** - the first import in the repo to read the
     protobuf, via the new `onnx::read` - with two-way coverage (462 / 119
     tensors). Forward-parity-gated per stage at cosine 1.000000.
-    See `.agents/roadmap/scrfd.md`. **Serving contract met**: `facenet::caps`
-    (`detect`, `embed`), `crates/cli/src/resident_facenet.rs`
-    (`BRAIN_FACENET_DIR`), D-Bus `Run`, `examples/vision/`. *(`run_batch` is the
-    serial default and says why: both released graphs are built for
+    See `.agents/roadmap/scrfd.md`. **Serving contract met**, as TWO models:
+    `scrfd::caps` (`detect`, `BRAIN_SCRFD_DIR`) and `arcface::caps` (`embed`,
+    `BRAIN_ARCFACE_DIR`), with `crates/cli/src/resident_{scrfd,arcface}.rs`,
+    D-Bus `Run` and `examples/vision/`. The detector is self-sufficient; the
+    embedder depends on it (its default `align=true` detects first), so with
+    both resident SCRFD is loaded twice - accepted, it is 17 MB. *(`run_batch`
+    is the serial default and says why: both released graphs are built for
     `Shape::new(1,3,side,side)`. Backward/gradcheck are listed in that ledger.)*
 9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) - the **image path** of
     Meta's SAM 2.1: Hiera trunk (windowed attention with a per-block window
@@ -292,7 +296,7 @@ fast and scalable kernel - not a naive one.
     FLUX.1 forward** 10, worst 1−cos **1.44e-11**. See `.agents/roadmap/pulid.md`.
     *(Forward only: **no backward, no `check_pulid`**, no serving contract. The
     crate takes `id_cond` as **host slices** - there is **no image → `id_cond`
-    path**, so the facenet/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
+    path**, so the arcface/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
     is NOT claimed.)*
 
 ### Audio / speech
@@ -552,7 +556,7 @@ front-end to depend on.
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
-| `facenet` / `sam2` / `clip` | SCRFD + ArcFace face recognition; SAM 2.1 promptable segmentation (image path); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
+| `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
 | `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL text-conditioning encoder |
 | `sdxlunet` / `controlnet` / `pulid` / `instantid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1; InstantID's IP-Adapter-FaceID shapes (**forward not implemented** - see `crates/instantid/src/lib.rs`) |
@@ -568,7 +572,7 @@ front-end to depend on.
 
 | Crate | Responsibility |
 |---|---|
-| `onnx` | pure-Rust ONNX graph model + serializer (export), plus an import-side **reader** (`read`: initializers/nodes/attributes) used by `facenet`; vendored `prost`, no `protoc` |
+| `onnx` | pure-Rust ONNX graph model + serializer (export), plus the import side: a **reader** (`read`: initializers/nodes/attributes) and the coverage-checked topological **`walk`** both face crates import through; vendored `prost`, no `protoc` |
 | `npu` | YOLOv8/ZipDepth → ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (`runtime-linking`) |
 | `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
 | `capability` / `residency` / `stats` / `server` / `dbus` / `runtime` / `events` / `hfsm` | the serving/runtime stack (table above) |
@@ -619,7 +623,7 @@ front-end to depend on.
 | YOLO model / loss / inference | `crates/yolov8/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolov8/readme.md` |
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolov8/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/zipdepth/{readme,status}.md`; `crates/zipdepth/src/*`, `crates/cli/src/depth_cli.rs` |
-| Face recognition (SCRFD + alignment + ArcFace) | `.agents/roadmap/scrfd.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/goldens/arcface_dump_reference.py` |
+| Face recognition (SCRFD + alignment + ArcFace) | `.agents/roadmap/scrfd.md`; `crates/scrfd/src/{config,import,model,detect}.rs` + `crates/arcface/src/{config,import,model,align,train}.rs`; goldens via `tools/goldens/{scrfd,arcface}_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` - the import front-end; `crates/onnx` is otherwise export-only |
 | VQGAN / CodeFormer VQ autoencoder | `.agents/roadmap/vqgan.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/codeformer_dump_reference.py` |
 | FLUX.1 / Kontext (12 B MMDiT, per-block modulation, edit path) | `.agents/roadmap/flux1.md`; `crates/flux1/src/{config,import,model}.rs`; goldens via `tools/goldens/flux1_dump_reference.py` |
@@ -806,7 +810,7 @@ benchmarks score *any* architecture and results are directly comparable:
 
 1. **Implement `DecoderLm`** (`train_decoder` + `load_scorer`, plus a `Scorer`).
 2. **Add one line to `arch_registry()`** (`crates/bench/src/arch.rs`).
-   Registered today: `gpt`, `gpt-small`, `gpt-wide`, `moe`, `qwen`, `glm`.
+   Registered today: `gpt2`, `gpt2-small`, `gpt2-wide`, `toymoe`, `qwen3`, `glm`.
 3. **Run + compare:**
    ```bash
    BRAIN_DEVICE=cpu make bench/eval ARCH=<name>   # -> results/<arch>-<seed>.json
@@ -1175,10 +1179,10 @@ a metric that isn't there was simply forgotten.
   and driven over D-Bus is **incomplete**.
 
   **Imaging workstream status, so nobody has to infer it:** the contract is met
-  for **`sam2`, `facenet`, `vqgan` and `codeformer`** - four models, each with a
-  `caps` module, a `resident_*.rs` registered in `build_executor`, the existing
-  D-Bus `Run`, and an example under `examples/{vision,restore}/`. Only `sam2`'s
-  `run_batch` does real grouping (by image); the other three are the serial
+  for **`sam2`, `scrfd`, `arcface`, `vqgan` and `codeformer`** - five models, each
+  with a `caps` module, a `resident_*.rs` registered in `build_executor`, the
+  existing D-Bus `Run`, and an example under `examples/{vision,restore}/`. Only
+  `sam2`'s `run_batch` does real grouping (by image); the others are the serial
   default and each says why in-file. It is **not** met for `clip`, `t5encoder`, `flux1`,
   `sdxlunet`, `controlnet` or `pulid` - those six have no capability manifest, no
   residency adapter and no D-Bus surface at all.

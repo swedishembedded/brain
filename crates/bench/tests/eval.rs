@@ -3,7 +3,7 @@
 
 //! Architecture-eval harness integration test — the turn-key path end-to-end.
 //!
-//! It runs `eval` for the `gpt` architecture in **smoke** mode (every benchmark
+//! It runs `eval` for the `gpt2` architecture in **smoke** mode (every benchmark
 //! at a slashed step/corpus budget — see `bench::registry_smoke`) so it finishes
 //! in a couple of minutes on the CPU backend, then asserts the results artifact:
 //!   * is written to disk and re-parses,
@@ -27,8 +27,8 @@ fn eval_gpt_smoke_writes_valid_artifact() {
     }
 
     let seed = 4242u64;
-    // Run the WHOLE battery against `gpt` in smoke mode.
-    let report = bench::eval::run("gpt", seed, true).expect("eval run");
+    // Run the WHOLE battery against `gpt2` in smoke mode.
+    let report = bench::eval::run("gpt2", seed, true).expect("eval run");
 
     // Every axis that has a benchmark must be populated with a finite score.
     assert!(!report.axis_scores.is_empty(), "no capability axes populated");
@@ -52,7 +52,7 @@ fn eval_gpt_smoke_writes_valid_artifact() {
     let loaded = bench::eval::load_artifact(&out).expect("reload artifact");
     std::fs::remove_file(&out).ok();
 
-    assert_eq!(loaded.arch, "gpt");
+    assert_eq!(loaded.arch, "gpt2");
     assert_eq!(loaded.seed, seed);
     assert!(loaded.param_count > 0, "param_count not recorded");
     assert!(loaded.gating_pass_rate.is_finite());
@@ -71,9 +71,9 @@ fn compare_two_artifacts_runs() {
     if skip() {
         return;
     }
-    // Two cheap smoke runs (gpt at two seeds) is enough to exercise compare.
-    let r1 = bench::eval::run("gpt", 1, true).expect("eval 1");
-    let r2 = bench::eval::run("gpt-small", 2, true).expect("eval 2");
+    // Two cheap smoke runs (gpt2 at two seeds) is enough to exercise compare.
+    let r1 = bench::eval::run("gpt2", 1, true).expect("eval 1");
+    let r2 = bench::eval::run("gpt2-small", 2, true).expect("eval 2");
     let p1 = std::env::temp_dir().join(format!("brain_cmp1_{}.json", std::process::id()));
     let p2 = std::env::temp_dir().join(format!("brain_cmp2_{}.json", std::process::id()));
     bench::eval::write_artifact(&r1, &p1).unwrap();

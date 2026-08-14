@@ -93,7 +93,7 @@ pub trait Scorer {
 /// scored. The GPT baseline is [`GptDecoder`]; a MoE/PID decoder would be a new
 /// impl, immediately usable by every benchmark.
 pub trait DecoderLm {
-    /// Short architecture identifier (e.g. `"gpt"`), for table labels / logs.
+    /// Short architecture identifier (e.g. `"gpt2"`), for table labels / logs.
     fn arch_name(&self) -> &'static str;
 
     /// Train a fresh decoder on the token dataset in `dir` (brain's
@@ -121,7 +121,7 @@ pub struct GptDecoder;
 
 impl DecoderLm for GptDecoder {
     fn arch_name(&self) -> &'static str {
-        "gpt"
+        "gpt2"
     }
 
     fn train_decoder(
@@ -236,6 +236,6 @@ mod tests {
 
     #[test]
     fn gpt_decoder_arch_name() {
-        assert_eq!(GptDecoder.arch_name(), "gpt");
+        assert_eq!(GptDecoder.arch_name(), "gpt2");
     }
 }

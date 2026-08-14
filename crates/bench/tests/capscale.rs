@@ -3,7 +3,7 @@
 
 //! Per-capability predictive-scaling + tuning-advisor integration test.
 //!
-//! Runs the real capscale sweep for `gpt` at a smoke budget (3 sizes × one
+//! Runs the real capscale sweep for `gpt2` at a smoke budget (3 sizes × one
 //! representative benchmark per axis → train+score on `BRAIN_DEVICE` → fit each
 //! axis's saturating trend), then asserts the artifact:
 //!   * carries every capability axis with ≥3 size points,
@@ -30,7 +30,7 @@ fn capscale_gpt_smoke_writes_valid_artifact() {
 
     // A trimmed budget keeps the 3×6 grid under a few minutes on CPU.
     let cfg = CapScaleConfig { steps: 40, n_sequences: 500, eval_sequences: 40, seed: 4242, ..Default::default() };
-    let report = capscale::run("gpt", &cfg).expect("capscale run");
+    let report = capscale::run("gpt2", &cfg).expect("capscale run");
 
     // Every canonical axis has a probe, so all should be present with ≥3 points.
     assert!(!report.axes.is_empty(), "no axes scaled");
@@ -58,7 +58,7 @@ fn capscale_gpt_smoke_writes_valid_artifact() {
     let out = std::env::temp_dir().join(format!("brain_capscale_test_{}.json", std::process::id()));
     capscale::write_artifact(&report, &out).expect("write capscale artifact");
     let loaded = capscale::load_artifact(&out).expect("reload capscale artifact");
-    assert_eq!(loaded.arch, "gpt");
+    assert_eq!(loaded.arch, "gpt2");
     assert_eq!(loaded.knob, "size");
     assert!(loaded.max_params > 0);
     for ax in &report.axes {
@@ -68,7 +68,7 @@ fn capscale_gpt_smoke_writes_valid_artifact() {
     // The advisor, fed a synthetic eval + the real capscale, emits a non-empty
     // ranked list whose top item is a real axis.
     let eval = serde_json::json!({
-        "arch": "gpt",
+        "arch": "gpt2",
         "param_count": loaded.max_params,
         "axis_scores": {
             "recall": 0.40, "copying": 0.85, "memory": 0.99,
@@ -105,7 +105,7 @@ fn capscale_gpt_smoke_writes_valid_artifact() {
 #[test]
 fn advisor_ranks_without_training() {
     let eval = serde_json::json!({
-        "arch": "gpt",
+        "arch": "gpt2",
         "param_count": 110336u64,
         "axis_scores": { "recall": 0.35, "memory": 0.99 },
         "benchmarks": [
