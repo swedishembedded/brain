@@ -245,29 +245,41 @@ concrete (not type-erased) `Arc<QwenResident>` handle alongside the
 `set_adapter` is inherent to `QwenResident`, not part of the
 `ResidentModel` trait.
 
-## P6 - the demonstrable proof - NOT STARTED
+## P6 - the demonstrable proof - DEFERRED, blocked on sven (P0)
 
 Run real sven sessions against `brain serve --openai` (qwen3), periodically
-harvest reward-stamped trajectories, run P5's loop in the background, chart
-a **held-out** real-task pass-rate (a fixed `sven-ci` headless suite,
+harvest reward-stamped trajectories, run P6a's cycle in the background,
+chart a **held-out** real-task pass-rate (a fixed `sven-ci` headless suite,
 disjoint from whatever tasks generated the training trajectories) over
 wall-clock time across multiple continuous-loop cycles, plus a check that
 LoRA hot-swap never drops or corrupts an in-flight request. This is the
-concrete "brain trains continuously" deliverable.
+concrete "brain trains continuously" deliverable, and the only piece of
+this whole roadmap still not done.
 
-## Why P5–P6 are not in this pass
+Every piece on brain's side is built and independently tested (P1-P6a).
+What's left is entirely outside this repo: sven's trajectories carry no
+reward signal, so there is nothing real yet for the pipeline to train on
+- the P0 boundary this roadmap set from the start. That's now written up
+as a standalone task brief for whoever picks up sven next:
+`applications/sven/.todo/self-improvement.md` (gitignored in sven, per
+that repo's own convention for cross-session task notes - not something
+this repo's history can point at by path, hence the full brief living
+there rather than a citation here). Once a real sven session produces a
+real reward-stamped trajectory, P6 is: point `hot_swap_cycle` (P6a) at
+sven's real trajectory directory instead of a test fixture, wire it into
+`brain serve`'s startup path behind an opt-in flag (deferred in P6a for
+exactly this reason - no real server run to verify it against until now),
+and let it run.
 
-P1–P4 are done and verified, each as its own gate (crate mirror, gradchecked
-kernel composition, a convergence-tested generic driver, and a
-de-duplication + tested concurrency-safe primitive). P5 (turning real ATIF
-trajectories into weighted training data - needs P0's sven-side reward
-stamp to have real, non-synthetic input to test against) and P6 (the actual
-multi-session, two-repo end-to-end proof) are each substantial enough, and
-depend on state outside this repo (P0), that building them in the same pass
-without that dependency actually being available would mean testing against
-fabricated stand-ins rather than the real thing - the opposite of this
-repo's own "evaluate honestly" discipline. Picking this file back up: P5
-first (it can start against hand-built weight-stamped ATIF fixtures even
-before P0 lands on sven's side, same technique `crates/rl`'s own tests
-already use for synthetic weight files), P6 once a real sven session can
-produce real reward-stamped trajectories.
+## Why P6 is not in this pass
+
+P1-P6a are done and verified, each as its own gate (crate mirror,
+gradchecked kernel composition, a convergence-tested generic driver, a
+de-duplication + tested concurrency-safe primitive, and the cycle glue
+tying them together). P6 is the actual multi-session, two-repo,
+real-traffic proof - building it now would mean testing against fabricated
+stand-ins rather than the real thing, the opposite of this repo's own
+"evaluate honestly" discipline, and is why every phase up to here
+deliberately used synthetic fixtures small enough to run safely (tiny
+configs, no real checkpoints) rather than reaching for real weights or a
+live server before there was something real to justify the risk.
