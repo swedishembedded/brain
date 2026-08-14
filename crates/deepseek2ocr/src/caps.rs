@@ -80,7 +80,7 @@ use crate::prompt::{self, Prompt};
 pub const MODEL: &str = "deepseek-ai/DeepSeek-OCR";
 
 /// `$BRAIN_DEEPSEEK_OCR_DIR` - the directory holding BOTH shipped GGUFs. One
-/// variable for a multi-file checkpoint, matching `BRAIN_FACENET_DIR` /
+/// variable for a multi-file checkpoint, matching `BRAIN_ARCFACE_DIR` /
 /// `BRAIN_CLIP_DIR`.
 pub const DIR_VAR: &str = "BRAIN_DEEPSEEK_OCR_DIR";
 

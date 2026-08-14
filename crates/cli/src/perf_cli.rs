@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain perf …` — the performance benchmarking suite.
+//! `brain perf …` - the performance benchmarking suite.
 //!
 //! Sibling to `brain bench` (which asks whether an architecture *learns* a task).
 //! This asks how much correct work brain delivers per unit of hardware, memory,
-//! energy and time — and is built so a single flattering number cannot be
+//! energy and time - and is built so a single flattering number cannot be
 //! reported on its own.
 
 use perf::scenarios::{self, Options};
 use perf::target::{PerfTarget, TargetInfo};
 
 const HELP: &str = "\
-brain perf — performance benchmarking (how fast, at what cost, still correct?)
+brain perf - performance benchmarking (how fast, at what cost, still correct?)
 
 USAGE
   brain perf list
@@ -28,19 +28,19 @@ USAGE
 
   brain perf gate <candidate.json> --baseline <b.json> [--floor 0.85] [--update]
       Hard-floor regression gate: throughput floors at --floor of baseline,
-      latency ceilings at baseline / --floor (generous on purpose — tight
+      latency ceilings at baseline / --floor (generous on purpose - tight
       deltas flap on shared boxes and a flapping gate gets deleted). Refuses
       incomparable pairs (different scenario/unit/hardware/build), smoke runs
       and correctness-failed runs; unmeasured metrics skip and say so.
       --update promotes the candidate to the new baseline. Exit 1 on failure.
 
 OPTIONS
-  --target <spec>       what to measure (required — no default; there is no
+  --target <spec>       what to measure (required - no default; there is no
                         harness-only stand-in, every target exercises a real
                         engine)
                           qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]]
                                                    the REAL paged serving engine on
-                                                   random weights of that shape —
+                                                   random weights of that shape -
                                                    same kernels, KV traffic and
                                                    batching, no checkpoint needed.
                                                    HeadDim/NKvHeads default to a
@@ -75,7 +75,7 @@ OPTIONS
                         comparable; the override is recorded in the artifact.
   --warmup <N>          warm-up requests, excluded from every statistic (default 4)
   --best-of <N>         repeat and keep the best, reporting the spread (default 1)
-  --admission <p>       overload only: admission policy installed on the engine —
+  --admission <p>       overload only: admission policy installed on the engine -
                         unbounded (default) | depth:<N> | deadline:<ms>. Real
                         rejections are counted; SLO attainment covers admitted
                         work only.
@@ -137,7 +137,9 @@ targets (--target):
                                      (unit: embedding; embed_image only). The root is the same
                                      SDXL-layout dir BRAIN_CLIP_DIR serves (tokenizer[_2]/ +
                                      the EVA release .pt)
-  facenet:<weights-dir>              SCRFD detect + ArcFace embed via the residency executor
+  scrfd:<weights-dir>                SCRFD face detection via the residency executor
+                                     (unit: image; one synthetic 640x480 frame per request)
+  arcface:<weights-dir>              ArcFace identity embedding via the residency executor
                                      (unit: embedding; align=true on a synthetic image)
   tts:<weights-dir>:<hf-ckpt-dir>    Qwen3-TTS speaker-free synthesis via the residency executor
                                      (unit: audio_chunk; --output caps codec frames)
@@ -188,7 +190,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 }
 
 /// `perf gate <candidate.json> --baseline <b.json> [--floor 0.85] [--update]`
-/// — hard-floor regression gate (J2). Exit 0 = pass, 1 = fail/refused.
+/// - hard-floor regression gate (J2). Exit 0 = pass, 1 = fail/refused.
 fn gate(args: &[String]) {
     let mut candidate = None;
     let mut baseline = None;
@@ -229,7 +231,7 @@ fn gate(args: &[String]) {
         }
     };
     if update {
-        // Promote the candidate to the new baseline — deliberate, never a
+        // Promote the candidate to the new baseline - deliberate, never a
         // side effect of a passing run. And only a candidate the gate itself
         // would accept: promoting a smoke/invalid/unmeasured artifact would
         // poison every later comparison against it (the same refusals
@@ -242,11 +244,11 @@ fn gate(args: &[String]) {
             std::process::exit(1);
         }
         if cand.smoke {
-            eprintln!("perf gate: refusing --update: candidate is a smoke run — not a measurement");
+            eprintln!("perf gate: refusing --update: candidate is a smoke run - not a measurement");
             std::process::exit(1);
         }
         if cand.output_per_s.is_none() && cand.goodput_per_s.is_none() && cand.ttfa_p99.is_none() && cand.ial_p99.is_none() {
-            eprintln!("perf gate: refusing --update: candidate measured nothing — a baseline with no metrics can never gate");
+            eprintln!("perf gate: refusing --update: candidate measured nothing - a baseline with no metrics can never gate");
             std::process::exit(1);
         }
         if let Err(e) = std::fs::copy(&cand_path, &base_path) {
@@ -369,7 +371,7 @@ fn run(args: &[String]) {
     }
 
     let Some(target_spec) = target_spec else {
-        eprintln!("perf run: --target is required (no default — see `brain perf list` or `brain perf --help`)");
+        eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
     let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override) {
@@ -532,7 +534,7 @@ impl SynthSpec {
         self.build_engine_with_blocks(cfg, w, self.num_blocks)
     }
 
-    /// Build on an existing engine's device (`Engine::from_map_on`) — the
+    /// Build on an existing engine's device (`Engine::from_map_on`) - the
     /// warm-start path `perf startup` measures.
     pub fn build_engine_on(
         &self,
@@ -622,8 +624,11 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("clip:") {
         return build_clip(rest);
     }
-    if let Some(rest) = spec.strip_prefix("facenet:") {
-        return build_facenet(rest);
+    if let Some(rest) = spec.strip_prefix("scrfd:") {
+        return build_scrfd(rest);
+    }
+    if let Some(rest) = spec.strip_prefix("arcface:") {
+        return build_arcface(rest);
     }
     if let Some(rest) = spec.strip_prefix("tts:") {
         return build_tts(rest);
@@ -657,14 +662,14 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
          'sam2:<weights-dir>[:tiny|large]', 'clip:<checkpoint-root>', \
-         'facenet:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
+         'scrfd:<weights-dir>', 'arcface:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
          'zimage[:<W>x<H>x<steps>]', 'upscale:<weights>', 'restore:<weights>', \
          'vqgan:<weights>', 'nemotron:<checkpoint-dir>', or 'qwen-asr:<checkpoint-dir>')"
     ))
 }
 
 /// `http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>` or
-/// `http:qwen:<weights.brain>:<tokenizer.json>` — the model measured through
+/// `http:qwen:<weights.brain>:<tokenizer.json>` - the model measured through
 /// the REAL served path: a real `residency::Executor` holding a real
 /// `QwenResident`, behind the real `apiserve::router()`, driven over HTTP
 /// in-process (`perf::targets::HttpTarget`). This is the target the serving-
@@ -672,7 +677,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
 /// `qwen-synth:`/`qwen:` targets above measure the
 /// paged engine directly and skip the whole HTTP/bridge/residency layer the
 /// bug actually lived in. The tokenizer suffix is required (unlike the
-/// engine-direct targets, which synthesize token ids and never tokenize) — a
+/// engine-direct targets, which synthesize token ids and never tokenize) - a
 /// real client sends text, and this target must too.
 fn build_http(rest: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
     let (inner, tokenizer) = rest.rsplit_once(':').ok_or_else(|| {
@@ -695,7 +700,7 @@ fn build_http(rest: &str, workload: &str, input_override: Option<usize>, output_
 }
 
 /// Random weights of the given shape, written to a scratch checkpoint so
-/// `QwenResident` can `mmap` them exactly as it would a real one — the point
+/// `QwenResident` can `mmap` them exactly as it would a real one - the point
 /// is measuring the served path's OWN weight-loading/activation code, not
 /// bypassing it. Content is irrelevant to serving cost; only shape matters,
 /// same rationale as `SynthSpec::build_weights` for the engine-direct target.
@@ -743,7 +748,7 @@ fn build_http_qwen(weights: &str, tokenizer: &str) -> Result<Box<dyn PerfTarget>
 }
 
 /// Shared plumbing: one `QwenResident` behind a real `residency::Executor`
-/// (budgeted only over the schedulable devices — see `build_lfm`'s comment on
+/// (budgeted only over the schedulable devices - see `build_lfm`'s comment on
 /// why an excluded GPU must never be budgeted), wrapped in the real
 /// `apiserve` OpenAI router, driven over HTTP by `HttpTarget`.
 fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: TargetInfo) -> Result<Box<dyn PerfTarget>, String> {
@@ -770,7 +775,7 @@ fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: Targe
 
 
 
-/// `lfm:<weights>:<tokenizer.json>` — the LFM2.5 encoder behind the residency
+/// `lfm:<weights>:<tokenizer.json>` - the LFM2.5 encoder behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), so concurrency>1 measures
 /// brain's real batching/placement rather than a synchronous provider mutex.
 /// One-shot semantics: artifact_unit "sequence", ttfa == e2e, tpoa null.
@@ -787,7 +792,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     // Budget ONLY the schedulable devices (`--device`/BRAIN_DEVICE narrowing,
     // exactly as `brain serve --dbus` does): budgeting an excluded GPU lets
     // placement pick an index the process cannot see, and the lane silently
-    // falls back to a software adapter — a flattering-to-nobody 6× slowdown
+    // falls back to a software adapter - a flattering-to-nobody 6× slowdown
     // that must never masquerade as a GPU number.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();
@@ -819,7 +824,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, lfm2::caps::MODEL, "embed", "sequence", info, build)))
 }
 
-/// `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` (defaults 64 / 1) — the
+/// `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` (defaults 64 / 1) - the
 /// horizon and sample count every forecast perf target requests.
 fn forecast_env() -> (i64, i64) {
     let horizon = std::env::var("BRAIN_FORECAST_HORIZON").ok().and_then(|s| s.parse().ok()).filter(|&h| h > 0).unwrap_or(64);
@@ -827,7 +832,7 @@ fn forecast_env() -> (i64, i64) {
     (horizon, samples)
 }
 
-/// Budget the schedulable devices and start a one-resident executor — the shared
+/// Budget the schedulable devices and start a one-resident executor - the shared
 /// forecast/lfm rule: never budget an excluded GPU (or placement silently drops to
 /// a software adapter, a flattering-to-nobody slowdown).
 fn forecast_executor<R: residency::ResidentModel + 'static>(resident: R) -> residency::Executor {
@@ -865,7 +870,7 @@ fn forecast_build(horizon: i64, samples: i64) -> Box<dyn Fn(&perf::target::PerfR
     })
 }
 
-/// `kronos:<tokenizer-dir>:<decoder-dir>` — the Kronos OHLCV forecaster behind the
+/// `kronos:<tokenizer-dir>:<decoder-dir>` - the Kronos OHLCV forecaster behind the
 /// residency EXECUTOR (scheduler + budgets + device lanes), so concurrency>1 and
 /// device placement (CPU/iGPU/NPU) are measured through brain's real serving path.
 /// One forecast per request (`artifact_unit` "forecast"); `input_artifacts` is the
@@ -892,7 +897,7 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::KRONOS_MODEL, "forecast", "forecast", info, forecast_build(horizon, samples))))
 }
 
-/// `chronos2:<weights>` — the Chronos-2 universal forecaster behind the residency
+/// `chronos2:<weights>` - the Chronos-2 universal forecaster behind the residency
 /// executor (same measurement path as `kronos:`; `input_artifacts` = context length).
 fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(path).exists() {
@@ -908,7 +913,7 @@ fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::CHRONOS2_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
-/// `fincast:<weights>` — the FinCast financial forecaster behind the residency
+/// `fincast:<weights>` - the FinCast financial forecaster behind the residency
 /// executor (same measurement path as `kronos:`; `input_artifacts` = context length).
 fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(path).exists() {
@@ -924,10 +929,10 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::FINCAST_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
-/// `flux2[:<W>x<H>x<steps>[:<precision>]]` — FLUX.2 Klein (klein-4b, weights from the
+/// `flux2[:<W>x<H>x<steps>[:<precision>]]` - FLUX.2 Klein (klein-4b, weights from the
 /// `BRAIN_FLUX2_*` env like the rest of the flux2 stack) behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), running [`crate::resident_flux2::Flux2Resident`]
-/// — so concurrency measures brain's real scheduler, not a bare provider.
+/// - so concurrency measures brain's real scheduler, not a bare provider.
 ///
 /// Streaming semantics: `flux2::Pipeline::generate` reports one `Progress` per
 /// denoise step (message `"denoising"`, emitted at step START), plus
@@ -937,9 +942,9 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// = one denoise step, and the final step + VAE decode land between the last
 /// artifact and Done (inside e2e). All requests of one size share one resident
 /// pipeline instance (the instance key is `{variant}:{w}x{h}:{nref}`), so
-/// weights load once — put it in the warmup request.
+/// weights load once - put it in the warmup request.
 fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
-    // optional `:<precision>` tail — the DiT numeric tier the requests ask for.
+    // optional `:<precision>` tail - the DiT numeric tier the requests ask for.
     // int8 is the single-card configuration (weights ~4x smaller), so it is the
     // one a concurrency ladder can actually reach batch 8 on.
     let (rest, precision) = match rest.rsplit_once(':') {
@@ -958,7 +963,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     if w % 16 != 0 || h % 16 != 0 {
         return Err(format!("flux2: width/height must be multiples of 16 (got {w}x{h})"));
     }
-    // Fail before the run starts, naming what is missing — not at first activation.
+    // Fail before the run starts, naming what is missing - not at first activation.
     let paths = flux2::Paths::from_env()
         .map_err(|e| format!("flux2 target needs BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER: {e}"))?;
     for (var, p) in [
@@ -973,7 +978,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     }
     let resident = crate::resident_flux2::Flux2Resident::from_env()
         .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
-    // Budget ONLY the schedulable devices — same guard as `build_lfm` (its
+    // Budget ONLY the schedulable devices - same guard as `build_lfm` (its
     // ledger records a silent 6× llvmpipe regression from budgeting a GPU the
     // process could not see; the lane fell back to a software adapter and the
     // run masqueraded as a GPU number).
@@ -995,7 +1000,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let variant = "klein-4b";
     let cfg = flux2::Flux2Config::from_name(variant)?;
     let mut info = TargetInfo::new(&format!("flux2-{variant}"), "denoise_step");
-    // The 4B MMDiT — the component a denoise step runs; TE/VAE cost sits in
+    // The 4B MMDiT - the component a denoise step runs; TE/VAE cost sits in
     // TTFA/e2e, not in the per-step rate.
     info.params = Some(3_870_000_000);
     info.quant = Some(precision.clone());
@@ -1035,7 +1040,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// index, so it's reproducible without pulling in `data::rng` here). Real
 /// enough that a model's forward pass sees varied, non-constant input
 /// (constant input can hide a broadcast bug or trivially fold in a kernel),
-/// while costing nothing to generate and needing no file on disk — exactly
+/// while costing nothing to generate and needing no file on disk - exactly
 /// what "random weights is fine" already licenses for the checkpoint side of
 /// this suite, extended to the input side for the vision targets that have
 /// no natural synthetic-shape target the way `qwen-synth:` does.
@@ -1072,7 +1077,7 @@ fn synth_audio_blob(secs: f32) -> capability::Blob {
     capability::Blob::new(capability::Media::Audio, bytes).with_meta(serde_json::json!({"sample_rate": 16000}))
 }
 
-/// `gpt:<weights>` — the dense char-level GPT baseline behind the residency
+/// `gpt:<weights>` - the dense char-level GPT baseline behind the residency
 /// executor (unit: token). `--input`/`--output` control prompt length and
 /// generated length, same shape as every LLM target in this file.
 fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1081,7 +1086,7 @@ fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     }
     // Direct constructor -- never the set_var+from_env round-trip: the process
     // environment is a stringly-typed channel with no compile-time link to the
-    // reader, and exactly that pattern shipped the facenet/upscale/clip perf
+    // reader, and exactly that pattern shipped the face/upscale/clip perf
     // targets dead on arrival (wrong var names, unfixable by the type system).
     let resident = crate::resident_llm::GptResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"), None);
     let exec = forecast_executor(resident);
@@ -1094,7 +1099,7 @@ fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/gpt", "generate", "token", info, build)))
 }
 
-/// `glm:<weights>` — the GLM-5.2-shaped decoder (MLA + sigmoid-gated MoE)
+/// `glm:<weights>` - the GLM-5.2-shaped decoder (MLA + sigmoid-gated MoE)
 /// behind the residency executor (unit: token).
 fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
@@ -1111,7 +1116,7 @@ fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/glm", "generate", "token", info, build)))
 }
 
-/// `yolo:<weights>` — YOLOv8-style detection behind the residency executor
+/// `yolo:<weights>` - YOLOv8-style detection behind the residency executor
 /// (unit: frame). One 640x640 synthetic image per request, matching the
 /// model's native training resolution.
 fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1127,7 +1132,7 @@ fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/yolo", "detect", "frame", info, build)))
 }
 
-/// `depth:<weights>` — ZipDepth monocular depth behind the residency
+/// `depth:<weights>` - ZipDepth monocular depth behind the residency
 /// executor (unit: frame). The checkpoint's native input (0 = auto-detect,
 /// typically 384) is left at its default rather than forced, so the target
 /// measures what `brain depth` actually serves.
@@ -1143,9 +1148,9 @@ fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/depth", "depth", "frame", info, build)))
 }
 
-/// `sam2:<weights-dir>[:tiny|large]` — SAM 2.1 promptable segmentation behind
+/// `sam2:<weights-dir>[:tiny|large]` - SAM 2.1 promptable segmentation behind
 /// the residency executor (unit: mask). One centred point prompt per
-/// request — a degenerate zero-prompt call is a valid API call but not a
+/// request - a degenerate zero-prompt call is a valid API call but not a
 /// representative one.
 fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let (dir, variant) = rest.split_once(':').unwrap_or((rest, "tiny"));
@@ -1171,13 +1176,13 @@ fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, sam2::caps::MODEL, "segment", "mask", info, build)))
 }
 
-/// `clip:<checkpoint-root>` — the EVA-CLIP-L/336 image tower behind the
+/// `clip:<checkpoint-root>` - the EVA-CLIP-L/336 image tower behind the
 /// residency executor (unit: embedding). The root is the SDXL-layout dir
 /// `ClipResident` serves from (`tokenizer[_2]/`, `text_encoder[_2]/`, plus
-/// the EVA release file for `embed_image`) — the SAME directory `brain
+/// the EVA release file for `embed_image`) - the SAME directory `brain
 /// serve` takes via `BRAIN_CLIP_DIR`, because this target measures that
 /// resident. (The old `clip:<text-encoder-dir>:<eva.pt>` spec set two env
-/// vars nothing reads — dead on arrival, the env round-trip's third victim.)
+/// vars nothing reads - dead on arrival, the env round-trip's third victim.)
 /// Text towers exist on the same resident but need a real tokenizer to
 /// exercise honestly; `embed_image` needs only a pixel grid.
 fn build_clip(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1198,26 +1203,44 @@ fn build_clip(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, clip::caps::MODEL, "embed_image", "embedding", info, build)))
 }
 
-/// `facenet:<weights-dir>` — SCRFD detect + ArcFace embed behind the
-/// residency executor (unit: embedding). `align=true` (the default) runs
-/// full detect+align+embed on a whole image, so a generic synthetic image
-/// exercises the real served path — it will not *find* a face, but it
-/// measures the same dispatch sequence a real one takes.
-fn build_facenet(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+/// `scrfd:<weights-dir>` - SCRFD detection behind the residency executor
+/// (unit: image). A generic synthetic image exercises the real served path:
+/// it will not *contain* a face, but it measures the same dispatch sequence a
+/// real one takes - the letterbox, the 58-conv backbone, the PAFPN and all
+/// three heads run regardless of what is in the picture.
+fn build_scrfd(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
-        return Err(format!("facenet weights dir not found: {dir}"));
+        return Err(format!("scrfd weights dir not found: {dir}"));
     }
-    let resident = crate::resident_facenet::FacenetResident::new(dir)
-        .ok_or_else(|| format!("facenet: {dir} does not hold both released antelopev2 graphs"))?;
+    let resident = crate::resident_scrfd::ScrfdResident::new(dir)
+        .ok_or_else(|| format!("scrfd: {dir} does not hold the released scrfd_10g_bnkps.onnx"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
         capability::Invocation::new().blob("image", synth_image_blob(640, 480))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, facenet::caps::MODEL, "embed", "embedding", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, scrfd::caps::MODEL, "detect", "image", info, build)))
 }
 
-/// `tts:<weights-dir>:<hf-ckpt-dir>` — Qwen3-TTS speaker-free synthesis
+/// `arcface:<weights-dir>` - ArcFace identity embedding behind the residency
+/// executor (unit: embedding). `align=true` (the default) runs the full
+/// detect + align + embed chain on a whole image, so this measures the served
+/// path including the detection step it depends on.
+fn build_arcface(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(dir).exists() {
+        return Err(format!("arcface weights dir not found: {dir}"));
+    }
+    let resident = crate::resident_arcface::ArcFaceResident::new(dir)
+        .ok_or_else(|| format!("arcface: {dir} does not hold the released glintr100.onnx"))?;
+    let exec = forecast_executor(resident);
+    let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
+    let build = Box::new(|_req: &perf::target::PerfRequest| {
+        capability::Invocation::new().blob("image", synth_image_blob(640, 480))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, arcface::caps::MODEL, "embed", "embedding", info, build)))
+}
+
+/// `tts:<weights-dir>:<hf-ckpt-dir>` - Qwen3-TTS speaker-free synthesis
 /// behind the residency executor (unit: audio_chunk, streaming). `--output`
 /// caps generated codec frames via `max_frames`.
 fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1243,7 +1266,7 @@ fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     )))
 }
 
-/// `zimage[:<W>x<H>x<steps>]` — Z-Image (Tongyi S3-DiT) text-to-image behind
+/// `zimage[:<W>x<H>x<steps>]` - Z-Image (Tongyi S3-DiT) text-to-image behind
 /// the residency executor (unit: denoise_step). Mirrors `build_flux2`
 /// exactly; large (13-24 GiB VRAM), so check the memory-safety protocol
 /// before running on a unified-memory box.
@@ -1287,8 +1310,8 @@ fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     )))
 }
 
-/// `upscale:<weights>` — Real-ESRGAN RRDBNet super-resolution behind the
-/// residency executor (unit: image). No batching (activation-dominated —
+/// `upscale:<weights>` - Real-ESRGAN RRDBNet super-resolution behind the
+/// residency executor (unit: image). No batching (activation-dominated -
 /// `resident_upscale.rs`'s own doc explains why); one 256x256 input tile.
 fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
@@ -1303,7 +1326,7 @@ fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, rrdbnet::caps::MODEL, "upscale", "image", info, build)))
 }
 
-/// `restore:<weights>` — CodeFormer blind face restoration behind the
+/// `restore:<weights>` - CodeFormer blind face restoration behind the
 /// residency executor (unit: image). Fixed 512x512 graph.
 fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
@@ -1318,7 +1341,7 @@ fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, codeformer::caps::MODEL, "restore_face", "image", info, build)))
 }
 
-/// `vqgan:<weights>` — the CodeFormer VQ autoencoder's encode half behind the
+/// `vqgan:<weights>` - the CodeFormer VQ autoencoder's encode half behind the
 /// residency executor (unit: image). Fixed 512x512 graph (the released
 /// checkpoints' training resolution).
 fn build_vqgan(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1334,8 +1357,8 @@ fn build_vqgan(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, vqgan::caps::MODEL, "encode", "image", info, build)))
 }
 
-/// `nemotron:<checkpoint-dir>` — FastConformer streaming ASR behind the
-/// residency executor (unit: transcript_token — deliberately NOT "token":
+/// `nemotron:<checkpoint-dir>` - FastConformer streaming ASR behind the
+/// residency executor (unit: transcript_token - deliberately NOT "token":
 /// ranking ASR tokens against LLM tokens is exactly the meaningless
 /// cross-unit comparison the report's `artifact_unit` guard exists to
 /// prevent). `--input` controls synthetic audio length in whole seconds.
@@ -1360,7 +1383,7 @@ fn build_nemotron(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     )))
 }
 
-/// `qwen-asr:<checkpoint-dir>` — the Whisper-style-encoder + Qwen3 decoder
+/// `qwen-asr:<checkpoint-dir>` - the Whisper-style-encoder + Qwen3 decoder
 /// offline ASR behind the residency executor (unit: transcript_token, same
 /// reasoning as `build_nemotron`).
 fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
@@ -1385,8 +1408,8 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
 }
 
 /// Split optional trailing target-spec flags, in either order:
-/// `:i8w` (int8 weights, opt IN — off by default) and `:kvf32` (fp32 KV,
-/// opt OUT of int8 KV, which perf targets default to ON — matching
+/// `:i8w` (int8 weights, opt IN - off by default) and `:kvf32` (fp32 KV,
+/// opt OUT of int8 KV, which perf targets default to ON - matching
 /// `resident_llm.rs::QwenResident::kv_int8`'s serving default, so perf
 /// numbers stay representative of what actually ships).
 fn spec_flags(spec: &str) -> (&str, bool, bool) {
@@ -1426,8 +1449,8 @@ fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc
 /// Build the serving engine on **randomly initialised weights** of a given
 /// shape: `qwen-synth:<layers>x<d_model>x<heads>[x<vocab>[x<head_dim>[x<n_kv_heads>]]]`.
 ///
-/// Weight *values* do not affect execution cost — the same kernels, KV traffic,
-/// batching and memory pressure occur whatever the numbers are — so this
+/// Weight *values* do not affect execution cost - the same kernels, KV traffic,
+/// batching and memory pressure occur whatever the numbers are - so this
 /// measures the real engine without needing a checkpoint on the machine. It is
 /// the right tool for hardware and configuration comparison, and the wrong tool
 /// for anything about output quality: generated tokens are meaningless, so the
@@ -1437,7 +1460,7 @@ fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc
 /// caller (`startup`/`cancel`/`kvcache`/`faults`/`http:qwen-synth:`) rather
 /// than a second, independent copy of the shape-to-config arithmetic
 /// (a registration/derivation split across N call
-/// sites is a defect waiting for its turn — this WAS two copies until now,
+/// sites is a defect waiting for its turn - this WAS two copies until now,
 /// and the derived `head_dim`/`n_kv_heads` silently did not match real
 /// Qwen3-0.6B's, understating both the memory win and the append kernel's
 /// cost at the shape that mattered).
@@ -1446,7 +1469,7 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
     let (cfg, weights) = spec.build_weights();
     let params: usize = cfg.param_list().iter().map(|(_, n)| n).sum();
     eprintln!(
-        "perf: synthetic qwen L{} D{} H{} (kv {}, head_dim {}) vocab {} — {:.1}M params, random weights",
+        "perf: synthetic qwen L{} D{} H{} (kv {}, head_dim {}) vocab {} - {:.1}M params, random weights",
         spec.n_layers,
         spec.d_model,
         spec.n_heads,
@@ -1483,11 +1506,11 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
 ///
 /// `input_override`/`output_override` MUST be the same `--input`/`--output`
 /// values `Options` carries (`crate::scenarios::workload_for` applies them to
-/// the actual request stream) — this was previously sized from the workload
+/// the actual request stream) - this was previously sized from the workload
 /// PRESET's own shape unconditionally, so `--workload prefill_heavy --input
 /// 256` (a deliberately small override) still allocated a pool for
 /// `prefill_heavy`'s full 32768-token preset: a real ~64 GiB single
-/// allocation on this box (rejected by the allocator, not silently wrong —
+/// allocation on this box (rejected by the allocator, not silently wrong -
 /// but the box has no discrete GPU and 30 GiB total RAM, so this was one
 /// workload name away from a genuine OOM). The pool must be sized from what
 /// the run will ACTUALLY request, not from a name that happens to share a

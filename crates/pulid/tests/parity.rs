@@ -173,7 +173,7 @@ fn idformer_stage_parity() {
     let m = IdFormer::new_on(gpu, cfg.clone(), pulid::KERNELS, w.encoder);
 
     // The inputs are exactly what brain's OWN parity-gated towers produce:
-    // `id_cond = cat(facenet ArcFace 512, clip::EvaVision L2-normed cls 768)`
+    // `id_cond = cat(arcface ArcFace 512, clip::EvaVision L2-normed cls 768)`
     // and the 5 `clip::EvaVisionConfig::PULID_TAPS` block outputs. This test
     // replays them from the fixtures rather than re-running those two towers,
     // so a failure here is PuLID's, not theirs.

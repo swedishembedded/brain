@@ -1,0 +1,34 @@
+[package]
+name = "brain-scrfd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SCRFD-10GF face detector: boxes, scores and 5-point landmarks (insightface antelopev2)."
+
+[lib]
+name = "scrfd"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-paramstore.workspace = true
+# The reference release (insightface antelopev2) ships ONNX and only ONNX, so
+# import reads the protobuf. The reader AND the coverage-checked topological
+# walk live in `crates/onnx` - a private one here would be a second decoder of
+# the same wire format.
+brain-onnx.workspace = true
+# `caps.rs` - the serving contract's capability surface.
+brain-capability.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+# The parity test replays goldens dumped as safetensors; nothing in the library
+# reads a checkpoint (weights arrive through `import_dir`).
+brain-checkpoint.workspace = true
+# `hostmath::cosine`, the parity test's per-stage metric.
+brain-model.workspace = true

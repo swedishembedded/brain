@@ -62,8 +62,7 @@ if [ -z "$rows" ]; then
   fail=1
 fi
 
-# `autoencoderkl` is a deliberate, PERMANENT exception, not a pending rename
-# like scrfd/arcface (still bundled in brain-facenet until that crate splits):
+# `autoencoderkl` is a deliberate, PERMANENT exception, not a pending rename:
 # crates/vae is genuinely shared infrastructure AND the AutoencoderKL
 # architecture's home at once (vqgan/rrdbnet/sdxlunet all consume its conv
 # blocks), and splitting it would duplicate that shared code instead of
@@ -73,14 +72,15 @@ fi
 permanent_exceptions="autoencoderkl:vae"
 
 # TEMPORARY, TRACKED exceptions -- unlike the permanent one above, each of
-# these is real drift, not a deliberate design choice: scrfd and arcface are
-# two distinct upstream architectures still bundled in one brain-facenet
-# crate pending the split into crates/scrfd + crates/arcface (tracked
-# separately; see the facenet-split follow-up). Remove a row here in the
-# SAME commit that lands its rename -- an exception nobody ever removes is
+# these would be real drift, not a deliberate design choice: an architecture
+# whose crate has not been renamed (or split out) yet. The list is EMPTY, and
+# that is the steady state: the last entries were scrfd/arcface, removed in
+# the commit that split the bundled crate into crates/scrfd + crates/arcface.
+# Add a row here only alongside a tracked plan to remove it, and remove it in
+# the SAME commit that lands the rename -- an exception nobody ever removes is
 # indistinguishable from a permanent one, which defeats the point of this
 # gate existing at all.
-temporary_exceptions="scrfd:facenet arcface:facenet"
+temporary_exceptions=""
 
 while read -r id pkg_suffix; do
   [ -z "$id" ] && continue

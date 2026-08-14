@@ -69,7 +69,7 @@ one served; what matters is that the sweep does not *increase* it.)
 
 The action takes an **aligned** 512² face and returns one - the reference CLI's
 `cropped_faces/` → `restored_faces/` step. CodeFormer's alignment template is
-facexlib's 512² one, which is *not* `facenet::ARCFACE_DST_112` rescaled, so the
+facexlib's 512² one, which is *not* `arcface::ARCFACE_DST_112` rescaled, so the
 face stack in `examples/vision/` is not chained in automatically: wiring the
 wrong template would quietly degrade every restoration. Use
 `examples/vision/face_id.py`'s `detect` to locate faces, crop, and feed the crop

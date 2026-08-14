@@ -9,7 +9,8 @@ marshalled through D-Bus.
 | model | actions | weights env |
 |---|---|---|
 | `sam2` | `segment` — point/box prompts → a mask | `BRAIN_SAM2_WEIGHTS` (+ optional `BRAIN_SAM2_VARIANT=tiny\|large`) |
-| `facenet` | `detect` → boxes/scores/landmarks, `embed` → a 512-d identity vector | `BRAIN_FACENET_DIR` (the antelopev2 directory) |
+| `scrfd` | `detect` → boxes/scores/landmarks | `BRAIN_SCRFD_DIR` (the antelopev2 directory) |
+| `arcface` | `embed` → a 512-d identity vector (detects + aligns first unless `align=false`) | `BRAIN_ARCFACE_DIR` (the antelopev2 directory) |
 
 A third vision model lives in its own directory here, because its example is
 about a streaming decode rather than a one-shot image result:
@@ -21,7 +22,8 @@ Discover them the same way as everything else:
 
 ```bash
 brain caps brain/sam2
-brain caps brain/facenet
+brain caps brain/scrfd
+brain caps brain/arcface
 ```
 
 ## Run it
@@ -30,7 +32,8 @@ A private session bus needs no system configuration:
 
 ```bash
 BRAIN_SAM2_WEIGHTS=$BRAIN_TESTDATA/sam2/hiera-tiny/sam2.1_hiera_tiny.pt \
-BRAIN_FACENET_DIR=$BRAIN_TESTDATA/face/antelopev2 \
+BRAIN_SCRFD_DIR=$BRAIN_TESTDATA/face/antelopev2 \
+BRAIN_ARCFACE_DIR=$BRAIN_TESTDATA/face/antelopev2 \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 3
     python3 examples/vision/segment_image.py --image photo.ppm --point 614,430 --concurrent 4
@@ -46,8 +49,8 @@ The same actions work with no bus at all:
 ```bash
 BRAIN_SAM2_WEIGHTS=… brain sam2 segment --points "614,430" \
     --in image=photo.ppm --out mask=mask.ppm --json
-BRAIN_FACENET_DIR=… brain scrfd detect --in image=photo.ppm --json
-BRAIN_FACENET_DIR=… brain arcface embed --align false \
+BRAIN_SCRFD_DIR=… brain scrfd detect --in image=photo.ppm --json
+BRAIN_ARCFACE_DIR=… brain arcface embed --align false \
     --in image=aligned112.ppm --out embedding=id.bin
 ```
 
@@ -84,8 +87,9 @@ groups them into one batch (`max_batch: 3` in `brain.stats()`), which
 
 ## `face_id.py` — SCRFD + ArcFace
 
-`detect` returns every face with its score and five landmarks, in source pixels.
-`embed` runs the same detector, picks the primary face (`select = largest`, or
+`detect` (on `brain/scrfd`) returns every face with its score and five
+landmarks, in source pixels. `embed` (on `brain/arcface`) runs the same detector
+internally, picks the primary face (`select = largest`, or
 `score`), similarity-aligns it to the 112² ArcFace template and returns the
 512-d vector — **already L2-normalised**, so a cosine is a plain dot product:
 
@@ -101,9 +105,9 @@ reference one bit for bit (cosine 1.000000 against the insightface goldens).
 
 ## What is NOT here
 
-* **Batched faces.** `facenet`'s two graphs are built for a single image, so its
+* **Batched faces.** Both face graphs are built for a single image, so their
   `run_batch` is the serial default — stated, with the reason, in
-  `crates/cli/src/resident_facenet.rs`. SAM 2 batches by image, as above.
+  `crates/cli/src/resident_scrfd.rs`. SAM 2 batches by image, as above.
 * **A mask prompt for SAM 2.** The reference downsamples one with
   `interpolate(antialias=True)` and brain has no antialiased resize kernel, so
   the wire surface does not offer what it cannot compute exactly.

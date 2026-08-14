@@ -125,11 +125,12 @@ use Source::*;
 /// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
 /// audio, vision, image generation, 3D, forecasting, world models, toy).
 ///
-/// `package` names the crate as it exists TODAY - `scrfd` and `arcface`
-/// (still one bundled `brain-facenet` crate, pending a real split into two)
-/// are the one remaining pre-rename pair; the rest of the crate-rename
-/// migration is complete. Each rename updates its row in the same commit
-/// that moves the crate.
+/// `package` names the crate as it exists TODAY, and every row now satisfies
+/// the naming rule (`crates/<id>`, package `brain-<id>`): the crate-rename
+/// migration is complete, the last pair to land being `scrfd`/`arcface`, which
+/// were one bundled crate until they were split into `crates/scrfd` and
+/// `crates/arcface`. Each rename updates its row in the same commit that moves
+/// the crate.
 pub const ARCHS: &[Arch] = &[
     // -- Text decoders --------------------------------------------------
     arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
@@ -157,8 +158,8 @@ pub const ARCHS: &[Arch] = &[
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2"),
-    arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-facenet"),
-    arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-facenet"),
+    arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-scrfd"),
+    arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------

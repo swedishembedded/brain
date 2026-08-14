@@ -10,7 +10,7 @@
 //! `ArcFace(L2-normalised) ‖ EvaClip(L2-normalised)` have the same length, the
 //! same dtype and the same finite values.
 //!
-//! brain's `facenet` `embed` action normalises (its output is meant to be
+//! brain's `arcface` `embed` action normalises (its output is meant to be
 //! cosine-ready), so wiring *that* into PuLID is the natural mistake, and it
 //! would leave the first 512 components ~20x too small.
 //!

@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The [`Executor`] — brain's general model-execution layer. Every path (the CLI,
+//! The [`Executor`] - brain's general model-execution layer. Every path (the CLI,
 //! the event runtime, the D-Bus surface) submits [`Job`]s here instead of calling
 //! models directly, so scheduling, residency, and batching are shared and uniform.
 //!
 //! Design: a **dispatcher** thread owns the [`ResidencyManager`] and the pending
 //! queue (so the manager needs no lock), and **per-device lanes** run the actual
-//! inference. Each round the dispatcher drains new jobs + completions, then — for
-//! every device NOT currently busy — asks the [`crate::scheduler`] policy for the
+//! inference. Each round the dispatcher drains new jobs + completions, then - for
+//! every device NOT currently busy - asks the [`crate::scheduler`] policy for the
 //! best runnable group (balancing batch size against queue age), claims it (promote
 //! / evict via the manager, pinned so it can't be swapped mid-run), and hands the
 //! hot instance to that device's lane. Lanes run concurrently, so models on
 //! different GPUs (or the CPU) execute in parallel; jobs contending for one device
 //! serialize on its lane (the GPU is the bottleneck anyway). Replies and progress go
-//! back through each job's callbacks — no async runtime dependency here.
+//! back through each job's callbacks - no async runtime dependency here.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -37,7 +37,7 @@ pub struct Job {
     pub on_progress: Box<dyn FnMut(Progress) + Send>,
     pub reply: Box<dyn FnOnce(ActionResult) + Send>,
     /// Fired exactly once, at the moment the dispatcher CLAIMS this job onto a lane
-    /// (work is about to start) — the admission signal an HTTP layer gates on.
+    /// (work is about to start) - the admission signal an HTTP layer gates on.
     pub on_admit: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -74,7 +74,7 @@ struct Pending {
     on_admit: Option<Box<dyn FnOnce() + Send>>,
 }
 
-/// One job the executor currently holds — either still in the pending `queue`
+/// One job the executor currently holds - either still in the pending `queue`
 /// (`phase == "queued"`), claimed onto a device lane but still deferred-
 /// activating/promoting (`phase == "building"`), or claimed AND running on an
 /// already-adopted instance (`phase == "running"`). A live snapshot from
@@ -85,8 +85,8 @@ pub struct InFlightJob {
     pub id: u64,
     pub model: String,
     pub action: String,
-    /// `"queued"`, `"building"`, or `"running"` — see this struct's doc.
-    /// Group-granular — a whole same-key group is admitted together, so all
+    /// `"queued"`, `"building"`, or `"running"` - see this struct's doc.
+    /// Group-granular - a whole same-key group is admitted together, so all
     /// of its jobs flip together; `"building"` -> `"running"` flips the
     /// instant [`Msg::Built`] arrives (activate/promote finished), which can
     /// be seconds to well over a minute after admission for a real cold model.
@@ -104,12 +104,12 @@ struct RunningJob {
     key: InstanceKey,
     enqueued: Instant,
     /// True from the moment this group is claimed until its [`Msg::Built`]
-    /// arrives (deferred activate/promote still in progress on the lane) —
+    /// arrives (deferred activate/promote still in progress on the lane) -
     /// see [`InFlightJob::phase`].
     building: bool,
 }
 
-/// Live scheduler counters — proof that batching and eviction happen, and the
+/// Live scheduler counters - proof that batching and eviction happen, and the
 /// numbers to profile with. Cumulative unless noted.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -120,28 +120,28 @@ pub struct Stats {
     pub max_batch: usize,
     pub resident: usize,
     /// Resident MULTI-DEVICE instances (parallel to `resident`, which only
-    /// counts single-device ones — an instance is never counted in both).
+    /// counts single-device ones - an instance is never counted in both).
     pub resident_multi: usize,
     pub queue_peak: usize,
-    /// Deepest observed number of DEVICES occupied at once — for a pure
+    /// Deepest observed number of DEVICES occupied at once - for a pure
     /// single-device workload this is identical to "lanes running at once"
     /// (the reading this field used to have exclusively); a multi-device
     /// group occupies every device it spans, so it can raise this count while
     /// only one lane is actually executing.
     pub max_parallel: usize,
     /// Cumulative count of jobs admitted onto a lane (claimed a device, `on_admit`
-    /// fired) — as distinct from `jobs`, which only counts a job once ITS group's
+    /// fired) - as distinct from `jobs`, which only counts a job once ITS group's
     /// `Done` arrives. `admitted` moves the instant a job starts running;
     /// `jobs`/`batches` are the batching-shape counters `Done` already needed.
     pub admitted: u64,
     /// LIVE queued-job count (unlike `queue_peak`, a high-water mark that never
-    /// resets) — the number a dashboard/braintop panel actually wants to watch
+    /// resets) - the number a dashboard/braintop panel actually wants to watch
     /// change in real time. `InFlightJob::since_ms` is per-request; this is the
     /// aggregate depth.
     pub queue_depth: usize,
     /// Model-specific observability metrics (`Instance::metrics`), refreshed by
     /// the dispatcher after every `assign()` pass. Empty for any instance that
-    /// doesn't override `metrics()` — most models.
+    /// doesn't override `metrics()` - most models.
     pub metrics: HashMap<InstanceKey, Vec<(String, serde_json::Value)>>,
 }
 
@@ -158,17 +158,17 @@ enum Msg {
     /// registration immediately even though scheduling eligibility lands
     /// here, one hop later, on the dispatcher thread.
     Register(Arc<dyn ResidentModel>),
-    /// [`Msg::Register`]'s multi-device sibling — see
+    /// [`Msg::Register`]'s multi-device sibling - see
     /// [`Executor::register_multi`].
     RegisterMulti(Arc<dyn MultiDeviceResidentModel>),
     Built { key: InstanceKey, handle: InstanceHandle },
     /// [`Msg::Built`]'s multi-device sibling. A SEPARATE variant (rather than
     /// reusing `Built`) purely so `ResidencyManager::adopt_multi` runs instead
-    /// of `adopt` — the audit log then says "built ... (multi-device)", not a
+    /// of `adopt` - the audit log then says "built ... (multi-device)", not a
     /// false single-device event.
     BuiltMulti { key: InstanceKey, handle: InstanceHandle },
     Done { key: InstanceKey, device: Device, batch: usize, failed: bool },
-    /// [`Msg::Done`]'s multi-device sibling — `devices` is every device the
+    /// [`Msg::Done`]'s multi-device sibling - `devices` is every device the
     /// group occupied (in the same order `estimate_multi` named them), all of
     /// which must be freed from `busy` here.
     DoneMulti { key: InstanceKey, devices: Vec<Device>, batch: usize, failed: bool },
@@ -177,11 +177,13 @@ enum Msg {
     /// exposed, but read straight from the manager rather than the counters.
     Report(Sender<crate::ResidencyReport>),
     /// An in-flight query: the dispatcher replies with one [`InFlightJob`] per job
-    /// currently queued OR running. Handled like [`Msg::Report`] — read from the
+    /// currently queued OR running. Handled like [`Msg::Report`] - read from the
     /// dispatcher's own live queue + running set, so it is scheduling-consistent.
     InFlight(Sender<Vec<InFlightJob>>),
-    /// Demote a resident multi-device instance — see [`Executor::evict_multi`].
+    /// Demote a resident multi-device instance - see [`Executor::evict_multi`].
     EvictMulti { key: InstanceKey, reply: Sender<bool> },
+    /// Demote a resident single-device instance - see [`Executor::evict`].
+    Evict { key: InstanceKey, reply: Sender<bool> },
     /// Stop the dispatcher - see [`Executor::shutdown`]'s doc for why this
     /// has to be an explicit message rather than relying on `rx.recv()`
     /// erroring once every sender is dropped: every lane thread holds its
@@ -192,7 +194,7 @@ enum Msg {
     Shutdown,
 }
 
-/// What a [`RunReq`] runs — either a single-device claim (today's shape,
+/// What a [`RunReq`] runs - either a single-device claim (today's shape,
 /// unchanged) or a multi-device one spanning several devices at once. Kept as
 /// an enum (not two `Option` fields) so a `RunReq` can never claim to be both
 /// or neither.
@@ -202,11 +204,11 @@ enum RunTarget {
 }
 
 /// A group of same-key jobs handed to a device lane to run. `target` is
-/// either a hot handle or a deferred build the LANE performs — activation
+/// either a hot handle or a deferred build the LANE performs - activation
 /// (weight load, NPU graph compile) can take seconds or hang, and on the
 /// dispatcher thread that froze every model on the server; on the lane it can
 /// only stall its own device (or, for a multi-device target, its own HOME
-/// lane — see `assign`'s doc on how that is chosen).
+/// lane - see `assign`'s doc on how that is chosen).
 struct RunReq {
     target: RunTarget,
     action: String,
@@ -341,12 +343,12 @@ impl Executor {
     }
 
     /// [`Self::register`], but a no-op if `model.manifest().model`'s name is
-    /// already registered — atomically: the presence check and the insert
+    /// already registered - atomically: the presence check and the insert
     /// happen under the SAME `manifests` write-lock acquisition, unlike a
     /// caller doing `!exec.manifests().iter().any(...)` then `exec.register()`
     /// as two separate steps (a check-then-act race a supplier's own
     /// single-flight gate does not close: that gate only serializes callers
-    /// that overlap IN TIME — a straggler that lands after the leader already
+    /// that overlap IN TIME - a straggler that lands after the leader already
     /// tore its gate down starts a fresh, unguarded episode). Returns `true`
     /// if this call actually registered the model, `false` if it was already
     /// present (in which case `model` is dropped, unused).
@@ -366,16 +368,16 @@ impl Executor {
         true
     }
 
-    /// [`Self::register`]'s multi-device sibling — registers a
+    /// [`Self::register`]'s multi-device sibling - registers a
     /// [`MultiDeviceResidentModel`] (e.g. a checkpoint layer-sharded across
     /// several GPUs, too large for any one of them alone). Register a model
     /// ONLY this way, never also via [`Self::register`]: a model whose plain
     /// [`ResidentModel::estimate`] reports a zero/placeholder cost (as a
-    /// multi-device-only model's does, by necessity — it has no meaningful
+    /// multi-device-only model's does, by necessity - it has no meaningful
     /// single-device footprint) would otherwise be reachable through the
     /// ordinary single-device claim path too, where a zero cost is placed on
-    /// the CPU lane and its `activate` — which such a model correctly hard-
-    /// errors on, since it can only run via `activate_multi` — fails every
+    /// the CPU lane and its `activate` - which such a model correctly hard-
+    /// errors on, since it can only run via `activate_multi` - fails every
     /// time. Keeping it out of the single-device registry makes that path
     /// structurally unreachable rather than relying on every caller to know
     /// not to take it.
@@ -394,13 +396,36 @@ impl Executor {
     /// Demote (drop) a resident multi-device instance, freeing its memory on
     /// every device it occupies. Returns `false` (refuses, evicts nothing)
     /// while a job is actively running against it, or if it isn't resident at
-    /// all — see [`crate::manager::ResidencyManager::evict_multi`]'s doc for
+    /// all - see [`crate::manager::ResidencyManager::evict_multi`]'s doc for
     /// why pinned refuses rather than evicting out from under a running lane.
     /// Round-trips through the dispatcher like [`Self::residency`]/
     /// [`Self::in_flight`]; returns `false` if the dispatcher is gone.
     pub fn evict_multi(&self, key: InstanceKey) -> bool {
         let (tx, rx) = channel();
         if self.tx.send(Msg::EvictMulti { key, reply: tx }).is_err() {
+            return false;
+        }
+        rx.recv().unwrap_or(false)
+    }
+
+    /// Demote (drop) a resident single-device instance. Returns `false`
+    /// (refuses, evicts nothing) while a job is actively running against it,
+    /// or if it isn't resident at all - see
+    /// [`crate::manager::ResidencyManager::evict`]'s doc. Round-trips
+    /// through the dispatcher like [`Self::evict_multi`]; returns `false` if
+    /// the dispatcher is gone.
+    ///
+    /// The self-improve continuous-training hot-swap path (roadmap P4/P5):
+    /// a resident LLM served at a fixed model-card id (e.g. `resident_llm::
+    /// QwenResident`) whose backing checkpoint/adapter file changes on disk
+    /// needs the CURRENTLY resident instance gone so the next claim rebuilds
+    /// (`activate`) against the new file - bump whatever the caller uses to
+    /// name the new adapter version, then call this. A running request is
+    /// never interrupted (pinned refuses); the swap takes effect for the
+    /// NEXT request against that key.
+    pub fn evict(&self, key: InstanceKey) -> bool {
+        let (tx, rx) = channel();
+        if self.tx.send(Msg::Evict { key, reply: tx }).is_err() {
             return false;
         }
         rx.recv().unwrap_or(false)
@@ -421,7 +446,7 @@ impl Executor {
 
     /// A live residency + budget snapshot (which model is Hot on which device, at
     /// what memory cost, plus every device's budget). Round-trips a query through
-    /// the dispatcher — the only thread that owns the [`ResidencyManager`] — so it
+    /// the dispatcher - the only thread that owns the [`ResidencyManager`] - so it
     /// is always consistent with scheduling. Returns an empty report if the
     /// dispatcher is gone. Mirrors [`stats`](Self::stats).
     pub fn residency(&self) -> crate::ResidencyReport {
@@ -432,7 +457,7 @@ impl Executor {
         rx.recv().unwrap_or_default()
     }
 
-    /// A live list of every job the executor currently holds — queued or running —
+    /// A live list of every job the executor currently holds - queued or running -
     /// each with a stable submit-order `id`, model/action, coarse phase, and elapsed
     /// time since it was enqueued. Round-trips a query through the dispatcher (the
     /// only thread that owns the queue + running set) so it is consistent with
@@ -464,7 +489,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     let mut queue: Vec<Pending> = Vec::new();
     let mut running: HashSet<InstanceKey> = HashSet::new();
     let mut busy: HashSet<Device> = HashSet::new();
-    // Jobs handed to a lane and running now — tracked here (not in `queue`) so the
+    // Jobs handed to a lane and running now - tracked here (not in `queue`) so the
     // in-flight query can report them, keyed by the group's instance key.
     let mut running_jobs: Vec<RunningJob> = Vec::new();
     // Monotonic job-id source; each submitted job gets the next value.
@@ -502,12 +527,12 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // EACH message gets its OWN catch_unwind, for the SAME reason
         // `lane_loop` isolates each lane: a dropped `InstanceHandle` (e.g.
         // `ResidencyManager::build_failed` unwinding a failed claim) runs that
-        // model's real Drop impl right here, on the dispatcher thread — and a
+        // model's real Drop impl right here, on the dispatcher thread - and a
         // GPU backend whose device was already lost (a real, observed wgpu
         // `Device is lost` fault) can panic again from INSIDE that Drop, deep
         // in a third-party crate this code never calls directly. Without
         // this, that second panic kills the ONE thread that owns the entire
-        // `ResidencyManager` and lane routing — every other model on the
+        // `ResidencyManager` and lane routing - every other model on the
         // server stops being scheduled forever, not just the one that hit the
         // fault. `build_failed`/`evict` release the budget and resident-slot
         // bookkeeping BEFORE the risky drop (see their own bodies), so a panic
@@ -630,17 +655,17 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             // Free the dispatcher's OWN bookkeeping (`busy`/`running`) BEFORE
             // the risky `mgr.build_failed`/`release` call below, which drops
             // the claim's `InstanceHandle` and can panic a SECOND time (a lost
-            // GPU device's backend panicking again from inside its own Drop —
+            // GPU device's backend panicking again from inside its own Drop -
             // see dispatch_loop's per-message catch_unwind). If that panic cut
             // this handler off here instead, `device` would stay marked busy
             // FOREVER (nothing else ever clears it), silently wedging every
-            // future claim on it — not a hang in this one model, a dead
+            // future claim on it - not a hang in this one model, a dead
             // device. `mgr`'s own state is a separate concern: `build_failed`/
             // `release` still run next, and their own edits to `residents`/
             // `budgets`/`instances` happen before THEIR risky drop too (see
             // their own bodies).
             running.remove(&key);
-            running_jobs.retain(|r| r.key != key); // group finished — drop its jobs
+            running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
             busy.remove(&device);
             if failed {
                 crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
@@ -686,6 +711,14 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             }
             let _ = reply.send(ok);
         }
+        Msg::Evict { key, reply } => {
+            let ok = mgr.evict(&key);
+            if let Ok(mut s) = stats.lock() {
+                s.evictions = mgr.evictions;
+                s.resident = mgr.resident_count();
+            }
+            let _ = reply.send(ok);
+        }
         // Unreachable: dispatch_loop checks the drained batch for this
         // variant and returns before ever calling on_msg - see
         // Msg::Shutdown's doc. Still matched (not `_`) so a future Msg
@@ -704,7 +737,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let now = Instant::now();
         let rows = group_rows(queue, now, running);
         // Multi-device groups need `placeable_multi` (checks EVERY named device),
-        // never plain `placeable` — a model registered ONLY via `register_multi`
+        // never plain `placeable` - a model registered ONLY via `register_multi`
         // is never in `self.models` at all, so `placeable` would always return
         // `false` for it and its jobs would sit in the queue forever, silently.
         let placeable: Vec<Group> = rows
@@ -716,8 +749,8 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             Some(x) => x,
             None => break, // nothing runnable right now
         };
-        // choose_next returns the group's `id` FIELD — which group_rows numbered
-        // as its index into `rows` — never an index into the filtered
+        // choose_next returns the group's `id` FIELD - which group_rows numbered
+        // as its index into `rows` - never an index into the filtered
         // `placeable` slice. (Indexing `placeable[gid]` here panicked the
         // dispatcher with index-out-of-bounds the moment any group was filtered
         // out as unplaceable, killing scheduling for the whole server.)
@@ -725,7 +758,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
 
         // Claim (promote/evict, pin) on non-busy device(s). Multi-device models
-        // (registered via `register_multi`, never also via `register` — see
+        // (registered via `register_multi`, never also via `register` - see
         // `Executor::register_multi`'s doc) go through `claim_multi` instead of
         // `claim`; both `ClaimError` variants mean the same thing either way, so
         // the handling below is shared.
@@ -746,7 +779,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             Err(ClaimError::TooLarge(e)) | Err(ClaimError::Activate(e)) => {
                 // Both permanent for this group: FAIL its queued jobs now and
                 // keep scheduling the others. (The old code broke out of the
-                // whole round here — the jobs waited forever and every other
+                // whole round here - the jobs waited forever and every other
                 // group starved behind them.) TooLarge specifically will
                 // never resolve itself by waiting (no eviction, however
                 // aggressive, could ever make room), so it must not be
@@ -768,7 +801,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // The HOME lane a multi-device group runs its ONE lane loop on: the
         // first device `estimate_multi` named (`pick_devices` preserves
         // declaration order). `busy` still gets every device the group
-        // occupies below — the home lane only decides which thread runs
+        // occupies below - the home lane only decides which thread runs
         // `run_group`, not which devices are considered occupied.
         let home: Device = match &outcome {
             ClaimOutcome::Single(_, device) => *device,
@@ -776,7 +809,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         };
         // Structurally shouldn't happen (`pick_device`/`pick_devices` only ever
         // name budgeted devices, and `Executor::start` spawns one lane per
-        // budgeted device) — but a missing lane must fail this group's jobs
+        // budgeted device) - but a missing lane must fail this group's jobs
         // cleanly, never panic the one thread every model depends on.
         if !lanes.contains_key(&home) {
             match outcome {
@@ -822,7 +855,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
         jobs.reverse();
 
-        // The group is now CLAIMED onto a lane — work is about to start. Fire each
+        // The group is now CLAIMED onto a lane - work is about to start. Fire each
         // job's admission signal exactly once (an HTTP layer gates streaming on it).
         for j in jobs.iter_mut() {
             if let Some(f) = j.on_admit.take() {
@@ -844,7 +877,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
         }
 
-        // Sync residency counters immediately — a claim may have built/evicted, and
+        // Sync residency counters immediately - a claim may have built/evicted, and
         // that must be visible before the lane's Done (which lags the actual run).
         if let Ok(mut s) = stats.lock() {
             s.builds = mgr.builds;
@@ -905,7 +938,7 @@ fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -
 
 /// What a [`lane_loop`] iteration ran, carried alongside the handle out of
 /// the big match below purely so the FINAL `Done`/`DoneMulti` send (after
-/// `run_group`, or after a panic — see [`park_reply`]) knows which shape to
+/// `run_group`, or after a panic - see [`park_reply`]) knows which shape to
 /// send without re-deriving it from anything guessable (e.g.
 /// `devices.len() == 1`, which a genuine single-device multi-device instance
 /// would make ambiguous).
@@ -915,7 +948,7 @@ enum Ran {
 }
 
 /// A job's reply callback, parked where BOTH the normal completion path and the
-/// lane's panic handler can reach it — whichever runs first takes it, so the
+/// lane's panic handler can reach it - whichever runs first takes it, so the
 /// reply fires exactly once either way.
 type ReplySlot = Arc<Mutex<Option<Box<dyn FnOnce(ActionResult) + Send>>>>;
 
@@ -944,13 +977,13 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
         let key = req.key.clone();
         // Salvage which `Done`/`DoneMulti` shape this group needs BEFORE `req`
         // moves into the `catch_unwind` closure below, so a panic can still
-        // report on the right device(s) — matches `run_req`'s own `Ran` return
+        // report on the right device(s) - matches `run_req`'s own `Ran` return
         // on the non-panic path.
         let ran_shape = match &req.target {
             RunTarget::Single { device, .. } => Ran::Single(*device),
             RunTarget::Multi { devices, .. } => Ran::Multi(devices.clone()),
         };
-        // A lane runs model code — activate(), promote(), run_batch() — that
+        // A lane runs model code - activate(), promote(), run_batch() - that
         // CAN panic in practice (a bug reachable only with real weights, a
         // driver fault). Without isolation a panic killed this thread with no
         // `Msg::Done`: the dispatcher never cleared `busy`/`running`, so the
@@ -987,7 +1020,7 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
 /// One [`RunReq`]'s body: activate/promote as needed (single- or multi-device),
 /// then run the group. Returns whether the claim failed (the dispatcher must
 /// unwind it) alongside the [`Ran`] shape (needed for the `Done`/`DoneMulti`
-/// choice on EVERY path, including a failed activate — `lane_loop`'s
+/// choice on EVERY path, including a failed activate - `lane_loop`'s
 /// `ran_shape` fallback exists only for the panic path, which never reaches
 /// here). Runs under `lane_loop`'s `catch_unwind`; the `Done`/`DoneMulti` send
 /// stays OUTSIDE, in `lane_loop` itself, so it is delivered on every path
@@ -1054,7 +1087,7 @@ fn run_req(req: RunReq, done: &Sender<Msg>) -> (bool, Ran) {
             }
         },
     };
-    // `run_group` is one implementation shared by both shapes above — a
+    // `run_group` is one implementation shared by both shapes above - a
     // multi-device instance is just an `Instance` whose forward happens to
     // span devices internally; nothing here needs to know that.
     run_group(&handle, &action, jobs);
@@ -1227,7 +1260,7 @@ mod tests {
     fn stateless_zero_cost_model_is_schedulable_on_a_gpu_only_budget() {
         // Regression: a zero-cost instance (MemCost::default(), e.g. a stateless
         // ProviderResident like `demo`) must be placeable even when only GPU
-        // budgets exist — this is exactly how the D-Bus roundtrip test wires up.
+        // budgets exist - this is exactly how the D-Bus roundtrip test wires up.
         let builds = Arc::new(AtomicU32::new(0));
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 0);
@@ -1260,7 +1293,7 @@ mod tests {
     }
 
     /// REGRESSION (2026-07-30 wedge): an activation failure must (1) reply the
-    /// error to every queued job of the group — never silence — and (2) leave the
+    /// error to every queued job of the group - never silence - and (2) leave the
     /// scheduler fully alive for other models. The old code broke out of the
     /// assign round on any claim error: the jobs waited forever and every later
     /// Run on ANY model queued behind them.
@@ -1295,7 +1328,7 @@ mod tests {
         assert!(exec.run_blocking("bad", "run", Invocation::new(), |_| {}).is_err());
     }
 
-    /// A model whose activate() or run() PANICS (not Err) — the shape a truncated
+    /// A model whose activate() or run() PANICS (not Err) - the shape a truncated
     /// checkpoint used to produce inside a lane before mmap validation existed,
     /// and the shape any latent model bug still can.
     struct Panicky {
@@ -1326,7 +1359,7 @@ mod tests {
         }
     }
 
-    /// SPEC (audit F1): a panic in a lane — during activate() or run_batch() —
+    /// SPEC (audit F1): a panic in a lane - during activate() or run_batch() -
     /// must (1) reply an error to every job of the group, never hang the
     /// waiters, and (2) deliver Msg::Done so the dispatcher clears busy/running
     /// and the DEVICE AND MODEL both stay schedulable. Before panic isolation
@@ -1362,15 +1395,15 @@ mod tests {
             assert!(ok.is_ok(), "device wedged after a lane panic (panic_in_activate={panic_in_activate}): {ok:?}");
             // The claim was unwound (nothing from `boom` left resident or charged).
             assert_eq!(exec.stats().resident, 1, "only the good instance may be resident");
-            // And the panicking model itself stays schedulable — it fails again
+            // And the panicking model itself stays schedulable - it fails again
             // cleanly (fresh build each time) instead of being silently dead.
             assert!(exec.run_blocking("boom", "run", Invocation::new(), |_| {}).is_err());
             assert!(exec.run_blocking("good", "run", Invocation::new(), |_| {}).is_ok());
         }
     }
 
-    /// An `Instance` whose `run` panics (e.g. "device lost" mid-run — the real
-    /// fault this regression is named for) AND whose `Drop` ALSO panics —
+    /// An `Instance` whose `run` panics (e.g. "device lost" mid-run - the real
+    /// fault this regression is named for) AND whose `Drop` ALSO panics -
     /// modeling a third-party GPU backend's own internal teardown panicking a
     /// SECOND time when it discovers the device is already lost (observed
     /// verbatim: `wgpu-core`'s device-poll-on-drop hits the same fault its
@@ -1510,7 +1543,7 @@ mod tests {
                 InstanceKey::new("free", "stateless")
             }
             fn estimate(&self, _k: &InstanceKey) -> MemCost {
-                MemCost::default() // 0 vram / 0 ram / 0 npu — the demo case
+                MemCost::default() // 0 vram / 0 ram / 0 npu - the demo case
             }
             fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
                 Ok(Box::new(FreeInst))
@@ -1531,7 +1564,7 @@ mod tests {
     /// REGRESSION (dispatcher panic, 2026-07-30): `choose_next` returns a group
     /// **id** (an index into `rows`), not an index into the FILTERED `placeable`
     /// slice. With one group unplaceable (here: `b` only fits the busy GPU 0),
-    /// the old `placeable[gid]` was out of bounds — the dispatcher died and every
+    /// the old `placeable[gid]` was out of bounds - the dispatcher died and every
     /// later call on any model got "executor worker gone".
     #[test]
     fn filtered_unplaceable_group_does_not_kill_the_dispatcher() {
@@ -1586,7 +1619,7 @@ mod tests {
         assert!(srx.recv_timeout(Duration::from_secs(5)).expect("slowboot reply").is_ok());
     }
 
-    /// A model whose `run` blocks until a shared gate is released — so a job can be
+    /// A model whose `run` blocks until a shared gate is released - so a job can be
     /// held mid-flight while the test inspects the executor. `entered` flips once the
     /// lane is actually executing the job (so the test can wait for the running
     /// state deterministically, with no sleeps-as-timing).
@@ -1617,7 +1650,7 @@ mod tests {
     impl Instance for GatedInst {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             self.entered.fetch_add(1, Ordering::SeqCst);
-            // Block until released — bounded so a bug can never hang the suite.
+            // Block until released - bounded so a bug can never hang the suite.
             let start = Instant::now();
             while !self.release.load(Ordering::SeqCst) {
                 if start.elapsed() > Duration::from_secs(5) {
@@ -1632,7 +1665,7 @@ mod tests {
     /// `Executor::in_flight` reports both a RUNNING job (claimed onto a lane) and a
     /// QUEUED one (still waiting), with stable, monotonic submit-order ids. Two
     /// 20 GB models on a 24 GB card: only one fits, so while `a` runs (gated) `b`
-    /// cannot be placed and sits queued — a deterministic queued+running mix.
+    /// cannot be placed and sits queued - a deterministic queued+running mix.
     #[test]
     fn in_flight_reports_queued_and_running_jobs_with_monotonic_ids() {
         let mut budgets = Budgets::new();
@@ -1678,7 +1711,7 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
         rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
         // The list drains once both groups' `Done` land (which the lane sends just
-        // after each reply — so poll rather than assume it is already processed).
+        // after each reply - so poll rather than assume it is already processed).
         let start = Instant::now();
         while !exec.in_flight().is_empty() {
             assert!(start.elapsed() < Duration::from_secs(5), "in-flight never drained: {:?}", exec.in_flight());
@@ -1745,11 +1778,11 @@ mod tests {
 
     // ------------------------------------------------------------ multi-device
 
-    /// A fake model spanning BOTH gpu0 and gpu1 at once — the `Executor`-level
+    /// A fake model spanning BOTH gpu0 and gpu1 at once - the `Executor`-level
     /// twin of `manager.rs`'s `MultiFake`, driven through the FULL dispatcher +
     /// lane machinery instead of `ResidencyManager` directly. Its plain
     /// `ResidentModel::estimate`/`activate` are deliberately unusable (zero
-    /// cost, hard error) — exactly `Int8ThinkerResident`'s real shape — so any
+    /// cost, hard error) - exactly `Int8ThinkerResident`'s real shape - so any
     /// test that succeeds here proves the model ran via `claim_multi`, never
     /// `claim`.
     struct MultiFake {
@@ -1823,7 +1856,7 @@ mod tests {
     }
 
     /// A multi-only model (zero-cost `estimate`, hard-erroring `activate`) must
-    /// run via `claim_multi` even when a CPU budget is ALSO present — the case
+    /// run via `claim_multi` even when a CPU budget is ALSO present - the case
     /// that would silently break if `register_multi` ever also called
     /// `register` (a zero-cost model's PLAIN `estimate` places it on the CPU
     /// lane preferentially, per `place::pick_device`'s zero-cost branch, where
@@ -1891,7 +1924,7 @@ mod tests {
 
     /// Mirrors `activation_failure_replies_errors_and_does_not_wedge_the_executor`
     /// for the multi-device path: every queued job gets the error, BOTH
-    /// devices' budgets are unwound (not just one — this is what distinguishes
+    /// devices' budgets are unwound (not just one - this is what distinguishes
     /// `build_failed_multi` from `build_failed`), and the executor stays alive.
     #[test]
     fn multi_device_activation_failure_replies_errors_and_unwinds_both_budgets() {
@@ -1924,7 +1957,7 @@ mod tests {
     }
 
     /// A multi-device model whose `run` blocks until a shared gate is
-    /// released — the multi-device twin of `Gated`/`GatedInst`, so a job can
+    /// released - the multi-device twin of `Gated`/`GatedInst`, so a job can
     /// be held mid-flight while the test inspects `busy`/`in_flight`.
     struct MultiGated {
         name: String,
@@ -1975,18 +2008,18 @@ mod tests {
     /// THE busy-tracking test: while a multi-device group genuinely holds
     /// BOTH gpu0 and gpu1, a single-device model that would otherwise fit
     /// trivially (1 GB on a 24 GB card) must not even be CLAIMED, let alone
-    /// run — proving `busy` really gained every device the group claimed, not
+    /// run - proving `busy` really gained every device the group claimed, not
     /// just its home lane's device.
     ///
     /// Uses a SECOND `Gated` instance (not `Slow`) for the single-device job
     /// so the check is deterministic rather than a timing race: if `busy`
     /// only tracked the home device (the bug this pins), the single-device
     /// job would be claimed onto the OTHER, still-idle card and its own
-    /// `entered2` counter would flip within microseconds — polling
+    /// `entered2` counter would flip within microseconds - polling
     /// `exec.in_flight()` for a `"queued"` snapshot cannot reliably observe
     /// that (a fast wrongly-scheduled job can start AND finish inside one
     /// poll interval, so the racy version of this test silently passed
-    /// against the very bug it was written to catch — confirmed once by
+    /// against the very bug it was written to catch - confirmed once by
     /// deliberately reintroducing that bug and rerunning this exact test).
     /// Blocking `single` on its own gate makes a wrongly-early start
     /// observable no matter how fast the dispatcher reacts.
@@ -2069,5 +2102,52 @@ mod tests {
         assert!(report.multi_placements.is_empty());
         let gpu0 = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu0 budget");
         assert_eq!(gpu0.used, 0);
+    }
+
+    /// [`Executor::evict`]'s single-device analogue of
+    /// `evict_multi_frees_every_device_and_refuses_while_pinned` - the
+    /// self-improve continuous-training hot-swap primitive (P4/P5): refuses
+    /// while a job is actively running (pinned), succeeds and frees the
+    /// device once it isn't.
+    #[test]
+    fn evict_frees_the_device_and_refuses_while_pinned() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let entered = Arc::new(AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register(Arc::new(Gated { name: "adapter-model".into(), vram: 5 * GB, entered: entered.clone(), release: release.clone() }));
+
+        let (tx, rx) = channel();
+        exec.submit(Job::new("adapter-model", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "gated run never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let key = InstanceKey::new("adapter-model", "default");
+        assert!(!exec.evict(key.clone()), "must refuse to evict a PINNED (actively running) instance");
+
+        release.store(true, Ordering::SeqCst);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+
+        // Poll until the job's Done has actually landed (unpinned) before
+        // expecting a real eviction to succeed - same pattern as the
+        // multi-device test above.
+        let start = Instant::now();
+        loop {
+            if exec.evict(key.clone()) {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "evict never succeeded once unpinned");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let report = exec.residency();
+        let gpu0 = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu0 budget");
+        assert_eq!(gpu0.used, 0, "evict must free the device's budget");
+
+        // Evicting an unknown key (never resident) is a clean `false`, not a panic.
+        assert!(!exec.evict(InstanceKey::new("never-registered", "default")));
     }
 }

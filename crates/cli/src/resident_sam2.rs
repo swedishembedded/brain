@@ -46,7 +46,7 @@ impl Sam2Resident {
     }
 
     /// Direct constructor (no env round-trip) — see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
     pub fn new(path: impl Into<String>, variant: impl Into<String>) -> Option<Sam2Resident> {
         let (path, variant) = (path.into(), variant.into());
         if !std::path::Path::new(&path).exists() {

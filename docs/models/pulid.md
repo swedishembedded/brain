@@ -10,7 +10,7 @@ This is a real, verified port - 312 tensors, parity-gated on both backends
 (IDFormer 29 taps, the cross-attention unit 8, the conditioned FLUX.1
 forward 10, worst 1-cos 1.44e-11) - but forward only: no backward, no
 serving surface, and no image -> `id_cond` path exists yet (the crate
-takes `id_cond` as raw host slices, so the facenet/EVA-CLIP wiring isn't
+takes `id_cond` as raw host slices, so the arcface/EVA-CLIP wiring isn't
 done). "PuLID works" is not claimed. Not something you can run as a model
 today.
 

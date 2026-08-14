@@ -20,7 +20,7 @@
 //!    `w = 0` maximum quality, `w = 1` maximum fidelity to the input.
 //!
 //! Face detection and 5-point alignment for a full in-the-wild pipeline come
-//! from `crates/facenet` (SCRFD + Umeyama similarity alignment, already
+//! from `crates/scrfd` + `crates/arcface` (detection + Umeyama similarity alignment, already
 //! parity-gated); this crate takes an aligned 512×512 face and gives one back.
 //!
 //! Scope today: the **forward** ([`model`]), parity-gated per stage against

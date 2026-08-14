@@ -117,7 +117,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
     // Imaging models, each gated on its own weights env var: SAM 2.1 promptable
     // segmentation (BRAIN_SAM2_WEIGHTS, prompt-batched per image), the
-    // antelopev2 face stack (BRAIN_FACENET_DIR), the VQ autoencoder
+    // antelopev2 face stack (BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR), the VQ autoencoder
     // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_CODEFORMER_WEIGHTS) and
     // the CLIP encoders (BRAIN_CLIP_DIR, genuinely batched per tower).
     // The imaging models come from `crate::catalog`, which owns their manifests

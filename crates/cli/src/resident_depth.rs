@@ -5,7 +5,7 @@
 //!
 //! Mirrors the yolo adapter: a [`ResidentModel`] whose `activate` loads a released
 //! ZipDepth `.pth` (`BRAIN_ZIPDEPTH_WEIGHTS`) once, and whose [`Instance`] owns the
-//! resident weights — dropping it frees them. One action, `depth`.
+//! resident weights - dropping it frees them. One action, `depth`.
 //!
 //! The instance keeps the imported weight map in host RAM (the model's "Hot"
 //! footprint) plus a live [`Gpu`] backend, and per call rebuilds a [`ParamStore`]
@@ -25,7 +25,7 @@ use serde_json::json;
 
 /// ZipDepth monocular depth behind the scheduler. Loads a brain-format ZipDepth
 /// checkpoint (`BRAIN_ZIPDEPTH_WEIGHTS`); the resident instance holds the weights in
-/// RAM — dropping it frees them. One action, `depth`.
+/// RAM - dropping it frees them. One action, `depth`.
 pub struct DepthResident {
     /// Catalog id (the model-card id): the manifest/instance-key key, so two
     /// checkpoints of the same family are two distinct selectable models
@@ -103,7 +103,7 @@ impl ResidentModel for DepthResident {
         // Build the engine once (honours the process backend / `--device`), and
         // keep the imported weights resident in host RAM. `on_device` scopes
         // the build onto the dispatcher's assigned device, like every sibling
-        // adapter (`resident_facenet.rs`, `resident_upscale.rs`, ...) — a bare
+        // adapter (`resident_scrfd.rs`, `resident_upscale.rs`, ...) - a bare
         // `Gpu::new` here bound whatever the thread-local default card was,
         // so the manager could budget depth against a device it wasn't on.
         let gpu = crate::resident_llm::on_device(device, || Gpu::new(zipdepth::net::PIPELINES))?;
@@ -112,7 +112,7 @@ impl ResidentModel for DepthResident {
 }
 
 /// The ZipDepth graph as a generic [`npu::NpuModel`]: build the depth ONNX for a
-/// fixed `side × side` input. This is the *only* depth-specific NPU code — compile /
+/// fixed `side × side` input. This is the *only* depth-specific NPU code - compile /
 /// cache / infer / evict all reuse `npu::openvino::NpuGraph`.
 struct DepthNpuModel {
     cfg: ZipConfig,
@@ -189,7 +189,7 @@ impl Instance for DepthInstance {
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Optional smaller input (shorter side): the net is fully convolutional, so
-        // any x32 input is valid and faster — the predictor rounds it. 0 keeps native.
+        // any x32 input is valid and faster - the predictor rounds it. 0 keeps native.
         let mut cfg = self.cfg.clone();
         if let Some(n) = inv.get_i64("input") {
             if n > 0 {

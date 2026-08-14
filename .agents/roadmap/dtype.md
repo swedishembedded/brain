@@ -3503,7 +3503,7 @@ deliberate limit of this phase's scope, not an oversight.
   The full, unscoped `cargo test -p brain-gradcheck --lib analytic_grads_
   match_finite_differences` (every model's own training gradcheck) was
   STARTED, ran past 400s wall-clock without finishing (heavy - qwen35/
-  qwen35moe/facenet/lfm2 each take real time), and was killed rather than let
+  qwen35moe/arcface/lfm2 each take real time), and was killed rather than let
   run unbounded, per this phase's own operating instructions; the pre-existing
   qwen3 failures above were confirmed from its PARTIAL output plus a separate,
   faster, targeted `--lib "tests::qwen"` run, not the full unscoped run.

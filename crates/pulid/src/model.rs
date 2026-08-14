@@ -166,7 +166,7 @@ struct Tap {
 ///
 /// `id_cond` is `cat(ArcFace 512, L2-normalised EVA-CLIP cls 768)` and
 /// `id_vit_hidden[j]` the EVA-CLIP tower's block `4j+3` output — both produced
-/// by brain's own parity-gated `facenet` and `clip` crates
+/// by brain's own parity-gated `arcface` and `clip` crates
 /// (`clip::EvaVisionConfig::PULID_TAPS`); this graph adds no second copy of
 /// either.
 pub struct IdFormer {

@@ -8,7 +8,7 @@
 //! FLUX.1 image stream at 20 points along the backbone.
 //!
 //! ```text
-//!   face image ──► facenet (SCRFD + align + ArcFace)  ──► 512-d embedding ─┐
+//!   face image ──► arcface (SCRFD + align + ArcFace) ──► 512-d embedding ─┐
 //!              └─► clip::EvaVision (EVA-CLIP-L/336)   ──► cls (L2-normed) ─┤ id_cond [1280]
 //!                                                     └─► 5 tapped hidden states
 //!                                                                          │
@@ -20,7 +20,7 @@
 //! ```
 //!
 //! **Nothing here re-implements a model brain already has.** The ArcFace half is
-//! `crates/facenet` (parity-gated at cosine 1.0000000) and the image tower is
+//! `crates/arcface` (parity-gated at cosine 1.0000000) and the image tower is
 //! `clip::model::EvaVision` (0.99999999), which already exposes exactly the
 //! taps PuLID needs (`clip::EvaVisionConfig::PULID_TAPS`). This crate adds the
 //! two modules that do not exist anywhere else — the `IDFormer` resampler and
@@ -54,7 +54,7 @@
 //!   with facexlib's RetinaFace alignment and a BiSeNet face parse (background
 //!   whitened, face greyscaled) — two models brain does not have. The ArcFace
 //!   half needs none of it: PuLID calls insightface antelopev2, which IS
-//!   `crates/facenet`.
+//!   `crates/arcface` + `crates/scrfd`.
 //! * backward / gradcheck, INT8, the serving contract (no capability manifest,
 //!   no residency adapter, no D-Bus surface) — all follow-ups.
 

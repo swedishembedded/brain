@@ -16,6 +16,5 @@ brain-model.workspace = true
 brain-checkpoint.workspace = true
 brain-sdxlunet.workspace = true
 brain-controlnet.workspace = true
-brain-facenet.workspace = true
 brain-clip.workspace = true
 brain-imaging.workspace = true

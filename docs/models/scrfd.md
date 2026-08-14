@@ -2,10 +2,11 @@
 
 Finds every face in an image - boxes, scores, 5-point landmarks. Part of the
 well-known insightface antelopev2 stack; its sibling architecture is
-[ArcFace](arcface.md), the identity embedding SCRFD's output aligns and feeds.
-Both are implemented in one crate (`crates/facenet`) and served as one model,
-`brain/facenet` - see that page for why, and for the identity-embedding half
-of this pipeline.
+[ArcFace](arcface.md), the identity embedding this detector's landmarks align
+and feed. The two are independently served models with their own weights and
+their own weights variable, and this one stands alone: detection needs nothing
+from the embedder. (The reverse is not true - `brain/arcface`'s default path
+detects with this model first.)
 
 ## Support
 
@@ -20,11 +21,12 @@ of this pipeline.
 
 ## Getting the weights
 
-Model id: `brain/facenet` - not auto-fetched. Set `BRAIN_FACENET_DIR` to a
-directory holding both released ONNX graphs under their antelopev2 names:
-`glintr100.onnx` (the [ArcFace](arcface.md) embedding model) and
-`scrfd_10g_bnkps.onnx` (this detector). Both are read directly - no import or
-conversion step.
+Model id: `brain/scrfd` - not auto-fetched. Set `BRAIN_SCRFD_DIR` to a
+directory holding the released ONNX graph under its antelopev2 name,
+`scrfd_10g_bnkps.onnx`. It is read directly - no import or conversion step.
+(The antelopev2 release ships `glintr100.onnx`, the
+[ArcFace](arcface.md) embedder, in the same directory; pointing both
+`BRAIN_SCRFD_DIR` and `BRAIN_ARCFACE_DIR` at it serves both models.)
 
 ## Running it
 

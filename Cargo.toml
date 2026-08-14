@@ -25,6 +25,8 @@ default-members = [
     "crates/gguf",
     "crates/paramstore",
     "crates/optim",
+    "crates/atif",
+    "crates/rl",
     "crates/autodiff",
     "crates/data",
     "crates/audio",
@@ -78,7 +80,8 @@ default-members = [
     "crates/imaging",
     "crates/sam2",
     "crates/sam1",
-    "crates/facenet",
+    "crates/scrfd",
+    "crates/arcface",
     "crates/vqgan",
     "crates/clip",
     "crates/deepseek2ocr",
@@ -131,6 +134,8 @@ brain-checkpoint = { path = "crates/checkpoint" }
 brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
+brain-atif = { path = "crates/atif" }
+brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }
 brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
@@ -184,7 +189,8 @@ brain-vision = { path = "crates/vision" }
 brain-imaging = { path = "crates/imaging" }
 brain-sam2 = { path = "crates/sam2" }
 brain-sam1 = { path = "crates/sam1" }
-brain-facenet = { path = "crates/facenet" }
+brain-scrfd = { path = "crates/scrfd" }
+brain-arcface = { path = "crates/arcface" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
@@ -277,6 +283,18 @@ jsonschema = "0.49"
 # StatsSnapshot over D-Bus. Confined to that bin - no engine/model crate links it.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+
+# crates/atif (ATIF trajectory model, mirrored from applications/sven/crates/atif,
+# formerly crates/trace): versions matched to sven's own workspace so the mirror
+# stays a straight diff.
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+tempfile = "3"
+# libc was previously only a literal per-crate dep (crates/gpu-core,
+# crates/shutdown, both pinned "0.2"); promoted to a workspace entry here so
+# crates/atif (and any future consumer) can inherit it instead of repeating
+# the literal a third time.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

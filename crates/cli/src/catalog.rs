@@ -224,12 +224,20 @@ pub fn models() -> Vec<ModelEntry> {
             resident: resident!(crate::resident_sam2::Sam2Resident::from_env),
         },
         ModelEntry {
-            manifest: facenet::caps::manifest,
+            manifest: scrfd::caps::manifest,
             provider: from_env!(
-                facenet::caps::FacenetProvider::from_env,
-                "set BRAIN_FACENET_DIR to an antelopev2 directory holding glintr100.onnx + scrfd_10g_bnkps.onnx"
+                scrfd::caps::ScrfdProvider::from_env,
+                "set BRAIN_SCRFD_DIR to a directory holding scrfd_10g_bnkps.onnx"
             ),
-            resident: resident!(crate::resident_facenet::FacenetResident::from_env),
+            resident: resident!(crate::resident_scrfd::ScrfdResident::from_env),
+        },
+        ModelEntry {
+            manifest: arcface::caps::manifest,
+            provider: from_env!(
+                arcface::caps::ArcFaceProvider::from_env,
+                "set BRAIN_ARCFACE_DIR to a directory holding glintr100.onnx (+ scrfd_10g_bnkps.onnx for the default aligned path)"
+            ),
+            resident: resident!(crate::resident_arcface::ArcFaceResident::from_env),
         },
         ModelEntry {
             manifest: vqgan::caps::manifest,
@@ -265,7 +273,7 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
-        // facenet's and clip's. CPU-resident by declaration - see
+        // the face stack's and clip's. CPU-resident by declaration - see
         // `crate::resident_deepseekocr`'s header.
         ModelEntry {
             manifest: deepseek2ocr::caps::manifest,

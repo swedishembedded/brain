@@ -119,7 +119,7 @@ one extracted `preprocess_chw` both call, so the claim cannot drift again.
 
 PuLID's `id_cond` is `ArcFace(raw) ‖ EvaClip(L2-normalised)` — the reference
 reads insightface's `face_info['embedding']`, *not* `normed_embedding`, and
-divides only the CLIP half. brain's `facenet` `embed` action normalises, because
+divides only the CLIP half. brain's `arcface` `embed` action normalises, because
 its output is meant to be cosine-ready, so wiring it in is the natural move and
 nothing structural catches it: same length, same dtype, same finite values, first
 512 components ~20× too small. Verified numerically against the golden

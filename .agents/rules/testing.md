@@ -43,7 +43,7 @@ with no GPU to skip the device-dependent tests.
 ### `testdata/` - fixture inputs and goldens, not a model store
 
 Parity/import tests across many crates (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
-`qwen-asr`, `sam2`, `zimage`, `vae`, `clip`, `facenet`, `tts`, `codec`, `speaker`,
+`qwen-asr`, `sam2`, `zimage`, `vae`, `clip`, `scrfd`, `arcface`, `tts`, `codec`, `speaker`,
 `vqgan`, `wm-genie`, `flux2`, `qwen`, `diffusion`, `npu`, `audio`) resolve their
 fixtures through `brain_testutil::testdata(rel)` (one implementation, shared as a
 dev-dependency, rather than a byte-identical function copy-pasted into every one of

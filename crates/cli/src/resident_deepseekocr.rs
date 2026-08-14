@@ -79,7 +79,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 /// DeepSeek-OCR behind the scheduler. `BRAIN_DEEPSEEK_OCR_DIR` names the
 /// directory holding BOTH shipped GGUFs (`mmproj-DeepSeek-OCR-Q8_0.gguf` and
 /// `DeepSeek-OCR-Q8_0.gguf`) - one variable for a multi-file checkpoint, the
-/// same convention as `BRAIN_FACENET_DIR` and `BRAIN_CLIP_DIR`.
+/// same convention as `BRAIN_ARCFACE_DIR` and `BRAIN_CLIP_DIR`.
 pub struct DeepseekOcrResident {
     dir: String,
 }
@@ -94,7 +94,7 @@ impl DeepseekOcrResident {
     }
 
     /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
     pub fn new(dir: impl Into<String>) -> Option<DeepseekOcrResident> {
         let dir = dir.into();
         match deepseek2ocr::import::Files::locate(&dir) {

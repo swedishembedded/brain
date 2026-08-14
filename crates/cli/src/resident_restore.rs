@@ -53,7 +53,7 @@ impl RestoreResident {
     }
 
     /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
     pub fn new(path: impl Into<String>) -> Option<RestoreResident> {
         let path = path.into();
         std::path::Path::new(&codeformer::caps::checkpoint_path(&path)).exists().then_some(RestoreResident { path })
@@ -113,7 +113,7 @@ impl VqganResident {
     }
 
     /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
     pub fn new(path: impl Into<String>) -> Option<VqganResident> {
         let path = path.into();
         std::path::Path::new(&vqgan::caps::checkpoint_path(&path)).exists().then_some(VqganResident { path })

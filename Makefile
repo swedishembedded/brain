@@ -29,7 +29,7 @@ OUT    ?= out
 SEED   ?= 1337
 STEPS  ?= 1000
 N      ?= 100000
-ARCH   ?= gpt
+ARCH   ?= gpt2
 
 # model size (GPT)
 LAYERS ?= 4
@@ -100,8 +100,8 @@ help:
 	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
 	@echo "  make bench/<name>            run one benchmark (e.g. bench/mqar)"
 	@echo "  make bench/scaling           scaling-law sweep: fit L(N)=E+A*N^-alpha across sizes"
-	@echo "  make bench/eval ARCH=<name>  run the WHOLE battery vs one architecture (gpt|gpt-small|"
-	@echo "                               gpt-wide), aggregate per axis -> results/<arch>-<seed>.json"
+	@echo "  make bench/eval ARCH=<name>  run the WHOLE battery vs one architecture (gpt2|gpt2-small|"
+	@echo "                               gpt2-wide), aggregate per axis -> results/<arch>-<seed>.json"
 	@echo "  make bench/scale ARCH=<name> predictive per-capability scaling: score@2x/@4x per axis"
 	@echo "  make bench/advise ARCH=<name> ranked tuning recommendations from eval(+scale) artifacts"
 	@echo "  make bench/compare           side-by-side leaderboard of every results/<arch>-<seed>.json"

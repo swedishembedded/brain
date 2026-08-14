@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Real-ESRGAN behind the generalized [`capability`] interface — what makes
+//! Real-ESRGAN behind the generalized [`capability`] interface - what makes
 //! `brain caps`, `brain do … upscale`, the D-Bus `Run` method and `brain perf`
 //! work with no upscaler-specific plumbing in the CLI or the transports.
 //!
@@ -10,13 +10,13 @@
 //! **No `run_batch` override, deliberately.** RRDBNet is a dense conv net whose
 //! cost is linear in pixels and whose peak VRAM is linear in them too, so
 //! grouping N images saves no work and multiplies the high-water mark by N. The
-//! serial default is the right answer here, and saying so is the point —
+//! serial default is the right answer here, and saying so is the point -
 //! the serving contract asks for a genuine batching decision, not
 //! necessarily a genuine batch.
 //!
 //! **Value range and geometry.** The reference feeds RGB in `[0,1]` (unlike the
 //! VQGAN stack's `[-1,1]`), which is also brain's wire format, so there is no
-//! affine here — only the HWC-blob to CHW-model layout permutation. The graph is
+//! affine here - only the HWC-blob to CHW-model layout permutation. The graph is
 //! recorded for one input size, so `w`/`h` are part of the residency instance
 //! key.
 
@@ -35,8 +35,8 @@ use crate::model::Rrdb;
 
 /// The served id.
 ///
-/// A BARE name, like its siblings in the imaging stack (`sam2`, `facenet`,
-/// `vqgan`, `restore`, `clip`, `imgpipe`) — which resolve under the reserved
+/// A BARE name, like its siblings in the imaging stack (`sam2`, `scrfd`,
+/// `arcface`, `vqgan`, `restore`, `clip`, `imgpipe`) - which resolve under the reserved
 /// `brain` vendor. `crates/cli/tests/model_ids.rs` requires every static
 /// catalog id to sit under a reserved vendor, so the upstream-repo spelling
 /// (`ai-forever/Real-ESRGAN`) is NOT usable here: that vendor is fetchable, and
@@ -58,7 +58,7 @@ pub fn upscale_spec() -> ActionSpec {
         .output(BlobSpec::new("image", Media::Image, "the upscaled image, RGB in [0,1]"))
 }
 
-/// The full, static capability manifest — safe to build with no weights loaded.
+/// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
@@ -67,7 +67,7 @@ pub fn manifest() -> Manifest {
     )
 }
 
-/// What a host must implement to serve the action — the seam the residency
+/// What a host must implement to serve the action - the seam the residency
 /// adapter and the in-process provider share, so neither owns a copy of the
 /// blob/layout handling below.
 pub trait Upscaler: Send + Sync {
@@ -143,11 +143,11 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 ///
 /// | halo | tiny, 2 blocks | x4plus, 23 blocks |
 /// |---|---|---|
-/// | 4  | 1.0e0   | — |
-/// | 8  | 2.0e-1  | — |
+/// | 4  | 1.0e0   | - |
+/// | 8  | 2.0e-1  | - |
 /// | 16 | 9.2e-4  | **7.3e-1** |
 /// | 32 | 3.3e-6  | 1.6e-1 |
-/// | 48 | —       | 5.9e-2 |
+/// | 48 | -       | 5.9e-2 |
 ///
 /// The first draft of this constant was 16, justified on the 2-block toy where
 /// it is 4x below an 8-bit step. On the model anyone actually runs it is off by
@@ -155,12 +155,12 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 /// cost/quality point, and `tile` defaults to 0 so callers who can afford the
 /// memory never meet the trade-off at all.
 ///
-/// **A blended tiler was tried and is WORSE — do not re-try it without new
+/// **A blended tiler was tried and is WORSE - do not re-try it without new
 /// evidence.** Feathering the overlap instead of hard-cropping it measured
 /// 2.1e-2 on the tiny config where cropping measures 3.3e-6, and 2.0e-1 vs
 /// 1.6e-1 on x4plus. The reason is structural: blending mixes each tile's HALO
-/// pixels — the least accurate ones it computed, precisely because they had the
-/// least context — back into the output, while cropping discards them and keeps
+/// pixels - the least accurate ones it computed, precisely because they had the
+/// least context - back into the output, while cropping discards them and keeps
 /// only the well-conditioned interior. Blending buys continuity of the error at
 /// the cost of its magnitude, and here the magnitude is what was wrong. The
 /// real fix is a bigger halo, i.e. memory.
@@ -243,8 +243,8 @@ impl Session {
         }
 
         // One graph at (tile + 2*halo) square, swept over the image. Every tile
-        // is the SAME size — including the edge ones, which are replicate-padded
-        // — so the graph is built once.
+        // is the SAME size - including the edge ones, which are replicate-padded
+        // - so the graph is built once.
         let side = tile + 2 * halo;
         let mut out = vec![0.0f32; 3 * (ow as usize) * (oh as usize)];
         let (padded, pw, ph) = pad_replicate(chw, w, h, halo);
@@ -299,7 +299,7 @@ impl Upscaler for Session {
 
 impl UpscaleProvider<Session> {
     /// Build from `BRAIN_ESRGAN_WEIGHTS`, on a device of this crate's kernel
-    /// set. `None` when the var is unset or names nothing that exists — the
+    /// set. `None` when the var is unset or names nothing that exists - the
     /// caller turns that into its own "set BRAIN_..." message.
     pub fn from_env() -> Option<UpscaleProvider<Session>> {
         let path = std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
@@ -358,7 +358,7 @@ mod tests {
 
     /// The layout round-trip is what silently corrupts: the blob is HWC and the
     /// model is CHW, so a missing permutation is a scrambled image with exactly
-    /// the right size and range — nothing structural catches it.
+    /// the right size and range - nothing structural catches it.
     #[test]
     fn an_hwc_blob_round_trips_through_the_chw_model() {
         let (w, h) = (2u32, 2u32);

@@ -10,9 +10,9 @@
 //! `clip::caps`, so this file holds no second copy of the tokenisation, the
 //! pooling choice or the resize.
 //!
-//! # Batching: genuinely batched, unlike facenet
+//! # Batching: genuinely batched, unlike the face stack
 //!
-//! `crates/cli/src/resident_facenet.rs` documents why the antelopev2 graphs
+//! `crates/cli/src/resident_scrfd.rs` documents why the antelopev2 graphs
 //! cannot batch (built for a single image, no N axis). CLIP is the opposite
 //! case and gets no such excuse: [`clip::model::ClipText`] takes `b` at build
 //! time, every row is the same fixed 77-token context, and
@@ -49,7 +49,7 @@ impl ClipResident {
     }
 
     /// Direct constructor (no env round-trip) — see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale. `brain
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale. `brain
     /// perf`'s old `clip:` target set `BRAIN_CLIP_TEXT_ENCODER`/`BRAIN_CLIP_EVA`,
     /// two variables NOTHING reads — this is the seam that makes that class of
     /// mismatch impossible.

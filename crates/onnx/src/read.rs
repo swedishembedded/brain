@@ -5,12 +5,12 @@
 //!
 //! The crate was export-only. Every brain model imported so far arrived as
 //! safetensors or a torch archive, so nothing needed to read an ONNX file —
-//! until `crates/facenet`, whose reference release (insightface `antelopev2`)
-//! ships ONNX and *only* ONNX.
+//! until the face stack (SCRFD + ArcFace), whose reference release (insightface
+//! `antelopev2`) ships ONNX and *only* ONNX.
 //!
 //! This module is deliberately small and lives HERE rather than in the model
 //! crate, for the AGENTS.md "one implementation" reason: a private protobuf
-//! reader inside `facenet` would be a second decoder of the same wire format
+//! reader inside a model crate would be a second decoder of the same wire format
 //! that nothing compares against the first. The vendored [`crate::onnx`]
 //! bindings already carry `dims`, `raw_data`, `float_data`, `data_location` and
 //! the external-data key/value pairs; all that was missing was the extraction.

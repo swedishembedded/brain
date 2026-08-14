@@ -4,13 +4,13 @@
 //! Building `id_cond` from a photograph — the wiring that makes PuLID an
 //! operation on an image rather than on a golden.
 //!
-//! Until this module existed `crates/pulid` declared `brain-facenet` as a
+//! Until this module existed `crates/pulid` declared the face crate as a
 //! dependency and never referenced it: `tests/parity.rs` fed the ArcFace half of
 //! `id_cond` straight from the dumped reference, so the crate gated the
 //! *resampler* while the path from a face photo to its ID vector was untested.
 //!
 //! ```text
-//!   photo ─► facenet: SCRFD detect ─► largest face ─► 5-point align ─► IResNet
+//!   photo ─► arcface: SCRFD detect ─► largest face ─► 5-point align ─► IResNet
 //!                                                                        │
 //!                                                        RAW 512-d ──────┤
 //!                                                                        ├─► id_cond [1280]
@@ -26,12 +26,12 @@
 //! `torch.cat([id_ante_embedding, id_cond_vit])`.
 //!
 //! This is easy to get wrong in exactly one direction, because brain's own
-//! `facenet` **`embed` action normalises** (its output is meant to be
+//! `arcface` **`embed` action normalises** (its output is meant to be
 //! cosine-ready). Feeding that into `id_cond` would leave the first 512
 //! components ~20x too small and let the EVA half dominate the conditioning —
 //! with nothing to catch it, since the shape and the dtype would both be right.
 //! The dumped reference says so numerically: `‖id_cond[:512]‖ = 20.11` against
-//! `‖id_cond[512:]‖ = 1.0000`. [`facenet::caps::Session::embed_raw_chw`] exists
+//! `‖id_cond[512:]‖ = 1.0000`. [`arcface::caps::ArcFaceSession::embed_raw_chw`] exists
 //! so both consumers share one implementation and each applies its own
 //! convention.
 //!
@@ -43,7 +43,7 @@
 //! have — so [`IdCond::from_image`] takes the already-prepared EVA input as a
 //! separate argument rather than pretending to reproduce it. The ArcFace half
 //! needs none of that: PuLID calls insightface antelopev2, which *is*
-//! `crates/facenet`.
+//! `crates/arcface` + `crates/scrfd`.
 
 use crate::config::PulidConfig;
 
@@ -55,7 +55,7 @@ pub struct IdCond {
     /// `ArcFace(raw) ‖ EvaClip(L2-normalised)`, length [`PulidConfig::id_cond_dim`].
     pub cond: Vec<f32>,
     /// The detected face the ArcFace half came from, when detection ran.
-    pub face: Option<facenet::detect::Face>,
+    pub face: Option<arcface::Face>,
 }
 
 /// Compose `id_cond` from a raw ArcFace embedding and an EVA-CLIP CLS vector.
@@ -85,7 +85,7 @@ impl IdCond {
     /// rule (`sorted by box area, take the last`).
     pub fn from_image(
         cfg: &PulidConfig,
-        face_session: &facenet::caps::Session,
+        face_session: &arcface::caps::ArcFaceSession,
         chw: &[f32],
         w: u32,
         h: u32,

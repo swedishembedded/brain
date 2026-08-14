@@ -67,7 +67,8 @@ served, with no error.
 | `BRAIN_YOLOV8` | YOLOv8 detection | checkpoint |
 | `BRAIN_ZIPDEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
 | `BRAIN_SAM2_WEIGHTS` | SAM 2.1 segmentation | `sam2.1_hiera_*.pt` checkpoint |
-| `BRAIN_FACENET_DIR` | antelopev2 face detect/embed | dir holding `glintr100.onnx` + `scrfd_10g_bnkps.onnx` |
+| `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
+| `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |
 | `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
 | `BRAIN_CODEFORMER_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
 | `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |

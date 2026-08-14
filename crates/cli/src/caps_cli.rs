@@ -17,8 +17,8 @@
 //!
 //! Neither command knows anything model-specific: both go through
 //! `capability::Registry`. A new model shows up here the moment it provides a
-//! `capability::Manifest` (discovery) and a `Provider` (execution) — see
-//! `crate::catalog` — ONE entry per model, so the list and the constructor
+//! `capability::Manifest` (discovery) and a `Provider` (execution) - see
+//! `crate::catalog` - ONE entry per model, so the list and the constructor
 //! cannot drift apart (see that module's docs).
 
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use capability::{Action, ActionSpec, Blob, Invocation, Manifest, Media, ParamTyp
 use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Value};
 
-/// Every model's static capability manifest (discovery — no weights). Add a model
+/// Every model's static capability manifest (discovery - no weights). Add a model
 /// here and it appears in `brain caps` immediately.
 /// The catalog id of the trivial always-available demo model (no `caps.rs` of
 /// its own -- this const is its single source of truth).
@@ -53,7 +53,7 @@ pub fn run_caps(argv: &[String]) -> i32 {
         return 0;
     }
     for m in &mans {
-        println!("\x1b[1m{}\x1b[0m — {}", m.model, m.summary);
+        println!("\x1b[1m{}\x1b[0m - {}", m.model, m.summary);
         for a in &m.actions {
             let stream = if a.streaming { " (streaming)" } else { "" };
             println!("  \x1b[36m{}\x1b[0m{stream}: {}", a.name, a.summary);
@@ -117,7 +117,7 @@ pub fn run_do(argv: &[String]) -> i32 {
     };
     let spec = act.spec();
 
-    // Build a clap parser *from the action's schema* — no hand-rolled arg loop.
+    // Build a clap parser *from the action's schema* - no hand-rolled arg loop.
     // Each param becomes a typed `--name`, plus `--in`/`--out name=path` and `--json`.
     let matches = match build_parser(&model, &action, &spec).try_get_matches_from(&argv[2..]) {
         Ok(m) => m,
@@ -198,7 +198,7 @@ pub fn run_do(argv: &[String]) -> i32 {
 
 /// Build a clap parser directly from an [`ActionSpec`]: one typed `--<param>` per
 /// param (required/enum/bool honoured by clap), plus repeatable `--in`/`--out
-/// name=path` and `--json`. All argument parsing goes through clap — no bespoke loop.
+/// name=path` and `--json`. All argument parsing goes through clap - no bespoke loop.
 fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
     let mut cmd = Command::new(format!("brain {model} {action}")).no_binary_name(true).about(spec.summary.clone());
     for p in &spec.params {
@@ -207,8 +207,8 @@ fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
             // A bool takes an OPTIONAL value: `--flag` is still `true` (every
             // existing call site keeps working), and `--flag false` / `--flag=0`
             // can now turn one OFF. Without that, a param whose schema default
-            // is `true` — `facenet embed --aligned`, `sam2 segment --multimask`
-            // — was unreachable from `brain do` while being perfectly settable
+            // is `true` - `arcface embed --aligned`, `sam2 segment --multimask`
+            // - was unreachable from `brain do` while being perfectly settable
             // over D-Bus, i.e. the CLI silently exposed a smaller API than the
             // manifest advertises.
             arg = arg
@@ -335,7 +335,7 @@ impl Action for EchoAction {
 
 impl Provider for DemoModel {
     fn manifest(&self) -> Manifest {
-        Manifest::new(DEMO_MODEL, "a trivial always-available model (no weights) — a worked example of the capability interface", vec![EchoAction.spec()])
+        Manifest::new(DEMO_MODEL, "a trivial always-available model (no weights) - a worked example of the capability interface", vec![EchoAction.spec()])
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         (name == "echo").then(|| Arc::new(EchoAction) as Arc<dyn Action>)

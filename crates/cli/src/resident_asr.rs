@@ -52,7 +52,7 @@ impl NemotronResident {
     }
 
     /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale.
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
     pub fn new(dir: impl Into<String>) -> NemotronResident {
         NemotronResident { dir: dir.into() }
     }
@@ -284,7 +284,7 @@ impl QwenAsrResident {
     }
 
     /// Direct constructor (no env round-trip for the PATH) - see
-    /// `crate::resident_facenet::FacenetResident::new`'s rationale. The two
+    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale. The two
     /// tuning knobs (`BRAIN_QWEN3ASR_WINDOW`/`_MAXNEW`) stay env-read here:
     /// they configure HOW the model runs, not WHICH weights serve.
     pub fn new(dir: impl Into<String>) -> QwenAsrResident {

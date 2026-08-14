@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Resident-model adapters for brain's text-generation LLMs — GPT (dense
+//! Resident-model adapters for brain's text-generation LLMs - GPT (dense
 //! char-level baseline), GLM (MLA + noaux_tc MoE decoder), and Qwen3 (BPE
-//! decoder) — behind the residency [`Executor`], mirroring the yolo/z-image
+//! decoder) - behind the residency [`Executor`], mirroring the yolo/z-image
 //! adapters in [`crate::resident`].
 //!
 //! Each model family is one [`ResidentModel`] with a single `"generate"` action.
 //! Unlike yolo (which pins itself to the CPU via `Gpu::new_cpu` unless a
 //! `--device` was chosen), these models load through `gpu_core::Gpu::new`, i.e.
-//! the process-default backend — **wgpu (GPU) unless `BRAIN_DEVICE=cpu`**. So the
+//! the process-default backend - **wgpu (GPU) unless `BRAIN_DEVICE=cpu`**. So the
 //! resident instance holds the model on a GPU (VRAM); dropping it frees the card.
 //! `activate` places the build on the assigned card via a scoped device-registry
 //! selection ([`on_device`]), exactly like z-image.
 //!
 //! Config is env-only: `BRAIN_GPT2_WEIGHTS`, `BRAIN_GLMDSA_WEIGHTS`,
 //! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (and an optional
-//! `BRAIN_QWEN_CTX` sizing Qwen's built context length — default in `QwenResident::ctx`,
+//! `BRAIN_QWEN_CTX` sizing Qwen's built context length - default in `QwenResident::ctx`,
 //! currently 24576). Each `from_env` returns `None` when its primary weights
 //! var is unset/empty.
 
@@ -88,7 +88,7 @@ const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
 
 /// Run `f` placed on the residency-assigned device: a GPU assignment becomes a
 /// scoped (thread-local) selection in the canonical device registry, so every
-/// `Gpu::new` inside `f` binds that physical card — race-free across the
+/// `Gpu::new` inside `f` binds that physical card - race-free across the
 /// executor's concurrent activation lanes. Shared by the resident adapters.
 ///
 /// `f` always builds a wgpu (GPU/CPU backend) engine, so a `Device::Npu`
@@ -129,7 +129,7 @@ impl GptResident {
         Some(Self::from_card(&path, &ModelCard::new("brain/gpt", "gpt"), None))
     }
 
-    /// Construct under the card's id. `_tokenizer` is unused — GPT is char-level
+    /// Construct under the card's id. `_tokenizer` is unused - GPT is char-level
     /// (its vocab is embedded in the checkpoint).
     pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GptResident {
         GptResident { id: card.id.clone(), path: path.to_string() }
@@ -196,7 +196,7 @@ impl GlmResident {
         Some(Self::from_card(&path, &ModelCard::new("brain/glm", "glm"), None))
     }
 
-    /// Construct under the card's id. `_tokenizer` is unused — GLM is char-level.
+    /// Construct under the card's id. `_tokenizer` is unused - GLM is char-level.
     pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GlmResident {
         GlmResident { id: card.id.clone(), path: path.to_string() }
     }
@@ -249,7 +249,7 @@ impl Instance for GlmInstance {
 /// The Qwen3 BPE decoder behind the scheduler (`BRAIN_QWEN_WEIGHTS` +
 /// `BRAIN_QWEN_TOKENIZER`). Runs the CPU/GPU forward `generate` path (never the
 /// NPU branch). `BRAIN_QWEN_CTX` sizes the built context length (default in
-/// `QwenResident::ctx`, currently 24576 — do not restate the number here,
+/// `QwenResident::ctx`, currently 24576 - do not restate the number here,
 /// it drifted once already).
 pub struct QwenResident {
     id: String,
@@ -259,7 +259,20 @@ pub struct QwenResident {
     /// output), when this resident is the ADAPTER's catalog entry rather than
     /// the base's -- folded into the base tensors at `activate` (see that
     /// method's doc). `None` for a plain base/quant resident.
-    adapter: Option<String>,
+    ///
+    /// `RwLock`, not a plain `Option<String>`: `activate(&self, ..)` only
+    /// ever gets `&self` (this resident is registered once as `Arc<dyn
+    /// ResidentModel>` and shared), but the self-improve continuous-training
+    /// hot-swap path (roadmap P4/P5) needs to point an ALREADY-registered
+    /// resident at a newly-trained adapter file without re-registering under
+    /// the same model id (which would duplicate the manifest entry --
+    /// `Executor::register` has no update-in-place semantics, only
+    /// `register`/`register_if_absent`). [`Self::set_adapter`] writes here;
+    /// callers pair it with `Executor::evict` (evicts the stale Hot/Warm
+    /// instance so the NEXT claim's `activate` reads the new value -- a
+    /// currently-running request is never interrupted, `evict`'s own
+    /// pinned-refusal contract) to actually take effect.
+    adapter: std::sync::RwLock<Option<String>>,
 }
 
 impl QwenResident {
@@ -279,8 +292,27 @@ impl QwenResident {
             id: card.id.clone(),
             path: path.to_string(),
             tokenizer: tokenizer.unwrap_or_default().to_string(),
-            adapter: adapter.filter(|a| !a.is_empty()).map(str::to_string),
+            adapter: std::sync::RwLock::new(adapter.filter(|a| !a.is_empty()).map(str::to_string)),
         }
+    }
+
+    /// Point this ALREADY-registered resident at a different (or no) LoRA
+    /// adapter file - the self-improve continuous-training hot-swap write
+    /// side (see [`Self::adapter`]'s doc for the full contract). Takes
+    /// effect for the next `activate` - pair with `Executor::evict(self.
+    /// instance_key(...))` (or just `Executor::evict(InstanceKey::new(&self.
+    /// id, "default"))`) so a cached Hot/Warm instance from the OLD adapter
+    /// isn't reused first.
+    ///
+    /// `#[allow(dead_code)]`: no caller yet - the self-improve continuous-
+    /// training loop is the intended one, not built in this pass. The write itself
+    /// (`RwLock::write` behind a plain field swap) has no logic worth a
+    /// standalone test; `activate`'s fold path this feeds is already
+    /// covered by `qwen3::lora`'s own round-trip/learning-gate tests. When
+    /// P5 lands its first real caller, this annotation comes off.
+    #[allow(dead_code)]
+    pub fn set_adapter(&self, adapter: Option<String>) {
+        *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());
     }
 
     /// Default 24576 (12x the old 2048), sized to what int8 KV actually
@@ -349,7 +381,7 @@ impl QwenResident {
         v.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
     }
 
-    /// KV-pool geometry for the batched serving engine — the ONE place
+    /// KV-pool geometry for the batched serving engine - the ONE place
     /// `estimate()` and `activate()` derive `block_size`/`max_batch`/
     /// `max_blocks_per_seq`/`num_blocks`/`max_prefill` from, so the residency
     /// budget's PREDICTION of what a pool will cost cannot silently drift
@@ -525,7 +557,12 @@ impl ResidentModel for QwenResident {
             if !kv_int8 {
                 QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, &self.path)?;
             }
-            let mut eng = match &self.adapter {
+            // Snapshot the adapter path under the lock, then release it before
+            // the (potentially slow) fold/load below -- `set_adapter` must
+            // never block on an in-progress activation, and this activation
+            // must not hold up a concurrent `set_adapter` either.
+            let adapter_path = self.adapter.read().unwrap().clone();
+            let mut eng = match &adapter_path {
                 None => qwen3::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
                 // Fold the adapter's delta into the base tensors first (the same
                 // fold `qwen3::eval::score_chat` uses to score one) -- the result
@@ -557,7 +594,7 @@ impl ResidentModel for QwenResident {
     }
 }
 
-/// Which serving path this instance drives — see [`QwenResident::activate`]'s
+/// Which serving path this instance drives - see [`QwenResident::activate`]'s
 /// `.gguf` note for why both still exist.
 enum QwenEngineKind {
     /// The original single-sequence KV-cache decode path (`Qwen::
@@ -588,7 +625,7 @@ impl Instance for QwenInstance {
     /// `Batched`: every invocation in `invs` is submitted into the SAME
     /// persistent `Scheduler` (built once at `activate`, so the paged KV pool
     /// and prefix cache are shared and reused across calls, not rebuilt) and
-    /// driven to completion together — real continuous batching for
+    /// driven to completion together - real continuous batching for
     /// whatever the dispatcher grouped into this one call (admitting MORE
     /// work into an ALREADY-running call is a separate, known gap this does
     /// not yet do).
@@ -604,7 +641,7 @@ impl Instance for QwenInstance {
     }
 
     /// `Batched`'s prefix-cache effectiveness, surfaced through
-    /// `Executor::stats().metrics` — reachable from HTTP/D-Bus for the first
+    /// `Executor::stats().metrics` - reachable from HTTP/D-Bus for the first
     /// time (previously only observable from `brain perf`'s in-process
     /// `PagedLlmTarget`, which bypasses the served path entirely). `Legacy`
     /// (GGUF) has no prefix cache, so it reports nothing extra.
@@ -625,7 +662,7 @@ impl Instance for QwenInstance {
     }
 }
 
-/// One full generation on the legacy single-sequence decode path — the exact
+/// One full generation on the legacy single-sequence decode path - the exact
 /// logic `QwenInstance::run` had before this rewiring, extracted so
 /// `run_batch`'s sequential loop and the (unlikely, but possible) direct
 /// `run` call share one implementation.
@@ -663,7 +700,7 @@ fn run_one_legacy(
 }
 
 /// Drive every invocation in `invs` to completion on the SAME persistent
-/// `Scheduler` — see [`QwenInstance::run_batch`]'s doc.
+/// `Scheduler` - see [`QwenInstance::run_batch`]'s doc.
 fn run_batch_scheduled(
     sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
     tok: &data::qwen_tokenizer::QwenBpe,
@@ -700,7 +737,7 @@ fn run_batch_scheduled(
         // Stream each still-open sequence's newly generated suffix and check
         // its stop-string/cancellation; a triggered sequence is cancelled
         // (and finalised) immediately rather than waiting for the scheduler
-        // to reap it naturally — `Scheduler::cancel` returns its tokens so
+        // to reap it naturally - `Scheduler::cancel` returns its tokens so
         // far synchronously and reclaims its blocks right away.
         let mut just_finished = Vec::new();
         for &bi in &remaining {
@@ -723,7 +760,7 @@ fn run_batch_scheduled(
         let report = sched.step_report();
         // A request the scheduler refuses at admission (a prompt token
         // outside its vocabulary, or one that can never fit its per-sequence
-        // capacity — see `model::serve::RejectReason`) never appears in
+        // capacity - see `model::serve::RejectReason`) never appears in
         // `completed` and never will; without handling it here its `bi`
         // would stay in `remaining` forever, spinning this loop on an
         // otherwise-empty scheduler.
@@ -929,7 +966,7 @@ mod tests {
 
     /// Build a tiny (fast-CPU-testable) but REAL safetensors checkpoint whose
     /// vocab covers the real tokenizer's full range (so chat-template special
-    /// tokens like `<|im_start|>` never index outside the embedding table —
+    /// tokens like `<|im_start|>` never index outside the embedding table -
     /// same reasoning as `rejected_admission_resolves_promptly_instead_of_hanging`),
     /// and write it to a scratch dir. Returns the checkpoint path.
     fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {
@@ -962,7 +999,7 @@ mod tests {
     /// Two chat requests share a long system prompt (differing only in the
     /// short user turn) submitted SEQUENTIALLY against the SAME resident
     /// (`QwenResident` persists its `Scheduler`/KV pool/prefix cache across
-    /// `activate` — see that method's doc), so the second's prefill should
+    /// `activate` - see that method's doc), so the second's prefill should
     /// find the first's system-prompt blocks already cached.
     ///
     /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
@@ -1028,8 +1065,8 @@ mod tests {
     /// REGRESSION: `run_batch_scheduled` must resolve EVERY batch index,
     /// including one the scheduler REJECTS at admission (`model::serve::
     /// RejectReason`) rather than completes. Before this test's fix, a
-    /// rejected sequence's `bi` was never removed from the pending set —
-    /// `report.rejected` was silently ignored — so `run_batch_scheduled`
+    /// rejected sequence's `bi` was never removed from the pending set -
+    /// `report.rejected` was silently ignored - so `run_batch_scheduled`
     /// spun forever calling `step_report()` on an otherwise-empty scheduler.
     /// Reproduced live: `http:qwen-synth:<small vocab>` against a REAL
     /// tokenizer whose chat-template special tokens exceed the synth

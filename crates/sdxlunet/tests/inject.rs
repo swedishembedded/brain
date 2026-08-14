@@ -21,7 +21,7 @@ use sdxlunet::model::{Unet, KERNELS};
 
 /// The backbone's kernels PLUS what the stub adapter dispatches. An adapter runs
 /// on the backbone's device, so the caller builds it from the union — the same
-/// tail-append `facenet::caps::SERVING_PIPELINES` uses, which keeps one kernel
+/// tail-append `arcface::caps::SERVING_PIPELINES` uses, which keeps one kernel
 /// index space and leaves every existing index valid.
 const N: usize = KERNELS.len() + 1;
 static INJECT_KERNELS: [(&str, &str); N] = union_set();

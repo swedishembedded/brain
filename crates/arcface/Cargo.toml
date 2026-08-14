@@ -1,0 +1,38 @@
+[package]
+name = "brain-arcface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ArcFace IResNet-100 face identity embedding, with 5-point similarity alignment and the additive-angular-margin training head - the visual analogue of crates/ecapatdnn."
+
+[lib]
+name = "arcface"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-paramstore.workspace = true
+# The reference release (insightface antelopev2) ships ONNX and only ONNX, so
+# import reads the protobuf. The reader AND the coverage-checked topological
+# walk live in `crates/onnx` - a private one here would be a second decoder of
+# the same wire format.
+brain-onnx.workspace = true
+# The `embed` action's default path detects and aligns the primary face first,
+# and the detector is its own model with its own weights and its own
+# normalisation. This is the ONE direction the dependency runs in: the detector
+# knows nothing about embeddings.
+brain-scrfd.workspace = true
+# `caps.rs` - the serving contract's capability surface.
+brain-capability.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+# The parity test replays goldens dumped as safetensors; nothing in the library
+# reads a checkpoint (weights arrive through `import_dir`).
+brain-checkpoint.workspace = true

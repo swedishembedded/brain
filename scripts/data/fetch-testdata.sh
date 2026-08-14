@@ -6,25 +6,25 @@
 # Populate the gitignored `testdata/` tree that parity / integration tests read.
 #
 # Design goals:
-#   * Idempotent — only ever fetches files that are NOT already present.
-#   * Offline-first — reads a local mirror directory (fast, no network). There is
+#   * Idempotent - only ever fetches files that are NOT already present.
+#   * Offline-first - reads a local mirror directory (fast, no network). There is
 #     currently no URL-download fallback; a missing mirror is reported and
 #     skipped (see the `missing` counter at the end of a run). `brain fetch`
 #     (`crates/cli/src/fetch.rs`) is the network-download path for actual model
-#     weights — this script is test-fixture plumbing, not a general fetcher.
-#   * Zero extra disk on the same filesystem — mirror files are HARD-LINKED into
+#     weights - this script is test-fixture plumbing, not a general fetcher.
+#   * Zero extra disk on the same filesystem - mirror files are HARD-LINKED into
 #     `testdata/` when possible (instant, shares blocks), else copied.
 #   * Never bakes an absolute path into the source tree: tests resolve their
 #     inputs from `$BRAIN_TESTDATA` (default `<repo>/testdata`); this script is the
 #     ONE place a machine-specific mirror location may appear, and it is an
 #     overridable variable, not source code.
-#   * `testdata/` holds test INPUTS AND GOLDENS ONLY — never a `.git` directory
+#   * `testdata/` holds test INPUTS AND GOLDENS ONLY - never a `.git` directory
 #     (stripped unconditionally, see `_link_from` below), never upstream
 #     source/notebooks/docs a test doesn't read (`vl_tree`'s extra exclusions),
-#     and never a model checkpoint — those go to the model store (see
+#     and never a model checkpoint - those go to the model store (see
 #     `model_tree` below), addressed by fully-qualified `<vendor>/<repo>` name,
 #     the same place `brain fetch` writes and `brain_testutil::model_dir`
-#     resolves — this separation is what an earlier testdata-layout audit
+#     resolves - this separation is what an earlier testdata-layout audit
 #     of this script recommended.
 #
 # Layout produced (a proper tree, mirroring each model's asset namespace):
@@ -54,7 +54,7 @@ fi
 
 # Local mirrors of the raw assets on a dev box (override each with its env var).
 # These are the "copy from the local absolute path" sources the tests used to
-# hardcode — the ONE place a machine-specific path may still appear.
+# hardcode - the ONE place a machine-specific path may still appear.
 ASR_MIRROR="${BRAIN_ASR_MIRROR:-/data/workspace/resources/asr}"
 VL_MIRROR="${BRAIN_VL_MIRROR:-/data/workspace/resources/vl}"
 TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
@@ -65,25 +65,25 @@ UNET_MIRROR="${BRAIN_UNET_MIRROR:-/data/workspace/resources/unet}"
 
 added=0 skipped=0 missing=0
 
-# _link_from <mirror-root> <mirror-subdir> <dest-subdir> [extra-exclude-ere] [dest-root] —
+# _link_from <mirror-root> <mirror-subdir> <dest-subdir> [extra-exclude-ere] [dest-root] -
 # hard-link (or copy) every file under <mirror-root>/<mirror-subdir> into
 # <dest-root>/<dest-subdir> (dest-root defaults to $DEST, the testdata tree;
 # `model_tree` below passes $MODELS_DIR instead), creating only what's missing.
 #
-# ALWAYS excludes `.git` directory contents — no test consumer ever needs one,
+# ALWAYS excludes `.git` directory contents - no test consumer ever needs one,
 # and a cloned mirror's `.git` is pure duplicated disk (a checked-out working
-# tree plus its own packed history of the same blobs) — and a mirror's
+# tree plus its own packed history of the same blobs) - and a mirror's
 # `.cache/huggingface/` (download bookkeeping `huggingface_hub`/`hf` leave
-# behind: `.gitignore`, `CACHEDIR.TAG`, per-file `.metadata`, tree manifests —
+# behind: `.gitignore`, `CACHEDIR.TAG`, per-file `.metadata`, tree manifests -
 # never a weight, never read by a test). An optional extended regex (matched
 # against the path relative to <mirror-subdir>) excludes whatever else that
-# particular tree's mirror carries but no test reads — see `vl_tree` below,
+# particular tree's mirror carries but no test reads - see `vl_tree` below,
 # whose mirror is whole upstream HF/GitHub checkouts.
 _link_from() {
   local root="$1" sub_src="$2" sub_dst="$3" extra_exclude="${4:-}" dest_root="${5:-$DEST}"
   local src="$root/$sub_src" dst="$dest_root/$sub_dst"
   if [ ! -d "$src" ]; then
-    echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
+    echo "  · $sub_dst: mirror '$src' absent - skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     missing=$((missing + 1))
     return 0
   fi
@@ -108,27 +108,27 @@ _link_from() {
     added=$((added + 1))
   done < <(find "$src" -type f -print0)
   if [ "$excluded" -gt 0 ]; then
-    echo "  ✓ $sub_dst ($excluded excluded — .git and/or the tree's extra-exclude pattern)"
+    echo "  ✓ $sub_dst ($excluded excluded - .git and/or the tree's extra-exclude pattern)"
   else
     echo "  ✓ $sub_dst"
   fi
 }
-# _link_files <mirror-root> <mirror-subdir> <dest-subdir> <file>… — same as
+# _link_files <mirror-root> <mirror-subdir> <dest-subdir> <file>… - same as
 # _link_from but for a NAMED subset, used where the mirror holds more models
-# than a test needs (antelopev2 ships five .onnx; facenet reads two).
+# than a test needs (antelopev2 ships five .onnx; the face crates read two).
 _link_files() {
   local root="$1" sub_src="$2" sub_dst="$3"
   shift 3
   local src="$root/$sub_src" dst="$DEST/$sub_dst"
   if [ ! -d "$src" ]; then
-    echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
+    echo "  · $sub_dst: mirror '$src' absent - skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     missing=$((missing + 1))
     return 0
   fi
   mkdir -p "$dst"
   for rel in "$@"; do
     if [ ! -e "$src/$rel" ]; then
-      echo "  · $sub_dst/$rel: not in mirror — skipping"
+      echo "  · $sub_dst/$rel: not in mirror - skipping"
       missing=$((missing + 1))
       continue
     fi
@@ -146,7 +146,7 @@ golden_tree() { _link_from "$GOLDEN_MIRROR" "$1" "$2"; }
 # vl_tree's mirror is whole upstream HF/GitHub checkouts (that is what a `git
 # clone` / `git lfs` checkout of a model repo naturally is), so beyond `.git`
 # (always excluded) it also carries source code, notebooks, docs, papers and
-# demo media that `crates/{fastvlm,moondream,qwenvl}` never read — only
+# demo media that `crates/{fastvlm,moondream,qwenvl}` never read - only
 # `*.safetensors`, `*.safetensors.index.json` and small tokenizer/config JSON
 # are. Exclude by extension/path rather than allow-list by filename, since new
 # checkpoint shards land under names this script doesn't know ahead of time.
@@ -157,9 +157,9 @@ VL_EXCLUDE='\.(py|ipynb|sh|md|MD|html|pdf|mp4|pt)$|(^|/)(docker|evaluation|cookb
 vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2" "$VL_EXCLUDE"; }
 tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
-# model_tree <mirror-root> <mirror-subdir> <vendor>/<repo> — like the *_tree
+# model_tree <mirror-root> <mirror-subdir> <vendor>/<repo> - like the *_tree
 # helpers above, but the destination is $MODELS_DIR/<vendor>/<repo>, not
-# $DEST/testdata/…: a model CHECKPOINT (an upstream HF repo, as downloaded —
+# $DEST/testdata/…: a model CHECKPOINT (an upstream HF repo, as downloaded -
 # not test input/golden data) belongs in the model store, addressed by its
 # fully-qualified reference, so it's found the same way a real `brain fetch`
 # of the same ref would leave it. No extra-exclude: unlike vl_tree's whole
@@ -199,13 +199,16 @@ sam2_tree "weights/sam2.1-hiera-large" "sam2/hiera-large"
 sam2_tree "weights/sam2.1-hiera-tiny"  "sam2/hiera-tiny"
 
 # --- Face recognition (insightface antelopev2: SCRFD + ArcFace) --------------
-# The two released ONNX files `crates/facenet` imports. The stage goldens
-# (`{arcface,arcface_blocks,scrfd,align,e2e}.safetensors` + `manifest.json`) are
-# NOT mirrored — regenerate them next to the weights with
+# The two released ONNX files the face crates import - `crates/scrfd` reads the
+# detector, `crates/arcface` the embedder (and the detector too, for its aligned
+# path). The stage goldens (`{arcface,arcface_blocks,scrfd,align,e2e}.safetensors`
+# + `manifest*.json`) are NOT mirrored - regenerate them next to the weights with
+#   python3 tools/goldens/scrfd_dump_reference.py \
+#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2
 #   python3 tools/goldens/arcface_dump_reference.py \
 #       --weights testdata/face/antelopev2 --out testdata/face/antelopev2 \
 #       [--photos a.jpg b.jpg c.jpg]
-# `crates/facenet/tests/parity.rs` skips itself while they are absent.
+# Both crates' `tests/parity.rs` skip themselves while they are absent.
 _link_files "$IDENTITY_MIRROR" "weights/antelopev2" "face/antelopev2" \
   glintr100.onnx scrfd_10g_bnkps.onnx
 
@@ -220,7 +223,7 @@ _link_files "$UNET_MIRROR" "weights/sdxl-base-1.0/tokenizer" "clip/tokenizer" \
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
 # Checkpoints go to the model store, named exactly (only the ONE variant per
-# family the model crates actually import/parity-test against — the mirror
+# family the model crates actually import/parity-test against - the mirror
 # also carries sibling sizes, e.g. FastVLM-1.5B/7B, that nothing here reads).
 model_tree "$VL_MIRROR" "fastvlm/hf/FastVLM-0.5B"          "apple/FastVLM-0.5B"
 model_tree "$VL_MIRROR" "moondream3/hf/moondream3-preview" "moondream/moondream3-preview"
@@ -240,4 +243,4 @@ if [ -d "$TTS_MIRROR" ]; then
   done
 fi
 
-echo "brain: testdata ready — $added new, $skipped already present, $missing groups unavailable"
+echo "brain: testdata ready - $added new, $skipped already present, $missing groups unavailable"

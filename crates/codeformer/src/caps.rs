@@ -25,8 +25,8 @@
 //!
 //! `crates/restore` is forward-only and takes an **aligned** face:
 //! detection + 5-point alignment live in
-//! `crates/facenet` and are not chained in here, because CodeFormer's alignment
-//! template is facexlib's 512² one and not `facenet::ARCFACE_DST_112` rescaled -
+//! `crates/arcface` and are not chained in here, because CodeFormer's alignment
+//! template is facexlib's 512² one and not `arcface::ARCFACE_DST_112` rescaled -
 //! wiring the wrong template would silently degrade every restoration. An
 //! unaligned photo still restores; it just is not the reference recipe.
 

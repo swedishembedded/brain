@@ -47,7 +47,7 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 /// declares what it needs via [`kernels`](CrossAttnInject::kernels), and the
 /// caller builds the device from the UNION of the backbone's set and the
 /// adapter's — the same `const fn` append that
-/// `facenet::caps::SERVING_PIPELINES` uses to extend `model::PIPELINES` at the
+/// `arcface::caps::SERVING_PIPELINES` uses to extend `model::PIPELINES` at the
 /// tail, which keeps ONE kernel index space and leaves every existing index
 /// valid.
 ///

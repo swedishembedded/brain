@@ -18,5 +18,5 @@ examples/qwen3omnimoe/omni.py	run	--model mock exercises the generate wire contr
 examples/restore/restore_face.py	skip	needs BRAIN_CODEFORMER_WEIGHTS (codeformer.pth); the mock model serves no restore_face
 examples/restore/vq_roundtrip.py	skip	needs BRAIN_VQGAN_WEIGHTS (a VQGAN checkpoint); the mock model serves no encode/decode
 examples/vision/deepseek-ocr/ocr_document.py	skip	needs BRAIN_DEEPSEEK_OCR_DIR (both shipped GGUFs); the mock model serves no deepseek-ai/DeepSeek-OCR generate, and a real run is minutes per token (see examples/vision/deepseek-ocr/README.md)
-examples/vision/face_id.py	skip	needs BRAIN_FACENET_DIR (antelopev2 glintr100 + scrfd); the mock model serves no detect/embed
+examples/vision/face_id.py	skip	needs BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR (antelopev2 scrfd + glintr100); the mock model serves no detect/embed
 examples/vision/segment_image.py	skip	needs BRAIN_SAM2_WEIGHTS (sam2.1_hiera_*.pt); the mock model serves no segment

@@ -1,7 +1,8 @@
 # scrfd - roadmap
 
-Face recognition (`crates/facenet`): insightface antelopev2 - SCRFD-10GF
-detection + 5-point alignment + ArcFace IResNet-100 embedding, imported and
+Face recognition (`crates/scrfd` + `crates/arcface`): insightface antelopev2 -
+SCRFD-10GF detection + 5-point alignment + ArcFace IResNet-100 embedding, split
+into one crate and one served model per architecture, imported and
 parity-gated, with ArcFace training (backbone + additive-angular-margin head)
 also gradient-checked. Forward parity is verified against the reference
 implementation, and the serving contract (capability, residency, D-Bus,

@@ -73,16 +73,16 @@ fn run_toymoe(args: &[String]) {
 
 /// Architectures with no dedicated CLI module, reached generically through
 /// their [`capability::Provider`] instead: `<arch id>, <canonical model id>`.
-/// A model id repeated here (`scrfd`/`arcface` both naming `brain/facenet`)
-/// is expected -- see `crates/facenet`'s module doc for why they are one
-/// served model today.
+/// One row per architecture, each naming its own served model: the face pair
+/// (`scrfd` detection, `arcface` identity embedding) are two crates and two
+/// models, and `arcface embed`'s default path reaches the detector itself.
 const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("s3dit", "brain/z-image"),
     ("fastvlm", "brain/fastvlm"),
     ("qwen3vl", "brain/qwenvl"),
     ("sam2", "brain/sam2"),
-    ("scrfd", "brain/facenet"),
-    ("arcface", "brain/facenet"),
+    ("scrfd", "brain/scrfd"),
+    ("arcface", "brain/arcface"),
     ("vqgan", "brain/vqgan"),
     ("codeformer", "brain/restore"),
     ("rrdbnet", "brain/upscale"),

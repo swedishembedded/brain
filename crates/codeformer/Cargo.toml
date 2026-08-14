@@ -18,7 +18,6 @@ brain-vae.workspace = true
 brain-vqgan.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
-brain-facenet.workspace = true
 # `caps.rs` — the serving contract's capability surface.
 brain-capability.workspace = true
 # `train.rs` — trainable params + grads, and the workspace's test PRNG.

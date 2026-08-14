@@ -5,7 +5,7 @@
 //! cross-attention keyed by the ArcFace embedding.
 //!
 //! ```text
-//!   photo ─► facenet (SCRFD + align + ArcFace) ─► 512-d ─► Resampler ─► 16 x 2048 ID tokens
+//!   photo ─► scrfd detect + arcface align/embed ─► 512-d ─► Resampler ─► 16 x 2048 ID tokens
 //!                                                                          │
 //!   photo ─► 5 face keypoints ─► crates/controlnet ─► residuals ─► SDXL UNet
 //!                                                                  │  every attn2 site:
@@ -17,7 +17,7 @@
 //! is `crates/controlnet` — whose SDXL implementation was imported from *this*
 //! release and is parity-gated at 140 comparisons — the backbone is
 //! `crates/unet` (165 comparisons, cosine 0.9999999999) and the face embedding is
-//! `crates/facenet` (cosine 1.0000000).
+//! `crates/arcface` (cosine 1.0000000).
 //!
 //! ## Status: shapes and import only
 //!

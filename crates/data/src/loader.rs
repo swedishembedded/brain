@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Token-dataset batching with optional masking and line alignment — a faithful
+//! Token-dataset batching with optional masking and line alignment - a faithful
 //! port of nanogpt's `DataLoader.get_batch` / `_apply_masking` /
 //! `_precompute_line_starts`.
 //!
@@ -51,9 +51,15 @@ pub struct TokenDataset {
     /// Optional per-token supervision mask (parallel to `data`): `mask[i] == true`
     /// means "token `i` is a trainable target". Used for chat / tool-call
     /// fine-tuning, where only the assistant/response span is supervised and the
-    /// prompt is masked — token-level, unlike the char-boundary `mask_before_token`
+    /// prompt is masked - token-level, unlike the char-boundary `mask_before_token`
     /// which cannot express a multi-token prompt prefix.
     mask: Option<Vec<bool>>,
+    /// Optional per-token reward/advantage weight (parallel to `data`), for
+    /// continuous/reward-driven training (`crates/rl`) - see
+    /// [`TokenDataset::get_batch_weighted`]. `None` (the default) means every
+    /// token implicitly weights `1.0`, matching `model::Batch::Lm`'s
+    /// semantics on a weighted-loss-enabled model.
+    weights: Option<Vec<f32>>,
 }
 
 impl TokenDataset {
@@ -65,7 +71,7 @@ impl TokenDataset {
         } else {
             None
         };
-        TokenDataset { data, line_starts, mask: None }
+        TokenDataset { data, line_starts, mask: None, weights: None }
     }
 
     /// Wrap a token array with an explicit per-token supervision mask (see
@@ -75,6 +81,38 @@ impl TokenDataset {
         let mut d = Self::new(data, cfg);
         d.mask = Some(mask);
         d
+    }
+
+    /// Wrap a token array with an explicit per-token reward/advantage weight
+    /// (see [`TokenDataset::weights`]). `weights.len()` must equal
+    /// `data.len()`. Composable with [`TokenDataset::new_with_mask`]'s
+    /// supervision mask via [`TokenDataset::with_mask`] - a token can be both
+    /// unsupervised (IGNORE) and, were it supervised, carry a weight; the
+    /// mask still wins (IGNORE positions never enter the loss regardless of
+    /// weight).
+    pub fn new_with_weights(data: Vec<u32>, weights: Vec<f32>, cfg: &BatchConfig) -> Self {
+        assert_eq!(data.len(), weights.len(), "weights length must match data length");
+        let mut d = Self::new(data, cfg);
+        d.weights = Some(weights);
+        d
+    }
+
+    /// Attach a supervision mask to a dataset already built with
+    /// [`TokenDataset::new_with_weights`] (or vice versa via
+    /// [`TokenDataset::with_weights`]) - the two are independent optional
+    /// fields; either constructor alone only sets its own.
+    pub fn with_mask(mut self, mask: Vec<bool>) -> Self {
+        assert_eq!(self.data.len(), mask.len(), "mask length must match data length");
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Attach a reward/advantage weight to a dataset already built with
+    /// [`TokenDataset::new_with_mask`] - see [`TokenDataset::with_mask`].
+    pub fn with_weights(mut self, weights: Vec<f32>) -> Self {
+        assert_eq!(self.data.len(), weights.len(), "weights length must match data length");
+        self.weights = Some(weights);
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -121,6 +159,38 @@ impl TokenDataset {
     /// Draw a `(x, y)` batch. `x[b*block + t]` is the input token, `y[..]` the
     /// next-token target (`IGNORE` where masked).
     pub fn get_batch(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
+        let (x, y, _starts) = self.sample_windows(cfg, rng);
+        (x, y)
+    }
+
+    /// [`TokenDataset::get_batch`], plus the per-position reward/advantage
+    /// weight (`w[b*block + t]`, matching `x`/`y`'s layout) for `crates/rl`'s
+    /// weighted training driver - `1.0` everywhere when this dataset carries
+    /// no [`TokenDataset::weights`] (`new`/`new_with_mask`), matching
+    /// `model::Batch::Lm`'s implicit-weight-1.0 semantics on a
+    /// weighted-loss-enabled model, so an unweighted dataset run through this
+    /// method reproduces `get_batch`'s gradient exactly.
+    pub fn get_batch_weighted(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<f32>) {
+        let (x, y, starts) = self.sample_windows(cfg, rng);
+        let bl = cfg.block_size;
+        let mut w = vec![1.0f32; x.len()];
+        if let Some(weights) = &self.weights {
+            for (b, &start) in starts.iter().enumerate() {
+                for t in 0..bl {
+                    w[b * bl + t] = weights[start + 1 + t];
+                }
+            }
+        }
+        (x, y, w)
+    }
+
+    /// The shared core of [`TokenDataset::get_batch`]/
+    /// [`TokenDataset::get_batch_weighted`]: sample `batch_size` windows,
+    /// apply both masking schemes, and additionally return each row's
+    /// absolute start offset into `data` - needed only by the weighted path
+    /// to gather the matching weight window, so `get_batch` itself just
+    /// drops it.
+    fn sample_windows(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<usize>) {
         let bs = cfg.batch_size;
         let bl = cfg.block_size;
         let mut x = vec![0u32; bs * bl];
@@ -151,7 +221,7 @@ impl TokenDataset {
                 }
             }
         }
-        (x, y)
+        (x, y, starts)
     }
 
     fn sample_start(&self, cfg: &BatchConfig, rng: &mut Rng) -> usize {
@@ -167,7 +237,7 @@ impl TokenDataset {
                 // actually wrong instead.
                 let hi = self.data.len().checked_sub(cfg.block_size + 1).unwrap_or_else(|| {
                     panic!(
-                        "dataset has {} tokens but block_size {} needs at least {} — \
+                        "dataset has {} tokens but block_size {} needs at least {} - \
                          use a longer dataset or a smaller --block-size",
                         self.data.len(),
                         cfg.block_size,
@@ -285,5 +355,51 @@ mod tests {
         for b in 0..cfg.batch_size {
             assert_eq!(x[b * cfg.block_size], 0);
         }
+    }
+
+    #[test]
+    fn get_batch_weighted_defaults_every_position_to_1_when_no_weights_attached() {
+        let data: Vec<u32> = (0..40).collect();
+        let cfg = BatchConfig { batch_size: 3, block_size: 5, ..Default::default() };
+        let ds = TokenDataset::new(data, &cfg);
+        let mut rng = Rng::new(1);
+        let (x, y, w) = ds.get_batch_weighted(&cfg, &mut rng);
+        assert_eq!(w, vec![1.0f32; x.len()]);
+        assert_eq!(x.len(), y.len());
+        assert_eq!(x.len(), w.len());
+    }
+
+    #[test]
+    fn get_batch_weighted_gathers_the_window_matching_targets_not_inputs() {
+        // weights[i] is deliberately `i` as f32 so the test can assert
+        // exactly which absolute offsets got gathered, not just "some
+        // window". `get_batch_weighted` must align weights to the TARGET
+        // token y[t] (== data[start+1+t]), the same offset the supervision
+        // mask in `sample_windows` uses - not the input token x[t].
+        let data: Vec<u32> = (0..40).collect();
+        let weights: Vec<f32> = (0..40).map(|i| i as f32).collect();
+        let cfg = BatchConfig { batch_size: 2, block_size: 5, ..Default::default() };
+        let ds = TokenDataset::new_with_weights(data, weights, &cfg);
+        let mut rng = Rng::new(7);
+        let (x, _y, w) = ds.get_batch_weighted(&cfg, &mut rng);
+        for b in 0..cfg.batch_size {
+            for t in 0..cfg.block_size {
+                // x[t] == start+t, so the matching weight is at start+1+t == x[t]+1.
+                assert_eq!(w[b * cfg.block_size + t], x[b * cfg.block_size + t] as f32 + 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn with_weights_and_with_mask_compose_independently() {
+        let data: Vec<u32> = (0..40).collect();
+        let mask: Vec<bool> = (0..40).map(|i| i % 2 == 0).collect();
+        let weights: Vec<f32> = vec![2.0; 40];
+        let cfg = BatchConfig { batch_size: 2, block_size: 5, ..Default::default() };
+        let ds = TokenDataset::new(data, &cfg).with_mask(mask).with_weights(weights);
+        let mut rng = Rng::new(2);
+        let (_x, y, w) = ds.get_batch_weighted(&cfg, &mut rng);
+        assert!(w.iter().all(|&wi| wi == 2.0), "weights must come through regardless of mask");
+        assert!(y.contains(&IGNORE), "the mask attached via with_mask must still apply");
     }
 }

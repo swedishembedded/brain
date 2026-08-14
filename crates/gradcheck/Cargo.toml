@@ -26,8 +26,8 @@ brain-sam2.workspace = true
 brain-vqgan.workspace = true
 brain-vae.workspace = true
 brain-gpu-core.workspace = true
-# `check_arcface` (src/facenet.rs) - the ArcFace/IResNet training graph.
-brain-facenet.workspace = true
+# `check_arcface` (src/arcface.rs) - the ArcFace/IResNet training graph.
+brain-arcface.workspace = true
 # `check_clip` (src/clip.rs) - the CLIP text-tower training graph.
 brain-clip.workspace = true
 # `check_t5` (src/t5.rs) - the T5 encoder training graph.

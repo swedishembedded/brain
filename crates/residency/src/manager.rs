@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The [`ResidencyManager`]: given `(model, action, invocation)`, ensure the right
-//! model instance is **Hot** on a device — placing it on the emptiest GPU that fits,
-//! or evicting least-recently-used instances to make room — then run it. Dropping an
+//! model instance is **Hot** on a device - placing it on the emptiest GPU that fits,
+//! or evicting least-recently-used instances to make room - then run it. Dropping an
 //! evicted [`Instance`] frees its device memory (RAII). This is the "use all the
 //! memory automatically" core; the scheduler (next) drives concurrency and batching
 //! on top of it.
@@ -12,7 +12,7 @@
 //! in [`crate::lru::Residents`]). A model that spans multiple devices AT ONCE
 //! (e.g. an int8 MoE model layer-sharded across two GPUs) registers separately
 //! via [`ResidencyManager::register_multi`] and is placed by
-//! [`ResidencyManager::claim_multi`] — real, honest per-device accounting via
+//! [`ResidencyManager::claim_multi`] - real, honest per-device accounting via
 //! [`crate::multi::MultiDeviceCost`]/[`crate::multi::pick_devices`] against the
 //! SAME [`Budgets`] every single-device instance shares (so a multi-device
 //! instance's bytes are never invisible to a single-device claim's budget
@@ -21,20 +21,20 @@
 //! **What the multi-device path does NOT do (a deliberate, documented scope
 //! limit, not an oversight)**: multi-device instances are NOT tracked in
 //! [`crate::lru::Residents`] (whose `Entry` is single-device by construction)
-//! and are therefore never chosen as LRU/cost-aware eviction VICTIMS — once
+//! and are therefore never chosen as LRU/cost-aware eviction VICTIMS - once
 //! claimed, a multi-device instance stays resident until explicitly
 //! `release_multi`'d/evicted by its own caller, not auto-evicted to make room
 //! for something else. `claim_multi`'s OWN eviction fallback still works (it
 //! can evict single-device LRU victims per needed device to make room for
 //! itself), so a multi-device claim is not stuck behind stale single-device
-//! residents — the gap is one-directional: nothing evicts a multi-device
+//! residents - the gap is one-directional: nothing evicts a multi-device
 //! instance automatically. Acceptable for the intended shape (one big model
 //! held resident for the process lifetime, e.g. an int8-sharded Thinker), and
 //! precisely the honest boundary this crate's own "gates that lie" discipline
 //! prefers over silently pretending full LRU parity exists. Extending
 //! `Residents` to a multi-device `Entry` (so eviction scoring can consider
 //! multi-device victims too) is real, separate follow-up work if a future
-//! caller genuinely needs it — not attempted here, since the original
+//! caller genuinely needs it - not attempted here, since the original
 //! dual-GPU residency work this integration grew out of is now closed;
 //! `crate::executor` layers the async `Executor` dispatch this module's
 //! synchronous `claim_multi` needed on top.
@@ -56,15 +56,15 @@ pub type InstanceHandle = Arc<Mutex<Box<dyn Instance>>>;
 
 /// Why a claim could not produce a runnable instance. The executor MUST treat
 /// these differently: `NoCapacity` is transient (retry when a lane frees a
-/// device); `TooLarge` and `Activate` are permanent for the key — the queued
+/// device); `TooLarge` and `Activate` are permanent for the key - the queued
 /// jobs must be failed, or they wait forever and wedge the group.
 #[derive(Debug)]
 pub enum ClaimError {
     /// No free device can host the instance right now (SOME device's usable
     /// budget could hold it, but not without evicting more than is
-    /// currently evictable — try again once something frees).
+    /// currently evictable - try again once something frees).
     NoCapacity(String),
-    /// The instance exceeds EVERY device's usable budget even fully empty —
+    /// The instance exceeds EVERY device's usable budget even fully empty -
     /// no eviction, however aggressive, could ever make room. Checked
     /// BEFORE planning any eviction, so a claim that can never succeed never
     /// costs anything else its residency (see `place::could_ever_fit`).
@@ -99,7 +99,7 @@ pub enum Claimed {
     Hot(InstanceHandle),
     Build(Arc<dyn ResidentModel>),
     /// The instance is Warm (a prior eviction called
-    /// [`Instance::demote`] instead of dropping it) — the caller must run
+    /// [`Instance::demote`] instead of dropping it) - the caller must run
     /// [`Instance::promote`] on `device` (deferred to its own thread, same
     /// reason `Build`'s `activate` is: it can be slow) and report
     /// [`ResidencyManager::adopt`]/[`build_failed`](ResidencyManager::build_failed)
@@ -108,7 +108,7 @@ pub enum Claimed {
     Promote(InstanceHandle),
 }
 
-/// [`Claimed`]'s multi-device sibling — carries a [`MultiDeviceResidentModel`]
+/// [`Claimed`]'s multi-device sibling - carries a [`MultiDeviceResidentModel`]
 /// (whose `activate_multi` takes a device SET) instead of a `ResidentModel`,
 /// since [`ResidencyManager::claim_multi`] needs a different build contract,
 /// not just a different placement.
@@ -117,7 +117,7 @@ pub enum ClaimedMulti {
     Build(Arc<dyn MultiDeviceResidentModel>),
 }
 
-/// One resident instance's placement — the per-model residency the stats
+/// One resident instance's placement - the per-model residency the stats
 /// subsystem renders (which model is Hot, on which device, at what memory cost).
 #[derive(Clone, Debug)]
 pub struct InstancePlacement {
@@ -128,7 +128,7 @@ pub struct InstancePlacement {
     pub mem: u64,
 }
 
-/// One device's live budget (total capacity, reserved headroom, bytes in use) —
+/// One device's live budget (total capacity, reserved headroom, bytes in use) -
 /// the accelerator memory picture the stats subsystem renders (nvidia-smi-like).
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceBudget {
@@ -138,12 +138,12 @@ pub struct DeviceBudget {
     pub used: u64,
 }
 
-/// One multi-device resident instance's placement — [`InstancePlacement`]'s
+/// One multi-device resident instance's placement - [`InstancePlacement`]'s
 /// sibling for an instance that spans several devices instead of one.
 #[derive(Clone, Debug)]
 pub struct MultiInstancePlacement {
     pub key: InstanceKey,
-    /// `(device, bytes on that device)` — every device this instance
+    /// `(device, bytes on that device)` - every device this instance
     /// occupies, each with its own real byte count (never summed into one
     /// figure that could be mistaken for a single-device cost).
     pub devices: Vec<(Device, u64)>,
@@ -158,7 +158,7 @@ pub struct MultiInstancePlacement {
 #[derive(Clone, Debug, Default)]
 pub struct ResidencyReport {
     pub placements: Vec<InstancePlacement>,
-    /// Multi-device placements — kept SEPARATE from `placements` rather than
+    /// Multi-device placements - kept SEPARATE from `placements` rather than
     /// folded in (an `InstancePlacement` has exactly one `device: Device`
     /// field, singular by construction; forcing a multi-device instance into
     /// that shape would mean picking one device to report and hiding the
@@ -171,7 +171,7 @@ pub struct ResidencyReport {
 
 /// A single-device [`MemCost`] naming `need` bytes on exactly `d`'s class
 /// (VRAM for a GPU, NPU bytes for an NPU, host RAM for the CPU) and nothing
-/// else — what [`plan_eviction_with`] needs to evaluate ONE specific device
+/// else - what [`plan_eviction_with`] needs to evaluate ONE specific device
 /// of a multi-device cost in isolation. Shared by [`ResidencyManager::
 /// claim_multi`] (which actually evicts) and [`ResidencyManager::
 /// placeable_multi`] (which only checks feasibility) so the two stay in
@@ -196,10 +196,10 @@ fn device_order(d: Device) -> (u8, u32) {
 }
 
 /// Owns the resident model instances, their budgets, and the LRU. Not thread-safe by
-/// itself — the scheduler owns one behind its worker(s).
+/// itself - the scheduler owns one behind its worker(s).
 pub struct ResidencyManager {
     models: HashMap<String, Arc<dyn ResidentModel>>,
-    /// Models placeable across several devices at once — a SEPARATE registry
+    /// Models placeable across several devices at once - a SEPARATE registry
     /// from `models` (see this file's own module doc): `claim_multi` looks
     /// here, `claim` never does. A model may be registered in both maps
     /// under the same name if it wants to be reachable either way (not
@@ -207,7 +207,7 @@ pub struct ResidencyManager {
     multi_models: HashMap<String, Arc<dyn MultiDeviceResidentModel>>,
     budgets: Budgets,
     residents: Residents,
-    /// Multi-device residents' bookkeeping — parallel to `residents` but
+    /// Multi-device residents' bookkeeping - parallel to `residents` but
     /// keyed on the same `InstanceKey` space. A name must not be claimed
     /// both ways at once, and BOTH claim paths enforce it: `claim` refuses a
     /// key resident here, `claim_multi` refuses a key resident in
@@ -217,10 +217,10 @@ pub struct ResidencyManager {
     instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     /// BOUNDED (a ring of the last [`Self::MAX_EVENTS`]): a long-lived server
-    /// churning instances used to grow this Vec forever — an unbounded audit
+    /// churning instances used to grow this Vec forever - an unbounded audit
     /// log with no production reader is a slow leak, not observability.
     pub events: std::collections::VecDeque<String>,
-    /// Cumulative counters (never reset) — instance builds and evictions.
+    /// Cumulative counters (never reset) - instance builds and evictions.
     pub builds: u64,
     pub evictions: u64,
     /// Which resident to evict first when a claim needs room. Defaults to
@@ -232,13 +232,13 @@ pub struct ResidencyManager {
     eviction: Box<dyn EvictionPolicy>,
 }
 
-/// One multi-device resident instance's bookkeeping — parallel to
+/// One multi-device resident instance's bookkeeping - parallel to
 /// [`crate::lru::Entry`], but spanning several devices and (see this file's
 /// module doc) deliberately NOT part of the LRU/cost-aware eviction pool.
 struct MultiEntry {
     cost: MultiDeviceCost,
     devices: Vec<Device>,
-    /// True while a job is actively running — must not be evicted/dropped.
+    /// True while a job is actively running - must not be evicted/dropped.
     pinned: bool,
 }
 
@@ -258,7 +258,7 @@ impl ResidencyManager {
         }
     }
 
-    /// The audit ring's bound — see `events`.
+    /// The audit ring's bound - see `events`.
     const MAX_EVENTS: usize = 256;
 
     fn event(&mut self, e: String) {
@@ -286,7 +286,7 @@ impl ResidencyManager {
     /// Every currently-built instance's own [`Instance::metrics`], keyed by
     /// `InstanceKey`. Polled by the DISPATCHER thread, so this must NEVER
     /// block: a `try_lock` skips any instance a lane is mid-`run_batch` on
-    /// (its handle is locked for the whole batch — see `run_group`) rather
+    /// (its handle is locked for the whole batch - see `run_group`) rather
     /// than stalling the dispatcher until that lane frees. A skipped
     /// instance's metrics are simply stale until the next poll finds it
     /// free, which is correct for best-effort observability and was NOT
@@ -302,7 +302,7 @@ impl ResidencyManager {
         self.models.insert(model.manifest().model.clone(), model);
     }
 
-    /// Register a model reachable via [`Self::claim_multi`] — a SEPARATE
+    /// Register a model reachable via [`Self::claim_multi`] - a SEPARATE
     /// registry from [`Self::register`] (see this file's own module doc).
     pub fn register_multi(&mut self, model: Arc<dyn MultiDeviceResidentModel>) {
         self.multi_models.insert(model.manifest().model.clone(), model);
@@ -314,7 +314,7 @@ impl ResidencyManager {
 
     /// The instance key for `(model, action, inv)`, or `None` if the model is
     /// unknown under EITHER registry. Falls back to `multi_models` only when
-    /// `models` doesn't have it — strictly additive: every model reachable
+    /// `models` doesn't have it - strictly additive: every model reachable
     /// before this fallback existed resolves exactly as it did (the single-
     /// device registry is always checked first), and this only adds names
     /// that previously produced `None` here (and, downstream, the executor's
@@ -326,7 +326,7 @@ impl ResidencyManager {
             .or_else(|| self.multi_models.get(model).map(|m| m.instance_key(action, inv)))
     }
 
-    /// Whether `model` is registered as a [`MultiDeviceResidentModel`] — the
+    /// Whether `model` is registered as a [`MultiDeviceResidentModel`] - the
     /// executor's `assign` uses this to pick between the `claim`/`placeable`
     /// and `claim_multi`/`placeable_multi` branches for a queued group.
     pub fn is_multi(&self, model: &str) -> bool {
@@ -369,13 +369,13 @@ impl ResidencyManager {
         !could_ever_fit(&cost, &self.budgets)
     }
 
-    /// [`Self::placeable`]'s multi-device sibling — the executor's scheduling
+    /// [`Self::placeable`]'s multi-device sibling - the executor's scheduling
     /// filter for a [`MultiDeviceResidentModel`] group, mirroring exactly what
     /// [`Self::claim_multi`] can achieve (direct fit OR its own per-device LRU
     /// eviction fallback) WITHOUT mutating anything, the same relationship
     /// `placeable`/`claim` already have.
     ///
-    /// Returns `true` — deliberately, though it reads like the wrong answer —
+    /// Returns `true` - deliberately, though it reads like the wrong answer -
     /// when `estimate_multi` names ZERO devices. An empty cost is that
     /// method's documented "this model is unavailable right now" signal (see
     /// its own doc); filtering the group out HERE would mean it is never
@@ -383,7 +383,7 @@ impl ResidencyManager {
     /// jobs would sit in the queue forever with no error and no explanation.
     /// Returning `true` instead lets the group reach [`Self::claim_multi`],
     /// which turns the same empty cost into a real, per-job
-    /// [`ClaimError::Activate`] — a clean failure instead of a silent hang.
+    /// [`ClaimError::Activate`] - a clean failure instead of a silent hang.
     pub fn placeable_multi(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
         if let Some(e) = self.multi_residents.get(key) {
             return e.devices.iter().all(|d| !exclude.contains(d));
@@ -441,7 +441,7 @@ impl ResidencyManager {
     /// A full residency + budget snapshot for stats/reporting: every placed
     /// instance (with its device-memory cost) plus every device's budget,
     /// deterministically ordered. This is the data-source the stats subsystem and
-    /// the D-Bus `StatsSnapshot`/`StatsStream` surface render from — it is
+    /// the D-Bus `StatsSnapshot`/`StatsStream` surface render from - it is
     /// computed inside the dispatcher thread (which owns the manager) and shipped
     /// out via the [`Executor`](crate::Executor) residency accessor.
     pub fn report(&self) -> ResidencyReport {
@@ -476,7 +476,7 @@ impl ResidencyManager {
 
     /// Ensure the instance for `(model, action, inv)` is Hot, then run the action.
     /// Promotes (evicting LRU as needed) automatically. Pins the instance while it
-    /// runs so a concurrent request can't evict it mid-job. (Synchronous path —
+    /// runs so a concurrent request can't evict it mid-job. (Synchronous path -
     /// deferred builds run inline on this thread.)
     pub fn run(&mut self, model: &str, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (handle, key) = self.claim_built(model, action, inv)?;
@@ -485,7 +485,7 @@ impl ResidencyManager {
         out
     }
 
-    /// [`claim`](Self::claim) + build inline when needed — for synchronous callers
+    /// [`claim`](Self::claim) + build inline when needed - for synchronous callers
     /// that are not a scheduler dispatcher.
     fn claim_built(&mut self, model: &str, action: &str, inv: &Invocation) -> Result<(InstanceHandle, InstanceKey), String> {
         let (claimed, device, key) = self.claim(model, action, inv, &no_exclude()).map_err(String::from)?;
@@ -515,7 +515,7 @@ impl ResidencyManager {
     /// Place + **pin** the instance for `(model, action, inv)`, returning either a
     /// hot handle or a deferred build (see [`Claimed`]). The caller runs the handle
     /// (outside the manager lock, so other lanes proceed) and MUST call
-    /// [`release`](Self::release) after — or, for a deferred build,
+    /// [`release`](Self::release) after - or, for a deferred build,
     /// [`adopt`](Self::adopt) / [`build_failed`](Self::build_failed) first.
     /// `exclude` names devices a concurrent lane is already using (so this
     /// placement avoids them).
@@ -533,17 +533,17 @@ impl ResidencyManager {
             .clone();
         let key = m.instance_key(action, inv);
         // Cross-registry guard: a key resident as a MULTI-device instance
-        // must never be claimed through the single-device path — before this
+        // must never be claimed through the single-device path - before this
         // check, the handle lookup below found the shared `instances` entry,
         // then the `residents` expect() panicked ON THE DISPATCHER THREAD,
         // killing scheduling for the whole server.
         if self.multi_residents.contains_key(&key) {
-            return Err(ClaimError::Activate(format!("{key}: resident as a multi-device instance — claim it via claim_multi, not claim")));
+            return Err(ClaimError::Activate(format!("{key}: resident as a multi-device instance - claim it via claim_multi, not claim")));
         }
         // The instance object existing is still the real guard (matches the
         // pre-Warm invariant exactly): a cold build's `residents.insert`
         // pre-accounts the slot before `self.instances` gets the handle
-        // (via `adopt`, on the caller's thread) — so `residents` can have a
+        // (via `adopt`, on the caller's thread) - so `residents` can have a
         // NOT-yet-adopted entry for `key` while a build is in flight, and
         // that in-flight window must keep falling into the cold-build path
         // below (which is itself made a no-op-ish re-place by the budget
@@ -551,7 +551,7 @@ impl ResidencyManager {
         if let Some(handle) = self.instances.get(&key).cloned() {
             // Never expect() here: this runs on the dispatcher thread, where a
             // panic kills scheduling for every model. A handle with no
-            // residency entry is a registry-wiring bug — fail the one claim.
+            // residency entry is a registry-wiring bug - fail the one claim.
             let entry = *self
                 .residents
                 .get(&key)
@@ -562,7 +562,7 @@ impl ResidencyManager {
                 return Ok((Claimed::Hot(handle), entry.device, key));
             }
             // Warm: place it like a cold build (pick a device, evict if
-            // needed — the entry itself is never a candidate victim of its
+            // needed - the entry itself is never a candidate victim of its
             // own placement, same as a cold build's `keep`), but hand back
             // `Claimed::Promote` so the caller reuses the existing
             // `Instance` via `promote()` instead of rebuilding it.
@@ -579,12 +579,12 @@ impl ResidencyManager {
                     let plan = plan_eviction_with(&*self.eviction, &hot_cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
                         .ok_or_else(|| {
                             ClaimError::NoCapacity(format!(
-                                "{key} ({} MiB) has no room right now — nothing currently evictable frees enough",
+                                "{key} ({} MiB) has no room right now - nothing currently evictable frees enough",
                                 hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
                             ))
                         })?;
                     for victim in &plan.victims {
-                        self.evict(victim);
+                        self.evict_entry(victim);
                     }
                     plan.device
                 }
@@ -603,13 +603,13 @@ impl ResidencyManager {
         // A key can be in `residents` WITHOUT being in `instances` while such
         // a deferred build is in flight (insert happens here, adopt happens on
         // the lane). Re-claiming it then would double-charge the budget and
-        // overwrite the LRU entry without releasing the old cost — previously
+        // overwrite the LRU entry without releasing the old cost - previously
         // documented as a "no-op-ish re-place" (it wasn't) and unreachable
         // only because the Executor's `running` set happens to serialize
         // same-key groups. The manager now enforces its own invariant.
         if self.residents.get(&key).is_some() {
             return Err(ClaimError::NoCapacity(format!(
-                "{key}: a deferred build for this key is already in flight — retry when it adopts or fails"
+                "{key}: a deferred build for this key is already in flight - retry when it adopts or fails"
             )));
         }
         let cost = m.estimate(&key);
@@ -628,12 +628,12 @@ impl ResidencyManager {
                 let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
                     .ok_or_else(|| {
                         ClaimError::NoCapacity(format!(
-                            "{key} ({} MiB) has no room right now — nothing currently evictable frees enough",
+                            "{key} ({} MiB) has no room right now - nothing currently evictable frees enough",
                             cost.vram.max(cost.ram).max(cost.npu) >> 20
                         ))
                     })?;
                 for victim in &plan.victims {
-                    self.evict(victim);
+                    self.evict_entry(victim);
                 }
                 plan.device
             }
@@ -654,7 +654,7 @@ impl ResidencyManager {
     }
 
     /// A deferred build failed: unwind the pre-accounted budget + resident slot.
-    /// The claim is over — do NOT also call [`release`](Self::release).
+    /// The claim is over - do NOT also call [`release`](Self::release).
     pub fn build_failed(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.residents.remove(key) {
             self.budgets.release(entry.device, entry.cost.on(entry.device));
@@ -669,7 +669,7 @@ impl ResidencyManager {
         self.residents.touch(key);
     }
 
-    /// [`Self::claim`]'s multi-device sibling — places (or finds hot) an
+    /// [`Self::claim`]'s multi-device sibling - places (or finds hot) an
     /// instance of a [`MultiDeviceResidentModel`] registered via
     /// [`Self::register_multi`]. See this file's own module doc for what the
     /// eviction fallback here does and does not cover.
@@ -690,7 +690,7 @@ impl ResidencyManager {
         // SINGLE-device instance must not be claimed through the multi path
         // (the old expect("multi-resident") below panicked the dispatcher).
         if self.residents.get(&key).is_some() {
-            return Err(ClaimError::Activate(format!("{key}: resident as a single-device instance — claim it via claim, not claim_multi")));
+            return Err(ClaimError::Activate(format!("{key}: resident as a single-device instance - claim it via claim, not claim_multi")));
         }
         if let Some(handle) = self.instances.get(&key).cloned() {
             let entry = self
@@ -724,7 +724,7 @@ impl ResidencyManager {
             None => {
                 // Per-device eviction fallback: for EACH device this instance
                 // needs, evict single-device LRU victims on THAT device
-                // specifically to make room — never touching another
+                // specifically to make room - never touching another
                 // multi-device resident (this manager's own module doc names
                 // that as the deliberate scope limit). Reuses the existing
                 // single-device eviction planner per device by excluding
@@ -754,7 +754,7 @@ impl ResidencyManager {
                     let plan = plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d)
                         .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
                     for victim in &plan.victims {
-                        self.evict(victim);
+                        self.evict_entry(victim);
                     }
                 }
                 pick_devices(&cost, &self.budgets, exclude)
@@ -799,20 +799,20 @@ impl ResidencyManager {
     /// Demote (drop) a multi-device instance, freeing its memory on EVERY
     /// device it occupied. Public (unlike the single-device [`Self::evict`]):
     /// nothing auto-evicts a multi-device resident (this file's own module
-    /// doc explains why), so a caller that genuinely wants one gone —
-    /// swapping to a different checkpoint, a shutdown path — calls this
+    /// doc explains why), so a caller that genuinely wants one gone -
+    /// swapping to a different checkpoint, a shutdown path - calls this
     /// directly.
     ///
     /// Refuses (returns `false`, evicts nothing) while the instance is
-    /// PINNED — a lane is actively running a job against it (`claim_multi`
+    /// PINNED - a lane is actively running a job against it (`claim_multi`
     /// pins on every claim; `release_multi` unpins after). Evicting out from
     /// under a running job would drop the `Instance` (freeing its GPU memory)
-    /// while a lane still holds a strong `Arc` to it and is mid-call — the
+    /// while a lane still holds a strong `Arc` to it and is mid-call - the
     /// budget would say the memory is free while the lane is still using it,
     /// exactly the kind of lying figure this crate's `multi` module exists to
     /// avoid. Returns `true` if an unpinned entry was found and evicted;
     /// `true` is also NOT returned for a key that was never resident (no-op,
-    /// same as `false`) — check separately if the caller needs to
+    /// same as `false`) - check separately if the caller needs to
     /// distinguish "refused" from "nothing to evict".
     pub fn evict_multi(&mut self, key: &InstanceKey) -> bool {
         match self.multi_residents.get(key) {
@@ -831,7 +831,7 @@ impl ResidencyManager {
         }
     }
 
-    /// Run several same-key invocations of one action on a single hot instance —
+    /// Run several same-key invocations of one action on a single hot instance -
     /// the hot-path-reuse batch. The instance is promoted once and pinned for the
     /// whole group (so it can't be evicted between jobs), then its `run_batch` runs
     /// them (a model with real batch support does one forward; others loop).
@@ -843,28 +843,55 @@ impl ResidencyManager {
         Ok(out)
     }
 
+    /// Public single-device sibling of [`Self::evict_multi`] - same
+    /// pinned-refusal contract: refuses (returns `false`, evicts nothing)
+    /// while a job is actively running against `key`, or if it isn't
+    /// resident at all. For a caller that genuinely wants a specific
+    /// instance gone right now - e.g. swapping in a newly-trained LoRA
+    /// adapter (self-improve roadmap P4/P5's continuous-training hot-swap:
+    /// bump the served model-card's adapter path, then call this so the
+    /// NEXT claim rebuilds against it instead of reusing the stale Hot/Warm
+    /// instance) - as opposed to [`Self::evict_entry`] below, the automatic
+    /// make-room-for-something-else path, whose only caller already
+    /// excludes pinned candidates upstream (`Residents::lru_on`) and so
+    /// never needed its own check.
+    pub fn evict(&mut self, key: &InstanceKey) -> bool {
+        match self.residents.get(key) {
+            None => false,
+            Some(e) if e.pinned => false,
+            Some(_) => {
+                self.evict_entry(key);
+                true
+            }
+        }
+    }
+
     /// Demote (drop) an instance, freeing its device memory.
     /// Free `key`'s device slot to make room for something else. Tries a
     /// soft demotion to `Tier::Warm` first (releases the device buffers,
     /// keeps the `Instance` and its host bytes alive, so a later claim for
     /// the same key can [`Instance::promote`] straight back instead of
-    /// rebuilding from the checkpoint) — this is the entire "made real"
-    /// part of `Tier::Warm`: every existing caller of `evict` gets it for
-    /// free, with zero behaviour change for a model that hasn't opted in,
-    /// since `demote` defaults to `Err` and this falls straight through to
-    /// the original full-drop below whenever it does.
-    fn evict(&mut self, key: &InstanceKey) {
+    /// rebuilding from the checkpoint) - this is the entire "made real"
+    /// part of `Tier::Warm`: every existing caller of `evict_entry` gets it
+    /// for free, with zero behaviour change for a model that hasn't opted
+    /// in, since `demote` defaults to `Err` and this falls straight through
+    /// to the original full-drop below whenever it does.
+    ///
+    /// Not pinned-checked: its only caller (the eviction-planner path above)
+    /// already excludes pinned candidates before this ever runs - see
+    /// [`Self::evict`] for the pinned-safe public entry point.
+    fn evict_entry(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.residents.get(key).copied() {
             if entry.tier == Tier::Hot {
                 if let (Some(handle), Some(model)) = (self.instances.get(key).cloned(), self.models.get(&key.model).cloned()) {
                     let warm_cost = model.estimate_at(key, Tier::Warm);
-                    // The Warm copy is a real host-RAM charge — it must FIT
+                    // The Warm copy is a real host-RAM charge - it must FIT
                     // (pool-aware: on a unified-memory box the HOST_POOL is
                     // the same physical bytes the accelerators use). Checked
                     // BEFORE `demote()` releases anything: repeated multi-GB
                     // demotions that nothing refuses are exactly the swap
                     // cliff memauth's doc warns about. When it doesn't fit,
-                    // fall through to the full drop below — freeing the
+                    // fall through to the full drop below - freeing the
                     // device slot is the caller's actual requirement; keeping
                     // a warm copy is only an optimization. (Conservative for
                     // a CPU-Hot instance, whose own Hot bytes are not counted
@@ -949,7 +976,7 @@ mod tests {
             mgr.register(Arc::new(Fake { name: n.into(), vram: 10 * GB, live: live.clone() }));
         }
 
-        // Run a, then b — both fit (20 GB <= 22).
+        // Run a, then b - both fit (20 GB <= 22).
         mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
         mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(live.load(Ordering::SeqCst), 2);
@@ -971,7 +998,7 @@ mod tests {
     /// A model whose `Instance` implements `demote`/`promote` for real: `live`
     /// counts the `Instance` object's whole lifetime (activate..Drop); `hot`
     /// counts device residency specifically (activate/promote add, demote
-    /// subtracts) — the two diverging is exactly the property a Warm
+    /// subtracts) - the two diverging is exactly the property a Warm
     /// demotion has that a full evict doesn't.
     struct DemotableFake {
         name: String,
@@ -1030,12 +1057,12 @@ mod tests {
 
     /// The actual "made real" wiring: evicting a model that opts into
     /// `demote` releases its device slot WITHOUT dropping the `Instance`
-    /// (`live` unchanged, `hot` drops) — and a later claim for the same key
+    /// (`live` unchanged, `hot` drops) - and a later claim for the same key
     /// promotes it straight back (`hot` rises again, `live` STILL
     /// unchanged: no second `activate()`/checkpoint reload ever happened).
     /// A model that hasn't opted in (`Fake`/`FakeInst`) keeps dropping on
     /// eviction exactly as `three_models_on_one_gpu_swap_by_lru` already
-    /// proves — this test is the other half.
+    /// proves - this test is the other half.
     #[test]
     fn evict_demotes_to_warm_when_the_model_opts_in_and_a_later_claim_promotes_it_back() {
         let live = Arc::new(AtomicU32::new(0));
@@ -1083,7 +1110,7 @@ mod tests {
 
     /// SPEC (audit F2): a Warm demotion charges host RAM, so it must CHECK the
     /// host budget first. When the warm bytes don't fit, eviction falls through
-    /// to a full drop — never an unrefused overcommit (the swap cliff on
+    /// to a full drop - never an unrefused overcommit (the swap cliff on
     /// unified-memory boxes).
     #[test]
     fn warm_demotion_that_does_not_fit_host_ram_falls_back_to_a_full_drop() {
@@ -1107,7 +1134,7 @@ mod tests {
     }
 
     /// SPEC (audit F3): one name resident through one registry must be REFUSED
-    /// (clean ClaimError) when claimed through the other — both directions.
+    /// (clean ClaimError) when claimed through the other - both directions.
     /// Before the guard existed, each direction panicked the dispatcher thread
     /// via an expect() on the other registry's bookkeeping.
     #[test]
@@ -1137,7 +1164,7 @@ mod tests {
 
     /// A model bigger than every device's usable budget, even fully empty,
     /// must fail cleanly with `ClaimError::TooLarge` and cost NOTHING else
-    /// its residency — no eviction plan is even attempted, because none
+    /// its residency - no eviction plan is even attempted, because none
     /// could ever succeed (the "larger than every tier" scenario).
     #[test]
     fn too_large_for_any_device_fails_cleanly_without_evicting_anything() {
@@ -1207,7 +1234,7 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 2);
     }
 
-    /// A fake model that spans BOTH gpu0 and gpu1 at once — occupies real,
+    /// A fake model that spans BOTH gpu0 and gpu1 at once - occupies real,
     /// distinct bytes on each, the shape `MultiDeviceCost` exists for.
     struct MultiFake {
         name: String,

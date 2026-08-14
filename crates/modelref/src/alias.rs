@@ -45,7 +45,8 @@ const ROWS: &[Row] = &[
     // before the fully-qualified scheme landed; the rows keep those callers
     // (examples, docs, D-Bus clients) working.
     Row { legacy: "sam2", canonical: "brain/sam2" },
-    Row { legacy: "facenet", canonical: "brain/facenet" },
+    Row { legacy: "scrfd", canonical: "brain/scrfd" },
+    Row { legacy: "arcface", canonical: "brain/arcface" },
     Row { legacy: "vqgan", canonical: "brain/vqgan" },
     Row { legacy: "restore", canonical: "brain/restore" },
     Row { legacy: "clip", canonical: "brain/clip" },

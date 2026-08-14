@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Dump insightface / antelopev2 reference goldens for brain's `crates/facenet`.
+"""Dump insightface / antelopev2 reference goldens for brain's `crates/arcface`.
 
 The reference here is the **ONNX model itself** (`glintr100.onnx` = ArcFace
-IResNet-100, `scrfd_10g_bnkps.onnx` = the SCRFD detector), driven exactly the way
-`insightface.model_zoo.{arcface_onnx,scrfd}` drives it, plus
-`insightface.utils.face_align` for the 5-point similarity-transform alignment.
-There is no PyTorch reference to hook, so per-stage activations are captured by
-**promoting internal ONNX values to graph outputs** and re-running the session —
-the ONNX equivalent of a forward hook, and exact rather than a re-derivation.
+IResNet-100), driven exactly the way `insightface.model_zoo.arcface_onnx` drives
+it, plus `insightface.utils.face_align` for the 5-point similarity-transform
+alignment. There is no PyTorch reference to hook, so per-stage activations are
+captured by **promoting internal ONNX values to graph outputs** and re-running
+the session - the ONNX equivalent of a forward hook, and exact rather than a
+re-derivation.
+
+This is also the PIPELINE dumper: `--photos` runs the real end-to-end chain,
+which is detect (`scrfd_10g_bnkps.onnx`, run as shipped) then align then embed,
+so it needs both released graphs. The detector's own per-stage goldens are the
+sibling script's, `scrfd_dump_reference.py`.
 
 Files written under `--out` (default `testdata/face/antelopev2`):
 
@@ -18,14 +23,14 @@ Files written under `--out` (default `testdata/face/antelopev2`):
                              stem / layer1..layer4 / bn2 / flatten / fc /
                              embedding taps, plus first-block internals per stage
   arcface_blocks.safetensors every residual block output (49) for bisection
-  scrfd.safetensors          synthetic 640x640 -> stem / C2..C5 / FPN / neck /
-                             per-stride head features + the 9 raw head outputs +
-                             decoded anchor centres
   align.safetensors          arcface 5-point template, synthetic landmark sets,
                              the similarity matrix M, the cv2.warpAffine result,
                              and the equivalent normalized grid_sample grid+result
   e2e.safetensors            (optional, --photos) real photo -> detect -> align ->
-                             embed, with the cosine matrix between embeddings
+                             embed, with the cosine matrix between embeddings.
+                             Replayed by BOTH crates' parity tests: the detector's
+                             decode/NMS gate needs real detections, and the
+                             synthetic detector image has none above threshold.
   manifest.json              per-file tensor shapes + sha256, tap->ONNX-value map,
                              the exact reference config, and library versions
 
@@ -179,7 +184,7 @@ def save(out, name, tensors, manifest, extra=None):
 
 def session_with_taps(model_path, taps, scratch):
     """Re-serialize `model_path` with `taps` (internal value names) promoted to
-    graph outputs — the ONNX analogue of a forward hook — and open a session."""
+    graph outputs - the ONNX analogue of a forward hook - and open a session."""
     model = onnx.load(model_path)
     existing = {o.name for o in model.graph.output}
     produced = {o for n in model.graph.node for o in n.output}
@@ -337,47 +342,17 @@ def dump_arcface(args, manifest, scratch):
 
 
 # ---------------------------------------------------------------------------
-# SCRFD
+# SCRFD - run AS SHIPPED, only to drive the end-to-end chain. Its per-stage
+# goldens (tapped internals, the 9 raw head outputs) are the sibling script's:
+# tools/goldens/scrfd_dump_reference.py.
 # ---------------------------------------------------------------------------
-# Hardcoded because the graph is a fixed released artifact; every name is
-# asserted against its producing node's op_type so a different file fails loudly.
-SCRFD_TAPS = {
-    "stem_pre_pool": ("285", "Relu"), "stem": ("286", "MaxPool"),
-    "c2": ("307", "Relu"), "c3": ("338", "Relu"),
-    "c4": ("355", "Relu"), "c5": ("379", "Relu"),
-    "lat3": ("380", "Conv"), "lat4": ("381", "Conv"), "lat5": ("382", "Conv"),
-    "fpn4": ("402", "Add"), "fpn3": ("422", "Add"),
-    "pafpn16_pre": ("424", "Conv"), "pafpn32_pre": ("425", "Conv"),
-    "pafpn16": ("427", "Add"), "pafpn32": ("429", "Add"),
-    "neck8": ("423", "Conv"), "neck16": ("430", "Conv"), "neck32": ("431", "Conv"),
-    "head8_feat": ("440", "Relu"), "head16_feat": ("463", "Relu"),
-    "head32_feat": ("486", "Relu"),
-    "head8_cls_raw": ("441", "Conv"), "head16_cls_raw": ("464", "Conv"),
-    "head32_cls_raw": ("487", "Conv"),
-    "head8_bbox_scaled": ("443", "Mul"), "head16_bbox_scaled": ("466", "Mul"),
-    "head32_bbox_scaled": ("489", "Mul"),
-    "head8_kps_raw": ("444", "Conv"), "head16_kps_raw": ("467", "Conv"),
-    "head32_kps_raw": ("490", "Conv"),
-}
-
-
-def check_scrfd_graph(path):
-    g = onnx.load(path, load_external_data=False).graph
-    producer = {o: n for n in g.node for o in n.output}
-    for tap, (val, op) in SCRFD_TAPS.items():
-        assert val in producer, f"scrfd tap {tap} ({val}) missing"
-        assert producer[val].op_type == op, \
-            f"scrfd tap {tap} ({val}) is {producer[val].op_type}, expected {op}"
-    scales = {}
-    from onnx import numpy_helper
-    init = {i.name: i for i in g.initializer}
-    for n in g.node:
-        if n.op_type == "Mul":
-            for i in n.input:
-                if i in init:
-                    scales[n.output[0]] = float(numpy_helper.to_array(init[i]))
-    assert len(g.output) == 9, f"expected 9 outputs, got {len(g.output)}"
-    return [o.name for o in g.output], scales
+def det_session(weights):
+    """Open the released detector and return `(session, input, 9 output names)`."""
+    path = os.path.join(weights, "scrfd_10g_bnkps.onnx")
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    out_names = [o.name for o in sess.get_outputs()]
+    assert len(out_names) == 9, f"expected 9 outputs, got {len(out_names)}"
+    return sess, sess.get_inputs()[0].name, out_names
 
 
 def scrfd_decode(net_outs, out_names, size):
@@ -428,56 +403,6 @@ def detect(sess, in_name, out_names, bgr_u8, size=640):
     kps = (np.vstack(kpss) / det_scale)[order]
     keep = nms(pre, NMS_THRESH)
     return det_img, det_scale, blob, outs, dec, pre[keep], kps[keep]
-
-
-def dump_scrfd(args, manifest, scratch):
-    path = os.path.join(args.weights, "scrfd_10g_bnkps.onnx")
-    out_names, mul_scales = check_scrfd_graph(path)
-    taps = {k: v[0] for k, v in SCRFD_TAPS.items()}
-    sess, all_names = session_with_taps(path, list(taps.values()), scratch)
-    in_name = sess.get_inputs()[0].name
-
-    img = synth_image(640, 640, args.seed + 1, "face")
-    blob = det_blob(img)
-    res = dict(zip(all_names, sess.run(all_names, {in_name: blob})))
-    dec = scrfd_decode(res, out_names, 640)
-
-    # self-check: promoting taps to outputs (and disabling ORT graph fusion)
-    # must not move the 9 head tensors
-    plain = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-    ref = plain.run(None, {plain.get_inputs()[0].name: blob})
-    d = max(float(np.abs(res[n] - r).max()) for n, r in zip(out_names, ref))
-    assert d < 1e-5, f"tapped scrfd session diverges from the plain one: {d:.3e}"
-    print(f"  tapped vs plain head outputs max abs diff {d:.3e}", flush=True)
-    dp = float(np.abs(((img[:, :, ::-1].astype(np.float32) - DET_INPUT_MEAN)
-                       / DET_INPUT_STD).transpose(2, 0, 1)[None] - blob).max())
-    assert dp < 1e-5, f"blobFromImage != manual (BGR->RGB, -mean)/std: {dp:.3e}"
-
-    t = {"image_bgr_u8": img.astype(np.float32), "blob": blob[0]}
-    for k, v in taps.items():
-        t[k] = res[v][0]
-    for i, n in enumerate(out_names):
-        stride = FEAT_STRIDES[i % 3]
-        kind = ["score", "bbox", "kps"][i // 3]
-        t[f"out_{kind}_{stride}"] = res[n]
-    # scores_* are byte-identical to out_score_* (the decode does not touch them)
-    t.update({k: v for k, v in dec.items() if not k.startswith("scores_")})
-    npos = {s: int((dec[f"scores_{s}"] >= DET_THRESH).sum()) for s in FEAT_STRIDES}
-    save(args.out, "scrfd.safetensors", t, manifest, {
-        "onnx_value_of_tap": taps,
-        "graph_output_order": out_names,
-        "graph_output_meaning": "scores[8,16,32], bbox[8,16,32], kps[8,16,32]",
-        "bbox_mul_scale_per_output": mul_scales,
-        "preprocess": "cv2.dnn.blobFromImage(bgr_u8, 1/128.0, (640,640), "
-                      "(127.5,)*3, swapRB=True) -> NCHW RGB",
-        "decode": "bbox/kps *= stride; anchors = mgrid[:H,:W][::-1]*stride "
-                  "repeated num_anchors=2; boxes=distance2bbox, kps=distance2kps",
-        "det_thresh": DET_THRESH, "nms_thresh": NMS_THRESH,
-        "synthetic_positives_per_stride": npos,
-        "note": "the synthetic image is not a real face; positives above "
-                "det_thresh may be zero. The 9 raw head tensors are the golden.",
-    })
-    return sess, in_name, out_names
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +551,7 @@ def dump_e2e(args, manifest, det_sess, det_in, det_outs, scratch):
         print(f"  {name}: {dets.shape[0]} face(s), "
               f"score {dets[j][4]:.4f}, |emb| {np.linalg.norm(emb):.3f}", flush=True)
     if not embs:
-        print("  no usable photos — e2e.safetensors not written", flush=True)
+        print("  no usable photos - e2e.safetensors not written", flush=True)
         return
     e = np.stack(embs)
     t["cosine_matrix"] = e @ e.T
@@ -660,12 +585,11 @@ def main():
     manifest = {}
     print("== ArcFace / glintr100 (IResNet-100)", flush=True)
     dump_arcface(args, manifest, scratch)
-    print("== SCRFD / scrfd_10g_bnkps", flush=True)
-    det_sess, det_in, det_outs = dump_scrfd(args, manifest, scratch)
     print("== 5-point alignment", flush=True)
     dump_align(args, manifest)
     if args.photos:
-        print("== end-to-end on real photos", flush=True)
+        print("== end-to-end on real photos (detect -> align -> embed)", flush=True)
+        det_sess, det_in, det_outs = det_session(args.weights)
         dump_e2e(args, manifest, det_sess, det_in, det_outs, scratch)
 
     manifest["config"] = {
@@ -676,7 +600,8 @@ def main():
                            "BN folded into convs, opset 11, ir 6)",
             "detection": "scrfd_10g_bnkps.onnx (SCRFD-10GF, 9 outputs -> "
                          "fmc 3, strides [8,16,32], num_anchors 2, use_kps, "
-                         "opset 11, ir 6)",
+                         "opset 11, ir 6) - run as shipped for the e2e chain "
+                         "only; its stage goldens are scrfd_dump_reference.py's",
         },
         "arcface": {"input_mean": ARC_INPUT_MEAN, "input_std": ARC_INPUT_STD,
                     "input_size": [112, 112], "layout": "NCHW RGB",

@@ -6,20 +6,20 @@
 #
 # Which models `brain serve` serves, and how the engine behaves, is configured
 # ONLY through `BRAIN_*` environment variables (there is no config file), so an
-# undocumented variable is an unreachable feature: the facenet/rrdbnet perf
-# targets shipped dead for exactly this reason (`BRAIN_FACENET_WEIGHTS` vs the
-# resident's `BRAIN_FACENET_DIR` — nothing forced the names to agree, and no
+# undocumented variable is an unreachable feature: the face/rrdbnet perf
+# targets shipped dead for exactly this reason (a `BRAIN_*_WEIGHTS` spelling in
+# one place vs the resident's `BRAIN_*_DIR` - nothing forced the names to agree, and no
 # reference existed to check against). This gate greps every `BRAIN_*` variable
 # read anywhere under crates/ (env::var, env::var_os, and any helper matching
 # `fn(...)("BRAIN_X", ...)` such as env_path/env_or) and requires each one to
 # be documented in one of three places:
 #   1. the user-facing config reference (default home)
-#   2. a per-model page                — for a model-specific
+#   2. a per-model page                - for a model-specific
 #                                       knob that's more natural to explain in
 #                                       context (the page must literally spell
 #                                       out the variable name, not a shorthand
 #                                       like "`_VAE`")
-#   3. the internal testing rules      — test-fixture-only and internal
+#   3. the internal testing rules      - test-fixture-only and internal
 #                                       engine-tuning vars, neither of which
 #                                       belong in user-facing docs
 #

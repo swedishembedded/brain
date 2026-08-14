@@ -538,13 +538,13 @@ fn image_edit_manifest() -> Manifest {
     )
 }
 
-/// A FaceNet-shaped model: an action literally named `embed`, right name, but it
+/// An ArcFace-shaped model: an action literally named `embed`, right name, but it
 /// takes a required `image` input and NO `text` param — `/v1/embeddings`
 /// (`openai.rs::handle_embeddings`) always dispatches `embed` with a `text` param
 /// and never a blob, so this would 400 on the missing required input if advertised.
 fn image_embed_manifest() -> Manifest {
     Manifest::new(
-        "brain-facenet",
+        "brain-arcface",
         "a face embedding model",
         vec![ActionSpec::new("embed", "512-d face identity embedding")
             .input(BlobSpec::new("image", Media::Image, "the face").required())

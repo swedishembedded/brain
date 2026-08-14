@@ -4,9 +4,11 @@ Turns an aligned face crop into a 512-d embedding you can use for identity
 matching and search - "are these two photos the same person?" or "find this
 face among a set of known ones." Part of the well-known insightface
 antelopev2 stack (IResNet-100 backbone); its sibling architecture is
-[SCRFD](scrfd.md), the detector that finds and aligns the face this model
-embeds. Both are implemented in one crate (`crates/facenet`) and served as
-one model, `brain/facenet`.
+[SCRFD](scrfd.md), the detector that finds the face this model aligns and
+embeds. They are independently served models with their own weights, but this
+one's default path is not independent of the detector: `align = true` runs
+SCRFD to locate the primary face first. Pass `align = false` and it embeds the
+crop you give it, with no detector involved.
 
 ## Support
 
@@ -21,11 +23,12 @@ one model, `brain/facenet`.
 
 ## Getting the weights
 
-Model id: `brain/facenet` - not auto-fetched. Set `BRAIN_FACENET_DIR` to a
-directory holding both released ONNX graphs under their antelopev2 names:
-`glintr100.onnx` (this embedding model) and `scrfd_10g_bnkps.onnx` (the
-[SCRFD](scrfd.md) detector). Both are read directly - no import or
-conversion step.
+Model id: `brain/arcface` - not auto-fetched. Set `BRAIN_ARCFACE_DIR` to a
+directory holding the released ONNX graph under its antelopev2 name,
+`glintr100.onnx`. Keep `scrfd_10g_bnkps.onnx` (the [SCRFD](scrfd.md) detector)
+beside it - the antelopev2 release ships them together - or the default
+`align = true` path has no detector to run and says so. Both are read directly
+- no import or conversion step.
 
 ## Running it
 

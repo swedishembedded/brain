@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Shared host-side LoRA (low-rank adapter) machinery: the generic
-//! `W_eff = W + (α/r)·B·A` pair — init, delta apply (plain and
+//! `W_eff = W + (α/r)·B·A` pair - init, delta apply (plain and
 //! strided-into-fused-tensor), the `dW → (dA, dB)` projection, and the Adam
 //! moments - hoisted from `flux2::lora` / `s3dit::lora`, which carried it as
 //! two near-verbatim copies (the next `chw_to_hwc`, per the hoist-and-migrate
@@ -11,8 +11,17 @@
 //! and its own init distribution (passed into [`Pair::new`] as a closure, so
 //! existing seeds keep producing bit-identical adapters).
 //!
-//! `crates/qwen/src/lora.rs` is a legitimately different design (device-side
-//! param-list adapters, not host pair math) and deliberately not folded in.
+//! [`device_adapter`] is the OTHER LoRA family in this codebase - device-side
+//! param-list adapters (`.lora_a`/`.lora_b` tensors living in a `Model`'s own
+//! `ParamStore`, not a host-side `Pair`) used by `qwen3`/`qwen35moe`/
+//! `deepseek2`. It is a genuinely different representation from [`Pair`]
+//! above (deliberately not merged into it - same reasoning as this module's
+//! original split from `flux2`/`s3dit`), but its SAVE/FOLD logic was, until
+//! self-improve roadmap P4, three near-verbatim copies (`qwen35moe::lora`'s
+//! and `deepseek2::lora`'s own doc comments called theirs "a direct port" of
+//! `qwen3::lora`'s). [`device_adapter`] ends that duplication; each of the
+//! three crates' own `lora.rs` is now a thin wrapper supplying its
+//! architecture's `LoraCfg`/family name.
 
 /// LoRA hyper-parameters. `alpha/rank` is the delta scale ([`LoraCfg::scale`]).
 #[derive(Clone, Copy)]
@@ -33,7 +42,7 @@ impl LoraCfg {
 
 /// A single linear's adapter: `A [r×in]`, `B [out×r]`, plus Adam moments.
 /// Weights are public so a model's serializer can read/overwrite `a`/`b`
-/// directly (`to_tensors`/`from_tensors`); the moments stay private — they
+/// directly (`to_tensors`/`from_tensors`); the moments stay private - they
 /// are reset on reload by design.
 #[derive(Clone)]
 pub struct Pair {
@@ -50,7 +59,7 @@ pub struct Pair {
 
 impl Pair {
     /// Standard LoRA init: `A` drawn from `init` (the caller's own small
-    /// random distribution — kept caller-side so each model's existing seeds
+    /// random distribution - kept caller-side so each model's existing seeds
     /// reproduce bit-identical adapters), `B = 0` (initial no-op).
     pub fn new(out: usize, inn: usize, r: usize, mut init: impl FnMut() -> f32) -> Pair {
         let a: Vec<f32> = (0..r * inn).map(|_| init()).collect();
@@ -72,7 +81,7 @@ impl Pair {
         self.delta_strided(scale, w, 0, self.inn, 0);
     }
 
-    /// `out_buf[(row0+o)·row_stride + col0 + i] += scale·(B·A)[o,i]` — the
+    /// `out_buf[(row0+o)·row_stride + col0 + i] += scale·(B·A)[o,i]` - the
     /// fused-tensor fold: row slices use `row0`, a column split uses
     /// `col0`/`row_stride`.
     pub fn delta_strided(&self, scale: f32, out_buf: &mut [f32], row0: usize, row_stride: usize, col0: usize) {
@@ -138,14 +147,14 @@ pub fn adam(p: &mut [f32], m: &mut [f32], v: &mut [f32], g: &[f32], lr: f32, t: 
     }
 }
 
-/// Project `dw` onto `p`'s adapter grads and Adam-step them — the one-liner
+/// Project `dw` onto `p`'s adapter grads and Adam-step them - the one-liner
 /// every per-linear walk calls.
 pub fn proj_step(p: &mut Pair, dw: &[f32], scale: f32, lr: f32, t: u64) {
     let (da, db) = p.project(dw, scale);
     p.adam_step(&da, &db, lr, t);
 }
 
-/// A cheap deterministic standard-normal (xorshift + Box–Muller half) — the
+/// A cheap deterministic standard-normal (xorshift + Box–Muller half) - the
 /// init distribution `s3dit::lora` seeds `A` with.
 pub fn randn(s: &mut u64) -> f64 {
     let mut nx = || {
@@ -156,4 +165,126 @@ pub fn randn(s: &mut u64) -> f64 {
     };
     let (u1, u2) = (nx(), nx());
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+/// Device-side param-list LoRA adapters - see this module's own top doc
+/// comment on why this is a separate family from [`Pair`] above, not a
+/// unification of the two representations. `qwen3`/`qwen35moe`/`deepseek2`
+/// each keep their own `LoraCfg` type (rank/alpha/targets, plus an
+/// architecture-specific `targets_leaf` matcher `param_list()` consults -
+/// genuinely different per architecture, not folded in here) and their own
+/// public `save_adapter`/`fold_adapter_into` signatures; each is now a thin
+/// wrapper over this module's generic versions, so the actual save/fold I/O
+/// and the `fold_delta` math exist exactly once.
+pub mod device_adapter {
+    use std::collections::HashMap;
+
+    use checkpoint::st::{Adapter, ModelCard};
+
+    use crate::Model;
+
+    /// Write only `model`'s `.lora_a`/`.lora_b` tensors - never the frozen
+    /// base - to `path`, carrying a `ModelCard` with `variant_of: base_id`
+    /// and an `Adapter` descriptor, so the adapter is discoverable and
+    /// reloadable without the base's shape being re-derived by guesswork.
+    /// `family` is the `ModelCard`'s architecture tag (e.g. `"qwen"`,
+    /// `"qwen35"`, `"deepseekv2"`).
+    pub fn save_adapter<M: Model>(
+        path: &str,
+        model: &M,
+        rank: u32,
+        alpha: f32,
+        targets: &[String],
+        card_id: &str,
+        base_id: &str,
+        family: &str,
+        dataset_id: Option<&str>,
+    ) -> std::io::Result<()> {
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
+            .param_names()
+            .into_iter()
+            .filter(|name| name.ends_with(".lora_a") || name.ends_with(".lora_b"))
+            .map(|name| {
+                let data = model.read_weight(&name);
+                (name.clone(), vec![data.len() as u64], data)
+            })
+            .collect();
+        assert!(!tensors.is_empty(), "save_adapter: no .lora_a/.lora_b tensors in the param store");
+
+        let mut card = ModelCard::new(card_id, family);
+        card.variant_of = Some(base_id.to_string());
+        card.adapter = Some(Adapter {
+            kind: "lora".to_string(),
+            rank: Some(rank),
+            base: Some(base_id.to_string()),
+            alpha: Some(alpha),
+            targets: Some(targets.to_vec()),
+            dataset_id: dataset_id.map(str::to_string),
+        });
+
+        let config = serde_json::json!({ "rank": rank, "alpha": alpha, "targets": targets });
+        checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
+    }
+
+    /// Fold an adapter saved by [`save_adapter`] into a base model's host
+    /// tensor map (name -> row-major `[out, in]` data), in place. `base`
+    /// must already contain every targeted linear's weight under its plain
+    /// name; this only reads the `.lora_a`/`.lora_b` pair alongside it and
+    /// adds the low-rank delta. Returns `(rank, alpha)` read back from the
+    /// adapter's own `ModelCard` - the fold itself needs no `targets` (only
+    /// the tensor names actually present in the file), so callers build
+    /// their own crate-local `LoraCfg` from this plus whatever `targets`
+    /// they already know.
+    pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &str) -> std::io::Result<(u32, f32)> {
+        let st = checkpoint::st::load_safetensors(adapter_path)?;
+        let card = st
+            .card()
+            .unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path} has no ModelCard"));
+        let a = card.adapter.as_ref().unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s card has no adapter descriptor"));
+        let rank = a.rank.unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s adapter has no rank"));
+        let alpha = a.alpha.unwrap_or(rank as f32);
+        let scale = alpha / rank as f32;
+
+        let mut names: Vec<&str> = st
+            .tensors
+            .keys()
+            .filter_map(|n| n.strip_suffix(".lora_a"))
+            .collect();
+        names.sort();
+        for base_name in names {
+            let a_name = format!("{base_name}.lora_a");
+            let b_name = format!("{base_name}.lora_b");
+            let a_data = st.tensors.get(&a_name).unwrap_or_else(|| panic!("{adapter_path}: missing {a_name}"));
+            let b_data = st.tensors.get(&b_name).unwrap_or_else(|| panic!("{adapter_path}: missing {b_name}"));
+            let w = base
+                .get_mut(base_name)
+                .unwrap_or_else(|| panic!("fold_adapter_into: base has no weight named {base_name}"));
+            fold_delta(w, a_data, b_data, rank as usize, scale);
+        }
+
+        Ok((rank, alpha))
+    }
+
+    /// `W[o,i] += scale * sum_k B[o,k] * A[k,i]`, `A` is `[r,in]`, `B` is
+    /// `[out,r]`, both row-major - the convention every device-adapter
+    /// model's unfolded LoRA forward computes.
+    fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, scale: f32) {
+        let inn = a.len() / r;
+        let out = b.len() / r;
+        assert_eq!(w.len(), out * inn, "fold_delta: base weight shape does not match adapter rank/dims");
+        for o in 0..out {
+            let brow = &b[o * r..o * r + r];
+            let wrow = &mut w[o * inn..o * inn + inn];
+            for (k, &bok) in brow.iter().enumerate() {
+                if bok == 0.0 {
+                    continue;
+                }
+                let bok = bok * scale;
+                let arow = &a[k * inn..k * inn + inn];
+                for i in 0..inn {
+                    wrow[i] += bok * arow[i];
+                }
+            }
+        }
+    }
 }

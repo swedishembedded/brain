@@ -44,7 +44,7 @@
 // cannot see it, because `1 - c*c` in fp32 is either exactly 0 (c == +/-1.0 to
 // the bit) or >= ~1.2e-7 — there is no c in between for a central difference to
 // land on. So the branch is pinned by `the_margin_adjoint_is_finite_at_cos_one`
-// in crates/facenet/src/train.rs instead.
+// in crates/arcface/src/train.rs instead.
 
 const SIN_FLOOR: f32 = 1e-6;
 

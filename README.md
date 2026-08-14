@@ -71,7 +71,7 @@ architecture has a confirmed small default checkpoint to auto-fetch yet):
 
 ```bash
 brain caps                                                  # every architecture + its actions
-brain infer scrfd --in image=photo.ppm --json                # face detection (needs BRAIN_FACENET_DIR)
+brain infer scrfd --in image=photo.ppm --json                # face detection (needs BRAIN_SCRFD_DIR)
 brain infer glmdsa --weights F --prompt "..."                 # GLM-5.2 MoE decoder
 brain qwen3tts synth --text "..." --out out.wav               # voice synthesis
 brain zipdepth --image photo.ppm --weights zipdepth.pth       # monocular depth
@@ -111,7 +111,8 @@ including those.
 | [`Ultralytics/YOLOv8`](docs/models/yolov8/readme.md) | Vision | from-scratch anchor-free object detection |
 | [`brain/depth`](docs/models/zipdepth.md) | Vision | monocular depth (pure-conv, realtime webcam) |
 | [`brain/sam2`](docs/models/sam2.md) | Vision | promptable segmentation |
-| [`brain/facenet`](docs/models/scrfd.md) | Vision | face detection + identity embedding |
+| [`brain/scrfd`](docs/models/scrfd.md) | Vision | face detection (boxes, scores, 5-point landmarks) |
+| [`brain/arcface`](docs/models/arcface.md) | Vision | face identity embedding (512-d, cosine-ready) |
 | [`brain/clip`](docs/models/clip.md) | Vision | text/image embeddings |
 | [`Tongyi-MAI/Z-Image-Turbo`](docs/models/s3dit.md) | Image | text-to-image diffusion (S3-DiT) |
 | [`brain/flux2-klein`](docs/models/flux2.md) | Image | text-to-image + editing (MMDiT) |
