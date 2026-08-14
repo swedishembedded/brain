@@ -208,16 +208,42 @@ asserts the fold actually changed weights - reusing `qwen3::lora::
 fold_adapter_into` directly, not re-deriving the check), plus P3's own
 convergence test, all green.
 
-**What's still missing** (the one concrete gap left before P6 can run for
-real): nothing yet calls `run_cycle` on a timer/watch loop, and nothing
-yet pairs its returned adapter path with `QwenResident::set_adapter` +
-`Executor::evict` to actually take effect on a live resident - `rl::
-continuous` deliberately does not reach into `crates/residency`/
-`crates/cli` itself (dependency direction stays model-crates ->
-residency/cli, never the reverse), so that pairing is a small driver
-living in `crates/cli` (or wherever the served process's own main loop
-lives), not in `crates/rl`. `QwenResident::set_adapter` stays
-`#[allow(dead_code)]` until that driver exists and calls it.
+## P6a - hot-swap cycle glue - DONE (still not wired to a live server or a timer)
+
+`crates/cli/src/continuous_train.rs::hot_swap_cycle` is the driver P5's own
+notes flagged as missing: `rl::continuous::run_cycle`, then (only if it
+produced an adapter) `QwenResident::set_adapter` + `residency::Executor::
+evict`. Lives in `crates/cli`, not `crates/rl` - `rl::continuous`
+deliberately does not reach into `crates/residency`/`crates/cli` itself
+(dependency direction stays model-crates -> residency/cli, never the
+reverse). `QwenResident::set_adapter` lost its `#[allow(dead_code)]` - this
+is its first real caller.
+
+`evict`'s pinned-refusal contract means a refused evict (pinned, or simply
+a key nothing has claimed yet) is not a lost swap: the adapter file and
+the resident's pointer both already landed before the evict attempt, so
+the very next successful evict of that key - from any cause - picks it up.
+
+Verified: `cargo test -p brain-cli --bin brain hot_swap_cycle` - 2 tests
+(nothing-to-train no-op; a real reward-stamped trajectory producing a
+versioned adapter and pointing the resident at it, using the same tiny
+synthetic fixtures as every other test in this roadmap - no real
+checkpoint, no OOM risk), plus the existing `resident_llm` suite unaffected.
+
+**What's still missing** before P6 can run for real: nothing yet calls
+`hot_swap_cycle` on a timer/watch loop, and it is not wired into `brain
+serve`'s startup path (`run_apis` in `crates/cli/src/run_cli.rs`) - that
+wiring needs a real running server to verify end to end (this repo's own
+gradual, independently-verified phases avoid doing that blind), and is
+gated on the still-outstanding sven-side reward stamp (P0) having
+something real to train on in the first place. When both exist, the
+remaining work is: an opt-in flag/env var so default `brain serve`
+behavior is unchanged, a background thread reusing the `brain_shutdown`
+channel `run_apis` already wires up for clean process exit, and keeping a
+concrete (not type-erased) `Arc<QwenResident>` handle alongside the
+`Arc<dyn ResidentModel>` `run_apis` currently only keeps type-erased, since
+`set_adapter` is inherent to `QwenResident`, not part of the
+`ResidentModel` trait.
 
 ## P6 - the demonstrable proof - NOT STARTED
 
