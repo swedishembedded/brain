@@ -13,9 +13,17 @@
 
 /// `factor` for 4B: `patch_size · spatial_merge_size = 16 · 2`.
 pub const DEFAULT_FACTOR: u32 = 32;
-/// Area bounds from the released `preprocessor_config.json` (256² and 4096²).
-pub const DEFAULT_MIN_PIXELS: u32 = 256 * 256;
-pub const DEFAULT_MAX_PIXELS: u32 = 4096 * 4096;
+/// Area bounds from the real released `Qwen/Qwen3-Omni-30B-A3B-Instruct`
+/// `preprocessor_config.json` (`min_pixels: 3136` = 56², `max_pixels:
+/// 12845056` = 3584²) -- re-verified directly against that file, not
+/// carried over from an earlier Qwen-VL generation's defaults (256²/4096²,
+/// what this crate used before). For any image whose `smart_resize` lands
+/// inside BOTH bound pairs the two are indistinguishable (this crate's own
+/// `tests/` fixtures and the real bench task's 697x503 image all do), so the
+/// old constants could sit unnoticed; they still under/over-shoot the real
+/// model's own operating range for smaller or larger images.
+pub const DEFAULT_MIN_PIXELS: u32 = 56 * 56;
+pub const DEFAULT_MAX_PIXELS: u32 = 3584 * 3584;
 
 fn round_by_factor(x: f64, f: u32) -> u32 {
     ((x / f as f64).round_ties_even() as u32) * f

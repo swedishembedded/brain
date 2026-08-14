@@ -61,10 +61,11 @@ fn default_weights() -> String {
 /// Pixel-area budget for the resident model's DeepStack/splice buffer
 /// CAPACITY (see this module's doc) - a practical default (roughly a
 /// 1024x1024 image, ~1024 visual tokens at the 4B config's patch/merge
-/// granularity), not `preprocess::DEFAULT_MAX_PIXELS`'s theoretical 4096²
-/// ceiling, which would allocate multiple GB of DeepStack scratch per level
-/// for a capacity most requests never approach. Override via the `max_pixels`
-/// param for a checkpoint/workload that genuinely needs bigger images.
+/// granularity), not `preprocess::DEFAULT_MAX_PIXELS`'s own real-checkpoint
+/// ceiling (3584² -- see that constant's doc), which would still allocate
+/// multiple GB of DeepStack scratch per level for a capacity most requests
+/// never approach. Override via the `max_pixels` param for a
+/// checkpoint/workload that genuinely needs bigger images.
 const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 /// Decoder context: enough for a real prompt + the max image + a real
 /// response. Matches `fastvlm::caps`'s `t_max` sizing philosophy (a fixed,
