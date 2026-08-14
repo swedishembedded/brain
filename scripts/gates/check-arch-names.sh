@@ -124,15 +124,40 @@ done
 
 # ---- 3. docs/models/<id>.md, both directions -------------------------------
 
+# Space-separated on purpose (not the newline-separated raw sed output): the
+# `case " $non_toy_ids " in *" $x "*)` membership checks below need every id
+# bounded by literal spaces to match correctly -- a newline-separated blob
+# silently matches nothing there (word-splitting still works in a bare `for`
+# loop, which is why that half of this looked fine while the `case` half did
+# not; caught by the ORPHAN check flagging every single docs page at once).
 non_toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", (Text|Multimodal|Audio|Vision|Image|ThreeD|Forecast|World)' "$ARCH_TABLE" \
-             | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/')
+             | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/' | tr '\n' ' ')
 
 for id in $non_toy_ids; do
-  if [ ! -f "$MODELS_DIR/$id.md" ]; then
-    echo "MISSING DOCS PAGE: architecture '$id' has no $MODELS_DIR/$id.md"
+  # A page named `<id>.md` directly, or `<id>/readme.md` -- the subdirectory
+  # form some multi-file model pages already used before this rename (image
+  # assets alongside the page: yolov8/, qwen3omnimoe/, glmdsa/).
+  if [ ! -f "$MODELS_DIR/$id.md" ] && [ ! -f "$MODELS_DIR/$id/readme.md" ]; then
+    echo "MISSING DOCS PAGE: architecture '$id' has no $MODELS_DIR/$id.md or $MODELS_DIR/$id/readme.md"
     fail=1
   fi
 done
+
+# Pages that are deliberately NOT one architecture: the catalog landing page,
+# and family-comparison pages that editorially discuss several related
+# architectures side by side (when to reach for which) with the per-model
+# reference detail living on each architecture's own page instead. A new
+# entry here needs the same justification: real comparative content, not a
+# place to leave a rename unfinished.
+overview_pages="index asr vlm world-models forecast imgpipe"
+
+# Toy architectures (Domain::Toy) are excluded from `non_toy_ids` by design
+# (see crates/arch's own doc: excluded from brain caps / --help / the docs
+# model list) -- their docs pages are optional, educational content, not
+# something this gate requires, but a page that DOES exist for one is real
+# and legitimate, not an orphan.
+toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", Domain::Toy' "$ARCH_TABLE" \
+         | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/' | tr '\n' ' ')
 
 for f in "$MODELS_DIR"/*.md; do
   [ -e "$f" ] || continue
@@ -140,7 +165,13 @@ for f in "$MODELS_DIR"/*.md; do
   case " $non_toy_ids " in
   *" $base "*) continue ;;
   esac
-  echo "ORPHAN DOCS PAGE: $f's basename '$base' is not a registered non-toy architecture id (see $ARCH_TABLE)"
+  case " $overview_pages " in
+  *" $base "*) continue ;;
+  esac
+  case " $toy_ids " in
+  *" $base "*) continue ;;
+  esac
+  echo "ORPHAN DOCS PAGE: $f's basename '$base' is not a registered architecture id, overview page, or toy architecture page (see $ARCH_TABLE)"
   fail=1
 done
 

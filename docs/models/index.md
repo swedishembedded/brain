@@ -1,99 +1,108 @@
 # Model catalog
 
-Every model id below is what you pass to `brain do`, or set as the `model`
-field over HTTP/D-Bus. A checked box means the capability is reachable through
-a real, documented command — nothing here is aspirational. **⤓** means brain
-fetches and converts the weights itself on first use; everything else needs a
-local checkpoint, pointed at by a `BRAIN_*` variable named on the model's own
-page (see [Getting the weights](../using/models-and-weights.md)).
+Every architecture below has one canonical id (see [The CLI](../using/cli.md))
+that names it everywhere: the CLI (`brain <id> <verb>` / `brain <verb> <id>`),
+`brain caps`, and its own page here. A checked box means the capability is
+reachable through a real, documented command - nothing here is aspirational.
+**⤓** means brain fetches and converts the weights itself on first use;
+everything else needs a local checkpoint, pointed at by a `BRAIN_*` variable
+named on the model's own page (see
+[Getting the weights](../using/models-and-weights.md)).
 
 ## Text
 
-| Model id | Solves | Infer | Train | LoRA |
+| Architecture | Solves | Infer | Train | LoRA |
 |---|---|:---:|:---:|:---:|
-| [`Qwen/Qwen3-0.6B`](qwen3.md) ⤓ | instruct/chat LLM, tool calls, paged-KV serving | [x] | [x] | [x] |
-| [`brain/gpt`](gpt.md) | dense nanoGPT-parity baseline | [x] | [x] | [ ] |
-| [`brain/glm`](glm.md) | mixture-of-experts decoder | [x] | [x] | [ ] |
-| [`brain train`](moe.md) | sparse top-2-of-4 MoE toy next-token rule | [x] | [x] | [ ] |
-| [`brain seq2seq`](seq2seq.md) | general encoder-decoder Transformer | [x] | [x] | [ ] |
+| [`qwen3`](qwen3.md) ⤓ | instruct/chat LLM, tool calls, paged-KV serving | [x] | [x] | [x] |
+| [`qwen35moe`](qwen35moe.md) | hybrid GDN/GQA sparse-MoE decoder | [x] | [ ] | [x] |
+| [`gpt2`](gpt2.md) | dense nanoGPT-parity baseline | [x] | [x] | [ ] |
+| [`glmdsa`](glmdsa.md) | MLA + sigmoid noaux_tc MoE decoder | [x] | [x] | [ ] |
 
 ## Embeddings
 
-| Model id | Solves | Infer |
+| Architecture | Solves | Infer |
 |---|---|:---:|
-| [`LiquidAI/LFM2.5-350M`](lfm.md) ⤓ | text embeddings + fill-mask, 8k context | [x] |
-| [`brain/clip`](clip.md) | text/image embeddings | [x] |
-| [`brain/facenet`](face.md) | face detection + identity embedding | [x] |
+| [`lfm2`](lfm2.md) ⤓ | text embeddings + fill-mask, 8k context | [x] |
+| [`clip`](clip.md) | text/image embeddings | [x] |
+| [`scrfd`](scrfd.md) | face detection | [x] |
+| [`arcface`](arcface.md) | face identity embedding | [x] |
 
 ## Vision-language
 
-| Model id | Solves | Infer |
+| Architecture | Solves | Infer |
 |---|---|:---:|
-| [`brain/fastvlm`](vlm.md) | image captioning | [x] |
-| [`brain/qwenvl`](vlm.md) | image + text → text | [x] |
-| [`deepseek-ai/DeepSeek-OCR`](deepseek-ocr.md) | document image → text/markdown (OCR, tables, grounding) | [x] |
-| [`brain/omni`](omni/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
+| [`fastvlm`](fastvlm.md) | image captioning | [x] |
+| [`qwen3vl`](qwen3vl.md) | image + text → text | [x] |
+| [`deepseek2ocr`](deepseek2ocr.md) ⤓ | document image → text/markdown (OCR, tables, grounding) | [x] |
+| [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 
 ## Speech
 
-| Model id | Solves | Infer | LoRA |
+| Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
-| [`brain/nemotron`](asr.md) | streaming speech-to-text | [x] | |
-| [`brain/qwen-asr`](asr.md) | offline speech-to-text | [x] | |
-| [`brain/tts`](tts.md) | voice cloning / speech synthesis | [x] | [x] |
+| [`nemotronasr`](nemotronasr.md) | streaming speech-to-text | [x] | |
+| [`qwen3asr`](qwen3asr.md) | offline speech-to-text | [x] | |
+| [`qwen3tts`](qwen3tts.md) | voice cloning / speech synthesis | [x] | [x] |
 
 ## Image generation and editing
 
-| Model id | Solves | Infer | LoRA |
+| Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
-| [`Tongyi-MAI/Z-Image-Turbo`](zimage.md) ⤓ | text-to-image | [x] | [x] |
-| [`brain/flux2-klein`](flux2.md) | text-to-image + reference-image editing | [x] | [x] |
-| [`brain/restore`](restore.md) | blind face restoration | [x] | |
-| [`brain/upscale`](upscale.md) | 4x super-resolution | [x] | |
-| [`brain/vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
-| [`brain/imgpipe`](imgpipe.md) | composed segment → restore → upscale, one call | [x] | |
+| [`s3dit`](s3dit.md) ⤓ | text-to-image | [x] | [x] |
+| [`flux2`](flux2.md) | text-to-image + reference-image editing | [x] | [x] |
+| [`codeformer`](codeformer.md) | blind face restoration | [x] | |
+| [`rrdbnet`](rrdbnet.md) | 4x super-resolution | [x] | |
+| [`vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
+| [`imgpipe`](imgpipe.md) | composed segment → restore → upscale, one call | [x] | |
 
 ## Vision and 3D
 
-| Model id | Solves | Infer | Train |
+| Architecture | Solves | Infer | Train |
 |---|---|:---:|:---:|
-| [`Ultralytics/YOLOv8`](yolo/readme.md) ⤓ | anchor-free object detection | [x] | [x] |
-| [`brain/depth`](depth.md) | monocular relative depth | [x] | [x] |
-| [`brain/sam2`](sam2.md) | promptable image segmentation | [x] | |
-| [`brain mirror`](mirror.md) | multi-view photos → 3D scene | [x] | |
-| [`brain splat`](splat.md) | 3D Gaussian Splatting render/fit | [x] | [x] |
+| [`yolov8`](yolov8/readme.md) ⤓ | anchor-free object detection | [x] | [x] |
+| [`zipdepth`](zipdepth.md) | monocular relative depth | [x] | [x] |
+| [`sam2`](sam2.md) | promptable image segmentation | [x] | |
+| [`worldmirror2`](worldmirror2.md) | multi-view photos → 3D scene | [x] | |
+| [`splat`](splat.md) | 3D Gaussian Splatting render/fit | [x] | [x] |
 
 ## Forecasting
 
-| Model id | Solves | Infer | Train | LoRA |
+| Architecture | Solves | Infer | Train | LoRA |
 |---|---|:---:|:---:|:---:|
-| [`brain/chronos2`](chronos2.md) | probabilistic time-series forecasting | [x] | | |
-| [`brain/fincast`](fincast.md) | probabilistic time-series forecasting | [x] | | |
-| [`brain/kronos`](kronos.md) | OHLCV bar forecasting | [x] | [x] | [x] |
+| [`chronos2`](chronos2.md) | probabilistic time-series forecasting | [x] | | |
+| [`fincast`](fincast.md) | probabilistic time-series forecasting | [x] | | |
+| [`kronos`](kronos.md) | OHLCV bar forecasting | [x] | [x] | [x] |
 
 ## World models and control
 
-| Model id | Solves | Infer | Train |
+| Architecture | Solves | Infer | Train |
 |---|---|:---:|:---:|
-| [`brain wm`](world-models.md) | playable, action-conditioned video | [x] | [x] |
-| [`brain pid`](pid.md) | control policy imitation | [x] | [x] |
+| [`diamond`](diamond.md) | playable, action-conditioned video (Atari-100k) | [x] | [x] |
+| [`genieredux`](genieredux.md) | playable, action-conditioned video (CoinRun) | [ ] | [ ] |
 
 ## Not yet servable
 
-These are parity-gated architecture ports with no `brain do`/HTTP/D-Bus surface
-yet — real, verified code, but not something you can run as a model today.
-Each has a public roadmap of what's left:
+These are parity-gated architecture ports with no CLI/HTTP/D-Bus serving
+surface yet - real, verified code, but not something you can run as a model
+today. Each has its own page with the full status:
 
-- T5-XXL encoder — a text conditioner
-- SDXL UNet — a diffusion backbone
-- ControlNet — spatial conditioning for diffusion backbones
-- FLUX.1/Kontext — text-to-image + image editing
-- PuLID — identity-conditioned image generation
-- Moondream 3 — a second vision-language model (see [the VLM page](vlm.md))
+- [`t5encoder`](t5encoder.md) - a text conditioner
+- [`sdxlunet`](sdxlunet.md) - a diffusion backbone
+- [`controlnet`](controlnet.md) - spatial conditioning for diffusion backbones
+- [`flux1`](flux1.md) - text-to-image + image editing
+- [`pulid`](pulid.md) - identity-conditioned image generation
+- [`instantid`](instantid.md) - identity-conditioned image generation (SDXL)
+- [`moondream3`](moondream3.md) - a third vision-language model
+
+## Components
+
+Not independently servable - reached only as part of another architecture's
+composed pipeline: [`deepseek2`](deepseek2.md), [`sam1`](sam1.md),
+[`mimi`](mimi.md), [`ecapatdnn`](ecapatdnn.md), [`autoencoderkl`](autoencoderkl.md).
 
 Notes on the columns:
 
 - **LoRA** columns are omitted for model families where fine-tuning isn't
   offered at all (rather than shown as an empty box everywhere).
-- **QLoRA is not implemented anywhere in brain** — INT8/GGUF paths are
+- **QLoRA is not implemented anywhere in brain** - INT8/GGUF paths are
   inference-only.
