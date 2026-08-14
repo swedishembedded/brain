@@ -226,12 +226,19 @@ test/slow:
 # via std::env::var in exactly one file (crates/gpu-core/src/devices.rs's
 # ambient_compute_set) rather than a second, independently-drifting parser -
 # see A4 in .agents/roadmap/dtype.md for the bug this keeps fixed.
+# check-arch-names.sh additionally requires every crates/arch architecture
+# row to name a real, correspondingly-named crate (bar an explicit, dated
+# exception list), the CLI's top-level dispatch to never hard-code an
+# architecture name as its own match arm, and every non-toy architecture to
+# have (and every docs/models/*.md page to BE) a real registry id in both
+# directions - see that script for the full rationale.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
 	bash scripts/gates/check-no-doc-citations.sh
 	bash scripts/gates/check-no-perf-numbers.sh
 	bash scripts/gates/check-device-env-single-source.sh
+	bash scripts/gates/check-arch-names.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
