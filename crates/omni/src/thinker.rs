@@ -86,6 +86,10 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 18
         // General (non-MoE) int8 GEMM -- see `lm_head_fwd_i8`'s doc.
         ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),           // 19
+        // O(T*head_dim)-memory causal GQA attention -- see
+        // `attn_ids`/`flash_attn_causal_gqa.wgsl`'s doc for the real
+        // ERROR_OUT_OF_DEVICE_MEMORY this closes.
+        ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA), // 20
     ]
 }
 
@@ -125,7 +129,11 @@ fn decode_ids() -> GqaDecodeIds {
 /// The hoisted attention sublayer's kernel indices, resolved against
 /// [`thinker_pipelines`]'s ordering - see `model::block::GqaAttnIds`.
 fn attn_ids() -> GqaAttnIds {
-    GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids() }
+    // flash_causal_gqa: Some(20) -- the Thinker prefills a real agent's whole
+    // conversation (system prompt + tool schemas can run thousands of
+    // tokens), where gqa_fwd's O(T*T) materialized scores/probs is the real
+    // ERROR_OUT_OF_DEVICE_MEMORY source; see flash_attn_causal_gqa.wgsl's doc.
+    GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids(), flash_causal_gqa: Some(20) }
 }
 
 fn attn_dims(cfg: &MoeTextConfig) -> GqaAttnDims {

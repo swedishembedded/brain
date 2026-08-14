@@ -367,6 +367,15 @@ pub struct GqaAttnIds {
     pub kv_append: usize,
     /// The decode-step ids ([`gqa_decode_step`]).
     pub decode: GqaDecodeIds,
+    /// `flash_attn_causal_gqa.wgsl`'s pipeline index, when a caller has
+    /// registered it - `None` (every caller before this field existed)
+    /// keeps [`gqa_attn_sublayer_fwd`] on the original `gqa_fwd` path
+    /// (materialized `[H,T,T]` scores/probs), byte-for-byte unchanged.
+    /// `Some` switches to the O(T*head_dim)-memory flash-attention kernel
+    /// instead - see that kernel's doc for the real
+    /// `ERROR_OUT_OF_DEVICE_MEMORY` (a real agent's long system prompt +
+    /// tool schemas, thousands of tokens) this closes.
+    pub flash_causal_gqa: Option<usize>,
 }
 
 /// The attention sublayer's shape parameters.
@@ -451,13 +460,58 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
         g.submit(&[], &[kv_cache_fill(g, ids.kv_append, &k, kcache, n, nkv, hd), kv_cache_fill(g, ids.kv_append, &v, vcache, n, nkv, hd)]);
     }
 
-    let scores = g.storage((nh * n * n) as u64);
-    let probs = g.storage((nh * n * n) as u64);
-    let ctx = g.storage((n * nh * hd) as u64);
     let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &q, &k, &v, &scores, &probs, &ctx));
+    let ctx = g.storage((n * nh * hd) as u64);
+    match ids.flash_causal_gqa {
+        // Same gate every other `flash_bidir_fwd` caller in this codebase uses
+        // (flux1/flux2/lfm/unet): shared memory + `workgroupBarrier` need real
+        // workgroup cooperation, which the CPU JIT backend (and any other
+        // backend that reports it) does not have -- dispatching there panics
+        // instead of computing a wrong answer, so this falls back to the
+        // materialized path rather than assuming every registered kernel id
+        // is safe to run on every device. The kernel is also lane-split at a
+        // fixed `@workgroup_size(256)` (see its own doc), so a device capped
+        // below that - `flash_bidir_variant`'s own check for its split kernel -
+        // falls back the same way rather than dispatching a workgroup size
+        // the device cannot run.
+        Some(flash) if g.caps().workgroup_reductions && g.caps().max_workgroup_size >= 256 => {
+            g.submit(&[], &[flash_gqa_causal_fwd(g, flash, &ga, &q, &k, &v, &ctx)])
+        }
+        _ => {
+            let scores = g.storage((nh * n * n) as u64);
+            let probs = g.storage((nh * n * n) as u64);
+            g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &q, &k, &v, &scores, &probs, &ctx));
+        }
+    }
 
     gqa_attn_out(g, ids, dims, w, x, &ctx, n)
+}
+
+/// One fused causal GQA flash-attention dispatch: [`gqa_fwd`]'s
+/// scores -> softmax -> apply chain, FUSED into one tiled online-softmax
+/// kernel (`crates/kernels/wgsl/flash_attn_causal_gqa.wgsl`) so the dense
+/// `[H,T,T]` scores/probs slabs are never materialized - peak attention
+/// memory is O(T*head_dim) instead of O(T*T). Same separate-q/k/v-buffer,
+/// GQA-head-group layout `gqa_fwd` uses (unlike [`flash_bidir_fwd`]'s fused-
+/// qkv, non-causal, plain-MHA shape) so it drops into
+/// [`gqa_attn_sublayer_fwd`] with no upstream layout change.
+///
+/// Lane-split across `head_dim` (`flash_attn_bidir_split`'s own fix for the
+/// same real Pascal register-spill bug, measured 29x at head_dim=128 - see
+/// that kernel's header and this one's own doc for the account of the
+/// register-per-thread design that was tried first and measured ~300x too
+/// slow). The workgroup still owns `BR = 64` query rows, same as
+/// [`flash_bidir_step`]'s convention, but each row is now split across 4
+/// lanes, so the workgroup's real thread count is `256`, not `BR`.
+///
+/// `Gqa::params()`'s field order (`[b, n_heads, n_kv_heads, t, head_dim,
+/// group]`) already matches the kernel's own `Params` struct exactly - same
+/// contract `gqa_fwd`/`gqa_scores.wgsl`/`gqa_apply.wgsl` share.
+pub fn flash_gqa_causal_fwd(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer) -> Step {
+    const BR: u32 = 64; // query rows per workgroup - matches the kernel's own BR
+    const WS: u32 = 256; // threads per workgroup - matches the kernel's own workgroup_size(256) (BR * LANES)
+    let nwg = a.b * a.n_heads * a.t.div_ceil(BR);
+    g.step(kernel, &[q, k, v, ctx], &a.params(), nwg * WS)
 }
 
 /// The single-token incremental-decode twin of [`gqa_attn_sublayer_fwd`]:
@@ -1574,6 +1628,83 @@ mod kv_cache_tests {
         }
 
         assert_eq!(gpu.read(&bulk, (n * hkv) as usize), gpu.read(&per_row, (n * hkv) as usize));
+    }
+
+    /// [`flash_gqa_causal_fwd`] (O(T*head_dim) memory, tiled online softmax)
+    /// must reproduce [`gqa_fwd`]'s materialized-`[H,T,T]` causal output --
+    /// the real correctness bar for the fix that closed a real
+    /// `ERROR_OUT_OF_DEVICE_MEMORY` (see `flash_attn_causal_gqa.wgsl`'s doc):
+    /// a memory-cheaper kernel that answers differently is not a fix, it is a
+    /// different bug. `t=100` deliberately exceeds both the kernel's query
+    /// tile (BR=64) and key/value tile (BC=16) sizes, so this exercises the
+    /// multi-tile loop in both dimensions, not just a single-tile shortcut;
+    /// `n_kv_heads < n_heads` exercises the GQA head-group mapping the same
+    /// way `gqa_scores.wgsl`'s own `hkv = h / group` does.
+    ///
+    /// Runs on the pooled *wgpu* test device (`gpu_core::testgpu::dev`), not
+    /// `Gpu::new_cpu`: the CPU backend only JIT-compiles a fixed set of
+    /// natively-recognized workgroup kernels, and this one -- a fresh shared-
+    /// memory/`workgroupBarrier` kernel with no hand-written CPU fast path --
+    /// is not in that set (`wgsl-cpu: ... unsupported work-group structure`).
+    /// wgpu compiles arbitrary WGSL for real, on a software rasterizer when no
+    /// GPU is present, so it is the correct portable device for a kernel this
+    /// new.
+    #[test]
+    fn flash_causal_gqa_matches_materialized_gqa_fwd() {
+        let (t, n_heads, n_kv_heads, head_dim) = (100u32, 4u32, 2u32, 8u32);
+        let (hq, hkv) = (n_heads * head_dim, n_kv_heads * head_dim);
+
+        let gpu = gpu_core::testgpu::dev(&[
+            ("gqa_scores", kernels::GQA_SCORES),
+            ("attn_softmax", kernels::ATTN_SOFTMAX),
+            ("gqa_apply", kernels::GQA_APPLY),
+            ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+        ]);
+        let ids = KernelIds {
+            rmsnorm: 0,
+            rms_inv: 0,
+            rmsnorm_dx: 0,
+            rmsnorm_dw: 0,
+            rope: 0,
+            rope_bwd: 0,
+            gqa_scores: 0,
+            gqa_apply: 2,
+            attn_softmax: 1,
+            gqa_dscores: 0,
+            gqa_dv: 0,
+            gqa_dq: 0,
+            gqa_dk: 0,
+            silu_mul: 0,
+            silu_da: 0,
+            silu_db: 0,
+        };
+
+        // Deterministic pseudo-random q/k/v -- same fixed-formula convention
+        // `decode_step_matches_causal_batched_attention_at_every_position` uses.
+        let mk = |n: u32, seed: f32| (0..n).map(|i| (i as f32 * 0.7 + seed).sin()).collect::<Vec<f32>>();
+        let q = gpu.storage_init("q", &mk(t * hq, 0.1));
+        let k = gpu.storage_init("k", &mk(t * hkv, 0.2));
+        let v = gpu.storage_init("v", &mk(t * hkv, 0.3));
+        let ga = Gqa { b: 1, t, n_heads, n_kv_heads, head_dim };
+
+        let scores = gpu.storage((n_heads * t * t) as u64);
+        let probs = gpu.storage((n_heads * t * t) as u64);
+        let ctx_ref = gpu.storage((t * hq) as u64);
+        gpu.submit(&[], &gqa_fwd(&gpu, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx_ref));
+        let want = gpu.read(&ctx_ref, (t * hq) as usize);
+
+        let ctx_flash = gpu.storage((t * hq) as u64);
+        gpu.submit(&[], &[flash_gqa_causal_fwd(&gpu, 3, &ga, &q, &k, &v, &ctx_flash)]);
+        let got = gpu.read(&ctx_flash, (t * hq) as usize);
+
+        let mut worst = 0.0f32;
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            let diff = (g - w).abs();
+            worst = worst.max(diff);
+            assert!(diff < 1e-3, "elem {i}: flash={g}, reference={w}, diff={diff}");
+        }
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        println!("flash_causal_gqa vs gqa_fwd: worst abs diff = {worst:e}");
     }
 }
 

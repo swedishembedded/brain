@@ -114,7 +114,11 @@ fn decode_ids() -> GqaDecodeIds {
 /// The hoisted attention sublayer's kernel indices, resolved against
 /// [`talker_pipelines`]'s ordering - see `model::block::GqaAttnIds`.
 fn attn_ids() -> GqaAttnIds {
-    GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids() }
+    // flash_causal_gqa: None -- the Talker's own sequence lengths are small
+    // (bounded assistant-turn generation, not a long system prompt + tool
+    // schemas), so the O(T*T) path this leaves unchanged is not the real
+    // problem `flash_attn_causal_gqa.wgsl` closes for the Thinker.
+    GqaAttnIds { kernels: kernel_ids(), matmul: MATMUL, add2: ADD2, rope2d: ROPE2D, kv_append: KV_APPEND, decode: decode_ids(), flash_causal_gqa: None }
 }
 
 fn attn_dims(cfg: &MoeTextConfig) -> GqaAttnDims {
