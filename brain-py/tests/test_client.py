@@ -3,7 +3,7 @@
 
 """CI-fast tests for BrainStdio (the JSONL transport): req_id demux + reader thread.
 
-These run `brain run` with NO --yolo / --gpt, so brain uses its built-in fake
+These run `brain serve --stdio` with NO --yolo / --gpt, so brain uses its built-in fake
 detector (a fixed deterministic box) and fake echo text model. That keeps CI
 fast (no model load / no JIT inference) while still exercising the real
 subprocess, the JSONL protocol, the background reader thread, and the

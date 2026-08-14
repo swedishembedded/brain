@@ -4,11 +4,11 @@
 
 """Generate five views of a porcupine-styled Toyota pickup with HOT weights.
 
-Spawns ONE ``brain run`` server, keeps it alive, and fires five ``text2image``
+Spawns ONE ``brain serve --stdio`` server, keeps it alive, and fires five ``text2image``
 requests back-to-back. The server loads the ~20 GB of Z-Image weights (Qwen-4B
 encoder + int8 DiT + VAE) on the FIRST request and keeps them resident, so calls
 2..5 skip the load entirely and are fast — the whole point of a persistent
-connection vs. re-running ``brain do`` (which reloads everything each time).
+connection vs. re-running ``brain infer`` (which reloads everything each time).
 
 Run:
     python -m brain_py.examples.porcupine_trucks           # 512x512, int8
@@ -59,7 +59,7 @@ def main() -> int:
     precision = os.environ.get("PRECISION", "int8")
     os.makedirs(out, exist_ok=True)
 
-    print(f"spawning `brain run` (weights load on first request)…", flush=True)
+    print(f"spawning `brain serve --stdio` (weights load on first request)…", flush=True)
     client = BrainClient(device="cpu")  # z-image drives GPU explicitly; device is ignored by it
     saved = []
     try:

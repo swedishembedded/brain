@@ -97,7 +97,7 @@ class _FakeErrorConnection:
 
 def test_call_raises_brain_error_not_a_masked_json_bug():
     brain = BrainDBus.__new__(BrainDBus)  # skip __init__ (no real bus connection)
-    brain._conn = _FakeErrorConnection("model 'nemotron' not served (have: mock, demo)")
+    brain._conn = _FakeErrorConnection("model 'nemotronasr' not served (have: mock, demo)")
 
     with pytest.raises(BrainError) as exc_info:
         brain.manifests()  # json.loads(self._call("Manifests")[0]) in the old code

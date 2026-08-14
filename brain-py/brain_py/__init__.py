@@ -11,8 +11,8 @@ share ONE high-level API, so you can switch transport without rewriting:
 * :class:`~brain_py.dbus.BrainDBus` — **the default**: the ``com.swedishembedded.Brain1``
   D-Bus surface of ``brain serve --dbus``, exchanging bulk data as file descriptors.
 * :class:`~brain_py.client.BrainStdio` — the JSONL-on-stdio transport that drives a
-  ``brain run`` subprocess and correlates requests by ``req_id``. It additionally
-  offers the ``brain run`` legacy verbs :meth:`~brain_py.client.BrainStdio.detect`,
+  ``brain serve --stdio`` subprocess and correlates requests by ``req_id``. It additionally
+  offers the ``brain serve --stdio`` legacy verbs :meth:`~brain_py.client.BrainStdio.detect`,
   :meth:`~brain_py.client.BrainStdio.converse`, ``forecast`` and ``backtest``.
 
 Pick one with the top-level :func:`Brain` factory (D-Bus unless you ask for JSONL):
@@ -23,7 +23,7 @@ Pick one with the top-level :func:`Brain` factory (D-Bus unless you ask for JSON
         print(brain.models())
         print(brain.generate(prompt="hello", model="mock"))
 
-    with Brain(transport="jsonl") as brain:      # spawn `brain run` over stdio
+    with Brain(transport="jsonl") as brain:      # spawn `brain serve --stdio` over stdio
         print(brain.generate(prompt="hello", model="mock"))
 
 Both expose the same :meth:`~brain_py.base.BrainBase.run` /
@@ -53,7 +53,7 @@ def Brain(transport: str = "dbus", **kwargs: Any) -> BrainBase:
       to ``com.swedishembedded.Brain1`` on the session bus. Extra kwargs
       (e.g. ``bus="SYSTEM"``) pass through.
     * ``transport="jsonl"`` (aliases: ``"stdio"``) → :class:`~brain_py.client.BrainStdio`,
-      spawning a ``brain run`` subprocess. Extra kwargs (``yolo=``, ``device=``,
+      spawning a ``brain serve --stdio`` subprocess. Extra kwargs (``yolo=``, ``device=``,
       ``forecast=``, …) pass through.
 
     Both share the high-level capability API, so switching transport needs no

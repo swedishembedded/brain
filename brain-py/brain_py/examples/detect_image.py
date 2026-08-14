@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""End-to-end example: image in -> annotated image out, via ``brain run``.
+"""End-to-end example: image in -> annotated image out, via ``brain serve --stdio``.
 
     python -m brain_py.examples.detect_image \
         --weights /tmp/bp.weights --image in.png --out annotated.png [--conf 0.25]
 
 Reads the input image with Pillow (any format), runs detection through a
-``BrainClient`` (which drives ``brain run --yolo <weights>`` as a subprocess),
+``BrainClient`` (which drives ``brain serve --stdio --yolo <weights>`` as a subprocess),
 draws the returned boxes, and saves the annotated image. If ``--image`` is
 omitted, a synthetic in-distribution image is generated so the demo runs out of
 the box.
@@ -37,14 +37,14 @@ def _load_names(spec):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="detect objects in an image via brain run")
-    ap.add_argument("--weights", help="YOLO weights for `brain run --yolo`. "
+    ap = argparse.ArgumentParser(description="detect objects in an image via brain serve --stdio")
+    ap.add_argument("--weights", help="YOLO weights for `brain serve --stdio --yolo`. "
                     "If omitted, brain's built-in fake detector is used.")
     ap.add_argument("--image", help="input image (any Pillow format). "
                     "If omitted, a synthetic gen_detect image is generated.")
     ap.add_argument("--out", default="annotated.png", help="output annotated PNG")
     ap.add_argument("--conf", type=float, default=0.25,
-                    help="detection confidence threshold (passed to brain run --conf)")
+                    help="detection confidence threshold (passed to brain serve --stdio --conf)")
     ap.add_argument("--names", help="class names: 'coco' for the built-in COCO-80 "
                     "list, or a path to a newline-separated names file. Default: "
                     "numeric class ids.")

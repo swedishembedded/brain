@@ -203,7 +203,7 @@ class BrainBase:
         :meth:`subscribe` — generic, model-agnostic multimodal input (e.g.
         ``blobs={"audio": pcm_bytes}, meta={"audio": {"media": "audio"}}`` for a
         model whose ``generate`` action declares an ``audio``/``image`` blob
-        input, like ``brain/omni``). With ``on_progress`` set the run streams
+        input, like ``brain/qwen3omnimoe``). With ``on_progress`` set the run streams
         (one callback per token via :meth:`subscribe`); otherwise it is a single
         :meth:`run`. ``model`` defaults to the first model advertising ``generate``.
         """

@@ -9,7 +9,7 @@ over two transports that share **one** high-level API:
 | Transport | Class | Backend | Default? |
 |-----------|-------|---------|----------|
 | **D-Bus** | `BrainDBus` | `com.swedishembedded.Brain1` (`brain serve --dbus`), bulk data as **fds** | **yes** |
-| JSONL/stdio | `BrainStdio` | a `brain run` subprocess, correlated by `req_id`, blobs base64'd | no |
+| JSONL/stdio | `BrainStdio` | a `brain serve --stdio` subprocess, correlated by `req_id`, blobs base64'd | no |
 
 Because both implement the same `run` / `subscribe` primitives and the same
 convenience wrappers, you can switch transport without rewriting anything.
@@ -36,13 +36,13 @@ with Brain() as brain:
     print(brain.generate(prompt="hello", model="mock"))    # text
     vec = brain.embed("hello world", model="mock")         # embedding vector
     img = brain.text2image("a red cube", model="mock")     # -> PIL Image
-    text = brain.transcribe(pcm_f32le_16k, model="nemotron")  # live ASR
+    text = brain.transcribe(pcm_f32le_16k, model="nemotronasr")  # live ASR
 ```
 
 Select the JSONL/stdio transport explicitly — the API is identical:
 
 ```python
-with Brain(transport="jsonl") as brain:   # spawns `brain run`
+with Brain(transport="jsonl") as brain:   # spawns `brain serve --stdio`
     print(brain.generate(prompt="hello", model="mock"))
 ```
 
@@ -87,7 +87,7 @@ builds an input fd.
 
 ### JSONL/stdio extras
 
-`BrainStdio` keeps the `brain run` legacy verbs: `detect(image)` (object
+`BrainStdio` keeps the `brain serve --stdio` legacy verbs: `detect(image)` (object
 detection), `converse(text)` (the `user_text` → `brain_text_chunk` chat path,
 distinct from the capability `generate`), and — with `BrainStdio(forecast=True)`
 — `forecast(...)`, `backtest(...)`, `capabilities()`. It can also `connect()` to
@@ -102,7 +102,7 @@ python -m pytest brain-py/tests -q
 * `tests/test_dbus.py` — bus-free: the memfd/fd plumbing plus the
   transport-agnostic capability layer (`Outcome` + the convenience wrappers)
   exercised against a fake transport. **No server, no D-Bus needed.**
-* `tests/test_client.py`, `tests/test_forecast.py` — drive a real `brain run`
+* `tests/test_client.py`, `tests/test_forecast.py` - drive a real `brain serve --stdio`
   subprocess (fake detector / echo model); **skipped** when the `brain` binary is
   absent.
 

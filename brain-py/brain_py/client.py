@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""``BrainStdio`` — an event-driven driver for the ``brain run`` subprocess.
+"""``BrainStdio`` - an event-driven driver for the ``brain serve --stdio`` subprocess.
 
 This is the **JSONL-on-stdio** transport (select it with ``Brain(transport=
 "jsonl")`` or by constructing :class:`BrainStdio` directly). The default
@@ -9,12 +9,12 @@ transport is D-Bus (:class:`~brain_py.dbus.BrainDBus`); both speak the same
 capability model, so the high-level API (:meth:`run` / :meth:`subscribe` and the
 :class:`~brain_py.base.BrainBase` wrappers ``generate`` / ``embed`` /
 ``text2image``) is identical — only the wire underneath differs. On top of that,
-``BrainStdio`` keeps the ``brain run`` legacy verbs :meth:`detect`,
+``BrainStdio`` keeps the ``brain serve --stdio`` legacy verbs :meth:`detect`,
 :meth:`converse`, :meth:`forecast` and :meth:`backtest`.
 
 Design
 ------
-``brain run`` reads ONE JSON event per line on stdin and writes events (one per
+``brain serve --stdio`` reads ONE JSON event per line on stdin and writes events (one per
 line) on stdout; stderr carries logs. Every request may carry a top-level
 ``"req_id"`` which the runtime echoes onto every response event for that request.
 
@@ -146,7 +146,7 @@ def _wire_blobs(blobs: Optional[dict], meta: Optional[dict]) -> list[dict]:
 
 
 class BrainStdio(BrainBase):
-    """Spawn ``brain run`` and drive it over its JSONL event protocol."""
+    """Spawn ``brain serve --stdio`` and drive it over its JSONL event protocol."""
 
     def __init__(
         self,
@@ -164,13 +164,13 @@ class BrainStdio(BrainBase):
         With ``forecast=True`` the client launches ``brain forecast serve`` (the
         statistical baselines registered, foundation models added as they land)
         so :meth:`forecast`, :meth:`backtest` and :meth:`capabilities` work.
-        Otherwise it launches ``brain run`` for :meth:`converse` / :meth:`detect`.
+        Otherwise it launches ``brain serve --stdio`` for :meth:`converse` / :meth:`detect`.
         """
         self._binary = _find_brain_binary(brain_bin)
         if forecast:
             argv = [self._binary, "forecast", "serve"]
         else:
-            argv = [self._binary, "run"]
+            argv = [self._binary, "serve", "--stdio"]
             if yolo:
                 argv += ["--yolo", yolo]
             if gpt:
@@ -437,7 +437,7 @@ class BrainStdio(BrainBase):
                   blobs: Optional[dict] = None, meta: Optional[dict] = None,
                   on_progress: Optional[OnProgress] = None,
                   timeout: float = 1800.0) -> Outcome:
-        """Streaming counterpart to :meth:`run`. ``brain run``'s generic action
+        """Streaming counterpart to :meth:`run`. ``brain serve --stdio``'s generic action
         interface delivers a single ``action_result`` (no intermediate frames), so
         this runs the action and, if ``on_progress`` is given, ticks it once on
         completion. For token/step streaming use the D-Bus transport."""
@@ -446,13 +446,13 @@ class BrainStdio(BrainBase):
             on_progress(1, 1, "done")
         return out
 
-    # -- legacy `brain run` conversational path -------------------------------
+    # -- legacy `brain serve --stdio` conversational path -------------------------------
 
     def converse(self, text: str, timeout: float = 120.0,
                  req_id: Optional[str] = None) -> str:
-        """Send ``user_text`` to ``brain run`` and return the streamed reply.
+        """Send ``user_text`` to ``brain serve --stdio`` and return the streamed reply.
 
-        This is the ``brain run`` conversational path (``user_text`` →
+        This is the ``brain serve --stdio`` conversational path (``user_text`` →
         ``brain_text_chunk`` stream), distinct from the capability
         :meth:`~brain_py.base.BrainBase.generate` (the ``generate`` action). Use
         :meth:`~brain_py.base.BrainBase.chat` / ``generate`` for the portable API."""
