@@ -51,7 +51,16 @@ pub fn parse_chat_messages(raw: &str, system: Option<&str>) -> Result<Vec<ChatMe
             "tool" => Role::Tool,
             other => return Err(format!("qwen: unknown message.role {other:?}")),
         };
-        let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        // capability::content_text (not a bare `.as_str()`): `content` is a
+        // plain string for a text-only message but an OpenAI-style typed-part
+        // ARRAY for a genuinely multimodal one (`crates/apiserve/src/
+        // openai.rs`'s `to_invocation` now preserves that shape instead of
+        // always flattening it, for omni's chat-template splice -- see
+        // `omni::caps::render_chat_prompt`'s doc). Qwen3 has no image/audio
+        // input of its own, but a client sending one anyway should still get
+        // this message's TEXT, not silently lose it (`.as_str()` alone
+        // would return `None` for an array and drop the whole turn).
+        let content = capability::content_text(m.get("content"));
         let reasoning_content = m.get("reasoning_content").and_then(|c| c.as_str()).map(str::to_string);
         let tool_call_id = m.get("tool_call_id").and_then(|c| c.as_str()).map(str::to_string);
         let tool_calls = match m.get("tool_calls").and_then(|c| c.as_array()) {

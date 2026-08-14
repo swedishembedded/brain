@@ -99,7 +99,7 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
         .param(ParamSpec::new("top_k", ParamType::Int, "accepted; greedy generation ignores it"))
         .param(ParamSpec::new("seed", ParamType::Int, "accepted; greedy generation is deterministic already"))
         .param(ParamSpec::new("stop", ParamType::Str, "accepted; not yet applied (JSON array string)"))
-        .param(ParamSpec::new("tools", ParamType::Str, "accepted, not implemented"))
+        .param(ParamSpec::new("tools", ParamType::Str, "accepted, rendered into the chat template's own tool-schema preamble (see render_chat_prompt's doc) -- but a tool-call response is NOT scanned back out of generated text into a structured tool_calls array (no ChatScanner parity yet), so it comes back as literal <tool_call> text in message.content"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "accepted, ignored"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
@@ -204,10 +204,11 @@ pub fn load_chat_template(dir: &str) -> Option<data::chat_template::ChatTemplate
 }
 
 /// Render a chat-shaped [`Invocation`] (`messages` JSON array + optional
-/// `system` + `enable_thinking`, or a bare `prompt`) through `tmpl` -- the ONE
-/// implementation [`GenerateAction`]/[`SpeakAction`]/[`ConverseAction`]
-/// (bf16) and `Int8ThinkerInstance::generate_chat` (int8) all call, so Omni
-/// has a single chat-templating code path rather than two that could drift.
+/// `system` + `enable_thinking` + `tools`, or a bare `prompt`) through `tmpl`
+/// -- the ONE implementation [`GenerateAction`]/[`SpeakAction`]/
+/// [`ConverseAction`] (bf16) and `Int8ThinkerInstance::generate_chat` (int8)
+/// all call, so Omni has a single chat-templating code path rather than two
+/// that could drift.
 ///
 /// `messages` wins when present (`[{"role","content"}, ...]`, the same shape
 /// `capability::last_user_text` and `qwen3::chat::parse_chat_messages` read);
@@ -218,6 +219,27 @@ pub fn load_chat_template(dir: &str) -> Option<data::chat_template::ChatTemplate
 /// parse_request` already accept, so callers that never adopted `messages`
 /// keep working. `add_generation_prompt` is always `true`: every caller here
 /// wants a completion, never a training-style full-conversation render.
+///
+/// `tools` (`inv.get_str("tools")`, the JSON array `crates/apiserve/src/
+/// openai.rs`'s `to_invocation` already sets when a request supplies one) is
+/// now forwarded into the template's own `tools` context variable -- real
+/// Qwen3-Omni's chat template has a `{%- if tools %}` branch that renders a
+/// `# Tools\n\n...` system-prompt section listing each schema (`tool |
+/// tojson`, matching `ChatTemplate::render`'s already-registered Python-json
+/// `tojson` filter); previously this branch was NEVER exercised
+/// (`tmpl.render(..., None, ...)`, unconditionally), so a real request's real
+/// tool schemas never reached the model at all, contradicting the request.
+/// KNOWN GAP THIS DOES NOT CLOSE: neither this function's caller
+/// (`Int8ThinkerInstance::generate_chat`) nor the bf16 `GenerateAction::run`
+/// parses `<tool_call>...</tool_call>` XML back out of the generated text
+/// the way `qwen3::chat::ChatScanner` does for the qwen3 family (scanning
+/// into a structured `tool_calls` array + `finish_reason: "tool_calls"`) --
+/// so telling the model about its tools now makes it ABLE to try calling one
+/// (previously it had no idea any existed), but a real tool-call attempt
+/// still comes back as literal `<tool_call>` text in `message.content`, not
+/// an OpenAI-shaped `tool_calls` response. Building that scanner for Omni is
+/// real, separate, larger work (parity with `qwen3::chat`'s own), not
+/// attempted here.
 pub fn render_chat_prompt(tmpl: &data::chat_template::ChatTemplate, inv: &Invocation) -> Result<String, String> {
     let mut messages: Vec<serde_json::Value> = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
@@ -238,11 +260,16 @@ pub fn render_chat_prompt(tmpl: &data::chat_template::ChatTemplate, inv: &Invoca
     let messages_text = serde_json::to_string(&messages).map_err(|e| format!("omni: messages: {e}"))?;
     let messages_value = data::chat_template::parse_json_ordered(&messages_text).map_err(|e| format!("omni: chat template: {e}"))?;
 
+    let tools = match inv.get_str("tools").filter(|s| !s.is_empty()) {
+        Some(raw) => Some(data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("omni: tools JSON: {e}"))?),
+        None => None,
+    };
+
     let mut extra = std::collections::BTreeMap::new();
     if let Some(t) = inv.get_bool("enable_thinking") {
         extra.insert("enable_thinking".to_string(), minijinja::Value::from(t));
     }
-    tmpl.render(messages_value, None, true, &extra).map_err(|e| format!("omni: chat template: {e}"))
+    tmpl.render(messages_value, tools, true, &extra).map_err(|e| format!("omni: chat template: {e}"))
 }
 
 /// [`render_chat_prompt`] when a template is available, else [`last_user_text`]
@@ -468,14 +495,20 @@ impl OmniInner {
         video: Option<&[(Vec<f32>, u32, u32)]>,
         max_new: u32,
     ) -> Result<(String, Vec<u32>), String> {
-        let text_ids = self.tok.encode(prompt);
+        // Strip the chat template's own inline media-placeholder literals
+        // before tokenizing -- see `crate::mm::strip_media_placeholder_text`'s
+        // doc for the real-hardware tokenization-boundary bug this avoids
+        // (real embeddings always splice in as a whole block, never expanded
+        // in place).
+        let stripped_prompt = crate::mm::strip_media_placeholder_text(prompt);
+        let text_ids = self.tok.encode(&stripped_prompt);
         // Leading "\n": the template's own system-turn closer is the single
         // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
         // in `text_ids` belongs to the system turn's own close, not to the
         // user turn's open tag - `next_turn_open` must include it to match
         // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
         let user_open = self.tok.encode("\n<|im_start|>user\n");
-        let splice_at = crate::mm::media_splice_point(prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+        let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
         let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len();
         let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
@@ -573,14 +606,20 @@ impl OmniInner {
     /// same way (see [`Self::speak`]'s doc on `on_chunk`).
     #[allow(clippy::too_many_arguments)]
     pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
-        let text_ids = self.tok.encode(prompt);
+        // Strip the chat template's own inline media-placeholder literals
+        // before tokenizing -- see `crate::mm::strip_media_placeholder_text`'s
+        // doc for the real-hardware tokenization-boundary bug this avoids
+        // (real embeddings always splice in as a whole block, never expanded
+        // in place).
+        let stripped_prompt = crate::mm::strip_media_placeholder_text(prompt);
+        let text_ids = self.tok.encode(&stripped_prompt);
         // Leading "\n": the template's own system-turn closer is the single
         // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
         // in `text_ids` belongs to the system turn's own close, not to the
         // user turn's open tag - `next_turn_open` must include it to match
         // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
         let user_open = self.tok.encode("\n<|im_start|>user\n");
-        let splice_at = crate::mm::media_splice_point(prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+        let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
         let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len() as u32;
         let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);

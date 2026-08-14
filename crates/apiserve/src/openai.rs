@@ -349,11 +349,14 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         inv = inv.set("enable_thinking", json!(et));
     }
 
-    // image_url/input_audio content parts, previously silently dropped by
-    // flatten_message/content_text (which only ever kept "text" parts) --
-    // see crate::media's module doc. Attaching the blobs unconditionally is
-    // harmless for a model whose generate action doesn't declare an
-    // "image"/"audio" input (same as any unused blob passed over D-Bus).
+    // image_url/input_audio content parts' REAL bytes -- flatten_message's
+    // own "content" (message_content) now preserves a lightweight, payload-
+    // stripped typed marker for the chat template's own placeholder
+    // placement (see that function's doc), but the actual pixel/audio bytes
+    // still only ever flow through here, into a blob -- see crate::media's
+    // module doc. Attaching the blobs unconditionally is harmless for a
+    // model whose generate action doesn't declare an "image"/"audio" input
+    // (same as any unused blob passed over D-Bus).
     let media = crate::media::extract_openai(messages).map_err(|e| ApiError::invalid_request(provider, e))?;
     if let Some(img) = media.image {
         inv = inv.blob("image", img);
@@ -429,11 +432,12 @@ fn normalize_stop(v: Option<&Value>) -> Option<String> {
 }
 
 /// One OpenAI message → the contract `{role, content, reasoning_content?,
-/// tool_calls?, tool_call_id?}` (content flattened to text; a `tool_calls`
-/// element's `function.{name,arguments}` flattens to `{id,name,arguments}` —
-/// the shape `crates/cli/src/resident_llm.rs::parse_chat_messages` reads).
-/// `role:"tool"` is now its OWN contract role (no longer folded into `user`) so
-/// the resident's chat template renders it as a `<tool_response>` turn.
+/// tool_calls?, tool_call_id?}` (`content` - see [`message_content`]; a
+/// `tool_calls` element's `function.{name,arguments}` flattens to
+/// `{id,name,arguments}` - the shape `crates/cli/src/resident_llm.rs::
+/// parse_chat_messages` reads). `role:"tool"` is now its OWN contract role
+/// (no longer folded into `user`) so the resident's chat template renders it
+/// as a `<tool_response>` turn.
 fn flatten_message(m: &Value) -> Value {
     let role = match m.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
         "system" | "developer" => "system",
@@ -442,7 +446,7 @@ fn flatten_message(m: &Value) -> Value {
         // anything else folds into the user turn.
         _ => "user",
     };
-    let mut out = json!({ "role": role, "content": content_text(m.get("content")) });
+    let mut out = json!({ "role": role, "content": message_content(m.get("content")) });
     if let Some(rc) = m.get("reasoning_content").and_then(|v| v.as_str()) {
         out["reasoning_content"] = json!(rc);
     }
@@ -478,6 +482,74 @@ fn content_text(c: Option<&Value>) -> String {
             .collect::<Vec<_>>()
             .join(""),
         _ => String::new(),
+    }
+}
+
+/// The contract `content` for one message: [`content_text`]'s flattened
+/// STRING when the original `content` is already a string, or an array with
+/// ONLY `"text"` parts (byte-identical to this function's old always-flatten
+/// behavior - every other model's own `messages` parser, and every
+/// text-only client, sees no change at all); a NORMALIZED typed-part ARRAY
+/// when `content` has any non-`"text"` part (`image_url`/`input_audio`/...).
+///
+/// **Real bug this closes**: this used to be [`content_text`] unconditionally
+/// - ANY multimodal content part (`image_url`, `input_audio`, ...) was
+/// silently dropped before the chat-templated `messages` JSON was ever built,
+/// so `omni::caps::render_chat_prompt`'s real Jinja template (which DOES
+/// detect typed parts and place `<|vision_start|><|image_pad|><|vision_end|>`
+/// / `<|audio_start|><|audio_pad|><|audio_end|>` at each part's own position
+/// - see that function's doc) never actually saw a typed array in
+/// production, only ever flattened text; verified by tracing this exact
+/// code path (not a standalone probe) against a real captured sven request.
+/// Preserving the array here is what lets `crate::mm::build_multimodal_prompt`
+/// expand each medium's real embeddings IN PLACE at its own placeholder,
+/// instead of a whole-block splice heuristic.
+///
+/// `input_audio` parts also get TWO additional keys, `"audio"` and
+/// `"audio_url"` (additive - the original `"type"`/`"input_audio"` keys stay
+/// untouched, so any other consumer of the raw shape is unaffected): read
+/// directly off the real checkpoint's `chat_template.json`
+/// (`/tmp/.X11-unix/brain/omni/Qwen3-Omni-30B-A3B-Instruct/chat_template.json`
+/// at the time this was written), the template's own audio detection is
+/// `content.type == 'audio' or 'audio' in content or 'audio_url' in
+/// content` - none of which match OpenAI's real
+/// `{"type":"input_audio","input_audio":{...}}` shape as sent by a real
+/// OpenAI-compatible client (sven included) as-is, so without this the
+/// audio part would reach the template as a typed array yet still render as
+/// NOTHING (silently falls through every `{%- elif %}` branch). `image_url`
+/// parts need no such normalization: OpenAI's own `{"type":"image_url",
+/// "image_url":{...}}` shape already satisfies `'image_url' in content`
+/// unmodified.
+fn message_content(c: Option<&Value>) -> Value {
+    match c {
+        Some(Value::Array(parts)) if parts.iter().any(|p| p.get("type").and_then(|t| t.as_str()) != Some("text")) => {
+            Value::Array(parts.iter().map(normalize_content_part_for_template).collect())
+        }
+        other => json!(content_text(other)),
+    }
+}
+
+/// One content part, normalized for the chat template's own typed-part
+/// detection (see [`message_content`]'s doc for why `input_audio` needs an
+/// extra key and `image_url`/`text` don't) AND stripped of its actual
+/// pixel/audio PAYLOAD bytes: the template only ever checks part-KEY
+/// membership and emits a FIXED placeholder literal (`<|vision_start|>
+/// <|image_pad|><|vision_end|>` etc.) - never the url/data VALUE itself (read
+/// directly off the real template text) - so carrying the real (often
+/// multi-hundred-KB base64) payload through the `messages` JSON string
+/// alongside the ALREADY-separately-extracted blob (`crate::media::
+/// extract_openai`, still the real bytes' only consumer) would only double
+/// the memory this request holds for no benefit.
+fn normalize_content_part_for_template(p: &Value) -> Value {
+    match p.get("type").and_then(|t| t.as_str()) {
+        Some("image_url") => json!({ "type": "image_url", "image_url": {} }),
+        Some("input_audio") => {
+            // Keep "format" (small, harmless) if present; always drop "data"
+            // (the real base64 payload).
+            let format = p.get("input_audio").and_then(|a| a.get("format")).cloned();
+            json!({ "type": "input_audio", "input_audio": { "format": format.unwrap_or(Value::Null) }, "audio": true, "audio_url": true })
+        }
+        _ => p.clone(),
     }
 }
 

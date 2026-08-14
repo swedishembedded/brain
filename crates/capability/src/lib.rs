@@ -371,6 +371,30 @@ impl Invocation {
     }
 }
 
+/// Extract plain text from a `content` field shaped either as a bare string
+/// or as an OpenAI-style array of typed parts (`{"type":"text","text":...}`,
+/// `{"type":"image_url",...}`, ...): a string returns as-is; an array joins
+/// every `"text"` part's own `text` value (image/audio/other typed parts
+/// contribute nothing here -- a real multimodal consumer reads the typed
+/// array directly via `content`, not this text-only view).
+///
+/// Exists so a caller that only ever wants the literal text (a liveness
+/// check, a non-multimodal model's own parser) keeps working once `content`
+/// is SOMETIMES an array -- `crates/apiserve/src/openai.rs`'s
+/// `to_invocation` now preserves a genuinely multimodal message's typed
+/// parts instead of always flattening them (needed so a real chat template
+/// can place `<|vision_start|><|image_pad|><|vision_end|>` etc. at the
+/// content part's own position -- see `omni::caps::render_chat_prompt`'s
+/// doc), so `content` is a plain string ONLY for a text-only message now, an
+/// array for any message with a non-text part.
+pub fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts.iter().filter_map(|p| p.get("text").and_then(|v| v.as_str())).collect::<Vec<_>>().join(""),
+        _ => String::new(),
+    }
+}
+
 /// The last user turn from a flattened `messages` JSON array
 /// (`[{"role":...,"content":...}, ...]`), falling back to the last message's
 /// content, then the bare `prompt` param.
@@ -382,18 +406,29 @@ impl Invocation {
 /// resident, each copy annotated "kept in sync deliberately"; per the
 /// hoist-and-migrate policy a shared extraction cannot silently disagree
 /// between models the way three hand-synced copies can.
+///
+/// [`content_text`] handles a genuinely multimodal message's `content`
+/// (an array, not a string) so this liveness/fallback check doesn't start
+/// treating an image-plus-caption message as empty just because its content
+/// is no longer a bare string -- a real regression this fixes, not a
+/// theoretical one (this function gates `Int8ThinkerInstance::generate_chat`'s
+/// and `GenerateAction::run`'s own empty-prompt rejection).
 pub fn last_user_text(inv: &Invocation) -> String {
     if let Some(s) = inv.get_str("messages") {
         if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&s) {
             for m in arr.iter().rev() {
                 if m.get("role").and_then(|v| v.as_str()) == Some("user") {
-                    if let Some(c) = m.get("content").and_then(|v| v.as_str()) {
-                        return c.to_string();
+                    let t = content_text(m.get("content"));
+                    if !t.is_empty() {
+                        return t;
                     }
                 }
             }
-            if let Some(c) = arr.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()) {
-                return c.to_string();
+            if let Some(m) = arr.last() {
+                let t = content_text(m.get("content"));
+                if !t.is_empty() {
+                    return t;
+                }
             }
         }
     }

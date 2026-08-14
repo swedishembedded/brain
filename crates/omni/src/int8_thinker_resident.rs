@@ -628,7 +628,7 @@ impl Int8ThinkerInstance {
 
     /// The shared implementation behind [`Self::generate`]/[`Self::generate_multimodal`]:
     /// `x_host_override`, when `Some`, is used as the prompt's embedding
-    /// buffer verbatim (already spliced with media, `crate::mm::splice_host`);
+    /// buffer verbatim (already spliced with media, `crate::mm::build_multimodal_prompt`);
     /// when `None`, it's built by a plain per-token gather from `self.embed`
     /// (the pure-text case). Mirrors `crate::generate::generate_greedy_with_embeds`'s
     /// shape exactly - same reason the bf16 path has that split: one loop
@@ -738,7 +738,17 @@ impl Int8ThinkerInstance {
                      model's encoders only read plain f32 -- see this module's own doc). Set BRAIN_OMNI_HF_DIR."
                 ));
             };
-            let text_ids = tok.encode(&prompt);
+            // Strip the chat template's own inline media-placeholder literals
+            // before tokenizing -- real embeddings always splice in as a
+            // whole block (never expanded in place), and tokenizing WITH the
+            // placeholder literal present splits the surrounding caption
+            // text into separate BPE runs at that boundary, which measurably
+            // broke real-hardware generation even after stripping the
+            // resulting placeholder TOKENS back out post-hoc -- see
+            // `crate::mm::strip_media_placeholder_text`'s doc for the full
+            // real-hardware account.
+            let stripped_prompt = crate::mm::strip_media_placeholder_text(&prompt);
+            let text_ids = tok.encode(&stripped_prompt);
             let embed_host = self.embed.to_host(&self.reader);
             let gpu = &self.shards[0].gpu;
             let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
@@ -748,7 +758,7 @@ impl Int8ThinkerInstance {
             // exactly one bogus `<|im_start|>` token then immediate EOS) this closes.
             // Leading "\n" -- see the matching comment in caps.rs's call sites.
             let user_open = tok.encode("\n<|im_start|>user\n");
-            let splice_at = crate::mm::media_splice_point(&prompt, &text_ids, tok.special_id("<|im_end|>"), Some(&user_open));
+            let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, tok.special_id("<|im_end|>"), Some(&user_open));
             let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref(), splice_at)
                 .map_err(|e| format!("{MODEL}: {e}"))?;
             if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_ok() {
@@ -756,6 +766,25 @@ impl Int8ThinkerInstance {
                 let tail = &mm_prompt.token_ids[n.saturating_sub(8)..];
                 let tail_pos = &mm_prompt.positions[n.saturating_sub(8)..];
                 eprintln!("{MODEL}: multimodal prompt: {n} token(s), last 8 ids={tail:?} positions={tail_pos:?}");
+                eprintln!(
+                    "{MODEL}: pre-assembly text_ids: {} token(s), image_token_id({}) occurs {}x, audio_token_id({}) occurs {}x",
+                    text_ids.len(),
+                    self.cfg.image_token_id,
+                    text_ids.iter().filter(|&&t| t == self.cfg.image_token_id).count(),
+                    self.cfg.audio_token_id,
+                    text_ids.iter().filter(|&&t| t == self.cfg.audio_token_id).count(),
+                );
+                for (label, tok_id) in [("image", self.cfg.image_token_id), ("audio", self.cfg.audio_token_id)] {
+                    if let Some(p) = mm_prompt.token_ids.iter().position(|&t| t == tok_id) {
+                        let lo = p.saturating_sub(6);
+                        let hi = (p + 6).min(n);
+                        eprintln!(
+                            "{MODEL}: {label} placeholder first at index {p}: ids[{lo}..{hi}]={:?} positions[{lo}..{hi}]={:?}",
+                            &mm_prompt.token_ids[lo..hi],
+                            &mm_prompt.positions[lo..hi]
+                        );
+                    }
+                }
             }
             self.generate_multimodal(&mm_prompt, max_new, eos_ids)
         } else {

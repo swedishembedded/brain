@@ -2498,6 +2498,116 @@ async fn openai_input_audio_is_resampled_to_16khz_before_it_reaches_the_model() 
     assert_eq!(v["choices"][0]["message"]["content"], "seen: [audio:320samples@16k]", "{v}");
 }
 
+/// A chat model that echoes the raw contract `messages` JSON verbatim --
+/// lets a test see EXACTLY what `to_invocation`/`flatten_message` built,
+/// the same round-trip-proof pattern `FakeToolCallChatInst`'s `reasoning`
+/// echo already uses for `tools`/`enable_thinking`.
+struct MessagesEchoChat;
+struct MessagesEchoChatInst;
+impl ResidentModel for MessagesEchoChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-messagesecho",
+            "a chat model that echoes the raw contract 'messages' JSON",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-messagesecho", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(MessagesEchoChatInst))
+    }
+}
+impl Instance for MessagesEchoChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let text = inv.get_str("messages").unwrap_or_default();
+        progress(Progress::token(0, 1, text.clone()));
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(1))
+            .set("completion_tokens", json!(1))
+            .set("finish_reason", json!("stop"))
+            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+fn messages_echo_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(MessagesEchoChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    let state = AppState::new(exec, key.clone(), provider);
+    (router(state), key)
+}
+
+/// Gap A's regression test: a genuinely multimodal message's `content` must
+/// reach the chat-templated `messages` JSON as a TYPED ARRAY (so the real
+/// Jinja template can place each medium's placeholder at its own position -
+/// see `omni::caps::render_chat_prompt`'s doc), not `content_text`'s old
+/// always-flatten-to-a-string behavior, which silently dropped every
+/// non-"text" part before the template ever saw it. Also proves the real
+/// base64 PAYLOAD is stripped, not duplicated into this JSON string -- the
+/// separately-extracted blob (`openai_chat_image_url_content_part_reaches_
+/// the_invocation_as_a_blob`) is still its only carrier.
+#[tokio::test]
+async fn openai_chat_multimodal_content_preserves_typed_parts_for_the_chat_template() {
+    let (app, key) = messages_echo_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-messagesecho",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look at this"},
+            {"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{TINY_PPM_B64}")}},
+            {"type": "input_audio", "input_audio": {"data": wav_b64(320, 16000), "format": "wav"}},
+        ]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let echoed = v["choices"][0]["message"]["content"].as_str().expect("echoed messages JSON string");
+    let messages: Value = serde_json::from_str(echoed).expect("echoed text is valid JSON");
+    let content = &messages[0]["content"];
+    assert!(content.is_array(), "multimodal content must stay a typed array, not flatten to a string: {content}");
+    let parts = content.as_array().unwrap();
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[1]["type"], "image_url");
+    assert!(parts[1]["image_url"].is_object(), "image_url part must keep its 'image_url' key -- the template checks 'image_url' in content");
+    assert!(!echoed.contains(TINY_PPM_B64), "the real image payload must not be duplicated into the messages JSON -- it already lives in the separately-extracted blob");
+    assert_eq!(parts[2]["type"], "input_audio");
+    // Gap B: the normalized key the real chat template's own audio detection
+    // (`content.type == 'audio' or 'audio' in content or 'audio_url' in
+    // content` -- read directly off the real chat_template.json) needs,
+    // since OpenAI's real `input_audio` shape matches none of the three as-is.
+    assert_eq!(parts[2]["audio_url"], true);
+    assert_eq!(parts[2]["audio"], true);
+}
+
+/// Minimal-blast-radius guarantee: a message whose content is an array of
+/// ONLY "text" parts (no image/audio) keeps flattening to a plain string,
+/// byte-identical to this session's pre-fix behavior -- every OTHER model's
+/// own `messages` parser (`qwen3::chat::parse_chat_messages`,
+/// `capability::last_user_text`, etc.) sees no shape change at all for the
+/// common, non-multimodal case; only a genuinely multimodal message's
+/// `content` becomes an array.
+#[tokio::test]
+async fn openai_chat_text_only_multipart_content_still_flattens_to_a_string() {
+    let (app, key) = messages_echo_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-messagesecho",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello "}, {"type": "text", "text": "world"}]}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let echoed = v["choices"][0]["message"]["content"].as_str().expect("echoed messages JSON string");
+    let messages: Value = serde_json::from_str(echoed).expect("echoed text is valid JSON");
+    assert_eq!(messages[0]["content"], "hello world");
+}
+
 #[tokio::test]
 async fn anthropic_image_content_block_reaches_the_model() {
     let (app, key) = media_echo_app(Provider::Anthropic);
