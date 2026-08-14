@@ -1,0 +1,21 @@
+[package]
+name = "brain-rl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus the qwen3-specific ATIF-trajectory ingestion and continuous-loop cycle built on top of it (self-improve roadmap P3/P5)."
+
+[lib]
+name = "rl"
+path = "src/lib.rs"
+
+[dependencies]
+brain-model.workspace = true
+brain-data.workspace = true
+brain-checkpoint.workspace = true
+brain-atif.workspace = true
+brain-qwen3.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
