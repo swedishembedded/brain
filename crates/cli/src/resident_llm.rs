@@ -302,15 +302,8 @@ impl QwenResident {
     /// effect for the next `activate` - pair with `Executor::evict(self.
     /// instance_key(...))` (or just `Executor::evict(InstanceKey::new(&self.
     /// id, "default"))`) so a cached Hot/Warm instance from the OLD adapter
-    /// isn't reused first.
-    ///
-    /// `#[allow(dead_code)]`: no caller yet - the self-improve continuous-
-    /// training loop is the intended one, not built in this pass. The write itself
-    /// (`RwLock::write` behind a plain field swap) has no logic worth a
-    /// standalone test; `activate`'s fold path this feeds is already
-    /// covered by `qwen3::lora`'s own round-trip/learning-gate tests. When
-    /// P5 lands its first real caller, this annotation comes off.
-    #[allow(dead_code)]
+    /// isn't reused first. `crate::continuous_train::hot_swap_cycle` does
+    /// exactly that pairing.
     pub fn set_adapter(&self, adapter: Option<String>) {
         *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());
     }

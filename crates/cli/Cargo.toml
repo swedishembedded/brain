@@ -35,6 +35,7 @@ brain-wm-display.workspace = true
 brain-toymoe.workspace = true
 brain-gpt2.workspace = true
 brain-qwen3.workspace = true
+brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen3vl.workspace = true
 brain-fastvlm.workspace = true

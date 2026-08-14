@@ -602,6 +602,7 @@ dependencies = [
  "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-residency",
+ "brain-rl",
  "brain-rrdbnet",
  "brain-runtime",
  "brain-s3dit",

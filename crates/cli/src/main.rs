@@ -44,6 +44,7 @@ mod resident_depth;
 mod resident_flux2;
 mod resident_forecast;
 mod resident_lfm;
+mod continuous_train;
 mod resident_llm;
 mod resident_mock;
 mod resident_omni;
