@@ -94,6 +94,34 @@ pub enum Batch<'a> {
     /// (DeepStack levels, M-RoPE position ids, prefix length) travel through
     /// model-specific `set_*` methods, keeping this shared variant minimal.
     Multimodal { tokens: &'a [u32], targets: &'a [u32], image_embeds: &'a [f32], image_rows: &'a [u32] },
+    /// Causal LM with a per-POSITION scalar weight on the cross-entropy
+    /// gradient - the seam continuous/reward-driven training (STaR-style
+    /// rejection sampling, GRPO-lite advantage weighting) composes on top of
+    /// ordinary supervised [`Batch::Lm`] training, generic over any
+    /// [`Head::TokenClassifier`] model. `weights.len()` must equal
+    /// `tokens.len()`/`targets.len()`; a caller with only a per-EXAMPLE
+    /// (whole-completion) reward broadcasts that single scalar across the
+    /// completion's own token positions before calling `set_batch` - this
+    /// variant itself has no notion of example boundaries, matching DAPO's
+    /// finding that token-level (not sample-level) loss aggregation is the
+    /// more robust default.
+    ///
+    /// A weight of `0.0` must produce exactly zero gradient contribution
+    /// from that position (masked-out and reward=0 collapse to the same
+    /// thing); a weight of `1.0` everywhere must reproduce [`Batch::Lm`]'s
+    /// gradient bit-for-bit - both are asserted by each adopting model's
+    /// gradcheck (e.g. `qwen3`'s `check_qwen3_weighted`).
+    ///
+    /// A model opts into this variant by constructing itself with weighted-
+    /// loss support enabled (each model's own opt-in method, e.g.
+    /// `qwen3::Qwen::enable_weighted_loss`, following the same
+    /// allocate-buffer/rebuild-steps pattern as `enable_mrope`/
+    /// `enable_mm_splice`) - NOT by every model handling this variant by
+    /// default, so ordinary (unweighted) training pays zero extra kernel
+    /// dispatches. A model that has not opted in may treat this like any
+    /// other unsupported `Batch` variant (panic, matching the existing
+    /// `Batch::Lm`-only models' own wildcard arm).
+    LmWeighted { tokens: &'a [u32], targets: &'a [u32], weights: &'a [f32] },
 }
 
 /// The objective head + loss a model's final stage realizes (ADR §2.3). Selected
@@ -153,6 +181,17 @@ pub trait Model {
 
     /// Upload one batch (shape must match how the model was constructed).
     fn set_batch(&self, batch: Batch);
+
+    /// Opt into per-position weighted-loss training ([`Batch::LmWeighted`]) -
+    /// call once after construction, before the first [`Model::backward`].
+    /// Default panics: a model must explicitly override this to support
+    /// `crates/rl`'s generic weighted-training driver - the same opt-in,
+    /// thin-per-model-wiring shape [`Batch::LmWeighted`]'s own doc comment
+    /// documents. `qwen3::Qwen::enable_weighted_loss` is the reference
+    /// implementation this delegates to.
+    fn enable_weighted_loss(&mut self) {
+        unimplemented!("{}: does not implement Model::enable_weighted_loss (no weighted-loss/Batch::LmWeighted support yet)", std::any::type_name::<Self>());
+    }
 
     /// Run forward; return the scalar objective loss that `backward` differentiates.
     fn forward(&self) -> f32;

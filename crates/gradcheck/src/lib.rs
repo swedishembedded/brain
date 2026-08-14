@@ -19,8 +19,8 @@ use data::rng::Rng;
 pub mod sam2;
 pub use sam2::check_sam2;
 
-pub mod facenet;
-pub use facenet::check_arcface;
+pub mod arcface;
+pub use arcface::check_arcface;
 
 pub mod vqgan;
 pub use vqgan::check_vqgan;
@@ -100,7 +100,7 @@ impl Report {
     /// `within` atol floor cannot see: with `analytic == 0` and a true
     /// derivative below `atol + rtol·|numeric|` (≈4.35e-3 at the workspace
     /// gate), `abs_err == |numeric|` passes. A backend-specific kernel that
-    /// returns all-zero gradients (facenet's `prelu_bwd_wg`-on-CPU bug, the
+    /// returns all-zero gradients (arcface's `prelu_bwd_wg`-on-CPU bug, the
     /// measured instance) presents exactly this way at small dims. The
     /// `1e-3` floor sits above directional-FD noise but inside the atol
     /// escape window, so a genuinely-zero derivative is not flagged.
@@ -174,7 +174,7 @@ pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
     Report { checks }
 }
 
-/// Structural guard, generalised from facenet's `every_prelu_slope_gradient_
+/// Structural guard, generalised from arcface's `every_prelu_slope_gradient_
 /// is_nonzero` (written because `prelu_bwd_wg` returned ALL-ZERO slope
 /// gradients on the CPU backend while `dx` stayed correct - a model that
 /// trains to a plausible loss with one parameter family silently frozen):
@@ -315,6 +315,34 @@ pub fn check_qwen(seed: u64) -> Report {
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
     model.set_batch(&x, &y);
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
+/// The reward/advantage-weighted CE gradient (`model::Batch::LmWeighted`,
+/// `Qwen::enable_weighted_loss`/`write_weights`) - the seam brain's
+/// continuous-training work (STaR-style rejection sampling, GRPO-lite
+/// advantage weighting) composes on top of ordinary Qwen3 training. Same tiny
+/// config/batch as [`check_qwen`], but with deliberately NON-uniform,
+/// including exactly-zero, per-position weights, so the check actually
+/// exercises `scale_row`'s composition rather than degenerating to the
+/// all-ones (`check_qwen`-equivalent) case. `forward`'s returned scalar is
+/// asserted (not just the gradient) to be the weighted loss `backward`
+/// actually differentiates - the `Model::forward` contract this whole
+/// gradcheck harness relies on.
+pub fn check_qwen3_weighted(seed: u64) -> Report {
+    use qwen3::{Qwen, QwenConfig};
+    let cfg = QwenConfig::tiny();
+    let init = qwen3::init_weights(&cfg, seed);
+    let mut model = Qwen::new(cfg, 2, 6, &init);
+    model.enable_weighted_loss();
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    // Zero out half the positions entirely, weight the rest unevenly - a
+    // uniform weight (even uniform-non-1.0) wouldn't distinguish "scaled
+    // correctly per-row" from "scaled correctly overall".
+    let weights: Vec<f32> = (0..12).map(|i| if i % 2 == 0 { 0.0 } else { 0.25 * (1 + i) as f32 }).collect();
+    model.write_weights(&weights);
+    directional_check(&model, 5e-3, 4, seed ^ 0x5a17)
 }
 
 /// Build a tiny LFM2.5 encoder (conv + attention + conv layer stack) and
@@ -927,6 +955,16 @@ mod tests {
             return;
         }
         let report = check_qwen(7);
+        report.print();
+        assert_grad_gate(&report, "model");
+    }
+
+    #[test]
+    fn qwen3_weighted_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen3_weighted(7);
         report.print();
         assert_grad_gate(&report, "model");
     }

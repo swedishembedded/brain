@@ -673,6 +673,7 @@ fn clone_batch<'a>(b: &crate::Batch<'a>) -> crate::Batch<'a> {
         Multimodal { tokens, targets, image_embeds, image_rows } => {
             Multimodal { tokens, targets, image_embeds, image_rows }
         }
+        LmWeighted { tokens, targets, weights } => LmWeighted { tokens, targets, weights },
     }
 }
 
