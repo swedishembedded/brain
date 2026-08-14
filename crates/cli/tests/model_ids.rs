@@ -32,12 +32,26 @@ fn static_manifests() -> Vec<serde_json::Value> {
     v.as_array().expect("brain caps --json: expected a top-level array").clone()
 }
 
+/// The one deliberate exception to the reserved-vendor rule below. Every
+/// other catalog id is a `brain/<family>` placeholder standing in for
+/// whatever checkpoint an env var happens to point at, but this model's
+/// weights are not an arbitrary checkpoint - they are exactly one specific
+/// upstream GGUF pair or nothing, so its crate pins the catalog id to the
+/// case-exact real upstream repo on purpose instead of inventing a
+/// placeholder to abstract over a choice that does not exist. That crate's
+/// own tests assert the same id for the same reason, so this is a named,
+/// intentional carve-out here, not a hole in the invariant.
+const DELIBERATE_NON_RESERVED_ID: &str = "deepseek-ai/DeepSeek-OCR";
+
 #[test]
 fn every_static_model_id_is_a_valid_ref_under_a_reserved_vendor() {
     let manifests = static_manifests();
     assert!(!manifests.is_empty(), "brain caps --json returned no models");
     for m in &manifests {
         let id = m.get("model").and_then(|v| v.as_str()).unwrap_or_else(|| panic!("manifest missing a \"model\" field: {m}"));
+        if id == DELIBERATE_NON_RESERVED_ID {
+            continue;
+        }
         let r = ModelRef::parse(id).unwrap_or_else(|e| panic!("{id:?} is not a valid ModelRef: {e}"));
         assert!(r.is_reserved(), "{id:?} parses but its vendor {:?} is not reserved (brain/local/test)", r.vendor());
     }
