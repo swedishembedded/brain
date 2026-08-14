@@ -1,0 +1,21 @@
+[package]
+name = "brain-atif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ATIF (Agent Trajectory Interchange Format) v1.7 trajectory model, validator, and persistence. Mirrored from applications/sven/crates/atif (formerly crates/trace) -- see src/lib.rs for the sync note."
+
+[lib]
+name = "atif"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

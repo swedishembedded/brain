@@ -16,4 +16,4 @@ tokio.workspace = true
 # atexit handlers and shared-library finalizers. Pure Rust binding, no bindgen,
 # and already transitively present via tokio.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true

@@ -33,4 +33,4 @@ brain-backend-wgpu.workspace = true
 # Linux CPU affinity for `--device cpu<N>` (pure Rust; no bindgen/libclang in the
 # build path, and already transitively present via cranelift-jit / wgpu-hal).
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+libc.workspace = true
