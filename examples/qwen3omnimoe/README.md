@@ -8,7 +8,7 @@ is what proves that.
 
 **Scope, honestly**: text in/out, speech in (`--in-speech`, WAV), and image in
 (`--in-image`, PPM) are real over `--dbus` — real audio/vision tower encode,
-host-side embedding splice, and real M-RoPE positions (`crates/omni/src/mm.rs`).
+host-side embedding splice, and real M-RoPE positions (`crates/qwen3omnimoe/src/mm.rs`).
 `--openai`/`--anthropic` reject blob inputs with a clear error (their
 content-part wiring is separate, not-yet-done server-side work — `--dbus` is
 the one transport that carries blobs generically today). `--in-mic`/`--in-video` and `--out-mic`/
@@ -19,7 +19,7 @@ loop yet. Generation is still validation-tier for weight I/O: the KV-cache
 makes attention O(cached length) not O(cached length)², but every layer's
 weights are still streamed fresh from the checkpoint per generated token, so
 a real 48-layer/128-expert run is still minutes, not milliseconds, per token
-(`crates/omni/src/generate.rs`'s own doc — int8/GPU-sharded residency across
+(`crates/qwen3omnimoe/src/generate.rs`'s own doc - int8/GPU-sharded residency across
 steps is separate, not-yet-built work).
 
 ## Run it
@@ -30,7 +30,7 @@ steps is separate, not-yet-built work).
 BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
-    python3 examples/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
+    python3 examples/qwen3omnimoe/omni.py --dbus --in-text "Say hello in French." --out-stdio
   '
 ```
 
@@ -39,7 +39,7 @@ BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 
 ```bash
 BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --openai 8788 &
-python3 examples/omni/omni.py --openai localhost:8788 --api-key sk-brain-... \
+python3 examples/qwen3omnimoe/omni.py --openai localhost:8788 --api-key sk-brain-... \
   --in-text "2+2=" --out-stdio
 ```
 
@@ -47,7 +47,7 @@ python3 examples/omni/omni.py --openai localhost:8788 --api-key sk-brain-... \
 
 ```bash
 BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --anthropic 8787 &
-python3 examples/omni/omni.py --anthropic localhost:8787 --api-key sk-brain-... \
+python3 examples/qwen3omnimoe/omni.py --anthropic localhost:8787 --api-key sk-brain-... \
   --in-text "2+2=" --out-stdio
 ```
 
@@ -57,7 +57,7 @@ python3 examples/omni/omni.py --anthropic localhost:8787 --api-key sk-brain-... 
 BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
-    python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
+    python3 examples/qwen3omnimoe/omni.py --dbus --in-speech clip.wav --out-stdio
   '
 ```
 
@@ -67,7 +67,7 @@ BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
-    python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
+    python3 examples/qwen3omnimoe/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
   '
 ```
 
@@ -77,7 +77,7 @@ the exact same `generate` action shape against the mock resident):
 ```bash
 BRAIN_MOCK=1 dbus-run-session -- bash -c '
   brain serve --dbus & sleep 2
-  python3 examples/omni/omni.py --dbus --model brain/mock --in-text hi --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --model brain/mock --in-text hi --out-stdio
 '
 ```
 
@@ -117,11 +117,11 @@ explicit `http://host:port/v1` both work.
                               v
                 residency::Executor -> OmniResident
                               |
-              audio/image present? -> omni::mm::build_multimodal_prompt
+              audio/image present? -> qwen3omnimoe::mm::build_multimodal_prompt
                   (real AudioEncoder/VisionEncoder splice + real M-RoPE)
                               |                     no media: plain text
                               v                            |
-          omni::generate::generate_greedy_multimodal <-----+---- generate_greedy
+          qwen3omnimoe::generate::generate_greedy_multimodal <-----+---- generate_greedy
                               |
         prefill the whole prompt once (populates a per-layer KV cache),
         then decode one new token at a time attending only the cache
@@ -130,11 +130,11 @@ explicit `http://host:port/v1` both work.
 ```
 
 The three transports converge on the exact same `brain/omni` `generate`
-action (`crates/omni/src/caps.rs`) — nothing here is Omni-specific in the
+action (`crates/qwen3omnimoe/src/caps.rs`) - nothing here is Omni-specific in the
 transport layer; it is the same generic `(model, action)` dispatch every
 brain model uses. What differs per transport is only the request/response
 shape each protocol expects, translated by `brain_py.openai`/
 `brain_py.anthropic` (new — brain-py previously had D-Bus + JSONL-stdio
 only) into the same `messages`/`prompt`/`max_new` params `crate::
-resident_mock::MockResident` and now `omni::caps::generate_spec()` both
+resident_mock::MockResident` and now `qwen3omnimoe::caps::generate_spec()` both
 declare.

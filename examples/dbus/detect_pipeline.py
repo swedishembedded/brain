@@ -10,7 +10,7 @@ the image as a file descriptor. Both models are served and scheduled by the same
 residency Executor.
 
     dbus-run-session -- bash -c '
-        BRAIN_ZIMAGE_*=... BRAIN_YOLOV8=... brain serve --dbus &
+        BRAIN_S3DIT_*=... BRAIN_YOLOV8=... brain serve --dbus &
         sleep 1
         python3 examples/dbus/detect_pipeline.py'
 """

@@ -47,7 +47,7 @@ pace at real time (latency, as a live mic would).
 ### No microphone? Make a test clip with brain's own TTS
 
 ```bash
-brain tts synth --text "the quick brown fox jumps over the lazy dog" --out /tmp/tts.wav
+brain qwen3tts synth --text "the quick brown fox jumps over the lazy dog" --out /tmp/tts.wav
 sox /tmp/tts.wav -r 16000 -c 1 /tmp/tts16k.wav          # 24 kHz -> 16 kHz mono
 python3 examples/asr/transcribe_mic.py --wav /tmp/tts16k.wav
 ```

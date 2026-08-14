@@ -10,7 +10,7 @@ Run under a private session bus so it needs no system config:
 
     dbus-run-session -- bash -c 'brain serve --dbus & sleep 1; python3 examples/dbus/brain_dbus.py'
 
-With brain's z-image weights exported (``BRAIN_ZIMAGE_*``) it also generates an image
+With brain's z-image weights exported (``BRAIN_S3DIT_*``) it also generates an image
 over D-Bus; otherwise it runs the no-GPU ``imageops`` path.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ def main() -> int:
         if "brain/z-image" in models and os.environ.get("BRAIN_S3DIT_DIT"):
             demo_streaming_generation(brain)
         else:
-            print("z-image streaming demo skipped (export BRAIN_ZIMAGE_* to enable)")
+            print("z-image streaming demo skipped (export BRAIN_S3DIT_* to enable)")
 
         print("scheduler stats:", brain.stats())
     print("OK")

@@ -82,5 +82,4 @@ wrote fox.ppm (512x512)
 - Same-key concurrent requests are grouped by the scheduler but execute
   sequentially for now (documented in `resident_flux2.rs::run_batch`; a true
   batched DiT forward is a planned follow-up).
-- The CLI twins of these scripts: `brain do brain/flux2-klein text2image --prompt …
-  --out image=out.ppm` and `brain flux2 generate …`.
+- The CLI twin of these scripts: `brain flux2 generate --prompt … --out out.ppm`.

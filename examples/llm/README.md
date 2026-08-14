@@ -10,7 +10,7 @@ plugs into the exact same generic `(model, action)` dispatch every brain
 model uses — nothing here is qwen35moe-specific in the transport layer.
 
 **Scope, honestly**: text only — no audio/image/video splice (see
-`examples/omni/omni.py` for that). Single-GPU, fp32 weights + fp32 KV, one
+`examples/qwen3omnimoe/omni.py` for that). Single-GPU, fp32 weights + fp32 KV, one
 sequence truly decoding on the GPU at a time (several may be RESIDENT and
 interleaved by the scheduler across iterations, never batched into one GPU
 dispatch) — `crates/cli/src/resident_qwen35moe.rs`'s own module doc has the
@@ -62,13 +62,13 @@ BRAIN_MOCK=1 dbus-run-session -- bash -c '
 '
 ```
 
-**Ad hoc, no server at all** — `brain do` drives the same `generate` action
-directly against a checkpoint path (weights are a per-call param here, not
-an env-configured resident):
+**Ad hoc, no server at all** - `brain qwen35moe infer` loads a checkpoint and
+generates directly (weights are a per-call flag here, not an env-configured
+resident):
 
 ```bash
-brain do brain/qwen35moe generate --weights /path/to/qwen35.safetensors \
-    --tokenizer /path/to/tokenizer.json --prompt "2+2=" --max_new 8 --chat
+brain qwen35moe infer --weights /path/to/qwen35.safetensors \
+    --tokenizer /path/to/tokenizer.json --prompt "2+2=" --max-new 8 --chat
 ```
 
 ## Flags
@@ -112,7 +112,7 @@ explicit `http://host:port/v1` both work.
                     recurrent state -- one Progress per generated token
 ```
 
-`brain do brain/qwen35moe generate` (no server) instead dispatches through
-`qwen35moe::caps::Qwen35Provider` — the same `generate` action, a
-lazily-loaded, weights-path-keyed resident model rather than the
-residency-managed one above; see `crates/qwen35moe/src/caps.rs`'s module doc.
+`brain qwen35moe infer` (no server) instead loads the checkpoint directly
+through `qwen35moe_cli::infer` - a one-shot, weights-path-keyed load rather
+than the residency-managed resident above; see
+`crates/cli/src/qwen35moe_cli.rs`'s module doc.

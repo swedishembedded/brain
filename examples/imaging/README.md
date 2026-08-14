@@ -1,6 +1,6 @@
 # Imaging pipeline examples
 
-## The whole edit in one call (`brain do brain/imgpipe run`)
+## The whole edit in one call (`brain/imgpipe`'s `run` action, over D-Bus)
 
 `edit_pipeline.py` drives `brain/imgpipe` over D-Bus: segment → refine the mask →
 restore → (optionally) upscale, as a **single** `run`.

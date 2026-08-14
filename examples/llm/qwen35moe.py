@@ -5,7 +5,7 @@
 """Talk to Qwen3.5-35B-A3B's decoder over any of brain's three transports.
 
 **Scope, honestly**: text in/out only — no audio/image/video splice (that is
-`examples/omni/omni.py`'s territory, a different model). Single-GPU,
+`examples/qwen3omnimoe/omni.py`'s territory, a different model). Single-GPU,
 single-active-sequence serving: `crate::resident_qwen35moe::Qwen35Resident`
 (`crates/cli/src/resident_qwen35moe.rs`) is fp32 weights + fp32 KV, one
 sequence truly decoding on the GPU at a time (several may be RESIDENT and
@@ -13,8 +13,8 @@ interleaved by the scheduler, never batched into one GPU dispatch) — see
 that module's own doc for the complete list of what this does NOT have yet
 (int8 KV, LoRA adapter folding, multi-GPU sharding, a `.gguf` serving path).
 `--dbus`/`--openai`/`--anthropic` all converge on the exact same `generate`
-action (`crates/qwen35moe/src/caps.rs` for `brain do`/D-Bus-direct-dispatch
-callers; the residency-managed, always-hot path above for the served HTTP/
+action (`brain qwen35moe infer`/D-Bus-direct-dispatch callers reach it ad
+hoc; the residency-managed, always-hot path above for the served HTTP/
 D-Bus surfaces) — this script is what proves that: same `messages`/`prompt`/
 `max_new`/... params, same response shape, three wires.
 
@@ -22,7 +22,7 @@ No `--stream`: brain_py's transport-agnostic `on_progress` callback carries
 `(step, total, message)`, not per-token delta text (that's a
 `BrainDBus.subscribe`-only `on_delta` kwarg, outside the abstract contract
 this script relies on to behave identically over all three transports) —
-same reasoning `examples/omni/omni.py` documents for the same choice. The
+same reasoning `examples/qwen3omnimoe/omni.py` documents for the same choice. The
 server DOES emit one real `Progress` per generated token
 (`qwen35moe::caps`/`Qwen35Resident` both stream token-by-token) — a caller
 using `brain_py.dbus.BrainDBus.subscribe(..., on_delta=...)` directly (not
@@ -101,7 +101,7 @@ def main() -> None:
     # BrainAnthropic has no model-listing endpoint (Anthropic's API has no
     # /v1/models equivalent) -- skip the pre-check there and let a real
     # failure surface from the actual generate call instead of crashing on a
-    # NotImplementedError, matching examples/omni/omni.py's own handling.
+    # NotImplementedError, matching examples/qwen3omnimoe/omni.py's own handling.
     try:
         served = brain.models()
     except NotImplementedError:

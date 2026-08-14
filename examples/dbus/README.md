@@ -6,7 +6,8 @@ actions, and exchange images / streams / results as **file descriptors** (memfd/
 and dmabuf where the kernel supports it) instead of bytes marshalled through D-Bus.
 
 It's a thin front-end over brain's `capability::Registry` — the same models and
-actions as `brain do` / `brain run`, now reachable over the bus.
+actions as the CLI (`brain <arch> <verb>`) or `brain serve --stdio`, now
+reachable over the bus.
 
 ## Enable & run
 
@@ -94,7 +95,7 @@ first. Python: `BrainDBus.cancel(job)`.
   with `pip install -e brain-py`) and `brain_py.image` (PPM save + box drawing for
   brain's HWC-f32 image blobs, no third-party image lib).
 - **`brain_dbus.py`** — an example using the client: discovery, `imageops.gradient`
-  (a real image via fd → PPM), and — with `BRAIN_ZIMAGE_*` exported — a streaming
+  (a real image via fd → PPM), and - with `BRAIN_S3DIT_*` exported - a streaming
   `z-image text2image`:
 
   ```bash

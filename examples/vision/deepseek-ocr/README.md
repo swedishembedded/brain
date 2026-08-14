@@ -33,7 +33,7 @@ with no bus at all:
 
 ```bash
 BRAIN_DEEPSEEK_OCR_DIR=<dir> \
-  brain do deepseek-ai/DeepSeek-OCR generate \
+  brain deepseek2ocr generate \
     --prompt "<|grounding|>Convert the document to markdown." \
     --max_new 8 --in image=page.ppm --json
 ```

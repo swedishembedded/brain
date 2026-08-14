@@ -28,10 +28,10 @@ BRAIN_VQGAN_WEIGHTS=/path/to/codeformer/vqgan_code1024.pth \
 Or with no bus at all:
 
 ```bash
-BRAIN_CODEFORMER_WEIGHTS=… brain do brain/restore restore_face --w 0.5 \
+BRAIN_CODEFORMER_WEIGHTS=… brain codeformer restore_face --w 0.5 \
     --in image=face.ppm --out image=restored.ppm --json
-BRAIN_VQGAN_WEIGHTS=…  brain do brain/vqgan encode --in image=face.ppm --out codes=codes.bin --json
-BRAIN_VQGAN_WEIGHTS=…  brain do brain/vqgan decode --in codes=codes.bin --out image=recon.ppm
+BRAIN_VQGAN_WEIGHTS=…  brain vqgan encode --in image=face.ppm --out codes=codes.bin --json
+BRAIN_VQGAN_WEIGHTS=…  brain vqgan decode --in codes=codes.bin --out image=recon.ppm
 ```
 
 > **Point the env var at the file you mean.** `codeformer.pth` and

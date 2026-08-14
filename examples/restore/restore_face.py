@@ -18,7 +18,7 @@ later `w` costs one forward.
         python3 examples/restore/restore_face.py --image face.ppm'
 
 The action takes an ALIGNED face and returns a 512x512 one (the reference CLI's
-`cropped_faces/` -> `restored_faces/` step). Pair it with `facenet detect`
+`cropped_faces/` -> `restored_faces/` step). Pair it with `scrfd detect`
 (`examples/vision/face_id.py`) to find the face in a full photo first.
 """
 from __future__ import annotations

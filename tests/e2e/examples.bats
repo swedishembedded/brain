@@ -169,35 +169,35 @@ run_example() {
   [[ "$output" == *"You said: hi"* ]]
 }
 
-# ------------------------------------------------------------- omni/
+# ------------------------------------------------------------- qwen3omnimoe/
 
-@test "examples/omni/omni.py runs against the mock over D-Bus" {
-  run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-text "hi" --out-stdio
+@test "examples/qwen3omnimoe/omni.py runs against the mock over D-Bus" {
+  run_example "$REPO/examples/qwen3omnimoe/omni.py" --dbus --model brain/mock --in-text "hi" --out-stdio
   [[ "$output" == *"You said: hi"* ]]
 }
 
-@test "examples/omni/omni.py skips cleanly on unimplemented input/output flags" {
-  run_example "$REPO/examples/omni/omni.py" --dbus --model brain/mock --in-image foo.png --in-text ignored --out-stdio
+@test "examples/qwen3omnimoe/omni.py skips cleanly on unimplemented input/output flags" {
+  run_example "$REPO/examples/qwen3omnimoe/omni.py" --dbus --model brain/mock --in-image foo.png --in-text ignored --out-stdio
 }
 
-@test "examples/omni/omni.py runs against the mock over OpenAI-compatible HTTP" {
+@test "examples/qwen3omnimoe/omni.py runs against the mock over OpenAI-compatible HTTP" {
   # brain.models() is real on this transport, so the served-model precheck
   # (omni.py:144-153) runs before the generate call -- brain/mock is served,
   # so this exercises the full precheck-then-generate path, not just generate.
-  run_example "$REPO/examples/omni/omni.py" \
+  run_example "$REPO/examples/qwen3omnimoe/omni.py" \
     --openai "127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" \
     --model brain/mock --in-text "hi" --out-stdio
   [[ "$output" == *"You said: hi"* ]]
 }
 
-@test "examples/omni/omni.py runs against the mock over Anthropic-compatible HTTP" {
+@test "examples/qwen3omnimoe/omni.py runs against the mock over Anthropic-compatible HTTP" {
   # BrainAnthropic.manifests() raises NotImplementedError (Anthropic's API has
   # no /v1/models equivalent), so omni.py:148-151 catches it and skips the
   # served-model precheck entirely on this transport -- an unserved model
   # would fail at generate time, not as a skip(). brain/mock IS served here,
   # so this is still the real generate path, just without the precheck step
   # the OpenAI-transport test above exercises.
-  run_example "$REPO/examples/omni/omni.py" \
+  run_example "$REPO/examples/qwen3omnimoe/omni.py" \
     --anthropic "127.0.0.1:$ANTHROPIC_PORT" --api-key "$ANTHROPIC_KEY" \
     --model brain/mock --in-text "hi" --out-stdio
   [[ "$output" == *"You said: hi"* ]]

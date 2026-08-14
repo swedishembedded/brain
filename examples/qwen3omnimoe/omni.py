@@ -22,7 +22,7 @@ real HF checkpoint directory too (`BRAIN_QWEN3OMNIMOE_HF_DIR`, same env var
 `brain/omni` reads) -- its own int8 checkpoint stores those towers
 quantized, which nothing here executes yet, so `BRAIN_QWEN3OMNIMOE_HF_DIR` has to be
 set alongside `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` for `--in-speech`/`--in-image`/
-`--in-video` against it to work (see `omni::int8_thinker_resident`'s module
+`--in-video` against it to work (see `qwen3omnimoe::int8_thinker_resident`'s module
 doc for the full reasoning); text-only `--in-text` against it does not need
 an HF dir at all. `--in-mic` and `--out-mic`/`--out-audio` are still
 `skip()`s -- live capture needs extra dependencies this script deliberately
@@ -47,27 +47,27 @@ parts itself (unlike this script) gets real multimodal input over
 
 Examples:
   # D-Bus (needs `BRAIN_QWEN3OMNIMOE_HF_DIR=... brain serve --dbus` running):
-  python3 examples/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
-  python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
-  python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
-  python3 examples/omni/omni.py --dbus --in-video clip.mp4 --in-text "What happens in this clip?" --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --in-text "Say hello in French." --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --in-speech clip.wav --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --in-video clip.mp4 --in-text "What happens in this clip?" --out-stdio
 
   # The fast GPU-resident int8 path (needs `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=...
   # BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR=... [BRAIN_QWEN3OMNIMOE_HF_DIR=... for multimodal]
   # brain serve --dbus` running):
-  python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-text "Say hello in French." --out-stdio
-  python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-image photo.ppm --in-text "What is this?" --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-text "Say hello in French." --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-image photo.ppm --in-text "What is this?" --out-stdio
 
   # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running,
   # with BRAIN_QWEN3OMNIMOE_HF_DIR set for that process):
-  python3 examples/omni/omni.py --openai localhost:8788 --in-text "2+2=" --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --openai localhost:8788 --in-text "2+2=" --out-stdio
 
   # Anthropic-compatible HTTP:
-  python3 examples/omni/omni.py --anthropic localhost:8787 --in-text "2+2=" --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --anthropic localhost:8787 --in-text "2+2=" --out-stdio
 
   # Quick, deps-free wire-contract check against the mock resident:
   BRAIN_MOCK=1 brain serve --dbus &
-  python3 examples/omni/omni.py --dbus --model brain/mock --in-text hi --out-stdio
+  python3 examples/qwen3omnimoe/omni.py --dbus --model brain/mock --in-text hi --out-stdio
 """
 from __future__ import annotations
 
