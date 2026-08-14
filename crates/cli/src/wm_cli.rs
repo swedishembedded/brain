@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain wm …` — world-model subcommands: import (torch .pt -> .safetensors),
+//! `brain diamond …` - world-model subcommands: import (torch .pt -> .safetensors),
 //! play (windowed SDL / headless), bench. Models: `diamond` (pretrained
 //! Atari-100k EDM world model) and `fake` (deterministic GPU-free test
 //! model).
@@ -25,7 +25,7 @@ pub fn run_wm(args: &[String]) {
         Some("finetune") => run_finetune(&args[1..]),
         Some("export") => run_export(&args[1..]),
         _ => {
-            eprintln!("usage: brain wm <import|export|play|replay|bench> [options]");
+            eprintln!("usage: brain diamond <import|export|play|replay|bench> [options]");
             eprintln!("  import --arch diamond --src <agent.pt> --out <F.safetensors> [--actions-count N]");
             eprintln!("  export --arch diamond --weights <F.safetensors> --onnx <F.onnx>");
             eprintln!("  play  --model fake|diamond [--weights F.safetensors] [--device cpu|gpu|npu]");
@@ -136,7 +136,7 @@ fn run_finetune(rest: &[String]) {
         t0.elapsed().as_secs_f32()
     );
     if !last.is_finite() {
-        eprintln!("training diverged (NaN/inf loss) — NOT saving. Lower --lr (batch-1 \
+        eprintln!("training diverged (NaN/inf loss) - NOT saving. Lower --lr (batch-1 \
 fine-tuning is sensitive).");
         std::process::exit(1);
     }
@@ -178,7 +178,7 @@ fn run_import(rest: &[String]) {
     }
 }
 
-/// `brain wm export`: DIAMOND `.safetensors` -> fp32 ONNX of the UNet inner model
+/// `brain diamond export`: DIAMOND `.safetensors` -> fp32 ONNX of the UNet inner model
 /// (for `--device npu` play/bench via OpenVINO).
 fn run_export(rest: &[String]) {
     let mut a = Args::new(rest);
@@ -188,7 +188,7 @@ fn run_export(rest: &[String]) {
         std::process::exit(2);
     }
     let weights = a.take_str("--weights").unwrap_or_else(|| {
-        eprintln!("wm export needs --weights <F.safetensors> (from `brain wm import`)");
+        eprintln!("wm export needs --weights <F.safetensors> (from `brain diamond import`)");
         std::process::exit(2);
     });
     let onnx = a.take_str("--onnx").unwrap_or_else(|| {
@@ -261,7 +261,7 @@ fn build_model(
     match name {
         "diamond" => {
             let path = weights.unwrap_or_else(|| {
-                eprintln!("--model diamond needs --weights <F.safetensors> (from `brain wm import`)");
+                eprintln!("--model diamond needs --weights <F.safetensors> (from `brain diamond import`)");
                 std::process::exit(2);
             });
             // `--device npu` is consumed by main's select_backend (it is a
@@ -278,7 +278,7 @@ fn build_model(
                 let onnx_path = onnx.unwrap_or_else(|| {
                     eprintln!(
                         "--model diamond --device npu needs --onnx <F.onnx> \
-                         (from `brain wm export --weights {path} --onnx F.onnx`)"
+                         (from `brain diamond export --weights {path} --onnx F.onnx`)"
                     );
                     std::process::exit(2);
                 });
@@ -286,7 +286,7 @@ fn build_model(
                 {
                     Ok(m) => Box::new(m),
                     Err(e) => {
-                        // e.g. OpenVINO runtime not installed / NPU absent —
+                        // e.g. OpenVINO runtime not installed / NPU absent -
                         // NpuError's Display carries the install instructions.
                         eprintln!("cannot start the diamond NPU world model: {e}");
                         std::process::exit(1);
@@ -425,7 +425,7 @@ fn run_play(rest: &[String]) {
     // Windowed play (opens a real SDL window; needs a display).
     {
         let (_c, h, w) = model.frame_shape();
-        let mut win = match wm_display::window::SdlWindow::new("brain wm", w, h, scale) {
+        let mut win = match wm_display::window::SdlWindow::new("brain diamond", w, h, scale) {
             Ok(win) => win,
             Err(e) => {
                 eprintln!("cannot open SDL window: {e}");
@@ -471,7 +471,7 @@ impl wm_display::PlayIo for WinRecIo<'_> {
     }
 }
 
-/// `brain wm replay`: inspect a recorded episode dataset, and optionally
+/// `brain diamond replay`: inspect a recorded episode dataset, and optionally
 /// re-generate it through a model and compare frame-by-frame.
 ///
 /// Verification is exact-by-construction for deterministic models (fake) and
@@ -479,7 +479,7 @@ impl wm_display::PlayIo for WinRecIo<'_> {
 /// `frame_len` normals, so with the SAME `--seed` (and `--denoise-steps`)
 /// used at record time the noise streams align. `--context 0` (default)
 /// rebuilds the model exactly as `wm play` did and replays the FULL action
-/// sequence — the noise stream aligns from frame 0. `--context N` burns N
+/// sequence - the noise stream aligns from frame 0. `--context N` burns N
 /// steps (consuming N * frame_len normals, discarding the frames) and then
 /// resets with the first N recorded frames + actions as context, so
 /// verification starts at frame N with the noise stream still aligned.
@@ -489,7 +489,7 @@ impl wm_display::PlayIo for WinRecIo<'_> {
 fn run_replay(rest: &[String]) {
     let mut a = Args::new(rest);
     let dir = a.take_str("--episode").unwrap_or_else(|| {
-        eprintln!("wm replay needs --episode <DIR> (from `brain wm play --record DIR`)");
+        eprintln!("wm replay needs --episode <DIR> (from `brain diamond play --record DIR`)");
         std::process::exit(2);
     });
     let verify = a.take_flag("--verify");
@@ -625,7 +625,7 @@ fn run_bench(rest: &[String]) {
         let _ = unet.forward(&noisy, 0.1, &actions);
         let prof = unet.profile_forward(&noisy, 0.1, &actions);
         let total: f64 = prof.iter().map(|(_, ms, _)| ms).sum();
-        println!("per-kernel (one UNet forward, ONE SUBMIT PER STEP — ranking only):");
+        println!("per-kernel (one UNet forward, ONE SUBMIT PER STEP - ranking only):");
         for (name, ms, count) in &prof {
             println!("  {name:<20} {ms:8.2} ms  {count:4} dispatches  {:5.1}%", ms / total * 100.0);
         }

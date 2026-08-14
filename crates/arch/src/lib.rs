@@ -140,7 +140,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
-    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", default_ref: Some("LiquidAI/LFM2.5-350M")),
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M")),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl"),

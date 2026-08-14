@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain mirror …` — WorldMirror-2 multi-view 3D reconstruction.
+//! `brain worldmirror2 …` - WorldMirror-2 multi-view 3D reconstruction.
 //!
-//!   brain mirror import <safetensors|hf_dir> --out mirror.safetensors
-//!   brain mirror infer  --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
+//!   brain worldmirror2 import <safetensors|hf_dir> --out mirror.safetensors
+//!   brain worldmirror2 infer  --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
 //!         [--prune VOXEL]   (voxel-merge duplicates, try 0.002 for multi-view)
-//!   brain mirror demo   --weights F --images <…> [viewer flags] [--prune VOXEL]
+//!   brain worldmirror2 demo   --weights F --images <…> [viewer flags] [--prune VOXEL]
 //!
 //! Inputs are P6 PPM images; any aspect ratio (the DINOv2 pos-embed is
 //! bicubic-interpolated for non-native grids, reference semantics).
@@ -28,7 +28,7 @@ pub fn run_mirror(argv: &[String]) {
         Some("demo") => demo(&argv[1..]),
         Some("export-npu") => export_npu(&argv[1..]),
         other => {
-            eprintln!("usage: brain mirror <import|infer|demo|export-npu> ...  (got {other:?})");
+            eprintln!("usage: brain worldmirror2 <import|infer|demo|export-npu> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -225,7 +225,7 @@ fn export_npu(argv: &[String]) {
         std::process::exit(1);
     });
     println!("wrote {out} (+ external weight data)");
-    println!("verify: python3 tools/goldens/mirror_check_onnx.py {out}   (OpenVINO CPU/NPU)");
+    println!("verify: python3 tools/goldens/worldmirror2_check_onnx.py {out}   (OpenVINO CPU/NPU)");
 }
 
 fn infer(argv: &[String]) {
@@ -291,7 +291,7 @@ fn demo(argv: &[String]) {
     });
     crate::splat_cli::run_viewer(
         &splats,
-        "brain mirror — WorldMirror-2",
+        "brain worldmirror2 - WorldMirror-2",
         width,
         height,
         fov,
@@ -305,7 +305,7 @@ fn import(argv: &[String]) {
     let mut a = Args::new(argv);
     let out = a.str_or("--out", "out/mirror.safetensors");
     let src = a.positional().unwrap_or_else(|| {
-        eprintln!("usage: brain mirror import <model.safetensors|hf_dir> --out mirror.safetensors");
+        eprintln!("usage: brain worldmirror2 import <model.safetensors|hf_dir> --out mirror.safetensors");
         std::process::exit(2);
     });
     a.finish();

@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain tts …` — Qwen3-TTS voice synthesis (Talker + MTP + codec + speaker).
+//! `brain qwen3tts …` - Qwen3-TTS voice synthesis (Talker + MTP + codec + speaker).
 //!
-//!   brain tts import --ckpt <hf_dir> [--codec-ckpt <dir> --speaker-ckpt <dir>]
+//!   brain qwen3tts import --ckpt <hf_dir> [--codec-ckpt <dir> --speaker-ckpt <dir>]
 //!                    [--out-dir out/tts]
 //!       Import all four components into brain checkpoints:
 //!         <out-dir>/talker.safetensors  <out-dir>/mtp.safetensors
 //!         <out-dir>/codec.safetensors   <out-dir>/speaker.safetensors
 //!
-//!   brain tts clone --text "..." --ref voice.wav --ref-text "..." --out demo.wav
+//!   brain qwen3tts clone --text "..." --ref voice.wav --ref-text "..." --out demo.wav
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english
 //!                    --max-frames N --temp X --top-k K --seed S --ref-codes codes.bin]
 //!       Voice clone: x-vector timbre from the reference voice (pure brain). When
 //!       --ref-text is given, the reference wav is encoded to [T,16] codes in-tree
-//!       (codec encoder) and the in-context (ICL) path runs automatically — no
+//!       (codec encoder) and the in-context (ICL) path runs automatically - no
 //!       external --ref-codes needed (an explicit --ref-codes still overrides).
 //!
-//!   brain tts synth --text "..." --out out.wav
+//!   brain qwen3tts synth --text "..." --out out.wav
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english ...]
 //!       Speaker-free text-to-speech.
 //!
-//!   brain tts finetune --base out/tts/talker.safetensors --data data/tts
+//!   brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts
 //!                      --out out/tts/talker_lora.safetensors
 //!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 //!       LoRA fine-tune (single-speaker SFT) the Talker on a `text->codes`
@@ -42,13 +42,13 @@ pub fn run_tts(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
         Some("import") => import(&args[1..]),
         Some("clone") => clone(&args[1..]),
-        Some("synth") => synth(&args[1..]),
+        Some("synth") | Some("infer") => synth(&args[1..]),
         Some("design") => design(&args[1..]),
         Some("serve") => crate::tts_serve::run_serve(&args[1..]),
         Some("sim") => sim(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
         other => {
-            eprintln!("usage: brain tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");
+            eprintln!("usage: brain qwen3tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -56,7 +56,7 @@ pub fn run_tts(args: &[String]) {
 
 /// LoRA fine-tune the Talker on a `text->codes` dataset (single-speaker SFT).
 ///
-///   brain tts finetune --base out/tts/talker.safetensors --data data/tts --out out/tts/talker_lora.safetensors
+///   brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts --out out/tts/talker_lora.safetensors
 ///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 fn finetune(args: &[String]) {
     let mut base = "out/tts/talker.safetensors".to_string();
@@ -93,8 +93,8 @@ fn finetune(args: &[String]) {
     }
 }
 
-/// `brain tts sim --a A.wav --b B.wav [--speaker out/tts-1b7/speaker.safetensors]`
-/// Speaker-embedding cosine similarity between two utterances (ECAPA x-vectors) —
+/// `brain qwen3tts sim --a A.wav --b B.wav [--speaker out/tts-1b7/speaker.safetensors]`
+/// Speaker-embedding cosine similarity between two utterances (ECAPA x-vectors) -
 /// the timbre-preservation metric. Used to validate that a quantized (e.g. INT4)
 /// Talker keeps the cloned voice: compare sim(int4_out, ref) vs sim(int8_out, ref).
 /// Each wav is embedded at its own sample rate (the encoder resamples internally).
@@ -113,7 +113,7 @@ fn sim(args: &[String]) {
         i += 1;
     }
     if a.is_empty() || b.is_empty() {
-        eprintln!("usage: brain tts sim --a A.wav --b B.wav [--speaker speaker.safetensors]");
+        eprintln!("usage: brain qwen3tts sim --a A.wav --b B.wav [--speaker speaker.safetensors]");
         std::process::exit(2);
     }
     let wa = audio::wav::read(&a).unwrap_or_else(|e| { eprintln!("read {a}: {e}"); std::process::exit(1); });
@@ -148,7 +148,7 @@ fn import(args: &[String]) {
         i += 1;
     }
     if ckpt.is_empty() {
-        eprintln!("usage: brain tts import --ckpt <hf_dir> [--codec-ckpt D --speaker-ckpt D --out-dir D]");
+        eprintln!("usage: brain qwen3tts import --ckpt <hf_dir> [--codec-ckpt D --speaker-ckpt D --out-dir D]");
         std::process::exit(2);
     }
     // The speaker encoder lives in the same checkpoint as the Talker; the codec
@@ -172,11 +172,11 @@ fn import(args: &[String]) {
     run_step("mtp", qwen3tts::import::import_mtp(&ckpt, &mtp));
     run_step("codec", mimi::import::import(&codec_ckpt, &codec_out));
     // The CustomVoice / VoiceDesign (instruct) checkpoints have no speaker encoder
-    // (tts_model_type != base) — they don't clone from reference audio. Skip it with
+    // (tts_model_type != base) - they don't clone from reference audio. Skip it with
     // a warning rather than failing the whole import.
     match ecapatdnn::import::import(&speaker_ckpt, &speaker_out) {
         Ok(()) => {}
-        Err(e) => eprintln!("import speaker: skipped ({e}) — fine for CustomVoice/VoiceDesign"),
+        Err(e) => eprintln!("import speaker: skipped ({e}) - fine for CustomVoice/VoiceDesign"),
     }
     println!("imported Qwen3-TTS components -> {out_dir}/");
 }
@@ -287,7 +287,7 @@ fn clone(args: &[String]) {
     let refw = extra.get("ref").cloned().unwrap_or_default();
     let ref_text = extra.get("ref-text").cloned().unwrap_or_default();
     if text.is_empty() || refw.is_empty() {
-        eprintln!("usage: brain tts clone --text \"...\" --ref voice.wav [--ref-text \"...\" --ref-codes F] --out demo.wav");
+        eprintln!("usage: brain qwen3tts clone --text \"...\" --ref voice.wav [--ref-text \"...\" --ref-codes F] --out demo.wav");
         std::process::exit(2);
     }
     let ref_code = match extra.get("ref-codes") {
@@ -343,7 +343,7 @@ fn synth(args: &[String]) {
     let (c, extra) = parse_common(args);
     let text = extra.get("text").cloned().unwrap_or_default();
     if text.is_empty() {
-        eprintln!("usage: brain tts synth --text \"...\" --out out.wav [--lang english ...]");
+        eprintln!("usage: brain qwen3tts synth --text \"...\" --out out.wav [--lang english ...]");
         std::process::exit(2);
     }
     let npu = crate::npu_explicit();
@@ -373,7 +373,7 @@ fn synth(args: &[String]) {
     write_wav(&c.out, &wav);
 }
 
-/// `brain tts design --text "..." --instruct "..." [--speaker NAME] --out out.wav`
+/// `brain qwen3tts design --text "..." --instruct "..." [--speaker NAME] --out out.wav`
 /// VoiceDesign (instruct only) / CustomVoice (instruct + preset speaker). Needs a
 /// 1.7B CustomVoice/VoiceDesign checkpoint (the 0.6B Base has no instruct control).
 fn design(args: &[String]) {
@@ -382,7 +382,7 @@ fn design(args: &[String]) {
     let instruct = extra.get("instruct").cloned().unwrap_or_default();
     let speaker = extra.get("speaker").map(|s| s.as_str());
     if text.is_empty() {
-        eprintln!("usage: brain tts design --text \"...\" --instruct \"...\" [--speaker NAME] --out out.wav");
+        eprintln!("usage: brain qwen3tts design --text \"...\" --instruct \"...\" [--speaker NAME] --out out.wav");
         std::process::exit(2);
     }
     let npu = crate::npu_explicit();

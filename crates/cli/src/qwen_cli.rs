@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain qwen …` — import / run / fine-tune the Qwen3 decoder.
+//! `brain qwen3 …` - import / run / fine-tune the Qwen3 decoder.
 //!
-//!   brain qwen import --hf <dir> --out qwen.safetensors
-//!   brain qwen infer  --weights F --tokenizer tokenizer.json --prompt "..."
+//!   brain qwen3 import --hf <dir> --out qwen.safetensors
+//!   brain qwen3 infer  --weights F --tokenizer tokenizer.json --prompt "..."
 //!                     [--max-new N --temp X --top-k K --chat --device cpu|gpu]
-//!   brain qwen train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
-//!   brain qwen finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
-//!   brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
+//!   brain qwen3 train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
+//!   brain qwen3 finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
+//!   brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
 //!                     [--alpha A --steps N --lr X --batch B --block T --seed S
 //!                      --models-dir DIR --dataset-id ID]
-//!   brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
+//!   brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
-//!   brain qwen calib --weights BASE --jsonl FILE [--report --out kv_calib.json
+//!   brain qwen3 calib --weights BASE --jsonl FILE [--report --out kv_calib.json
 //!                     --models-dir DIR]
 
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ pub fn run_qwen(args: &[String]) {
         Some("eval") => eval_chat(&args[1..]),
         Some("calib") => calib(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall|eval|calib> ...  (got {other:?})")
+            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib> ...  (got {other:?})")
         }
     }
 }
@@ -47,7 +47,7 @@ fn want_npu() -> bool {
     crate::npu_explicit()
 }
 
-/// `brain qwen export --weights F --out model.onnx --seq T` — emit the ONNX
+/// `brain qwen3 export --weights F --out model.onnx --seq T` - emit the ONNX
 /// decoder graph (for OpenVINO / `brain npu check`).
 fn export(args: &[String]) {
     let mut weights = String::new();
@@ -64,7 +64,7 @@ fn export(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() {
-        eprintln!("usage: brain qwen export --weights F --out model.onnx [--seq T]");
+        eprintln!("usage: brain qwen3 export --weights F --out model.onnx [--seq T]");
         return;
     }
     match npu::qwen_export::export_qwen_fp32(&weights, &out, seq) {
@@ -96,7 +96,7 @@ fn import(args: &[String]) {
         i += 1;
     }
     if hf.is_empty() {
-        eprintln!("usage: brain qwen import --hf <dir> --out qwen.safetensors");
+        eprintln!("usage: brain qwen3 import --hf <dir> --out qwen.safetensors");
         return;
     }
     match qwen3::import::import_with_block(&hf, &out, block) {
@@ -105,7 +105,7 @@ fn import(args: &[String]) {
     }
 }
 
-/// `brain qwen precompile --weights F --seq T [--npu-cache D] [--allow-fallback]`
+/// `brain qwen3 precompile --weights F --seq T [--npu-cache D] [--allow-fallback]`
 /// -- export + compile the NPU decoder once into the cache so later `infer
 /// --device npu --seq T` (with the same `--npu-cache`) skips the export +
 /// compile wait.
@@ -132,7 +132,7 @@ fn precompile(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || seq == 0 {
-        eprintln!("usage: brain qwen precompile --weights F --seq T [--npu-cache out/npu-cache] [--allow-fallback]");
+        eprintln!("usage: brain qwen3 precompile --weights F --seq T [--npu-cache out/npu-cache] [--allow-fallback]");
         return;
     }
     match npu::qwen_decode::precompile(&weights, seq, npu::openvino::NpuDevice::Npu, allow_fallback, std::path::Path::new(&npu_cache)) {
@@ -141,7 +141,7 @@ fn precompile(args: &[String]) {
         }
         Ok((dev, _)) => {
             eprintln!(
-                "brain qwen precompile: compiled on {dev}, not NPU (pass --allow-fallback to accept this on purpose)"
+                "brain qwen3 precompile: compiled on {dev}, not NPU (pass --allow-fallback to accept this on purpose)"
             );
             std::process::exit(1);
         }
@@ -152,7 +152,7 @@ fn precompile(args: &[String]) {
     }
 }
 
-/// `brain qwen serve` — continuous-batching serving: submit several prompts and
+/// `brain qwen3 serve` - continuous-batching serving: submit several prompts and
 /// decode them concurrently through the paged Scheduler (one batched forward per
 /// iteration over all running sequences).
 fn serve(args: &[String]) {
@@ -187,7 +187,7 @@ fn serve(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() || prompts.is_empty() {
-        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --kv-fp32 --weights-int8 --kv-calib]");
+        eprintln!("usage: brain qwen3 serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --kv-fp32 --weights-int8 --kv-calib]");
         eprintln!("       (int8 KV is on by default; --kv-fp32 opts out. --int8 is accepted as a no-op.");
         eprintln!("        --kv-calib opts INTO a kv_calib.json beside --weights, if one exists there.)");
         return;
@@ -300,7 +300,7 @@ fn infer(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() {
-        eprintln!("usage: brain qwen infer --weights F --tokenizer tokenizer.json --prompt \"...\" [--max-new N --temp X --top-k K --chat]");
+        eprintln!("usage: brain qwen3 infer --weights F --tokenizer tokenizer.json --prompt \"...\" [--max-new N --temp X --top-k K --chat]");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -337,7 +337,7 @@ fn infer(args: &[String]) {
             }
             Ok(run) => {
                 eprintln!(
-                    "brain qwen infer: compiled on {}, not NPU (pass --allow-fallback to accept this on purpose)",
+                    "brain qwen3 infer: compiled on {}, not NPU (pass --allow-fallback to accept this on purpose)",
                     run.device
                 );
                 std::process::exit(1);
@@ -394,7 +394,7 @@ fn train(args: &[String], base: Option<&str>) {
         i += 1;
     }
     if data_dir.is_empty() {
-        eprintln!("usage: brain qwen {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align]");
+        eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align]");
         return;
     }
     // A small default architecture for from-scratch training; finetune reads the
@@ -477,7 +477,7 @@ fn finetune(args: &[String]) {
         i += 1;
     }
     if base.is_empty() {
-        eprintln!("usage: brain qwen finetune <data_dir> --weights BASE --out F [...]");
+        eprintln!("usage: brain qwen3 finetune <data_dir> --weights BASE --out F [...]");
         return;
     }
     train(&rest, Some(&base));
@@ -525,7 +525,7 @@ fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
     Ok((owner.to_string(), name.to_string(), tag))
 }
 
-/// `brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
+/// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
 ///     --dataset DIR [--alpha A --steps N --lr X --batch B --block T --seed S
 ///     --models-dir DIR --dataset-id ID]`
 ///
@@ -572,7 +572,7 @@ fn finetune_lora(args: &[String]) {
     }
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
-            "usage: brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
+            "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
         return;
@@ -723,15 +723,15 @@ fn finetune_lora(args: &[String]) {
 }
 
 
-/// `brain qwen toolcall gen  --out DIR [--n N --held M --tools K --vocab V --tokenizer T]`
+/// `brain qwen3 toolcall gen  --out DIR [--n N --held M --tools K --vocab V --tokenizer T]`
 ///   Write a masked tool-call fine-tuning dataset (train + held-out val).
-/// `brain qwen toolcall eval --weights F --tokenizer T [--n N --tools K --seq S]`
+/// `brain qwen3 toolcall eval --weights F --tokenizer T [--n N --tools K --seq S]`
 ///   Score a checkpoint's held-out tool-call exact-match (teacher-forced greedy).
 fn toolcall(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
         Some("gen") => toolcall_gen(&args[1..]),
         Some("eval") => toolcall_eval(&args[1..]),
-        other => eprintln!("usage: brain qwen toolcall <gen|eval> ...  (got {other:?})"),
+        other => eprintln!("usage: brain qwen3 toolcall <gen|eval> ...  (got {other:?})"),
     }
 }
 
@@ -754,7 +754,7 @@ fn toolcall_gen(args: &[String]) {
         i += 1;
     }
     if tokenizer.is_empty() {
-        eprintln!("usage: brain qwen toolcall gen --tokenizer tokenizer.json --out DIR [--n --held --tools --vocab --seed]");
+        eprintln!("usage: brain qwen3 toolcall gen --tokenizer tokenizer.json --out DIR [--n --held --tools --vocab --seed]");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -787,7 +787,7 @@ fn toolcall_eval(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() {
-        eprintln!("usage: brain qwen toolcall eval --weights F --tokenizer T [--n --tools --seq --seed]");
+        eprintln!("usage: brain qwen3 toolcall eval --weights F --tokenizer T [--n --tools --seq --seed]");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -797,7 +797,7 @@ fn toolcall_eval(args: &[String]) {
     println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
 }
 
-/// `brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
+/// `brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 ///     --block T --models-dir DIR]`
 ///
 /// Gate B of the Definition of Done's "a way to validate that model has
@@ -841,7 +841,7 @@ fn eval_chat(args: &[String]) {
         i += 1;
     }
     if base.is_empty() || jsonl.is_empty() {
-        eprintln!("usage: brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG] --block T --models-dir DIR] [--kv fp32,int8,int8-calib]");
+        eprintln!("usage: brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG] --block T --models-dir DIR] [--kv fp32,int8,int8-calib]");
         return;
     }
 
@@ -955,12 +955,12 @@ fn eval_chat(args: &[String]) {
     println!("{full_ref_str} {verdict} base on held-out loss ({:.4} vs {:.4})", adapter_score.loss, base_score.loss);
 }
 
-/// `brain qwen calib --weights BASE --jsonl PROMPTS [--report] [--out kv_calib.json]
+/// `brain qwen3 calib --weights BASE --jsonl PROMPTS [--report] [--out kv_calib.json]
 ///     [--clip-out kv_calib.json --percentile Q] [--models-dir DIR]`
 ///
 /// The design input for a calibrated INT8 KV scale: runs `PROMPTS` through a
 /// real checkpoint's fp32-KV paged engine and reports, per `(layer, K|V,
-/// kv_head)`, `absmax` / `p99` / `p99.99` / `outlier_ratio` — most
+/// kv_head)`, `absmax` / `p99` / `p99.99` / `outlier_ratio` - most
 /// quantization-hostile first (`qwen3::serve::Engine::calibrate_kv`,
 /// `model::actstats`). `outlier_ratio` near 1 means today's per-token online
 /// absmax is already close to optimal for that stream; a large ratio means a
@@ -969,7 +969,7 @@ fn eval_chat(args: &[String]) {
 ///
 /// `--clip-out FILE` (with `--percentile Q`, default `0.999`) additionally
 /// writes the actual usable `KvCalib` clip table (`model::kvcalib`, shared
-/// with any future paged-attention model, not Qwen-specific) — save it as
+/// with any future paged-attention model, not Qwen-specific) - save it as
 /// `kv_calib.json` next to the checkpoint and pass `--kv-calib` to `brain
 /// qwen serve` (`BRAIN_QWEN_KV_CALIB=1` for `brain serve`'s resident) to opt
 /// IN to it (`KvCalib::from_model_dir`); calibration is NOT picked up
@@ -1003,15 +1003,15 @@ fn calib(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || jsonl.is_empty() {
-        eprintln!("usage: brain qwen calib --weights BASE --jsonl FILE [--report] [--out kv_calib_report.json] [--clip-out kv_calib.json --percentile Q] [--models-dir DIR]");
+        eprintln!("usage: brain qwen3 calib --weights BASE --jsonl FILE [--report] [--out kv_calib_report.json] [--clip-out kv_calib.json --percentile Q] [--models-dir DIR]");
         return;
     }
     if !report && out.is_none() && clip_out.is_none() {
-        eprintln!("brain qwen calib: nothing to do without --report, --out, or --clip-out");
+        eprintln!("brain qwen3 calib: nothing to do without --report, --out, or --clip-out");
         return;
     }
     if !(0.0..=1.0).contains(&percentile) {
-        eprintln!("brain qwen calib: --percentile must be in [0,1], got {percentile}");
+        eprintln!("brain qwen3 calib: --percentile must be in [0,1], got {percentile}");
         return;
     }
 
@@ -1056,7 +1056,7 @@ fn calib(args: &[String]) {
     let mut prompts: Vec<Vec<u32>> = Vec::new();
     // Keep the first few DISTINCT encode errors: the template engine's
     // carefully-worded diagnostics ("not prefix-stable … refusing to guess a
-    // loss-mask boundary") used to be swallowed here — only a bare skip count
+    // loss-mask boundary") used to be swallowed here - only a bare skip count
     // survived, so the user whose data was dropped never learned why.
     let mut encode_errors: Vec<String> = Vec::new();
     for s in &samples {
@@ -1073,7 +1073,7 @@ fn calib(args: &[String]) {
     }
     let report_errors = |errs: &[String]| {
         for e in errs {
-            eprintln!("brain qwen calib:   encode error: {e}");
+            eprintln!("brain qwen3 calib:   encode error: {e}");
         }
     };
     if prompts.is_empty() {
@@ -1083,7 +1083,7 @@ fn calib(args: &[String]) {
     }
     let skipped = total - prompts.len();
     if skipped > 0 {
-        eprintln!("brain qwen calib: skipped {skipped}/{total} samples that failed to encode (first distinct errors below)");
+        eprintln!("brain qwen3 calib: skipped {skipped}/{total} samples that failed to encode (first distinct errors below)");
         report_errors(&encode_errors);
     }
 
@@ -1098,7 +1098,7 @@ fn calib(args: &[String]) {
     let max_batch = prompts.len().max(1) as u32;
     let max_prefill = max_len.max(1);
 
-    eprintln!("brain qwen calib: {base_id}, {} prompts", prompts.len());
+    eprintln!("brain qwen3 calib: {base_id}, {} prompts", prompts.len());
     let weights_str = weights_path.to_str().unwrap_or_default();
     let mut eng = qwen3::serve::Engine::load(weights_str, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false);
     let collector = eng.calibrate_kv(&prompts);
@@ -1112,7 +1112,7 @@ fn calib(args: &[String]) {
         let worst = rows.first();
         let median_ratio = if rows.is_empty() { 0.0 } else { rows[rows.len() / 2].outlier_ratio };
         println!(
-            "brain qwen calib: {} streams, worst ratio {:.2} ({}), median ratio {:.2}",
+            "brain qwen3 calib: {} streams, worst ratio {:.2} ({}), median ratio {:.2}",
             rows.len(),
             worst.map(|r| r.outlier_ratio).unwrap_or(0.0),
             worst.map(|r| r.name.as_str()).unwrap_or("-"),
@@ -1128,8 +1128,8 @@ fn calib(args: &[String]) {
         let doc = serde_json::json!({"model": base_id, "prompts": prompts.len(), "streams": json});
         let text = serde_json::to_string_pretty(&doc).expect("report JSON is always serializable");
         match std::fs::write(&path, text) {
-            Ok(()) => println!("brain qwen calib: wrote {path}"),
-            Err(e) => eprintln!("brain qwen calib: {path}: {e}"),
+            Ok(()) => println!("brain qwen3 calib: wrote {path}"),
+            Err(e) => eprintln!("brain qwen3 calib: {path}: {e}"),
         }
     }
 
@@ -1145,8 +1145,8 @@ fn calib(args: &[String]) {
             &collector,
         );
         match calib.save(Path::new(&path)) {
-            Ok(()) => println!("brain qwen calib: wrote {path} (percentile {percentile})"),
-            Err(e) => eprintln!("brain qwen calib: {path}: {e}"),
+            Ok(()) => println!("brain qwen3 calib: wrote {path} (percentile {percentile})"),
+            Err(e) => eprintln!("brain qwen3 calib: {path}: {e}"),
         }
     }
 }

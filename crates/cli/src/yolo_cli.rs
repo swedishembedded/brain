@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain yolo …` — train / evaluate / run the from-scratch YOLOv8-style
+//! `brain yolov8 …` - train / evaluate / run the from-scratch YOLOv8-style
 //! detector. Mirrors the `gpt_cli` flag-parsing idiom; respects the global
 //! `--device cpu|gpu` flag handled in `main.rs` (the YOLO model itself only ever
 //! instantiates the CPU backend today, see `Yolo::new`).
 //!
-//!   brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C
-//!                                        --input S --seed S]
-//!   brain yolo eval  --weights F --data <dir> [--conf X --iou X]
-//!   brain yolo detect --weights F --image <path> [--conf X --iou X]
-//!   brain yolo fine-tune <data_dir> --weights F --out F [--freeze-backbone ...]
+//!   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
+//!                                          --input S --seed S]
+//!   brain yolov8 eval  --weights F --data <dir> [--conf X --iou X]
+//!   brain yolov8 detect --weights F --image <path> [--conf X --iou X]
+//!   brain yolov8 fine-tune <data_dir> --weights F --out F [--freeze-backbone ...]
+//!
+//! `infer` is accepted as an alias for `detect` - the canonical verb every
+//! architecture answers to.
 //!
 //! Datasets are the synthetic `Dataset::Detect` dirs produced by
 //! `brain data gen detect` (CHW `images.f32` + `boxes.bin` + `meta.json`). The
@@ -30,9 +33,9 @@ pub fn run_yolo(args: &[String]) {
         Some("train") => train(&args[1..], None),
         Some("fine-tune") | Some("finetune") => fine_tune(&args[1..]),
         Some("eval") => eval(&args[1..]),
-        Some("detect") => detect(&args[1..]),
+        Some("detect") | Some("infer") => detect(&args[1..]),
         other => eprintln!(
-            "usage: brain yolo <train|fine-tune|eval|detect> ...  (got {other:?})"
+            "usage: brain yolov8 <train|fine-tune|eval|detect> ...  (got {other:?})"
         ),
     }
 }
@@ -106,7 +109,7 @@ fn build_model(cfg: &TrainCfg, data: &DetectData) -> Yolo {
         ycfg.input = cfg.input;
     } else {
         // Train at the dataset's own resolution so the CHW blob uploads directly
-        // (no letterbox) — the synthetic generator's default is 128, matching
+        // (no letterbox) - the synthetic generator's default is 128, matching
         // tiny's default input.
         ycfg.input = data.w;
     }
@@ -125,7 +128,7 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
     let dims_match = (data.w as usize == side) && (data.h as usize == side);
     if !dims_match {
         eprintln!(
-            "brain yolo train: WARNING dataset {}x{} != model input {side}; training only \
+            "brain yolov8 train: WARNING dataset {}x{} != model input {side}; training only \
              supports matching geometry (regenerate the dataset at {side}px or pass \
              --input {})",
             data.w, data.h, data.w
@@ -175,7 +178,7 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
 
 fn train(args: &[String], pretrained: Option<&str>) {
     let Some(dir) = args.first().cloned() else {
-        eprintln!("usage: brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S]");
+        eprintln!("usage: brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S]");
         return;
     };
     let mut cfg = TrainCfg::default();
@@ -184,14 +187,14 @@ fn train(args: &[String], pretrained: Option<&str>) {
     let mut freeze = false;
     parse_train_flags(args, 1, &mut cfg, &mut out, &mut weights, &mut freeze);
     if out.is_empty() {
-        eprintln!("brain yolo train: --out <weights> is required");
+        eprintln!("brain yolov8 train: --out <weights> is required");
         return;
     }
 
     let data = match load_dataset(Path::new(&dir)) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("brain yolo train: loading {dir}: {e}");
+            eprintln!("brain yolov8 train: loading {dir}: {e}");
             std::process::exit(1);
         }
     };
@@ -217,7 +220,7 @@ fn train(args: &[String], pretrained: Option<&str>) {
 fn fine_tune(args: &[String]) {
     // `fine-tune <data_dir> --weights <pretrained> --out F ...`
     if args.is_empty() {
-        eprintln!("usage: brain yolo fine-tune <data_dir> --weights <pretrained> --out F [flags]");
+        eprintln!("usage: brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [flags]");
         return;
     }
     let mut cfg = TrainCfg::default();
@@ -226,12 +229,12 @@ fn fine_tune(args: &[String]) {
     let mut freeze = false;
     parse_train_flags(args, 1, &mut cfg, &mut out, &mut weights, &mut freeze);
     if weights.is_empty() || out.is_empty() {
-        eprintln!("brain yolo fine-tune: --weights <pretrained> and --out <weights> are required");
+        eprintln!("brain yolov8 fine-tune: --weights <pretrained> and --out <weights> are required");
         return;
     }
     if freeze {
         eprintln!(
-            "brain yolo fine-tune: --freeze-backbone has no effect (no per-param freeze \
+            "brain yolov8 fine-tune: --freeze-backbone has no effect (no per-param freeze \
              API); fine-tuning the whole network from the pretrained init"
         );
     }
@@ -255,7 +258,7 @@ fn load_pretrained_into(model: &Yolo, path: &str) {
             }
         }
     }
-    eprintln!("brain yolo fine-tune: loaded {copied} pretrained tensors from {path}");
+    eprintln!("brain yolov8 fine-tune: loaded {copied} pretrained tensors from {path}");
 }
 
 fn eval(args: &[String]) {
@@ -275,13 +278,13 @@ fn eval(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || data_dir.is_empty() {
-        eprintln!("usage: brain yolo eval --weights F --data <dir> [--conf X --iou X]");
+        eprintln!("usage: brain yolov8 eval --weights F --data <dir> [--conf X --iou X]");
         return;
     }
     let data = match load_dataset(Path::new(&data_dir)) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("brain yolo eval: loading {data_dir}: {e}");
+            eprintln!("brain yolov8 eval: loading {data_dir}: {e}");
             std::process::exit(1);
         }
     };
@@ -346,7 +349,7 @@ fn detect(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || image.is_empty() {
-        eprintln!("usage: brain yolo detect --weights F --image <path> [--conf X --iou X]");
+        eprintln!("usage: brain yolov8 detect --weights F --image <path> [--conf X --iou X]");
         eprintln!("  <path> is a binary PPM (P6) or a detection dataset dir (uses image 0)");
         eprintln!("  add --device npu to compile+run on the Intel NPU via OpenVINO");
         return;
@@ -362,13 +365,13 @@ fn detect(args: &[String]) {
     let (hwc, w, h) = match crate::image_io::load_image(&image) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("brain yolo detect: {e}");
+            eprintln!("brain yolov8 detect: {e}");
             std::process::exit(1);
         }
     };
     let dets = model.detect(&hwc, w, h, conf, iou);
     print_dets(&dets);
-    eprintln!("brain yolo detect: {} detection(s) on {w}x{h}", dets.len());
+    eprintln!("brain yolov8 detect: {} detection(s) on {w}x{h}", dets.len());
 }
 
 /// `--device npu` route for `detect`: auto-export the weights to an fp32 ONNX and
@@ -378,7 +381,7 @@ fn detect_via_npu(weights: &str, image: &str, conf: f32, iou: f32) {
     let (hwc, w, h) = match crate::image_io::load_image(image) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("brain yolo detect: {e}");
+            eprintln!("brain yolov8 detect: {e}");
             std::process::exit(1);
         }
     };
@@ -386,10 +389,10 @@ fn detect_via_npu(weights: &str, image: &str, conf: f32, iou: f32) {
     match npu::detect_weights_on_npu(weights, &hwc, w, h, conf, iou, &cfg, None) {
         Ok(dets) => {
             print_dets(&dets);
-            eprintln!("brain yolo detect (--device npu): {} detection(s) on {w}x{h}", dets.len());
+            eprintln!("brain yolov8 detect (--device npu): {} detection(s) on {w}x{h}", dets.len());
         }
         Err(e) => {
-            eprintln!("brain yolo detect --device npu: {e}");
+            eprintln!("brain yolov8 detect --device npu: {e}");
             std::process::exit(1);
         }
     }

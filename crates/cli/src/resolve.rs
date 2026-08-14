@@ -173,21 +173,29 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
 /// the architecture's default checkpoint
 /// ([`brain_arch::Arch::default_ref`], via
 /// [`crate::supply::ensure_default_weights`]) and inject `--weights <path>`
-/// -- what makes `brain infer zipdepth --in image=x.jpg` (no flags beyond
-/// the input) resolve a real checkpoint on its own. Passes `rest` through
-/// completely unchanged for every other verb, for an architecture with no
-/// `default_ref`, or when `--weights` is already present -- this never
-/// silently overrides an explicit flag with a fetched one.
+/// (plus `--tokenizer <path>`, when the fetched checkpoint has one and
+/// `--tokenizer` was not already given) -- what makes `brain infer zipdepth
+/// --in image=x.jpg` (no flags beyond the input) resolve a real checkpoint on
+/// its own. Passes `rest` through completely unchanged for every other verb,
+/// for an architecture with no `default_ref`, or when `--weights` is already
+/// present -- this never silently overrides an explicit flag with a fetched
+/// one.
 fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
     let is_infer = rest.first().is_some_and(|v| crate::args::canon_verb(v) == "infer");
     if !is_infer || rest.iter().any(|a| a == "--weights") {
         return rest;
     }
     match crate::supply::ensure_default_weights(arch) {
-        Ok(path) => {
+        Ok(got) => {
             let mut rest = rest;
             rest.push("--weights".to_string());
-            rest.push(path);
+            rest.push(got.weights);
+            if !rest.iter().any(|a| a == "--tokenizer") {
+                if let Some(tokenizer) = got.tokenizer {
+                    rest.push("--tokenizer".to_string());
+                    rest.push(tokenizer);
+                }
+            }
             rest
         }
         Err(e) => {

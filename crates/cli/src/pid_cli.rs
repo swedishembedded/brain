@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! CLI for the PID event/effect transformer: train / rollout / profile.
-//! Dispatched from `main` via `moe pid <action> ...`.
+//! Dispatched from `main` via `brain toypid <action> ...`.
 
 use std::collections::HashMap;
 
@@ -19,7 +19,7 @@ pub fn run_pid(args: &[String]) {
         #[cfg(feature = "vulkan-coopmat")]
         Some("vk-matmul") => vulkan::cooperative_matmul_demo(),
         other => {
-            eprintln!("usage: moe pid <train|rollout|profile> ...  (got {other:?})");
+            eprintln!("usage: brain toypid <train|rollout|profile> ...  (got {other:?})");
         }
     }
 }

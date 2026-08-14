@@ -24,7 +24,7 @@ pub fn run_flux2(args: &[String]) {
         return;
     }
     match args[0].as_str() {
-        "generate" => {
+        "generate" | "infer" => {
             if let Err(e) = generate(&args[1..]) {
                 eprintln!("flux2 generate: {e}");
                 std::process::exit(1);

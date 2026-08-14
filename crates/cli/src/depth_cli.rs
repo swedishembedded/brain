@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain depth` — monocular depth inference and the depth demo.
+//! `brain zipdepth` - monocular depth inference and the depth demo.
 //!
-//! Today: the single-image path. `brain depth --image foo.ppm --weights foo.pth`
-//! loads a ZipDepth checkpoint, runs it, and shows a side-by-side RGB | colorized
-//! depth window (Esc quits, `[`/`]` cycle colormaps without re-inference). With
-//! `--headless` it writes the composite as a PPM and prints a hash instead — the
-//! smoke-test path that needs no display.
+//! Today: the single-image path. `brain zipdepth --image foo.ppm --weights foo.pth`
+//! (or `brain zipdepth infer --image foo.ppm --weights foo.pth`) loads a ZipDepth
+//! checkpoint, runs it, and shows a side-by-side RGB | colorized depth window
+//! (Esc quits, `[`/`]` cycle colormaps without re-inference). With `--headless`
+//! it writes the composite as a PPM and prints a hash instead - the smoke-test
+//! path that needs no display.
 //!
-//! `brain depth --camera` adds the realtime V4L2 webcam path (Linux, YUYV): a
+//! `brain zipdepth --camera` adds the realtime V4L2 webcam path (Linux, YUYV): a
 //! capture thread fills a single-slot latest-frame buffer, the main loop takes the
 //! latest frame, runs the same [`zipdepth::Predictor`], EMA-smooths the depth window,
-//! and shows it — Esc quits, `[`/`]` cycle colormaps live.
+//! and shows it - Esc quits, `[`/`]` cycle colormaps live.
 
 use zipdepth::viz::{colorize, composite_side_by_side, Bounds, Colormap};
 use zipdepth::{import, Predictor, ZipConfig};
@@ -23,7 +24,7 @@ use crate::image_io;
 
 /// What the demo shows. `v` cycles these live; `--view` picks the initial one.
 /// Each view renders at its NATURAL size (side is 2w wide, the rest are w wide), so
-/// the stereogram keeps the camera's aspect — the window resizes to match.
+/// the stereogram keeps the camera's aspect - the window resizes to match.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     /// RGB | colorized depth, side by side (2w × h).
@@ -109,7 +110,7 @@ fn render_view(
         ViewMode::Stereo => zipdepth::autostereogram(depth, w, h, bounds, stereo),
         ViewMode::StereoTex => zipdepth::autostereogram_textured(depth, w, h, bounds, stereo, rgb8),
         ViewMode::StereoDual => {
-            // Peak disparity ~ 1/25 of the width — enough relief to fuse, small
+            // Peak disparity ~ 1/25 of the width - enough relief to fuse, small
             // enough that disocclusion holes stay tiny.
             let max_disp = (w / 25).clamp(8, 40);
             zipdepth::stereo_pair(rgb8, depth, w, h, bounds, max_disp, stereo.near_is_high)
@@ -129,12 +130,12 @@ pub fn run_depth(args: &[String]) {
         return;
     }
     match args.first().map(|s| s.as_str()) {
-        Some("--image") | Some("image") => run_image(args),
+        Some("--image") | Some("image") | Some("infer") => run_image(args),
         Some("calib") => run_calib(&args[1..]),
         Some("train") => run_train(&args[1..]),
         Some("--help") | Some("-h") | None => print!("{HELP}"),
         Some(other) => {
-            eprintln!("brain depth: unknown option '{other}'\n");
+            eprintln!("brain zipdepth: unknown option '{other}'\n");
             print!("{HELP}");
             std::process::exit(2);
         }
@@ -142,12 +143,12 @@ pub fn run_depth(args: &[String]) {
 }
 
 const HELP: &str = "\
-brain depth — monocular depth (ZipDepth)
+brain zipdepth - monocular depth (ZipDepth)
 
 USAGE:
-  brain depth --image <img>  --weights <ckpt.pth> [options]   # single image
-  brain depth --camera       --weights <ckpt.pth> [options]   # realtime webcam
-  brain depth train --out <w.safetensors> [--steps N --batch B --lr X --size WxH
+  brain zipdepth --image <img>  --weights <ckpt.pth> [options]   # single image
+  brain zipdepth --camera       --weights <ckpt.pth> [options]   # realtime webcam
+  brain zipdepth train --out <w.safetensors> [--steps N --batch B --lr X --size WxH
                      --seed S --wd X --weights <init.pth>]    # train / fine-tune
                     (synthetic RGB->depth pairs; loss printed per step)
 
@@ -168,10 +169,10 @@ OPTIONS:
   --headless           no window: write the composite PPM to --out and print a hash
   --out <path>         PPM output path (default out/depth.ppm)
   --bench <n>          after the first (cold) inference, run n more and report
-                       per-frame ms (min/median/mean) — steady-state timing
+                       per-frame ms (min/median/mean) - steady-state timing
   --input <n>          model input (shorter side; default = the checkpoint's
                        native 384). The net is fully convolutional, so smaller
-                       inputs are valid and faster — work scales with n²
+                       inputs are valid and faster - work scales with n²
                        (--input 256 is ~2.3x quicker, mildly softer depth)
 ";
 
@@ -214,7 +215,7 @@ fn parse(args: &[String]) -> Opts {
     let next = |i: &mut usize| -> String {
         *i += 1;
         args.get(*i).cloned().unwrap_or_else(|| {
-            eprintln!("brain depth: missing value after '{}'", args[*i - 1]);
+            eprintln!("brain zipdepth: missing value after '{}'", args[*i - 1]);
             std::process::exit(2);
         })
     };
@@ -247,14 +248,14 @@ fn parse(args: &[String]) -> Opts {
                 };
             }
             other => {
-                eprintln!("brain depth: unknown option '{other}'");
+                eprintln!("brain zipdepth: unknown option '{other}'");
                 std::process::exit(2);
             }
         }
         i += 1;
     }
     if o.image.is_empty() || o.weights.is_empty() {
-        eprintln!("brain depth --image needs both --image and --weights\n");
+        eprintln!("brain zipdepth --image needs both --image and --weights\n");
         print!("{HELP}");
         std::process::exit(2);
     }
@@ -278,16 +279,16 @@ fn run_image(args: &[String]) {
     }
 
     let (hwc, w, h) = image_io::load_image(&o.image).unwrap_or_else(|e| {
-        eprintln!("brain depth: {e}");
+        eprintln!("brain zipdepth: {e}");
         std::process::exit(1);
     });
 
     // Gpu::new honours the process backend (`--device cpu|vulkan` / BRAIN_DEVICE),
-    // which main.rs::select_backend already parsed out of argv — so the same demo
+    // which main.rs::select_backend already parsed out of argv - so the same demo
     // runs on the CPU JIT or a real GPU with no code change here.
     let gpu = Gpu::new(zipdepth::net::PIPELINES);
     let ps = import::load_into(&gpu, &o.weights, &cfg).unwrap_or_else(|e| {
-        eprintln!("brain depth: loading {}: {e}", o.weights);
+        eprintln!("brain zipdepth: loading {}: {e}", o.weights);
         std::process::exit(1);
     });
     let t0 = std::time::Instant::now();
@@ -310,7 +311,7 @@ fn run_image(args: &[String]) {
             ms.sort_by(f32::total_cmp);
             let mean = ms.iter().sum::<f32>() / ms.len() as f32;
             eprintln!(
-                "bench: {} warm frames — min {:.1} ms, median {:.1} ms, mean {:.1} ms",
+                "bench: {} warm frames - min {:.1} ms, median {:.1} ms, mean {:.1} ms",
                 ms.len(),
                 ms[0],
                 ms[ms.len() / 2],
@@ -337,7 +338,7 @@ fn run_image(args: &[String]) {
         // `imaging::save_ppm` creates the parent directory itself.
         let img = imaging::Rgb8::new(cw, ch, canvas.clone()).expect("canvas is cw*ch*3");
         imaging::save_ppm(&o.out, &img).unwrap_or_else(|e| {
-            eprintln!("brain depth: {e}");
+            eprintln!("brain zipdepth: {e}");
             std::process::exit(1);
         });
         let hash = fnv1a(&canvas);
@@ -348,10 +349,10 @@ fn run_image(args: &[String]) {
     // Windowed: [ / ] cycle colormaps, v cycles the view (resizing the window to the
     // view's natural aspect), Esc quits.
     let (mut cw, mut ch) = mode.canvas(w, h);
-    let mut win = match wm_display::window::SdlWindow::new("brain depth", cw, ch, o.scale) {
+    let mut win = match wm_display::window::SdlWindow::new("brain zipdepth", cw, ch, o.scale) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("brain depth: no display ({e}). Re-run with --headless for a PPM.");
+            eprintln!("brain zipdepth: no display ({e}). Re-run with --headless for a PPM.");
             std::process::exit(1);
         }
     };
@@ -375,7 +376,7 @@ fn run_image(args: &[String]) {
                     let (nw, nh) = mode.canvas(w, h);
                     if (nw, nh) != (cw, ch) {
                         (cw, ch) = (nw, nh);
-                        win = wm_display::window::SdlWindow::new("brain depth", cw, ch, o.scale).expect("recreate window");
+                        win = wm_display::window::SdlWindow::new("brain zipdepth", cw, ch, o.scale).expect("recreate window");
                     }
                     changed = true;
                 }
@@ -390,7 +391,7 @@ fn run_image(args: &[String]) {
     }
 }
 
-/// FNV-1a over the canvas bytes — a stable content hash for the smoke test.
+/// FNV-1a over the canvas bytes - a stable content hash for the smoke test.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for &b in bytes {
@@ -405,10 +406,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 // ---------------------------------------------------------------------------
 
 const CAM_HELP: &str = "\
-brain depth --camera — realtime webcam depth (Linux/V4L2, YUYV)
+brain zipdepth --camera - realtime webcam depth (Linux/V4L2, YUYV)
 
 USAGE:
-  brain depth --camera --weights <ckpt.pth> [options]
+  brain zipdepth --camera --weights <ckpt.pth> [options]
 
 OPTIONS:
   --camera             use the webcam instead of an image
@@ -424,7 +425,7 @@ OPTIONS:
                        quadratically: --input 256 is ~2.3x quicker per frame.
   --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
 In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
-Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
+Forces YUYV - an MJPEG-only camera is rejected (no JPEG decoder).
 ";
 
 #[cfg(target_os = "linux")]
@@ -485,7 +486,7 @@ fn run_camera(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() {
-        eprintln!("brain depth --camera needs --weights\n{CAM_HELP}");
+        eprintln!("brain zipdepth --camera needs --weights\n{CAM_HELP}");
         std::process::exit(2);
     }
     let _ = &variant; // variant is auto-detected from the checkpoint now.
@@ -498,7 +499,7 @@ fn run_camera(args: &[String]) {
 
     // Open the camera and negotiate YUYV. The driver reports the size it accepted.
     let mut dev = Device::open(&dev_path, req_w, req_h, 4).unwrap_or_else(|e| {
-        eprintln!("brain depth: opening {dev_path}: {e}");
+        eprintln!("brain zipdepth: opening {dev_path}: {e}");
         eprintln!("(the camera must expose YUYV; many UVC cams are MJPEG-only.)");
         std::process::exit(1);
     });
@@ -537,7 +538,7 @@ fn run_camera(args: &[String]) {
         None
     } else {
         let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
-            eprintln!("brain depth: loading {weights}: {e}");
+            eprintln!("brain zipdepth: loading {weights}: {e}");
             running.store(false, Ordering::Relaxed);
             std::process::exit(1);
         });
@@ -549,10 +550,10 @@ fn run_camera(args: &[String]) {
     let stereo = zipdepth::StereoOpts::with_stripes(cw, stripes);
     let mut mode = ViewMode::parse(&view);
     let (mut win_w, mut win_h) = mode.canvas(cw, ch);
-    let mut win = match wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale) {
+    let mut win = match wm_display::window::SdlWindow::new("brain zipdepth", win_w, win_h, scale) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("brain depth: no display ({e})");
+            eprintln!("brain zipdepth: no display ({e})");
             running.store(false, Ordering::Relaxed);
             let _ = cap_thread.join();
             std::process::exit(1);
@@ -579,7 +580,7 @@ fn run_camera(args: &[String]) {
                     let (nw, nh) = mode.canvas(cw, ch);
                     if (nw, nh) != (win_w, win_h) {
                         (win_w, win_h) = (nw, nh);
-                        win = wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale).expect("recreate window");
+                        win = wm_display::window::SdlWindow::new("brain zipdepth", win_w, win_h, scale).expect("recreate window");
                     }
                 }
                 _ => {}
@@ -648,7 +649,7 @@ fn run_camera(args: &[String]) {
 
 #[cfg(not(target_os = "linux"))]
 fn run_camera(_args: &[String]) {
-    eprintln!("brain depth --camera is Linux/V4L2 only");
+    eprintln!("brain zipdepth --camera is Linux/V4L2 only");
     std::process::exit(1);
 }
 
@@ -657,7 +658,7 @@ fn run_camera(_args: &[String]) {
 // Training path
 // ---------------------------------------------------------------------------
 
-/// `brain depth train` — the end-to-end loop on synthetic RGB->inverse-depth
+/// `brain zipdepth train` - the end-to-end loop on synthetic RGB->inverse-depth
 /// pairs: forward -> masked L1 -> backward -> AdamW (see `zipdepth::train`).
 /// Placeholder-grade data, real loop; `--weights <ckpt.pth>` seeds from a
 /// released checkpoint (fine-tune), otherwise fresh `init_weights`.
@@ -693,18 +694,18 @@ fn run_train(args: &[String]) {
                 }
             }
             other => {
-                eprintln!("brain depth train: unknown option '{other}'");
+                eprintln!("brain zipdepth train: unknown option '{other}'");
                 std::process::exit(2);
             }
         }
         i += 1;
     }
     if out.is_empty() {
-        eprintln!("brain depth train: --out <file.safetensors> is required");
+        eprintln!("brain zipdepth train: --out <file.safetensors> is required");
         std::process::exit(2);
     }
     if w % 32 != 0 || h % 32 != 0 {
-        eprintln!("brain depth train: --size must be multiples of 32 (got {w}x{h})");
+        eprintln!("brain zipdepth train: --size must be multiples of 32 (got {w}x{h})");
         std::process::exit(2);
     }
 
@@ -717,7 +718,7 @@ fn run_train(args: &[String]) {
         match zipdepth::load_checkpoint(&weights, &cfg) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("brain depth train: loading {weights}: {e}");
+                eprintln!("brain zipdepth train: loading {weights}: {e}");
                 std::process::exit(1);
             }
         }
@@ -764,7 +765,7 @@ fn run_train(args: &[String]) {
     println!("done: loss {:.4} -> {:.4}; saved {out}", res.first_loss, res.last_loss);
 }
 
-// `brain depth calib --report` — per-layer activation outlier ratios (the INT8
+// `brain zipdepth calib --report` - per-layer activation outlier ratios (the INT8
 // decision data, measured with NO NPU).
 // ---------------------------------------------------------------------------
 
@@ -793,17 +794,17 @@ fn run_calib(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || images_dir.is_empty() {
-        eprintln!("usage: brain depth calib --report --weights <pth> --images <dir-of-ppm> [--max N] [--variant base|npu]");
+        eprintln!("usage: brain zipdepth calib --report --weights <pth> --images <dir-of-ppm> [--max N] [--variant base|npu]");
         std::process::exit(2);
     }
     let _ = &variant; // variant is auto-detected from the checkpoint now.
     let cfg = cfg_for_checkpoint(&weights);
 
     // Load calibration images (any PPM in the dir), preprocessed exactly as the
-    // predictor does — aspect-preserving, no pad, so each carries its own size.
+    // predictor does - aspect-preserving, no pad, so each carries its own size.
     let imgs = load_calib_images(&images_dir, cfg.input, max_n);
     if imgs.is_empty() {
-        eprintln!("brain depth: no PPM images found under {images_dir}");
+        eprintln!("brain zipdepth: no PPM images found under {images_dir}");
         std::process::exit(1);
     }
     {
@@ -817,13 +818,13 @@ fn run_calib(args: &[String]) {
 
     let gpu = Gpu::new(zipdepth::net::PIPELINES);
     let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
-        eprintln!("brain depth: loading {weights}: {e}");
+        eprintln!("brain zipdepth: loading {weights}: {e}");
         std::process::exit(1);
     });
     let stats = zipdepth::collect_activation_stats_sized(&gpu, &cfg, &ps, &imgs);
     let report = stats.report();
 
-    // Encoder vs decoder summary — the QuartDepth question.
+    // Encoder vs decoder summary - the QuartDepth question.
     let mean = |it: &[&zipdepth::LayerReport]| -> f32 {
         if it.is_empty() {
             0.0
@@ -892,14 +893,14 @@ fn build_npu_session(weights: &str, cfg: &ZipConfig, th: u32, tw: u32) -> npu::o
     use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
     assert!(!cfg.upsample_unfold, "--infer npu needs the blend (npu) checkpoint");
     let init = zipdepth::import::load(weights, cfg).unwrap_or_else(|e| {
-        eprintln!("brain depth: loading {weights}: {e}");
+        eprintln!("brain zipdepth: loading {weights}: {e}");
         std::process::exit(1);
     });
     let mut g = onnx::GraphBuilder::new("zipdepth");
     npu::build_depth_graph_hw(cfg, &init, th, tw, &mut g);
     let sess = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
         .unwrap_or_else(|e| {
-            eprintln!("brain depth: NPU compile failed: {e}");
+            eprintln!("brain zipdepth: NPU compile failed: {e}");
             std::process::exit(1);
         });
     eprintln!("depth: compiled ZipDepth {tw}x{th} for {}", sess.device());
@@ -929,7 +930,7 @@ fn run_npu_session(sess: &mut npu::openvino::NpuSession, hwc: &[f32], w0: u32, h
         }
     }
     let out = sess.run(&chw, [1, 3, th as usize, tw as usize]).unwrap_or_else(|e| {
-        eprintln!("brain depth: NPU inference failed: {e}");
+        eprintln!("brain zipdepth: NPU inference failed: {e}");
         std::process::exit(1);
     });
     imaging::resize_bilinear_hwc(&out.tensors[0].2, 1, tw, th, w0, h0)

@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain lfm …` — import / run the LFM2.5-Encoder (bidirectional hybrid
+//! `brain lfm2 …` - import / run the LFM2.5-Encoder (bidirectional hybrid
 //! short-conv/attention encoder, tied MLM head). Uses the shared `args` grammar.
 //!
-//!   brain lfm import    --hf <dir> --out lfm.safetensors
-//!   brain lfm fill-mask --weights F --tokenizer tokenizer.json --text "… <|mask|> …"
-//!                       [--topk K]
-//!   brain lfm embed     --weights F --tokenizer tokenizer.json
-//!                       (--text "…" | --input FILE) [--out emb.f32] [--seq T]
+//!   brain lfm2 import    --hf <dir> --out lfm.safetensors
+//!   brain lfm2 fill-mask --weights F --tokenizer tokenizer.json --text "… <|mask|> …"
+//!                        [--topk K]
+//!   brain lfm2 embed     --weights F --tokenizer tokenizer.json
+//!                        (--text "…" | --input FILE) [--out emb.f32] [--seq T]
+//!
+//! `infer` is accepted as an alias for `fill-mask` -- the canonical verb
+//! every architecture answers to, here the mask-filling demo action.
 //!
 //! Both inference verbs run the chunked long-context path (bounded attention
 //! slab), so an 8k-token input works on any backend within the binding budget.
@@ -28,12 +31,12 @@ const SLAB_BUDGET: u64 = 512 << 20;
 pub fn run_lfm(argv: &[String]) {
     match argv.first().map(|s| canon_verb(s)) {
         Some("import") => import(&argv[1..]),
-        Some("fill-mask") | Some("fillmask") => fill_mask(&argv[1..]),
+        Some("fill-mask") | Some("fillmask") | Some("infer") => fill_mask(&argv[1..]),
         Some("embed") => embed(&argv[1..]),
         Some("data") => data_prep(&argv[1..]),
         Some("finetune") => finetune(&argv[1..]),
         Some("eval") => eval(&argv[1..]),
-        other => eprintln!("usage: brain lfm <import|fill-mask|embed|data|finetune|eval> ...  (got {other:?})"),
+        other => eprintln!("usage: brain lfm2 <import|fill-mask|embed|data|finetune|eval> ...  (got {other:?})"),
     }
 }
 
@@ -58,7 +61,7 @@ fn data_prep(argv: &[String]) {
     let val_frac = a.f32_or("--val-frac", 0.05);
     a.finish();
     let (Some(input), Some(tokenizer)) = (input, tokenizer) else {
-        eprintln!("usage: brain lfm data --input corpus.txt --tokenizer tokenizer.json --out data/lfm [--val-frac 0.05]");
+        eprintln!("usage: brain lfm2 data --input corpus.txt --tokenizer tokenizer.json --out data/lfm [--val-frac 0.05]");
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);
@@ -89,7 +92,7 @@ fn finetune(argv: &[String]) {
     let seed = a.u32_or("--seed", 0) as u64;
     a.finish();
     let (Some(weights), Some(tokenizer)) = (weights, tokenizer) else {
-        eprintln!("usage: brain lfm finetune --weights F --tokenizer T [--data D --out F --steps N --batch B --seq T --lr X --seed K]");
+        eprintln!("usage: brain lfm2 finetune --weights F --tokenizer T [--data D --out F --steps N --batch B --seq T --lr X --seed K]");
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);
@@ -129,7 +132,7 @@ fn eval(argv: &[String]) {
     let seed = a.u32_or("--seed", 0) as u64;
     a.finish();
     let (Some(weights), Some(tokenizer)) = (weights, tokenizer) else {
-        eprintln!("usage: brain lfm eval --weights F --tokenizer T [--data D --batches N --batch B --seq T --seed K]");
+        eprintln!("usage: brain lfm2 eval --weights F --tokenizer T [--data D --batches N --batch B --seq T --seed K]");
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);
@@ -149,7 +152,7 @@ fn import(argv: &[String]) {
     let out = a.str_or("--out", "out/lfm.safetensors");
     a.finish();
     let Some(hf) = hf else {
-        eprintln!("usage: brain lfm import --hf <hf_checkpoint_dir> --out lfm.safetensors");
+        eprintln!("usage: brain lfm2 import --hf <hf_checkpoint_dir> --out lfm.safetensors");
         std::process::exit(2);
     };
     if let Some(parent) = std::path::Path::new(&out).parent() {
@@ -186,7 +189,7 @@ fn fill_mask(argv: &[String]) {
     let topk = a.u32_or("--topk", 5) as usize;
     a.finish();
     let (Some(tokenizer), Some(text)) = (tokenizer, text) else {
-        eprintln!("usage: brain lfm fill-mask --weights F --tokenizer tokenizer.json --text \"… <|mask|> …\" [--topk K]");
+        eprintln!("usage: brain lfm2 fill-mask --weights F --tokenizer tokenizer.json --text \"… <|mask|> …\" [--topk K]");
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);
@@ -245,7 +248,7 @@ fn embed(argv: &[String]) {
     let seq = a.u32_or("--seq", 0);
     a.finish();
     let Some(tokenizer) = tokenizer else {
-        eprintln!("usage: brain lfm embed --weights F --tokenizer tokenizer.json (--text \"…\" | --input FILE) [--out emb.f32] [--seq T]");
+        eprintln!("usage: brain lfm2 embed --weights F --tokenizer tokenizer.json (--text \"…\" | --input FILE) [--out emb.f32] [--seq T]");
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);

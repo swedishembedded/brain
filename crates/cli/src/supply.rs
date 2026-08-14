@@ -211,16 +211,27 @@ fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) -> Option<u
 /// rare case, and each just refetches into the same destination independently
 /// rather than corrupting anything (`brain_modelstore::fetch` writes via a
 /// temp file + atomic rename).
-pub fn ensure_default_weights(arch: &str) -> Result<String, String> {
+pub fn ensure_default_weights(arch: &str) -> Result<DefaultWeights, String> {
     let root = crate::model_dir::resolve(None).ok_or_else(|| "no models directory (no $HOME and no $BRAIN_MODELS_DIR)".to_string())?;
     ensure_default_weights_with(arch, &Store::new(root), &brain_modelstore::HfHub::new())
+}
+
+/// [`ensure_default_weights`]'s result: the weights path every architecture
+/// needs, plus the tokenizer path for the ones that also need one (a fetched
+/// HF checkpoint's `tokenizer.json`, when present) -- what lets
+/// [`crate::resolve::maybe_inject_default_weights`] inject both `--weights`
+/// and `--tokenizer` for a flagless `brain infer <arch>`.
+#[derive(Debug)]
+pub struct DefaultWeights {
+    pub weights: String,
+    pub tokenizer: Option<String>,
 }
 
 /// [`ensure_default_weights`]'s implementation, taking `store`/`hub`
 /// explicitly so it is testable against [`brain_modelstore::FakeHub`] with no
 /// real network or `$HOME` -- the same split every other fetch path in this
 /// file (`StoreSupplier`, `convert_*`) already uses.
-fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<String, String> {
+fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<DefaultWeights, String> {
     let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
     let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
@@ -249,7 +260,9 @@ fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Resu
     }
 
     let local = store.local(&reference).ok_or_else(|| format!("{default_ref}: fetched but not found on disk (unexpected)"))?;
-    local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{default_ref}: non-UTF8 store path"))
+    let weights = local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{default_ref}: non-UTF8 store path"))?;
+    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
+    Ok(DefaultWeights { weights, tokenizer })
 }
 
 /// One single-flight gate per model: the fetch's outcome plus the condvar
@@ -424,9 +437,9 @@ mod tests {
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
         let store = store("supply-test-default-weights-qwen3");
 
-        let path = ensure_default_weights_with("qwen3", &store, &hub).unwrap();
-        assert!(path.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{path}");
-        assert!(std::path::Path::new(&path).exists(), "{path} must actually exist on disk");
+        let got = ensure_default_weights_with("qwen3", &store, &hub).unwrap();
+        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{}", got.weights);
+        assert!(std::path::Path::new(&got.weights).exists(), "{} must actually exist on disk", got.weights);
     }
 
     #[test]
