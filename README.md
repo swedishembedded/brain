@@ -44,30 +44,97 @@ workload runtime that scales across both accelerators and nodes.
 make release                          # build the optimized ./target/release/brain
 make test                             # full test suite
 make gradcheck                        # backprop correctness gate (finite differences)
-
-# Train + evaluate the GPT baseline end to end:
-make data/calculator                  # generate a dataset
-make train/gpt/calculator             # -> out/gpt-calculator.safetensors
-make eval/gpt/calculator              # validation perplexity + task exact-match
 ```
 
+Every architecture is reachable through one grammar: `brain <verb>
+<architecture>` and `brain <architecture> <verb>` are the same command. For an
+architecture with a known small default checkpoint, `infer` needs no other
+flags at all -- brain fetches the weights, converts them, and runs:
+
+```bash
+brain infer qwen3 --prompt "The capital of France is"     # auto-fetches Qwen/Qwen3-0.6B
+brain infer yolov8 --image photo.ppm                       # auto-fetches Ultralytics/YOLOv8
+brain infer lfm2 --text "The capital of France is <|mask|>."  # auto-fetches LiquidAI/LFM2.5-350M
+```
+
+The first two are validated end to end on this box: `brain infer yolov8
+--image ...` fetched Ultralytics/YOLOv8 and returned real detections; `brain
+infer qwen3 --prompt ...` fetched Qwen/Qwen3-0.6B and generated a correct
+completion. `brain infer lfm2` runs the identical code path (LiquidAI/LFM2.5-350M
+is the smallest checkpoint of the three, ~650 MB) but its download did not
+finish inside this session's network budget -- expect it to work the same way
+qwen3 does, just note it hasn't been observed completing end to end here.
+
+Every other architecture is reachable the same way once you point it at
+weights (`brain caps <arch>` prints exactly what each takes; not every
+architecture has a confirmed small default checkpoint to auto-fetch yet):
+
+```bash
+brain caps                                                  # every architecture + its actions
+brain infer scrfd --in image=photo.ppm --json                # face detection (needs BRAIN_FACENET_DIR)
+brain infer glmdsa --weights F --prompt "..."                 # GLM-5.2 MoE decoder
+brain qwen3tts synth --text "..." --out out.wav               # voice synthesis
+brain zipdepth --image photo.ppm --weights zipdepth.pth       # monocular depth
+```
+
+Large architectures (Qwen3.5-35B-A3B, Qwen3-Omni-30B, FLUX.1/FLUX.2, SDXL) are
+deliberately not part of this list -- they need tens of GB of disk and are not
+something to fetch by accident. See their own pages in
+[`docs/models/`](docs/models/index.md) for sizing before you run them.
+
 See [`docs/introduction/quickstart.md`](docs/introduction/quickstart.md) for a
-walkthrough, including running a real LLM behind a local API in one command.
+fuller walkthrough, including running a local API in one command, and
+[`docs/using/cli.md`](docs/using/cli.md) for the complete CLI grammar.
 
-## Supported models
+## Model support
 
-A sample of what's covered — the full matrix (every model, what it supports,
-and its own page) is [`docs/models/index.md`](docs/models/index.md).
+Every model `brain caps` reports, with what it does and where its full page
+is. Toy architectures (`toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` --
+brain's own tasks, no upstream reference) are excluded here; see
+[`docs/models/index.md`](docs/models/index.md) for the complete catalog
+including those.
 
-| Task | Examples |
-|---|---|
-| Text | Qwen3 chat/tool-calling, a mixture-of-experts decoder, a nanoGPT-style baseline |
-| Vision | YOLOv8-style detection, monocular depth, promptable segmentation, face recognition, document OCR |
-| Image generation & editing | Text-to-image diffusion, face restoration, super-resolution |
-| Speech | Voice cloning / TTS, streaming and offline speech-to-text |
-| Forecasting | Probabilistic time-series and OHLCV forecasters, with LoRA fine-tuning |
-| 3D | Multi-view reconstruction, 3D Gaussian Splatting |
-| World models | Playable, action-conditioned video simulation |
+| Model id | Domain | What it does |
+|---|---|---|
+| [`Qwen/Qwen3-0.6B`](docs/models/qwen3.md) | Text | dense decoder chat/tool-calling, paged continuous-batching serving |
+| [`brain/qwen35moe`](docs/models/qwen35moe.md) | Text | Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder |
+| [`gpt2`](docs/models/gpt2.md) | Text | nanoGPT-style baseline, from-scratch training reference |
+| [`glmdsa`](docs/models/glmdsa.md) | Text | GLM-5.2 (MLA + sigmoid noaux_tc MoE + DSA) |
+| [`LiquidAI/LFM2.5-350M`](docs/models/lfm2.md) | Text | bidirectional encoder, fill-mask + embeddings, 8k context |
+| [`qwen3omnimoe`](docs/models/qwen3omnimoe/readme.md) | Multimodal | text/audio/image/video in, text + speech out (Thinker+Talker+Code2Wav) |
+| [`brain/qwenvl`](docs/models/qwen3vl.md) | Multimodal | general image + text -> text |
+| [`brain/fastvlm`](docs/models/fastvlm.md) | Multimodal | dedicated fast image captioning |
+| [`deepseek-ai/DeepSeek-OCR`](docs/models/deepseek2ocr.md) | Multimodal | document image -> text/markdown |
+| [`brain/nemotron`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
+| [`brain/qwen-asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
+| [`brain/tts`](docs/models/qwen3tts.md) | Audio | voice cloning / text-to-speech (Talker + MTP + codec) |
+| [`Ultralytics/YOLOv8`](docs/models/yolov8/readme.md) | Vision | from-scratch anchor-free object detection |
+| [`brain/depth`](docs/models/zipdepth.md) | Vision | monocular depth (pure-conv, realtime webcam) |
+| [`brain/sam2`](docs/models/sam2.md) | Vision | promptable segmentation |
+| [`brain/facenet`](docs/models/scrfd.md) | Vision | face detection + identity embedding |
+| [`brain/clip`](docs/models/clip.md) | Vision | text/image embeddings |
+| [`Tongyi-MAI/Z-Image-Turbo`](docs/models/s3dit.md) | Image | text-to-image diffusion (S3-DiT) |
+| [`brain/flux2-klein`](docs/models/flux2.md) | Image | text-to-image + editing (MMDiT) |
+| [`brain/restore`](docs/models/codeformer.md) | Image | blind face restoration |
+| [`brain/upscale`](docs/models/rrdbnet.md) | Image | super-resolution |
+| [`brain/vqgan`](docs/models/vqgan.md) | Image | VQ autoencoder (CodeFormer's codebook) |
+| [`worldmirror2`](docs/models/worldmirror2.md) | 3D | multi-view images -> 3D Gaussian Splatting scene |
+| [`splat`](docs/models/splat.md) | 3D | 3D Gaussian Splatting viewer/renderer |
+| [`brain/chronos2`](docs/models/chronos2.md) | Forecasting | probabilistic time-series forecasting |
+| [`brain/fincast`](docs/models/fincast.md) | Forecasting | patched decoder + sparse MoE forecasting |
+| [`brain/kronos`](docs/models/kronos.md) | Forecasting | OHLCV candlestick forecasting |
+| [`diamond`](docs/models/diamond.md) | World models | playable, action-conditioned Atari-100k simulation |
+| [`brain/imgpipe`](docs/models/imgpipe.md) | Vision | composable image-processing pipeline (D-Bus only) |
+
+`brain caps --json` is the live, weights-free source of truth this table is
+checked against (`tests/e2e/model_table_check.py`); the model id column names
+what `brain caps`/D-Bus/HTTP actually serve today. Where that id still reads
+as a pre-rename crate name (`brain/qwenvl`, `brain/depth`, `brain/tts`, ...)
+rather than its architecture id (`qwen3vl`, `zipdepth`, `qwen3tts`), that is
+this catalog's own internal dispatch key, not something you type -- the CLI
+column you actually run is the architecture id (`brain infer qwen3vl`, `brain
+zipdepth --image ...`, `brain qwen3tts synth ...`); unifying the two is
+tracked follow-up work, not yet done.
 
 ## Where to go next
 
