@@ -36,7 +36,7 @@ impl UpscaleResident {
 
     /// Direct constructor for callers that already hold the path (e.g. `brain
     /// perf`'s `upscale:<weights>` target) — no env round-trip: that pattern
-    /// shipped this exact target dead (`BRAIN_UPSCALE_WEIGHTS` set, the var
+    /// shipped this exact target dead (`BRAIN_RRDBNET_WEIGHTS` set, the var
     /// above read).
     pub fn new(path: impl Into<String>) -> Option<UpscaleResident> {
         let path = path.into();

@@ -43,9 +43,9 @@ fn tokens(cfg: &GptConfig) -> (Vec<u32>, Vec<u32>) {
 /// model is built so `linear_kernel` sees it at dispatch-record time.
 fn run(backend: Backend, naive_mm: bool, reps: usize) -> (Vec<f32>, f64) {
     if naive_mm {
-        std::env::set_var("BRAIN_GPT_NAIVE_MM", "1");
+        std::env::set_var("BRAIN_GPT2_NAIVE_MM", "1");
     } else {
-        std::env::remove_var("BRAIN_GPT_NAIVE_MM");
+        std::env::remove_var("BRAIN_GPT2_NAIVE_MM");
     }
     set_default_backend(backend);
     let c = cfg();

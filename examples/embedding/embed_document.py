@@ -13,8 +13,8 @@ forward; different devices run in parallel lanes.
 Run under a private session bus (weights + tokenizer via env):
 
     dbus-run-session -- bash -c '
-      BRAIN_LFM=out/lfm-230m.weights \
-      BRAIN_LFM_TOKENIZER=/path/to/tokenizer.json \
+      BRAIN_LFM2=out/lfm-230m.weights \
+      BRAIN_LFM2_TOKENIZER=/path/to/tokenizer.json \
       brain serve --dbus & sleep 2
       python3 examples/embedding/embed_document.py --input README.md --concurrent 4'
 
@@ -81,7 +81,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_LFM + BRAIN_LFM_TOKENIZER")
+            skip(f"{args.model!r} not served (models: {models}); set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER")
 
         # Warm-up (weight upload + graph build for this length) — never timed.
         print("warm-up:")

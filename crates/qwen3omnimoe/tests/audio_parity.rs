@@ -11,7 +11,7 @@
 //! `thinker.audio_tower.*` (shard 1 of 15 for the released model) is not on
 //! disk, per the engine's standard opt-in-env-var test pattern.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test audio_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ use qwen3asr::encoder::{audio_pipelines, AudioEncoder};
 type FusedQkv = (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>);
 
 fn shard_with_audio_tower() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
+    let dir = PathBuf::from(std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok()?);
     let idx_path = dir.join("model.safetensors.index.json");
     let idx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&idx_path).ok()?).ok()?;
     let weight_map = idx["weight_map"].as_object()?;
@@ -49,7 +49,7 @@ fn golden_mel(num_mel: u32, n_frames: u32) -> Vec<f32> {
 #[ignore]
 fn matches_the_real_audio_tower() {
     let Some(shard) = shard_with_audio_tower() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.audio_tower");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.audio_tower");
         return;
     };
     let golden_path =

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-TTS's capabilities behind the generalized [`capability`] interface —
+//! Qwen3-TTS's capabilities behind the generalized [`capability`] interface -
 //! what makes `brain caps tts` / `brain do tts synth …` (and the perf suite's
 //! `CapabilityTarget`) work with no tts-specific plumbing in the CLI.
 //!
@@ -9,7 +9,7 @@
 //! `brain tts synth` runs ([`crate::pipeline::synth`]: Talker KV decode + MTP
 //! residual fill + codec decode, 24 kHz). One-shot: the wav is the single
 //! artifact. Like `pipeline::synth` itself (and the `TtsResident` adapter),
-//! the weights load per call — the load-once seam (`serve::TtsEngine`) is
+//! the weights load per call - the load-once seam (`serve::TtsEngine`) is
 //! OpenVINO/NPU-only, so there is nothing resident to cache here without
 //! duplicating the pipeline internals.
 
@@ -30,7 +30,7 @@ pub const MODEL: &str = "brain/tts";
 /// Qwen3-TTS output sample rate (see [`crate::pipeline`] / `brain tts synth`).
 const SAMPLE_RATE: u32 = 24_000;
 
-/// The full, static capability manifest — safe to build with no weights loaded.
+/// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let synth = ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)")
         .param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required())
@@ -42,14 +42,14 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech as a 24 kHz mono WAV"));
-    Manifest::new(MODEL, "Qwen3-TTS voice synthesis — text to 24 kHz speech (Talker + MTP + codec).", vec![synth])
+    Manifest::new(MODEL, "Qwen3-TTS voice synthesis - text to 24 kHz speech (Talker + MTP + codec).", vec![synth])
 }
 
 /// The env-configured RESIDENT surface's `speak` action (`cli::resident_tts::
-/// TtsResident` — weights resolved from `BRAIN_TTS_WEIGHTS`/`BRAIN_TTS_CKPT`
+/// TtsResident` - weights resolved from `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT`
 /// at registration, so no path params; declares the audio output the
 /// instance actually emits). Lives HERE, next to [`manifest`]'s `synth`
-/// spec, so the two surfaces' specs cannot silently diverge — the resident
+/// spec, so the two surfaces' specs cannot silently diverge - the resident
 /// used to build its own private Manifest in `crates/cli`.
 pub fn speak_spec() -> ActionSpec {
     ActionSpec::new("speak", "synthesize speech from text (Qwen3-TTS, 24 kHz f32 PCM)")
@@ -62,7 +62,7 @@ pub fn speak_spec() -> ActionSpec {
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: raw mono f32 little-endian PCM at 24 kHz"))
 }
 
-/// The resident (D-Bus/HTTP) manifest — [`speak_spec`] under the same
+/// The resident (D-Bus/HTTP) manifest - [`speak_spec`] under the same
 /// [`MODEL`] id the catalog's [`manifest`] uses.
 pub fn resident_manifest() -> Manifest {
     Manifest::new(MODEL, "text-to-speech (Qwen3-TTS Talker + MTP + codec)", vec![speak_spec()])

@@ -27,7 +27,7 @@
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard holding
 //! `thinker.model.layers.0.*` (shard 1, same shard M4/M5 use) is absent.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test thinker_layer_parity -- --ignored --nocapture`
 
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ use qwen3omnimoe::thinker::{layer_fwd, thinker_pipelines, ThinkerLayerWeights};
 use qwen3vl::mrope::{get_rope_index, mrope_tables};
 
 fn shard_with_layer0() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
+    let dir = PathBuf::from(std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok()?);
     let idx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("model.safetensors.index.json")).ok()?).ok()?;
     let shard = idx["weight_map"].as_object()?.get("thinker.model.layers.0.mlp.gate.weight")?.as_str()?;
     let p = dir.join(shard);
@@ -57,7 +57,7 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_thinker_layer0() {
     let Some(shard) = shard_with_layer0() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.model.layers.0");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.model.layers.0");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_layer0.safetensors");

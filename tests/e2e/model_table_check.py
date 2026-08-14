@@ -20,7 +20,7 @@ have no weights-free `caps::manifest()` and so never appear in `brain caps` at
 all — asserting the reverse would fail on models that are correctly documented.
 
 KNOWN BLIND SPOT: residency-registered models gated on env vars (e.g.
-`brain/omni` behind BRAIN_OMNI_HF_DIR) are served over D-Bus/HTTP without ever
+`brain/omni` behind BRAIN_QWEN3OMNIMOE_HF_DIR) are served over D-Bus/HTTP without ever
 appearing in `brain caps`, so this guard cannot notice one missing from the
 table — omni's row was added by hand after exactly that slip. A weights-free
 "list residency registrations" surface would close the gap.

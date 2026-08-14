@@ -211,7 +211,7 @@ fast and scalable kernel — not a naive one.
     tensors; forward-parity-gated per stage at cosine 1.000000000 with **zero**
     code-index disagreements at every `w`. See `.agents/roadmap/restore.md`.
     **Serving contract met**: `restore::caps` (`restore_face`, `w` as a plain
-    float param), `resident_restore::RestoreResident` (`BRAIN_RESTORE_WEIGHTS`),
+    float param), `resident_restore::RestoreResident` (`BRAIN_CODEFORMER_WEIGHTS`),
     D-Bus `Run`, `examples/restore/`. *(Forward only: `adain=True` — the
     reference CLI's path — face detection/alignment, batch > 1, sizes ≠ 512² and
     backward/gradcheck are all deferred and listed in that ledger.)*
@@ -328,8 +328,8 @@ fast and scalable kernel — not a naive one.
     `brain/omni` takes (`omni::caps::chat_generate_spec`), so it serves
     `/v1/chat/completions` and `/v1/messages` rather than raw token ids only
     (`Executor::register_multi`, `crates/cli/src/resident_omni.rs::
-    int8_thinker_multi_from_env`, env `BRAIN_OMNI_INT8_CHECKPOINT` +
-    `BRAIN_OMNI_INT8_TOKENIZER_DIR`). Measured: **2.3 s/token vs 57.6
+    int8_thinker_multi_from_env`, env `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` +
+    `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`). Measured: **2.3 s/token vs 57.6
     s/token** for the streaming bf16 path, identical output, 16.9/16.7 GiB on
     two 24 GB cards. Text only - multimodal input and `speak` still require
     `brain/omni`; see `.agents/roadmap/omni.md`.
@@ -338,7 +338,7 @@ fast and scalable kernel — not a naive one.
     text in, greedy text out, `brain caps`/`brain do` (`crates/qwenvl/src/
     caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP);
     real-checkpoint coverage of the served path is a skip-if-absent smoke in
-    `qwenvl::caps::tests` (runs when `BRAIN_QWENVL_WEIGHTS` is set).
+    `qwenvl::caps::tests` (runs when `BRAIN_QWEN3VL_WEIGHTS` is set).
     Full ledger: `.agents/roadmap/omni.md`.
 13d. **FastVLM** (`crates/fastvlm`) — served VLM, `brain/fastvlm`: FastViTHD
     conv/attention vision tower + `mlp2x_gelu` projector spliced into a Qwen2
@@ -755,8 +755,8 @@ BRAIN_DEVICE=cpu make test            # whole suite on CPU, no GPU needed
 ```
 
 Event/stdio controller — an HFSM (`crates/runtime`) reads JSONL events on stdin
-and emits JSONL on stdout. `--gpt`/`--yolo` load real models (or `BRAIN_GPT`/
-`BRAIN_YOLO`); with neither, fake echo/detector models keep the loop usable:
+and emits JSONL on stdout. `--gpt`/`--yolo` load real models (or `BRAIN_GPT2`/
+`BRAIN_YOLOV8`); with neither, fake echo/detector models keep the loop usable:
 
 ```bash
 printf '{"event":"user_text","text":"hi"}\n' | ./target/release/brain run

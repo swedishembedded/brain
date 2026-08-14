@@ -23,7 +23,7 @@ spec by position rather than silently reordering.
 
 Run it against a private session bus:
 
-    BRAIN_SAM2_WEIGHTS=... BRAIN_RESTORE_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \\
+    BRAIN_SAM2_WEIGHTS=... BRAIN_CODEFORMER_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \\
       dbus-run-session -- bash -c '
         brain serve --dbus & sleep 3
         python3 examples/imaging/edit_pipeline.py --image photo.ppm --point 614,430'

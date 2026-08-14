@@ -9,7 +9,7 @@ a running `brain serve --dbus`, feeding each as fast as possible, and reports pe
 throughput, real-time factor (RTF), first-/final-segment latency, and the scheduler's
 batch counters (proof that concurrent windows actually batched).
 
-    BRAIN_NEMOTRON=$BRAIN_TESTDATA/asr/nemotron/hf \
+    BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
       dbus-run-session -- bash -c '
         brain serve --dbus --device cpu & sleep 2
         python3 examples/asr/bench_streams.py --model brain/nemotron \

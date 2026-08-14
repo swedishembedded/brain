@@ -6,7 +6,7 @@
 //! Golden fixture (`testdata/golden/vae/zimage_vae_decode.safetensors`, fetched):
 //! a fixed latent `[1,16,8,8]` and diffusers' `vae.decode(z).sample`
 //! `[1,3,64,64]`, baked by `tools/goldens/vae_dump_reference.py`.
-//! The 168 MB reference weights are NOT committed — point `BRAIN_ZIMAGE_VAE` at
+//! The 168 MB reference weights are NOT committed - point `BRAIN_S3DIT_VAE` at
 //! `.../z-image/weights/vae/diffusion_pytorch_model.safetensors` (a default
 //! resources path is tried); the test skips if absent (like brain's other
 //! weight-gated tests). Runs on the CPU backend (deterministic, no GPU needed).
@@ -52,18 +52,18 @@ fn psnr(a: &[f32], b: &[f32]) -> f64 {
 fn zimage_vae_decode_matches_diffusers() {
     let fixture = testdata("golden/vae/zimage_vae_decode.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata`");
         return;
     }
-    let vae_path = match std::env::var("BRAIN_ZIMAGE_VAE") {
+    let vae_path = match std::env::var("BRAIN_S3DIT_VAE") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_ZIMAGE_VAE to the Z-Image vae/ safetensors");
+            eprintln!("SKIP: set BRAIN_S3DIT_VAE to the Z-Image vae/ safetensors");
             return;
         }
     };
     if !Path::new(&vae_path).exists() {
-        eprintln!("SKIP: BRAIN_ZIMAGE_VAE={vae_path} not found");
+        eprintln!("SKIP: BRAIN_S3DIT_VAE={vae_path} not found");
         return;
     }
 

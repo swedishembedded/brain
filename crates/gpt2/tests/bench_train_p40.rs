@@ -24,8 +24,8 @@ const B: usize = 4;
 const T: usize = 256;
 
 fn run(naive: bool, reps: usize) -> (f64, Vec<f32>) {
-    if naive { std::env::set_var("BRAIN_GPT_NAIVE_MM", "1"); }
-    else { std::env::remove_var("BRAIN_GPT_NAIVE_MM"); }
+    if naive { std::env::set_var("BRAIN_GPT2_NAIVE_MM", "1"); }
+    else { std::env::remove_var("BRAIN_GPT2_NAIVE_MM"); }
     set_default_backend(Backend::Wgpu);
     let c = cfg();
     let init = gpt2::init_weights(&c, 1234);

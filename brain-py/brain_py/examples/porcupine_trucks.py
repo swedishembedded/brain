@@ -14,7 +14,7 @@ Run:
     python -m brain_py.examples.porcupine_trucks           # 512x512, int8
     OUT=/tmp SIZE=384 STEPS=8 python -m brain_py.examples.porcupine_trucks
 
-Needs the Z-Image weight paths in the environment (BRAIN_ZIMAGE_DIT/_VAE/_QWEN/
+Needs the Z-Image weight paths in the environment (BRAIN_S3DIT_DIT/_VAE/_QWEN/
 _TOKENIZER); this script fills in the on-box defaults if they are unset.
 """
 import os
@@ -24,7 +24,7 @@ import time
 # Weight locations are configuration, never hard-coded — the server reads them
 # from the environment. Fail fast (with guidance) if they are not set, rather than
 # baking in machine-specific paths.
-_REQUIRED = ["BRAIN_ZIMAGE_DIT", "BRAIN_ZIMAGE_VAE", "BRAIN_ZIMAGE_QWEN", "BRAIN_ZIMAGE_TOKENIZER"]
+_REQUIRED = ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"]
 _missing = [k for k in _REQUIRED if not os.environ.get(k)]
 if _missing:
     sys.stderr.write(

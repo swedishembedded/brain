@@ -230,8 +230,8 @@ HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
 EVENT/STDIO CONTROLLER
   brain serve --stdio [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
       Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
-      on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT),
-      a fake echo model runs; with no --yolo (or BRAIN_YOLO), a fake detector runs,
+      on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT2),
+      a fake echo model runs; with no --yolo (or BRAIN_YOLOV8), a fake detector runs,
       so the loop is usable without a trained checkpoint.
       Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
@@ -271,7 +271,7 @@ GLM-5.2 (MLA + sigmoid noaux_tc MoE)
 QWEN3-OMNI (text/audio/image/video in, text + speech out)
   brain qwen3omnimoe import --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
       # brain-native W8A16 checkpoint for the GPU-resident sharded Thinker
-      # (serve it with BRAIN_OMNI_INT8_CHECKPOINT=<out>)
+      # (serve it with BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=<out>)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 import    --hf <dir> --out lfm.safetensors

@@ -806,7 +806,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     );
     let info = vec![
         ("weights".to_string(), serde_json::json!(weights)),
-        ("batch".to_string(), serde_json::json!(std::env::var("BRAIN_LFM_BATCH").unwrap_or_else(|_| "2".into()))),
+        ("batch".to_string(), serde_json::json!(std::env::var("BRAIN_LFM2_BATCH").unwrap_or_else(|_| "2".into()))),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1257,7 +1257,7 @@ fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         }
         (p[0], p[1], p[2])
     };
-    for var in ["BRAIN_ZIMAGE_DIT", "BRAIN_ZIMAGE_VAE", "BRAIN_ZIMAGE_QWEN", "BRAIN_ZIMAGE_TOKENIZER"] {
+    for var in ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"] {
         if std::env::var(var).map(|v| v.is_empty()).unwrap_or(true) {
             return Err(format!("zimage target needs {var} set"));
         }

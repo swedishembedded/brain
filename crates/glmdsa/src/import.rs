@@ -4,8 +4,8 @@
 //! Import a HuggingFace GLM-5.2 (`glm_moe_dsa`) checkpoint (`config.json` +
 //! single or sharded `model.safetensors`) into a brain `.safetensors` container.
 //!
-//! Convention: brain's `matmul` is `out = x·Wᵀ` with `W:[out,in]` row-major —
-//! exactly HF `nn.Linear.weight` — so linears are **not transposed**. Two HF
+//! Convention: brain's `matmul` is `out = x·Wᵀ` with `W:[out,in]` row-major -
+//! exactly HF `nn.Linear.weight` - so linears are **not transposed**. Two HF
 //! structures need reshaping into brain's split-projection layout (see
 //! `config.rs`):
 //!   * **Row de-interleave**: HF `q_b_proj` `[H*(nope+rope), q_lora]`,
@@ -16,7 +16,7 @@
 //!     `[E, 2*moe_ff, d]` (gate‖up fused) and `experts.down_proj` `[E, d, moe_ff]`;
 //!     brain uses per-expert `gate`/`up`/`down`.
 //! Phase-2 tensors (the DSA `indexer.*`) and any MTP (`layers.{n_layers}.*`) are
-//! dropped — the Phase-1 model does not carry them.
+//! dropped - the Phase-1 model does not carry them.
 
 use std::path::Path;
 
@@ -98,7 +98,7 @@ fn split_heads(src: &[f32], h: usize, a: usize, bdim: usize, inw: usize) -> (Vec
 }
 
 /// Transform one HF source tensor into 0, 1, or 2·E brain-named `(name, data)`
-/// pairs — the same match as the eager importer, just returning outputs
+/// pairs - the same match as the eager importer, just returning outputs
 /// instead of inserting them into a HashMap. `dropped` tallies skipped source
 /// tensors (indexer/MTP/tied) for the final log line.
 fn transform_tensor(n: &str, data: Vec<f32>, cfg: &GlmConfig, dropped: &mut usize) -> Result<Vec<(String, Vec<f32>)>, String> {
@@ -174,7 +174,7 @@ fn transform_tensor(n: &str, data: Vec<f32>, cfg: &GlmConfig, dropped: &mut usiz
         "mlp.shared_experts.gate_proj.weight" => vec![(bp("moe.shared.gate.weight"), data)],
         "mlp.shared_experts.up_proj.weight" => vec![(bp("moe.shared.up.weight"), data)],
         "mlp.shared_experts.down_proj.weight" => vec![(bp("moe.shared.down.weight"), data)],
-        // packed routed experts: gate_up_proj [E, 2*moe_ff, d], down_proj [E, d, moe_ff] — this
+        // packed routed experts: gate_up_proj [E, 2*moe_ff, d], down_proj [E, d, moe_ff] - this
         // one source tensor is held once (up to hundreds of MB across 256 experts) for exactly
         // as long as it takes to slice its 2·E outputs, then dropped by the caller.
         "mlp.experts.gate_up_proj" => {
@@ -205,7 +205,7 @@ fn transform_tensor(n: &str, data: Vec<f32>, cfg: &GlmConfig, dropped: &mut usiz
 
 /// Import `<hf_dir>` (config.json + single/sharded safetensors) into `out_path`.
 /// Validates full coverage of the model's parameter list; fails loudly (never
-/// writes a partial checkpoint). Streams one HF source tensor at a time — the
+/// writes a partial checkpoint). Streams one HF source tensor at a time - the
 /// only tensor ever fully materialized is the packed-expert one, and only for
 /// the duration of producing its own per-expert outputs.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
@@ -224,7 +224,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
     let plan: Vec<(String, Vec<u64>)> =
         cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     // A card so this file auto-serves from the global model directory (P2) with
-    // no BRAIN_GLM_WEIGHTS env var — id defaults to the output filename stem,
+    // no BRAIN_GLMDSA_WEIGHTS env var - id defaults to the output filename stem,
     // matching how the model dir keys catalog entries, unless the caller
     // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();

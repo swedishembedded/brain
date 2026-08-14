@@ -10,7 +10,7 @@
 //! `tools/goldens/vae_dump_reference.py` only bakes the decode direction; a
 //! `<something>_encode` counterpart does not exist in this repo. This VAE has no
 //! `quant_conv`, so the posterior parameters are exactly the encoder `conv_out`
-//! that brain's `VaeEncoder` returns. Weights gated on `BRAIN_ZIMAGE_VAE` (skips
+//! that brain's `VaeEncoder` returns. Weights gated on `BRAIN_S3DIT_VAE` (skips
 //! if absent). CPU backend by default; `BRAIN_VAE_DEVICE=gpu` runs it on wgpu.
 
 use std::collections::HashMap;
@@ -47,15 +47,15 @@ fn zimage_vae_encode_matches_diffusers() {
         eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
         return;
     }
-    let vae_path = match std::env::var("BRAIN_ZIMAGE_VAE") {
+    let vae_path = match std::env::var("BRAIN_S3DIT_VAE") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_ZIMAGE_VAE to the Z-Image vae/ safetensors");
+            eprintln!("SKIP: set BRAIN_S3DIT_VAE to the Z-Image vae/ safetensors");
             return;
         }
     };
     if !Path::new(&vae_path).exists() {
-        eprintln!("SKIP: BRAIN_ZIMAGE_VAE={vae_path} not found");
+        eprintln!("SKIP: BRAIN_S3DIT_VAE={vae_path} not found");
         return;
     }
 

@@ -111,12 +111,12 @@ mod tests {
     /// (synthetic weights, OpenVINO CPU); this test proves the omni-specific
     /// wiring (weight loading + naming, config mapping) holds against a real
     /// checkpoint's actual tensor shapes/names. Run:
-    ///   BRAIN_OMNI_HF_DIR=/path/to/hf/dir \
+    ///   BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/hf/dir \
     ///   cargo test -p brain-omni npu_export_builds_real_graphs -- --ignored --nocapture
     #[test]
     #[ignore]
     fn npu_export_builds_real_graphs() {
-        let dir = std::env::var("BRAIN_OMNI_HF_DIR").expect("set BRAIN_OMNI_HF_DIR");
+        let dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").expect("set BRAIN_QWEN3OMNIMOE_HF_DIR");
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&dir)).expect("open checkpoint");
         let config_json = std::fs::read_to_string(std::path::Path::new(&dir).join("config.json")).expect("read config.json");
         let root: serde_json::Value = serde_json::from_str(&config_json).expect("parse config.json");

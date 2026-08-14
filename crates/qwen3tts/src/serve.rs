@@ -78,13 +78,13 @@ pub struct TtsEngine {
     // Resident NPU MTP (INT8 KV-cache decode graph). When present it replaces the
     // host `CpuMtp` in the generation loop — ~87ms/frame vs ~580ms on the large
     // 1.7B (the host MTP re-streams its ~300MB fp32 weights 16x/frame and is
-    // memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_TTS_MTP=cpu`.
+    // memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_QWEN3TTS_MTP=cpu`.
     mtp_npu: Option<crate::npu_gen::KvMtp>,
     kv: KvTalker,
     codec_sessions: HashMap<usize, CodecSession>,
-    // Pure-CPU stateful streaming codec (BRAIN_TTS_CODEC=cpu-stream); lazily loaded.
+    // Pure-CPU stateful streaming codec (BRAIN_QWEN3TTS_CODEC=cpu-stream); lazily loaded.
     cpu_codec: Option<StreamingCodecDecoder>,
-    // NPU stateful streaming codec (BRAIN_TTS_CODEC=npu-stream); lazily loaded.
+    // NPU stateful streaming codec (BRAIN_QWEN3TTS_CODEC=npu-stream); lazily loaded.
     npu_codec: Option<NpuStreamCodec>,
     // Clone-mode, encoded once at load:
     ref_code: Option<Vec<u32>>,
@@ -116,8 +116,8 @@ impl TtsEngine {
 
         // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
         // graph beats the host CpuMtp on the large model. Default on for d_model>=2048;
-        // `BRAIN_TTS_MTP=cpu` forces the host path, `=npu` forces it on.
-        let want_npu_mtp = match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
+        // `BRAIN_QWEN3TTS_MTP=cpu` forces the host path, `=npu` forces it on.
+        let want_npu_mtp = match std::env::var("BRAIN_QWEN3TTS_MTP").ok().as_deref() {
             Some("cpu") => false,
             Some("npu") => true,
             _ => tables.cfg.d_model >= 2048,
@@ -147,7 +147,7 @@ impl TtsEngine {
         } else {
             "host CpuMtp"
         };
-        let codec_place = match std::env::var("BRAIN_TTS_CODEC").ok().as_deref() {
+        let codec_place = match std::env::var("BRAIN_QWEN3TTS_CODEC").ok().as_deref() {
             Some("windowed") => "NPU windowed",
             Some("cpu-stream") => "CPU streaming (reference)",
             _ => "NPU streaming (stateful)",
@@ -251,7 +251,7 @@ impl TtsEngine {
         // Codec backend `cpu-stream`: the pure-CPU *stateful* streaming decoder —
         // each chunk decodes ONLY its new frames (no warmup re-decode), emitting
         // audio progressively. Generate the full codes, then stream-decode.
-        if std::env::var("BRAIN_TTS_CODEC").map(|v| v == "cpu-stream").unwrap_or(false) {
+        if std::env::var("BRAIN_QWEN3TTS_CODEC").map(|v| v == "cpu-stream").unwrap_or(false) {
             let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
                 match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
             let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
@@ -262,7 +262,7 @@ impl TtsEngine {
                 let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
                 self.cpu_codec = Some(StreamingCodecDecoder::load(&codec_path));
             }
-            let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+            let chunk = std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
             let dec = self.cpu_codec.as_ref().unwrap();
             let mut total = 0usize;
             dec.decode_streaming_cb(&codes, chunk, &mut |pcm, seq| {
@@ -278,9 +278,9 @@ impl TtsEngine {
         // Codec backend `npu-stream` (DEFAULT): the NPU *stateful* streaming
         // decoder — front graph once, then the streaming-back graph per chunk
         // carrying per-conv state (no warmup re-decode). Exact and ~faster than the
-        // windowed path. `BRAIN_TTS_CODEC=windowed` forces the old sliding-window
+        // windowed path. `BRAIN_QWEN3TTS_CODEC=windowed` forces the old sliding-window
         // path below.
-        if std::env::var("BRAIN_TTS_CODEC").map(|v| v != "windowed").unwrap_or(true) {
+        if std::env::var("BRAIN_QWEN3TTS_CODEC").map(|v| v != "windowed").unwrap_or(true) {
             let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
                 match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
             let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
@@ -290,7 +290,7 @@ impl TtsEngine {
             if self.npu_codec.is_none() {
                 let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
                 let front_t = self.kv.cap();
-                let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+                let chunk = std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
                 self.npu_codec = Some(NpuStreamCodec::load(
                     &codec_path,
                     front_t,
@@ -312,8 +312,8 @@ impl TtsEngine {
         // newest `chunk` frames' audio is emitted. Gaps between chunks are fine
         // (fast hardware keeps up). One resident codec session at length `win`.
         let envn = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let chunk = envn("BRAIN_TTS_STREAM_CHUNK", 16).max(1);
-        let win = codec_bucket(envn("BRAIN_TTS_STREAM_WIN", 32).max(chunk));
+        let chunk = envn("BRAIN_QWEN3TTS_STREAM_CHUNK", 16).max(1);
+        let win = codec_bucket(envn("BRAIN_QWEN3TTS_STREAM_WIN", 32).max(chunk));
         if !self.codec_sessions.contains_key(&win) {
             let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
             let s = open_codec_session(&codec_path, win, self.cfg.device, true, Some(Path::new(&self.cfg.npu_cache)))?;

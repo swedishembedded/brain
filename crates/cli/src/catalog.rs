@@ -243,7 +243,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: codeformer::caps::manifest,
             provider: from_env!(
                 codeformer::caps::RestoreProvider::from_env,
-                "set BRAIN_RESTORE_WEIGHTS to an existing codeformer.pth (or its directory)"
+                "set BRAIN_CODEFORMER_WEIGHTS to an existing codeformer.pth (or its directory)"
             ),
             resident: resident!(crate::resident_restore::RestoreResident::from_env),
         },
@@ -292,7 +292,7 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: nemotronasr::caps::manifest,
             provider: || {
-                let dir = env_path("BRAIN_NEMOTRON", "a Nemotron 3.5 ASR checkpoint dir")?;
+                let dir = env_path("BRAIN_NEMOTRONASR", "a Nemotron 3.5 ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
                     nemotronasr::caps::manifest,
                     Box::new(move || {
@@ -306,7 +306,7 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
             provider: || {
-                let dir = env_path("BRAIN_QWEN_ASR", "a Qwen3-ASR checkpoint dir")?;
+                let dir = env_path("BRAIN_QWEN3ASR", "a Qwen3-ASR checkpoint dir")?;
                 Ok(Arc::new(LazyProvider::new(
                     qwen3asr::caps::manifest,
                     Box::new(move || {

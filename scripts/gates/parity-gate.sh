@@ -12,7 +12,7 @@
 #      CPU vs GPU logits in one process) and the device-local codec/MSE tests.
 #   3. The TTS NPU codec path matches the CPU reference (npu_stream_matches_cpu) —
 #      NPU == CPU for inference. Runs on the OpenVINO CPU device by default (set
-#      BRAIN_TTS_NPU_DEVICE=npu to exercise the real NPU); skipped without codec
+#      BRAIN_QWEN3TTS_NPU_DEVICE=npu to exercise the real NPU); skipped without codec
 #      weights.
 #
 # Usage:  scripts/gates/parity-gate.sh
@@ -53,10 +53,10 @@ run "model FD suites (MoE/ViT backward) — Vulkan backend" \
 run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
                                        env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
 
-codec="${BRAIN_CODEC_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
+codec="${BRAIN_MIMI_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
 if [ -f "$codec" ]; then
     run "TTS codec: NPU graph == CPU reference" \
-        env BRAIN_CODEC_WEIGHTS="$codec" cargo test --release -q -p brain-tts npu_stream_matches_cpu -- --ignored
+        env BRAIN_MIMI_WEIGHTS="$codec" cargo test --release -q -p brain-tts npu_stream_matches_cpu -- --ignored
 else
     echo "=== TTS NPU==CPU: SKIP (no codec weights at $codec) ==="; echo
 fi

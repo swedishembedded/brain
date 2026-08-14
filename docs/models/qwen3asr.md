@@ -21,7 +21,7 @@ Qwen3-1.7B decoder. For live/streaming transcription instead, see
 ## Getting the weights
 
 Model id: `brain/qwen-asr` (reserved vendor - never auto-fetched).
-`BRAIN_QWEN_ASR` - checkpoint directory (HF layout).
+`BRAIN_QWEN3ASR` - checkpoint directory (HF layout).
 
 ## Running it
 
@@ -29,7 +29,7 @@ Pass a WAV file directly - `--in audio=` decodes a RIFF/WAVE file, downmixes
 it to mono and resamples it to 16 kHz for you:
 
 ```bash
-BRAIN_QWEN_ASR=/path/to/qwen3-asr/hf \
+BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf \
   brain qwen3asr transcribe --in audio=clip.wav --out text=out.txt
 ```
 
@@ -41,7 +41,7 @@ header triggers decoding.
 Resident server (D-Bus):
 
 ```bash
-BRAIN_QWEN_ASR=/path/to/qwen3-asr/hf brain serve --dbus
+BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf brain serve --dbus
 ```
 
 Reference client:
@@ -54,11 +54,11 @@ protocol.
 
 - `prompt_id` - language-prompt id (default `0` = English).
 - `sample_rate` - input PCM sample rate; must be `16000`.
-- `BRAIN_QWEN_ASR_WINDOW` - audio window in seconds (default `30`); audio
+- `BRAIN_QWEN3ASR_WINDOW` - audio window in seconds (default `30`); audio
   longer than the window is truncated to its first window, not chunked -
   use [Nemotron](nemotronasr.md)'s streaming path for clips longer than
   the window.
-- `BRAIN_QWEN_ASR_MAXNEW` - max generated tokens (default `200`).
+- `BRAIN_QWEN3ASR_MAXNEW` - max generated tokens (default `200`).
 
 ## Hardware and limits
 

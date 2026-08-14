@@ -190,7 +190,7 @@ impl Action for TranscribeAction {
         let wav = wav_from_blob(blob)?;
         let truncated = window_truncation(self.inner.window_samples, &wav);
         if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN_ASR_WINDOW)")));
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN3ASR_WINDOW)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.inner.transcribe(&wav)?;

@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! CodeFormer face restoration behind the generalized [`capability`] interface
-//! — what makes `brain caps restore` / `brain do restore restore_face …`, the
+//! - what makes `brain caps restore` / `brain do restore restore_face …`, the
 //! D-Bus `Run` method and `brain perf`'s `CapabilityTarget` work with no
 //! restoration-specific plumbing in the CLI or the transports.
 //!
 //! One action, `restore_face`: a face image in, the restored face out, with the
 //! identity-fidelity dial `w` as a plain float param. `w` is a one-element
 //! device buffer read by `scale_add` ([`crate::model`]), so sweeping it across
-//! calls is a buffer write, not a graph rebuild — the resident instance is built
+//! calls is a buffer write, not a graph rebuild - the resident instance is built
 //! once and answers every `w`.
 //!
 //! # Geometry: 512² in, 512² out
@@ -26,7 +26,7 @@
 //! `crates/restore` is forward-only and takes an **aligned** face:
 //! detection + 5-point alignment live in
 //! `crates/facenet` and are not chained in here, because CodeFormer's alignment
-//! template is facexlib's 512² one and not `facenet::ARCFACE_DST_112` rescaled —
+//! template is facexlib's 512² one and not `facenet::ARCFACE_DST_112` rescaled -
 //! wiring the wrong template would silently degrade every restoration. An
 //! unaligned photo still restores; it just is not the reference recipe.
 
@@ -51,7 +51,7 @@ pub const MODEL: &str = "brain/restore";
 /// dispatches: `resize_bilinear` (the input is any size, the graph is 512²) and
 /// `film_chan` (the `[0,1] <-> [-1,1]` value-range affine, via `imaging::Ctx`).
 ///
-/// Appended, never reordered — `crate::model` and `vae::blocks::Builder` address
+/// Appended, never reordered - `crate::model` and `vae::blocks::Builder` address
 /// their kernel slots positionally, so extending at the tail keeps ONE kernel
 /// index space and leaves every existing slot valid. The test below pins that.
 ///
@@ -84,14 +84,14 @@ pub fn restore_spec() -> ActionSpec {
         .output(BlobSpec::new("image", Media::Image, "the restored 512x512 face, RGB in [0,1]"))
 }
 
-/// The full, static capability manifest — safe to build with no weights loaded.
+/// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "CodeFormer blind face restoration: a degraded face -> a restored one, with the fidelity dial w.", vec![restore_spec()])
 }
 
 /// Resolve the checkpoint: `path` may be `codeformer.pth` itself or the
 /// directory holding it (the layout `tests/parity.rs` and
-/// `BRAIN_RESTORE_WEIGHTS` already use).
+/// `BRAIN_CODEFORMER_WEIGHTS` already use).
 pub fn checkpoint_path(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -112,7 +112,7 @@ pub fn load(path: &str, gpu: Gpu) -> Result<CodeFormer, String> {
 
 // ===================== the shared work =====================
 
-/// A built CodeFormer — the single implementation of `restore_face`, shared by
+/// A built CodeFormer - the single implementation of `restore_face`, shared by
 /// the [`RestoreProvider`] and the residency adapter
 /// (`crates/cli/src/resident_restore.rs`).
 pub struct Session {
@@ -165,7 +165,7 @@ impl Session {
 
 // ===================== the provider =====================
 
-/// The executable CodeFormer behind the manifest. Construction is free — the
+/// The executable CodeFormer behind the manifest. Construction is free - the
 /// checkpoint imports lazily on the first call and stays resident.
 pub struct RestoreProvider {
     weights: String,
@@ -174,17 +174,17 @@ pub struct RestoreProvider {
 
 impl RestoreProvider {
     /// `weights` is `codeformer.pth` or the directory holding it; it comes from
-    /// a CLI flag or `BRAIN_RESTORE_WEIGHTS`, never a baked-in path.
+    /// a CLI flag or `BRAIN_CODEFORMER_WEIGHTS`, never a baked-in path.
     pub fn new(weights: impl Into<String>) -> RestoreProvider {
         RestoreProvider { weights: weights.into(), hot: Arc::new(Mutex::new(None)) }
     }
-    /// `BRAIN_RESTORE_WEIGHTS` — `None` when unset or when it does not resolve to
+    /// `BRAIN_CODEFORMER_WEIGHTS` - `None` when unset or when it does not resolve to
     /// a file that exists. Deliberately NOT falling back to `BRAIN_VQGAN_WEIGHTS`:
     /// that one commonly points at `vqgan_code1024.pth`, which has none of the
     /// CodeFormer tensors, so the fallback would register a model whose every
     /// call fails.
     pub fn from_env() -> Option<RestoreProvider> {
-        let path = std::env::var("BRAIN_RESTORE_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let path = std::env::var("BRAIN_CODEFORMER_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         std::path::Path::new(&checkpoint_path(&path)).exists().then(|| RestoreProvider::new(path))
     }
 }
@@ -248,7 +248,7 @@ mod caps_tests {
         let ext = SERVING_PIPELINES;
         assert_eq!(ext[..base.len()], base[..], "the shared prefix must stay identical");
         for (name, _) in &ext[base.len()..] {
-            assert!(!base.iter().any(|(n, _)| n == name), "{name} is already registered — appending it would duplicate a pipeline");
+            assert!(!base.iter().any(|(n, _)| n == name), "{name} is already registered - appending it would duplicate a pipeline");
         }
     }
 
@@ -269,7 +269,7 @@ mod caps_tests {
         let err = reg.run(MODEL, "restore_face", Invocation::new().blob("image", img()), &mut |_| {}).unwrap_err();
         assert!(!err.is_empty(), "expected a descriptive error, got: {err}");
         // out-of-range w is rejected by the action, not by the schema (the spec
-        // has no range type) — assert the message names the bound.
+        // has no range type) - assert the message names the bound.
         assert!(restore_spec().validate(Invocation::new().blob("image", img()).set("w", json!(2.0))).is_ok());
     }
 }

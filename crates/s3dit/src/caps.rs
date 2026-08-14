@@ -99,7 +99,7 @@ type HotKey = (u32, u32, bool, Option<String>); // (width, height, hifi, adapter
 /// cache** so a long-lived process (`brain run` / the event server) loads the
 /// ~20 GB of weights once and reuses them across `ActionRequest`s — subsequent
 /// generations are fast. Weight paths come from the environment
-/// (`BRAIN_ZIMAGE_DIT` / `_VAE` / `_QWEN` / `_TOKENIZER`).
+/// (`BRAIN_S3DIT_DIT` / `_VAE` / `_QWEN` / `_TOKENIZER`).
 pub struct ZImageProvider {
     hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
 }

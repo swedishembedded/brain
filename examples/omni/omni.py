@@ -18,10 +18,10 @@ however many GPUs it needs, ~25-50x brain/omni's tokens/second on the same
 hardware) -- since both build their multimodal prompt through the SAME
 `crate::mm::build_multimodal_prompt`; `--model` selects between them (see
 Examples). The int8 model's OWN vision/audio tower weights are read from a
-real HF checkpoint directory too (`BRAIN_OMNI_HF_DIR`, same env var
+real HF checkpoint directory too (`BRAIN_QWEN3OMNIMOE_HF_DIR`, same env var
 `brain/omni` reads) -- its own int8 checkpoint stores those towers
-quantized, which nothing here executes yet, so `BRAIN_OMNI_HF_DIR` has to be
-set alongside `BRAIN_OMNI_INT8_CHECKPOINT` for `--in-speech`/`--in-image`/
+quantized, which nothing here executes yet, so `BRAIN_QWEN3OMNIMOE_HF_DIR` has to be
+set alongside `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` for `--in-speech`/`--in-image`/
 `--in-video` against it to work (see `omni::int8_thinker_resident`'s module
 doc for the full reasoning); text-only `--in-text` against it does not need
 an HF dir at all. `--in-mic` and `--out-mic`/`--out-audio` are still
@@ -46,20 +46,20 @@ parts itself (unlike this script) gets real multimodal input over
 `--openai`/`--anthropic` too, no server-side change needed.
 
 Examples:
-  # D-Bus (needs `BRAIN_OMNI_HF_DIR=... brain serve --dbus` running):
+  # D-Bus (needs `BRAIN_QWEN3OMNIMOE_HF_DIR=... brain serve --dbus` running):
   python3 examples/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
   python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
   python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
   python3 examples/omni/omni.py --dbus --in-video clip.mp4 --in-text "What happens in this clip?" --out-stdio
 
-  # The fast GPU-resident int8 path (needs `BRAIN_OMNI_INT8_CHECKPOINT=...
-  # BRAIN_OMNI_INT8_TOKENIZER_DIR=... [BRAIN_OMNI_HF_DIR=... for multimodal]
+  # The fast GPU-resident int8 path (needs `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=...
+  # BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR=... [BRAIN_QWEN3OMNIMOE_HF_DIR=... for multimodal]
   # brain serve --dbus` running):
   python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-text "Say hello in French." --out-stdio
   python3 examples/omni/omni.py --dbus --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-image photo.ppm --in-text "What is this?" --out-stdio
 
   # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running,
-  # with BRAIN_OMNI_HF_DIR set for that process):
+  # with BRAIN_QWEN3OMNIMOE_HF_DIR set for that process):
   python3 examples/omni/omni.py --openai localhost:8788 --in-text "2+2=" --out-stdio
 
   # Anthropic-compatible HTTP:
@@ -227,7 +227,7 @@ def main() -> None:
     except NotImplementedError:
         served = None
     if served is not None and args.model not in served:
-        skip(f"model {args.model!r} is not served (served: {served}); for real Omni: BRAIN_OMNI_HF_DIR=<checkpoint dir> brain serve --dbus")
+        skip(f"model {args.model!r} is not served (served: {served}); for real Omni: BRAIN_QWEN3OMNIMOE_HF_DIR=<checkpoint dir> brain serve --dbus")
 
     kwargs = {"model": args.model, "max_new": args.max_new}
     if args.system:

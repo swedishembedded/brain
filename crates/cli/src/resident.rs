@@ -74,11 +74,11 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
         Ok(z) => models.push(Arc::new(z)),
         Err(e) => eprintln!("brain: z-image not served over the scheduler ({e})"),
     }
-    // yolo object detection if a checkpoint is configured (BRAIN_YOLO).
+    // yolo object detection if a checkpoint is configured (BRAIN_YOLOV8).
     if let Some(y) = YoloResident::from_env() {
         models.push(Arc::new(y));
     } else {
-        eprintln!("brain: yolo not served over the scheduler (set BRAIN_YOLO to a checkpoint)");
+        eprintln!("brain: yolo not served over the scheduler (set BRAIN_YOLOV8 to a checkpoint)");
     }
     // Text-generation LLMs (each gated on its own weights env var).
     if let Some(g) = crate::resident_llm::GptResident::from_env() {
@@ -97,12 +97,12 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(q) = crate::resident_qwen35moe::Qwen35Resident::from_env() {
         models.push(Arc::new(q));
     }
-    // LFM2.5-Encoder (BRAIN_LFM + BRAIN_LFM_TOKENIZER): fill-mask + embeddings
+    // LFM2.5-Encoder (BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER): fill-mask + embeddings
     // with equal-length true batching (see resident_lfm.rs).
     if let Some(l) = crate::resident_lfm::LfmResident::from_env() {
         models.push(Arc::new(l));
     } else {
-        eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM + BRAIN_LFM_TOKENIZER)");
+        eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)");
     }
     // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}): text-to-image,
     // reference-image editing, LoRA training (see resident_flux2.rs).
@@ -111,21 +111,21 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER)");
     }
-    // Monocular depth (BRAIN_DEPTH_WEIGHTS).
+    // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));
     }
     // Imaging models, each gated on its own weights env var: SAM 2.1 promptable
     // segmentation (BRAIN_SAM2_WEIGHTS, prompt-batched per image), the
     // antelopev2 face stack (BRAIN_FACENET_DIR), the VQ autoencoder
-    // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_RESTORE_WEIGHTS) and
+    // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_CODEFORMER_WEIGHTS) and
     // the CLIP encoders (BRAIN_CLIP_DIR, genuinely batched per tower).
     // The imaging models come from `crate::catalog`, which owns their manifests
     // and providers too — so a model cannot be listed by `brain caps`, runnable
     // by `brain do` and yet missing here (which is exactly how Real-ESRGAN
     // shipped unreachable). Each is still gated on its own weights env var.
-    // ... plus, from the same catalog: TTS (BRAIN_TTS_WEIGHTS), speech-to-text
-    // (BRAIN_NEMOTRON + BRAIN_QWEN_ASR), and the forecasting foundation models
+    // ... plus, from the same catalog: TTS (BRAIN_QWEN3TTS_WEIGHTS), speech-to-text
+    // (BRAIN_NEMOTRONASR + BRAIN_QWEN3ASR), and the forecasting foundation models
     // (BRAIN_CHRONOS2 / BRAIN_FINCAST / BRAIN_KRONOS_* — chronos2/fincast
     // advertise an NPU footprint and auto-place there when budgeted). Folded
     // into `catalog::models()` so `brain caps`/`brain do` and this executor
@@ -177,7 +177,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
 
     let exec = Executor::start(models, budgets, policy);
-    // Qwen3-Omni (BRAIN_OMNI_HF_DIR): the full chat/multimodal surface, placed
+    // Qwen3-Omni (BRAIN_QWEN3OMNIMOE_HF_DIR): the full chat/multimodal surface, placed
     // across as many budgeted cards as its real per-layer bytes need. Like the
     // int8 Thinker below it is multi-device and therefore registered AFTER
     // `start` via `register_multi` -- see resident_omni's module doc for why a
@@ -193,7 +193,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(t) = crate::resident_omni::int8_thinker_multi_from_env(gpus, reserved) {
         exec.register_multi(Arc::new(t));
     } else {
-        eprintln!("brain: {} not served over the scheduler (set BRAIN_OMNI_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL);
+        eprintln!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
     exec
 }
@@ -213,7 +213,7 @@ const COCO: [&str; 80] = [
 ];
 
 /// YOLO detection behind the scheduler. Loads a brain-format YOLOv8 checkpoint
-/// (`BRAIN_YOLO`); the resident instance holds the model on the CPU (brain's yolo
+/// (`BRAIN_YOLOV8`); the resident instance holds the model on the CPU (brain's yolo
 /// default) — dropping it frees the RAM. One action, `detect`.
 pub struct YoloResident {
     /// Catalog id (the model-card id): the manifest/instance-key key, so two
@@ -225,7 +225,7 @@ pub struct YoloResident {
 
 impl YoloResident {
     pub fn from_env() -> Option<YoloResident> {
-        let path = std::env::var("BRAIN_YOLO").ok().filter(|p| !p.is_empty())?;
+        let path = std::env::var("BRAIN_YOLOV8").ok().filter(|p| !p.is_empty())?;
         // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
         // no upstream vendor/repo provenance.
         Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/yolo", "yolo"), None))
@@ -258,9 +258,9 @@ impl ResidentModel for YoloResident {
         MemCost::new(0, 128 << 20)
     }
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
-        // `BRAIN_YOLO_BATCH` (default 1) sets the forward batch: >1 enables a TRUE
+        // `BRAIN_YOLOV8_BATCH` (default 1) sets the forward batch: >1 enables a TRUE
         // batched forward (one detect over N images) when the scheduler groups jobs.
-        let batch = std::env::var("BRAIN_YOLO_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1u32).max(1);
+        let batch = std::env::var("BRAIN_YOLOV8_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1u32).max(1);
         Ok(Box::new(YoloInstance { yolo: yolov8::Yolo::load(&self.path, batch), batch: batch as usize }))
     }
 }
@@ -447,7 +447,7 @@ impl ResidentModel for ZImageResident {
         let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
         let cap_len = 64;
         // Place the DiT on the assigned card (scoped registry selection); the
-        // encoder card is z-image's own (BRAIN_ZIMAGE_ENCODER_GPU) and left as
+        // encoder card is z-image's own (BRAIN_S3DIT_ENCODER_GPU) and left as
         // configured.
         let (pipe, dit_cache) = if retains_int8_cache(hifi, adapter) {
             let (pipe, cache) = crate::resident_llm::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, w, h, cap_len, |_| {}))??;
@@ -463,13 +463,13 @@ impl ResidentModel for ZImageResident {
 /// Whether an `activate` for `(hifi, adapter)` should retain a
 /// [`s3dit::DitI8Cache`] alongside the built pipeline - real, permanent
 /// extra host RAM (see [`ZImageDitI8::build_from_source_with_cache`]'s
-/// doc), so opt-in only (`BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`) and only for
+/// doc), so opt-in only (`BRAIN_S3DIT_RETAIN_INT8_CACHE=1`) and only for
 /// the one shape a cache can even be built for: plain int8, no adapter.
 /// fp32 and LoRA-folded builds always return `false` regardless of the env
 /// var — `demote` for those stays the manager's unmodified default
 /// (`Err("unsupported")`, today's full drop-and-rebuild), not a silent lie.
 fn retains_int8_cache(hifi: bool, adapter: Option<&str>) -> bool {
-    !hifi && adapter.is_none() && std::env::var("BRAIN_ZIMAGE_RETAIN_INT8_CACHE").ok().as_deref() == Some("1")
+    !hifi && adapter.is_none() && std::env::var("BRAIN_S3DIT_RETAIN_INT8_CACHE").ok().as_deref() == Some("1")
 }
 
 /// A resident z-image instance: `pipe` when a text2image pipeline is built; the
@@ -508,7 +508,7 @@ impl Instance for ZImageInstance {
     }
 
     /// Real only when `activate` retained a `dit_cache` (plain int8, no
-    /// adapter, `BRAIN_ZIMAGE_RETAIN_INT8_CACHE=1`): drops the whole
+    /// adapter, `BRAIN_S3DIT_RETAIN_INT8_CACHE=1`): drops the whole
     /// resident pipeline — encoder, DiT, VAE, every device buffer — while
     /// the cache (already held separately) survives, ready for `promote`.
     /// Refuses for everything else (fp32, an adapter build, or a plain
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     #[ignore = "slow: real checkpoint + GPU; set BRAIN_ZIMAGE_* and run with --ignored"]
     fn zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster() {
-        std::env::set_var("BRAIN_ZIMAGE_RETAIN_INT8_CACHE", "1");
+        std::env::set_var("BRAIN_S3DIT_RETAIN_INT8_CACHE", "1");
         let model = match ZImageResident::from_env() {
             Ok(m) => m,
             Err(e) => {

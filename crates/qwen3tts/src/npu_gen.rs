@@ -1357,13 +1357,13 @@ mod stream_codec_tests {
     use super::*;
 
     /// NPU stateful streaming codec vs the bit-exact CPU reference. Run (CPU dev):
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors BRAIN_TTS_NPU_DEVICE=cpu \
+    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors BRAIN_QWEN3TTS_NPU_DEVICE=cpu \
     ///   cargo test --release -p brain-tts npu_stream_matches_cpu -- --ignored --nocapture
     #[test]
     #[ignore]
     fn npu_stream_matches_cpu() {
-        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
-        let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let device = std::env::var("BRAIN_QWEN3TTS_NPU_DEVICE")
             .ok()
             .and_then(|s| NpuDevice::parse(&s))
             .unwrap_or(NpuDevice::Cpu);

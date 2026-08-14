@@ -193,15 +193,15 @@ const PIPELINES: &[(&str, &str)] = &[
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_LFM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m, n, MATMUL, MATMUL_REG3, naive)
 }
 fn dx_kernel(m: u32, k: u32) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_LFM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
 }
 fn dw_kernel(nrows: u32, k: u32) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_LFM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(nrows as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, naive)
 }
 

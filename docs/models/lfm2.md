@@ -4,7 +4,7 @@ LFM2.5-Encoder from LiquidAI: a bidirectional text encoder built from a
 hybrid of short-convolution and attention layers, with a masked-language-
 model head tied to its token embedding. It was pretrained with 30% token
 masking and handles a usable context of up to 8,192 tokens. Reach for it when
-you need text embeddings or cloze-style mask-filling, not generative chat —
+you need text embeddings or cloze-style mask-filling, not generative chat -
 that's what Qwen3 is for.
 
 ## Support
@@ -28,7 +28,7 @@ auto-fetched on first use. To import a checkpoint you already have locally:
 brain lfm import --hf <hf_dir> --out lfm-350m.safetensors
 ```
 
-To serve a checkpoint, point `BRAIN_LFM` (and `BRAIN_LFM_TOKENIZER`) at it.
+To serve a checkpoint, point `BRAIN_LFM2` (and `BRAIN_LFM2_TOKENIZER`) at it.
 
 ## Running it
 
@@ -47,7 +47,7 @@ brain do brain/lfm fill_mask --weights F --tokenizer tokenizer.json --text "..."
 To serve it over HTTP or D-Bus:
 
 ```bash
-BRAIN_LFM=lfm-350m.safetensors BRAIN_LFM_TOKENIZER=tokenizer.json brain serve --dbus --openai
+BRAIN_LFM2=lfm-350m.safetensors BRAIN_LFM2_TOKENIZER=tokenizer.json brain serve --dbus --openai
 ```
 
 Embeddings are reachable at the standard `POST /embeddings` endpoint once
@@ -55,15 +55,15 @@ serving.
 
 ## Options
 
-- `--seq T` — sequence length for `embed` (up to the 8,192-token usable
+- `--seq T` - sequence length for `embed` (up to the 8,192-token usable
   context).
-- `--topk K` — number of mask-fill candidates to return.
-- `BRAIN_LFM_BATCH` — batched-forward slots per serving instance (default 2).
+- `--topk K` - number of mask-fill candidates to return.
+- `BRAIN_LFM2_BATCH` - batched-forward slots per serving instance (default 2).
 
 ## Hardware and limits
 
 Usable context is 8,192 tokens. Attention is bidirectional (non-causal),
-which means unmasked padding corrupts every real token's encoding — requests
+which means unmasked padding corrupts every real token's encoding - requests
 are built at their exact length rather than padded into a batch, so
 padding-aware batched serving is a separate piece of future work. There's no
 training-from-scratch path today; you import a released checkpoint and

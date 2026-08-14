@@ -24,7 +24,7 @@ its own model's weights the normal way, and a stage whose model is
 unconfigured fails with that model's own error:
 
 - `segment` → `BRAIN_SAM2_WEIGHTS`
-- `restore` → `BRAIN_RESTORE_WEIGHTS`
+- `restore` → `BRAIN_CODEFORMER_WEIGHTS`
 - `upscale` → `BRAIN_ESRGAN_WEIGHTS`
 
 ## Running it

@@ -11,7 +11,7 @@
 //! `thinker.visual.*` (shard 1 of 15, same shard the audio tower needs) is
 //! not on disk.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test vision_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use qwen3vl::config::VisionConfig;
 use qwen3vl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
 
 fn shard_with_visual() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
+    let dir = PathBuf::from(std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok()?);
     let idx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("model.safetensors.index.json")).ok()?).ok()?;
     let shard = idx["weight_map"].as_object()?.get("thinker.visual.patch_embed.proj.weight")?.as_str()?;
     let p = dir.join(shard);
@@ -44,7 +44,7 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_vision_tower() {
     let Some(shard) = shard_with_visual() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.visual");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.visual");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_vision.safetensors");

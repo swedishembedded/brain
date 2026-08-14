@@ -4,7 +4,7 @@ Turns text into a 24 kHz speech waveform. Give it a few seconds of reference
 audio and it clones that voice for the sentence you ask it to speak; without
 a reference it falls back to a default, speaker-free voice. Reach for it when
 you need narration, a cloned voice for a demo, or a spoken-output leg for an
-assistant pipeline — all running locally, no external TTS service.
+assistant pipeline - all running locally, no external TTS service.
 
 ## Support
 
@@ -19,7 +19,7 @@ assistant pipeline — all running locally, no external TTS service.
 
 ## Getting the weights
 
-Model id: `brain/tts`. Reserved vendor `brain/` — never auto-fetched; you
+Model id: `brain/tts`. Reserved vendor `brain/` - never auto-fetched; you
 need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
 
 1. Convert the upstream HF checkpoint into brain's own checkpoint format:
@@ -38,9 +38,9 @@ need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
 2. Point the CLI or the server at the imported directory and the original HF
    checkpoint (for its tokenizer/config):
 
-   - `--weights-dir` (CLI flag, defaults to `out/tts`) or `BRAIN_TTS_WEIGHTS`
-     (D-Bus serving) — the directory from step 1.
-   - `--ckpt` (CLI flag) or `BRAIN_TTS_CKPT` — the original HF checkpoint
+   - `--weights-dir` (CLI flag, defaults to `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS`
+     (D-Bus serving) - the directory from step 1.
+   - `--ckpt` (CLI flag) or `BRAIN_QWEN3TTS_CKPT` - the original HF checkpoint
      directory.
 
 ## Running it
@@ -81,17 +81,17 @@ brain do brain/tts synth --text "Hello from brain." \
 Resident server for repeated calls without reloading weights each time:
 
 ```bash
-BRAIN_TTS_WEIGHTS=out/tts BRAIN_TTS_CKPT=/path/to/Qwen3-TTS-12Hz-0.6B-Base \
+BRAIN_QWEN3TTS_WEIGHTS=out/tts BRAIN_QWEN3TTS_CKPT=/path/to/Qwen3-TTS-12Hz-0.6B-Base \
   brain serve --dbus
 ```
 
 The resident exposes one action, `speak` (text in, 24 kHz PCM out); set
-`BRAIN_TTS_REF` (+ `BRAIN_TTS_REF_TEXT`) to have every `speak` call clone that
+`BRAIN_QWEN3TTS_REF` (+ `BRAIN_QWEN3TTS_REF_TEXT`) to have every `speak` call clone that
 reference voice instead of running speaker-free.
 
 There is also a dedicated low-latency server, `brain tts serve`, which keeps
 compiled NPU graphs resident and streams synthesized audio back over a
-line-delimited JSON protocol on a Unix socket — see `brain tts serve --help`
+line-delimited JSON protocol on a Unix socket - see `brain tts serve --help`
 for its engine/socket flags. `scripts/tts/voice-clone.py` and
 `scripts/tts/voice-design.py` are example clients that speak to it and play
 the result.
@@ -108,17 +108,17 @@ This freezes the base Talker and trains attention adapters only.
 
 ## Options
 
-- `--lang` / `--language` — synthesis language (default `english`).
-- `--max-frames` — max codec frames, i.e. an upper bound on clip length
+- `--lang` / `--language` - synthesis language (default `english`).
+- `--max-frames` - max codec frames, i.e. an upper bound on clip length
   (default `256`).
-- `--temp`, `--top-k`, `--seed` — sampling controls for the Talker.
-- `--ref-codes` — an external `[T,16]` codec-codes file (8-byte little-endian
+- `--temp`, `--top-k`, `--seed` - sampling controls for the Talker.
+- `--ref-codes` - an external `[T,16]` codec-codes file (8-byte little-endian
   count header + u32 data) for the in-context (ICL) cloning path, used
   instead of the default x-vector-only cloning when you already have codes
   for the reference clip.
-- `--device npu` — run on an NPU (OpenVINO) if present; `BRAIN_TTS_TALKER=cpu`
+- `--device npu` - run on an NPU (OpenVINO) if present; `BRAIN_QWEN3TTS_TALKER=cpu`
   falls the Talker back to CPU while keeping the codec on NPU.
-- `BRAIN_TTS_LANG`, `BRAIN_TTS_REF`, `BRAIN_TTS_REF_TEXT` — resident-server
+- `BRAIN_QWEN3TTS_LANG`, `BRAIN_QWEN3TTS_REF`, `BRAIN_QWEN3TTS_REF_TEXT` - resident-server
   defaults for language and voice-clone reference.
 
 Output is always mono 24 kHz f32 PCM WAV.
@@ -129,9 +129,9 @@ Output is always mono 24 kHz f32 PCM WAV.
   GPU (Vulkan) forward passes exist for correctness checks but are not the
   path used for practical synthesis speed. The NPU path uses a resident,
   KV-cached decode graph and a streaming codec, which is substantially faster
-  than a cold, cache-free run — pass `--device npu` to use it.
+  than a cold, cache-free run - pass `--device npu` to use it.
 - The in-context (ICL) cloning path needs externally-supplied reference codes
-  (`--ref-codes`) for some flows — brain's own codec encoder can also produce
+  (`--ref-codes`) for some flows - brain's own codec encoder can also produce
   them in-tree when you pass `--ref-text` without `--ref-codes`.
 - No HTTP endpoint: TTS is reachable from the CLI and D-Bus/`brain do`, not
   from the OpenAI/Anthropic-compatible chat APIs.

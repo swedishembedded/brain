@@ -701,13 +701,13 @@ impl Glm {
         // Size-adaptive GEMM: software-pipelined `matmul_reg3` (128x128 tile,
         // ~4 TFLOP/s on a P40) once both output dims fill a tile, else the naive
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
-        // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
+        // so this only changes speed. `BRAIN_GLMDSA_NAIVE_MM=1` forces naive.
         // The threshold is `block::pick_gemm`'s MEASURED `m < 8`, not the
         // `m < 128` this used to carry - a guard that cost 22x on an
         // SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
         // naive vs tiled is 1.5x at m=8 rising to 34.1x at m=127, bit-identical
         // throughout. `pick_gemm` owns the rule so this cannot drift again.
-        let naive = std::env::var("BRAIN_GLM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+        let naive = std::env::var("BRAIN_GLMDSA_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
         let (mk, mt) = model::block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, naive);
         s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
@@ -1533,7 +1533,7 @@ impl Glm {
         // -- the same id crates/cli/src/resident_llm.rs::GlmResident::from_env
         // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
         // here is auto-discoverable by crates/cli/src/model_dir.rs without
-        // requiring BRAIN_GLM_WEIGHTS to be set.
+        // requiring BRAIN_GLMDSA_WEIGHTS to be set.
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/glm", "glm"));
     }
 }

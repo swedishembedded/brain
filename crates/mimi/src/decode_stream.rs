@@ -699,12 +699,12 @@ mod tests {
 
     /// End-to-end parity: the pure-CPU streaming decoder vs the real gpu_core
     /// `Codec::decode`, on real weights. Run explicitly:
-    ///   BRAIN_CODEC_WEIGHTS=out/tts-1b7/codec.safetensors \
+    ///   BRAIN_MIMI_WEIGHTS=out/tts-1b7/codec.safetensors \
     ///   cargo test -p brain-codec --lib e2e_parity_vs_codec -- --ignored --nocapture
     #[test]
     #[ignore]
     fn e2e_parity_vs_codec() {
-        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg.num_quantizers as usize;
         let t = 16usize; // small T (< sliding_window) so attention is plain causal
@@ -730,12 +730,12 @@ mod tests {
     }
 
     /// Wall-clock of the rayon decoder. Run in RELEASE:
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors \
+    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors \
     ///   cargo test --release -p brain-codec --lib bench_decode -- --ignored --nocapture
     #[test]
     #[ignore]
     fn bench_decode() {
-        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg().num_quantizers as usize;
         let t = 48usize;

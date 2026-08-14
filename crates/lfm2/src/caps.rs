@@ -43,7 +43,7 @@ const SLAB_BUDGET: u64 = 512 << 20;
 const PROBE_CAP: u32 = 64;
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor): the
-/// checkpoint + tokenizer are service-side configuration (`BRAIN_LFM*` env),
+/// checkpoint + tokenizer are service-side configuration (`BRAIN_LFM2*` env),
 /// so the actions carry only request parameters.
 pub fn manifest_resident() -> Manifest {
     let mut m = manifest();

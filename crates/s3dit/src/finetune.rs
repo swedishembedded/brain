@@ -254,7 +254,7 @@ pub fn run(
     progress(0, opts.steps + 1, format!("loaded {} images from {}", samples.len(), dir.display()));
 
     // 2. encode (encoders dropped before the trainer is built)
-    let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "1".to_string());
+    let enc_gpu = std::env::var("BRAIN_S3DIT_ENCODER_GPU").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "1".to_string());
     let n_samples = samples.len();
     let encoded = encode_samples(paths, &samples, opts.size, opts.cap_len, &enc_gpu, cancel, |i, tot, stage| {
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))

@@ -8,13 +8,13 @@
 //! pattern: skips (never panics) when the checkpoint dir
 //! is not present.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test real_config -- --ignored`
 
 use std::path::PathBuf;
 
 fn hf_dir() -> Option<PathBuf> {
-    let d = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
+    let d = PathBuf::from(std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok()?);
     d.join("config.json").exists().then_some(d)
 }
 
@@ -22,7 +22,7 @@ fn hf_dir() -> Option<PathBuf> {
 #[ignore]
 fn matches_the_released_checkpoint() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or config.json missing");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or config.json missing");
         return;
     };
     let json = std::fs::read_to_string(dir.join("config.json")).expect("read config.json");

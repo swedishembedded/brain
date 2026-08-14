@@ -132,7 +132,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // true is that the resulting unified checkpoint is directly loadable
         // by qwen3tts::mtp::MtpModel/mimi::Codec for the Talker/Code2Wav pieces
         // (two open naming gaps); Thinker-only generation
-        // (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not this
+        // (crate::resident_omni, gated on BRAIN_QWEN3OMNIMOE_HF_DIR, not this
         // converted-checkpoint path) is unaffected by either gap.
         "qwen3omnimoe" => qwen3omnimoe::import::import_as(hf_dir, out, Some(&id)),
         other => Err(format!("architecture {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),

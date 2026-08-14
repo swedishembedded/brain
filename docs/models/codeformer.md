@@ -18,7 +18,7 @@ detail from its own learned prior.
 
 ## Getting the weights
 
-Model id: `brain/restore`. Set `BRAIN_RESTORE_WEIGHTS` to a `codeformer.pth`
+Model id: `brain/restore`. Set `BRAIN_CODEFORMER_WEIGHTS` to a `codeformer.pth`
 checkpoint file, or to a directory containing one.
 
 ## Running it

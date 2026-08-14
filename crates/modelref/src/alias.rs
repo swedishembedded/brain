@@ -53,8 +53,8 @@ const ROWS: &[Row] = &[
     Row { legacy: "upscale", canonical: "brain/upscale" },
     // qwen/lfm/nemotron/qwen-asr are env-loaded from an arbitrary checkpoint,
     // so their canonical id depends on what was actually imported (see
-    // `resident_llm.rs`'s BRAIN_QWEN_REF / BRAIN_LFM_REF / BRAIN_NEMOTRON_REF /
-    // BRAIN_QWEN_ASR_REF) and is NOT fixed at compile time. When that env var
+    // `resident_llm.rs`'s BRAIN_QWEN_REF / BRAIN_LFM2_REF / BRAIN_NEMOTRONASR_REF /
+    // BRAIN_QWEN3ASR_REF) and is NOT fixed at compile time. When that env var
     // is unset, the resident registers under its own brain/<family> fallback
     // (row above/below), so the short legacy name still resolves via THAT row.
     Row { legacy: "qwen", canonical: "brain/qwen" },

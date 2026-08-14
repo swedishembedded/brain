@@ -9,7 +9,7 @@
 //! fails) when either is absent:
 //!
 //! ```text
-//! BRAIN_T5_XXL=/path/to/FLUX.1-Kontext-dev/text_encoder_2
+//! BRAIN_T5ENCODER_XXL=/path/to/FLUX.1-Kontext-dev/text_encoder_2
 //! ```
 //!
 //! Gate: cosine >= 0.9999 per stage. `last_hidden_state` is ALSO split by row
@@ -158,8 +158,8 @@ fn env_path(var: &str) -> Option<PathBuf> {
 #[test]
 fn t5_xxl_encoder_stage_parity() {
     let Some(g) = Golden::open("t5/t5xxl/encoder.safetensors") else { return };
-    let Some(weights) = env_path("BRAIN_T5_XXL") else {
-        eprintln!("SKIP: set BRAIN_T5_XXL to a FLUX.1 text_encoder_2 directory");
+    let Some(weights) = env_path("BRAIN_T5ENCODER_XXL") else {
+        eprintln!("SKIP: set BRAIN_T5ENCODER_XXL to a FLUX.1 text_encoder_2 directory");
         return;
     };
 

@@ -27,7 +27,7 @@ steps is separate, not-yet-built work).
 **Real Omni, over D-Bus:**
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
     python3 examples/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
@@ -38,7 +38,7 @@ BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 <key>` at startup — pass it with `--api-key`):
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --openai 8788 &
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --openai 8788 &
 python3 examples/omni/omni.py --openai localhost:8788 --api-key sk-brain-... \
   --in-text "2+2=" --out-stdio
 ```
@@ -46,7 +46,7 @@ python3 examples/omni/omni.py --openai localhost:8788 --api-key sk-brain-... \
 **Real Omni, over Anthropic-compatible HTTP:**
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --anthropic 8787 &
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct brain serve --anthropic 8787 &
 python3 examples/omni/omni.py --anthropic localhost:8787 --api-key sk-brain-... \
   --in-text "2+2=" --out-stdio
 ```
@@ -54,7 +54,7 @@ python3 examples/omni/omni.py --anthropic localhost:8787 --api-key sk-brain-... 
 **Real Omni, speech input, over D-Bus:**
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
     python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
@@ -64,7 +64,7 @@ BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 **Real Omni, image input, over D-Bus** (PPM only — see Flags below):
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 2
     python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio

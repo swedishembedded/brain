@@ -14,7 +14,7 @@
 //! `activate` places the build on the assigned card via a scoped device-registry
 //! selection ([`on_device`]), exactly like z-image.
 //!
-//! Config is env-only: `BRAIN_GPT_WEIGHTS`, `BRAIN_GLM_WEIGHTS`,
+//! Config is env-only: `BRAIN_GPT2_WEIGHTS`, `BRAIN_GLMDSA_WEIGHTS`,
 //! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (and an optional
 //! `BRAIN_QWEN_CTX` sizing Qwen's built context length — default in `QwenResident::ctx`,
 //! currently 24576). Each `from_env` returns `None` when its primary weights
@@ -110,7 +110,7 @@ pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, S
 
 // ---------------------------------------------------------------- gpt
 
-/// The dense char-level GPT baseline behind the scheduler (`BRAIN_GPT_WEIGHTS`).
+/// The dense char-level GPT baseline behind the scheduler (`BRAIN_GPT2_WEIGHTS`).
 /// The checkpoint must embed its char vocab (trained with vocab embedding).
 pub struct GptResident {
     /// Catalog id (the model-card id): the manifest/instance-key key, so two
@@ -121,7 +121,7 @@ pub struct GptResident {
 
 impl GptResident {
     pub fn from_env() -> Option<GptResident> {
-        let path = std::env::var("BRAIN_GPT_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let path = std::env::var("BRAIN_GPT2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         // Back-compat: synthesize a card whose id is the canonical brain/
         // fallback (see crates/modelref/src/alias.rs's module docs) -- a
         // checkpoint loaded straight from an env var carries no upstream
@@ -152,7 +152,7 @@ impl ResidentModel for GptResident {
         // the vocab, the config, and the tensor upload.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("gpt: {e}"))?;
         let itos = gpt2::model::Gpt::itos_from_config(&reader.config())
-            .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT_WEIGHTS)")?;
+            .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT2_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
         let block = gpt2::GptConfig::from_json(&reader.config()).block_size;
         let model = on_device(device, || gpt2::model::Gpt::from_reader(&reader, 1, block))?;
@@ -183,7 +183,7 @@ impl Instance for GptInstance {
 // ---------------------------------------------------------------- glm
 
 /// The GLM decoder (MLA + sigmoid noaux_tc MoE) behind the scheduler
-/// (`BRAIN_GLM_WEIGHTS`). Char-level: the checkpoint must embed its vocab.
+/// (`BRAIN_GLMDSA_WEIGHTS`). Char-level: the checkpoint must embed its vocab.
 pub struct GlmResident {
     id: String,
     path: String,
@@ -191,7 +191,7 @@ pub struct GlmResident {
 
 impl GlmResident {
     pub fn from_env() -> Option<GlmResident> {
-        let path = std::env::var("BRAIN_GLM_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let path = std::env::var("BRAIN_GLMDSA_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
         Some(Self::from_card(&path, &ModelCard::new("brain/glm", "glm"), None))
     }
@@ -216,7 +216,7 @@ impl ResidentModel for GlmResident {
         // Stream weights from the mmap (see GptResident::activate).
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("glm: {e}"))?;
         let itos = glmdsa::model::Glm::itos_from_config(&reader.config())
-            .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLM_WEIGHTS)")?;
+            .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLMDSA_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
         let block = glmdsa::config::GlmConfig::from_json(&reader.config()).block_size;
         let model = on_device(device, || glmdsa::model::Glm::from_reader_inference(&reader, 1, block))?;

@@ -16,12 +16,12 @@
 //! "does the loop control work end to end on real weights" bar
 //! `generate_e2e.rs` set for the text-only path, extended to speech output.
 //!
-//! Real-weight-adjacent: skips cleanly when `BRAIN_OMNI_HF_DIR` is unset.
+//! Real-weight-adjacent: skips cleanly when `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset.
 //! Expected to be SLOW (`crate::talker_generate`'s own module doc: every
 //! Talker layer's weights are streamed fresh per decode step, same
 //! validation-tier tradeoff as the Thinker path) — `#[ignore]`d.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test speak_e2e -- --ignored --nocapture`
 
 use qwen3omnimoe::caps::OmniProvider;
@@ -29,8 +29,8 @@ use qwen3omnimoe::caps::OmniProvider;
 #[test]
 #[ignore]
 fn speak_runs_end_to_end_and_produces_a_real_waveform() {
-    let Some(hf_dir) = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty()) else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset");
+    let Some(hf_dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
 

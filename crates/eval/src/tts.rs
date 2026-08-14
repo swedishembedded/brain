@@ -262,13 +262,13 @@ mod tests {
     }
 
     /// Checkpoint-dependent: only runs with a real speaker checkpoint path in
-    /// `BRAIN_TTS_SPEAKER` and GPU tests enabled.
+    /// `BRAIN_QWEN3TTS_SPEAKER` and GPU tests enabled.
     #[test]
     fn speaker_similarity_identical_is_one_gated() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let weights = match std::env::var("BRAIN_TTS_SPEAKER") {
+        let weights = match std::env::var("BRAIN_QWEN3TTS_SPEAKER") {
             Ok(p) => p,
             Err(_) => return, // no checkpoint available -> skip
         };

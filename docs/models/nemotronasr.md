@@ -22,7 +22,7 @@ transducer. For offline batch transcription of a complete clip instead, see
 ## Getting the weights
 
 Model id: `brain/nemotron` (reserved vendor - never auto-fetched).
-`BRAIN_NEMOTRON` - checkpoint directory (HF layout).
+`BRAIN_NEMOTRONASR` - checkpoint directory (HF layout).
 
 ## Running it
 
@@ -30,7 +30,7 @@ Pass a WAV file directly - `--in audio=` decodes a RIFF/WAVE file, downmixes
 it to mono and resamples it to 16 kHz for you:
 
 ```bash
-BRAIN_NEMOTRON=/path/to/nemotron/hf \
+BRAIN_NEMOTRONASR=/path/to/nemotron/hf \
   brain nemotronasr transcribe --in audio=clip.wav --out text=out.txt
 ```
 
@@ -43,7 +43,7 @@ decoding.
 Resident server (D-Bus):
 
 ```bash
-BRAIN_NEMOTRON=/path/to/nemotron/hf brain serve --dbus
+BRAIN_NEMOTRONASR=/path/to/nemotron/hf brain serve --dbus
 ```
 
 Additionally exposes `transcribe_stream` for a live session: send successive
@@ -55,7 +55,7 @@ client [`examples/asr/transcribe_mic.py`](../../examples/asr/transcribe_mic.py)
 protocol.
 
 ```bash
-BRAIN_NEMOTRON=/path/to/nemotron/hf dbus-run-session -- bash -c '
+BRAIN_NEMOTRONASR=/path/to/nemotron/hf dbus-run-session -- bash -c '
   brain serve --dbus & sleep 2
   python3 examples/asr/transcribe_mic.py --model brain/nemotron --wav clip.wav'
 ```

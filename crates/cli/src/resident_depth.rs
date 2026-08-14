@@ -4,7 +4,7 @@
 //! Monocular depth (ZipDepth) behind the residency scheduler.
 //!
 //! Mirrors the yolo adapter: a [`ResidentModel`] whose `activate` loads a released
-//! ZipDepth `.pth` (`BRAIN_DEPTH_WEIGHTS`) once, and whose [`Instance`] owns the
+//! ZipDepth `.pth` (`BRAIN_ZIPDEPTH_WEIGHTS`) once, and whose [`Instance`] owns the
 //! resident weights — dropping it frees them. One action, `depth`.
 //!
 //! The instance keeps the imported weight map in host RAM (the model's "Hot"
@@ -24,7 +24,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
 /// ZipDepth monocular depth behind the scheduler. Loads a brain-format ZipDepth
-/// checkpoint (`BRAIN_DEPTH_WEIGHTS`); the resident instance holds the weights in
+/// checkpoint (`BRAIN_ZIPDEPTH_WEIGHTS`); the resident instance holds the weights in
 /// RAM — dropping it frees them. One action, `depth`.
 pub struct DepthResident {
     /// Catalog id (the model-card id): the manifest/instance-key key, so two
@@ -36,7 +36,7 @@ pub struct DepthResident {
 
 impl DepthResident {
     pub fn from_env() -> Option<DepthResident> {
-        let path = std::env::var("BRAIN_DEPTH_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let path = std::env::var("BRAIN_ZIPDEPTH_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
         // no upstream vendor/repo provenance.
         Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/depth", "depth"), None))
@@ -90,7 +90,7 @@ impl ResidentModel for DepthResident {
         // reusable `NpuGraph`. Every other device → the existing engine path.
         if let Device::Npu(_) = device {
             if cfg.upsample_unfold {
-                return Err("depth on NPU needs the blend ('npu') ZipDepth checkpoint (BRAIN_DEPTH_WEIGHTS)".into());
+                return Err("depth on NPU needs the blend ('npu') ZipDepth checkpoint (BRAIN_ZIPDEPTH_WEIGHTS)".into());
             }
             let side = if cfg.input > 0 { cfg.input } else { 384 };
             let model = DepthNpuModel { cfg: cfg.clone(), init, side };

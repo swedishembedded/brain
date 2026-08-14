@@ -1,12 +1,12 @@
 # Face restoration and the VQ latent, over D-Bus
 
 Two models from the CodeFormer stack driven through `com.swedishembedded.Brain1`
-with the generic `Run` method — images and code grids travel as file descriptors
+with the generic `Run` method - images and code grids travel as file descriptors
 (memfd/dmabuf), not as bytes marshalled through D-Bus.
 
 | model | actions | weights env |
 |---|---|---|
-| `restore` | `restore_face` — a degraded face + `w` → a restored 512² face | `BRAIN_RESTORE_WEIGHTS` (`codeformer.pth`, or its directory) |
+| `restore` | `restore_face` - a degraded face + `w` → a restored 512² face | `BRAIN_CODEFORMER_WEIGHTS` (`codeformer.pth`, or its directory) |
 | `vqgan` | `encode` → codebook indices, `decode` → an image | `BRAIN_VQGAN_WEIGHTS` (a released checkpoint, or its directory) |
 
 ```bash
@@ -17,7 +17,7 @@ brain caps brain/vqgan
 ## Run it
 
 ```bash
-BRAIN_RESTORE_WEIGHTS=/path/to/codeformer \
+BRAIN_CODEFORMER_WEIGHTS=/path/to/codeformer \
 BRAIN_VQGAN_WEIGHTS=/path/to/codeformer/vqgan_code1024.pth \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 3
@@ -28,7 +28,7 @@ BRAIN_VQGAN_WEIGHTS=/path/to/codeformer/vqgan_code1024.pth \
 Or with no bus at all:
 
 ```bash
-BRAIN_RESTORE_WEIGHTS=… brain do brain/restore restore_face --w 0.5 \
+BRAIN_CODEFORMER_WEIGHTS=… brain do brain/restore restore_face --w 0.5 \
     --in image=face.ppm --out image=restored.ppm --json
 BRAIN_VQGAN_WEIGHTS=…  brain do brain/vqgan encode --in image=face.ppm --out codes=codes.bin --json
 BRAIN_VQGAN_WEIGHTS=…  brain do brain/vqgan decode --in codes=codes.bin --out image=recon.ppm
@@ -40,7 +40,7 @@ BRAIN_VQGAN_WEIGHTS=…  brain do brain/vqgan decode --in codes=codes.bin --out 
 > server logs `vqgan: <dir> -> <file>` so the choice is never silent. They are
 > different weights and produce different codes.
 
-## `restore_face.py` — the fidelity dial
+## `restore_face.py` - the fidelity dial
 
 `w` is CodeFormer's identity-fidelity control: **0 = maximum quality** (the code
 prediction alone drives the generator), **1 = maximum fidelity** to the input
@@ -52,12 +52,12 @@ prediction alone drives the generator), **1 = maximum fidelity** to the input
   w = 1.00  512x512     945.1 ms  mean|out-in| 0.02754
 ```
 
-Higher `w` tracks the input more closely — visible in the last column, and the
+Higher `w` tracks the input more closely - visible in the last column, and the
 reason the sweep is worth running on your own photo.
 
 The whole sweep runs on **one** resident instance: `w` lives in a one-element
 device buffer read by `scale_add`, so changing it is a buffer write, not a graph
-rebuild. Only the first call pays the 377 MB import and the upload — which is
+rebuild. Only the first call pays the 377 MB import and the upload - which is
 what the 30× drop after the first row shows. (`builds` in `brain.stats()` counts
 every model the server has built, so it is only `1` when `restore` is the only
 one served; what matters is that the sweep does not *increase* it.)
@@ -67,7 +67,7 @@ one served; what matters is that the sweep does not *increase* it.)
 
 ### Scope
 
-The action takes an **aligned** 512² face and returns one — the reference CLI's
+The action takes an **aligned** 512² face and returns one - the reference CLI's
 `cropped_faces/` → `restored_faces/` step. CodeFormer's alignment template is
 facexlib's 512² one, which is *not* `facenet::ARCFACE_DST_112` rescaled, so the
 face stack in `examples/vision/` is not chained in automatically: wiring the
@@ -75,11 +75,11 @@ wrong template would quietly degrade every restoration. Use
 `examples/vision/face_id.py`'s `detect` to locate faces, crop, and feed the crop
 here.
 
-## `vq_roundtrip.py` — image → codes → image
+## `vq_roundtrip.py` - image → codes → image
 
 `encode` and `decode` are separate actions because the whole point of a discrete
 latent is that the **codes travel**. A 512² RGB image is 786 432 bytes; its 16×16
-code grid is 256 indices — 1 KiB as `u32`, 320 bytes at 10 bits each:
+code grid is 256 indices - 1 KiB as `u32`, 320 bytes at 10 bits each:
 
 ```
   256 indices, 207 distinct of 1024
@@ -100,6 +100,6 @@ not the action name, so a round trip builds the graph once.
 
 Neither model batches. Both are **recorded step lists over fixed buffers**
 (`CodeFormer::new` / `Vqgan::new` size every buffer from one `[3, H, W]` image),
-so there is no N axis to widen at call time — the default serial `run_batch`
+so there is no N axis to widen at call time - the default serial `run_batch`
 stands, with the reason stated in `crates/cli/src/resident_restore.rs`. What does
 amortise is residency: a `w` sweep, or an encode/decode pair, costs one build.

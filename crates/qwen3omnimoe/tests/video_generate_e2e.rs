@@ -24,14 +24,14 @@
 //! test's own assertion (non-empty text) cannot check that without a
 //! reference.
 //!
-//! Real-weight-adjacent: skips cleanly when `BRAIN_OMNI_HF_DIR` is unset, or
+//! Real-weight-adjacent: skips cleanly when `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset, or
 //! when `ffmpeg` is not installed (`imaging::video::ffmpeg_available`).
 //! Expected to be slow (`crate::generate`'s own doc: every layer's weights
 //! stream fresh per token) -- kept to 2 tiny 32x32 frames and 2 new tokens to
 //! stay a smoke test, not a benchmark. Marked `#[ignore]`, matching every
 //! other real-weight test in this crate.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test video_generate_e2e -- --ignored --nocapture`
 
 use std::process::Command;
@@ -44,8 +44,8 @@ use qwen3omnimoe::caps::OmniProvider;
 #[test]
 #[ignore]
 fn video_blob_generates_real_text_end_to_end() {
-    let Some(hf_dir) = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty()) else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset");
+    let Some(hf_dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     if !ffmpeg_available() {

@@ -77,12 +77,12 @@ pub fn export_codec_back_stream_fp32(
 mod tests {
     /// Structural check: the front + streaming-back graphs build and emit valid
     /// ONNX, and the back exposes the expected per-conv state buffers. Run:
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors \
+    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors \
     ///   cargo test -p brain-npu export_streaming_graphs -- --ignored --nocapture
     #[test]
     #[ignore]
     fn export_streaming_graphs() {
-        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
         let dir = std::env::temp_dir();
         let front = dir.join("codec_front.onnx");
         let back = dir.join("codec_back_stream.onnx");

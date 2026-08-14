@@ -7,16 +7,16 @@
 //! Goldens come from `tools/goldens/codeformer_restore_dump_reference.py` and live
 //! under `testdata/restore/codeformer/` (gitignored); each test skips itself
 //! when its fixture is absent. The reference weights are not in `testdata/`
-//! either — point **`BRAIN_RESTORE_WEIGHTS`** (or `BRAIN_VQGAN_WEIGHTS`, the
+//! either - point **`BRAIN_CODEFORMER_WEIGHTS`** (or `BRAIN_VQGAN_WEIGHTS`, the
 //! same directory) at the directory holding `codeformer.pth`, or the
 //! weight-gated tests skip.
 //!
 //! The VQ autoencoder underneath is already gated by `crates/vqgan`'s own
-//! parity suite; what is gated here is everything CodeFormer adds — the
+//! parity suite; what is gated here is everything CodeFormer adds - the
 //! code-prediction Transformer, the controllable feature transformation, and
 //! the `w` dial's direction.
 //!
-//! `BRAIN_RESTORE_DEVICE=cpu` runs everything on the CPU JIT instead of the
+//! `BRAIN_CODEFORMER_DEVICE=cpu` runs everything on the CPU JIT instead of the
 //! pooled test device.
 
 use codeformer::{CodeFormer, CodeFormerConfig};
@@ -48,11 +48,11 @@ fn load(rel: &str) -> Option<Golden> {
 
 /// `codeformer.pth`, or `None` (test skips).
 fn weights() -> Option<String> {
-    let dir = ["BRAIN_RESTORE_WEIGHTS", "BRAIN_VQGAN_WEIGHTS"]
+    let dir = ["BRAIN_CODEFORMER_WEIGHTS", "BRAIN_VQGAN_WEIGHTS"]
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|d| !d.is_empty()));
     let Some(dir) = dir else {
-        eprintln!("SKIP: set BRAIN_RESTORE_WEIGHTS to the dir holding codeformer.pth");
+        eprintln!("SKIP: set BRAIN_CODEFORMER_WEIGHTS to the dir holding codeformer.pth");
         return None;
     };
     let p = format!("{dir}/codeformer.pth");
@@ -64,7 +64,7 @@ fn weights() -> Option<String> {
 }
 
 fn gpu() -> gpu_core::Gpu {
-    match std::env::var("BRAIN_RESTORE_DEVICE").as_deref() {
+    match std::env::var("BRAIN_CODEFORMER_DEVICE").as_deref() {
         Ok("cpu") => gpu_core::Gpu::new_cpu(&codeformer::KERNELS),
         _ => gpu_core::testgpu::dev(&codeformer::KERNELS),
     }
@@ -87,8 +87,8 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| (x as f64 - y as f64).abs()).fold(0.0, f64::max)
 }
 
-/// Relative L2 error `‖got − want‖ / ‖want‖`. Cosine alone is scale-invariant —
-/// a stage uniformly 2× the reference still reports cosine 1.000000000 — so
+/// Relative L2 error `‖got − want‖ / ‖want‖`. Cosine alone is scale-invariant -
+/// a stage uniformly 2× the reference still reports cosine 1.000000000 - so
 /// every gate below also carries this, which is scale-sensitive.
 fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     let (mut num, mut den) = (0.0f64, 0.0f64);
@@ -140,7 +140,7 @@ impl Report {
         assert!(worst.0 >= floor, "{title}: {} cosine {:.9} < {floor}", worst.1, worst.0);
         assert!(
             worst_rel.0 <= rel_floor,
-            "{title}: {} relative L2 {:.3e} > {rel_floor:.0e} — the direction matches but the \
+            "{title}: {} relative L2 {:.3e} > {rel_floor:.0e} - the direction matches but the \
              MAGNITUDE does not",
             worst_rel.1,
             worst_rel.0
@@ -178,7 +178,7 @@ fn imported(cfg: &CodeFormerConfig) -> Option<vae::blocks::Tensors> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. mapping units — the checkpoint contract, no device needed.
+// 1. mapping units - the checkpoint contract, no device needed.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -187,7 +187,7 @@ fn import_covers_the_real_checkpoint_both_ways() {
     let Some(t) = imported(&cfg) else { return };
     assert_eq!(t.len(), cfg.runtime_manifest().len());
     // The VQGAN half must be byte-identical to what `crates/vqgan` imports from
-    // the same file — one import, not two.
+    // the same file - one import, not two.
     let path = weights().expect("weights present");
     let vq = vqgan::import::load(&path, &cfg.vqgan).expect("vqgan import");
     assert_eq!(vq.skipped.len(), 515 - 329, "vqgan skips exactly the CodeFormer tensors");
@@ -226,7 +226,7 @@ fn ladder(case: &str) {
     }
     rep.add("lq_feat", &tap("lq_feat"), &genc["lq_feat"].1);
     rep.add("feat_emb", &tap("feat_emb"), &gtf["feat_emb"].1);
-    // Inside layer 0 — the five stage boundaries of one TransformerSALayer.
+    // Inside layer 0 - the five stage boundaries of one TransformerSALayer.
     for leaf in ["norm1", "attn_out", "norm2", "linear1", "linear2"] {
         rep.add(
             &format!("ft.00.{leaf}"),
@@ -320,7 +320,7 @@ fn ladder(case: &str) {
     for pair in drift.windows(2) {
         assert!(
             pair[1].1 >= pair[0].1,
-            "{case}: the CFT contribution shrank from w={} to w={} — the dial is inverted or \
+            "{case}: the CFT contribution shrank from w={} to w={} - the dial is inverted or \
              the residual is not scaled by w",
             pair[0].0,
             pair[1].0
@@ -342,7 +342,7 @@ fn ladder_synth() {
 // 4. THE PRODUCTION PATH. Every test above builds with `taps = true`, which
 //    pins every activation and DISABLES the shared builder's buffer pool.
 //    Callers outside the tests pass `taps = false`, so the graph they actually
-//    run — the one where activations are ALIASED — is never otherwise compared
+//    run - the one where activations are ALIASED - is never otherwise compared
 //    to anything. A `free` issued one step early is invisible in the tapped
 //    build and silently corrupts the pooled one.
 //
@@ -387,7 +387,7 @@ fn pooled_matches_tapped() {
     assert_eq!(
         max_abs_diff(&a.image, &b.image),
         0.0,
-        "pooled restoration differs from the tapped one (cosine {:.9}) — a buffer is freed \
+        "pooled restoration differs from the tapped one (cosine {:.9}) - a buffer is freed \
          before its last read",
         cosine(&a.image, &b.image)
     );
@@ -397,7 +397,7 @@ fn pooled_matches_tapped() {
     assert_eq!(
         max_abs_diff(&again, &b.image),
         0.0,
-        "a second generate() at the same w differs — an encoder feature was aliased"
+        "a second generate() at the same w differs - an encoder feature was aliased"
     );
     println!("pooled (taps=false) graph is bit-identical to the tapped one");
 }

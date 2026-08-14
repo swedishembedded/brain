@@ -10,14 +10,14 @@
 //! Real-weight-adjacent, so it follows the engine's opt-in-env-var pattern:
 //! skips cleanly when the checkpoint dir is not present.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test real_import_coverage -- --ignored`
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 fn hf_dir() -> Option<PathBuf> {
-    let d = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
+    let d = PathBuf::from(std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok()?);
     d.join("model.safetensors.index.json").exists().then_some(d)
 }
 
@@ -25,7 +25,7 @@ fn hf_dir() -> Option<PathBuf> {
 #[ignore]
 fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or model.safetensors.index.json missing");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
         return;
     };
     let idx_json = std::fs::read_to_string(dir.join("model.safetensors.index.json")).expect("read index");
@@ -79,7 +79,7 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
 ///    a 1-D (never-quantized) tensor matches the source exactly.
 ///
 /// Real-weight-adjacent AND real-disk-adjacent: skips cleanly when the
-/// checkpoint dir is absent, and needs ~35 GB free at `BRAIN_OMNI_IMPORT_OUT`
+/// checkpoint dir is absent, and needs ~35 GB free at `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`
 /// (defaults to a scratch path under the system temp dir, removed on success).
 ///
 /// Slow (streams the full 70 GB source): expect real wall-clock minutes, not
@@ -88,13 +88,13 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
 #[ignore]
 fn full_real_import_produces_a_two_way_covered_checkpoint() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or model.safetensors.index.json missing");
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
         return;
     };
     let shards = std::fs::read_dir(&dir).expect("read hf dir").filter(|e| e.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "safetensors"))).count();
     assert_eq!(shards, 15, "expected all 15 real shards on disk, found {shards} -- this test needs the full checkpoint, not a partial one");
 
-    let out_path = std::env::var("BRAIN_OMNI_IMPORT_OUT").unwrap_or_else(|_| {
+    let out_path = std::env::var("BRAIN_QWEN3OMNIMOE_IMPORT_OUT").unwrap_or_else(|_| {
         std::env::temp_dir().join(format!("omni_full_import_{}.safetensors", std::process::id())).to_string_lossy().into_owned()
     });
 
@@ -212,8 +212,8 @@ fn full_real_import_produces_a_two_way_covered_checkpoint() {
     assert!(rel_err < 0.05, "embed_tokens dequant strayed too far from the real source: rel_err={rel_err}");
 
     // Clean up the ~35 GB output unless the caller pointed at a path they
-    // want to keep (BRAIN_OMNI_IMPORT_OUT set explicitly).
-    if std::env::var("BRAIN_OMNI_IMPORT_OUT").is_err() {
+    // want to keep (BRAIN_QWEN3OMNIMOE_IMPORT_OUT set explicitly).
+    if std::env::var("BRAIN_QWEN3OMNIMOE_IMPORT_OUT").is_err() {
         std::fs::remove_file(&out_path).ok();
     }
 }

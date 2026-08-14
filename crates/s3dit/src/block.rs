@@ -475,10 +475,10 @@ impl Scratch {
 /// approach **this device's** per-binding limit (queried, not hard-coded — so it
 /// scales from a 2 GiB-binding card up to a large-binding one). Below that,
 /// materialised stays; above it, flash is the only thing that runs at all.
-/// `BRAIN_ZIMAGE_FLASH=1|0` forces it (1 to benchmark/verify flash at any size;
+/// `BRAIN_S3DIT_FLASH=1|0` forces it (1 to benchmark/verify flash at any size;
 /// 0 to prove the OOM).
 pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
-    match std::env::var("BRAIN_ZIMAGE_FLASH").ok().as_deref() {
+    match std::env::var("BRAIN_S3DIT_FLASH").ok().as_deref() {
         Some("1") => return true,
         Some("0") => return false,
         _ => {}

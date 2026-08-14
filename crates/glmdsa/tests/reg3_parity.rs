@@ -29,9 +29,9 @@ fn cfg() -> GlmConfig {
 
 fn logits(backend: Backend, naive: bool, c: &GlmConfig, init: &HashMap<String, Vec<f32>>, x: &[u32]) -> Vec<f32> {
     if naive {
-        std::env::set_var("BRAIN_GLM_NAIVE_MM", "1");
+        std::env::set_var("BRAIN_GLMDSA_NAIVE_MM", "1");
     } else {
-        std::env::remove_var("BRAIN_GLM_NAIVE_MM");
+        std::env::remove_var("BRAIN_GLMDSA_NAIVE_MM");
     }
     set_default_backend(backend);
     let m = Glm::new_on(gpu_core::testgpu::dev(glmdsa::model::PIPELINES), c.clone(), 1, x.len() as u32, init);

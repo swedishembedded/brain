@@ -12,7 +12,7 @@ on ONE resident instance with one buffer write per value and no rebuild. The
 timings below make that visible: the first call pays the import + upload, every
 later `w` costs one forward.
 
-    BRAIN_RESTORE_WEIGHTS=/path/to/codeformer \\
+    BRAIN_CODEFORMER_WEIGHTS=/path/to/codeformer \\
       dbus-run-session -- bash -c '
         brain serve --dbus & sleep 3
         python3 examples/restore/restore_face.py --image face.ppm'
@@ -57,7 +57,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if "brain/restore" not in brain.models():
-            print("FATAL: 'restore' not served (set BRAIN_RESTORE_WEIGHTS)", file=sys.stderr)
+            print("FATAL: 'restore' not served (set BRAIN_CODEFORMER_WEIGHTS)", file=sys.stderr)
             return 2
 
         print(f"{args.image}: {w}x{h} -> 512x512 restored face")

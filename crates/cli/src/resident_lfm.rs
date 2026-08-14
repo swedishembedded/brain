@@ -38,7 +38,7 @@ pub struct LfmResident {
     weights: String,
     tokenizer_path: String,
     tok: Arc<QwenBpe>,
-    /// Batched-forward slots per instance (`BRAIN_LFM_BATCH`, default 2).
+    /// Batched-forward slots per instance (`BRAIN_LFM2_BATCH`, default 2).
     batch: u32,
     /// Bytes of the checkpoint (device weight footprint ≈ file size, fp32).
     weight_bytes: u64,
@@ -46,8 +46,8 @@ pub struct LfmResident {
 
 impl LfmResident {
     pub fn from_env() -> Option<LfmResident> {
-        let weights = std::env::var("BRAIN_LFM").ok().filter(|p| !p.is_empty())?;
-        let tokenizer = std::env::var("BRAIN_LFM_TOKENIZER").ok().filter(|p| !p.is_empty())?;
+        let weights = std::env::var("BRAIN_LFM2").ok().filter(|p| !p.is_empty())?;
+        let tokenizer = std::env::var("BRAIN_LFM2_TOKENIZER").ok().filter(|p| !p.is_empty())?;
         match Self::new(&weights, &tokenizer) {
             Ok(r) => Some(r),
             Err(e) => {
@@ -70,7 +70,7 @@ impl LfmResident {
     pub fn from_card(weights: &str, card: &ModelCard, tokenizer_path: Option<&str>) -> Result<LfmResident, String> {
         let tokenizer_path = tokenizer_path.filter(|t| !t.is_empty()).ok_or("lfm: a sibling tokenizer.json is required")?;
         let tok = Arc::new(QwenBpe::from_file(tokenizer_path)?);
-        let batch = std::env::var("BRAIN_LFM_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(2u32).max(1);
+        let batch = std::env::var("BRAIN_LFM2_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(2u32).max(1);
         let weight_bytes = std::fs::metadata(weights).map(|m| m.len()).unwrap_or(1 << 30);
         Ok(LfmResident {
             id: card.id.clone(),

@@ -11,13 +11,13 @@
 //!
 //! Config is env-only (no hardcoded paths), mirroring `brain tts synth`'s
 //! `--weights-dir` / `--ckpt` flags:
-//!   * `BRAIN_TTS_WEIGHTS` — dir holding `talker.safetensors`, `mtp.safetensors`,
+//!   * `BRAIN_QWEN3TTS_WEIGHTS` - dir holding `talker.safetensors`, `mtp.safetensors`,
 //!     `codec.safetensors`, `speaker.safetensors` (the primary gate; unset ⇒ not served).
-//!   * `BRAIN_TTS_CKPT`     — HF checkpoint dir (for `config.json` + tokenizer).
-//!   * `BRAIN_TTS_LANG`     — default synthesis language (default `english`).
-//!   * `BRAIN_TTS_REF`      — optional reference `.wav`: when set, `speak` voice
+//!   * `BRAIN_QWEN3TTS_CKPT`     - HF checkpoint dir (for `config.json` + tokenizer).
+//!   * `BRAIN_QWEN3TTS_LANG`     - default synthesis language (default `english`).
+//!   * `BRAIN_QWEN3TTS_REF`      - optional reference `.wav`: when set, `speak` voice
 //!     -clones this timbre instead of the speaker-free synth.
-//!   * `BRAIN_TTS_REF_TEXT` — optional transcript of `BRAIN_TTS_REF`; enables the
+//!   * `BRAIN_QWEN3TTS_REF_TEXT` - optional transcript of `BRAIN_QWEN3TTS_REF`; enables the
 //!     in-context (ICL) clone path (the reference wav is codec-encoded in-tree).
 
 use capability::{
@@ -31,8 +31,8 @@ use qwen3tts::{GenOpts, TtsPaths};
 const SAMPLE_RATE: u32 = 24_000;
 
 /// Text-to-speech behind the scheduler. Loads brain-format Qwen3-TTS checkpoints
-/// (`BRAIN_TTS_WEIGHTS`); the resident instance decodes on the CPU (brain's
-/// `CpuTalker` default) — dropping it frees the RAM. One action, `speak`.
+/// (`BRAIN_QWEN3TTS_WEIGHTS`); the resident instance decodes on the CPU (brain's
+/// `CpuTalker` default) - dropping it frees the RAM. One action, `speak`.
 pub struct TtsResident {
     weights_dir: String,
     ckpt_dir: String,
@@ -43,22 +43,22 @@ pub struct TtsResident {
 
 impl TtsResident {
     /// Configure from the environment, mirroring `brain tts synth`'s flags. Returns
-    /// `None` (not served) when `BRAIN_TTS_WEIGHTS` is unset/empty, like
+    /// `None` (not served) when `BRAIN_QWEN3TTS_WEIGHTS` is unset/empty, like
     /// [`crate::resident::YoloResident::from_env`].
     pub fn from_env() -> Option<TtsResident> {
-        let weights_dir = std::env::var("BRAIN_TTS_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let ckpt_dir = std::env::var("BRAIN_TTS_CKPT").ok().unwrap_or_default();
-        let lang = std::env::var("BRAIN_TTS_LANG").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "english".to_string());
-        let ref_wav = std::env::var("BRAIN_TTS_REF").ok().filter(|p| !p.is_empty());
-        let ref_text = std::env::var("BRAIN_TTS_REF_TEXT").ok().unwrap_or_default();
+        let weights_dir = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        let ckpt_dir = std::env::var("BRAIN_QWEN3TTS_CKPT").ok().unwrap_or_default();
+        let lang = std::env::var("BRAIN_QWEN3TTS_LANG").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "english".to_string());
+        let ref_wav = std::env::var("BRAIN_QWEN3TTS_REF").ok().filter(|p| !p.is_empty());
+        let ref_text = std::env::var("BRAIN_QWEN3TTS_REF_TEXT").ok().unwrap_or_default();
         Some(TtsResident { weights_dir, ckpt_dir, lang, ref_wav, ref_text })
     }
 
     /// Direct constructor for callers that already hold the two paths (e.g.
-    /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target) — no env
+    /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target) - no env
     /// round-trip; see `crate::resident_facenet::FacenetResident::new`.
-    /// Default English, no reference voice — the synthesis-tuning knobs
-    /// (`BRAIN_TTS_LANG`/`_REF`/`_REF_TEXT`) remain `from_env`-only.
+    /// Default English, no reference voice - the synthesis-tuning knobs
+    /// (`BRAIN_QWEN3TTS_LANG`/`_REF`/`_REF_TEXT`) remain `from_env`-only.
     pub fn new(weights_dir: impl Into<String>, ckpt_dir: impl Into<String>) -> TtsResident {
         TtsResident {
             weights_dir: weights_dir.into(),
@@ -114,7 +114,7 @@ impl ResidentModel for TtsResident {
         // Talker checkpoint is missing.
         let paths = self.paths();
         if !std::path::Path::new(&paths.talker).exists() {
-            return Err(format!("tts: talker weights not found at {} (set BRAIN_TTS_WEIGHTS)", paths.talker));
+            return Err(format!("tts: talker weights not found at {} (set BRAIN_QWEN3TTS_WEIGHTS)", paths.talker));
         }
         Ok(Box::new(TtsInstance {
             paths,
@@ -159,14 +159,14 @@ impl Instance for TtsInstance {
         }
 
         // Speaker-free synth by default; voice-clone the configured reference when
-        // `BRAIN_TTS_REF` is set (ICL when a transcript is also given).
+        // `BRAIN_QWEN3TTS_REF` is set (ICL when a transcript is also given).
         let wav = match &self.ref_wav {
             Some(refw) => qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
             None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
         };
 
         // Emit raw little-endian f32 PCM (mono, 24 kHz), as the tts_serve protocol
-        // streams it — no external WAV encoder dependency.
+        // streams it - no external WAV encoder dependency.
         let bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         Ok(Outcome::new()
             .set("samples", json!(wav.len()))

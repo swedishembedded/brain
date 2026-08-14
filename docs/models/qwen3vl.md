@@ -20,14 +20,14 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 ## Getting the weights
 
 Model id: `brain/qwenvl` (reserved vendor - never auto-fetched).
-`BRAIN_QWENVL_WEIGHTS` - a checkpoint directory holding `config.json` +
+`BRAIN_QWEN3VL_WEIGHTS` - a checkpoint directory holding `config.json` +
 `model.safetensors[.index.json]` + `tokenizer.json` (overridable per call
 via the `weights` param).
 
 ## Running it
 
 ```bash
-BRAIN_QWENVL_WEIGHTS=/path/to/qwen3-vl \
+BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
   brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
     --in image=photo.ppm --out text=answer.txt
 ```
@@ -38,7 +38,7 @@ BRAIN_QWENVL_WEIGHTS=/path/to/qwen3-vl \
 - `max_new` - max tokens to generate.
 - `image` input - raw HWC f32 pixels in `[0,1]`, with `{w,h}` metadata.
 - `weights` - per-call override of the checkpoint directory (in place of
-  `BRAIN_QWENVL_WEIGHTS`).
+  `BRAIN_QWEN3VL_WEIGHTS`).
 
 ## Hardware and limits
 

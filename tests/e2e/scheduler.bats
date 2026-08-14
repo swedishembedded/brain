@@ -17,8 +17,8 @@
 # model instead, on every `make test/e2e`. Run:
 #
 #   BRAIN_E2E=1 \
-#   BRAIN_ZIMAGE_DIT=... BRAIN_ZIMAGE_VAE=... BRAIN_ZIMAGE_QWEN=... BRAIN_ZIMAGE_TOKENIZER=... \
-#   BRAIN_YOLO=/path/to/brain-yolov8.weights \
+#   BRAIN_S3DIT_DIT=... BRAIN_S3DIT_VAE=... BRAIN_S3DIT_QWEN=... BRAIN_S3DIT_TOKENIZER=... \
+#   BRAIN_YOLOV8=/path/to/brain-yolov8.weights \
 #   make test/e2e/scheduler
 #
 # SAFETY: the server is started as a background job of the dbus-run-session
@@ -30,8 +30,8 @@ setup_file() {
   command -v busctl >/dev/null || skip "busctl not available"
   command -v dbus-run-session >/dev/null || skip "dbus-run-session not available"
   python3 -c "import jeepney" 2>/dev/null || skip "python jeepney not installed (pip install -e brain-py)"
-  [ -n "${BRAIN_ZIMAGE_DIT:-}" ] || skip "set BRAIN_ZIMAGE_* to the z-image weights"
-  [ -n "${BRAIN_YOLO:-}" ] || skip "set BRAIN_YOLO (detect_pipeline.py hard-requires both models)"
+  [ -n "${BRAIN_S3DIT_DIT:-}" ] || skip "set BRAIN_ZIMAGE_* to the z-image weights"
+  [ -n "${BRAIN_YOLOV8:-}" ] || skip "set BRAIN_YOLOV8 (detect_pipeline.py hard-requires both models)"
   command -v nvidia-smi >/dev/null || skip "no GPU (nvidia-smi)"
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   export REPO
@@ -45,7 +45,7 @@ setup_file() {
   # encoder-in-RAM — several sizes then fit across the GPUs and the extra one is
   # evicted, with no single-card overcommit. --reserve-gb keeps headroom for
   # activations.
-  run env -u BRAIN_ZIMAGE_ENCODER_GPU OUT="${OUT:-/tmp/brain_e2e}" SIZE="${SIZE:-256}" STEPS="${STEPS:-8}" BATCH_N="${BATCH_N:-4}" \
+  run env -u BRAIN_S3DIT_ENCODER_GPU OUT="${OUT:-/tmp/brain_e2e}" SIZE="${SIZE:-256}" STEPS="${STEPS:-8}" BATCH_N="${BATCH_N:-4}" \
     timeout 1800 dbus-run-session -- bash -c "
       '$BIN' serve --dbus --reserve-gb 4 2>/tmp/brain_e2e_srv.log &
       SRV=\$!

@@ -174,13 +174,13 @@ pub const PIPELINES: &[(&str, &str)] = &[
 /// that the naive one-thread-per-output `matmul` is better (a whole tile for a
 /// handful of outputs is mostly masked lanes). Same math either way — parity is
 /// gated in `brain-gpu-core`'s `bench_matmul` and by `gradcheck` — so this only
-/// ever changes speed, never results. `BRAIN_GPT_NAIVE_MM=1` forces the naive
+/// ever changes speed, never results. `BRAIN_GPT2_NAIVE_MM=1` forces the naive
 /// kernel (A/B comparison + a fallback if a driver ever mishandles the tile).
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    // `matmul_reg3` (software-pipelined) is the default; `BRAIN_GPT_REG1=1`
+    let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    // `matmul_reg3` (software-pipelined) is the default; `BRAIN_GPT2_REG1=1`
     // selects the non-pipelined `matmul_reg` for A/B comparison.
-    let reg = if std::env::var("BRAIN_GPT_REG1").map(|v| v != "0").unwrap_or(false) {
+    let reg = if std::env::var("BRAIN_GPT2_REG1").map(|v| v != "0").unwrap_or(false) {
         MATMUL_REG
     } else {
         MATMUL_REG3
@@ -203,15 +203,15 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
 
 /// Backward GEMM pickers — the tiled `matmul_{dx,dw}_reg` (matmul_reg3 structure,
 /// ~34% of P40 peak, bit-identical to the naive kernels) once both output dims
-/// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT_NAIVE_MM=1`
+/// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT2_NAIVE_MM=1`
 /// forces naive (shares the forward's flag). Same math — gradcheck-gated.
 fn dx_kernel(m: usize, k: usize) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     if naive || m < 128 || k < 128 { (MATMUL_DX, (m * k) as u32) }
     else { (MATMUL_DX_REG, (m.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
 }
 fn dw_kernel(nrows: usize, k: usize) -> (usize, u32) {
-    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     if naive || nrows < 128 || k < 128 { (MATMUL_DW, (nrows * k) as u32) }
     else { (MATMUL_DW_REG, (nrows.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
 }
@@ -963,7 +963,7 @@ impl Gpt {
         // -- the same id crates/cli/src/resident_llm.rs::GptResident::from_env
         // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
         // here is auto-discoverable by crates/cli/src/model_dir.rs without
-        // requiring BRAIN_GPT_WEIGHTS to be set.
+        // requiring BRAIN_GPT2_WEIGHTS to be set.
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"));
     }
 

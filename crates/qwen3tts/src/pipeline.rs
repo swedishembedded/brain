@@ -563,15 +563,15 @@ fn run_npu(
     npu_cache: Option<&str>,
 ) -> Result<Vec<f32>, String> {
     let cache = npu_cache.map(std::path::Path::new);
-    // OpenVINO target device; override with BRAIN_TTS_NPU_DEVICE=cpu|gpu|npu|auto
+    // OpenVINO target device; override with BRAIN_QWEN3TTS_NPU_DEVICE=cpu|gpu|npu|auto
     // (e.g. `cpu` to validate the fp32 graph, since the NPU runs the graph in fp16).
-    let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+    let device = std::env::var("BRAIN_QWEN3TTS_NPU_DEVICE")
         .ok()
         .and_then(|s| npu::openvino::NpuDevice::parse(&s))
         .unwrap_or(npu::openvino::NpuDevice::Npu);
     let allow_fallback = true;
 
-    // Talker placement (`BRAIN_TTS_TALKER`):
+    // Talker placement (`BRAIN_QWEN3TTS_TALKER`):
     //   cpu          -> CPU KV-cache decoder (codec still on NPU),
     //   npu          -> fp32 cache-free NPU graph,
     //   npu-int8     -> weight-only INT8 cache-free NPU graph,
@@ -588,7 +588,7 @@ fn run_npu(
         NpuKvF32,
         NpuKvI4,
     }
-    let mode = match std::env::var("BRAIN_TTS_TALKER").ok().as_deref() {
+    let mode = match std::env::var("BRAIN_QWEN3TTS_TALKER").ok().as_deref() {
         Some("cpu") => Mode::Cpu,
         Some("npu") | Some("npu-fp32") => Mode::NpuF32,
         Some("npu-int8") | Some("int8") => Mode::NpuI8,
@@ -613,16 +613,16 @@ fn run_npu(
     // (vs an earlier ~225ms when the decoder was smaller). The resident INT8 NPU
     // decode graph (`KvMtp`) streams 4x-smaller weights from device memory and
     // measures ~257ms/frame — a 2.25x win — so it is now the DEFAULT for the large
-    // (d_model>=2048) model. `BRAIN_TTS_MTP=cpu` forces the host path (still the
+    // (d_model>=2048) model. `BRAIN_QWEN3TTS_MTP=cpu` forces the host path (still the
     // default on the small 0.6B, whose CPU MTP is cheap); `=npu` forces it on.
     // Not used for the CPU-Talker mode (which already uses the host MTP).
-    // `BRAIN_TTS_MTP`: `fused` = the single-infer fused graph (all 15 substeps in one
+    // `BRAIN_QWEN3TTS_MTP`: `fused` = the single-infer fused graph (all 15 substeps in one
     // NPU inference — kills the per-substep dispatch overhead); `npu` = the per-substep
     // KvMtp; `cpu` = the host CpuMtp. Default for the large model is `npu` (KvMtp).
     let mut npu_mtp: Option<Box<dyn crate::npu_gen::MtpEngine>> = if mode == Mode::Cpu {
         None
     } else {
-        match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
+        match std::env::var("BRAIN_QWEN3TTS_MTP").ok().as_deref() {
             Some("cpu") => None,
             Some("fused") => Some(Box::new(crate::npu_gen::FusedMtp::load(&paths.mtp, device, allow_fallback, cache)?)),
             Some("npu") => Some(Box::new(crate::npu_gen::KvMtp::load(

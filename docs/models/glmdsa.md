@@ -31,7 +31,7 @@ brain glm import --hf <hf_dir> --out glm.safetensors
 
 There's no auto-fetch by model id yet — either import a checkpoint yourself
 or train/finetune your own from scratch. For CLI inference against an
-existing checkpoint, point `BRAIN_GLM_WEIGHTS` at it.
+existing checkpoint, point `BRAIN_GLMDSA_WEIGHTS` at it.
 
 ## Running it
 

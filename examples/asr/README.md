@@ -27,7 +27,7 @@ pointed at your `testdata` tree, then run the client:
 
 ```bash
 # Nemotron only (streaming demo), CPU backend:
-BRAIN_NEMOTRON=$BRAIN_TESTDATA/asr/nemotron/hf \
+BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
   dbus-run-session -- bash -c '
     brain serve --dbus --device cpu & sleep 2
     python3 examples/asr/transcribe_mic.py --model nemotron --seconds 15

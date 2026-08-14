@@ -5,24 +5,24 @@
 //!
 //! One action, `generate`, in the SAME chat-capable shape
 //! `crates/omni/src/caps.rs::generate_spec()` uses (`messages`/`prompt`,
-//! `.streaming()`, `Media::Text` output) — required, not by convention:
+//! `.streaming()`, `Media::Text` output) - required, not by convention:
 //! `apiserve::catalog::api_caps` classifies a model chat-capable only on that
 //! exact shape (see `qwen3omnimoe::caps`'s own doc for the full reasoning), and both
 //! HTTP handlers always populate `messages`, never a bare `prompt`.
 //!
-//! Real, working, but validation-tier — the honest scope of what serving
+//! Real, working, but validation-tier - the honest scope of what serving
 //! wiring for `Qwen3Vl::generate()` turned out to need:
 //!
 //! - **Image placement is per-request, not baked into the resident model.**
 //!   `Qwen3Vl::generate()`'s incremental KV-cache decode derives image
 //!   placement dynamically from the token stream (`tok ==
 //!   self.image_token_id`), NOT from the `image_row0`/`n_visual` this crate's
-//!   `Qwen3Vl::new` takes at construction — those only gate the BATCHED
+//!   `Qwen3Vl::new` takes at construction - those only gate the BATCHED
 //!   `forward()` (training) graph, which `generate()` never calls. The
 //!   resident model is therefore built ONCE with a generous CAPACITY
 //!   (`MAX_VISUAL_TOKENS`, wired to `Qwen3Vl::new`'s `n_visual`), and each
 //!   request's actual (smaller-or-equal) image writes only the front of that
-//!   capacity — `checkpoint::upload_at`'s own `assert!(offset + len <=
+//!   capacity - `checkpoint::upload_at`'s own `assert!(offset + len <=
 //!   buf.size)` makes an oversized request a loud, immediate error, never a
 //!   silent overflow.
 //! - **Preprocessing does the real "smart resize"**, not the "caller
@@ -30,7 +30,7 @@
 //!   follow-up doc once proposed: `preprocess::smart_resize_default`
 //!   computes the patch-aligned target size for ANY input resolution, and
 //!   this module bilinear-resizes to it (`resize_bilinear_chw`, the same
-//!   shape as `fastvlm::caps::pad_resize_chw` but without the square-pad —
+//!   shape as `fastvlm::caps::pad_resize_chw` but without the square-pad -
 //!   Qwen3-VL's own preprocessor does not pad).
 //! - **DeepStack is real** (this session's `qwen3::Qwen::decode_steps`
 //!   `deepstack_row` fix, which threads each level's per-row residual add
@@ -52,14 +52,14 @@ use crate::preprocess::{normalize_unit, pack_patches, patch_grid, smart_resize};
 
 pub const MODEL: &str = "brain/qwenvl";
 
-/// Default checkpoint directory — `$BRAIN_QWENVL_WEIGHTS`, never a baked-in
+/// Default checkpoint directory - `$BRAIN_QWEN3VL_WEIGHTS`, never a baked-in
 /// absolute path (AGENTS.md: no absolute paths in source).
 fn default_weights() -> String {
-    std::env::var("BRAIN_QWENVL_WEIGHTS").unwrap_or_default()
+    std::env::var("BRAIN_QWEN3VL_WEIGHTS").unwrap_or_default()
 }
 
 /// Pixel-area budget for the resident model's DeepStack/splice buffer
-/// CAPACITY (see this module's doc) — a practical default (roughly a
+/// CAPACITY (see this module's doc) - a practical default (roughly a
 /// 1024x1024 image, ~1024 visual tokens at the 4B config's patch/merge
 /// granularity), not `preprocess::DEFAULT_MAX_PIXELS`'s theoretical 4096²
 /// ceiling, which would allocate multiple GB of DeepStack scratch per level
@@ -104,7 +104,7 @@ struct Resident {
     weights: String,
     max_pixels: u32,
     /// How many visual tokens this resident's DeepStack/splice buffers were
-    /// allocated for (computed once at construction from `max_pixels`) — see
+    /// allocated for (computed once at construction from `max_pixels`) - see
     /// this module's own doc on why construction-time capacity, not one
     /// request's exact size.
     n_visual_capacity: u32,
@@ -154,7 +154,7 @@ impl Action for GenerateAction {
         }
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
         if dir.is_empty() {
-            return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWENVL_WEIGHTS)".to_string());
+            return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
         }
         let max_new = inv.get_i64("max_new").unwrap_or(64).clamp(1, 2048) as u32;
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
@@ -289,16 +289,16 @@ mod tests {
 
     /// Served-path smoke on the real checkpoint (skip-if-absent, like the
     /// fastvlm caption parity tests): exercises the FULL `GenerateAction`
-    /// path — smart-resize preprocessing, image splice, and
-    /// `Qwen3Vl::generate`'s M-RoPE/DeepStack KV-cache incremental decode —
+    /// path - smart-resize preprocessing, image splice, and
+    /// `Qwen3Vl::generate`'s M-RoPE/DeepStack KV-cache incremental decode -
     /// which `parity.rs` (batched 4-layer decoder only) never touches.
     /// Bar is "runs end-to-end and produces text", not token parity (no HF
-    /// golden for the incremental path yet — see VALIDATION.md).
+    /// golden for the incremental path yet - see VALIDATION.md).
     #[test]
     fn served_generate_path_runs_on_real_weights() {
         let dir = default_weights();
         if dir.is_empty() || !std::path::Path::new(&dir).join("config.json").exists() {
-            eprintln!("skip: BRAIN_QWENVL_WEIGHTS not set / checkpoint absent");
+            eprintln!("skip: BRAIN_QWEN3VL_WEIGHTS not set / checkpoint absent");
             return;
         }
         let (w, h) = (64u32, 64u32);

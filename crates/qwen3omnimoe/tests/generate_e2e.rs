@@ -23,7 +23,7 @@
 //! checkpoint (5 new tokens, `BRAIN_DEVICE=cpu` — the GPU run hit an
 //! unrelated pre-existing VRAM shortfall):
 //! the prefill and the first 3 KV-cache decode steps matched EXACTLY,
-//! diverging only on the 4th. `BRAIN_OMNI_DEBUG_LOGITS=1` at that step
+//! diverging only on the 4th. `BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1` at that step
 //! showed the top-2 candidates 0.17 logits apart and the golden's actual
 //! pick in 3rd place, 1.3 logits back — a closely-contested position, not a
 //! confidently-wrong one, consistent with accumulated bf16 (HF's reference
@@ -40,7 +40,7 @@
 //! same near-tie.
 //!
 //! Real-weight-adjacent, real-golden-adjacent: skips cleanly when
-//! `BRAIN_OMNI_HF_DIR` is unset or the golden (`tools/goldens/
+//! `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset or the golden (`tools/goldens/
 //! omni_dump_generate.py`'s output) is missing.
 //!
 //! Expected to be SLOW — `crate::generate`'s own module doc: every layer's
@@ -49,7 +49,7 @@
 //! token, not milliseconds. Marked `#[ignore]`, matching every other
 //! real-weight test in this crate.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test generate_e2e -- --ignored --nocapture`
 
 use std::path::PathBuf;
@@ -64,8 +64,8 @@ use qwen3omnimoe::thinker::thinker_pipelines;
 #[test]
 #[ignore]
 fn matches_the_real_hf_greedy_generation() {
-    let Some(hf_dir) = std::env::var("BRAIN_OMNI_HF_DIR").ok().filter(|p| !p.is_empty()) else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset");
+    let Some(hf_dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_generate.safetensors");
@@ -119,6 +119,6 @@ fn matches_the_real_hf_greedy_generation() {
     let common_prefix = got_ids.iter().zip(&want_ids).take_while(|(a, b)| a == b).count();
     println!("want: {want_ids:?}");
     println!("got:  {got_ids:?}");
-    println!("common prefix: {common_prefix} of {} tokens (re-run with BRAIN_OMNI_DEBUG_LOGITS=1 to see the diverging step's top candidates)", want_ids.len());
+    println!("common prefix: {common_prefix} of {} tokens (re-run with BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1 to see the diverging step's top candidates)", want_ids.len());
     assert_eq!(got_ids, want_ids, "generate_greedy's token ids must exactly match HF's real greedy generate()");
 }

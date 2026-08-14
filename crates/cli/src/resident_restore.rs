@@ -7,9 +7,9 @@
 //! Two adapters, one file, because they read the SAME released checkpoint
 //! directory and their scope only differs by what part of it they use:
 //!
-//! * [`RestoreResident`] (`BRAIN_RESTORE_WEIGHTS`) — `restore_face`, the code
+//! * [`RestoreResident`] (`BRAIN_CODEFORMER_WEIGHTS`) - `restore_face`, the code
 //!   Transformer + controllable feature transformation + the `w` dial.
-//! * [`VqganResident`] (`BRAIN_VQGAN_WEIGHTS`) — `encode`/`decode`, the discrete
+//! * [`VqganResident`] (`BRAIN_VQGAN_WEIGHTS`) - `encode`/`decode`, the discrete
 //!   autoencoder alone.
 //!
 //! `activate` imports once and the [`Instance`] owns the built graph, so
@@ -22,7 +22,7 @@
 //! Both graphs are RECORDED step lists over fixed buffers: `CodeFormer::new` and
 //! `Vqgan::new` size `img_in`/`z`/`idx_in`/`out` from one `[3, H, W]` image and
 //! `submit` replays exactly those steps. There is no N axis to widen at call
-//! time — a batched forward would mean recording a second graph at batch N and
+//! time - a batched forward would mean recording a second graph at batch N and
 //! holding both sets of activations, which for a 512² VQ generator is a worse
 //! trade than running twice. So the default serial [`Instance::run_batch`]
 //! stands.
@@ -36,23 +36,23 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 // ---------------------------------------------------------------- restore
 
-/// CodeFormer behind the scheduler. `BRAIN_RESTORE_WEIGHTS` is `codeformer.pth`
+/// CodeFormer behind the scheduler. `BRAIN_CODEFORMER_WEIGHTS` is `codeformer.pth`
 /// or the directory holding it.
 pub struct RestoreResident {
     path: String,
 }
 
 impl RestoreResident {
-    /// `None` when the var is unset or does not resolve to an existing file —
+    /// `None` when the var is unset or does not resolve to an existing file -
     /// registering a model whose every call would fail is worse than not
     /// serving it. Deliberately NOT falling back to `BRAIN_VQGAN_WEIGHTS`: that
     /// one commonly names `vqgan_code1024.pth`, which carries none of the
     /// CodeFormer tensors.
     pub fn from_env() -> Option<RestoreResident> {
-        Self::new(std::env::var("BRAIN_RESTORE_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+        Self::new(std::env::var("BRAIN_CODEFORMER_WEIGHTS").ok().filter(|p| !p.is_empty())?)
     }
 
-    /// Direct constructor (no env round-trip) — see
+    /// Direct constructor (no env round-trip) - see
     /// `crate::resident_facenet::FacenetResident::new`'s rationale.
     pub fn new(path: impl Into<String>) -> Option<RestoreResident> {
         let path = path.into();
@@ -67,7 +67,7 @@ impl ResidentModel for RestoreResident {
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         // The graph is fixed at 512² and `w` is a buffer write, so every request
-        // shares one build — which is exactly what makes a `w` sweep cheap.
+        // shares one build - which is exactly what makes a `w` sweep cheap.
         InstanceKey::new(codeformer::caps::MODEL, "512")
     }
 
@@ -95,7 +95,7 @@ impl Instance for RestoreInstance {
             other => Err(format!("restore: unknown action '{other}'")),
         }
     }
-    // `run_batch` is deliberately the serial default — see the module docs.
+    // `run_batch` is deliberately the serial default - see the module docs.
 }
 
 // ---------------------------------------------------------------- vqgan
@@ -112,7 +112,7 @@ impl VqganResident {
         Self::new(std::env::var("BRAIN_VQGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?)
     }
 
-    /// Direct constructor (no env round-trip) — see
+    /// Direct constructor (no env round-trip) - see
     /// `crate::resident_facenet::FacenetResident::new`'s rationale.
     pub fn new(path: impl Into<String>) -> Option<VqganResident> {
         let path = path.into();
@@ -158,5 +158,5 @@ impl Instance for VqganInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         self.session.run(action, inv)
     }
-    // `run_batch` is deliberately the serial default — see the module docs.
+    // `run_batch` is deliberately the serial default - see the module docs.
 }

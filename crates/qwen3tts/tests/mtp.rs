@@ -6,7 +6,7 @@ use qwen3tts::MtpModel;
 
 #[test]
 fn mtp_real_import_and_forward() {
-    let Ok(dir) = std::env::var("BRAIN_TTS_CKPT") else {
+    let Ok(dir) = std::env::var("BRAIN_QWEN3TTS_CKPT") else {
         return;
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {

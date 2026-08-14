@@ -748,7 +748,7 @@ fn run_train(args: &[String]) {
     // -- the same id crates/cli/src/resident_depth.rs::DepthResident::from_env
     // synthesizes for an env-loaded checkpoint -- so a checkpoint saved here
     // is auto-discoverable by crates/cli/src/model_dir.rs without requiring
-    // BRAIN_DEPTH_WEIGHTS to be set. The "variant" field is informational
+    // BRAIN_ZIPDEPTH_WEIGHTS to be set. The "variant" field is informational
     // only (DepthResident::activate auto-detects the real variant from the
     // checkpoint's own tensor shapes via zipdepth::cfg_for_checkpoint, never
     // reads this back) -- previously hardcoded "base" regardless of which

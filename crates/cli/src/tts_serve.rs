@@ -59,10 +59,10 @@ pub fn run_serve(args: &[String]) {
     let mut talker_quant = "int8".to_string();
     let mut engines: HashMap<String, EngineCfg> = HashMap::new();
 
-    // Per-engine flag triplets/quads. The resources base comes from $BRAIN_TTS_RES
+    // Per-engine flag triplets/quads. The resources base comes from $BRAIN_QWEN3TTS_RES
     // (empty if unset — flags then supply the paths); never a baked-in absolute path
     // (see AGENTS.md: no absolute paths in source).
-    let res = std::env::var("BRAIN_TTS_RES").unwrap_or_default();
+    let res = std::env::var("BRAIN_QWEN3TTS_RES").unwrap_or_default();
     let mut clone_w = "out/tts-1b7".to_string();
     let mut clone_c = format!("{res}/ckpt/Qwen3-TTS-12Hz-1.7B-Base");
     let mut clone_ref = format!("{res}/voice-clone-example-voice.wav");
@@ -110,7 +110,7 @@ pub fn run_serve(args: &[String]) {
         }
     };
     eprintln!("tts serve: talker weight precision = {talker_quant}");
-    let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+    let device = std::env::var("BRAIN_QWEN3TTS_NPU_DEVICE")
         .ok()
         .and_then(|s| npu::openvino::NpuDevice::parse(&s))
         .unwrap_or(npu::openvino::NpuDevice::Npu);

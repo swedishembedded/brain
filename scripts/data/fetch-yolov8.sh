@@ -13,7 +13,7 @@
 # Produces  <out>/<variant>.pt  (the source) and  <out>/<variant>.brain.weights
 # (the brain checkpoint). Point brain at the latter:
 #
-#   export BRAIN_YOLO=<out>/<variant>.brain.weights
+#   export BRAIN_YOLOV8=<out>/<variant>.brain.weights
 #
 # Needs Python with torch + ultralytics to READ the .pt (the export writer is pure
 # Python). This installs them (CPU torch) if missing — a large one-time download.
@@ -66,4 +66,4 @@ python3 "$EXPORTER" --weights "$PT" --out "$WEIGHTS"
 
 echo
 echo "done. serve it with:"
-echo "  export BRAIN_YOLO=$WEIGHTS"
+echo "  export BRAIN_YOLOV8=$WEIGHTS"

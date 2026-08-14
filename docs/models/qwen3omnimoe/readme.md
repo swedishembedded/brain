@@ -1,9 +1,9 @@
 # Omni-Modal Assistant (Qwen3-Omni)
 
-Text, audio, image and video in — text out, plus real synthesized speech out.
+Text, audio, image and video in - text out, plus real synthesized speech out.
 Qwen3-Omni is brain's most ambitious served model: a single assistant that
 can read a prompt, listen to a clip, look at an image or video frames, answer
-in text, and — when you ask it to speak — respond with an actual spoken
+in text, and - when you ask it to speak - respond with an actual spoken
 waveform instead of just text. Reach for it when you want one model handling
 mixed-modality input and, optionally, a spoken reply, rather than wiring
 separate ASR/VLM/TTS models together yourself.
@@ -21,9 +21,9 @@ separate ASR/VLM/TTS models together yourself.
 
 ## Getting the weights
 
-Model id: `brain/omni`. Reserved vendor `brain/` — never auto-fetched.
+Model id: `brain/omni`. Reserved vendor `brain/` - never auto-fetched.
 
-- `BRAIN_OMNI_HF_DIR` — the HF checkpoint directory (`config.json` +
+- `BRAIN_QWEN3OMNIMOE_HF_DIR` - the HF checkpoint directory (`config.json` +
   tokenizer files + the sharded `model.safetensors.index.json` + shards).
   This is the gate: serving is unavailable until it's set.
 
@@ -61,16 +61,16 @@ tensor's f32 expansion, never the whole ~70 GB checkpoint) and quantizes
 every rank-2 weight to int8. Then serve it:
 
 ```bash
-BRAIN_OMNI_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors \
-BRAIN_OMNI_INT8_TOKENIZER_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors \
+BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   brain serve --openai --dbus --device vulkan
 ```
 
 An int8 checkpoint is a single `.safetensors` and carries no tokenizer, so
-`BRAIN_OMNI_INT8_TOKENIZER_DIR` says where to read `tokenizer.json` (or
+`BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` says where to read `tokenizer.json` (or
 `vocab.json` + `merges.txt`) from - normally the HF directory you converted
 from. It defaults to the checkpoint's own directory when that holds tokenizer
-files, then to `BRAIN_OMNI_HF_DIR`. Without any of them the model still loads
+files, then to `BRAIN_QWEN3OMNIMOE_HF_DIR`. Without any of them the model still loads
 and still serves raw token ids, but it is not on the chat endpoints.
 
 How the sharding decides itself:
@@ -113,7 +113,7 @@ Two limits worth knowing before you point it at real weights:
 Serve it over D-Bus and/or the HTTP chat APIs:
 
 ```bash
-BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
   brain serve --dbus --openai --anthropic
 ```
 
@@ -138,7 +138,7 @@ The same model is reachable on the Anthropic-compatible `/v1/messages`
 endpoint with `image` content blocks.
 
 Real spoken output (the `speak` action: response text + a 24 kHz waveform) is
-D-Bus/`brain do`-only today — the HTTP chat endpoints always dispatch the
+D-Bus/`brain do`-only today - the HTTP chat endpoints always dispatch the
 `generate` action, so speech output doesn't come back over HTTP:
 
 ```python
@@ -155,20 +155,20 @@ speech, image and video input over both the D-Bus and HTTP transports.
 
 ## Options
 
-- `messages` / `prompt` — chat input, same shape as brain's other chat
+- `messages` / `prompt` - chat input, same shape as brain's other chat
   models; `messages` is a flattened JSON array, `prompt` is a raw string.
-- `max_new` — max tokens to generate (default `32`).
-- `audio` input blob — raw mono f32 little-endian PCM at 16 kHz.
-- `image` input blob — interleaved HWC f32 pixels in `[0,1]`.
-- `video` input blob — N concatenated HWC f32 RGB frames plus
+- `max_new` - max tokens to generate (default `32`).
+- `audio` input blob - raw mono f32 little-endian PCM at 16 kHz.
+- `image` input blob - interleaved HWC f32 pixels in `[0,1]`.
+- `video` input blob - N concatenated HWC f32 RGB frames plus
   `{frames,w,h,c}` metadata; brain decodes already-extracted frames, it does
   not demux a video file itself.
-- `speaker` (`speak` only) — voice name (`chelsie`, `ethan`, `aiden`;
+- `speaker` (`speak` only) - voice name (`chelsie`, `ethan`, `aiden`;
   default `chelsie`).
 
 ## Hardware and limits
 
-- Generation is greedy (argmax) only — `temp`/`top_p`/`top_k`/`seed` are
+- Generation is greedy (argmax) only - `temp`/`top_p`/`top_k`/`seed` are
   accepted for API compatibility but have no effect.
 - `speak` is text-only on the input side today: a `speak` call does not also
   take audio/image input, and it's single-turn (no multi-turn spoken
@@ -197,5 +197,5 @@ speech, image and video input over both the D-Bus and HTTP transports.
   bf16 is not an option on this class of hardware regardless - brain's
   kernels are fp32 throughout, and Pascal's fp16 rate is 1/64.
 - No LoRA/fine-tuning path.
-- No CLI (`brain do`/`brain caps`) access — D-Bus and the HTTP chat APIs
+- No CLI (`brain do`/`brain caps`) access - D-Bus and the HTTP chat APIs
   only.

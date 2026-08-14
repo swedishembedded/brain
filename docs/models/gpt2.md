@@ -25,7 +25,7 @@ carry.
 
 `brain/gpt` is a reserved built-in id with no upstream checkpoint — there's
 nothing to fetch. Train your own with `brain gpt train`, or point
-`BRAIN_GPT_WEIGHTS` at an existing brain-format checkpoint to serve one you
+`BRAIN_GPT2_WEIGHTS` at an existing brain-format checkpoint to serve one you
 already have.
 
 ## Running it
@@ -47,7 +47,7 @@ don't recompute the whole prefix each step.
 To serve it over HTTP or D-Bus:
 
 ```bash
-BRAIN_GPT_WEIGHTS=gpt.safetensors brain serve --dbus --openai
+BRAIN_GPT2_WEIGHTS=gpt.safetensors brain serve --dbus --openai
 ```
 
 Once serving, it's reachable like any other resident model over `brain do`,

@@ -17,12 +17,12 @@ fn cpu_register_equals_cpu_naive() {
     let x: Vec<u32> = (0..512).map(|i| (i as u32 * 5 + 1) % c.vocab).collect();
     let y = vec![gpt2::model::IGNORE; 512];
 
-    std::env::set_var("BRAIN_GPT_NAIVE_MM", "1");
+    std::env::set_var("BRAIN_GPT2_NAIVE_MM", "1");
     let m1 = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), 4, 128, &init);
     m1.set_batch(&x, &y); m1.forward_submit();
     let naive = m1.logits_host();
 
-    std::env::remove_var("BRAIN_GPT_NAIVE_MM");
+    std::env::remove_var("BRAIN_GPT2_NAIVE_MM");
     let m2 = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), 4, 128, &init); // M=512>=128, N picks reg where >=128
     m2.set_batch(&x, &y); m2.forward_submit();
     let reg = m2.logits_host();

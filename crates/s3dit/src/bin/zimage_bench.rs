@@ -5,7 +5,7 @@
 //! single GPU. Reports vs the Tesla P40 fp32 peak (11.76 TFLOP/s/card).
 //!
 //! Usage:
-//!   BRAIN_ZIMAGE_DIT=<z_image_turbo_bf16.safetensors> \
+//!   BRAIN_S3DIT_DIT=<z_image_turbo_bf16.safetensors> \
 //!     zimage_bench <cpu|gpu> [h w cap_len reps]
 //!
 //! (Full 6B fp32 exceeds a single 24 GB P40, so `gpu` here is for sizes/configs
@@ -81,7 +81,7 @@ fn main() {
         let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(64);
         let reps: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(8);
         let mut cfg = ZImageConfig::turbo();
-        if let Ok(n) = std::env::var("BRAIN_ZIMAGE_LAYERS").and_then(|n| n.parse::<u32>().map_err(|_| std::env::VarError::NotPresent)) {
+        if let Ok(n) = std::env::var("BRAIN_S3DIT_LAYERS").and_then(|n| n.parse::<u32>().map_err(|_| std::env::VarError::NotPresent)) {
             cfg.n_layers = n;
         }
         let (dim, hidden) = (cfg.dim as usize, (cfg.dim * 8 / 3) as usize);
@@ -161,10 +161,10 @@ fn main() {
     let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(32);
     let reps: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(3);
 
-    let dit_path = match std::env::var("BRAIN_ZIMAGE_DIT") {
+    let dit_path = match std::env::var("BRAIN_S3DIT_DIT") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("set BRAIN_ZIMAGE_DIT to the z_image_turbo_bf16 safetensors");
+            eprintln!("set BRAIN_S3DIT_DIT to the z_image_turbo_bf16 safetensors");
             std::process::exit(1);
         }
     };
@@ -172,7 +172,7 @@ fn main() {
     let mut cfg = ZImageConfig::turbo();
     // Optional: run a layer-reduced model (fits one 24 GB card for single-GPU
     // profiling; extrapolate ms to the full 30 layers). Uses real layer weights.
-    if let Ok(n) = std::env::var("BRAIN_ZIMAGE_LAYERS") {
+    if let Ok(n) = std::env::var("BRAIN_S3DIT_LAYERS") {
         if let Ok(n) = n.parse::<u32>() {
             cfg.n_layers = n;
         }

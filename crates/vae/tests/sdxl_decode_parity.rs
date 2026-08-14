@@ -5,7 +5,7 @@
 //!
 //! Why this file exists, separately from `decode_parity.rs`: that gate covers
 //! Z-Image's VAE, which is a *16*-channel `AutoencoderKL`, and it skips unless
-//! `BRAIN_ZIMAGE_VAE` is set — so on this machine, and on CI, **nothing gated a
+//! `BRAIN_S3DIT_VAE` is set - so on this machine, and on CI, **nothing gated a
 //! VAE decode at all**. `crates/unet`'s SDXL pipeline shipped a decode that
 //! produced structurally-correct but visibly corrupted pictures, and no test
 //! could see it: the UNet's own 165-tap parity is green, and a
@@ -63,7 +63,7 @@ fn psnr(a: &[f32], b: &[f32]) -> f64 {
 fn sdxl_vae_decode_matches_diffusers() {
     let fixture = testdata("golden/vae/sdxl_vae_decode.safetensors");
     if !Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata` (or tools/goldens/sdxl_dump_vae_decode.py)");
+        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata` (or tools/goldens/sdxl_dump_vae_decode.py)");
         return;
     }
     let Ok(root) = std::env::var("BRAIN_SDXL") else {

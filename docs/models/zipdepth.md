@@ -26,7 +26,7 @@ checkpoint (`.pth` or an equivalent `.safetensors`) yourself:
 - Standalone demo (`brain depth --image` / `--camera`): pass `--weights
   <path>` directly.
 - Served (via `brain do` / D-Bus, or the `--infer npu` path): set
-  `BRAIN_DEPTH_WEIGHTS=<path>`.
+  `BRAIN_ZIPDEPTH_WEIGHTS=<path>`.
 
 The checkpoint variant (base vs. the NPU-blend layout) is auto-detected from
 the file's own tensor names — you never need to pass `--variant` by hand.
@@ -61,7 +61,7 @@ Served through the capability system (D-Bus / `brain do`), the model takes
 one `image` input and returns a `depth` map:
 
 ```bash
-BRAIN_DEPTH_WEIGHTS=$ZIPDEPTH_PTH brain do brain/depth depth \
+BRAIN_ZIPDEPTH_WEIGHTS=$ZIPDEPTH_PTH brain do brain/depth depth \
     --in image=photo.ppm --out depth=out/depth.ppm --json
 ```
 
@@ -94,7 +94,7 @@ brain depth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-
 | Flag / env | Effect |
 |---|---|
 | `--weights <path>` | ZipDepth checkpoint for the standalone demo |
-| `BRAIN_DEPTH_WEIGHTS` | checkpoint path for the served (`brain do`/D-Bus) path |
+| `BRAIN_ZIPDEPTH_WEIGHTS` | checkpoint path for the served (`brain do`/D-Bus) path |
 | `--device cpu\|gpu\|vulkan` | pick the compute backend for the engine path |
 | `--infer engine\|npu` | run brain's own engine (default) or the Intel NPU via OpenVINO |
 | `--input N` | model input side (rounded to a multiple of 32); smaller is faster, quadratically |

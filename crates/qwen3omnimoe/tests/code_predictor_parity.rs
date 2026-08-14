@@ -29,7 +29,7 @@
 //! Real-weight-adjacent: skips cleanly when the checkpoint shards holding
 //! `talker.code_predictor.*` (shards 14-15 of 15) are absent.
 //!
-//! usage: `BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test code_predictor_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;
@@ -58,8 +58,8 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[test]
 #[ignore]
 fn matches_the_real_code_predictor() {
-    let Some(dir) = std::env::var("BRAIN_OMNI_HF_DIR").ok().map(PathBuf::from) else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset");
+    let Some(dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().map(PathBuf::from) else {
+        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     let Some(layer0_shard) = shard_for(&dir, "talker.code_predictor.model.layers.0.self_attn.q_proj.weight") else {

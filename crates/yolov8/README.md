@@ -71,7 +71,7 @@ HWC floats, calls `Yolo::detect` (letterbox → eval-mode forward → DFL decode
 NMS), and returns `[x1,y1,x2,y2,conf,class]` rows; labels are numeric class ids.
 
 ```bash
-# Load a trained YOLO as the detector (or set BRAIN_YOLO=out/yolo.safetensors).
+# Load a trained YOLO as the detector (or set BRAIN_YOLOV8=out/yolo.safetensors).
 # With no --yolo, a FakeDetectModel returns a fixed box so the loop still runs.
 printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,"data":"<base64 rgb8>"}\n' \
   | BRAIN_DEVICE=cpu brain run --yolo out/yolo.safetensors

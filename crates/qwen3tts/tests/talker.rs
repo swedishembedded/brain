@@ -88,12 +88,12 @@ fn talker_analytic_grads_match_finite_differences() {
     );
 }
 
-/// Env-gated real-checkpoint import + forward (set `BRAIN_TTS_CKPT` to the
+/// Env-gated real-checkpoint import + forward (set `BRAIN_QWEN3TTS_CKPT` to the
 /// `Qwen3-TTS-12Hz-0.6B-Base` dir). Verifies the import consumes every Talker
 /// tensor with matching shapes and produces finite `[T, 3072]` codebook-0 logits.
 #[test]
 fn talker_real_import_and_forward() {
-    let Ok(dir) = std::env::var("BRAIN_TTS_CKPT") else {
+    let Ok(dir) = std::env::var("BRAIN_QWEN3TTS_CKPT") else {
         return;
     };
     if gpu_disabled() {

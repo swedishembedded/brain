@@ -74,7 +74,7 @@ def main() -> int:
         if "brain/imageops" in models:
             demo_image_over_fd(brain)
 
-        if "brain/z-image" in models and os.environ.get("BRAIN_ZIMAGE_DIT"):
+        if "brain/z-image" in models and os.environ.get("BRAIN_S3DIT_DIT"):
             demo_streaming_generation(brain)
         else:
             print("z-image streaming demo skipped (export BRAIN_ZIMAGE_* to enable)")

@@ -5,7 +5,7 @@
 //! `model.safetensors`) into a brain `.safetensors` container.
 //!
 //! Convention match (same as qwen): brain's `matmul.wgsl` is `out = x @ Wᵀ`
-//! with `W:[out,in]` row-major — exactly HF `nn.Linear.weight`; the embedding
+//! with `W:[out,in]` row-major - exactly HF `nn.Linear.weight`; the embedding
 //! table is `[vocab, hidden]` in both; the depthwise conv weight `[d,1,k]` is
 //! stored flat as `[d,k]`. **No tensor is transposed.** The head is tied
 //! (`lm_head.weight` never ships in the checkpoint; the model reuses
@@ -167,7 +167,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
         cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
     // A card so this file auto-serves from the global model directory (P2) with
-    // no BRAIN_LFM_WEIGHTS env var — id defaults to the output filename stem,
+    // no BRAIN_LFM2_WEIGHTS env var - id defaults to the output filename stem,
     // matching how the model dir keys catalog entries, unless the caller
     // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("lfm"));

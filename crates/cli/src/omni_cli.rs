@@ -7,9 +7,9 @@
 //!
 //! Produces the brain-native, W8A16 (int8 weight-only, MoE expert linears,
 //! full-precision activations) checkpoint the GPU-resident sharded Thinker
-//! (`BRAIN_OMNI_INT8_CHECKPOINT`, `qwen3omnimoe::int8_thinker_resident`) loads. The
+//! (`BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT`, `qwen3omnimoe::int8_thinker_resident`) loads. The
 //! raw HF bf16 checkpoint the
-//! validation-tier `BRAIN_OMNI_HF_DIR` path reads is NOT that format - it is
+//! validation-tier `BRAIN_QWEN3OMNIMOE_HF_DIR` path reads is NOT that format - it is
 //! ~2x the size and stores no packed int8 - so this conversion is the step
 //! between "downloaded the weights" and "the model is GPU-resident".
 //!
@@ -45,7 +45,7 @@ fn import(argv: &[String]) {
         Ok(()) => {
             let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             println!("wrote {out} ({:.2} GiB) in {:.1}s", bytes as f64 / (1u64 << 30) as f64, t.elapsed().as_secs_f64());
-            println!("serve it GPU-resident with:  BRAIN_OMNI_INT8_CHECKPOINT={out} brain serve --dbus --openai");
+            println!("serve it GPU-resident with:  BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={out} brain serve --dbus --openai");
         }
         Err(e) => {
             eprintln!("brain omni import: {e}");

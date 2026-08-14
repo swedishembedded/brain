@@ -8,17 +8,17 @@
 //! back as a JSONL line to stdout (flushed per line). Diagnostics go to stderr.
 //!
 //! Flags:
-//!   * `--gpt <path>` (or env `BRAIN_GPT`) — load a GPT checkpoint as the text
+//!   * `--gpt <path>` (or env `BRAIN_GPT2`) - load a GPT checkpoint as the text
 //!     model. With none, a fake echo model is used so the loop is testable
 //!     without a trained model.
-//!   * `--yolo <path>` (or env `BRAIN_YOLO`) — load a YOLO checkpoint as the
+//!   * `--yolo <path>` (or env `BRAIN_YOLOV8`) - load a YOLO checkpoint as the
 //!     object detector. With none, a `FakeDetectModel` returns a fixed box so the
 //!     loop runs without a trained detector.
-//!   * `--conf <f32>` (or env `BRAIN_CONF`) — detection confidence threshold for
+//!   * `--conf <f32>` (or env `BRAIN_CONF`) - detection confidence threshold for
 //!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
 //!     low-confidence boxes still surface. No effect on the fake detector.
-//!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` — generation config.
-//!   * `--models-dir <path>` (or env `BRAIN_MODELS_DIR`) — the global model
+//!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` - generation config.
+//!   * `--models-dir <path>` (or env `BRAIN_MODELS_DIR`) - the global model
 //!     directory `brain serve --dbus` scans at startup to build the served-model
 //!     catalog (one entry per carded file, keyed by model-card id). Defaults to
 //!     `$XDG_DATA_HOME/brain/models` else `$HOME/.local/share/brain/models`.
@@ -68,7 +68,7 @@ HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
   --openrouter [PORT]    OpenRouter-compatible dialect   (default port 8789)
   --anthropic [PORT]     Anthropic Messages dialect      (default port 8787)
 
-  BASE URL — for OpenAI and OpenRouter, BOTH of these work, because every route
+  BASE URL - for OpenAI and OpenRouter, BOTH of these work, because every route
   is registered with and without the /v1 prefix:
       http://127.0.0.1:PORT        POST /chat/completions,    GET /models
       http://127.0.0.1:PORT/v1     POST /v1/chat/completions, GET /v1/models
@@ -114,16 +114,16 @@ SERVING OPTIONS
                          pid and no address.
 
 STDIO CONTROLLER  (the default, with no surface flag)
-  --gpt PATH             GPT checkpoint (else $BRAIN_GPT; else a fake echo model)
-  --yolo PATH             YOLO checkpoint (else $BRAIN_YOLO; else a fake detector)
+  --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
+  --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
   --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
   --max-new N  --temp X  --top-k K  --seed S      generation config
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
-MODEL CONFIGURATION (env-only — there is no config file)
+MODEL CONFIGURATION (env-only - there is no config file)
   Which models this server actually serves is chosen ENTIRELY by BRAIN_* env
-  vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM, BRAIN_NEMOTRON, ...): a model whose
+  vars (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...): a model whose
   weights var is unset is simply not served. Run `brain serve --help` for the
   full reference table of every serving variable.
 
@@ -154,7 +154,7 @@ EXAMPLES
 
 /// The value that must follow a value-taking flag. A flag with no value is a
 /// typo, not a request for the default: a trailing `--gpt` used to silently
-/// mean \"no checkpoint\", erasing a `BRAIN_GPT` already read from the
+/// mean \"no checkpoint\", erasing a `BRAIN_GPT2` already read from the
 /// environment, and a trailing `--models-dir` used to silently scan the XDG
 /// default instead of the directory the caller meant to name.
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
@@ -171,7 +171,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 
 /// The parsed value that must follow a value-taking numeric flag. Same policy
 /// as [`val`], extended to the parse: an UNPARSEABLE value is a typo, not a
-/// request for the default — `--reserve-gb 2G` used to silently serve with
+/// request for the default - `--reserve-gb 2G` used to silently serve with
 /// the default 2 (a coincidence), and `--temp 0,8` silently sampled at the
 /// default temperature. Exit 2 names the flag and the rejected value.
 fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T {
@@ -184,8 +184,8 @@ fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T
 }
 
 pub fn run_serve(args: &[String]) {
-    let mut gpt_path = std::env::var("BRAIN_GPT").ok();
-    let mut yolo_path = std::env::var("BRAIN_YOLO").ok();
+    let mut gpt_path = std::env::var("BRAIN_GPT2").ok();
+    let mut yolo_path = std::env::var("BRAIN_YOLOV8").ok();
     let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: 0 };
     // Optional detection confidence threshold for the YOLO detector. A tiny model
     // trained for only a few hundred steps emits low-confidence boxes that the
@@ -352,7 +352,7 @@ pub fn run_serve(args: &[String]) {
     let mut ctrl = Controller::with_config(Registry::with_models(infer, detect), cfg);
 
     // Expose the generic capability providers over the event API (manifest_request
-    // / action_request) — the same actions `brain do` runs, now network-reachable.
+    // / action_request) - the same actions `brain do` runs, now network-reachable.
     ctrl.register_provider(std::sync::Arc::new(s3dit::caps::ZImageProvider::load().expect("z-image provider")));
     ctrl.register_provider(std::sync::Arc::new(lfm2::caps::LfmProvider::new()));
 
@@ -400,11 +400,11 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     let mut all_gpus = query_gpu_mem();
     // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
     // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
-    // have no dedicated VRAM — they share system RAM — so size the budget like the
+    // have no dedicated VRAM - they share system RAM - so size the budget like the
     // NPU (a modest fraction of RAM). This is what makes `--device gpu` (and the
     // all-devices default) actually schedule onto the iGPU on such boxes.
     // Devices this fallback creates ALWAYS share physical RAM with the CPU
-    // (that is the case it exists for) — tracked so they can be declared into
+    // (that is the case it exists for) - tracked so they can be declared into
     // the same memauth pool as Device::Cpu below, instead of budgeted as an
     // independent-but-physically-identical pool of bytes.
     let mut fallback_unified_gpus: Vec<u32> = Vec::new();
@@ -415,7 +415,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         let n = gpu_core::visible_gpu_count();
         if n > 0 {
             // The real ceiling is the shared RAM pool declared below, not a
-            // fraction reserved here — this device budget only needs to be AT
+            // fraction reserved here - this device budget only needs to be AT
             // LEAST the pool's total so the pool (not a smaller guessed
             // fraction) is always the binding constraint.
             let ram = host_ram_available();
@@ -432,8 +432,8 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
     // Devices whose bytes physically ARE the CPU's RAM: this fallback's
     // synthesized GPUs, plus any real GPU the device registry classifies as
-    // integrated (an Arc/Xe iGPU reporting real VRAM via query_gpu_mem — the
-    // common case on this box — never goes through the fallback above, so it
+    // integrated (an Arc/Xe iGPU reporting real VRAM via query_gpu_mem - the
+    // common case on this box - never goes through the fallback above, so it
     // needs its own check here). A discrete GPU with dedicated VRAM is not
     // included. See `memauth`'s module doc for why declaring this matters:
     // without it, a GPU-side allocation and a CPU-side one are budgeted as
@@ -460,14 +460,14 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     let ram = host_ram_available();
     // NPUs always share system RAM (see the comment above); their device
     // budget only needs to be at least the pool's total, same reasoning as
-    // the iGPU fallback — `resident::build_executor` declares them into the
+    // the iGPU fallback - `resident::build_executor` declares them into the
     // shared pool alongside `unified_gpus` and Device::Cpu.
     let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, ram)).collect();
 
     // What is actually schedulable is `gpus`/`npus`/`cpu_schedulable`, not just
-    // `gpus` — a prior version of this message said "scheduling on CPU only"
+    // `gpus` - a prior version of this message said "scheduling on CPU only"
     // purely from `gpus.is_empty()`, which was wrong on two counts whenever an
-    // NPU was involved: `--device npu` schedules on the NPU (never CPU — CPU
+    // NPU was involved: `--device npu` schedules on the NPU (never CPU - CPU
     // compute is excluded, see `cpu_compute_ram` below), and `--device npu,cpu`
     // schedules on both, not "CPU only".
     if gpus.is_empty() && npus.is_empty() {
@@ -485,7 +485,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     }
     let reserved = reserve_gb << 30;
     // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
-    // compute — `--device gpu` bounds where work runs, not where bytes may rest.
+    // compute - `--device gpu` bounds where work runs, not where bytes may rest.
     let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     eprintln!(
         "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
@@ -500,7 +500,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     let dir = crate::model_dir::resolve(models_dir.as_deref());
     if let Some(d) = &dir {
         // First run on a fresh install: the dir doesn't exist yet. Create it so
-        // the scan is clean (an empty catalog, not an ENOENT warning) — models
+        // the scan is clean (an empty catalog, not an ENOENT warning) - models
         // dropped in later are picked up on the next `brain serve` with no env
         // vars needed.
         if let Err(e) = std::fs::create_dir_all(d) {
@@ -513,7 +513,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
-/// intersected with any cgroup v2 limit — see `memauth::HostProbe`, whose
+/// intersected with any cgroup v2 limit - see `memauth::HostProbe`, whose
 /// doc carries the `MemAvailable`-over-`MemTotal` rationale this used to
 /// duplicate locally. `query_ram_bytes` (the old name, kept public within
 /// the crate since `perf_cli.rs` calls it by that name) is now a thin alias.
@@ -543,7 +543,7 @@ struct RunApis {
 /// D-Bus and an HTTP surface both run, D-Bus gets its own thread (it owns a tokio
 /// runtime) and the HTTP servers own the main thread; a single surface blocks directly.
 /// A `brain_dbus::serve` failure is almost always "no bus at this address" (no
-/// desktop session, no `dbus-run-session`, no system bus policy for this user) —
+/// desktop session, no `dbus-run-session`, no system bus policy for this user) -
 /// give a message that says what to try instead of the raw connect errno.
 /// `http_up` reports whether an HTTP API surface is still serving, so the
 /// operator knows this failure did not take the whole process down.
@@ -567,7 +567,7 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: boo
 /// How long [`run_apis`] waits for a backgrounded D-Bus surface to finish its own
 /// graceful shutdown after the HTTP surface has drained, before giving up and
 /// letting the process exit anyway. Bounded so a wedged D-Bus shutdown cannot
-/// hang `brain serve` forever — [`brain_shutdown::install_signals`]'s own
+/// hang `brain serve` forever - [`brain_shutdown::install_signals`]'s own
 /// second-signal escape hatch is the backstop if this window is not enough.
 const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -612,7 +612,7 @@ fn run_apis(a: RunApis) {
     // One shutdown source for every surface this process serves. SIGINT/SIGTERM
     // disposition is process-wide: if D-Bus and HTTP each installed their own
     // `tokio::signal::ctrl_c()` handler, only one registration would ever
-    // actually see the signal — see `brain_shutdown` for the failure this
+    // actually see the signal - see `brain_shutdown` for the failure this
     // caused. Installed once, here, before either surface's runtime exists, so
     // Ctrl-C/SIGTERM reaches whichever surfaces are actually running.
     let (trigger, shutdown) = brain_shutdown::channel();
@@ -744,7 +744,7 @@ fn run_apis(a: RunApis) {
 /// Per-GPU `(canonical index, total_bytes)`.
 ///
 /// Capacities come from `nvidia-smi` (NVML), but NVML enumeration order is not
-/// the placement order — budgets are keyed by **PCI bus id** through the device
+/// the placement order - budgets are keyed by **PCI bus id** through the device
 /// registry, so `Device::Gpu(i)` budgets provably describe the same physical
 /// card `gpu<i>` placement binds. Cards nvidia-smi does not report (or a
 /// missing nvidia-smi) fall back to the registry's own VRAM size; with no
@@ -775,11 +775,11 @@ pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
     mem
 }
 
-/// Old name for [`host_ram_available`], kept as a thin alias — `perf_cli.rs`
+/// Old name for [`host_ram_available`], kept as a thin alias - `perf_cli.rs`
 /// still calls it by this name and there is no reason to touch those four
 /// call sites in the same change that fixes the unified-memory double-count.
 /// The `/proc/meminfo`-only parsing this used to do locally now lives in
-/// `memauth::HostProbe`, which additionally intersects a cgroup v2 limit —
+/// `memauth::HostProbe`, which additionally intersects a cgroup v2 limit -
 /// tighter and more correct, never looser, than the old behaviour.
 pub(crate) fn query_ram_bytes() -> u64 {
     host_ram_available()

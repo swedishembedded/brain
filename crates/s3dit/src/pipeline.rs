@@ -46,7 +46,7 @@ pub struct Paths {
 impl Paths {
     pub fn from_env() -> Result<Paths, String> {
         let g = |k: &str| std::env::var(k).map_err(|_| format!("set {k} to the Z-Image {k} path"));
-        Ok(Paths { dit: g("BRAIN_ZIMAGE_DIT")?, vae: g("BRAIN_ZIMAGE_VAE")?, qwen: g("BRAIN_ZIMAGE_QWEN")?, tokenizer: g("BRAIN_ZIMAGE_TOKENIZER")? })
+        Ok(Paths { dit: g("BRAIN_S3DIT_DIT")?, vae: g("BRAIN_S3DIT_VAE")?, qwen: g("BRAIN_S3DIT_QWEN")?, tokenizer: g("BRAIN_S3DIT_TOKENIZER")? })
     }
 }
 
@@ -121,12 +121,12 @@ pub fn hifi_needs_window(gpu_count: usize) -> bool {
 }
 
 /// How many of the main stack's blocks stay resident in the fp32 single-GPU
-/// window. `BRAIN_ZIMAGE_WINDOW_BLOCKS` overrides; the default (2) keeps the
+/// window. `BRAIN_S3DIT_WINDOW_BLOCKS` overrides; the default (2) keeps the
 /// window's own device footprint small (~1.4 GB at Z-Image-Turbo's real
 /// shape — dim 3840, hidden 10240) regardless of model size, at the cost of
 /// reloading every other block once per denoise step.
 pub fn window_blocks_from_env() -> u32 {
-    std::env::var("BRAIN_ZIMAGE_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
+    std::env::var("BRAIN_S3DIT_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
 }
 
 /// The real fp32 ("hifi") cost the residency layer should budget against —
@@ -301,11 +301,11 @@ fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u
 /// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
 /// any prompt (masked pad: `<|endoftext|>` pad tokens, excluded as attention
 /// keys past the true content length — HF attention_mask semantics).
-/// `BRAIN_ZIMAGE_ENCODER_RESIDENT=1`: opt back into a resident encoder even
+/// `BRAIN_S3DIT_ENCODER_RESIDENT=1`: opt back into a resident encoder even
 /// when it shares the DiT's card (a box with room for both). Pure function
 /// of the environment so [`encoder_on_demand`]'s decision stays testable.
 fn resident_override() -> bool {
-    std::env::var("BRAIN_ZIMAGE_ENCODER_RESIDENT").ok().as_deref() == Some("1")
+    std::env::var("BRAIN_S3DIT_ENCODER_RESIDENT").ok().as_deref() == Some("1")
 }
 
 /// Whether the int8 GPU encoder should be built on-demand (never resident
@@ -319,7 +319,7 @@ fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
 }
 
 /// The encoder's GPU card, defaulted when the caller gave no explicit
-/// `BRAIN_ZIMAGE_ENCODER_GPU`. On a box with more than one GPU, which card
+/// `BRAIN_S3DIT_ENCODER_GPU`. On a box with more than one GPU, which card
 /// should host the encoder is a real choice (a second, otherwise-idle card
 /// vs. sharing the DiT's) that only the caller can make — `None` (CPU) stays
 /// the conservative default there, unchanged. On a box with exactly one GPU
@@ -359,7 +359,7 @@ enum Encoder {
     /// DiT sampling loop). Costs a rebuild (~1-2 s: open + int8 quantize +
     /// upload) every `generate()` call instead of once at `build()` time — the
     /// deliberate trade for never holding both models on the card together.
-    /// `BRAIN_ZIMAGE_ENCODER_RESIDENT=1` opts back into [`Encoder::Gpu8`] on a
+    /// `BRAIN_S3DIT_ENCODER_RESIDENT=1` opts back into [`Encoder::Gpu8`] on a
     /// box with enough VRAM to hold both (a 24 GB+ discrete card).
     OnDemand { qreader_path: String, qcfg: QwenConfig, cap_len: u32, gpu: u32 },
 }
@@ -459,7 +459,7 @@ impl HotPipeline {
         progress("loading tokenizer");
         let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
-        // Where the Qwen-4B encoder runs. `BRAIN_ZIMAGE_ENCODER_GPU=<i>` (when NOT
+        // Where the Qwen-4B encoder runs. `BRAIN_S3DIT_ENCODER_GPU=<i>` (when NOT
         // hifi — hifi already uses both cards for the DiT) shards it across two
         // cards: the bulk (embedding + first ~¾ of the layers) on GPU `i` (the
         // otherwise-empty card) and the thin tail on the DiT's card. The whole fp32
@@ -479,10 +479,10 @@ impl HotPipeline {
         // User env input, parsed to canonical card indices at this edge; all
         // placement below goes through the device registry (explicit Shard
         // indices / scoped `with_gpu`), never env mutation.
-        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
+        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_S3DIT_ENCODER_GPU")
             .ok()
             .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_ZIMAGE_ENCODER_GPU {s:?}")))
+            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
             .transpose()?;
         // The DiT/VAE card: the ambient selection (`--device gpu<i>`, the
         // residency-assigned scope, or BRAIN_GPU_INDEX), canonical card 0 otherwise.
@@ -500,15 +500,15 @@ impl HotPipeline {
         // resident bytes. `split` carries the params needed to finish after the DiT.
         let mut split: Option<(Qwen, usize, usize, u32)> = None; // (s0, cut, n, di)
         let enc_cpu = match (enc_gpu, hifi) {
-            (Some(bulk), false) if std::env::var("BRAIN_ZIMAGE_ENCODER_FP32SPLIT").ok().as_deref() == Some("1") => {
+            (Some(bulk), false) if std::env::var("BRAIN_S3DIT_ENCODER_FP32SPLIT").ok().as_deref() == Some("1") => {
                 let n = qcfg.n_layers as usize;
                 // fp32 2-card split (opt-in; needs a large-binding / ReBAR card — it
                 // does NOT fit two P40s). Cut point: layers 0..cut (+ embedding) on
                 // the bulk card, cut..n-1 on the DiT's card. The fp32 encoder is
                 // ~16 GB and each card's usable budget (weights × ~2 alloc overhead
                 // on non-ReBAR Pascal) is < 24 GB, so the bulk must NOT exceed ~11 GB
-                // (≈ embed + ⅔ of the layers). `BRAIN_ZIMAGE_ENCODER_CUT` overrides.
-                let cut = std::env::var("BRAIN_ZIMAGE_ENCODER_CUT").ok().and_then(|s| s.parse().ok()).unwrap_or((n * 2) / 3).min(n - 1);
+                // (≈ embed + ⅔ of the layers). `BRAIN_S3DIT_ENCODER_CUT` overrides.
+                let cut = std::env::var("BRAIN_S3DIT_ENCODER_CUT").ok().and_then(|s| s.parse().ok()).unwrap_or((n * 2) / 3).min(n - 1);
                 progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
@@ -525,14 +525,14 @@ impl HotPipeline {
                 // `generate()` call instead, so it and the DiT are never
                 // resident at once. Opt back into the
                 // old both-resident behaviour with
-                // `BRAIN_ZIMAGE_ENCODER_RESIDENT=1` on a card with room for
+                // `BRAIN_S3DIT_ENCODER_RESIDENT=1` on a card with room for
                 // both (a real 24 GB+ discrete GPU).
                 progress(&format!("using on-demand Qwen-4B encoder (int8 DP4A, GPU {bulk} shared with the DiT)"));
                 Some(Encoder::OnDemand { qreader_path: paths.qwen.clone(), qcfg: qcfg.clone(), cap_len, gpu: bulk })
             }
             (Some(bulk), false) => {
                 // A genuinely separate card from the DiT's (or
-                // BRAIN_ZIMAGE_ENCODER_RESIDENT=1 opting back in): whole
+                // BRAIN_S3DIT_ENCODER_RESIDENT=1 opting back in): whole
                 // Qwen-4B in int8 (DP4A), built once, resident for the
                 // pipeline's whole life. ~9.5 GB resident. `end: n-1` skips
                 // the unused last layer (encode reads the penultimate hidden).
@@ -610,10 +610,10 @@ impl HotPipeline {
         let qcfg = QwenConfig::qwen3_4b();
         let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
         let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
-        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
+        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_S3DIT_ENCODER_GPU")
             .ok()
             .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_ZIMAGE_ENCODER_GPU {s:?}")))
+            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
             .transpose()?;
         let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
         let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::gpus().len());
@@ -1134,11 +1134,11 @@ mod encoder_scheduling_tests {
     fn on_demand_exactly_when_sharing_the_dits_card() {
         assert!(encoder_on_demand(0, 0, false), "same card as the DiT -> on-demand");
         assert!(!encoder_on_demand(1, 0, false), "a separate card -> resident (no conflict to avoid)");
-        assert!(!encoder_on_demand(0, 0, true), "BRAIN_ZIMAGE_ENCODER_RESIDENT=1 -> resident even on the same card");
+        assert!(!encoder_on_demand(0, 0, true), "BRAIN_S3DIT_ENCODER_RESIDENT=1 -> resident even on the same card");
         assert!(!encoder_on_demand(1, 0, true), "override + separate card -> still resident");
     }
 
-    /// With no explicit `BRAIN_ZIMAGE_ENCODER_GPU`, the encoder must not
+    /// With no explicit `BRAIN_S3DIT_ENCODER_GPU`, the encoder must not
     /// default to a CPU-resident fp32 build (~16 GB, never dropped) on a box
     /// with exactly one GPU: there is no "separate bulk card" for CPU to be
     /// conserving VRAM against, so CPU-by-default is strictly worse than

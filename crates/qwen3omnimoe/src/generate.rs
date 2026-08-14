@@ -410,7 +410,7 @@ fn argmax(row: &[f32]) -> u32 {
     row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab")
 }
 
-/// Opt-in (`BRAIN_OMNI_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
+/// Opt-in (`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
 /// — diagnoses exactly the failure mode `crates/omni/tests/generate_e2e.rs`
 /// found on the real checkpoint: a reference comparison (HF's bf16 compute
 /// vs. this engine's fp32) diverging at a token whose top candidates are
@@ -419,7 +419,7 @@ fn argmax(row: &[f32]) -> u32 {
 /// still nearby) from "an actual bug" (a wildly wrong, confidently-argmaxed
 /// token). Costs nothing when unset.
 fn debug_log_top_candidates(cache_row: u32, logits: &[f32]) {
-    if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_err() {
+    if std::env::var("BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS").is_err() {
         return;
     }
     let mut sorted: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();

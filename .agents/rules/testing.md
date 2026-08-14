@@ -171,12 +171,12 @@ tuned from the environment instead of a recompile.
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
 `BRAIN_EVA_CLIP`, `BRAIN_CONTROLNET`, `BRAIN_PULID`, `BRAIN_INSTANTID`,
-`BRAIN_INSTANTID_CKPT`, `BRAIN_INSTANTID_CODE`, `BRAIN_T5_XXL`, `BRAIN_ESRGAN`,
+`BRAIN_INSTANTID_CKPT`, `BRAIN_INSTANTID_CODE`, `BRAIN_T5ENCODER_XXL`, `BRAIN_ESRGAN`,
 `BRAIN_FLUX1_FULL`, `BRAIN_FLUX2_TRANSFORMER`, `BRAIN_FLUX2_BATCH_LADDER`,
-`BRAIN_FLUX2_BATCH_PRECISION`, `BRAIN_FLUX2_BATCH_REPS`, `BRAIN_ZIMAGE_I8`,
+`BRAIN_FLUX2_BATCH_PRECISION`, `BRAIN_FLUX2_BATCH_REPS`, `BRAIN_S3DIT_I8`,
 `BRAIN_LFM25_230M`, `BRAIN_LFM25_350M`, `BRAIN_QWEN3_4B`,
 `BRAIN_QWEN35_SMOKE_GPUS`, `BRAIN_QWEN35_SMOKE_LAYERS`, `BRAIN_QWEN35_SMOKE_LR`,
-`BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_OMNI_IMPORT_OUT`,
+`BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
 `BRAIN_MOONDREAM_CKPT`, `BRAIN_QWENVL_CKPT`, `BRAIN_FASTVLM_CKPT`,
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`.
 
@@ -197,7 +197,7 @@ the one place a machine-specific path may appear in this repo):
 **Production-namespaced but test-only in practice** (these look like serving
 config but in this codebase only ever gate whole test suites):
 `BRAIN_QWEN_TE_SHARD`, `BRAIN_VAE_DEVICE`, `BRAIN_VQGAN_DEVICE`,
-`BRAIN_RESTORE_DEVICE`, `BRAIN_QWEN35_GGUF`, `BRAIN_SDXL`,
+`BRAIN_CODEFORMER_DEVICE`, `BRAIN_QWEN35_GGUF`, `BRAIN_SDXL`,
 `BRAIN_SDXL_VAE_DEVICE` (the SDXL UNet has no CLI or serving surface at all
 today — these two exist only for the dev-only `sdxl` binary).
 
@@ -212,8 +212,8 @@ regression will.
 **Kernel-variant A/B switches** (force the naive/reference kernel instead of
 the selector's normal choice, for isolating a regression to one variant):
 `BRAIN_CONV_GEMM`, `BRAIN_CONV_GEMM_MIN`, `BRAIN_NAIVE_CONV`, `BRAIN_TILED_CONV`,
-`BRAIN_WINOGRAD`, `BRAIN_GLM_NAIVE_MM`, `BRAIN_GPT_NAIVE_MM`, `BRAIN_GPT_REG1`,
-`BRAIN_LFM_NAIVE_MM`, `BRAIN_QWEN_NAIVE_MM`, `BRAIN_NO_COOP_GRADNORM`,
+`BRAIN_WINOGRAD`, `BRAIN_GLMDSA_NAIVE_MM`, `BRAIN_GPT2_NAIVE_MM`, `BRAIN_GPT2_REG1`,
+`BRAIN_LFM2_NAIVE_MM`, `BRAIN_QWEN_NAIVE_MM`, `BRAIN_NO_COOP_GRADNORM`,
 `BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV`, `BRAIN_NO_KERNEL_UPGRADE`.
 
 **Profiling / roofline internals:**
@@ -225,8 +225,8 @@ budget used for kernel selection).
 host RAM instead of device memory).
 
 **Per-model dev/debug knobs:** `BRAIN_VAE_COL_MIB`, `BRAIN_VAE_TAPS`,
-`BRAIN_OMNI_DEBUG_LOGITS`, `BRAIN_FLUX2_BENCH_BASELINE`,
-`BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_ZIMAGE_LAYERS` (truncates the Z-Image DiT
+`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS`, `BRAIN_FLUX2_BENCH_BASELINE`,
+`BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_LAYERS` (truncates the Z-Image DiT
 to N layers in the benchmark binary only).
 
 **Ad-hoc dev benchmarks (needs a Python + HuggingFace Transformers

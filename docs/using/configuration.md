@@ -59,31 +59,31 @@ served, with no error.
 | --- | --- | --- |
 | `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import-gguf`) + `tokenizer.json` |
-| `BRAIN_GPT_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
-| `BRAIN_GLM_WEIGHTS` | GLM decoder | checkpoint (char-level) |
-| `BRAIN_LFM` + `BRAIN_LFM_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
+| `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
+| `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
+| `BRAIN_LFM2` + `BRAIN_LFM2_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
 | `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit | the four component paths (all required) |
-| `BRAIN_ZIMAGE_DIT`, `BRAIN_ZIMAGE_VAE`, `BRAIN_ZIMAGE_QWEN`, `BRAIN_ZIMAGE_TOKENIZER` | Z-Image text2image/edit | the four component paths (all required) |
-| `BRAIN_YOLO` | YOLOv8 detection | checkpoint |
-| `BRAIN_DEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
+| `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | the four component paths (all required) |
+| `BRAIN_YOLOV8` | YOLOv8 detection | checkpoint |
+| `BRAIN_ZIPDEPTH_WEIGHTS` | ZipDepth monocular depth | `.pth` checkpoint |
 | `BRAIN_SAM2_WEIGHTS` | SAM 2.1 segmentation | `sam2.1_hiera_*.pt` checkpoint |
 | `BRAIN_FACENET_DIR` | antelopev2 face detect/embed | dir holding `glintr100.onnx` + `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
-| `BRAIN_RESTORE_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
+| `BRAIN_CODEFORMER_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
 | `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
 | `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
 | `BRAIN_FASTVLM_WEIGHTS` | FastVLM vision-language | checkpoint directory |
-| `BRAIN_QWENVL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only - not yet residency-scheduled) | checkpoint directory |
+| `BRAIN_QWEN3VL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only - not yet residency-scheduled) | checkpoint directory |
 | `BRAIN_DEEPSEEK_OCR_DIR` | DeepSeek-OCR document image → text/markdown (CPU-resident, ~22 GiB) | dir holding `mmproj-DeepSeek-OCR-Q8_0.gguf` + `DeepSeek-OCR-Q8_0.gguf` |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
 | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting | the two checkpoint dirs |
-| `BRAIN_TTS_WEIGHTS` (+ `BRAIN_TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF checkpoint dir for config/tokenizer) |
-| `BRAIN_NEMOTRON` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
-| `BRAIN_QWEN_ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
-| `BRAIN_OMNI_HF_DIR` | Qwen3-Omni Thinker, validation tier - full chat + audio/image/video + `speak`, but weights re-stream from the checkpoint per generated token | HF checkpoint dir |
-| `BRAIN_OMNI_INT8_CHECKPOINT` | Qwen3-Omni Thinker, **GPU-resident** - W8A16 (int8 weight-only, MoE expert linears, full-precision activations) sharded across as many GPUs as they need, loaded with bounded host memory. A separate model id (`brain/Qwen3-Omni-30B-A3B-Instruct-W8A16`), not a variant of the above; build the file with `brain omni import`. Text-only, but ~25x the tokens/second of the streaming path above | unset (not served) |
-| `BRAIN_OMNI_INT8_TOKENIZER_DIR` | where the int8 model reads `tokenizer.json` (or `vocab.json` + `merges.txt`) so it can serve ordinary chat requests - an int8 checkpoint is a single file with no tokenizer sibling. Without one it still serves raw token ids, but is not on `/v1/chat/completions` | the checkpoint's own directory if it has tokenizer files, else `BRAIN_OMNI_HF_DIR` |
+| `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF checkpoint dir for config/tokenizer) |
+| `BRAIN_NEMOTRONASR` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
+| `BRAIN_QWEN3ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
+| `BRAIN_QWEN3OMNIMOE_HF_DIR` | Qwen3-Omni Thinker, validation tier - full chat + audio/image/video + `speak`, but weights re-stream from the checkpoint per generated token | HF checkpoint dir |
+| `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` | Qwen3-Omni Thinker, **GPU-resident** - W8A16 (int8 weight-only, MoE expert linears, full-precision activations) sharded across as many GPUs as they need, loaded with bounded host memory. A separate model id (`brain/Qwen3-Omni-30B-A3B-Instruct-W8A16`), not a variant of the above; build the file with `brain omni import`. Text-only, but ~25x the tokens/second of the streaming path above | unset (not served) |
+| `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` | where the int8 model reads `tokenizer.json` (or `vocab.json` + `merges.txt`) so it can serve ordinary chat requests - an int8 checkpoint is a single file with no tokenizer sibling. Without one it still serves raw token ids, but is not on `/v1/chat/completions` | the checkpoint's own directory if it has tokenizer files, else `BRAIN_QWEN3OMNIMOE_HF_DIR` |
 | `BRAIN_MOCK` | deterministic, weight-free mock model (for exercising the serving stack without real weights) | any non-empty value |
 
 ## Serving & admission
@@ -115,35 +115,35 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen calib` | unset |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
-| `BRAIN_LFM_BATCH` | LFM batched-forward slots per instance | 2 |
+| `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
 | `BRAIN_FLUX2_TE_DEVICE` | FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated int8 shard on that card) | co-located with the DiT |
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
-| `BRAIN_YOLO_BATCH` | YOLO true-batch forward width | 1 |
+| `BRAIN_YOLOV8_BATCH` | YOLO true-batch forward width | 1 |
 | `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |
-| `BRAIN_ZIMAGE_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |
-| `BRAIN_ZIMAGE_ENCODER_GPU` | which GPU card hosts the Z-Image text encoder | shares the DiT's card |
-| `BRAIN_ZIMAGE_ENCODER_CUT` | fp32 2-card encoder split point (layer index) | ~2/3 of layers |
-| `BRAIN_ZIMAGE_ENCODER_FP32SPLIT` | `1` enables the fp32 2-card encoder split | off |
-| `BRAIN_ZIMAGE_ENCODER_RESIDENT` | `1` keeps the encoder resident even when it shares the DiT's card | off (build on demand) |
-| `BRAIN_ZIMAGE_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
-| `BRAIN_ZIMAGE_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
-| `BRAIN_TTS_LANG` / `BRAIN_TTS_REF` / `BRAIN_TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
-| `BRAIN_CODEC_WEIGHTS` | TTS codec weights override | derived from `BRAIN_TTS_WEIGHTS` |
-| `BRAIN_TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |
-| `BRAIN_TTS_MTP` | TTS next-token-prediction placement (`cpu`, `npu`, `fused`) | model-size default |
-| `BRAIN_TTS_CODEC` | TTS codec placement (`windowed`, `cpu-stream`, `npu-stream`) | default engine path |
-| `BRAIN_TTS_STREAM_CHUNK` | frames per chunk in `cpu-stream` codec mode | 16 |
-| `BRAIN_TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
-| `BRAIN_TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from `BRAIN_TTS_WEIGHTS` |
-| `BRAIN_TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
-| `BRAIN_TTS_RES` | resources base for `brain tts serve`'s default engine paths | unset (flags supply paths) |
-| `BRAIN_QWEN_ASR_WINDOW` / `BRAIN_QWEN_ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
+| `BRAIN_S3DIT_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |
+| `BRAIN_S3DIT_ENCODER_GPU` | which GPU card hosts the Z-Image text encoder | shares the DiT's card |
+| `BRAIN_S3DIT_ENCODER_CUT` | fp32 2-card encoder split point (layer index) | ~2/3 of layers |
+| `BRAIN_S3DIT_ENCODER_FP32SPLIT` | `1` enables the fp32 2-card encoder split | off |
+| `BRAIN_S3DIT_ENCODER_RESIDENT` | `1` keeps the encoder resident even when it shares the DiT's card | off (build on demand) |
+| `BRAIN_S3DIT_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
+| `BRAIN_S3DIT_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
+| `BRAIN_QWEN3TTS_LANG` / `BRAIN_QWEN3TTS_REF` / `BRAIN_QWEN3TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
+| `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
+| `BRAIN_QWEN3TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |
+| `BRAIN_QWEN3TTS_MTP` | TTS next-token-prediction placement (`cpu`, `npu`, `fused`) | model-size default |
+| `BRAIN_QWEN3TTS_CODEC` | TTS codec placement (`windowed`, `cpu-stream`, `npu-stream`) | default engine path |
+| `BRAIN_QWEN3TTS_STREAM_CHUNK` | frames per chunk in `cpu-stream` codec mode | 16 |
+| `BRAIN_QWEN3TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
+| `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
+| `BRAIN_QWEN3TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
+| `BRAIN_QWEN3TTS_RES` | resources base for `brain tts serve`'s default engine paths | unset (flags supply paths) |
+| `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache dir (ASR/NPU) | `$TMPDIR/brain_ov_cache` |
-| `BRAIN_GPT` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
+| `BRAIN_GPT2` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
 
 Deeper per-model knobs not listed here are documented on that model's own
 page under `docs/models/`.
@@ -155,4 +155,4 @@ page under `docs/models/`.
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
-| `BRAIN_TTS_RES` | resources base for `brain tts serve`'s default paths | unset |
+| `BRAIN_QWEN3TTS_RES` | resources base for `brain tts serve`'s default paths | unset |

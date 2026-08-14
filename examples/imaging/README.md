@@ -6,7 +6,7 @@
 restore → (optionally) upscale, as a **single** `run`.
 
 ```sh
-BRAIN_SAM2_WEIGHTS=... BRAIN_RESTORE_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \
+BRAIN_SAM2_WEIGHTS=... BRAIN_CODEFORMER_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \
   dbus-run-session -- bash -c '
     brain serve --dbus & sleep 3
     python3 examples/imaging/edit_pipeline.py --image photo.ppm --point 614,430 --upscale'

@@ -24,12 +24,12 @@ names it (that first call is as slow as the cold fetch; every one after is
 instant). Point `--model` at `LiquidAI/LFM2.5-230M` for the smaller encoder,
 or `brain/mock` for a weight-free smoke test.
 
-Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM`/
-`BRAIN_LFM_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm`
+Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM2`/
+`BRAIN_LFM2_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm`
 — the env-loaded-checkpoint fallback (the `brain/`
 table), unchanged from before auto-fetch existed.
 
-Environment knobs: `BRAIN_LFM_BATCH` (batched-forward slots per instance,
+Environment knobs: `BRAIN_LFM2_BATCH` (batched-forward slots per instance,
 default 2), `BRAIN_DEVICE` (which compute is schedulable).
 
 Expected output shape (numbers are hardware-dependent):

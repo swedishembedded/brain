@@ -231,7 +231,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   explicit instruction to flag rather than fix manifest structure.
 - **`docs/models/asr.md`** (1 → 0 violations, not one of the 12 numbered
   items but part of the gate's worklist). The "default 30s" Qwen3-ASR window
-  is a fixed config default (`BRAIN_QWEN_ASR_WINDOW`), not a measured result
+  is a fixed config default (`BRAIN_QWEN3ASR_WINDOW`), not a measured result
   - marked `<!-- perf-number: fixed capability limit (config default), not a
   measured result -->` rather than rephrased, since the number itself
   (the actual default) is exactly the information a reader needs and won't
@@ -964,7 +964,7 @@ left as a clean, scoped follow-up: build the same two `NpuModel` structs in
 `resident_asr.rs`, and either (a) add minimal `::tiny()`-style config
 constructors to `nemotron`/`qwen_asr` first (the more durable fix, also
 useful beyond this test), or (b) gate the parity test on real
-`BRAIN_NEMOTRON`/`BRAIN_QWEN_ASR` checkpoints the way
+`BRAIN_NEMOTRONASR`/`BRAIN_QWEN3ASR` checkpoints the way
 `chronos2_export.rs::export_real_checkpoint_to_onnx` already does for its own
 env-gated real-checkpoint tests.
 

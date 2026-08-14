@@ -6,7 +6,7 @@
 //! them exactly like every other model.
 //!
 //! Both build their model ONCE in `activate` (weights uploaded once) and hold it for
-//! the instance's life (dropping frees the RAM). Nemotron — the streaming model —
+//! the instance's life (dropping frees the RAM). Nemotron - the streaming model -
 //! implements a **true batched** `run_batch`: concurrent stream-windows with the
 //! same language prompt encode in one FastConformer forward
 //! ([`nemotronasr::encoder::Encoder::transcribe_batch`]). Qwen3-ASR is offline and
@@ -14,10 +14,10 @@
 //! instance (the audio encoder still amortises across the batch).
 //!
 //! Config is env-only (each `from_env` returns `None`/skips when unset):
-//!   * `BRAIN_NEMOTRON`      — Nemotron 3.5 ASR checkpoint dir.
-//!   * `BRAIN_QWEN_ASR`      — Qwen3-ASR checkpoint dir.
-//!   * `BRAIN_QWEN_ASR_WINDOW` — Qwen3-ASR audio window in seconds (default 30).
-//!   * `BRAIN_QWEN_ASR_MAXNEW` — Qwen3-ASR max generated tokens (default 200).
+//!   * `BRAIN_NEMOTRONASR`      - Nemotron 3.5 ASR checkpoint dir.
+//!   * `BRAIN_QWEN3ASR`      - Qwen3-ASR checkpoint dir.
+//!   * `BRAIN_QWEN3ASR_WINDOW` - Qwen3-ASR audio window in seconds (default 30).
+//!   * `BRAIN_QWEN3ASR_MAXNEW` - Qwen3-ASR max generated tokens (default 200).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -48,10 +48,10 @@ pub struct NemotronResident {
 
 impl NemotronResident {
     pub fn from_env() -> Option<NemotronResident> {
-        std::env::var("BRAIN_NEMOTRON").ok().filter(|p| !p.is_empty()).map(NemotronResident::new)
+        std::env::var("BRAIN_NEMOTRONASR").ok().filter(|p| !p.is_empty()).map(NemotronResident::new)
     }
 
-    /// Direct constructor (no env round-trip) — see
+    /// Direct constructor (no env round-trip) - see
     /// `crate::resident_facenet::FacenetResident::new`'s rationale.
     pub fn new(dir: impl Into<String>) -> NemotronResident {
         NemotronResident { dir: dir.into() }
@@ -101,7 +101,7 @@ struct NemotronNpuInstance {
 impl NemotronNpuInstance {
     fn new(dir: &str, cfg: nemotronasr::NemotronConfig, model: nemotronasr::model::NemotronAsr, detok: nemotronasr::tokenizer::Detokenizer) -> Result<NemotronNpuInstance, String> {
         // Streamed (mmap, header-only open): no second full-model host copy
-        // alongside the already-resident `model` — see checkpoint::weightio.
+        // alongside the already-resident `model` - see checkpoint::weightio.
         let weights = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| e.to_string())?;
         let topo = npu::NemotronTopo {
             num_mel_bins: cfg.num_mel_bins,
@@ -172,7 +172,7 @@ struct NemotronInstance {
     model: nemotronasr::model::NemotronAsr,
     detok: nemotronasr::tokenizer::Detokenizer,
     /// Live `transcribe_stream` sessions. They live on the instance, so evicting
-    /// the model (residency swap) drops any in-flight streams — a restarted stream
+    /// the model (residency swap) drops any in-flight streams - a restarted stream
     /// id simply begins a fresh session.
     sessions: nemotronasr::caps::StreamSessions,
 }
@@ -271,7 +271,7 @@ impl NemotronInstance {
 
 // ---------------------------------------------------------------- Qwen3-ASR
 
-/// Qwen3-ASR (1.7B) behind the scheduler — offline, fixed audio window. CPU-resident.
+/// Qwen3-ASR (1.7B) behind the scheduler - offline, fixed audio window. CPU-resident.
 pub struct QwenAsrResident {
     dir: String,
     window_secs: f32,
@@ -280,12 +280,12 @@ pub struct QwenAsrResident {
 
 impl QwenAsrResident {
     pub fn from_env() -> Option<QwenAsrResident> {
-        std::env::var("BRAIN_QWEN_ASR").ok().filter(|p| !p.is_empty()).map(QwenAsrResident::new)
+        std::env::var("BRAIN_QWEN3ASR").ok().filter(|p| !p.is_empty()).map(QwenAsrResident::new)
     }
 
-    /// Direct constructor (no env round-trip for the PATH) — see
+    /// Direct constructor (no env round-trip for the PATH) - see
     /// `crate::resident_facenet::FacenetResident::new`'s rationale. The two
-    /// tuning knobs (`BRAIN_QWEN_ASR_WINDOW`/`_MAXNEW`) stay env-read here:
+    /// tuning knobs (`BRAIN_QWEN3ASR_WINDOW`/`_MAXNEW`) stay env-read here:
     /// they configure HOW the model runs, not WHICH weights serve.
     pub fn new(dir: impl Into<String>) -> QwenAsrResident {
         let (window_secs, max_new) = qwen_asr_tuning();
@@ -293,12 +293,12 @@ impl QwenAsrResident {
     }
 }
 
-/// The Qwen3-ASR tuning knobs (`BRAIN_QWEN_ASR_WINDOW` seconds, default 30;
-/// `BRAIN_QWEN_ASR_MAXNEW` tokens, default 200) — one reader, shared by the
+/// The Qwen3-ASR tuning knobs (`BRAIN_QWEN3ASR_WINDOW` seconds, default 30;
+/// `BRAIN_QWEN3ASR_MAXNEW` tokens, default 200) - one reader, shared by the
 /// resident adapter and the catalog's direct `brain do` provider.
 pub(crate) fn qwen_asr_tuning() -> (f32, usize) {
-    let window_secs = std::env::var("BRAIN_QWEN_ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
-    let max_new = std::env::var("BRAIN_QWEN_ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
+    let window_secs = std::env::var("BRAIN_QWEN3ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
+    let max_new = std::env::var("BRAIN_QWEN3ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
     (window_secs, max_new)
 }
 
@@ -335,7 +335,7 @@ impl Instance for QwenAsrInstance {
         let wav = wav_from_blob(blob)?;
         let truncated = qwen3asr::caps::window_truncation(self.provider.window_samples(), &wav);
         if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN_ASR_WINDOW)")));
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN3ASR_WINDOW)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.provider.transcribe(&wav)?;
@@ -378,7 +378,7 @@ impl QwenAsrNpuInstance {
 
     /// Run the audio-encoder head ONNX on the NPU: `packed[n_audio·d] + spans →
     /// audio_embeds[n_audio·output_dim]`. Compiles/caches one graph per `(n_audio,
-    /// spans)`. Returns `(_, embeds)` — only the embeds are used downstream.
+    /// spans)`. Returns `(_, embeds)` - only the embeds are used downstream.
     fn npu_head(&self, packed: &[f32], n_audio: u32, spans: &[(u32, u32)]) -> (Vec<f32>, Vec<f32>) {
         let (d, out) = (self.topo.d_model, self.topo.output_dim);
         let key = format!("{n_audio}:{spans:?}");

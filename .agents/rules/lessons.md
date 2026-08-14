@@ -229,7 +229,7 @@ comes from the latent and the ruined part was a linear recombination of it.
 Three things let it ship:
 
 * No gate. `crates/vae`'s only decode parity covers *Z-Image's* 16-channel
-  `AutoencoderKL` and skips unless `BRAIN_ZIMAGE_VAE` is set, so nothing gated
+  `AutoencoderKL` and skips unless `BRAIN_S3DIT_VAE` is set, so nothing gated
   a VAE decode of this kind at all (#1, again).
 * The UNet's own 165-tap parity was green — and stayed green. It ends at the
   latent; the defect is downstream of everything it checks.
