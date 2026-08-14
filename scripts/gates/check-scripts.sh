@@ -77,7 +77,7 @@ while IFS= read -r -d '' f; do
     # A full-line comment (# in bash or python) has no runtime effect — an
     # absolute path there can't misbehave on someone else's machine the way one
     # baked into executable code can. Skip it; docstring usage EXAMPLES should
-    # still use a placeholder (see mirror_dump_reference.py), but that's a
+    # still use a placeholder (see worldmirror2_dump_reference.py), but that's a
     # documentation-quality call, not this gate's job.
     case "$trimmed" in '#'*) continue ;; esac
     # ${VAR:-/abs/path} or os.environ.get(V, "/abs/path") — both an overridable

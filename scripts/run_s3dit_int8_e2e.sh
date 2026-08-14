@@ -17,7 +17,7 @@ echo "epoch_s,rss_kb,avail_kb,cgroup_current_b" > results/zimage-int8-256.memlog
 START=$(date +%s)
 echo "START:$START" > results/zimage-int8-256.timing.log
 
-./target/release/brain --device gpu do brain/z-image text2image \
+./target/release/brain --device gpu s3dit text2image \
     --prompt "a red fox in snow, photograph" --width 256 --height 256 \
     --steps 8 --seed 42 --precision int8 \
     --out image=results/zimage-int8-256.ppm \

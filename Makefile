@@ -58,7 +58,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 flux2/generate flux2/edit zimage/int8-e2e
+        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e
 
 help:
 	@echo "brain targets:"
@@ -117,7 +117,7 @@ help:
 	@echo "  make train/qwen/lora         LoRA-finetune a Qwen checkpoint (DATASET=<dir> ADAPTER=<ref>)"
 	@echo "  make flux2/generate          generate one image with FLUX.2 Klein (BRAIN_FLUX2_* env)"
 	@echo "  make flux2/edit              reference-image edit with FLUX.2 Klein (FLUX2_REF=...)"
-	@echo "  make zimage/int8-e2e         real z-image int8 e2e generation (no-OOM regression)"
+	@echo "  make s3dit/int8-e2e          real z-image (s3dit) int8 e2e generation (no-OOM regression)"
 	@echo "  make data/tts                synthetic TTS text->codes dataset (Talker SFT smokes)"
 	@echo "  make docs                    build the full docs bundle (pandoc + xelatex)"
 	@echo "  make wm/play                  play the fake world model in an SDL window (WASD)"
@@ -158,18 +158,19 @@ deb/release: release
 #     test binaries use the weak-pool fixture gpu_core::testgpu, whose device
 #     dies with its last in-process handle - kronos is proven clean at
 #     --test-threads=48, and after the fixture migration every GPU-test crate
-#     either shares the pooled device (qwen/gpt/tts/speaker/glm/moe/pid/
-#     seq2seq/autoencoder/chronos2/fincast/splat/model/wm-core/yolo), pins the
-#     CPU backend (never touches the card), or gates multi-device tests on the
-#     hardware being present. 8 is the suite-wide proven point (qwen + the six
-#     heaviest migrated crates, 0 failures).
+#     either shares the pooled device (qwen3/gpt2/qwen3tts/ecapatdnn/glmdsa/
+#     toymoe/toypid/toyseq2seq/toyautoencoder/chronos2/fincast/splat/model/
+#     wm-core/yolov8), pins the CPU backend (never touches the card), or
+#     gates multi-device tests on the hardware being present. 8 is the
+#     suite-wide proven point (qwen3 + the six heaviest migrated crates,
+#     0 failures).
 #
 # The timeout turns a deadlock into a fast, loud failure instead of an hour of
 # silence. Override any of these: TEST_THREADS=1 make test restores serial.
 TEST_THREADS ?= 8
 # The guard is a DEADLOCK detector, not a performance target: it must sit above
 # the measured run time so a completing suite never reads as a hang. The VLM
-# crates (fastvlm/qwenvl/moondream) grew the suite past the old 1500s budget -
+# crates (fastvlm/qwen3vl/moondream3) grew the suite past the old 1500s budget -
 # 266 suites / 1492 tests now complete at TEST_THREADS=8 inside ~2000s wall on
 # the 2xP40 box, so the guard sits at 2400. Making the suite faster is real
 # work (slow-lane moves), not a tighter timeout.
@@ -410,7 +411,7 @@ wm-fixtures:
 # The SDL window is always compiled into the standard build (needs system
 # libSDL2 at link); it only OPENS when a run needs it.
 wm/play: release
-	./target/release/brain wm play --model fake
+	./target/release/brain diamond play --model fake
 
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
@@ -430,7 +431,7 @@ forecast/perf-gate: release
 
 # World-model fps regression gate (best-of-3 vs scripts/gates/wm-perf-baselines.json,
 # hard floors only). Dev-box gate, not CI: needs out/diamond-breakout.weights
-# (brain wm import ...) and a real display/GPU. `--update` rewrites baselines.
+# (brain diamond import ...) and a real display/GPU. `--update` rewrites baselines.
 wm/perf-gate: release
 	scripts/gates/wm-perf-gate.sh
 
@@ -477,14 +478,14 @@ MASK_wordcalc   := --mask =
 
 train/gpt/%: release
 	@mkdir -p $(OUT)
-	$(BRAIN) gpt train $(DATA)/$* --out $(OUT)/gpt-$*.safetensors \
+	$(BRAIN) gpt2 train $(DATA)/$* --out $(OUT)/gpt-$*.safetensors \
 		--steps $(STEPS) --batch $(BATCH) --block $(BLOCK) \
 		--layers $(LAYERS) --d-model $(DMODEL) --heads $(HEADS) --lr $(LR) \
 		--seed $(SEED) $(MASK_$*)
 
 # ---- eval (pattern: eval/gpt/<dataset>) -----------------------------------
 eval/gpt/%: release
-	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
+	$(BRAIN) gpt2 eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
 
 # ---- Qwen LoRA fine-tuning: the "one command to fully retrain and overwrite
 # the lora checkpoint" from applications/edgeai/brain/.todo/bench-training.md.
@@ -519,15 +520,15 @@ data/detect: release
 
 train/yolo: release
 	@mkdir -p $(OUT)
-	$(BRAIN) yolo train $(DATA)/detect --out $(OUT)/yolo.safetensors \
+	$(BRAIN) yolov8 train $(DATA)/detect --out $(OUT)/yolo.safetensors \
 		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) --seed $(SEED)
 
 eval/yolo: release
-	$(BRAIN) yolo eval --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
+	$(BRAIN) yolov8 eval --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 detect/yolo: release
-	$(BRAIN) yolo detect --weights $(OUT)/yolo.safetensors --image $(DATA)/detect \
+	$(BRAIN) yolov8 detect --weights $(OUT)/yolo.safetensors --image $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 # ---- depth (ZipDepth) ------------------------------------------------------
@@ -538,17 +539,17 @@ DEPTH_IMG    ?=
 depth/demo: release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
-	$(BRAIN) depth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH)
+	$(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH)
 
 depth/smoke: release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
-	DISPLAY= $(BRAIN) depth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH) \
+	DISPLAY= $(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH) \
 		--headless --out $(OUT)/depth.ppm
 
 depth/camera: release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
-	$(BRAIN) depth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
+	$(BRAIN) zipdepth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
 
 # WorldMirror-2 (multi-view 3D reconstruction). MIRROR_CKPT = the reference
 # model.safetensors (or its HF dir); the converted .safetensors is what infer uses.
@@ -557,7 +558,7 @@ MIRROR_WEIGHTS ?= $(OUT)/mirror.safetensors
 
 mirror/import: release
 	@test -n "$(MIRROR_CKPT)" || (echo "set MIRROR_CKPT=<model.safetensors|hf_dir>"; exit 2)
-	$(BRAIN) mirror import $(MIRROR_CKPT) --out $(MIRROR_WEIGHTS)
+	$(BRAIN) worldmirror2 import $(MIRROR_CKPT) --out $(MIRROR_WEIGHTS)
 
 # 3DGS scene viewer (interactive fly-through; WASD + mouse, see --help).
 SPLAT_SCENE ?=
@@ -571,17 +572,17 @@ MIRROR_IMAGES ?=
 
 mirror/infer: release
 	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
-	$(BRAIN) mirror infer --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
+	$(BRAIN) worldmirror2 infer --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
 mirror/demo: release
 	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
-	$(BRAIN) mirror demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
+	$(BRAIN) worldmirror2 demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
 # Train ZipDepth end to end on the synthetic RGB->depth pairs (placeholder data,
 # real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
 # Fine-tune a released checkpoint instead with ZIPDEPTH_PTH set.
 train/zipdepth: release
-	$(BRAIN) depth train --out $(OUT)/zipdepth.safetensors --steps 50 --batch 2 \
+	$(BRAIN) zipdepth train --out $(OUT)/zipdepth.safetensors --steps 50 --batch 2 \
 		$(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
 
 # ---- Intel NPU deployment (OpenVINO) --------------------------------------
@@ -806,11 +807,11 @@ perf/smoke: release
 docs:
 	python3 docs/pandoc/build-docs.py
 
-# Real end-to-end z-image int8 generation (256x256) against the fetched
+# Real end-to-end s3dit (Z-Image) int8 generation (256x256) against the fetched
 # checkpoint under out/models/ - the no-OOM regression run from fa7b576.
 # Heavy: real weights + a GPU; writes results/zimage-int8-e2e.log.
-zimage/int8-e2e:
-	bash scripts/run_zimage_int8_e2e.sh
+s3dit/int8-e2e:
+	bash scripts/run_s3dit_int8_e2e.sh
 
 # ---- FLUX.2 Klein (crates/flux2; weights via BRAIN_FLUX2_* env) ----
 flux2/generate: release

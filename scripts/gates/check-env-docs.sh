@@ -6,7 +6,7 @@
 #
 # Which models `brain serve` serves, and how the engine behaves, is configured
 # ONLY through `BRAIN_*` environment variables (there is no config file), so an
-# undocumented variable is an unreachable feature: the facenet/upscale perf
+# undocumented variable is an unreachable feature: the facenet/rrdbnet perf
 # targets shipped dead for exactly this reason (`BRAIN_FACENET_WEIGHTS` vs the
 # resident's `BRAIN_FACENET_DIR` — nothing forced the names to agree, and no
 # reference existed to check against). This gate greps every `BRAIN_*` variable

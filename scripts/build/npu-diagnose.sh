@@ -20,7 +20,7 @@
 #   4. userspace libs    -- the intel-level-zero-npu package + the
 #                            libze_intel_vpu.so.1 compat symlink a stock
 #                            libze1 loader needs to find it (see docs/models/
-#                            yolo/npu.md and ~/.claude memory
+#                            yolov8/npu.md and ~/.claude memory
 #                            brain-npu-container-blocked.md for why)
 #   5. OpenVINO install  -- the pip wheel's unversioned-symlink gap that
 #                            crates/npu/src/openvino/real.rs papers over at

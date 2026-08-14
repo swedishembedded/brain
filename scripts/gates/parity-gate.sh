@@ -42,7 +42,7 @@ run "model FD suites (MoE/ViT backward) — CPU backend" \
 run "model FD suites (MoE/ViT backward) — Vulkan backend" \
     env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
 
-# REMAINING (audit F15, models batch): crates/moondream, crates/nemotron and
+# REMAINING (audit F15, models batch): crates/moondream3, crates/nemotronasr and
 # crates/vision pin their FD suites to `Gpu::new_cpu` in the test code itself,
 # so adding them here would not exercise a second backend until those call
 # sites move to `gpu_core::testgpu::dev`.
@@ -56,7 +56,7 @@ run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
 codec="${BRAIN_MIMI_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
 if [ -f "$codec" ]; then
     run "TTS codec: NPU graph == CPU reference" \
-        env BRAIN_MIMI_WEIGHTS="$codec" cargo test --release -q -p brain-tts npu_stream_matches_cpu -- --ignored
+        env BRAIN_MIMI_WEIGHTS="$codec" cargo test --release -q -p brain-qwen3tts npu_stream_matches_cpu -- --ignored
 else
     echo "=== TTS NPU==CPU: SKIP (no codec weights at $codec) ==="; echo
 fi

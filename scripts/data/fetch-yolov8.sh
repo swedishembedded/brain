@@ -4,7 +4,7 @@
 
 # Fetch a pretrained Ultralytics YOLOv8 checkpoint and export it to brain's native
 # `.weights` format, ready to serve as an object detector (e.g. over `brain serve
-# --dbus`, or `brain yolo detect`).
+# --dbus`, or `brain yolov8 detect`).
 #
 #   scripts/data/fetch-yolov8.sh [--variant yolov8n] [--out DIR]
 #

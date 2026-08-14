@@ -6,7 +6,7 @@
 # perf-gate.sh: best-of-N against committed baselines; hard floors only, since
 # this laptop-class 155H throttles and soft deltas would flap).
 #
-# Dev-box gate, NOT CI: needs out/diamond-breakout.weights (brain wm import).
+# Dev-box gate, NOT CI: needs out/diamond-breakout.weights (brain diamond import).
 # Usage: scripts/gates/wm-perf-gate.sh [--update]   (--update rewrites baselines)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -18,13 +18,13 @@ RUNS=3
 export DISPLAY=
 
 [ -x "$BIN" ] || { echo "build first: make release"; exit 2; }
-[ -f "$WEIGHTS" ] || { echo "missing $WEIGHTS (brain wm import ...)"; exit 2; }
+[ -f "$WEIGHTS" ] || { echo "missing $WEIGHTS (brain diamond import ...)"; exit 2; }
 
 best_ms() { # "device [extra args]" -> best mean ms/frame over RUNS
   local dev="$1" best=999999 ms
   for _ in $(seq "$RUNS"); do
     # shellcheck disable=SC2086
-    ms=$($BIN wm bench --model diamond --weights "$WEIGHTS" --device $dev --frames 15 \
+    ms=$($BIN diamond bench --model diamond --weights "$WEIGHTS" --device $dev --frames 15 \
       | sed -n 's/.*ms_per_frame_mean=\([0-9.]*\).*/\1/p')
     ms=${ms%.*}
     [ "$ms" -lt "$best" ] && best=$ms
