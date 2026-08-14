@@ -54,7 +54,7 @@ use crate::model::Qwen35;
 /// is `Qwen/Qwen3.5-35B-A3B`, used where a
 /// checkpoint's actual provenance matters (import/fetch), not as this
 /// catalog entry's id — matching every other `caps.rs`'s `MODEL` convention
-/// (`qwen3::caps::MODEL == "brain/qwen"`, `qwen3omnimoe::caps::MODEL == "brain/omni"`).
+/// (`qwen3::caps::MODEL == "brain/qwen3"`, `qwen3omnimoe::caps::MODEL == "brain/qwen3omnimoe"`).
 pub const MODEL: &str = "brain/qwen35moe";
 
 /// The full, static capability manifest — safe to build with no weights loaded.

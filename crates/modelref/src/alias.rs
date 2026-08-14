@@ -31,11 +31,11 @@ const ROWS: &[Row] = &[
     Row { legacy: "demo", canonical: "brain/demo" },
     Row { legacy: "imageops", canonical: "brain/imageops" },
     Row { legacy: "fastvlm", canonical: "brain/fastvlm" },
-    Row { legacy: "yolo", canonical: "brain/yolo" },
-    Row { legacy: "depth", canonical: "brain/depth" },
-    Row { legacy: "z-image", canonical: "brain/z-image" },
+    Row { legacy: "yolo", canonical: "brain/yolov8" },
+    Row { legacy: "depth", canonical: "brain/zipdepth" },
+    Row { legacy: "z-image", canonical: "brain/s3dit" },
     Row { legacy: "flux2-klein", canonical: "brain/flux2-klein" },
-    Row { legacy: "tts", canonical: "brain/tts" },
+    Row { legacy: "tts", canonical: "brain/qwen3tts" },
     Row { legacy: "chronos2", canonical: "brain/chronos2" },
     Row { legacy: "fincast", canonical: "brain/fincast" },
     Row { legacy: "kronos", canonical: "brain/kronos" },
@@ -48,20 +48,20 @@ const ROWS: &[Row] = &[
     Row { legacy: "scrfd", canonical: "brain/scrfd" },
     Row { legacy: "arcface", canonical: "brain/arcface" },
     Row { legacy: "vqgan", canonical: "brain/vqgan" },
-    Row { legacy: "restore", canonical: "brain/restore" },
+    Row { legacy: "restore", canonical: "brain/codeformer" },
     Row { legacy: "clip", canonical: "brain/clip" },
     Row { legacy: "imgpipe", canonical: "brain/imgpipe" },
-    Row { legacy: "upscale", canonical: "brain/upscale" },
+    Row { legacy: "upscale", canonical: "brain/rrdbnet" },
     // qwen/lfm/nemotron/qwen-asr are env-loaded from an arbitrary checkpoint,
     // so their canonical id depends on what was actually imported (see
     // `resident_llm.rs`'s BRAIN_QWEN_REF / BRAIN_LFM2_REF / BRAIN_NEMOTRONASR_REF /
     // BRAIN_QWEN3ASR_REF) and is NOT fixed at compile time. When that env var
     // is unset, the resident registers under its own brain/<family> fallback
     // (row above/below), so the short legacy name still resolves via THAT row.
-    Row { legacy: "qwen", canonical: "brain/qwen" },
-    Row { legacy: "lfm", canonical: "brain/lfm" },
-    Row { legacy: "nemotron", canonical: "brain/nemotron" },
-    Row { legacy: "qwen-asr", canonical: "brain/qwen-asr" },
+    Row { legacy: "qwen", canonical: "brain/qwen3" },
+    Row { legacy: "lfm", canonical: "brain/lfm2" },
+    Row { legacy: "nemotron", canonical: "brain/nemotronasr" },
+    Row { legacy: "qwen-asr", canonical: "brain/qwen3asr" },
 ];
 
 fn table() -> &'static std::collections::HashMap<&'static str, &'static str> {
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn known_legacy_names_resolve() {
         assert_eq!(canonical("mock"), Some("brain/mock"));
-        assert_eq!(canonical("qwen"), Some("brain/qwen"));
+        assert_eq!(canonical("qwen"), Some("brain/qwen3"));
     }
 
     #[test]

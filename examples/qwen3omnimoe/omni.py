@@ -12,14 +12,14 @@ positions, `crate::mm`). `--in-video` needs PyAV (`pip install av`) to
 extract frames -- unlike speech/image, which stay zero-dependency by design,
 real video demuxing genuinely needs a decoder, so this `skip()`s cleanly
 (exit 77) rather than adding a hard requirement. This is true of BOTH served
-Thinker models -- `brain/omni` (streamed bf16 weights) and
+Thinker models -- `brain/qwen3omnimoe` (streamed bf16 weights) and
 `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` (GPU-resident int8, layer-sharded across
-however many GPUs it needs, ~25-50x brain/omni's tokens/second on the same
+however many GPUs it needs, ~25-50x brain/qwen3omnimoe's tokens/second on the same
 hardware) -- since both build their multimodal prompt through the SAME
 `crate::mm::build_multimodal_prompt`; `--model` selects between them (see
 Examples). The int8 model's OWN vision/audio tower weights are read from a
 real HF checkpoint directory too (`BRAIN_QWEN3OMNIMOE_HF_DIR`, same env var
-`brain/omni` reads) -- its own int8 checkpoint stores those towers
+`brain/qwen3omnimoe` reads) -- its own int8 checkpoint stores those towers
 quantized, which nothing here executes yet, so `BRAIN_QWEN3OMNIMOE_HF_DIR` has to be
 set alongside `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` for `--in-speech`/`--in-image`/
 `--in-video` against it to work (see `qwen3omnimoe::int8_thinker_resident`'s module
@@ -28,7 +28,7 @@ an HF dir at all. `--in-mic` and `--out-mic`/`--out-audio` are still
 `skip()`s -- live capture needs extra dependencies this script deliberately
 doesn't take on, and speech OUTPUT needs Talker+Code2Wav, not wired into a
 generation loop yet. Generation is still validation-tier for weight I/O on
-`brain/omni` specifically (`crate::generate`'s own doc): the KV-cache makes
+`brain/qwen3omnimoe` specifically (`crate::generate`'s own doc): the KV-cache makes
 attention O(cached length), but every layer's weights are still streamed
 fresh from the checkpoint per generated token; `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16`
 does not have this limitation -- its weights are GPU-resident.
@@ -210,7 +210,7 @@ def main() -> None:
     outputs.add_argument("--out-audio", metavar="WAV", help="not yet implemented -- see this module's doc")
     outputs.add_argument("--out-text", metavar="PATH", help="write the generated text to a file instead of stdout")
 
-    ap.add_argument("--model", default="brain/omni", help="served model name (default brain/omni; brain/mock for a deps-free wire-contract check)")
+    ap.add_argument("--model", default="brain/qwen3omnimoe", help="served model name (default brain/qwen3omnimoe; brain/mock for a deps-free wire-contract check)")
     ap.add_argument("--max-new", type=int, default=32, help="max tokens to generate")
     ap.add_argument("--system", help="optional system prompt")
     args = ap.parse_args()

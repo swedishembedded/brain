@@ -25,7 +25,7 @@ use crate::chat::{parse_request, ParsedRequest, SeqState};
 use crate::model::Qwen;
 
 /// The model id used on the CLI (`brain do qwen …`) and the event API.
-pub const MODEL: &str = "brain/qwen";
+pub const MODEL: &str = "brain/qwen3";
 
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {

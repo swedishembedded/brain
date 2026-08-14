@@ -42,7 +42,7 @@ def generate(brain: BrainDBus) -> bytes:
     def on_progress(step: int, total: int, message: str) -> None:
         print(f"  [{step}/{total}] {message}")
 
-    out = brain.subscribe("brain/z-image", "text2image", params, on_progress=on_progress)
+    out = brain.subscribe("brain/s3dit", "text2image", params, on_progress=on_progress)
     image = out.blobs.get("image")
     if not image:
         raise RuntimeError("no image produced")
@@ -52,7 +52,7 @@ def generate(brain: BrainDBus) -> bytes:
 def detect(brain: BrainDBus, image: bytes) -> list[dict]:
     """Run yolo detection on the image (passed as an input blob)."""
     meta = {"image": {"media": "image", "w": SIZE, "h": SIZE, "c": 3}}
-    out = brain.run("brain/yolo", "detect", {"conf": 0.25}, blobs={"image": image}, meta=meta)
+    out = brain.run("brain/yolov8", "detect", {"conf": 0.25}, blobs={"image": image}, meta=meta)
     return out.outputs.get("detections", [])
 
 
@@ -74,7 +74,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         print("models:", models)
-        for need in ("brain/z-image", "brain/yolo"):
+        for need in ("brain/s3dit", "brain/yolov8"):
             if need not in models:
                 skip(f"'{need}' not served (set its weights env)")
 

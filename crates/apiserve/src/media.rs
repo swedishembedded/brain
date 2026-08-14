@@ -4,20 +4,20 @@
 //! Decoding OpenAI `image_url`/`input_audio` content parts and Anthropic
 //! `image` content blocks into brain's own blob wire format
 //! (`capability::blob::image_blob`, `audio::asr_caps`'s raw-16kHz-PCM
-//! convention) — the fix for the "multimodal content parts are silently
+//! convention) - the fix for the "multimodal content parts are silently
 //! dropped" gap `openai.rs`/`anthropic.rs`'s own `content_text` functions
 //! have always had (M11/M12 flagged it, left it open; still true for every
-//! OTHER model, not just `brain/omni` — this is a generic content-part fix,
+//! OTHER model, not just `brain/qwen3omnimoe` - this is a generic content-part fix,
 //! not omni-specific).
 //!
-//! **Scope**: inline `data:` URLs / base64 payloads only — no external URL
+//! **Scope**: inline `data:` URLs / base64 payloads only - no external URL
 //! fetching. A plain `http(s)://` `image_url` is valid per OpenAI's own
 //! schema, but this server does not fetch third-party URLs on a client's
 //! behalf (the same boundary this codebase draws elsewhere for outbound
-//! network calls) — it errors with a clear message instead of silently
+//! network calls) - it errors with a clear message instead of silently
 //! dropping the image as before. At most ONE image and ONE audio clip are
 //! extracted per request (the first found, scanning all messages in
-//! order) — matches the single-image/single-audio-input shape
+//! order) - matches the single-image/single-audio-input shape
 //! `qwen3omnimoe::caps::generate_spec()`'s `audio`/`image` blob inputs already
 //! declare; a model that wants more would need a richer wire shape this
 //! module doesn't attempt to invent.
@@ -36,7 +36,7 @@ pub struct ExtractedMedia {
 }
 
 /// Decode a `data:<mime>;base64,<payload>` URL's payload, or `None` if `url`
-/// isn't a data URL (a real `http(s)://` URL — out of scope, see module doc).
+/// isn't a data URL (a real `http(s)://` URL - out of scope, see module doc).
 fn data_url_payload(url: &str) -> Option<&str> {
     let rest = url.strip_prefix("data:")?;
     let (_, payload) = rest.split_once(";base64,")?;
@@ -53,7 +53,7 @@ fn decode_image_data_url(data_url: &str) -> Result<Blob, String> {
 }
 
 /// Decode one image content block's raw base64 payload (Anthropic's own
-/// `source.data` — no `data:` URL wrapper, unlike OpenAI's `image_url`).
+/// `source.data` - no `data:` URL wrapper, unlike OpenAI's `image_url`).
 fn decode_image_base64(payload: &str) -> Result<Blob, String> {
     let bytes = b64::decode(payload)?;
     let rgb = imaging::codec::decode(&bytes)?;
@@ -61,9 +61,9 @@ fn decode_image_base64(payload: &str) -> Result<Blob, String> {
 }
 
 /// Decode one `input_audio` part's base64 payload (a whole WAV/MP3 FILE per
-/// OpenAI's schema — not raw PCM) into brain's raw-16kHz-mono-PCM audio
+/// OpenAI's schema - not raw PCM) into brain's raw-16kHz-mono-PCM audio
 /// blob (`audio::asr_caps`'s wire convention). Only WAV is actually
-/// decodable today — no MP3 decoder exists in this workspace — an MP3
+/// decodable today - no MP3 decoder exists in this workspace - an MP3
 /// payload errors clearly rather than silently producing garbage/empty
 /// audio.
 fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
@@ -107,7 +107,7 @@ pub fn extract_openai(messages: &[Value]) -> Result<ExtractedMedia, String> {
 
 /// Scan Anthropic-shaped `messages` for the first `image` content block
 /// across all messages (`{"type":"image","source":{"type":"base64",
-/// "media_type":...,"data":...}}` — `source.type` other than `"base64"`,
+/// "media_type":...,"data":...}}` - `source.type` other than `"base64"`,
 /// e.g. a URL source, is out of scope for the same reason OpenAI's
 /// external `image_url` is).
 pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
@@ -139,7 +139,7 @@ mod tests {
     use capability::Media;
     use serde_json::json;
 
-    /// A 1x1 white binary PPM (P6) — `imaging::codec::decode` supports P6
+    /// A 1x1 white binary PPM (P6) - `imaging::codec::decode` supports P6
     /// alongside PNG/JPEG (`crates/cli/src/image_io.rs`'s own doc), and a
     /// hand-built PPM is trivially verifiable byte for byte (unlike a
     /// memorized PNG base64 string, which risks an invalid fixture the

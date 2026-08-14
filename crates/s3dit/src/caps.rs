@@ -15,7 +15,7 @@ use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
 /// The model id used on the CLI (`brain do z-image …`) and the event API.
-pub const MODEL: &str = "brain/z-image";
+pub const MODEL: &str = "brain/s3dit";
 
 /// Shared generation params (steps / guidance / seed / size).
 fn gen_params(spec: ActionSpec) -> ActionSpec {

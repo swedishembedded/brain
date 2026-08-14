@@ -94,11 +94,11 @@ pub const DEFAULT_W: f32 = 0.5;
 /// depending on their implementations. `crates/cli` sees both and asserts they
 /// are equal (`catalog::tests::imgpipe_stage_ids_match_the_catalog`), so the
 /// string cannot drift from the model it names.
-pub const UPSCALE_MODEL: &str = "brain/upscale";
+pub const UPSCALE_MODEL: &str = "brain/rrdbnet";
 
 /// The catalog ids of the other model-backed stages, for the same reason.
 pub const SEGMENT_MODEL: &str = "brain/sam2";
-pub const RESTORE_MODEL: &str = "brain/restore";
+pub const RESTORE_MODEL: &str = "brain/codeformer";
 
 /// The parameter names each `op` accepts. Anything else is an error rather than
 /// a silent default — a misspelled `radius` that quietly became 0 would produce

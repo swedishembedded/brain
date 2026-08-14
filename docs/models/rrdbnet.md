@@ -15,7 +15,7 @@ resolution. Feed it any RGB image and get back a larger, sharper version.
 
 ## Getting the weights
 
-Model id: `brain/upscale`. Set `BRAIN_ESRGAN_WEIGHTS` to a released RRDBNet
+Model id: `brain/rrdbnet`. Set `BRAIN_ESRGAN_WEIGHTS` to a released RRDBNet
 checkpoint file, e.g. `RealESRGAN_x4plus.pth` (`x2plus` and
 `x4plus_anime_6B` checkpoints also work — the scale factor is read from the
 checkpoint itself).
@@ -23,8 +23,8 @@ checkpoint itself).
 ## Running it
 
 ```bash
-brain caps brain/upscale
-brain do brain/upscale upscale --tile 0 \
+brain caps brain/rrdbnet
+brain do brain/rrdbnet upscale --tile 0 \
     --in image=photo.ppm --out image=upscaled.ppm --json
 ```
 

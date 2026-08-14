@@ -280,7 +280,7 @@ impl QwenResident {
         let path = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN_TOKENIZER").ok().unwrap_or_default();
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        Some(Self::from_card(&path, &ModelCard::new("brain/qwen", "qwen"), Some(&tokenizer), None))
+        Some(Self::from_card(&path, &ModelCard::new("brain/qwen3", "qwen"), Some(&tokenizer), None))
     }
 
     /// Construct under the card's id. `tokenizer` is the sibling `tokenizer.json`
@@ -945,9 +945,9 @@ mod tests {
     fn estimate_counts_the_kv_pool_and_shrinks_under_int8() {
         let path = write_tiny_checkpoint(11, "estimate");
         let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
-        let card = checkpoint::st::ModelCard::new("brain/qwen", "qwen");
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
-        let key = InstanceKey::new("brain/qwen", "default");
+        let key = InstanceKey::new("brain/qwen3", "default");
 
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(QwenResident::ctx());
         let kv_int8 = QwenResident::kv_int8();
@@ -1012,7 +1012,7 @@ mod tests {
         };
         let path = write_tiny_checkpoint(5, "prefix");
 
-        let card = checkpoint::st::ModelCard::new("brain/qwen", "qwen");
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some(&tok_path), None);
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
@@ -1029,7 +1029,7 @@ mod tests {
         let system: String = (0..200).map(|i| format!("rule {i}: always answer politely. ")).collect();
         let post = |user: &str| {
             let body = serde_json::json!({
-                "model": "brain/qwen",
+                "model": "brain/qwen3",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -1055,7 +1055,7 @@ mod tests {
             assert_eq!(r2.status(), axum::http::StatusCode::OK, "second (prefix-sharing) request must succeed");
         });
 
-        let key = InstanceKey::new("brain/qwen", "default");
+        let key = InstanceKey::new("brain/qwen3", "default");
         let stats = exec.stats();
         let m = stats.metrics.get(&key).unwrap_or_else(|| panic!("no metrics for {key:?}; stats={stats:?}"));
         let rate = m.iter().find(|(k, _)| k == "kv_prefix_hit_rate").map(|(_, v)| v.as_f64().unwrap_or(0.0)).unwrap_or(0.0);

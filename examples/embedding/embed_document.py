@@ -70,7 +70,7 @@ def main() -> int:
         default="LiquidAI/LFM2.5-350M",
         help="an embed-capable model: a fully-qualified <vendor>/<repo> ref "
         "(auto-fetched + converted on first use, e.g. LiquidAI/LFM2.5-350M), "
-        "brain/lfm for an already env-loaded checkpoint, or brain/mock for a quick check",
+        "brain/lfm2 for an already env-loaded checkpoint, or brain/mock for a quick check",
     )
     ap.add_argument("--concurrent", type=int, default=1, help="issue N identical requests concurrently")
     args = ap.parse_args()

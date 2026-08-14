@@ -645,7 +645,7 @@ mod tests {
         supplier.ensure("Tongyi-MAI/Z-Image-Turbo", &e, &mut |_, _, _| {}).unwrap();
 
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
-        assert_eq!(names, vec!["Tongyi-MAI/Z-Image-Turbo".to_string()], "must register under the fetched ref, not the compiled-in brain/z-image constant, or the request that triggered the fetch would find nothing");
+        assert_eq!(names, vec!["Tongyi-MAI/Z-Image-Turbo".to_string()], "must register under the fetched ref, not the compiled-in brain/s3dit constant, or the request that triggered the fetch would find nothing");
 
         // The manifest landed with the exact roles ZimageRecipe declares, and
         // a second ensure() for the same ref needs no network at all.

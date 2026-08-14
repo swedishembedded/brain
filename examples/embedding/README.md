@@ -25,7 +25,7 @@ instant). Point `--model` at `LiquidAI/LFM2.5-230M` for the smaller encoder,
 or `brain/mock` for a weight-free smoke test.
 
 Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM2`/
-`BRAIN_LFM2_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm`
+`BRAIN_LFM2_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm2`
 — the env-loaded-checkpoint fallback (the `brain/`
 table), unchanged from before auto-fetch existed.
 

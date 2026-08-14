@@ -50,7 +50,7 @@ use crate::config::Qwen3VlConfig;
 use crate::model::Qwen3Vl;
 use crate::preprocess::{normalize_unit, pack_patches, patch_grid, smart_resize};
 
-pub const MODEL: &str = "brain/qwenvl";
+pub const MODEL: &str = "brain/qwen3vl";
 
 /// Default checkpoint directory - `$BRAIN_QWEN3VL_WEIGHTS`, never a baked-in
 /// absolute path (AGENTS.md: no absolute paths in source).

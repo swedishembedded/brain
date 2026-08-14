@@ -745,7 +745,7 @@ fn run_train(args: &[String]) {
             (name.clone(), vec![n as u64], gpu.read(ps.w(name), n))
         })
         .collect();
-    // "brain/depth" matches the reserved-vendor fallback id
+    // "brain/zipdepth" matches the reserved-vendor fallback id
     // -- the same id crates/cli/src/resident_depth.rs::DepthResident::from_env
     // synthesizes for an env-loaded checkpoint -- so a checkpoint saved here
     // is auto-discoverable by crates/cli/src/model_dir.rs without requiring
@@ -760,7 +760,7 @@ fn run_train(args: &[String]) {
         &out,
         serde_json::json!({ "model": "zipdepth", "variant": variant }),
         &tensors,
-        &checkpoint::st::ModelCard::new("brain/depth", "depth"),
+        &checkpoint::st::ModelCard::new("brain/zipdepth", "depth"),
     );
     println!("done: loss {:.4} -> {:.4}; saved {out}", res.first_loss, res.last_loss);
 }

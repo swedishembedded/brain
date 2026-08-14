@@ -24,7 +24,7 @@ and aligning it first unless you pass `--align false`. Use them for face
 search/verification, or to locate and align a face before restoring it. See the
 [SCRFD](../models/scrfd.md) and [ArcFace](../models/arcface.md) pages.
 
-### Blind face restoration - `brain/restore`
+### Blind face restoration - `brain/codeformer`
 
 Takes a degraded (ideally aligned) face and produces a restored version, with
 a continuous identity-fidelity dial: one end favors visual quality, the other
@@ -32,7 +32,7 @@ favors staying close to the input. Use it after detection/alignment to clean
 up compression artifacts, blur, or low resolution on a face crop. See
 the [face restoration page](../models/restore.md).
 
-### Image upscaling - `brain/upscale`
+### Image upscaling - `brain/rrdbnet`
 
 Super-resolves an image (4x on the released checkpoint). Use it as a final
 step after generation, editing, or restoration to raise output resolution.
@@ -65,9 +65,9 @@ batching:
 | `brain/sam2` | under 1 GB |
 | `brain/scrfd` | under 1 GB |
 | `brain/arcface` | under 1 GB |
-| `brain/restore` | under 1 GB |
+| `brain/codeformer` | under 1 GB |
 | `brain/vqgan` | under 1 GB |
-| `brain/upscale` | under 1 GB |
+| `brain/rrdbnet` | under 1 GB |
 
 All of them are small enough to stay resident together on one GPU.
 `brain/imgpipe` holds no weights of its own - it composes whichever of the

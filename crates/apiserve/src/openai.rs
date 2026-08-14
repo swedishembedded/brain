@@ -1019,7 +1019,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         let mut finish = String::from("stop");
         let (mut prompt, mut completion) = (0i64, 0i64);
         // Whether any real token delta was streamed. A model that only reports
-        // coarse `Progress::step` ticks (no `delta`) - `brain/omni` is one -
+        // coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is one -
         // produces its whole answer in the terminal `Outcome` and would
         // otherwise stream a syntactically valid but EMPTY assistant message.
         // See the `Done` arm below for the one-shot fallback chunk.

@@ -12,7 +12,7 @@ batch counters (proof that concurrent windows actually batched).
     BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
       dbus-run-session -- bash -c '
         brain serve --dbus --device cpu & sleep 2
-        python3 examples/asr/bench_streams.py --model brain/nemotron \
+        python3 examples/asr/bench_streams.py --model brain/nemotronasr \
           --wav $BRAIN_TESTDATA/asr/audio/librispeech_mr_quilter.wav \
           --streams 1,2,4
       '
@@ -123,7 +123,7 @@ def run_level(model: str, pcm: bytes, audio_s: float, window_ms: int, n: int) ->
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="brain/nemotron")
+    ap.add_argument("--model", default="brain/nemotronasr")
     ap.add_argument("--wav", required=True, help="16 kHz mono 16-bit wav to replay per stream")
     ap.add_argument("--streams", default="1,2,4", help="comma list of concurrency levels")
     ap.add_argument("--window-ms", type=int, default=1000)

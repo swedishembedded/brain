@@ -41,7 +41,7 @@ use crate::model::Rrdb;
 /// catalog id to sit under a reserved vendor, so the upstream-repo spelling
 /// (`ai-forever/Real-ESRGAN`) is NOT usable here: that vendor is fetchable, and
 /// this model is served from a locally-configured checkpoint, not fetched.
-pub const MODEL: &str = "brain/upscale";
+pub const MODEL: &str = "brain/rrdbnet";
 
 pub fn upscale_spec() -> ActionSpec {
     ActionSpec::new("upscale", "super-resolve an image (Real-ESRGAN RRDBNet generator)")

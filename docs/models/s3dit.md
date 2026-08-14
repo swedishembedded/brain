@@ -43,8 +43,8 @@ There is no dedicated `brain zimage` CLI subcommand — Z-Image is served
 through the generalized capability interface:
 
 ```bash
-brain caps brain/z-image                        # discovery, no weights needed
-brain do brain/z-image text2image --prompt "a red apple on a wooden table" \
+brain caps brain/s3dit                        # discovery, no weights needed
+brain do brain/s3dit text2image --prompt "a red apple on a wooden table" \
     --out image=apple.ppm --json
 ```
 

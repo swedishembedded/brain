@@ -19,7 +19,7 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 
 ## Getting the weights
 
-Model id: `brain/qwenvl` (reserved vendor - never auto-fetched).
+Model id: `brain/qwen3vl` (reserved vendor - never auto-fetched).
 `BRAIN_QWEN3VL_WEIGHTS` - a checkpoint directory holding `config.json` +
 `model.safetensors[.index.json]` + `tokenizer.json` (overridable per call
 via the `weights` param).

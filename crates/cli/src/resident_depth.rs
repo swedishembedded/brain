@@ -39,7 +39,7 @@ impl DepthResident {
         let path = std::env::var("BRAIN_ZIPDEPTH_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
         // no upstream vendor/repo provenance.
-        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/depth", "depth"), None))
+        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/zipdepth", "depth"), None))
     }
 
     /// Construct under the card's id. `_tokenizer` is unused -- depth has no

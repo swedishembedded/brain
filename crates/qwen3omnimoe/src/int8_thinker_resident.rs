@@ -45,11 +45,11 @@
 //! the original contract, which the multi-GPU and executor tests drive) OR the
 //! ordinary chat request every other served text model takes (`messages` /
 //! `prompt`, text out). The chat shape is what makes this model reachable over
-//! `/v1/chat/completions`, `/v1/messages` and D-Bus the same way `brain/omni`
+//! `/v1/chat/completions`, `/v1/messages` and D-Bus the same way `brain/qwen3omnimoe`
 //! is, rather than being a faster path nobody can call: `apiserve::catalog::
 //! api_caps` classifies a model chat-capable only from its manifest, so the
 //! declared spec is [`crate::caps::chat_generate_spec`] - the SAME builder
-//! `brain/omni`'s own `generate` uses, not a second copy of that param list.
+//! `brain/qwen3omnimoe`'s own `generate` uses, not a second copy of that param list.
 //!
 //! Tokenization needs vocab files, and a brain-native int8 checkpoint is a
 //! single `.safetensors` with no tokenizer sibling, so the directory to read
@@ -61,7 +61,7 @@
 //!
 //! `generate`'s chat shape also accepts real audio/image/video, spliced in by
 //! the SAME `crate::mm::build_multimodal_prompt` (+ `qwen3vl::mrope::
-//! get_rope_index_multi` for the real per-axis M-RoPE positions) `brain/omni`
+//! get_rope_index_multi` for the real per-axis M-RoPE positions) `brain/qwen3omnimoe`
 //! uses - not a second copy of that splicing/position logic. This is why
 //! [`Int8ThinkerInstance`] carries a [`crate::config::ThinkerConfig`] rather
 //! than the bare [`MoeTextConfig`] `thinker::layer_fwd` et al. actually
@@ -78,7 +78,7 @@
 //! only through the Thinker's own MoE experts via `model::moe::expert_fwd_i8`).
 //! Building one would mean writing new quantized vision/audio kernels - real,
 //! separable follow-up work, not attempted here. So this path reuses the
-//! encoders EXACTLY as `brain/omni` does, reading the towers' fp32 weights
+//! encoders EXACTLY as `brain/qwen3omnimoe` does, reading the towers' fp32 weights
 //! from a real HF checkpoint directory (`BRAIN_QWEN3OMNIMOE_HF_DIR`, the same
 //! directory the tokenizer is often read from already) - see
 //! [`Int8ThinkerInstance::generate_chat`]'s multimodal branch. The
@@ -92,7 +92,7 @@
 //! dequantize_weight`, the same primitive [`load_mat_host`] already uses) is
 //! real, scoped follow-up, not this pass's job.
 //!
-//! Speech output (`speak`) remains out of scope - `brain/omni` remains the
+//! Speech output (`speak`) remains out of scope - `brain/qwen3omnimoe` remains the
 //! only path with Thinker->Talker->MTP->Code2Wav.
 
 use std::collections::HashMap;
@@ -846,7 +846,7 @@ impl Instance for Int8ThinkerInstance {
     ///   LE `u32`, the GENERATED tokens only, prompt excluded - matches
     ///   [`Self::generate`]'s own contract).
     /// * **chat** - no `ids` blob: `messages`/`prompt` in, `max_new` tokens,
-    ///   `text` out, exactly like `brain/omni`. Requires a tokenizer.
+    ///   `text` out, exactly like `brain/qwen3omnimoe`. Requires a tokenizer.
     ///
     /// The `ids` blob is what selects between them, so an existing raw caller
     /// is unaffected by the chat shape existing.
@@ -1044,10 +1044,10 @@ impl ResidentModel for Int8ThinkerResident {
     fn manifest(&self) -> Manifest {
         Manifest::new(
             MODEL,
-            "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/omni, including real audio/image/video input (splice via crate::mm::build_multimodal_prompt, the same code brain/omni uses -- see this module's doc for the vision/audio tower weight source), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache. Still no speak (see this module's doc).",
+            "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/qwen3omnimoe, including real audio/image/video input (splice via crate::mm::build_multimodal_prompt, the same code brain/qwen3omnimoe uses -- see this module's doc for the vision/audio tower weight source), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache. Still no speak (see this module's doc).",
             vec![
                 ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob"),
-                // The SAME builder brain/omni's generate uses (chat params +
+                // The SAME builder brain/qwen3omnimoe's generate uses (chat params +
                 // the three media inputs) -- what makes this model reachable
                 // over /v1/chat/completions and /v1/messages with the SAME
                 // multimodal contract, rather than a second hand-synced copy

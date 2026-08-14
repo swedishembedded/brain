@@ -19,7 +19,7 @@ assistant pipeline - all running locally, no external TTS service.
 
 ## Getting the weights
 
-Model id: `brain/tts`. Reserved vendor `brain/` - never auto-fetched; you
+Model id: `brain/qwen3tts`. Reserved vendor `brain/` - never auto-fetched; you
 need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
 
 1. Convert the upstream HF checkpoint into brain's own checkpoint format:
@@ -73,7 +73,7 @@ brain tts design --text "..." --instruct "a calm, low voice" \
 Generic capability CLI (same synthesis, uniform invocation):
 
 ```bash
-brain do brain/tts synth --text "Hello from brain." \
+brain do brain/qwen3tts synth --text "Hello from brain." \
   --weights_dir out/tts --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
   --out audio=out.wav
 ```

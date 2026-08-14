@@ -21,7 +21,7 @@ separate ASR/VLM/TTS models together yourself.
 
 ## Getting the weights
 
-Model id: `brain/omni`. Reserved vendor `brain/` - never auto-fetched.
+Model id: `brain/qwen3omnimoe`. Reserved vendor `brain/` - never auto-fetched.
 
 - `BRAIN_QWEN3OMNIMOE_HF_DIR` - the HF checkpoint directory (`config.json` +
   tokenizer files + the sharded `model.safetensors.index.json` + shards).
@@ -29,7 +29,7 @@ Model id: `brain/omni`. Reserved vendor `brain/` - never auto-fetched.
 
 ## GPU residency (the sharded int8 path)
 
-`brain/omni` above is the **validation tier**: it has the full chat and
+`brain/qwen3omnimoe` above is the **validation tier**: it has the full chat and
 audio/image/video surface, but every decoder layer's weights - including all
 128 experts - are re-read from the checkpoint for every generated token, so
 nothing stays on the GPU between calls. It is correct and slow.
@@ -41,7 +41,7 @@ output channel, MoE expert linears only) with full-precision activations,
 the current HF/vLLM-recognized tag for this scheme (not GGUF's `Q8_0`, a
 different, block-quantized format). Its weights live in VRAM across calls,
 layer-sharded across however many GPUs their real per-layer byte cost needs.
-It takes the same chat request as `brain/omni` (text only - no audio/image/
+It takes the same chat request as `brain/qwen3omnimoe` (text only - no audio/image/
 video and no `speak`), and is dramatically faster per token than the
 streaming path above, on the same prompt with the same output, since the
 weights never leave VRAM between calls. Measure the actual ratio on your own
@@ -103,7 +103,7 @@ Two limits worth knowing before you point it at real weights:
   the difference decides whether the model fits two 24 GB cards at all.
 - **This path is Thinker text only.** It has no multimodal splice and no
   `speak`, so an image, an audio clip or a spoken reply still needs
-  `brain/omni`. It IS on `/v1/chat/completions`, `/v1/messages` and D-Bus with
+  `brain/qwen3omnimoe`. It IS on `/v1/chat/completions`, `/v1/messages` and D-Bus with
   the same `messages`/`prompt` contract, and it additionally accepts a raw
   `ids` blob (LE `u32` token ids, meta `max_new_tokens`/`eos_ids`) for callers
   that tokenize themselves.
@@ -126,7 +126,7 @@ curl http://localhost:8788/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <key from brain serve>' \
   -d '{
-    "model": "brain/omni",
+    "model": "brain/qwen3omnimoe",
     "messages": [{"role": "user", "content": [
       {"type": "text", "text": "What is in this image?"},
       {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
@@ -144,7 +144,7 @@ D-Bus/`brain do`-only today - the HTTP chat endpoints always dispatch the
 ```python
 from brain_py.dbus import BrainDBus
 with BrainDBus() as brain:
-    out = brain.subscribe("brain/omni", "speak",
+    out = brain.subscribe("brain/qwen3omnimoe", "speak",
         {"prompt": "Say hello.", "speaker": "chelsie"})
     # out.blobs["audio"]: raw mono f32 LE PCM at 24 kHz
     # out.text: the response text
@@ -173,7 +173,7 @@ speech, image and video input over both the D-Bus and HTTP transports.
 - `speak` is text-only on the input side today: a `speak` call does not also
   take audio/image input, and it's single-turn (no multi-turn spoken
   context).
-- On `brain/omni`, weights stream from the checkpoint per generated token
+- On `brain/qwen3omnimoe`, weights stream from the checkpoint per generated token
   rather than living resident, so throughput is validation-tier, not
   production-grade - the large majority of a request's wall time is
   re-reading the layers that do not fit in VRAM, not kernel execution.

@@ -294,7 +294,7 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         let mut finish = String::from("stop");
         let mut completion = 0i64;
         // Whether any real token delta was streamed. A resident that only
-        // reports coarse `Progress::step` ticks (no `delta`) - `brain/omni` is
+        // reports coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is
         // one - carries its whole answer in the terminal `Outcome`, and would
         // otherwise stream a well-formed but EMPTY text block. See the one-shot
         // fallback below `content_block_stop`.

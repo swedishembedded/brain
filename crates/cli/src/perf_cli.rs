@@ -1123,13 +1123,13 @@ fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("yolo weights not found: {weights}"));
     }
-    let resident = crate::resident::YoloResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/yolo", "yolo"), None);
+    let resident = crate::resident::YoloResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
         capability::Invocation::new().blob("image", synth_image_blob(640, 640))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/yolo", "detect", "frame", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/yolov8", "detect", "frame", info, build)))
 }
 
 /// `depth:<weights>` - ZipDepth monocular depth behind the residency
@@ -1140,12 +1140,12 @@ fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("depth weights not found: {weights}"));
     }
-    let resident = crate::resident_depth::DepthResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/depth", "depth"), None);
+    let resident = crate::resident_depth::DepthResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/zipdepth", "depth"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build =
         Box::new(|_req: &perf::target::PerfRequest| capability::Invocation::new().blob("image", synth_image_blob(384, 384)));
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/depth", "depth", "frame", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/zipdepth", "depth", "frame", info, build)))
 }
 
 /// `sam2:<weights-dir>[:tiny|large]` - SAM 2.1 promptable segmentation behind

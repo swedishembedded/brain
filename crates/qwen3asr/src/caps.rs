@@ -25,7 +25,7 @@ use crate::config::QwenAsrConfig;
 use crate::model::Qwen3Asr;
 
 /// Model name in the manifest.
-pub const MODEL: &str = "brain/qwen-asr";
+pub const MODEL: &str = "brain/qwen3asr";
 
 /// Contiguous audio-placeholder token id (`config.audio_token_id`).
 pub const AUDIO_TOKEN_ID: u32 = 151676;

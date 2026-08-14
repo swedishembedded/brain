@@ -20,7 +20,7 @@ have no weights-free `caps::manifest()` and so never appear in `brain caps` at
 all — asserting the reverse would fail on models that are correctly documented.
 
 KNOWN BLIND SPOT: residency-registered models gated on env vars (e.g.
-`brain/omni` behind BRAIN_QWEN3OMNIMOE_HF_DIR) are served over D-Bus/HTTP without ever
+`brain/qwen3omnimoe` behind BRAIN_QWEN3OMNIMOE_HF_DIR) are served over D-Bus/HTTP without ever
 appearing in `brain caps`, so this guard cannot notice one missing from the
 table — omni's row was added by hand after exactly that slip. A weights-free
 "list residency registrations" surface would close the gap.
@@ -39,7 +39,7 @@ from pathlib import Path
 
 # Utility/demo entries that are real catalog models but not "a model" for the
 # support table's purposes (no ML weights, nothing to document a support
-# matrix for). Weighted models NEVER belong here: `brain/qwenvl` was once
+# matrix for). Weighted models NEVER belong here: `brain/qwen3vl` was once
 # whitelisted with a "forward-only" rationale that was already false when it
 # was written (commit 6b4e44a had landed a real served `generate` action) —
 # exactly the drift this guard exists to catch. If a new model trips this
@@ -47,7 +47,7 @@ from pathlib import Path
 IGNORE = {"brain/mock", "brain/demo", "brain/imageops"}
 
 # `brain caps` is a WEIGHTS-FREE static listing: it reports each catalog
-# entry's crate-level `caps::MODEL` constant (`brain/qwen`, `brain/lfm`), which
+# entry's crate-level `caps::MODEL` constant (`brain/qwen3`, `brain/lfm2`), which
 # is a family placeholder, not a specific checkpoint — resolving to an actual
 # HF ref (`Qwen/Qwen3-0.6B`, `LiquidAI/LFM2.5-350M`) only happens later, via
 # `brain_modelstore`, which `brain caps` never touches. The table documents
@@ -56,10 +56,10 @@ IGNORE = {"brain/mock", "brain/demo", "brain/imageops"}
 # `brain_modelref::alias` maps a legacy short name to its canonical id, just
 # in the other direction (a family placeholder to its recommended checkpoint).
 CATALOG_ALIASES = {
-    "brain/qwen": "Qwen/Qwen3-0.6B",
-    "brain/lfm": "LiquidAI/LFM2.5-350M",
-    "brain/z-image": "Tongyi-MAI/Z-Image-Turbo",
-    "brain/yolo": "Ultralytics/YOLOv8",
+    "brain/qwen3": "Qwen/Qwen3-0.6B",
+    "brain/lfm2": "LiquidAI/LFM2.5-350M",
+    "brain/s3dit": "Tongyi-MAI/Z-Image-Turbo",
+    "brain/yolov8": "Ultralytics/YOLOv8",
 }
 
 ROW_RE = re.compile(r"^\|\s*\[`([^`]+)`\]\(([^)]+)\)")

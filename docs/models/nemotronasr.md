@@ -21,7 +21,7 @@ transducer. For offline batch transcription of a complete clip instead, see
 
 ## Getting the weights
 
-Model id: `brain/nemotron` (reserved vendor - never auto-fetched).
+Model id: `brain/nemotronasr` (reserved vendor - never auto-fetched).
 `BRAIN_NEMOTRONASR` - checkpoint directory (HF layout).
 
 ## Running it
@@ -51,13 +51,13 @@ windows of a mic feed under the same `stream` session id, and a final
 `eos`-only call to flush and close it. See
 [`examples/asr/README.md`](../../examples/asr/README.md) and the reference
 client [`examples/asr/transcribe_mic.py`](../../examples/asr/transcribe_mic.py)
-(`--model brain/nemotron`, `--wav FILE` or live mic capture) for the full
+(`--model brain/nemotronasr`, `--wav FILE` or live mic capture) for the full
 protocol.
 
 ```bash
 BRAIN_NEMOTRONASR=/path/to/nemotron/hf dbus-run-session -- bash -c '
   brain serve --dbus & sleep 2
-  python3 examples/asr/transcribe_mic.py --model brain/nemotron --wav clip.wav'
+  python3 examples/asr/transcribe_mic.py --model brain/nemotronasr --wav clip.wav'
 ```
 
 ## Options

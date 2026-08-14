@@ -20,7 +20,7 @@ Qwen3-1.7B decoder. For live/streaming transcription instead, see
 
 ## Getting the weights
 
-Model id: `brain/qwen-asr` (reserved vendor - never auto-fetched).
+Model id: `brain/qwen3asr` (reserved vendor - never auto-fetched).
 `BRAIN_QWEN3ASR` - checkpoint directory (HF layout).
 
 ## Running it
@@ -46,7 +46,7 @@ BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf brain serve --dbus
 
 Reference client:
 [`examples/asr/transcribe_mic.py`](../../examples/asr/transcribe_mic.py)
-(`--model brain/qwen-asr`, `--wav FILE`) - see
+(`--model brain/qwen3asr`, `--wav FILE`) - see
 [`examples/asr/README.md`](../../examples/asr/README.md) for the full
 protocol.
 

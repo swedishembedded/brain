@@ -329,15 +329,15 @@ fast and scalable kernel - not a naive one.
     two real P40s against the REAL 30B checkpoint: real int8 expert AND
     non-expert weights resident across both cards, real cross-device residual
     handoff, KV-cached greedy decode, and the same chat request contract
-    `brain/omni` takes (`qwen3omnimoe::caps::chat_generate_spec`), so it serves
+    `brain/qwen3omnimoe` takes (`qwen3omnimoe::caps::chat_generate_spec`), so it serves
     `/v1/chat/completions` and `/v1/messages` rather than raw token ids only
     (`Executor::register_multi`, `crates/cli/src/resident_omni.rs::
     int8_thinker_multi_from_env`, env `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` +
     `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`). Measured: **2.3 s/token vs 57.6
     s/token** for the streaming bf16 path, identical output, 16.9/16.7 GiB on
     two 24 GB cards. Text only - multimodal input and `speak` still require
-    `brain/omni`; see `.agents/roadmap/qwen3omnimoe.md`.
-    **Qwen3-VL** (`crates/qwen3vl`) is a separate served model, `brain/qwenvl` - reuses `crates/qwen3`'s decoder
+    `brain/qwen3omnimoe`; see `.agents/roadmap/qwen3omnimoe.md`.
+    **Qwen3-VL** (`crates/qwen3vl`) is a separate served model, `brain/qwen3vl` - reuses `crates/qwen3`'s decoder
     (KV-cache decode path carries real M-RoPE + DeepStack support), image +
     text in, greedy text out, `brain caps`/`brain qwen3vl ...` (`crates/qwen3vl/src/
     caps.rs`). No residency adapter yet (not servable over D-Bus/HTTP);
@@ -1189,7 +1189,7 @@ a metric that isn't there was simply forgotten.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
-  and test mocks respectively (`brain/mock`, `brain/yolo`, `brain/z-image`, …);
+  and test mocks respectively (`brain/mock`, `brain/yolov8`, `brain/s3dit`, …);
   everything else names a real HuggingFace repo (`Qwen/Qwen3-0.6B`,
   `Qwen/Qwen3-0.6B-Q4_K_M`). The grammar, the reserved-vendor list, and the
   legacy-name deprecation table live in **`crates/modelref`**

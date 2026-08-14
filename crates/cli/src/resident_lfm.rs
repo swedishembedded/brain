@@ -62,7 +62,7 @@ impl LfmResident {
     /// `resident_llm.rs::GptResident::from_env`'s comment -- no upstream
     /// vendor/repo provenance from an env-loaded checkpoint).
     pub fn new(weights: &str, tokenizer_path: &str) -> Result<LfmResident, String> {
-        Self::from_card(weights, &ModelCard::new("brain/lfm", "lfm"), Some(tokenizer_path))
+        Self::from_card(weights, &ModelCard::new("brain/lfm2", "lfm"), Some(tokenizer_path))
     }
 
     /// Construct under the card's id. The encoder tokenizes eagerly, so a

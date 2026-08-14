@@ -26,7 +26,7 @@ fn omni_manifest_is_chat_exposed() {
 }
 
 /// Spec: the GPU-resident int8 Thinker is reachable over the SAME chat
-/// surfaces as `brain/omni`. It used to declare raw blob actions only, so
+/// surfaces as `brain/qwen3omnimoe`. It used to declare raw blob actions only, so
 /// `/v1/chat/completions` 404'd the one model on this box fast enough to be
 /// worth calling (~25x the streaming path's tokens/second on two P40s) - the
 /// speed was unreachable through the interface anyone actually uses.
@@ -64,7 +64,7 @@ fn both_thinker_models_declare_the_same_chat_params() {
     for p in qwen3omnimoe::caps::generate_spec().params {
         assert!(
             int8.params.iter().any(|q| q.name == p.name),
-            "brain/omni declares chat param '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not",
+            "brain/qwen3omnimoe declares chat param '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not",
             p.name
         );
     }
@@ -91,19 +91,19 @@ fn both_thinker_models_declare_the_same_media_inputs() {
     let m = r.manifest();
     let int8 = m.actions.iter().find(|a| a.name == "generate").expect("int8 must declare generate");
     let bf16_inputs = qwen3omnimoe::caps::generate_spec().inputs;
-    assert!(!bf16_inputs.is_empty(), "brain/omni's generate_spec must declare at least one media input (audio/image/video)");
+    assert!(!bf16_inputs.is_empty(), "brain/qwen3omnimoe's generate_spec must declare at least one media input (audio/image/video)");
     for want in &bf16_inputs {
         let got = int8.inputs.iter().find(|i| i.name == want.name);
         assert!(
             got.is_some(),
-            "brain/omni declares media input '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not -- \
+            "brain/qwen3omnimoe declares media input '{}' but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 does not -- \
              an attached blob would be silently dropped on the fast path",
             want.name
         );
         assert_eq!(
             got.unwrap().media,
             want.media,
-            "brain/omni's '{}' input is {:?} but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16's is {:?}",
+            "brain/qwen3omnimoe's '{}' input is {:?} but brain/Qwen3-Omni-30B-A3B-Instruct-W8A16's is {:?}",
             want.name,
             want.media,
             got.unwrap().media

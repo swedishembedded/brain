@@ -10,7 +10,7 @@ with the generic `Run` method - images and code grids travel as file descriptors
 | `vqgan` | `encode` → codebook indices, `decode` → an image | `BRAIN_VQGAN_WEIGHTS` (a released checkpoint, or its directory) |
 
 ```bash
-brain caps brain/restore
+brain caps brain/codeformer
 brain caps brain/vqgan
 ```
 

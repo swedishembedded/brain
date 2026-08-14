@@ -22,7 +22,7 @@
 //! when it is literally named `generate` (see this doc's own note on
 //! `generate_spec()` below), so `converse` never appears on `/v1/chat/
 //! completions`/`/v1/messages`. No `transcribe` action — it needs a
-//! dedicated ASR-shaped prompt this crate hasn't built (use `brain/qwen-asr`
+//! dedicated ASR-shaped prompt this crate hasn't built (use `brain/qwen3asr`
 //! directly for transcription today). Declaring an action whose `run()`
 //! can't actually do what its spec promises is worse than not declaring it.
 //! All three actions are single-turn (no multi-turn Talker context tracked
@@ -72,13 +72,13 @@ use crate::talker_prompt::{build_talker_prompt, UserMediaSplice};
 use crate::thinker::thinker_pipelines;
 
 /// Model name in the manifest.
-pub const MODEL: &str = "brain/omni";
+pub const MODEL: &str = "brain/qwen3omnimoe";
 
 /// The chat-shaped `generate` schema every Thinker-backed model shares: the
 /// text params, `.streaming()`, and a `Media::Text` output.
 ///
 /// Extracted so `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` is reachable through the SAME
-/// request contract as `brain/omni` without a second, hand-synced copy of this
+/// request contract as `brain/qwen3omnimoe` without a second, hand-synced copy of this
 /// param list. That shape is not cosmetic: `apiserve::catalog::api_caps` gates
 /// `/v1/chat/completions` and `/v1/messages` exposure on exactly
 /// `name == "generate"` + `streaming` + a `messages`/`prompt`/`text` param + a

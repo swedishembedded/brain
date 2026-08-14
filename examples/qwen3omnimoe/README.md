@@ -92,7 +92,7 @@ BRAIN_MOCK=1 dbus-run-session -- bash -c '
 --in-image PPM                              binary PPM (P6), real vision-tower splice (--dbus only;
                                              convert PNG/JPEG first -- no Pillow dependency here)
 --out-stdio | --out-text PATH               print, or write to a file (stdout is the default)
---model MODEL                               served model name (default brain/omni)
+--model MODEL                               served model name (default brain/qwen3omnimoe)
 --max-new N                                 max tokens to generate (default 32)
 --system TEXT                               optional system prompt
 ```
@@ -129,7 +129,7 @@ explicit `http://host:port/v1` both work.
         still streamed fresh from the real HF checkpoint every step
 ```
 
-The three transports converge on the exact same `brain/omni` `generate`
+The three transports converge on the exact same `brain/qwen3omnimoe` `generate`
 action (`crates/qwen3omnimoe/src/caps.rs`) - nothing here is Omni-specific in the
 transport layer; it is the same generic `(model, action)` dispatch every
 brain model uses. What differs per transport is only the request/response

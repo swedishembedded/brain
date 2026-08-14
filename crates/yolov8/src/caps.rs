@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use crate::model::Yolo;
 
 /// The model id used on the CLI (`brain do yolo …`) and the event API.
-pub const MODEL: &str = "brain/yolo";
+pub const MODEL: &str = "brain/yolov8";
 
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {

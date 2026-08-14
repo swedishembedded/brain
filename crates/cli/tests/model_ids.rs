@@ -83,3 +83,30 @@ fn every_legacy_alias_resolves_to_a_reserved_canonical_ref() {
         assert!(r.is_reserved(), "{canon:?} should be under a reserved vendor");
     }
 }
+
+/// `brain caps <arch id>` must resolve every architecture whose catalog id
+/// is `brain/<arch id>`, whether that architecture is dispatched through the
+/// generic `capability::Provider` path or through its own dedicated
+/// `_cli.rs` module -- discovery and dispatch must agree on what names an
+/// architecture regardless of which path serves it. Derives the expected
+/// set from the live catalog rather than hardcoding arch ids, so it can't
+/// drift out of sync with either side.
+#[test]
+fn brain_caps_resolves_every_arch_id_whose_catalog_id_is_brain_slash_that_id() {
+    let manifests = static_manifests();
+    let mut checked = 0;
+    for m in &manifests {
+        let id = m.get("model").and_then(|v| v.as_str()).unwrap();
+        let Some(arch) = id.strip_prefix("brain/") else { continue };
+        if brain_arch::by_id(arch).is_none() {
+            continue;
+        }
+        let out = Command::new(bin()).args(["caps", arch, "--json"]).output().expect("run brain caps <arch> --json");
+        assert!(out.status.success(), "brain caps {arch} --json failed: {}", String::from_utf8_lossy(&out.stderr));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("brain caps {arch} --json: invalid JSON: {e}"));
+        let got: Vec<&str> = v.as_array().unwrap().iter().filter_map(|m| m.get("model").and_then(|v| v.as_str())).collect();
+        assert_eq!(got, vec![id], "brain caps {arch} should resolve to exactly {id:?}");
+        checked += 1;
+    }
+    assert!(checked > 0, "no brain/<arch id> catalog entries found to check -- fixture drifted?");
+}

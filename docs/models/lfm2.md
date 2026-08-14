@@ -41,7 +41,7 @@ brain lfm eval      --weights F --dataset <dir>
 brain lfm data      [...]
 
 # via the generic capability surface
-brain do brain/lfm fill_mask --weights F --tokenizer tokenizer.json --text "..."
+brain do brain/lfm2 fill_mask --weights F --tokenizer tokenizer.json --text "..."
 ```
 
 To serve it over HTTP or D-Bus:

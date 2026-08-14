@@ -133,7 +133,7 @@ impl OmniResident {
         let reader = match WeightReader::open_hf_dir(std::path::Path::new(&self.hf_dir)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("brain/omni: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.hf_dir);
+                eprintln!("brain/qwen3omnimoe: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.hf_dir);
                 return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
             }
         };
@@ -143,18 +143,18 @@ impl OmniResident {
         {
             Some(root) => qwen3omnimoe::config::OmniConfig::from_json(&root).thinker.text,
             None => {
-                eprintln!("brain/omni: cannot read '{}/config.json' -- reporting zero devices", self.hf_dir);
+                eprintln!("brain/qwen3omnimoe: cannot read '{}/config.json' -- reporting zero devices", self.hf_dir);
                 return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
             }
         };
         let Some(cost) = qwen3omnimoe::thinker_plan::layer_cost(&reader, &cfg) else {
-            eprintln!("brain/omni: '{}' is missing Thinker tensors this model loads -- reporting zero devices", self.hf_dir);
+            eprintln!("brain/qwen3omnimoe: '{}' is missing Thinker tensors this model loads -- reporting zero devices", self.hf_dir);
             return Plan { devices: Vec::new(), bytes: Vec::new(), host_ram };
         };
         let caps: Vec<(usize, u64)> = self.devices.iter().map(|&(_, c)| c).enumerate().collect();
         let Some(placement) = qwen3omnimoe::thinker_plan::place_fewest_devices(&cost, &caps) else {
             eprintln!(
-                "brain/omni: does not fit the {} budgeted device(s) even streamed ({} bytes available) -- reporting zero devices",
+                "brain/qwen3omnimoe: does not fit the {} budgeted device(s) even streamed ({} bytes available) -- reporting zero devices",
                 caps.len(),
                 caps.iter().map(|&(_, c)| c).sum::<u64>()
             );
@@ -185,7 +185,7 @@ impl ResidentModel for OmniResident {
     }
 
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
-        Err("brain/omni: single-device activate is not supported -- this model places itself across devices, claim it via ResidencyManager::claim_multi".to_string())
+        Err("brain/qwen3omnimoe: single-device activate is not supported -- this model places itself across devices, claim it via ResidencyManager::claim_multi".to_string())
     }
 }
 
@@ -199,7 +199,7 @@ impl MultiDeviceResidentModel for OmniResident {
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
         let plan = self.plan();
         if plan.devices.is_empty() {
-            return Err("brain/omni: no placement (checkpoint unreadable, or it does not fit the budgeted devices)".to_string());
+            return Err("brain/qwen3omnimoe: no placement (checkpoint unreadable, or it does not fit the budgeted devices)".to_string());
         }
         // `claim_multi` reserves against exactly the devices `estimate_multi`
         // named, so it hands back that same set. Insisting on it here (rather
@@ -207,7 +207,7 @@ impl MultiDeviceResidentModel for OmniResident {
         // reservation and the allocation describe the same bytes.
         let planned: Vec<Device> = plan.devices.iter().map(|&(i, _)| Device::Gpu(i)).collect();
         if devices.len() != planned.len() || !devices.iter().all(|d| planned.contains(d)) {
-            return Err(format!("brain/omni: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
+            return Err(format!("brain/qwen3omnimoe: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
         }
         let provider = OmniProvider::load_on(&self.hf_dir, &plan.devices)?;
         Ok(Box::new(OmniInstance { inner: provider.inner() }))
@@ -289,7 +289,7 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // vision/audio tower weights (the int8 checkpoint's own audio.*/vision.*
     // tensors are quantized; see qwen3omnimoe::int8_thinker_resident's module doc for
     // why this model does not read them). Reuses BRAIN_QWEN3OMNIMOE_HF_DIR -- the
-    // same variable brain/omni itself is configured from -- rather than
+    // same variable brain/qwen3omnimoe itself is configured from -- rather than
     // inventing a second one; unset ⇒ this model still serves text-only.
     let hf_dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty());
     if hf_dir.is_none() {

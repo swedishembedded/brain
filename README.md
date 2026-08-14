@@ -102,22 +102,22 @@ including those.
 | [`glmdsa`](docs/models/glmdsa.md) | Text | GLM-5.2 (MLA + sigmoid noaux_tc MoE + DSA) |
 | [`LiquidAI/LFM2.5-350M`](docs/models/lfm2.md) | Text | bidirectional encoder, fill-mask + embeddings, 8k context |
 | [`qwen3omnimoe`](docs/models/qwen3omnimoe/readme.md) | Multimodal | text/audio/image/video in, text + speech out (Thinker+Talker+Code2Wav) |
-| [`brain/qwenvl`](docs/models/qwen3vl.md) | Multimodal | general image + text -> text |
+| [`brain/qwen3vl`](docs/models/qwen3vl.md) | Multimodal | general image + text -> text |
 | [`brain/fastvlm`](docs/models/fastvlm.md) | Multimodal | dedicated fast image captioning |
 | [`deepseek-ai/DeepSeek-OCR`](docs/models/deepseek2ocr.md) | Multimodal | document image -> text/markdown |
-| [`brain/nemotron`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
-| [`brain/qwen-asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
-| [`brain/tts`](docs/models/qwen3tts.md) | Audio | voice cloning / text-to-speech (Talker + MTP + codec) |
+| [`brain/nemotronasr`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
+| [`brain/qwen3asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
+| [`brain/qwen3tts`](docs/models/qwen3tts.md) | Audio | voice cloning / text-to-speech (Talker + MTP + codec) |
 | [`Ultralytics/YOLOv8`](docs/models/yolov8/readme.md) | Vision | from-scratch anchor-free object detection |
-| [`brain/depth`](docs/models/zipdepth.md) | Vision | monocular depth (pure-conv, realtime webcam) |
+| [`brain/zipdepth`](docs/models/zipdepth.md) | Vision | monocular depth (pure-conv, realtime webcam) |
 | [`brain/sam2`](docs/models/sam2.md) | Vision | promptable segmentation |
 | [`brain/scrfd`](docs/models/scrfd.md) | Vision | face detection (boxes, scores, 5-point landmarks) |
 | [`brain/arcface`](docs/models/arcface.md) | Vision | face identity embedding (512-d, cosine-ready) |
 | [`brain/clip`](docs/models/clip.md) | Vision | text/image embeddings |
 | [`Tongyi-MAI/Z-Image-Turbo`](docs/models/s3dit.md) | Image | text-to-image diffusion (S3-DiT) |
 | [`brain/flux2-klein`](docs/models/flux2.md) | Image | text-to-image + editing (MMDiT) |
-| [`brain/restore`](docs/models/codeformer.md) | Image | blind face restoration |
-| [`brain/upscale`](docs/models/rrdbnet.md) | Image | super-resolution |
+| [`brain/codeformer`](docs/models/codeformer.md) | Image | blind face restoration |
+| [`brain/rrdbnet`](docs/models/rrdbnet.md) | Image | super-resolution |
 | [`brain/vqgan`](docs/models/vqgan.md) | Image | VQ autoencoder (CodeFormer's codebook) |
 | [`worldmirror2`](docs/models/worldmirror2.md) | 3D | multi-view images -> 3D Gaussian Splatting scene |
 | [`splat`](docs/models/splat.md) | 3D | 3D Gaussian Splatting viewer/renderer |
@@ -129,13 +129,11 @@ including those.
 
 `brain caps --json` is the live, weights-free source of truth this table is
 checked against (`tests/e2e/model_table_check.py`); the model id column names
-what `brain caps`/D-Bus/HTTP actually serve today. Where that id still reads
-as a pre-rename crate name (`brain/qwenvl`, `brain/depth`, `brain/tts`, ...)
-rather than its architecture id (`qwen3vl`, `zipdepth`, `qwen3tts`), that is
-this catalog's own internal dispatch key, not something you type -- the CLI
-column you actually run is the architecture id (`brain infer qwen3vl`, `brain
-zipdepth --image ...`, `brain qwen3tts synth ...`); unifying the two is
-tracked follow-up work, not yet done.
+what `brain caps`/D-Bus/HTTP actually serve today, and now matches the
+architecture id you actually type at the CLI (`brain infer qwen3vl`, `brain
+zipdepth --image ...`, `brain qwen3tts synth ...`) for every `brain/<id>`
+row -- the two used to drift (a catalog id frozen at its pre-rename crate
+name while the CLI word moved on) and no longer do.
 
 ## Where to go next
 

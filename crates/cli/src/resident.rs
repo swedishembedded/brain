@@ -228,7 +228,7 @@ impl YoloResident {
         let path = std::env::var("BRAIN_YOLOV8").ok().filter(|p| !p.is_empty())?;
         // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
         // no upstream vendor/repo provenance.
-        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/yolo", "yolo"), None))
+        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"), None))
     }
 
     /// Construct under the card's id. `_tokenizer` is unused -- yolo's class
@@ -360,7 +360,7 @@ impl ZImageResident {
     /// is the fully-qualified ref it was fetched as (e.g.
     /// `Tongyi-MAI/Z-Image-Turbo`) -- registering under the compiled-in
     /// constant instead would silently strand the request that triggered the
-    /// fetch (it named the fetched ref, not `brain/z-image`).
+    /// fetch (it named the fetched ref, not `brain/s3dit`).
     pub fn from_paths(id: impl Into<String>, paths: Paths) -> Result<ZImageResident, String> {
         Ok(ZImageResident { id: id.into(), paths, provider: Arc::new(s3dit::caps::ZImageProvider::load()?) })
     }

@@ -26,7 +26,7 @@ use crate::stream::StreamState;
 use crate::tokenizer::Detokenizer;
 
 /// The model name advertised in the manifest.
-pub const MODEL: &str = "brain/nemotron";
+pub const MODEL: &str = "brain/nemotronasr";
 
 /// The manifest: offline `transcribe` plus frame-synchronous `transcribe_stream`
 /// (schemas shared via [`audio::asr_caps`]).

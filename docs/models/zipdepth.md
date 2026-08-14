@@ -3,8 +3,8 @@
 Monocular relative-depth estimation: point it at a single image or a live
 camera feed and it produces a per-pixel depth map, no stereo rig or second
 camera needed. It's a small, fast, pure-convolutional network, so it's the
-model to reach for when you want depth in realtime — live webcam preview,
-depth-of-field or fog effects on a photo, or even an autostereogram — rather
+model to reach for when you want depth in realtime - live webcam preview,
+depth-of-field or fog effects on a photo, or even an autostereogram - rather
 than a slow, large-scale depth transformer.
 
 ## Support
@@ -20,7 +20,7 @@ than a slow, large-scale depth transformer.
 
 ## Getting the weights
 
-Model id: `brain/depth`. Not auto-fetched — point it at a released ZipDepth
+Model id: `brain/zipdepth`. Not auto-fetched - point it at a released ZipDepth
 checkpoint (`.pth` or an equivalent `.safetensors`) yourself:
 
 - Standalone demo (`brain depth --image` / `--camera`): pass `--weights
@@ -29,7 +29,7 @@ checkpoint (`.pth` or an equivalent `.safetensors`) yourself:
   `BRAIN_ZIPDEPTH_WEIGHTS=<path>`.
 
 The checkpoint variant (base vs. the NPU-blend layout) is auto-detected from
-the file's own tensor names — you never need to pass `--variant` by hand.
+the file's own tensor names - you never need to pass `--variant` by hand.
 
 ## Running it
 
@@ -61,7 +61,7 @@ Served through the capability system (D-Bus / `brain do`), the model takes
 one `image` input and returns a `depth` map:
 
 ```bash
-BRAIN_ZIPDEPTH_WEIGHTS=$ZIPDEPTH_PTH brain do brain/depth depth \
+BRAIN_ZIPDEPTH_WEIGHTS=$ZIPDEPTH_PTH brain do brain/zipdepth depth \
     --in image=photo.ppm --out depth=out/depth.ppm --json
 ```
 
@@ -108,8 +108,8 @@ brain depth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-
 
 ## Hardware and limits
 
-Output is unbounded non-negative **inverse depth**, relative only — there is
+Output is unbounded non-negative **inverse depth**, relative only - there is
 no metric-scale mode. `--camera` is Linux/V4L2 (YUYV) only; an MJPEG-only
 webcam is rejected. Training uses a built-in synthetic generator today, not
-real depth datasets. HTTP is not wired up for this model — use `brain do`,
+real depth datasets. HTTP is not wired up for this model - use `brain do`,
 D-Bus, or the standalone `brain depth` demo verb.

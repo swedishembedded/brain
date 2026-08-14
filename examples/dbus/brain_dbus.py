@@ -52,7 +52,7 @@ def demo_streaming_generation(brain: BrainDBus) -> None:
         print(f"  [{step}/{total}] {message}")
 
     try:
-        out = brain.subscribe("brain/z-image", "text2image", params, on_progress=on_progress)
+        out = brain.subscribe("brain/s3dit", "text2image", params, on_progress=on_progress)
     except BrainError as e:
         print("  error:", e)
         return
@@ -74,7 +74,7 @@ def main() -> int:
         if "brain/imageops" in models:
             demo_image_over_fd(brain)
 
-        if "brain/z-image" in models and os.environ.get("BRAIN_S3DIT_DIT"):
+        if "brain/s3dit" in models and os.environ.get("BRAIN_S3DIT_DIT"):
             demo_streaming_generation(brain)
         else:
             print("z-image streaming demo skipped (export BRAIN_S3DIT_* to enable)")
