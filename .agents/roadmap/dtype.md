@@ -45,7 +45,7 @@ counts are real hits from a live run, not estimates):
 | file | violations |
 |---|---|
 | `docs/performance/overview.md` | 209 |
-| `docs/models/deepseek-ocr.md` | 36 |
+| `docs/models/deepseek2ocr.md` | 36 |
 | `docs/performance/hardware-notes.md` | 3 |
 | `docs/scaling/data-parallel.md` | 2 |
 | `docs/scaling/pipeline.md` | 1 |
@@ -165,7 +165,7 @@ consults isn't fully trusted yet - deleting that sidecar is a later phase
 **Known follow-up risk (not fixed here, out of scope for A4).** A handful of
 other crates' tests mutate `BRAIN_DEVICE` per-test via
 `std::env::set_var("BRAIN_DEVICE", "cpu")` before building a `Gpu`
-(`crates/{sam1,clip,deepseekocr,deepseekv2,qwenvl,fastvlm}`'s test/parity
+(`crates/{sam1,clip,deepseek2ocr,deepseek2,qwen3vl,fastvlm}`'s test/parity
 code), relying on the old per-call-fresh env read. `ambient_compute_set()`'s
 process-lifetime memoization (an intentional, documented design choice -
 matching the precedent this module already set for `BRAIN_GPU_INDEX`) means
@@ -187,7 +187,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   Kept the number-free methodology sections (profiling/roofline probe,
   runtime kernel selector, INT8 inference, `brain flops`). Deleted the
   ~800-line DeepSeek-OCR case-study / "a real example" section entirely
-  (verified first that `.agents/roadmap/deepseek-ocr.md`'s Phase 8 entries
+  (verified first that `.agents/roadmap/deepseek2ocr.md`'s Phase 8 entries
   already carry the same content in full, including the retracted
   `llama.cpp` 1.8x comparison - git history is the only archive for the
   deleted prose, nothing was moved). Line ~55's citation to
@@ -209,11 +209,11 @@ numbers found"). Full program from the approved plan, not just the gate:
   `AGENTS.md` is not in this task's formally scoped file list but item 4
   explicitly named it as a reference to fix, so it got the same two-line
   edit rather than leaving a dangling citation in the pandoc build.
-- **`docs/models/deepseek-ocr.md`** (36 → 0 violations). Stripped every
+- **`docs/models/deepseek2ocr.md`** (36 → 0 violations). Stripped every
   wall-clock/percentage/speedup number from the "Hardware and limits"
   section down to the structural facts (KV-cache exists, split
   vision/decoder backend, what was optimized) plus a pointer to
-  `.agents/roadmap/deepseek-ocr.md` for the real numbers. Kept the ~22 GiB
+  `.agents/roadmap/deepseek2ocr.md` for the real numbers. Kept the ~22 GiB
   resident-memory figure (a sizing requirement, not a throughput claim) under
   `<!-- perf-number: hardware requirement, not a throughput claim -->` -
   verified the gate does not flag it either way (GiB-as-size was never
@@ -221,12 +221,12 @@ numbers found"). Full program from the approved plan, not just the gate:
   explicitly per the task brief. Deleted the retracted "~1.8x faster than
   llama.cpp" claim entirely (confirmed the retraction first by reading
   `overview.md`'s old §"corrected" section and
-  `.agents/roadmap/deepseek-ocr.md`'s Phase 8 conclusion, both of which say
+  `.agents/roadmap/deepseek2ocr.md`'s Phase 8 conclusion, both of which say
   the 33.4s figure could not be reproduced) - did not replace it with the
   "corrected" ~parity number either, since the whole point of this sweep is
   zero measured numbers in `docs/`, not more-honest measured numbers.
-  **Flagging for a human**: this model is served (`brain do`, HTTP, D-Bus)
-  but `docs/models/deepseek-ocr.md` is **not listed in `docs/manifest.txt`**
+  **Flagging for a human**: this model is served (`brain deepseek2ocr`, HTTP, D-Bus)
+  but `docs/models/deepseek2ocr.md` is **not listed in `docs/manifest.txt`**
   - its docs never reach the compiled PDF. Not fixed here per the task's
   explicit instruction to flag rather than fix manifest structure.
 - **`docs/models/asr.md`** (1 → 0 violations, not one of the 12 numbered
@@ -285,10 +285,10 @@ numbers found"). Full program from the approved plan, not just the gate:
   fixed here (out of this task's scope). Rewrote `--device npu` as
   constraining/forcing the schedulable device set, not the sole trigger for
   reaching the NPU.
-- **`docs/models/glm/npu.md`** - corrected "`infer --device npu` does not
+- **`docs/models/glmdsa/npu.md`** - corrected "`infer --device npu` does not
   yet exist": `crates/cli/src/glm_cli.rs` dispatches it to
   `npu::glm_decode::generate` today (fp32 greedy decode, real). Also found
-  `brain glm export --int8` is implemented and tested
+  `brain glmdsa export --int8` is implemented and tested
   (`crates/npu/tests/glm_onnx.rs::glm_onnx_int8_runs`) but `infer --device
   npu` hardcodes `int8: false` and exposes no `--int8` flag - so INT8 is
   reachable via `export` today, not via `infer` end to end. Doc now states
@@ -608,7 +608,7 @@ unsupported_capability`, `cache_key_distinguishes_every_dtype_tier`).
 `cargo check` clean across every crate that reaches `backend_api::select` or
 `backend_api::DType` transitively: `brain-gpu-core`, `brain-model`,
 `brain-checkpoint`, `brain-qwen3`, `brain-apiserve`, `brain-modelstore`,
-`brain-omni`, `brain-modelref`, and `brain-cli` (which pulls in essentially
+`brain-qwen3omnimoe`, `brain-modelref`, and `brain-cli` (which pulls in essentially
 the whole workspace transitively - confirmed clean rather than doing a full
 `cargo check --workspace`, since disk was already at 690G/935G from concurrent
 activity).
@@ -752,9 +752,9 @@ backend (`batched_serving_matches_reference`, `chunked_prefill_matches_whole`,
 `warm_prefill_is_identical_to_cold`, `prefill_matches_step_by_step`, …),
 across both the decode and the newly-reachable prefill regime, with no output
 difference. `cargo check` also run clean for every other `pick_gemm`/
-`gemm_variant` caller in the workspace in one batch: `brain-glm`, `brain-clip`,
-`brain-deepseekv2`, `brain-unet`, `brain-sam1`, `brain-t5`, `brain-restore`,
-`brain-lfm`, `brain-gpt`, `brain-moe`, `brain-flux2`. `cargo test -p
+`gemm_variant` caller in the workspace in one batch: `brain-glmdsa`, `brain-clip`,
+`brain-deepseek2`, `brain-sdxlunet`, `brain-sam1`, `brain-t5encoder`, `brain-codeformer`,
+`brain-lfm2`, `brain-gpt2`, `brain-toymoe`, `brain-flux2`. `cargo test -p
 brain-flux2 --lib`: 6/6 passed (its `gemm_variant`-exercising checks live in
 `tests/batch_parity.rs`, an integration test needing real checkpoint weights
 not available in this sandbox - not run, per this phase's own "cheap enough"
@@ -943,7 +943,7 @@ test's checkpoint out from under it - fixed with a per-call
 `cargo test -p brain-cli --bin brain resident_forecast`: 2/2 passed (the
 file's own pre-existing schema/codec unit tests, unaffected by the migration).
 
-**Deferred - ASR (nemotron + qwen-asr), explicitly not done this phase.**
+**Deferred - ASR (nemotronasr + qwen3asr), explicitly not done this phase.**
 `crates/cli/src/resident_asr.rs`'s `NemotronNpuInstance`/`QwenAsrNpuInstance`
 have the SAME drift (`onnx::GraphBuilder` + `NpuGraph::compile_bytes`/
 `compile_path` called directly, not through `NpuModel`) and the mechanical
@@ -951,7 +951,7 @@ migration is straightforward - sketched and judged low-risk during this
 phase (two new structs, `NemotronEncoderNpuModel`/`QwenAsrHeadNpuModel`,
 following the exact same pattern as `Chronos2NpuModel`/`FincastNpuModel`
 above). Deliberately NOT landed this phase for one reason: unlike
-chronos2/fincast, neither `nemotron`'s nor `qwen_asr`'s config carries a
+chronos2/fincast, neither `nemotronasr`'s nor `qwen3asr`'s config carries a
 cheap `::tiny()` synthetic-checkpoint helper the way `Chronos2Config`/
 `FincastConfig` do, so there is no equivalent low-cost way to write a real
 RED-then-GREEN parity test for this migration in-sandbox (both models load
@@ -962,7 +962,7 @@ mandate more than deferring it does; per this task's own explicit guidance
 ("a smaller, correct C2 commit is better than a larger, risky one"), it is
 left as a clean, scoped follow-up: build the same two `NpuModel` structs in
 `resident_asr.rs`, and either (a) add minimal `::tiny()`-style config
-constructors to `nemotron`/`qwen_asr` first (the more durable fix, also
+constructors to `nemotronasr`/`qwen3asr` first (the more durable fix, also
 useful beyond this test), or (b) gate the parity test on real
 `BRAIN_NEMOTRONASR`/`BRAIN_QWEN3ASR` checkpoints the way
 `chronos2_export.rs::export_real_checkpoint_to_onnx` already does for its own
@@ -992,10 +992,10 @@ living alongside the one A4 had just made canonical.
 
 **Call sites migrated** (all `crate::npu_requested()` -> `crate::npu_explicit()`):
 
-- `crates/cli/src/yolo_cli.rs:355` (`brain yolo detect`)
-- `crates/cli/src/glm_cli.rs:218` (`brain glm infer`)
-- `crates/cli/src/wm_cli.rs:270` (`brain wm play`/`bench`, `--model diamond`)
-- `crates/cli/src/qwen_cli.rs:47` (`want_npu()`, used by `brain qwen infer`)
+- `crates/cli/src/yolo_cli.rs:355` (`brain yolov8 detect`)
+- `crates/cli/src/glm_cli.rs:218` (`brain glmdsa infer`)
+- `crates/cli/src/wm_cli.rs:270` (`brain diamond play`/`bench`, `--model diamond`)
+- `crates/cli/src/qwen_cli.rs:47` (`want_npu()`, used by `brain qwen3 infer`)
 - `crates/cli/src/tts_cli.rs:310,349,388` (`clone`/`synth`/`design`) - not
   named in this phase's original file list, but unavoidably in scope: it had
   three live call sites on the same global, so deleting `NPU_REQUESTED`
@@ -1118,7 +1118,7 @@ historical note in `check-device-env-single-source.sh`'s own comment
 explaining why the exception it used to carve out is gone - no live code
 reference remains.
 
-**Out of scope, untouched** (per the plan): TTS's three `BRAIN_TTS_*`
+**Out of scope, untouched** (per the plan): TTS's three `BRAIN_QWEN3TTS_*`
 placement env vars and its four stateful sessions (`KvSession`,
 `PrefillSession`, `BackStreamSession`, `FusedMtpSession` - see C2's own "out
 of scope" note above) are unrelated to this sidecar-deletion phase and were
@@ -1339,7 +1339,7 @@ directly (`npu_cli.rs:336,538,704,708`). `NpuSession` is live via
 `crates/npu/src/decode.rs` (YOLO NPU detect), `crates/cli/src/depth_cli.rs`
 (ZipDepth NPU), and `npu_cli.rs`'s own `run`/`bench`/`check`. `DecoderSession`
 is live via `crates/npu/src/{qwen_decode,glm_decode}.rs`. `EmbedSession`/
-`CodecSession` are live via `crates/tts/src/{npu_gen,serve}.rs`. `LfmSession`
+`CodecSession` are live via `crates/qwen3tts/src/{npu_gen,serve}.rs`. `LfmSession`
 is live via `npu_cli.rs`'s `lfm` subcommand. So this phase collapsed all 9
 into thin wrappers rather than deleting any of them - "collapse", not
 "prune", is the accurate description of what actually happened.
@@ -1349,7 +1349,7 @@ one of the 9 keeps its exact public type name, constructor signatures
 (`load`/`load_bytes`/`load_path`), and typed accessor/run methods (`seq_len`,
 `vocab`, `d_in`/`d_out`, `n_out`/`head_out`, `s1_vocab`/`s2_vocab`, `nq`/
 `code_len`, `run`/`run_ids`/`run_embeds`/`run_codes`) - callers across
-`crates/cli`, `crates/npu`, and `crates/tts` needed zero changes. Internally,
+`crates/cli`, `crates/npu`, and `crates/qwen3tts` needed zero changes. Internally,
 each struct now holds one `graph: NpuGraph` field (plus its own typed shape
 metadata extracted from the compiled model at construction time, exactly as
 before) instead of raw `_core: Core` + `request: openvino::InferRequest`.
@@ -1425,9 +1425,9 @@ or had its assertions loosened to reach green.
 from C2's own baseline, confirming the `NpuModel`/`NpuGraph` residency seam
 (a different code path from the 9 collapsed sessions, but sharing the same
 `NpuGraph::from_compiled` tail now) is undisturbed.
-`cargo check -p brain-cli -p brain-tts -p brain-omni -p brain-wm-diamond`:
+`cargo check -p brain-cli -p brain-qwen3tts -p brain-qwen3omnimoe -p brain-diamond`:
 clean - the four workspace crates that depend on `brain-npu`
-(`crates/{cli,omni,tts,wm-diamond}/Cargo.toml`), confirming every caller of
+(`crates/{cli,qwen3omnimoe,qwen3tts,diamond}/Cargo.toml`), confirming every caller of
 every touched session type still compiles unchanged.
 `git diff -- crates/npu/src/openvino/real.rs`: grepped for
 `KvSession|PrefillSession|FusedMtpSession|BackStreamSession` - zero matches,
@@ -1443,7 +1443,7 @@ real seam and proved it for Chronos-2/FinCast, C3 deleted the
 deferred, unchanged by this phase, per the plan:**
 - **ASR migration** (`resident_asr.rs`'s `NemotronNpuInstance`/
   `QwenAsrNpuInstance` onto the `NpuModel` trait) - flagged by C2 as blocked
-  on `nemotron`/`qwen_asr` lacking a cheap `::tiny()` synthetic-checkpoint
+  on `nemotronasr`/`qwen3asr` lacking a cheap `::tiny()` synthetic-checkpoint
   constructor for an in-sandbox RED-then-GREEN parity test; still true, not
   touched here (this phase's scope was `real.rs`'s bespoke sessions, not the
   residency-adapter layer C2 already handled for chronos2/fincast).
@@ -2348,7 +2348,7 @@ resolves its `(RegisterTiled, F32)` kernel by the fixed name `"matmul_reg2"`
 lessons.md` #17 ("`matmul_reg3` supersedes `matmul_reg2` - everywhere":
 bit-identical output, 1.08x-1.30x faster across twelve measured shapes,
 "there is no shape where preferring `reg2` is correct" - the SAME lesson
-`crates/unet`/`crates/vae` already learned and fixed). Registering
+`crates/sdxlunet`/`crates/vae` already learned and fixed). Registering
 `"matmul_reg2"` against the REAL, slower `kernels::MATMUL_REG2` source in
 `pipelines()` would have silently undone that measured speed-up for every
 `RegisterTiled` fp32 dispatch `Ops::matmul` makes, on any shape a `Weight::
@@ -2794,8 +2794,8 @@ names (`embed`, `embed#emb=bf16`, `embed#emb=f16`, `moe_linear_gated`,
 `dtype_variant`'s real output by the new `b8_kname_literals_match_dtype_variant_naming`
 test, same pattern as B4/B5's own `bf16_and_f16_kname_literals_match_dtype_variant_naming`.
 
-**No model crate's call sites were migrated** - `qwen3`/`qwen35moe`/`deepseekv2`/
-`omni`'s own hand-dispatched `EMBED`/`moe_linear_gated` kernel indices and
+**No model crate's call sites were migrated** - `qwen3`/`qwen35moe`/`deepseek2`/
+`qwen3omnimoe`'s own hand-dispatched `EMBED`/`moe_linear_gated` kernel indices and
 `model::moe`'s shared `MoeIds`-based dispatch are all untouched, matching B3's
 own "build the façade, prove it, migrate later" precedent (B7 is what
 eventually migrated `qwen3`'s matmul call sites; no analogous migration phase
@@ -3271,7 +3271,7 @@ on `matmul_dx.wgsl` (this phase) - gradient-checked, and **NOT wired into any
 model crate's training loop**. `matmul_gemv`/`matmul_reg3`'s own dx siblings
 (`matmul_dx_reg.wgsl` exists and was read, not templatized), F16/I8/Q4
 backward-through-the-weight, and any model-crate integration (`crates/qwen3`,
-`crates/gpt`, LoRA, AdamW-side awareness, a training CLI flag) are explicit,
+`crates/gpt2`, LoRA, AdamW-side awareness, a training CLI flag) are explicit,
 named follow-ups - matching the "build the façade, prove it, migrate later"
 precedent B3/B4/B5/B8/B9 all set. `crates/optim`/`crates/paramstore` were
 **not touched** - this phase's own harness (and its convergence check, see
@@ -3370,7 +3370,7 @@ phase): nothing constructs a `Weight::BF16` unless a caller explicitly asks
 `Weight::upload` for `Dtype::BF16`, and even then `DType::promote` can still
 demote to `F32` if the device lacks `bf16_storage` (B1's capability gate,
 unchanged). No model crate's training loop calls `Ops::matmul_dx`/`Ops::
-matmul_dw` at all - `crates/qwen3`, `crates/gpt`, and every other model crate
+matmul_dw` at all - `crates/qwen3`, `crates/gpt2`, and every other model crate
 are untouched by this phase, so their existing all-f32 training behaviour has
 zero code-path changes.
 
@@ -3459,9 +3459,9 @@ deliberate limit of this phase's scope, not an oversight.
 
 ### Default-off regression proof
 
-- **`crates/gpt` is the clean, direct proof.** `gpt::model.rs` dispatches
+- **`crates/gpt2` is the clean, direct proof.** `gpt::model.rs` dispatches
   `matmul_dx`/`matmul_dw` via its own pre-existing hand-numbered kernel table
-  (NOT through `Ops` - `crates/gpt` was never migrated, B7 only touched
+  (NOT through `Ops` - `crates/gpt2` was never migrated, B7 only touched
   `crates/qwen3`), so it is structurally unaffected by `Ops::REQUIRED_
   KERNELS` growing. `gpt_analytic_grads_match_finite_differences` (tiny
   `block_size=12`, well inside the naive/non-register-tiled crossover, so it
@@ -3503,7 +3503,7 @@ deliberate limit of this phase's scope, not an oversight.
   The full, unscoped `cargo test -p brain-gradcheck --lib analytic_grads_
   match_finite_differences` (every model's own training gradcheck) was
   STARTED, ran past 400s wall-clock without finishing (heavy - qwen35/
-  qwen35moe/facenet/lfm each take real time), and was killed rather than let
+  qwen35moe/facenet/lfm2 each take real time), and was killed rather than let
   run unbounded, per this phase's own operating instructions; the pre-existing
   qwen3 failures above were confirmed from its PARTIAL output plus a separate,
   faster, targeted `--lib "tests::qwen"` run, not the full unscoped run.
@@ -3544,7 +3544,7 @@ deliberate limit of this phase's scope, not an oversight.
 - F16/I8/Q4 backward-through-the-weight (`Ops::matmul_dx` panics loudly for
   all three today, by design).
 - Wiring the bf16 training tier into any model crate's actual training loop
-  (`crates/qwen3`, `crates/gpt`, ...) - a selection mechanism (env var? CLI
+  (`crates/qwen3`, `crates/gpt2`, ...) - a selection mechanism (env var? CLI
   flag? a `Precision` enum?), LoRA interaction, and re-running that crate's
   own full (heavy) test suite are all deliberately deferred, matching every
   prior B-phase's own "façade first, migrate later" precedent.

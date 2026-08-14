@@ -1,4 +1,4 @@
-# lfm — roadmap
+# lfm2 - roadmap
 
 LFM2.5-Encoder: a bidirectional embedding encoder ported to brain's Rust+WGSL
 engine, with chunked long-context inference, training, an NPU export path,
@@ -19,16 +19,16 @@ against the NPU export via OpenVINO.
 - [ ] `brain perf` integration: a resident-backed concurrency benchmarking
       target, an NPU perf target, and a full model x device x concurrency
       table
-- [ ] Ragged/mixed-length batched inference — only exact-length builds are
+- [ ] Ragged/mixed-length batched inference - only exact-length builds are
       supported today
 - [ ] Registering the bidirectional/MLM encoder in the (currently
       causal-only) generic benchmarking harness
 - [ ] Fixing the buffer-offset alignment violation in the GEMM attention
-      fallback path at its source — it's currently just avoided because the
+      fallback path at its source - it's currently just avoided because the
       faster flash-attention kernel is selected by default; a device that
       falls back to the GEMM path can still hit it
 
 Bidirectional attention has no causal mask to hide padded positions, so
 mixing sequence lengths in one batch requires either exact-length builds or
-explicit zeroed pad states plus an additive mask — naive padding silently
+explicit zeroed pad states plus an additive mask - naive padding silently
 corrupts attention scores rather than failing loudly.

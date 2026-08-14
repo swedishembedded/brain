@@ -1,4 +1,4 @@
-# unet — roadmap
+# sdxlunet - roadmap
 
 Port of the SDXL UNet2DConditionModel diffusion backbone, plus the shared
 discrete-step diffusion schedulers (DDIM, Euler, Euler-ancestral,

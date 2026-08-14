@@ -1,4 +1,4 @@
-# zimage — roadmap
+# s3dit - roadmap
 
 Z-Image (S³-DiT) text-to-image diffusion transformer, with fp32/int8/sharded
 device engines, a VAE, a flow-matching scheduler, backward + LoRA fine-tuning,
@@ -10,7 +10,7 @@ loaded whole. Forward and backward parity against the reference are verified.
 - [ ] A true batched `run_batch` for the serving contract
 - [ ] A runnable examples client over D-Bus
 - [ ] Native lower-precision (bf16) device weight binding for the windowed
-      fp32 path — fp32 inference currently streams full fp32 weight tiles
+      fp32 path - fp32 inference currently streams full fp32 weight tiles
       per block, which is disk-bound rather than compute-bound
 - [ ] Device-resident block chaining, so the reference path doesn't
       round-trip through host memory between blocks

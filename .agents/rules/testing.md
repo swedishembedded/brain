@@ -1,4 +1,4 @@
-# brain — testing plan
+# brain - testing plan
 
 The goal is to evaluate every architecture **reliably against the same input
 data**, and to keep the from-scratch WGSL backprop provably correct without a
@@ -8,14 +8,14 @@ PyTorch oracle. Coverage is layered:
 
 Tests never depend on `rand`. Deterministic filler comes from
 **`data::rng::Lcg`** (`Lcg::new(seed)` → `signed()` `[-1,1)`, `unit()` `[0,1)`,
-`scaled(a)` `[-a,a)`, plus the `vec*` bulk forms) — and from nowhere else.
+`scaled(a)` `[-a,a)`, plus the `vec*` bulk forms) - and from nowhere else.
 `data::rng::Rng` (SplitMix64) is a *different* generator and belongs to the
 on-disk dataset generators; its stream must not move.
 
 The reason `Lcg` exists as a shared type rather than a per-file helper: a
 copied helper elsewhere computed
 `((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0`, and `u64 >> 33` keeps only
-31 bits — so it returned `[-1, 0)` and no test that used it ever fed a
+31 bits - so it returned `[-1, 0)` and no test that used it ever fed a
 positive value to an activation kernel. Several files had independently
 rediscovered and locally patched that; many more had not. `Lcg::signed`
 shifts by 32 and straddles zero.
@@ -40,7 +40,7 @@ order exactly and must be kept in step with `Lcg`.
 Run with `make test` (or `cargo test`); set `MOE_SKIP_GPU_TESTS=1` on a machine
 with no GPU to skip the device-dependent tests.
 
-### `testdata/` — fixture inputs and goldens, not a model store
+### `testdata/` - fixture inputs and goldens, not a model store
 
 Parity/import tests across many crates (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
 `qwen-asr`, `sam2`, `zimage`, `vae`, `clip`, `facenet`, `tts`, `codec`, `speaker`,
@@ -50,46 +50,46 @@ dev-dependency, rather than a byte-identical function copy-pasted into every one
 those crates). It resolves to `$BRAIN_TESTDATA` if set, else the gitignored
 `<repo>/testdata/`.
 
-**`testdata/` holds test inputs and goldens ONLY** — dumped-golden tensors a test
+**`testdata/` holds test inputs and goldens ONLY** - dumped-golden tensors a test
 compares against and small input media (audio clips, images). It must never hold a
 `.git` directory, runnable code (upstream source, notebooks, docs), or a model
 checkpoint: `scripts/data/fetch-testdata.sh`, the one thing that populates it,
 unconditionally strips `.git` and `.cache/huggingface` from everything it mirrors,
 plus an extra exclusion list for trees whose mirror is a whole upstream checkout
 (a `.py`/`.ipynb`/`.md`/`.pdf`/`.mp4`/`.pt` exclusion for the vision-language tree
-— none of its consuming crates' tests read any of those).
+- none of its consuming crates' tests read any of those).
 
 **Real upstream checkpoints (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
-`qwen-asr`'s parity/import tests) live in the model store, not `testdata/`** — the
+`qwen-asr`'s parity/import tests) live in the model store, not `testdata/`** - the
 same `<models-dir>/<vendor>/<repo>/` tree `brain serve`'s auto-fetch (and
 `crates/modelstore::execute`) writes and scans (see `docs/models/naming.md`).
 Tests resolve one with
 `brain_testutil::model_dir("<vendor>/<repo>")`, which wraps
 `brain_modelstore::default_root()` (`$BRAIN_MODELS_DIR`, else
-`$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models`) — `None` when
+`$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models`) - `None` when
 unresolvable, which every call site turns into an empty path via `unwrap_or_default()`
 so the existing `Path::new(&format!("{ckpt}/…")).exists()` skip check stays correct
 either way.
 
-Populate both with `make fetch/testdata` (hard-links from a local mirror —
+Populate both with `make fetch/testdata` (hard-links from a local mirror -
 `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path may appear in
-this repo, per `AGENTS.md` — into `testdata/` for goldens/media, `$BRAIN_MODELS_DIR`
+this repo, per `AGENTS.md` - into `testdata/` for goldens/media, `$BRAIN_MODELS_DIR`
 or its default for checkpoints). A test whose fixture is still absent **skips
-itself** (`eprintln!` + early return, never `panic!`) — verify a change here by
+itself** (`eprintln!` + early return, never `panic!`) - verify a change here by
 removing `testdata/`, re-running `make fetch/testdata`, and re-running the
 crates in the table above; a fixture that stopped resolving shows up as a new
 skip, not a failure, which is itself the bug to look for.
 
-## 2. Backprop correctness gate — numerical gradient check
+## 2. Backprop correctness gate - numerical gradient check
 
 `crates/gradcheck` replaces the dropped PyTorch oracle. For each parameter
 tensor it compares the analytic WGSL directional derivative `⟨∇L, v⟩` to a
 central finite difference `(L(w+εv) − L(w−εv))/2ε` (ε=5e-3), over several random
 directions, with an `allclose`-style `|a−n| ≤ atol + rtol·max(|a|,|n|)` criterion
-(atol=4e-3, rtol=8e-2 — fp32 on a software GPU). This validates the GPT's GELU
+(atol=4e-3, rtol=8e-2 - fp32 on a software GPU). This validates the GPT's GELU
 MLP, causal attention, LayerNorm, embeddings, and untied head across all 29
 tensors. Run with `make gradcheck`. (Extending the `CheckModel` impl to MoE/PID
-needs a `write_weight` on those models — a small follow-up.)
+needs a `write_weight` on those models - a small follow-up.)
 
 ## 3. Federated round-trip & integrity
 
@@ -103,10 +103,10 @@ needs a `write_weight` on those models — a small follow-up.)
 ## 4. Same-input model comparison (the "which is best" answer)
 
 `crates/eval` provides one metric set applied identically across models:
-- **Validation perplexity** = `exp(mean next-token CE)` on the val split — the
+- **Validation perplexity** = `exp(mean next-token CE)` on the val split - the
   architecture-agnostic number.
 - **Task exact-match** for `LHS=RHS` datasets (calculator/reverser/wordcalc):
-  greedily decode the RHS on a **held-out tail** and check string equality — the
+  greedily decode the RHS on a **held-out tail** and check string equality - the
   honest "did it learn the rule" metric (separate from perplexity, per README §3).
 
 `make bench` trains + evaluates the GPT baseline on the shared char datasets with
@@ -128,22 +128,22 @@ tooling or weights are absent.
 
 | Suite | `make` target | What it proves |
 |---|---|---|
-| `tests/e2e/api_conformance.bats` | `test/e2e/api-conformance` | The OpenAI/Anthropic/OpenRouter HTTP dialects, over a real socket, against the deterministic `BRAIN_MOCK=1` model — schema-validated against the vendored OpenAPI specs, plus the auth/DoS/error-hygiene security matrix. |
-| `tests/e2e/shutdown.bats` | `test/e2e/shutdown` | `brain serve` actually exits on SIGINT/SIGTERM, for every surface combination (`--dbus` alone, `--dbus --openai` together, `--openai` alone) — each test starts and kills its own server. |
-| `tests/e2e/examples.bats` | `test/e2e/examples` | Every example under `examples/` actually runs (against the mock, where the model it needs has a mock equivalent) or skips with a clear, honest reason — not silently. A completeness check fails the suite if a tracked example is missing from `tests/e2e/examples/manifest.tsv`, so a newly-added, never-wired example cannot rot the way examples used to before this suite existed. |
-| `tests/e2e/ready.bats` | `test/e2e/ready` | `brain serve --ready-file PATH` appears only after **every** requested surface (HTTP dialects + D-Bus) has bound its listener, and never at all when one fails — and therefore strictly after `--api-keys-out` is written, so a script can wait on one file and then read the keys with no retry. Covers a full bind, a failed bind, a partial bind, and D-Bus alone / D-Bus+HTTP together. |
+| `tests/e2e/api_conformance.bats` | `test/e2e/api-conformance` | The OpenAI/Anthropic/OpenRouter HTTP dialects, over a real socket, against the deterministic `BRAIN_MOCK=1` model - schema-validated against the vendored OpenAPI specs, plus the auth/DoS/error-hygiene security matrix. |
+| `tests/e2e/shutdown.bats` | `test/e2e/shutdown` | `brain serve` actually exits on SIGINT/SIGTERM, for every surface combination (`--dbus` alone, `--dbus --openai` together, `--openai` alone) - each test starts and kills its own server. |
+| `tests/e2e/examples.bats` | `test/e2e/examples` | Every example under `examples/` actually runs (against the mock, where the model it needs has a mock equivalent) or skips with a clear, honest reason - not silently. A completeness check fails the suite if a tracked example is missing from `tests/e2e/examples/manifest.tsv`, so a newly-added, never-wired example cannot rot the way examples used to before this suite existed. |
+| `tests/e2e/ready.bats` | `test/e2e/ready` | `brain serve --ready-file PATH` appears only after **every** requested surface (HTTP dialects + D-Bus) has bound its listener, and never at all when one fails - and therefore strictly after `--api-keys-out` is written, so a script can wait on one file and then read the keys with no retry. Covers a full bind, a failed bind, a partial bind, and D-Bus alone / D-Bus+HTTP together. |
 | `tests/e2e/claude_code.bats` | `test/e2e/claude-code` | The real `claude` CLI working end-to-end against `brain serve --anthropic` (the deterministic `BRAIN_MOCK` model, so it needs no weights and never hangs on a cold fetch). Skips cleanly unless `claude`/`jq`/`timeout` and a brain binary are present. |
-| `tests/e2e/scheduler.bats` | `test/e2e/scheduler` | Heavy, opt-in (`BRAIN_E2E=1`): residency scheduler batching/eviction, and the generate→detect→annotate pipeline, against **real** z-image + yolo weights and a GPU. Not part of the fast lane — `tests/e2e/examples.bats` runs the same generate/detect example against the mock instead. |
+| `tests/e2e/scheduler.bats` | `test/e2e/scheduler` | Heavy, opt-in (`BRAIN_E2E=1`): residency scheduler batching/eviction, and the generate→detect→annotate pipeline, against **real** z-image + yolo weights and a GPU. Not part of the fast lane - `tests/e2e/examples.bats` runs the same generate/detect example against the mock instead. |
 
 `make test/e2e` runs the four fast suites (api-conformance, shutdown, examples,
 ready) in one shot; `make test/full` folds that into the release gate alongside the
-cargo lanes. `claude-code` and `scheduler` stay separate targets — they need real
+cargo lanes. `claude-code` and `scheduler` stay separate targets - they need real
 weights/a real `claude` install/a GPU, which the fast lane deliberately does not
 require.
 
 **Server lifecycle discipline**, followed by every suite above that starts a
 process: record `$!` into a file immediately, poll readiness (never a fixed
-sleep), and `teardown_file` kills **only** that recorded PID — never `pkill`. The
+sleep), and `teardown_file` kills **only** that recorded PID - never `pkill`. The
 D-Bus suites additionally spin up a **private** `dbus-daemon` per run
 (`dbus-daemon --session --fork --print-address --print-pid=3`) so nothing here
 ever touches the real session/system bus.
@@ -151,22 +151,22 @@ ever touches the real session/system bus.
 ## Test-only environment variables
 
 These gate test fixtures, weight-required test paths, or benchmark knobs. None
-of them are read by production serving code — they exist only so a test can
+of them are read by production serving code - they exist only so a test can
 skip cleanly when its prerequisite isn't present, or so a benchmark can be
 tuned from the environment instead of a recompile.
 
 **Device / GPU selection for tests:**
-- `BRAIN_DEV_GPU` — selects/forces a GPU device for a test run.
-- `BRAIN_NPU_DEVICE` — selects the NPU device for npu-crate tests.
-- `MOE_SKIP_GPU_TESTS` — skips device-dependent tests on a machine with no GPU.
-- `SHARD_TEST_GPUS` — how many GPUs a pipeline/tensor-parallel sharding test should assume.
+- `BRAIN_DEV_GPU` - selects/forces a GPU device for a test run.
+- `BRAIN_NPU_DEVICE` - selects the NPU device for npu-crate tests.
+- `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU.
+- `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
 
 **Benchmark knobs:**
-- `BRAIN_BENCH_REPS` — repetition count for a benchmark harness.
+- `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.
 
 **Golden/fixture file paths:**
-- `BRAIN_GGUF_TESTFILE` — path to a GGUF fixture for GGUF-reader tests.
-- `BRAIN_INT8_TEST` — enables/points at an int8-specific test fixture.
+- `BRAIN_GGUF_TESTFILE` - path to a GGUF fixture for GGUF-reader tests.
+- `BRAIN_INT8_TEST` - enables/points at an int8-specific test fixture.
 
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
@@ -177,7 +177,7 @@ that needs a real checkpoint; unset means the test skips):
 `BRAIN_LFM25_230M`, `BRAIN_LFM25_350M`, `BRAIN_QWEN3_4B`,
 `BRAIN_QWEN35_SMOKE_GPUS`, `BRAIN_QWEN35_SMOKE_LAYERS`, `BRAIN_QWEN35_SMOKE_LR`,
 `BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
-`BRAIN_MOONDREAM_CKPT`, `BRAIN_QWENVL_CKPT`, `BRAIN_FASTVLM_CKPT`,
+`BRAIN_MOONDREAM3_CKPT`, `BRAIN_QWEN3VL_CKPT`, `BRAIN_FASTVLM_CKPT`,
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`.
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make fetch/testdata`;
@@ -187,24 +187,24 @@ the one place a machine-specific path may appear in this repo):
 `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
 
 **Test/bench infrastructure:**
-- `BRAIN_LOG_WEIGHTS` — verbose weight-loading logging in a test/bench run.
-- `BRAIN_BIN` — path to the `brain` binary for e2e/bats suites.
-- `BRAIN_TTS_SOCK` — socket path a TTS e2e test connects to.
-- `BRAIN_TESTDATA` — overrides the `testdata/` resolution root (see §1).
-- `BRAIN_MODELS_DIR` — overrides the model-store root tests resolve checkpoints under.
-- `BRAIN_E2E` — enables the heavy, opt-in e2e suites (real weights + GPU).
+- `BRAIN_LOG_WEIGHTS` - verbose weight-loading logging in a test/bench run.
+- `BRAIN_BIN` - path to the `brain` binary for e2e/bats suites.
+- `BRAIN_TTS_SOCK` - socket path a TTS e2e test connects to.
+- `BRAIN_TESTDATA` - overrides the `testdata/` resolution root (see §1).
+- `BRAIN_MODELS_DIR` - overrides the model-store root tests resolve checkpoints under.
+- `BRAIN_E2E` - enables the heavy, opt-in e2e suites (real weights + GPU).
 
 **Production-namespaced but test-only in practice** (these look like serving
 config but in this codebase only ever gate whole test suites):
 `BRAIN_QWEN_TE_SHARD`, `BRAIN_VAE_DEVICE`, `BRAIN_VQGAN_DEVICE`,
 `BRAIN_CODEFORMER_DEVICE`, `BRAIN_QWEN35_GGUF`, `BRAIN_SDXL`,
 `BRAIN_SDXL_VAE_DEVICE` (the SDXL UNet has no CLI or serving surface at all
-today — these two exist only for the dev-only `sdxl` binary).
+today - these two exist only for the dev-only `sdxl` binary).
 
 ## Internal engine-tuning environment variables
 
 Real production reads, but kernel-selection A/B switches and debug/benchmark
-knobs for contributors doing kernel or performance work — not part of the
+knobs for contributors doing kernel or performance work - not part of the
 user-facing configuration surface in `docs/using/configuration.md`. A user
 should never need to set these; a contributor profiling or bisecting a kernel
 regression will.

@@ -1,4 +1,4 @@
-# mirror — roadmap
+# worldmirror2 - roadmap
 
 Port of HY-WorldMirror-2.0, a DINOv2-based multi-frame 3D scene
 reconstruction model that predicts Gaussian splats, depth/normal maps, and
@@ -16,5 +16,5 @@ against the reference is verified.
 Training backward for cross-attention currently accumulates gradients only
 within a chunk rather than across the full sequence, so training requires
 the chunk size to cover the full attention span. The NPU backend executes
-only in fp16, and precision drift grows with network depth — acceptable for
+only in fp16, and precision drift grows with network depth - acceptable for
 preview-quality geometry, less so for higher-fidelity uses.

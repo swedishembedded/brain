@@ -1,4 +1,4 @@
-# yolo — roadmap
+# yolov8 - roadmap
 
 From-scratch anchor-free YOLO detector (CSP backbone, PAN-FPN neck, decoupled
 DFL head), byte-compatible with the canonical yolov8n checkpoint format, with
@@ -7,7 +7,7 @@ implemented.
 
 ## Not yet done
 
-- [ ] Per-parameter layer freezing for fine-tuning — `--freeze-backbone` is
+- [ ] Per-parameter layer freezing for fine-tuning - `--freeze-backbone` is
       currently accepted but is a no-op; fine-tuning always trains the whole
       network
 - [ ] A representative, full-resolution calibration set for NPU INT8

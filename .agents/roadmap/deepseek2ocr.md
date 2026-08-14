@@ -1,4 +1,4 @@
-# deepseek-ocr - roadmap
+# deepseek2ocr - roadmap
 
 DeepSeek-OCR: a document-image-in, text/markdown-out model. DeepEncoder (SAM
 ViT-B windowed+global tower with decomposed relative position bias -> a 16x
@@ -75,7 +75,7 @@ file, 476 tensors):
   halves by slicing them back out (`findings.vision_concat`), and llama.cpp's
   own consumer of this GGUF does `ggml_concat(ctx0, clip_out, sam_out, 0)`
   (`tools/mtmd/models/deepseekocr.cpp`), concatenating along the row width with
-  CLIP first. `crates/deepseekocr/tests/tiny_ref.rs` asserts each half against
+  CLIP first. `crates/deepseek2ocr/tests/tiny_ref.rs` asserts each half against
   its own source tap at widths 14 and 11; mutation-verified (swapping the two
   drops `vision_concat` to cosine 0.064 and trips the explicit half assertion).
 - **CLIP `pre_ln`: CLOSED, and it was a real fixture defect.** The tower applies
@@ -92,7 +92,7 @@ file, 476 tensors):
     one tile-row **interleaved by token row** (tile 0 row y, tile 1 row y, ...,
     then one newline) and **NO separator** anywhere in the local branch.
     "The same as the global view, per tile" was the wrong reading.
-  Implemented and unit-tested in `crates/deepseekocr/src/rows.rs`. The one thing
+  Implemented and unit-tested in `crates/deepseek2ocr/src/rows.rs`. The one thing
   still unverified is the ORDER of the two blocks (global-then-local as built),
   because the preprocessor that orders the views is outside the graph builder;
   it is flagged in that module's header and changes no row count, so only a real
@@ -126,7 +126,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   corresponding `ffn_moe_probs` entries **exactly** (max_abs 0). That is
   `norm_topk_prob = false` AND `routed_scaling_factor = 1.0`, observed rather
   than argued from an absent GGUF key.
-  `deepseekv2::tests::real_weight_router_gates_are_raw_not_renormalized`
+  `deepseek2::tests::real_weight_router_gates_are_raw_not_renormalized`
   asserts both halves on the reference and on brain's own gate.
 - **`clip.use_gelu = true` in the shipped mmproj.** The earlier note that this
   file sets it *false* (and therefore selects quick-GELU) was WRONG, and
@@ -449,15 +449,15 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   * **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is STILL
     UNCHANGED - but not for a correctness reason anymore.** The actual
     device selection for the whole composite (vision AND decoder) is
-    hardcoded in `crates/deepseekocr::caps::Session::load`
-    (`crates/deepseekocr/src/caps.rs`, one `dev` closure passed to
+    hardcoded in `crates/deepseek2ocr::caps::Session::load`
+    (`crates/deepseek2ocr/src/caps.rs`, one `dev` closure passed to
     `DeepEncoder::new` and `DeepseekOcr::build`, both of which already call
     it once per component - `dev(sam1::model::PIPELINES)`,
     `dev(CLIP_VISION_PIPELINES)`, `dev(GLUE_PIPELINES)` for vision,
-    `dev(deepseekv2::PIPELINES)` for the decoder). Giving the vision tower
+    `dev(deepseek2::PIPELINES)` for the decoder). Giving the vision tower
     `gpu_core::Gpu::new_wgpu` while leaving the decoder on
     `gpu_core::Gpu::new_cpu` is a small, well-scoped change to that one
-    closure - but `crates/deepseekocr` is explicitly outside this pass's
+    closure - but `crates/deepseek2ocr` is explicitly outside this pass's
     assigned scope (`crates/backend-wgpu`, `crates/sam1`,
     `crates/model/src/vit.rs`, `crates/cli/src/resident_deepseekocr.rs`
     only), reserved to avoid colliding with a concurrent sibling pass on
@@ -476,7 +476,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     tracked across four passes is DONE - the wgpu backend is confirmed
     correct for `sam1` at production shape, with real evidence, not a
     guess or a clean-but-quiet run. What remains is a one-file, few-line,
-    already-specified mechanical change in `crates/deepseekocr/src/
+    already-specified mechanical change in `crates/deepseek2ocr/src/
     caps.rs`, blocked only by this session's scope boundary, not by
     unresolved doubt. `docs/performance/overview.md`'s "still open" line
     about the wgpu correctness bug is now stale and should be updated in
@@ -488,7 +488,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
 Read off `DeepSeek-OCR-Q8_0.gguf`'s own `tokenizer.ggml.*` KV, and cross-checked
 against `deepseek-ai/DeepSeek-OCR`'s published `tokenizer.json` and
 `modeling_deepseekocr.py`. All of it is asserted by
-`crates/deepseekocr/tests/prompt_real.rs`, which enumerates the file rather than
+`crates/deepseek2ocr/tests/prompt_real.rs`, which enumerates the file rather than
 looking single strings up, so a re-quantized checkpoint that renumbers a control
 token fails loudly.
 
@@ -510,7 +510,7 @@ token fails loudly.
   contains the substring `newline`, `separator` or `seperator` - the scan is
   over the reserved classes only, because ordinary vocabulary of course carries
   the English words. So the decoder-side splice has one placeholder id and the row
-  *kind* lives only in `deepseekocr::rows`.
+  *kind* lives only in `deepseek2ocr::rows`.
 - That same reference code confirms `rows.rs`'s arithmetic from a second,
   non-llama.cpp source: the global block is `n*(n+1) + 1` rows and the local
   block is `(n*tiles_w + 1) * (n*tiles_h)` - exactly `global_rows` and
@@ -639,7 +639,7 @@ token fails loudly.
       untouched); `imaging::tiling::internvl_grid` (discrete candidate-ratio
       tiling) lands beside `moondream::select_tiling` (now re-exported from
       there), with a test proving the two policies genuinely disagree on some
-      inputs. One pre-existing unrelated test failure found in `brain-mirror`
+      inputs. One pre-existing unrelated test failure found in `brain-worldmirror2`
       (`t8_multiframe_tiny::s3_forward_is_finite`, a NaN) was proven
       pre-existing (reproduces at pristine HEAD) and unrelated to the (2-line,
       same-kernel-id) rename touching that crate.
@@ -707,7 +707,7 @@ token fails loudly.
       change's scope while sibling work was in flight there) - the gate lives
       self-contained in `crates/clip/tests/vision.rs` instead; lifting it into
       `gradcheck::clip` is a small follow-up.
-- [x] `crates/deepseekv2` (MHA-only DeepSeek-V2 decoder) - modeled on
+- [x] `crates/deepseek2` (MHA-only DeepSeek-V2 decoder) - modeled on
       `qwen35moe`'s shape (tape-built `Vec<Step>` fwd/bwd, `model::Model`),
       composing `model::block::{rmsnorm,rope,gqa,swiglu}` + `model::moe`
       end-to-end (dense layer 0, MoE layers 1..N via `router_fwd_kind` +
@@ -728,7 +728,7 @@ token fails loudly.
       explicitly out of scope for this phase (qwen35moe has all of these;
       this crate is the decoder shape only, not yet the full production
       surface).
-- [x] `crates/deepseekocr` composite + `tiny_ref` parity. `config.rs` groups the
+- [x] `crates/deepseek2ocr` composite + `tiny_ref` parity. `config.rs` groups the
       three sub-configs and owns only the projector's two shape facts
       (`projector_in = compressor_out + clip_width`, `projector_out = decoder
       d_model`); `check_real_scale_shaped()` asserts `compressor_out ==
@@ -739,7 +739,7 @@ token fails loudly.
       `model.rs` splices the projector output into the decoder at a caller-given
       `(row0, n_rows)` and runs to logits, forward AND backward. `rows.rs` is
       pure host index math (see above), 8 unit tests, consumed by nothing yet.
-      **`crates/deepseekv2` gained the splice seam** (`enable_mm_splice` /
+      **`crates/deepseek2` gained the splice seam** (`enable_mm_splice` /
       `write_img_embeds` / `read_d_img_embeds` / `img_embeds_buf` /
       `d_img_embeds_buf` over `model::vlm::splice_{fwd,bwd}`, appended
       `splice`/`splice_bwd` pipelines) plus per-stage read taps; **`crates/sam1`
@@ -761,7 +761,7 @@ token fails loudly.
       the capture commands, the byte-layout checks and the semantic findings) →
       `testdata/deepseek-ocr/real/{vision,decoder}.safetensors` +
       `manifest-real.json`. `crates/sam1/tests/parity.rs` and
-      `crates/deepseekv2/tests/parity.rs` are the gates; both self-skip.
+      `crates/deepseek2/tests/parity.rs` are the gates; both self-skip.
       *Vision* (`llama-mtmd-debug -p encode --image gray -n 1024`): SAM's 12
       block outputs + the neck/compressor output + CLIP's assembled input.
       **All 14 taps ≥ 0.9994**, worst `sam_blk07_out` 0.99944 / max_abs 1.65e-1,
@@ -789,7 +789,7 @@ token fails loudly.
       it. The identity position resample at 16x16 is asserted exact, and
       `class_embed` matches the reference's assembled row 0 at max_abs 0.
 - [x] **Real-weight COMPOSITE forward (Phase 5, sanity only).**
-      `crates/deepseekocr/tests/real_weight.rs` runs image -> SAM -> CLIP ->
+      `crates/deepseek2ocr/tests/real_weight.rs` runs image -> SAM -> CLIP ->
       concat -> projector -> splice -> decoder -> logits on the real pair. The
       SAM stage inside the composite reproduces the SAM-only parity number
       exactly (0.9999586 / 5.23e-3), the compressor->CLIP handoff matches the
@@ -865,7 +865,7 @@ token fails loudly.
       tower** is the number that matters there.
 
       *Measured, the whole composite on the real Q8_0 pair*
-      (`crates/deepseekocr/tests/real_weight.rs`, seq 258, **256** image rows -
+      (`crates/deepseek2ocr/tests/real_weight.rs`, seq 258, **256** image rows -
       a 16x16 token grid at rows `[1, 257)`, plus BOS and one trailing text row;
       an earlier draft of this entry said 257 and was off by one):
       * `train = false`: **completes**. VmHWM **24.39 GiB** (transient, during
@@ -896,14 +896,14 @@ token fails loudly.
       `to_map` in `crates/gguf/src/import.rs`, with its own two-way coverage
       gate. Until that exists, the decoder half streams from the cached
       **11.7 GB fp32 `.safetensors` expansion** on disk (built once by
-      `crates/deepseekv2`'s parity test) rather than from the 3.1 GB shipped
+      `crates/deepseek2`'s parity test) rather than from the 3.1 GB shipped
       file, and the vision half still goes through `gguf::import::to_map`,
       an eager ~1.6 GiB host map held for the whole `new_split` call. Removing
       both would take the composite's 24.39 GiB construction peak down by
       ~1.6 GiB and drop the 11.7 GB disk requirement entirely. Neither blocks
       Phase 6.
 - [x] **Composed-loop / generation parity against the real Q8_0 weights
-      (Phase 6b) - this FREEZES `crates/deepseekv2/src/model.rs`'s
+      (Phase 6b) - this FREEZES `crates/deepseek2/src/model.rs`'s
       forward/decode contract.** Every real-weight number above it is ONE
       forward over a FIXED token sequence. That is a snapshot, and it cannot see
       the three things only a loop can get wrong: whether RoPE's position
@@ -927,7 +927,7 @@ token fails loudly.
         sized for the final length. The per-step cost is a host-side
         `Vec<Step>`; no device buffer is reallocated.
       * `O(T²)` recompute on purpose. This is the recompute tier of the
-        `generate` / `generate_kv` pair `crates/gpt`/`crates/glm`/`crates/qwen3`
+        `generate` / `generate_kv` pair `crates/gpt2`/`crates/glmdsa`/`crates/qwen3`
         keep; the cached tier stays out of scope with the rest of the serving
         surface, and a *correctness* proof wants the tier that shares its graph
         with `forward()` rather than a second graph. Ties break to the lowest id
@@ -945,7 +945,7 @@ token fails loudly.
       `result_output` dump, so the multi-step chain starts from a step verified
       against tensors rather than from a CLI's stdout.
 
-      *Result:* `crates/deepseekv2/tests/generate.rs` -
+      *Result:* `crates/deepseek2/tests/generate.rs` -
       **all 10 positions agree exactly, position by position.** CPU backend,
       35-45 s wall including the 12 GB load. The failure path is a debugging aid,
       not an opaque `assert_eq`: it names the FIRST divergent index and re-runs
@@ -969,7 +969,7 @@ token fails loudly.
       construction (streaming the 11.7 GB expansion) - Phase 6a's number, not a
       generation cost.
 
-      *Fast lane too.* `deepseekv2::model::tests::
+      *Fast lane too.* `deepseek2::model::tests::
       greedy_decode_is_prefix_stable_and_reads_the_last_row` pins the loop's
       bookkeeping at toy dims on both backends with no checkpoint at all: prompt
       returned verbatim, a run resumed from a generated prefix producing the
@@ -979,7 +979,7 @@ token fails loudly.
       cannot quietly go vacuous the way it would at `t = 1`.
 
       *Stretch goal, DONE: the composed loop on the whole real composite.*
-      `crates/deepseekocr/tests/real_weight_generate.rs` (its own test binary -
+      `crates/deepseek2ocr/tests/real_weight_generate.rs` (its own test binary -
       cargo runs binaries one at a time, so two ~21 GiB composites can never be
       resident together) runs image → SAM → CLIP → concat → projector → splice →
       decoder and then 3 greedy steps, at the production 1024x1024 / 258-row
@@ -1002,9 +1002,9 @@ token fails loudly.
 
       *Tech-debt paid on the way:* the model-store lookup / fp32-expansion /
       CPU-pin / inference-build scaffolding moved to
-      `crates/deepseekv2/tests/common/real_lm.rs` and is now shared by
-      `parity.rs` and `generate.rs` (the house `#[path]` pattern `crates/yolo`
-      and `crates/omni` already use), so the two real-weight binaries cannot
+      `crates/deepseek2/tests/common/real_lm.rs` and is now shared by
+      `parity.rs` and `generate.rs` (the house `#[path]` pattern `crates/yolov8`
+      and `crates/qwen3omnimoe` already use), so the two real-weight binaries cannot
       drift about *which* weights they ran - which is what lets `generate.rs`
       treat `parity.rs`'s verified argmax as its anchor. The `/proc/self/status`
       memory reporter was hoisted to `brain_testutil::mem` before it became a
@@ -1013,7 +1013,7 @@ token fails loudly.
       *Still open after this phase* (unchanged by it): incremental/KV-cached
       decode, sampling beyond greedy, EOS/stop handling, batch > 1, and the
       whole serving surface - see the items below.
-- [x] **Real image preprocessing (Phase 7a).** `crates/deepseekocr/src/
+- [x] **Real image preprocessing (Phase 7a).** `crates/deepseek2ocr/src/
       preprocess.rs` - arbitrary decoded RGB in, the `[3, 1024, 1024]`
       normalized NCHW tensor `DeepEncoder::forward` takes out. Until now that
       entry point had no producer at all: every test in this effort fed either a
@@ -1123,7 +1123,7 @@ token fails loudly.
       which is why that helper is not reused); and the mean/std assertion against
       the real mmproj.
 
-      *Real weights.* `crates/deepseekocr/tests/real_weight_image.rs` - its own
+      *Real weights.* `crates/deepseek2ocr/tests/real_weight_image.rs` - its own
       test binary, CPU backend, `#[ignore]`d to the slow lane. A synthetic
       1600x1131 document page (text-line bands, a vertical rule, a saturated
       three-channel margin block - structured rather than noise, which would
@@ -1168,13 +1168,13 @@ token fails loudly.
       *Tech debt paid on the way:* the mmproj-import / model-store / CPU-pin /
       `describe` scaffolding was copy-pasted in **two** real-weight binaries and
       was about to become three. It now lives once in
-      `crates/deepseekocr/tests/common/real_vision.rs` (the house `#[path]`
-      pattern, mirroring `crates/deepseekv2/tests/common/real_lm.rs`), and
+      `crates/deepseek2ocr/tests/common/real_vision.rs` (the house `#[path]`
+      pattern, mirroring `crates/deepseek2/tests/common/real_lm.rs`), and
       `real_weight.rs` / `real_weight_generate.rs` were migrated onto it. A
       hand-rolled cosine/max-abs helper in the new test was likewise dropped for
       the existing `brain_testutil::parity::compare`.
 - [x] **The real tokenizer and a real prompt (Phase 7c).**
-      `crates/deepseekocr/src/prompt.rs`: `tokenizer_from_gguf(path)` (the LM
+      `crates/deepseek2ocr/src/prompt.rs`: `tokenizer_from_gguf(path)` (the LM
       GGUF's own `tokenizer.ggml.*` KV through `QwenBpe::from_gguf` - header
       only, the 3.1 GB mmap is dropped on return), `ImageTokens` (the
       `rows::Src` kind → token id map; all three kinds are `<image>` = 128815 in
@@ -1219,23 +1219,23 @@ token fails loudly.
       is a `model.rs`/`encoder.rs` change, it is the next step, and until it
       lands the prompt builder and the composite do not meet.
       **CLOSED by Phase 7d, below** - `DeepseekOcr::new_with_prompt` sizes the
-      splice from the prompt and `deepseekocr::layout::RowGather` fills it. The
+      splice from the prompt and `deepseek2ocr::layout::RowGather` fills it. The
       256-row numbers above are still correct for the path they were measured
       on (`new`/`new_split`), which still ships.
 - [x] **The real 273-row image block (Phase 7d) - the gap Phase 7c flagged is
       closed.** `build_prompt` emitted a 273-row image run while `DeepseekOcr`
       spliced 256, and the two learned vectors the mmproj ships
       (`vision.image_newline`, `vision.view_separator`) had **no consumer
-      anywhere in `crates/deepseekocr`** - `glue_param_list()` did not even
+      anywhere in `crates/deepseek2ocr`** - `glue_param_list()` did not even
       declare them, so the import silently dropped both. Now:
 
       ```rust
-      // crates/deepseekocr/src/config.rs
+      // crates/deepseek2ocr/src/config.rs
       pub const IMAGE_NEWLINE:  &str = "vision.image_newline";   // [d_model]
       pub const VIEW_SEPARATOR: &str = "vision.view_separator";  // [d_model]
       // both now in DeepseekOcrConfig::glue_param_list()
 
-      // crates/deepseekocr/src/layout.rs  (new module)
+      // crates/deepseek2ocr/src/layout.rs  (new module)
       pub const LAYOUT_PIPELINES: &[(&str, &str)];   // splice, embed, emb_bwd
       pub struct RowGatherIds { pub splice: usize, pub embed: usize, pub emb_bwd: usize }
       pub struct RowGather;
@@ -1252,12 +1252,12 @@ token fails loudly.
           pub fn shared_row_counts(&self) -> (u32, u32);   // (16, 1)
       }
 
-      // crates/deepseekocr/src/encoder.rs
+      // crates/deepseek2ocr/src/encoder.rs
       pub fn row_gather(&self, rows: &[Src]) -> RowGather
       pub fn forward_rows(&self, image: &[f32], rg: &RowGather) -> Vec<f32>   // [273, d_model]
       pub fn backward_rows(&self, d_block: &[f32], rg: &RowGather) -> Vec<f32>
 
-      // crates/deepseekocr/src/model.rs
+      // crates/deepseek2ocr/src/model.rs
       pub fn new_with_prompt(dev: DeviceFactory, cfg: DeepseekOcrConfig,
                              vision: &dyn TensorSource, decoder: &dyn TensorSource,
                              seed: u64, seq: u32, prompt: &Prompt, train: bool) -> DeepseekOcr
@@ -1296,7 +1296,7 @@ token fails loudly.
       the gather's `P*d` reads, so the gather is what ships.)
 
       **Tests.**
-      * `deepseekocr::layout::tests` (5, checkpoint-free, 0.5 s): every
+      * `deepseek2ocr::layout::tests` (5, checkpoint-free, 0.5 s): every
         assembled row asserted **row by row** against its source at exact
         equality - a swapped newline/separator or an off-by-one projector index
         still yields the right shape and the right multiset of rows, so an
@@ -1388,18 +1388,18 @@ token fails loudly.
       loops ran to completion and returned everything at once, so a served path
       could not emit a token until the whole decode was done - the D-Bus/HTTP
       `Progress::token` surface the item below needs is impossible on that
-      shape. Closed by the pattern `crates/qwenvl` already uses
+      shape. Closed by the pattern `crates/qwen3vl` already uses
       (`Qwen3Vl::generate` / `generate_cb`), copied verbatim rather than
       invented: the loop moves into a `_cb` variant taking an extra
       `impl FnMut(u32)`, the old name becomes a thin `|_| {}` wrapper.
 
       ```rust
-      // crates/deepseekv2/src/model.rs
+      // crates/deepseek2/src/model.rs
       pub fn generate_greedy(&self, prompt_ids: &[u32], n_new: u32) -> Vec<u32>
       pub fn generate_greedy_cb(&self, prompt_ids: &[u32], n_new: u32,
                                 on_token: impl FnMut(u32)) -> Vec<u32>
 
-      // crates/deepseekocr/src/model.rs
+      // crates/deepseek2ocr/src/model.rs
       pub fn generate_greedy(&self, image: &[f32], prompt_ids: &[u32],
                              n_new: u32) -> Vec<u32>
       pub fn generate_greedy_cb(&self, image: &[f32], prompt_ids: &[u32],
@@ -1416,14 +1416,14 @@ token fails loudly.
       on it), so the stream is `result[prompt_ids.len()..]`, *not* `result`.
 
       *Behaviour-preserving, measured on both sides rather than asserted.* The
-      real-weight gate `crates/deepseekv2/tests/generate.rs`'s reference-anchored
+      real-weight gate `crates/deepseek2/tests/generate.rs`'s reference-anchored
       decode test returns the same ten ids
       `[0, 19923, 3, 4117, 588, 342, 1694, 440, 4316, 33]` - all 10 positions
       agreeing with the reference - before (114.8 s) and after (75.5 s; the wall
       difference is page-cache warmth on the 11.7 GB expansion, not decode).
       `model::tests::greedy_decode_is_prefix_stable_and_reads_the_last_row`
       passes unchanged in both. The composite gate
-      `crates/deepseekocr/tests/real_weight_generate.rs` re-ran too, since the
+      `crates/deepseek2ocr/tests/real_weight_generate.rs` re-ran too, since the
       wrapper it calls is the half that was restructured: same ids
       `[372, 223, 643]`, same deciding top-5 to the last digit
       (`643 @ 9.2369585, 19 @ 8.853098, 20 @ 8.613617, 21 @ 8.528564,
@@ -1451,7 +1451,7 @@ token fails loudly.
       infallible, so there is no cancellation and no early stop through it -
       EOS/stop handling, sampling beyond greedy and KV-cached decode remain
       where the Phase 6b entry left them.
-- [x] **Serving contract (Phase 7d-bis) - `brain caps`, `brain do`, the
+- [x] **Serving contract (Phase 7d-bis) - `brain caps`, `brain deepseek2ocr ...`, the
       residency scheduler, D-Bus and the OpenAI/Anthropic surfaces, from ONE
       catalog entry.** The three things that had to exist first were the real
       273-row prompt (above), the per-token callback (below) and a *production*
@@ -1461,7 +1461,7 @@ token fails loudly.
       than copied.
 
       ```rust
-      // crates/deepseekocr/src/import.rs   (new - production, not test glue)
+      // crates/deepseek2ocr/src/import.rs   (new - production, not test glue)
       pub const STORE: &str;      // "ggml-org/DeepSeek-OCR-GGUF"
       pub const MMPROJ: &str;     // "mmproj-DeepSeek-OCR-Q8_0.gguf"
       pub const LM: &str;         // "DeepSeek-OCR-Q8_0.gguf"
@@ -1475,7 +1475,7 @@ token fails loudly.
       pub fn config(files: &Files, block_size: u32) -> Result<DeepseekOcrConfig, String>;
       pub fn tokenizer(files: &Files)           -> Result<QwenBpe, String>;
 
-      // crates/deepseekocr/src/caps.rs   (new - the serving surface)
+      // crates/deepseek2ocr/src/caps.rs   (new - the serving surface)
       pub const MODEL: &str = "deepseek-ai/DeepSeek-OCR";   // case-exact upstream repo
       pub const DIR_VAR: &str = "BRAIN_DEEPSEEK_OCR_DIR";
       pub const DEFAULT_INSTRUCTION: &str = "<|grounding|>Convert the document to markdown.";
@@ -1523,12 +1523,12 @@ token fails loudly.
       // run_batch: the serial default (per-image encoder pass, no decoder batch axis)
 
       // crates/cli/src/catalog.rs - ONE ModelEntry, which is what wires
-      // `brain caps`, `brain do`, `resident.rs::build_executor`'s
+      // `brain caps`, `brain deepseek2ocr ...`, `resident.rs::build_executor`'s
       // `models.extend(catalog::residents())`, D-Bus and the HTTP surfaces at once.
       ```
 
       **Token accounting is real, and the precedent was wrong.** Neither
-      `omni::caps::GenerateAction::run` nor `qwenvl::caps::GenerateAction::run`
+      `qwen3omnimoe::caps::GenerateAction::run` nor `qwen3vl::caps::GenerateAction::run`
       sets `prompt_tokens`/`completion_tokens`/`finish_reason`, and
       `apiserve::bridge::read_outcome` defaults them to `0`/`0`/`"stop"` - so
       both report zero usage over the OpenAI and Anthropic APIs today. This
@@ -1537,7 +1537,7 @@ token fails loudly.
       stop/length rule minus the tool-call and cancellation arms this model has
       no notion of.
 
-      *Still open* (and stated on `docs/models/deepseek-ocr.md`): the greedy
+      *Still open* (and stated on `docs/models/deepseek2ocr.md`): the greedy
       loop does **not** stop at EOS - the output is truncated and
       `finish_reason` is honest, but the wall time is always `max_new` steps
       (now `O(1)` decode steps, not full recomputes - see the KV-cache entry
@@ -1553,14 +1553,14 @@ token fails loudly.
       minutes.
 
       **The fix: `DeepseekV2::generate_greedy_kv`/`step`, a real KV cache -**
-      the `O(T)`-per-token twin `crates/gpt`/`crates/glm`/`crates/qwen3`
+      the `O(T)`-per-token twin `crates/gpt2`/`crates/glmdsa`/`crates/qwen3`
       already keep alongside their own `O(T²)` recompute tier, now built for
       this MoE decoder too. The prompt still pays ONE batched forward (which
       also handles the vision-language splice and seeds the persistent
       per-layer K/V cache via `model::block::kv_cache_fill`'s documented
       bulk-prefill pattern); every token after that is one incremental
       attention step (`model::block::gqa_decode_step`, the same primitive
-      `crates/gpt`/`crates/glm`/`crates/qwen3`/`crates/qwen35moe` already use)
+      `crates/gpt2`/`crates/glmdsa`/`crates/qwen3`/`crates/qwen35moe` already use)
       plus a single-row MoE/dense FFN pass. Adds **one** new kernel wiring
       (`kernels::ROPE_AT`, for rotating at an explicit absolute position -
       `rope_base.wgsl`'s `row % tcols` convention cannot express a single new
@@ -1570,7 +1570,7 @@ token fails loudly.
 
       **Measured, same machine, same real weights, `--max_new 32`:** total
       wall dropped from ~12 min (`O(T²)`, extrapolated from the `--max_new
-      2`/`--max_new 10` numbers on `docs/models/deepseek-ocr.md`) to ~123-147 s
+      2`/`--max_new 10` numbers on `docs/models/deepseek2ocr.md`) to ~123-147 s
       (`O(T)`) - roughly a 5-6x wall-clock improvement. `BRAIN_PROFILE`'s own
       per-kernel table for the KV-cached run: `moe_linear_gated` 66.9% (one
       prompt-prefill forward + 32 decode steps combined), `matmul` 10.6%,
@@ -1586,7 +1586,7 @@ token fails loudly.
 
       **One optimization tried and MEASURED, not shipped:** row-compacted MoE
       (skip dispatching the ~58/64 non-selected experts per decode step,
-      mirroring `crates/glm`'s `model::moe::expert_fwd_compact`, which measures
+      mirroring `crates/glmdsa`'s `model::moe::expert_fwd_compact`, which measures
       ~7x on GLM's own *batched* MoE forward). At a single decoded row this
       needed a host readback of the router gate per MoE layer to know which
       experts to skip. Measured: `moe_linear_gated` call count dropped
@@ -1637,12 +1637,12 @@ token fails loudly.
 
       **Two fixes landed, both re-verified against the whole relevant test
       matrix (`cargo test -p brain-sam1 --release`, `-p brain-backend-cpu
-      --release`, `-p brain-clip --release`, `-p brain-deepseekocr
-      --release`, `-p brain-model --release`, `-p brain-deepseekv2
+      --release`, `-p brain-clip --release`, `-p brain-deepseek2ocr
+      --release`, `-p brain-model --release`, `-p brain-deepseek2
       --release` - all green, gradcheck and parity included):**
       1. `crates/sam1` now dispatches its forward GEMMs through
          `model::block::pick_gemm` (matching `crates/clip`/
-         `crates/deepseekv2`) instead of a hardcoded naive `matmul` index -
+         `crates/deepseek2`) instead of a hardcoded naive `matmul` index -
          per kernels.md's "already-faster-sibling" check, but measured to
          have **zero effect on the CPU backend**: `backend-cpu` already
          routes every `matmul*` kernel name to the same native AVX2+rayon
@@ -1666,7 +1666,7 @@ token fails loudly.
       `DeepEncoder::run_forward` now brackets SAM / the NCHW->NLC bridge /
       CLIP / the projector separately under `BRAIN_PROFILE` (previously one
       lumped "encode+splice+decode" line), shared via a `pub(crate)
-      stage_time` hoisted to `crates/deepseekocr/src/lib.rs`. Two real runs
+      stage_time` hoisted to `crates/deepseek2ocr/src/lib.rs`. Two real runs
       (same checkpoint, same document image, a few minutes apart): vision
       encode measured directly at **25.3 s and 34.4 s** (SAM 23.8-33.0 s,
       CLIP 1.4-1.5 s, the bridge/projector each under 15 ms) - replacing the
@@ -1690,10 +1690,10 @@ token fails loudly.
       fixed, and the fix confirmed, in a later pass (see the "CONCLUSION"
       entry under the wgpu tracking section above) - the 3.6x
       cost-of-CPU-pin number measured here is what a follow-up that lifts
-      the pin (a small `crates/deepseekocr/src/caps.rs` change, out of that
+      the pin (a small `crates/deepseek2ocr/src/caps.rs` change, out of that
       later pass's own scope) stands to recover; model construction's 20-28 s
       (reconfirmed, inspected for redundant work - none found in
-      `crates/deepseekocr/src/import.rs`'s streaming path - but not profiled
+      `crates/deepseek2ocr/src/import.rs`'s streaming path - but not profiled
       per kernel); the tiled-transpose fix's whole-pass magnitude, which
       needs a quiet machine to pin down (the clean re-run above measured the
       END-TO-END ratio, not this fix's isolated contribution). See
@@ -1704,15 +1704,15 @@ token fails loudly.
       once for `qwen35moe`) - frozen base `Role::Frozen` + trainable
       `.lora_a`/`.lora_b` `Role::Trainable`, two matmuls + `axpy` forward, the
       matching `matmul_dx`/`matmul_dw`/`grad_scale` backward - composed
-      entirely from `crates/deepseekv2`'s OWN already-registered kernels
+      entirely from `crates/deepseek2`'s OWN already-registered kernels
       (`matmul`/`matmul_dx`/`matmul_dw`/`grad_scale`); only `axpy` needed a new
       pipeline slot in that crate's `PIPELINES`, no new kernel anywhere.
-      `deepseekv2::config::DeepseekV2Config::lora` (`qwen3::LoraCfg` reused
+      `deepseek2::config::DeepseekV2Config::lora` (`qwen3::LoraCfg` reused
       as-is, not redeclared - same choice `qwen35moe` made for the identical
       type) targets the four attention projections
       (`q_proj`/`k_proj`/`v_proj`/`o_proj`), never an MoE expert or the
       router. TDD: the composite descent test was written and confirmed RED
-      (compile failure - `deepseekocr::train` and `DeepseekV2Config::lora`
+      (compile failure - `deepseek2ocr::train` and `DeepseekV2Config::lora`
       did not exist) before any implementation landed, then brought GREEN.
       Gradient-checked (`deepseekv2/tests/gradcheck.rs::
       grads_match_finite_differences_lora`, `directional_check` - deliberately
@@ -1730,20 +1730,20 @@ token fails loudly.
       gradient panics (`Role::Frozen` really allocated no grad buffer, not
       merely "unused"), `decoder().param_names()` is EXACTLY the `.lora_a`/
       `.lora_b` set, and a decoder-base tensor plus a vision-encoder tensor
-      are BYTE-IDENTICAL before and after the step. `crates/deepseekocr/src/
+      are BYTE-IDENTICAL before and after the step. `crates/deepseek2ocr/src/
       train.rs` is the one new composite-level file (`lora_init_map`, merging
       a real/fixture base weight map with a fresh zero-`B` adapter init,
       mirroring `qwen3::finetune::finetune`'s own merge) -
       `DeepseekOcr::new`/`new_split` needed **zero** changes: `cfg.decoder.lora`
       threads straight through `DeepseekV2::new_on`'s existing role
-      assignment. `deepseekv2::lora` (save_adapter/fold_adapter_into) is a
+      assignment. `deepseek2::lora` (save_adapter/fold_adapter_into) is a
       direct port of `qwen3::lora`/`qwen35moe::lora` for completeness, not
       exercised by the smoke test itself. All new/changed tests green on the
       pooled test device; `qwen3::LoraCfg` gained `PartialEq` (additive) so
       `DeepseekV2Config`'s existing derive keeps working. *Not done*: a
       `finetune`-style CLI verb, a masked-dataset training loop, adapter
-      save/load through `brain do` - this phase proves the wiring descends,
-      not a production fine-tune (see `docs/models/deepseek-ocr.md`).
+      save/load through `brain deepseek2ocr` - this phase proves the wiring descends,
+      not a production fine-tune (see `docs/models/deepseek2ocr.md`).
 - [x] **CPU AVX2/AVX-512 fast paths for the Phase 8 hot kernels.** Phase 8's
       own per-kernel table put `moe_linear_gated` at 66.9% of the KV-cached
       decode loop, running as the scalar one-invocation-per-element
@@ -1786,7 +1786,7 @@ token fails loudly.
       bit-approximate/fp-reassociation-tolerance style the existing
       `fast_ops.rs` tests already use. Full regression green after landing:
       `cargo test -p brain-backend-cpu --release` (31 passed), `-p
-      brain-deepseekv2 --release` (15+8 passed, including the real
+      brain-deepseek2 --release` (15+8 passed, including the real
       `grads_match_finite_differences_*` gradchecks and
       `generate_greedy_kv_matches_recompute` which exercises the KV-cached
       decode path these kernels serve), `-p brain-model --release` (every
@@ -1838,8 +1838,8 @@ token fails loudly.
       number this entry's Phase 8 table implies - `moe_linear_gated` at 66.9%
       of a 34.9 s decode - is NOT re-measured; only the kernel-level
       microbenchmark above is. Whoever next has the real weights available
-      should re-run `BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain do
-      deepseek-ai/DeepSeek-OCR generate --max_new 32 --in image=page.ppm
+      should re-run `BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain deepseek2ocr
+      generate --max_new 32 --in image=page.ppm
       --json` and update this entry and `docs/performance/overview.md`'s case
       study with the real before/after wall-clock and per-kernel table.
       Stayed scoped to `crates/backend-cpu` (plus the ten touched `.wgsl`
@@ -1847,7 +1847,7 @@ token fails loudly.
       kernels-table/check` once `crates/backend-cpu/src/lib.rs`'s `FastIdx`
       gains a kernel's name - the generator derives `native` from that struct,
       not from a separate list, so a fast path and its catalogue entry cannot
-      drift apart) - no `crates/deepseekocr`/`crates/sam1`/`crates/deepseekv2`
+      drift apart) - no `crates/deepseek2ocr`/`crates/sam1`/`crates/deepseek2`
       source changes. SAM's decomposed relative-position kernels
       (`attn_relpos_*`) were assessed but not landed this pass (out of time
       budget after the two higher-priority families + the AVX-512 tier); they
@@ -1859,7 +1859,7 @@ token fails loudly.
       candidate this pass's own brief named: `crates/wgsl-cpu::Jit::new`'s
       total Cranelift compile time per `Gpu::new_cpu` call, and
       `crates/paramstore::ParamStore::new_with_roles_src`'s alloc / read+write
-      / flush phases (split further from `crates/deepseekv2::DeepseekV2::
+      / flush phases (split further from `crates/deepseek2::DeepseekV2::
       new_on`'s own weight-upload vs scratch-buffer-allocation vs tape-build
       brackets).
 
@@ -1867,7 +1867,7 @@ token fails loudly.
       `Gpu` instances (SAM, CLIP, glue, decoder, preprocessor), each compiling
       its own `PIPELINES` list (42, 37, 9, 47, 5 kernels). Measured total
       across all five, real checkpoint: **~174-186 ms - under 0.5% of a
-      40.7-48.2 s load.** `deepseekv2::PIPELINES` having 40+ slots after this
+      40.7-48.2 s load.** `deepseek2::PIPELINES` having 40+ slots after this
       session's KV-cache/LoRA work was a reasonable thing to suspect; it is
       real work, just three orders of magnitude too small to matter here.
 
@@ -1896,7 +1896,7 @@ token fails loudly.
       throwaway diagnostic.** `dd if=<11.7 GB decoder file> of=/dev/null bs=4M`
       read it in **7.9 s (1.5 GB/s)** - pure sequential I/O is not the
       bottleneck. A new `#[ignore]`d bench
-      (`crates/deepseekv2/tests/weight_read_order_bench.rs`, kept as a real
+      (`crates/deepseek2/tests/weight_read_order_bench.rs`, kept as a real
       tool) reads every tensor via the SAME `raw_words` call the real upload
       uses, same construction order, forcing the same page faults but
       allocating NO destination buffer: **13.3 s for the same 10.93 GiB (881
@@ -1942,19 +1942,19 @@ token fails loudly.
 
       **What this pass DID leave behind: real, permanent instrumentation.**
       The `BRAIN_PROFILE` brackets above cost nothing when the env var is
-      unset (the same `std::env::var` check `deepseekocr::stage_time` already
+      unset (the same `std::env::var` check `deepseek2ocr::stage_time` already
       uses) and are now load-bearing for the next investigation of this cost -
       a real per-stage table exists where there was one lumped 20-28 s number
       before. Verified against the full test matrix (`cargo test -p
-      brain-deepseekocr --release`, `-p brain-deepseekv2 --release`, both
+      brain-deepseek2ocr --release`, `-p brain-deepseek2 --release`, both
       green including `grads_match_finite_differences_*` and
       `generate_greedy_kv_matches_recompute`) plus two real end-to-end
       real-weight CLI runs through every touched path
-      (`BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain do
-      deepseek-ai/DeepSeek-OCR generate --max_new 2..8 --in image=page.ppm
+      (`BRAIN_DEEPSEEK_OCR_DIR=<dir> BRAIN_PROFILE=1 brain deepseek2ocr
+      generate --max_new 2..8 --in image=page.ppm
       --json`), both producing coherent generated output. Touched
-      `crates/wgsl-cpu`, `crates/paramstore`, `crates/deepseekv2/src/model.rs`,
-      `crates/deepseekocr/src/model.rs` - no `crates/backend-cpu`,
+      `crates/wgsl-cpu`, `crates/paramstore`, `crates/deepseek2/src/model.rs`,
+      `crates/deepseek2ocr/src/model.rs` - no `crates/backend-cpu`,
       `crates/backend-wgpu` or `crates/sam1` changes. See
       `docs/performance/overview.md`'s case study for the full numbers.
 - [x] **Real multi-page document workload + concurrent-request measurement
@@ -1968,7 +1968,7 @@ token fails loudly.
       reference manual PDF (pages 60-109, 150 DPI PNG, a real peripheral-
       register chapter). Served path: ONE resident `brain serve --openai`
       process (built once), driven over the real `/v1/chat/completions` HTTP
-      route, not the `brain do` CLI (which would pay the ~22 GiB weight
+      route, not the `brain deepseek2ocr` CLI (which would pay the ~22 GiB weight
       upload fresh on every page). `max_new = 128`, decided by two real
       calibration requests (not a guess) - `SEQ_LEN = 512` minus the
       ~283-token image+instruction prompt caps `max_new` at 229, so "a few
@@ -1998,7 +1998,7 @@ token fails loudly.
       and stable for the full run after that (280 samples, minimum 2.6 GiB,
       no downward trend). Tighter than the ~4-6 GiB floor this pass started
       from, but that floor predates knowing this model's own documented
-      footprint (`docs/models/deepseek-ocr.md`: "a box with less than ~24
+      footprint (`docs/models/deepseek2ocr.md`: "a box with less than ~24
       GiB free will not activate it" - this box had exactly ~24 GiB free at
       the start); since the number was measured stable rather than
       declining, the run continued under tight monitoring rather than being
@@ -2019,7 +2019,7 @@ token fails loudly.
       HTTP-admission artifact) is what gets measured: **zero speedup at any
       N** - N=2 181.5 s (90.7 s/request), N=4 315.8 s (79.0 s/request), N=8
       649.7 s (81.2 s/request), every one within a few percent of Part 1's
-      78.5 s single-stream median. Confirms `docs/models/deepseek-ocr.md`'s
+      78.5 s single-stream median. Confirms `docs/models/deepseek2ocr.md`'s
       existing claim ("`run_batch` is therefore the serial default") with
       real measurement instead of trusting the doc's claim on faith.
 
@@ -2048,7 +2048,7 @@ token fails loudly.
       docs already rule out batch > 1 for this session
       ("`sam1` is a single-image tower... its windowed attention spans'
       storage-binding offsets are not 256 B aligned across a batch stride" -
-      `crates/deepseekocr/src/lib.rs`). Making that true is a
+      `crates/deepseek2ocr/src/lib.rs`). Making that true is a
       `crates/sam1`/`crates/backend-cpu` architecture change, larger than a
       measurement pass and outside this session's own avoidance list for
       `crates/checkpoint`/`crates/wgsl-cpu`/`crates/paramstore` neighbours.
@@ -2057,7 +2057,7 @@ token fails loudly.
       a quiet box to verify its peak-memory behaviour was judged the wrong
       trade - "lean conservative" was the guidance this investigation
       started from, and a clean, honest measurement is what it delivered.
-      **No `crates/deepseekocr`, `crates/deepseekv2`, `crates/sam1`,
+      **No `crates/deepseek2ocr`, `crates/deepseek2`, `crates/sam1`,
       `crates/residency` or `crates/apiserve` source file was touched this
       pass** - only `docs/performance/overview.md` and this file. See
       `docs/performance/overview.md`'s case study for the full tables.
@@ -2096,19 +2096,19 @@ token fails loudly.
 
       **Step 2 (a scoped bonus, handed off by the wgpu-correctness sibling
       pass mid-session): the vision encoder moved onto wgpu.**
-      `crates/deepseekocr/src/model.rs` gained
+      `crates/deepseek2ocr/src/model.rs` gained
       `DeepseekOcr::new_with_prompt_devices` (independent `dev_vision`/
       `dev_decoder` factories; the existing single-factory `new`/
       `new_split`/`new_with_prompt` are unchanged) and `caps::Session::load`
       now builds SAM+CLIP+glue on `gpu_core::Gpu::new_wgpu` while the
       decoder stays on `gpu_core::Gpu::new_cpu`. Gated by a new wiring test,
       `split_device_vision_wgpu_decoder_cpu_matches_all_cpu`
-      (`crates/deepseekocr/tests/tiny_ref.rs`): the same checkpoint-free
+      (`crates/deepseek2ocr/tests/tiny_ref.rs`): the same checkpoint-free
       fixture built all-CPU and split-device agrees at cosine > 0.9999 - a
       wiring gate, not a re-verification of wgpu's own SAM correctness
       (`crates/sam1/tests/wgpu_real_weight_parity.rs`'s job, already done).
-      Full regression green: `cargo test -p brain-deepseekocr --release`
-      (42/42), `-p brain-deepseekv2 --release`, `-p brain-backend-cpu
+      Full regression green: `cargo test -p brain-deepseek2ocr --release`
+      (42/42), `-p brain-deepseek2 --release`, `-p brain-backend-cpu
       --release`.
 
       **Measured real-weight effect: honestly mixed.** SAM forward dropped
@@ -2162,8 +2162,8 @@ token fails loudly.
 
       **What changed this pass**: `crates/backend-cpu/src/{fast_ops.rs,
       lib.rs}` (inherited via `main`, the `silu_mul`/`scale_add` AVX2 fast
-      paths), `crates/deepseekocr/src/{model.rs,caps.rs}` (the vision/
-      decoder device split), `crates/deepseekocr/tests/tiny_ref.rs` (the new
+      paths), `crates/deepseek2ocr/src/{model.rs,caps.rs}` (the vision/
+      decoder device split), `crates/deepseek2ocr/tests/tiny_ref.rs` (the new
       wiring gate). No `crates/sam1` or `crates/backend-wgpu` source changed
       this pass. **This concludes Phase 8**: the just-landed kernels are
       validated on a real page, the vision encoder's CPU-pin question has a

@@ -1,6 +1,6 @@
-# face — roadmap
+# scrfd - roadmap
 
-Face recognition (`crates/facenet`): insightface antelopev2 — SCRFD-10GF
+Face recognition (`crates/facenet`): insightface antelopev2 - SCRFD-10GF
 detection + 5-point alignment + ArcFace IResNet-100 embedding, imported and
 parity-gated, with ArcFace training (backbone + additive-angular-margin head)
 also gradient-checked. Forward parity is verified against the reference
@@ -9,7 +9,7 @@ example) is met except for batching.
 
 ## Not yet done
 
-- [ ] `Instance::run_batch` is the serial default — ArcFace's input batches
+- [ ] `Instance::run_batch` is the serial default - ArcFace's input batches
       trivially but the graph is pre-allocated at N=1; SCRFD's detector graph
       is also pinned to N=1 and would need looping or re-export to batch
 - [ ] Gradient check only covers a tiny config (4 blocks); IResNet-100's full

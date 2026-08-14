@@ -1,4 +1,4 @@
-# qwen — roadmap
+# qwen3 - roadmap
 
 Qwen3 dense decoder transformer (GQA, QK-norm, RoPE, SwiGLU) with a
 concurrent paged-KV serving engine. Training, LoRA fine-tuning, INT8 weights,
@@ -11,5 +11,5 @@ against the reference.
       but is not wired into the serving engine)
 - [ ] An FP8 / E4M3 weight path (INT8 is the only quantized weight format
       today)
-- [ ] Mixture-of-Experts serving — only dense configurations are supported
+- [ ] Mixture-of-Experts serving - only dense configurations are supported
       end to end
