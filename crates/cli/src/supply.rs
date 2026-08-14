@@ -195,6 +195,63 @@ fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) -> Option<u
     last.is_none_or(|l| bucket > l).then_some(bucket)
 }
 
+/// Auto-fetch `arch`'s [`brain_arch::Arch::default_ref`] checkpoint into the
+/// model store (fetching + converting exactly as [`StoreSupplier::ensure`]
+/// does for a server request), and return the path to its
+/// `model.brain.safetensors` -- the one thing every dedicated `_cli.rs`
+/// handler's `--weights F` flag already expects. `crate::resolve` calls this
+/// to inject `--weights <path>` into an `infer` invocation that named none,
+/// so `brain infer zipdepth --in image=x.jpg` (no `--weights`) resolves a
+/// concrete checkpoint on its own.
+///
+/// Not single-flight (unlike [`StoreSupplier`], built for concurrent server
+/// requests sharing one long-lived process): a one-shot CLI invocation has
+/// exactly one caller, so the plain plan/execute/convert sequence is enough
+/// -- two `brain infer` processes racing the same cold fetch is a real but
+/// rare case, and each just refetches into the same destination independently
+/// rather than corrupting anything (`brain_modelstore::fetch` writes via a
+/// temp file + atomic rename).
+pub fn ensure_default_weights(arch: &str) -> Result<String, String> {
+    let root = crate::model_dir::resolve(None).ok_or_else(|| "no models directory (no $HOME and no $BRAIN_MODELS_DIR)".to_string())?;
+    ensure_default_weights_with(arch, &Store::new(root), &brain_modelstore::HfHub::new())
+}
+
+/// [`ensure_default_weights`]'s implementation, taking `store`/`hub`
+/// explicitly so it is testable against [`brain_modelstore::FakeHub`] with no
+/// real network or `$HOME` -- the same split every other fetch path in this
+/// file (`StoreSupplier`, `convert_*`) already uses.
+fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<String, String> {
+    let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
+    let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
+    let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
+
+    let plan = brain_modelstore::plan(&reference, store, hub).map_err(|e| format!("{default_ref}: {e}"))?;
+    let mut last_pct: HashMap<String, u32> = HashMap::new();
+    let deferred = brain_modelstore::execute(store, hub, &plan, &mut |name, got, total| {
+        if let Some(total) = total {
+            if let Some(bucket) = next_download_pct_bucket(got, total, last_pct.get(name).copied()) {
+                residency::log::info(&format!("{default_ref}: downloading {name} {bucket}%"));
+                last_pct.insert(name.to_string(), bucket);
+            }
+        }
+    })
+    .map_err(|e| format!("{default_ref}: {e}"))?;
+
+    for step in &deferred {
+        match step {
+            Step::Convert { vendor, repo, recipe } => convert(store, vendor, repo, recipe).map_err(|e| format!("{default_ref}: {e}"))?,
+            other => {
+                return Err(format!(
+                    "{default_ref}: needs an additional step ({other:?}) auto-fetch does not automate yet -- fetch and convert manually"
+                ))
+            }
+        }
+    }
+
+    let local = store.local(&reference).ok_or_else(|| format!("{default_ref}: fetched but not found on disk (unexpected)"))?;
+    local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{default_ref}: non-UTF8 store path"))
+}
+
 /// One single-flight gate per model: the fetch's outcome plus the condvar
 /// that wakes every other concurrent `ensure` call waiting on it.
 type FetchGate = Arc<(Mutex<FetchState>, Condvar)>;
@@ -357,6 +414,38 @@ mod tests {
         // total == 0 has no meaningful percentage and must never divide by it.
         assert_eq!(next_download_pct_bucket(0, 0, None), None);
         assert_eq!(next_download_pct_bucket(500, 0, None), None);
+    }
+
+    #[test]
+    fn ensure_default_weights_fetches_converts_and_returns_the_brain_safetensors_path() {
+        let (config, weights) = tiny_qwen3_hf_files();
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
+        let store = store("supply-test-default-weights-qwen3");
+
+        let path = ensure_default_weights_with("qwen3", &store, &hub).unwrap();
+        assert!(path.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{path}");
+        assert!(std::path::Path::new(&path).exists(), "{path} must actually exist on disk");
+    }
+
+    #[test]
+    fn ensure_default_weights_is_a_clean_error_for_an_arch_with_no_default_ref() {
+        // t5encoder has no default_ref (no confirmed small upstream repo
+        // yet) -- must fail with a clear reason, never panic or silently
+        // pick something.
+        let store = store("supply-test-default-weights-no-ref");
+        let hub = FakeHub::new();
+        let err = ensure_default_weights_with("t5encoder", &store, &hub).unwrap_err();
+        assert!(err.contains("no default checkpoint known"), "{err}");
+    }
+
+    #[test]
+    fn ensure_default_weights_is_a_clean_error_for_an_unknown_arch() {
+        let store = store("supply-test-default-weights-unknown-arch");
+        let hub = FakeHub::new();
+        let err = ensure_default_weights_with("totally-bogus", &store, &hub).unwrap_err();
+        assert!(err.contains("not a registered architecture"), "{err}");
     }
 
     #[test]

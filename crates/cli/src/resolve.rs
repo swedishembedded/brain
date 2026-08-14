@@ -154,6 +154,7 @@ pub(crate) fn model_for_arch(arch: &str) -> Option<&'static str> {
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
+        let rest = maybe_inject_default_weights(arch, rest);
         return handler(&rest);
     }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
@@ -166,6 +167,34 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     }
     eprintln!("brain: architecture {arch:?} is registered but not reachable via the CLI yet (see `brain caps` and `brain serve`)");
     std::process::exit(1);
+}
+
+/// For an `infer`-shaped verb with no `--weights` already given, auto-fetch
+/// the architecture's default checkpoint
+/// ([`brain_arch::Arch::default_ref`], via
+/// [`crate::supply::ensure_default_weights`]) and inject `--weights <path>`
+/// -- what makes `brain infer zipdepth --in image=x.jpg` (no flags beyond
+/// the input) resolve a real checkpoint on its own. Passes `rest` through
+/// completely unchanged for every other verb, for an architecture with no
+/// `default_ref`, or when `--weights` is already present -- this never
+/// silently overrides an explicit flag with a fetched one.
+fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
+    let is_infer = rest.first().is_some_and(|v| crate::args::canon_verb(v) == "infer");
+    if !is_infer || rest.iter().any(|a| a == "--weights") {
+        return rest;
+    }
+    match crate::supply::ensure_default_weights(arch) {
+        Ok(path) => {
+            let mut rest = rest;
+            rest.push("--weights".to_string());
+            rest.push(path);
+            rest
+        }
+        Err(e) => {
+            eprintln!("brain: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -97,17 +97,24 @@ pub struct Arch {
     /// the dense Qwen3 importer). Empty when no HF-checkpoint fetch path
     /// exists yet for this architecture.
     pub hf: &'static [&'static str],
+    /// The `<vendor>/<repo>` this architecture auto-fetches by default when a
+    /// verb needs weights and none were named explicitly (`brain infer
+    /// zipdepth --in image=x.jpg` with no `--weights`). `None` when no small,
+    /// generally-useful default checkpoint is known, or when auto-fetch for
+    /// this architecture is not wired yet (`crates/cli/src/supply.rs`'s
+    /// `ensure_default_weights` is what actually resolves this - a `Some`
+    /// here is a claim that repo is real and fetchable, not that every verb
+    /// honors it yet).
+    pub default_ref: Option<&'static str>,
 }
 
+/// Every field [`arch!`] does not set explicitly, for its trailing
+/// functional-update `..DEFAULT`.
+const DEFAULT: Arch = Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None };
+
 macro_rules! arch {
-    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr) => {
-        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: None, hf: &[] }
-    };
-    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr, gguf: $gguf:expr) => {
-        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: Some($gguf), hf: &[] }
-    };
-    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr, hf: $hf:expr) => {
-        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, gguf: None, hf: $hf }
+    ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr $(, $key:ident : $val:expr)* $(,)?) => {
+        Arch { id: $id, display: $display, domain: $domain, source: $source, package: $package, $($key: $val,)* ..DEFAULT }
     };
 }
 
@@ -129,17 +136,17 @@ pub const ARCHS: &[Arch] = &[
     // "qwen3" is the real config.json `model_type` fallback value (used when
     // `architectures[0]` is absent), alongside the real `architectures[0]`
     // class name.
-    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"]),
-    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: "qwen35moe"),
+    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B")),
+    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
-    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2"),
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", default_ref: Some("LiquidAI/LFM2.5-350M")),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl"),
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm"),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3"),
-    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: "deepseek2-ocr"),
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("deepseek-ai/DeepSeek-OCR")),
     arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr"),
     arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr"),
     // -- Audio / TTS ------------------------------------------------------
@@ -147,7 +154,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // -- Vision: detection / segmentation / face / depth -------------------
-    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8"),
+    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2"),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-facenet"),
@@ -155,7 +162,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit"),
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo")),
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
@@ -213,6 +220,23 @@ pub fn public() -> impl Iterator<Item = &'static Arch> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn every_default_ref_parses_as_a_non_reserved_two_segment_ref() {
+        // A default_ref names a REAL upstream repo to auto-fetch, never a
+        // reserved brain/local/test vendor (those are never fetched) and
+        // never a stray third path segment.
+        for a in ARCHS {
+            let Some(r) = a.default_ref else { continue };
+            let (vendor, repo) = r.split_once('/').unwrap_or_else(|| panic!("{:?}: default_ref {r:?} has no '/'", a.id));
+            assert!(!repo.contains('/'), "{:?}: default_ref {r:?} has more than one '/'", a.id);
+            assert!(
+                !matches!(vendor, "brain" | "local" | "test"),
+                "{:?}: default_ref {r:?} names a reserved vendor -- reserved vendors are never fetched",
+                a.id
+            );
+        }
+    }
 
     #[test]
     fn ids_are_lowercase_alphanumeric_only() {
