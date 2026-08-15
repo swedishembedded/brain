@@ -32,6 +32,14 @@ use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::{Ops, Weight};
 
+/// The three `_on_gpu` tests below each build real `Gpu::new_wgpu` devices
+/// directly (same reason as `conv_dtype_roundtrip.rs`'s copy of this same
+/// lock - forcing a specific backend rather than sharing the ambient one via
+/// `gpu_core::testgpu::dev`), so under `cargo test`'s default multi-threaded
+/// run they can race their own independent device builds against each
+/// other. See `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL`.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The full façade kernel set `Ops::new` requires (mirrors
 /// `model::ops::tests::kernel_list` and `bf16_roundtrip.rs`'s own copy),
 /// extended with the B8 `embed`/`moe_linear_gated` bf16/f16 variants this
@@ -176,6 +184,7 @@ fn embed_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn embed_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("embed_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;
@@ -253,6 +262,7 @@ fn embed_tile_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn embed_tile_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("embed_tile_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;
@@ -369,6 +379,7 @@ fn moe_linear_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn moe_linear_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("moe_linear_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;

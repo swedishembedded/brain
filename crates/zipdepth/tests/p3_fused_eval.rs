@@ -28,6 +28,14 @@ use std::collections::HashMap;
 
 use gpu_core::Gpu;
 use paramstore::ParamStore;
+
+/// `fused_eval_gpu_matches_cpu` and `grouped_reg_conv_gpu_matches_cpu` each
+/// build a real `Gpu::new_wgpu` device directly (forcing the real backend
+/// rather than sharing the ambient one via `gpu_core::testgpu::dev`), so
+/// under `cargo test`'s default multi-threaded run they can race their own
+/// independent device builds against each other. See
+/// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL`.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use vision::blocks::{Act, Conv, ConvSpec};
 use vision::{ConvKernelIds, Ctx, Shape};
 
@@ -161,6 +169,7 @@ fn fused_eval_matches_unfused_reference() {
 ///    `conv_act*` with its native fast path, so only a GPU run proves the WGSL).
 #[test]
 fn fused_eval_gpu_matches_cpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         eprintln!("skipping fused GPU parity (MOE_SKIP_GPU_TESTS)");
         return;
@@ -256,6 +265,7 @@ fn qarep_fused_eval_matches_unfused() {
 ///    (`nc = min(8, cout_g - oc*8)`) is exactly what this pins.
 #[test]
 fn grouped_reg_conv_gpu_matches_cpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         eprintln!("skipping grouped GPU parity (MOE_SKIP_GPU_TESTS)");
         return;

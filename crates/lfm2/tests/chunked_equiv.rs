@@ -16,6 +16,20 @@ use std::collections::HashMap;
 use lfm2::config::LfmConfig;
 use lfm2::model::Lfm;
 
+/// `Lfm::new`/`new_chunked` have no `_on(gpu, ...)` variant - every
+/// constructor builds its own real device via `Gpu::new` internally (see
+/// `crates/lfm2/src/model.rs`'s `new_impl_alloc_inner`), so this file's two
+/// tests cannot share one via `gpu_core::testgpu::dev` the way most GPU tests
+/// do. Each test already builds/drops sequentially WITHIN itself (this file's
+/// own module doc), but under `cargo test`'s default multi-threaded run nothing
+/// stopped the two `#[test]` functions running concurrently on separate
+/// threads and racing their own independent device builds against each other
+/// - several concurrent devices on one card are hostile to the driver
+/// (`gpu_core::Gpu::share`'s own doc comment), the same hazard
+/// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` and
+/// `device_churn.rs`'s own copy of it exist to prevent. Same fix here.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Deterministic pseudo-random init (small values keep fp32 paths well-scaled).
 fn lcg_init(cfg: &LfmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = Lcg::new(seed | 1);
@@ -35,6 +49,7 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn chunked_matches_materialized() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = LfmConfig::tiny();
     let (b, t) = (2u32, 200u32);
     let n = (b * t) as usize;
@@ -83,6 +98,7 @@ fn chunked_matches_materialized() {
 /// padding without enlarging those allocations would overflow them.
 #[test]
 fn chunked_matches_materialized_b1() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = LfmConfig::tiny();
     let (b, t) = (1u32, 200u32);
     let n = (b * t) as usize;

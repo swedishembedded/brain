@@ -17,6 +17,18 @@
 use backend_api::Backend;
 use backend_vulkan::VulkanBackend;
 
+/// Each of this file's 3 tests calls `backend()` to build its own real
+/// Vulkan device directly (below `gpu_core::Gpu`, so `gpu_core::testgpu::dev`
+/// does not apply here) - under `cargo test`'s default multi-threaded run
+/// they can run concurrently and race their own independent device builds
+/// against each other on the same physical card, the exact driver hazard
+/// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` (and its
+/// copies elsewhere) exist to prevent. This is the actual root cause of a
+/// hang this file caused under a full `make test` run that was previously
+/// attributed to unproven cross-process contention - it was cross-thread
+/// contention within this one test binary all along. Same fix here.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn backend() -> Option<VulkanBackend> {
     match VulkanBackend::try_new(&[("axpy", kernels::AXPY)]) {
         Ok(b) => Some(b),
@@ -29,6 +41,7 @@ fn backend() -> Option<VulkanBackend> {
 
 #[test]
 fn kernel_times_reports_real_device_time_less_than_host_wall_clock() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.set_kernel_timing(true) {
         eprintln!("skipping: this queue cannot write timestamps (timestamp_valid_bits == 0)");
@@ -66,6 +79,7 @@ fn kernel_times_reports_real_device_time_less_than_host_wall_clock() {
 
 #[test]
 fn kernel_times_also_works_on_the_serialized_intel_workaround_path() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.set_kernel_timing(true) {
         eprintln!("skipping: this queue cannot write timestamps");
@@ -92,6 +106,7 @@ fn kernel_times_also_works_on_the_serialized_intel_workaround_path() {
 
 #[test]
 fn timing_is_off_by_default_and_disabling_reports_zero_calls() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if be.caps().numeric.f32 && be.set_kernel_timing(false) {
         // Explicitly disabled: dispatching must not accumulate anything.

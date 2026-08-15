@@ -23,6 +23,16 @@ use data::rng::Lcg;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 
+/// The three `_on_gpu` tests below each build real `Gpu::new_wgpu` devices
+/// directly (no `gpu_core::testgpu::dev` sharing - the whole point here is a
+/// specific, fixed backend per test, not a shared one), so under `cargo
+/// test`'s default multi-threaded run they can run concurrently and race
+/// their own independent device builds against each other - the same driver
+/// hazard `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` (and
+/// its copies in `device_churn.rs`, `crates/lfm2/tests/chunked_equiv.rs`)
+/// exist to prevent. Same fix here.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn skip_gpu() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
 }
@@ -267,6 +277,7 @@ fn conv2d_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn conv2d_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("conv2d_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;
@@ -286,6 +297,7 @@ fn conv1d_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn conv1d_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("conv1d_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;
@@ -305,6 +317,7 @@ fn conv_bias_bf16_and_f16_match_f32_reference_on_cpu() {
 
 #[test]
 fn conv_bias_bf16_and_f16_match_f32_reference_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip_gpu() {
         eprintln!("conv_bias_bf16_and_f16_match_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;

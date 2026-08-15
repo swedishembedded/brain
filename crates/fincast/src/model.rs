@@ -489,7 +489,7 @@ mod tests {
         let cfg = FincastConfig::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        let model = Fincast::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Fincast::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
 
         let context: Vec<f32> = (0..32).map(|i| 3.0 + (i as f32) * 0.5).collect();
         // reference standardizes by the FIRST patch -> denorm target is that
@@ -516,7 +516,7 @@ mod tests {
         let cfg = FincastConfig::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        let model = Fincast::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Fincast::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
         // logits for 2 tokens, 3 experts
         let glog = vec![3.0, 1.0, 2.0, /*t1*/ 0.0, 5.0, 4.0];
         let w = model.gate_weights(&glog, 2, 3);
@@ -554,7 +554,7 @@ mod tests {
             }
             weights.insert(k, v);
         }
-        let model = Fincast::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Fincast::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
         let context: Vec<f32> = (0..40).map(|i| 10.0 + (i as f32 * 0.3).sin() * 2.0).collect();
         let horizon = 6;
 

@@ -65,6 +65,15 @@ use gpu_core::Gpu;
 use model::ops::{KvPage, Ops, PagedDecodeShape};
 use model::paged::{BlockAllocator, BlockTable};
 
+/// `kv_bf16_long_context_parity_on_gpu` and `kv_bf16_append_rmw_shared_
+/// word_preserves_both_adjacent_slots_on_gpu` each build a real
+/// `Gpu::new_wgpu` device directly (same reason as `conv_dtype_roundtrip.rs`
+/// - forcing a specific backend rather than sharing the ambient one via
+/// `gpu_core::testgpu::dev`), so under `cargo test`'s default multi-threaded
+/// run they can race their own independent device builds against each
+/// other. See `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL`.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The full façade kernel set `Ops::new` requires, plus `decode_softmax_batched`
 /// (dispatched directly, not through `Ops` - softmax has no weight/cache
 /// operand to narrow, so it was never a candidate for the `Ops` façade).
@@ -413,6 +422,7 @@ fn kv_bf16_long_context_parity_on_cpu() {
 
 #[test]
 fn kv_bf16_long_context_parity_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         eprintln!("kv_bf16_long_context_parity_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;
@@ -428,6 +438,7 @@ fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_cpu() {
 
 #[test]
 fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         eprintln!("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
         return;

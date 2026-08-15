@@ -653,7 +653,7 @@ mod tests {
         let cfg = Chronos2Config::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        let model = Chronos2::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Chronos2::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
 
         let context: Vec<f32> = (0..40).map(|i| 3.0 + (i as f32) * 0.5).collect();
         let mean = context.iter().sum::<f32>() / context.len() as f32;
@@ -686,7 +686,7 @@ mod tests {
                 (k, (0..n).map(|i| (((i + seed) as f32) * 0.1).sin() * 0.05).collect())
             })
             .collect();
-        let model = Chronos2::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Chronos2::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
         let context: Vec<f32> = (0..40).map(|i| 3.0 + (i as f32 * 0.3).sin()).collect();
         let horizon = 6;
 
@@ -731,7 +731,7 @@ mod tests {
                 (k, data)
             })
             .collect();
-        let model = Chronos2::from_weights(cfg.clone(), &weights).unwrap();
+        let model = Chronos2::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &weights).unwrap();
 
         let context: Vec<f32> = (0..40).map(|i| 3.0 + (i as f32 * 0.3).sin()).collect();
         let horizon = 6;

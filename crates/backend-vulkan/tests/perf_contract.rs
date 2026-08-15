@@ -23,6 +23,13 @@
 use backend_api::Backend;
 use backend_vulkan::VulkanBackend;
 
+/// Each of this file's 4 tests calls `backend()` to build its own real
+/// Vulkan device directly (below `gpu_core::Gpu`, so `gpu_core::testgpu::dev`
+/// does not apply) - under `cargo test`'s default multi-threaded run they
+/// can race their own independent device builds against each other. Same
+/// hazard, same fix as this crate's `kernel_timing.rs`.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn backend() -> Option<VulkanBackend> {
     match VulkanBackend::try_new(&[("add2", kernels::ADD2)]) {
         Ok(b) => Some(b),
@@ -35,6 +42,7 @@ fn backend() -> Option<VulkanBackend> {
 
 #[test]
 fn step_creation_performs_no_queue_submits() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
     let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
@@ -56,6 +64,7 @@ fn step_creation_performs_no_queue_submits() {
 
 #[test]
 fn frame_loop_submits_are_bounded_per_frame() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
     let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
@@ -83,6 +92,7 @@ fn frame_loop_submits_are_bounded_per_frame() {
 
 #[test]
 fn transient_uniforms_are_recycled_across_flushes() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
     let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
@@ -128,6 +138,7 @@ fn transient_uniforms_are_recycled_across_flushes() {
 /// exactly one submit (the staging copy) here, same as everywhere else.
 #[test]
 fn storage_buffers_skip_staging_on_a_unified_memory_device() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.caps().unified_memory {
         eprintln!("skipping: this device is not unified memory (a real staging path is correct here)");

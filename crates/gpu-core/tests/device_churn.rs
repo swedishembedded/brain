@@ -12,8 +12,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static N: AtomicUsize = AtomicUsize::new(0);
 
+/// Every test in this file builds several independent real `Gpu::new()`
+/// devices in a loop by design (that's the churn under test) rather than
+/// sharing one via `gpu_core::testgpu` - so, unlike the rest of the suite,
+/// nothing here is protected from a sibling test's concurrent device churn
+/// racing against it. Several independently churning devices on one card at
+/// once is the exact driver deadlock `device_sharing.rs`'s own
+/// `DEVICE_SERIAL` avoids for its tests; this file needs the same one lock,
+/// held for each test's whole body.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn building_and_dropping_devices_in_sequence_does_not_exhaust_the_driver() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
@@ -40,6 +51,7 @@ fn building_and_dropping_devices_in_sequence_does_not_exhaust_the_driver() {
 #[test]
 #[ignore = "diagnostic, assertion-free: builds 12 live devices and only eprintln!s the count -- run by hand when investigating driver exhaustion, not in the default lane"]
 fn building_devices_while_holding_the_previous_ones_does_not_exhaust_the_driver() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
@@ -57,6 +69,7 @@ fn building_devices_while_holding_the_previous_ones_does_not_exhaust_the_driver(
 /// dies at the 7th, and the only difference left is how much each device did.
 #[test]
 fn devices_that_did_real_work_can_still_be_rebuilt() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
@@ -105,6 +118,7 @@ fn devices_that_did_real_work_can_still_be_rebuilt() {
 #[test]
 #[ignore = "diagnostic, assertion-free: 6x1.5s sleeps to characterise driver teardown timing, records a streak it never asserts on -- a lab-notebook entry (kept for its measured findings above), not a gate"]
 fn churn_with_delay_between_devices_extends_but_does_not_fix_the_streak() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }

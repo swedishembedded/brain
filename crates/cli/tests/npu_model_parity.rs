@@ -77,7 +77,8 @@ fn tiny_chronos2() -> (chronos2::Chronos2Config, chronos2::model::Chronos2, Stri
             (k, (0..n).map(|i| (((i + seed) as f32) * 0.1).sin() * 0.05).collect())
         })
         .collect();
-    let model = chronos2::model::Chronos2::from_weights(cfg.clone(), &weights).unwrap();
+    let model =
+        chronos2::model::Chronos2::from_weights_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), cfg.clone(), &weights).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("brain_c2_npu_parity_{}.safetensors", unique_id()));
     let tmp = tmp.to_str().unwrap().to_string();
@@ -167,7 +168,7 @@ fn tiny_fincast() -> (fincast::FincastConfig, fincast::model::Fincast, String) {
             (k, (0..n).map(|i| (((i + seed) as f32) * 0.1).sin() * 0.05).collect())
         })
         .collect();
-    let model = fincast::model::Fincast::from_weights(cfg.clone(), &weights).unwrap();
+    let model = fincast::model::Fincast::from_weights_on(gpu_core::testgpu::dev(fincast::model::PIPELINES), cfg.clone(), &weights).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("brain_fincast_npu_parity_{}.safetensors", unique_id()));
     let tmp = tmp.to_str().unwrap().to_string();
