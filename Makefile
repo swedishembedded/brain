@@ -198,6 +198,23 @@ test:
 	fi; \
 	exit $$rc
 
+# cargo-nextest: same tests as `test`, but each one runs as its own OS
+# process with a per-test timeout (.config/nextest.toml), not one shared
+# binary under one whole-suite timeout. `test`'s TEST_TIMEOUT is a real
+# deadlock guard, but it only fires once, for the WHOLE run, and does not say
+# which test hung - a single wedged GPU test (a fence wait or lock that never
+# returns) blocks every other test behind it for up to TEST_TIMEOUT seconds
+# with no attribution. Observed for real: several unrelated GPU tests each
+# independently hung for 10-30+ minutes under heavy concurrent GPU load
+# (multiple processes competing for the same physical device), with nothing
+# short of manually inspecting `/proc` to find which process and kill it.
+# nextest turns that into: this ONE named test is killed and reported after
+# ~90-190s, everything else keeps running. Requires `cargo install
+# cargo-nextest --locked` once; not yet the default `test` target since it
+# has not been run against the full workspace end to end, only smoke-tested.
+test/nextest:
+	cargo nextest run --release --offline --lib --bins --tests
+
 # Doc-tests: real coverage, but each crate links its own binary, so this is
 # minutes of linking for a handful of examples. Separate lane, not the default.
 test/doc:

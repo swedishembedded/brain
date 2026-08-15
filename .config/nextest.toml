@@ -1,0 +1,27 @@
+[store]
+dir = "target/nextest"
+
+# Process-per-test isolation plus a hard slow-timeout is the actual fix for a
+# real, repeatedly-observed class of bug: a GPU/NPU-touching test wedges (a
+# fence wait, or some other blocking call, that never returns) and the whole
+# `cargo test` binary -- and with it the entire suite -- hangs for as long as
+# the wrapping `timeout(1)` allows (Makefile's TEST_TIMEOUT, 2400s today),
+# with no indication of WHICH test caused it. nextest runs every test as its
+# own OS process, so one wedged test cannot block any other test, and
+# slow-timeout below turns "hangs until the outer 2400s timeout" into "this
+# ONE test is killed and reported after ~90s, by name."
+#
+# period/terminate-after chosen from this repo's own real test times: the
+# slowest legitimate (non-ignored, no real weights) test in this suite is
+# on the order of single-digit seconds; 60s is already generous headroom
+# above that, and 3 periods (~180s total, plus the default 10s SIGTERM grace
+# period) is comfortably short of the wedges observed in practice (which ran
+# 8-30+ minutes before being killed by hand).
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3 }
+status-level = "fail"
+final-status-level = "flaky"
+
+# Real-weight / heavy e2e tests are already opt-in via #[ignore] or an env-var
+# gate (BRAIN_QUICKSTART_E2E, etc.) and are not part of this default profile
+# at all -- nothing here needs a per-test override for them.
