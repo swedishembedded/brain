@@ -391,13 +391,13 @@ impl ResidentModel for ZImageResident {
         // (they build + drop within the call). fp32 delegates to
         // `s3dit::pipeline::hifi_cost_bytes`, which picks between the
         // 2-GPU-shard estimate and the real windowed-engine estimate from
-        // the SAME machine-shape decision (`gpu_core::devices::gpus().len()`)
+        // the SAME machine-shape decision (`gpu_core::devices::schedulable_gpu_count()`)
         // `DitEngine::build_from_source` itself makes — the number budgeted
         // here and the number the code actually allocates must be the same
         // expression, or this estimate silently outlives whichever engine
         // it was written for.
         if key.config.contains(":fp32:") {
-            let (vram, ram) = s3dit::pipeline::hifi_cost_bytes(gpu_core::devices::gpus().len());
+            let (vram, ram) = s3dit::pipeline::hifi_cost_bytes(gpu_core::devices::schedulable_gpu_count());
             return MemCost::new(vram, ram);
         }
         let vram = if key.config.starts_with("edit:") { 2u64 << 30 } else { 14u64 << 30 };

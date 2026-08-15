@@ -671,6 +671,25 @@ pub fn ambient_compute_set() -> &'static ComputeSet {
     })
 }
 
+/// How many GPUs a machine-shape decision may actually use RIGHT NOW - the
+/// `--device`/`BRAIN_DEVICE` restriction applied, not the machine's raw
+/// physical card count ([`gpus`]/`visible_gpu_count`). Every "should this
+/// model shard across N GPUs, or fall back to a single-GPU streaming window"
+/// decision (`s3dit::pipeline::hifi_needs_window` and its siblings) must read
+/// THIS, never `gpus().len()` directly - otherwise `--device gpu0` restricts
+/// nothing: the decision still sees every card the machine physically has,
+/// picks the multi-GPU shape, and the kernels that actually dispatch (which DO
+/// honour the restriction) either fail outright or silently touch a card
+/// outside the requested set.
+///
+/// Reads [`ambient_compute_set`] (the same single resolution `--device` goes
+/// through everywhere else), so it agrees with what `Gpu::new` can actually
+/// reach - a caller never needs its own env/CLI parsing to answer this.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn schedulable_gpu_count() -> usize {
+    ambient_compute_set().gpus.len()
+}
+
 /// Restrict this process to `cores` via `sched_setaffinity`.
 ///
 /// Uses the `libc` crate rather than a hand-rolled `extern "C"`. brain's build

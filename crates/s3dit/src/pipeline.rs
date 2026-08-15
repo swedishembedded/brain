@@ -214,7 +214,7 @@ impl DitEngine {
         if !hifi {
             return DitEngine::I8(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len));
         }
-        if hifi_needs_window(gpu_core::devices::gpus().len()) {
+        if hifi_needs_window(gpu_core::devices::schedulable_gpu_count()) {
             let window = window_blocks_from_env();
             let dit = ZImageDitWindowed::build_from_source(cfg.clone(), src, window, 1, lh, lw, cap_len, Some("gpu"));
             DitEngine::Windowed { dit, dit_path: dit_path.to_string(), cfg }
@@ -490,7 +490,7 @@ impl HotPipeline {
         // See default_bulk_gpu's doc: on a single-GPU box, defaulting to CPU
         // would only trade a smaller on-demand int8 encoder for a larger,
         // permanently resident fp32 one -- share the DiT's card instead.
-        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::gpus().len());
+        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::schedulable_gpu_count());
 
         // For the 2-card encoder split we interleave the builds: bulk shard on the
         // empty GPU `bulk`, THEN the DiT on GPU `dit_gpu` (while that card is still
@@ -573,17 +573,39 @@ impl HotPipeline {
         // put the VAE there. That frees the DiT card of the VAE's multi-GB decode
         // activations, raising the max image size (GPU 0 = DiT only). The latent
         // crosses DiT→VAE through host memory already, so no cross-device GPU copy.
-        // CPU/fp32-split encoders keep the VAE on the DiT card (unchanged).
+        // CPU/fp32-split encoders keep the VAE on the DiT card (unchanged) - UNLESS
+        // that card is the 2-GPU fp32 `Shard` engine's: measured on a real 24 GB
+        // P40 (`nvidia-smi` during the real Z-Image-Turbo checkpoint's `Shard`
+        // build) each card lands within half a GB of its 24 GB ceiling from the
+        // DiT shard's weights ALONE - the default wgpu backend's ~2.00x real-VRAM-
+        // per-uploaded-BYTE cost on this non-ReBAR card (a property of wgpu's
+        // Vulkan HAL, not the hardware; the fix is a different device backend,
+        // which this code path does not take) applied to "half the ~33 GB fp32
+        // checkpoint" already consumes essentially the whole 24 GB, independent of
+        // how the `cut` between the two cards is chosen (shifting blocks from one
+        // to the other does not create headroom - the SUM is already at the
+        // ceiling). There is no room left on EITHER card for the VAE's own weight
+        // upload (same per-byte cost), so it decodes on the CPU instead, exactly
+        // the reasoning `hifi`'s Qwen-4B encoder already applies to itself above,
+        // extended to the other GPU-resident piece of this same pipeline.
+        let vae_on_cpu = matches!(dit, DitEngine::Shard(_));
         let vae_card = match &enc {
-            Encoder::Gpu8(_) => enc_gpu.unwrap_or(dit_gpu),
+            Encoder::Gpu8(_) if !vae_on_cpu => enc_gpu.unwrap_or(dit_gpu),
             _ => dit_gpu,
         };
-        progress(&format!("building VAE decoder (GPU {vae_card})"));
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+        progress(&format!("building VAE decoder ({})", if vae_on_cpu { "CPU".to_string() } else { format!("GPU {vae_card}") }));
+        // `VaeDecoder::from_diffusers`'s `Some("cpu")`/`Some("gpu")` already pick
+        // the device explicitly regardless of the ambient default backend, so no
+        // `set_default_backend` toggle is needed here (unlike the encoder above,
+        // whose `Qwen::new_shard` has no such explicit-device parameter).
         let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-        let vae = gpu_core::devices::with_gpu(vae_card, || {
-            VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
-        })?;
+        let vae = if vae_on_cpu {
+            VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("cpu"))
+        } else {
+            gpu_core::devices::with_gpu(vae_card, || {
+                VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
+            })?
+        };
 
         Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi })
     }
@@ -616,7 +638,7 @@ impl HotPipeline {
             .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
             .transpose()?;
         let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
-        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::gpus().len());
+        let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, gpu_core::devices::schedulable_gpu_count());
 
         // Same three arms as build_adapted's !hifi cases (no fp32-split arm
         // -- that one only ever applies when hifi, which these entry points
