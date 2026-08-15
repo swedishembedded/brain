@@ -159,16 +159,31 @@ impl ParamStore {
             weight.insert(name.clone(), wbuf);
             match role {
                 Role::Trainable => {
-                    let z = vec![0.0f32; *numel];
-                    grad.insert(name.clone(), gpu.storage_init(name, &z));
-                    adam_m.insert(name.clone(), gpu.storage_init(name, &z));
-                    adam_v.insert(name.clone(), gpu.storage_init(name, &z));
+                    // `gpu.storage(numel)` - NOT `storage_init`, and no write
+                    // at all - for the zero-initialized grad/Adam moment
+                    // buffers. Measured precisely on this backend: a buffer
+                    // that is allocated and never written costs its real
+                    // 1.00x on this non-ReBAR card; ANY upload into it -
+                    // `storage_init` or a plain `storage()` + `write_f32`,
+                    // chunked or not - costs 2.00x, because the resident
+                    // cost tracks cumulative bytes ever WRITTEN, not the
+                    // call shape. wgpu already guarantees a freshly-created
+                    // buffer reads as zero, so the old `let z = vec![0.0;
+                    // numel]; storage_init(name, &z)` was paying that 2x for
+                    // a write whose only content was the zero the buffer
+                    // already had - three such buffers per trainable tensor
+                    // (grad, adam_m, adam_v) made this the dominant real
+                    // VRAM cost of a full (non-LoRA) finetune, invisible
+                    // from the nominal parameter count.
+                    grad.insert(name.clone(), gpu.storage(*numel as u64));
+                    adam_m.insert(name.clone(), gpu.storage(*numel as u64));
+                    adam_v.insert(name.clone(), gpu.storage(*numel as u64));
                     trainable.push((name.clone(), *numel));
                 }
                 Role::Offload => {
                     // grad on GPU (backward writes it); moments live in RAM.
-                    let z = vec![0.0f32; *numel];
-                    grad.insert(name.clone(), gpu.storage_init(name, &z));
+                    // Same zero-init, no-write `storage()` - see above.
+                    grad.insert(name.clone(), gpu.storage(*numel as u64));
                     offload.push((name.clone(), *numel));
                 }
                 Role::Frozen => {}

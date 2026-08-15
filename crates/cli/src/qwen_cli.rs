@@ -447,7 +447,28 @@ fn train(args: &[String], base: Option<&str>) {
             std::fs::copy(p, &out).unwrap_or_else(|e| panic!("seed finetune from {p}: {e}"));
         }
     }
-    match model::fit::<Qwen>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out))) {
+    // Full (non-LoRA) finetune of a real checkpoint: offload the AdamW
+    // moments to system RAM (`Role::Offload`, `qwen3::model::offload_adam`) so
+    // the GPU holds weight+grad (2x the checkpoint) instead of
+    // weight+grad+m+v (4x) - the same machine-shape reasoning
+    // `qwen3::finetune::Mode::FullOffload` documents. That mode was dead code
+    // before this change: `finetune()` below routes a plain (no `--lora`)
+    // `brain qwen3 finetune` through THIS function (`train`), never through
+    // `qwen3::finetune::finetune`, so nothing ever constructed
+    // `Mode::FullOffload` - only `finetune_lora`'s `Mode::Lora` was reachable.
+    // Only when `base` is `Some` (a real finetune): a from-scratch train
+    // starts from the small architecture above and has no checkpoint-scale
+    // weights to offload for, so it keeps the GPU-resident default.
+    let prev_offload = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
+    if base.is_some() {
+        std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
+    }
+    let result = model::fit::<Qwen>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out)));
+    match prev_offload {
+        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
+        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
+    }
+    match result {
         Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
         Err(e) => eprintln!("train error: {e}"),
     }
