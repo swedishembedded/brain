@@ -9,7 +9,7 @@
 use dit::rope::{tables_for_ids, RopeConfig};
 
 fn zimage_cfg() -> RopeConfig {
-    RopeConfig { axes_dims: vec![32, 48, 48], axes_lens: vec![1024, 512, 512], theta: 256.0 }
+    RopeConfig { axes_dims: vec![32, 48, 48], axes_lens: vec![1536, 512, 512], theta: 256.0 }
 }
 
 fn close(a: f32, b: f32, what: &str) {

@@ -105,7 +105,7 @@ impl ZImageConfig {
             patch_size: 2,
             f_patch_size: 1,
             axes_dims: vec![32, 48, 48],
-            axes_lens: vec![1024, 512, 512],
+            axes_lens: vec![1536, 512, 512],
             rope_theta: 256.0,
             t_scale: 1000.0,
             norm_eps: 1e-5,
@@ -161,11 +161,14 @@ pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -
 
 /// Sinusoidal timestep embedding (diffusers `TimestepEmbedder.timestep_embedding`,
 /// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]` — the shared
-/// `model::hostmath::timestep_embedding` with `flip_sin_to_cos = false`,
-/// `downscale_freq_shift = 0` (this used to be a local f32 re-derivation;
-/// the shared one accumulates the angle in f64 like the references do).
+/// `model::hostmath::timestep_embedding` with `flip_sin_to_cos = true` (that flag
+/// picks which half comes first: `true` puts cos first, matching Z-Image's fixed
+/// `cat([cos(args), sin(args)])`, the same way `flux1`/`flux2` call this same
+/// helper for their own "cos first" timestep embedding), `downscale_freq_shift =
+/// 0` (this used to be a local f32 re-derivation; the shared one accumulates the
+/// angle in f64 like the references do).
 pub(crate) fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
-    model::hostmath::timestep_embedding(t, dim, false, 0.0, max_period as f64)
+    model::hostmath::timestep_embedding(t, dim, true, 0.0, max_period as f64)
 }
 
 /// Host pre-block state: timestep conditioning, embedded image/caption tokens,

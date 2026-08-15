@@ -151,6 +151,18 @@ pub fn silu_slice(x: &[f32]) -> Vec<f32> {
 /// The angle is accumulated in `f64` and rounded once, as the references do.
 /// `dim` must be even (diffusers zero-pads an odd `dim`; this asserts rather
 /// than silently dropping the pad).
+///
+/// A wrong value for either knob does not crash and does not even look wrong
+/// at a glance: every downstream conditioning vector is still a smooth,
+/// plausible-looking number, just built from the wrong half-order or the
+/// wrong frequencies, so the model still runs and still produces AN image or
+/// AN output - usually a visibly worse one, but at small test scales the
+/// error can be too small to trip a `cosine >= 0.99`-style parity gate at
+/// all. Every caller in this repo today passes `flip_sin_to_cos = true`, but
+/// that is a fact about those models, not a default to inherit: when wiring
+/// up a new one, read ITS OWN timestep-embedding reference implementation
+/// and match its actual half-order and frequency-shift convention - do not
+/// copy whatever value a sibling model happens to pass here.
 pub fn timestep_embedding(
     t: f32,
     dim: usize,
