@@ -130,7 +130,15 @@ pub fn run_depth(args: &[String]) {
         return;
     }
     match args.first().map(|s| s.as_str()) {
-        Some("--image") | Some("image") | Some("infer") => run_image(args),
+        Some("--image") | Some("image") => run_image(args),
+        // `infer` is a bare verb token (unlike `image`, which doubles as a
+        // positional flag consuming the next arg as the path) -- `parse`
+        // below has no arm for it, so it must be stripped here rather than
+        // passed through, or `brain zipdepth infer --image x.ppm --weights
+        // w.pth` (equally, `brain infer zipdepth ...`, since `resolve.rs`
+        // injects nothing extra for zipdepth) hits `parse`'s catch-all as an
+        // "unknown option" and exits(2) before ever reading `--image`.
+        Some("infer") => run_image(&args[1..]),
         Some("calib") => run_calib(&args[1..]),
         Some("train") => run_train(&args[1..]),
         Some("--help") | Some("-h") | None => print!("{HELP}"),
