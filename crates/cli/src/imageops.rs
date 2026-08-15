@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `imageops` — deterministic, no-weights image utilities exposed through the
+//! `imageops` - deterministic, no-weights image utilities exposed through the
 //! generalized capability interface. They prove the whole image-output path of
 //! `brain do` end-to-end (typed params → an actual viewable image blob), and
 //! provide the pieces an inpainting workflow needs (a rectangle mask) without any
@@ -27,11 +27,22 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("h", ParamType::Int, "rectangle height, px").required())
         .output(BlobSpec::new("mask", Media::Mask, "the mask (white rect on black)"));
 
-    let gradient = size(ActionSpec::new("gradient", "render a smooth procedural gradient image — a deterministic, viewable test image"))
+    let gradient = size(ActionSpec::new("gradient", "render a smooth procedural gradient image - a deterministic, viewable test image"))
         .param(ParamSpec::new("style", ParamType::Enum(vec!["sunset".into(), "ocean".into(), "aurora".into()]), "palette").default(json!("sunset")))
         .output(BlobSpec::new("image", Media::Image, "the rendered image"));
 
-    Manifest::new(MODEL, "deterministic image utilities (mask + procedural renders) — no weights", vec![mask_rect, gradient])
+    let draw_boxes = ActionSpec::new("draw_boxes", "draw labeled detection boxes onto an image (e.g. yolov8 detect's own output)")
+        .param(ParamSpec::new("boxes", ParamType::Str, "JSON array of {bbox:[x1,y1,x2,y2], conf, class} in image coords - yolov8 detect's exact output shape").required())
+        .param(ParamSpec::new("thickness", ParamType::Int, "box edge thickness, px").default(json!(2)))
+        .input(BlobSpec::new("image", Media::Image, "the image the boxes were detected on"))
+        .output(BlobSpec::new("image", Media::Image, "the image with boxes and class/confidence labels drawn"));
+
+    let colorize = ActionSpec::new("colorize", "false-color a single-channel field (a depth map, a segmentation mask) for viewing")
+        .param(ParamSpec::new("colormap", ParamType::Enum(vec!["turbo".into(), "gray".into(), "grayinv".into()]), "palette").default(json!("turbo")))
+        .input(BlobSpec::new("image", Media::Image, "a 1-channel field, replicated to grey RGB (what save_blob writes for a Mask output)"))
+        .output(BlobSpec::new("image", Media::Image, "the false-colored image"));
+
+    Manifest::new(MODEL, "deterministic image utilities (mask + procedural renders + detection/mask visualization) - no weights", vec![mask_rect, gradient, draw_boxes, colorize])
 }
 
 pub struct ImageOps;
@@ -44,6 +55,8 @@ impl Provider for ImageOps {
         match name {
             "mask_rect" => Some(Arc::new(MaskRect)),
             "gradient" => Some(Arc::new(Gradient)),
+            "draw_boxes" => Some(Arc::new(DrawBoxes)),
+            "colorize" => Some(Arc::new(Colorize)),
             _ => None,
         }
     }
@@ -102,6 +115,111 @@ impl Action for Gradient {
             }
         }
         Ok(Outcome::new().set("style", json!(style)).blob("image", capability::blob::image_blob(&img, wd as u32, ht as u32, 3)))
+    }
+}
+
+/// One detection box, as `brain yolov8 detect`'s own `detections` JSON emits
+/// it (`{"bbox":[x1,y1,x2,y2],"conf":...,"class":N}`) - parsed loosely (a
+/// missing/malformed entry is skipped, not a hard error) so a caller piping
+/// live model output straight through never has to pre-validate it.
+struct Box_ {
+    bbox: [f32; 4],
+    conf: f32,
+    class: u32,
+}
+
+impl Box_ {
+    fn from_json(v: &serde_json::Value) -> Option<Box_> {
+        let b = v.get("bbox")?.as_array()?;
+        if b.len() != 4 {
+            return None;
+        }
+        let mut bbox = [0f32; 4];
+        for (i, slot) in bbox.iter_mut().enumerate() {
+            *slot = b[i].as_f64()? as f32;
+        }
+        Some(Box_ { bbox, conf: v.get("conf").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32, class: v.get("class").and_then(|c| c.as_u64()).unwrap_or(0) as u32 })
+    }
+}
+
+/// A small, high-contrast, cycling palette - enough to tell classes apart at
+/// a glance without a model-specific color table.
+const BOX_PALETTE: [[u8; 3]; 8] =
+    [[255, 64, 64], [64, 200, 255], [255, 210, 40], [80, 220, 100], [220, 100, 255], [255, 150, 60], [90, 255, 200], [255, 255, 255]];
+
+struct DrawBoxes;
+impl Action for DrawBoxes {
+    fn spec(&self) -> ActionSpec {
+        manifest().actions.into_iter().find(|a| a.name == "draw_boxes").unwrap()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        let mut img = imaging::pixels::hwc_to_rgb8(&hwc, w, h, 3, imaging::ChannelPolicy::RequireRgb)?;
+        let thickness = inv.get_i64("thickness").unwrap_or(2).clamp(1, 32) as u32;
+        let raw = inv.get_str("boxes").ok_or("draw_boxes: missing required param 'boxes'")?;
+        let boxes: Vec<Box_> = serde_json::from_str::<Vec<serde_json::Value>>(&raw)
+            .map_err(|e| format!("draw_boxes: 'boxes' is not a JSON array: {e}"))?
+            .iter()
+            .filter_map(Box_::from_json)
+            .collect();
+        progress(Progress::step(1, 1, format!("drawing {} box(es)", boxes.len())));
+        for b in &boxes {
+            let color = BOX_PALETTE[b.class as usize % BOX_PALETTE.len()];
+            let (x0, y0, x1, y1) = (b.bbox[0].round() as i64, b.bbox[1].round() as i64, b.bbox[2].round() as i64, b.bbox[3].round() as i64);
+            draw_rect(&mut img.px, w, h, x0, y0, x1, y1, thickness, color);
+            let label = format!("{}:{:.2}", b.class, b.conf);
+            let (lx, ly) = (x0.max(0) as u32, y0.saturating_sub(9).max(0) as u32);
+            imaging::viz::draw_text(&mut img.px, w, h, lx, ly, &label, 1, color);
+        }
+        Ok(Outcome::new().set("boxes_drawn", json!(boxes.len())).blob("image", capability::blob::image_blob(&img.to_hwc_unit(), w, h, 3)))
+    }
+}
+
+/// Draw a `thickness`-px rectangle outline, clamped to the frame - a demo
+/// annotation overlay, not a training-path op, so this stays host-side next
+/// to `imaging::viz::draw_text` rather than becoming a kernel dispatch.
+#[allow(clippy::too_many_arguments)]
+fn draw_rect(rgb: &mut [u8], w: u32, h: u32, x0: i64, y0: i64, x1: i64, y1: i64, thickness: u32, color: [u8; 3]) {
+    let (x0, y0) = (x0.clamp(0, w as i64 - 1) as u32, y0.clamp(0, h as i64 - 1) as u32);
+    let (x1, y1) = (x1.clamp(0, w as i64 - 1) as u32, y1.clamp(0, h as i64 - 1) as u32);
+    let mut set = |x: u32, y: u32| {
+        if x < w && y < h {
+            let o = ((y * w + x) * 3) as usize;
+            rgb[o] = color[0];
+            rgb[o + 1] = color[1];
+            rgb[o + 2] = color[2];
+        }
+    };
+    for t in 0..thickness {
+        for x in x0..=x1 {
+            set(x, y0.saturating_add(t));
+            set(x, y1.saturating_sub(t));
+        }
+        for y in y0..=y1 {
+            set(x0.saturating_add(t), y);
+            set(x1.saturating_sub(t), y);
+        }
+    }
+}
+
+struct Colorize;
+impl Action for Colorize {
+    fn spec(&self) -> ActionSpec {
+        manifest().actions.into_iter().find(|a| a.name == "colorize").unwrap()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        let map = imaging::viz::parse_colormap(&inv.get_str("colormap").unwrap_or_else(|| "turbo".into()))?;
+        // A saved Mask/depth blob is replicated to grey RGB (`save_blob`'s
+        // `ChannelPolicy::ReplicateFirst`), so channel 0 already carries the
+        // scalar field regardless of whether `image` came in as 1 or 3 chan.
+        let c = hwc.len() / (w as usize * h as usize).max(1);
+        let field: Vec<f32> = hwc.chunks_exact(c).map(|px| px[0]).collect();
+        progress(Progress::step(1, 1, "colorizing"));
+        let bounds = imaging::viz::Bounds::from_percentiles(&field, 0.02, 0.98);
+        let rgb = imaging::viz::colorize(&field, bounds, map);
+        let hwc_out = imaging::pixels::u8_to_unit(&rgb);
+        Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
 
