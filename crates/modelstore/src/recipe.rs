@@ -60,7 +60,162 @@ pub trait ArtifactRecipe: Send + Sync {
 /// and always matches (the historical, still-default family) -- more
 /// specific recipes get first refusal, ahead of it.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
-    vec![Box::new(ZimageRecipe), Box::new(YoloRecipe), Box::new(TransformersRecipe)]
+    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(YoloRecipe)];
+    v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
+    v.push(Box::new(TransformersRecipe));
+    v
+}
+
+/// A repo servable by downloading a small, fixed set of named files verbatim
+/// -- no tensor rewrite, no `config.json`/architecture gate -- and exposing
+/// them as a [`crate::CompoundManifest`]'s roles. This is [`ZimageRecipe`]'s
+/// shape generalised past Z-Image's own four roles: most of the small
+/// vision/audio checkpoints this store fetches are "grab N release files,
+/// point an env var at one of them (or at the directory holding all of
+/// them)", not "convert a tensor format".
+///
+/// `matches_listing` keys on one distinctive filename rather than the whole
+/// shape (unlike [`YoloRecipe`]'s `yolov8*.pt` glob) because these are each
+/// one specific upstream repo's own release artifact -- a name unlikely
+/// enough that a shape-only match is not a meaningful risk, and specific
+/// enough that ordering [`recipes`] ahead of [`TransformersRecipe`] cannot
+/// accidentally swallow an unrelated transformers-shaped repo.
+#[derive(Clone, Copy)]
+pub struct FilesRecipe {
+    id: &'static str,
+    /// The `resident_for`-style family tag written into the manifest. Every
+    /// current `FilesRecipe` row names a family with no model-dir-scan
+    /// dispatch arm (`resident_for_compound` logs and skips it, harmlessly --
+    /// these models are served through their own `BRAIN_*_WEIGHTS`/`_DIR` env
+    /// var, not the generic scan), so this is documentation more than a live
+    /// dispatch key today.
+    family: &'static str,
+    /// Filenames that must ALL be present in a repo's listing to claim it for
+    /// this recipe. More than one entry is for repos with no single
+    /// distinctively-named file (`Qwen3-ASR-1.7B` ships nothing but ordinary
+    /// `transformers`-repo names -- `config.json`, `vocab.json`, `merges.txt`
+    /// -- individually far too common to key on alone; the exact SET of
+    /// them, keyed together, is specific enough).
+    signature: &'static [&'static str],
+    /// Files downloaded verbatim from the repo root, each landing under its
+    /// own basename. Empty means "every file in the repo's listing" (nested
+    /// paths preserved as their own `dest_name`, same as `ZimageRecipe`
+    /// already does for its four role directories) -- for a repo whose
+    /// consumer needs more than `TransformersRecipe`'s curated
+    /// config/tokenizer/weights subset (`qwen3tts`'s nested
+    /// `speech_tokenizer/` codec checkpoint, `vocab.json`/`merges.txt` with
+    /// no unified `tokenizer.json`).
+    files: &'static [&'static str],
+    /// Role name -> path relative to the repo dir: one of `files` verbatim,
+    /// or `"."` for the whole directory (when a model's env var wants a
+    /// directory, not a single file -- `deepseek2ocr`'s two-GGUF pair).
+    roles: &'static [(&'static str, &'static str)],
+}
+
+/// Every [`FilesRecipe`] this store knows, keyed by [`FilesRecipe::id`] --
+/// the single source of truth both [`recipes`] (for planning) and
+/// `crates/cli/src/supply.rs::convert_files` (for the finish-side manifest
+/// write, via [`files_recipe`]) read.
+const FILES_RECIPES: &[FilesRecipe] = &[
+    FilesRecipe {
+        id: "sam2",
+        family: "sam2",
+        signature: &["sam2.1_hiera_tiny.pt"],
+        files: &["sam2.1_hiera_tiny.pt"],
+        roles: &[("weights", "sam2.1_hiera_tiny.pt")],
+    },
+    FilesRecipe {
+        id: "rrdbnet",
+        family: "rrdbnet",
+        // NOT `ai-forever/Real-ESRGAN`'s `RealESRGAN_x4.pth` -- same file
+        // size (67 040 989 bytes) as the real release but a different
+        // checksum, and `rrdbnet::import::read`/`validate` reject it
+        // (confirmed by running it for real: `brain rrdbnet upscale` fails
+        // with "set BRAIN_ESRGAN_WEIGHTS to an existing RealESRGAN_x4plus.pth"
+        // even with the var pointed straight at the downloaded file). This
+        // repo's copy loads and upscales correctly, verified the same way.
+        signature: &["RealESRGAN_x4plus.pth"],
+        files: &["RealESRGAN_x4plus.pth"],
+        roles: &[("weights", "RealESRGAN_x4plus.pth")],
+    },
+    FilesRecipe {
+        id: "deepseek2ocr-gguf",
+        family: "deepseek2ocr",
+        signature: &["DeepSeek-OCR-Q8_0.gguf"],
+        files: &["DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"],
+        roles: &[("dir", ".")],
+    },
+    FilesRecipe {
+        id: "qwen3tts",
+        family: "qwen3tts",
+        // Nested and distinctive enough that no other repo shape could match
+        // it by accident (unlike a bare `config.json`, which every
+        // transformers-shaped repo has).
+        signature: &["speech_tokenizer/config.json"],
+        // Whole repo: `TransformersRecipe`'s curated fetch (config.json,
+        // tokenizer.json/tokenizer_config.json, model.safetensors) misses
+        // the nested `speech_tokenizer/` codec checkpoint entirely, plus
+        // `vocab.json`/`merges.txt` this repo needs since it ships no
+        // unified `tokenizer.json`. `roles` is empty here on purpose --
+        // `crates/cli/src/supply.rs::convert` special-cases this recipe id
+        // to `convert_qwen3tts`, which runs the real Talker/MTP/codec/
+        // speaker conversion and writes its OWN two-role manifest, never
+        // `convert_files`.
+        files: &[],
+        roles: &[],
+    },
+    FilesRecipe {
+        id: "fastvlm",
+        family: "fastvlm",
+        // `llava_qwen.py` (the model's own HF-hub custom modeling file) is
+        // distinctive enough alone. Confirmed needed the hard way: routing
+        // `apple/FastVLM-0.5B` through `TransformersRecipe`'s curated fetch
+        // (config.json/tokenizer.json/tokenizer_config.json/model.safetensors)
+        // downloads a checkpoint that fails at load with "read .../vocab.json:
+        // No such file or directory" -- this repo has no unified
+        // `tokenizer.json`, only `vocab.json`+`merges.txt`+`added_tokens.json`,
+        // none of which the curated list fetches.
+        signature: &["llava_qwen.py"],
+        files: &[],
+        roles: &[("weights", ".")],
+    },
+    FilesRecipe {
+        id: "qwen3asr",
+        family: "qwen3asr",
+        // No single distinctively-named file (an ordinary transformers-repo
+        // shape) -- this exact combination is specific enough. Same gap as
+        // `fastvlm`, caught by inspection before running it for real:
+        // `Qwen/Qwen3-ASR-1.7B` ships `vocab.json`+`merges.txt`, no unified
+        // `tokenizer.json`, so `TransformersRecipe`'s curated fetch would
+        // miss the tokenizer files the same way it did for fastvlm.
+        signature: &["vocab.json", "merges.txt", "preprocessor_config.json"],
+        files: &[],
+        roles: &[("weights", ".")],
+    },
+];
+
+/// The `(family, roles)` a [`FilesRecipe::id`] carries, for the finish-side
+/// manifest write -- so `supply.rs::convert_files` does not hand-maintain a
+/// second copy of [`FILES_RECIPES`].
+pub fn files_recipe_roles(id: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
+    FILES_RECIPES.iter().find(|r| r.id == id).map(|r| (r.family, r.roles))
+}
+
+impl ArtifactRecipe for FilesRecipe {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn matches_listing(&self, listing: &[String]) -> bool {
+        self.signature.iter().all(|sig| listing.iter().any(|f| f == sig))
+    }
+
+    fn artifacts(&self, _reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        if self.files.is_empty() {
+            return Ok(listing.iter().map(|f| artifact(f.clone(), f.clone())).collect());
+        }
+        Ok(self.files.iter().map(|f| artifact(*f, *f)).collect())
+    }
 }
 
 /// An Ultralytics-shaped release repo (`Ultralytics/YOLOv8`, confirmed live
@@ -345,5 +500,70 @@ mod tests {
         let artifacts = YoloRecipe.artifacts(&r, &listing, &hub).unwrap();
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].file, "yolov8l.pt", "sorted first among the available variants");
+    }
+
+    /// The exact `facebook/sam2.1-hiera-tiny` file listing, confirmed live via
+    /// the HF API this session. Deliberately includes `config.json` and
+    /// `model.safetensors`, which is what makes this a real test of
+    /// ordering: without `FilesRecipe` claiming it ahead of
+    /// `TransformersRecipe`, this repo would fetch as a (wrong -- brain's
+    /// SAM2 loader wants the raw `.pt`) transformers-shaped model instead.
+    fn sam2_tiny_listing() -> Vec<String> {
+        [
+            ".gitattributes",
+            "README.md",
+            "config.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "sam2.1_hiera_t.yaml",
+            "sam2.1_hiera_tiny.pt",
+            "video_preprocessor_config.json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn files_recipe_matches_sam2_ahead_of_transformers_despite_a_config_json() {
+        let listing = sam2_tiny_listing();
+        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        assert_eq!(matched.id(), "sam2");
+    }
+
+    #[test]
+    fn files_recipe_downloads_only_its_named_files() {
+        let listing = sam2_tiny_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("facebook", "sam2.1-hiera-tiny", None);
+        let recipe = recipes().into_iter().find(|r| r.id() == "sam2").unwrap();
+        let artifacts = recipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].file, "sam2.1_hiera_tiny.pt");
+        assert_eq!(artifacts[0].dest_name, "sam2.1_hiera_tiny.pt");
+    }
+
+    #[test]
+    fn files_recipe_roles_are_looked_up_by_id_not_duplicated() {
+        let (family, roles) = files_recipe_roles("sam2").unwrap();
+        assert_eq!(family, "sam2");
+        assert_eq!(roles, &[("weights", "sam2.1_hiera_tiny.pt")]);
+        assert!(files_recipe_roles("no-such-recipe").is_none());
+    }
+
+    #[test]
+    fn deepseek2ocr_gguf_recipe_downloads_both_named_ggufs() {
+        let listing: Vec<String> = ["README.md", "DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"].into_iter().map(String::from).collect();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("ggml-org", "DeepSeek-OCR-GGUF", None);
+        let recipe = recipes().into_iter().find(|r| r.id() == "deepseek2ocr-gguf").unwrap();
+        assert!(recipe.matches_listing(&listing));
+        let artifacts = recipe.artifacts(&r, &listing, &hub).unwrap();
+        let files: Vec<&str> = artifacts.iter().map(|a| a.file.as_str()).collect();
+        assert_eq!(files, ["DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"]);
+        let (family, roles) = files_recipe_roles("deepseek2ocr-gguf").unwrap();
+        assert_eq!(family, "deepseek2ocr");
+        assert_eq!(roles, &[("dir", ".")]);
     }
 }
