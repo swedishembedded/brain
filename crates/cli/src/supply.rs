@@ -40,8 +40,37 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
         "transformers" => convert_transformers(store, vendor, repo),
         "zimage" => convert_zimage(store, vendor, repo),
         "yolo" => convert_yolo(store, vendor, repo),
-        other => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
+        // Real conversion (four output files, two roles), not a passthrough
+        // manifest -- special-cased ahead of the generic `files_recipe_roles`
+        // fallback, which would otherwise write the `FilesRecipe` row's
+        // (deliberately empty) `roles` verbatim. See `convert_qwen3tts`.
+        "qwen3tts" => convert_qwen3tts(store, vendor, repo),
+        other => match brain_modelstore::recipe::files_recipe_roles(other) {
+            Some((family, roles)) => convert_files(store, vendor, repo, family, roles),
+            None => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
+        },
     }
+}
+
+/// A [`brain_modelstore::recipe::FilesRecipe`]'s finish step: the files it
+/// downloaded need no tensor rewrite at all -- write the
+/// [`CompoundManifest`] naming their roles, reading the SAME
+/// `(family, roles)` table [`brain_modelstore::recipe::files_recipe_roles`]
+/// already exposes rather than a second copy of it living here (the
+/// `ZimageRecipe::ROLES` pattern [`convert_zimage`] uses, generalised past
+/// one hardcoded family).
+fn convert_files(store: &Store, vendor: &str, repo: &str, family: &str, roles_table: &[(&str, &str)]) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let mut roles = BTreeMap::new();
+    for (role, rel) in roles_table {
+        if !dir.join(rel).exists() {
+            return Err(format!("{vendor}/{repo}: convert: role {role:?} ({rel}) did not download"));
+        }
+        roles.insert(role.to_string(), rel.to_string());
+    }
+    let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: family.to_string(), roles };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
+    std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
 
 /// The yolo recipe: `YoloRecipe::artifacts` downloaded exactly one
@@ -94,6 +123,24 @@ fn convert_zimage(store: &Store, vendor: &str, repo: &str) -> Result<(), String>
     std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
 
+/// Families whose model crate loads the downloaded HF checkpoint directory
+/// directly (`BRAIN_QWEN3VL_WEIGHTS`/`BRAIN_FASTVLM_WEIGHTS`/
+/// `BRAIN_NEMOTRONASR`/`BRAIN_QWEN3ASR` each name a DIRECTORY, not a
+/// brain-format file) rather than through a `model.brain.safetensors`
+/// conversion -- see [`convert_transformers`]'s branch for why that changes
+/// both what "finish" writes and whether the upstream weights get deleted.
+/// Only families whose upstream repo ships a unified `tokenizer.json` --
+/// `TransformersRecipe`'s curated fetch (config.json, tokenizer.json,
+/// tokenizer_config.json, weights) is actually sufficient for those. `fastvlm`
+/// and `qwen3asr` do NOT belong here even though their model crate ALSO reads
+/// the directory verbatim: their upstream repos ship only `vocab.json`+
+/// `merges.txt` (no `tokenizer.json`), so they need the WHOLE repo, which is
+/// what their own `FilesRecipe` rows in `crates/modelstore/src/recipe.rs`
+/// fetch instead -- confirmed the hard way for `fastvlm` (a checkpoint
+/// converted through this curated path fails at load: "read .../vocab.json:
+/// No such file or directory").
+const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[&str] = &["qwen3vl", "nemotronasr"];
+
 /// The original (and still only) family: an HF `transformers`-shaped repo.
 /// Reads `<dir>/config.json` to pick the specific qwen/glm/lfm/gpt importer
 /// the same way `modelstore::plan`'s `TransformersRecipe` already gated the
@@ -109,6 +156,27 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let config: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(|e| format!("{vendor}/{repo}: config.json: {e}"))?;
     let arch = brain_modelstore::declared_architecture(&config).ok_or_else(|| format!("{vendor}/{repo}: config.json has no architecture"))?;
     let family = brain_modelstore::family_of_architecture(&arch).ok_or_else(|| format!("{vendor}/{repo}: unsupported architecture {arch:?}"))?;
+
+    // A handful of families read the downloaded HF directory VERBATIM at
+    // load time (own config.json + model.safetensors[.index.json] +
+    // tokenizer.json, HF tensor names used as-is by the model crate's own
+    // loader) -- there is no brain-format tensor rewrite to do, so "finish"
+    // is a manifest naming the directory itself as the `weights` role,
+    // never `convert_transformers`'s `model.brain.safetensors` step below.
+    // Critically this means `remove_upstream_weights` must NOT run either:
+    // for every other family the upstream `model.safetensors` is dead
+    // weight once the brain-format file exists; for these it IS what gets
+    // served.
+    if PASSTHROUGH_TRANSFORMERS_FAMILIES.contains(&family) {
+        return convert_files(store, vendor, repo, family, &[("weights", ".")]);
+    }
+    // qwen3tts's own repo (`speech_tokenizer/config.json` present) is claimed
+    // by the `qwen3tts` `FilesRecipe` ahead of `TransformersRecipe` in
+    // `recipes()`'s order, so `family == "qwen3tts"` is never actually
+    // reachable here -- `hf: &["Qwen3TTSForConditionalGeneration"]` on its
+    // `Arch` row exists for `family_of_architecture` completeness/documentation,
+    // not because this path converts it. See `convert_qwen3tts` (dispatched
+    // from `convert`'s `"qwen3tts"` recipe-id arm instead).
 
     let hf_dir = dir.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
     let out_path = dir.join("model.brain.safetensors");
@@ -146,6 +214,41 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     // cleanup must not fail an otherwise-successful convert.
     remove_upstream_weights(&dir);
     Ok(())
+}
+
+/// Qwen3-TTS's finish step: unlike every other `convert_transformers` family,
+/// this one produces FOUR converted files (not one `model.brain.safetensors`)
+/// via the exact same three importers `brain qwen3tts import` runs by hand
+/// (`qwen3tts::import::{import_talker,import_mtp}`, `mimi::import::import`
+/// for the codec, `ecapatdnn::import::import` for the speaker encoder) --
+/// this is that command's logic, reused, not reimplemented. The speaker
+/// encoder is best-effort: CustomVoice/VoiceDesign checkpoints ship none
+/// (`tts_model_type != "base"`), so a failure there is a warning, matching
+/// `tts_cli.rs::import`'s own policy, never a hard error for the whole fetch.
+///
+/// Two roles, both kept (no `remove_upstream_weights` -- the downloaded
+/// checkpoint dir doubles as `ckpt`, still needed for tokenizer/config at
+/// serve time): `ckpt` -> the repo dir itself, `weights_dir` -> the new
+/// `brain_tts/` subdirectory holding the four converted files.
+fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let ckpt = dir.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
+    let out_dir = dir.join("brain_tts");
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("{vendor}/{repo}: create {}: {e}", out_dir.display()))?;
+    let path = |name: &str| out_dir.join(name).to_str().map(str::to_string).ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"));
+
+    qwen3tts::import::import_talker(ckpt, &path("talker.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import talker: {e}"))?;
+    qwen3tts::import::import_mtp(ckpt, &path("mtp.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import mtp: {e}"))?;
+    // The speech tokenizer (codec) ships nested inside the Talker's own
+    // checkpoint dir, same default `tts_cli.rs::import` uses.
+    let codec_ckpt = dir.join("speech_tokenizer");
+    let codec_ckpt = codec_ckpt.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
+    mimi::import::import(codec_ckpt, &path("codec.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import codec: {e}"))?;
+    if let Err(e) = ecapatdnn::import::import(ckpt, &path("speaker.safetensors")?) {
+        residency::log::info(&format!("{vendor}/{repo}: import speaker: skipped ({e}) -- fine for CustomVoice/VoiceDesign checkpoints"));
+    }
+
+    convert_files(store, vendor, repo, "qwen3tts", &[("ckpt", "."), ("weights_dir", "brain_tts")])
 }
 
 /// See [`convert_transformers`]'s cleanup note. Handles both shapes
@@ -232,6 +335,20 @@ pub struct DefaultWeights {
 /// real network or `$HOME` -- the same split every other fetch path in this
 /// file (`StoreSupplier`, `convert_*`) already uses.
 fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<DefaultWeights, String> {
+    let local = fetch_default_ref(arch, store, hub)?;
+    let weights = local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{arch}: non-UTF8 store path"))?;
+    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
+    Ok(DefaultWeights { weights, tokenizer })
+}
+
+/// The plan/execute/convert core [`ensure_default_weights_with`] and
+/// [`ensure_env_weights_with`] both need: resolve `arch`'s `default_ref`,
+/// fetch and (when the recipe has one) run its finish step, and return the
+/// resulting [`brain_modelstore::LocalModel`] -- single-file, GGUF, or
+/// compound, whichever `default_ref` turned out to be. One implementation of
+/// "fetch this architecture's default checkpoint", not two call sites each
+/// re-driving `plan`/`execute`/`convert` their own way.
+fn fetch_default_ref(arch: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
     let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
@@ -259,10 +376,72 @@ fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Resu
         }
     }
 
-    let local = store.local(&reference).ok_or_else(|| format!("{default_ref}: fetched but not found on disk (unexpected)"))?;
-    let weights = local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{default_ref}: non-UTF8 store path"))?;
-    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
-    Ok(DefaultWeights { weights, tokenizer })
+    store.local(&reference).ok_or_else(|| format!("{default_ref}: fetched but not found on disk (unexpected)"))
+}
+
+/// The capability-path counterpart to [`ensure_default_weights`]: for each
+/// `(env var, role)` pair `arch`'s [`brain_arch::Arch::weights_env`] lists, if
+/// that variable is unset, fetch `default_ref` once and set every listed var
+/// from the fetched checkpoint's roles. Never overrides a variable already
+/// set -- the same rule [`crate::resolve::maybe_inject_default_weights`]
+/// follows for `--weights`. Called once, lazily, right before capability
+/// dispatch resolves a provider (`caps_cli.rs::run_do`), so `brain sam2
+/// segment ...` with no env exported becomes a real one-liner.
+///
+/// CLI-process-only, matching [`ensure_default_weights`]'s own scope note:
+/// `brain serve`'s `StoreSupplier` auto-fetch path is untouched, since
+/// mutating process env from a server-lifetime resident is exactly what
+/// `AGENTS.md` forbids -- a short-lived CLI invocation setting its OWN env
+/// before it does anything else is a different thing.
+///
+/// `BRAIN_AUTO_FETCH=0` (also `off`/`false`, case-insensitive, matching the
+/// spelling `run_cli.rs::build_auto_fetch_supplier` already accepts) disables
+/// this -- an unresolved var is left unset and the model's own "set
+/// BRAIN_X_WEIGHTS to ..." error fires exactly as it does without this
+/// function existing. Errors are reported, never silently swallowed, but
+/// deliberately non-fatal to the caller (`caps_cli.rs` still tries the
+/// provider afterward and lets its own from-env error explain what's
+/// missing) -- a fetch failure should not read differently from "you forgot
+/// to export the var" when auto-fetch was never in the picture for this
+/// architecture at all.
+pub fn ensure_env_weights(arch: &str) {
+    let disabled = std::env::var("BRAIN_AUTO_FETCH").ok().is_some_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "0" || v == "false" || v == "off"
+    });
+    if disabled {
+        return;
+    }
+    let Some(a) = brain_arch::by_id(arch) else { return };
+    if a.weights_env.is_empty() || a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty())) {
+        return; // nothing to resolve, or every var the caller needs is already set
+    }
+    let Some(root) = crate::model_dir::resolve(None) else { return };
+    let store = Store::new(root);
+    let hub = brain_modelstore::HfHub::new();
+    let local = match fetch_default_ref(arch, &store, &hub) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("brain: {arch}: auto-fetch failed ({e}) -- falling back to whatever BRAIN_* env is set");
+            return;
+        }
+    };
+    // Every `weights_env` architecture today fetches through a `FilesRecipe`
+    // (or `convert_transformers`'s passthrough branch), which always writes a
+    // `CompoundManifest` -- so `local.roles` is always `Some` here, even for
+    // a single-role case like `sam2`'s lone `"weights"` role. A future
+    // `default_ref` landing on a plain `Format::Safetensors`/`Gguf` conversion
+    // would need `local.weights` directly instead; that's not reachable by
+    // any current row, so it stays unhandled rather than a silent no-op.
+    for (var, role) in a.weights_env {
+        if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
+            continue;
+        }
+        match local.roles.as_ref().and_then(|r| r.get(*role)).and_then(|p| p.to_str()) {
+            Some(p) => std::env::set_var(var, p),
+            None => eprintln!("brain: {arch}: fetched but role {role:?} (for {var}) has no path (non-UTF8, not a compound checkpoint, or this recipe doesn't produce it)"),
+        }
+    }
 }
 
 /// One single-flight gate per model: the fetch's outcome plus the condvar
