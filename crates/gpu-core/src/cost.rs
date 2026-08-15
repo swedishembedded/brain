@@ -233,6 +233,20 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, nt) = (p(0)?, p(1)?, p(4)?);
             f(2 * m * k * nt, 4 * (m * k + nt * k + m * nt))
         }
+        // Sparse-MoE expert linear: params [m, k, n, n_experts, e_idx] - same
+        // (m, k, n) GEMM shape as `matmul` in the first three slots, plus two
+        // routing params that do not change the dispatch shape. A non-routed
+        // row early-exits before the K-reduction (moe_linear_gated.wgsl's own
+        // header), so the REAL flop count is data-dependent (scales with how
+        // many of the `m` rows are actually routed to this expert) - this
+        // formula reports the dense upper bound the dispatch shape implies,
+        // the same convention `kernel_cost`'s own doc uses for every other
+        // kernel here (a pure function of params/threads, never buffer
+        // contents).
+        "moe_linear_gated" => {
+            let (m, k, n) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * k * n, 4 * (m * k + n * k + m * n))
+        }
         // dX[m,k] = dY[m,n]·W[n,k]; dW[n,k] += dY[m,n]ᵀ·X[m,k].
         "matmul_dx" | "matmul_dx_reg" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
@@ -321,7 +335,14 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(2 * b * nh * cap * hd, 4 * (b * nh * cap + b * nh * hd) + b * nkv * cap * hd)
         }
         // params: [batch, kv_stride, block_size] — a copy into the paged pool.
-        "paged_kv_append_batched" | "paged_kv_append" => f(0, 8 * p(0)? * p(1)?),
+        // `paged_kv_append_batched_word` (B9's bf16-packed, one-thread-per-
+        // token sibling - see that kernel's own doc comment) shares this
+        // EXACT `Params` struct (batch, kv_stride, block_size) and moves the
+        // same batch*kv_stride elements, just with a different thread
+        // granularity, so the same formula applies.
+        "paged_kv_append_batched" | "paged_kv_append" | "paged_kv_append_batched_word" => {
+            f(0, 8 * p(0)? * p(1)?)
+        }
         "paged_kv_append_i8_clipped_batched" => {
             let (b, kv) = (p(0)?, p(1)?);
             f(2 * b * kv, 5 * b * kv)
@@ -607,6 +628,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "scale_chan" => {
             let total = p(0)?;
             f(total, 4 * (2 * total + p(1)?))
+        }
+        // params [total, m]: y[i] = s[i/m] * x[i] (per-row scalar scale, EDM
+        // c_in/c_skip/c_out/lambda(sigma) row factors - see scale_row.wgsl).
+        // One multiply per element; reads x (total) + the per-row scale array
+        // (total/m rows) once each, writes y (total) once.
+        "scale_row" => {
+            let total = p(0)?;
+            let m = p(1)?.max(1);
+            f(total, 4 * (2 * total + total / m))
         }
         // params [m, n]: out[m,n] += bias[n] / dbias[n] += Σ_m dy[m,n].
         "bias_add" => {
