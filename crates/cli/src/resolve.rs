@@ -208,6 +208,23 @@ pub(crate) fn model_for_arch(arch: &str) -> Option<&'static str> {
 }
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
+    // Unconditional and first: covers BOTH halves of this resolver.
+    // `ARCH_TO_MODEL` architectures have no `--weights` flag at all (`run_do`'s
+    // params are the action's own schema) and always need this; a handful of
+    // `ARCH_HANDLERS` architectures (`qwen3tts`) ALSO read `BRAIN_*` env vars
+    // as their own flags' defaults (`--ckpt` defaults to `$BRAIN_QWEN3TTS_CKPT`)
+    // rather than taking `--weights` the way `maybe_inject_default_weights`
+    // below expects, so this can't be scoped to just the `ARCH_TO_MODEL`
+    // branch. No-ops instantly for every architecture with an empty
+    // `weights_env` (everything else today).
+    //
+    // Skipped for `-h`/`--help`: help text must never block on a network
+    // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
+    // weights and the network is slow/unreachable) just to print itself.
+    let wants_help = rest.iter().any(|a| a == "-h" || a == "--help");
+    if !wants_help {
+        crate::supply::ensure_env_weights(arch);
+    }
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
         let rest = maybe_inject_default_weights(arch, rest);
         return handler(&rest);
