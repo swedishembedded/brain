@@ -197,7 +197,12 @@ struct CommonArgs {
 }
 
 fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<String, String>) {
-    let mut weights_dir = "out/tts".to_string();
+    // `--weights-dir` defaults from $BRAIN_QWEN3TTS_WEIGHTS when set, same as
+    // `--ckpt` below does from $BRAIN_QWEN3TTS_CKPT -- both are "where do the
+    // converted/original checkpoint files live" and both are documented,
+    // fetchable env vars, so one silently ignoring its var while the other
+    // honors it was a drift, not a choice.
+    let mut weights_dir = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "out/tts".to_string());
     // Checkpoint dir comes from $BRAIN_QWEN3TTS_CKPT (or `--ckpt`); never a baked-in
     // absolute path (see AGENTS.md: no absolute paths in source).
     let mut ckpt = std::env::var("BRAIN_QWEN3TTS_CKPT").unwrap_or_default();
