@@ -171,24 +171,33 @@ mod tests {
 
     #[test]
     fn save_ppm_creates_the_directory_and_reloads() {
+        // Only ever touch OUR OWN leaf dir, never `dir.parent()` - the parent
+        // (`brain-imaging-codec-test`) is shared by every test in this file,
+        // each in its own leaf subdirectory; removing the shared parent races
+        // with and deletes a concurrently-running sibling test's directory
+        // out from under it (`cargo test`'s default multi-threaded run hits
+        // this - see `save_dispatches_on_extension`'s own correct `&dir`
+        // pattern, which this used to diverge from).
         let dir = std::env::temp_dir().join("brain-imaging-codec-test/nested");
         let path = dir.join("tiny.ppm");
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
         save_ppm(&path, &tiny()).unwrap();
         assert_eq!(load(&path).unwrap(), tiny());
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_png_round_trips_through_the_image_decoder() {
+        // See `save_ppm_creates_the_directory_and_reloads`'s comment - only
+        // ever remove our own leaf dir, never the shared parent.
         let dir = std::env::temp_dir().join("brain-imaging-codec-test/png");
         let path = dir.join("tiny.png");
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
         save_png(&path, &tiny()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG file");
         assert_eq!(decode(&bytes).unwrap(), tiny());
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
