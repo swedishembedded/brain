@@ -1003,12 +1003,34 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
             let init_t = ((opts.steps as f32 * strength).round() as usize).min(opts.steps as usize);
             let start = (opts.steps as usize).saturating_sub(init_t);
             let sig = sig_full[start];
-            let lat_init: Vec<f32> = lat0.iter().zip(&noise).map(|(&x0, &nz)| (1.0 - sig) * x0 + sig * nz).collect();
 
             let mask_lat = init.mask.map(|m| {
                 let ds = downsample_mask(m, w, h, lw as usize, lh as usize);
                 feather_mask(&ds, lw as usize, lh as usize, init.feather as usize)
             });
+
+            // The masked (`mask=1`, "regenerate") region starts from PURE noise,
+            // not the strength-blended `(1-sigma)*lat0 + sigma*noise` used for
+            // image2image: that blend leaves a `(1-sigma)` sliver of the ORIGINAL
+            // latent under the mask - small in magnitude (e.g. 8% at the default
+            // strength 0.85) but STRUCTURED rather than random, which a
+            // diffusion model latches onto far more readily than noise of the
+            // same magnitude, pulling the "regenerated" region back toward the
+            // original content instead of the prompt. `mask=1` means "ignore the
+            // original here", so its starting point must not carry any of it.
+            // The kept (`mask=0`) region still uses the strength blend, for
+            // consistency with the per-step re-anchor below (which overwrites
+            // every kept cell every iteration regardless).
+            let lat_init: Vec<f32> = match &mask_lat {
+                Some(mask) => (0..n)
+                    .map(|idx| {
+                        let m = mask[idx % plane];
+                        let kept = (1.0 - sig) * lat0[idx] + sig * noise[idx];
+                        m * noise[idx] + (1.0 - m) * kept
+                    })
+                    .collect(),
+                None => lat0.iter().zip(&noise).map(|(&x0, &nz)| (1.0 - sig) * x0 + sig * nz).collect(),
+            };
             (lat_init, start, mask_lat, Some(lat0))
         }
     };
