@@ -1,0 +1,2 @@
+=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total -0.0 ms) ===
+finetune done: loss 17.6053 -> 0.3237  saved -> /data/workspace/resources/.quickstart-talker-lora.safetensors

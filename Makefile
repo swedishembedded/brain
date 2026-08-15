@@ -349,6 +349,16 @@ test/e2e/scheduler:
 test/e2e/ready: build
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
 
+# Heavy, opt-in, same shape as test/e2e/scheduler: re-runs README.md's Quick
+# start against REAL auto-fetched weights (tens of GB) and asserts the
+# cross-model agreement it claims (yolo/qwen3vl on the same generated image,
+# the TTS->ASR->LLM round trip). NOT part of test/e2e. Run `make
+# docs/quickstart` first (or BRAIN_QUICKSTART_E2E=1 scripts/demo/quickstart.sh)
+# to populate docs/quickstart/img/, which this asserts against rather than
+# re-fetching itself.
+test/e2e/quickstart: release
+	BRAIN_QUICKSTART_E2E=1 BRAIN_BIN=$(BRAIN) bats tests/e2e/quickstart.bats
+
 # Every fast (no real weights, no GPU) end-to-end bats suite, in one target.
 test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/ready
 
@@ -822,6 +832,15 @@ perf/smoke: release
 .PHONY: docs
 docs:
 	python3 docs/pandoc/build-docs.py
+
+# Regenerates README.md's Quick start assets: every one-liner in it, run for
+# real against auto-fetched weights (tens of GB on a cold cache), writing
+# docs/quickstart/img/*.png and the *.txt/*.json outputs the README quotes.
+# Heavy and network-bound, not compute-bound - see scripts/demo/quickstart.sh's
+# own docs. `test/e2e/quickstart` asserts on this target's output afterward.
+.PHONY: docs/quickstart
+docs/quickstart: release
+	scripts/demo/quickstart.sh
 
 # Real end-to-end s3dit (Z-Image) int8 generation (256x256) against the fetched
 # checkpoint under out/models/ - the no-OOM regression run from fa7b576.
