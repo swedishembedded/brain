@@ -2563,6 +2563,18 @@ mod tests {
         }
     }
 
+    /// `pipelines()` (the list `self.ops` is built from, via `Gpu::share` -
+    /// see that function's own doc comment) against `model::ops::
+    /// REQUIRED_KERNELS` - a pure name-set comparison, no `Gpu`/GPU device
+    /// required. Catches drift at `cargo test` time; the same class of bug
+    /// `qwen3::serve::ops_kernel_list` had (15 kernels short of
+    /// `REQUIRED_KERNELS`), which only surfaced on a live server's first
+    /// real request rather than here.
+    #[test]
+    fn pipelines_has_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(pipelines());
+    }
+
     /// `step_embed` must be indistinguishable from `step`: feeding token t's
     /// own embedding row produces the identical hidden state. This is the seam
     /// a VLM front-end trusts when it interleaves image rows with text tokens.

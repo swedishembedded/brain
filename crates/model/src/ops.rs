@@ -229,6 +229,45 @@ mod kname {
 /// them and risking a silent mismatch against [`Ops::new`]'s own check.
 pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
 
+/// Assert `list` (the `(name, wgsl_source)` pairs a caller is about to feed
+/// `Gpu::new`/`gpu_core::testgpu::dev`, or has already registered on some
+/// other `Gpu` it plans to build an [`Ops`] from) names every kernel in
+/// [`REQUIRED_KERNELS`]. Every real call site in this workspace that builds
+/// an `Ops` (`qwen3::model::pipelines`, `qwen3::serve::ops_kernel_list`,
+/// `gradcheck::bf16_train::kernel_list`, this module's own test-only
+/// `kernel_list`) hand-maintains its own kernel-name list rather than
+/// deriving it from `REQUIRED_KERNELS` directly, because several entries
+/// (the bf16/f16 storage-tier variants) are only available as `(name,
+/// source)` pairs via `kernels::template::dtype_variant`, computed at
+/// runtime, not as `const` values this crate could re-export as a ready-made
+/// list. That hand-maintenance is exactly how `qwen3::serve`'s
+/// `ops_kernel_list` silently drifted 15 kernels short of `REQUIRED_KERNELS`
+/// (missing `embed`, `moe_linear_gated`, every `paged_*_batched` bf16 tier,
+/// and `matmul_dx`/`matmul_dw`) without `Ops::new`'s own fail-fast check ever
+/// firing in a normal test run - `qwen3::serve::Engine` is only ever built
+/// eagerly by the residency pool's lazy `activate()` path (GPU activation
+/// on-demand, by design - many resident models share one GPU, so nothing is
+/// uploaded until a request actually needs it), not at `brain serve`
+/// startup, so the gap surfaced on a live server's first real request
+/// instead of at `cargo test`/CI time. Calling this function from every
+/// `Ops`-building call site's own test suite - a plain name-set comparison
+/// against [`REQUIRED_KERNELS`], no `Gpu` required - closes that gap: drift
+/// is now caught the moment `cargo test -p <crate>` runs, not three months
+/// later on a paying customer's request. Panics (via `assert!`) naming every
+/// missing kernel, rather than just the first one [`Ops::new`] would have
+/// hit.
+pub fn assert_kernel_list_complete(list: &[(&str, &str)]) {
+    let have: std::collections::HashSet<&str> = list.iter().map(|(name, _)| *name).collect();
+    let missing: Vec<&str> = REQUIRED_KERNELS.iter().filter(|name| !have.contains(*name)).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "kernel list is missing {} kernel(s) required by Ops::new: {missing:?} -- every model that \
+         builds an `Ops` must register the full façade kernel set (REQUIRED_KERNELS), not just the \
+         tiers it plans to use",
+        missing.len()
+    );
+}
+
 /// One linear layer's resident weight, at whichever tier
 /// [`Weight::upload`]'s `want.promote(caps)` landed on.
 pub enum Weight {
@@ -1162,6 +1201,29 @@ mod tests {
         want.sort_unstable();
         got.sort_unstable();
         assert_eq!(want, got);
+    }
+
+    /// [`assert_kernel_list_complete`] itself, exercised against this
+    /// module's own `kernel_list()` - the shared helper every OTHER
+    /// `Ops`-building call site's test suite also calls (`qwen3::model`,
+    /// `qwen3::serve`, `gradcheck::bf16_train`) must at minimum accept the
+    /// canonical, known-complete list this module maintains.
+    #[test]
+    fn assert_kernel_list_complete_accepts_the_canonical_list() {
+        assert_kernel_list_complete(kernel_list());
+    }
+
+    /// [`assert_kernel_list_complete`] must reject a list missing even one
+    /// required kernel, and name it in the panic message - the exact
+    /// property that would have caught `qwen3::serve::ops_kernel_list`'s
+    /// 15-kernel gap at `cargo test` time instead of on a live server's
+    /// first request.
+    #[test]
+    #[should_panic(expected = "embed")]
+    fn assert_kernel_list_complete_rejects_a_list_missing_embed() {
+        let without_embed: Vec<(&str, &str)> =
+            kernel_list().iter().filter(|(n, _)| *n != kname::EMBED).copied().collect();
+        assert_kernel_list_complete(&without_embed);
     }
 
     /// `kname`'s bf16/f16 name literals are plain consts (see that module's

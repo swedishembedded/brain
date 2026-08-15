@@ -519,4 +519,17 @@ mod tests {
              rel_gap={rel_gap:.3}"
         );
     }
+
+    /// This module's own `kernel_list()` against `model::ops::
+    /// REQUIRED_KERNELS` - a pure name-set comparison, no `Gpu`/GPU device
+    /// required, so unlike every other test in this module it is NOT gated
+    /// behind `MOE_SKIP_GPU_TESTS`. Catches drift (a kernel `Ops::new`
+    /// requires but this list forgets to register) at `cargo test` time -
+    /// exactly the class of bug `qwen3::serve::ops_kernel_list` had (15
+    /// kernels short of `REQUIRED_KERNELS`) that no GPU-gated test here would
+    /// have caught in an environment where `MOE_SKIP_GPU_TESTS` is set.
+    #[test]
+    fn kernel_list_has_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(kernel_list());
+    }
 }
