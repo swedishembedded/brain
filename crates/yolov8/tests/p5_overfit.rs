@@ -22,6 +22,7 @@
 //!   * `boxmath::dist_to_xyxy` maps (l,t,r,b) + anchor point + stride -> pixel
 //!     xyxy.
 //!   * `sigmoid(cls_logits)` -> per-anchor class scores.
+//!
 //! Recovery for a GT = some anchor whose ARGMAX class equals the GT class, whose
 //! sigmoid score on that class is "high", and whose decoded box has IoU>0.5 with
 //! the GT. Recall = fraction of GTs recovered.
@@ -56,14 +57,14 @@ fn sigmoid(z: f32) -> f32 {
 /// returns per-side distances flat `[N,A,4]`.
 fn decode_dist(box_logits: &[f32], na: usize, reg_max: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; na * 4];
-    for idx in 0..na * 4 {
+    for (idx, o) in out.iter_mut().enumerate() {
         let base = idx * reg_max;
         let mx = (0..reg_max).map(|i| box_logits[base + i]).fold(f32::MIN, f32::max);
         let sum: f32 = (0..reg_max).map(|i| (box_logits[base + i] - mx).exp()).sum();
         let e: f32 = (0..reg_max)
             .map(|i| i as f32 * (box_logits[base + i] - mx).exp() / sum)
             .sum();
-        out[idx] = e;
+        *o = e;
     }
     out
 }
