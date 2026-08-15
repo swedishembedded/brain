@@ -2,10 +2,20 @@
 
 brain is a Cargo **workspace** of many small, single-responsibility crates
 (currently in the neighborhood of 90). The engine is pure Rust + raw WGSL,
-**fp32-only / core-compute-only** (single bind group, ≤8 storage
-buffers/kernel, no atomics/subgroups/f16, `@workgroup_size(64)` apart from the
-register-tiled matmuls at 256) so the exact same kernels run on old desktop
-GPUs and on WebGPU in the browser.
+**core-compute-only** (single bind group, ≤8 storage buffers/kernel, no
+atomics/subgroups/f16, `@workgroup_size(64)` apart from the register-tiled
+matmuls at 256) so the exact same kernels run on old desktop GPUs and on
+WebGPU in the browser. Storage/activations are **fp32, never f16** - WGSL f16
+needs the optional `shader-f16` extension, which old GPUs and WebGPU do not
+reliably have, so it is never used. That is a **narrower** claim than
+"fp32-only": **int8 is a first-class, load-bearing compute path**, not a
+storage-only quantization - real DP4A dot-product WGSL kernels
+(`matmul_i8*.wgsl`, `moe_linear_gated_i8.wgsl`, `crates/kernels/wgsl/`) drive
+Qwen3.5's int8 paged KV cache (the *serving default*), `qwen3`/`s3dit`/
+`qwen35moe`'s `--precision int8` inference paths, and INT8 PTQ for the Intel
+NPU export. int8 activates the same DP4A hardware path fp16 would have used on
+a modern GPU, without needing `shader-f16` - so "no f16" did not mean "no
+reduced precision", and this doc should not have implied it did.
 
 `AGENTS.md` is the routing guide (which crate does what, task → file); this
 document is the *shape* of the workspace: how the layers stack and what may
