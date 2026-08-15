@@ -31,8 +31,8 @@ named on the model's own page (see
 
 | Architecture | Solves | Infer |
 |---|---|:---:|
-| [`fastvlm`](fastvlm.md) | image captioning | [x] |
-| [`qwen3vl`](qwen3vl.md) | image + text → text | [x] |
+| [`fastvlm`](fastvlm.md) ⤓ | image captioning | [x] |
+| [`qwen3vl`](qwen3vl.md) ⤓ | image + text → text | [x] |
 | [`deepseek2ocr`](deepseek2ocr.md) ⤓ | document image → text/markdown (OCR, tables, grounding) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
 
@@ -40,9 +40,9 @@ named on the model's own page (see
 
 | Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
-| [`nemotronasr`](nemotronasr.md) | streaming speech-to-text | [x] | |
-| [`qwen3asr`](qwen3asr.md) | offline speech-to-text | [x] | |
-| [`qwen3tts`](qwen3tts.md) | voice cloning / speech synthesis | [x] | [x] |
+| [`nemotronasr`](nemotronasr.md) ⤓ | streaming speech-to-text | [x] | [ ] |
+| [`qwen3asr`](qwen3asr.md) ⤓ | offline speech-to-text | [x] | [ ] |
+| [`qwen3tts`](qwen3tts.md) ⤓ | voice cloning / speech synthesis | [x] | [x] |
 
 ## Image generation and editing
 
@@ -51,7 +51,7 @@ named on the model's own page (see
 | [`s3dit`](s3dit.md) ⤓ | text-to-image | [x] | [x] |
 | [`flux2`](flux2.md) | text-to-image + reference-image editing | [x] | [x] |
 | [`codeformer`](codeformer.md) | blind face restoration | [x] | |
-| [`rrdbnet`](rrdbnet.md) | 4x super-resolution | [x] | |
+| [`rrdbnet`](rrdbnet.md) ⤓ | 4x super-resolution | [x] | |
 | [`vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
 | [`imgpipe`](imgpipe.md) | composed segment → restore → upscale, one call | [x] | |
 
@@ -61,7 +61,7 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`yolov8`](yolov8/readme.md) ⤓ | anchor-free object detection | [x] | [x] |
 | [`zipdepth`](zipdepth.md) | monocular relative depth | [x] | [x] |
-| [`sam2`](sam2.md) | promptable image segmentation | [x] | |
+| [`sam2`](sam2.md) ⤓ | promptable image segmentation | [x] | |
 | [`worldmirror2`](worldmirror2.md) | multi-view photos → 3D scene | [x] | |
 | [`splat`](splat.md) | 3D Gaussian Splatting render/fit | [x] | [x] |
 
