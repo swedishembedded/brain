@@ -135,8 +135,9 @@ FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
       [--guidance G]              # CFG, base variants only
       [--ref in.ppm]...           # reference images => editing mode
       weights via env: BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
-      served generically as model `flux2-klein`: brain caps flux2-klein,
-      brain flux2 text2image|edit|lora_train, and D-Bus (examples/imagegen);
+      served generically as model `flux2-klein`: brain caps flux2-klein, and D-Bus
+      (examples/imagegen); the manifest's text2image/edit/lora_train actions are
+      D-Bus/HTTP only today -- this `brain flux2` CLI reaches generate/infer, not those
       9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
 
 World models (playable action-conditioned video models; docs/models/world-models/)
