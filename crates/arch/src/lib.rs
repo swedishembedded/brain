@@ -106,11 +106,29 @@ pub struct Arch {
     /// here is a claim that repo is real and fetchable, not that every verb
     /// honors it yet).
     pub default_ref: Option<&'static str>,
+    /// `(env var, manifest role)` pairs this architecture's OWN weights
+    /// resolution reads (`BRAIN_SAM2_WEIGHTS`, `BRAIN_S3DIT_DIT`, ...) -- the
+    /// capability-path counterpart to [`default_ref`](Self::default_ref):
+    /// architectures reached via `brain <arch> <action>`'s generic capability
+    /// dispatch (never through the `--weights`-flag injection the
+    /// `ARCH_HANDLERS` path gets) resolve weights from environment variables
+    /// their own provider's `from_env` reads, one role each when
+    /// `default_ref` fetches a single file/directory, several when a compound
+    /// checkpoint has named parts (`s3dit`'s DiT/VAE/text-encoder/tokenizer
+    /// four). `crates/cli/src/supply.rs::ensure_env_weights` is what actually
+    /// resolves this: for each listed var that is UNSET, it fetches
+    /// `default_ref`, reads its role back from the store (a single-file
+    /// [`LocalModel::weights`] path for a `"weights"` role, else
+    /// [`LocalModel::roles`]), and sets the var -- never overriding one
+    /// already set. Empty when this architecture has no env-var-driven
+    /// weights resolution (an `ARCH_HANDLERS` architecture using `--weights`
+    /// directly, or one with no auto-fetch story yet).
+    pub weights_env: &'static [(&'static str, &'static str)],
 }
 
 /// Every field [`arch!`] does not set explicitly, for its trailing
 /// functional-update `..DEFAULT`.
-const DEFAULT: Arch = Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None };
+const DEFAULT: Arch = Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None, weights_env: &[] };
 
 macro_rules! arch {
     ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr $(, $key:ident : $val:expr)* $(,)?) => {
@@ -144,26 +162,33 @@ pub const ARCHS: &[Arch] = &[
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M")),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
-    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl"),
-    arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm"),
+    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")]),
+    arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3"),
-    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("deepseek-ai/DeepSeek-OCR")),
-    arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr"),
-    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr"),
+    // `default_ref` names the GGUF release repo (`ggml-org/DeepSeek-OCR-GGUF`),
+    // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
+    // repo with an empty `hf:` list here, so it would fall through to
+    // `TransformersRecipe` and fail `UnsupportedArchitecture`, and this is
+    // the checkpoint `crates/deepseek2ocr` actually loads (`BRAIN_DEEPSEEK_OCR_DIR`
+    // wants the two-GGUF pair, not an HF safetensors dir). See
+    // `crates/modelstore/src/recipe.rs`'s `deepseek2ocr-gguf` `FilesRecipe` row.
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"), weights_env: &[("BRAIN_DEEPSEEK_OCR_DIR", "dir")]),
+    arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B"), weights_env: &[("BRAIN_QWEN3ASR", "weights")]),
+    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"), weights_env: &[("BRAIN_NEMOTRONASR", "weights")]),
     // -- Audio / TTS ------------------------------------------------------
-    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts"),
+    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
-    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2"),
+    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"), weights_env: &[("BRAIN_SAM2_WEIGHTS", "weights")]),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-scrfd"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo")),
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[("BRAIN_S3DIT_DIT", "dit"), ("BRAIN_S3DIT_VAE", "vae"), ("BRAIN_S3DIT_QWEN", "text_encoder"), ("BRAIN_S3DIT_TOKENIZER", "tokenizer")]),
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
@@ -174,7 +199,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
-    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet"),
+    arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus"), weights_env: &[("BRAIN_ESRGAN_WEIGHTS", "weights")]),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
