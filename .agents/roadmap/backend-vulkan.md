@@ -134,49 +134,138 @@ constructors, inside a `#[cfg(test)]` module or `tests/` file with no
 catch a tenth instance before it causes another multi-minute hang instead of
 after.
 
-## Real, open bug: intermittent SIGSEGV at test-binary exit, seen in `brain-qwen3 --lib`
+## Real, open bug: intermittent SIGSEGV at test-binary exit, seen in `brain-qwen3 --lib` - very likely an NVIDIA driver defect, not fixable from this codebase
 
 Distinct from every hang above (which were all deterministic, 100%
 reproducible cross-thread device-construction races with a clear fix) - this
 one is a genuine flake: `cargo test -p brain-qwen3 --lib` (73 tests, all
 using the shared `gpu_core::testgpu::dev()` pool correctly, none of the
 patterns above) crashes with `signal: 11, SIGSEGV: invalid memory reference`
-roughly 1 run in 3, with **no panic message at all** - every individual
-test's `test result: ok` line prints first, THEN the crash, meaning the
-failure is in process teardown after every actual assertion already passed,
-not in any test's own logic. Confirmed non-deterministic across repeated identical runs on an
-otherwise-idle box (no other GPU process competing): clean, crash, clean,
-across three back-to-back attempts - not proof of an exact rate at this
-sample size, but enough to rule out "always crashes" or "never crashes."
+somewhere around 1 run in 3, with **no panic message at all** - every
+individual test's `test result: ok` line prints first, THEN the crash,
+meaning the failure is in process teardown after every actual assertion
+already passed, not in any test's own logic.
 
-**This matches a hazard `gpu_core::WeakGpu`'s own doc comment already names
-and partially defends against**: "a device that survives into process exit
-(leaked in a static, or torn down from an `atexit` hook) crashes the NVIDIA
-driver's worker threads during teardown... in-test drops never crash; a
-leaked static crashed intermittently; atexit teardown crashed every run."
-`testgpu::dev()`'s weak-reference pool exists specifically so a pooled
-device dies with its last real handle DURING a test, never surviving to
-process exit - but this crash's timing (strictly after every test's own
-`ok`, during the test harness's own final cleanup) is exactly the "survives
-to process exit" danger zone that doc comment describes, at roughly the
-"leaked static" crash RATE it measured ("intermittent", not "every run").
-Something in this crate's 73-test suite - which builds many distinct
-`testgpu::dev()` pool entries, one per distinct kernel-list key, all
-potentially still weakly-referenced right up to the test harness's own exit
-- is not draining as cleanly as the "dies in-test" design assumes. Not yet
-narrowed to which specific test/kernel-list combination is the last one
-standing when this fires, since the crash is silent (no panic, no test name
-attached) and non-deterministic (bisecting by disabling tests would need
-many repeated runs per candidate to get a confident signal at a ~33% base
-rate).
+**A real backtrace WAS captured** (`ptrace` is not actually blocked in this
+sandbox - it is YAMA-restricted to parent/child, which running the crashing
+binary directly under `gdb -batch -ex run -ex bt` satisfies; earlier
+sessions' "ptrace is blocked" conclusion, inherited from `fastvlm caption`'s
+still-genuinely-blocked case, was over-generalized). The crash is:
 
-**Not further root-caused this session**: like `fastvlm caption`'s
-documented segfault-on-exit (`.agents/roadmap/vlm.md`), this is a SIGSEGV
-with no Rust panic to backtrace, and this sandbox blocks `ptrace` entirely
-(even for a locally-owned process), so no core dump or live debugger
-attachment was possible. Given the crash is in process teardown after every
-assertion already passed, it does not indicate any of this session's actual
-fixes are wrong - `make test` runs that hit this flake and are re-run
-without changing anything reliably pass clean, which is why this was not
-treated as a blocker for the fixes already verified and committed. A real,
-open bug, not silently dropped.
+```
+Thread 33 "[vkps] Update" received signal SIGSEGV, Segmentation fault.
+#0  0x00007605e8c0e4c0 in ?? ()
+#1  0x000000006a80ef89 in ?? ()
+... (every frame "No symbol table info available", nonsensical addresses,
+     "Backtrace stopped: previous frame inner to this frame (corrupt stack?)")
+```
+
+`"[vkps] Update"` is a thread the NVIDIA Vulkan driver itself spawns and
+owns (not brain/wgpu/wgpu-hal Rust code - no symbols exist for it because
+it's inside the closed-source driver blob), doing background maintenance
+(the existing `DeviceShared::drop` doc comment's own theory: pipeline-cache
+optimisation) independently of anything the test process explicitly
+schedules. The fully corrupted stack (garbage frame pointers, no symbols
+anywhere) is the signature of memory corruption inside the driver's own
+internal state, not a Rust-level bug this codebase's source can be at fault
+for in the usual sense.
+
+**Three real mitigations were tried and empirically measured against a
+same-methodology baseline** (10-15 back-to-back native runs of the same
+built test binary each, `--test-threads=8` unless noted, same otherwise-idle
+box):
+
+| variant | crashes / runs |
+|---|---|
+| baseline (current committed code: drain + `init_lock()` + destroy) | 4 / 10 |
+| baseline, but `--test-threads=1` (fully serial, zero concurrent GPU work) | 3 / 8 |
+| + a 25ms sleep after the drain, before the actual destroy calls | 8 / 10 |
+| + `gpu_core::set_process_exiting()` called once at the pool's first build, so every teardown leaks (`mem::forget`) instead of destroying | 12 / 15 |
+
+Two findings fall out of this, both surprising relative to the existing
+`DeviceShared::drop`/`testgpu` doc comments' own theories:
+
+1. **Serial execution does not fix it.** The existing comments blame
+   concurrent GPU dispatch racing the driver's background thread
+   ("observed... while the test suite ran concurrently"). A fully serial
+   run - one test at a time, never two threads touching the GPU at once -
+   crashed at essentially the same rate (3/8) as the default concurrent run
+   (4/10). Thread contention within this process is not the dominant
+   mechanism; the existing causal story is likely incomplete or wrong.
+2. **Neither extra settle time nor skipping destruction entirely helped -
+   both made the observed rate measurably worse**, not better, at this
+   sample size. This corroborates `crates/gpu-core/tests/device_churn.rs`'s
+   own already-committed, already-`#[ignore]`d finding from a separate
+   investigation: even a 1.5s delay between tearing down one device and
+   building the next did not prevent this box's driver from destabilizing
+   after a handful of device-construction cycles ("rules out 'concurrent
+   creation' as the mechanism... narrows the remaining theory to
+   driver-side teardown/reclaim timing"). A 25ms settle window is far
+   short of that already-insufficient 1.5s, so its failure to help is
+   consistent, not surprising in hindsight.
+
+**Same crash, confirmed in `brain`'s own CLI binary, not just test
+binaries**: `.agents/roadmap/vlm.md` separately documented `brain fastvlm
+caption` reliably segfaulting on exit after correctly writing its output,
+previously written up as un-backtraceable ("this sandbox blocks `ptrace`
+entirely"). That conclusion was wrong - `ptrace` is YAMA-restricted to
+parent/child, not disabled, and running the crashing binary directly under
+`gdb -batch -ex run -ex bt` (gdb spawns it as gdb's own child, satisfying
+the restriction) catches it cleanly. The captured trace is
+frame-for-frame the same signature as the `brain-qwen3` crash above: a
+thread named `"[vkps] Update"` (the same driver-owned, symbol-free thread),
+the same corrupted-stack pattern, after the caption was already written
+correctly to disk. **These are the same bug**, not two unrelated ones -
+`fastvlm caption` and `brain-qwen3 --lib`'s test teardown both hit the same
+NVIDIA driver defect through different call paths (a real CLI command's
+device teardown vs. a test binary's pooled-device teardown).
+
+A fourth mitigation was tried against the `fastvlm caption` case
+specifically, informed by a real clue in a *non-crashing* `gdb` run: the
+exit-path backtrace showed `brain::main` falling through to Rust's normal
+process-exit machinery, which runs libc's `atexit` handlers, one of which
+`dlclose()`s `libEGL_nvidia.so.0` - unloading the driver's own shared
+library as part of ordinary process shutdown, a well-known real-world
+trigger for exactly this class of "driver's own background thread races
+its own unload" crash. The fix tried: after `main`'s dispatch returns
+normally, flush stdout/stderr explicitly and call `libc::_exit()` instead
+of letting Rust's runtime reach the normal atexit/dlclose path. It did not
+help - repeated `fastvlm caption` runs after this change still crashed (and
+in one run, hung instead, needing `SIGKILL`), because the actual device
+teardown happens EARLIER, inside `resolve::dispatch`'s own Rust-level
+`Drop` chain (`Gpu`/`DeviceShared` going out of scope as the caption
+function returns) - well before control would ever reach the new
+process-exit code. Reverted (also drops a `libc` dependency added to
+`crates/cli` only for this experiment).
+
+**One new observation from this fourth attempt**: the failure is not always
+a crash - one run hung instead, needing `SIGKILL` after 35s. A single
+underlying race manifesting as either a segfault or a hang depending on
+precise timing is the classic signature of a genuine data race, not a
+deterministic logic bug, and is consistent with the driver-defect theory
+above rather than anything specific to brain's own exit sequencing.
+
+**Conclusion: this reads as a genuine defect in the installed NVIDIA driver
+(570.195.03, from `nvidia-smi`) in how it handles a Vulkan device's teardown
+interacting with its own internal worker thread on repeated device churn -
+not a bug in brain's Rust code, and not something the userspace Vulkan/wgpu
+API calls this codebase makes can reliably avoid.** Four independent
+mitigations were tried (extra settle time, always-leak instead of destroy,
+forcing serial test execution, skipping the atexit/dlclose path at process
+end) - none helped, two measurably made the observed rate worse, and one
+(serial execution) directly falsified the existing code comments' own
+causal theory (concurrent GPU dispatch racing the driver's thread). All
+four were reverted; the committed baseline (drain + lock + destroy) remains
+the best of the options actually measured, even though it is not
+crash-free. Does not indicate any of this session's other fixes are wrong -
+the crash is in process teardown after every actual assertion/output
+already completed correctly, and a re-run that hits this flake reliably
+passes clean without changing anything.
+
+**If revisited**: try a newer/older NVIDIA driver build on this box (a
+version-specific driver bug is the most likely explanation given
+`nvidia-smi`'s reported 570.195.03 and the closed-source, symbol-free crash
+site), or file a driver bug report with the captured backtrace above and a
+minimal Vulkan repro extracted from `crates/gpu-core/tests/device_churn.rs`
+(which already demonstrates the same instability class without any of
+brain's own model code involved).

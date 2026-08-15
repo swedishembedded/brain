@@ -41,18 +41,41 @@ missed OOM) - 100% reproducible in isolation. Fixed by adding an explicit
 `true` (they only ever call `.generate()`). Verified: all 52
 `brain-qwen3vl` lib tests pass, including both of the above.
 
-## fastvlm - segfaults on exit after correctly writing its output
+## fastvlm - segfaults (sometimes hangs) on exit after correctly writing its output - same driver defect as the backend-vulkan/gpu-core teardown crash, root cause found, not fixable from this codebase
 
 `brain fastvlm caption` against the real `apple/FastVLM-0.5B` checkpoint
-reliably segfaults (core dumped) on process exit, EVERY time, but only
-after the caption has already been generated correctly and written to the
-requested output file - the crash is in some cleanup/Drop path, not in the
-computation itself. `RUST_BACKTRACE=1` gives nothing useful (SIGSEGV
-bypasses Rust's own panic machinery), and this sandbox blocks `ptrace`
-entirely (even for a locally-owned process), so a real backtrace has not
-been captured. Worked around in `scripts/demo/quickstart.sh` (`|| true`
-plus a check that the output file is actually non-empty) rather than
-blocking the quickstart on it - the real bug is still open.
+intermittently segfaults (occasionally hangs instead, needing `SIGKILL`) on
+process exit, but only after the caption has already been generated
+correctly and written to the requested output file - the failure is in some
+cleanup/Drop path, not in the computation itself.
+
+**Root cause found**: this sandbox does NOT block `ptrace` (an earlier
+write-up here was wrong) - it is YAMA-restricted to parent/child, and
+running the crashing binary directly under `gdb -batch -ex run -ex bt`
+(gdb spawns it as gdb's own child, satisfying the restriction) catches it
+cleanly. The captured backtrace is frame-for-frame identical to a separate
+crash documented in `.agents/roadmap/backend-vulkan.md`'s "intermittent
+SIGSEGV at test-binary exit" entry, seen independently in
+`brain-qwen3 --lib`'s test teardown: a thread
+named `"[vkps] Update"`, owned by the NVIDIA driver itself (no symbols -
+it's inside the closed-source driver blob), with a fully corrupted,
+symbol-free stack. **This is the same bug as that entry, not a separate
+one** - two different call paths (a real CLI command's device teardown here,
+a test binary's pooled-device teardown there) hitting the same underlying
+driver defect. See that entry for the full investigation: four independent
+mitigations were tried against this exact failure (extra settle time before
+device destruction, always-leak instead of destroy, forcing serial
+execution, skipping libc's `atexit`/`dlclose` path via `libc::_exit()`) -
+none helped, two made the measured crash rate worse, and one directly
+falsified the pre-existing theory that concurrent GPU dispatch was the
+trigger. The conclusion there applies here too: this reads as a genuine
+NVIDIA driver defect (570.195.03), not something userspace Vulkan/wgpu API
+sequencing can reliably avoid.
+
+Worked around in `scripts/demo/quickstart.sh` (`|| true` plus a check that
+the output file is actually non-empty) rather than blocking the quickstart
+on it - the real bug is open, tracked, and (per the investigation above)
+outside this codebase's ability to fix without a driver update.
 
 ## Moondream 3 - not yet done
 
