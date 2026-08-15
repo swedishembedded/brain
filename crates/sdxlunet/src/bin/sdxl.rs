@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `sdxl` — generate an image from a prompt with the SDXL stack.
+//! `sdxl` - generate an image from a prompt with the SDXL stack.
 //!
 //! Usage:
 //!   sdxl --root <sdxl-base-1.0> --prompt "..." [--out out.ppm]
@@ -68,7 +68,7 @@ fn main() {
     }
     let px: Vec<u8> = img.iter().map(|v| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8).collect();
     let rgb = imaging::Rgb8 { w: o.width, h: o.height, px };
-    match imaging::save_ppm(&out, &rgb) {
+    match imaging::save(&out, &rgb) {
         Ok(()) => eprintln!("sdxl: wrote {out}"),
         Err(e) => {
             eprintln!("sdxl: writing {out}: {e}");

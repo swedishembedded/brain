@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain flux2 …` — FLUX.2 Klein text-to-image + image editing.
+//! `brain flux2 …` - FLUX.2 Klein text-to-image + image editing.
 //!
 //! Weights via env (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`); images in/out are
 //! binary PPM P6 (the CLI-wide convention).
@@ -70,7 +70,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let variant = Flux2Config::from_name(&variant_name)?;
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
 
-    // load refs as [-1,1] CHW, center-cropped to /16 (shared helper — the
+    // load refs as [-1,1] CHW, center-cropped to /16 (shared helper - the
     // capability provider uses the same one)
     let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
     for r in &refs {
@@ -89,7 +89,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     // encode / denoise / VAE decode are the three costs a generation is made
     // of, and the split is what any perf claim has to be argued from.
     let mut phase = std::cell::RefCell::new((std::time::Instant::now(), String::new(), std::collections::BTreeMap::<String, f32>::new()));
-    // The CLI has no cancel front-end — an unarmed Default token never fires.
+    // The CLI has no cancel front-end - an unarmed Default token never fires.
     let (rgb, w, h) = pipe.generate(&prompt, &ref_imgs, &o, &Default::default(), |step, total, msg| {
         let mut p = phase.borrow_mut();
         let dt = p.0.elapsed().as_secs_f32();
@@ -111,7 +111,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             eprintln!("  {k:<20} {v:>7.2}s");
         }
     }
-    imaging::save_ppm(&out, &imaging::Rgb8::new(w, h, rgb)?)?;
+    imaging::save(&out, &imaging::Rgb8::new(w, h, rgb)?)?;
     eprintln!("flux2: wrote {out} ({w}x{h})");
     Ok(())
 }

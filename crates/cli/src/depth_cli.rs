@@ -335,9 +335,9 @@ fn run_image(args: &[String]) {
     if o.headless {
         let (cw, ch) = mode.canvas(w, h);
         let canvas = render(mode, colormap);
-        // `imaging::save_ppm` creates the parent directory itself.
+        // `imaging::save` creates the parent directory itself.
         let img = imaging::Rgb8::new(cw, ch, canvas.clone()).expect("canvas is cw*ch*3");
-        imaging::save_ppm(&o.out, &img).unwrap_or_else(|e| {
+        imaging::save(&o.out, &img).unwrap_or_else(|e| {
             eprintln!("brain zipdepth: {e}");
             std::process::exit(1);
         });

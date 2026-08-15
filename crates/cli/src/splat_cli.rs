@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain splat …` — 3D Gaussian Splatting scenes.
+//! `brain splat …` - 3D Gaussian Splatting scenes.
 //!
 //!   brain splat info   <scene.ply>
 //!   brain splat render <scene.ply> --out img.ppm [--width N --height N]
@@ -158,7 +158,7 @@ fn view(argv: &[String]) {
     let bg = vec3(&mut a, "--bg").unwrap_or([0.02, 0.02, 0.03]);
     let frames = a.opt_u32("--frames").map(|n| n as u64);
     a.finish();
-    let title = format!("brain splat — {path}");
+    let title = format!("brain splat - {path}");
     run_viewer(&s, &title, width, height, fov, bg, frames, None);
 }
 
@@ -201,7 +201,7 @@ impl FlyCam {
 
 /// The interactive loop, reused by `brain mirror demo`. Renders with the
 /// tiled pipeline at a quality-selectable fraction of the window size
-/// (1×, 1/2, 1/4 — SDL stretches back up), presents via wm-display.
+/// (1×, 1/2, 1/4 - SDL stretches back up), presents via wm-display.
 #[allow(clippy::too_many_arguments)]
 pub fn run_viewer(
     s: &Splats,
@@ -466,11 +466,11 @@ fn fit_cmd(argv: &[String]) {
     println!("{path} -> {out} (final mse {mse:.6})");
 }
 
-/// Tight RGB24 bytes → P6.
+/// Tight RGB24 bytes → an image file (P6, or PNG when `path` says `.png`).
 pub fn write_ppm_rgb(path: &str, rgb: &[u8], w: usize, h: usize) {
     let img = imaging::Rgb8::new(w as u32, h as u32, rgb.to_vec())
         .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
-    imaging::save_ppm(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    imaging::save(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
 }
 
 /// RGBA f32 → P6. Depth views are min-max normalized for visibility.
@@ -501,5 +501,5 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
     }
     let img = imaging::pixels::hwc_to_rgb8(&hwc, w as u32, h as u32, 3, imaging::ChannelPolicy::RequireRgb)
         .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
-    imaging::save_ppm(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    imaging::save(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
 }

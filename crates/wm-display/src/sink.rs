@@ -16,7 +16,7 @@ pub struct Hud {
     /// The action CONSUMED by the step that produced this frame (recorders
     /// pair it with the frame; see `record::RecorderSink`).
     pub action: u32,
-    /// True on the first frame emitted after a `UxKey::Reset` — i.e. this
+    /// True on the first frame emitted after a `UxKey::Reset` - i.e. this
     /// frame starts a new episode. Recorders close the previous episode when
     /// they see it.
     pub reset: bool,
@@ -74,7 +74,7 @@ impl FrameSink for PpmDirSink {
         let path = self.dir.join(format!("frame_{:06}.ppm", self.n));
         self.n += 1;
         if let Ok(img) = imaging::Rgb8::new(w, h, rgb.to_vec()) {
-            let _ = imaging::save_ppm(path, &img);
+            let _ = imaging::save(path, &img);
         }
     }
 }

@@ -298,7 +298,8 @@ fn load_audio_bytes(bytes: Vec<u8>) -> Result<Blob, String> {
 }
 
 /// Write a [`Blob`] to a file: images (raw HWC f32 + `{w,h,c}` meta) → binary PPM
-/// (P6, the brain image convention); everything else → raw bytes.
+/// (P6, the brain image convention) or PNG (see [`imaging::save`]); audio →
+/// a WAV file; everything else → raw bytes.
 fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
     match b.media {
         Media::Image | Media::Mask => {
@@ -310,7 +311,23 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
             // it as visible grey rather than refuse to save it. That is a real
             // choice, so it is spelled out rather than implied by the code.
             let img = imaging::pixels::hwc_to_rgb8(&hwc, w, h, c, imaging::ChannelPolicy::ReplicateFirst)?;
-            imaging::save_ppm(path, &img)
+            imaging::save(path, &img)
+        }
+        // Two conventions coexist among audio-producing actions: `qwen3tts
+        // synth` already packs a complete WAV byte stream (`meta.format ==
+        // "wav"`, or sniffable via the RIFF header), while `qwen3omnimoe`'s
+        // `speak`/`converse` emit headerless mono f32-LE PCM at `meta.
+        // sample_rate` (the same wire convention `--in audio=` reads on the
+        // way in). Writing the latter raw silently produced a file with no
+        // WAV header a player could not open; wrap it here instead of
+        // guessing at every actions's own meta shape a second time.
+        Media::Audio if b.meta.get("format").and_then(|v| v.as_str()) == Some("wav") || audio::asr_caps::is_wav(&b.bytes) => {
+            std::fs::write(path, &b.bytes).map_err(|e| e.to_string())
+        }
+        Media::Audio => {
+            let sample_rate = b.meta.get("sample_rate").and_then(|v| v.as_u64()).ok_or("audio blob has no sample_rate and is not already a WAV -- cannot write a header")? as u32;
+            let samples: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+            audio::wav::write(path, &samples, sample_rate).map_err(|e| e.to_string())
         }
         _ => std::fs::write(path, &b.bytes).map_err(|e| e.to_string()),
     }
