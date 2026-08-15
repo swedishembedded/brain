@@ -52,7 +52,7 @@ pub fn run_caps(argv: &[String]) -> i32 {
         Some(m) => {
             let mut c = vec![crate::resolve::model_for_arch(m).map(str::to_string).unwrap_or_else(|| m.clone())];
             if brain_arch::by_id(m).is_some() {
-                c.push(format!("brain/{m}"));
+                c.push(crate::resolve::catalog_id_for_arch_handler(m));
             }
             c
         }

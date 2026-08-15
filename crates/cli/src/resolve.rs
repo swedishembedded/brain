@@ -58,6 +58,23 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("toymoe", run_toymoe),
 ];
 
+/// For an [`ARCH_HANDLERS`] id whose crate's own catalog `MODEL` id is NOT
+/// simply `brain/<id>` -- `caps_cli::run_caps`'s "is this arch id ALSO a
+/// catalog entry" guess otherwise assumes that pattern, which every
+/// `ARCH_HANDLERS` architecture but this one follows. Without this row,
+/// `brain caps flux2` (and `brain caps flux2-klein`, which is not an
+/// `ARCH_HANDLERS`/`ARCH_TO_MODEL` id at all) both report "no such model" even
+/// though `crates/flux2/src/caps.rs` has a real, listed manifest.
+const ARCH_HANDLER_CATALOG_ID_OVERRIDES: &[(&str, &str)] = &[("flux2", "brain/flux2-klein")];
+
+/// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
+/// (most do, for `brain caps`/discovery, even though dispatch never routes
+/// through it) -- the override above when one is needed, else the
+/// `brain/<id>` pattern every other row follows.
+pub(crate) fn catalog_id_for_arch_handler(id: &str) -> String {
+    ARCH_HANDLER_CATALOG_ID_OVERRIDES.iter().find(|(a, _)| *a == id).map(|(_, m)| m.to_string()).unwrap_or_else(|| format!("brain/{id}"))
+}
+
 /// The bare sparse-MoE toy model used to be three unrelated top-level
 /// commands (`brain train`, `brain eval`, `brain generate`, no shared verb
 /// dispatch). Folded into one handler so it fits [`ARCH_HANDLERS`]'s shape;
@@ -93,6 +110,20 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("chronos2", "brain/chronos2"),
     ("fincast", "brain/fincast"),
     ("kronos", "brain/kronos"),
+    // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
+    // but, before this row existed, unreachable from the CLI - the same
+    // listed-but-unreachable gap `catalog.rs`'s own module docs warn about
+    // (`ai-forever/Real-ESRGAN` shipped with a manifest and a provider and was
+    // still unreachable because only the residency list had been updated).
+    // `flux2-klein`'s `text2image`/`edit`/`lora_train` have the same gap today
+    // and are tracked separately, not fixed here.
+    ("imageops", "brain/imageops"),
+    ("demo", "brain/demo"),
+    // Same gap again: imgpipe was documented as CLI-reachable, and every
+    // example used the long-dead `brain do brain/imgpipe run ...` spelling -
+    // with no `brain_arch` row and no entry here, `brain imgpipe run ...`
+    // was never actually reachable.
+    ("imgpipe", "brain/imgpipe"),
 ];
 
 enum Resolved {
@@ -106,18 +137,42 @@ enum Resolved {
     Empty,
 }
 
+/// Every id [`dispatch_arch`] can actually route, from any of the three
+/// tables this resolver draws on. `brain_arch::ARCHS` covers the common case
+/// (real architectures with a crate, an HF/GGUF fetch story); this resolver's
+/// OWN [`ARCH_HANDLERS`]/[`ARCH_TO_MODEL`] additionally list a couple of
+/// no-weights utility models (`imageops`, `demo`) that intentionally have no
+/// `brain_arch::Arch` row at all - no crate, nothing to fetch - so gating on
+/// `by_id` alone made them silently unreachable: `dispatch_arch` already
+/// checks `ARCH_TO_MODEL`, but `resolve` never got that far because it never
+/// recognized the token as an arch in the first place. Same "listed but
+/// unreachable" bug class `catalog.rs`'s module docs warn about, just one
+/// layer up (the CLI's OWN word, not the model catalog).
+fn known_arch_id(s: &str) -> Option<&'static str> {
+    if let Some(a) = brain_arch::by_id(s) {
+        return Some(a.id);
+    }
+    if let Some((id, _)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == s) {
+        return Some(id);
+    }
+    if let Some((id, _)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == s) {
+        return Some(id);
+    }
+    None
+}
+
 fn resolve(argv: &[String]) -> Resolved {
     let Some(first) = argv.first() else {
         return Resolved::Empty;
     };
-    if let Some(a) = brain_arch::by_id(first) {
-        return Resolved::Arch { arch: a.id, rest: argv[1..].to_vec() };
+    if let Some(id) = known_arch_id(first) {
+        return Resolved::Arch { arch: id, rest: argv[1..].to_vec() };
     }
     if let Some(second) = argv.get(1) {
-        if let Some(a) = brain_arch::by_id(second) {
+        if let Some(id) = known_arch_id(second) {
             let mut rest = vec![first.clone()];
             rest.extend_from_slice(&argv[2..]);
-            return Resolved::Arch { arch: a.id, rest };
+            return Resolved::Arch { arch: id, rest };
         }
     }
     if first == "import" {
@@ -236,6 +291,23 @@ mod tests {
     }
 
     #[test]
+    fn a_no_weights_utility_model_with_no_brain_arch_row_still_resolves() {
+        // `imageops`/`demo` are listed by `brain caps` (via `catalog::MODELS`)
+        // but carry no `brain_arch::Arch` row (no crate, nothing to fetch) --
+        // `known_arch_id` must fall through to `ARCH_TO_MODEL` for these, or
+        // `brain imageops gradient` regresses to "unknown command" even
+        // though `dispatch_arch` has always known how to route it.
+        for id in ["imageops", "demo"] {
+            assert!(brain_arch::by_id(id).is_none(), "{id} was added to brain_arch::ARCHS -- this test (and the ARCH_TO_MODEL fallback) can be deleted");
+            let Resolved::Arch { arch, rest } = resolve(&s(&[id, "gradient"])) else {
+                panic!("expected {id} to resolve as Resolved::Arch");
+            };
+            assert_eq!(arch, id);
+            assert_eq!(rest, s(&["gradient"]));
+        }
+    }
+
+    #[test]
     fn import_with_a_file_argument_is_not_mistaken_for_an_architecture() {
         let Resolved::ImportFile { rest } = resolve(&s(&["import", "model-Q4_K_M.gguf", "--out", "out.safetensors"])) else {
             panic!("expected Resolved::ImportFile");
@@ -286,8 +358,18 @@ mod tests {
 
     #[test]
     fn every_arch_to_model_id_is_a_real_registry_entry() {
+        // `imageops`/`demo`/`imgpipe` are the documented exception (see
+        // `known_arch_id`'s doc comment): no-weights utility models (`imgpipe`
+        // composes OTHER architectures' own weights) with no crate-with-a-port
+        // story of their own, so no `brain_arch::Arch` row makes sense for
+        // them. Every other `ARCH_TO_MODEL` id is a real architecture.
+        const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
         for (id, _) in ARCH_TO_MODEL {
-            assert!(brain_arch::by_id(id).is_some(), "{id:?} in ARCH_TO_MODEL has no brain_arch row");
+            if NO_ARCH_ROW.contains(id) {
+                assert!(brain_arch::by_id(id).is_none(), "{id:?} was added to brain_arch::ARCHS -- remove it from NO_ARCH_ROW");
+                continue;
+            }
+            assert!(brain_arch::by_id(id).is_some(), "{id:?} in ARCH_TO_MODEL has no brain_arch row (if intentional, add it to NO_ARCH_ROW above)");
         }
     }
 
