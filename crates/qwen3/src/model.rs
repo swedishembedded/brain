@@ -1537,9 +1537,19 @@ impl Qwen {
         self.img_embeds = self.gpu.storage(sz);
         self.d_img_embeds = self.gpu.storage(sz);
         self.mm_splice.set(Some((row0, n_rows)));
-        self.fwd_steps = self.forward_steps(self.b, self.t);
-        if !self.bwd_steps.is_empty() {
-            self.bwd_steps = self.build_backward_steps();
+        // A decode-only build (`from_reader_decode`/`from_tensors_decode`) never
+        // runs `forward()`/`backward()` (both assert `!self.decode_only`) - only
+        // the incremental KV-cache decode path, which reads the state just set
+        // above, not `fwd_steps`. Rebuilding the batched step graph here would
+        // bind the quadratic (non-decode-shaped) `scores`/`logits` buffers this
+        // build never allocated at their real batched-forward size (they're the
+        // `st(1)` dummies `new_impl` gives a decode-only build) - dead work at
+        // best, an oversized/undersized-buffer bind-group mismatch at worst.
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            if !self.bwd_steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
         }
     }
 
@@ -1591,9 +1601,14 @@ impl Qwen {
         self.mrope_cos = self.gpu.storage(sz);
         self.mrope_sin = self.gpu.storage(sz);
         self.mrope.set(true);
-        self.fwd_steps = self.forward_steps(self.b, self.t);
-        if !self.bwd_steps.is_empty() {
-            self.bwd_steps = self.build_backward_steps();
+        // See `enable_mm_splice`'s comment: a decode-only build never executes
+        // `fwd_steps`, only the KV-cache decode path (which reads `self.mrope`
+        // directly), so rebuilding the batched graph here is skipped for it.
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            if !self.bwd_steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
         }
     }
 
@@ -1648,7 +1663,11 @@ impl Qwen {
         let sz = (n_rows * self.cfg.d_model) as u64;
         self.deepstack_bufs = (0..n_levels).map(|_| self.gpu.storage(sz)).collect();
         self.deepstack.set(Some((row0, n_rows, n_levels)));
-        self.fwd_steps = self.forward_steps(self.b, self.t);
+        // See `enable_mm_splice`'s comment: skip the batched-graph rebuild for
+        // a decode-only build - `decode_steps` reads `self.deepstack` directly.
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+        }
     }
 
     /// Write DeepStack level `level`'s merged features `[n_rows, d_model]` for the

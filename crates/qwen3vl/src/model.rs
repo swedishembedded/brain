@@ -55,7 +55,23 @@ impl Qwen3Vl {
     ) -> Qwen3Vl {
         assert_eq!(ds_merger_weights.len(), vcfg.deepstack_indexes.len(), "one merger per DeepStack tap");
         let merge = vcfg.spatial_merge_size;
-        let mut decoder = Qwen::new(dcfg, 1, seq_len, dweights);
+        // `Qwen3Vl::generate` runs the decoder ONLY through its incremental
+        // KV-cache decode path (`decode_steps`/`generate_cb`) - never
+        // `forward()`/`backward()` (see this crate's `caps.rs` module doc).
+        // `Qwen::new` is the FULL BATCHED TRAINING constructor: every param
+        // Trainable (weight+grad+adam_m+adam_v = 4x the checkpoint's weight
+        // bytes resident on the GPU) plus quadratic `[heads,seq_len,seq_len]`
+        // attention-score and `seq_len*vocab` logits/d_logits buffers sized
+        // for a batched forward this model never runs. At the real 4B
+        // checkpoint's scale (~16 GB fp32 weights) that is >60 GB of
+        // optimizer state alone - genuine VRAM exhaustion on any 24 GB card,
+        // reported by wgpu as "Out of Memory" partway through weight upload
+        // (a real allocation failure this time, not a per-buffer-cap
+        // false-alarm). `Qwen::from_tensors_decode` is the purpose-built
+        // decode-only constructor: Frozen weights only (1x, not 4x) and
+        // `[heads,ctx]`-linear KV-cache scratch instead of the quadratic
+        // batched shape - exactly what a greedy-decode-only model needs.
+        let mut decoder = Qwen::from_tensors_decode(dcfg, dweights, seq_len);
         decoder.enable_mm_splice(image_row0, n_visual);
         decoder.enable_mrope();
         if !ds_merger_weights.is_empty() {
