@@ -14,7 +14,7 @@ that's what Qwen3 is for.
 | Inference             | [x] |
 | Training from scratch | [ ] |
 | INT8                   | [ ] |
-| CLI (`brain do`)       | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
 | Batched serving        | [x] |
@@ -33,16 +33,18 @@ To serve a checkpoint, point `BRAIN_LFM2` (and `BRAIN_LFM2_TOKENIZER`) at it.
 ## Running it
 
 ```bash
-brain lfm embed     --weights F --tokenizer tokenizer.json --text "..."
-brain lfm fill-mask --weights F --tokenizer tokenizer.json \
+brain lfm2 embed     --weights F --tokenizer tokenizer.json --text "..."
+brain lfm2 fill-mask --weights F --tokenizer tokenizer.json \
     --text "The capital of France is <|mask|>." --topk 5
-brain lfm finetune  --weights F --dataset <dir> [...]
-brain lfm eval      --weights F --dataset <dir>
-brain lfm data      [...]
-
-# via the generic capability surface
-brain do brain/lfm2 fill_mask --weights F --tokenizer tokenizer.json --text "..."
+brain lfm2 finetune  --weights F --tokenizer tokenizer.json --data <dir> [...]
+brain lfm2 eval      --weights F --tokenizer tokenizer.json --data <dir>
+brain lfm2 data      --input corpus.txt --tokenizer tokenizer.json --out data/lfm
 ```
+
+lfm2 also has a capability manifest (`brain caps brain/lfm2` lists it, and it
+is reachable over D-Bus/HTTP) - but it dispatches through the `brain lfm2 ...`
+verbs above on the CLI specifically, same as every other architecture with
+its own dedicated CLI module.
 
 To serve it over HTTP or D-Bus:
 

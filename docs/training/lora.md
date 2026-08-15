@@ -10,19 +10,19 @@ preference-optimization methods like DPO.
 ## Running a fine-tune
 
 ```
-brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
+brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
 ```
 
-- `--lora RANK` — the LoRA rank (higher = more capacity, more adapter
+- `--lora RANK` - the LoRA rank (higher = more capacity, more adapter
   parameters).
-- `--weights BASE` — the base model to fine-tune from, either a model-store
+- `--weights BASE` - the base model to fine-tune from, either a model-store
   reference or a direct path to a checkpoint.
-- `--adapter OWNER/NAME[:TAG]` — where to store the resulting adapter.
+- `--adapter OWNER/NAME[:TAG]` - where to store the resulting adapter.
   Running the same command again with the same `--adapter` overwrites that
   tag in place, so retraining is just rerunning the command.
-- `--dataset DIR` — a directory of chat-template-driven supervised
+- `--dataset DIR` - a directory of chat-template-driven supervised
   fine-tuning (SFT) data. Each training example is a multi-turn
-  conversation (a sequence of role-tagged messages — user, assistant, and
+  conversation (a sequence of role-tagged messages - user, assistant, and
   optionally tool calls/results), rendered through the base model's own
   chat template. Only the messages marked as trainable in a given example
   contribute to the loss, so a dataset can mix turns you want the model to
@@ -47,11 +47,11 @@ selectable models.
 ## Evaluating an adapter
 
 ```
-brain qwen eval
+brain qwen3 eval --weights BASE --jsonl held-out.jsonl [--adapter OWNER/NAME[:TAG]]
 ```
 
-scores a checkpoint on held-out data — either the base model alone, or the
-base model against an adapter side by side — reporting an explicit verdict
+scores a checkpoint on held-out data - either the base model alone, or the
+base model against an adapter side by side - reporting an explicit verdict
 on whether the adapter beats the base.
 
 ## Serving cost

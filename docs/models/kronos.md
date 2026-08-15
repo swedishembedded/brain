@@ -1,6 +1,6 @@
 # Kronos
 
-Kronos forecasts OHLCV (Open/High/Low/Close/Volume) bars — a candlestick
+Kronos forecasts OHLCV (Open/High/Low/Close/Volume) bars - a candlestick
 foundation model that tokenizes bar history and autoregressively predicts
 future bars. Reach for it when you need bar-level forecasts (not just a
 close-price series) for a tradable instrument, or when you want to
@@ -14,24 +14,24 @@ brain's three forecasting models with CLI-reachable fine-tuning.
 | Inference | [x] |
 | Training from scratch | [ ] |
 | LoRA fine-tune | [x] |
-| CLI (`brain do`) | [ ] |
+| CLI (`brain <arch> <action>`) | [ ] |
 | HTTP API | [ ] |
 | D-Bus | [x] |
 | Batched serving | [ ] |
 
 ## Getting the weights
 
-- **Model id:** `brain/kronos` — a reserved `brain/` id, never auto-fetched.
-- **Weights:** two directories, both required, no import step — they load
+- **Model id:** `brain/kronos` - a reserved `brain/` id, never auto-fetched.
+- **Weights:** two directories, both required, no import step - they load
   directly:
-  - `BRAIN_KRONOS_TOKENIZER` — the Kronos tokenizer model directory.
-  - `BRAIN_KRONOS_DECODER` — the Kronos decoder model directory (or a
+  - `BRAIN_KRONOS_TOKENIZER` - the Kronos tokenizer model directory.
+  - `BRAIN_KRONOS_DECODER` - the Kronos decoder model directory (or a
     `.safetensors` fine-tune checkpoint produced by `brain forecast
     finetune`, see below).
 
 ## Running it
 
-Kronos has no `brain kronos ...` subcommand of its own — it is reached
+Kronos has no `brain kronos ...` subcommand of its own - it is reached
 through the shared `brain forecast` verb and the shared `forecast` D-Bus
 action.
 
@@ -67,12 +67,12 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
   (override the decoder path for a single request).
 
 Fine-tuning (full fine-tune and LoRA) is available via `brain forecast
-finetune` — see [Fine-tuning a forecaster](../training/forecast-finetune.md)
+finetune` - see [Fine-tuning a forecaster](../training/forecast-finetune.md)
 for the full how-to.
 
 ## Hardware and limits
 
-- QLoRA is not supported — only full fine-tune and LoRA.
+- QLoRA is not supported - only full fine-tune and LoRA.
 - No HTTP route: reachable only via the `brain forecast` CLI and D-Bus.
 - Runs on CPU or GPU by default, and is NPU-eligible via a cached
   autoregressive rollout.

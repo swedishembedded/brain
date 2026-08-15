@@ -21,7 +21,7 @@ block spliced over the decoder's `<image>` placeholders.
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [ ] |
-| CLI (`brain do`)      | [x] |
+| CLI (`brain <arch> <action>`)      | [x] |
 | HTTP API              | [x] |
 | D-Bus                 | [x] |
 | Batched serving       | [ ] |
@@ -51,18 +51,20 @@ for the composite-level merge helper (`lora_init_map`) that exists so far.
 
 ## Getting the weights
 
-Model id: `deepseek-ai/DeepSeek-OCR` - not auto-fetched. The checkpoint is the
-GGUF pair `ggml-org/DeepSeek-OCR-GGUF` publishes:
+Model id: `deepseek-ai/DeepSeek-OCR`. The checkpoint is the GGUF pair
+`ggml-org/DeepSeek-OCR-GGUF` publishes, and it auto-fetches (⤓) on first CLI
+use, no env var needed:
 
 ```text
 <dir>/mmproj-DeepSeek-OCR-Q8_0.gguf     448 MB   SAM + CLIP + projector
 <dir>/DeepSeek-OCR-Q8_0.gguf            3.1 GB   the decoder, and the tokenizer
 ```
 
-Point `BRAIN_DEEPSEEK_OCR_DIR` at the directory holding **both**. If either is
-missing the model does not register at all - `brain caps` still lists it (the
-manifest is weights-free) but `brain do` and `brain serve` say which file is
-missing rather than failing mid-request.
+To point at a checkpoint you already have, set `BRAIN_DEEPSEEK_OCR_DIR` at
+the directory holding **both** files yourself. If either is missing the
+model does not register at all - `brain caps` still lists it (the manifest
+is weights-free) but the CLI and `brain serve` say which file is missing
+rather than failing mid-request.
 
 On first use brain writes one derived file beside them:
 
@@ -85,7 +87,7 @@ There is no dedicated `brain deepseekocr` verb - one generic action,
 brain caps deepseek-ai/DeepSeek-OCR
 
 BRAIN_DEEPSEEK_OCR_DIR=<dir> \
-  brain do deepseek-ai/DeepSeek-OCR generate \
+  brain deepseek2ocr generate \
     --prompt "<|grounding|>Convert the document to markdown." \
     --max_new 10 --in image=page.ppm --json
 ```

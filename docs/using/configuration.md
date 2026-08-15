@@ -1,7 +1,7 @@
 # Configuration
 
-brain has no config file. Every choice — which models `brain serve` activates,
-where they run, and how they're tuned — is a `BRAIN_*` environment variable,
+brain has no config file. Every choice - which models `brain serve` activates,
+where they run, and how they're tuned - is a `BRAIN_*` environment variable,
 set before you run `brain serve` or a `brain <model>` subcommand. This page is
 the complete reference, grouped by purpose.
 
@@ -20,7 +20,7 @@ unset simply isn't served (no error, it's just absent from `brain caps`).
 
 ### Backend workarounds & debugging
 
-Most users never need these — they exist for GPU-driver quirks and profiling.
+Most users never need these - they exist for GPU-driver quirks and profiling.
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ served, with no error.
 | Variable | Serves | Value |
 | --- | --- | --- |
 | `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` | Qwen3 chat (`generate`) | `.brain` checkpoint + `tokenizer.json` |
-| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import-gguf`) + `tokenizer.json` |
+| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
 | `BRAIN_LFM2` + `BRAIN_LFM2_TOKENIZER` | LFM2.5-Encoder (`fill-mask`/`embed`) | weights + `tokenizer.json` |
@@ -139,7 +139,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN3TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
 | `BRAIN_QWEN3TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
-| `BRAIN_QWEN3TTS_RES` | resources base for `brain tts serve`'s default engine paths | unset (flags supply paths) |
+| `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default engine paths | unset (flags supply paths) |
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
@@ -156,4 +156,4 @@ page under `docs/models/`.
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
-| `BRAIN_QWEN3TTS_RES` | resources base for `brain tts serve`'s default paths | unset |
+| `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |

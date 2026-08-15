@@ -1,15 +1,15 @@
 # Time-series forecasting
 
-Three foundation models — Chronos-2, FinCast, and Kronos — share one
+Three foundation models - Chronos-2, FinCast, and Kronos - share one
 contract: a numeric time-series context goes in, a probabilistic forecast
 comes out. They all sit behind the same `brain forecast` CLI verb and the
 same `forecast` D-Bus action; this page covers that shared surface. Each
 model's own page has its exact model id, environment variable(s), and any
 model-specific behavior:
 
-- [Chronos-2](chronos2.md) — general-purpose probabilistic forecaster
-- [FinCast](fincast.md) — financial forecaster, research/educational use only
-- [Kronos](kronos.md) — OHLCV bar forecaster, the only one with CLI-reachable fine-tuning
+- [Chronos-2](chronos2.md) - general-purpose probabilistic forecaster
+- [FinCast](fincast.md) - financial forecaster, research/educational use only
+- [Kronos](kronos.md) - OHLCV bar forecaster, the only one with CLI-reachable fine-tuning
 
 ## Support
 
@@ -18,18 +18,18 @@ model-specific behavior:
 | Inference | [x] |
 | Training from scratch | [ ] |
 | LoRA fine-tune | [x] |
-| CLI (`brain do`) | [ ] |
+| CLI (`brain <arch> <action>`) | [ ] |
 | HTTP API | [ ] |
 | D-Bus | [x] |
 | Batched serving | [ ] |
 
-Support varies by model — Kronos is the only one with a CLI-reachable
+Support varies by model - Kronos is the only one with a CLI-reachable
 fine-tune (including LoRA); see the individual pages linked above for the
 exact per-model breakdown.
 
 ## Getting the weights
 
-Each model has its own id and weight variable — none of the three are
+Each model has its own id and weight variable - none of the three are
 auto-fetched, so weights always have to be provided explicitly:
 
 | Model | Model id | Weights |
@@ -44,7 +44,7 @@ See each model's page for its exact import command.
 
 `brain forecast` has four subcommands, shared across all three models:
 
-- **`compare`** — run a backtest scenario battery against statistical
+- **`compare`** - run a backtest scenario battery against statistical
   baselines (and against any foundation models you point it at). This is
   the way to sanity-check a forecaster before trusting it in production: it
   fails if a model doesn't even beat a random-walk baseline.
@@ -53,7 +53,7 @@ See each model's page for its exact import command.
     [--chronos2 <weights>] [--fincast <weights>] \
     [--kronos-tokenizer <dir> --kronos-decoder <dir>]
   ```
-- **`serve`** — start a resident forecast server (stdio by default, or a
+- **`serve`** - start a resident forecast server (stdio by default, or a
   Unix socket / TCP listener), loaded with whichever models' weight flags
   you pass:
   ```bash
@@ -61,10 +61,10 @@ See each model's page for its exact import command.
     [--chronos2 <weights>] [--fincast <weights>] \
     [--kronos-tokenizer <dir> --kronos-decoder <dir>]
   ```
-- **`import`** — convert an upstream checkpoint into the brain
+- **`import`** - convert an upstream checkpoint into the brain
   `.safetensors` format Chronos-2 and FinCast serve from (see their pages
   for the exact form).
-- **`finetune`** — Kronos-only; see [its page](kronos.md) and
+- **`finetune`** - Kronos-only; see [its page](kronos.md) and
   [Fine-tuning a forecaster](../training/forecast-finetune.md).
 
 Every resident exposes one `forecast` D-Bus action: input blob `context`
@@ -91,7 +91,7 @@ full runnable invocations per model.
 
 ## Hardware and limits
 
-- None of the three models have an HTTP route today — only the `brain
+- None of the three models have an HTTP route today - only the `brain
   forecast` CLI and the `forecast` D-Bus action.
 - Serving handles requests sequentially; there is no batched forward pass
   across multiple in-flight forecast requests yet.

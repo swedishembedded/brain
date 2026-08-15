@@ -12,20 +12,27 @@ assistant pipeline - all running locally, no external TTS service.
 |---|---|
 | Inference             | [x] |
 | LoRA fine-tune         | [x] |
-| CLI (`brain do`)       | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [x] |
 
 ## Getting the weights
 
-Model id: `brain/qwen3tts`. Reserved vendor `brain/` - never auto-fetched; you
-need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
+Model id: `brain/qwen3tts`. `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Base only, the
+variant with a speaker encoder for voice cloning) auto-fetches (⤓) on first
+CLI use - no env var, no manual `import` step. That default run:
+downloads the checkpoint (including its nested `speech_tokenizer/` codec),
+converts it exactly the way `brain qwen3tts import` does by hand (below),
+and points `--weights-dir`/`--ckpt` at the result.
+
+For a CustomVoice or VoiceDesign checkpoint, or one you already have
+locally, convert it yourself:
 
 1. Convert the upstream HF checkpoint into brain's own checkpoint format:
 
    ```bash
-   brain tts import --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
+   brain qwen3tts import --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
      [--codec-ckpt <dir>] [--speaker-ckpt <dir>] \
      --out-dir out/tts
    ```
@@ -38,8 +45,9 @@ need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
 2. Point the CLI or the server at the imported directory and the original HF
    checkpoint (for its tokenizer/config):
 
-   - `--weights-dir` (CLI flag, defaults to `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS`
-     (D-Bus serving) - the directory from step 1.
+   - `--weights-dir` (CLI flag, defaults to `$BRAIN_QWEN3TTS_WEIGHTS` else
+     `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS` (D-Bus serving) - the directory
+     from step 1.
    - `--ckpt` (CLI flag) or `BRAIN_QWEN3TTS_CKPT` - the original HF checkpoint
      directory.
 
@@ -48,14 +56,14 @@ need a local Qwen3-TTS checkpoint (Base, CustomVoice, or VoiceDesign).
 Speaker-free synthesis:
 
 ```bash
-brain tts synth --text "Hello from brain." --out out.wav \
+brain qwen3tts synth --text "Hello from brain." --out out.wav \
   --weights-dir out/tts --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base
 ```
 
 Voice cloning from a reference clip:
 
 ```bash
-brain tts clone \
+brain qwen3tts clone \
   --text "This sentence is spoken in the reference speaker's voice." \
   --ref voice.wav --ref-text "transcript of voice.wav" \
   --out demo.wav \
@@ -66,17 +74,14 @@ Instructed voice design / preset speakers (CustomVoice/VoiceDesign
 checkpoints only):
 
 ```bash
-brain tts design --text "..." --instruct "a calm, low voice" \
+brain qwen3tts design --text "..." --instruct "a calm, low voice" \
   [--speaker NAME] --out out.wav
 ```
 
-Generic capability CLI (same synthesis, uniform invocation):
-
-```bash
-brain do brain/qwen3tts synth --text "Hello from brain." \
-  --weights_dir out/tts --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
-  --out audio=out.wav
-```
+The same `synth` action is also in the capability manifest (`brain caps
+brain/qwen3tts` lists it, and it's reachable over D-Bus/HTTP) - the `brain
+qwen3tts synth` form above is what reaches it from the CLI specifically,
+same as every other architecture with its own dedicated CLI module.
 
 Resident server for repeated calls without reloading weights each time:
 
@@ -89,9 +94,9 @@ The resident exposes one action, `speak` (text in, 24 kHz PCM out); set
 `BRAIN_QWEN3TTS_REF` (+ `BRAIN_QWEN3TTS_REF_TEXT`) to have every `speak` call clone that
 reference voice instead of running speaker-free.
 
-There is also a dedicated low-latency server, `brain tts serve`, which keeps
+There is also a dedicated low-latency server, `brain qwen3tts serve`, which keeps
 compiled NPU graphs resident and streams synthesized audio back over a
-line-delimited JSON protocol on a Unix socket - see `brain tts serve --help`
+line-delimited JSON protocol on a Unix socket - see `brain qwen3tts serve --help`
 for its engine/socket flags. `scripts/tts/voice-clone.py` and
 `scripts/tts/voice-design.py` are example clients that speak to it and play
 the result.
@@ -99,7 +104,7 @@ the result.
 LoRA fine-tuning (single-speaker) of the Talker on a `text -> codes` dataset:
 
 ```bash
-brain tts finetune --base out/tts/talker.safetensors --data data/tts \
+brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts \
   --out out/tts/talker_lora.safetensors \
   [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 ```

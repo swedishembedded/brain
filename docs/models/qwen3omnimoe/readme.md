@@ -14,7 +14,7 @@ separate ASR/VLM/TTS models together yourself.
 |---|---|
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
-| CLI (`brain do`)       | [ ] |
+| CLI (`brain <arch> <action>`)       | [ ] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [x] (token streaming; not batched) |

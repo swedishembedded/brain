@@ -14,7 +14,7 @@ into an event-driven pipeline, or exported to run on an Intel NPU.
 | Inference               | [x] |
 | Training from scratch   | [x] |
 | Fine-tuning             | [x] |
-| CLI (`brain do`)        | [x] |
+| CLI (`brain <arch> <action>`)        | [x] |
 | Intel NPU export        | [x] |
 | Batched serving         | [x] |
 

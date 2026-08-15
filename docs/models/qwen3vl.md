@@ -19,8 +19,10 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 
 ## Getting the weights
 
-Model id: `brain/qwen3vl` (reserved vendor - never auto-fetched).
-`BRAIN_QWEN3VL_WEIGHTS` - a checkpoint directory holding `config.json` +
+Model id: `brain/qwen3vl` (the served id itself is never fetched, per this
+project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓)
+on first CLI use, no env var needed. To point at a different checkpoint, set
+`BRAIN_QWEN3VL_WEIGHTS` to a directory holding `config.json` +
 `model.safetensors[.index.json]` + `tokenizer.json` (overridable per call
 via the `weights` param).
 

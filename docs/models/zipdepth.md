@@ -13,7 +13,7 @@ than a slow, large-scale depth transformer.
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [x] |
-| CLI (`brain do`)       | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
@@ -57,13 +57,11 @@ brain depth --image photo.ppm --infer npu --weights zipdepth_base_npu.pth
 The CLI reads PPM (P6); convert anything else first, e.g. `convert photo.jpg
 photo.ppm`.
 
-Served through the capability system (D-Bus / `brain do`), the model takes
-one `image` input and returns a `depth` map:
-
-```bash
-BRAIN_ZIPDEPTH_WEIGHTS=$ZIPDEPTH_PTH brain do brain/zipdepth depth \
-    --in image=photo.ppm --out depth=out/depth.ppm --json
-```
+Served through the capability system over D-Bus, the model takes one `image`
+input and returns a `depth` map via the `infer` action (`brain caps
+brain/zipdepth` lists it) - zipdepth has its own dedicated CLI module, so
+`brain zipdepth --image ...` above is how the CLI specifically reaches it,
+not a second `brain zipdepth infer ...` form.
 
 ### Views
 

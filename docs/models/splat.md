@@ -3,7 +3,7 @@
 brain's own from-scratch 3D Gaussian Splatting renderer and optimizer: load
 a `.ply` scene, render still images or fly through it interactively, or fit
 a new scene against a set of posed photos. Reach for it to view or inspect
-any Gaussian-splat scene — including ones produced by [mirror](mirror.md) —
+any Gaussian-splat scene - including ones produced by [mirror](mirror.md) -
 or to optimize a scene of your own from a set of camera-posed images. The
 same rendering kernels run on any GPU and on the CPU, so it works without
 a discrete graphics card.
@@ -14,14 +14,14 @@ a discrete graphics card.
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [x] |
-| CLI (`brain do`)       | [ ] |
+| CLI (`brain <arch> <action>`)       | [ ] |
 | HTTP API               | [ ] |
 | D-Bus                  | [ ] |
 | Batched serving        | [ ] |
 
 ## Getting the weights
 
-There's no fetched model here — splat works directly on Inria-format `.ply`
+There's no fetched model here - splat works directly on Inria-format `.ply`
 scene files, whether produced by `brain mirror infer`, brain's own `fit`
 (below), or another Gaussian Splatting tool.
 
@@ -51,7 +51,7 @@ the scene from its bounds. Viewer controls:
 | Esc | quit |
 
 `fit` optimizes an existing `.ply` scene against a set of posed target
-photos — the same rasterizer, run backward. `--cameras` takes the
+photos - the same rasterizer, run backward. `--cameras` takes the
 `cameras.json` format `brain mirror infer` produces (a list of camera poses
 and intrinsics); `--images` is a directory of P6 PPM photos (or a
 comma-separated list) in the same order as the cameras, and each image's
@@ -80,10 +80,10 @@ into a scene that actually reproduces your photos.
 
 ## Hardware and limits
 
-Runs on any wgpu-supported GPU or on the CPU — no CUDA or vendor-specific
+Runs on any wgpu-supported GPU or on the CPU - no CUDA or vendor-specific
 GPU is required. Only spherical-harmonics degree 0 (flat per-splat color)
 actually renders today; higher-order SH coefficients in a `.ply` are parsed
 and preserved on round-trip (so re-saving a scene doesn't lose them) but
 don't yet affect the rendered image. `fit` optimizes an existing set of
-gaussians against posed photos — it does not run structure-from-motion or
+gaussians against posed photos - it does not run structure-from-motion or
 recover camera poses itself; bring your own `cameras.json`.

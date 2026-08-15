@@ -21,8 +21,11 @@ transducer. For offline batch transcription of a complete clip instead, see
 
 ## Getting the weights
 
-Model id: `brain/nemotronasr` (reserved vendor - never auto-fetched).
-`BRAIN_NEMOTRONASR` - checkpoint directory (HF layout).
+Model id: `brain/nemotronasr` (the served id itself is never fetched, per
+this project's naming grammar) - but `nvidia/nemotron-3.5-asr-streaming-0.6b`
+auto-fetches (⤓) on first CLI use, no env var needed. To point at a
+different checkpoint, set `BRAIN_NEMOTRONASR` to an HF-layout checkpoint
+directory.
 
 ## Running it
 

@@ -103,7 +103,7 @@ checkpoint you already have into brain's own format, rather than relying on
 auto-fetch or a raw upstream file. Qwen3 is the reference case:
 
 ```bash
-brain qwen import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
+brain qwen3 import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
 ```
 
 This converts an HF-layout checkpoint directory into a `.safetensors` file
@@ -118,9 +118,9 @@ A quantized GGUF checkpoint is converted by one generic command that picks the
 right importer from the file's own `general.architecture` metadata:
 
 ```bash
-brain import-gguf /path/to/Model-Q4_K_M.gguf        # -> Model-Q4_K_M.brain.safetensors
-brain import-gguf FILE --out PATH --id VENDOR/REPO  # explicit output / catalog id
-brain import-gguf --list                            # registered architectures
+brain import /path/to/Model-Q4_K_M.gguf        # -> Model-Q4_K_M.brain.safetensors
+brain import FILE --out PATH --id VENDOR/REPO  # explicit output / catalog id
+brain import --list                            # registered architectures
 ```
 
 By default the conversion is written next to the source as
@@ -134,12 +134,12 @@ converting a quantized GGUF materializes a much larger file - a 22 GB Q4_K_M
 of a 35B model becomes roughly 140 GB of fp32 safetensors. Silently writing
 that during a server-startup directory scan would be a surprising use of disk
 and an unbounded startup delay, so the scan instead logs the exact
-`brain import-gguf` command to run.
+`brain import` command to run.
 
 Not every GGUF architecture needs this. Architectures brain serves directly
 from GGUF (e.g. `qwen3`) are picked up by the model-dir scan as they are; the
 import path is for architectures whose tensor layout has to be translated
-first. `brain import-gguf --list` shows which those are.
+first. `brain import --list` shows which those are.
 
 ## See also
 

@@ -1,8 +1,8 @@
 # Restore (blind face restoration)
 
 Blind face restoration for degraded photos: feed it a low-quality, blurry,
-compressed, or otherwise damaged face image — ideally already cropped/aligned
-to the face — and it returns a restored 512x512 version. A fidelity dial lets
+compressed, or otherwise damaged face image - ideally already cropped/aligned
+to the face - and it returns a restored 512x512 version. A fidelity dial lets
 you choose how much the model should trust the input pixels versus regenerate
 detail from its own learned prior.
 
@@ -12,7 +12,7 @@ detail from its own learned prior.
 |---|---|
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
-| CLI (`brain do`)       | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
@@ -25,7 +25,7 @@ checkpoint file, or to a directory containing one.
 
 ```bash
 brain caps brain/codeformer
-brain do brain/codeformer restore_face --w 0.5 \
+brain codeformer restore_face --w 0.5 \
     --in image=face.ppm --out image=restored.ppm --json
 ```
 
@@ -35,15 +35,15 @@ aligned 512x512 face), one float param `w`, output `image` (the restored
 
 ## Options
 
-- `w` (`0.0..=1.0`, default `0.5`) — the identity-fidelity dial. `0` favors
+- `w` (`0.0..=1.0`, default `0.5`) - the identity-fidelity dial. `0` favors
   maximum restored quality (the model leans on its own prior, more
   hallucination); `1` favors maximum fidelity to the original degraded input
   (less hallucination, closer to the source).
 
 ## Hardware and limits
 
-The action expects an already-aligned face — pair it with a face-detection
+The action expects an already-aligned face - pair it with a face-detection
 step to locate and align a face within a full photo first if you don't
 already have one cropped. No LoRA/fine-tune path is exposed on the CLI, no
-batching beyond one image per request, and no HTTP endpoint — use `brain do`
+batching beyond one image per request, and no HTTP endpoint - use `brain do`
 or D-Bus.

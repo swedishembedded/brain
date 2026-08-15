@@ -1,7 +1,7 @@
 # CLIP (text & image embeddings)
 
 Turns text or images into vector embeddings you can compare for search,
-similarity, and classification — a CLIP-family encoder combining CLIP-L and
+similarity, and classification - a CLIP-family encoder combining CLIP-L and
 OpenCLIP-bigG (two text towers) with an EVA-CLIP image tower.
 
 ## Support
@@ -9,7 +9,7 @@ OpenCLIP-bigG (two text towers) with an EVA-CLIP image tower.
 | Capability | Supported |
 |---|---|
 | Inference             | [x] |
-| CLI (`brain do`)       | [x] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | D-Bus                  | [x] |
 | Batched serving        | [x] |
 
@@ -25,9 +25,9 @@ least one tokenizer must be present), and the EVA-CLIP image tower file
 
 ```bash
 brain caps brain/clip
-BRAIN_CLIP_DIR=<ckpt-root> brain do brain/clip embed_text --text "a photo of a cat" \
+BRAIN_CLIP_DIR=<ckpt-root> brain clip embed_text --text "a photo of a cat" \
     --tower clip_l --out embedding=text.bin --json
-BRAIN_CLIP_DIR=<ckpt-root> brain do brain/clip embed_image \
+BRAIN_CLIP_DIR=<ckpt-root> brain clip embed_image \
     --in image=photo.ppm --out embedding=img.bin --json
 ```
 
@@ -35,9 +35,9 @@ Both actions are also reachable over D-Bus.
 
 ## Options
 
-- `embed_text` — `text` (required), `tower` (`clip_l`, 768-d, default; or
+- `embed_text` - `text` (required), `tower` (`clip_l`, 768-d, default; or
   `openclip_bigg`, 1280-d). Returns an f32 embedding.
-- `embed_image` — an input `image` (resized to the tower's 336² input).
+- `embed_image` - an input `image` (resized to the tower's 336² input).
   Returns an L2-normalised f32 embedding.
 
 ## Hardware and limits
@@ -45,4 +45,4 @@ Both actions are also reachable over D-Bus.
 Text embedding batches efficiently (many strings in one forward pass); image
 embedding processes one image per call. There is no fine-tuning/LoRA path
 exposed on the CLI, and this model is not reachable through the HTTP
-embeddings endpoint — use `brain do` or D-Bus.
+embeddings endpoint - use `brain do` or D-Bus.

@@ -16,7 +16,7 @@ GLM-family MoE decoder, or import official GLM-5.2 HuggingFace weights.
 | Inference             | [x] |
 | Training from scratch | [x] |
 | INT8                   | [ ] |
-| CLI (`brain do`)       | [ ] |
+| CLI (`brain <arch> <action>`)       | [ ] |
 | HTTP API               | [ ] |
 | D-Bus                  | [ ] |
 | Batched serving        | [ ] |
@@ -29,7 +29,7 @@ Import official GLM-5.2 HuggingFace weights (single or sharded safetensors):
 brain glm import --hf <hf_dir> --out glm.safetensors
 ```
 
-There's no auto-fetch by model id yet — either import a checkpoint yourself
+There's no auto-fetch by model id yet - either import a checkpoint yourself
 or train/finetune your own from scratch. For CLI inference against an
 existing checkpoint, point `BRAIN_GLMDSA_WEIGHTS` at it.
 
@@ -50,13 +50,13 @@ path (below) rather than a servable checkpoint.
 
 ## Options
 
-- `--size tiny|small|base` — model size preset.
-- `--device cpu|gpu` — backend selection.
-- `--seq T` (export) — sequence length baked into the exported ONNX graph.
+- `--size tiny|small|base` - model size preset.
+- `--device cpu|gpu` - backend selection.
+- `--seq T` (export) - sequence length baked into the exported ONNX graph.
 
 ## Hardware and limits
 
-Forward and backward passes are backprop-verified — the attention/MoE core,
+Forward and backward passes are backprop-verified - the attention/MoE core,
 the optional attention indexer, and the optional multi-token-prediction head
 each have their gradients checked against finite differences, and the model
 demonstrably learns on held-out data. The indexer is trained separately from
@@ -66,7 +66,7 @@ initialization there's nothing meaningful to distill yet.
 
 The full published GLM-5.2 shape (78 layers, 256 experts, roughly 155k
 vocabulary) is far too large to run locally today and is used only to
-validate that HuggingFace imports resolve to the right shapes — train,
+validate that HuggingFace imports resolve to the right shapes - train,
 finetune, and evaluate against the `tiny`/`small`/`base` presets instead.
 
 GLM also has a validated **Intel NPU export path**: `brain glm export`
@@ -74,9 +74,9 @@ produces a dense-expert (every expert computed, non-selected ones masked to
 zero) fp32 ONNX graph that has been confirmed to run correctly on real NPU
 hardware. NPU INT8 weight-only quantization for GLM isn't implemented yet,
 and the attention indexer and multi-token-prediction head aren't part of the
-exported graph — the NPU path runs dense attention, and multi-token
+exported graph - the NPU path runs dense attention, and multi-token
 prediction there would need a separate host-side draft loop. See
 [glm/npu.md](glm/npu.md) for the export design.
 
 Serving GLM over HTTP or D-Bus alongside brain's other decoders isn't wired
-up yet — use the CLI directly for train/finetune/infer/eval.
+up yet - use the CLI directly for train/finetune/infer/eval.

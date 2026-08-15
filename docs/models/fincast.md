@@ -18,14 +18,14 @@ and quantile bands for financial data.
 | Inference | [x] |
 | Training from scratch | [ ] |
 | LoRA fine-tune | [ ] |
-| CLI (`brain do`) | [ ] |
+| CLI (`brain <arch> <action>`) | [ ] |
 | HTTP API | [ ] |
 | D-Bus | [x] |
 | Batched serving | [ ] |
 
 ## Getting the weights
 
-- **Model id:** `brain/fincast` — a reserved `brain/` id, never auto-fetched.
+- **Model id:** `brain/fincast` - a reserved `brain/` id, never auto-fetched.
 - **Weights:** set `BRAIN_FINCAST` to a single brain `.safetensors` file
   produced by the import step below (not a directory, not the raw upstream
   checkpoint).
@@ -38,7 +38,7 @@ and quantile bands for financial data.
 
 ## Running it
 
-FinCast has no `brain fincast ...` subcommand of its own — it is reached
+FinCast has no `brain fincast ...` subcommand of its own - it is reached
 through the shared `brain forecast` verb and the shared `forecast` D-Bus
 action.
 
@@ -71,9 +71,9 @@ BRAIN_FINCAST=/path/to/fincast.safetensors dbus-run-session -- bash -c '
 
 ## Hardware and limits
 
-- Reference weights are for research and educational use only — not
+- Reference weights are for research and educational use only - not
   financial advice; see the license note above.
-- Inference only today — no fine-tuning or LoRA path reachable from the
+- Inference only today - no fine-tuning or LoRA path reachable from the
   CLI.
 - No HTTP route: reachable only via the `brain forecast` CLI and D-Bus.
 - Runs on CPU or GPU, and is placed on an NPU automatically when one is

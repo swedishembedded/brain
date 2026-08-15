@@ -1,6 +1,6 @@
 # What is brain?
 
-brain trains and runs neural networks **locally** — pure Rust, with hand-written
+brain trains and runs neural networks **locally** - pure Rust, with hand-written
 WGSL GPU kernels doing the compute. There's no PyTorch and no Python required to
 build it, run it, or even to check that it learns correctly.
 
@@ -34,7 +34,7 @@ compiled graph, rather than dispatching brain's own kernels op by op. See
 ## Correctness without a Python oracle
 
 Most from-scratch training code proves its backward pass is right by diffing
-against a PyTorch reference. brain doesn't have one to diff against — instead,
+against a PyTorch reference. brain doesn't have one to diff against - instead,
 every model's analytic WGSL gradients are checked against an in-repo
 finite-difference gradient checker (`make gradcheck`), on its own forward pass.
 That gate is what "correct" means here, and it runs as part of the normal test
@@ -42,28 +42,29 @@ suite.
 
 ## What it actually does
 
-Under one consistent toolset — a CLI, an HTTP API (OpenAI/Anthropic/OpenRouter-
-compatible), and a D-Bus surface — brain covers a lot of ground:
+Under one consistent toolset - a CLI, an HTTP API (OpenAI/Anthropic/OpenRouter-
+compatible), and a D-Bus surface - brain covers a lot of ground:
 
-- **Large language models** — training from scratch, LoRA fine-tuning, and
+- **Large language models** - training from scratch, LoRA fine-tuning, and
   serving (chat, tool calls, batched inference with a paged KV cache).
-- **Vision** — object detection, segmentation, monocular depth, face
+- **Vision** - object detection, segmentation, monocular depth, face
   restoration, super-resolution.
-- **Speech** — text-to-speech voice cloning and speech-to-text.
-- **Image generation** — text-to-image and reference-image editing.
-- **Time-series forecasting** — probabilistic forecasting over OHLCV and
+- **Speech** - text-to-speech voice cloning and speech-to-text.
+- **Image generation** - text-to-image and reference-image editing.
+- **Time-series forecasting** - probabilistic forecasting over OHLCV and
   general time series.
-- **3D** — multi-view reconstruction and Gaussian-splatting fly-throughs.
-- **World models** — playable, action-conditioned video generation.
+- **3D** - multi-view reconstruction and Gaussian-splatting fly-throughs.
+- **World models** - playable, action-conditioned video generation.
 
-Every one of these is reachable the same way: a dedicated `brain <model>`
-subcommand, or the uniform `brain do <model> <action>` entry point that works
-identically across all of them. See the model catalog for the full, current
-list of models and what each supports.
+Every one of these is reachable the same way: `brain <architecture> <action>`
+(or `brain <action> <architecture>` - both orders dispatch identically),
+whether that architecture has its own dedicated CLI module or reaches the
+generalized capability interface directly. See the model catalog for the
+full, current list of models and what each supports.
 
 ## Where to go next
 
-- [Install](install.md) — build it.
-- [Quickstart](quickstart.md) — train something, then run a real LLM.
-- [Hardware](hardware.md) — picking a device (GPU/CPU/NPU).
-- [The CLI](../using/cli.md) — the full command map.
+- [Install](install.md) - build it.
+- [Quickstart](quickstart.md) - train something, then run a real LLM.
+- [Hardware](hardware.md) - picking a device (GPU/CPU/NPU).
+- [The CLI](../using/cli.md) - the full command map.

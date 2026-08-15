@@ -14,14 +14,14 @@ than a bare mean prediction.
 | Inference | [x] |
 | Training from scratch | [ ] |
 | LoRA fine-tune | [ ] |
-| CLI (`brain do`) | [ ] |
+| CLI (`brain <arch> <action>`) | [ ] |
 | HTTP API | [ ] |
 | D-Bus | [x] |
 | Batched serving | [ ] |
 
 ## Getting the weights
 
-- **Model id:** `brain/chronos2` — a reserved `brain/` id, never auto-fetched.
+- **Model id:** `brain/chronos2` - a reserved `brain/` id, never auto-fetched.
 - **Weights:** set `BRAIN_CHRONOS2` to a single brain `.safetensors` file
   produced by the import step below (not a directory, not the raw upstream
   checkpoint).
@@ -32,7 +32,7 @@ than a bare mean prediction.
 
 ## Running it
 
-Chronos-2 has no `brain chronos2 ...` subcommand of its own — it is reached
+Chronos-2 has no `brain chronos2 ...` subcommand of its own - it is reached
 through the shared `brain forecast` verb and the shared `forecast` D-Bus
 action.
 
@@ -66,10 +66,10 @@ BRAIN_CHRONOS2=/path/to/chronos2.safetensors dbus-run-session -- bash -c '
 
 ## Hardware and limits
 
-- Inference only today — no training, fine-tuning, or LoRA path.
+- Inference only today - no training, fine-tuning, or LoRA path.
 - No HTTP route: reachable only via the `brain forecast` CLI and D-Bus.
 - Runs on CPU or GPU, and is placed on an NPU automatically when one is
   available and budgeted for the request.
-- Univariate forecasting only — known-future covariates and multi-series
+- Univariate forecasting only - known-future covariates and multi-series
   grouping are not part of the served path yet, and horizons much beyond
   1024 steps are not a supported use case.

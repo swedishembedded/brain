@@ -282,7 +282,7 @@ test/times: release
 # proving brain works as a Claude Code backend. Skips cleanly unless `claude` is
 # installed AND a served qwen model is configured:
 #   BRAIN_QWEN_WEIGHTS=... BRAIN_QWEN_TOKENIZER=... make test/e2e/claude-code
-# (import one first: brain qwen import --hf <hf_qwen_dir> --out qwen.safetensors)
+# (import one first: brain qwen3 import --hf <hf_qwen_dir> --out qwen.safetensors)
 test/e2e/claude-code: release
 	bats tests/e2e/claude_code.bats
 
@@ -487,9 +487,8 @@ train/gpt/%: release
 eval/gpt/%: release
 	$(BRAIN) gpt2 eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
 
-# ---- Qwen LoRA fine-tuning: the "one command to fully retrain and overwrite
-# the lora checkpoint" from applications/edgeai/brain/.todo/bench-training.md.
-# DATASET is a bench `datasets build` output dir (train.jsonl [+ validation.jsonl]);
+# ---- Qwen LoRA fine-tuning: one command to fully retrain and overwrite the
+# LoRA checkpoint. DATASET is a bench `datasets build` output dir (train.jsonl [+ validation.jsonl]);
 # ADAPTER is OWNER/NAME[:TAG] (TAG defaults to "latest" and is OVERWRITTEN on
 # every rerun -- that's the "retrain and overwrite" part). QWEN_BASE is a model
 # store ref (default the published Qwen3-0.6B) or a direct .safetensors path.
@@ -504,7 +503,7 @@ QWEN_BLOCK ?= 1024
 train/qwen/lora: release
 	@test -n "$(DATASET)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
 	@test -n "$(ADAPTER)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
-	$(BRAIN) qwen finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
+	$(BRAIN) qwen3 finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
 		--weights $(QWEN_BASE) --adapter $(ADAPTER) --dataset $(DATASET) \
 		--steps $(QWEN_STEPS) --lr $(QWEN_LR) --batch $(QWEN_BATCH) --block $(QWEN_BLOCK) \
 		--seed $(SEED) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
