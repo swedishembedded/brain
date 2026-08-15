@@ -127,8 +127,9 @@ pub mod mask;
 pub mod pixels;
 pub mod tiling;
 pub mod video;
+pub mod viz;
 
-pub use codec::{decode, load, save_ppm};
+pub use codec::{decode, load, save, save_png, save_ppm};
 pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};
 pub use device::{AlignCorners, Border, Ctx, Filter, ImagingKernelIds, PIPELINES};
 pub use host::resize_bilinear_hwc;

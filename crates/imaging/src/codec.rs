@@ -76,14 +76,50 @@ pub fn load(path: impl AsRef<Path>) -> Result<Rgb8, String> {
 /// Write an [`Rgb8`] as a binary PPM, creating the parent directory.
 ///
 /// PPM because it is the format brain can both read and write with no encoder
-/// dependency; `image` is decode-only here on purpose.
+/// dependency; `image` was decode-only here for a long time on purpose - see
+/// [`save_png`] and [`save`] for why that stopped being enough.
 pub fn save_ppm(path: impl AsRef<Path>, img: &Rgb8) -> Result<(), String> {
     let path = path.as_ref();
+    create_parent_dir(path)?;
+    std::fs::write(path, encode_p6(&img.px, img.w, img.h))
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+/// Write an [`Rgb8`] as PNG, creating the parent directory.
+///
+/// PPM has no viewer in a browser, a chat client, or GitHub's own markdown
+/// renderer - exactly the audiences a generated demo image is FOR. `image`
+/// (already a decode dependency here, `png` feature already enabled for
+/// [`decode`]) makes PNG encoding free to add rather than a new dependency.
+pub fn save_png(path: impl AsRef<Path>, img: &Rgb8) -> Result<(), String> {
+    let path = path.as_ref();
+    create_parent_dir(path)?;
+    image::RgbImage::from_raw(img.w, img.h, img.px.clone())
+        .ok_or_else(|| format!("{}: pixel buffer does not match {}x{}", path.display(), img.w, img.h))?
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+/// Write an [`Rgb8`], choosing the encoder from `path`'s extension:
+/// `.png`/`.PNG` -> [`save_png`], anything else (including no extension,
+/// `.ppm`, or an extension nobody asked for) -> [`save_ppm`]. This is the
+/// front door every CLI `--out name=path` write should go through: the
+/// extension the caller typed is the format that lands on disk, rather than
+/// always being a P6 regardless of what the path says (the previous
+/// behaviour of every `imaging::save_ppm` call site).
+pub fn save(path: impl AsRef<Path>, img: &Rgb8) -> Result<(), String> {
+    let path = path.as_ref();
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("png") => save_png(path, img),
+        _ => save_ppm(path, img),
+    }
+}
+
+fn create_parent_dir(path: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     }
-    std::fs::write(path, encode_p6(&img.px, img.w, img.h))
-        .map_err(|e| format!("writing {}: {e}", path.display()))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,5 +177,39 @@ mod tests {
         save_ppm(&path, &tiny()).unwrap();
         assert_eq!(load(&path).unwrap(), tiny());
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn save_png_round_trips_through_the_image_decoder() {
+        let dir = std::env::temp_dir().join("brain-imaging-codec-test/png");
+        let path = dir.join("tiny.png");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        save_png(&path, &tiny()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG file");
+        assert_eq!(decode(&bytes).unwrap(), tiny());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn save_dispatches_on_extension() {
+        let dir = std::env::temp_dir().join("brain-imaging-codec-test/dispatch");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let png = dir.join("out.png");
+        save(&png, &tiny()).unwrap();
+        assert!(std::fs::read(&png).unwrap().starts_with(&[0x89, b'P', b'N', b'G']), "out.png should be PNG bytes");
+
+        // An unrecognised (or absent) extension keeps today's PPM behaviour -
+        // no existing `--out foo.ppm`/`--out foo` caller's output changes.
+        let ppm = dir.join("out.ppm");
+        save(&ppm, &tiny()).unwrap();
+        assert!(std::fs::read(&ppm).unwrap().starts_with(b"P6"), "out.ppm should still be P6");
+
+        let no_ext = dir.join("out");
+        save(&no_ext, &tiny()).unwrap();
+        assert!(std::fs::read(&no_ext).unwrap().starts_with(b"P6"), "extensionless path should still be P6");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
