@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The remote side of the resolution ladder: listing and downloading files
-//! from a model host. [`Hub`] is the seam [`crate::plan`] is tested against —
+//! from a model host. [`Hub`] is the seam [`crate::plan`] is tested against -
 //! every test in this crate uses [`FakeHub`], never the network. [`HfHub`] is
 //! the one real implementation, restricted to a fixed host allowlist so a
 //! redirect can never be used to exfiltrate a fetch to an arbitrary origin.
@@ -31,6 +31,32 @@ const ALLOWED_HOST_SUFFIXES: &[&str] = &["huggingface.co", "hf.co"];
 /// Is `host` exactly one of [`ALLOWED_HOST_SUFFIXES`], or a subdomain of one?
 fn host_is_allowed(host: &str) -> bool {
     ALLOWED_HOST_SUFFIXES.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// The caller's HF auth token, if any: `HF_TOKEN` env var first (the
+/// standard override every HF client honors), else `~/.cache/huggingface/
+/// token` -- written by `huggingface-cli login` / `hf auth login`, so a box
+/// where the user has already logged in via the `hf` CLI gets faster,
+/// higher-rate-limit fetches with no extra brain-side setup. `None` means
+/// anonymous requests, same as before this existed: unauthenticated HF
+/// traffic works for public repos, just throttled hard (HF's own `resolve/`
+/// response carries an `x-hf-warning` saying so).
+///
+/// Read fresh on every call rather than cached once -- a fetch can span
+/// hours for a large checkpoint, and a login performed after brain started
+/// (or a token that gets revoked) should take effect/fail on the NEXT
+/// request rather than being frozen at process start.
+fn hf_token() -> Option<String> {
+    if let Ok(t) = std::env::var("HF_TOKEN") {
+        let t = t.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let bytes = std::fs::read_to_string(std::path::Path::new(&home).join(".cache/huggingface/token")).ok()?;
+    let t = bytes.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 #[derive(Debug)]
@@ -175,9 +201,21 @@ impl Hub for HfHub {
 /// `huggingface.co`, not by the (host-only) unit tests below.
 fn get_following_allowed_redirects(url: &str) -> Result<ureq::Response, HubError> {
     let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let token = hf_token();
     let mut current = url.to_string();
     for _ in 0..10 {
-        match agent.get(&current).call() {
+        let mut req = agent.get(&current);
+        // Every hop by this point has already passed `check_redirect_allowed`
+        // (the very first request is to `self.base_url`, always
+        // huggingface.co) -- the token never reaches a host outside
+        // `ALLOWED_HOST_SUFFIXES`, so attaching it unconditionally here is
+        // safe, and matches how `huggingface_hub` itself forwards auth
+        // across the API -> CDN redirect (needed for a gated/private repo's
+        // signed CDN URL to authorize at all).
+        if let Some(t) = &token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        match req.call() {
             Ok(resp) if (300..400).contains(&resp.status()) => {
                 let location = resp.header("Location").ok_or_else(|| HubError::BadResponse("redirect with no Location header".into()))?.to_string();
                 let absolute = resolve_redirect_location(&current, &location)?;
@@ -314,6 +352,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hf_token_prefers_the_env_var_over_the_token_file() {
+        // Same save/mutate/assert/restore discipline as `default_root`'s own
+        // test in `lib.rs` -- env vars are process-global, so a test touching
+        // them must never leave a real value clobbered for whatever runs
+        // next in this process.
+        let orig = std::env::var_os("HF_TOKEN");
+        unsafe {
+            std::env::set_var("HF_TOKEN", "hf_from_env_var");
+        }
+        assert_eq!(hf_token().as_deref(), Some("hf_from_env_var"));
+
+        unsafe {
+            std::env::set_var("HF_TOKEN", "  ");
+        }
+        // A whitespace-only override must not be mistaken for "set" -- falls
+        // through to the token-file lookup (which may itself be `None` on a
+        // box with no `hf auth login`, and that's fine to assert either way
+        // here since this test only pins the env-var branch's own emptiness
+        // check, not the file fallback).
+        assert_ne!(hf_token().as_deref(), Some("  "));
+
+        unsafe {
+            match orig {
+                Some(v) => std::env::set_var("HF_TOKEN", v),
+                None => std::env::remove_var("HF_TOKEN"),
+            }
+        }
+    }
+
+    #[test]
     fn fake_hub_lists_and_reads_registered_files() {
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", b"{}".to_vec());
@@ -390,7 +458,7 @@ mod tests {
 
     /// Regression for the real bug: HF's `resolve/<rev>/<file>` redirect is
     /// ABSOLUTE-PATH relative (no scheme/host), e.g.
-    /// `/api/resolve-cache/models/Qwen/Qwen3-0.6B/<sha>/config.json?...` —
+    /// `/api/resolve-cache/models/Qwen/Qwen3-0.6B/<sha>/config.json?...` -
     /// verified against the actual live response. This must resolve onto the
     /// SAME origin as the request that produced it, not be rejected or
     /// mis-treated as a host.
