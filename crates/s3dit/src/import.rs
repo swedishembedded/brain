@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 
+use checkpoint::gguf::MmapGguf;
 use checkpoint::safetensors::StTensor;
+use checkpoint::st::ModelCard;
 
 use crate::block::Tensors;
 use crate::grad::WeightsF32;
@@ -56,14 +58,94 @@ pub fn import_comfy(tensors: Vec<StTensor>, cfg: &ZImageConfig) -> Tensors {
     out
 }
 
+/// The `general.architecture` unsloth's Z-Image Q8_0 GGUF release
+/// (`unsloth/Z-Image-Turbo-GGUF`) declares. **Not a Z-Image-specific
+/// spelling** - Z-Image is architecturally Lumina2-adjacent and unsloth
+/// reused that tag for RoPE/metadata purposes, so on its own this cannot
+/// distinguish a Z-Image GGUF from a genuine Lumina2 one the way
+/// `crates/gguf::registry`'s `clip.projector_type` discriminator tells
+/// DeepSeek-OCR's mmproj apart from every other CLIP-shaped GGUF.
+/// `crates/cli/src/gguf_import.rs`'s `GgufArchitectureImporter` registry has
+/// no such discriminator mechanism, so [`import_gguf`] carries its own guard
+/// (see [`DISCRIMINATOR_TENSOR`]) instead of silently trusting the tag.
+pub const GGUF_ARCHITECTURE: &str = "lumina2";
+
+/// A tensor name unique to Z-Image's checkpoint (the caption-conditioning
+/// embedder) and absent from a real Lumina2 release - [`import_gguf`]
+/// requires it before proceeding, so a genuine Lumina2 GGUF reaching this
+/// importer (mis-routed at the registry level, since both share
+/// [`GGUF_ARCHITECTURE`]) fails loudly with a clear message instead of
+/// silently producing a wrong-but-plausible checkpoint.
+const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
+
+/// Import a Q8_0 (or any block-quant this crate's `checkpoint::gguf` dequant
+/// supports) Z-Image GGUF into a brain-native single-file safetensors
+/// checkpoint that `BRAIN_S3DIT_DIT` can point at directly - the same tensor
+/// names [`import_comfy`] already remaps, since unsloth's GGUF conversion
+/// kept the original/Comfy layout unchanged (`layers.N.attention.qkv.weight`,
+/// `context_refiner.*`, `noise_refiner.*`, `t_embedder.*`, `x_embedder.*`,
+/// `cap_embedder.*`, `final_layer.*`).
+///
+/// **DiT-only.** The GGUF release does not bundle the VAE or the Qwen-4B text
+/// encoder; `BRAIN_S3DIT_VAE`/`BRAIN_S3DIT_QWEN` still need their own source,
+/// same as the safetensors path. Dequantizes every tensor eagerly into host
+/// memory (the whole DiT, ~24 GB fp32) rather than streaming, since - unlike
+/// Qwen3.5-35B-A3B - that comfortably fits this workspace's boxes; see
+/// `qwen35moe::import::import_gguf_truncated_to_map`'s doc comment for the
+/// streaming alternative this deliberately isn't, and why.
+pub fn import_gguf(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+    if mg.shape(DISCRIMINATOR_TENSOR).is_none() {
+        return Err(format!(
+            "not a Z-Image checkpoint: missing tensor {DISCRIMINATOR_TENSOR:?} \
+             (general.architecture={:?} is shared with real Lumina2 GGUFs, \
+             which this importer refuses to guess at)",
+            mg.kv().get("general.architecture")
+        ));
+    }
+    let cfg = ZImageConfig::turbo();
+    let tensors: Vec<StTensor> = mg
+        .names()
+        .iter()
+        .map(|name| {
+            let shape = mg.shape(name).ok_or_else(|| format!("{name}: missing shape in GGUF tensor info"))?.to_vec();
+            let data = mg
+                .tensor(name)
+                .ok_or_else(|| format!("{name}: missing tensor data"))?
+                .map_err(|e| format!("{name}: dequant failed: {e}"))?;
+            Ok(StTensor { name: name.clone(), shape, data })
+        })
+        .collect::<Result<_, String>>()?;
+    let remapped = import_comfy(tensors, &cfg);
+
+    let id = id_override.unwrap_or("brain/s3dit-gguf");
+    let mut card = ModelCard::new(id, "s3dit");
+    card.param_count = Some(remapped.values().map(|(_, data)| data.len() as u64).sum());
+    let config = serde_json::json!({
+        "dim": cfg.dim,
+        "n_layers": cfg.n_layers,
+        "n_refiner_layers": cfg.n_refiner_layers,
+        "n_heads": cfg.n_heads,
+        "cap_feat_dim": cfg.cap_feat_dim,
+        "in_channels": cfg.in_channels,
+        "patch_size": cfg.patch_size,
+        "f_patch_size": cfg.f_patch_size,
+        "rope_theta": cfg.rope_theta,
+        "t_scale": cfg.t_scale,
+        "norm_eps": cfg.norm_eps,
+    });
+    let out: Vec<(String, Vec<u64>, Vec<f32>)> =
+        remapped.into_iter().map(|(name, (shape, data))| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
+    checkpoint::st::save_safetensors(out_path, &out, &config, Some(&card)).map_err(|e| e.to_string())
+}
+
 /// The streaming sibling of [`import_comfy`]: a `checkpoint::remap::RemapSource`
 /// over `r` resolving every brain (diffusers-named) tensor to its Comfy source
-/// via the SAME rename/qkv-split rules — reading no tensor data up front. A
+/// via the SAME rename/qkv-split rules - reading no tensor data up front. A
 /// `qkv.weight` still resolves to three zero-copy [`checkpoint::remap::Fetch::Slice`]s
 /// (slicing a borrow is still a borrow); every renamed tensor is a
 /// [`checkpoint::remap::Fetch::Whole`] pass-through. `ZImageDit{,I8,Shard}::
 /// build_from_source` accept the result directly, so a build from this never
-/// materializes the whole DiT checkpoint on the host — peak allocation is one
+/// materializes the whole DiT checkpoint on the host - peak allocation is one
 /// tensor (up to ~157 MB for `feed_forward.w1`, once converted from BF16), not
 /// the whole ~24 GB model.
 pub fn comfy_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &ZImageConfig) -> checkpoint::remap::RemapSource<'a> {
@@ -73,7 +155,7 @@ pub fn comfy_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &ZImageC
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
     for name in r.names() {
         if let Some(base) = name.strip_suffix("qkv.weight") {
-            // base = "…attention."; split [3·dim, dim] into q|k|v row-blocks —
+            // base = "…attention."; split [3·dim, dim] into q|k|v row-blocks -
             // three Slice fetches over the SAME source tensor, zero-copy.
             let dd = dim * dim;
             plan.insert(format!("{base}to_q.weight"), checkpoint::remap::Fetch::Slice { name: name.to_string(), start: 0, len: dd });
@@ -96,7 +178,7 @@ pub fn comfy_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &ZImageC
 }
 
 /// Bridge the (already-`import_comfy`'d) inference tensor map into the **training**
-/// weight format [`ModelWeightsF32`] — the piece that lets a real shipped Z-Image
+/// weight format [`ModelWeightsF32`] - the piece that lets a real shipped Z-Image
 /// checkpoint be fine-tuned (LoRA or full). The inference path and this share one
 /// source of truth: the exact same tensor keys the inference model reads
 /// ([`crate::block::BlockWeights`]/[`NormBufs`], `model.rs` embedders/final) are
@@ -109,7 +191,7 @@ pub fn model_weights_from_comfy(t: &Tensors, cfg: &ZImageConfig) -> Result<Model
     };
     let f64v = |k: &str| -> Result<Vec<f64>, String> { Ok(f32v(k)?.iter().map(|&x| x as f64).collect()) };
 
-    // One transformer block (15 tensors; adaLN present only when modulated — the
+    // One transformer block (15 tensors; adaLN present only when modulated - the
     // context_refiner blocks are UNmodulated, matching the inference model).
     let block = |prefix: &str, modulated: bool| -> Result<WeightsF32, String> {
         let g = |leaf: &str| f32v(&format!("{prefix}.{leaf}"));
@@ -248,7 +330,7 @@ mod tests {
         assert!(!w.main[0].adaln_w.is_empty());
         assert!(!w.main[0].wq.is_empty() && !w.xemb_w.is_empty() && !w.flin_w.is_empty());
 
-        // A missing tensor must error (loudly, named) — not silently zero-fill.
+        // A missing tensor must error (loudly, named) - not silently zero-fill.
         m.remove("layers.1.feed_forward.w2.weight");
         let err = match model_weights_from_comfy(&m, &cfg) {
             Ok(_) => panic!("expected a missing-tensor error"),
@@ -258,7 +340,7 @@ mod tests {
     }
 
     /// [`comfy_source`] must be byte-for-byte identical to the eager
-    /// [`import_comfy`] for every renamed AND every qkv-split tensor — the
+    /// [`import_comfy`] for every renamed AND every qkv-split tensor - the
     /// same tiny fixture `remap_and_qkv_split` above uses, round-tripped
     /// through a real safetensors file so `comfy_source` reads it via a
     /// genuine `WeightReader`, not an in-memory shortcut.

@@ -95,9 +95,28 @@ impl GgufArchitectureImporter for Qwen35MoeImporter {
     }
 }
 
+/// Z-Image (S³-DiT), DiT only (`general.architecture = "lumina2"` - shared
+/// with real Lumina2 releases; `s3dit::import::import_gguf` refuses to guess
+/// and checks for a Z-Image-only tensor before converting anything, since
+/// this registry has no per-architecture discriminator the way
+/// `crates/gguf::registry`'s `clip.projector_type` case does).
+struct S3ditImporter;
+
+impl GgufArchitectureImporter for S3ditImporter {
+    fn architecture(&self) -> &'static str {
+        s3dit::import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "Z-Image S3-DiT text-to-image (DiT only - VAE/text-encoder come from their own source)"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        s3dit::import::import_gguf(gguf, out_path, id_override)
+    }
+}
+
 /// Every registered architecture importer. ONE line per architecture - this is
 /// the whole registration surface (see this module's doc).
-const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter];
+const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter];
 
 /// The importer claiming `architecture`, or `None` if none does.
 pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
@@ -243,11 +262,23 @@ mod tests {
     /// knows -- this and `brain_arch`'s own table cannot drift apart, which is
     /// what lets `import_file`'s error message tell "brain has a name for
     /// this but no importer" apart from "brain has never heard of this".
+    ///
+    /// `s3dit`'s spelling ("lumina2") is the one documented exception: it is
+    /// shared with real Lumina2 releases (see `s3dit::import::GGUF_ARCHITECTURE`'s
+    /// doc), so `brain_arch` deliberately does NOT claim it as s3dit's `gguf:`
+    /// spelling -- `import_gguf` discriminates by tensor presence instead,
+    /// not by architecture string. This test asserts that non-resolution is
+    /// intentional, not a silent gap.
     #[test]
-    fn every_registered_importer_matches_a_brain_arch_row() {
+    fn every_registered_importer_matches_a_brain_arch_row_or_is_a_documented_ambiguous_tag() {
+        const AMBIGUOUS_TAG_EXCEPTIONS: &[&str] = &["lumina2"];
         for i in IMPORTERS {
             let arch = i.architecture();
-            assert_eq!(brain_arch::by_gguf(arch).map(|a| a.id), Some("qwen35moe"), "importer {arch:?} has no matching brain_arch row");
+            if AMBIGUOUS_TAG_EXCEPTIONS.contains(&arch) {
+                assert!(brain_arch::by_gguf(arch).is_none(), "importer {arch:?} is a documented ambiguous-tag exception and must NOT resolve via by_gguf");
+                continue;
+            }
+            assert!(brain_arch::by_gguf(arch).is_some(), "importer {arch:?} has no matching brain_arch row");
         }
     }
 
