@@ -46,10 +46,32 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       256k-entry `spiece.model` needs one.
 - [ ] **Goldens** (`tools/goldens/wan_dump_reference.py`) before any DiT Rust,
       per porting.md section 1.
-- [ ] **UniPC multistep in the flow-matching parameterisation**, plus the sigma
-      shift `s' = shift*s / (1 + (shift-1)*s)`. Neither exists: brain's
-      `DpmSolverPlusPlusScheduler` is built on `alphas_cumprod` and cannot be
-      pointed at flow-match sigmas, and there is no UniPC anywhere in the repo.
+- [x] **UniPC multistep in the flow-matching parameterisation**, plus the sigma
+      shift `s' = shift*s / (1 + (shift-1)*s)`. Landed as
+      `crates/diffusion/src/flowsolvers.rs` (a third scheduler family beside
+      `scheduler.rs` and `discrete.rs`): brain's `DpmSolverPlusPlusScheduler` is
+      built on `alphas_cumprod` and cannot be pointed at flow-match sigmas, so
+      nothing was bent to fit. `flow_shift` sits next to
+      `time_shift_exponential` in `scheduler.rs` with the contrast written down,
+      because the two shifts are easy to mistake for each other and picking the
+      wrong one changes every sigma silently. **The DPM++ flow variant landed
+      too** rather than being deferred: once the flow `(alpha, sigma)` pair and
+      the schedule plumbing existed it was ~70 lines, and it is the only way to
+      prove that the two solvers do *not* share a schedule (see below).
+      Gate: `crates/diffusion/tests/wan_schedule_parity.rs` against
+      `tools/goldens/wan_schedule_dump_reference.py` (no weights needed - it
+      imports the two scheduler classes only). Sigmas and timesteps are
+      **bit-exact** over 16 (solver, shift, steps) combinations; the `step()`
+      trajectory agrees to 5.2e-6 max abs over 50 steps, which is f32 rounding
+      accumulating (the reference does its scalar coefficients in f32, brain in
+      f64), mutation-checked against a wrong order (2.8e-1), a skipped
+      corrector (7.5e-2) and an off-by-one in the corrector history (inf).
+      Two facts worth keeping: the reference is constructed with `shift=1` and
+      given the real shift at `set_timesteps` (applying it in both places
+      squares it), and **the two solvers start at different sigmas** - UniPC at
+      the training grid's top `1 - 1/1000 = 0.999` (first timestep 999), dpm++
+      at exactly 1.0 (first timestep 1000), because `get_sampling_sigmas`
+      builds its own `linspace(1, 0, N+1)`.
 - [ ] **`crates/wan`** proper -- currently only `config.rs`.
 - [ ] **`capability::Media::Video`**. There is no video media type, and
       `.agents/rules/serving-contract.md` section 4 requires extending `Media`

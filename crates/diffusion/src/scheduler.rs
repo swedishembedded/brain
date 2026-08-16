@@ -151,6 +151,26 @@ pub fn empirical_mu(image_seq_len: usize, num_steps: usize) -> f32 {
     (a * num_steps as f64 + b) as f32
 }
 
+/// Static (resolution-independent) sigma shift: `σ' = shift·σ / (1 + (shift-1)·σ)`.
+///
+/// **Not interchangeable with [`time_shift_exponential`]**, which is FLUX.2's
+/// `mu` form `σ' = e^mu / (e^mu + (1/σ - 1))`, parameterised by a token-count-
+/// and step-count-dependent `mu` rather than by a scalar `shift`. The two agree
+/// only for `e^mu = shift`, and picking the wrong one silently changes every
+/// sigma in the schedule. This one is what Wan2.1 uses (`shift = 5.0` for T2V,
+/// `3.0` for I2V at 480p, `16` for FLF2V/VACE); the exponential one is what
+/// FLUX.2 and Z-Image's `dynamic_shift` use.
+///
+/// In `f64` on purpose: the reference builds the whole schedule in numpy
+/// `float64` and rounds to `f32` exactly once, at the end. Rounding earlier
+/// moves the result by more than a ULP, so the flow-matching solvers keep the
+/// pipeline in `f64` and cast where the reference casts.
+/// ([`FlowMatchEulerScheduler::set_timesteps`] applies the same map in `f32`,
+/// which is what the Z-Image/FLUX.2 pipelines do.)
+pub fn flow_shift(shift: f64, sigmas: &[f64]) -> Vec<f64> {
+    sigmas.iter().map(|&s| shift * s / (1.0 + (shift - 1.0) * s)).collect()
+}
+
 /// Exponential time shift: `σ' = e^mu / (e^mu + (1/σ - 1))`, with `σ = 0`
 /// mapping to 0. This is diffusers' `_time_shift_exponential` (sigma
 /// exponent 1.0) and the same map Z-Image's `dynamic_shift` applies.

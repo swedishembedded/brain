@@ -21,6 +21,11 @@
 //!   [`DdimScheduler`], [`EulerScheduler`], [`EulerAncestralScheduler`] and
 //!   [`DpmSolverPlusPlusScheduler`], each in the ε- and v-prediction
 //!   parameterisations.
+//! * [`flowsolvers`] - **multistep** solvers in the flow-matching
+//!   parameterisation ([`FlowUniPcScheduler`], [`FlowDpmSolverPlusPlusScheduler`],
+//!   Wan2.1's `unipc` and `dpm++`): same `α = 1-σ` forward process as
+//!   [`scheduler`], but the update reuses the previous steps' model outputs
+//!   instead of integrating each step independently.
 //!
 //! Both are deliberately pure host math (no `gpu_core` dependency) so they are
 //! trivially unit-testable and reusable on CPU and GPU paths alike; the
@@ -28,10 +33,15 @@
 //! are wired to the denoiser.
 
 pub mod discrete;
+pub mod flowsolvers;
 pub mod scheduler;
 
 pub use discrete::{
     BetaSchedule, DdimScheduler, DiscreteConfig, DpmSolverPlusPlusScheduler,
     EulerAncestralScheduler, EulerScheduler, Prediction, Sigmas, SolverType, TimestepSpacing,
 };
-pub use scheduler::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler};
+pub use flowsolvers::{
+    BhSolver, FlowDpmSolverConfig, FlowDpmSolverPlusPlusScheduler, FlowUniPcConfig,
+    FlowUniPcScheduler,
+};
+pub use scheduler::{default_z_image_sigmas, flow_shift, FlowMatchConfig, FlowMatchEulerScheduler};
