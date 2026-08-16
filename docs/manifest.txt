@@ -70,6 +70,7 @@ models/codeformer.md
 models/rrdbnet.md
 models/vqgan.md
 models/imgpipe.md
+models/wan.md
 models/worldmirror2.md
 models/splat.md
 models/forecast.md

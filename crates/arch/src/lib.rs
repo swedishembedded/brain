@@ -18,9 +18,13 @@
 //!   name lowercased with the `LLM_ARCH_` prefix dropped and underscores
 //!   removed (`LLM_ARCH_GLM_DSA` -> `glmdsa`).
 //! - **[`Source::Brain`]** - architectures llama.cpp has no entry for (vision,
-//!   diffusion, 3D, forecasting, world models): named after the upstream
+//!   diffusion, video, 3D, forecasting, world models): named after the upstream
 //!   paper/repo's own architecture name, same `[a-z0-9]+` restriction
-//!   (`yolov8`, `zipdepth`, `sdxlunet`, `s3dit`).
+//!   (`yolov8`, `zipdepth`, `sdxlunet`, `s3dit`). When the upstream family
+//!   spans several releases under one architecture name, the id names the
+//!   FAMILY, not the release (`wan` covers Wan2.1 and Wan2.2, as `qwen3`
+//!   covers 0.6B through 32B) - the release is a config, and a per-release id
+//!   would collide on the shared [`Arch::gguf`] spelling.
 //! - **[`Source::Toy`]** - brain's own architectures with no upstream
 //!   reference to parity-check against (the sparse-MoE toy task, the PID
 //!   control transformer, …). Named, registered, gradient-checked and
@@ -46,6 +50,12 @@ pub enum Domain {
     Audio,
     Vision,
     Image,
+    /// Generates video (a temporal sequence of frames) rather than a single
+    /// image - a separate domain because the generic `infer` verb has to mean
+    /// something different here (frame count, fps and a video container are
+    /// part of the request, not optional extras) and because the serving path
+    /// carries `capability::Media::Video` blobs rather than `Image` ones.
+    Video,
     ThreeD,
     Forecast,
     World,
@@ -141,7 +151,8 @@ use Source::*;
 
 /// The registry. Order is presentation order for `brain caps` / `--help` -
 /// roughly the grouping `AGENTS.md` already uses (text decoders, multimodal,
-/// audio, vision, image generation, 3D, forecasting, world models, toy).
+/// audio, vision, image generation, video generation, 3D, forecasting, world
+/// models, toy).
 ///
 /// `package` names the crate as it exists TODAY, and every row now satisfies
 /// the naming rule (`crates/<id>`, package `brain-<id>`): the crate-rename
@@ -200,6 +211,34 @@ pub const ARCHS: &[Arch] = &[
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
     arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus"), weights_env: &[("BRAIN_ESRGAN_WEIGHTS", "weights")]),
+    // -- Video generation -----------------------------------------------
+    // `wan` names the FAMILY, not the release: Wan2.1 and Wan2.2 share one
+    // upstream architecture name, one HF class (`WanTransformer3DModel`) and
+    // one GGUF `general.architecture` spelling (`"wan"`, ComfyUI-GGUF's
+    // `IMG_ARCH_LIST`), so a per-release `wan21` id would have to claim that
+    // shared spelling via `gguf:` and then collide with `wan22` under
+    // `gguf_spellings_are_unique_across_archs`. The release is a config
+    // (`WanConfig::{t2v_1_3b, t2v_14b, i2v_14b_480p, i2v_14b_720p}`), exactly
+    // as `qwen3` spans 0.6B..32B. `gguf` stays `None` because the id IS the
+    // spelling.
+    //
+    // `default_ref` names the NATIVE repo rather than `-Diffusers`: it is
+    // self-contained (all four T2V roles in one listing, which is all brain's
+    // one-ModelRef-per-plan fetch can express), and it ships the umT5-XXL
+    // encoder as a single bf16 `.pth` (11.4 GB) where `-Diffusers` shards it
+    // in fp32 (22.7 GB) -- 17.6 GB total against 28.9 GB for the same model.
+    // `-Diffusers` remains the tensor-NAMING authority that `import_diffusers`
+    // targets; it is just not what we make users download by default.
+    //
+    // `BRAIN_WAN_CLIP` (the I2V CLIP ViT-H/14 vision tower) is deliberately
+    // NOT in `weights_env`: it does not exist in the T2V repo, and I2V's own
+    // checkpoint is a different `default_ref` -- so it stays an explicitly-set
+    // variable rather than something auto-fetch would fail to resolve.
+    arch!("wan", "Wan2.1/2.2 video diffusion transformer (T2V/I2V)", Video, Brain, "brain-wan",
+          hf: &["WanTransformer3DModel"],
+          default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
+          weights_env: &[("BRAIN_WAN_DIT", "dit"), ("BRAIN_WAN_VAE", "vae"),
+                         ("BRAIN_WAN_T5", "text_encoder"), ("BRAIN_WAN_TOKENIZER", "tokenizer")]),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
@@ -328,6 +367,22 @@ mod tests {
         assert_eq!(by_gguf("qwen35moe").map(|a| a.id), Some("qwen35moe"));
         assert_eq!(by_gguf("deepseek2-ocr").map(|a| a.id), Some("deepseek2ocr"));
         assert_eq!(by_gguf("deepseek2ocr"), None); // the id itself is NOT the gguf spelling here
+    }
+
+    #[test]
+    fn wan_owns_the_bare_gguf_spelling_so_the_family_stays_one_row() {
+        // Wan2.1 and Wan2.2 GGUFs both carry `general.architecture = "wan"`
+        // (ComfyUI-GGUF's IMG_ARCH_LIST). Keeping the id itself equal to that
+        // spelling -- rather than `wan21` + `gguf: Some("wan")` -- is what
+        // lets one row cover the whole family: two release-pinned rows would
+        // both have to claim "wan" and trip
+        // `gguf_spellings_are_unique_across_archs`. If someone ever splits
+        // this into per-release ids, this test is the thing that should stop
+        // them and send them back to the module doc's naming rule.
+        let wan = by_id("wan").expect("the wan row exists");
+        assert_eq!(wan.gguf, None, "wan's id IS its GGUF spelling -- an explicit `gguf:` here means the id drifted off the upstream name");
+        assert_eq!(by_gguf("wan").map(|a| a.id), Some("wan"));
+        assert_eq!(by_hf("WanTransformer3DModel").map(|a| a.id), Some("wan"));
     }
 
     #[test]

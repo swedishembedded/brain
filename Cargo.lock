@@ -1715,6 +1715,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-wan"
+version = "0.1.1"
+
+[[package]]
 name = "brain-web"
 version = "0.1.1"
 dependencies = [
