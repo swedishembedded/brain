@@ -252,8 +252,25 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
 /// for an architecture with no `default_ref`, or when `--weights` is already
 /// present -- this never silently overrides an explicit flag with a fetched
 /// one.
+///
+/// A small, explicit per-arch allowlist extends this past `canon_verb`'s
+/// generic "infer" mapping for architectures whose own dedicated CLI never
+/// uses that spelling at all: `lfm2`'s real verbs are `fill-mask`/`embed`,
+/// both genuinely inference-shaped (never trains from them), but neither
+/// canonicalizes to "infer" - so without this, `default_ref: Some(...)` on
+/// its `Arch` entry would be dead weight, unreachable from any verb its own
+/// CLI actually supports. Kept local and explicit rather than widening
+/// `canon_verb` itself, which is shared by every architecture and would
+/// risk giving some future, unrelated arch's own "embed" verb a training
+/// path this injection was never meant to touch.
+fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
+    let verb = verb.map(crate::args::canon_verb);
+    verb.is_some_and(|v| v == "infer")
+        || (arch == "lfm2" && verb.is_some_and(|v| v == "fill-mask" || v == "embed"))
+}
+
 fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
-    let is_infer = rest.first().is_some_and(|v| crate::args::canon_verb(v) == "infer");
+    let is_infer = wants_default_weights(arch, rest.first().map(String::as_str));
     if !is_infer || rest.iter().any(|a| a == "--weights") {
         return rest;
     }
@@ -296,6 +313,48 @@ mod tests {
         assert_eq!(arch_a, arch_b);
         assert_eq!(rest_a, rest_b);
         assert_eq!(rest_a, s(&["train", "data/calculator"]));
+    }
+
+    #[test]
+    fn wants_default_weights_recognizes_lfm2s_own_verbs() {
+        // `lfm2`'s real verbs are `fill-mask`/`embed`, both genuinely
+        // inference-shaped, but neither canonicalizes to "infer" the way
+        // `generate`/`gen`/`sample` do for other architectures - so without
+        // this arch-specific allowlist, `default_ref: Some("LiquidAI/
+        // LFM2.5-350M")` on `lfm2`'s `Arch` entry was unreachable dead weight
+        // from any verb its own CLI actually supports.
+        assert!(wants_default_weights("lfm2", Some("fill-mask")));
+        assert!(wants_default_weights("lfm2", Some("embed")));
+        // Not for a verb lfm2's own CLI does not define, even one another
+        // architecture's dedicated CLI happens to use for training.
+        assert!(!wants_default_weights("lfm2", Some("train")));
+        assert!(!wants_default_weights("lfm2", Some("finetune")));
+        assert!(!wants_default_weights("lfm2", None));
+        // The `fill-mask`/`embed` allowlist is scoped to `lfm2` alone - some
+        // future, unrelated architecture's own "embed" verb (if one exists)
+        // must not silently start auto-fetching a default checkpoint it
+        // never asked for.
+        assert!(!wants_default_weights("clip", Some("embed")));
+    }
+
+    #[test]
+    fn wants_default_weights_still_recognizes_the_generic_infer_mapping() {
+        assert!(wants_default_weights("zipdepth", Some("infer")));
+        assert!(wants_default_weights("qwen3vl", Some("generate")));
+        assert!(wants_default_weights("s3dit", Some("gen")));
+        assert!(!wants_default_weights("qwen3", Some("train")));
+    }
+
+    #[test]
+    fn maybe_inject_default_weights_leaves_an_explicit_weights_flag_untouched() {
+        // `--weights` already present must short-circuit BEFORE the
+        // network-dependent `ensure_default_weights` call, for both the
+        // generic "infer" path and the lfm2-specific allowlist above -
+        // never silently override an explicit flag with a fetched one.
+        let rest = s(&["infer", "--weights", "explicit.safetensors"]);
+        assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
+        let rest = s(&["fill-mask", "--weights", "explicit.safetensors", "--text", "hi"]);
+        assert_eq!(maybe_inject_default_weights("lfm2", rest.clone()), rest);
     }
 
     #[test]
