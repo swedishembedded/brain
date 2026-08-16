@@ -142,6 +142,46 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       `shift = 16`, which is far enough from 5.0 to look like a bug if
       encountered without warning.
 
+## The bar for the CLI
+
+One command, in one shell, produces a playable file. The reference point is
+LTX's distilled pipeline, which is worth beating rather than matching:
+
+```
+python -m ltx_pipelines.distilled \
+  --transformer-path   models/.../transformer-bf16.safetensors \
+  --text-encoder-path  models/.../gemma4-12b-with-proj-bf16.safetensors \
+  --video-vae-path     models/.../video-vae-bf16.safetensors \
+  --prompt "A belgian malinois running on a paved highway, cinematic lighting" \
+  --seed 42 \
+  --output-path output_distilled.mp4
+```
+
+Everything the run needs is a flag on the one command: each weight by path, the
+prompt, the seed, the output file. No environment variables to export first, no
+config to write, no second step to turn frames into a video.
+
+Two things follow for `brain wan`:
+
+- **Every `BRAIN_WAN_*` variable needs a flag twin** (`--dit`, `--vae`, `--t5`,
+  `--tokenizer`, `--clip`), and the flag wins. Env vars are fine as the
+  serving-path default, but a user who has just downloaded four files should
+  never have to learn them to try the model once.
+- **`--out video=out.mp4` is worse than `--output-path out.mp4`** for the common
+  case. The `name=path` form comes from `run_do` deriving its parser from the
+  capability action's blob schema, which is the right machinery for actions with
+  several outputs. A single-output action should still accept the plain form.
+
+With auto-fetch this can beat the reference outright, since the paths become
+optional:
+
+```
+brain wan t2v --prompt "..." --seed 42 --output-path out.mp4
+```
+
+That is the target. If the demo needs a paragraph of setup to explain, it is
+not done.
+
 A structural constraint worth stating early: brain's fetch plan is one
 `ModelRef` to one repo listing to one `Plan`. Blending a GGUF DiT from `city96/`
 with a VAE and text encoder from `Wan-AI/` cannot be expressed, which is the
