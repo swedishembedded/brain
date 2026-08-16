@@ -189,9 +189,19 @@ pub fn time_shift_exponential(mu: f32, sigmas: &[f32]) -> Vec<f32> {
 }
 
 /// The FLUX.2 Klein sigma schedule: `linspace(1, 1/N, N)` exponentially
-/// shifted by [`empirical_mu`], with the terminal 0 appended (`N+1` entries) —
+/// shifted by [`empirical_mu`], with the terminal 0 appended (`N+1` entries) -
 /// feed straight into [`FlowMatchEulerScheduler::set_timesteps`] with
 /// `shift: 1.0` (the shift is already applied).
+///
+/// The `base` below spells out the same ramp [`default_z_image_sigmas`] gives,
+/// and unifying the two is a standing temptation. **Do not**, without moving
+/// the FLUX.2 goldens deliberately and in the same change. The two spellings
+/// associate their float ops differently - `(i * span) / (n-1)` here against
+/// `((b - a) / (n-1)) * i` in [`linspace`] - and f32 multiply/divide is not
+/// associative, so they disagree by one ULP (5.96e-8) for 1979 of the first
+/// 2001 step counts. The handful that do agree includes the small round
+/// numbers a spot check reaches for, which is exactly how this reads as
+/// duplication when it is really a second, load-bearing rounding.
 pub fn klein_sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
     let n = num_steps;
     let mu = empirical_mu(image_seq_len, n);
