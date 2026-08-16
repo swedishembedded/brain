@@ -151,9 +151,75 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       the training grid's top `1 - 1/1000 = 0.999` (first timestep 999), dpm++
       at exactly 1.0 (first timestep 1000), because `get_sampling_sigmas`
       builds its own `linspace(1, 0, N+1)`.
-- [ ] **`crates/wan`** proper -- the DiT itself. `config.rs`, `vae3d.rs` and
-      `import.rs` (VAE, both name spaces, two-way validated) are in; `model.rs`,
-      the pipeline and the CLI wiring are not.
+- [x] **The DiT itself** -- `rope.rs`, `block.rs`, `model.rs` (host-orchestrated
+      reference), `dev.rs` (device-resident engine, weights uploaded once, the
+      whole 30-block stack as ONE recorded graph) and the DiT half of
+      `import.rs`. **Zero new kernels**: the whole transformer is existing
+      kernels at Wan's shapes.
+      * **Goldens first** (`tools/goldens/wan_dit_dump_reference.py`), with two
+        independent paths asserted before a byte is written: the official
+        `wan/modules/model.py` and diffusers' `WanTransformer3DModel`. The
+        1.3B weights ship in the diffusers name space, so the dumper converts
+        them to the reference names -- the same mapping `import.rs` implements,
+        which means a mapping mistake fails in Python instead of surfacing as a
+        cosine deficit thirty blocks deep. The two agree at cosine
+        1.0000000000, rel 4.98e-6.
+      * **One shim, recorded in the manifest**: `flash_attention` asserts
+        `q.device.type == 'cuda'`, and its own fallback would run SDPA in
+        **bfloat16** with the key-padding mask dropped. Replaced with an fp32
+        SDPA that honours `k_lens`; the diffusers cross-check is what says the
+        replacement invents nothing.
+      * **The `seq_len` pad is provably irrelevant**, settled by experiment
+        rather than argument: `text2video.py` computes `seq_len` as exactly the
+        token count at `sp_size = 1`, and a forward at `tokens + 37` leaves the
+        output at cosine 1.0000000000 (3.4e-6 relative, fp32 reassociation in
+        SDPA's key blocking). brain therefore computes content rows only and
+        carries no token mask. The text encoding's own pad rows are real and
+        are reported as a separate population.
+      * **The modulation fold** (`.agents/rules/porting.md` section 7):
+        `e0 = time_projection(time_embedding(t))` is `[1, 6, dim]`, a function
+        of the timestep alone, so `LN_noaffine(x)*(1+scale)+shift` is exactly
+        `LayerNorm(gamma = 1+scale, beta = shift)`. Six vectors become two
+        `(gamma, beta)` pairs plus two `gate_row` gates per block, computed once
+        per forward on the host. Wan 2.2's TI2V passes a **per-token** `temb`,
+        which breaks the token-independence; `ModBufs::upload` takes one
+        `[6·dim]` vector so that variant cannot be fed to it by accident.
+      * **QK-norm is across ALL heads, not per head.** `WanRMSNorm(dim)` runs
+        before the `view(b, s, n, d)`; diffusers spells it
+        `RMSNorm(dim_head * heads)` under the config name
+        `"rms_norm_across_heads"`. Per-head would divide by a different scalar
+        per head and still produce plausible video.
+      * **diffusers' `norm2` and `norm3` are SWAPPED against upstream's.**
+        diffusers `norm2` is the cross-attention norm (upstream `norm3`);
+        diffusers `norm3` is the FFN pre-norm (upstream `norm2`, affine-free and
+        therefore absent from the checkpoint). A pass-through mapping imports
+        cleanly, validates cleanly, and normalises with the wrong learned affine.
+      * **Two patch orderings, and they differ.** `patch_embedding` is a
+        `Conv3d` whose weight row flattens `[c][kt][kh][kw]`, so its token
+        vector is channel-OUTERMOST; the head's row is `view(*patch_size, c)`,
+        channel-INNERMOST. One ordering for both gives a shuffled latent that
+        still looks like video.
+      * **Attention**: 32,760 tokens at 480p makes a materialised score matrix
+        51 GB across 12 heads against the P40's 2047 MiB per-binding ceiling, so
+        self-attention is `flash_attn_bidir{,_split}` on any device with
+        workgroup reductions and query-chunked `[heads, chunk, t]` slabs
+        otherwise (the CPU JIT cannot run the flash barriers). Cross-attention
+        is query-chunked against the 512 text keys. A weight-free test builds
+        and submits a real 32,760-token graph at toy widths.
+      Parity (`crates/wan/tests/dit_parity.rs`): tiny 3-block model at 320
+      tokens **cosine 1.000000000** on both backends (flash on Vulkan, chunked
+      on the CPU JIT), rel_l2 2.4e-7 at the output; the real 1.3B weights at
+      **4,680 tokens** (latent 3x60x104, i.e. 480p) at **cosine 1.000000000**,
+      rel_l2 3.755e-6, max_abs 1.814e-4 against the reference and 3.635e-6 /
+      1.566e-4 against diffusers, with every fourth block tapped and the
+      host-orchestrated and device-resident forwards agreeing to the last digit.
+      Perf is deliberately NOT addressed: the chunked fallback's naive cross
+      trio is far too slow to be a GPU path at 4,680 tokens (it needs a raised
+      `BRAIN_GPU_WAIT_S` to finish at all), and `model::block::gemm_bidir_fwd`
+      is the measured answer when that ladder starts.
+- [ ] **The pipeline and the CLI wiring** on top of the parity-proven forward:
+      CFG's two forward passes per step, the UniPC/DPM++ loop, and
+      `brain wan t2v`.
 - [ ] **`capability::Media::Video`**. There is no video media type, and
       `.agents/rules/serving-contract.md` section 4 requires extending `Media`
       and the D-Bus frame handling rather than adding a side channel. This is a

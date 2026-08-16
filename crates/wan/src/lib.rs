@@ -27,9 +27,16 @@
 //! steps, guidance - live in the CLI's argument defaults, not in any config
 //! file the checkpoint ships.
 
+pub mod block;
 pub mod config;
+pub mod dev;
 pub mod import;
+pub mod model;
+pub mod rope;
 pub mod vae3d;
 
+pub use block::{AttnMode, WanBlock};
 pub use config::{Task, WanConfig};
+pub use dev::WanDitDev;
+pub use model::WanDit;
 pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};

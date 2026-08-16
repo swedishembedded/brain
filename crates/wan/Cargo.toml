@@ -3,7 +3,7 @@ name = "brain-wan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wan2.1/2.2 video diffusion transformer (T2V/I2V): a DiT over 3D (frame, height, width) latents with per-block text cross-attention, flow-matching UniPC sampling, and a causal 3D VAE at (4, 8, 8) stride. Currently the architecture's config surface; the model, importer and pipeline land on top of brain-dit / brain-vae / brain-diffusion / brain-t5encoder."
+description = "Wan2.1/2.2 video diffusion transformer (T2V/I2V): a DiT over 3D (frame, height, width) latents with per-block text cross-attention, flow-matching UniPC sampling, and a causal 3D VAE at (4, 8, 8) stride. The config surface, the VAE, the DiT (block, host-orchestrated reference and device-resident engine) and both importers, built on brain-dit / brain-vae / brain-model; the sampling pipeline and CLI land on top of brain-diffusion / brain-t5encoder."
 
 [lib]
 name = "wan"
@@ -14,7 +14,9 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-vae.workspace = true
+brain-model.workspace = true
+brain-dit.workspace = true
+brain-paramstore.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
-brain-model.workspace = true
