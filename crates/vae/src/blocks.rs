@@ -452,8 +452,8 @@ fn col_budget_floats() -> u64 {
 ///
 /// Who this actually moves: **inference only**, and only for architectures in
 /// that channel band. `conv_s` pins train mode to the direct lowering (its
-/// adjoints are the ones that exist), and VQGAN/AutoencoderKL/SDXL are all
-/// >= 128 channels — so this is worth nothing to them and everything to
+/// adjoints are the ones that exist), and VQGAN/AutoencoderKL/SDXL all carry
+/// at least 128 channels - so this is worth nothing to them and everything to
 /// RRDBNet (`num_feat` 64, `num_grow_ch` 32) and the vision backbones.
 const GEMM_CONV_MIN_COUT: u32 = 32;
 

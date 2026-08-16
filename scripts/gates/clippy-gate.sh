@@ -116,7 +116,7 @@ cd "$ROOT"
 # (`crates/bench/tests/capscale.rs`, `crates/yolov8/tests/common/p7.rs`,
 # `crates/yolov8/tests/p7_unit.rs`) it found alongside its own work, rather
 # than leaving them as unrelated drift.
-BASELINE="${BASELINE:-292}"
+BASELINE="${BASELINE:-291}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.
