@@ -113,11 +113,6 @@ depth: 512x512, inference 137.6 ms (engine)
 
 ![zipdepth's relative depth estimate, the apple nearest and the background farthest](docs/quickstart/img/depth.png)
 
-No public checkpoint for this one is hosted on HuggingFace - the upstream
-[ZipDepth](https://github.com/fabiotosi92/ZipDepth) project ships
-`zipdepth_base.pth` directly in its own repo, so this is the one line above
-that does not go through brain's own model-store auto-fetch.
-
 **Image + text → text**, two ways - a dedicated fast captioner and a general
 VQA model, on the same image:
 
@@ -128,15 +123,6 @@ A golden retriever with a red apple in front of it, both in sharp focus, with a 
 $ brain qwen3vl generate --in image=seed.png --prompt "What is in this image? Answer in one sentence." --max_new 40   # auto-fetches Qwen/Qwen3-VL-4B-Instruct
 A golden retriever is looking at a red apple on a wooden table.
 ```
-
-Two differently-trained vision-language models, run through two different
-code paths, independently name the same two objects the generation prompt
-asked for and yolov8 found - the self-check the chain is built around.
-
-(`fastvlm caption` prints its real caption correctly, then segfaults on
-process exit - a real, open bug, tracked in
-[`.agents/roadmap/vlm.md`](.agents/roadmap/vlm.md). Shown as-is rather than
-hidden; the caption above is genuine.)
 
 **Masked inpainting** - replace the apple with a slice of cake, everything
 outside the mask held fixed:
@@ -162,13 +148,6 @@ $ brain qwen3asr transcribe --in audio=spoken.wav --json                        
 $ brain infer qwen3 --prompt "Brain trains and runs neural networks from scratch in rust." --max-new 24
 Brain trains and runs neural networks from scratch in rust. This is a problem that is very common in the field of AI, and it is also a problem that is very difficult
 ```
-
-`nemotronasr` recovers every word of the synthesized sentence - the speech
-round-trip actually carried the content, not just noise shaped like speech.
-`qwen3asr` is shown as-is: a real, correctly-loaded 1.7B model producing a
-real (if much shorter) transcription of the same audio, not a cherry-picked
-result - a smaller/differently-tuned ASR model genuinely can undershoot on a
-ten-second clip.
 
 **Document OCR** - a second round trip through a different modality (text →
 rendered document image → text), the same self-verifying shape as the
@@ -214,16 +193,6 @@ brain infer glmdsa --weights F --prompt "..."                 # GLM-5.2 MoE deco
 brain zipdepth --image photo.ppm --weights zipdepth.pth       # monocular depth
 ```
 
-Large architectures (Qwen3.5-35B-A3B, Qwen3-Omni-30B, FLUX.1/FLUX.2, SDXL) are
-deliberately not part of this list -- they need tens of GB of disk and are not
-something to fetch by accident. See their own pages in
-[`docs/models/`](docs/models/index.md) for sizing before you run them.
-
-`scripts/demo/quickstart.sh` (`make docs/quickstart`) is the script that
-actually produced every command and asset on this page - copy-pasteable,
-idempotent, and re-run by `make test/e2e/quickstart` to keep this page honest.
-See [`docs/using/cli.md`](docs/using/cli.md) for the complete CLI grammar.
-
 ## Model support
 
 Every model `brain caps` reports, with what it does and where its full page
@@ -264,14 +233,6 @@ including those.
 | [`brain/kronos`](docs/models/kronos.md) | Forecasting | OHLCV candlestick forecasting |
 | [`diamond`](docs/models/diamond.md) | World models | playable, action-conditioned Atari-100k simulation |
 | [`brain/imgpipe`](docs/models/imgpipe.md) | Vision | composable image-processing pipeline (no HTTP endpoint) |
-
-`brain caps --json` is the live, weights-free source of truth this table is
-checked against (`tests/e2e/model_table_check.py`); the model id column names
-what `brain caps`/D-Bus/HTTP actually serve today, and now matches the
-architecture id you actually type at the CLI (`brain infer qwen3vl`, `brain
-zipdepth --image ...`, `brain qwen3tts synth ...`) for every `brain/<id>`
-row -- the two used to drift (a catalog id frozen at its pre-rename crate
-name while the CLI word moved on) and no longer do.
 
 ## Where to go next
 
