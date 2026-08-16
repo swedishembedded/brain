@@ -250,6 +250,8 @@ test/slow:
 # architecture name as its own match arm, and every non-toy architecture to
 # have (and every docs/models/*.md page to BE) a real registry id in both
 # directions - see that script for the full rationale.
+# check-linear-history.sh fails if HEAD's history contains a merge commit -
+# the working branch must always be rebased, never merged into.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
@@ -257,6 +259,7 @@ check/scripts:
 	bash scripts/gates/check-no-perf-numbers.sh
 	bash scripts/gates/check-device-env-single-source.sh
 	bash scripts/gates/check-arch-names.sh
+	bash scripts/gates/check-linear-history.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"

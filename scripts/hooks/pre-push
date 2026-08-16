@@ -3,9 +3,12 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Git pre-push hook: FAILS the push if (1) any commit about to be pushed
-still has a Co-Authored-By:/Claude-Session: trailer line, or (2) the tree
-being pushed cites a docs/ or .agents/ file path from crates/, scripts/,
-tools/, or examples/ (scripts/gates/check-no-doc-citations.sh).
+still has a Co-Authored-By:/Claude-Session: trailer line, (2) the tree being
+pushed cites a docs/ or .agents/ file path from crates/, scripts/, tools/, or
+examples/ (scripts/gates/check-no-doc-citations.sh), or (3) HEAD's history
+contains a merge commit (scripts/gates/check-linear-history.sh) -- merging
+instead of rebasing is exactly the kind of local mistake this backstop exists
+to catch before it becomes shared history.
 
 Unlike scripts/hooks/commit-msg (which silently cleans new commits and never
 fails), this is a real gate — a safety net for a commit that reached this
@@ -69,6 +72,15 @@ def check_doc_citations():
     return None if result.returncode == 0 else (result.stdout + result.stderr)
 
 
+def check_linear_history():
+    """Run scripts/gates/check-linear-history.sh against HEAD -- the ref
+    actually about to be pushed. Returns the gate's stdout+stderr on
+    failure, None if clean."""
+    gate = REPO_ROOT / "scripts" / "gates" / "check-linear-history.sh"
+    result = subprocess.run(["bash", str(gate), "HEAD"], capture_output=True, text=True, cwd=REPO_ROOT)
+    return None if result.returncode == 0 else (result.stdout + result.stderr)
+
+
 def main(argv):
     shas = set()
     if not sys.stdin.isatty():
@@ -121,6 +133,16 @@ def main(argv):
             "file args) -- it runs regardless of whether the pre-commit hook fired on the "
             "commit that introduced this, so fixing it is the same either way: remove the "
             "citation and state the fact inline, then commit and push again.",
+            file=sys.stderr,
+        )
+
+    linear_report = check_linear_history()
+    if linear_report is not None:
+        failed = True
+        print("pre-push: refusing to push -- " + linear_report, file=sys.stderr)
+        print(
+            "Rebase the merge commit(s) out of HEAD's history (git rebase, not git merge), "
+            "then push again.",
             file=sys.stderr,
         )
 
