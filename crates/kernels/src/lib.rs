@@ -113,6 +113,8 @@ pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl
 pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
 /// `wgsl/attn_decode_scores_win.wgsl`
 pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
+/// `wgsl/attn_keypad_mask.wgsl`
+pub const ATTN_KEYPAD_MASK: &str = include_str!("../wgsl/attn_keypad_mask.wgsl");
 /// `wgsl/attn_prefix_mask.wgsl`
 pub const ATTN_PREFIX_MASK: &str = include_str!("../wgsl/attn_prefix_mask.wgsl");
 /// `wgsl/attn_relpos_add.wgsl`
@@ -886,6 +888,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("attn_decode_scores", ATTN_DECODE_SCORES),
     ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
+    ("attn_keypad_mask", ATTN_KEYPAD_MASK),
     ("attn_prefix_mask", ATTN_PREFIX_MASK),
     ("attn_relpos_add", ATTN_RELPOS_ADD),
     ("attn_relpos_dq", ATTN_RELPOS_DQ),
