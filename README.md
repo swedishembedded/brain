@@ -97,6 +97,20 @@ $ brain sam2 segment --in image=seed.png --points "220,180" --labels "1" --out m
 
 ![the sam2 segmentation mask, isolating the dog](docs/quickstart/img/segmented.png)
 
+**Monocular depth**, false-colored (near = red, far = blue):
+
+```bash
+$ brain zipdepth --image seed.ppm --weights zipdepth_base.pth --headless --view depth --colormap turbo --out depth.ppm
+depth: 512x512, inference 137.6 ms (engine)
+```
+
+![zipdepth's relative depth estimate, the apple nearest and the background farthest](docs/quickstart/img/depth.png)
+
+No public checkpoint for this one is hosted on HuggingFace - the upstream
+[ZipDepth](https://github.com/fabiotosi92/ZipDepth) project ships
+`zipdepth_base.pth` directly in its own repo, so this is the one line above
+that does not go through brain's own model-store auto-fetch.
+
 **Image + text → text**, two ways - a dedicated fast captioner and a general
 VQA model, on the same image:
 

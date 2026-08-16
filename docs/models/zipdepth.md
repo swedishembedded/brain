@@ -20,10 +20,16 @@ than a slow, large-scale depth transformer.
 
 ## Getting the weights
 
-Model id: `brain/zipdepth`. Not auto-fetched - point it at a released ZipDepth
-checkpoint (`.pth` or an equivalent `.safetensors`) yourself:
+Model id: `brain/zipdepth`. Not auto-fetched (no HuggingFace host exists for
+this checkpoint to fetch from) - point it at a released ZipDepth checkpoint
+(`.pth` or an equivalent `.safetensors`) yourself. The upstream
+[ZipDepth](https://github.com/fabiotosi92/ZipDepth) project ships its
+released checkpoints directly in its own GitHub repo, e.g.
+`checkpoints/zipdepth_base.pth` (the base/unfold-upsampler variant this
+crate's importer expects, verified to load and produce a real depth map -
+see `scripts/demo/quickstart.sh`):
 
-- Standalone demo (`brain depth --image` / `--camera`): pass `--weights
+- Standalone demo (`brain zipdepth --image` / `--camera`): pass `--weights
   <path>` directly.
 - Served (via `brain do` / D-Bus, or the `--infer npu` path): set
   `BRAIN_ZIPDEPTH_WEIGHTS=<path>`.
@@ -37,20 +43,20 @@ the file's own tensor names - you never need to pass `--variant` by hand.
 export ZIPDEPTH_PTH=/path/to/zipdepth_base.pth
 
 # Still image (window; Esc quits, [ ] cycle colormaps, v cycles views)
-brain depth --image photo.ppm --weights $ZIPDEPTH_PTH
+brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH
 
 # Headless: writes the composite PPM + a content hash, no display needed
-DISPLAY= brain depth --image photo.ppm --weights $ZIPDEPTH_PTH \
+DISPLAY= brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH \
     --headless --out out/depth.ppm
 
 # Webcam, realtime (Linux/V4L2, YUYV)
-brain depth --camera --weights $ZIPDEPTH_PTH
+brain zipdepth --camera --weights $ZIPDEPTH_PTH
 
 # Pick the accelerator
-brain depth --image photo.ppm --weights $ZIPDEPTH_PTH --device cpu       # all cores
-brain depth --image photo.ppm --weights $ZIPDEPTH_PTH --device gpu       # wgpu (default)
-brain depth --image photo.ppm --weights $ZIPDEPTH_PTH --device vulkan    # native Vulkan
-brain depth --image photo.ppm --infer npu --weights zipdepth_base_npu.pth
+brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device cpu       # all cores
+brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device gpu       # wgpu (default)
+brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device vulkan    # native Vulkan
+brain zipdepth --image photo.ppm --infer npu --weights zipdepth_base_npu.pth
                                                        # Intel NPU via ONNX/OpenVINO
 ```
 
@@ -83,8 +89,8 @@ not a second `brain zipdepth infer ...` form.
 ### Training / fine-tuning
 
 ```bash
-brain depth train --out out/zipdepth.safetensors --steps 50 --batch 2 --size 64x64
-brain depth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-tune
+brain zipdepth train --out out/zipdepth.safetensors --steps 50 --batch 2 --size 64x64
+brain zipdepth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-tune
 ```
 
 ## Options
@@ -102,7 +108,7 @@ brain depth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-
 | `--camera` / `--device-path <dev>` / `--res WxH` | webcam capture options (Linux/V4L2 only) |
 | `--headless --out <file>` | write a composite PPM instead of opening a window |
 | `--bench N` | print steady-state per-frame timing over N warm re-inferences |
-| `brain depth calib --report --weights <pth> --images <dir>` | per-layer INT8 outlier report, used to pick which layers to keep in FP when quantizing |
+| `brain zipdepth calib --report --weights <pth> --images <dir>` | per-layer INT8 outlier report, used to pick which layers to keep in FP when quantizing |
 
 ## Hardware and limits
 
@@ -110,4 +116,4 @@ Output is unbounded non-negative **inverse depth**, relative only - there is
 no metric-scale mode. `--camera` is Linux/V4L2 (YUYV) only; an MJPEG-only
 webcam is rejected. Training uses a built-in synthetic generator today, not
 real depth datasets. HTTP is not wired up for this model - use `brain do`,
-D-Bus, or the standalone `brain depth` demo verb.
+D-Bus, or the standalone `brain zipdepth` demo verb.

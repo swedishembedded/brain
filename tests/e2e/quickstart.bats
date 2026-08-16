@@ -89,6 +89,17 @@ assert len(data) > 500, 'suspiciously tiny -- likely a flat/degenerate mask'
   [ "$status" -eq 0 ]
 }
 
+@test "quickstart: zipdepth produced a real depth map" {
+  [ -s "$IMG_DIR/depth.png" ] || skip "step 4b (zipdepth) has not run yet"
+  run python3 -c "
+from pathlib import Path
+data = Path('$IMG_DIR/depth.png').read_bytes()
+assert data[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+assert len(data) > 500, 'suspiciously tiny -- likely a flat/degenerate depth map'
+"
+  [ "$status" -eq 0 ]
+}
+
 @test "quickstart: fastvlm caption names an object the s3dit prompt asked for (cross-model agreement)" {
   [ -s "$IMG_DIR/fastvlm-caption.txt" ] || skip "step 5 (fastvlm caption) has not run yet"
   run cat "$IMG_DIR/fastvlm-caption.txt"

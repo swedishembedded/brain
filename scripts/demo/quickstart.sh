@@ -16,8 +16,8 @@
 #     stdout into the .txt files the README quotes and copying images into
 #     $IMG_DIR under their published names.
 #   * Chained - each step's real output feeds the next: the text2image call
-#     is the ONE seed image every later step (detect, segment, caption,
-#     inpaint, vlm) reads.
+#     is the ONE seed image every later step (detect, segment, depth,
+#     caption, inpaint, vlm) reads.
 #   * Network-bound, not compute-bound - the checkpoints this pulls are
 #     multi-GB; set HF_TOKEN (or `hf auth login` first) to avoid HF's
 #     unauthenticated rate limit, and expect a cold run to take a while.
@@ -110,6 +110,35 @@ if ! need "$IMG_DIR/segmented.png"; then
   "$BRAIN" imageops colorize --in image="$IMG_DIR/.mask-raw.png" --colormap gray \
     --out image="$IMG_DIR/segmented.png"
   rm -f "$IMG_DIR/.mask-raw.png"
+fi
+
+# ---------------------------------------------------------------- 4b. depth
+
+step "4b. monocular depth (zipdepth) + turbo colormap"
+if ! need "$IMG_DIR/depth.png"; then
+  # No HuggingFace host exists for this checkpoint - the upstream project
+  # ships it directly in its own GitHub repo, so this is the one step that
+  # does not go through brain's own model-store auto-fetch.
+  ZIPDEPTH_PTH="$BRAIN_MODELS_DIR/brain/zipdepth/zipdepth_base.pth"
+  if ! need "$ZIPDEPTH_PTH"; then
+    mkdir -p "$(dirname "$ZIPDEPTH_PTH")"
+    curl -sSL -o "$ZIPDEPTH_PTH" \
+      "https://github.com/fabiotosi92/ZipDepth/raw/main/checkpoints/zipdepth_base.pth"
+  fi
+  # zipdepth's CLI reads/writes PPM directly (not the shared --in/--out
+  # image= codec path every other action here uses), so this is the one
+  # step that round-trips through PPM by hand.
+  python3 -c "
+from PIL import Image
+Image.open('$IMG_DIR/seed.png').convert('RGB').save('$IMG_DIR/.seed.ppm')
+"
+  DISPLAY= "$BRAIN" zipdepth --image "$IMG_DIR/.seed.ppm" --weights "$ZIPDEPTH_PTH" \
+    --headless --view depth --colormap turbo --out "$IMG_DIR/.depth.ppm"
+  python3 -c "
+from PIL import Image
+Image.open('$IMG_DIR/.depth.ppm').save('$IMG_DIR/depth.png')
+"
+  rm -f "$IMG_DIR/.seed.ppm" "$IMG_DIR/.depth.ppm"
 fi
 
 # ---------------------------------------------------------------- 5. image + text -> text (two VLMs)
