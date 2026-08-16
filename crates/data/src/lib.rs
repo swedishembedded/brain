@@ -27,6 +27,7 @@ pub mod qwen_chat;
 pub mod qwen_tokenizer;
 pub mod rng;
 pub mod tokenizer;
+pub mod unigram;
 
 // Dataset generators (one module per source), ported 1:1 from
 // `scratchpad/reference/nanogpt/data_generators/*.py`.
