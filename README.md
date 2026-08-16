@@ -134,7 +134,7 @@ while the wood table, the apple, and the background all change together:
 $ python3 -c "from PIL import Image, ImageOps; ImageOps.invert(Image.open('dog-mask.png').convert('L')).save('bg-mask.png')"
 $ brain --device gpu s3dit inpaint --in image=seed.png --in mask=bg-mask.png \
     --prompt "a golden retriever dog sitting behind a slice of chocolate cake on a white marble kitchen countertop, bright natural daylight, blurred modern kitchen background, photorealistic" \
-    --strength 1.0 --feather 3 --steps 8 --precision int8 \
+    --strength 1.0 --feather 0 --steps 8 --precision int8 \
     --out image=inpainted.png
 ```
 
@@ -142,6 +142,12 @@ $ brain --device gpu s3dit inpaint --in image=seed.png --in mask=bg-mask.png \
 
 A real segmentation mask driving inpainting, not a hand-picked rectangle: the
 dog is the one thing sam2 marked, so it's the one thing this leaves alone.
+`feather=0` is deliberate here, not the default 2-3: any positive feather
+blends a few percent of the *original* pixels back in near the mask boundary
+at every sampling step, and the apple used to sit right against the dog's
+chin - so it kept reinforcing an apple-shaped ghost into the regenerated
+cake regardless of step count. sam2's mask already follows the dog's real
+silhouette, so a hard edge doesn't need softening to hide a straight line.
 
 **Speech: text → speech → text → text**, a full TTS → ASR → LLM round trip,
 through two independently-trained ASR models on the exact same audio:

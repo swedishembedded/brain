@@ -182,9 +182,20 @@ if ! need "$IMG_DIR/inpainted.png"; then
 from PIL import Image, ImageOps
 ImageOps.invert(Image.open('$IMG_DIR/dog-mask.png').convert('L')).save('$IMG_DIR/.bg-mask.png')
 "
+  # feather=0 (a hard mask edge) is intentional here, not a fallback: the
+  # sam2 mask already follows the dog's organic fur silhouette (unlike a
+  # synthetic rectangle, it needs no softening to hide a straight edge), and
+  # any positive feather blends a few percent of the ORIGINAL pixels back in
+  # at every sampling step for cells near the boundary. The apple used to
+  # sit right against the dog's chin, so that leak reinforced an apple-shaped
+  # ghost into the regenerated cake every step, regardless of step count
+  # (confirmed: 8 vs 16 steps at feather=3 produced near-identical ghosting,
+  # mean diff 7.9/255 -- ruling out "just needs more steps"). feather=0
+  # removes the leak entirely and the boundary still reads as clean because
+  # the mask shape itself is already the right shape.
   "$BRAIN" --device gpu s3dit inpaint --in image="$IMG_DIR/seed.png" --in mask="$IMG_DIR/.bg-mask.png" \
     --prompt "a golden retriever dog sitting behind a slice of chocolate cake on a white marble kitchen countertop, bright natural daylight, blurred modern kitchen background, photorealistic" \
-    --strength 1.0 --feather 3 --steps 8 --precision int8 \
+    --strength 1.0 --feather 0 --steps 8 --precision int8 \
     --out image="$IMG_DIR/inpainted.png"
   rm -f "$IMG_DIR/.bg-mask.png"
 fi
