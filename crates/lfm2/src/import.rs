@@ -20,16 +20,16 @@ use crate::config::{adjust_ff_dim, LayerType, LfmConfig};
 /// it (nothing is expected to drop for these checkpoints; unknown names fail
 /// coverage instead of being silently ignored).
 fn hf_to_brain(name: &str) -> Option<String> {
-    if name == "lfm2.embed_tokens.weight" {
+    if name == "model.embed_tokens.weight" {
         return Some("tok.weight".to_string());
     }
-    if name == "lfm2.embedding_norm.weight" {
+    if name == "model.embedding_norm.weight" {
         return Some("norm.weight".to_string());
     }
     if name == "lm_head.weight" {
         return None; // tied: model reuses tok.weight
     }
-    let rest = name.strip_prefix("lfm2.layers.")?;
+    let rest = name.strip_prefix("model.layers.")?;
     let (n, rest) = rest.split_once('.')?;
     let leaf = match rest {
         "operator_norm.weight" => "ln1.weight",
@@ -214,22 +214,22 @@ mod tests {
 
     #[test]
     fn name_mapping() {
-        assert_eq!(hf_to_brain("lfm2.embed_tokens.weight").unwrap(), "tok.weight");
-        assert_eq!(hf_to_brain("lfm2.embedding_norm.weight").unwrap(), "norm.weight");
+        assert_eq!(hf_to_brain("model.embed_tokens.weight").unwrap(), "tok.weight");
+        assert_eq!(hf_to_brain("model.embedding_norm.weight").unwrap(), "norm.weight");
         assert_eq!(hf_to_brain("lm_head.weight"), None);
         assert_eq!(
-            hf_to_brain("lfm2.layers.0.conv.conv.weight").unwrap(),
+            hf_to_brain("model.layers.0.conv.conv.weight").unwrap(),
             "blocks.0.conv.conv.weight"
         );
         assert_eq!(
-            hf_to_brain("lfm2.layers.2.self_attn.q_layernorm.weight").unwrap(),
+            hf_to_brain("model.layers.2.self_attn.q_layernorm.weight").unwrap(),
             "blocks.2.attn.q_norm.weight"
         );
         assert_eq!(
-            hf_to_brain("lfm2.layers.13.feed_forward.w1.weight").unwrap(),
+            hf_to_brain("model.layers.13.feed_forward.w1.weight").unwrap(),
             "blocks.13.mlp.gate.weight"
         );
-        assert_eq!(hf_to_brain("lfm2.layers.1.operator_norm.weight").unwrap(), "blocks.1.ln1.weight");
+        assert_eq!(hf_to_brain("model.layers.1.operator_norm.weight").unwrap(), "blocks.1.ln1.weight");
     }
 
     #[test]
@@ -282,30 +282,30 @@ mod tests {
 
         // d=6, hq = 2*head_dim(=d/n_heads=3) = 6, hkv = 1*3 = 3, ff = 8, conv_k = 3.
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
-            ("lfm2.embed_tokens.weight".into(), vec![30], seq(1_000_000.0, 30)),
-            ("lfm2.embedding_norm.weight".into(), vec![6], seq(2_000_000.0, 6)),
+            ("model.embed_tokens.weight".into(), vec![30], seq(1_000_000.0, 30)),
+            ("model.embedding_norm.weight".into(), vec![6], seq(2_000_000.0, 6)),
             ("lm_head.weight".into(), vec![30], seq(3_000_000.0, 30)), // tied -> must be dropped
             // layer 0: conv
-            ("lfm2.layers.0.operator_norm.weight".into(), vec![6], seq(10.0, 6)),
-            ("lfm2.layers.0.conv.in_proj.weight".into(), vec![108], seq(20.0, 108)),
-            ("lfm2.layers.0.conv.conv.weight".into(), vec![18], seq(140.0, 18)),
-            ("lfm2.layers.0.conv.out_proj.weight".into(), vec![36], seq(160.0, 36)),
-            ("lfm2.layers.0.ffn_norm.weight".into(), vec![6], seq(200.0, 6)),
-            ("lfm2.layers.0.feed_forward.w1.weight".into(), vec![48], seq(210.0, 48)),
-            ("lfm2.layers.0.feed_forward.w3.weight".into(), vec![48], seq(260.0, 48)),
-            ("lfm2.layers.0.feed_forward.w2.weight".into(), vec![48], seq(310.0, 48)),
+            ("model.layers.0.operator_norm.weight".into(), vec![6], seq(10.0, 6)),
+            ("model.layers.0.conv.in_proj.weight".into(), vec![108], seq(20.0, 108)),
+            ("model.layers.0.conv.conv.weight".into(), vec![18], seq(140.0, 18)),
+            ("model.layers.0.conv.out_proj.weight".into(), vec![36], seq(160.0, 36)),
+            ("model.layers.0.ffn_norm.weight".into(), vec![6], seq(200.0, 6)),
+            ("model.layers.0.feed_forward.w1.weight".into(), vec![48], seq(210.0, 48)),
+            ("model.layers.0.feed_forward.w3.weight".into(), vec![48], seq(260.0, 48)),
+            ("model.layers.0.feed_forward.w2.weight".into(), vec![48], seq(310.0, 48)),
             // layer 1: attention
-            ("lfm2.layers.1.operator_norm.weight".into(), vec![6], seq(400.0, 6)),
-            ("lfm2.layers.1.self_attn.q_proj.weight".into(), vec![36], seq(410.0, 36)),
-            ("lfm2.layers.1.self_attn.k_proj.weight".into(), vec![18], seq(450.0, 18)),
-            ("lfm2.layers.1.self_attn.v_proj.weight".into(), vec![18], seq(470.0, 18)),
-            ("lfm2.layers.1.self_attn.q_layernorm.weight".into(), vec![3], seq(490.0, 3)),
-            ("lfm2.layers.1.self_attn.k_layernorm.weight".into(), vec![3], seq(500.0, 3)),
-            ("lfm2.layers.1.self_attn.out_proj.weight".into(), vec![36], seq(510.0, 36)),
-            ("lfm2.layers.1.ffn_norm.weight".into(), vec![6], seq(550.0, 6)),
-            ("lfm2.layers.1.feed_forward.w1.weight".into(), vec![48], seq(560.0, 48)),
-            ("lfm2.layers.1.feed_forward.w3.weight".into(), vec![48], seq(610.0, 48)),
-            ("lfm2.layers.1.feed_forward.w2.weight".into(), vec![48], seq(660.0, 48)),
+            ("model.layers.1.operator_norm.weight".into(), vec![6], seq(400.0, 6)),
+            ("model.layers.1.self_attn.q_proj.weight".into(), vec![36], seq(410.0, 36)),
+            ("model.layers.1.self_attn.k_proj.weight".into(), vec![18], seq(450.0, 18)),
+            ("model.layers.1.self_attn.v_proj.weight".into(), vec![18], seq(470.0, 18)),
+            ("model.layers.1.self_attn.q_layernorm.weight".into(), vec![3], seq(490.0, 3)),
+            ("model.layers.1.self_attn.k_layernorm.weight".into(), vec![3], seq(500.0, 3)),
+            ("model.layers.1.self_attn.out_proj.weight".into(), vec![36], seq(510.0, 36)),
+            ("model.layers.1.ffn_norm.weight".into(), vec![6], seq(550.0, 6)),
+            ("model.layers.1.feed_forward.w1.weight".into(), vec![48], seq(560.0, 48)),
+            ("model.layers.1.feed_forward.w3.weight".into(), vec![48], seq(610.0, 48)),
+            ("model.layers.1.feed_forward.w2.weight".into(), vec![48], seq(660.0, 48)),
         ];
         checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None)
             .unwrap();

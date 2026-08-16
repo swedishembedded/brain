@@ -2,12 +2,20 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Load a Qwen3-ASR checkpoint's audio encoder + projector into the weight map
-//! [`crate::encoder::AudioEncoder`] consumes. HF names are `model.audio_tower.*`
-//! and `model.multi_modal_projector.*`. The per-layer `self_attn.{q,k,v}_proj`
-//! are fused into a single `blocks.{b}.qkv` (weights stacked `[3·d, d]`, biases
-//! `[3·d]`) to match the `model::vit` block layout. No transposes (brain `matmul`
-//! is `x·Wᵀ` with HF's `[out, in]` layout). The Qwen3 decoder half is loaded
-//! separately via `qwen`-style mapping under `model.language_model.`.
+//! [`crate::encoder::AudioEncoder`] consumes. HF names sit under a `thinker.`
+//! prefix (the Qwen "Thinker+Talker" convention, not the bare `model.` an
+//! omni-less single-tower checkpoint would use): `thinker.audio_tower.*` for
+//! the encoder, and its own `proj1`/`proj2` leaves (not a separate
+//! `multi_modal_projector.*` module - there isn't one in the released
+//! checkpoint, and `proj2`'s [2048,1024] output shape exactly matches the
+//! decoder's [151936,2048] embedding table's hidden dim, confirming it IS the
+//! bridge) for what this module still stores under brain's own
+//! `multi_modal_projector.linear_{1,2}` key names. The per-layer
+//! `self_attn.{q,k,v}_proj` are fused into a single `blocks.{b}.qkv` (weights
+//! stacked `[3·d, d]`, biases `[3·d]`) to match the `model::vit` block layout.
+//! No transposes (brain `matmul` is `x·Wᵀ` with HF's `[out, in]` layout). The
+//! Qwen3 decoder half is loaded separately via `qwen`-style mapping under
+//! `thinker.model.`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,14 +40,14 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
 
     // conv stem + conv_out
     for i in 1..=3 {
-        w.insert(format!("conv2d{i}.weight"), get(&format!("model.audio_tower.conv2d{i}.weight")));
-        w.insert(format!("conv2d{i}.bias"), get(&format!("model.audio_tower.conv2d{i}.bias")));
+        w.insert(format!("conv2d{i}.weight"), get(&format!("thinker.audio_tower.conv2d{i}.weight")));
+        w.insert(format!("conv2d{i}.bias"), get(&format!("thinker.audio_tower.conv2d{i}.bias")));
     }
-    w.insert("conv_out.weight".into(), get("model.audio_tower.conv_out.weight"));
+    w.insert("conv_out.weight".into(), get("thinker.audio_tower.conv_out.weight"));
 
     // transformer blocks (fuse q/k/v)
     for b in 0..cfg.n_layers {
-        let a = |leaf: &str| get(&format!("model.audio_tower.layers.{b}.{leaf}"));
+        let a = |leaf: &str| get(&format!("thinker.audio_tower.layers.{b}.{leaf}"));
         let mut qkv_w = a("self_attn.q_proj.weight");
         qkv_w.extend(a("self_attn.k_proj.weight"));
         qkv_w.extend(a("self_attn.v_proj.weight"));
@@ -61,20 +69,23 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
     }
 
     // final norm + projector
-    w.insert("ln_post.weight".into(), get("model.audio_tower.ln_post.weight"));
-    w.insert("ln_post.bias".into(), get("model.audio_tower.ln_post.bias"));
+    w.insert("ln_post.weight".into(), get("thinker.audio_tower.ln_post.weight"));
+    w.insert("ln_post.bias".into(), get("thinker.audio_tower.ln_post.bias"));
     for i in 1..=2 {
-        w.insert(format!("multi_modal_projector.linear_{i}.weight"), get(&format!("model.multi_modal_projector.linear_{i}.weight")));
-        w.insert(format!("multi_modal_projector.linear_{i}.bias"), get(&format!("model.multi_modal_projector.linear_{i}.bias")));
+        w.insert(format!("multi_modal_projector.linear_{i}.weight"), get(&format!("thinker.audio_tower.proj{i}.weight")));
+        w.insert(format!("multi_modal_projector.linear_{i}.bias"), get(&format!("thinker.audio_tower.proj{i}.bias")));
     }
     w
 }
 
-/// Map an HF Qwen3-ASR decoder tensor name (`model.language_model.*`) to a brain
-/// Qwen parameter name. Standard Qwen3 leaves under an extra `language_model.`
-/// prefix; tied embeddings mean `embed_tokens` also serves as the head.
+/// Map an HF Qwen3-ASR decoder tensor name (`thinker.model.*`) to a brain
+/// Qwen parameter name - standard Qwen3 leaves under the `thinker.` prefix
+/// this checkpoint's decoder half shares with the audio tower (see this
+/// module's own doc comment). Tied embeddings mean `embed_tokens` also
+/// serves as the head; the checkpoint's separate `thinker.lm_head.weight`
+/// (present but redundant under tying) is simply never looked up.
 pub fn map_decoder(hf: &str) -> Option<String> {
-    let s = hf.strip_prefix("model.language_model.")?;
+    let s = hf.strip_prefix("thinker.model.")?;
     match s {
         "embed_tokens.weight" => return Some("tok.weight".into()),
         "norm.weight" => return Some("norm.weight".into()),
