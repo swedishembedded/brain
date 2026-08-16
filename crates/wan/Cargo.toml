@@ -8,3 +8,13 @@ description = "Wan2.1/2.2 video diffusion transformer (T2V/I2V): a DiT over 3D (
 [lib]
 name = "wan"
 path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-vae.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-model.workspace = true

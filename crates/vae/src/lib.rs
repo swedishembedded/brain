@@ -15,8 +15,15 @@
 //! GroupNorm (`gn_stats`/`gn_apply`), SiLU, residual add, nearest upsample, and
 //! the bidirectional self-attention trio — the same primitives the DIAMOND UNet
 //! (`crates/wm-diamond`) already validates.
+//!
+//! [`blocks3d`] is the sibling builder for **3D causal video** autoencoders
+//! (`[C, T, H, W]` volumes, causal `conv3d`, cross-chunk `FeatCache`). It is
+//! deliberately a sibling and not a widening of [`blocks`]: five consumers
+//! depend on the latter's `(prefix, c, h, w, x)` signatures and none of them has
+//! a time axis. The two share the kernel set, not the builder.
 
 pub mod blocks;
+pub mod blocks3d;
 pub mod config;
 pub mod decoder;
 pub mod latent;

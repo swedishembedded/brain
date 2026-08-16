@@ -59,6 +59,7 @@ more than once:
 |---|---|
 | `silu_mul` takes a **single `total`** param; passing `[rows, cols]` computed a small fraction of the MLP | forward cosine **0.504** — silently wrong, not a crash |
 | `step_sliced` offsets/lengths are **f32 elements, not bytes** | SIGSEGV |
+| `nchw_nlc`/`nlc_nchw`'s `hw` is **every axis below the channel**, not `H*W`. On a 5D `[C, T, H, W]` operand that is `T*H*W` | the Wan-VAE attention permuted the wrong axis. Invisible at `T == 1` - which is what every chunk of the reference's own encode AND decode feeds it, so no golden at any clip length could catch it. Found only by a bit-exact chunk-size-invariance test: cosine **0.99962** where the answer must be exactly 0.0 |
 
 So, for every kernel you dispatch:
 

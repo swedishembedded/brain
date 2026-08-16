@@ -26,17 +26,65 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       including two structural causality probes -- an output frame may not move
       when a future input frame does, and `_dx` may not push gradient forward in
       time. Both were mutation-verified against a symmetric-pad kernel.
-- [ ] **Wan-VAE** as a sibling 3D builder in `crates/vae/src/blocks3d.rs`, not a
+- [x] **Wan-VAE** as a sibling 3D builder in `crates/vae/src/blocks3d.rs`, not a
       widening of `blocks.rs` -- widening every `(prefix, c, h, w, x)` signature
       would destabilise five existing consumers (AutoencoderKL, VQGAN,
-      CodeFormer, RRDBNet, SDXL-UNet) to no benefit.
-- [ ] **`feat_cache`**, the causal VAE's cross-chunk state (`CACHE_T = 2`). Three
-      sentinel states exist upstream for `upsample3d` -- `None`, the string
-      `'Rep'`, and a real cached tensor -- selecting between "no time_conv",
-      "time_conv against a zero cache" and "time_conv against the real cache".
-      All three have to be reproduced, and the chunked-vs-unchunked equality
-      test has to exist before any of the rest of the VAE is trusted. This is
-      the single most likely source of a "correct at 8 frames, wrong at 81" bug.
+      CodeFormer, RRDBNet, SDXL-UNet) to no benefit. The Wan *schedule* (encoder,
+      decoder, tensor names, chunked driver) sits in `crates/wan/src/vae3d.rs`,
+      the same split `crates/vae`'s own `decoder.rs` has against `blocks.rs`.
+      **Zero new kernels**: every op is an existing one at 3D `Params`, including
+      the three that looked like they needed new ones --
+      * a per-frame 2D conv, a `(3,1,1)` temporal conv and a `(1,1,1)`
+        projection are all `conv3d` at different extents, so the whole model
+        dispatches exactly ONE convolution kernel;
+      * time-axis slice / place / concat are the channel-axis kernels
+        (`concat_split`, `chan_place`, `concat2`) on the `[N=C, T, H, W]` view;
+      * `upsample3d`'s channel-to-time fold (`[2C,T] -> [C,2T]` interleaved) is
+        two `concat_split`s plus a `concat2` over the `[N=C*T, 1, H, W]` view.
+- [x] **`feat_cache`**, the causal VAE's cross-chunk state (`CACHE_T = 2`). All
+      three `upsample3d` states reproduced (`None` -> no time_conv and mark the
+      slot; `'Rep'` -> time_conv against an all-zero history, with the zero frame
+      a REAL operand of the next chunk; a cached tensor -> the ordinary path).
+      Because the whole clip is recorded as one graph before a single submit,
+      the cache is an SSA buffer flowing between chunk sub-graphs -- no device
+      state, no readback, one submit per clip.
+- [x] **The chunked-vs-unchunked gate, and what it caught.** Two independent
+      forms of it, in the order they were built:
+      * `tools/goldens/wan_vae_dump_reference.py` carries a whole-clip
+        formulation of a model upstream only ever runs chunked (with
+        `feat_cache=None` the `Resample` blocks silently skip their temporal conv
+        entirely, so there IS no upstream whole-clip mode), and asserts the two
+        agree before writing a byte. Derivation and both special cases are in
+        that file's header. They agree to within 3e-6 relative across every
+        stage tap at both clip lengths (fp32 reassociation, nothing else).
+      * **Encode is chunk-size invariant; decode is not.** The encoder's
+        `downsample3d` keeps one frame of history and consumes stride-2 windows
+        at even positions, so (1,4,4) and (1,8) are the same computation, per
+        output element in the same summation order -- brain asserts it
+        **bit-exactly**, weight-free, at toy dims, as the first test in the file.
+        The decoder's `'Rep'` state breaks the property (a 2-frame first chunk
+        zero-fills two history slots where two 1-frame chunks fill one), so
+        `WanVaeDecoder` hardcodes upstream's one-latent-frame chunking instead of
+        offering a knob that would be quietly wrong.
+      That bit-exact test found a real defect on its first run: the attention
+      block's `nchw_nlc`/`nlc_nchw` permutes were given `H*W` where the operand
+      is `[C, T, H, W]` and the argument means "everything below the channel
+      axis", i.e. `T*H*W`. **The two are identical at `T == 1`, and every chunk
+      of upstream's own encode and decode reaches the middle attention with
+      exactly one frame** -- so the golden could not see it at any clip length,
+      and neither could a real generation. Pre-fix the invariance test read
+      max_abs 1.1e-2 / cosine 0.99962; post-fix, exactly 0.0.
+
+      Parity reached (`crates/wan/tests/vae_parity.rs`, 9 and 17 frames at
+      64x64, Vulkan on a P40 and the CPU JIT, same numbers on both): every
+      boundary at **cosine 1.000000**, rel_l2 6e-7..1.4e-6, max_abs 4.8e-7 on
+      `z_denorm`, 3.5e-6 on the reconstruction, 3.2e-5 on the deepest encoder
+      tap. Encode, decode against the chunked reference, decode against the
+      independent unchunked reference, and the composed round trip all agree.
+      Perf is deliberately NOT addressed: every conv is the direct `conv3d`
+      kernel, and the per-frame spatial convs that could take `blocks.rs`'s
+      `im2col_at` + `matmul_reg3` lowering are a minority of the FLOPs, so the
+      lowering is a later change with its own measurement.
 - [ ] **umT5-XXL** in `crates/t5encoder`: vocab 32128 -> 256384, per-block
       relative position bias (see below), attention masking with a zero-pad to
       `text_len = 512`. The crate's own size analysis understates umT5 by about
@@ -72,7 +120,9 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       the training grid's top `1 - 1/1000 = 0.999` (first timestep 999), dpm++
       at exactly 1.0 (first timestep 1000), because `get_sampling_sigmas`
       builds its own `linspace(1, 0, N+1)`.
-- [ ] **`crates/wan`** proper -- currently only `config.rs`.
+- [ ] **`crates/wan`** proper -- the DiT itself. `config.rs`, `vae3d.rs` and
+      `import.rs` (VAE, both name spaces, two-way validated) are in; `model.rs`,
+      the pipeline and the CLI wiring are not.
 - [ ] **`capability::Media::Video`**. There is no video media type, and
       `.agents/rules/serving-contract.md` section 4 requires extending `Media`
       and the D-Bus frame handling rather than adding a side channel. This is a

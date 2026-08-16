@@ -28,5 +28,8 @@
 //! file the checkpoint ships.
 
 pub mod config;
+pub mod import;
+pub mod vae3d;
 
 pub use config::{Task, WanConfig};
+pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};
