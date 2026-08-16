@@ -136,15 +136,27 @@ assert len(data) > 500, 'suspiciously tiny -- likely a flat/degenerate depth map
   }
 }
 
-@test "quickstart: s3dit inpaint produced a real, different image (not a no-op)" {
+@test "quickstart: s3dit inpaint held the dog fixed (sam2 mask) while changing everything else" {
   [ -s "$IMG_DIR/inpainted.png" ] || skip "step 6 (s3dit inpaint) has not run yet"
   [ -s "$IMG_DIR/seed.png" ] || skip "step 2 (s3dit text2image) has not run yet"
+  [ -s "$IMG_DIR/dog-mask.png" ] || skip "step 4 (sam2 segment) has not run yet"
+  # The inpaint mask is sam2's own dog mask, inverted (regenerate everything
+  # BUT the dog). A real mask-anchored inpaint should show near-zero drift
+  # inside the dog region and real, substantial change outside it - not just
+  # "the file changed", which a broken mask (e.g. inverted the wrong way, or
+  # ignored entirely) would also satisfy.
   run python3 -c "
-from pathlib import Path
-data = Path('$IMG_DIR/inpainted.png').read_bytes()
-assert data[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
-assert len(data) > 10_000, f'suspiciously small: {len(data)} bytes'
-assert data != Path('$IMG_DIR/seed.png').read_bytes(), 'inpaint output is byte-identical to the seed image'
+from PIL import Image
+import numpy as np
+seed = np.array(Image.open('$IMG_DIR/seed.png').convert('RGB'), dtype=np.int16)
+inpainted = np.array(Image.open('$IMG_DIR/inpainted.png').convert('RGB'), dtype=np.int16)
+dog = np.array(Image.open('$IMG_DIR/dog-mask.png').convert('L')) > 127
+assert seed.shape == inpainted.shape, f'size mismatch: seed {seed.shape} vs inpainted {inpainted.shape}'
+diff = np.abs(seed - inpainted).mean(axis=2)
+dog_drift = diff[dog].mean()
+bg_drift = diff[~dog].mean()
+assert dog_drift < 10.0, f'dog region drifted too much (mean abs diff {dog_drift:.1f}) -- mask is not holding it fixed'
+assert bg_drift > dog_drift * 3, f'background barely changed relative to the dog region (bg {bg_drift:.1f} vs dog {dog_drift:.1f}) -- inpaint looks like a no-op'
 "
   [ "$status" -eq 0 ]
 }

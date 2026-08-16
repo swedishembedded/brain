@@ -98,11 +98,13 @@ generation prompt asked for, at 4x the seed image's resolution.
 **Promptable segmentation**:
 
 ```bash
-$ brain sam2 segment --in image=seed.png --points "220,180" --labels "1" --out mask=mask.png --json   # auto-fetches facebook/sam2.1-hiera-tiny
+$ brain sam2 segment --in image=seed.png --points "220,180" --labels "1" --out mask=dog-mask.png --json   # auto-fetches facebook/sam2.1-hiera-tiny
 {"area":113765,"iou":0.9763,"object_score":21.10,...}
 ```
 
 ![the sam2 segmentation mask, isolating the dog](docs/quickstart/img/segmented.png)
+
+`dog-mask.png` is kept - it drives the inpainting step below.
 
 **Monocular depth**, false-colored (near = red, far = blue):
 
@@ -124,17 +126,22 @@ $ brain qwen3vl generate --in image=seed.png --prompt "What is in this image? An
 A golden retriever is looking at a red apple on a wooden table.
 ```
 
-**Masked inpainting** - replace the apple with a slice of cake, everything
-outside the mask held fixed:
+**Masked inpainting** - invert sam2's own segmentation mask (above) so it reads
+"regenerate everything *but* the dog", then let the dog anchor the composition
+while the wood table, the apple, and the background all change together:
 
 ```bash
-$ brain imageops mask_rect --width 512 --height 512 --x 150 --y 300 --w 210 --h 190 --out mask=mask.png
-$ brain --device gpu s3dit inpaint --in image=seed.png --in mask=mask.png \
-    --prompt "a slice of chocolate cake on the table" --strength 0.85 --steps 8 --precision int8 \
+$ python3 -c "from PIL import Image, ImageOps; ImageOps.invert(Image.open('dog-mask.png').convert('L')).save('bg-mask.png')"
+$ brain --device gpu s3dit inpaint --in image=seed.png --in mask=bg-mask.png \
+    --prompt "a golden retriever dog sitting behind a slice of chocolate cake on a white marble kitchen countertop, bright natural daylight, blurred modern kitchen background, photorealistic" \
+    --strength 1.0 --feather 3 --steps 8 --precision int8 \
     --out image=inpainted.png
 ```
 
-![the seed image with the apple replaced by a slice of chocolate cake](docs/quickstart/img/inpainted.png)
+![the seed image with the wood table, apple, and background all replaced, the dog itself held pixel-fixed by the inverted sam2 mask](docs/quickstart/img/inpainted.png)
+
+A real segmentation mask driving inpainting, not a hand-picked rectangle: the
+dog is the one thing sam2 marked, so it's the one thing this leaves alone.
 
 **Speech: text → speech → text → text**, a full TTS → ASR → LLM round trip,
 through two independently-trained ASR models on the exact same audio:

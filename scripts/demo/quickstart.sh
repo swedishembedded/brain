@@ -110,12 +110,11 @@ fi
 # ---------------------------------------------------------------- 4. segment
 
 step "4. promptable segmentation (sam2, auto-fetches facebook/sam2.1-hiera-tiny) + colorize"
-if ! need "$IMG_DIR/segmented.png"; then
+if ! need "$IMG_DIR/segmented.png" || ! need "$IMG_DIR/dog-mask.png"; then
   "$BRAIN" sam2 segment --in image="$IMG_DIR/seed.png" --points "220,180" --labels "1" \
-    --out mask="$IMG_DIR/.mask-raw.png" --json
-  "$BRAIN" imageops colorize --in image="$IMG_DIR/.mask-raw.png" --colormap gray \
+    --out mask="$IMG_DIR/dog-mask.png" --json
+  "$BRAIN" imageops colorize --in image="$IMG_DIR/dog-mask.png" --colormap gray \
     --out image="$IMG_DIR/segmented.png"
-  rm -f "$IMG_DIR/.mask-raw.png"
 fi
 
 # ---------------------------------------------------------------- 4b. depth
@@ -171,14 +170,23 @@ fi
 
 # ---------------------------------------------------------------- 6. inpaint
 
-step "6. masked inpainting (s3dit inpaint) - replace the apple with a slice of chocolate cake"
+step "6. masked inpainting (s3dit inpaint) - regenerate everything BUT the dog, from sam2's own mask"
 if ! need "$IMG_DIR/inpainted.png"; then
-  "$BRAIN" imageops mask_rect --width 512 --height 512 --x 150 --y 300 --w 210 --h 190 \
-    --out mask="$IMG_DIR/.inpaint-mask.png"
-  "$BRAIN" --device gpu s3dit inpaint --in image="$IMG_DIR/seed.png" --in mask="$IMG_DIR/.inpaint-mask.png" \
-    --prompt "a slice of chocolate cake on the table" --strength 0.85 --steps 8 --precision int8 \
+  # Invert step 4's real segmentation mask (white = dog) into an inpaint mask
+  # (white = regenerate): everything except the dog is fair game, so this
+  # keeps the dog itself pixel-anchored while the wood table, the apple, and
+  # the background all change together - a real demonstration of "hold part
+  # of the image fixed", not just a small object swap inside a hand-picked
+  # rectangle.
+  python3 -c "
+from PIL import Image, ImageOps
+ImageOps.invert(Image.open('$IMG_DIR/dog-mask.png').convert('L')).save('$IMG_DIR/.bg-mask.png')
+"
+  "$BRAIN" --device gpu s3dit inpaint --in image="$IMG_DIR/seed.png" --in mask="$IMG_DIR/.bg-mask.png" \
+    --prompt "a golden retriever dog sitting behind a slice of chocolate cake on a white marble kitchen countertop, bright natural daylight, blurred modern kitchen background, photorealistic" \
+    --strength 1.0 --feather 3 --steps 8 --precision int8 \
     --out image="$IMG_DIR/inpainted.png"
-  rm -f "$IMG_DIR/.inpaint-mask.png"
+  rm -f "$IMG_DIR/.bg-mask.png"
 fi
 
 # ---------------------------------------------------------------- 7. tts -> asr -> text (round trip)
