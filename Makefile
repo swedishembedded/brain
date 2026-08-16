@@ -62,7 +62,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
-        clippy check/scripts check/spdx hooks/install qwen/serving-perf-gate \
+        clippy check/scripts check/spdx check/paths hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
@@ -86,6 +86,7 @@ help:
 	@echo "  make check/scripts           scripts/tools self-validation + env-var doc gate"
 	@echo "                               + no-doc-citations + no-perf-numbers gates"
 	@echo "  make check/spdx              SPDX-License-Identifier + copyright header gate"
+	@echo "  make check/paths             no baked-in absolute machine paths under crates/"
 	@echo "  make hooks/install           install the local git hooks (SPDX check, commit"
 	@echo "                               trailer cleanup/gate)"
 	@echo "  make gradcheck               the FULL numerical backprop gate (every model check"
@@ -366,6 +367,9 @@ check/scripts:
 # the file-selection rules (shared with scripts/spdx/check.py); `make
 # hooks/install` wires the same check into a git pre-commit hook so a
 # non-compliant commit is refused locally, not just caught here.
+check/paths:
+	bash scripts/gates/check-no-machine-paths.sh
+
 check/spdx:
 	python3 scripts/spdx/check.py $$(git ls-files)
 
@@ -390,7 +394,7 @@ hooks/install:
 	@echo "installed: .git/hooks/{pre-commit,commit-msg,pre-push}"
 
 # Everything, for a release gate.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx kernels-table/check
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths kernels-table/check
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.

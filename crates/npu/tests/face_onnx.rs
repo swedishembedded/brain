@@ -48,10 +48,18 @@ const NPU_SAFE: &[&str] = &[
 /// a style complaint: the NPU plugin needs static shapes.
 const DYNAMIC_SHAPE_OPS: &[&str] = &["Shape", "Slice", "Gather", "Unsqueeze", "NonMaxSuppression"];
 
+/// The antelopev2 ONNX pair, from `var` or from the model store
+/// `BRAIN_MODELS_DIR` names. Neither is a literal: a baked-in path resolves on
+/// one machine and skips silently everywhere else, which is indistinguishable
+/// from the fixture simply being absent.
 fn weights_dir(var: &str) -> Option<PathBuf> {
-    let p = std::env::var(var)
-        .unwrap_or_else(|_| "/data/workspace/resources/identity/weights/antelopev2".into());
-    let p = PathBuf::from(p);
+    if let Ok(p) = std::env::var(var) {
+        let p = PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let p = PathBuf::from(std::env::var("BRAIN_MODELS_DIR").ok()?).join("identity/weights/antelopev2");
     p.is_dir().then_some(p)
 }
 

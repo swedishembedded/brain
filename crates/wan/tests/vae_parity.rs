@@ -149,18 +149,19 @@ fn wan_vae_decoder_tiny_smoke() {
 
 // ---------------------------------------------------------- real fixtures
 
-/// The shipped VAE weights: `BRAIN_WAN_VAE`, else the fetched resource tree.
+/// The shipped VAE weights: `BRAIN_WAN_VAE`, else the same file inside
+/// whatever model store `BRAIN_MODELS_DIR` names. Both are variables rather
+/// than a literal because a machine path baked into a test passes on exactly
+/// one machine and skips silently on every other, which reads as "no fixture"
+/// instead of "wrong path".
 fn weights_path() -> Option<String> {
     if let Ok(p) = std::env::var("BRAIN_WAN_VAE") {
         return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
     }
-    [
-        "/data/workspace/resources/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/vae/diffusion_pytorch_model.safetensors",
-        "resources/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/vae/diffusion_pytorch_model.safetensors",
-    ]
-    .into_iter()
-    .find(|p| Path::new(p).exists())
-    .map(str::to_string)
+    let store = std::env::var("BRAIN_MODELS_DIR").ok()?;
+    let p = Path::new(&store)
+        .join("Wan-AI/Wan2.1-T2V-1.3B-Diffusers/vae/diffusion_pytorch_model.safetensors");
+    p.exists().then(|| p.to_string_lossy().into_owned())
 }
 
 struct Fixture {
