@@ -130,7 +130,7 @@ done
 # silently matches nothing there (word-splitting still works in a bare `for`
 # loop, which is why that half of this looked fine while the `case` half did
 # not; caught by the ORPHAN check flagging every single docs page at once).
-non_toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", (Text|Multimodal|Audio|Vision|Image|ThreeD|Forecast|World)' "$ARCH_TABLE" \
+non_toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", (Text|Multimodal|Audio|Vision|Image|Video|ThreeD|Forecast|World)' "$ARCH_TABLE" \
              | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/' | tr '\n' ' ')
 
 for id in $non_toy_ids; do
@@ -158,6 +158,21 @@ overview_pages="index asr vlm world-models forecast imgpipe"
 # and legitimate, not an orphan.
 toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", Domain::Toy' "$ARCH_TABLE" \
          | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/' | tr '\n' ' ')
+
+# The `non_toy_ids` extraction above spells out every Domain variant as a grep
+# alternation, which is silent-drift bait of exactly the kind this gate exists
+# to stop: adding a new Domain (Video was the first since this gate was
+# written) and forgetting to extend that alternation does not fail anything --
+# the new domain's architectures simply stop being checked for a docs page,
+# and every one of their pages then reads as an ORPHAN. So account for every
+# row: non-toy + toy must equal the total number of `arch!` rows in the table.
+total_rows=$(grep -cE '^\s*arch!\("[a-z0-9]+"' "$ARCH_TABLE")
+counted=$(( $(printf '%s' "$non_toy_ids" | wc -w) + $(printf '%s' "$toy_ids" | wc -w) ))
+if [ "$total_rows" -ne "$counted" ]; then
+  echo "DOMAIN ALTERNATION STALE: $ARCH_TABLE has $total_rows arch! rows but the extraction matched only $counted ($(printf '%s' "$non_toy_ids" | wc -w) non-toy + $(printf '%s' "$toy_ids" | wc -w) toy)."
+  echo "  A Domain variant is missing from this script's non_toy_ids grep alternation -- add it there, or those architectures are silently unchecked."
+  fail=1
+fi
 
 for f in "$MODELS_DIR"/*.md; do
   [ -e "$f" ] || continue
