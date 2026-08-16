@@ -245,6 +245,12 @@ pub const CONV2D_GD_DX: &str = include_str!("../wgsl/conv2d_gd_dx.wgsl");
 pub const CONV2D_GD_REG: &str = include_str!("../wgsl/conv2d_gd_reg.wgsl");
 /// `wgsl/conv2d_tiled.wgsl`
 pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
+/// `wgsl/conv3d.wgsl`
+pub const CONV3D: &str = include_str!("../wgsl/conv3d.wgsl");
+/// `wgsl/conv3d_dw.wgsl`
+pub const CONV3D_DW: &str = include_str!("../wgsl/conv3d_dw.wgsl");
+/// `wgsl/conv3d_dx.wgsl`
+pub const CONV3D_DX: &str = include_str!("../wgsl/conv3d_dx.wgsl");
 /// `wgsl/conv_act.wgsl`
 pub const CONV_ACT: &str = include_str!("../wgsl/conv_act.wgsl");
 /// `wgsl/conv_act_reg.wgsl`
@@ -946,6 +952,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv2d_gd_dx", CONV2D_GD_DX),
     ("conv2d_gd_reg", CONV2D_GD_REG),
     ("conv2d_tiled", CONV2D_TILED),
+    ("conv3d", CONV3D),
+    ("conv3d_dw", CONV3D_DW),
+    ("conv3d_dx", CONV3D_DX),
     ("conv_act", CONV_ACT),
     ("conv_act_reg", CONV_ACT_REG),
     ("conv_act_tiled", CONV_ACT_TILED),

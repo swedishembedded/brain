@@ -15,10 +15,17 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
 
 ## Not yet done
 
-- [ ] **Causal `conv3d` kernels** (`conv3d`, `conv3d_dx`, `conv3d_dw`, or an
-      `im2col3d` + `matmul_reg3` lowering). This is the only genuinely new WGSL
-      family the port needs -- see "scope that collapsed" below for why the other
-      four planned kernels turned out to be unnecessary.
+- [x] **Causal `conv3d` kernels** -- `conv3d`, `conv3d_dx`, `conv3d_dw` landed as
+      direct kernels rather than an `im2col3d` + `matmul_reg3` lowering: a 3D
+      im2col operand is the classic way to blow past
+      `max_storage_buffer_binding_size` (2047 MiB on the P40 this was written
+      on), and the direct form binds only the natural tensors, so the fallback
+      split is over N. Per-axis kernel extent, per-axis stride, symmetric
+      spatial pad, one-sided temporal low-pad `pt` (already doubled, as in
+      `dwconv3d`), bias, and groups. Gate: `crates/gradcheck/tests/conv3d_kernels.rs`,
+      including two structural causality probes -- an output frame may not move
+      when a future input frame does, and `_dx` may not push gradient forward in
+      time. Both were mutation-verified against a symmetric-pad kernel.
 - [ ] **Wan-VAE** as a sibling 3D builder in `crates/vae/src/blocks3d.rs`, not a
       widening of `blocks.rs` -- widening every `(prefix, c, h, w, x)` signature
       would destabilise five existing consumers (AutoencoderKL, VQGAN,
@@ -125,9 +132,10 @@ genuine (3,3,3) convolution, and that is the one real gap.
 
 ## Pre-existing drift found while surveying
 
-`docs/reference/kernels.md` claims 401 kernels and is missing
+`docs/reference/kernels.md` claimed 401 kernels and was missing
 `flash_attn_causal_gqa`, which is present at
 `crates/kernels/wgsl/flash_attn_causal_gqa.wgsl` and registered in
-`crates/kernels/src/lib.rs`. `make kernels-table/check` should therefore be
-failing already, independent of this port. Worth regenerating alongside the
-`conv3d` kernels so a real drift signal is not buried under a stale one.
+`crates/kernels/src/lib.rs`, so `make kernels-table/check` was already failing
+independent of this port. Regenerated alongside the `conv3d` kernels (401 -> 405:
+one stale omission plus the three new ones) so a real drift signal is not buried
+under a stale one. The kernel itself was never missing; only the catalogue was.
