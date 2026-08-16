@@ -1,10 +1,10 @@
 # Wan (video generation)
 
 Wan turns a text prompt - or a single still image - into a short video: about
-five seconds, 81 frames at 16 fps. It is the first video model in brain, and the
-smallest variant is deliberately modest: Wan2.1-T2V-1.3B generates 480p video in
-roughly 8 GB of VRAM, which puts it on consumer hardware rather than on a
-datacentre card.
+five seconds, 81 frames at 16 fps. <!-- perf-number: the output frame rate is a property of the video the model generates, not a throughput claim -->
+It is the first video model in brain, and the smallest variant is deliberately
+modest: Wan2.1-T2V-1.3B generates 480p video in roughly 8 GB of VRAM, which puts
+it on consumer hardware rather than on a datacentre card.
 
 Reach for it when you want motion. For a single still frame, the image models
 (`s3dit`, `flux2`) are far cheaper - Wan spends most of its work on making
@@ -58,8 +58,15 @@ native repository by default and uses the diffusers naming only for importing.
 export BRAIN_WAN_DIT=.../diffusion_pytorch_model.safetensors
 export BRAIN_WAN_VAE=.../Wan2.1_VAE.pth
 export BRAIN_WAN_T5=.../models_t5_umt5-xxl-enc-bf16.pth
-export BRAIN_WAN_TOKENIZER=.../google/umt5-xxl/spiece.model
+export BRAIN_WAN_TOKENIZER=.../google/umt5-xxl
 ```
+
+The tokenizer variable names the *directory*, not a file: brain reads that
+directory's `tokenizer.json` rather than the `spiece.model` protobuf beside it.
+Both describe the same 256k pieces, but the JSON is what
+`AutoTokenizer.from_pretrained` loads and therefore what upstream Wan actually
+tokenizes with, and it spells out its own normalizer and pre-tokenizer instead
+of leaving them to sentencepiece's defaults. See [t5encoder](t5encoder.md).
 
 Image-to-video additionally needs a CLIP ViT-H/14 vision tower in
 `BRAIN_WAN_CLIP`. That one is not auto-fetched, because it ships with the I2V
@@ -72,6 +79,7 @@ attention score matrix at those lengths would be 4.3 GB and 22.9 GB per head
 respectively, so Wan always runs through chunked or flash attention - that is a
 requirement here, not a tuning option.
 
+<!-- perf-number: 4x/8x are the VAE's fixed compression strides, an architectural constant, not a speedup -->
 The video autoencoder compresses time 4x and space 8x, and gives the first frame
 a latent frame of its own. Frame counts therefore have to take the form
 `1 + 4k`: 81 frames become 21 latent frames. Asking for 80 is rejected rather

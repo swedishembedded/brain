@@ -26,6 +26,17 @@ pub fn read_encoder(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
     checkpoint::safetensors::read_model_dir(dir)
 }
 
+/// Read the native umT5 encoder checkpoint, which Wan2.1 ships as a single
+/// bf16 `.pth` (`models_t5_umt5-xxl-enc-bf16.pth`) rather than safetensors.
+/// [`checkpoint::torchpt`] widens every storage to f32, so the result is the
+/// same `StTensor` shape [`import_wan`] takes from a converted file.
+pub fn read_encoder_pth(path: &std::path::Path) -> Result<Vec<StTensor>, String> {
+    let r = checkpoint::torchpt::read(path.to_str().ok_or("non-utf8 path")?)?;
+    Ok(r.into_iter()
+        .map(|t| StTensor { name: t.name, shape: t.shape, data: t.data })
+        .collect())
+}
+
 fn validate(map: Tensors, cfg: &T5Config) -> Result<Tensors, String> {
     let manifest = cfg.tensor_manifest();
     for (name, shape) in &manifest {
@@ -98,14 +109,93 @@ fn hf_to_brain(name: &str) -> Option<String> {
     Some(mapped)
 }
 
+/// The q/k/v slot a split projection occupies, in EITHER name space.
+fn any_qkv_slot(name: &str) -> Option<(String, usize)> {
+    qkv_slot(name).or_else(|| wan_qkv_slot(name))
+}
+
+/// The Wan/umT5 module-tree spelling of [`qkv_slot`]
+/// (`blocks.<l>.attn.{q,k,v}.weight`).
+fn wan_qkv_slot(name: &str) -> Option<(String, usize)> {
+    let rest = name.strip_prefix("blocks.")?;
+    let (l, leaf) = rest.split_once('.')?;
+    let slot = match leaf {
+        "attn.q.weight" => 0,
+        "attn.k.weight" => 1,
+        "attn.v.weight" => 2,
+        _ => return None,
+    };
+    Some((format!("blocks.{l}.qkv.weight"), slot))
+}
+
+/// Map one tensor of the **native** umT5 checkpoint
+/// (`models_t5_umt5-xxl-enc-bf16.pth`, a `T5Encoder` state dict) to its brain
+/// name.
+///
+/// The FFN is where this layout is easy to get backwards. `T5FeedForward` is
+/// `gate = Sequential(Linear(dim, dim_ffn), GELU())`, `fc1 = Linear(dim,
+/// dim_ffn)`, `fc2 = Linear(dim_ffn, dim)`, and its forward is
+/// `fc2(fc1(x) * gate(x))`. So the GELU sits on **`ffn.gate.0`**, which is
+/// brain's `wi_0` (the activated half), and `ffn.fc1` is `wi_1` (the linear
+/// half) - the numeral in the reference's name is the opposite way round from
+/// brain's and from HF's. Swapping them keeps every shape valid and every
+/// import check green while computing `gelu(wi_1) * wi_0`.
+fn wan_to_brain(name: &str) -> Option<String> {
+    match name {
+        "token_embedding.weight" => return Some("shared.weight".into()),
+        "norm.weight" => return Some("final_norm.weight".into()),
+        _ => {}
+    }
+    let rest = name.strip_prefix("blocks.")?;
+    let (l, leaf) = rest.split_once('.')?;
+    let mapped = match leaf {
+        "attn.o.weight" => format!("blocks.{l}.o.weight"),
+        "pos_embedding.embedding.weight" => format!("blocks.{l}.rel_bias.weight"),
+        "norm1.weight" => format!("blocks.{l}.attn_norm.weight"),
+        "norm2.weight" => format!("blocks.{l}.ff_norm.weight"),
+        "ffn.gate.0.weight" => format!("blocks.{l}.wi_0.weight"),
+        "ffn.fc1.weight" => format!("blocks.{l}.wi_1.weight"),
+        "ffn.fc2.weight" => format!("blocks.{l}.wo.weight"),
+        _ => return None,
+    };
+    Some(mapped)
+}
+
+/// Import the native umT5 encoder checkpoint (`T5Encoder.state_dict()`, 242
+/// tensors) onto the canonical manifest, with the same two-way coverage and the
+/// same q/k/v fusion as [`import_hf`].
+pub fn import_wan(tensors: Vec<StTensor>, cfg: &T5Config) -> Result<Tensors, String> {
+    if !cfg.per_block_rel_bias {
+        return Err("import: the umT5 checkpoint has a per-block relative bias, \
+                    but this config shares one table"
+            .into());
+    }
+    import_named(tensors, cfg, wan_to_brain, "umT5")
+}
+
 /// Import an HF `T5EncoderModel` checkpoint onto the canonical manifest.
 pub fn import_hf(tensors: Vec<StTensor>, cfg: &T5Config) -> Result<Tensors, String> {
+    if cfg.per_block_rel_bias {
+        return Err("import: an HF T5EncoderModel ships ONE relative bias table, \
+                    but this config wants one per block"
+            .into());
+    }
+    import_named(tensors, cfg, hf_to_brain, "T5")
+}
+
+/// The shared body of both importers: rename, fuse q/k/v, validate both ways.
+fn import_named(
+    tensors: Vec<StTensor>,
+    cfg: &T5Config,
+    rename: fn(&str) -> Option<String>,
+    what: &str,
+) -> Result<Tensors, String> {
     let (d, inner) = (cfg.d_model as usize, cfg.inner() as usize);
     let mut map: Tensors = HashMap::new();
     let mut qkv: HashMap<String, [Option<Vec<f32>>; 3]> = HashMap::new();
 
     for t in tensors {
-        if let Some((fused, slot)) = qkv_slot(&t.name) {
+        if let Some((fused, slot)) = any_qkv_slot(&t.name) {
             if t.shape != vec![inner, d] {
                 return Err(format!(
                     "import: {} shape {:?}, expected [{inner}, {d}]",
@@ -119,8 +209,8 @@ pub fn import_hf(tensors: Vec<StTensor>, cfg: &T5Config) -> Result<Tensors, Stri
             e[slot] = Some(t.data);
             continue;
         }
-        let Some(brain) = hf_to_brain(&t.name) else {
-            return Err(format!("import: unrecognized T5 tensor {}", t.name));
+        let Some(brain) = rename(&t.name) else {
+            return Err(format!("import: unrecognized {what} tensor {}", t.name));
         };
         if map.insert(brain.clone(), (t.shape, t.data)).is_some() {
             return Err(format!("import: duplicate mapping onto {brain}"));
@@ -266,5 +356,129 @@ mod tests {
             }
         }
         assert!(import_hf(bad, &cfg).is_err());
+    }
+
+    /// umT5 at toy dims: the per-block bias table makes the manifest 1 bigger
+    /// per block, and `heads * d_kv != d_model` again so a fused-offset swap
+    /// cannot hide.
+    fn tiny_umt5() -> T5Config {
+        T5Config {
+            vocab: 128,
+            d_model: 64,
+            d_ff: 128,
+            d_kv: 64,
+            layers: 2,
+            heads: 2,
+            ..T5Config::umt5_xxl()
+        }
+    }
+
+    /// The native `T5Encoder.state_dict()` name space.
+    fn fake_wan(cfg: &T5Config) -> Vec<StTensor> {
+        let (d, ff, inner) = (cfg.d_model as usize, cfg.d_ff as usize, cfg.inner() as usize);
+        let mut v = vec![
+            StTensor {
+                name: "token_embedding.weight".into(),
+                shape: vec![cfg.vocab as usize, d],
+                data: vec![0.5; cfg.vocab as usize * d],
+            },
+            StTensor { name: "norm.weight".into(), shape: vec![d], data: vec![0.5; d] },
+        ];
+        for l in 0..cfg.layers {
+            let p = format!("blocks.{l}");
+            for (leaf, fill) in [("q", 1.0f32), ("k", 2.0), ("v", 3.0)] {
+                v.push(StTensor {
+                    name: format!("{p}.attn.{leaf}.weight"),
+                    shape: vec![inner, d],
+                    data: vec![fill; inner * d],
+                });
+            }
+            v.push(StTensor {
+                name: format!("{p}.attn.o.weight"),
+                shape: vec![d, inner],
+                data: vec![0.5; d * inner],
+            });
+            for leaf in ["norm1", "norm2"] {
+                v.push(StTensor {
+                    name: format!("{p}.{leaf}.weight"),
+                    shape: vec![d],
+                    data: vec![0.5; d],
+                });
+            }
+            // Slot-tagged so the gate/fc1 -> wi_0/wi_1 direction is observable.
+            v.push(StTensor {
+                name: format!("{p}.ffn.gate.0.weight"),
+                shape: vec![ff, d],
+                data: vec![7.0; ff * d],
+            });
+            v.push(StTensor {
+                name: format!("{p}.ffn.fc1.weight"),
+                shape: vec![ff, d],
+                data: vec![9.0; ff * d],
+            });
+            v.push(StTensor {
+                name: format!("{p}.ffn.fc2.weight"),
+                shape: vec![d, ff],
+                data: vec![0.5; d * ff],
+            });
+            // Per-block table, filled with the block index so a shared-bias
+            // import cannot pass by accident.
+            v.push(StTensor {
+                name: format!("{p}.pos_embedding.embedding.weight"),
+                shape: vec![cfg.rel_buckets as usize, cfg.heads as usize],
+                data: vec![l as f32 + 1.0; (cfg.rel_buckets * cfg.heads) as usize],
+            });
+        }
+        v
+    }
+
+    #[test]
+    fn wan_import_maps_the_native_names_with_two_way_coverage() {
+        let cfg = tiny_umt5();
+        let src = fake_wan(&cfg);
+        // 2 globals + 10 per block; fuses to 1 + 8 per block + 1.
+        assert_eq!(src.len(), 2 + 10 * cfg.layers as usize);
+        let map = import_wan(src, &cfg).expect("import_wan");
+        assert_eq!(map.len(), cfg.tensor_manifest().len());
+
+        let (inner, d, ff) = (cfg.inner() as usize, cfg.d_model as usize, cfg.d_ff as usize);
+        let (s, w) = &map["blocks.1.qkv.weight"];
+        assert_eq!(s, &vec![3 * inner, d]);
+        assert_eq!((w[0], w[inner * d], w[2 * inner * d]), (1.0, 2.0, 3.0), "q|k|v order");
+        // `ffn.gate.0` is the ACTIVATED half and must land on wi_0.
+        assert_eq!(map["blocks.0.wi_0.weight"].1[0], 7.0, "gate.0 -> wi_0");
+        assert_eq!(map["blocks.0.wi_1.weight"].1[0], 9.0, "fc1 -> wi_1");
+        assert_eq!(map["blocks.0.wo.weight"].0, vec![d, ff]);
+        // Each block keeps its OWN bias table.
+        assert_eq!(map["blocks.0.rel_bias.weight"].1[0], 1.0);
+        assert_eq!(map["blocks.1.rel_bias.weight"].1[0], 2.0);
+    }
+
+    #[test]
+    fn wan_import_rejects_missing_extra_and_the_wrong_config() {
+        let cfg = tiny_umt5();
+
+        let mut short = fake_wan(&cfg);
+        short.retain(|t| t.name != "blocks.1.pos_embedding.embedding.weight");
+        let err = import_wan(short, &cfg).unwrap_err();
+        assert!(err.contains("blocks.1.rel_bias.weight"), "{err}");
+
+        let mut extra = fake_wan(&cfg);
+        extra.push(StTensor { name: "head.weight".into(), shape: vec![1], data: vec![0.0] });
+        let err = import_wan(extra, &cfg).unwrap_err();
+        assert!(err.contains("unrecognized umT5"), "{err}");
+
+        // The two name spaces do not silently accept each other's files.
+        let err = import_wan(fake_hf(&tiny()), &cfg).unwrap_err();
+        assert!(err.contains("unrecognized umT5"), "{err}");
+        let err = import_hf(fake_wan(&cfg), &tiny()).unwrap_err();
+        assert!(err.contains("unrecognized T5"), "{err}");
+
+        // ...nor each other's CONFIG, which is the failure that would otherwise
+        // surface as 23 missing tensors instead of one clear sentence.
+        let err = import_wan(fake_wan(&cfg), &tiny()).unwrap_err();
+        assert!(err.contains("per-block"), "{err}");
+        let err = import_hf(fake_hf(&tiny()), &cfg).unwrap_err();
+        assert!(err.contains("one per block"), "{err}");
     }
 }

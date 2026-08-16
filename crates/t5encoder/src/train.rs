@@ -224,6 +224,17 @@ impl T5Trainer {
         t: u32,
         init: &HashMap<String, Vec<f32>>,
     ) -> T5Trainer {
+        // The reverse pass folds ONE `rel_bias.weight` gradient across every
+        // block (`build_bwd_steps`'s `axpy` accumulation) and attends over
+        // every key. umT5's per-block tables and key-padding mask would each
+        // need their own reverse; refusing here keeps a silently wrong
+        // gradient out of the trainer instead of producing one.
+        assert!(
+            !cfg.per_block_rel_bias,
+            "T5Trainer implements the SHARED relative-position bias only; \
+             per-block (umT5) training is not implemented"
+        );
+        assert!(!cfg.masked, "T5Trainer implements the UNMASKED contract only");
         let roles: Vec<(String, usize, Role)> = cfg
             .tensor_manifest()
             .into_iter()
@@ -647,6 +658,10 @@ pub fn tiny_config() -> T5Config {
         rel_buckets: 8,
         rel_max_distance: 6,
         eps: 1e-6,
+        // The trainer implements T5 v1.1's SHARED bias and the unmasked
+        // contract only; see `T5Trainer::new_on`.
+        per_block_rel_bias: false,
+        masked: false,
     }
 }
 

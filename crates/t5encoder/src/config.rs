@@ -25,6 +25,18 @@ pub struct T5Config {
     pub rel_max_distance: u32,
     /// `layer_norm_epsilon`. T5's norm is RMS (no mean subtraction, no bias).
     pub eps: f32,
+    /// **Topology.** `true` = one `T5RelativeEmbedding` per block (umT5's
+    /// `shared_pos=False`); `false` = one table on block 0, shared by every
+    /// block (T5 v1.1's `shared_pos=True`). It changes
+    /// [`T5Config::tensor_manifest`], the importer and the forward, and getting
+    /// it wrong is SILENT - the wrong bias still produces plausible embeddings.
+    pub per_block_rel_bias: bool,
+    /// **Call contract**, not topology: `true` = the encoder is driven with a
+    /// `[B, T]` key-padding mask, so right-pad positions are removed from every
+    /// query's attention. FLUX passes no mask and needs `false`; Wan passes one
+    /// and needs `true` (the reference dump measures 1.5 max|d| on the CONTENT
+    /// rows between the two runs, so this is a real feature, not rounding).
+    pub masked: bool,
 }
 
 impl T5Config {
@@ -41,6 +53,28 @@ impl T5Config {
             rel_buckets: 32,
             rel_max_distance: 128,
             eps: 1e-6,
+            per_block_rel_bias: false,
+            masked: false,
+        }
+    }
+
+    /// **umT5-XXL encoder** - Wan2.1's text tower
+    /// (`Wan2.1/wan/modules/t5.py::umt5_xxl`, 5.681 B parameters).
+    ///
+    /// Same block topology and the same widths as [`T5Config::xxl`], and it is
+    /// tempting to treat it as "T5-XXL with a bigger vocabulary". It is three
+    /// different models:
+    ///
+    /// * `vocab_size=256384` instead of 32128 - multilingual, and on its own
+    ///   that is **+3.67 GB** of fp32 embedding table (0.53 -> 4.20 GB);
+    /// * `shared_pos=False` - 24 independent relative-position tables;
+    /// * it is called WITH an attention mask and a 512-token pad.
+    pub fn umt5_xxl() -> T5Config {
+        T5Config {
+            vocab: 256384,
+            per_block_rel_bias: true,
+            masked: true,
+            ..T5Config::xxl()
         }
     }
 
@@ -61,15 +95,20 @@ impl T5Config {
     /// product either way.
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
         let (d, ff, inner) = (self.d_model as usize, self.d_ff as usize, self.inner() as usize);
-        let mut v: Vec<(String, Vec<usize>)> = vec![
-            ("shared.weight".into(), vec![self.vocab as usize, d]),
+        let bias = vec![self.rel_buckets as usize, self.heads as usize];
+        let mut v: Vec<(String, Vec<usize>)> =
+            vec![("shared.weight".into(), vec![self.vocab as usize, d])];
+        if !self.per_block_rel_bias {
             // The learned relative-position bias table: one row per bucket, one
             // column per head. It lives on block 0 in the checkpoint and is
             // shared by every block.
-            ("rel_bias.weight".into(), vec![self.rel_buckets as usize, self.heads as usize]),
-        ];
+            v.push(("rel_bias.weight".into(), bias.clone()));
+        }
         for l in 0..self.layers {
             let p = format!("blocks.{l}");
+            if self.per_block_rel_bias {
+                v.push((format!("{p}.rel_bias.weight"), bias.clone()));
+            }
             v.push((format!("{p}.attn_norm.weight"), vec![d]));
             v.push((format!("{p}.qkv.weight"), vec![3 * inner, d]));
             v.push((format!("{p}.o.weight"), vec![d, inner]));
@@ -85,6 +124,16 @@ impl T5Config {
     /// Total parameter count of the manifest (fused q/k/v does not change it).
     pub fn param_count(&self) -> usize {
         self.tensor_manifest().iter().map(|(_, s)| s.iter().product::<usize>()).sum()
+    }
+
+    /// The relative-position bias table block `l` reads: its own when
+    /// `per_block_rel_bias`, otherwise the single shared one.
+    pub fn rel_bias_name(&self, l: usize) -> String {
+        if self.per_block_rel_bias {
+            format!("blocks.{l}.rel_bias.weight")
+        } else {
+            "rel_bias.weight".to_string()
+        }
     }
 }
 
@@ -105,5 +154,28 @@ mod tests {
         // 4.762 B — matches the reference dump ("loaded: 4.762 B params").
         let p = c.param_count();
         assert!((4.760e9..4.765e9).contains(&(p as f64)), "param count {p}");
+    }
+
+    #[test]
+    fn umt5_manifest_shape_and_size() {
+        let c = T5Config::umt5_xxl();
+        let m = c.tensor_manifest();
+        // 1 global + 8 per block + final norm: the shared bias becomes 24
+        // per-block ones, so the count goes UP by 23 against T5 v1.1.
+        assert_eq!(m.len(), 1 + 8 * 24 + 1);
+        assert_eq!(m.len(), 194);
+        // The checkpoint's 242 tensors fuse to 194 (24 blocks lose 2 each as
+        // q/k/v become one qkv).
+        assert_eq!(m.len() + 2 * 24, 242);
+        assert_eq!(c.rel_bias_name(7), "blocks.7.rel_bias.weight");
+        assert_eq!(T5Config::xxl().rel_bias_name(7), "rel_bias.weight");
+        // 5.681 B - matches the reference dump ("5.681 B params").
+        let p = c.param_count();
+        assert!((5.680e9..5.682e9).contains(&(p as f64)), "param count {p}");
+        // The whole delta against T5-XXL is the embedding table: 224256 extra
+        // rows of 4096 = 918 M parameters = 3.67 GB in fp32.
+        let d = p - T5Config::xxl().param_count();
+        assert_eq!(d, (256384 - 32128) * 4096 + 23 * 32 * 64);
+        assert!((3.66e9..3.68e9).contains(&(d as f64 * 4.0)), "fp32 delta {} GB", d * 4);
     }
 }

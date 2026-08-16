@@ -148,3 +148,128 @@ fn position_bias_is_the_bucket_gather_permuted() {
         }
     }
 }
+
+// -------------------------------------------------------------- umT5 (Wan)
+
+/// umT5 topology at the same toy dims: per-block relative bias, masked.
+fn tiny_umt5() -> T5Config {
+    T5Config {
+        vocab: 256,
+        d_model: 64,
+        d_ff: 128,
+        d_kv: 64,
+        layers: 3,
+        heads: 2,
+        ..T5Config::umt5_xxl()
+    }
+}
+
+/// The gate for the delta that is otherwise SILENT: umT5 owns one
+/// `T5RelativeEmbedding` per block (`shared_pos=False`), so block `l`'s bias
+/// slab must be built from block `l`'s OWN table. With each table filled by
+/// `bucket*10 + head + 100*l`, a port that shares block 0's table produces a
+/// perfectly plausible slab that is off by a constant per block - which is
+/// exactly what makes the bug survive an eyeball and a rough cosine.
+#[test]
+fn each_block_uses_its_own_relative_position_table() {
+    force_tiled_embedding();
+    let cfg = tiny_umt5();
+    let (b, t) = (1u32, 8u32);
+    let heads = cfg.heads as usize;
+    let mut init = fake_init(&cfg);
+    for l in 0..cfg.layers as usize {
+        init.insert(
+            cfg.rel_bias_name(l),
+            (0..cfg.rel_buckets as usize)
+                .flat_map(|bk| (0..heads).map(move |h| (bk * 10 + h + 100 * l) as f32))
+                .collect(),
+        );
+    }
+    let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
+    m.set_tokens(&vec![1u32; (b * t) as usize]);
+    m.set_mask(&vec![1u32; (b * t) as usize]);
+    m.forward();
+
+    let buckets = t5encoder::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance);
+    for l in 0..cfg.layers as usize {
+        let got = m.read_block_bias(l);
+        assert_eq!(got.len(), heads * (t * t) as usize);
+        for h in 0..heads {
+            for i in 0..t as usize {
+                for j in 0..t as usize {
+                    let want = (buckets[i * t as usize + j] as usize * 10 + h + 100 * l) as f32;
+                    let idx = (h * t as usize + i) * t as usize + j;
+                    assert_eq!(got[idx], want, "block {l} bias[h={h}, i={i}, j={j}]");
+                }
+            }
+        }
+    }
+}
+
+/// Masking a right-padded run must be **the same computation** as never having
+/// had the padding: nothing in this encoder mixes rows except attention, and
+/// the mask removes the pad keys from every query. So a `T=12` run whose last 4
+/// keys are masked and a `T=8` run of the same tokens must agree on all 8
+/// content rows, and the masked keys contribute a hard zero rather than a small
+/// number, so the agreement is BIT-EXACT rather than merely close.
+///
+/// This is the weight-free gate on the mask. It would catch a mask applied on
+/// the query axis, applied after the softmax, or dropped in some blocks - none
+/// of which a cosine on a real prompt reliably separates from rounding.
+#[test]
+fn masking_the_pad_keys_equals_never_having_padded() {
+    force_tiled_embedding();
+    let cfg = tiny_umt5();
+    let (b, keep, pad) = (2u32, 8u32, 4u32);
+    let init = fake_init(&cfg);
+    let dev = || gpu_core::testgpu::dev(t5encoder::model::PIPELINES);
+    let content: Vec<u32> = (0..b * keep).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+
+    let short = T5Encoder::new_on(dev(), cfg.clone(), b, keep, &init);
+    short.set_tokens(&content);
+    short.set_mask(&vec![1u32; (b * keep) as usize]);
+    short.forward();
+
+    let t = keep + pad;
+    let mut ids = vec![0u32; (b * t) as usize];
+    let mut mask = vec![0u32; (b * t) as usize];
+    for r in 0..b as usize {
+        for i in 0..keep as usize {
+            ids[r * t as usize + i] = content[r * keep as usize + i];
+            mask[r * t as usize + i] = 1;
+        }
+    }
+    let long = T5Encoder::new_on(dev(), cfg.clone(), b, t, &init);
+    long.set_tokens(&ids);
+    long.set_mask(&mask);
+    long.forward();
+
+    let d = cfg.d_model as usize;
+    let a = short.read_hidden();
+    let c = long.read_hidden();
+    let mut worst = 0.0f32;
+    for r in 0..b as usize {
+        for i in 0..keep as usize {
+            for k in 0..d {
+                let x = a[(r * keep as usize + i) * d + k];
+                let y = c[(r * t as usize + i) * d + k];
+                worst = worst.max((x - y).abs());
+            }
+        }
+    }
+    eprintln!("masked T={t} vs unmasked T={keep}: max_abs {worst:.3e} on the content rows");
+    assert_eq!(worst, 0.0, "the key-padding mask is not equivalent to truncation");
+
+    // ...and `read_context` hands the DiT hard zeros at the pad rows, not the
+    // encoder's (perfectly nonzero) output there.
+    let ctx = long.read_context();
+    for r in 0..(b * t) as usize {
+        let row = &ctx[r * d..(r + 1) * d];
+        if mask[r] == 1 {
+            assert!(row.iter().any(|&v| v != 0.0), "content row {r} is zero");
+        } else {
+            assert!(row.iter().all(|&v| v == 0.0), "pad row {r} is not zeroed");
+            assert!(c[r * d..(r + 1) * d].iter().any(|&v| v != 0.0), "pad row {r} was already zero");
+        }
+    }
+}

@@ -52,6 +52,28 @@ pub fn compare(a: &[f32], b: &[f32]) -> (f64, f64) {
     (dot / denom, mx)
 }
 
+/// Relative L2 error, `||got - want|| / ||want||` - the third number, and the
+/// only one of the three that is scale-free AND sees every element.
+///
+/// Cosine is blind to a uniform scale, max_abs is dominated by whichever single
+/// element is worst, and a tensor can look fine on both while a broad fraction
+/// of its energy is in the wrong place. `0.0` for an all-zero reference, which
+/// is the only sane answer and is why [`Report::check`] refuses that case
+/// separately.
+pub fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
+    assert_eq!(got.len(), want.len(), "length mismatch {} vs {}", got.len(), want.len());
+    let (mut num, mut den) = (0f64, 0f64);
+    for (x, y) in got.iter().zip(want.iter()) {
+        let (x, y) = (*x as f64, *y as f64);
+        num += (x - y) * (x - y);
+        den += y * y;
+    }
+    if den == 0.0 {
+        return 0.0;
+    }
+    (num / den).sqrt()
+}
+
 /// One parity run's accumulated per-stage results and the cosine floor they are
 /// all held to.
 pub struct Report {
@@ -83,7 +105,13 @@ impl Report {
     /// rather than inflating the pass count.
     pub fn check(&mut self, name: &str, got: &[f32], want: &[f32]) {
         let (c, m) = compare(got, want);
-        println!("  {:<w$} cos {c:.10}  max_abs {m:.3e}  n={}", name, want.len(), w = self.width);
+        let r = rel_l2(got, want);
+        println!(
+            "  {:<w$} cos {c:.10}  rel_l2 {r:.3e}  max_abs {m:.3e}  n={}",
+            name,
+            want.len(),
+            w = self.width
+        );
         assert!(
             want.iter().any(|v| v.abs() > 1e-6),
             "{name}: the REFERENCE tap is all ~zero -- degenerate comparison"
@@ -142,6 +170,15 @@ mod tests {
         let (c, m) = compare(&a, &b);
         assert!((c - 1.0).abs() < 1e-12, "{c}");
         assert!((m - 3.5).abs() < 1e-6, "{m}");
+        // ...and rel_l2 sees it too: half the reference's norm is missing.
+        assert!((rel_l2(&a, &b) - 0.5).abs() < 1e-12, "{}", rel_l2(&a, &b));
+    }
+
+    #[test]
+    fn rel_l2_is_zero_on_equality_and_defined_on_an_all_zero_reference() {
+        let a = [1.0f32, -2.0, 3.5];
+        assert_eq!(rel_l2(&a, &a), 0.0);
+        assert_eq!(rel_l2(&a, &[0.0; 3]), 0.0);
     }
 
     #[test]

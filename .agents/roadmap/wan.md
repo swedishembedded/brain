@@ -85,15 +85,46 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       kernel, and the per-frame spatial convs that could take `blocks.rs`'s
       `im2col_at` + `matmul_reg3` lowering are a minority of the FLOPs, so the
       lowering is a later change with its own measurement.
-- [ ] **umT5-XXL** in `crates/t5encoder`: vocab 32128 -> 256384, per-block
-      relative position bias (see below), attention masking with a zero-pad to
-      `text_len = 512`. The crate's own size analysis understates umT5 by about
-      3.7 GB because it assumes the T5 v1.1 vocabulary.
-- [ ] **SentencePiece unigram tokenizer** in `crates/data` -- brain has GPT-2,
-      Qwen3 and CLIP BPE, but no unigram implementation at all, and umT5's
-      256k-entry `spiece.model` needs one.
-- [ ] **Goldens** (`tools/goldens/wan_dump_reference.py`) before any DiT Rust,
-      per porting.md section 1.
+- [x] **umT5-XXL** in `crates/t5encoder` as a second `T5Config` variant
+      (`umt5_xxl()`), not a second crate: same block topology, three deltas.
+      * **vocab 32128 -> 256384.** The whole 918 M parameter difference is the
+        embedding table, i.e. **+3.67 GB** in fp32 before a block is allocated
+        (4.762 B -> 5.681 B, 19.05 -> 22.72 GB). The crate's size analysis was
+        understating it by exactly that and now states both.
+      * **Per-block relative position bias** (`shared_pos=False`): the manifest
+        gains `blocks.<l>.rel_bias.weight` and loses the shared one (171 -> 194
+        tensors), and the gather+permute pair moves inside the block loop. The
+        bias slabs stay per block (67 MB each at T=512) rather than sharing one
+        scratch, so `read_block_bias` can gate block 0 AND block 23 - with one
+        scratch a shared-bias regression would only be visible at the last
+        block. The bucket math is UNCHANGED between the two variants, so
+        `hostbias` is reused as-is.
+      * **Key padding**, one new kernel: `attn_keypad_mask` (405 -> 406), the
+        bidirectional twin of `attn_prefix_mask`, added into the score slab
+        between the bias and the softmax. `attn_scores_bidir_bias`'s bias is
+        `[H,T,T]` with no batch axis, so folding the mask into it would have
+        been correct only at B=1. An unmasked config records no mask step at
+        all, so FLUX's certified graph is unchanged byte for byte.
+      * **The 512 pad is applied AFTER the encoder, as hard zeros**
+        (`read_context`), because `T5EncoderModel.__call__` trims to `seq_len`
+        and `WanModel.forward` re-pads with `new_zeros`. The encoder's own
+        output at those positions peaks at 0.87 and is discarded.
+      Training is deliberately NOT extended: `T5Trainer` folds one shared
+      `rel_bias` gradient across the block stack and attends over every key, so
+      it asserts against both flags instead of returning a wrong gradient.
+- [x] **SentencePiece unigram tokenizer** -- `crates/data/src/unigram.rs`, the
+      first non-BPE tokenization model in the workspace (Viterbi over the piece
+      lattice, `fuse_unk`, Metaspace pre-tokenizer, `TemplateProcessing`).
+      Built from **`tokenizer.json`, not `spiece.model`**: the JSON is the
+      artifact `AutoTokenizer.from_pretrained` actually loads (which is what
+      `wan/modules/tokenizers.py` wraps), it needs no protobuf decoder, and it
+      needs neither sentencepiece's `precompiled_charsmap` normalizer nor its
+      piece-type table - umT5's normalizer is one `" {2,}" -> " "` rule. Exact
+      ids on all 9 golden prompts including the unknown-piece path.
+- [x] **umT5 goldens** (`tools/goldens/wan_t5_dump_reference.py`), five
+      self-validations before a byte is written, including an independent
+      Viterbi that doubles as the spec for the Rust tokenizer. The DiT's own
+      goldens are still to come.
 - [x] **UniPC multistep in the flow-matching parameterisation**, plus the sigma
       shift `s' = shift*s / (1 + (shift-1)*s)`. Landed as
       `crates/diffusion/src/flowsolvers.rs` (a third scheduler family beside

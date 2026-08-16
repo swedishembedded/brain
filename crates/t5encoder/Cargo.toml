@@ -15,6 +15,12 @@ brain-kernels.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-checkpoint.workspace = true
-# `train` — the workspace's only test/gradcheck PRNG (`data::rng::Rng`).
+# `train` - the workspace's only test/gradcheck PRNG (`data::rng::Rng`); the
+# umT5 parity test additionally drives `data::unigram`, so the tokenizer and
+# the encoder are gated against the same golden prompts.
 brain-data.workspace = true
+
+[dev-dependencies]
+# The shared testdata resolution + the parity report's rel_l2.
+brain-testutil.workspace = true
 

@@ -7,9 +7,11 @@
 //! x0    = embed(ids)                                        [B*T, D]
 //! bias  = permute(embed(bucket_ids, rel_bias))              [H, T, T]   (once)
 //! per block l:
+//!   bias = permute(embed(bucket_ids, rel_bias_l))           (umT5 only, per block)
 //!   xn   = RMSNorm(x_l)                                     (no bias, no mean)
 //!   qkv  = xn @ Wqkv^T          (fused [3*inner, D] — fused at import)
 //!   scr  = q.k^T * 1.0 + bias   (NO 1/sqrt(d_kv) — see below)
+//!   scr -= 1e30 where key is padded                         (masked configs)
 //!   ctx  = softmax_bidir(scr) . v
 //!   res  = x_l + ctx @ Wo^T                                 (residual UNSCALED)
 //!   fn_  = RMSNorm(res)
@@ -27,13 +29,21 @@
 //!    `T5LayerNorm` (`w * x * rsqrt(mean(x²)+eps)`), so no new kernel and no
 //!    host copy. The residual is a plain `add2`.
 //! 2. **Relative position bias, not RoPE.** A learned `[num_buckets, heads]`
-//!    table gathered through a bucketing of `key - query`, computed once in
-//!    block 0 and shared by all 24. There is no RoPE and no absolute position
-//!    embedding, so no rotary kernel is dispatched at all. The bucket table is
-//!    host integer math ([`crate::hostbias`]); the gather is the `embed`
-//!    kernel and the `(q,k,H) -> (H,q,k)` permutation is `nlc_nchw`.
-//!    brain's `rel_shift` is Transformer-XL's *shift* of an existing score
-//!    slab — a different mechanism, not reusable here (see `hostbias`).
+//!    table gathered through a bucketing of `key - query`. T5 v1.1 computes it
+//!    once in block 0 and shares it with all 24; **umT5 does not** - it sets
+//!    `shared_pos=False` and owns one table per block, so the gather+permute
+//!    pair moves inside the block loop and each block reads its own
+//!    `blocks.<l>.rel_bias.weight`. Sharing block 0's table there is a SILENT
+//!    error: every shape stays valid, every activation stays plausible, and the
+//!    only thing that separates it from a correct run is comparing block 23's
+//!    bias against the reference (they differ by max_abs 53 in the released
+//!    checkpoint). There is no RoPE and no absolute position embedding, so no
+//!    rotary kernel is dispatched at all. The bucket table is host integer math
+//!    ([`crate::hostbias`]) and is the SAME formula in both variants; the
+//!    gather is the `embed` kernel and the `(q,k,H) -> (H,q,k)` permutation is
+//!    `nlc_nchw`. brain's `rel_shift` is Transformer-XL's *shift* of an
+//!    existing score slab - a different mechanism, not reusable here (see
+//!    `hostbias`).
 //! 3. **No attention scaling.** T5 folds `1/sqrt(d_kv)` into its
 //!    initialisation, so the scores are a bare `q.k^T`. This is why the
 //!    attention uses `attn_scores_bidir_bias` (which takes the multiplier as a
@@ -44,13 +54,22 @@
 //!    NewGELUActivation — the tanh form brain's `gelu.wgsl` already computes —
 //!    and the gate is `mul`, whose header documents exactly this composition.
 //!
-//! **Attention mask.** diffusers' `FluxPipeline._get_t5_prompt_embeds` calls the
-//! encoder with NO `attention_mask`, so right-pad positions are attended as
-//! ordinary keys; that is the contract implemented here and the run the goldens
-//! gate. It is not a no-op the way CLIP's causal isolation is — the dumper
-//! measures 4.5 max|d| on *content* rows between the masked and unmasked runs —
-//! so a masked variant is a real (unimplemented) feature, not a rounding
-//! difference. See the crate docs.
+//! **Attention mask** (`T5Config::masked`). diffusers'
+//! `FluxPipeline._get_t5_prompt_embeds` calls the encoder with NO
+//! `attention_mask`, so right-pad positions are attended as ordinary keys.
+//! Wan2.1 tokenizes to a fixed 512 and passes the mask. Neither is a no-op the
+//! way CLIP's causal isolation is - the two dumpers measure 4.5 and 1.5 max|d|
+//! on *content* rows between the masked and unmasked runs - so the flag selects
+//! between two different answers, and an unmasked config records no mask step
+//! at all (its graph is byte-for-byte the one FLUX's goldens certify).
+//!
+//! Only the KEY axis is masked, matching `t5.py:107-109`, so a padded query
+//! still attends over the real keys and produces a defined row. Wan then
+//! discards those rows entirely: `T5EncoderModel.__call__` trims to `seq_len`
+//! and `WanModel.forward` re-pads with `new_zeros`, which is what
+//! [`T5Encoder::read_context`] reproduces. Masking the pad keys is exactly
+//! equivalent to never having padded (nothing here mixes rows except
+//! attention), and `tests/smoke.rs` asserts that BIT-EXACTLY at toy dims.
 //!
 //! SSA: every stage writes a fresh buffer, which doubles as the activation
 //! cache the deferred backward needs. The two shared score slabs are the
@@ -77,6 +96,7 @@ const K_ADD2: usize = 9;
 const K_GELU: usize = 10;
 const K_MUL: usize = 11;
 const K_RMSNORM_ROWS: usize = 12;
+const K_KEYPAD: usize = 13;
 
 /// The encoder's kernels. Forward only — the backward workstream appends its
 /// own, which is why nothing here may be reordered (every `K_*` above is a
@@ -95,6 +115,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gelu", kernels::GELU),
     ("mul", kernels::MUL),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("attn_keypad_mask", kernels::ATTN_KEYPAD_MASK),
 ];
 
 /// One block's SSA activations.
@@ -140,12 +161,26 @@ pub struct T5Encoder {
     b: u32,
     t: u32,
     tokens: DeviceBuffer,
+    /// `[B*T]` u32 key-padding mask (1 = real token). Allocated and dispatched
+    /// only when `cfg.masked`; an unmasked config records no mask step at all,
+    /// so its graph is byte-for-byte the one FLUX's goldens certify.
+    keep: Option<DeviceBuffer>,
+    /// Host copy of the same mask, so `read_context` can zero the pad rows
+    /// without a device round trip.
+    mask: std::cell::RefCell<Vec<u32>>,
     /// `[T*T]` u32 relative-position bucket ids — uploaded once at build time.
     buckets: DeviceBuffer,
-    /// `[T*T, heads]` gather of `rel_bias.weight`, before the permute.
+    /// `[T*T, heads]` gather of a relative-position table, before the permute.
+    /// ONE scratch buffer even with 24 per-block tables: it is written and
+    /// consumed by the very next step, and at T=512 a per-block copy would be
+    /// 1.6 GB of pure intermediate.
     bias_gather: DeviceBuffer,
-    /// `[heads, T, T]` additive attention bias, shared by every block.
-    bias: DeviceBuffer,
+    /// `[heads, T, T]` additive attention bias. One entry when the config
+    /// shares the table (T5 v1.1), one PER BLOCK when it does not (umT5) - the
+    /// per-block buffers are kept rather than reusing one scratch so that
+    /// `read_block_bias` can gate block 0 and block 23 independently, which is
+    /// the only thing that can tell a shared-bias port from a correct one.
+    bias: Vec<DeviceBuffer>,
     /// `x[0]` = embedding output; `x[i+1]` = output of block `i`.
     x: Vec<DeviceBuffer>,
     blocks: Vec<BlockBufs>,
@@ -195,6 +230,18 @@ impl T5Encoder {
             gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
         );
         gpu.write(&buckets, &crate::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance));
+        let keep = cfg.masked.then(|| {
+            let b = gpu.buffer(
+                "t5_keep",
+                n * 4,
+                gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
+            );
+            // Default to "everything is a real token": a caller that forgets
+            // `set_mask` then gets the unmasked answer, which is wrong but
+            // defined, rather than attending to nothing and producing NaN.
+            gpu.write(&b, &vec![1u32; n as usize]);
+            b
+        });
         let blocks: Vec<BlockBufs> = (0..cfg.layers)
             .map(|_| BlockBufs {
                 attn_norm: gpu.storage(n * d),
@@ -210,15 +257,18 @@ impl T5Encoder {
                 ff_out: gpu.storage(n * d),
             })
             .collect();
+        let n_bias = if cfg.per_block_rel_bias { cfg.layers } else { 1 };
         let mut m = T5Encoder {
             bias_gather: gpu.storage(tt * cfg.heads as u64),
-            bias: gpu.storage(cfg.heads as u64 * tt),
+            bias: (0..n_bias).map(|_| gpu.storage(cfg.heads as u64 * tt)).collect(),
             x: (0..=cfg.layers).map(|_| gpu.storage(n * d)).collect(),
             blocks,
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
             hidden: gpu.storage(n * d),
+            mask: std::cell::RefCell::new(vec![1u32; n as usize]),
             tokens,
+            keep,
             buckets,
             gpu,
             cfg,
@@ -281,24 +331,33 @@ impl T5Encoder {
             ));
         }
 
-        // ---- relative-position bias, computed ONCE and shared by every block.
-        // `embed` Params: [d_model, seq_len]; here the "tokens" are the bucket
-        // ids and the "d_model" is the head count, so the gather yields
-        // [T*T, heads].
-        s.push(g.step(
-            K_EMBED,
-            &[&self.buckets, self.w("rel_bias.weight"), &self.bias_gather],
-            &[heads, tt],
-            tt * heads,
-        ));
-        // `nlc_nchw` Params: [total, c, hw] — y[(ch*hw)+l] = x[l*c + ch], i.e.
-        // exactly the reference's `.permute(2, 0, 1)` from (q, k, H) to
-        // (H, q, k). The score kernel indexes bias[(h*T + i)*T + j].
-        s.push(g.step(K_NLC_NCHW, &[&self.bias_gather, &self.bias], &[heads * tt, heads, tt], heads * tt));
+        // ---- relative-position bias. `embed` Params: [d_model, seq_len]; here
+        // the "tokens" are the bucket ids and the "d_model" is the head count,
+        // so the gather yields [T*T, heads]. `nlc_nchw` Params: [total, c, hw]
+        // - y[(ch*hw)+l] = x[l*c + ch], i.e. exactly the reference's
+        // `.permute(2, 0, 1)` from (q, k, H) to (H, q, k). The score kernel
+        // indexes bias[(h*T + i)*T + j].
+        //
+        // T5 v1.1 builds this ONCE, before the block loop, because every block
+        // reads the same table. umT5 sets `shared_pos=False` and owns one table
+        // per block, so the pair is emitted per block instead - the loop below
+        // covers both, and the shared case still emits exactly one pair.
+        let bias_step = |s: &mut Vec<Step>, l: usize| {
+            let table = self.w(&c.rel_bias_name(l));
+            let out = &self.bias[if c.per_block_rel_bias { l } else { 0 }];
+            s.push(g.step(K_EMBED, &[&self.buckets, table, &self.bias_gather], &[heads, tt], tt * heads));
+            s.push(g.step(K_NLC_NCHW, &[&self.bias_gather, out], &[heads * tt, heads, tt], heads * tt));
+        };
+        if !c.per_block_rel_bias {
+            bias_step(&mut s, 0);
+        }
 
         for l in 0..c.layers as usize {
             let bb = &self.blocks[l];
             let p = format!("blocks.{l}");
+            if c.per_block_rel_bias {
+                bias_step(&mut s, l);
+            }
             s.push(self.rmsnorm(&self.x[l], self.w(&format!("{p}.attn_norm.weight")), &bb.attn_norm, n));
 
             let (mk, mt) = self.gemm(n, 3 * inner);
@@ -314,10 +373,17 @@ impl T5Encoder {
             //   [bsz, n_heads, tcols, head_dim, qkv_stride, q_off, k_off, scale(f32 bits)]
             s.push(g.step(
                 K_SCORES,
-                &[&bb.qkv, &self.bias, &self.scores],
+                &[&bb.qkv, &self.bias[if c.per_block_rel_bias { l } else { 0 }], &self.scores],
                 &[b, heads, t, hd, 3 * inner, 0, inner, f(1.0)],
                 b * heads * t * t,
             ));
+            // Key padding, after the bias and before the softmax - exactly
+            // where `t5.py:102-109` builds it (`attn_bias` accumulates the
+            // pos_bias, then `masked_fill_` writes finfo.min at the pad keys).
+            // `attn_keypad_mask` Params: [bsz, heads, tcols].
+            if let Some(keep) = &self.keep {
+                s.push(g.step(K_KEYPAD, &[keep, &self.scores], &[b, heads, t], b * heads * t * t));
+            }
             // `attn_softmax_bidir` Params: [bsz, n_heads, tcols].
             s.push(g.step(K_SOFTMAX, &[&self.scores, &self.probs], &[b, heads, t], b * heads * t));
             // `attn_apply_bidir` Params:
@@ -367,6 +433,22 @@ impl T5Encoder {
         self.gpu.write(&self.tokens, ids);
     }
 
+    /// Set the `[B*T]` key-padding mask (1 = real token, 0 = right padding) -
+    /// `attention_mask` in the reference's terms. Only meaningful when the
+    /// config is `masked`; a config that is not gets a panic rather than a
+    /// silently ignored argument.
+    pub fn set_mask(&self, mask: &[u32]) {
+        let keep = self.keep.as_ref().expect("this T5Config is not `masked`");
+        assert_eq!(mask.len(), (self.b * self.t) as usize, "mask length");
+        assert!(mask.iter().all(|&m| m <= 1), "mask must be 0/1");
+        for r in 0..self.b as usize {
+            let row = &mask[r * self.t as usize..(r + 1) * self.t as usize];
+            assert!(row.contains(&1), "batch row {r} masks every key");
+        }
+        self.gpu.write(keep, mask);
+        self.mask.replace(mask.to_vec());
+    }
+
     pub fn forward(&self) {
         self.gpu.submit(&[], &self.steps);
     }
@@ -381,9 +463,16 @@ impl T5Encoder {
     }
 
     /// The `[heads, T, T]` additive attention bias (the reference's
-    /// `position_bias[0]`).
+    /// `position_bias[0]`) of block `l`. With a shared table every block
+    /// returns the same buffer.
+    pub fn read_block_bias(&self, l: usize) -> Vec<f32> {
+        let i = if self.cfg.per_block_rel_bias { l } else { 0 };
+        self.gpu.read(&self.bias[i], (self.cfg.heads * self.t * self.t) as usize)
+    }
+
+    /// Block 0's attention bias - the shared one when the config shares it.
     pub fn read_position_bias(&self) -> Vec<f32> {
-        self.gpu.read(&self.bias, (self.cfg.heads * self.t * self.t) as usize)
+        self.read_block_bias(0)
     }
 
     /// `x[0]` = embedding output; `x[i+1]` = output of block `i`.
@@ -413,5 +502,28 @@ impl T5Encoder {
     /// tensor FLUX conditions on.
     pub fn read_hidden(&self) -> Vec<f32> {
         self.gpu.read(&self.hidden, self.n() * self.cfg.d_model as usize)
+    }
+
+    /// [`Self::read_hidden`] with every padded row set to EXACTLY zero - the
+    /// `[B, T, d_model]` context a Wan DiT consumes.
+    ///
+    /// This is not cosmetic and it is not the same as trusting the mask.
+    /// `T5EncoderModel.__call__` trims each row to its own `seq_len`, and
+    /// `WanModel.forward` re-pads with `u.new_zeros(text_len - u.size(0), dim)`
+    /// (`wan/modules/model.py:552-558`), so the DiT's cross-attention keys at
+    /// the pad positions are zeros, NOT the encoder's output there. That output
+    /// is not small - the reference dump measures it at 0.87 peak - so feeding
+    /// it through would be a real error that no cosine on the content rows
+    /// could see.
+    pub fn read_context(&self) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        let mut h = self.read_hidden();
+        let mask = self.mask.borrow();
+        for (r, &m) in mask.iter().enumerate() {
+            if m == 0 {
+                h[r * d..(r + 1) * d].fill(0.0);
+            }
+        }
+        h
     }
 }

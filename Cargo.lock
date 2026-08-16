@@ -1588,6 +1588,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-testutil",
 ]
 
 [[package]]

@@ -26,7 +26,7 @@ load-bearing, not aspirational: the packed-int8 DP4A dot kernels
 (`matmul_i8*`, WGSL `dot4I8Packed`) execute on every wgpu-class backend, and
 several models default to them - Qwen3.5's paged KV cache serves in int8 by
 default, and `qwen3`/`s3dit`/`qwen35moe` all take `--precision int8` for a
-~4× smaller weight footprint on the same card. `bf16`/`f16`/cooperative-matrix
+~4× smaller weight footprint on the same card. <!-- perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup --> `bf16`/`f16`/cooperative-matrix
 tiers are the ones still gated off (`NumericSupport::BASELINE` reports them
 unsupported and every such dtype promotes to fp32); wiring those is tracked
 separately. So "portable fp32 baseline" describes the *arithmetic contract*

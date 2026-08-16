@@ -196,6 +196,10 @@ pub fn check_t5_tiled(seed: u64) -> Report {
         rel_buckets: 8,
         rel_max_distance: 6,
         eps: 1e-6,
+        // The trainer implements T5 v1.1's shared bias and the unmasked
+        // contract only; umT5's per-block variant has no backward.
+        per_block_rel_bias: false,
+        masked: false,
     };
     let h = T5Harness::new(cfg, 2, 128, seed);
     directional_check(&h, 5e-4, 4, seed ^ 0x1234)
