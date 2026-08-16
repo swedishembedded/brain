@@ -9,6 +9,7 @@
 //!   * carries every capability axis with ≥3 size points,
 //!   * a finite fitted slope (β) + a finite local slope per axis,
 //!   * finite 2×/4× predictions,
+//!
 //! and that the advisor, fed the capscale + a synthetic eval, emits a non-empty
 //! ranked recommendation list whose top item is a real axis.
 //!

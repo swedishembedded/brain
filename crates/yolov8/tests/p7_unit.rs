@@ -185,6 +185,7 @@ fn one_step_update_moves_weights_and_clears_grads() {
 ///   * non-positive width or height  -> REJECTED (zero/negative area),
 ///   * center/size out of `[0,1]`    -> CLIPPED to a valid in-frame box; if the
 ///     clipped box collapses to zero area it is then rejected.
+///
 /// Returns the kept (valid) boxes. This is the contract a real loader must
 /// uphold; the model's `set_targets` assumes already-valid in-range labels.
 fn sanitize_gts(gts: &[GtBox], nc: u32) -> Vec<GtBox> {

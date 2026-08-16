@@ -110,7 +110,13 @@ cd "$ROOT"
 # session. The session's working tree showed 295 (294 + exactly one new
 # warning, `crates/cli/src/imageops.rs`'s `draw_boxes` action it added),
 # which it fixed directly rather than folding into this baseline bump.
-BASELINE="${BASELINE:-294}"
+#
+# Lowered 294 -> 292: a later session's real-bug sweep fixed two more
+# pre-existing `doc_lazy_continuation`/`needless_range_loop` warnings
+# (`crates/bench/tests/capscale.rs`, `crates/yolov8/tests/common/p7.rs`,
+# `crates/yolov8/tests/p7_unit.rs`) it found alongside its own work, rather
+# than leaving them as unrelated drift.
+BASELINE="${BASELINE:-292}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

@@ -230,7 +230,7 @@ pub fn detect_split_train(
     let mut out = Vec::with_capacity(n);
     for img in 0..n {
         let mut dets: Vec<Detection> = Vec::new();
-        for i in 0..a {
+        for (i, &an) in anchors.iter().enumerate() {
             // best class + score for this anchor.
             let cbase = (img * a + i) * nc;
             let mut best_c = 0usize;
@@ -245,7 +245,6 @@ pub fn detect_split_train(
             if best_s < conf {
                 continue;
             }
-            let an = anchors[i];
             let dbase = (img * a + i) * 4;
             let d = [dist[dbase], dist[dbase + 1], dist[dbase + 2], dist[dbase + 3]];
             let bx = yolov8::boxmath::dist_to_xyxy(d, an.ax, an.ay, an.stride);
