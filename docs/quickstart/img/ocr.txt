@@ -1,0 +1,2 @@
+rendered:    Brain trains and runs neural networks from scratch, in Rust.
+ocr'd:       Brain trains and runs neural networks from scratch, in Rust.

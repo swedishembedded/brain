@@ -56,6 +56,12 @@ if ! need "$IMG_DIR/qwen3-infer.txt"; then
     2>/dev/null | tail -1 > "$IMG_DIR/qwen3-infer.txt"
 fi
 
+step "1b. bidirectional text embedding (lfm2, auto-fetches LiquidAI/LFM2.5-350M)"
+if ! need "$IMG_DIR/lfm2-embed.txt"; then
+  "$BRAIN" lfm2 embed --text "Brain trains and runs neural networks from scratch, in Rust." \
+    2>/dev/null | grep "^embedding" > "$IMG_DIR/lfm2-embed.txt"
+fi
+
 # ---------------------------------------------------------------- 2. image
 
 step "2. text-to-image (s3dit, auto-fetches Tongyi-MAI/Z-Image-Turbo - ~33 GB, the slow step)"
@@ -177,20 +183,51 @@ fi
 
 # ---------------------------------------------------------------- 7. tts -> asr -> text (round trip)
 
-step "7. text -> speech -> text -> text (qwen3tts synth, auto-fetches Qwen/Qwen3-TTS-12Hz-0.6B-Base; nemotronasr transcribe, auto-fetches nvidia/nemotron-3.5-asr-streaming-0.6b; qwen3 infer)"
+step "7. text -> speech -> text -> text (qwen3tts synth, auto-fetches Qwen/Qwen3-TTS-12Hz-0.6B-Base; nemotronasr + qwen3asr transcribe, two independent ASR models on the same audio; qwen3 infer)"
 if ! need "$IMG_DIR/roundtrip.txt"; then
   SENTENCE="Brain trains and runs neural networks from scratch, in Rust."
   "$BRAIN" qwen3tts synth --text "$SENTENCE" --out "$IMG_DIR/.spoken.wav"
   TRANSCRIPT="$("$BRAIN" nemotronasr transcribe --in audio="$IMG_DIR/.spoken.wav" --json 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["text"].strip())')"
+  TRANSCRIPT2="$("$BRAIN" qwen3asr transcribe --in audio="$IMG_DIR/.spoken.wav" --json 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["text"].strip())')"
   RESPONSE="$("$BRAIN" infer qwen3 --prompt "$TRANSCRIPT" --max-new 24 2>/dev/null | tail -1)"
   {
     echo "synthesized: $SENTENCE"
-    echo "transcribed: $TRANSCRIPT"
+    echo "transcribed (nemotronasr): $TRANSCRIPT"
+    echo "transcribed (qwen3asr):    $TRANSCRIPT2"
     echo "---"
     echo "$RESPONSE"
   } > "$IMG_DIR/roundtrip.txt"
   rm -f "$IMG_DIR/.spoken.wav"
+fi
+
+# ---------------------------------------------------------------- 7b. document OCR round trip
+
+step "7b. text -> document image -> text (deepseek2ocr, auto-fetches ggml-org/DeepSeek-OCR-GGUF)"
+if ! need "$IMG_DIR/ocr.txt"; then
+  SENTENCE="Brain trains and runs neural networks from scratch, in Rust."
+  python3 -c "
+from PIL import Image, ImageDraw, ImageFont
+img = Image.new('RGB', (640, 320), 'white')
+d = ImageDraw.Draw(img)
+font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 28)
+d.multiline_text((40, 120), 'Brain trains and runs neural\nnetworks from scratch, in Rust.', fill='black', font=font, spacing=16)
+img.save('$IMG_DIR/doc.png')
+"
+  OCR_TEXT="$("$BRAIN" deepseek2ocr generate --in image="$IMG_DIR/doc.png" \
+    --prompt "<|grounding|>Convert the document to markdown." 2>/dev/null \
+    | python3 -c 'import json,re,sys
+for line in sys.stdin:
+    line = line.strip()
+    if line.startswith("text:"):
+        raw = json.loads(line.split(":", 1)[1].strip())
+        print(re.sub(r"<\|ref\|>.*?<\|/ref\|><\|det\|>.*?<\|/det\|>", "", raw).strip())
+        break')"
+  {
+    echo "rendered:    $SENTENCE"
+    echo "ocr'd:       $OCR_TEXT"
+  } > "$IMG_DIR/ocr.txt"
 fi
 
 # ---------------------------------------------------------------- 8. TTS LoRA

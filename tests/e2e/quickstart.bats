@@ -42,6 +42,16 @@ setup_file() {
   [ -n "$output" ]
 }
 
+@test "quickstart: lfm2 produced a real 1024-dim embedding" {
+  [ -s "$IMG_DIR/lfm2-embed.txt" ] || skip "step 1b (lfm2 embed) has not run yet"
+  run cat "$IMG_DIR/lfm2-embed.txt"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^embedding\[1024\]" || {
+    echo "unexpected lfm2 embed output: $output" >&2
+    return 1
+  }
+}
+
 @test "quickstart: s3dit text2image produced a real image" {
   [ -s "$IMG_DIR/seed.png" ] || skip "step 2 (s3dit text2image) has not run yet"
   run python3 -c "
@@ -144,12 +154,29 @@ assert data != Path('$IMG_DIR/seed.png').read_bytes(), 'inpaint output is byte-i
   run cat "$IMG_DIR/roundtrip.txt"
   [ "$status" -eq 0 ]
   grep -qi "synthesized:" <<< "$output"
-  grep -qi "transcribed:" <<< "$output"
+  grep -qi "transcribed (nemotronasr):" <<< "$output"
+  grep -qi "transcribed (qwen3asr):" <<< "$output"
   # At least one content word from the synthesized sentence must survive
   # transcription -- not an exact match (ASR is not lossless), a real signal
   # that the audio round-trip carried actual content rather than silence/noise.
+  # nemotronasr is the reliable one here (qwen3asr is shown as-is in the
+  # README, including its real, honest undershoot on this clip's length) --
+  # scoped to its own line rather than the whole file, so qwen3asr's shorter
+  # transcript can't accidentally satisfy this on nemotronasr's behalf.
+  grep -i "transcribed (nemotronasr):" <<< "$output" | grep -qiE 'brain|neural|network|rust' || {
+    echo "nemotronasr's transcript lost every expected content word: $output" >&2
+    return 1
+  }
+}
+
+@test "quickstart: deepseek2ocr read back the rendered document text" {
+  [ -s "$IMG_DIR/ocr.txt" ] || skip "step 7b (deepseek2ocr) has not run yet"
+  run cat "$IMG_DIR/ocr.txt"
+  [ "$status" -eq 0 ]
+  grep -qi "^rendered:" <<< "$output"
+  grep -qi "^ocr'd:" <<< "$output"
   echo "$output" | grep -qiE 'brain|neural|network|rust' || {
-    echo "transcript lost every expected content word: $output" >&2
+    echo "OCR output did not recover the rendered document's content: $output" >&2
     return 1
   }
 }

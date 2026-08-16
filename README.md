@@ -61,6 +61,13 @@ $ brain infer qwen3 --prompt "The capital of France is" --max-new 12   # auto-fe
 The capital of France is Paris. The capital of Italy is Rome. The capital of
 ```
 
+**Bidirectional text embedding** - a different architecture family (a non-causal encoder, not a decoder):
+
+```bash
+$ brain lfm2 embed --text "Brain trains and runs neural networks from scratch, in Rust."   # auto-fetches LiquidAI/LFM2.5-350M
+embedding[1024] mean-pool head: [1.97, -1.367, 3.628, 0.754, 2.136, -1.704, 1.704, -1.871] …
+```
+
 **Image generation** - the one seed image every step below reads:
 
 ```bash
@@ -143,18 +150,37 @@ $ brain --device gpu s3dit inpaint --in image=seed.png --in mask=mask.png \
 
 ![the seed image with the apple replaced by a slice of chocolate cake](docs/quickstart/img/inpainted.png)
 
-**Speech: text → speech → text → text**, a full TTS → ASR → LLM round trip:
+**Speech: text → speech → text → text**, a full TTS → ASR → LLM round trip,
+through two independently-trained ASR models on the exact same audio:
 
 ```bash
 $ brain qwen3tts synth --text "Brain trains and runs neural networks from scratch, in Rust." --out spoken.wav   # auto-fetches Qwen/Qwen3-TTS-12Hz-0.6B-Base
 $ brain nemotronasr transcribe --in audio=spoken.wav --json                                                     # auto-fetches nvidia/nemotron-3.5-asr-streaming-0.6b
 {"text":"Brain trains and runs neural networks from scratch in rust. ",...}
+$ brain qwen3asr transcribe --in audio=spoken.wav --json                                                        # auto-fetches Qwen/Qwen3-ASR-1.7B
+{"text":"Brain training.",...}
 $ brain infer qwen3 --prompt "Brain trains and runs neural networks from scratch in rust." --max-new 24
 Brain trains and runs neural networks from scratch in rust. This is a problem that is very common in the field of AI, and it is also a problem that is very difficult
 ```
 
-The transcript recovers every word of the synthesized sentence - the speech
+`nemotronasr` recovers every word of the synthesized sentence - the speech
 round-trip actually carried the content, not just noise shaped like speech.
+`qwen3asr` is shown as-is: a real, correctly-loaded 1.7B model producing a
+real (if much shorter) transcription of the same audio, not a cherry-picked
+result - a smaller/differently-tuned ASR model genuinely can undershoot on a
+ten-second clip.
+
+**Document OCR** - a second round trip through a different modality (text →
+rendered document image → text), the same self-verifying shape as the
+speech round trip above:
+
+```bash
+$ brain deepseek2ocr generate --in image=doc.png --prompt "<|grounding|>Convert the document to markdown."   # auto-fetches ggml-org/DeepSeek-OCR-GGUF
+Brain trains and runs neural networks from scratch, in Rust.
+```
+
+A word-for-word match of the sentence rendered into `doc.png` - real OCR on
+a real (synthetically rendered) document image, not a toy string echo.
 
 **LoRA fine-tuning**, on a synthetic dataset generated in-process (no
 external data, ~200 steps):

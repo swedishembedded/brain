@@ -1,4 +1,5 @@
 synthesized: Brain trains and runs neural networks from scratch, in Rust.
-transcribed: Brain trains and runs neural networks from scratch in rust.
+transcribed (nemotronasr): Brain trains and runs neural networks from scratch in rust.
+transcribed (qwen3asr):    Brain training.
 ---
 Brain trains and runs neural networks from scratch in rust. This is a problem that is very common in the field of AI, and it is also a problem that is very difficult
