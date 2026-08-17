@@ -141,6 +141,17 @@ help:
 	@echo "  make release/publish         push the tag + create the GitHub release"
 	@echo "  make deb                     build a self-contained Debian package"
 
+# The DEV profile on purpose, and NOT `cargo check`. The four fast e2e bats
+# suites `test/e2e` aggregates - api-conformance, shutdown, examples, ready -
+# each name this target as their prerequisite and drive `$(BRAIN_BIN)`, which
+# defaults to ./target/debug/brain; `deb/debug` packages that same file. Those
+# need a LINKED binary, which `cargo check` never produces, and each suite
+# SKIPS itself when the binary is absent rather than failing - so swapping in
+# `cargo check`, or pointing this at the release profile, would leave the whole
+# e2e lane reporting green while running nothing. The dev tree is the price of
+# that (tens of GB on the shared build volume, alongside release's own); it
+# buys a link step fast enough to keep the e2e lane a fast lane, which is why
+# `release` below stays the separate, slower target everything else runs.
 build:
 	cargo build
 
