@@ -925,6 +925,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-gemma4"
+version = "1.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-testutil",
+]
+
+[[package]]
 name = "brain-genieredux"
 version = "1.0.0"
 dependencies = [

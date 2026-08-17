@@ -171,6 +171,18 @@ pub const ARCHS: &[Arch] = &[
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M")),
+    // The LTX-2.5 text encoder: Gemma4Unified's text tower (12B, 26 GB bf16 -
+    // real-weight import out of scope until a machine that can hold it; see
+    // `crates/gemma4`'s own doc). `transformers.models.gemma4_unified` is
+    // itself dated 2026 in its own license header (a very recent addition, no
+    // local llama.cpp checkout in this repo to range-check against), so this
+    // is a brain-defined id per the naming rule's "no entry there yet" branch,
+    // not a lowercased `LLM_ARCH_*` spelling - re-verify against a real
+    // llama.cpp checkout before this assumption is load-bearing anywhere.
+    // `hf` names the real gated checkpoint's class; no `default_ref`/
+    // `weights_env` yet - this milestone never fetches or imports the real
+    // checkpoint.
+    arch!("gemma4", "Gemma-4 unified text tower (LTX-2.5's text encoder)", Text, Brain, "brain-gemma4", hf: &["Gemma4UnifiedForConditionalGeneration"]),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")]),

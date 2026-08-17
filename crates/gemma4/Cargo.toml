@@ -1,0 +1,18 @@
+[package]
+name = "brain-gemma4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gemma-4 (unified text tower) - the LTX-2.5 text encoder. This milestone: tiny-config layer-by-layer parity (5:1 sliding/full attention alternation, dual RoPE bases, attention_k_eq_v global layers, the 49-hidden-state aggregate-embed projection) against transformers.models.gemma4_unified; the real 12B/26GB checkpoint is out of scope, built on brain-gpu-core / brain-kernels / brain-checkpoint."
+
+[lib]
+name = "gemma4"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

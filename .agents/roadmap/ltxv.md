@@ -162,10 +162,32 @@ this port:
       encoder (see the next two bullets) are the tracked gaps this milestone
       exists to isolate, not to close. GGUF importer entry for `ltxv` is NOT
       part of this milestone - deferred until real-weight DiT import lands.
-- [ ] **`crates/gemma4` text encoder** - own arch row, 5:1 sliding/full attention
-      alternation, dual RoPE bases, `attention_k_eq_v` global layers, the
-      49-hidden-state `aggregate_embed` projection. Tiny-config parity; real-weight
-      parity deferred (needs a machine that can hold 26 GB).
+- [x] **`crates/gemma4` text encoder** - own arch row (`Source::Brain`; the
+      `transformers.models.gemma4_unified` reference is itself dated 2026, too
+      recent to check against a llama.cpp `LLM_ARCH_*` spelling - flagged for
+      re-verification rather than guessed at). Config/rope/block/model ported
+      against the real, INSTALLED `transformers.models.gemma4_unified`
+      package (a genuine authoritative reference, not reverse-engineered from
+      config alone). Tiny (6-layer, the real 5:1 sliding:full ratio's minimal
+      instance) config parity at cosine 1.000000000 on every tap, including
+      BOTH structurally different attention paths separately (a GQA sliding-
+      window layer and an MQA `attention_k_eq_v` global layer with dual RoPE
+      bases) and the LTX-specific 49-hidden-state `aggregate_embed`
+      projection. Zero new kernels - reuses `gqa_scores_win`/`gqa_apply`/
+      `rope2d`/`rmsnorm_eps`/`gelu` exactly. Two real bugs found and fixed:
+      the real `scaling=1.0` (not the kernel's built-in `1/sqrt(head_dim)`)
+      fixed exactly (not approximately) by folding `sqrt(head_dim)` into
+      `q_norm`'s uploaded weight, exploiting that RMSNorm-then-RoPE is linear
+      in a uniform per-vector scalar; and a RoPE kernel mismatch on the
+      `full_attention`/`partial_rotary_factor` layers - `rope2d_partial` was
+      the natural guess but pairs channels at the rotated sub-block's own
+      half-point, while Gemma-4's real `rotate_half` always pairs at the
+      FULL head's half-point regardless of how few frequencies are nonzero;
+      caught at cosine 0.77 on that one tap while the unaffected sliding-layer
+      tap was already at 1.0, fixed by widening the table to `head_dim/2`
+      with zero-padded identity columns past `rope_angles` and reusing plain
+      `rope2d` for both layer types. Real-weight (12B/26 GB) parity remains
+      an explicit, tracked gap - needs a machine that can hold it.
 - [ ] **Audio stream** - audio VAE, BigVGAN+snakebeta vocoder + BWE, audio DiT
       stream, bidirectional A<->V cross-attention (reversed table order, cross-
       modality-sigma gate).
