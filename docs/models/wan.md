@@ -179,9 +179,9 @@ CPU, at fp32 throughout:
 |---|---|---|---|---|---|
 | 33 frames, 832x480, 25 steps | 237 s | 12 s | 1764 s | 102 s | 35.3 min | <!-- perf-number: a real end-to-end run of the shipped CLI on one named card, which is what this section exists to report -->
 
-The same request measured 57.5 min before the VAE convolution was lowered to a
+The same request measured 57.5 min before the VAE convolution was lowered to a  <!-- perf-number: the before figure for the same named run in the table above; the whole point of the sentence is the delta -->
 GEMM, the cross-attention scores were made coalescing and the host stages were
-parallelised - 1.63x, at unchanged output (cosine 1.000000000 against the
+parallelised - 1.63x, at unchanged output (cosine 1.000000000 against the  <!-- perf-number: the measured ratio of the two runs above, stated so the parity claim beside it is anchored to a specific change -->
 reference transformer at every block, 1.000000 against the reference VAE at
 every stage). The two smaller rows this table used to carry were measured
 before those changes and have not been re-taken.
@@ -200,7 +200,7 @@ Three things that table is saying:
   is not implemented.
 - **The VAE decode is pure 3D convolution at every layer**, lowered to
   `im2col` + a tiled GEMM rather than run as a direct convolution. That is worth
-  8.6x on this phase and is why the decode is no longer a large minority of a
+  8.6x on this phase and is why the decode is no longer a large minority of a  <!-- perf-number: measured phase speedup from the im2col lowering, cited as the reason the decode stopped dominating a short clip -->
   short clip; a handful of low-channel convolutions still take the direct
   kernel, which is faster for them.
 - **Cost in the transformer is superlinear in size.** 81 frames at 480p is
