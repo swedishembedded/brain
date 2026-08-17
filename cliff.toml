@@ -6,6 +6,12 @@
 # -E 's/^([a-z]+)(\(.*\))?:.*/\1/' | sort | uniq -c`); commits that don't match
 # any of these (a bare "crate: did a thing" subject, no type keyword) land in
 # the catch-all "Other" group rather than being silently dropped.
+#
+# The body template replaces em dashes with a plain hyphen: this repo's
+# no-em-dash pre-commit hook is diff-scoped, so a freshly generated
+# CHANGELOG.md would fail on every historical commit subject that happens to
+# contain one (~1 in 5 of them) even though none of that prose is newly
+# authored here.
 
 [changelog]
 header = """
@@ -25,7 +31,7 @@ body = """
     ### {{ group | striptags | trim | upper_first }}
     {% for commit in commits %}
         - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
-            {{ commit.message | upper_first }} \
+            {{ commit.message | replace(from="\u2014", to="-") | upper_first }} \
             ([{{ commit.id | truncate(length=8, end="") }}](https://github.com/swedishembedded/brain/commit/{{ commit.id }}))
     {% endfor %}
 {% endfor %}\n

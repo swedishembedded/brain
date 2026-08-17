@@ -28,7 +28,7 @@ BRAIN_BIN ?= ./target/debug/brain
 # sub-make re-reads the Makefile from disk. Cargo.toml's [workspace.package]
 # version is the actual build-time source of truth (--version, D-Bus, the
 # .deb); this mirrors it for the release machinery only.
-BRAIN_VERSION := 0.1.1
+BRAIN_VERSION := 1.0.0
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
@@ -201,15 +201,24 @@ _release/finalize:
 changelog:
 	@command -v git-cliff >/dev/null 2>&1 || \
 		{ echo "error: git-cliff not found - install with 'cargo install git-cliff'"; exit 1; }
+	@# --prepend requires the target to already exist (git-cliff has no
+	@# create-if-missing mode); a fresh repo's first release starts it empty.
+	touch CHANGELOG.md
 	git-cliff --config cliff.toml --tag "v$(BRAIN_VERSION)" --unreleased --prepend CHANGELOG.md
 
 # Render just the tag's own section, no running header - this is the GitHub
-# release body, not the cumulative changelog.
+# release body, not the cumulative changelog. Sliced out of CHANGELOG.md
+# itself (not re-derived with `git-cliff --latest`), because CHANGELOG.md may
+# carry hand-curated prose above the auto-generated commit list (1.0.0's
+# subsystem intro) that a fresh git-cliff run has no way to know about.
 release/notes:
-	@command -v git-cliff >/dev/null 2>&1 || \
-		{ echo "error: git-cliff not found - install with 'cargo install git-cliff'"; exit 1; }
+	@[ -f CHANGELOG.md ] || { echo "error: no CHANGELOG.md - run 'make changelog' first"; exit 1; }
 	mkdir -p target
-	git-cliff --config cliff.toml --latest --strip header > target/release-notes-v$(BRAIN_VERSION).md
+	awk -v ver="$(BRAIN_VERSION)" '\
+		/^## \[/ { if (in_section) exit; if (index($$0, "## [" ver "]") == 1) { in_section = 1; next }; next } \
+		in_section { print }' CHANGELOG.md > target/release-notes-v$(BRAIN_VERSION).md
+	@[ -s target/release-notes-v$(BRAIN_VERSION).md ] || \
+		{ echo "error: v$(BRAIN_VERSION) section not found in CHANGELOG.md"; exit 1; }
 	@echo "wrote target/release-notes-v$(BRAIN_VERSION).md"
 
 # Create the GitHub release for the tag just cut, attaching the release .deb.
