@@ -41,50 +41,51 @@ impl Fidelity {
     /// Length mismatch is itself a failure: a run that stopped early produced
     /// different behaviour, and scoring only the common prefix would hide it.
     pub fn greedy(reference: &str, cand: &[Vec<u32>], refr: &[Vec<u32>], threshold: f64) -> Fidelity {
-        let mut compared = 0usize;
-        let mut agree = 0usize;
-        let mut detail = None;
+        verdict(GREEDY_GATE, reference, cand, refr, threshold)
+    }
 
-        if cand.len() != refr.len() {
-            detail = Some(format!("sequence count differs: {} vs reference {}", cand.len(), refr.len()));
-        }
-        for (i, (c, r)) in cand.iter().zip(refr.iter()).enumerate() {
-            if c.len() != r.len() && detail.is_none() {
-                detail = Some(format!("sequence {i} length {} vs reference {}", c.len(), r.len()));
-            }
-            let n = c.len().max(r.len());
-            for p in 0..n {
-                compared += 1;
-                match (c.get(p), r.get(p)) {
-                    (Some(a), Some(b)) if a == b => agree += 1,
-                    _ => {
-                        if detail.is_none() {
-                            detail = Some(format!(
-                                "first divergence at sequence {i} position {p}: {:?} vs reference {:?}",
-                                c.get(p),
-                                r.get(p)
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        let token_match = if compared == 0 { 1.0 } else { agree as f64 / compared as f64 };
-        // A run that compared nothing has not been verified; treat an empty
-        // comparison as a failure rather than a silent pass.
-        let passed = compared > 0 && token_match >= threshold && cand.len() == refr.len();
+    /// Compare two output-**byte** streams position by position.
+    ///
+    /// The byte-shaped sibling of [`Fidelity::greedy`], for a target whose
+    /// output is not token ids: the text a served endpoint actually streamed
+    /// back, an encoded image, an embedding blob. It is deliberately the same
+    /// comparison with the same discipline - a differing stream count or
+    /// length is a failure rather than a scored common prefix, and comparing
+    /// **zero** positions fails instead of passing vacuously - because a
+    /// second comparator with weaker semantics is exactly how a correctness
+    /// gate starts lying.
+    pub fn exact_bytes(reference: &str, cand: &[Vec<u8>], refr: &[Vec<u8>], threshold: f64) -> Fidelity {
+        verdict(BYTE_GATE, reference, cand, refr, threshold)
+    }
+
+    /// The verdict when the probe could not produce output to compare at all -
+    /// a probe request failed, or the target refused it. `compared: 0`, which
+    /// [`Fidelity::failure_reason`] already words as "nothing to verify"
+    /// rather than as a numerically-vacuous inequality.
+    ///
+    /// This exists so a failing probe can never be mistaken for a passing one:
+    /// capturing an error as if it were output would let two identically
+    /// broken runs "agree" and score 1.0.
+    pub fn probe_failed(gate: &str, reference: &str, detail: String) -> Fidelity {
         Fidelity {
-            gate: "greedy_token_match".into(),
+            gate: gate.into(),
             reference: reference.into(),
-            token_match,
-            threshold,
-            compared,
-            passed,
-            detail,
+            // Same convention as a zero-position comparison in `verdict`: 1.0
+            // so it can never be read as a low-but-real score, with `passed`
+            // false and `failure_reason` naming the real cause.
+            token_match: 1.0,
+            threshold: EXACT,
+            compared: 0,
+            passed: false,
+            detail: Some(detail),
         }
     }
 
     /// The artifact's `correctness` block.
+    ///
+    /// `greedy_token_match` is the schema's fixed name for "fraction of
+    /// compared positions that agreed"; which positions those are is named by
+    /// `gate` ([`GREEDY_GATE`] = token ids, [`BYTE_GATE`] = output bytes).
     pub fn to_json(&self) -> Value {
         json!({
             "gate": self.gate,
@@ -132,6 +133,66 @@ impl Fidelity {
 /// The default agreement required: greedy decoding is deterministic, so anything
 /// short of exact is a behavioural change.
 pub const EXACT: f64 = 1.0;
+
+/// [`Fidelity::greedy`]'s gate name: positions are token ids.
+pub const GREEDY_GATE: &str = "greedy_token_match";
+/// [`Fidelity::exact_bytes`]'s gate name: positions are output bytes.
+pub const BYTE_GATE: &str = "output_byte_match";
+
+/// The ONE comparison both public constructors are: position-by-position over
+/// `max(len)` of each pair, a length or count mismatch recorded as its own
+/// failure, and zero compared positions treated as failure rather than as a
+/// vacuous pass. Generic over the position type purely so the token and byte
+/// gates cannot drift apart.
+fn verdict<T: PartialEq + std::fmt::Debug>(
+    gate: &str,
+    reference: &str,
+    cand: &[Vec<T>],
+    refr: &[Vec<T>],
+    threshold: f64,
+) -> Fidelity {
+    let mut compared = 0usize;
+    let mut agree = 0usize;
+    let mut detail = None;
+
+    if cand.len() != refr.len() {
+        detail = Some(format!("sequence count differs: {} vs reference {}", cand.len(), refr.len()));
+    }
+    for (i, (c, r)) in cand.iter().zip(refr.iter()).enumerate() {
+        if c.len() != r.len() && detail.is_none() {
+            detail = Some(format!("sequence {i} length {} vs reference {}", c.len(), r.len()));
+        }
+        let n = c.len().max(r.len());
+        for p in 0..n {
+            compared += 1;
+            match (c.get(p), r.get(p)) {
+                (Some(a), Some(b)) if a == b => agree += 1,
+                _ => {
+                    if detail.is_none() {
+                        detail = Some(format!(
+                            "first divergence at sequence {i} position {p}: {:?} vs reference {:?}",
+                            c.get(p),
+                            r.get(p)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let token_match = if compared == 0 { 1.0 } else { agree as f64 / compared as f64 };
+    // A run that compared nothing has not been verified; treat an empty
+    // comparison as a failure rather than a silent pass.
+    let passed = compared > 0 && token_match >= threshold && cand.len() == refr.len();
+    Fidelity {
+        gate: gate.into(),
+        reference: reference.into(),
+        token_match,
+        threshold,
+        compared,
+        passed,
+        detail,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -205,6 +266,56 @@ mod tests {
         let reason = f.failure_reason();
         assert!(reason.contains("compared 0 positions"), "must name the real cause, not a numeric inequality: {reason}");
         assert!(!reason.contains("1.0000 < 1.0000"), "must not print a token_match==threshold inequality for zero comparisons: {reason}");
+    }
+
+    /// SPEC: the byte gate is the token gate's discipline applied to a
+    /// byte-shaped output - exact agreement, no scored prefixes.
+    #[test]
+    fn byte_streams_agree_only_when_identical() {
+        let a = vec![b"hello".to_vec(), b"world".to_vec()];
+        let f = Fidelity::exact_bytes("sequential", &a, &a, EXACT);
+        assert!(f.passed);
+        assert_eq!(f.compared, 10);
+        assert_eq!(f.gate, BYTE_GATE, "the gate must name what a position IS");
+
+        let b = vec![b"hellp".to_vec(), b"world".to_vec()];
+        let f = Fidelity::exact_bytes("sequential", &b, &a, EXACT);
+        assert!(!f.passed, "one differing byte is a different computation");
+        assert!(f.detail.unwrap().contains("position 4"));
+    }
+
+    /// REGRESSION-BY-CONSTRUCTION: the byte gate inherits every rule the token
+    /// gate exists to enforce. A truncated stream must not score as a matching
+    /// prefix, a missing stream must not be ignored, and comparing NOTHING
+    /// must never read as a pass - the whole reason this is one shared
+    /// implementation and not a second, laxer comparator.
+    #[test]
+    fn byte_gate_inherits_the_token_gates_discipline() {
+        let refr = vec![b"abcd".to_vec()];
+        let truncated = vec![b"ab".to_vec()];
+        assert!(!Fidelity::exact_bytes("seq", &truncated, &refr, EXACT).passed);
+
+        let missing: Vec<Vec<u8>> = Vec::new();
+        let f = Fidelity::exact_bytes("seq", &missing, &refr, EXACT);
+        assert!(!f.passed);
+        assert!(f.detail.unwrap().contains("sequence count"));
+
+        let f = Fidelity::exact_bytes("seq", &[], &[], EXACT);
+        assert!(!f.passed, "an empty comparison has verified nothing");
+        assert!(f.failure_reason().contains("compared 0 positions"));
+    }
+
+    /// A probe that could not run has verified nothing, and must say WHY.
+    /// Capturing the error as if it were output would let two identically
+    /// broken runs agree and score a perfect pass.
+    #[test]
+    fn a_failed_probe_is_a_failure_that_names_its_cause() {
+        let f = Fidelity::probe_failed(BYTE_GATE, "sequential", "probe request 1 failed: OOM".into());
+        assert!(!f.passed);
+        assert_eq!(f.compared, 0);
+        let reason = f.failure_reason();
+        assert!(reason.contains("compared 0 positions"), "{reason}");
+        assert!(reason.contains("OOM"), "the real cause must survive into the artifact: {reason}");
     }
 
     #[test]
