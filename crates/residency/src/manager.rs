@@ -1375,7 +1375,7 @@ mod tests {
     }
     impl crate::multi::MultiDeviceResidentModel for MultiFakeUneven {
         fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
-            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(1), 30 * GB)], 0)
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(1), 30 * GB)], 0)
         }
         fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
             self.live.fetch_add(1, Ordering::SeqCst);

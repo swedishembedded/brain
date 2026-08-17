@@ -224,7 +224,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "named twice")]
     fn duplicate_device_panics_rather_than_silently_dropping_or_doubling() {
-        let _ = MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(0), 2 * GB)], 0);
+        let _ = MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(0), 2 * GB)], 0);
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn pick_devices_respects_exclude() {
         let budgets = budgets_2gpu();
-        let cost = MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(1), 1 * GB)], 0);
+        let cost = MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(1), GB)], 0);
         let mut exclude = HashSet::new();
         exclude.insert(Device::Gpu(1));
         assert!(pick_devices(&cost, &budgets, &exclude).is_none(), "gpu1 excluded must block the whole placement");
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn empty_device_set_is_not_placeable() {
         let budgets = budgets_2gpu();
-        let cost = MultiDeviceCost::new(vec![], 1 * GB);
+        let cost = MultiDeviceCost::new(vec![], GB);
         assert!(pick_devices(&cost, &budgets, &crate::place::no_exclude()).is_none());
     }
 }

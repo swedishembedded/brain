@@ -1867,7 +1867,7 @@ mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0).set(Device::Cpu, 128 * GB, 0);
         let exec = Executor::start(vec![], budgets, Policy::default());
-        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live: live.clone() }));
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: GB, live: live.clone() }));
         let r = exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {});
         assert!(r.is_ok(), "must run via claim_multi, not land on the CPU lane's single-device activate: {r:?}");
         assert_eq!(live.load(Ordering::SeqCst), 1);
@@ -1879,7 +1879,7 @@ mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
         let exec = Executor::start(vec![], budgets, Policy::default());
-        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live: live.clone() }));
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: GB, live: live.clone() }));
         assert!(exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {}).is_ok());
         assert!(exec.run_blocking("int8thinker", "run", Invocation::new(), |_| {}).is_ok());
         assert_eq!(exec.stats().builds, 1, "second run must reuse the hot instance, not rebuild");
@@ -1893,7 +1893,7 @@ mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
         let exec = Executor::start(vec![], budgets, Policy::default());
-        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: 1 * GB, live }));
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: GB, live }));
         assert!(exec.run_blocking("totally-unknown", "run", Invocation::new(), |_| {}).is_err());
     }
 
@@ -1915,7 +1915,7 @@ mod tests {
     }
     impl MultiDeviceResidentModel for MultiBadActivate {
         fn estimate_multi(&self, _k: &InstanceKey) -> MultiDeviceCost {
-            MultiDeviceCost::new(vec![(Device::Gpu(0), 1 * GB), (Device::Gpu(1), 1 * GB)], 0)
+            MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(1), GB)], 0)
         }
         fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
             Err("checkpoint not found: /nope-multi.safetensors".to_string())
@@ -2032,8 +2032,8 @@ mod tests {
         let entered2 = Arc::new(AtomicU32::new(0));
         let release2 = Arc::new(AtomicBool::new(false));
         let exec = Executor::start(vec![], budgets, Policy::default());
-        exec.register_multi(Arc::new(MultiGated { name: "thinker".into(), per_gpu: 1 * GB, entered: entered.clone(), release: release.clone() }));
-        exec.register(Arc::new(Gated { name: "single".into(), vram: 1 * GB, entered: entered2.clone(), release: release2.clone() }));
+        exec.register_multi(Arc::new(MultiGated { name: "thinker".into(), per_gpu: GB, entered: entered.clone(), release: release.clone() }));
+        exec.register(Arc::new(Gated { name: "single".into(), vram: GB, entered: entered2.clone(), release: release2.clone() }));
 
         let (tx, rx) = channel();
         exec.submit(Job::new("thinker", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
