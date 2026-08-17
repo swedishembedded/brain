@@ -139,6 +139,8 @@ pub const ATTN_SCORES_BIDIR_BIAS: &str = include_str!("../wgsl/attn_scores_bidir
 pub const ATTN_SCORES_CAUSAL_BIAS: &str = include_str!("../wgsl/attn_scores_causal_bias.wgsl");
 /// `wgsl/attn_scores_cross.wgsl`
 pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
+/// `wgsl/attn_scores_cross_kt.wgsl`
+pub const ATTN_SCORES_CROSS_KT: &str = include_str!("../wgsl/attn_scores_cross_kt.wgsl");
 /// `wgsl/attn_scores_full.wgsl`
 pub const ATTN_SCORES_FULL: &str = include_str!("../wgsl/attn_scores_full.wgsl");
 /// `wgsl/attn_scores_masked.wgsl`
@@ -471,6 +473,8 @@ pub const HEAD_PACK_T: &str = include_str!("../wgsl/head_pack_t.wgsl");
 pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
+/// `wgsl/im2col3d_at.wgsl`
+pub const IM2COL3D_AT: &str = include_str!("../wgsl/im2col3d_at.wgsl");
 /// `wgsl/im2col_at.wgsl`
 pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
 /// `wgsl/kv_append.wgsl`
@@ -479,6 +483,8 @@ pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 pub const KV_EXPAND: &str = include_str!("../wgsl/kv_expand.wgsl");
 /// `wgsl/kv_expand_bwd.wgsl`
 pub const KV_EXPAND_BWD: &str = include_str!("../wgsl/kv_expand_bwd.wgsl");
+/// `wgsl/kv_k_headt.wgsl`
+pub const KV_K_HEADT: &str = include_str!("../wgsl/kv_k_headt.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale_dg.wgsl`
@@ -901,6 +907,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
     ("attn_scores_causal_bias", ATTN_SCORES_CAUSAL_BIAS),
     ("attn_scores_cross", ATTN_SCORES_CROSS),
+    ("attn_scores_cross_kt", ATTN_SCORES_CROSS_KT),
     ("attn_scores_full", ATTN_SCORES_FULL),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
@@ -1067,10 +1074,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("head_pack_t", HEAD_PACK_T),
     ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
+    ("im2col3d_at", IM2COL3D_AT),
     ("im2col_at", IM2COL_AT),
     ("kv_append", KV_APPEND),
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
+    ("kv_k_headt", KV_K_HEADT),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),

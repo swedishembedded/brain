@@ -1721,6 +1721,7 @@ dependencies = [
 name = "brain-wan"
 version = "1.0.0"
 dependencies = [
+ "brain-backend-cpu",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",

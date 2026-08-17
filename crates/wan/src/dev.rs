@@ -68,8 +68,11 @@ pub struct WanDitDev {
     tokens: u32,
     steps: Vec<Step>,
     x0: DeviceBuffer,
-    cos: DeviceBuffer,
-    sin: DeviceBuffer,
+    /// Held only to keep the RoPE tables alive for the recorded graph: they are
+    /// uploaded once in `build` and never touched again, so nothing reads these
+    /// after construction (same reason as `_blocks` / `_scr` below).
+    _cos: DeviceBuffer,
+    _sin: DeviceBuffer,
     ctx: DeviceBuffer,
     /// Index into `pool` holding the last block's output.
     final_idx: usize,
@@ -114,8 +117,17 @@ impl WanDitDev {
             (0..cfg.num_layers).map(|l| ModBufs::new(&gpu, src, &format!("blocks.{l}"), d.dim)).collect();
 
         let x0 = gpu.storage(td);
+        // The RoPE tables are a pure function of the (f, h, w) patch grid, and
+        // the grid is fixed for the life of this engine - one latent volume is
+        // exactly what `build` records a graph for. So they are built and
+        // uploaded ONCE here rather than recomputed and re-uploaded on every
+        // forward: at 14k tokens that is ~1.8 M sin/cos pairs and ~14 MB of
+        // host-to-device traffic per forward, times 2 forwards a step.
+        let r = tables(cfg, grid.0, grid.1, grid.2);
         let cos = gpu.storage((tokens as u64) * (d.head_dim as u64) / 2);
         let sin = gpu.storage((tokens as u64) * (d.head_dim as u64) / 2);
+        gpu.write_f32(&cos, &r.cos);
+        gpu.write_f32(&sin, &r.sin);
         let ctx = gpu.storage((d.text_len as u64) * (d.dim as u64));
         let scr = Scratch::new(&gpu, d, tokens);
 
@@ -148,8 +160,8 @@ impl WanDitDev {
             tokens,
             steps,
             x0,
-            cos,
-            sin,
+            _cos: cos,
+            _sin: sin,
             ctx,
             final_idx: cur,
             pool,
@@ -167,6 +179,12 @@ impl WanDitDev {
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// The recorded block-stack graph - one submit's worth of dispatches.
+    /// A profiler groups these by kernel kind; nothing else should need them.
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
     }
 
     /// Embed the text encoding and upload it. Call once per prompt: a sampler
@@ -197,11 +215,10 @@ impl WanDitDev {
         let (f, h, w) = (self.grid.0, self.grid.1 * cfg.patch_size.1 as u32, self.grid.2 * cfg.patch_size.2 as u32);
         let tokens = model::embed_tokens(cfg, &self.host, latent, f, h, w);
         let (e, e0) = model::timestep_cond(cfg, &self.host, t);
-        let r = tables(cfg, self.grid.0, self.grid.1, self.grid.2);
 
+        // `cos`/`sin` are NOT written here: the grid cannot change after
+        // `build`, so they were uploaded once there.
         self.gpu.write_f32(&self.x0, &tokens);
-        self.gpu.write_f32(&self.cos, &r.cos);
-        self.gpu.write_f32(&self.sin, &r.sin);
         for m in &self.mods {
             m.upload(&self.gpu, &e0, self.d.dim as usize);
         }

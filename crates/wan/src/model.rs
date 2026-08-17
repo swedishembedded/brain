@@ -35,19 +35,31 @@ pub(crate) fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
 }
 
 /// `out[r,o] = Σ_i x[r,i]·w[o,i] (+ b[o])`; `w` is `[out,in]` row-major.
+///
+/// Row-parallel through `backend_cpu::par` - the workspace's only rayon seam, so
+/// this runs on the CPU scheduler's pool under its thread policy rather than one
+/// nobody owns. The split is over OUTPUT ROWS and each row's dot products are
+/// left exactly as they were, so every output element accumulates in the same
+/// order on any thread count: this is bit-identical to the serial form, not
+/// merely close, which is what lets a parity-gated path use it unconditionally.
+///
+/// It matters because the two calls bracketing every device forward -
+/// `embed_tokens` and the head inside `postprocess` - are ~2.8 GFLOP each at
+/// 1.3B/14k-token shapes, which is minutes a generation when only one of the
+/// machine's cores is doing it while the GPU idles.
 pub fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {
     let mut out = vec![0f32; rows * out_dim];
-    for r in 0..rows {
+    backend_cpu::par::rows_mut(&mut out, out_dim, |r, orow| {
         let xr = &x[r * in_dim..r * in_dim + in_dim];
-        for o in 0..out_dim {
+        for (o, slot) in orow.iter_mut().enumerate() {
             let wr = &w[o * in_dim..o * in_dim + in_dim];
             let mut acc = b.map(|b| b[o]).unwrap_or(0.0);
             for (xi, wi) in xr.iter().zip(wr) {
                 acc += xi * wi;
             }
-            out[r * out_dim + o] = acc;
+            *slot = acc;
         }
-    }
+    });
     out
 }
 

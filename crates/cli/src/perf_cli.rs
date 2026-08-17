@@ -63,6 +63,15 @@ OPTIONS
                                                    Concurrent same-size requests share
                                                    one batched denoise loop (cap:
                                                    BRAIN_FLUX2_MAX_BATCH, default 4).
+                          wan[:<frames>x<W>x<H>x<steps>]
+                                                   Wan2.1 text-to-video (t2v-1.3B)
+                                                   behind the residency executor;
+                                                   weights from BRAIN_WAN_* env.
+                                                   Default 9x256x256x4, a smoke size:
+                                                   upstream's 81x832x480x50 is about
+                                                   an hour a request. Unit:
+                                                   denoise_step; requests run one at a
+                                                   time (see the `wan` model page).
   --workload <name>     interactive | chat | rag | rag_long | agent |
                         decode_heavy | prefill_heavy | shared_prefix   (default chat)
   --concurrency <N>     fixed level for latency/serve (default 8)
@@ -124,6 +133,12 @@ targets (--target):
   flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
                                      weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
                                      prec = fp32|int8; batches concurrent same-key requests)
+  wan[:<frames>x<W>x<H>x<steps>]     Wan2.1 text-to-video (t2v-1.3B) via the residency executor
+                                     (unit: denoise_step; weights from BRAIN_WAN_* env;
+                                     default 9x256x256x4, a smoke size -- upstream's
+                                     81x832x480x50 is about an hour a request. Requests at
+                                     one key share the resident transformer but denoise in
+                                     turn; each also pays a fixed umT5-XXL CPU text encode)
   gpt:<weights>                      dense char-level GPT via the residency executor (unit: token)
   glm:<weights>                      GLM-5.2-shaped decoder (MLA + sigmoid MoE) via the residency
                                      executor (unit: token)
@@ -606,6 +621,12 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("flux2:") {
         return build_flux2(rest);
     }
+    if spec == "wan" {
+        return build_wan("");
+    }
+    if let Some(rest) = spec.strip_prefix("wan:") {
+        return build_wan(rest);
+    }
     if let Some(rest) = spec.strip_prefix("gpt:") {
         return build_gpt(rest);
     }
@@ -660,6 +681,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
+         'wan[:<frames>x<W>x<H>x<steps>]', \
          'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
          'sam2:<weights-dir>[:tiny|large]', 'clip:<checkpoint-root>', \
          'scrfd:<weights-dir>', 'arcface:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
@@ -1032,6 +1054,107 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         info,
         build,
         std::sync::Arc::new(|p: &capability::Progress| p.message == "denoising"),
+    )))
+}
+
+/// `wan[:<frames>x<W>x<H>x<steps>]` - Wan2.1 text-to-video (t2v-1.3B, weights from
+/// the `BRAIN_WAN_*` env like the rest of the wan stack) behind the residency
+/// EXECUTOR (scheduler + budgets + device lanes), running
+/// [`crate::resident_wan::WanResident`].
+///
+/// Streaming semantics: `wan::pipeline::generate` reports one `Progress` per
+/// denoise STEP (message `"denoise t=..."`), plus text-encode / transformer-load
+/// / VAE-decode bookkeeping callbacks either side of the loop.
+/// `ExecutorTarget::new_streaming` timestamps only the denoise callbacks as
+/// artifacts, so `artifact_unit = "denoise_step"`: TTFA = queue + the umT5-XXL
+/// text encode + (first request only) the transformer load, each IAL gap = one
+/// step, and the VAE decode lands between the last artifact and Done.
+///
+/// A step is TWO transformer forwards at the default guidance, and requests at
+/// one key denoise in turn rather than batching (`WanInstance::run_batch` says
+/// why). The default size is therefore a smoke size: upstream's own defaults are
+/// about an hour a request on a Tesla P40, which is not a latency ladder.
+fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (frames, w, h, steps) = if rest.is_empty() {
+        (9u32, 256u32, 256u32, 4u32)
+    } else {
+        let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
+        if p.len() != 4 || p.contains(&0) {
+            return Err(format!("bad wan spec {rest:?}, expected <frames>x<W>x<H>x<steps> (e.g. 9x256x256x4)"));
+        }
+        (p[0], p[1], p[2], p[3])
+    };
+    // The same two shape rules the CLI enforces, checked before the run starts:
+    // the causal VAE gives the first frame a latent frame of its own, and the
+    // (8, 8) spatial stride plus the (2, 2) patch needs a multiple of 16.
+    if (frames - 1) % 4 != 0 {
+        return Err(format!("wan: frames must be 1 + 4k (got {frames})"));
+    }
+    if w % 16 != 0 || h % 16 != 0 {
+        return Err(format!("wan: width/height must be multiples of 16 (got {w}x{h})"));
+    }
+    // Fail before the run starts, naming what is missing - not at first activation.
+    let paths = wan::Paths::from_env()
+        .map_err(|e| format!("wan target needs BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER: {e}"))?;
+    for (var, p) in [
+        ("BRAIN_WAN_DIT", &paths.dit),
+        ("BRAIN_WAN_VAE", &paths.vae),
+        ("BRAIN_WAN_T5", &paths.t5),
+        ("BRAIN_WAN_TOKENIZER", &paths.tokenizer),
+    ] {
+        if !std::path::Path::new(p).exists() {
+            return Err(format!("wan: {var} not found: {p}"));
+        }
+    }
+    let resident = crate::resident_wan::WanResident::from_env().ok_or("wan: BRAIN_WAN_* env incomplete")?;
+    // Budget ONLY the schedulable devices - the same guard `build_flux2` carries.
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(vec![std::sync::Arc::new(resident)], budgets, residency::Policy::default());
+    let variant = "t2v-1.3B";
+    let cfg = wan::caps::config_from_name(variant)?;
+    let tokens = cfg
+        .token_count(frames as usize, w as usize, h as usize)
+        .ok_or_else(|| format!("wan: {frames} frames at {w}x{h} has no latent shape"))?;
+    let mut info = TargetInfo::new(&format!("wan-{variant}"), "denoise_step");
+    // The transformer alone - the component a denoise step runs. The umT5-XXL
+    // encoder (5.68 B) and the VAE sit in TTFA/e2e, not in the per-step rate.
+    info.params = Some(1_300_000_000);
+    info.quant = Some("fp32".to_string());
+    let info = info
+        .with("frames", frames.into())
+        .with("width", w.into())
+        .with("height", h.into())
+        .with("steps", steps.into())
+        .with("tokens", (tokens as u64).into())
+        .with("text_len", (cfg.text_len as u32).into())
+        .with("engine", "residency-executor".into());
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        // Prompt values do not change the cost: text conditioning is padded to
+        // the fixed text_len. The per-request seed keeps noise deterministic.
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("a lighthouse on a rocky coast at sunset"))
+            .set("frames", serde_json::json!(frames))
+            .set("width", serde_json::json!(w))
+            .set("height", serde_json::json!(h))
+            .set("steps", serde_json::json!(steps))
+            .set("seed", serde_json::json!(req.seed))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        wan::caps::MODEL,
+        "t2v",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.message.starts_with("denoise")),
     )))
 }
 

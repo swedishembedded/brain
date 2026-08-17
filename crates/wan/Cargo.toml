@@ -13,6 +13,10 @@ path = "src/lib.rs"
 # The serving surface: the manifest/action types `caps.rs` declares, and the
 # cancel token a multi-minute generation has to poll.
 brain-capability.workspace = true
+# The CPU scheduler, for `backend_cpu::par` only - the workspace's single rayon
+# seam. The host stages either side of a device forward (patch embed, head) are
+# GFLOP-scale at video token counts and must not run on one core.
+brain-backend-cpu.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true

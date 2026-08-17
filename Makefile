@@ -64,7 +64,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx check/paths hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e \
+        perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
         release/github release/publish test/e2e/deb
 
@@ -123,9 +123,11 @@ help:
 	@echo "  make perf/lfm                LFM2.5 8k-context concurrency benchmark (LFM_WEIGHTS/"
 	@echo "                               LFM_TOKENIZER select the model)"
 	@echo "  make perf/flux2              FLUX.2 Klein denoise-step benchmark (BRAIN_FLUX2_* env)"
+	@echo "  make perf/wan                Wan2.1 text-to-video denoise-step benchmark (BRAIN_WAN_* env)"
 	@echo "  make train/qwen/lora         LoRA-finetune a Qwen checkpoint (DATASET=<dir> ADAPTER=<ref>)"
 	@echo "  make flux2/generate          generate one image with FLUX.2 Klein (BRAIN_FLUX2_* env)"
 	@echo "  make flux2/edit              reference-image edit with FLUX.2 Klein (FLUX2_REF=...)"
+	@echo "  make wan/t2v                 generate one video clip with Wan2.1 (BRAIN_WAN_* env)"
 	@echo "  make s3dit/int8-e2e          real z-image (s3dit) int8 e2e generation (no-OOM regression)"
 	@echo "  make data/tts                synthetic TTS text->codes dataset (Talker SFT smokes)"
 	@echo "  make docs                    build the full docs bundle (pandoc + xelatex)"
@@ -925,6 +927,23 @@ perf/flux2: release
 		--concurrency 1 --requests $(FLUX2_REQUESTS) --warmup $(FLUX2_WARMUP) \
 		--input 1 --output $(word 3,$(subst x, ,$(FLUX2_SIZE))) --seed $(SEED)
 
+# Wan2.1 text-to-video denoise-step benchmark, standalone: the residency-executor
+# target (real scheduler + budgets + lanes) on t2v-1.3B; weights from the
+# BRAIN_WAN_* env (same as wan/t2v). WAN_SIZE is <frames>x<W>x<H>x<steps> and
+# defaults to a SMOKE size, not upstream's 81x832x480x50 (about an hour a
+# request on a Tesla P40); --output mirrors the step count so the workload's
+# requested artifacts match what a request emits. Every request also pays a
+# fixed umT5-XXL text encode on the CPU before its first denoise step, so keep
+# the request count small.
+WAN_SIZE ?= 9x256x256x4
+WAN_REQUESTS ?= 2
+WAN_WARMUP ?= 1
+perf/wan: release
+	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
+	$(BRAIN) perf run latency --target wan:$(WAN_SIZE) \
+		--concurrency 1 --requests $(WAN_REQUESTS) --warmup $(WAN_WARMUP) \
+		--input 1 --output $(word 4,$(subst x, ,$(WAN_SIZE))) --seed $(SEED)
+
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
 perf/compare: release
@@ -969,3 +988,14 @@ flux2/generate: release
 flux2/edit: release
 	@test -n "$(FLUX2_REF)" || (echo "set FLUX2_REF=<ref.ppm> PROMPT=..."; exit 2)
 	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --ref $(FLUX2_REF) --out out/flux2-edit.ppm $(FLUX2_FLAGS)
+
+# ---- Wan2.1 text to video (crates/wan; weights via BRAIN_WAN_* env) ----
+# WAN_FLAGS is deliberately NOT upstream's sampling defaults: 81 frames at
+# 832x480 over 50 steps is about an hour on a Tesla P40. These are the settings
+# a run can be checked with, and the ones the quickstart demo uses; drop
+# WAN_FLAGS entirely for the real thing.
+WAN_PROMPT ?= a golden retriever running along a sandy beach at sunset, waves in the background, cinematic
+WAN_FLAGS ?= --frames 9 --width 416 --height 240 --steps 20 --seed 7
+wan/t2v: release
+	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
+	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --output-path out/wan.mp4 $(WAN_FLAGS)

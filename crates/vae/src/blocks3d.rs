@@ -77,6 +77,9 @@ const K_CONCAT_SPLIT: usize = 11;
 const K_CHAN_PLACE: usize = 12;
 const K_SCALE_CHAN: usize = 13;
 const K_ADD_CHAN_BCAST: usize = 14;
+const K_IM2COL3D_AT: usize = 15;
+const K_MATMUL: usize = 16;
+const K_NLC_BIAS_NCHW: usize = 17;
 
 /// Frames of cross-chunk history every causal conv keeps (upstream `CACHE_T`).
 /// A `(3,1,1)`/`(3,3,3)` kernel with a one-sided pad of 2 needs exactly the
@@ -84,7 +87,7 @@ const K_ADD_CHAN_BCAST: usize = 14;
 pub const CACHE_T: u32 = 2;
 
 /// The 3D builder's kernel set, in slot order.
-pub const KERNELS: [(&str, &str); 15] = [
+pub const KERNELS: [(&str, &str); 18] = [
     ("conv3d", kernels::CONV3D),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -100,6 +103,11 @@ pub const KERNELS: [(&str, &str); 15] = [
     ("chan_place", kernels::CHAN_PLACE),
     ("scale_chan", kernels::SCALE_CHAN),
     ("add_chan_bcast", kernels::ADD_CHAN_BCAST),
+    // The GEMM lowering of `conv3d` - appended, so every index above is
+    // unchanged. See [`Builder3d::conv_step`] for when it is taken.
+    ("im2col3d_at", kernels::IM2COL3D_AT),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
 ];
 
 /// Slot index the first caller-supplied kernel gets when a set is built with
@@ -292,7 +300,37 @@ pub struct Builder3d<'a> {
     pool: HashMap<u64, Vec<DeviceBuffer>>,
     pooling: bool,
     uploaded: u64,
+    /// The single im2col scratch (`length, buffer`) shared by every lowered
+    /// conv, grown on demand - the 3D twin of the 2D builder's. Bounded by
+    /// [`col_budget_floats`]: a whole-volume 3D im2col operand is multiple GB
+    /// and unbindable, so the GEMM is chunked over output positions instead.
+    col: Option<(u64, DeviceBuffer)>,
 }
+
+/// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
+/// processes `floor(budget / CinKKK)` output positions per GEMM, trading scratch
+/// for chunk count. The 3D operand is `KT` times the 2D one for the same image,
+/// which is exactly why it is chunked rather than materialised whole. Override
+/// with `BRAIN_VAE_COL_MIB`, the same variable the 2D lowering reads - one
+/// decode uses both and a caller tuning device memory means both.
+fn col_budget_floats() -> u64 {
+    let mib: u64 = std::env::var("BRAIN_VAE_COL_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
+    mib * 1024 * 1024 / 4
+}
+
+/// Minimum output channels for the lowered conv3d.
+///
+/// `matmul_reg3` computes a 128-wide column tile, so a conv with few output
+/// channels pays for a full tile and wins nothing - the decoder's `conv_out`
+/// (Cout = 3) would be 42x wasted. The 2D builder swept this crossover on the
+/// same GEMM and the same card and landed between 16 and 32; this is the same
+/// kernel at a longer contraction (`Cin*KT*KH*KW` rather than `Cin*KH*KW`),
+/// which only moves the crossover down, so 32 carries over.
+const GEMM_CONV3D_MIN_COUT: u32 = 32;
+
+/// Minimum output positions for the lowered conv3d: below one 128-row GEMM tile
+/// the lowering is all overhead and no reuse.
+const GEMM_CONV3D_MIN_POS: u32 = 128;
 
 impl<'a> Builder3d<'a> {
     /// New builder over `gpu` (built with a kernel set whose first
@@ -314,6 +352,7 @@ impl<'a> Builder3d<'a> {
             // reuse off so that hypothesis can be killed in one run.
             pooling: !taps_on && std::env::var("BRAIN_VAE3D_NOPOOL").is_err(),
             uploaded: 0,
+            col: None,
         }
     }
 
@@ -401,6 +440,92 @@ impl<'a> Builder3d<'a> {
         T3 { buf, c, t, h, w }
     }
 
+    /// The shared im2col scratch, grown on demand and never shrunk - one buffer
+    /// for every lowered conv in the graph, because they run in sequence.
+    fn col_buf(&mut self, need: u64) -> DeviceBuffer {
+        if let Some((have, b)) = &self.col {
+            if *have >= need {
+                return b.clone();
+            }
+        }
+        let b = self.gpu.storage(need);
+        self.col = Some((need, b.clone()));
+        b
+    }
+
+    /// Record ONE convolution writing `y`, picking the lowering. Every conv in
+    /// this module funnels through here so the choice is made in one place.
+    ///
+    /// * **direct** - `conv3d`, one thread per output with four nested serial
+    ///   reductions and no operand reuse. Measured on a P40 at a flat ~137
+    ///   GFLOP/s (1.2% of fp32 peak) across every Wan-VAE decode shape, and it
+    ///   was 98% of the decode's device time.
+    /// * **lowered** - `im2col3d_at` + `matmul_reg3` + `nlc_bias_nchw`, i.e.
+    ///   `y[To·Ho·Wo, Cout] = col · Wᵀ` at the GEMM's ~35-41% of peak. A rate
+    ///   that does not move with shape is structural, so this is the
+    ///   algorithmic change that ceiling calls for, not a tuning knob.
+    ///
+    /// Grouped convs stay direct: the lowering's single GEMM contracts over all
+    /// of `Cin`, which is only the right answer at `groups == 1`. Nothing in the
+    /// Wan-VAE uses groups here (depthwise has its own kernel), so this is a
+    /// guard rather than a live path.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_step(&mut self, wgt: &DeviceBuffer, bias: &DeviceBuffer, cout: u32, spec: Conv3d, x: &T3, y: &T3) {
+        let (to, ho, wo) = (y.t, y.h, y.w);
+        let pos_n = to * ho * wo;
+        let cinkkk = x.c * spec.kt * spec.kh * spec.kw;
+        if cout < GEMM_CONV3D_MIN_COUT || pos_n < GEMM_CONV3D_MIN_POS {
+            self.steps.push(self.gpu.step(
+                K_CONV3D,
+                &[&x.buf, wgt, bias, &y.buf],
+                &[
+                    1, x.c, x.t, x.h, x.w, cout, spec.kt, spec.kh, spec.kw, spec.st, spec.sh, spec.sw, spec.pt,
+                    spec.ph, spec.pw, 1, to, ho, wo,
+                ],
+                y.n(),
+            ));
+            return;
+        }
+        // Positions per GEMM: a multiple of the 128-row tile, inside the scratch
+        // budget, at least one tile.
+        let budget = col_budget_floats();
+        let chunk = (((budget / cinkkk as u64) / 128) * 128).clamp(128, pos_n as u64) as u32;
+        let col = self.col_buf(chunk as u64 * cinkkk as u64);
+        // The GEMM's output is position-major `[pos, Cout]`; `nlc_bias_nchw`
+        // adds the bias and transposes it into the `[Cout, To, Ho, Wo]` the
+        // direct kernel would have written. Same element count, so the pool
+        // recycles it like any other activation.
+        let nlc = self.act3(cout, to, ho, wo);
+        let mut pos = 0u32;
+        while pos < pos_n {
+            let cnt = chunk.min(pos_n - pos);
+            self.steps.push(self.gpu.step(
+                K_IM2COL3D_AT,
+                &[&x.buf, &col],
+                &[
+                    x.c, x.t, x.h, x.w, spec.kt, spec.kh, spec.kw, spec.st, spec.sh, spec.sw, spec.pt, spec.ph,
+                    spec.pw, to, ho, wo, cinkkk, pos, cnt,
+                ],
+                cnt * cinkkk,
+            ));
+            self.steps.push(self.gpu.step_sliced(
+                K_MATMUL,
+                &[&col, wgt, &nlc.buf],
+                &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
+                &[cnt, cinkkk, cout],
+                cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+            ));
+            pos += cnt;
+        }
+        self.steps.push(self.gpu.step(
+            K_NLC_BIAS_NCHW,
+            &[&nlc.buf, bias, &y.buf],
+            &[pos_n * cout, cout, pos_n],
+            cout.div_ceil(64) * pos_n.div_ceil(64) * 64,
+        ));
+        self.free(nlc);
+    }
+
     /// Return an activation buffer for reuse. MUST be called only after its last
     /// read step has been pushed.
     pub fn free(&mut self, x: T3) {
@@ -460,15 +585,7 @@ impl<'a> Builder3d<'a> {
         let bias = self.dev(&format!("{prefix}.bias"));
         let (to, ho, wo) = out;
         let y = self.act3(cout, to, ho, wo);
-        self.steps.push(self.gpu.step(
-            K_CONV3D,
-            &[&x.buf, &wgt, &bias, &y.buf],
-            &[
-                1, x.c, x.t, x.h, x.w, cout, spec.kt, spec.kh, spec.kw, spec.st, spec.sh, spec.sw,
-                spec.pt, spec.ph, spec.pw, 1, to, ho, wo,
-            ],
-            y.n(),
-        ));
+        self.conv_step(&wgt, &bias, cout, spec, x, &y);
         y
     }
 
@@ -484,15 +601,7 @@ impl<'a> Builder3d<'a> {
         let (to, ho, wo) = spec.out_dims(x.t, x.h, x.w);
         assert!(to > 0 && ho > 0 && wo > 0, "conv3d: empty output for {spec:?} on {x:?}");
         let y = self.act3(cout, to, ho, wo);
-        self.steps.push(self.gpu.step(
-            K_CONV3D,
-            &[&x.buf, wgt, bias, &y.buf],
-            &[
-                1, x.c, x.t, x.h, x.w, cout, spec.kt, spec.kh, spec.kw, spec.st, spec.sh, spec.sw,
-                spec.pt, spec.ph, spec.pw, 1, to, ho, wo,
-            ],
-            y.n(),
-        ));
+        self.conv_step(wgt, bias, cout, spec, x, &y);
         y
     }
 

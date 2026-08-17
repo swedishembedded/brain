@@ -60,10 +60,14 @@ pub(crate) const K_FLASH_SPLIT: usize = 15;
 pub(crate) const K_LAYERNORM_ROWS: usize = 16;
 pub(crate) const K_RMSNORM_ROWS: usize = 17;
 pub(crate) const K_SOFTMAX_ROWS: usize = 18;
+/// The coalesced cross-attention scores pair, appended so every index above is
+/// unchanged: a one-off K transpose plus the scores kernel that reads it.
+pub(crate) const K_KV_K_HEADT: usize = 19;
+pub(crate) const K_XSCORES_KT: usize = 20;
 
 /// Every kernel the DiT dispatches. Nothing here is new: the whole model is
 /// existing kernels at Wan's shapes.
-pub const KERNELS: [(&str, &str); 19] = [
+pub const KERNELS: [(&str, &str); 21] = [
     ("layernorm", kernels::LAYERNORM),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
@@ -90,6 +94,13 @@ pub const KERNELS: [(&str, &str); 19] = [
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("softmax_rows", kernels::SOFTMAX_ROWS),
+    // Cross-attention scores against a key-minor K. `attn_scores_cross` reads
+    // the natural `[text_len, dim]` K with the KEY index as the fastest thread
+    // index, so every lane of a warp lands on its own cache line; transposing K
+    // once a block (`kv_k_headt`, ~3 MB) makes the same 44 GB-a-block sweep
+    // coalesce. See `attn_scores_cross_kt.wgsl` for the measured numbers.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 /// Shape parameters of one Wan block.
@@ -315,6 +326,8 @@ pub(crate) struct Scratch {
     xqn: DeviceBuffer,
     xk: DeviceBuffer,
     xkn: DeviceBuffer,
+    /// `xkn` transposed to key-minor `[dim, text_len]`, rebuilt once a block.
+    xkt: DeviceBuffer,
     xv: DeviceBuffer,
     xscores: DeviceBuffer,
     xprobs: DeviceBuffer,
@@ -366,6 +379,7 @@ impl Scratch {
             xqn: a(td),
             xk: a(ted),
             xkn: a(ted),
+            xkt: a(ted),
             xv: a(ted),
             xscores: a(cross_slab),
             xprobs: a(cross_slab),
@@ -458,16 +472,21 @@ fn push_cross(
     out: &DeviceBuffer,
 ) {
     let (dim, nh, hd, te) = (d.dim, d.n_heads, d.head_dim, d.text_len);
+    // K transposed to key-minor ONCE for the whole block: it does not vary with
+    // the query chunk, and the scores sweep re-reads it `t` times. See
+    // `attn_scores_cross_kt.wgsl` - this is what turns that sweep's per-lane
+    // memory transactions into coalesced ones.
+    s.push(gpu.step(K_KV_K_HEADT, &[k, &scr.xkt], &[te, dim, dim, 0], dim * te));
     let mut q0 = 0u32;
     while q0 < t {
         let qn = scr.cross_chunk.min(t - q0);
         let qoff = (q0 as u64) * (dim as u64);
         let qlen = (qn as u64) * (dim as u64);
         s.push(gpu.step_sliced(
-            K_XSCORES,
-            &[q, k, &scr.xscores],
+            K_XSCORES_KT,
+            &[q, &scr.xkt, &scr.xscores],
             &[(qoff, qlen), (0, 0), (0, 0)],
-            &[1, nh, qn, te, hd, dim, dim, 0, 0],
+            &[1, nh, qn, te, hd, dim, 0],
             nh * qn * te,
         ));
         match sel.softmax_rows {

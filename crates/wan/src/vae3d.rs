@@ -766,6 +766,17 @@ impl WanVaeDecoder {
     pub fn frames(&self) -> u32 {
         self.frames
     }
+
+    /// The device this graph was built on, for a caller that submits it itself.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
+    /// The recorded decode graph - every chunk's dispatches, in order. A
+    /// profiler groups these by kernel kind; nothing else should need them.
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
 }
 
 #[cfg(test)]
