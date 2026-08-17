@@ -184,6 +184,11 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> Result<std::collections::H
     Ok(weights)
 }
 
+/// The `thinker.visual.*` tensors split by consumer: `(vision encoder weights,
+/// primary patch-merger weights)`, each keyed by brain parameter name.
+pub(crate) type VisionWeights =
+    (std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>);
+
 /// Stream + remap every `thinker.visual.*` tensor from `reader` into the
 /// `VisionEncoder` + primary `PatchMerger` weight maps (same remap
 /// `crate::import`/`tests/vision_parity.rs` use) — the loader half of
@@ -191,7 +196,7 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> Result<std::collections::H
 /// weight maps for ONNX export without also running a GPU encode.
 /// DeepStack merger weights are skipped (see [`encode_image`]'s doc for why
 /// the plain single-merger path is what's actually served).
-pub(crate) fn vision_weights(reader: &WeightReader) -> Result<(std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>), String> {
+pub(crate) fn vision_weights(reader: &WeightReader) -> Result<VisionWeights, String> {
     use std::collections::HashMap;
     let mut encoder_w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut main_merger_w: HashMap<String, Vec<f32>> = HashMap::new();
@@ -429,6 +434,10 @@ pub fn strip_media_placeholder_text(prompt: &str) -> String {
         .replace("<|vision_start|><|video_pad|><|vision_end|>", "")
 }
 
+/// One medium's merged M-RoPE grid: `(temporal, height, width)` position
+/// extents, as `qwen3vl::mrope::get_rope_index_multi` consumes them.
+type Grid = (u32, u32, u32);
+
 /// Assemble a multimodal prompt: encode each attached medium (audio, then
 /// image, then video frames - any subset may be absent), then splice its
 /// real embeddings into `text_ids` (the whole rendered conversation, already
@@ -501,8 +510,8 @@ pub fn build_multimodal_prompt(
     let embed_row = |t: u32| embed_table[t as usize * d as usize..(t as usize + 1) * d as usize].to_vec();
     let (token_ids, x_host) = assemble_multimodal_tokens(text_ids, &blocks, splice_at, &embed_row, d);
 
-    let placeholder_grids: Vec<(u32, Vec<(u32, u32, u32)>)> = blocks.iter().map(|b| (b.placeholder_token, vec![b.grid])).collect();
-    let placeholders: Vec<(u32, &[(u32, u32, u32)])> = placeholder_grids.iter().map(|(id, g)| (*id, g.as_slice())).collect();
+    let placeholder_grids: Vec<(u32, Vec<Grid>)> = blocks.iter().map(|b| (b.placeholder_token, vec![b.grid])).collect();
+    let placeholders: Vec<(u32, &[Grid])> = placeholder_grids.iter().map(|(id, g)| (*id, g.as_slice())).collect();
     let positions = get_rope_index_multi(&token_ids, &placeholders);
 
     Ok(MultimodalPrompt { token_ids, x_host, positions })

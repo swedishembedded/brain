@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! CodeFormer face restoration behind the generalized [`capability`] interface
-//! - what makes `brain caps restore` / `brain do restore restore_face …`, the
+//! CodeFormer face restoration behind the generalized [`capability`] interface -
+//! what makes `brain caps restore` / `brain do restore restore_face …`, the
 //! D-Bus `Run` method and `brain perf`'s `CapabilityTarget` work with no
 //! restoration-specific plumbing in the CLI or the transports.
 //!

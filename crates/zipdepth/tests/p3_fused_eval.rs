@@ -71,10 +71,14 @@ fn pipelines_without_fused() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// A `ParamStore`'s inputs for one `Conv`: the `(name, element count)` specs
+/// plus the initial values keyed by those same names.
+type ConvParams = (Vec<(String, usize)>, HashMap<String, Vec<f32>>);
+
 /// Deterministic params for one `Conv` named `c`, with running stats that make
 /// BN-eval a real transform (non-zero mean, non-unit var), so a fused/unfused
 /// mismatch in the affine collapse cannot hide behind identity stats.
-fn params_for(spec: &ConvSpec, cin: u32, seed: u64) -> (Vec<(String, usize)>, HashMap<String, Vec<f32>>) {
+fn params_for(spec: &ConvSpec, cin: u32, seed: u64) -> ConvParams {
     let cin_g = cin / spec.groups;
     let wlen = (spec.cout * cin_g * spec.k * spec.k) as usize;
     let c = spec.cout as usize;

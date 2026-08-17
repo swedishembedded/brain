@@ -1635,9 +1635,8 @@ impl Qwen {
     }
 
     /// Write the per-position CE gradient weights (`[b·t]`) for the next
-    /// `backward`. Panics if [`Self::enable_weighted_loss`] was never called
-    /// - the same "opt in before use" contract as the M-RoPE/VLM splice
-    /// setters above.
+    /// `backward`. Panics if [`Self::enable_weighted_loss`] was never called - the
+    /// same "opt in before use" contract as the M-RoPE/VLM splice setters above.
     pub fn write_weights(&self, weights: &[f32]) {
         assert!(self.weighted.get(), "Qwen::write_weights: call enable_weighted_loss() first");
         assert_eq!(weights.len(), (self.b * self.t) as usize, "Qwen::write_weights: expected {} weights, got {}", self.b * self.t, weights.len());

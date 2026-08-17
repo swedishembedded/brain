@@ -12,7 +12,7 @@
 //! 1. **Candidates**: an anchor is a candidate for a GT only if its pixel center
 //!    lies inside that GT box (`point_in_box`).
 //! 2. **Alignment metric**: for every (GT, candidate anchor) pair,
-//!        `t = s^alpha * u^beta`
+//!    `t = s^alpha * u^beta`
 //!    where `s` is the predicted class score (sigmoid) for the GT's class and
 //!    `u = max(CIoU, 0)` between the anchor's decoded pred box and the GT box.
 //!    Defaults `alpha = 0.5`, `beta = 6.0`.
@@ -24,7 +24,7 @@
 //! 5. **Soft score**: per Ultralytics, the foreground BCE target is a normalised
 //!    alignment. For each GT, `t` over its positive anchors is rescaled so its
 //!    max equals that GT's max CIoU:
-//!        `norm_t = t / max_t(GT) * max_u(GT)`.
+//!    `norm_t = t / max_t(GT) * max_u(GT)`.
 //!    The anchor's `target_score` is the `norm_t` of the GT it ended up assigned
 //!    to (placed at the GT's class channel; all other class channels target 0).
 //!

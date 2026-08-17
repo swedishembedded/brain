@@ -3,8 +3,8 @@
 
 //! Qwen3-VL / Qwen3-Omni ViT vision tower + main `PatchMerger` as an
 //! OpenVINO-compilable ONNX graph (**single-merger path only** — see the
-//! DeepStack note below). Op-for-op with `qwen3vl::encoder::VisionEncoder::encode`
-//! + `PatchMerger::merge` (main merger, pre-shuffle LayerNorm), same split as
+//! DeepStack note below). Op-for-op with `qwen3vl::encoder::VisionEncoder::encode` +
+//! `PatchMerger::merge` (main merger, pre-shuffle LayerNorm), same split as
 //! [`crate::qwen_asr_topology`]: patch packing (data-dependent, host-side) and
 //! the learned pos-embed's bilinear resample stay off-graph; the patch-embed
 //! matmul onward is in-graph.

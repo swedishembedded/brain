@@ -6,8 +6,8 @@
 //! allocation bounded to one [`crate::UPLOAD_CHUNK_WORDS`] chunk no matter
 //! how large the tensor is.
 //!
-//! Any code path that puts model weights on a device should go through here
-//! - [`crate::ParamStore`] included - because the two things such a path has
+//! Any code path that puts model weights on a device should go through here -
+//! [`crate::ParamStore`] included - because the two things such a path has
 //! to get right are easy to get wrong independently, and getting either
 //! wrong is invisible until it OOMs a card mid-load:
 //!

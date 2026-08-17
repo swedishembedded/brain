@@ -1123,8 +1123,8 @@ fn main() { let v = w[base + i]; }
     /// The TDD gate this phase's brief specifically asked for: verify the
     /// magic-multiply decode against an independent reference for ALL 65536
     /// possible f16 bit patterns (f16's entire representable space is small
-    /// enough to check exhaustively, not just at a handful of sample points)
-    /// - normals, subnormals (including the smallest, `0x0001`), zero/negative
+    /// enough to check exhaustively, not just at a handful of sample points) -
+    /// normals, subnormals (including the smallest, `0x0001`), zero/negative
     /// zero, the largest normal, overflow/underflow boundaries, +-inf, and
     /// every NaN encoding. NaN pairs are accepted as equal iff BOTH sides are
     /// NaN (exact payload is not required to match - see [`f16_decode_expr`]'s

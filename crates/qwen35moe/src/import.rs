@@ -331,8 +331,8 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
 /// the layers actually kept).
 ///
 /// `cfg` must already carry the REAL checkpoint's non-layer-count shape
-/// fields (typically `config_from_gguf(&mg)` with `n_layers` overridden down)
-/// - this function does not re-derive them, only classifies and copies.
+/// fields (typically `config_from_gguf(&mg)` with `n_layers` overridden down) -
+/// this function does not re-derive them, only classifies and copies.
 /// Fails loudly on any coverage gap in `cfg.param_list()`, same contract as
 /// [`import_gguf`].
 pub fn import_gguf_truncated_to_map(mg: &checkpoint::gguf::MmapGguf, cfg: &Qwen35Config) -> Result<HashMap<String, Vec<f32>>, String> {
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(cfg.linear_conv_kernel_dim, 4);
         assert_eq!(cfg.vocab, 248320);
         assert!(!cfg.tie_embeddings);
-        assert_eq!((cfg.rotary_dim() as f32 / cfg.head_dim as f32 - 0.25).abs() < 1e-6, true);
+        assert!((cfg.rotary_dim() as f32 / cfg.head_dim as f32 - 0.25).abs() < 1e-6);
 
         let full_idx: Vec<usize> = cfg
             .layer_types()

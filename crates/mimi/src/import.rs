@@ -20,6 +20,7 @@
 //!   * the encoder only keeps the first `encoder_valid_num_quantizers` codebooks
 //!     (1 semantic + 15 acoustic); the rest of the 32-deep RVQ and the codebooks'
 //!     `initialized` flags are dropped (`encode` never reads past code 16);
+//!
 //! No tensor is transposed: brain `matmul` is `x @ Wᵀ` with `W:[out,in]`, exactly
 //! `nn.Linear.weight`, and conv weights keep PyTorch `[Cout,Cin/G,K]` /
 //! `[Cin,Cout/G,K]` layout that `conv1d`/`convtr1d` already expect.

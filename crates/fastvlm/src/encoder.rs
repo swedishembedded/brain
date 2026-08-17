@@ -748,11 +748,17 @@ pub fn repcpe(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32) -> ConvUnit {
 }
 
 /// One ordered layer of the FastViTHD forward.
+///
+/// Every variant is boxed. They differ by more than a kilobyte, and the
+/// encoder holds them in a `Vec` one entry per layer, so an unboxed enum would
+/// pad every stem conv out to the width of the fattest attention block. The
+/// extra pointer chase is one per layer per pass, against a layer's worth of
+/// GPU dispatches.
 enum Layer {
-    Conv(ConvUnit),        // stem convs, RepCPE, conv_exp
-    Rep(RepMixerBlock),    // stage 0–2 blocks
-    Attn(AttentionBlock),  // stage 3–4 blocks
-    Down(PatchEmbed),      // inter-stage downsample
+    Conv(Box<ConvUnit>),        // stem convs, RepCPE, conv_exp
+    Rep(Box<RepMixerBlock>),    // stage 0–2 blocks
+    Attn(Box<AttentionBlock>),  // stage 3–4 blocks
+    Down(Box<PatchEmbed>),      // inter-stage downsample
 }
 
 impl Layer {
@@ -844,13 +850,13 @@ impl Encoder {
         // Stem: dense 3→d0 /2, depthwise d0 /2, dense 1×1 d0.
         let stem0 = ConvUnit::new(ctx, "stem.0", shape, dims[0], 3, 2, 1, 1, bn_stem, true, true);
         shape = stem0.out_shape();
-        ls.push(Layer::Conv(stem0));
+        ls.push(Layer::Conv(Box::new(stem0)));
         let stem1 = ConvUnit::new(ctx, "stem.1", shape, dims[0], 3, 2, 1, dims[0], bn_stem, true, true);
         shape = stem1.out_shape();
-        ls.push(Layer::Conv(stem1));
+        ls.push(Layer::Conv(Box::new(stem1)));
         let stem2 = ConvUnit::new(ctx, "stem.2", shape, dims[0], 1, 1, 0, 1, bn_stem, true, true);
         shape = stem2.out_shape();
-        ls.push(Layer::Conv(stem2));
+        ls.push(Layer::Conv(Box::new(stem2)));
 
         for stage in 0..5 {
             let ch = dims[stage];
@@ -858,24 +864,24 @@ impl Encoder {
             if is_attn {
                 let cpe = repcpe(ctx, &format!("stage{stage}.cpe"), shape, ch);
                 shape = cpe.out_shape();
-                ls.push(Layer::Conv(cpe));
+                ls.push(Layer::Conv(Box::new(cpe)));
             }
             for b in 0..layers[stage] {
                 let p = format!("network.{stage}.{b}");
                 if is_attn {
                     let blk = AttentionBlock::new(ctx, &p, shape, ch, mlp_ratio);
                     shape = blk.out_shape();
-                    ls.push(Layer::Attn(blk));
+                    ls.push(Layer::Attn(Box::new(blk)));
                 } else {
                     let blk = RepMixerBlock::new(ctx, &p, shape, ch, mlp_ratio);
                     shape = blk.out_shape();
-                    ls.push(Layer::Rep(blk));
+                    ls.push(Layer::Rep(Box::new(blk)));
                 }
             }
             if stage < 4 {
                 let d = PatchEmbed::new(ctx, &format!("downsample.{stage}"), shape, dims[stage + 1]);
                 shape = d.out_shape();
-                ls.push(Layer::Down(d));
+                ls.push(Layer::Down(Box::new(d)));
             }
         }
         // conv_exp: grouped MobileOne last-dim → last-dim·cls_ratio.
@@ -885,7 +891,7 @@ impl Encoder {
             conv_exp = conv_exp.with_se(ctx, "conv_exp", se_reduction);
         }
         shape = conv_exp.out_shape();
-        ls.push(Layer::Conv(conv_exp));
+        ls.push(Layer::Conv(Box::new(conv_exp)));
 
         let tokens = shape.h * shape.w;
         Encoder {

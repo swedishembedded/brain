@@ -188,9 +188,9 @@ impl TilePlan {
 /// 1. Candidates are enumerated in `(i*j, i, j)` ascending order - the
 ///    reference's "sorted by tile count" with a lexicographic secondary key
 ///    supplied where the reference had none.
-/// 2. A strictly-closer ratio always wins. On an EXACT tie the later (larger,
-///    by rule 1) candidate wins **only if** `orig_w*orig_h > 0.5 * tile^2 * i*j`
-///    - the reference's own `area > 0.5 * image_size**2 * ratio[0] * ratio[1]`
+/// 2. A strictly-closer ratio always wins. On an EXACT tie the later (larger, by
+///    rule 1) candidate wins **only if** `orig_w*orig_h > 0.5 * tile^2 * i*j` -
+///    the reference's own `area > 0.5 * image_size**2 * ratio[0] * ratio[1]`
 ///    guard, i.e. "only spend more tiles if the image has enough pixels to fill
 ///    at least half of them". Otherwise the earlier, coarser grid stands.
 ///

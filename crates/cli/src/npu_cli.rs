@@ -682,9 +682,7 @@ fn kronos(args: &[String]) {
         if feat >= 6 {
             bars.push(v * (o + h + l + c) / 4.0);
         }
-        for _ in 6..feat {
-            bars.push(0.0);
-        }
+        bars.extend(std::iter::repeat_n(0.0, feat.saturating_sub(6)));
     }
     let (s1_ctx, s2_ctx) = model.tokenize(&bars, t_win);
     let dec = model.decoder();
@@ -946,11 +944,11 @@ fn check(args: &[String]) {
     structural_check(&onnx_path, &opts);
 }
 
-/// Structural ONNX validation (always available: decode + op histogram) plus
-/// - where an OpenVINO device is present - an attempted compile. Pure
-/// diagnostic printing, no process exit on failure (callers that export
-/// several graphs in one run, e.g. `brain npu omni`, want to see every
-/// graph's result, not abort at the first).
+/// Structural ONNX validation (always available: decode + op histogram) plus -
+/// where an OpenVINO device is present - an attempted compile. Pure diagnostic
+/// printing, no process exit on failure (callers that export several graphs in
+/// one run, e.g. `brain npu omni`, want to see every graph's result, not abort
+/// at the first).
 fn structural_check(onnx_path: &str, opts: &NpuOpts) {
     let bytes = match std::fs::read(onnx_path) {
         Ok(b) => b,

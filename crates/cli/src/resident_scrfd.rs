@@ -35,9 +35,9 @@ pub struct ScrfdResident {
 }
 
 impl ScrfdResident {
-    /// `None` when the directory is unset or does not hold the released graph
-    /// - registering a model whose every call would fail is worse than not
-    /// serving it.
+    /// `None` when the directory is unset or does not hold the released
+    /// graph - registering a model whose every call would fail is worse
+    /// than not serving it.
     pub fn from_env() -> Option<ScrfdResident> {
         Self::new(std::env::var("BRAIN_SCRFD_DIR").ok().filter(|p| !p.is_empty())?)
     }

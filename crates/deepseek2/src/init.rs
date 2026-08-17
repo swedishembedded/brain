@@ -7,8 +7,8 @@
 //!
 //! Three families, matching every other RMSNorm decoder in this tree:
 //!
-//! - **Norm gains** (`ln1.weight`, `ln2.weight`, `norm.weight`) start at `1.0`
-//!   - the FINAL per-channel multiplier this engine's shared `rmsnorm.wgsl`
+//! - **Norm gains** (`ln1.weight`, `ln2.weight`, `norm.weight`) start at `1.0` -
+//!   the FINAL per-channel multiplier this engine's shared `rmsnorm.wgsl`
 //!   applies, not HF's `1 + weight` storage convention. That is also what a
 //!   GGUF conversion bakes in, so an imported checkpoint and a fresh init mean
 //!   the same thing by the same rule.

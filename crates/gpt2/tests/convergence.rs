@@ -16,11 +16,11 @@
 //! tasks whose answer is known:
 //!
 //! * `cycle`   — memorize a fixed repeating sequence. Exercises embeddings,
-//!               positional encoding, softmax, cross-entropy and the optimizer
-//!               with no attention reasoning required. Floor ~= 0.
+//!   positional encoding, softmax, cross-entropy and the optimizer with no
+//!   attention reasoning required. Floor ~= 0.
 //! * `copy`    — `S=S`, loss masked to the answer. Exercises the loss-masking
-//!               path *and* a copy circuit through attention. If masking kept
-//!               the wrong positions this could not converge.
+//!   path *and* a copy circuit through attention. If masking kept the wrong
+//!   positions this could not converge.
 //! * `reverse` — `S=rev(S)`, masked. A position-dependent copy; harder.
 //!
 //! Scaling: `loss_improves_with_model_size` encodes a scaling-law expectation —

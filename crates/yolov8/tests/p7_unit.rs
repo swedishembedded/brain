@@ -292,11 +292,15 @@ fn empty_and_degenerate_targets_give_finite_loss_and_backward() {
 //    Here: normalized xywh <-> pixel xyxy across full-image / 1px / border /
 //    non-square edge cases.
 // ===========================================================================
+/// One normalized-box conversion case:
+/// `(case name, cx, cy, w, h, img_size, expected xyxy)`.
+type XywhnCase<'a> = (&'a str, f32, f32, f32, f32, f32, [f32; 4]);
+
 #[test]
 fn xywhn_pixel_xyxy_edge_cases_round_trip() {
     // (img_w, img_h via a square `img_size` arg — xywhn_to_xyxy uses one scale,
     // so non-square is exercised by an explicit pixel build/compare below.)
-    let cases: &[(&str, f32, f32, f32, f32, f32, [f32; 4])] = &[
+    let cases: &[XywhnCase<'_>] = &[
         // name, cx, cy, w, h, img_size, expected xyxy
         ("full-image", 0.5, 0.5, 1.0, 1.0, 128.0, [0.0, 0.0, 128.0, 128.0]),
         ("centered-half", 0.5, 0.5, 0.5, 0.5, 200.0, [50.0, 50.0, 150.0, 150.0]),

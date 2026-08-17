@@ -7,9 +7,9 @@
 //!
 //! - EDM conditioners (with sigma-offset-noise folded in, exactly as
 //!   `denoiser.py::compute_conditioners`):
-//!     s' = sqrt(s^2 + so^2); c_in = 1/sqrt(s'^2 + sd^2);
-//!     c_skip = sd^2/(s'^2 + sd^2); c_out = s'*sqrt(c_skip);
-//!     c_noise = ln(s')/4
+//!   s' = sqrt(s^2 + so^2); c_in = 1/sqrt(s'^2 + sd^2);
+//!   c_skip = sd^2/(s'^2 + sd^2); c_out = s'*sqrt(c_skip);
+//!   c_noise = ln(s')/4
 //! - Fourier noise embedding: f = 2*pi*c_noise*W (W = noise_emb.weight[1,C/2])
 //!   -> [cos f, sin f]  (C floats)
 //! - Action embedding: Embedding(num_actions, C/nsc) per context action,

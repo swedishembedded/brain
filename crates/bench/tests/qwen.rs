@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-decoder learnability guard: trains the Qwen architecture (GQA + QK-norm
-//! + RoPE + SwiGLU) from scratch on the `toolcall` exact-match benchmark through
-//! the architecture-agnostic `DecoderLm` seam, and asserts held-out tool-call
-//! exact-match clears the calibrated threshold — objective proof the engine both
-//! trains and infers the Qwen architecture correctly on concrete tasks.
-//! Skipped when `MOE_SKIP_GPU_TESTS` is set. ~1-2 min on the CPU backend.
+//! Qwen3-decoder learnability guard: trains the Qwen architecture (GQA +
+//! QK-norm + RoPE + SwiGLU) from scratch on the `toolcall` exact-match
+//! benchmark through the architecture-agnostic `DecoderLm` seam, and asserts
+//! held-out tool-call exact-match clears the calibrated threshold - objective
+//! proof the engine both trains and infers the Qwen architecture correctly on
+//! concrete tasks. Skipped when `MOE_SKIP_GPU_TESTS` is set. ~1-2 min on the
+//! CPU backend.
 
 use bench::toolcall::Toolcall;
 use bench::{Benchmark, QwenDecoder};

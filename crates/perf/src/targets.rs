@@ -389,6 +389,10 @@ impl PerfTarget for PagedLlmTarget {
 
 // ===================== residency executor seam =====================
 
+/// Predicate over a streaming `Progress` callback: `true` means that callback
+/// is one output artifact, `false` means it is bookkeeping and counts as none.
+pub type ArtifactFilter = Arc<dyn Fn(&Progress) -> bool + Send + Sync>;
+
 /// Drives a [`residency::Executor`] — the scheduler + budgets + per-device
 /// lanes that production serving (D-Bus) uses — so concurrency numbers reflect
 /// brain's real batching/placement, not a synchronous provider mutex.
@@ -412,7 +416,7 @@ pub struct ExecutorTarget {
     build: Box<dyn Fn(&PerfRequest) -> Invocation>,
     /// `Some` = streaming: a `Progress` this predicate accepts is timestamped
     /// as one `Artifact`. `None` = one-shot: the reply is the single artifact.
-    is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
+    is_artifact: Option<ArtifactFilter>,
     rx: std::sync::mpsc::Receiver<Emission>,
     tx: std::sync::mpsc::Sender<Emission>,
     inflight: std::collections::HashSet<ReqId>,
@@ -446,7 +450,7 @@ impl ExecutorTarget {
         action: &str,
         info: TargetInfo,
         build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-        is_artifact: Arc<dyn Fn(&Progress) -> bool + Send + Sync>,
+        is_artifact: ArtifactFilter,
     ) -> ExecutorTarget {
         ExecutorTarget::build(exec, job_model, action, info, build, Some(is_artifact))
     }
@@ -457,7 +461,7 @@ impl ExecutorTarget {
         action: &str,
         info: TargetInfo,
         build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-        is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
+        is_artifact: Option<ArtifactFilter>,
     ) -> ExecutorTarget {
         let (tx, rx) = std::sync::mpsc::channel();
         ExecutorTarget {
@@ -1376,13 +1380,13 @@ mod http_tests {
     /// How a fake chat endpoint decides what to answer.
     enum Answer {
         /// Deterministic in the request only: the honest baseline.
-        FromRequest,
+        Request,
         /// Answers differently when it is serving more than one request at
         /// once - a concurrency bug in the served path.
-        FromConcurrency,
+        Concurrency,
         /// Answers differently on every call, with no seed knob: genuinely
         /// stochastic, and so unverifiable by any two-run comparison.
-        FromCallCount,
+        CallCount,
     }
 
     struct Fake {
@@ -1414,9 +1418,9 @@ mod http_tests {
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         f.inflight.fetch_sub(1, Ordering::SeqCst);
         let text = match f.answer {
-            Answer::FromRequest => format!("r{}", body.bytes().map(|b| b as u64).sum::<u64>()),
-            Answer::FromConcurrency => format!("c{n}"),
-            Answer::FromCallCount => format!("n{calls}"),
+            Answer::Request => format!("r{}", body.bytes().map(|b| b as u64).sum::<u64>()),
+            Answer::Concurrency => format!("c{n}"),
+            Answer::CallCount => format!("n{calls}"),
         };
         axum::response::Response::builder()
             .header("content-type", "text/event-stream")
@@ -1442,7 +1446,7 @@ mod http_tests {
     /// from its sequential ones still wrote `valid: true`.
     #[test]
     fn http_target_concurrency_divergence_invalidates_the_artifact() {
-        let mut t = target(Answer::FromConcurrency);
+        let mut t = target(Answer::Concurrency);
         let f = t.fidelity().expect("a deterministic endpoint must produce a verdict");
         assert!(!f.passed, "concurrent answers differ from sequential ones: {f:?}");
         assert!(f.compared > 0, "a verdict that compared nothing verifies nothing: {f:?}");
@@ -1456,7 +1460,7 @@ mod http_tests {
     /// however it was scheduled must stay comparable.
     #[test]
     fn http_target_consistent_responses_pass_the_gate() {
-        let mut t = target(Answer::FromRequest);
+        let mut t = target(Answer::Request);
         let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt()).expect("run");
         assert!(art.valid, "identical responses must not be flagged: {:?}", art.invalid_reason);
         assert_eq!(art.to_json()["correctness"]["passed"], true);
@@ -1468,7 +1472,7 @@ mod http_tests {
     /// deterministic output to gate, and gets no fabricated verdict.
     #[test]
     fn http_target_reports_no_verdict_for_a_nondeterministic_endpoint() {
-        let mut t = target(Answer::FromCallCount);
+        let mut t = target(Answer::CallCount);
         assert!(t.fidelity().is_none(), "nondeterminism is not a correctness failure");
         let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt()).expect("run");
         assert!(art.valid);

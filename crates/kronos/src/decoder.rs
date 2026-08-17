@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The autoregressive decoder forward: `decode_s1` (tokens+calendar → s1 logits
-//! + context) and `decode_s2` (context + sampled s1 → s2 logits via the
+//! The autoregressive decoder forward: `decode_s1` (tokens+calendar → s1
+//! logits + context) and `decode_s2` (context + sampled s1 → s2 logits via the
 //! dependency layer). Reuses the shared causal `transformer_block`; the new
 //! pieces are the hierarchical embedding (s1/s2 fused, `×√d` scale), the summed
 //! calendar embeddings, and the non-causal scaled cross-attention.
@@ -14,8 +14,8 @@
 use crate::config::KronosConfig;
 use crate::nn::{self, Ops, ATTN_APPLY_FULL, ATTN_SCORES_QK, ATTN_SOFTMAX_FULL};
 use gpu_core::{f, DeviceBuffer, Gpu};
-use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 const CAL: [(&str, usize); 5] =
     [("minute", 60), ("hour", 24), ("weekday", 7), ("day", 32), ("month", 13)];
@@ -30,7 +30,7 @@ pub struct KronosDecoder {
     cal: Vec<Vec<f32>>, // one table per CAL entry, in CAL order
     // lazily-built, reused host weight set for the KV-cached rollout (reading all
     // ~24M weights off the device is expensive; do it once, not per sample).
-    host_w: OnceCell<crate::kvcache::HostW>,
+    host_w: OnceLock<crate::kvcache::HostW>,
 }
 
 impl KronosDecoder {
@@ -61,7 +61,7 @@ impl KronosDecoder {
             gpu,
             cfg,
             w,
-            host_w: OnceCell::new(),
+            host_w: OnceLock::new(),
         })
     }
 
@@ -261,11 +261,7 @@ impl KronosDecoder {
     /// samples of a forecast (and successive forecasts on this decoder) reuse it,
     /// so the ~24M-weight device→host read happens a single time.
     pub fn host_weights(&self) -> &crate::kvcache::HostW {
-        if self.host_w.get().is_none() {
-            let hw = self.build_host_weights();
-            let _ = self.host_w.set(hw);
-        }
-        self.host_w.get().expect("host_w initialized")
+        self.host_w.get_or_init(|| self.build_host_weights())
     }
 
     /// Read the decoder's weights + embedding tables to the host and assemble a

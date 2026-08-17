@@ -314,11 +314,13 @@ mod tests {
         a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
     }
 
+    /// The three MTP weight parts: `(decoder tensors by name, one codec
+    /// embedding table per residual codebook, one lm head per residual
+    /// codebook)`.
+    type MtpWeightParts = (HashMap<String, Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>);
+
     /// Build random MTP weight parts (decoder map + residual embeddings + heads).
-    fn synth_weights(
-        cfg: &MtpConfig,
-        seed: u64,
-    ) -> (HashMap<String, Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    fn synth_weights(cfg: &MtpConfig, seed: u64) -> MtpWeightParts {
         let mut rng = Rng::new(seed);
         let mut normal = |n: usize, s: f32| -> Vec<f32> {
             (0..n).map(|_| (rng.next_gaussian() as f32) * s).collect()

@@ -112,6 +112,10 @@ struct WeightedSample {
     reward: f32,
 }
 
+/// A weighted training block, one entry per token: `(token ids, loss mask,
+/// per-token reward weight)`.
+type WeightedTokens = (Vec<u32>, Vec<bool>, Vec<f32>);
+
 /// [`data::chat::encode_sample_split`], but tracking each sample's own
 /// token span so its reward can be broadcast across exactly those
 /// positions - `data::chat` itself has no notion of a per-sample reward
@@ -121,7 +125,7 @@ fn encode_weighted(
     samples: &[WeightedSample],
     tok: &QwenBpe,
     tmpl: &ChatTemplate,
-) -> Result<(Vec<u32>, Vec<bool>, Vec<f32>), String> {
+) -> Result<WeightedTokens, String> {
     let mut ids = Vec::new();
     let mut mask = Vec::new();
     let mut weights = Vec::new();

@@ -303,16 +303,21 @@ pub fn run(
 }
 
 /// One- or two-GPU trainer behind a common `grads`.
+///
+/// Both variants are boxed because each holds a full set of device buffers and
+/// the two differ several-fold in width. The value is built once per finetune
+/// run and matched once per step, so the indirection is invisible next to the
+/// GPU work a step does.
 enum TrainerKind {
-    One(crate::train::DeviceTrainer),
-    Two(crate::shard::ShardTrainer),
+    One(Box<crate::train::DeviceTrainer>),
+    Two(Box<crate::shard::ShardTrainer>),
 }
 impl TrainerKind {
     fn new(cfg: Cfg, two_gpu: bool) -> TrainerKind {
         if two_gpu {
-            TrainerKind::Two(crate::shard::ShardTrainer::new(cfg, cfg.n_layers / 2))
+            TrainerKind::Two(Box::new(crate::shard::ShardTrainer::new(cfg, cfg.n_layers / 2)))
         } else {
-            TrainerKind::One(crate::train::DeviceTrainer::new(cfg))
+            TrainerKind::One(Box::new(crate::train::DeviceTrainer::new(cfg)))
         }
     }
     fn grads(&self, w: &crate::modelgrad::ModelWeightsF32, b: &Batch) -> (f64, crate::modelgrad::ModelGradsF32) {

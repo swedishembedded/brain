@@ -15,6 +15,7 @@
 //!   * **Packed experts**: HF stores routed experts as 3D `experts.gate_up_proj`
 //!     `[E, 2*moe_ff, d]` (gate‖up fused) and `experts.down_proj` `[E, d, moe_ff]`;
 //!     brain uses per-expert `gate`/`up`/`down`.
+//!
 //! Phase-2 tensors (the DSA `indexer.*`) and any MTP (`layers.{n_layers}.*`) are
 //! dropped - the Phase-1 model does not carry them.
 

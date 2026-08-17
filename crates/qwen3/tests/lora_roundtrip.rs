@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A LoRA fine-tune must change what the model actually outputs after a save
-//! + reload cycle -- not just in the live process. Before this test, a LoRA
+//! A LoRA fine-tune must change what the model actually outputs after a save +
+//! reload cycle -- not just in the live process. Before this test, a LoRA
 //! checkpoint's adapters were written to disk but silently dropped on the next
-//! `load_inference`: `QwenConfig::to_json` never emitted `lora`, so
-//! `from_json` always rebuilt the param list without `*.lora_a`/`*.lora_b`,
-//! and `lora_fwd` never dispatched.
+//! `load_inference`: `QwenConfig::to_json` never emitted `lora`, so `from_json`
+//! always rebuilt the param list without `*.lora_a`/`*.lora_b`, and `lora_fwd`
+//! never dispatched.
 
 use std::collections::HashMap;
 

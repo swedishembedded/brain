@@ -285,7 +285,7 @@ impl<'a> TopoBase<'a> {
         beta: Vec<f32>,
         eps: f32,
     ) -> String {
-        assert!(c % groups == 0, "group_norm: C={c} not divisible by G={groups}");
+        assert!(c.is_multiple_of(groups), "group_norm: C={c} not divisible by G={groups}");
         // Per-channel affine, shaped [1,C,1,1] so it broadcasts over NCHW.
         self.f32(gamma_name, &[1, c as i64, 1, 1], gamma);
         self.f32(beta_name, &[1, c as i64, 1, 1], beta);
@@ -401,7 +401,7 @@ pub fn linear_quant(
     let wq = format!("{winit}.q");
     if !b.has(&wq) {
         let wt = transpose(&w.get(name)); // [inp, out]
-        let group = if inp % QUANT_GROUP == 0 { QUANT_GROUP } else { inp };
+        let group = if inp.is_multiple_of(QUANT_GROUP) { QUANT_GROUP } else { inp };
         let n_groups = inp / group;
         let mut scales = vec![0f32; n_groups * out];
         let mut q = vec![0i8; inp * out];
@@ -528,9 +528,9 @@ mod tests {
     }
 
     /// Structural: no `DequantizeLinear` (whole-channel-only, opset<=20 has no
-    /// sub-channel block) and the group-scale initializer's shape reflects
-    /// >1 group when `inp` is a clean multiple of the block size and larger
-    /// than it.
+    /// sub-channel block) and the group-scale initializer's shape reflects >1
+    /// group when `inp` is a clean multiple of the block size and larger than
+    /// it.
     #[test]
     fn group_quant_graph_shape() {
         let (inp, out) = (64usize, 8usize);

@@ -500,7 +500,7 @@ fn moe_bwd_ids() -> MoeIdsBwd {
 /// exercise the cross-chunk recurrence at all).
 pub fn gdn_chunk_size(t: u32) -> u32 {
     for c in [64, 32, 16, 8, 4, 2, 1] {
-        if t % c == 0 {
+        if t.is_multiple_of(c) {
             return c;
         }
     }
@@ -872,8 +872,12 @@ struct MoeLayerActs {
     sh_gate_scalar: DeviceBuffer,
 }
 
+/// Saved mixer activations for one layer's backward pass. `Gdn` is several
+/// times wider than `Gqa` and one of these is kept per layer for the whole
+/// step, so the wide variant is boxed rather than padding every `Gqa` layer
+/// out to match it.
 enum MixerActs {
-    Gdn(GdnLayerActs),
+    Gdn(Box<GdnLayerActs>),
     Gqa(GqaLayerActs),
 }
 
@@ -1517,8 +1521,8 @@ impl Qwen35 {
         &self.d_img_embeds
     }
 
-    /// Overwrite the M-RoPE `cos`/`sin` tables (`[b·t, rotary_dim/2]` row-major
-    /// - see the `cos`/`sin` fields' own doc, and
+    /// Overwrite the M-RoPE `cos`/`sin` tables (`[b·t, rotary_dim/2]` row-major -
+    /// see the `cos`/`sin` fields' own doc, and
     /// `qwen3vl::mrope::{get_rope_index, mrope_tables}` for how to build them
     /// from real 2-D image-grid positions) for the next `forward()`. RoPE here
     /// is unconditionally table-driven already (no `enable_mrope` gating
@@ -2225,7 +2229,7 @@ impl Qwen35 {
             let (attn_out, mixer_acts) = match ty {
                 LayerType::Linear => {
                     let (o, a) = self.layer_gdn_fwd(l, &xn1, n);
-                    (o, a.map(MixerActs::Gdn))
+                    (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
                 }
                 LayerType::Full => {
                     let (o, a) = self.layer_gqa_fwd(l, &xn1, n);

@@ -885,10 +885,10 @@ mod tests {
     /// at all) and `model::block::gemm_variant` (inference-shaped: `m <=
     /// DECODE_REGIME_MAX_ROWS` picks the GEMV kernel when the model registered
     /// one, else the tiled kernel at every M > 32 regardless of N). This crate
-    /// cannot depend on `brain-model`, so the two rules are reproduced inline
-    /// - the measured (m, n) pairs are `block::pick_gemm`'s own doc table
-    /// (P40, k=2048, n=2560): naive wins at m in {1,2,4}, the tile wins from
-    /// m=8. Before `KernelVariant::RegisterTiled` exists this does not even
+    /// cannot depend on `brain-model`, so the two rules are reproduced inline -
+    /// the measured (m, n) pairs are `block::pick_gemm`'s own doc table (P40,
+    /// k=2048, n=2560): naive wins at m in {1,2,4}, the tile wins from m=8.
+    /// Before `KernelVariant::RegisterTiled` exists this does not even
     /// compile - `candidates()` has no way to express the tiled choice, which
     /// is exactly the gap `qwen3::serve::Engine::gemm_tier`'s doc comment
     /// complains about.

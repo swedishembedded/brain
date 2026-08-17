@@ -94,6 +94,10 @@ struct Scratch {
     xn_final: DeviceBuffer,
 }
 
+/// A built incremental-decode tape: the recorded step list plus the
+/// `(buffer, uniform)` pairs whose position fields are rewritten each step.
+type DecodeTape = (Vec<Step>, Vec<(DeviceBuffer, PosUniform)>);
+
 /// Inference-only Talker, specialised for autoregressive generation from input
 /// embeddings.
 pub struct TalkerGen {
@@ -111,7 +115,7 @@ pub struct TalkerGen {
     dec_pos: std::cell::Cell<u32>,
     // Cached decode tape (built once, reused every token) + the position-dependent
     // uniform buffers to refresh per step — eliminates per-token tape rebuilding.
-    dec_cache: std::cell::RefCell<Option<(Vec<Step>, Vec<(DeviceBuffer, PosUniform)>)>>,
+    dec_cache: std::cell::RefCell<Option<DecodeTape>>,
     // CPU tables.
     pub text: TextProjection,
     codec_embedding: Vec<f32>, // talker codec table [vocab, d] (= tok.weight)

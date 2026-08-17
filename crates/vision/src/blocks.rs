@@ -43,6 +43,7 @@
 //!   * `Bottleneck`: convs `P.cv1`, `P.cv2`.
 //!   * `C2f`: `P.cv1` (in 1x1), `P.cv2` (out 1x1), bottlenecks `P.m.{i}`.
 //!   * `SPPF`: `P.cv1` (in 1x1), `P.cv2` (out 1x1).
+//!
 //! This matches Ultralytics' `cv1`/`cv2`/`m` naming for later string-mapping.
 
 use gpu_core::{f, DeviceBuffer};
@@ -269,6 +270,7 @@ pub struct ConvSpec {
     ///   * grouped/dilated -> `conv2d_gd` followed by `add_chan_inplace`
     ///     (`out[n,c,hw] += bias[c]`), because `conv_bias`'s uniform carries no
     ///     groups/dilation and would silently convolve as if dense.
+    ///
     /// The second path exists for ConvNeXt: [`CXBlock`]'s 7x7 depthwise conv is
     /// grouped AND biased. Every biased conv in ZipDepth is dense and keeps the
     /// fused path unchanged.

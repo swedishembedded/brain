@@ -7,11 +7,10 @@
 //! brain engine's portability constraints:
 //!   * [`wav`]   — canonical PCM WAV read/write (mono f32).
 //!   * [`conv`]  — 1D conv / transposed-conv `Step`-builders over the shared
-//!                 WGSL engine (+ CPU reference oracles), the audio analogue of
-//!                 `model::block`. Backs the codec, ECAPA speaker encoder and
-//!                 GAN vocoder.
+//!     WGSL engine (+ CPU reference oracles), the audio analogue of
+//!     `model::block`. Backs the codec, ECAPA speaker encoder and GAN vocoder.
 //!   * resampling — simple linear-interpolation rate conversion (24 kHz codec
-//!                 vs 16 kHz inputs).
+//!     vs 16 kHz inputs).
 //!
 //! STFT / mel-spectrogram features land in [`mel`] (built out for the speaker
 //! encoder in Phase 3).

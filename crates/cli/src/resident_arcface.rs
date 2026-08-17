@@ -48,9 +48,9 @@ pub struct ArcFaceResident {
 }
 
 impl ArcFaceResident {
-    /// `None` when the directory is unset or does not hold the released graph
-    /// - registering a model whose every call would fail is worse than not
-    /// serving it.
+    /// `None` when the directory is unset or does not hold the released
+    /// graph - registering a model whose every call would fail is worse
+    /// than not serving it.
     pub fn from_env() -> Option<ArcFaceResident> {
         Self::new(std::env::var("BRAIN_ARCFACE_DIR").ok().filter(|p| !p.is_empty())?)
     }

@@ -39,8 +39,8 @@
 //! future tiled+gated kernel is one change, not two, once compaction lands).
 //!
 //! **Backward** (this session's addition) is a hoist, not a from-scratch
-//! derivation: two complete, gradient-checked MoE backwards already existed
-//! - `crates/moe/src/train.rs`'s softmax-router training loop and
+//! derivation: two complete, gradient-checked MoE backwards already existed -
+//! `crates/moe/src/train.rs`'s softmax-router training loop and
 //! `crates/glm/src/model.rs`'s sigmoid `noaux_tc` router MLP arm - and
 //! comparing them line for line shows the expert half (SwiGLU backward,
 //! `scale_add_dexp`/`scale_add_dgate` combine) is IDENTICAL; only the router

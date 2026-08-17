@@ -16,15 +16,15 @@ use std::collections::HashMap;
 use lfm2::config::LfmConfig;
 use lfm2::model::Lfm;
 
-/// `Lfm::new`/`new_chunked` have no `_on(gpu, ...)` variant - every
-/// constructor builds its own real device via `Gpu::new` internally (see
+/// `Lfm::new`/`new_chunked` have no `_on(gpu, ...)` variant - every constructor
+/// builds its own real device via `Gpu::new` internally (see
 /// `crates/lfm2/src/model.rs`'s `new_impl_alloc_inner`), so this file's two
 /// tests cannot share one via `gpu_core::testgpu::dev` the way most GPU tests
 /// do. Each test already builds/drops sequentially WITHIN itself (this file's
 /// own module doc), but under `cargo test`'s default multi-threaded run nothing
-/// stopped the two `#[test]` functions running concurrently on separate
-/// threads and racing their own independent device builds against each other
-/// - several concurrent devices on one card are hostile to the driver
+/// stopped the two `#[test]` functions running concurrently on separate threads
+/// and racing their own independent device builds against each other - several
+/// concurrent devices on one card are hostile to the driver
 /// (`gpu_core::Gpu::share`'s own doc comment), the same hazard
 /// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` and
 /// `device_churn.rs`'s own copy of it exist to prevent. Same fix here.

@@ -194,9 +194,9 @@ pub fn arch_registry() -> Vec<Arch> {
     ]
 }
 
-/// Equal, moderate step budget for the matched-activation comparison archs (fair
-/// + fast on the CPU backend; both `qwen-cmp` and `glm-cmp` cap the benchmark's
-/// requested steps to this).
+/// Equal, moderate step budget for the matched-activation comparison archs
+/// (fair + fast on the CPU backend; both `qwen-cmp` and `glm-cmp` cap the
+/// benchmark's requested steps to this).
 const CMP_STEPS: u32 = 250;
 
 /// Look up an [`Arch`] by name.

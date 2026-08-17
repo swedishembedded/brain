@@ -13,6 +13,7 @@
 //!   - `noisy_scaled` `[1,ic,H,W]`   (c_in pre-multiplied on the host)
 //!   - `obs_rescaled` `[1,nsc*ic,H,W]` (obs / sigma_data)
 //!   - `cond`         `[1,cond_channels]`
+//!
 //! Output: `model_out` `[1,ic,H,W]`.
 //!
 //! Semantics mirror `diamond::model` 1:1:

@@ -718,6 +718,7 @@ impl StripPoolingAttention {
 ///     axis, and `softmax(z + b) == softmax(z)`.
 ///   * `transform.0.bias` is immediately followed by BN, which subtracts the mean —
 ///     the classic `bias=False`-before-BN redundancy, here left `True` upstream.
+///
 /// Both are in the checkpoint and must be loaded, and both are carried faithfully.
 /// `gcb_two_biases_are_provably_dead` pins the invariance (measured: the loss moves
 /// by EXACTLY 0.0f32 when either is shifted by +-0.5, and by 2 ULP at +-5.0, where

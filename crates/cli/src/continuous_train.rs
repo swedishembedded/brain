@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! One continuous-training hot-swap cycle: rl::continuous::run_cycle, then
-//! (only if it actually produced a new adapter) QwenResident::set_adapter
-//! + residency::Executor::evict, so the NEXT claim against `key` rebuilds
-//! with the new adapter folded in -- an in-flight request is never
-//! interrupted (`evict`'s own pinned-refusal contract).
+//! (only if it actually produced a new adapter) QwenResident::set_adapter +
+//! residency::Executor::evict, so the NEXT claim against `key` rebuilds with
+//! the new adapter folded in -- an in-flight request is never interrupted
+//! (`evict`'s own pinned-refusal contract).
 //!
 //! This is the glue self-improve roadmap P4/P5 flagged as the one gap left
 //! before a resident can actually be hot-swapped: `rl::continuous::

@@ -18,7 +18,11 @@
 //! 2. **Adjointness**, which is exact rather than tolerant. The forward is
 //!    *bilinear*: linear in `x` for fixed `w`, and linear in `w` for fixed `x`.
 //!    So for every `x, w, dy`
-//!        <A_w(x), dy> == <x, dx>      and      <B_x(w), dy> == <w, dw>
+//!
+//!    ```text
+//!    <A_w(x), dy> == <x, dx>      and      <B_x(w), dy> == <w, dw>
+//!    ```
+//!
 //!    to fp32 round-off. A dropped edge tap, a transposed group index or an
 //!    off-by-one window breaks this immediately, and unlike FD it needs no
 //!    step size. `dw` ACCUMULATES, so its buffer is zeroed via `submit`'s

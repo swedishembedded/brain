@@ -14,11 +14,11 @@
 //! non-alphanumeric char (not just a space).
 //!
 //! Special/added tokens (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, …) are
-//! matched as atomic units *before* BPE. A `TemplateProcessing` post-processor
-//! (LFM2.5 prepends `<|startoftext|>`) is captured as [`QwenBpe::template_prefix`]
-//! - callers that want HF-equivalent single-sequence encodings prepend it;
-//! `encode()` itself stays template-free. `vocab_size()` reports the model vocab
-//! used to size the embedding table.
+//! matched as atomic units *before* BPE. A `TemplateProcessing`
+//! post-processor (LFM2.5 prepends `<|startoftext|>`) is captured as
+//! [`QwenBpe::template_prefix`] - callers that want HF-equivalent single-sequence
+//! encodings prepend it; `encode()` itself stays template-free. `vocab_size()`
+//! reports the model vocab used to size the embedding table.
 
 use std::collections::HashMap;
 
@@ -50,8 +50,8 @@ impl QwenBpe {
 
     /// Build from a checkpoint DIRECTORY: `tokenizer.json` when present, else
     /// the split `vocab.json` + `merges.txt` (+ special-token source) layout
-    /// some Qwen2-family repos ship (FastVLM). Same byte-level BPE either way
-    /// - the split files are re-assembled into the unified shape and parsed by
+    /// some Qwen2-family repos ship (FastVLM). Same byte-level BPE either way -
+    /// the split files are re-assembled into the unified shape and parsed by
     /// the ONE existing parser, so the formats cannot drift apart.
     ///
     /// The special-token source is checked in order: `added_tokens.json`

@@ -8,6 +8,7 @@
 //!   2. at `index_topk < seq` the mask actually restricts attention (output
 //!      differs, stays finite);
 //!   3. IndexShare (`Full` then `Shared` layers) trains without breaking.
+//!
 //! Gated by `MOE_SKIP_GPU_TESTS`.
 
 use std::collections::HashMap;

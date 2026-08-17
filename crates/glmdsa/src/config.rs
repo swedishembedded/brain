@@ -14,6 +14,7 @@
 //!   * `q_b_proj`  → `q_b_nope` `[H*qk_nope, q_lora]` + `q_b_rope` `[H*qk_rope, q_lora]`
 //!   * `kv_b_proj` → `kv_b_nope` `[H*qk_nope, kv_lora]` + `kv_b_v` `[H*v_head, kv_lora]`
 //!   * `kv_a_proj_with_mqa` → `kv_a_c` `[kv_lora, d]` + `kv_a_rope` `[qk_rope, d]`
+//!
 //! The HF→brain importer row-permutes the fused matrices into these splits.
 
 use serde_json::Value;

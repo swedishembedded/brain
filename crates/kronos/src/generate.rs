@@ -45,6 +45,10 @@ pub struct KronosModel {
     decoder: KronosDecoder,
 }
 
+/// One series staged for a batched rollout: `(normalization, s1 context tokens,
+/// s2 context tokens, context+future stamps concatenated, context length)`.
+type PreppedSeries = (preprocess::Norm, Vec<u32>, Vec<u32>, Vec<u32>, usize);
+
 impl KronosModel {
     pub fn new(tokenizer: KronosTokenizer, decoder: KronosDecoder) -> KronosModel {
         KronosModel { tokenizer, decoder }
@@ -279,7 +283,7 @@ impl KronosModel {
     ) -> Vec<Vec<f32>> {
         let feat = self.feat();
         // 1. serial (device): normalize + BSQ-encode each series.
-        let prepped: Vec<(preprocess::Norm, Vec<u32>, Vec<u32>, Vec<u32>, usize)> = bars_list
+        let prepped: Vec<PreppedSeries> = bars_list
             .iter()
             .zip(ctx_stamps)
             .zip(fut_stamps)

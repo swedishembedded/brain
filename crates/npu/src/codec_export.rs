@@ -57,6 +57,10 @@ pub fn export_codec_front_fp32(weights_path: &str, out_path: &str, t: usize) -> 
     Ok(cfg)
 }
 
+/// One streaming-conv state buffer the host carries across chunks:
+/// `(name prefix, channels, width)`.
+pub type StreamBufSpec = (String, i64, i64);
+
 /// Export the **streaming-back** codec graph (`latent:[1,latent,chunk]` + per-conv
 /// `bufin.*` -> `waveform` + per-conv `bufout.*`). Returns the buffer specs
 /// `(prefix, channels, width)` the host needs to allocate + carry across chunks.
@@ -64,7 +68,7 @@ pub fn export_codec_back_stream_fp32(
     weights_path: &str,
     out_path: &str,
     chunk: usize,
-) -> std::io::Result<(CodecConfig, Vec<(String, i64, i64)>)> {
+) -> std::io::Result<(CodecConfig, Vec<StreamBufSpec>)> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
     let cfg = CodecConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen3tts_codec_back_stream");

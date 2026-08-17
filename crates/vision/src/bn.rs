@@ -15,6 +15,7 @@
 //!     runs as a separate dispatch there at all.
 //!   * this one can never fuse (it has no conv to fuse WITH), and has no
 //!     activation-tap site, so it is the strictly simpler subset.
+//!
 //! Factoring `Conv` onto this type would force the fused path to reach back in for
 //! `sb` and would gain nothing but indirection.
 //!

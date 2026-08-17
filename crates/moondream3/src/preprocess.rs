@@ -29,9 +29,10 @@ pub use imaging::tiling::moondream_select_tiling as select_tiling;
 /// `(tile_y, tile_x)`) into a single channel-first `[dim, out_h, out_w]` map,
 /// trimming `margin` patches on each interior edge. Returns `(flat, out_h, out_w)`.
 ///
-/// Mirrors `reconstruct_from_crops` with `patch_size=1`: `out = (grid-2·margin)·tile
-/// + 2·margin` per axis; a tile keeps its left/top margin only in the first
-/// column/row and its right/bottom margin only in the last.
+/// Mirrors `reconstruct_from_crops` with `patch_size=1`:
+/// `out = (grid-2·margin)·tile + 2·margin` per axis; a tile keeps its left/top
+/// margin only in the first column/row and its right/bottom margin only in the
+/// last.
 pub fn reconstruct_from_crops(locals: &[f32], h_tiles: u32, w_tiles: u32, grid: u32, dim: u32, margin: u32) -> (Vec<f32>, u32, u32) {
     let (g, m) = (grid as i64, margin as i64);
     let out_h = ((grid - 2 * margin) * h_tiles + 2 * margin) as usize;

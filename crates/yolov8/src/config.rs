@@ -37,9 +37,9 @@ use serde_json::Value;
 /// - `input`         — square input resolution in pixels (e.g. 640).
 /// - `nc`            — number of object classes.
 /// - `reg_max`       — DFL distribution bins per box side (box coord = expectation
-///                     over `reg_max` logits per side).
+///   over `reg_max` logits per side).
 /// - `depth_mult`    — CSP block-depth multiplier (informational; the explicit
-///                     `backbone_depth` is authoritative).
+///   `backbone_depth` is authoritative).
 /// - `width_mult`    — channel-width multiplier (informational).
 /// - `channels`      — legacy per-stage stem widths (informational / JSON).
 /// - `strides`       — the three pyramid strides (P3/P4/P5), e.g. `[8, 16, 32]`.

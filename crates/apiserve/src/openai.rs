@@ -492,18 +492,19 @@ fn content_text(c: Option<&Value>) -> String {
 /// text-only client, sees no change at all); a NORMALIZED typed-part ARRAY
 /// when `content` has any non-`"text"` part (`image_url`/`input_audio`/...).
 ///
-/// **Real bug this closes**: this used to be [`content_text`] unconditionally
-/// - ANY multimodal content part (`image_url`, `input_audio`, ...) was
-/// silently dropped before the chat-templated `messages` JSON was ever built,
-/// so `omni::caps::render_chat_prompt`'s real Jinja template (which DOES
-/// detect typed parts and place `<|vision_start|><|image_pad|><|vision_end|>`
-/// / `<|audio_start|><|audio_pad|><|audio_end|>` at each part's own position
-/// - see that function's doc) never actually saw a typed array in
-/// production, only ever flattened text; verified by tracing this exact
-/// code path (not a standalone probe) against a real captured sven request.
-/// Preserving the array here is what lets `crate::mm::build_multimodal_prompt`
-/// expand each medium's real embeddings IN PLACE at its own placeholder,
-/// instead of a whole-block splice heuristic.
+/// **Real bug this closes**: this used to be [`content_text`]
+/// unconditionally - ANY multimodal content part (`image_url`,
+/// `input_audio`, ...) was silently dropped before the chat-templated
+/// `messages` JSON was ever built, so `omni::caps::render_chat_prompt`'s
+/// real Jinja template (which DOES detect typed parts and place
+/// `<|vision_start|><|image_pad|><|vision_end|>` /
+/// `<|audio_start|><|audio_pad|><|audio_end|>` at each part's own position -
+/// see that function's doc) never actually saw a typed array in production,
+/// only ever flattened text; verified by tracing this exact code path (not a
+/// standalone probe) against a real captured sven request. Preserving the
+/// array here is what lets `crate::mm::build_multimodal_prompt` expand each
+/// medium's real embeddings IN PLACE at its own placeholder, instead of a
+/// whole-block splice heuristic.
 ///
 /// `input_audio` parts also get TWO additional keys, `"audio"` and
 /// `"audio_url"` (additive - the original `"type"`/`"input_audio"` keys stay

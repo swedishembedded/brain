@@ -6,6 +6,7 @@
 //! Two independent things must agree, and the whole design leans on it:
 //!   * `ZipConfig::param_list` — device-free, written from the reference's source.
 //!   * `ZipDepth::param_list` — emitted by the BUILT graph, block by block.
+//!
 //! They are written from the same spec but by different routes, so a disagreement
 //! means one of them is wrong. `p1_param_layout.rs` separately checks the config
 //! against a real `.pth` (env-gated); this makes the graph inherit that guarantee.

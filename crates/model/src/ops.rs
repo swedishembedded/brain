@@ -10,10 +10,11 @@
 //! at a fixed slot), hand-maintains a `LinW::{F32, I8}` enum per linear, and
 //! forks `if let LinW::I8(wq, sw) = w { self.mm8(...) } else { self.mm_rows_at(...) }`
 //! at every call site (`crates/flux1/src/model.rs`, `crates/flux2/src/model.rs`).
-//! `Ops`/`Weight` collapse that into one call: `ops.matmul(&mut s, &weight, &act, &y, yoff)`
-//! - the weight's own dtype carries which kernel family it needs, and the
-//! kernel NAME is resolved once, at construction, via `Gpu::kernel_index`,
-//! rather than re-derived (or silently drifting) at every call site.
+//! `Ops`/`Weight` collapse that into one call:
+//! `ops.matmul(&mut s, &weight, &act, &y, yoff)` - the weight's own dtype
+//! carries which kernel family it needs, and the kernel NAME is resolved
+//! once, at construction, via `Gpu::kernel_index`, rather than re-derived (or
+//! silently drifting) at every call site.
 //!
 //! **Scope of B3/B4/B5.** B3 built the façade and proved it reproduces
 //! today's `dispatch.rs`/`int8.rs`/`int4.rs` numeric behaviour exactly

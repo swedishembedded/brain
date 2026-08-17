@@ -231,6 +231,7 @@ fn gn_backward_matches_hand_reference() {
 ///     seed + dgb_ref, a second backward on seed + 2·dgb_ref;
 ///   - `dx` starts at a 7.5 sentinel; each backward must leave exactly the
 ///     §7.3 reference (an accumulating mutant reports 7.5 + dx or 2·dx).
+///
 /// The second pass also pins gn_dsum's overwrite semantics (spec §4.5 `=`):
 /// an accumulating gn_dsum doubles S1/S2 and corrupts pass-2 dx.
 #[test]

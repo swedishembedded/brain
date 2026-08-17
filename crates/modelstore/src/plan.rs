@@ -45,6 +45,14 @@ pub struct Plan {
     pub steps: Vec<Step>,
 }
 
+/// Why a [`Plan`] could not be built.
+///
+/// Three of the four variants carry a [`ModelRef`], which makes the enum wide
+/// enough that returning it unboxed would bloat every `Result<Plan, _>` on the
+/// success path too. Planning is a once-per-model, network-bound operation, so
+/// the allocation an error path pays is free relative to the HTTP call that
+/// produced it: every fallible entry point here returns `Box<PlanError>`, the
+/// same way [`recipe::Recipe::artifacts`](crate::recipe) does.
 #[derive(Debug)]
 pub enum PlanError {
     /// `reference`'s vendor is reserved (`brain/`, `local/`, `test/`) and it
@@ -76,12 +84,12 @@ pub(crate) const REVISION: &str = "main";
 /// Decide how to materialize `reference`: on disk (serve), an existing
 /// upstream quantized artifact (download), or the base checkpoint plus a
 /// local quantize step (recurse + append).
-pub fn plan(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, PlanError> {
+pub fn plan(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
     if store.local(reference).is_some() {
         return Ok(Plan { reference: reference.clone(), steps: vec![Step::Serve] });
     }
     if reference.is_reserved() {
-        return Err(PlanError::NotFetchable(reference.clone()));
+        return Err(Box::new(PlanError::NotFetchable(reference.clone())));
     }
     match reference.quant() {
         Some(q) => plan_quant(reference, q, store, hub),
@@ -89,7 +97,7 @@ pub fn plan(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, 
     }
 }
 
-fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) -> Result<Plan, PlanError> {
+fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
     for (vendor, repo, file) in quant_candidates(reference, quant) {
         match hub.list_files(&vendor, &repo, REVISION) {
             Ok(files) if files.iter().any(|f| f == &file) => {
@@ -164,19 +172,19 @@ fn quant_candidates(reference: &ModelRef, quant: Quant) -> Vec<(String, String, 
     out
 }
 
-fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, PlanError> {
+fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
     if let Some(local) = store.local(reference) {
         return Ok(Plan { reference: reference.clone(), steps: local_serve_steps(&local) });
     }
     let vendor = reference.vendor();
     let repo = reference.repo();
-    let listing = hub.list_files(vendor, repo, REVISION).map_err(PlanError::Hub)?;
+    let listing = hub.list_files(vendor, repo, REVISION).map_err(|e| Box::new(PlanError::Hub(e)))?;
 
     let recipe = crate::recipe::recipes()
         .into_iter()
         .find(|r| r.matches_listing(&listing))
         .expect("the last recipe in the registry is a catch-all and always matches");
-    let artifacts = recipe.artifacts(reference, &listing, hub).map_err(|e| *e)?;
+    let artifacts = recipe.artifacts(reference, &listing, hub)?;
 
     let mut steps: Vec<Step> = artifacts.into_iter().map(|a| download_step(vendor, repo, &a.file, &a.dest_name)).collect();
     steps.push(Step::Convert { vendor: vendor.to_string(), repo: repo.to_string(), recipe: recipe.id() });
@@ -318,7 +326,7 @@ mod tests {
         let hub = FakeHub::new();
         let reserved = ModelRef::new("brain", "mock", None);
         let err = plan(&reserved, &st, &hub).unwrap_err();
-        assert!(matches!(err, PlanError::NotFetchable(_)));
+        assert!(matches!(*err, PlanError::NotFetchable(_)));
     }
 
     #[test]
@@ -327,7 +335,7 @@ mod tests {
         let hub = FakeHub::new();
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let err = plan(&r, &st, &hub).unwrap_err();
-        assert!(matches!(err, PlanError::Hub(HubError::NotFound(_))));
+        assert!(matches!(*err, PlanError::Hub(HubError::NotFound(_))));
     }
 
     #[test]
@@ -427,7 +435,7 @@ mod tests {
 
         let r = ModelRef::new("someone", "exotic-model", None);
         let err = plan(&r, &st, &hub).unwrap_err();
-        assert!(matches!(err, PlanError::UnsupportedArchitecture(_, arch) if arch == "MambaForCausalLM"));
+        assert!(matches!(*err, PlanError::UnsupportedArchitecture(_, arch) if arch == "MambaForCausalLM"));
     }
 
     #[test]
@@ -438,7 +446,7 @@ mod tests {
 
         let r = ModelRef::new("someone", "no-config", None);
         let err = plan(&r, &st, &hub).unwrap_err();
-        assert!(matches!(err, PlanError::NoUpstreamArtifact(_, _)));
+        assert!(matches!(*err, PlanError::NoUpstreamArtifact(_, _)));
     }
 
     #[test]

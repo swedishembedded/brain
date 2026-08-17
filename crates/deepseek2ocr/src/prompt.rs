@@ -17,11 +17,11 @@
 //! learned rows the mmproj ships). Checked twice, independently:
 //!
 //! * the reference implementation builds the run as
-//!   `([image_token_id] * n + [image_token_id]) * n` then `+= [image_token_id]`
-//!   - one id, `n` token rows each followed by a newline row, then the
-//!   separator - with `image_token_id = 128815` written as a literal;
-//!   its `self.image_newline` / `self.view_seperator` are `nn.Parameter`s,
-//!   not vocabulary;
+//!   `([image_token_id] * n + [image_token_id]) * n` then `+= [image_token_id]` -
+//!   one id, `n` token rows each followed by a newline row, then the
+//!   separator - with `image_token_id = 128815` written as a literal; its
+//!   `self.image_newline` / `self.view_seperator` are `nn.Parameter`s, not
+//!   vocabulary;
 //! * the shipped `DeepSeek-OCR-Q8_0.gguf` vocabulary contains no
 //!   newline/separator token to resolve: its 830 CONTROL entries are BOS/EOS/
 //!   pad, 800 `<｜place▁holder▁no▁N｜>`, the FIM/chat/tool markers, `<image>`,

@@ -353,6 +353,7 @@ fn channel_isolation() {
 ///   * `H*W < 64` with `N > 1` — the shape where a per-PLANE stride-64 walk
 ///     leaves 64-H*W lanes idle, and at `H*W == 1` collapses onto thread 0;
 ///   * `H*W == 1` — the flat `[N, C]` activation the family advertises.
+///
 /// `C` is never a multiple of anything.
 const BWD_SHAPES: &[(usize, usize, usize, usize)] = &[
     (3, 5, 6, 7),

@@ -251,6 +251,13 @@ struct LayerBufs {
 }
 
 /// How the layer loop binds buffers + emits attention.
+///
+/// `Chunked` is several hundred bytes wider than `Materialized`, so
+/// `large_enum_variant` wants it boxed. It is not worth it here: there is
+/// exactly one `Regime` per model, held in a field and never stored in a
+/// collection, so the padding is paid once, while boxing would put a pointer
+/// chase in front of every buffer binding in the per-layer loop.
+#[allow(clippy::large_enum_variant)]
 enum Regime {
     /// Per-layer caches, full-score bidir trio (parity + training).
     Materialized { layers: Vec<LayerBufs>, res: Vec<DeviceBuffer>, scores: DeviceBuffer },

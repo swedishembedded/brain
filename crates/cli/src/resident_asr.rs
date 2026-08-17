@@ -177,6 +177,10 @@ struct NemotronInstance {
     sessions: nemotronasr::caps::StreamSessions,
 }
 
+/// One `transcribe_stream` job decoded from its `Invocation`:
+/// `(session id, PCM window, prompt id, end-of-stream flag)`.
+type StreamJob = (String, Vec<f32>, usize, bool);
+
 impl Instance for NemotronInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
@@ -192,7 +196,7 @@ impl Instance for NemotronInstance {
             return self.offline_batch(invs, progress);
         }
         let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
-        let mut jobs: Vec<(usize, (String, Vec<f32>, usize, bool))> = Vec::new();
+        let mut jobs: Vec<(usize, StreamJob)> = Vec::new();
         for (i, inv) in invs.iter().enumerate() {
             match nemotronasr::caps::stream_job_from_inv(inv) {
                 Ok(j) => jobs.push((i, j)),

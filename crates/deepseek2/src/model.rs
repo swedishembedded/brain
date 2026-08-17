@@ -1532,8 +1532,8 @@ impl DeepseekV2 {
     /// **Reconstructed as `xmid[l] - res[l]`, not read from a buffer.** The
     /// forward writes every layer's `o_proj` result into ONE shared `proj`
     /// temporary (only the last layer's survives a whole forward), and giving
-    /// each layer its own would add an eighth `[b*t, d_model]` buffer per layer
-    /// - half a gigabyte at this architecture's 8192 context - to serve nothing
+    /// each layer its own would add an eighth `[b*t, d_model]` buffer per layer -
+    /// half a gigabyte at this architecture's 8192 context - to serve nothing
     /// but a parity tap. Since `xmid` is literally `add2(res[l], proj)`, the
     /// subtraction recovers `proj` up to the single rounding of that sum: exact
     /// wherever the two summands are of comparable magnitude, and carrying at
