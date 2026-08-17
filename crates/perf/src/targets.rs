@@ -1013,14 +1013,15 @@ mod tests {
 /// here, the runtime's worker threads — do the real work; the driver loop
 /// stays synchronous and free of runtime-scheduling noise).
 ///
-/// `describe`/`fidelity`/`set_admission`/device-op counters are NOT yet wired
-/// through this target: today's `QwenInstance` (`crates/cli/src/
-/// resident_llm.rs`) is built on `Qwen::from_reader_decode`, which has no
-/// `device_stats()`/admission-policy seam to read. Once the LLM residents are
-/// rewired onto `qwen3::serve::Engine` (this plan's W5), those numbers become
-/// reachable here with no change to this struct's shape — reporting a
-/// fabricated number now would violate the "never a fabricated zero" rule,
-/// so they are simply absent.
+/// `set_admission` and the device-op counters are NOT yet wired through this
+/// target: today's `QwenInstance` (`crates/cli/src/resident_llm.rs`) is built
+/// on `Qwen::from_reader_decode`, which has no `device_stats()`/admission-policy
+/// seam to read. Once the LLM residents are rewired onto `qwen3::serve::Engine`
+/// (this plan's W5), those numbers become reachable here with no change to this
+/// struct's shape - reporting a fabricated number now would violate the "never
+/// a fabricated zero" rule, so they are simply absent. `fidelity` **is** wired
+/// (see the impl below): it needs nothing from the engine beyond the served
+/// endpoint itself.
 pub struct HttpTarget {
     rt: tokio::runtime::Runtime,
     router: axum::Router,
@@ -1059,6 +1060,58 @@ impl HttpTarget {
         let mut rng = data::rng::Rng::new(seed);
         (0..n_tokens.max(1)).map(|_| format!("tok{}", rng.next_u64() % 4096)).collect::<Vec<_>>().join(" ")
     }
+
+    /// The streaming chat-completion request for one [`PerfRequest`], byte-for-byte
+    /// reproducible from its seed. `temperature: 0` is greedy, which is what
+    /// makes [`HttpTarget::fidelity`]'s comparison meaningful at all.
+    fn chat_request(&self, req: &PerfRequest) -> axum::http::Request<axum::body::Body> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": HttpTarget::synth_system_prompt(req.input_artifacts, req.seed)},
+                {"role": "user", "content": "Continue the sequence."},
+            ],
+            "max_tokens": req.output_artifacts,
+            "temperature": 0,
+            "stream": true,
+        });
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", self.key))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).expect("perf: serialize chat body")))
+            .expect("perf: build chat request")
+    }
+
+    /// Run the correctness probe's requests through the router and capture the
+    /// text each one actually generated.
+    ///
+    /// `concurrent` puts every request in flight at once - through the same
+    /// edge concurrency limiter, admission race and batching the measurement
+    /// itself went through; otherwise each is awaited to completion before the
+    /// next is sent. A refused or failed request returns `Err`, never a
+    /// captured error string that could agree with itself.
+    fn probe(&self, reqs: &[PerfRequest], concurrent: bool) -> Result<Vec<Vec<u8>>, String> {
+        let calls: Vec<_> = reqs.iter().map(|r| (self.router.clone(), self.chat_request(r))).collect();
+        let got: Vec<Result<String, String>> = if concurrent {
+            self.rt.block_on(async {
+                futures::future::join_all(calls.into_iter().map(|(r, q)| collect_text(r, q))).await
+            })
+        } else {
+            self.rt.block_on(async {
+                let mut out = Vec::new();
+                for (r, q) in calls {
+                    out.push(collect_text(r, q).await);
+                }
+                out
+            })
+        };
+        got.into_iter()
+            .enumerate()
+            .map(|(i, r)| r.map(String::into_bytes).map_err(|e| format!("probe request {i} failed: {e}")))
+            .collect()
+    }
 }
 
 impl PerfTarget for HttpTarget {
@@ -1071,24 +1124,7 @@ impl PerfTarget for HttpTarget {
         self.next += 1;
         self.inflight.insert(id);
 
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": HttpTarget::synth_system_prompt(req.input_artifacts, req.seed)},
-                {"role": "user", "content": "Continue the sequence."},
-            ],
-            "max_tokens": req.output_artifacts,
-            "temperature": 0,
-            "stream": true,
-        });
-        let http_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", self.key))
-            .body(axum::body::Body::from(serde_json::to_vec(&body).expect("perf: serialize chat body")))
-            .expect("perf: build chat request");
-
+        let http_req = self.chat_request(&req);
         let router = self.router.clone();
         let tx = self.tx.clone();
         self.rt.spawn(async move { drive_one(router, http_req, id, tx).await });
@@ -1124,6 +1160,103 @@ impl PerfTarget for HttpTarget {
     fn busy(&self) -> bool {
         !self.inflight.is_empty()
     }
+
+    /// Sequential vs concurrent through the REAL served path - the same
+    /// two-path idea [`PagedLlmTarget`] and [`ExecutorTarget`] use, applied to
+    /// the layer they both skip by construction.
+    ///
+    /// Requests already go out at `temperature: 0` (greedy, deterministic), so
+    /// the same prompt must come back with the same text whether it was served
+    /// alone or alongside two others. What that covers here and nowhere else:
+    /// the edge concurrency limiter, `apiserve::bridge`'s admission race,
+    /// chat-template rendering and tokenisation - all of which can reorder or
+    /// cross-contaminate work without changing a single kernel.
+    ///
+    /// Determinism is measured rather than assumed; see [`two_path_verdict`].
+    fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
+        const REFERENCE: &str = "sequential-greedy-same-endpoint";
+        let reqs = fidelity_requests();
+        let failed = |e: String| {
+            Some(crate::fidelity::Fidelity::probe_failed(crate::fidelity::BYTE_GATE, REFERENCE, e))
+        };
+        let sequential = match self.probe(&reqs, false) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        let concurrent = match self.probe(&reqs, true) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        two_path_verdict(REFERENCE, sequential, concurrent, || self.probe(&reqs, false))
+    }
+}
+
+/// The generated-text fragments carried by one COMPLETE SSE frame, plus
+/// whether that frame ended the stream (`data: [DONE]`).
+///
+/// A thinking-enabled model's early tokens stream as `delta.reasoning_content`,
+/// never `delta.content` (`openai::event_delta`'s "reasoning" branch) -- both
+/// are real generated tokens, for the artifact timeline and for the
+/// correctness probe alike, so both count. One entry per event carrying any
+/// text, which is what makes the timeline's artifact count a token count.
+fn sse_deltas(frame: &str) -> (Vec<String>, bool) {
+    let mut out = Vec::new();
+    let mut done = false;
+    for line in frame.lines() {
+        let Some(data) = line.strip_prefix("data: ") else { continue };
+        if data == "[DONE]" {
+            done = true;
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+        let delta = &v["choices"][0]["delta"];
+        let mut text = String::new();
+        for field in ["content", "reasoning_content"] {
+            if let Some(s) = delta[field].as_str() {
+                text.push_str(s);
+            }
+        }
+        if !text.is_empty() {
+            out.push(text);
+        }
+    }
+    (out, done)
+}
+
+/// Fire one chat-completion request through the router and return exactly the
+/// text it generated. The correctness-probe twin of [`drive_one`], which
+/// *times* the same stream rather than keeping it.
+async fn collect_text(router: axum::Router, req: axum::http::Request<axum::body::Body>) -> Result<String, String> {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let resp = router.oneshot(req).await.map_err(|e| format!("request error: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let mut stream = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    let mut text = String::new();
+    let mut saw_done = false;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("body stream error: {e}"))?;
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(pos) = buf.find("\n\n") {
+            let frame: String = buf.drain(..pos + 2).collect();
+            let (deltas, done) = sse_deltas(&frame);
+            for d in deltas {
+                text.push_str(&d);
+            }
+            saw_done |= done;
+        }
+    }
+    // A truncated stream is not a short answer: comparing it would compare a
+    // prefix, which is exactly what the gate refuses to do.
+    if !saw_done {
+        return Err("stream ended without [DONE]".into());
+    }
+    Ok(text)
 }
 
 /// Fire one chat-completion request through the router and translate the SSE
@@ -1174,25 +1307,138 @@ async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Bo
         while let Some(pos) = buf.find("\n\n") {
             let frame: String = buf.drain(..pos + 2).collect();
             let at = Instant::now();
-            for line in frame.lines() {
-                let Some(data) = line.strip_prefix("data: ") else { continue };
-                if data == "[DONE]" {
-                    saw_done = true;
-                    continue;
-                }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
-                // A thinking-enabled model's early tokens stream as
-                // `delta.reasoning_content`, never `delta.content`
-                // (`openai::event_delta`'s "reasoning" branch) -- both are real
-                // generated tokens for TTFA/ITL purposes, so both count.
-                let delta = &v["choices"][0]["delta"];
-                let has_text = |field: &str| delta[field].as_str().map(|s| !s.is_empty()).unwrap_or(false);
-                if has_text("content") || has_text("reasoning_content") {
-                    let _ = tx.send(Emission { id, at, kind: EmissionKind::Artifact, error: None });
-                }
+            let (deltas, done) = sse_deltas(&frame);
+            saw_done |= done;
+            for _ in deltas {
+                let _ = tx.send(Emission { id, at, kind: EmissionKind::Artifact, error: None });
             }
         }
     }
     let (kind, error) = if saw_done { (EmissionKind::Done, None) } else { (EmissionKind::Failed, Some("stream ended without [DONE]".to_string())) };
     let _ = tx.send(Emission { id, at: Instant::now(), kind, error });
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// How a fake chat endpoint decides what to answer.
+    enum Answer {
+        /// Deterministic in the request only: the honest baseline.
+        FromRequest,
+        /// Answers differently when it is serving more than one request at
+        /// once - a concurrency bug in the served path.
+        FromConcurrency,
+        /// Answers differently on every call, with no seed knob: genuinely
+        /// stochastic, and so unverifiable by any two-run comparison.
+        FromCallCount,
+    }
+
+    struct Fake {
+        answer: Answer,
+        inflight: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    /// The generated text, streamed one character per SSE event and terminated
+    /// by `[DONE]`, exactly as `apiserve`'s OpenAI dialect does.
+    fn sse(text: &str) -> String {
+        let mut s = String::new();
+        for ch in text.chars() {
+            let ev = serde_json::json!({ "choices": [{ "delta": { "content": ch.to_string() } }] });
+            s.push_str(&format!("data: {ev}\n\n"));
+        }
+        s.push_str("data: [DONE]\n\n");
+        s
+    }
+
+    async fn chat(
+        axum::extract::State(f): axum::extract::State<Arc<Fake>>,
+        body: String,
+    ) -> axum::response::Response {
+        let n = f.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        let calls = f.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        // Long enough that concurrently-submitted requests are provably all
+        // in flight together before any of them answers.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        f.inflight.fetch_sub(1, Ordering::SeqCst);
+        let text = match f.answer {
+            Answer::FromRequest => format!("r{}", body.bytes().map(|b| b as u64).sum::<u64>()),
+            Answer::FromConcurrency => format!("c{n}"),
+            Answer::FromCallCount => format!("n{calls}"),
+        };
+        axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from(sse(&text)))
+            .expect("build the fake SSE response")
+    }
+
+    fn target(answer: Answer) -> HttpTarget {
+        let state = Arc::new(Fake { answer, inflight: AtomicUsize::new(0), calls: AtomicUsize::new(0) });
+        let router = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(chat))
+            .with_state(state);
+        HttpTarget::new(router, "fake", "k", TargetInfo::new("fake", "token"))
+    }
+
+    fn opt() -> crate::scenarios::Options {
+        crate::scenarios::Options { num_requests: 2, warmup_requests: 0, ..Default::default() }
+    }
+
+    /// SPEC: the served path is the only adapter that exercises JSON parsing,
+    /// the edge concurrency limiter and the admission race, and it had no
+    /// self-check at all - a run whose concurrent responses provably differ
+    /// from its sequential ones still wrote `valid: true`.
+    #[test]
+    fn http_target_concurrency_divergence_invalidates_the_artifact() {
+        let mut t = target(Answer::FromConcurrency);
+        let f = t.fidelity().expect("a deterministic endpoint must produce a verdict");
+        assert!(!f.passed, "concurrent answers differ from sequential ones: {f:?}");
+        assert!(f.compared > 0, "a verdict that compared nothing verifies nothing: {f:?}");
+
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt()).expect("run");
+        assert!(!art.valid, "the served path computed something else under load; that is not a slower-but-honest number");
+        assert_eq!(art.to_json()["correctness"]["passed"], false);
+    }
+
+    /// The other half: an endpoint that answers the same request the same way
+    /// however it was scheduled must stay comparable.
+    #[test]
+    fn http_target_consistent_responses_pass_the_gate() {
+        let mut t = target(Answer::FromRequest);
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt()).expect("run");
+        assert!(art.valid, "identical responses must not be flagged: {:?}", art.invalid_reason);
+        assert_eq!(art.to_json()["correctness"]["passed"], true);
+        assert!(art.to_json()["correctness"]["compared_positions"].as_u64().unwrap_or(0) > 0);
+    }
+
+    /// HONESTY: `temperature: 0` is what makes this check possible; an
+    /// endpoint that answers differently on every identical call has no
+    /// deterministic output to gate, and gets no fabricated verdict.
+    #[test]
+    fn http_target_reports_no_verdict_for_a_nondeterministic_endpoint() {
+        let mut t = target(Answer::FromCallCount);
+        assert!(t.fidelity().is_none(), "nondeterminism is not a correctness failure");
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt()).expect("run");
+        assert!(art.valid);
+        assert!(art.to_json()["correctness"]["passed"].is_null());
+    }
+
+    /// A probe whose requests the server refuses has verified NOTHING, and
+    /// must say so rather than reporting a clean gate - the same rule the
+    /// greedy gate learned from a perf run whose own probe was rejected at
+    /// admission.
+    #[test]
+    fn http_target_reports_a_refused_probe_as_a_failure() {
+        let router = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let mut t = HttpTarget::new(router, "fake", "k", TargetInfo::new("fake", "token"));
+        let f = t.fidelity().expect("a refused probe is a verdict, not an absence of one");
+        assert!(!f.passed);
+        assert_eq!(f.compared, 0);
+        assert!(f.failure_reason().contains("compared 0 positions"), "{}", f.failure_reason());
+    }
 }
