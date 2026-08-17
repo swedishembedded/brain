@@ -267,11 +267,6 @@ fn linear(x: &[f32], w: &[f32], b: &[f32], out: usize, inp: usize) -> Vec<f32> {
     y
 }
 
-
-/// NeoX half-split RoPE on a single token's `[heads*hd]` vector at absolute
-/// position `pos`: pair `(j, j+half)` rotated by `angle = pos·θ^(-2j/hd)`.
-
-
 /// Single-query multi-head attention: `q` `[heads*hd]` over keys/values
 /// `[len*d]` (windowed to `[w0,len)`), `scale`d, softmax over the window. Returns
 /// the context `[heads*hd]`. Causality is implicit: the query is the newest

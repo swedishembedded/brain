@@ -75,10 +75,7 @@ fn transpose(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     o
 }
 
-/// RMSNorm over the last axis (`c`) of token-major `[rows,c]`.
-
-/// LayerNorm over the last axis (`c`) of token-major `[rows,c]`, affine.
-
+/// Exact GELU in place: `0.5·x·(1 + erf(x/√2))`.
 fn gelu_inplace(x: &mut [f32]) {
     for v in x.iter_mut() {
         *v = 0.5 * *v * (1.0 + erf(*v * std::f32::consts::FRAC_1_SQRT_2));
