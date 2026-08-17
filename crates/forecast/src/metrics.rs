@@ -148,6 +148,47 @@ pub fn crps_ensemble(samples: &[f32], x: f32) -> f32 {
     e_abs - 0.5 * e_diff
 }
 
+/// Mean absolute error. Its own function because [`mase`] and every caller
+/// that wants a raw, unscaled number were each computing it inline.
+pub fn mae(pred: &[f32], actual: &[f32]) -> f32 {
+    assert_eq!(pred.len(), actual.len(), "mae: pred/actual length mismatch");
+    if pred.is_empty() {
+        return 0.0;
+    }
+    pred.iter().zip(actual).map(|(p, a)| (p - a).abs()).sum::<f32>() / pred.len() as f32
+}
+
+/// Root mean squared error - the companion to [`mae`], reported alongside it
+/// because the two disagree exactly when a forecast is occasionally badly
+/// wrong rather than consistently slightly wrong.
+pub fn rmse(pred: &[f32], actual: &[f32]) -> f32 {
+    assert_eq!(pred.len(), actual.len(), "rmse: pred/actual length mismatch");
+    if pred.is_empty() {
+        return 0.0;
+    }
+    (pred.iter().zip(actual).map(|(p, a)| (p - a) * (p - a)).sum::<f32>() / pred.len() as f32).sqrt()
+}
+
+/// Mean absolute PERCENTAGE error, in percent. Scale-free, so a reader can
+/// judge a price forecast without knowing the price level. Steps whose actual
+/// is zero are skipped rather than yielding an infinity.
+pub fn mape(pred: &[f32], actual: &[f32]) -> f32 {
+    assert_eq!(pred.len(), actual.len(), "mape: pred/actual length mismatch");
+    let mut acc = 0.0f32;
+    let mut n = 0usize;
+    for (p, a) in pred.iter().zip(actual) {
+        if *a != 0.0 {
+            acc += ((p - a) / a).abs();
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        acc / n as f32 * 100.0
+    }
+}
+
 /// Mean Absolute Scaled Error: forecast MAE divided by the in-sample
 /// seasonal-naive MAE (`|y_t - y_{t-season}|`) on `insample`. `season = 1` is
 /// plain naive. Returns unscaled MAE if the naive scale is degenerate.
@@ -156,8 +197,7 @@ pub fn mase(pred: &[f32], actual: &[f32], insample: &[f32], season: usize) -> f3
     if pred.is_empty() {
         return 0.0;
     }
-    let mae: f32 =
-        pred.iter().zip(actual).map(|(p, a)| (p - a).abs()).sum::<f32>() / pred.len() as f32;
+    let mae = mae(pred, actual);
     let s = season.max(1);
     let scale = if insample.len() > s {
         let mut acc = 0.0f32;

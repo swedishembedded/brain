@@ -61,7 +61,7 @@ echo "== [2/4] fine-tune on the ft-half (data <= T0, gated) =="
     --out "$OUT/ft.weights"
 
 echo "== [3/4] sharded base+ft sweep ($SHARDS shards) =="
-KRONOS_TOKENIZER_DIR="$TOK" KRONOS_DECODER_DIR="$BASE_DEC" \
+BRAIN_KRONOS_TOKENIZER="$TOK" BRAIN_KRONOS_DECODER="$BASE_DEC" \
 python3 "$HERE/oos_shard.py" --data "$OUT/bt" --db "$DB" --out "$OUT/eval.json" \
     --shards "$SHARDS" --ctx "$CTX" --horizon "$HOR" --step "$STEP" \
     --nsamples "$NSAMPLES" --start "$START" \

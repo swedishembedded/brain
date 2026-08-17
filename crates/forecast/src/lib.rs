@@ -10,6 +10,10 @@
 //! FinCast, and the statistical baselines) implement [`ForecastModel`] in their
 //! own crates.
 //!
+//! - [`csv::parse_ohlcv`] - an untrusted OHLCV CSV, validated structurally and
+//!   semantically at the boundary, into a [`Panel`] (see [`csv`]).
+//! - [`chart::render_png`] - history, forecast and held-out actual on one pair
+//!   of axes, via the `gnuplot` CLI (see [`chart`]).
 //! - [`Panel`] / [`Item`] / [`Variate`] — the input (see [`panel`]).
 //! - [`Forecast`] / [`TargetForecast`] / [`Block`] — the output, a distribution
 //!   over the horizon (see [`forecast`]).
@@ -22,13 +26,16 @@
 //! - [`ForecastError`] — a structured, wire-mappable error.
 
 pub mod backtest;
+pub mod chart;
 pub mod convert;
+pub mod csv;
 pub mod forecast;
 pub mod metrics;
 pub mod panel;
 pub mod train_data;
 
 pub use backtest::{BacktestReport, BacktestRow, BacktestSpec};
+pub use csv::{parse_ohlcv, Bar, OhlcvSeries, Split, Stamp};
 pub use forecast::{Block, Forecast, TargetForecast};
 pub use panel::{Item, Kind, Panel, Role, Variate};
 

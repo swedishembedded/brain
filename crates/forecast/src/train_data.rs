@@ -226,6 +226,10 @@ mod tests {
         assert_eq!(weekday(2026, 7, 20), 0); // Monday
         assert_eq!(weekday(2026, 7, 21), 1); // Tuesday
         assert_eq!(weekday(1970, 1, 1), 3); // Thursday
+        // The two century cases the naive `y % 4` rule gets wrong: 2000 IS a
+        // leap year (divisible by 400), 1900 is NOT.
+        assert_eq!(weekday(2000, 2, 29), 1); // Tuesday
+        assert_eq!(weekday(1900, 3, 1), 3); // Thursday
     }
 
     #[test]

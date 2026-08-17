@@ -19,14 +19,266 @@ use std::sync::Arc;
 
 pub fn run_forecast(argv: &[String]) {
     match argv.first().map(|s| s.as_str()) {
+        Some("predict") => predict(&argv[1..]),
         Some("compare") => compare(&argv[1..]),
         Some("serve") => serve(&argv[1..]),
         Some("import") => import(&argv[1..]),
         Some("finetune") => finetune(&argv[1..]),
         other => {
-            eprintln!("usage: brain forecast <compare|serve|import|finetune> ...  (got {other:?})");
+            eprintln!("usage: brain forecast <predict|compare|serve|import|finetune> ...  (got {other:?})");
         }
     }
+}
+
+/// Default held-out horizon: 48 hourly bars, two full daily cycles of the
+/// example series, long enough that a forecast which only copies the last
+/// value is visibly wrong.
+const DEFAULT_HORIZON: usize = 48;
+
+/// The seasonal period the naive baseline uses when the caller names none.
+/// 24 is "the same hour yesterday" on an hourly series - the sharpest cheap
+/// baseline there is on anything with a daily cycle, and therefore the one
+/// worth beating.
+const DEFAULT_SEASON: usize = 24;
+
+/// `brain forecast predict --csv <file>` - the one-command path: an OHLCV CSV
+/// in, a scored forecast (and optionally a chart) out.
+///
+/// The last `--horizon` rows of the file are **held out**, never shown to the
+/// model, and used as ground truth. That is what makes the printed numbers and
+/// the chart evidence: the model is judged against a continuation it did not
+/// see, next to two baselines that cost nothing, on one axis.
+fn predict(args: &[String]) {
+    let mut a = Args::new(args);
+    let csv_path = a.str_or("--csv", "");
+    let horizon = a.usize_or("--horizon", DEFAULT_HORIZON);
+    let context = a.usize_or("--context", 0); // 0 = the model's own max_context
+    let samples = a.usize_or("--samples", 1);
+    let origins = a.usize_or("--origins", 1);
+    let seed = a.u64_or("--seed", 7);
+    let season = a.usize_or("--season", DEFAULT_SEASON);
+    let item = a.str_or("--item", "series");
+    let freq = a.str_or("--freq", "1h");
+    let gnuplot = a.take_str("--gnuplot");
+    let kronos_tok = a.take_str("--kronos-tokenizer");
+    let kronos_dec = a.take_str("--kronos-decoder");
+    a.finish();
+
+    if csv_path.is_empty() {
+        eprintln!("usage: brain forecast predict --csv <ohlcv.csv> [--horizon 48] [--context N] [--samples N]");
+        eprintln!("         [--origins 1] [--seed 7] [--season 24] [--gnuplot chart.png]");
+        eprintln!("         [--kronos-tokenizer D --kronos-decoder D]");
+        eprintln!();
+        eprintln!("The CSV is timestamp,open,high,low,close,volume. The last --horizon rows are held out");
+        eprintln!("as ground truth; everything before them is the model's context. --origins N repeats");
+        eprintln!("that at N disjoint windows and averages, so the numbers are a measurement rather than");
+        eprintln!("one draw; the chart always shows the most recent origin.");
+        std::process::exit(2);
+    }
+
+    // Fail on a missing renderer BEFORE loading 400 MB of weights: a run that
+    // cannot produce the artifact the caller asked for should say so in
+    // milliseconds, not after a minute of rollout.
+    if gnuplot.is_some() && !forecast::chart::gnuplot_available() {
+        eprintln!("brain forecast predict: --gnuplot needs the gnuplot CLI, which is not on PATH");
+        eprintln!("  {}", forecast::chart::INSTALL_HINT);
+        std::process::exit(1);
+    }
+
+    let text = match std::fs::read_to_string(&csv_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("brain forecast predict: read {csv_path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let series = match forecast::csv::parse_ohlcv(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain forecast predict: {csv_path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Weights: explicit flags win, else the env pair, else auto-fetch sets the
+    // env pair from `NeoQuasar/Kronos-base` + `NeoQuasar/Kronos-Tokenizer-base`.
+    if kronos_tok.is_none() || kronos_dec.is_none() {
+        crate::supply::ensure_env_weights("kronos");
+    }
+    let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
+    let (Some(tok), Some(dec)) = (kronos_tok.or_else(|| env("BRAIN_KRONOS_TOKENIZER")), kronos_dec.or_else(|| env("BRAIN_KRONOS_DECODER"))) else {
+        eprintln!("brain forecast predict: no kronos checkpoint - auto-fetch did not resolve one, and neither");
+        eprintln!("  --kronos-tokenizer/--kronos-decoder nor BRAIN_KRONOS_TOKENIZER/BRAIN_KRONOS_DECODER are set");
+        std::process::exit(1);
+    };
+    let model = match kronos::KronosForecaster::load(&tok, &dec) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("brain forecast predict: load kronos from {tok} + {dec}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let max_context = forecast::ForecastModel::capabilities(&model).max_context;
+    let context = if context == 0 { max_context } else { context.min(max_context) };
+
+    // `samples == 1` means the deterministic modal rollout: one stable path,
+    // reproducible run to run, and N times cheaper than drawing a cloud. More
+    // than one draws real trajectories, the point path becomes the median, and
+    // the chart gains a 10-90% band.
+    let spec = forecast::ForecastSpec {
+        horizon,
+        representations: vec![forecast::Representation::Quantiles, forecast::Representation::Point],
+        quantile_levels: vec![0.1, 0.5, 0.9],
+        num_samples: samples.max(1),
+        seed,
+    };
+    if samples <= 1 {
+        std::env::set_var("BRAIN_KRONOS_ARGMAX", "1");
+    }
+
+    // Origin 0 is the end of the file; each further origin steps `horizon`
+    // bars earlier, so the held-out windows are disjoint and no bar is scored
+    // twice. Metrics are averaged over all of them - one origin is a draw, not
+    // a measurement.
+    let mut acc: Vec<(String, Vec<f32>)> = Vec::new(); // (model name, per-origin MAE)
+    let mut first: Option<(forecast::csv::Split, Vec<f32>, forecast::TargetForecast)> = None;
+    let t0 = std::time::Instant::now();
+    for o in 0..origins.max(1) {
+        let split = match series.split_at_origin(context, horizon, o * horizon) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("brain forecast predict: {csv_path}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let panel = forecast::csv::panel(&split, &item, &freq);
+        let out = match forecast::ForecastModel::forecast(&model, &panel, &spec) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("brain forecast predict: forecast failed: {} ({})", e.message, e.code);
+                std::process::exit(1);
+            }
+        };
+        let Some(tf) = out.targets.into_iter().find(|t| t.name == "close") else {
+            eprintln!("brain forecast predict: model returned no `close` target");
+            std::process::exit(1);
+        };
+        let Some(pred) = point_path(&tf, horizon) else {
+            eprintln!("brain forecast predict: model returned no usable point path");
+            std::process::exit(1);
+        };
+
+        // The two baselines. Persistence is the random-walk answer; seasonal
+        // naive is the same bar one period ago, read from the CONTEXT so it
+        // stays leak-free.
+        let ctx_close: Vec<f32> = split.context.iter().map(|b| b.ohlcv[forecast::csv::CLOSE]).collect();
+        let actual: Vec<f32> = split.actual.iter().map(|b| b.ohlcv[forecast::csv::CLOSE]).collect();
+        let last = *ctx_close.last().expect("split guarantees a non-empty context");
+        let mut row: Vec<(String, Vec<f32>)> = vec![("kronos".into(), pred.clone()), ("persistence (last close)".into(), vec![last; horizon])];
+        if let Some(s) = seasonal_naive(&ctx_close, horizon, season) {
+            row.push((format!("seasonal naive ({season} bars)"), s));
+        }
+        for (i, (name, p)) in row.iter().enumerate() {
+            if acc.len() <= i {
+                acc.push((name.clone(), Vec::new()));
+            }
+            acc[i].1.push(forecast::metrics::mae(p, &actual));
+        }
+        // Only the most recent origin is charted: it is the one whose held-out
+        // window a reader can line up against the end of the input file.
+        if o == 0 {
+            first = Some((split, pred, tf));
+        }
+    }
+    let elapsed = t0.elapsed();
+    let n = origins.max(1);
+
+    println!(
+        "kronos forecast: {context} bars of context -> {horizon} held-out bars x {n} rolling origin{}  ({:.1}s, {} sample{})",
+        if n == 1 { "" } else { "s" },
+        elapsed.as_secs_f64(),
+        spec.num_samples,
+        if spec.num_samples == 1 { "" } else { "s" }
+    );
+    println!("  {:<28} {:>10} {:>10}", "close, vs held-out truth", "mean MAE", "worst MAE");
+    for (name, maes) in &acc {
+        let mean = maes.iter().sum::<f32>() / maes.len() as f32;
+        let worst = maes.iter().copied().fold(f32::MIN, f32::max);
+        println!("  {name:<28} {mean:>10.4} {worst:>10.4}");
+    }
+    if let (Some(k), Some(p)) = (acc.first(), acc.get(1)) {
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let wins = k.1.iter().zip(&p.1).filter(|(a, b)| a < b).count();
+        println!("  vs persistence: {:+.1}% mean-MAE reduction, better at {wins}/{n} origins", (1.0 - mean(&k.1) / mean(&p.1)) * 100.0);
+    }
+
+    if let (Some(path), Some((split, pred, tf))) = (gnuplot, &first) {
+        match render_chart(&path, split, pred, tf, &item, horizon) {
+            Ok(p) => println!("  chart: {}", p.display()),
+            Err(e) => {
+                eprintln!("brain forecast predict: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// The forecast's point path over the horizon: the median quantile when the
+/// model produced quantiles (robust for a sampled model), else the mean.
+fn point_path(tf: &forecast::TargetForecast, horizon: usize) -> Option<Vec<f32>> {
+    if let (Some(q), Some(mid)) = (&tf.quantiles, tf.levels.iter().position(|l| (*l - 0.5).abs() < 1e-6)) {
+        let n = tf.levels.len();
+        if q.data.len() >= horizon * n {
+            return Some((0..horizon).map(|h| q.data[h * n + mid]).collect());
+        }
+    }
+    tf.mean.as_ref().filter(|m| m.data.len() >= horizon).map(|m| m.data[..horizon].to_vec())
+}
+
+/// "The same bar one season ago", extended by repeating the last full season
+/// when the horizon runs past it. `None` when the context is shorter than one
+/// season, so the baseline is omitted rather than silently degenerating into
+/// persistence.
+fn seasonal_naive(ctx: &[f32], horizon: usize, season: usize) -> Option<Vec<f32>> {
+    if season == 0 || ctx.len() < season {
+        return None;
+    }
+    Some((0..horizon).map(|h| ctx[ctx.len() - season + (h % season)]).collect())
+}
+
+/// Assemble and render the evidence chart: the tail of the context, the
+/// forecast, the held-out actual, and (when the model produced quantiles) the
+/// 10-90% band under the forecast.
+fn render_chart(
+    path: &str,
+    split: &forecast::csv::Split,
+    pred: &[f32],
+    tf: &forecast::TargetForecast,
+    item: &str,
+    horizon: usize,
+) -> Result<std::path::PathBuf, String> {
+    // Show at most three horizons of history: enough to read the seasonal
+    // structure the forecast is or is not continuing, without squeezing the
+    // part under judgement into the right-hand margin.
+    let show = (horizon * 3).min(split.context.len());
+    let first = split.context.len() - show;
+    let mut chart = forecast::chart::ForecastChart::new(format!("{item}: kronos {horizon}-bar forecast vs held-out actual"));
+    chart.y_label = "close".to_string();
+    chart.history = split.context[first..].iter().enumerate().map(|(i, b)| (i as f64, b.ohlcv[forecast::csv::CLOSE] as f64)).collect();
+    let origin = show as f64 - 1.0;
+    // The forecast and the actual both start at the context's last bar, so the
+    // three lines meet at the origin rather than floating apart by one step.
+    let last = split.context[split.context.len() - 1].ohlcv[forecast::csv::CLOSE] as f64;
+    chart.forecast = std::iter::once((origin, last)).chain(pred.iter().enumerate().map(|(h, v)| (origin + 1.0 + h as f64, *v as f64))).collect();
+    chart.actual = std::iter::once((origin, last)).chain(split.actual.iter().enumerate().map(|(h, b)| (origin + 1.0 + h as f64, b.ohlcv[forecast::csv::CLOSE] as f64))).collect();
+    if let Some(q) = &tf.quantiles {
+        let n = tf.levels.len();
+        let (lo, hi) = (0usize, n.saturating_sub(1));
+        if n >= 3 && q.data.len() >= horizon * n {
+            chart.band = (0..horizon).map(|h| (origin + 1.0 + h as f64, q.data[h * n + lo] as f64, q.data[h * n + hi] as f64)).collect();
+        }
+    }
+    forecast::chart::render_png(&chart, std::path::Path::new(path))
 }
 
 /// Where the foundation models' weights live, so the registry can load them.

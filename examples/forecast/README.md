@@ -42,7 +42,10 @@ BRAIN_CHRONOS2=chronos2.weights BRAIN_FINCAST=fincast.weights \
   '
 ```
 
-Kronos needs both checkpoint dirs:
+Kronos needs both checkpoint dirs, but you no longer have to find them:
+`brain forecast predict` auto-fetches `NeoQuasar/Kronos-base` and
+`NeoQuasar/Kronos-Tokenizer-base` and exports both variables. Set them by hand
+only to override:
 
 ```bash
 BRAIN_KRONOS_TOKENIZER=kronos-tokenizer-base BRAIN_KRONOS_DECODER=kronos-small \
@@ -50,6 +53,35 @@ BRAIN_KRONOS_TOKENIZER=kronos-tokenizer-base BRAIN_KRONOS_DECODER=kronos-small \
     brain serve --dbus --device cpu & sleep 2
     python3 examples/forecast/forecast_client.py --model kronos --horizon 32
   '
+```
+
+## `synthetic_hourly.csv` - the example series
+
+`synthetic_hourly.csv` is 720 hourly OHLCV bars (30 days, 24/7) that
+`brain forecast predict` reads directly:
+
+```bash
+brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
+  --horizon 24 --samples 16 --origins 4 --gnuplot chart.png
+```
+
+It is synthetic on purpose, and not trivially so. The latent log price is a
+deterministic backbone (a slow drift plus two-harmonic intraday and weekly
+profiles) plus a **mean-reverting AR(1) residual**, so the h-step conditional
+mean is known in closed form and everything left over is irreducible noise -
+which means "how good is this forecast" has an arithmetic answer rather than an
+aesthetic one. Bars are built from an intrabar Brownian bridge, so the OHLC
+invariants hold by construction and the validator in
+`crates/forecast/src/csv.rs` is a real test of the data rather than a
+formality.
+
+Regenerate it (or make a different one) with
+`tools/forecast/make_synthetic_ohlcv.py`, which also prints the oracle
+(conditional-mean) error and the two naive baselines - the numbers that say
+what "good" means on the series it just wrote:
+
+```bash
+python3 tools/forecast/make_synthetic_ohlcv.py --out examples/forecast/synthetic_hourly.csv --bars 720 --seed 7
 ```
 
 Feed a real series instead of the synthetic sine-with-trend:

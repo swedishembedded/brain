@@ -16,7 +16,7 @@ Usage:
     [--split-manifest out/bt/split_manifest.json]
     [--summary-out out/backtest_summary.json] [--k-frac 0.10]
 
-Requires KRONOS_TOKENIZER_DIR / KRONOS_DECODER_DIR (and friends) in the env,
+Requires BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER (and friends) in the env,
 exactly like running the harness directly.
 """
 import argparse
