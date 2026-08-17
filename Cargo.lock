@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "brain-diamond"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
