@@ -239,6 +239,23 @@ pub const ARCHS: &[Arch] = &[
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
           weights_env: &[("BRAIN_WAN_DIT", "dit"), ("BRAIN_WAN_VAE", "vae"),
                          ("BRAIN_WAN_T5", "text_encoder"), ("BRAIN_WAN_TOKENIZER", "tokenizer")]),
+    // `id` IS the GGUF spelling: `general.architecture = "ltxv"` on every
+    // LTX-2.x GGUF observed (confirmed by range-reading the header of both
+    // `unsloth/LTX-2.3-GGUF` and `city96/LTX-Video-gguf`), so `gguf: None`.
+    // `default_ref` names the split, Comfy-aligned HF repo directly -- brain's
+    // `weights_env` resolution reads one role per file, which is exactly how
+    // that repo is laid out (no single-file/monolith option exists upstream).
+    // `BRAIN_LTXV_AUDIO_VAE` is a role separate from `_VAE` (video) because
+    // upstream ships them as two independent checkpoints with unrelated
+    // shapes, unlike Wan's single VAE role. The vocoder ships bundled inside
+    // the audio-VAE checkpoint's own metadata, not as a fourth file.
+    arch!("ltxv", "LTX-2.5 two-stream audio+video diffusion transformer", Video, Brain, "brain-ltxv",
+          hf: &["AVTransformer3DModel"],
+          default_ref: Some("Lightricks/LTX-2.5"),
+          weights_env: &[("BRAIN_LTXV_DIT", "dit"), ("BRAIN_LTXV_VAE", "vae"),
+                         ("BRAIN_LTXV_AUDIO_VAE", "audio_vae"),
+                         ("BRAIN_LTXV_TEXT_ENCODER", "text_encoder"),
+                         ("BRAIN_LTXV_TOKENIZER", "tokenizer")]),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),

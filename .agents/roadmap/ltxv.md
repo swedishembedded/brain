@@ -1,0 +1,176 @@
+# ltxv - roadmap
+
+LTX-2.5: a **two-stream** (video + audio) PixArt-alpha-style DiT, 48 layers, video
+stream 32 heads x 128 = 4096 dim / audio stream 32 x 64 = 2048 dim, coupled every
+block by bidirectional audio<->video cross-attention, with **per-token timesteps**
+(diffusion forcing: `timesteps = denoise_mask * sigma`, shape `(B,T,1)`) driving a
+PixArt adaLN-single modulation table. Text conditioning is a separate cross-attention
+(SDXL/Wan topology, never concatenated into the sequence) from a 12B Gemma-4 encoder.
+A causal 3D video VAE (stride T8/H32/W32, 128 latent channels) ships with two
+decoders - a conv mirror and a 3D neighborhood-attention "diffusion decoder"
+(`NADiffusionDecoder`, zero convolutions) - plus a 2D-causal-conv audio VAE (log-mel
+in, continuous Gaussian latent), a BigVGAN+snakebeta vocoder with a bandwidth-
+extension stage, two latent upscalers, and a duration-prediction head. `ltxv` names
+the family (LTX-2.3/2.4/2.5 share one `AVTransformer3DModel` class and one GGUF
+architecture tag), the release is a config.
+
+The port follows `.agents/rules/porting.md` in order, staged **video -> audio ->
+DiffVAE/DFR** (see "Staging" below) because the video path alone is already a full
+port's worth of new structure (per-token modulation, split-RoPE, the embeddings
+connector) and audio adds a second VAE+vocoder+cross-attention surface on top.
+
+Reference material: official repo `github.com/Lightricks/LTX-2` (math authority,
+public even though the HF weights are gated) cloned under
+`resources/ltxv/source/`; real checkpoint headers of `Lightricks/LTX-2.5` (gated,
+needs an HF account with access accepted and `hf auth login`) are the
+tensor-naming + exact-config authority - **the code repo's own module defaults
+are for the now-superseded 19B checkpoints**, not 2.5; an LTX-2.3 GGUF header
+(`unsloth/LTX-2.3-GGUF`) is the third opinion / GGUF-detection authority.
+
+## Validation policy for the large components
+
+The 22B DiT (42 GB bf16 / ~88 GB fp32) and the 12B Gemma-4 text encoder (26 GB
+bf16) are large enough that many machines - including the one this port was
+started on - cannot build or run them at all, not merely slowly. Policy for
+this port:
+
+- Every component small enough to run on modest hardware (both video VAEs, the
+  audio VAE, the vocoder, both latent upscalers, the duration head - about
+  4.5 GB total) gets **real-weight parity gates**, same bar as every other port
+  in this repo.
+- The DiT, the embeddings connector, and Gemma-4 get **tiny-config** (few layers,
+  small dims) **layer-by-layer parity** against the reference, proving the op
+  sequence and every convention (chunk order, RoPE layout, table indexing) is
+  correct at a scale that fits everywhere, plus **import coverage asserted
+  against the real 4349-tensor / 686-tensor headers** even without a forward at
+  that size.
+- Full 22B / 12B real-weight validation is an explicit, tracked gap (see below),
+  not a silent omission - `brain:validate-existing-model` should re-run it the
+  day this lands on hardware that can hold it.
+
+## Not yet done
+
+- [ ] **`ltxv` arch row + resource fetch** - `crates/arch/src/lib.rs` `ARCHS` row
+      (`id`/`gguf` both `"ltxv"`, `hf: &["AVTransformer3DModel"]`,
+      `default_ref: Lightricks/LTX-2.5`), this ledger, `docs/models/ltxv.md`,
+      weights under `resources/ltxv/weights/` (the runnable-everywhere subset
+      only), source under `resources/ltxv/source/`.
+- [ ] **Shared DiT hoist** - `crates/dit` currently owns only RoPE despite its doc
+      claiming adaLN/patchify/QK-norm, so `wan`/`s3dit`/`flux2` each re-implement
+      PixArt timestep embedding and patchify/unpatchify. Hoist a shared
+      `timestep_embedding`, `patchify`/`unpatchify`, and a **per-token** adaLN
+      table helper (Wan's and s3dit's folds are both token-INDEPENDENT and would
+      silently produce the wrong result if reused for LTX) into `crates/dit`, and
+      migrate `wan` + `s3dit` onto them in the same change - no per-model copies,
+      per [[brain-evolve-core-for-models]].
+- [ ] **`LTX2Scheduler`** (token-count-dependent Flux-style shift + terminal
+      stretch to 0.1) added to `crates/diffusion/src/scheduler.rs` next to the
+      existing `flow_shift`/`time_shift_exponential`, not inside `crates/ltxv`.
+- [ ] **Reference goldens** - `tools/goldens/ltxv_{vae,dit,audio,schedule}_dump_reference.py`,
+      real weights for the VAEs/upscalers, tiny random-weight configs (2 layers,
+      small dims) for the DiT/connector/Gemma-4 with forward-hook capture during
+      a real module call.
+- [ ] **Video VAE** (`crates/ltxv/src/vae3d.rs` over `vae::blocks3d`) - encoder +
+      conv decoder first (real weights, first milestone that runs everywhere),
+      the NA diffusion decoder deferred to the DFR milestone.
+- [ ] **Video-stream DiT** (`LTXModelType::VideoOnly`) - block/model/rope/import,
+      tiny-config parity climbing porting.md sec5 rung by rung.
+- [ ] **Pipeline + CLI + serving contract** - `brain ltxv t2v` to a playable mp4,
+      `crates/ltxv/src/caps.rs`, `resident_ltxv.rs`, GGUF importer entry.
+- [ ] **`crates/gemma4` text encoder** - own arch row, 5:1 sliding/full attention
+      alternation, dual RoPE bases, `attention_k_eq_v` global layers, the
+      49-hidden-state `aggregate_embed` projection. Tiny-config parity; real-weight
+      parity deferred (needs a machine that can hold 26 GB).
+- [ ] **Audio stream** - audio VAE, BigVGAN+snakebeta vocoder + BWE, audio DiT
+      stream, bidirectional A<->V cross-attention (reversed table order, cross-
+      modality-sigma gate).
+- [ ] **Training** - `grad.rs`/`modelgrad.rs` generic over `trait Fp`,
+      `gradcheck::check_ltxv{,_lora}`, LoRA in the ComfyUI key layout, finetune,
+      single- and batch-overfit-to-zero gates.
+- [ ] **NA diffusion decoder, upscalers, duration head, DFR** - the one genuinely
+      new kernel family (3D neighborhood/windowed attention), gated against the
+      reference's own eager tiled-masked-SDPA fallback before any fast kernel.
+- [ ] **NPU export, INT8, sharding, optimization pass** - only after parity is
+      frozen, per porting.md sec10.
+
+## Convention questions settled from source, not experiment
+
+Recorded here as they're pinned by tests, so this section grows as milestones
+land. Known traps already identified from reading (not yet test-pinned):
+
+- adaLN table row order is **shift, scale, gate** (self-attn rows 0-2, MLP rows
+  3-5, optional text-CA q/kv rows 6-8) - but the **A<->V** table order is
+  **scale, shift** (reversed), and its **gate** is driven by the *cross*
+  modality's scalar sigma while scale/shift come from *this* modality's
+  per-token timestep.
+- QK-RMSNorm is over the full `inner_dim` (not per-head), learnable, applied
+  **before** RoPE.
+- Only one RMSNorm sits between self-attn and text cross-attn (the "fused
+  re-norm" - there is no separate `norm2`); the text-CA output is added with
+  **no gate** unless `cross_attention_adaln` is set (LTX-2.5: it is).
+- The final output norm is **LayerNorm**, not RMSNorm, and uses
+  `embedded_timestep` (the raw 256->D MLP output), not the 6D modulation vector.
+- RoPE is **split/rotate-half** (GPT-NeoX style), not brain's interleaved
+  `rope_interleave_table` layout - bridged by permuting q/k projection (and
+  q_norm/k_norm) weight rows at import time, since RMSNorm over `inner_dim` is
+  permutation-equivariant. No new kernel needed; must be pinned by a test before
+  trusting it.
+- Video VAE temporal padding is **replicate frame 0**, not Wan's zero-pad;
+  spatial padding is `zeros` on the encoder, `reflect` on the conv decoder.
+  `PixelNorm` (channel-RMS, no learnable gain) uses eps **1e-8** in the resnet/
+  `conv_norm_out` path vs **1e-6** everywhere `build_normalization_layer` is used
+  (the audio VAE) - both appear in the same checkpoint family, do not unify them.
+- Video VAE down/upsample is space-to-depth / depth-to-space with a
+  parameter-free group-mean skip, **not** strided/transposed conv, and there is
+  **no cross-chunk feature cache** (unlike Wan) - tiling uses overlapping tiles
+  with trapezoidal 1-D blend masks instead.
+- Audio VAE has **no attention anywhere** at the real config
+  (`attn_resolutions: []`, `mid_block_add_attention: false`) despite the
+  reference code supporting it.
+- The vocoder's bandwidth-extension stage needs an STFT, but it is implemented
+  as a **conv1d against checkpoint-supplied DFT+Hann bases** - no ISTFT anywhere
+  in the whole audio stack, which is what keeps this portable without a GPU FFT
+  kernel.
+- The Gemma-4 text projection consumes **all 49 hidden states** (embedding +
+  48 layers) concatenated per token (`Linear(3840*49 -> 4096/2048)`), not just
+  the last layer or a fixed offset like `s3dit`'s Qwen3 usage - confirmed by the
+  `188160 = 3840*49` shape in the real header, must be pinned by a test.
+- The real 22B/2.5 config differs from the code repo's own module defaults (which
+  describe the superseded ~19B checkpoints) in several fields the checkpoint
+  header settles empirically: `ff_bias: false` (repo default `true`),
+  `use_prompt_adaln_single: false`, `cross_attention_adaln: true`,
+  `caption_proj_before_connector: true`, `use_keyframes_abs_pos_embedding: true`,
+  `av_ca_timestep_scale_multiplier: 1000.0` in the checkpoint metadata (the repo
+  source computes `sigma*1` for the A<->V gate via a *separate* multiplier field
+  read from config, not the hardcoded `1` a stale reading of the code might
+  suggest - verify empirically before building on either number).
+- No int8 "convrot" quantization format exists in the reference repo despite the
+  HF filename (`comfy-int8-convrot`) implying one - the real formats are
+  blockwise FP8, blockwise FP6, and NVFP4. Layers upstream never quantizes:
+  `patchify_proj`, every `*adaln_single*`, `caption_projection`, `proj_out`, and
+  their `audio_` twins, `to_gate_logits`, `scale_shift_table` - the same list
+  applies when brain adds its own INT8 path in the optimization milestone.
+
+## Recorded gaps (kept current)
+
+- Full 22B DiT and 12B Gemma-4 real-weight parity: not run, needs hardware that
+  can hold the full checkpoints.
+- NPU device execution: not yet diagnosed for this port; treat as unproven
+  until a specific host and blocker (or lack of one) are recorded.
+- `vae::blocks3d` has no backward (`blocks/grad.rs` only covers the 2D builder),
+  so video-VAE fine-tuning is out of scope until that lands separately.
+- Multi-device residents (needed for a sharded 22B DiT across multiple cards)
+  do not show up in `braintop` - a pre-existing gap noted in the serving-
+  contract exploration, not new to this port.
+- Image-to-video, IC-LoRA pipelines, and the `DubIt` speaker-identity pipeline
+  are out of scope for this port.
+
+## Scope that collapsed once the reference was read
+
+- The HF filenames imply an "int8-convrot" quantization scheme; grepping the
+  full source tarball found zero references to convolution-rotation/Hadamard
+  quantization actually wired into any load path - see the INT8 note above.
+- `modality_tiling.py` looked like it might be the audio/video mixing mechanism
+  from its name; it is spatial/temporal tiling of a video-only token sequence
+  for tiled inference, unrelated to the A<->V cross-attention that actually
+  couples the streams.
