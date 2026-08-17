@@ -112,3 +112,14 @@ for the full how-to.
 - Kronos is a candlestick model, not a seasonal decomposition: its skill is
   concentrated at short horizons. Score it at several rolling origins
   (`--origins`) before believing a single window's number.
+- The KV-cached rollout (`--samples`, the D-Bus path, the resident server) is
+  **exact against the upstream implementation only while `context + horizon
+  <= 512`**, the model's attention window. Beyond that the upstream rollout
+  re-runs the whole 512-bar window from an origin one bar later at every step,
+  which no K/V cache reproduces - and this checkpoint is unusually sensitive to
+  that shift: two otherwise identical un-cached runs whose window origin
+  differs by a single bar disagree by ~1e-1 relative in the final token logits,
+  enough to change which token is sampled. Pass `--context 488` (or any
+  `context <= 512 - horizon`) when you need the cached path to reproduce the
+  reference bar for bar; leave it at the default when you want the full window.
+  `make forecast/parity` gates both regimes.

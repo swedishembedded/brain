@@ -7,9 +7,18 @@
 # defended by a fp32-exact parity check, and the user-facing path is defended
 # by an end-to-end one:
 #
+#   0. kronos vs the UPSTREAM reference, rung by rung: normalization, the
+#      tokenizer's integer codes, decode_s1 with and without the calendar, the
+#      dependency layer, and the composed argmax rollout end to end. This is the
+#      only rung whose answer does not come from brain - every other check here
+#      compares one brain path against another, and a defect present on both
+#      passes them all. Goldens: crates/kronos/tests/golden, re-dumped with
+#      tools/goldens/kronos_dump_reference.py against the SHIPPED checkpoint.
 #   1. batched training == per-window finite-difference gradcheck  AND
 #      a b-batched step == the mean of the b single-window steps (grads allclose)
-#   2. kronos KV-cache path == the reference growing-window forecast (cosine 1.0)
+#   2. kronos KV-cache path == brain's OWN un-cached growing-window rollout
+#      (cosine 1.0). "reference" here means the un-cached path, not upstream -
+#      which is why 0 exists.
 #   3. kronos shared-prefill sampling == N independent rollouts (bit-identical)
 #   4. kronos cross-section batch == serial forecast_cached (bit-identical)
 #   5. the CSV boundary: a malformed OHLCV file is rejected with a line number
@@ -17,7 +26,7 @@
 #      weights -> a forecast that beats persistence over 4 rolling origins,
 #      and the chart renders
 #
-# 1 and the weight-free half of 5 are self-contained. 2, 3, 4, 6 need the real
+# 1 and the weight-free half of 5 are self-contained. 0, 2, 3, 4, 6 need the real
 # Kronos checkpoints:
 #
 #   BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER   the two HF checkpoint dirs
@@ -43,12 +52,17 @@ export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
 fail=0
 run() { local desc="$1"; shift; echo "=== $desc ==="; if "$@"; then echo "  PASS: $desc"; else echo "  FAIL: $desc"; fail=1; fi; echo; }
 
+# (0) the upstream anchor. Skips without checkpoints or goldens; FAILS without
+# them under BRAIN_REQUIRE_FIXTURES=1.
+run "kronos == upstream reference, rung by rung (tokens exact, rollout exact)" \
+    cargo test --release -q -p brain-kronos --test parity
+
 # (1) batched-training gates - self-contained (KronosConfig::tiny random weights).
 run "batched training == gradcheck + == mean-of-singles" \
     cargo test --release -q -p brain-kronos --test train_gradcheck batched
 
-# (2) KV-cache == reference forecast.
-run "kronos KV-cache == reference forecast (cosine 1.0)" \
+# (2) KV-cache == brain's own un-cached rollout.
+run "kronos KV-cache == un-cached rollout (cosine 1.0)" \
     cargo test --release -q -p brain-kronos --test kvcache_parity
 
 # (3,4) shared-prefill + cross-section bit-identity. ONE filter per invocation:

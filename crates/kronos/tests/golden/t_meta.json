@@ -1,7 +1,13 @@
 {
-  "context_len": 120,
+  "context_len": 520,
+  "pred_len": 12,
+  "max_context": 512,
   "feat": 6,
+  "clip": 5.0,
+  "logit_tail": 16,
   "s1_vocab": 1024,
-  "d_model": 512,
-  "n_layers": 8
+  "s2_vocab": 1024,
+  "d_model": 832,
+  "n_layers": 12,
+  "t7_context_len": 500
 }

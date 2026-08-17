@@ -76,6 +76,13 @@ fn cached_matches_uncached_and_is_faster() {
     let uncached = m.forecast(&bars, &ctx_stamp, &fut_stamp, pred_len, &opts);
     let dt_u = t0.elapsed().as_secs_f64();
 
+    // Warm the host weight set BEFORE the clock starts. `host_weights()` reads
+    // every decoder weight (~24M floats at the base tier) off the device on
+    // first use and memoizes it for the process; charging that one-time transfer
+    // to the first cached forecast made this gate compare "cached rollout +
+    // weight download" against "uncached rollout" and conclude the cache was
+    // slower than what it accelerates.
+    let _ = m.decoder().host_weights();
     let t0 = Instant::now();
     let cached = m.forecast_cached(&bars, &ctx_stamp, &fut_stamp, pred_len, &opts);
     let dt_c = t0.elapsed().as_secs_f64();
