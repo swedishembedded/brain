@@ -999,6 +999,7 @@ dependencies = [
  "brain-toyseq2seq",
  "brain-vae",
  "brain-vqgan",
+ "brain-wan",
 ]
 
 [[package]]
