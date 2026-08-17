@@ -39,6 +39,13 @@ pub fn audio_pipelines() -> &'static [(&'static str, &'static str)] {
         ("ln_head", kernels::LN_HEAD),                     // 10 (unused: no QK-norm)
         ("rope2d", kernels::ROPE2D),                       // 11 (unused: no RoPE)
         ("conv_bias", kernels::CONV_BIAS),                 // 12
+        // ---- coalesced cross-attention scores ----
+        // `attn_scores_cross` walks the fused KV slab with the KEY index as
+        // the fastest thread index, so every lane of a warp lands on its own
+        // cache line. Transposing K to key-minor once per span buys the same
+        // sweep coalesced loads.
+        ("kv_k_headt", kernels::KV_K_HEADT),               // 13
+        ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT), // 14
     ]
 }
 
@@ -60,9 +67,8 @@ fn vit_ids() -> VitKernelIds {
         attn_scores_cross: 7,
         attn_softmax_cross: 8,
         attn_apply_cross: 9,
-        // Not wired: see the note on `VitKernelIds::kv_k_headt`.
-        kv_k_headt: model::vit::UNREGISTERED,
-        attn_scores_cross_kt: model::vit::UNREGISTERED,
+        kv_k_headt: 13,
+        attn_scores_cross_kt: 14,
         ln_head: 10,
         rope2d: 11,
     }

@@ -46,6 +46,13 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS), // 23
         ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS), // 24
         ("axpy", kernels::AXPY),                         // 25
+        // ---- coalesced cross-attention scores ----
+        // `attn_scores_cross` walks the fused KV slab with the KEY index as
+        // the fastest thread index, so every lane of a warp lands on its own
+        // cache line. Transposing K to key-minor once per span buys the same
+        // sweep coalesced loads.
+        ("kv_k_headt", kernels::KV_K_HEADT),                // 26
+        ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT), // 27
     ]
 }
 
@@ -89,11 +96,8 @@ fn vit_ids() -> VitKernelIds {
         attn_scores_cross: 7,
         attn_softmax_cross: 8,
         attn_apply_cross: 9,
-        // The coalesced score path is not wired here: see the note on
-        // `VitKernelIds::kv_k_headt`. Two lines to opt in, once a model has a
-        // reference it can re-certify against.
-        kv_k_headt: model::vit::UNREGISTERED,
-        attn_scores_cross_kt: model::vit::UNREGISTERED,
+        kv_k_headt: 26,
+        attn_scores_cross_kt: 27,
         ln_head: 10,
         rope2d: 11,
     }
