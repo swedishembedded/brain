@@ -14,8 +14,7 @@
 //! masked-attention oracle, and a mutation-style check that the
 //! window is actually load-bearing (not merely "runs without panicking"). A
 //! real T>72 golden against the released checkpoint is real, separate
-//! follow-up work once the checkpoint is staged — tracked in
-//! `.todo/omni-chunked-code2wav.md`.
+//! follow-up work once the checkpoint is staged.
 
 use data::rng::Lcg;
 use gpu_core::Gpu;

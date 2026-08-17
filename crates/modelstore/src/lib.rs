@@ -81,8 +81,6 @@ pub struct LocalModel {
 /// shards of a single tensor set. Written by a [`recipe::ArtifactRecipe`]'s
 /// finish step (`crates/cli/src/supply.rs::convert`) after the recipe's
 /// artifacts have downloaded; read back by [`Store::local`]/[`Store::scan`].
-/// See `.todo/multi-file-model-store-manifest.md` for the design this
-/// implements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompoundManifest {
     /// The fully-qualified id this model registers under (`vendor/repo`).

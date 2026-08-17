@@ -8,7 +8,7 @@
 //! demuxers/decoders for real containers are
 //! immature or absent, and this repo is deliberately dependency-light
 //! (`AGENTS.md`), so this follows the same subprocess pattern already used
-//! elsewhere (`crates/perf/src/energy.rs`, `crates/npu/src/openvino/real.rs`).
+//! elsewhere (`crates/perf/src/env.rs`, `crates/npu/src/openvino/real.rs`).
 //!
 //! Frames are written by `ffmpeg` to numbered PPM (P6) files in a fresh temp
 //! directory, then read back through [`crate::codec::load`] — NOT parsed from

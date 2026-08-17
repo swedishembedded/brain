@@ -626,7 +626,7 @@ impl Codec {
             // gap (its own `EncoderConfig::sliding_window`, 250, is likewise
             // parsed and never applied) -- left unfixed here, out of this
             // change's scope (the encode path is not on Qwen3-Omni's call
-            // path at all), filed as `.todo/codec-encoder-sliding-window.md`.
+            // path at all).
             self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, self.cfg.sliding_window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
