@@ -1,0 +1,19 @@
+[package]
+name = "brain-ltxv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE encoder + conv decoder only (crates/vae's blocks3d primitives), built on brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels; the DiT, audio stack and NA diffusion decoder land in later milestones."
+
+[lib]
+name = "ltxv"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-vae.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

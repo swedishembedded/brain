@@ -80,6 +80,8 @@ const K_ADD_CHAN_BCAST: usize = 14;
 const K_IM2COL3D_AT: usize = 15;
 const K_MATMUL: usize = 16;
 const K_NLC_BIAS_NCHW: usize = 17;
+const K_SPACE_TO_DEPTH3D: usize = 18;
+const K_DEPTH_TO_SPACE3D: usize = 19;
 
 /// Frames of cross-chunk history every causal conv keeps (upstream `CACHE_T`).
 /// A `(3,1,1)`/`(3,3,3)` kernel with a one-sided pad of 2 needs exactly the
@@ -87,7 +89,7 @@ const K_NLC_BIAS_NCHW: usize = 17;
 pub const CACHE_T: u32 = 2;
 
 /// The 3D builder's kernel set, in slot order.
-pub const KERNELS: [(&str, &str); 18] = [
+pub const KERNELS: [(&str, &str); 20] = [
     ("conv3d", kernels::CONV3D),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -108,6 +110,10 @@ pub const KERNELS: [(&str, &str); 18] = [
     ("im2col3d_at", kernels::IM2COL3D_AT),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
+    // LTX-style channel-outer space-to-depth / depth-to-space resample - see
+    // [`Builder3d::space_to_depth`] / [`Builder3d::depth_to_space`].
+    ("space_to_depth3d", kernels::SPACE_TO_DEPTH3D),
+    ("depth_to_space3d", kernels::DEPTH_TO_SPACE3D),
 ];
 
 /// Slot index the first caller-supplied kernel gets when a set is built with
@@ -727,6 +733,44 @@ impl<'a> Builder3d<'a> {
         y
     }
 
+    /// `PixelNorm(dim=1)`: pure channel-axis RMS normalisation with **no
+    /// learnable gain** - `y = x / sqrt(mean(x^2, dim=channel) + eps)`. The
+    /// LTX video-VAE's norm (`norm_layer: pixel_norm`), used both for every
+    /// resnet block's `norm1`/`norm2` and for the encoder/decoder's
+    /// `conv_norm_out` - unlike [`Builder3d::rms_norm`] (the Wan-VAE's
+    /// channel-L2-norm-with-learnable-gain), this checkpoint carries no gamma
+    /// tensor for it at all (`PixelNorm` has zero parameters).
+    ///
+    /// Reuses [`K_L2NORM_SCALE`] rather than adding a kernel: that kernel
+    /// computes `x * rsqrt(sum_sq + eps_l2) * g[d]` over the channel axis.
+    /// Setting the uniform gain `g[d] = sqrt(C)` and `eps_l2 = C * eps`
+    /// reproduces `x / sqrt(mean(x^2) + eps)` exactly, since `sum_sq = C *
+    /// mean(x^2)`:
+    /// `sqrt(C) * rsqrt(sum_sq + C*eps) = sqrt(C) / sqrt(C*(mean_sq + eps)) =
+    /// 1/sqrt(mean_sq + eps)`. No new WGSL, just a different (gain, eps) pair
+    /// than [`Builder3d::rms_norm`] passes to the same kernel.
+    pub fn pixel_norm(&mut self, x: &T3, eps: f32) -> T3 {
+        let c = x.c as f32;
+        let gain = vec![c.sqrt(); x.c as usize];
+        let g = self.dev_owned(&format!("__pixel_norm.gain.{}", x.c), &gain);
+
+        let thw = x.t * x.h * x.w;
+        let rows = self.act(x.len());
+        self.steps.push(self.gpu.step(K_NCHW_NLC, &[&x.buf, &rows], &[x.n(), x.c, thw], x.n()));
+        let normed = self.act(x.len());
+        self.steps.push(self.gpu.step(
+            K_L2NORM_SCALE,
+            &[&rows, &g, &normed],
+            &[thw, x.c, f(c * eps)],
+            x.n(),
+        ));
+        let y = self.act3(x.c, x.t, x.h, x.w);
+        self.steps.push(self.gpu.step(K_NLC_NCHW, &[&normed, &y.buf], &[x.n(), x.c, thw], x.n()));
+        self.free(T3 { buf: rows, ..x.clone() });
+        self.free(T3 { buf: normed, ..x.clone() });
+        y
+    }
+
     // ------------------------------------------------------------ pointwise
 
     /// SiLU/swish (`x * sigmoid(x)`), elementwise.
@@ -872,6 +916,90 @@ impl<'a> Builder3d<'a> {
         ));
         self.free(lo);
         self.free(hi);
+        y
+    }
+
+    /// LTX's channel-OUTER 3D space-to-depth (contract): `[C,T,H,W] ->
+    /// [C*pt*ph*pw, T/pt, H/ph, W/pw]`, `einops`
+    /// `'b c (d p1)(h p2)(w p3) -> b (c p1 p2 p3) d h w'`. The encoder's
+    /// `SpaceToDepthDownsample` resample - both its own conv's output AND
+    /// (for the parameter-free group-mean skip, see [`Builder3d::group_mean`])
+    /// its raw input go through this.
+    ///
+    /// Genuinely new semantics, not a reuse of [`Builder3d::time_interleave`]
+    /// or `pixel_shuffle` (2D, batch-major NCHW - this volume is channel-major
+    /// `[C,T,H,W]` with no batch axis, and needs THREE factors folded out of
+    /// one channel axis at once, not one).
+    pub fn space_to_depth(&mut self, x: &T3, pt: u32, ph: u32, pw: u32) -> T3 {
+        assert!(x.t % pt == 0 && x.h % ph == 0 && x.w % pw == 0, "space_to_depth: {x:?} not divisible by ({pt},{ph},{pw})");
+        let (to, ho, wo) = (x.t / pt, x.h / ph, x.w / pw);
+        let y = self.act3(x.c * pt * ph * pw, to, ho, wo);
+        self.steps.push(self.gpu.step(
+            K_SPACE_TO_DEPTH3D,
+            &[&x.buf, &y.buf],
+            &[x.c, x.t, x.h, x.w, pt, ph, pw, to, ho, wo],
+            y.n(),
+        ));
+        y
+    }
+
+    /// LTX's channel-OUTER 3D depth-to-space (expand): the exact inverse of
+    /// [`Builder3d::space_to_depth`] - `[C,T,H,W] -> [C/(pt*ph*pw), T*pt,
+    /// H*ph, W*pw]`. The decoder's `DepthToSpaceUpsample` resample.
+    pub fn depth_to_space(&mut self, x: &T3, pt: u32, ph: u32, pw: u32) -> T3 {
+        let g = pt * ph * pw;
+        assert!(x.c % g == 0, "depth_to_space: {} channels not divisible by {g}", x.c);
+        let cout = x.c / g;
+        let y = self.act3(cout, x.t * pt, x.h * ph, x.w * pw);
+        self.steps.push(self.gpu.step(
+            K_DEPTH_TO_SPACE3D,
+            &[&x.buf, &y.buf],
+            &[x.c, x.t, x.h, x.w, pt, ph, pw, cout],
+            y.n(),
+        ));
+        y
+    }
+
+    /// The `SpaceToDepthDownsample` skip branch: average every consecutive
+    /// `group_size` channels down to one, `x.c / group_size` channels out
+    /// (upstream: `rearrange('b (c g) d h w -> b c g d h w', g=group_size)
+    /// .mean(dim=2)`).
+    ///
+    /// Built from the SAME generic channel-range extraction
+    /// [`Builder3d::chan_slice`]/[`Builder3d::time_slice`] already dispatch
+    /// (`K_CONCAT_SPLIT`, a `[N, total, inner]` view with a contiguous pick
+    /// along `total`): viewing `x` as `[N = x.c/group_size, total =
+    /// group_size, inner = T*H*W]` and picking each `total`-index `k` in turn
+    /// extracts exactly the `k`-th channel of every group (channel index
+    /// `n*group_size + k`, matching the `(c g)` - c outer, g inner - grouping
+    /// upstream's rearrange assumes). No new kernel.
+    pub fn group_mean(&mut self, x: &T3, group_size: u32) -> T3 {
+        assert!(x.c % group_size == 0, "group_mean: {} channels not divisible by group_size {group_size}", x.c);
+        let cout = x.c / group_size;
+        let inner = x.t * x.h * x.w;
+        let mut acc: Option<T3> = None;
+        for k in 0..group_size {
+            let slice = self.act3(cout, x.t, x.h, x.w);
+            self.steps.push(self.gpu.step(
+                K_CONCAT_SPLIT,
+                &[&x.buf, &slice.buf],
+                &[cout, group_size, 1, k, 1, inner],
+                slice.n(),
+            ));
+            acc = Some(match acc {
+                None => slice,
+                Some(prev) => {
+                    let sum = self.add(&prev, &slice);
+                    self.free(prev);
+                    self.free(slice);
+                    sum
+                }
+            });
+        }
+        let sum = acc.expect("group_mean: group_size must be >= 1");
+        let recip = vec![1.0f32 / group_size as f32; cout as usize];
+        let y = self.scale_chan(&format!("__group_mean.recip.{cout}.{group_size}"), &recip, &sum);
+        self.free(sum);
         y
     }
 

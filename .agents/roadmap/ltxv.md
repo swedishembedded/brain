@@ -82,9 +82,24 @@ this port:
       `testdata/golden/ltxv/` (regenerate locally, never committed). The
       diffusion (NA) video decoder and audio BWE stage are explicitly deferred
       to their own later milestones, not dumped here.
-- [ ] **Video VAE** (`crates/ltxv/src/vae3d.rs` over `vae::blocks3d`) - encoder +
-      conv decoder first (real weights, first milestone that runs everywhere),
-      the NA diffusion decoder deferred to the DFR milestone.
+- [x] **Video VAE** (`crates/ltxv/src/vae3d.rs` over `vae::blocks3d`) - encoder +
+      conv decoder, real weights, parity at cosine >= 0.999999 on both the
+      Vulkan and CPU-JIT backends (`crates/ltxv/tests/vae_parity.rs`, 7 tests:
+      encoder/decoder/round-trip at 9 and 17 frames, plus import coverage).
+      Two new kernels (`space_to_depth3d`/`depth_to_space3d`, channel-outer
+      3-axis resample - genuinely new semantics, not covered by the existing
+      2D `pixel_shuffle`), everything else (`PixelNorm`, the group-mean skip)
+      reuses existing `blocks3d` kernels via a synthesized gain/eps or a
+      channel-slice-and-average composition. Two real bugs found and fixed
+      during the port: the encoder's pre-shuffle frame-0 duplication was
+      applied twice instead of once (space_to_depth divisibility panic), and
+      the outer pixel `patchify`/`unpatchify` boundary uses a DIFFERENT
+      channel sub-order (width-then-height) than the internal
+      space-to-depth/depth-to-space resample (height-then-width) - conflating
+      the two produced a "structurally right, numerically off" 0.982 cosine
+      with every per-block tap bit-exact up to the last op. The NA diffusion
+      decoder and general overlapping-tile chunked encode/decode remain out
+      of scope, deferred to the DFR milestone.
 - [ ] **Video-stream DiT** (`LTXModelType::VideoOnly`) - block/model/rope/import,
       tiny-config parity climbing porting.md sec5 rung by rung.
 - [ ] **Pipeline + CLI + serving contract** - `brain ltxv t2v` to a playable mp4,

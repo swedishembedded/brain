@@ -1103,6 +1103,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-ltxv"
+version = "1.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-testutil",
+ "brain-vae",
+]
+
+[[package]]
 name = "brain-memauth"
 version = "1.0.0"
 

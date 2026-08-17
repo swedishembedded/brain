@@ -95,6 +95,7 @@ default-members = [
     "crates/instantid",
     "crates/imgpipe",
     "crates/wan",
+    "crates/ltxv",
     "crates/zipdepth",
     "crates/splat",
     "crates/worldmirror2",
@@ -205,6 +206,7 @@ brain-pulid = { path = "crates/pulid" }
 brain-instantid = { path = "crates/instantid" }
 brain-imgpipe = { path = "crates/imgpipe" }
 brain-wan = { path = "crates/wan" }
+brain-ltxv = { path = "crates/ltxv" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
 brain-worldmirror2 = { path = "crates/worldmirror2" }

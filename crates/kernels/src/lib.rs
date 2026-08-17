@@ -295,6 +295,8 @@ pub const DECODE_FEED: &str = include_str!("../wgsl/decode_feed.wgsl");
 pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
 /// `wgsl/decode_softmax_batched.wgsl`
 pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
+/// `wgsl/depth_to_space3d.wgsl`
+pub const DEPTH_TO_SPACE3D: &str = include_str!("../wgsl/depth_to_space3d.wgsl");
 /// `wgsl/dfl_decode.wgsl`
 pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
 /// `wgsl/dfl_grad.wgsl`
@@ -789,6 +791,8 @@ pub const SOFTMAX_ROWS: &str = include_str!("../wgsl/softmax_rows.wgsl");
 pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
 /// `wgsl/sort_scatter.wgsl`
 pub const SORT_SCATTER: &str = include_str!("../wgsl/sort_scatter.wgsl");
+/// `wgsl/space_to_depth3d.wgsl`
+pub const SPACE_TO_DEPTH3D: &str = include_str!("../wgsl/space_to_depth3d.wgsl");
 /// `wgsl/splat_bwd_count.wgsl`
 pub const SPLAT_BWD_COUNT: &str = include_str!("../wgsl/splat_bwd_count.wgsl");
 /// `wgsl/splat_bwd_emit.wgsl`
@@ -985,6 +989,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("decode_feed", DECODE_FEED),
     ("decode_softmax", DECODE_SOFTMAX),
     ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
+    ("depth_to_space3d", DEPTH_TO_SPACE3D),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
@@ -1232,6 +1237,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("softmax_rows", SOFTMAX_ROWS),
     ("sort_hist", SORT_HIST),
     ("sort_scatter", SORT_SCATTER),
+    ("space_to_depth3d", SPACE_TO_DEPTH3D),
     ("splat_bwd_count", SPLAT_BWD_COUNT),
     ("splat_bwd_emit", SPLAT_BWD_EMIT),
     ("splat_bwd_keys", SPLAT_BWD_KEYS),
