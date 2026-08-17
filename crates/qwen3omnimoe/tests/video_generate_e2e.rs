@@ -4,7 +4,7 @@
 //! Real end-to-end smoke test for the `video` capability, file to generation:
 //! a real video FILE (ffmpeg-encoded on the fly) -> `imaging::video::
 //! decode_frames` (real ffmpeg subprocess decode) -> `capability::blob::
-//! video_blob` (the wire encoder) -> `capability::blob::decode_video_hwc`
+//! video_blob` (the wire encoder) -> `capability::blob::decode_video`
 //! (the wire decoder) -> `OmniInner::generate_multimodal`'s `video`
 //! parameter -> `crate::mm::encode_video_frames` (real 2-frame temporal-
 //! paired vision encode) -> a real generation, on the real 48-layer/
@@ -36,7 +36,7 @@
 
 use std::process::Command;
 
-use capability::blob::decode_video_hwc;
+use capability::blob::decode_video;
 use capability::{Invocation, Provider};
 use imaging::video::{decode_frames, ffmpeg_available, VideoDecodeOpts};
 use qwen3omnimoe::caps::OmniProvider;
@@ -77,8 +77,8 @@ fn video_blob_generates_real_text_end_to_end() {
     // if the wire shape itself is wrong, fail here, not deep inside a
     // multi-minute real forward pass.
     let probe_inv = Invocation::new().blob("video", blob.clone());
-    let decoded = decode_video_hwc(&probe_inv, "video").expect("decode_video_hwc must accept video_blob's own wire shape");
-    assert_eq!(decoded, frames, "video_blob -> decode_video_hwc must round-trip exactly");
+    let decoded = decode_video(&probe_inv, "video").expect("decode_video must accept video_blob's own wire shape");
+    assert_eq!(decoded, frames, "video_blob -> decode_video must round-trip exactly");
 
     let provider = OmniProvider::load(&hf_dir).expect("load real checkpoint");
     let action = provider.action("generate").expect("qwen3omnimoe::caps must register a generate action");

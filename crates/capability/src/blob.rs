@@ -6,6 +6,10 @@
 //! meta `{"w","h","c"}`). Every provider and resident adapter decodes/encodes
 //! images through here; never re-implement it locally (that is how
 //! per-model encodings drift apart).
+//!
+//! [`video_blob`]/[`decode_video`] are the same format repeated per frame
+//! ([`Media::Video`], meta `{"frames","w","h","c"}`) - one blob for a whole
+//! clip, see [`decode_video`] for why it is not N image blobs.
 
 use serde_json::json;
 
@@ -70,11 +74,16 @@ pub fn decode_plane(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32)
 /// Wire shape chosen over a repeated blob because `Invocation::blobs` is a
 /// `BTreeMap<String, Blob>` — one blob per declared name, not a list — and
 /// extending that to a repeated/dynamic blob would ripple into the D-Bus
-/// fd-map and every HTTP transport for one input kind. Uses `Media::Bytes`
-/// (there is no `Media::Video`), matching `crates/vqgan`'s precedent for a
-/// non-image payload shipped that way.
-pub fn decode_video_hwc(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
+/// fd-map and every HTTP transport for one input kind.
+///
+/// [`Media::Video`] is the tag; untyped [`Media::Bytes`] is still accepted so
+/// a client that sent no media tag is not rejected, exactly as [`decode_hwc`]
+/// does for images.
+pub fn decode_video(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
     let b = inv.get_blob(name).ok_or_else(|| format!("missing required input '{name}'"))?;
+    if !matches!(b.media, Media::Video | Media::Bytes) {
+        return Err(format!("'{name}' must be a video blob (got {})", b.media.name()));
+    }
     let dim = |k: &str| b.meta.get(k).and_then(|v| v.as_u64()).ok_or_else(|| format!("'{name}' blob missing {k}"));
     let frames = dim("frames")? as usize;
     let (w, h, c) = (dim("w")? as u32, dim("h")? as u32, dim("c")? as usize);
@@ -98,11 +107,11 @@ pub fn decode_video_hwc(inv: &Invocation, name: &str) -> Result<Vec<(Vec<f32>, u
 
 /// Encode N RGB frames as a video [`Blob`]: concatenated interleaved-HWC f32
 /// planes + `{"frames","w","h","c"}` metadata — the encoder counterpart of
-/// [`decode_video_hwc`], for a caller that has real frames (e.g.
-/// `imaging::video::decode_frames`'s output) and wants to send them over a
-/// `generate`/`converse` `video` input. Every frame must share the SAME
-/// `w`/`h` (the wire format carries no per-frame dimensions, matching
-/// [`decode_video_hwc`]'s own single `{w,h}` pair).
+/// [`decode_video`], for a caller that has real frames (e.g.
+/// `imaging::video::decode_frames`'s output, or a generated clip) and wants to
+/// send them over a `video` input or return them as a `video` output. Every
+/// frame must share the SAME `w`/`h` (the wire format carries no per-frame
+/// dimensions, matching [`decode_video`]'s own single `{w,h}` pair).
 pub fn video_blob(frames: &[(Vec<f32>, u32, u32)]) -> Result<Blob, String> {
     let (_, w, h) = frames.first().ok_or("video_blob: at least one frame required")?;
     let (w, h) = (*w, *h);
@@ -117,7 +126,7 @@ pub fn video_blob(frames: &[(Vec<f32>, u32, u32)]) -> Result<Blob, String> {
         }
         bytes.extend(hwc.iter().flat_map(|f| f.to_le_bytes()));
     }
-    Ok(Blob::new(Media::Bytes, bytes).with_meta(json!({"frames": frames.len(), "w": w, "h": h, "c": 3})))
+    Ok(Blob::new(Media::Video, bytes).with_meta(json!({"frames": frames.len(), "w": w, "h": h, "c": 3})))
 }
 
 #[cfg(test)]
@@ -181,9 +190,9 @@ mod tests {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }
         }
-        let b = Blob::new(Media::Bytes, bytes).with_meta(json!({"frames": 3, "w": 2, "h": 1, "c": 3}));
+        let b = Blob::new(Media::Video, bytes).with_meta(json!({"frames": 3, "w": 2, "h": 1, "c": 3}));
         let inv = Invocation::new().blob("video", b);
-        let frames = decode_video_hwc(&inv, "video").unwrap();
+        let frames = decode_video(&inv, "video").unwrap();
         assert_eq!(frames.len(), 3);
         for ((hwc, w, h), expect) in frames.iter().zip(frames_f32.iter()) {
             assert_eq!((*w, *h), (2, 1));
@@ -194,32 +203,45 @@ mod tests {
     #[test]
     fn video_validates_meta_and_exact_payload_size() {
         // missing blob
-        assert!(decode_video_hwc(&Invocation::new(), "video").unwrap_err().contains("missing required input"));
+        assert!(decode_video(&Invocation::new(), "video").unwrap_err().contains("missing required input"));
         // missing meta
-        let inv = Invocation::new().blob("video", Blob::new(Media::Bytes, vec![0; 24]));
-        assert!(decode_video_hwc(&inv, "video").unwrap_err().contains("missing frames"));
+        let inv = Invocation::new().blob("video", Blob::new(Media::Video, vec![0; 24]));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("missing frames"));
         // not 3-channel
         let inv = Invocation::new().blob(
             "video",
-            Blob::new(Media::Bytes, vec![0; 8]).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 1})),
+            Blob::new(Media::Video, vec![0; 8]).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 1})),
         );
-        assert!(decode_video_hwc(&inv, "video").unwrap_err().contains("3-channel"));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("3-channel"));
         // payload size mismatch (declares 2 frames, ships bytes for 1)
         let inv = Invocation::new().blob(
             "video",
-            Blob::new(Media::Bytes, vec![0; 12]).with_meta(json!({"frames": 2, "w": 1, "h": 1, "c": 3})),
+            Blob::new(Media::Video, vec![0; 12]).with_meta(json!({"frames": 2, "w": 1, "h": 1, "c": 3})),
         );
-        assert!(decode_video_hwc(&inv, "video").unwrap_err().contains("expected"));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("expected"));
+        // an image blob is not a clip, even with plausible-looking metadata
+        let inv = Invocation::new().blob("video", image_blob(&[0.0; 3], 1, 1, 3).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 3})));
+        assert!(decode_video(&inv, "video").unwrap_err().contains("must be a video blob"));
+    }
+
+    /// An untagged payload (a client that sent no media kind) still decodes,
+    /// the same leniency `decode_hwc` gives images -- this is what keeps a
+    /// pre-`Media::Video` caller working.
+    #[test]
+    fn video_still_accepts_an_untyped_bytes_payload() {
+        let bytes: Vec<u8> = [1.0f32, 0.0, 0.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+        let inv = Invocation::new().blob("video", Blob::new(Media::Bytes, bytes).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 3})));
+        assert_eq!(decode_video(&inv, "video").unwrap().len(), 1);
     }
 
     #[test]
-    fn video_blob_roundtrips_through_decode_video_hwc() {
+    fn video_blob_roundtrips_through_decode_video() {
         let frames: Vec<(Vec<f32>, u32, u32)> = vec![(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 2, 1), (vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0], 2, 1)];
         let b = video_blob(&frames).unwrap();
-        assert_eq!(b.media, Media::Bytes);
+        assert_eq!(b.media, Media::Video);
         assert_eq!(b.meta, json!({"frames": 2, "w": 2, "h": 1, "c": 3}));
         let inv = Invocation::new().blob("video", b);
-        let back = decode_video_hwc(&inv, "video").unwrap();
+        let back = decode_video(&inv, "video").unwrap();
         assert_eq!(back, frames);
     }
 

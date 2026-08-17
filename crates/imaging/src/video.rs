@@ -64,7 +64,7 @@ impl Default for VideoDecodeOpts {
 
 /// Decode a video file to RGB frames: one `(hwc_f32_unit, w, h)` tuple per
 /// frame, in order - the exact shape `qwen3omnimoe::mm::encode_video_frames` takes
-/// (`Rgb8::to_hwc_unit`'s output, `capability::blob::decode_video_hwc`'s wire
+/// (`Rgb8::to_hwc_unit`'s output, `capability::blob::decode_video`'s wire
 /// convention). Returns a clear error (not a panic) when `ffmpeg` is absent,
 /// the path doesn't exist, ffmpeg fails, or it produces zero frames.
 pub fn decode_frames(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {

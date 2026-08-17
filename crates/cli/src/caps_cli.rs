@@ -262,7 +262,8 @@ fn coerce(ty: &ParamType, s: &str) -> Value {
 /// Load a file into a [`Blob`] with the media the action's input spec declares.
 /// Images/masks are decoded to raw **HWC f32** planes in `[0,1]` (meta `{w,h,c}`);
 /// a WAV audio file is decoded to raw 16 kHz mono f32 PCM (meta
-/// `{"sample_rate":16000}`); text/bytes are read raw.
+/// `{"sample_rate":16000}`); a video container is demuxed to RGB frames
+/// (`capability::blob::video_blob`'s wire format); text/bytes are read raw.
 fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> {
     let media = spec.inputs.iter().find(|b| b.name == name).map(|b| b.media).ok_or_else(|| format!("action has no input '{name}'"))?;
     match media {
@@ -275,6 +276,15 @@ fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> 
         Media::Audio => {
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
             load_audio_bytes(bytes)
+        }
+        // A `video` input is a CLIP, not a file: the wire format is decoded
+        // frames, so the container has to be demuxed here (the model crates
+        // deliberately have no ffmpeg dependency). Defaults are
+        // `VideoDecodeOpts`'s -- 1 fps, at most 32 frames, the scale a
+        // multimodal prompt is validated at.
+        Media::Video => {
+            let frames = imaging::video::decode_frames(std::path::Path::new(path), &Default::default())?;
+            capability::blob::video_blob(&frames)
         }
         _ => std::fs::read(path).map(|b| Blob::new(media, b)).map_err(|e| e.to_string()),
     }
@@ -299,9 +309,31 @@ fn load_audio_bytes(bytes: Vec<u8>) -> Result<Blob, String> {
 
 /// Write a [`Blob`] to a file: images (raw HWC f32 + `{w,h,c}` meta) → binary PPM
 /// (P6, the brain image convention) or PNG (see [`imaging::save`]); audio →
-/// a WAV file; everything else → raw bytes.
+/// a WAV file; video (raw HWC f32 frames + `{frames,w,h,c}` meta) → a
+/// container via `imaging::video::encode_frames`; everything else → raw bytes.
 fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
     match b.media {
+        // A clip, not bytes: writing the raw f32 frames out would produce a
+        // file no player opens, which is the same class of bug the audio arm
+        // below exists to fix. The frame rate rides in the blob's own meta,
+        // because only the producing action knows it; the fallback is the one
+        // value every current producer would have written anyway.
+        Media::Video => {
+            let frames = capability::blob::decode_video(&Invocation::new().blob("video", b.clone()), "video")?;
+            let fps = b.meta.get("fps").and_then(|v| v.as_f64()).unwrap_or(16.0);
+            let rgb: Vec<imaging::Rgb8> = frames
+                .iter()
+                .map(|(hwc, w, h)| imaging::pixels::hwc_to_rgb8(hwc, *w, *h, 3, imaging::ChannelPolicy::ReplicateFirst))
+                .collect::<Result<_, _>>()?;
+            match imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &Default::default())? {
+                imaging::video::Encoded::Video(_) => Ok(()),
+                imaging::video::Encoded::Frames { dir, command } => {
+                    eprintln!("brain: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", rgb.len(), dir.display());
+                    eprintln!("brain: finish the job with:\n  {command}");
+                    Ok(())
+                }
+            }
+        }
         Media::Image | Media::Mask => {
             let w = b.meta["w"].as_u64().ok_or("image blob missing w")? as u32;
             let h = b.meta["h"].as_u64().ok_or("image blob missing h")? as u32;

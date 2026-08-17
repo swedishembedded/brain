@@ -98,7 +98,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use capability::blob::{decode_image, decode_video_hwc};
+use capability::blob::{decode_image, decode_video};
 use capability::{last_user_text, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
@@ -700,7 +700,7 @@ impl Int8ThinkerInstance {
     /// `OmniInner::generate`/`generate_multimodal` take - `last_user_text`
     /// (the shared messages-array extraction, not a second parser), decode
     /// the same three optional blobs the SAME way (`audio::asr_caps::
-    /// wav_from_blob`, `capability::blob::decode_image`/`decode_video_hwc`),
+    /// wav_from_blob`, `capability::blob::decode_image`/`decode_video`),
     /// splice via the SAME `crate::mm::build_multimodal_prompt` when any are
     /// present, greedy generate, `decode` - so the two Thinker-backed models
     /// answer an identical request the same way and differ only in how the
@@ -726,7 +726,7 @@ impl Int8ThinkerInstance {
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video(inv, "video")).transpose()?;
 
         progress(Progress::step(0, max_new, "generating"));
         let t0 = std::time::Instant::now();

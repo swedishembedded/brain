@@ -93,6 +93,14 @@ pub enum Media {
     Image,
     Mask,
     Audio,
+    /// A clip: N interleaved-HWC f32 RGB frames concatenated into one payload,
+    /// meta `{"frames","w","h","c"}` - [`blob::video_blob`] /
+    /// [`blob::decode_video`]. A distinct kind rather than [`Media::Bytes`]
+    /// because a host has to know the payload is frames to pick a codec at
+    /// all: the CLI writes it through a container encoder and reads a
+    /// container back, and the wire shape is indistinguishable from a single
+    /// wide image by length alone.
+    Video,
     Text,
     Bytes,
 }
@@ -103,6 +111,7 @@ impl Media {
             Media::Image => "image",
             Media::Mask => "mask",
             Media::Audio => "audio",
+            Media::Video => "video",
             Media::Text => "text",
             Media::Bytes => "bytes",
         }
@@ -112,6 +121,7 @@ impl Media {
             "image" => Media::Image,
             "mask" => Media::Mask,
             "audio" => Media::Audio,
+            "video" => Media::Video,
             "text" => Media::Text,
             "bytes" => Media::Bytes,
             _ => return None,

@@ -45,8 +45,10 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 - `params` / `in_meta` / `out_meta` are JSON strings.
 - `in_fds` / `out_fds` are `a{sh}` — a map from **blob name** to a Unix fd.
 - `in_meta` describes each input fd: `{"image": {"media":"image","w":512,"h":512,"c":3}}`.
-  `media` is one of `image|mask|audio|text|bytes`; the whole object is passed to the
-  action as the blob's metadata.
+  `media` is one of `image|mask|audio|video|text|bytes`; the whole object is passed
+  to the action as the blob's metadata. `video` is a whole clip in one blob:
+  N interleaved-HWC f32 RGB frames concatenated, meta `{"frames","w","h","c"}`
+  (plus `fps` on a generated one) - see `examples/videogen/`.
 - `transport` is `"memfd"` (default) or `"dmabuf"` (best-effort — falls back to
   memfd where no DMA-heap is available; the actual choice is reported in `out_meta`).
 

@@ -26,9 +26,9 @@
 //! directly for transcription today). Declaring an action whose `run()`
 //! can't actually do what its spec promises is worse than not declaring it.
 //! All three actions are single-turn (no multi-turn Talker context tracked
-//! across calls). Video input: a `video` blob (`Media::Bytes`, N concatenated
+//! across calls). Video input: a `video` blob (`Media::Video`, N concatenated
 //! HWC-f32 RGB frames + `{frames,w,h,c}` meta —
-//! `capability::blob::decode_video_hwc`) decodes to the already-decoded-frame
+//! `capability::blob::decode_video`) decodes to the already-decoded-frame
 //! list `crate::mm::encode_video_frames` takes. Frame EXTRACTION (demuxing an
 //! actual video file into frames) stays out of scope for this crate, same as
 //! before — the caller (`brain-py`) supplies frames it already has.
@@ -56,7 +56,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use capability::blob::{decode_image, decode_video_hwc};
+use capability::blob::{decode_image, decode_video};
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
@@ -116,7 +116,7 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
 pub fn with_multimodal_inputs(spec: ActionSpec) -> ActionSpec {
     spec.input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
-        .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
+        .input(BlobSpec::new("video", Media::Video, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video's wire convention)"))
 }
 
 /// The `generate` action schema - see this module's doc for why it mirrors
@@ -161,7 +161,7 @@ pub fn converse_spec() -> ActionSpec {
         .param(ParamSpec::new("speaker", ParamType::Str, "voice name from TalkerConfig::speaker_id (chelsie/ethan/aiden); falls back to the first configured voice").default(json!("chelsie")))
         .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
         .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
-        .input(BlobSpec::new("video", Media::Bytes, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video_hwc's wire convention)"))
+        .input(BlobSpec::new("video", Media::Video, "optional video input: N concatenated interleaved-HWC f32 RGB frames in [0,1], meta {frames,w,h,c=3} (capability::blob::decode_video's wire convention)"))
         .output(BlobSpec::new("text", Media::Text, "the generated response text"))
         .output(BlobSpec::new("audio", Media::Audio, "the spoken response: raw mono f32 little-endian PCM at Code2WavConfig::output_sample_rate (24 kHz)"))
 }
@@ -484,7 +484,7 @@ impl OmniInner {
     /// [`Self::generate`] takes. `audio` is raw 16kHz mono PCM; `image` is
     /// `(hwc, w, h)` (`capability::blob::decode_image`'s output shape);
     /// `video` is per-frame `(hwc, w, h)` in order
-    /// (`capability::blob::decode_video_hwc`'s output shape) — each frame
+    /// (`capability::blob::decode_video`'s output shape) - each frame
     /// runs through `crate::mm::encode_video_frames`'s single-frame-path
     /// approximation, per that function's own doc.
     pub fn generate_multimodal(
@@ -688,7 +688,7 @@ impl Action for GenerateAction {
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video(inv, "video")).transpose()?;
 
         progress(Progress::step(0, max_new, "generating"));
         let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
@@ -758,7 +758,7 @@ impl Action for ConverseAction {
 
         let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
         let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| decode_video_hwc(inv, "video")).transpose()?;
+        let video = inv.get_blob("video").map(|_| decode_video(inv, "video")).transpose()?;
         let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
 
         progress(Progress::step(0, 2, "generating text"));
