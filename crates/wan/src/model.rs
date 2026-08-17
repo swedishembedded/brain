@@ -19,6 +19,12 @@
 //! the token vector it consumes is **channel-outermost**. The head's output row
 //! is `view(*patch_size, c)`, i.e. **channel-innermost**. Reusing one ordering
 //! for both produces a shuffled latent that still looks like video.
+//!
+//! [`patchify`] (channel-outermost) is this crate's own - it is the one
+//! ordering `crates/dit`'s shared `dit::patchify` does NOT implement, because
+//! no other model in this repo needs it (see that module's doc). Unpatchify
+//! IS the shared channel-innermost ordering (at a temporal patch of 1), so it
+//! is `dit::patchify::unpatchify` directly - see [`postprocess`].
 
 use model::hostmath;
 
@@ -76,16 +82,24 @@ pub fn gelu_tanh(x: &mut [f32]) {
 /// The timestep conditioning: `e` (`[dim]`, the head's modulation base) and
 /// `e0` (`[6·dim]`, every block's).
 ///
-/// `sinusoidal_embedding_1d` is `cat([cos, sin])` over `10000^(-k/half)`, which
-/// is the shared `hostmath::timestep_embedding` at `flip_sin_to_cos = true`,
-/// `downscale_freq_shift = 0` - upstream accumulates the angle in f64 and so
-/// does that helper.
+/// `sinusoidal_embedding_1d` is `cat([cos, sin])` over `10000^(-k/half)`
+/// through `Linear -> SiLU -> Linear` - `time_embedding.0`/`.2` - which is
+/// exactly `dit::timestep::pixart_timestep_embed`, giving `e`. The third
+/// linear, `time_projection.1`, is Wan's own: it maps `silu(e)` into the
+/// per-block `[6·dim]` modulation `e0` and has no shared-crate counterpart.
 pub fn timestep_cond(cfg: &WanConfig, w: &Tensors, t: f32) -> (Vec<f32>, Vec<f32>) {
     let (dim, fd) = (cfg.dim, cfg.freq_dim);
-    let te = hostmath::timestep_embedding(t, fd, true, 0.0, 10000.0);
-    let h0 = linear(&te, 1, fd, tget(w, "time_embedding.0.weight"), Some(tget(w, "time_embedding.0.bias")), dim);
-    let h0 = hostmath::silu_slice(&h0);
-    let e = linear(&h0, 1, dim, tget(w, "time_embedding.2.weight"), Some(tget(w, "time_embedding.2.bias")), dim);
+    let e = dit::timestep::pixart_timestep_embed(
+        t,
+        fd,
+        tget(w, "time_embedding.0.weight"),
+        tget(w, "time_embedding.0.bias"),
+        dim,
+        tget(w, "time_embedding.2.weight"),
+        tget(w, "time_embedding.2.bias"),
+        dim,
+        10000.0,
+    );
     let e_act = hostmath::silu_slice(&e);
     let e0 = linear(&e_act, 1, dim, tget(w, "time_projection.1.weight"), Some(tget(w, "time_projection.1.bias")), 6 * dim);
     (e, e0)
@@ -106,30 +120,6 @@ pub fn patchify(latent: &[f32], c: usize, f: usize, h: usize, w: usize, ph: usiz
                         for b in 0..pw {
                             let src = ((ci * f + fi) * h + hi * ph + a) * w + wi * pw + b;
                             out[tok + (ci * ph + a) * pw + b] = latent[src];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Inverse of the head's row layout: `[tokens, pH·pW·C]` (channel-innermost)
-/// -> `[C, F, H, W]`.
-pub fn unpatchify(tokens: &[f32], c: usize, f: usize, ht: usize, wt: usize, ph: usize, pw: usize) -> Vec<f32> {
-    let (h, w) = (ht * ph, wt * pw);
-    let patch = ph * pw * c;
-    let mut out = vec![0f32; c * f * h * w];
-    for fi in 0..f {
-        for hi in 0..ht {
-            for wi in 0..wt {
-                let tok = ((fi * ht + hi) * wt + wi) * patch;
-                for a in 0..ph {
-                    for b in 0..pw {
-                        for ci in 0..c {
-                            let v = tokens[tok + (a * pw + b) * c + ci];
-                            out[((ci * f + fi) * h + hi * ph + a) * w + wi * pw + b] = v;
                         }
                     }
                 }
@@ -224,13 +214,16 @@ pub fn preprocess(cfg: &WanConfig, w: &Tensors, latent: &[f32], f: u32, h: u32, 
     Pre { tokens, ctx: text_embed(cfg, w, context, ctx_rows), cos: r.cos, sin: r.sin, e, e0, n_tokens, grid }
 }
 
-/// The head plus unpatchify - the mirror of [`preprocess`].
+/// The head plus unpatchify - the mirror of [`preprocess`]. Unpatchify is the
+/// shared channel-innermost ordering at a temporal patch of 1 (`pt` is
+/// asserted to be 1 in [`patch_grid`]), so it is `dit::patchify::unpatchify`
+/// directly rather than a local copy.
 pub fn postprocess(cfg: &WanConfig, w: &Tensors, x: &[f32], e: &[f32], grid: (u32, u32, u32)) -> Vec<f32> {
     let n = (grid.0 * grid.1 * grid.2) as usize;
     let (pt, ph, pw) = cfg.patch_size;
     let rows = head(cfg, w, x, e, n);
     let _ = pt;
-    unpatchify(&rows, cfg.out_channels, grid.0 as usize, grid.1 as usize, grid.2 as usize, ph, pw)
+    dit::patchify::unpatchify(&rows, cfg.out_channels, grid.0 as usize, grid.1 as usize, grid.2 as usize, 1, ph, pw)
 }
 
 /// The Wan DiT with host weights, running one forward per call.
@@ -305,11 +298,11 @@ mod tests {
         assert_eq!(flat, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
         // The head's layout is channel-innermost, so the same 8 values
         // unpatchify to a different tensor.
-        let back = unpatchify(&flat, c, f, 1, 1, 2, 2);
+        let back = dit::patchify::unpatchify(&flat, c, f, 1, 1, 1, 2, 2);
         assert_ne!(back, x);
         // ...and the head layout of the SAME latent is the interleaved one.
         let head_rows = vec![0.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0, 7.0];
-        assert_eq!(unpatchify(&head_rows, c, f, 1, 1, 2, 2), x);
+        assert_eq!(dit::patchify::unpatchify(&head_rows, c, f, 1, 1, 1, 2, 2), x);
     }
 
     #[test]

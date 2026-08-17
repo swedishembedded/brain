@@ -703,8 +703,12 @@ mod tests {
     /// The generic patchify/unpatchify must be the SAME permutations the
     /// forward path uses. They are two different orderings (channel-outermost
     /// in, channel-innermost out) and reusing one for both produces a shuffled
-    /// latent that still looks like video - so this pins each against
-    /// `crate::model`'s f32 original rather than against the other.
+    /// latent that still looks like video - so this pins each against its f32
+    /// original: `patchify` against `crate::model`'s own (Wan's genuinely
+    /// different, channel-outermost ordering - not shared), `unpatchify`
+    /// against `dit::patchify::unpatchify` (the shared channel-innermost
+    /// ordering `crate::model::postprocess` itself calls, at a temporal patch
+    /// of 1).
     #[test]
     fn the_generic_patchify_agrees_with_the_forward_paths() {
         let (c, f, h, w, ph, pw) = (3usize, 3usize, 4usize, 6usize, 2usize, 2usize);
@@ -713,7 +717,7 @@ mod tests {
         let rows: Vec<f32> = (0..(f * (h / ph) * (w / pw) * ph * pw * c)).map(|i| (i % 17) as f32 - 8.0).collect();
         assert_eq!(
             unpatchify(&rows, c, f, h / ph, w / pw, ph, pw),
-            crate::model::unpatchify(&rows, c, f, h / ph, w / pw, ph, pw)
+            dit::patchify::unpatchify(&rows, c, f, h / ph, w / pw, 1, ph, pw)
         );
     }
 

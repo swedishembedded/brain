@@ -787,6 +787,9 @@ dependencies = [
 [[package]]
 name = "brain-dit"
 version = "1.0.0"
+dependencies = [
+ "brain-model",
+]
 
 [[package]]
 name = "brain-ecapatdnn"

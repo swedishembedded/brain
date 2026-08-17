@@ -14,6 +14,9 @@
 //! isolation; the device blocks build on `gpu_core`/`kernels`/`wm-core` as they
 //! are wired to each model's forward.
 
+pub mod adaln;
+pub mod patchify;
 pub mod rope;
+pub mod timestep;
 
 pub use rope::{RopeConfig, RopeTables};

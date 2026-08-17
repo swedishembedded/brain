@@ -9,11 +9,12 @@
 //! caption (context_refiner) → concat `[image, caption]` → main layers →
 //! FinalLayer → unpatchify.
 //!
-//! The transformer blocks run on the device (`ZImageBlock`); everything else —
-//! the biased embedder/final-layer linears, patchify/unpatchify, the timestep
-//! sinusoid, RoPE-id construction — is cheap host math done where the data
-//! already lives. Tokens round-trip host↔device between blocks; a device-resident
-//! chaining is a later optimization (the numerics are what this validates).
+//! The transformer blocks run on the device (`ZImageBlock`); everything else -
+//! the biased embedder/final-layer linears, patchify/unpatchify (`dit::
+//! patchify`), the timestep sinusoid+MLP (`dit::timestep`), RoPE-id
+//! construction - is cheap host math done where the data already lives.
+//! Tokens round-trip host↔device between blocks; a device-resident chaining
+//! is a later optimization (the numerics are what this validates).
 
 use dit::rope::{tables_for_ids, RopeConfig, RopeTables};
 // Single implementation of the elementwise/normalisation math.
@@ -159,18 +160,6 @@ pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -
 }
 
 
-/// Sinusoidal timestep embedding (diffusers `TimestepEmbedder.timestep_embedding`,
-/// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]` — the shared
-/// `model::hostmath::timestep_embedding` with `flip_sin_to_cos = true` (that flag
-/// picks which half comes first: `true` puts cos first, matching Z-Image's fixed
-/// `cat([cos(args), sin(args)])`, the same way `flux1`/`flux2` call this same
-/// helper for their own "cos first" timestep embedding), `downscale_freq_shift =
-/// 0` (this used to be a local f32 re-derivation; the shared one accumulates the
-/// angle in f64 like the references do).
-pub(crate) fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
-    model::hostmath::timestep_embedding(t, dim, true, 0.0, max_period as f64)
-}
-
 /// Host pre-block state: timestep conditioning, embedded image/caption tokens,
 /// and the per-stream RoPE tables. Shared by the reference ([`ZImageModel`]) and
 /// device-resident ([`crate::dev::ZImageDit`]) forwards.
@@ -194,7 +183,8 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &dyn HostLookup, latent: &[f32],
     let ncap = cap_len as usize;
     let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
 
-    let patches = patchify(latent, cfg.in_channels, f, h, wd, ps, pf);
+    let patches =
+        dit::patchify::patchify(latent, cfg.in_channels as usize, f as usize, h as usize, wd as usize, pf as usize, ps as usize, ps as usize);
     let (xemb_w, xemb_b) = w.xemb(cfg);
     let img = linear(&patches, n_img, patch_dim, xemb_w, Some(xemb_b), dim);
     let cn = hostmath::rmsnorm_rows(cap, w.cap_norm(), ncap, cfg.cap_feat_dim as usize, cfg.norm_eps);
@@ -224,13 +214,13 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &dyn HostLookup, latent: &[f32],
     }
 }
 
-/// Timestep conditioning `c = t_embedder(t·t_scale)` `[cdim]`.
+/// Timestep conditioning `c = t_embedder(t·t_scale)` `[cdim]` - Z-Image's
+/// `TimestepEmbedder`: sinusoid(256) -> Linear(256,1024) -> SiLU ->
+/// Linear(1024,cdim), i.e. `dit::timestep::pixart_timestep_embed` exactly.
 pub(crate) fn timestep_cond(cfg: &ZImageConfig, w: &dyn HostLookup, t: f32) -> Vec<f32> {
     let cdim = (cfg.dim as usize).min(256);
-    let te = timestep_embedding(t * cfg.t_scale, 256, 10000.0);
     let (t0_w, t0_b, t2_w, t2_b) = w.t_embed();
-    let h0 = hostmath::silu_slice(&linear(&te, 1, 256, t0_w, Some(t0_b), 1024));
-    linear(&h0, 1, 1024, t2_w, Some(t2_b), cdim)
+    dit::timestep::pixart_timestep_embed(t * cfg.t_scale, 256, t0_w, t0_b, 1024, t2_w, t2_b, cdim, 10000.0)
 }
 
 /// FinalLayer (LayerNorm-no-affine · (1+adaLN(c)) → linear) + unpatchify the
@@ -252,7 +242,8 @@ pub(crate) fn postprocess(cfg: &ZImageConfig, w: &dyn HostLookup, uni: &[f32], c
         }
     }
     let final_out = linear(&scaled, ntot, dim, flin_w, Some(flin_b), patch_dim);
-    unpatchify(&final_out[..n_img * patch_dim], cfg.in_channels, f, h, wd, ps, pf)
+    let (ft, ht, wt) = ((f / pf) as usize, (h / ps) as usize, (wd / ps) as usize);
+    dit::patchify::unpatchify(&final_out[..n_img * patch_dim], cfg.in_channels as usize, ft, ht, wt, pf as usize, ps as usize, ps as usize)
 }
 
 /// The Z-Image DiT: config + host weights, runs a single forward.
@@ -298,61 +289,4 @@ impl ZImageModel {
         }
         postprocess(c, &self.w, &uni, &cvec, pre.n_img, f, h, w)
     }
-}
-
-/// `[C,F,H,W] -> [n_patches, pF·pH·pW·C]`, patch (f,h,w) row-major, inner order
-/// `[pF,pH,pW,C]` (matches diffusers `_patchify_image`).
-pub(crate) fn patchify(latent: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
-    let (c, ft, ht, wt) = (ch as usize, (f / pf) as usize, (h / ps) as usize, (w / ps) as usize);
-    let (pf, ph, pw) = (pf as usize, ps as usize, ps as usize);
-    let (fh, fw) = (h as usize, w as usize);
-    let patch_dim = pf * ph * pw * c;
-    let mut out = vec![0f32; ft * ht * wt * patch_dim];
-    for ff in 0..ft {
-        for hh in 0..ht {
-            for ww in 0..wt {
-                let tok = (ff * ht * wt + hh * wt + ww) * patch_dim;
-                for pff in 0..pf {
-                    for phh in 0..ph {
-                        for pww in 0..pw {
-                            for cc in 0..c {
-                                let src = ((cc * (f as usize) + (ff * pf + pff)) * fh + (hh * ph + phh)) * fw + (ww * pw + pww);
-                                let dst = tok + ((pff * ph + phh) * pw + pww) * c + cc;
-                                out[dst] = latent[src];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Inverse of [`patchify`]: `[n_img, pF·pH·pW·C] -> [C,F,H,W]`.
-pub(crate) fn unpatchify(tokens: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
-    let (c, ft, ht, wt) = (ch as usize, (f / pf) as usize, (h / ps) as usize, (w / ps) as usize);
-    let (pfz, ph, pw) = (pf as usize, ps as usize, ps as usize);
-    let (fh, fw) = (h as usize, w as usize);
-    let patch_dim = pfz * ph * pw * c;
-    let mut out = vec![0f32; c * (f as usize) * fh * fw];
-    for ff in 0..ft {
-        for hh in 0..ht {
-            for ww in 0..wt {
-                let tok = (ff * ht * wt + hh * wt + ww) * patch_dim;
-                for pff in 0..pfz {
-                    for phh in 0..ph {
-                        for pww in 0..pw {
-                            for cc in 0..c {
-                                let val = tokens[tok + ((pff * ph + phh) * pw + pww) * c + cc];
-                                let dst = ((cc * (f as usize) + (ff * pfz + pff)) * fh + (hh * ph + phh)) * fw + (ww * pw + pww);
-                                out[dst] = val;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
 }

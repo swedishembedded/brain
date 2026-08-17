@@ -8,3 +8,9 @@ description = "Shared diffusion-transformer (DiT) building blocks: multi-axis im
 [lib]
 name = "dit"
 path = "src/lib.rs"
+
+[dependencies]
+# `hostmath::timestep_embedding`/`silu_slice` - the sinusoid + activation
+# `timestep::pixart_timestep_embed` wraps in the shared MLP shape. `model`
+# does not depend on `dit`, so this is not a cycle.
+brain-model.workspace = true

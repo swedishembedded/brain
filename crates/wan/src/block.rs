@@ -21,11 +21,14 @@
 //!
 //! is an identity, not an approximation. The six vectors therefore become two
 //! `(gamma, beta)` pairs plus two gates per block, computed once per forward on
-//! the host, and no separate modulation kernel is dispatched. Wan 2.2's TI2V
-//! variant passes a **per-token** `temb` (`temb.ndim == 4` in diffusers), which
-//! breaks token-independence and is out of scope here; [`ModBufs::upload`]
-//! takes a single `[6·dim]` vector, so that variant cannot be fed to it by
-//! accident.
+//! the host, and no separate modulation kernel is dispatched. The `modulation +
+//! e0` add itself is `dit::adaln::add_table` (PixArt's shared-table trick,
+//! generalised there to also cover a future per-token modulation vector) at
+//! `rows=1` - the ROW COUNT is what encodes token-independence, not a
+//! different function. Wan 2.2's TI2V variant passes a **per-token** `temb`
+//! (`temb.ndim == 4` in diffusers), which breaks token-independence and is
+//! out of scope here; [`ModBufs::upload`] takes a single `[6·dim]` vector, so
+//! that variant cannot be fed to it by accident.
 //!
 //! ## Attention
 //!
@@ -282,12 +285,13 @@ impl ModBufs {
 
     /// Fold `modulation + e0` into the norm affines and gates and upload.
     /// `e0` is `[6·dim]`, chunk order `(shift, scale, gate)` for self-attention
-    /// then the same three for the FFN - upstream's `chunk(6, dim=1)`.
+    /// then the same three for the FFN - upstream's `chunk(6, dim=1)`. The add
+    /// itself is `dit::adaln::add_table` at `rows=1` - `e0` is one modulation
+    /// vector shared by every token in this forward, not a per-token one.
     pub fn upload(&self, gpu: &Gpu, e0: &[f32], dim: usize) {
         assert_eq!(e0.len(), 6 * dim, "e0 must be [6, dim]");
-        let part = |i: usize| -> Vec<f32> {
-            self.modulation[i * dim..(i + 1) * dim].iter().zip(&e0[i * dim..(i + 1) * dim]).map(|(a, b)| a + b).collect()
-        };
+        let m = dit::adaln::add_table(e0, &self.modulation, 1, 6 * dim);
+        let part = |i: usize| -> Vec<f32> { m[i * dim..(i + 1) * dim].to_vec() };
         let shift1 = part(0);
         let scale1 = part(1);
         let gate1 = part(2);
