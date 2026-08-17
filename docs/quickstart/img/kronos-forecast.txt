@@ -1,0 +1,6 @@
+kronos forecast: 512 bars of context -> 24 held-out bars x 4 rolling origins  (87.9s, 16 samples)
+  close, vs held-out truth       mean MAE  worst MAE
+  kronos                           2.8594     3.2327
+  persistence (last close)         3.7775     5.8121
+  seasonal naive (24 bars)         1.6054     2.9635
+  vs persistence: +24.3% mean-MAE reduction, better at 3/4 origins

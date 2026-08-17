@@ -214,6 +214,44 @@ assert drift > 2.0, f'first and last frame are near-identical (mean abs diff {dr
   }
 }
 
+@test "quickstart: kronos forecast beat the persistence baseline" {
+  [ -s "$IMG_DIR/kronos-forecast.txt" ] || skip "step 7c (kronos forecast) has not run yet"
+  run cat "$IMG_DIR/kronos-forecast.txt"
+  [ "$status" -eq 0 ]
+  # The claim the README makes is a comparison, not a number: kronos's mean MAE
+  # must be lower than the random-walk baseline's, and it must be lower at a
+  # majority of the rolling origins. A run that "succeeded" while forecasting
+  # worse than repeating the last close is exactly the decoration this step
+  # exists not to be.
+  run python3 -c "
+import re, sys
+text = open('$IMG_DIR/kronos-forecast.txt').read()
+rows = dict((m.group(1).strip(), float(m.group(2))) for m in re.finditer(r'^  (\S.*?)\s+([0-9.]+)\s+[0-9.]+\$', text, re.M))
+assert 'kronos' in rows, text
+assert 'persistence (last close)' in rows, text
+assert rows['kronos'] < rows['persistence (last close)'], rows
+m = re.search(r'better at (\d+)/(\d+) origins', text)
+assert m, text
+w, n = int(m.group(1)), int(m.group(2))
+assert w * 2 > n, f'kronos only won {w}/{n} origins'
+"
+  [ "$status" -eq 0 ]
+}
+
+@test "quickstart: the kronos forecast chart is a real, small PNG" {
+  [ -s "$IMG_DIR/kronos-forecast.png" ] || skip "step 7c (kronos forecast) has not run yet"
+  run python3 -c "
+b = open('$IMG_DIR/kronos-forecast.png','rb').read()
+assert b[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+assert len(b) > 5000, f'{len(b)} bytes is a blank canvas, not a chart'
+# Committed documentation: smaller than every other quickstart PNG.
+assert len(b) < 200_000, f'{len(b)} bytes is too heavy for an 800px chart'
+w = int.from_bytes(b[16:20], 'big')
+assert w <= 800, f'chart is {w}px wide, the cap is 800'
+"
+  [ "$status" -eq 0 ]
+}
+
 @test "quickstart: TTS LoRA loss measurably decreased" {
   [ -s "$IMG_DIR/qwen3tts-lora.txt" ] || skip "step 8 (qwen3tts finetune) has not run yet"
   run cat "$IMG_DIR/qwen3tts-lora.txt"

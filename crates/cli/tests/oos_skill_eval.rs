@@ -24,7 +24,7 @@
 //!
 //! Env:
 //!   CHRONOS2_WEIGHTS                          — chronos2 `.safetensors` (optional)
-//!   KRONOS_TOKENIZER_DIR, KRONOS_DECODER_DIR  — kronos checkpoints (optional)
+//!   BRAIN_KRONOS_TOKENIZER, BRAIN_KRONOS_DECODER  - kronos checkpoints (optional)
 //!   FINCAST_WEIGHTS                           — fincast `.safetensors` (optional)
 //!   OOS_DATA      — dir of `<TICKER>.csv` (Date,open,high,low,close,volume) (required)
 //!   OOS_OUT       — output JSON path (required)
@@ -95,7 +95,7 @@ fn build_models() -> Vec<(String, Box<dyn ForecastModel>)> {
             Err(e) => eprintln!("chronos2 load failed: {e}"),
         }
     }
-    if let (Ok(t), Ok(d)) = (std::env::var("KRONOS_TOKENIZER_DIR"), std::env::var("KRONOS_DECODER_DIR")) {
+    if let (Ok(t), Ok(d)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) {
         match kronos::KronosForecaster::load(&t, &d) {
             Ok(m) => {
                 models.push(("kronos".into(), Box::new(m)));

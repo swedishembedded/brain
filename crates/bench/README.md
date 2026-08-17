@@ -86,7 +86,7 @@ small interpretable profile rather than a dozen raw numbers (`axes.rs`):
 ### The results artifact
 
 `eval` writes a structured, diffable JSON artifact to `results/<arch>-<seed>.json`
-(`results/` is git-ignored; the dir is kept via `results/.gitkeep`). Schema:
+(`results/` is git-ignored and created on demand by whatever writes into it). Schema:
 
 | field | meaning |
 |---|---|

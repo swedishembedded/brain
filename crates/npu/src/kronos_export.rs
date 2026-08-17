@@ -171,8 +171,8 @@ mod tests {
     /// probe can compile it for the NPU. Writes `$KRONOS_ONNX_OUT` (or /tmp).
     #[test]
     fn export_real_checkpoint_to_onnx() {
-        let Ok(dir) = std::env::var("KRONOS_DECODER_DIR") else {
-            eprintln!("KRONOS_DECODER_DIR unset; skipping Kronos ONNX export");
+        let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
+            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos ONNX export");
             return;
         };
         let out = std::env::var("KRONOS_ONNX_OUT")
@@ -190,8 +190,8 @@ mod tests {
     /// chain reference→WGSL→ONNX→NPU for Kronos.
     #[test]
     fn dump_core_reference_for_onnx_parity() {
-        let Ok(dir) = std::env::var("KRONOS_DECODER_DIR") else {
-            eprintln!("KRONOS_DECODER_DIR unset; skipping Kronos core-reference dump");
+        let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
+            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos core-reference dump");
             return;
         };
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -222,8 +222,8 @@ mod tests {
     /// Env-gated: export the REAL Kronos `decode_s2` dependency layer to ONNX.
     #[test]
     fn export_real_dep_to_onnx() {
-        let Ok(dir) = std::env::var("KRONOS_DECODER_DIR") else {
-            eprintln!("KRONOS_DECODER_DIR unset; skipping Kronos dep ONNX export");
+        let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
+            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos dep ONNX export");
             return;
         };
         let out = std::env::var("KRONOS_DEP_ONNX_OUT")
@@ -239,8 +239,8 @@ mod tests {
     /// FIXED `(ctx, sib)` input so the probe can verify the dep ONNX/NPU graph.
     #[test]
     fn dump_dep_reference_for_onnx_parity() {
-        let Ok(dir) = std::env::var("KRONOS_DECODER_DIR") else {
-            eprintln!("KRONOS_DECODER_DIR unset; skipping Kronos dep reference dump");
+        let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
+            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos dep reference dump");
             return;
         };
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {

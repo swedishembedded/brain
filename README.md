@@ -198,6 +198,37 @@ Brain trains and runs neural networks from scratch, in Rust.
 A word-for-word match of the sentence rendered into `doc.png` - real OCR on
 a real (synthetically rendered) document image, not a toy string echo.
 
+**Time-series forecasting** - a CSV in, a scored forecast and a chart out. The
+last 24 rows of each window are held back from the model and used as the
+answer key, at four disjoint origins:
+
+```bash
+$ brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
+    --horizon 24 --samples 16 --origins 4 --gnuplot kronos-forecast.png   # auto-fetches NeoQuasar/Kronos-base + NeoQuasar/Kronos-Tokenizer-base (~407 MB)
+kronos forecast: 512 bars of context -> 24 held-out bars x 4 rolling origins  (87.9s, 16 samples)
+  close, vs held-out truth       mean MAE  worst MAE
+  kronos                           2.8594     3.2327
+  persistence (last close)         3.7775     5.8121
+  seasonal naive (24 bars)         1.6054     2.9635
+  vs persistence: +24.3% mean-MAE reduction, better at 3/4 origins
+```
+
+![a line chart: 72 bars of history, then the held-out actual continuation and kronos's forecast with a 10-90% band, split by a dashed vertical rule](docs/quickstart/img/kronos-forecast.png)
+
+History left of the rule is what the model saw; right of it, green is the truth
+it was not shown and red is what it predicted, with the 10-90% band from 16
+sampled trajectories. Kronos cuts the random-walk baseline's error by a quarter
+and wins at three origins out of four - but a **seasonal naive** baseline, which
+just repeats the bar from 24 hours earlier, beats it outright. That is the
+honest reading of this chart, and it is the reason the numbers are printed next
+to it: the series carries a hard 24-bar cycle by construction
+([`tools/forecast/make_synthetic_ohlcv.py`](tools/forecast/make_synthetic_ohlcv.py)
+generates a mean-reverting AR(1) around a two-harmonic daily and weekly
+profile, so its irreducible noise floor is known), and Kronos is a candlestick
+model, not a seasonal decomposition. At the single most recent origin it loses
+to persistence outright; over four it wins by 24%. One window is a draw, not a
+measurement - which is what `--origins` is for.
+
 **LoRA fine-tuning**, on a synthetic dataset generated in-process (no
 external data, ~200 steps):
 
