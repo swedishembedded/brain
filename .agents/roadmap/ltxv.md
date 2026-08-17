@@ -100,8 +100,25 @@ this port:
       with every per-block tap bit-exact up to the last op. The NA diffusion
       decoder and general overlapping-tile chunked encode/decode remain out
       of scope, deferred to the DFR milestone.
-- [ ] **Video-stream DiT** (`LTXModelType::VideoOnly`) - block/model/rope/import,
-      tiny-config parity climbing porting.md sec5 rung by rung.
+- [x] **Video-stream DiT** (`LTXModelType::VideoOnly`) - `config.rs`/`rope.rs`/
+      `block.rs`/`dit.rs`, tiny (2-layer) config, every real-LTX-2.5 flag set
+      correctly. Parity against the tiny golden at cosine >= 0.999999 on every
+      tap, most at 1.000000000 (`crates/ltxv/tests/dit_parity.rs`). RoPE's
+      exact construction (fractional position -> [-1,1], geometric bands,
+      front zero-pad, band-major/axis-minor, per-head sequential chunking of
+      one shared table) was verified against the golden's real `rope_cos`/
+      `rope_sin` numbers with an independent host reimplementation before any
+      device dispatch was written. Rotation reuses the existing `rope2d`
+      kernel (table-driven rotate-half), dispatched once per head since each
+      head reads a different sub-table - `rope_neox` was the first guess and
+      is refuted (it computes its angle analytically from a scalar position,
+      no table input, so it cannot express LTX's band/axis construction). The
+      per-token adaLN combine reuses `dit::adaln::add_table` at `rows=T`
+      (generalized for exactly this caller); the per-token gate reuses the
+      existing `gate_row` kernel (`rows_per_cond=1`) unchanged. No new
+      kernels. Real-22B-checkpoint import, the audio stream, the
+      audio<->video cross-attention, and the text encoder are explicit,
+      tracked gaps - only the tiny-config op sequence is proven so far.
 - [ ] **Pipeline + CLI + serving contract** - `brain ltxv t2v` to a playable mp4,
       `crates/ltxv/src/caps.rs`, `resident_ltxv.rs`, GGUF importer entry.
 - [ ] **`crates/gemma4` text encoder** - own arch row, 5:1 sliding/full attention

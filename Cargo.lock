@@ -1107,6 +1107,7 @@ name = "brain-ltxv"
 version = "1.0.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-dit",
  "brain-gpu-core",
  "brain-kernels",
  "brain-testutil",

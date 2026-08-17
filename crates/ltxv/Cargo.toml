@@ -3,7 +3,7 @@ name = "brain-ltxv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE encoder + conv decoder only (crates/vae's blocks3d primitives), built on brain-vae / brain-checkpoint / brain-gpu-core / brain-kernels; the DiT, audio stack and NA diffusion decoder land in later milestones."
+description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE (encoder + conv decoder, crates/vae's blocks3d primitives) and the video-only DiT stream (tiny-config parity), built on brain-vae / brain-dit / brain-checkpoint / brain-gpu-core / brain-kernels; the audio stack, A<->V cross-attention, text encoder and NA diffusion decoder land in later milestones."
 
 [lib]
 name = "ltxv"
@@ -14,6 +14,10 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-vae.workspace = true
+# `dit::adaln::add_table` (per-token adaLN table combine) and `dit::timestep::
+# pixart_timestep_embed` (the PixArt sinusoid -> Linear -> SiLU -> Linear
+# shape the AdaLayerNormSingle embedder shares with wan/s3dit).
+brain-dit.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
