@@ -21,13 +21,27 @@ brain's three forecasting models with CLI-reachable fine-tuning.
 
 ## Getting the weights
 
-- **Model id:** `brain/kronos` - a reserved `brain/` id, never auto-fetched.
+Nothing to do: `brain forecast predict` auto-fetches on first use, like every
+other model in the README's Quick start.
+
+Kronos is **one model published as two upstream repos** - the BSQ tokenizer
+and the decoder are separate, with no combined release - so auto-fetch pulls
+both and points one environment variable at each:
+
+| Variable | Repo | Role |
+|---|---|---|
+| `BRAIN_KRONOS_DECODER` | `NeoQuasar/Kronos-base` (391 MB) | the decoder |
+| `BRAIN_KRONOS_TOKENIZER` | `NeoQuasar/Kronos-Tokenizer-base` (16 MB) | the BSQ tokenizer |
+
+Set either variable yourself and auto-fetch leaves it alone, so a local
+checkout or a `.safetensors` fine-tune checkpoint from `brain forecast
+finetune` still wins. `BRAIN_AUTO_FETCH=0` disables the fetch entirely.
+
+- **Model id:** `brain/kronos` - a reserved `brain/` id for serving; the
+  fetchable upstream references are the two `NeoQuasar/...` repos above.
 - **Weights:** two directories, both required, no import step - they load
-  directly:
-  - `BRAIN_KRONOS_TOKENIZER` - the Kronos tokenizer model directory.
-  - `BRAIN_KRONOS_DECODER` - the Kronos decoder model directory (or a
-    `.safetensors` fine-tune checkpoint produced by `brain forecast
-    finetune`, see below).
+  directly. `BRAIN_KRONOS_DECODER` also accepts a `.safetensors` fine-tune
+  checkpoint file in place of a directory.
 
 ## Running it
 
@@ -36,6 +50,9 @@ through the shared `brain forecast` verb and the shared `forecast` D-Bus
 action.
 
 ```bash
+# one command, CSV in, scored forecast (and a chart) out
+brain forecast predict --csv examples/forecast/synthetic_hourly.csv --horizon 24 --samples 16 --gnuplot chart.png
+
 # backtest against statistical baselines before trusting it
 brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24 --seed 1337
 
@@ -60,6 +77,19 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
 
 ## Options
 
+- `predict`: `--csv <file>` (required, `timestamp,open,high,low,close,volume`),
+  `--horizon <n>` (default 48), `--context <n>` (default: the checkpoint's own
+  512-bar maximum), `--samples <n>` (default 1 = the deterministic modal
+  rollout; more draws real trajectories and adds a decile-to-ninth-decile
+  uncertainty band to the chart),
+  `--origins <n>` (default 1; score at N disjoint held-out windows and average,
+  because one origin is a draw and not a measurement), `--season <n>` (default
+  24, the seasonal-naive baseline's period), `--seed`, `--gnuplot <png>`.
+  The CSV is validated structurally and semantically at entry - column order,
+  ragged rows, non-finite values, non-monotonic timestamps, non-positive
+  prices and the OHLC invariants - and every rejection names the file line.
+  `--gnuplot` needs the `gnuplot` CLI on `PATH`; the command says so and exits
+  before loading any weights if it is missing.
 - `compare`: `--windows <n>` (default 24), `--seed <n>` (default 1337).
 - `serve`: `--socket <path>` or `--listen <addr>`.
 - D-Bus `forecast` action: `horizon` (default 64), `temperature` (default
@@ -76,3 +106,9 @@ for the full how-to.
 - No HTTP route: reachable only via the `brain forecast` CLI and D-Bus.
 - Runs on CPU or GPU by default, and is NPU-eligible via a cached
   autoregressive rollout.
+- `BRAIN_KRONOS_ARGMAX=1` forces the deterministic modal rollout (argmax over
+  the token distribution) instead of nucleus sampling: one stable path,
+  reproducible run to run. `brain forecast predict --samples 1` sets it.
+- Kronos is a candlestick model, not a seasonal decomposition: its skill is
+  concentrated at short horizons. Score it at several rolling origins
+  (`--origins`) before believing a single window's number.

@@ -182,7 +182,7 @@ fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan,
 
     let recipe = crate::recipe::recipes()
         .into_iter()
-        .find(|r| r.matches_listing(&listing))
+        .find(|r| r.matches(reference, &listing))
         .expect("the last recipe in the registry is a catch-all and always matches");
     let artifacts = recipe.artifacts(reference, &listing, hub)?;
 

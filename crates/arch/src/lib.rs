@@ -116,6 +116,25 @@ pub struct Arch {
     /// here is a claim that repo is real and fetchable, not that every verb
     /// honors it yet).
     pub default_ref: Option<&'static str>,
+    /// Further `<vendor>/<repo>` checkpoints this architecture needs beyond
+    /// [`default_ref`], for a model upstream publishes as SEVERAL repos.
+    ///
+    /// brain's fetch plan is one `ModelRef` -> one repo listing -> one
+    /// `Plan`, and that stays true: this is not a second repo inside one plan,
+    /// it is a second plan. `crates/cli/src/supply.rs::ensure_env_weights`
+    /// fetches `default_ref` and then each of these in turn, and merges the
+    /// roles of every resulting manifest into one map before resolving
+    /// [`weights_env`](Self::weights_env) against it -- so role names must be
+    /// DISJOINT across the set (a repo-wide test in this file enforces that).
+    ///
+    /// `wan` did not need this: choosing the native repo over `-Diffusers`
+    /// found one listing carrying all four roles. `kronos` has no such
+    /// option - upstream ships the BSQ tokenizer
+    /// (`NeoQuasar/Kronos-Tokenizer-base`) and the decoder
+    /// (`NeoQuasar/Kronos-base`) as two repos with no combined release - so
+    /// the honest answer is to say so here rather than to teach the planner
+    /// about compound fetches it would need for exactly one model.
+    pub extra_refs: &'static [&'static str],
     /// `(env var, manifest role)` pairs this architecture's OWN weights
     /// resolution reads (`BRAIN_SAM2_WEIGHTS`, `BRAIN_S3DIT_DIT`, ...) -- the
     /// capability-path counterpart to [`default_ref`](Self::default_ref):
@@ -138,7 +157,8 @@ pub struct Arch {
 
 /// Every field [`arch!`] does not set explicitly, for its trailing
 /// functional-update `..DEFAULT`.
-const DEFAULT: Arch = Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None, weights_env: &[] };
+const DEFAULT: Arch =
+    Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None, extra_refs: &[], weights_env: &[] };
 
 macro_rules! arch {
     ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr $(, $key:ident : $val:expr)* $(,)?) => {
@@ -273,7 +293,15 @@ pub const ARCHS: &[Arch] = &[
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),
     // -- Forecasting ----------------------------------------------------
     arch!("chronos2", "Chronos-2 encoder-only patch transformer", Forecast, Brain, "brain-chronos2"),
-    arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos"),
+    // Two repos, one model: `Kronos-base` is the decoder and
+    // `Kronos-Tokenizer-base` is the BSQ tokenizer, and upstream publishes no
+    // combined release - see `extra_refs`. `-base` rather than `-small` as
+    // the default because it is the tier the published RankIC results are
+    // quoted for, and 391 MB is not a size worth trading accuracy for.
+    arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos",
+          default_ref: Some("NeoQuasar/Kronos-base"),
+          extra_refs: &["NeoQuasar/Kronos-Tokenizer-base"],
+          weights_env: &[("BRAIN_KRONOS_DECODER", "decoder"), ("BRAIN_KRONOS_TOKENIZER", "tokenizer")]),
     arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
     // -- World models ---------------------------------------------------
     arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
@@ -316,20 +344,61 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn every_default_ref_parses_as_a_non_reserved_two_segment_ref() {
-        // A default_ref names a REAL upstream repo to auto-fetch, never a
-        // reserved brain/local/test vendor (those are never fetched) and
-        // never a stray third path segment.
+    fn every_fetchable_ref_parses_as_a_non_reserved_two_segment_ref() {
+        // A default_ref (or an extra_ref) names a REAL upstream repo to
+        // auto-fetch, never a reserved brain/local/test vendor (those are
+        // never fetched) and never a stray third path segment.
         for a in ARCHS {
-            let Some(r) = a.default_ref else { continue };
-            let (vendor, repo) = r.split_once('/').unwrap_or_else(|| panic!("{:?}: default_ref {r:?} has no '/'", a.id));
-            assert!(!repo.contains('/'), "{:?}: default_ref {r:?} has more than one '/'", a.id);
-            assert!(
-                !matches!(vendor, "brain" | "local" | "test"),
-                "{:?}: default_ref {r:?} names a reserved vendor -- reserved vendors are never fetched",
-                a.id
-            );
+            for r in a.default_ref.iter().chain(a.extra_refs.iter()) {
+                let (vendor, repo) = r.split_once('/').unwrap_or_else(|| panic!("{:?}: ref {r:?} has no '/'", a.id));
+                assert!(!repo.contains('/'), "{:?}: ref {r:?} has more than one '/'", a.id);
+                assert!(!matches!(vendor, "brain" | "local" | "test"), "{:?}: ref {r:?} names a reserved vendor -- reserved vendors are never fetched", a.id);
+            }
         }
+    }
+
+    #[test]
+    fn extra_refs_are_distinct_from_the_default_and_imply_weights_env() {
+        for a in ARCHS {
+            if a.extra_refs.is_empty() {
+                continue;
+            }
+            // An extra ref is only ever fetched by `ensure_env_weights`, which
+            // exists to resolve `weights_env`. Listing one without the other
+            // would download a checkpoint nothing then reads.
+            assert!(a.default_ref.is_some(), "{:?}: extra_refs without a default_ref -- there is no first fetch to extend", a.id);
+            assert!(!a.weights_env.is_empty(), "{:?}: extra_refs without weights_env -- nothing would ever read the extra checkpoint", a.id);
+            let mut seen: HashSet<&str> = HashSet::new();
+            for r in a.default_ref.iter().chain(a.extra_refs.iter()) {
+                assert!(seen.insert(r), "{:?}: ref {r:?} listed twice -- it would be fetched twice", a.id);
+            }
+        }
+    }
+
+    #[test]
+    fn weights_env_roles_are_unique_within_an_arch() {
+        // `ensure_env_weights` merges the roles of every fetched ref into one
+        // map, so two roles with the same name would silently resolve to
+        // whichever repo happened to be fetched last.
+        for a in ARCHS {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for (var, role) in a.weights_env {
+                assert!(seen.insert(role), "{:?}: role {role:?} claimed by more than one weights_env var (at {var})", a.id);
+            }
+        }
+    }
+
+    #[test]
+    fn kronos_names_both_of_its_upstream_repos() {
+        // The two-repo case the `extra_refs` field exists for. If someone ever
+        // finds (or publishes) a single repo carrying both checkpoints, this
+        // is the test that should send them to `Arch::extra_refs`'s doc before
+        // they collapse the row.
+        let k = by_id("kronos").expect("the kronos row exists");
+        assert_eq!(k.default_ref, Some("NeoQuasar/Kronos-base"));
+        assert_eq!(k.extra_refs, &["NeoQuasar/Kronos-Tokenizer-base"]);
+        let roles: Vec<&str> = k.weights_env.iter().map(|(_, r)| *r).collect();
+        assert_eq!(roles, ["decoder", "tokenizer"], "one role per repo, and the names the two FilesRecipe rows write");
     }
 
     #[test]

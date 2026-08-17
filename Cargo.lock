@@ -921,6 +921,7 @@ dependencies = [
 name = "brain-forecast"
 version = "1.0.0"
 dependencies = [
+ "brain-testutil",
  "serde_json",
 ]
 

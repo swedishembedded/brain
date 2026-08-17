@@ -383,6 +383,16 @@ fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Resu
 fn fetch_default_ref(arch: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
     let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
+    fetch_one_ref(default_ref, store, hub)
+}
+
+/// Fetch ONE `<vendor>/<repo>` and run its recipe's finish step. Factored out
+/// of [`fetch_default_ref`] because an architecture whose checkpoint upstream
+/// publishes as several repos (see [`brain_arch::Arch::extra_refs`]) drives
+/// this once per repo -- one `ModelRef` to one listing to one `Plan` each
+/// time, which is exactly the shape `brain_modelstore::plan` supports. The
+/// "several repos" fact lives in the arch table, not in the planner.
+fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
 
     let plan = brain_modelstore::plan(&reference, store, hub).map_err(|e| format!("{default_ref}: {e}"))?;
@@ -413,8 +423,10 @@ fn fetch_default_ref(arch: &str, store: &Store, hub: &dyn Hub) -> Result<brain_m
 
 /// The capability-path counterpart to [`ensure_default_weights`]: for each
 /// `(env var, role)` pair `arch`'s [`brain_arch::Arch::weights_env`] lists, if
-/// that variable is unset, fetch `default_ref` once and set every listed var
-/// from the fetched checkpoint's roles. Never overrides a variable already
+/// that variable is unset, fetch `default_ref` (plus each of
+/// [`brain_arch::Arch::extra_refs`], for a model upstream publishes as several
+/// repos) and set every listed var from the merged roles of what was fetched.
+/// Never overrides a variable already
 /// set -- the same rule [`crate::resolve::maybe_inject_default_weights`]
 /// follows for `--weights`. Called once, lazily, right before capability
 /// dispatch resolves a provider (`caps_cli.rs::run_do`), so `brain sam2
@@ -451,13 +463,8 @@ pub fn ensure_env_weights(arch: &str) {
     let Some(root) = crate::model_dir::resolve(None) else { return };
     let store = Store::new(root);
     let hub = brain_modelstore::HfHub::new();
-    let local = match fetch_default_ref(arch, &store, &hub) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("brain: {arch}: auto-fetch failed ({e}) -- falling back to whatever BRAIN_* env is set");
-            return;
-        }
-    };
+    let Some(default_ref) = a.default_ref else { return };
+
     // Every `weights_env` architecture today fetches through a `FilesRecipe`
     // (or `convert_transformers`'s passthrough branch), which always writes a
     // `CompoundManifest` -- so `local.roles` is always `Some` here, even for
@@ -465,11 +472,26 @@ pub fn ensure_env_weights(arch: &str) {
     // `default_ref` landing on a plain `Format::Safetensors`/`Gguf` conversion
     // would need `local.weights` directly instead; that's not reachable by
     // any current row, so it stays unhandled rather than a silent no-op.
+    //
+    // `extra_refs` are fetched after the default and their roles merged on
+    // top. `Arch::weights_env`'s role names are unique per architecture (a
+    // test in `crates/arch` enforces it), so the merge cannot shadow.
+    let mut roles: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    for reference in std::iter::once(default_ref).chain(a.extra_refs.iter().copied()) {
+        match fetch_one_ref(reference, &store, &hub) {
+            Ok(local) => roles.extend(local.roles.into_iter().flatten()),
+            Err(e) => {
+                eprintln!("brain: {arch}: auto-fetch failed ({e}) -- falling back to whatever BRAIN_* env is set");
+                return;
+            }
+        }
+    }
+
     for (var, role) in a.weights_env {
         if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
             continue;
         }
-        match local.roles.as_ref().and_then(|r| r.get(*role)).and_then(|p| p.to_str()) {
+        match roles.get(*role).and_then(|p| p.to_str()) {
             Some(p) => std::env::set_var(var, p),
             None => eprintln!("brain: {arch}: fetched but role {role:?} (for {var}) has no path (non-UTF8, not a compound checkpoint, or this recipe doesn't produce it)"),
         }

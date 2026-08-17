@@ -41,13 +41,23 @@ pub trait ArtifactRecipe: Send + Sync {
     /// `crates/cli/src/supply.rs::convert` knows which family it's finishing
     /// without re-deriving it from disk a second time.
     fn id(&self) -> &'static str;
-    /// Cheap, listing-only pre-filter -- no network beyond the one
-    /// `list_files` call `plan_base` already made. Most repos are ruled out
-    /// instantly (a flat Ultralytics-shaped repo has no `config.json`; a
-    /// diffusers-shaped repo has no top-level `.pt` files).
-    fn matches_listing(&self, listing: &[String]) -> bool;
+    /// Cheap pre-filter over the repo's identity and its file listing -- no
+    /// network beyond the one `list_files` call `plan_base` already made. Most
+    /// repos are ruled out instantly (a flat Ultralytics-shaped repo has no
+    /// `config.json`; a diffusers-shaped repo has no top-level `.pt` files).
+    ///
+    /// `reference` is here because a file listing is not always enough to tell
+    /// two families apart. `NeoQuasar/Kronos-base` and
+    /// `NeoQuasar/Kronos-Tokenizer-base` each ship exactly `.gitattributes`,
+    /// `README.md`, `config.json`, `model.safetensors` -- byte-for-byte the
+    /// shape of an ordinary transformers repo, and identical to each other, so
+    /// no [`FilesRecipe::signature`] over filenames could claim them without
+    /// also claiming every Qwen and GLM checkpoint in existence. The repo NAME
+    /// is the only thing that distinguishes them, and a recipe that keys on it
+    /// is more precise than one keying on a distinctive filename, not less.
+    fn matches(&self, reference: &ModelRef, listing: &[String]) -> bool;
     /// Full detection + the ordered artifact list to download. Only called
-    /// for a repo [`matches_listing`](Self::matches_listing) accepted; may do
+    /// for a repo [`matches`](Self::matches) accepted; may do
     /// extra [`Hub::read_file`] calls (e.g. reading and validating
     /// `config.json`'s architecture). Boxed error: `PlanError` carries a
     /// `ModelRef` in most variants (clippy's `result_large_err`), and this is
@@ -74,12 +84,16 @@ pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
 /// point an env var at one of them (or at the directory holding all of
 /// them)", not "convert a tensor format".
 ///
-/// `matches_listing` keys on one distinctive filename rather than the whole
-/// shape (unlike [`YoloRecipe`]'s `yolov8*.pt` glob) because these are each
-/// one specific upstream repo's own release artifact -- a name unlikely
-/// enough that a shape-only match is not a meaningful risk, and specific
-/// enough that ordering [`recipes`] ahead of [`TransformersRecipe`] cannot
-/// accidentally swallow an unrelated transformers-shaped repo.
+/// [`matches`](ArtifactRecipe::matches) keys on one distinctive filename
+/// rather than the whole shape (unlike [`YoloRecipe`]'s `yolov8*.pt` glob)
+/// because these are each one specific upstream repo's own release artifact --
+/// a name unlikely enough that a shape-only match is not a meaningful risk,
+/// and specific enough that ordering [`recipes`] ahead of
+/// [`TransformersRecipe`] cannot accidentally swallow an unrelated
+/// transformers-shaped repo. When even that is not enough (see [`repos`]), the
+/// repo's own name is the key instead.
+///
+/// [`repos`]: FilesRecipe::repos
 #[derive(Clone, Copy)]
 pub struct FilesRecipe {
     id: &'static str,
@@ -97,6 +111,18 @@ pub struct FilesRecipe {
     /// -- individually far too common to key on alone; the exact SET of
     /// them, keyed together, is specific enough).
     signature: &'static [&'static str],
+    /// Exact `vendor/repo` names this recipe claims, when a listing cannot
+    /// tell it apart from anything else. Empty (the usual case) means
+    /// `signature` alone decides.
+    ///
+    /// This is the escape hatch for a repo whose file listing is genuinely
+    /// ambiguous: the two Kronos repos ship a bare `config.json` +
+    /// `model.safetensors` pair, which is also every transformers repo's
+    /// shape AND is identical between the tokenizer and the decoder, so
+    /// neither a filename signature nor the catch-all can route them. Listing
+    /// the repos is exact rather than heuristic, and adding a sibling release
+    /// (`Kronos-mini`, `Kronos-large`) is one string, not a new recipe.
+    repos: &'static [&'static str],
     /// Files downloaded verbatim from the repo root, each landing under its
     /// own basename. Empty means "every file in the repo's listing" (nested
     /// paths preserved as their own `dest_name`, same as `ZimageRecipe`
@@ -121,6 +147,7 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         id: "sam2",
         family: "sam2",
         signature: &["sam2.1_hiera_tiny.pt"],
+        repos: &[],
         files: &["sam2.1_hiera_tiny.pt"],
         roles: &[("weights", "sam2.1_hiera_tiny.pt")],
     },
@@ -135,6 +162,7 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // even with the var pointed straight at the downloaded file). This
         // repo's copy loads and upscales correctly, verified the same way.
         signature: &["RealESRGAN_x4plus.pth"],
+        repos: &[],
         files: &["RealESRGAN_x4plus.pth"],
         roles: &[("weights", "RealESRGAN_x4plus.pth")],
     },
@@ -142,6 +170,7 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         id: "deepseek2ocr-gguf",
         family: "deepseek2ocr",
         signature: &["DeepSeek-OCR-Q8_0.gguf"],
+        repos: &[],
         files: &["DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"],
         roles: &[("dir", ".")],
     },
@@ -152,6 +181,7 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // it by accident (unlike a bare `config.json`, which every
         // transformers-shaped repo has).
         signature: &["speech_tokenizer/config.json"],
+        repos: &[],
         // Whole repo: `TransformersRecipe`'s curated fetch (config.json,
         // tokenizer.json/tokenizer_config.json, model.safetensors) misses
         // the nested `speech_tokenizer/` codec checkpoint entirely, plus
@@ -176,6 +206,7 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // `tokenizer.json`, only `vocab.json`+`merges.txt`+`added_tokens.json`,
         // none of which the curated list fetches.
         signature: &["llava_qwen.py"],
+        repos: &[],
         files: &[],
         roles: &[("weights", ".")],
     },
@@ -189,8 +220,52 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // `tokenizer.json`, so `TransformersRecipe`'s curated fetch would
         // miss the tokenizer files the same way it did for fastvlm.
         signature: &["vocab.json", "merges.txt", "preprocessor_config.json"],
+        repos: &[],
         files: &[],
         roles: &[("weights", ".")],
+    },
+    // -- Kronos: ONE model, TWO upstream repos ---------------------------
+    //
+    // brain's fetch plan is one `ModelRef` -> one repo listing -> one `Plan`,
+    // and upstream publishes the BSQ tokenizer and the decoder as separate
+    // repos with no combined release. Unlike `wan` -- where picking the
+    // self-contained native repo sidestepped the limit entirely -- there is no
+    // single Kronos repo to pick, so the pair is expressed as two recipes
+    // producing two DISJOINT roles of one family, and `brain_arch`'s
+    // `extra_refs` is what tells `ensure_env_weights` to fetch both and merge
+    // their manifests. Splitting it that way keeps the plan/store layer
+    // strictly one-repo-per-plan (nothing here learned about a second repo)
+    // and puts the "this model needs two checkpoints" fact in the one table
+    // that already answers "where does this architecture's weights come
+    // from".
+    //
+    // Both repos' listings are exactly `.gitattributes`, `README.md`,
+    // `config.json`, `model.safetensors` (confirmed live via the HF API):
+    // indistinguishable from each other and from every transformers repo, so
+    // `repos` rather than `signature` is what claims them. And neither
+    // config.json declares `architectures` OR `model_type`, so falling through
+    // to `TransformersRecipe` would fail with "config.json has no
+    // architecture" rather than fetch anything.
+    //
+    // `files` is explicit rather than empty because "the whole listing" would
+    // drag in an 8.8 KB README and a `.gitattributes` for no reason; the roles
+    // are the DIRECTORY, because `kronos::import::load_model` takes two
+    // directories and reads `config.json` + `model.safetensors` from each.
+    FilesRecipe {
+        id: "kronos-decoder",
+        family: "kronos",
+        signature: &["config.json", "model.safetensors"],
+        repos: &["NeoQuasar/Kronos-mini", "NeoQuasar/Kronos-small", "NeoQuasar/Kronos-base"],
+        files: &["config.json", "model.safetensors"],
+        roles: &[("decoder", ".")],
+    },
+    FilesRecipe {
+        id: "kronos-tokenizer",
+        family: "kronos",
+        signature: &["config.json", "model.safetensors"],
+        repos: &["NeoQuasar/Kronos-Tokenizer-2k", "NeoQuasar/Kronos-Tokenizer-base"],
+        files: &["config.json", "model.safetensors"],
+        roles: &[("tokenizer", ".")],
     },
 ];
 
@@ -206,7 +281,10 @@ impl ArtifactRecipe for FilesRecipe {
         self.id
     }
 
-    fn matches_listing(&self, listing: &[String]) -> bool {
+    fn matches(&self, reference: &ModelRef, listing: &[String]) -> bool {
+        if !self.repos.is_empty() && !self.repos.iter().any(|r| *r == format!("{}/{}", reference.vendor(), reference.repo())) {
+            return false;
+        }
         self.signature.iter().all(|sig| listing.iter().any(|f| f == sig))
     }
 
@@ -239,7 +317,7 @@ impl ArtifactRecipe for YoloRecipe {
         "yolo"
     }
 
-    fn matches_listing(&self, listing: &[String]) -> bool {
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
         !listing.iter().any(|f| f == "config.json" || f == "model_index.json")
             && listing.iter().any(|f| f.starts_with("yolov8") && f.ends_with(".pt"))
     }
@@ -274,7 +352,7 @@ impl ZimageRecipe {
     /// (`s3dit::pipeline::read_component_tensors` is dir-or-file-aware), a
     /// specific file for the two that are always exactly one file upstream.
     /// The single source of truth for z-image's role layout -- this recipe's
-    /// [`matches_listing`](ArtifactRecipe::matches_listing) probes it, and
+    /// [`matches`](ArtifactRecipe::matches) probes it, and
     /// the finish-side manifest writer in `crates/cli/src/supply.rs` reuses
     /// it verbatim rather than re-deriving the same mapping.
     pub const ROLES: &'static [(&'static str, &'static str)] =
@@ -290,7 +368,7 @@ impl ArtifactRecipe for ZimageRecipe {
         "zimage"
     }
 
-    fn matches_listing(&self, listing: &[String]) -> bool {
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
         listing.iter().any(|f| f == "model_index.json") && Self::ROLE_DIRS.iter().all(|prefix| listing.iter().any(|f| f.starts_with(prefix)))
     }
 
@@ -327,7 +405,7 @@ pub struct WanRecipe;
 impl WanRecipe {
     /// Role name -> the path (relative to the repo dir) that role's loader
     /// accepts. The single source of truth for wan's role layout: this
-    /// recipe's [`matches_listing`](ArtifactRecipe::matches_listing) probes
+    /// recipe's [`matches`](ArtifactRecipe::matches) probes
     /// it and the finish-side manifest writer reuses it verbatim.
     ///
     /// `dit` is the single-file 1.3B form; the 14B tiers ship a shard set
@@ -368,7 +446,7 @@ impl ArtifactRecipe for WanRecipe {
         "wan"
     }
 
-    fn matches_listing(&self, listing: &[String]) -> bool {
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
         Self::SIGNATURE.iter().all(|sig| listing.iter().any(|f| f == sig)) && listing.iter().any(|f| Self::is_dit(f))
     }
 
@@ -412,7 +490,7 @@ impl ArtifactRecipe for TransformersRecipe {
         "transformers"
     }
 
-    fn matches_listing(&self, _listing: &[String]) -> bool {
+    fn matches(&self, _reference: &ModelRef, _listing: &[String]) -> bool {
         // Catch-all: always tried, always last (see `recipes()`). Its own
         // artifacts() below produces the specific "no config.json"/
         // "unsupported architecture" errors when nothing more specific
@@ -476,8 +554,9 @@ mod tests {
         assert!(!all.is_empty());
         let last = all.last().unwrap();
         assert_eq!(last.id(), "transformers");
-        assert!(last.matches_listing(&[]), "the catch-all must match even an empty listing");
-        assert!(last.matches_listing(&["totally-unrelated-file.bin".to_string()]));
+        let any = ModelRef::new("v", "r", None);
+        assert!(last.matches(&any, &[]), "the catch-all must match even an empty listing");
+        assert!(last.matches(&any, &["totally-unrelated-file.bin".to_string()]));
     }
 
     /// The exact `Tongyi-MAI/Z-Image-Turbo` file listing, confirmed live via
@@ -510,14 +589,15 @@ mod tests {
     #[test]
     fn zimage_recipe_matches_a_diffusers_pipeline_repo_ahead_of_transformers() {
         let listing = zimage_turbo_listing();
-        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "zimage", "a diffusers-pipeline repo must not fall through to the transformers catch-all");
     }
 
     #[test]
     fn zimage_recipe_does_not_match_a_transformers_repo() {
         let listing = vec!["config.json".to_string(), "model.safetensors".to_string()];
-        assert!(!ZimageRecipe.matches_listing(&listing));
+        assert!(!ZimageRecipe.matches(&ModelRef::new("Qwen", "Qwen3-0.6B", None), &listing));
     }
 
     #[test]
@@ -601,19 +681,22 @@ mod tests {
     #[test]
     fn wan_recipe_claims_the_native_repo_ahead_of_transformers() {
         let listing = wan_t2v_1_3b_listing();
-        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        let r = ModelRef::new("Wan-AI", "Wan2.1-T2V-1.3B", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "wan", "the native Wan repo must not fall through to the transformers catch-all");
-        assert_eq!(recipes().into_iter().find(|r| r.matches_listing(&wan_t2v_14b_listing())).unwrap().id(), "wan");
+        let r14 = ModelRef::new("Wan-AI", "Wan2.1-T2V-14B", None);
+        assert_eq!(recipes().into_iter().find(|x| x.matches(&r14, &wan_t2v_14b_listing())).unwrap().id(), "wan");
     }
 
     #[test]
     fn wan_recipe_does_not_match_the_other_shapes_this_store_knows() {
-        assert!(!WanRecipe.matches_listing(&["config.json".to_string(), "model.safetensors".to_string()]));
-        assert!(!WanRecipe.matches_listing(&zimage_turbo_listing()));
-        assert!(!WanRecipe.matches_listing(&ultralytics_yolov8_listing()));
+        let r = ModelRef::new("Wan-AI", "Wan2.1-T2V-1.3B", None);
+        assert!(!WanRecipe.matches(&r, &["config.json".to_string(), "model.safetensors".to_string()]));
+        assert!(!WanRecipe.matches(&r, &zimage_turbo_listing()));
+        assert!(!WanRecipe.matches(&r, &ultralytics_yolov8_listing()));
         // The three signature files alone are not enough: no DiT, no model.
         let no_dit: Vec<String> = wan_t2v_1_3b_listing().into_iter().filter(|f| !f.starts_with("diffusion_pytorch_model")).collect();
-        assert!(!WanRecipe.matches_listing(&no_dit));
+        assert!(!WanRecipe.matches(&r, &no_dit));
     }
 
     #[test]
@@ -663,14 +746,16 @@ mod tests {
     #[test]
     fn yolo_recipe_matches_the_flat_release_repo_ahead_of_transformers_and_zimage() {
         let listing = ultralytics_yolov8_listing();
-        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        let r = ModelRef::new("Ultralytics", "YOLOv8", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "yolo");
     }
 
     #[test]
     fn yolo_recipe_does_not_match_transformers_or_zimage_shaped_repos() {
-        assert!(!YoloRecipe.matches_listing(&["config.json".to_string(), "model.safetensors".to_string()]));
-        assert!(!YoloRecipe.matches_listing(&zimage_turbo_listing()));
+        let r = ModelRef::new("Ultralytics", "YOLOv8", None);
+        assert!(!YoloRecipe.matches(&r, &["config.json".to_string(), "model.safetensors".to_string()]));
+        assert!(!YoloRecipe.matches(&r, &zimage_turbo_listing()));
     }
 
     #[test]
@@ -720,7 +805,8 @@ mod tests {
     #[test]
     fn files_recipe_matches_sam2_ahead_of_transformers_despite_a_config_json() {
         let listing = sam2_tiny_listing();
-        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        let r = ModelRef::new("facebook", "sam2.1-hiera-tiny", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "sam2");
     }
 
@@ -734,6 +820,56 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].file, "sam2.1_hiera_tiny.pt");
         assert_eq!(artifacts[0].dest_name, "sam2.1_hiera_tiny.pt");
+    }
+
+    /// The exact listing of BOTH `NeoQuasar/Kronos-base` and
+    /// `NeoQuasar/Kronos-Tokenizer-base`, confirmed live via the HF API. They
+    /// are identical, which is the whole point of the test below.
+    fn kronos_listing() -> Vec<String> {
+        [".gitattributes", "README.md", "config.json", "model.safetensors"].into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn the_two_kronos_repos_route_to_two_different_recipes_from_one_identical_listing() {
+        let listing = kronos_listing();
+        let pick = |v: &str, r: &str| recipes().into_iter().find(|x| x.matches(&ModelRef::new(v, r, None), &listing)).unwrap().id();
+        assert_eq!(pick("NeoQuasar", "Kronos-base"), "kronos-decoder");
+        assert_eq!(pick("NeoQuasar", "Kronos-Tokenizer-base"), "kronos-tokenizer");
+        // Every sibling release named in either row resolves the same way -
+        // adding a size is a string, not a recipe.
+        assert_eq!(pick("NeoQuasar", "Kronos-small"), "kronos-decoder");
+        assert_eq!(pick("NeoQuasar", "Kronos-Tokenizer-2k"), "kronos-tokenizer");
+        // Disjoint roles: merged, they are the two directories
+        // `kronos::import::load_model` takes.
+        assert_eq!(files_recipe_roles("kronos-decoder").unwrap().1, &[("decoder", ".")]);
+        assert_eq!(files_recipe_roles("kronos-tokenizer").unwrap().1, &[("tokenizer", ".")]);
+        assert_eq!(files_recipe_roles("kronos-decoder").unwrap().0, "kronos");
+    }
+
+    #[test]
+    fn a_repo_pinned_recipe_never_claims_a_repo_it_does_not_name() {
+        // The hazard a `config.json` + `model.safetensors` signature creates:
+        // that pair is EVERY transformers repo. `repos` is what keeps the
+        // kronos rows from swallowing them, so this is the test that would
+        // fail if someone dropped the pin and left the signature.
+        let listing = vec!["config.json".to_string(), "model.safetensors".to_string()];
+        let matched = recipes().into_iter().find(|x| x.matches(&ModelRef::new("Qwen", "Qwen3-0.6B", None), &listing)).unwrap();
+        assert_eq!(matched.id(), "transformers", "an ordinary transformers repo must still reach the catch-all");
+        // ... and a repo from the right vendor with the wrong name is not
+        // claimed either.
+        let matched = recipes().into_iter().find(|x| x.matches(&ModelRef::new("NeoQuasar", "Something-Else", None), &kronos_listing())).unwrap();
+        assert_eq!(matched.id(), "transformers");
+    }
+
+    #[test]
+    fn kronos_recipes_fetch_the_two_files_and_none_of_the_documentation() {
+        let hub = crate::hub::FakeHub::new();
+        for (repo, id) in [("Kronos-base", "kronos-decoder"), ("Kronos-Tokenizer-base", "kronos-tokenizer")] {
+            let r = ModelRef::new("NeoQuasar", repo, None);
+            let recipe = recipes().into_iter().find(|x| x.id() == id).unwrap();
+            let files: Vec<String> = recipe.artifacts(&r, &kronos_listing(), &hub).unwrap().into_iter().map(|a| a.file).collect();
+            assert_eq!(files, ["config.json", "model.safetensors"], "{repo}");
+        }
     }
 
     #[test]
@@ -750,7 +886,7 @@ mod tests {
         let hub = crate::hub::FakeHub::new();
         let r = ModelRef::new("ggml-org", "DeepSeek-OCR-GGUF", None);
         let recipe = recipes().into_iter().find(|r| r.id() == "deepseek2ocr-gguf").unwrap();
-        assert!(recipe.matches_listing(&listing));
+        assert!(recipe.matches(&r, &listing));
         let artifacts = recipe.artifacts(&r, &listing, &hub).unwrap();
         let files: Vec<&str> = artifacts.iter().map(|a| a.file.as_str()).collect();
         assert_eq!(files, ["DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"]);
