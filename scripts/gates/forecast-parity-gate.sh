@@ -40,9 +40,18 @@ fi
 
 # (2,3) shared-prefill + cross-section bit-identity — need BRAIN_KRONOS_TOKENIZER/_DECODER.
 if [ -n "${BRAIN_KRONOS_TOKENIZER:-}" ] && [ -n "${BRAIN_KRONOS_DECODER:-}" ]; then
-    run "kronos shared-prefill + cross-section == serial (bit-identical)" \
+    # ONE filter per invocation: `cargo test` takes a single positional
+    # TESTNAME, so passing both names made this exit with a usage error rather
+    # than run anything. It went unnoticed because the branch only executes
+    # when the Kronos checkpoints are present, and until they were fetched the
+    # gate always took the SKIP path below - a gate that has never once run is
+    # indistinguishable from a gate that passes.
+    run "kronos shared-prefill == serial (bit-identical)" \
         cargo test --release -q -p brain-kronos --test bench_cpu \
-        shared_prefill_parity_and_speed crosssection_batch_parity_and_speed -- --ignored
+        shared_prefill_parity_and_speed -- --ignored
+    run "kronos cross-section == serial (bit-identical)" \
+        cargo test --release -q -p brain-kronos --test bench_cpu \
+        crosssection_batch_parity_and_speed -- --ignored
 else
     echo "=== kronos shared-prefill/cross-section parity: SKIP (set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER) ==="; echo
 fi
