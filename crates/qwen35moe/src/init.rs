@@ -35,9 +35,7 @@ pub fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> 
 
     let mut w = HashMap::new();
     for (name, numel) in cfg.param_list() {
-        let v = if name.ends_with("norm.weight") {
-            vec![1.0f32; numel]
-        } else if name.ends_with(".dt_bias") {
+        let v = if name.ends_with("norm.weight") || name.ends_with(".dt_bias") {
             vec![1.0f32; numel]
         } else if name.ends_with(".A_log") {
             // A ~ Uniform(0,16), A_log = log(A). Floor A away from 0 so log
@@ -45,9 +43,10 @@ pub fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> 
             (0..numel).map(|_| (rng.unit() * 16.0).max(1e-4).ln()).collect()
         } else if name.ends_with(".lora_b") {
             vec![0.0f32; numel] // zero-init so the adapter starts as identity
-        } else if name.ends_with(".lora_a") {
-            rng.vec_scaled(numel, std)
         } else {
+            // Everything else, `.lora_a` included: N(0, std). The adapter is
+            // still identity at step 0 because `.lora_b` above is zero, so `A`
+            // takes the same spread as a base weight.
             rng.vec_scaled(numel, std)
         };
         w.insert(name, v);

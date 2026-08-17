@@ -116,18 +116,18 @@ impl KronosTokenizerConfig {
     pub fn param_list(&self) -> Vec<Param> {
         let d = self.d_model;
         let k = self.codebook_dim();
-        let mut p: Vec<Param> = Vec::new();
-
-        p.push(("embed.weight".into(), vec![d, self.d_in]));
-        p.push(("embed.bias".into(), vec![d]));
-        p.push(("head.weight".into(), vec![self.d_in, d]));
-        p.push(("head.bias".into(), vec![self.d_in]));
-        p.push(("quant_embed.weight".into(), vec![k, d]));
-        p.push(("quant_embed.bias".into(), vec![k]));
-        p.push(("post_quant_embed_pre.weight".into(), vec![d, self.s1_bits]));
-        p.push(("post_quant_embed_pre.bias".into(), vec![d]));
-        p.push(("post_quant_embed.weight".into(), vec![d, k]));
-        p.push(("post_quant_embed.bias".into(), vec![d]));
+        let mut p: Vec<Param> = vec![
+            ("embed.weight".into(), vec![d, self.d_in]),
+            ("embed.bias".into(), vec![d]),
+            ("head.weight".into(), vec![self.d_in, d]),
+            ("head.bias".into(), vec![self.d_in]),
+            ("quant_embed.weight".into(), vec![k, d]),
+            ("quant_embed.bias".into(), vec![k]),
+            ("post_quant_embed_pre.weight".into(), vec![d, self.s1_bits]),
+            ("post_quant_embed_pre.bias".into(), vec![d]),
+            ("post_quant_embed.weight".into(), vec![d, k]),
+            ("post_quant_embed.bias".into(), vec![d]),
+        ];
 
         for i in 0..self.enc_blocks() {
             transformer_block(&mut p, &format!("encoder.{i}"), d, self.ff_dim);
@@ -226,13 +226,13 @@ impl KronosConfig {
     /// The decoder's learnable parameter list (reference `state_dict` names).
     pub fn param_list(&self) -> Vec<Param> {
         let d = self.d_model;
-        let mut p: Vec<Param> = Vec::new();
-
         // hierarchical embedding
-        p.push(("embedding.emb_s1.weight".into(), vec![self.s1_vocab(), d]));
-        p.push(("embedding.emb_s2.weight".into(), vec![self.s2_vocab(), d]));
-        p.push(("embedding.fusion_proj.weight".into(), vec![d, 2 * d]));
-        p.push(("embedding.fusion_proj.bias".into(), vec![d]));
+        let mut p: Vec<Param> = vec![
+            ("embedding.emb_s1.weight".into(), vec![self.s1_vocab(), d]),
+            ("embedding.emb_s2.weight".into(), vec![self.s2_vocab(), d]),
+            ("embedding.fusion_proj.weight".into(), vec![d, 2 * d]),
+            ("embedding.fusion_proj.bias".into(), vec![d]),
+        ];
 
         // temporal (calendar) embeddings — 5 tables. `learn_te=true` → learned,
         // key `time_emb.<name>_embed.weight`; else frozen sinusoid, key

@@ -53,7 +53,7 @@ impl Default for ConnOpts {
 pub enum Update {
     Connected,
     Disconnected(String),
-    Snapshot(StatsSnapshot),
+    Snapshot(Box<StatsSnapshot>),
 }
 
 /// The `com.swedishembedded.Brain1.Manager` client proxy — just the stats surface
@@ -129,7 +129,7 @@ async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()>
     // Prime immediately so the UI shows data without waiting for the first tick.
     if let Ok(json) = proxy.stats_snapshot().await {
         if let Ok(snap) = StatsSnapshot::from_json_str(&json) {
-            if tx.send(Update::Snapshot(snap)).is_err() {
+            if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
                 return Ok(());
             }
         }
@@ -150,7 +150,7 @@ async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()>
                 if let Ok(args) = sig.args() {
                     last_signal = Instant::now();
                     if let Ok(snap) = StatsSnapshot::from_json_str(&args.snapshot) {
-                        if tx.send(Update::Snapshot(snap)).is_err() {
+                        if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
                             return Ok(());
                         }
                     }
@@ -162,7 +162,7 @@ async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()>
                 if last_signal.elapsed() >= SIGNAL_GRACE {
                     let json = proxy.stats_snapshot().await.context("polling stats_snapshot()")?;
                     if let Ok(snap) = StatsSnapshot::from_json_str(&json) {
-                        if tx.send(Update::Snapshot(snap)).is_err() {
+                        if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
                             return Ok(());
                         }
                     }

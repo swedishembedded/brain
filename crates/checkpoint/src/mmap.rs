@@ -84,7 +84,7 @@ impl MmapSafetensors {
             if start > end {
                 return Err(format!("safetensors: tensor '{name}': data_offsets start {start} > end {end}"));
             }
-            if (end - start) % width != 0 {
+            if !(end - start).is_multiple_of(width) {
                 return Err(format!("safetensors: tensor '{name}': byte range {} not a multiple of {dtype}'s element width {width}", end - start));
             }
             if end > mmap.len() - hend {

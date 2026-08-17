@@ -40,9 +40,7 @@ fn pad_to_context(context: &[f32], context_len: usize) -> (Vec<f32>, Vec<f32>) {
         vals.copy_from_slice(&context[l - context_len..]);
     } else {
         let front = context_len - l;
-        for i in 0..front {
-            pad[i] = 1.0;
-        }
+        pad[..front].fill(1.0);
         vals[front..].copy_from_slice(context);
     }
     (vals, pad)

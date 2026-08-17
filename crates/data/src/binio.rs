@@ -163,7 +163,7 @@ pub fn read_f32_bin(path: &Path) -> io::Result<Vec<f32>> {
 /// the exact "silent truncation" class the repo's validate-everything rule
 /// names. One shared refusal for every raw reader above.
 fn reject_trailing(path: &Path, len: usize, width: usize) -> io::Result<()> {
-    if len % width != 0 {
+    if !len.is_multiple_of(width) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(

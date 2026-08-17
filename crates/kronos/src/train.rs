@@ -295,12 +295,13 @@ pub fn param_list_blocks(cfg: &KronosConfig) -> Vec<(String, usize)> {
 /// into `fusion_l`/`fusion_r`) + the block/head params.
 pub fn param_list_b(cfg: &KronosConfig) -> Vec<(String, usize)> {
     let d = cfg.d_model;
-    let mut p: Vec<(String, usize)> = Vec::new();
-    p.push(("embedding.emb_s1.weight".into(), cfg.s1_vocab() * d));
-    p.push(("embedding.emb_s2.weight".into(), cfg.s2_vocab() * d));
-    p.push(("embedding.fusion_l".into(), d * d));
-    p.push(("embedding.fusion_r".into(), d * d));
-    p.push(("embedding.fusion_proj.bias".into(), d));
+    let mut p: Vec<(String, usize)> = vec![
+        ("embedding.emb_s1.weight".into(), cfg.s1_vocab() * d),
+        ("embedding.emb_s2.weight".into(), cfg.s2_vocab() * d),
+        ("embedding.fusion_l".into(), d * d),
+        ("embedding.fusion_r".into(), d * d),
+        ("embedding.fusion_proj.bias".into(), d),
+    ];
     for (name, size) in CAL {
         p.push((format!("time_emb.{name}_embed.weight"), size * d));
     }
@@ -599,13 +600,13 @@ impl KronosTrain {
         let hd = d / heads;
         let ids = Self::ids();
         let ga = self.gqa();
-        let mut s: Vec<Step> = Vec::new();
-
         // ---- hierarchical + temporal embedding → res[0] ----
-        s.push(self.gpu.step(EMBED, &[&self.s1_ids, self.w("embedding.emb_s1.weight"), &self.e1], &[d, n], n * d));
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.e1], &[n * d, f(self.sqrt_d)], n * d));
-        s.push(self.gpu.step(EMBED, &[&self.s2_ids, self.w("embedding.emb_s2.weight"), &self.e2], &[d, n], n * d));
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.e2], &[n * d, f(self.sqrt_d)], n * d));
+        let mut s: Vec<Step> = vec![
+            self.gpu.step(EMBED, &[&self.s1_ids, self.w("embedding.emb_s1.weight"), &self.e1], &[d, n], n * d),
+            self.gpu.step(GRAD_SCALE, &[&self.e1], &[n * d, f(self.sqrt_d)], n * d),
+            self.gpu.step(EMBED, &[&self.s2_ids, self.w("embedding.emb_s2.weight"), &self.e2], &[d, n], n * d),
+            self.gpu.step(GRAD_SCALE, &[&self.e2], &[n * d, f(self.sqrt_d)], n * d),
+        ];
         self.matmul(&mut s, &self.e1, "embedding.fusion_l", &self.x1, n, d, d);
         self.matmul(&mut s, &self.e2, "embedding.fusion_r", &self.x2, n, d, d);
         s.push(self.gpu.step(ADD2, &[&self.x1, &self.x2, &self.xf], &[n * d], n * d));

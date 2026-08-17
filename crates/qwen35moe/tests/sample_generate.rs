@@ -41,7 +41,7 @@ fn greedy_generation_is_deterministic() {
     let out1 = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut rng1);
     let out2 = generate_kv(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut rng2);
     assert_eq!(out1, out2, "greedy decoding must not depend on the rng seed");
-    assert!(out1.iter().all(|&t| (t as u32) < model.cfg.vocab), "generated a token outside the vocab");
+    assert!(out1.iter().all(|&t| t < model.cfg.vocab), "generated a token outside the vocab");
 }
 
 #[test]

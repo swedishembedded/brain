@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn back_chunked_equals_full() {
         let mut seed = Lcg::new(7);
-        let mut cfg = CodecConfig {
+        let cfg = CodecConfig {
             latent_dim: 4,
             decoder_dim: 8,
             upsampling_ratios: vec![2],

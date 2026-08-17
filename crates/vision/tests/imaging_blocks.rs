@@ -373,8 +373,8 @@ fn layernorm2d_normalizes_across_channels_not_across_space() {
     // constant offset and checking the OTHER channels moved with it.
     let mut x2 = x.clone();
     let hw = (s.h * s.w) as usize;
-    for p in 0..hw {
-        x2[p] += 10.0; // image 0, channel 0 only
+    for v in &mut x2[..hw] {
+        *v += 10.0; // image 0, channel 0 only
     }
     let x2b = gpu.storage_init("x2", &x2);
     ln.forward(&ctx, &ps, &x2b);

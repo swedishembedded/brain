@@ -367,9 +367,9 @@ impl Fincast {
                     continue; // all keys masked
                 }
                 let mut sum = 0.0f32;
-                for j in 0..s {
-                    sc[j] = (sc[j] - mx).exp();
-                    sum += sc[j];
+                for e in &mut sc {
+                    *e = (*e - mx).exp();
+                    sum += *e;
                 }
                 let inv = 1.0 / sum;
                 for j in 0..s {

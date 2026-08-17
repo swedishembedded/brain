@@ -1117,7 +1117,6 @@ mod tests {
         w.insert("lm_head.weight".to_string(), r((vocab * d) as usize));
         w.insert("lm_head.bias".to_string(), r(vocab as usize));
         let img: Vec<f32> = r((n_img * d) as usize); // last use of `r` before rng is reborrowed
-        drop(r);
         for l in 0..nl {
             for (k, v) in block_weights(d, ff, &mut rng) {
                 w.insert(format!("blocks.{l}.{k}"), v);

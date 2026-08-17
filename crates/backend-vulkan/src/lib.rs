@@ -883,7 +883,7 @@ impl VulkanBackend {
         // pool — an oversized batch silently skips timing rather than
         // truncating or panicking (`kernel_times` stays honest: it reports
         // what it measured, not a guess for what it didn't).
-        let time_this_batch = self.timing_active() && steps.len() + 1 <= MAX_TIMED_DISPATCHES;
+        let time_this_batch = self.timing_active() && steps.len() < MAX_TIMED_DISPATCHES;
         let query_pool = time_this_batch.then(|| unsafe { self.timestamp_pool() });
         unsafe {
             let (cmd, guard) = self.begin_cmd();

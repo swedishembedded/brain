@@ -142,7 +142,7 @@ pub fn upload_dequantized(
         if err.is_some() {
             return;
         }
-        if off_words as usize % kg != 0 || chunk.len() % kg != 0 {
+        if !(off_words as usize).is_multiple_of(kg) || !chunk.len().is_multiple_of(kg) {
             err = Some(format!("upload_dequantized '{name}': chunk at word {off_words} of len {} is not row-aligned (k/4={kg})", chunk.len()));
             return;
         }

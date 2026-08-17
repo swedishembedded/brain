@@ -103,6 +103,13 @@ fn fract_matches_x_minus_floor() {
     assert_exact("fract(v)", &run("fract(v)", XS), |x| x - x.floor());
 }
 
+// `max().min()` here is not a clumsy `f32::clamp` - it is the WGSL spec's own
+// expansion, `clamp(e, low, high) = min(max(e, low), high)`, which is the whole
+// point of an independent oracle. The two forms are not the same function:
+// `f32::clamp` propagates NaN, while `max`/`min` return the non-NaN operand, so
+// swapping them would silently retune this test to whatever the implementation
+// does the day a NaN is added to `XS`.
+#[allow(clippy::manual_clamp)]
 #[test]
 fn clamp_saturate_mix() {
     assert_exact("clamp(v, -1.0, 2.0)", &run("clamp(v, -1.0, 2.0)", XS), |x| {

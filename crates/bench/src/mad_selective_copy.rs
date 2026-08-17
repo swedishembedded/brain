@@ -128,7 +128,7 @@ impl MadSelectiveCopy {
         // Build the tagged stream: noise burst, then MARK+selected, repeated;
         // pad to the fixed budget with trailing noise.
         let mut stream: Vec<u16> = Vec::with_capacity(self.stream_budget());
-        for i in 0..self.n_copy {
+        for &sel in &selected {
             let burst = rng.gen_range_inclusive(0, self.noise_per_slot as i64) as usize;
             for _ in 0..burst {
                 if stream.len() < self.stream_budget() {
@@ -137,7 +137,7 @@ impl MadSelectiveCopy {
             }
             if stream.len() + 2 <= self.stream_budget() {
                 stream.push(MARK);
-                stream.push(selected[i]);
+                stream.push(sel);
             }
         }
         while stream.len() < self.stream_budget() {

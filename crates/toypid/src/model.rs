@@ -475,18 +475,19 @@ impl Pid {
         let hd = c.head_dim();
         let g = |name: &str| self.ps.g(name);
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
-        let mut s: Vec<Step> = Vec::new();
+        let last = c.n_layers as usize;
 
         // ---- head + final layernorm ----
-        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * u));
-        s.push(self.gpu.step(BIAS_GRAD, &[&self.d_logits, g("u_head.bias")], &[n, u], u));
-        s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("u_head.weight")], &[n, d, u], u * d));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("u_head.weight"), &self.d_xn], &[n, d, u, 0], n * d));
-        let last = c.n_layers as usize;
-        s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
-        s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
-        s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
-        s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5));
+        let mut s: Vec<Step> = vec![
+            self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * u),
+            self.gpu.step(BIAS_GRAD, &[&self.d_logits, g("u_head.bias")], &[n, u], u),
+            self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("u_head.weight")], &[n, d, u], u * d),
+            self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("u_head.weight"), &self.d_xn], &[n, d, u, 0], n * d),
+            model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5),
+            self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d),
+            self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d),
+            model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5),
+        ];
 
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];

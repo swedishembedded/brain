@@ -14,6 +14,11 @@
 //! `FincastResident`) are reachable here as `pub(crate)`/`pub` items despite
 //! `main.rs` never exporting them anywhere.
 
+// Only the handful of types this test drives are reachable from here, so
+// `dead_code` fires on the rest of the file - including the `from_env`
+// constructors `catalog.rs` calls in the real crate. The lint is right about
+// this compilation and wrong about the code: what it flags is live in the bin.
+#[allow(dead_code)]
 #[path = "../src/resident_forecast.rs"]
 mod resident_forecast;
 

@@ -2530,8 +2530,8 @@ mod tests {
             let mut gate = gate;
             // Force at least one zero-gated row so the accumulate-skip path runs.
             if seq_len > 1 {
-                for e in 0..n_experts {
-                    gate[e] = 0.0;
+                for g in gate.iter_mut().take(n_experts) {
+                    *g = 0.0;
                 }
             }
             let src: Vec<f32> = (0..seq_len * d_model).map(|_| lcg(&mut s)).collect();

@@ -477,10 +477,10 @@ impl KvTalker {
             return Err(format!("prefix {n} positions exceeds cap {}", self.cap));
         }
         // Fast path: one prefill inference seeds the whole cache.
-        if self.prefill.is_some() {
+        if let Some(prefill) = self.prefill.as_mut() {
             let mut buf = vec![0.0f32; self.cap * d];
             buf[..embeds.len()].copy_from_slice(embeds);
-            let (hidden, k, v) = self.prefill.as_mut().unwrap().run(&buf).map_err(|e| e.to_string())?;
+            let (hidden, k, v) = prefill.run(&buf).map_err(|e| e.to_string())?;
             for l in 0..self.n_layers {
                 self.past_k[l].copy_from_slice(&k[l]);
                 self.past_v[l].copy_from_slice(&v[l]);

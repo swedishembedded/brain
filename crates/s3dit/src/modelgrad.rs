@@ -446,8 +446,8 @@ pub fn backward(cfg: &Cfg, w: &ModelWeights, cache: &ModelCache, dpred: &[f64]) 
     for (bw, ca) in w.main.iter().zip(&cache.main_c).rev() {
         let g = block_bwd(cfg.dims(ntot), bw, ca, &d_uni);
         d_uni = g.dx.clone();
-        for j in 0..cdim {
-            dc[j] += g.dc[j];
+        for (dcj, &gj) in dc.iter_mut().zip(&g.dc) {
+            *dcj += gj;
         }
         main_g.push(g);
     }
@@ -469,8 +469,8 @@ pub fn backward(cfg: &Cfg, w: &ModelWeights, cache: &ModelCache, dpred: &[f64]) 
     for (bw, ca) in w.noise_ref.iter().zip(&cache.noise_c).rev() {
         let g = block_bwd(cfg.dims(n_img), bw, ca, &d_img);
         d_img = g.dx.clone();
-        for j in 0..cdim {
-            dc[j] += g.dc[j];
+        for (dcj, &gj) in dc.iter_mut().zip(&g.dc) {
+            *dcj += gj;
         }
         noise_g.push(g);
     }

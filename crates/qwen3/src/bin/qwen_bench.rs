@@ -260,7 +260,9 @@ fn main() {
                 rows as f64 / secs
             );
         }
-        "prefill" | "all" | _ => {
+        // "prefill" and "all" land here, and so does an unrecognised mode:
+        // prefill is the default bench.
+        _ => {
             let t: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
             eprintln!("qwen_bench prefill: Qwen3-0.6B, T={t}, {reps} reps (random weights)");
             let t0 = Instant::now();

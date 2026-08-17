@@ -450,19 +450,19 @@ impl Trainer {
         let hd = c.head_dim();
         let half = hd / 2;
         let n_layers = c.n_layers as usize;
-        let mut s: Vec<Step> = Vec::new();
-
         // ---- output: cross-entropy grad, lm_head, final norm ----
-        // Masked CE-grad reads its `[n, vocab, IGNORE, count]` from the dynamic
-        // uniform (written per batch in `backward`), since `count` varies.
-        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * c.vocab));
-        // lm_head dW (tied -> grad_emb) and dX -> d_xn (=d_xn_final)
-        s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d));
-        // final norm backward -> dres[L]
-        s.push(self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n], n));
-        s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d));
-        s.push(self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n], n));
+        let mut s: Vec<Step> = vec![
+            // Masked CE-grad reads its `[n, vocab, IGNORE, count]` from the dynamic
+            // uniform (written per batch in `backward`), since `count` varies.
+            self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * c.vocab),
+            // lm_head dW (tied -> grad_emb) and dX -> d_xn (=d_xn_final)
+            self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d),
+            self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d),
+            // final norm backward -> dres[L]
+            self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n], n),
+            self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d),
+            self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n], n),
+        ];
 
         for l in (0..n_layers).rev() {
             let lb = &self.layers[l];

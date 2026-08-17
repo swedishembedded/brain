@@ -857,7 +857,7 @@ mod tests {
             .collect();
         let (_r, w) = nix::unistd::pipe().expect("pipe");
         let err = mgr
-            .stream_transcribe("brain/asr-stub".to_string(), String::new(), std::os::fd::OwnedFd::from(w).into())
+            .stream_transcribe("brain/asr-stub".to_string(), String::new(), w.into())
             .await
             .expect_err("a saturated server must shed, not spawn another stream thread");
         assert!(err.to_string().contains("saturated"), "{err}");
@@ -875,7 +875,7 @@ mod tests {
         let (pcm_read, pcm_write) = nix::unistd::pipe().expect("pipe");
         // The server takes the READ end; the client holds the write end open.
         let (_job, _event_fd) = mgr
-            .stream_transcribe("brain/asr-stub".to_string(), String::new(), std::os::fd::OwnedFd::from(pcm_read).into())
+            .stream_transcribe("brain/asr-stub".to_string(), String::new(), pcm_read.into())
             .await
             .expect("stream starts");
         assert_eq!(mgr.edge_permits.available_permits(), total - 1, "a live stream must hold an edge permit");

@@ -32,7 +32,7 @@
 //!
 //! Skips when the checkpoints are absent, like brain's other weight-gated tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Ops the OpenVINO NPU plugin compiles for a static conv net. Not exhaustive -
 /// it is the set these two models are allowed to use, so a re-exported
@@ -63,7 +63,7 @@ fn weights_dir(var: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-fn read(dir: &PathBuf, name: &str) -> Option<onnx::onnx::GraphProto> {
+fn read(dir: &Path, name: &str) -> Option<onnx::onnx::GraphProto> {
     let p = dir.join(name);
     if !p.exists() {
         brain_testutil::skip(&format!("{} absent", p.display()));

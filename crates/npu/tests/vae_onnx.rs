@@ -38,16 +38,16 @@ impl WeightSource for Zeros {
 impl Zeros {
     fn for_topo(t: &VaeTopo) -> Zeros {
         let mut m: HashMap<String, Vec<i64>> = HashMap::new();
-        let mut conv = |p: &str, cout: u32, cin: u32, k: i64, m: &mut HashMap<String, Vec<i64>>| {
+        let conv = |p: &str, cout: u32, cin: u32, k: i64, m: &mut HashMap<String, Vec<i64>>| {
             m.insert(format!("{p}.weight"), vec![cout as i64, cin as i64, k, k]);
             m.insert(format!("{p}.bias"), vec![cout as i64]);
         };
-        let mut norm = |p: &str, c: u32, m: &mut HashMap<String, Vec<i64>>| {
+        let norm = |p: &str, c: u32, m: &mut HashMap<String, Vec<i64>>| {
             m.insert(format!("{p}.weight"), vec![c as i64]);
             m.insert(format!("{p}.bias"), vec![c as i64]);
         };
         let names = t.names;
-        let mut resnet = |p: &str, cin: u32, cout: u32, m: &mut HashMap<String, Vec<i64>>| {
+        let resnet = |p: &str, cin: u32, cout: u32, m: &mut HashMap<String, Vec<i64>>| {
             norm(&format!("{p}.norm1"), cin, m);
             conv(&format!("{p}.conv1"), cout, cin, 3, m);
             norm(&format!("{p}.norm2"), cout, m);

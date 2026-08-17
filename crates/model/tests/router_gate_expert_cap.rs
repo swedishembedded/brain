@@ -89,7 +89,7 @@ fn run_gate_case(n_experts: u32) {
     let kernel = idx(&g, "router_gate");
 
     let n_rows: u32 = 5;
-    let top_k = (n_experts / 4).max(1).min(32);
+    let top_k = (n_experts / 4).clamp(1, 32);
     let mut rng = Lcg::new(0xBEEF ^ n_experts as u64);
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
 
@@ -109,7 +109,7 @@ fn run_train_case(n_experts: u32) {
     let kernel = idx(&g, "router_gate_train");
 
     let n_rows: u32 = 4;
-    let top_k = (n_experts / 4).max(1).min(32);
+    let top_k = (n_experts / 4).clamp(1, 32);
     let mut rng = Lcg::new(0xCAFE ^ n_experts as u64);
     let logits = rng.vec_scaled((n_rows * n_experts) as usize, 3.0);
 

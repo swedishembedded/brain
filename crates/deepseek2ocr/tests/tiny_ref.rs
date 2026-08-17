@@ -508,7 +508,7 @@ fn composite_lora_backward_freezes_the_base_and_descends() {
 
     let mut cfg = cfg_base.clone();
     cfg.decoder.lora = Some(deepseek2::config::lora_cfg(2, 4.0));
-    let init = deepseek2ocr::train::lora_init_map(&cfg, &base_init, 0x10_A_DEC);
+    let init = deepseek2ocr::train::lora_init_map(&cfg, &base_init, 0x0010_ADEC);
 
     let ids: Vec<u32> = g["input_ids"].data.iter().map(|v| *v as u32).collect();
     let seq = ids.len() as u32;

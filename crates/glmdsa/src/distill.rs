@@ -181,8 +181,8 @@ pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_prob
                 qd[j] = (score[j] - mx).exp();
                 z += qd[j];
             }
-            for j in 0..=i {
-                qd[j] /= z;
+            for p in &mut qd {
+                *p /= z;
             }
             // target = mean_h dense_probs[bi,h,i,j]  (causal)
             let mut tgt = vec![0.0f32; i + 1];

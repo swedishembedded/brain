@@ -27,7 +27,7 @@ impl Zeros {
     fn for_topo(t: &RrdbTopo) -> Zeros {
         let (f, g) = (t.num_feat as usize, t.num_grow_ch as usize);
         let mut m = HashMap::new();
-        let mut conv = |name: String, cout: usize, cin: usize, m: &mut HashMap<String, usize>| {
+        let conv = |name: String, cout: usize, cin: usize, m: &mut HashMap<String, usize>| {
             m.insert(format!("{name}.weight"), cout * cin * 9);
             m.insert(format!("{name}.bias"), cout);
         };

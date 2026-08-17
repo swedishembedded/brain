@@ -103,7 +103,7 @@ impl App {
             Update::Snapshot(s) => {
                 self.connected = true;
                 self.status = "connected".into();
-                self.snapshot = Some(s);
+                self.snapshot = Some(*s);
                 self.clamp_selection();
             }
         }
