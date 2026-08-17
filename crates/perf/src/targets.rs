@@ -130,6 +130,65 @@ pub const FIDELITY_PROMPT_TOKENS: u32 = 24;
 /// same reasoning as [`FIDELITY_PROMPT_TOKENS`], for `--output`.
 pub const FIDELITY_MAX_NEW: u32 = 12;
 
+/// How many requests a correctness probe submits. Three, matching
+/// [`PagedLlmTarget::fidelity`] - and for a second reason on the targets that
+/// go through a scheduler: the first request is claimed onto a lane while
+/// nothing else has arrived yet, so the remaining two are what actually
+/// accumulate into ONE batched group. A probe of one could never reach the
+/// batched path it exists to check.
+pub const FIDELITY_PROBES: u64 = 3;
+
+/// The fixed correctness-probe requests, shared by every target that
+/// self-verifies by running the same work two ways. Deterministic in their
+/// seeds, so a target's own payload builder produces byte-identical
+/// invocations on every phase of the check - the ONLY thing allowed to differ
+/// between phases is HOW the requests reach the engine.
+pub fn fidelity_requests() -> Vec<PerfRequest> {
+    (0..FIDELITY_PROBES)
+        .map(|i| PerfRequest {
+            input_artifacts: FIDELITY_PROMPT_TOKENS as usize,
+            output_artifacts: FIDELITY_MAX_NEW as usize,
+            class: 0,
+            seed: 0x5EED ^ i,
+        })
+        .collect()
+}
+
+/// Decide a two-path self-check, given the two independent runs and a way to
+/// repeat the reference path.
+///
+/// The shared half of [`ExecutorTarget::fidelity`] and [`HttpTarget::fidelity`]:
+/// both submit the same requests sequentially and concurrently and demand exact
+/// agreement, and both face the same question when the two disagree - *is this
+/// engine broken, or is this action simply not deterministic?* Neither answer
+/// may be assumed:
+///
+/// * a mismatch is reported as a FAILURE only once a second sequential run
+///   reproduces the first, i.e. the reference path is stable and the concurrent
+///   path really did compute something else;
+/// * if the two sequential runs disagree with EACH OTHER, this action has no
+///   deterministic output to gate, and the target reports `None` ("no way to
+///   check itself") rather than manufacturing a verdict out of the model's own
+///   noise. An honest gap is recoverable; a gate that fires on legitimate
+///   nondeterminism gets switched off, and then nothing is checked at all.
+fn two_path_verdict(
+    reference: &str,
+    sequential: Vec<Vec<u8>>,
+    concurrent: Vec<Vec<u8>>,
+    repeat_sequential: impl FnOnce() -> Result<Vec<Vec<u8>>, String>,
+) -> Option<crate::fidelity::Fidelity> {
+    let f = crate::fidelity::Fidelity::exact_bytes(reference, &concurrent, &sequential, crate::fidelity::EXACT);
+    if f.passed {
+        return Some(f);
+    }
+    // A repeat that cannot even run is no evidence of nondeterminism, so it
+    // does not get to excuse the disagreement two SUCCESSFUL runs already
+    // showed; keep the failure, which names exactly what diverged.
+    let Ok(again) = repeat_sequential() else { return Some(f) };
+    let stable = crate::fidelity::Fidelity::exact_bytes(reference, &again, &sequential, crate::fidelity::EXACT);
+    stable.passed.then_some(f)
+}
+
 // ===================== paged LLM engine =====================
 
 /// Drives `qwen3::serve::Scheduler`. One [`PerfTarget::step`] is one scheduler
@@ -394,6 +453,82 @@ impl ExecutorTarget {
             next: 1,
         }
     }
+
+    /// Run the correctness probe's requests through the executor and capture
+    /// each one's OUTPUT bytes.
+    ///
+    /// `concurrent` submits every request before draining any of them, so the
+    /// scheduler is free to group them into one [`residency::Instance::run_batch`]
+    /// call; otherwise each request is drained to completion before the next
+    /// is submitted, which is the same engine reached one job at a time.
+    ///
+    /// A failed request returns `Err` rather than being captured as output: an
+    /// error string compared against itself would let two identically broken
+    /// runs agree and score a perfect pass.
+    fn probe(&self, reqs: &[PerfRequest], concurrent: bool) -> Result<Vec<Vec<u8>>, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<Vec<u8>, String>)>();
+        let mut got: Vec<Option<Vec<u8>>> = vec![None; reqs.len()];
+        let mut outstanding = 0usize;
+        for (i, req) in reqs.iter().enumerate() {
+            let inv = (self.build)(req);
+            let streamed = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let streamed_p = streamed.clone();
+            let tx = tx.clone();
+            self.exec.submit(
+                residency::executor::Job::new(self.model.clone(), self.action.clone(), inv)
+                    .on_progress(move |p| {
+                        // The streamed half of the output: a generation's own
+                        // token deltas, which for a streaming action ARE the
+                        // answer (the terminal Outcome may carry only counts).
+                        if let Some(d) = &p.delta {
+                            lock(&streamed_p).extend_from_slice(d.as_bytes());
+                        }
+                    })
+                    .reply(move |r| {
+                        let text = std::mem::take(&mut *lock(&streamed));
+                        let _ = tx.send((i, capture_output(text, r)));
+                    }),
+            );
+            outstanding += 1;
+            if !concurrent {
+                let (j, out) = rx.recv().map_err(|e| format!("probe request {i} never replied: {e}"))?;
+                got[j] = Some(out.map_err(|e| format!("probe request {j} failed: {e}"))?);
+                outstanding -= 1;
+            }
+        }
+        for _ in 0..outstanding {
+            let (j, out) = rx.recv().map_err(|e| format!("a probe request never replied: {e}"))?;
+            got[j] = Some(out.map_err(|e| format!("probe request {j} failed: {e}"))?);
+        }
+        Ok(got.into_iter().map(|o| o.unwrap_or_default()).collect())
+    }
+}
+
+/// A mutex a probe callback owns both sides of; poisoning it needs a panic in
+/// one of the two closures above, neither of which can.
+fn lock(m: &std::sync::Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    m.lock().expect("perf: fidelity probe capture buffer")
+}
+
+/// One probe run's output as bytes: everything the action streamed, then its
+/// terminal `Outcome` - scalar outputs first, then every named blob. Covers a
+/// streaming generation (deltas), a one-shot model (`outputs`) and a model
+/// whose real answer is binary (blobs) with one representation, because
+/// [`ExecutorTarget`] is model-agnostic and cannot know which it wrapped.
+fn capture_output(streamed: Vec<u8>, r: capability::ActionResult) -> Result<Vec<u8>, String> {
+    let out = r?;
+    let mut v = streamed;
+    v.extend_from_slice(b"\noutputs=");
+    // serde_json's Map is a BTreeMap here (no `preserve_order`), so the
+    // rendering is key-order stable across runs.
+    v.extend_from_slice(out.outputs.to_string().as_bytes());
+    for (name, b) in &out.blobs {
+        v.extend_from_slice(b"\nblob=");
+        v.extend_from_slice(name.as_bytes());
+        v.push(b':');
+        v.extend_from_slice(&b.bytes);
+    }
+    Ok(v)
 }
 
 impl PerfTarget for ExecutorTarget {
@@ -492,6 +627,41 @@ impl PerfTarget for ExecutorTarget {
             ("sched_builds".into(), s.builds.into()),
             ("sched_evictions".into(), s.evictions.into()),
         ]
+    }
+
+    /// Sequential-drain vs concurrent submission through the SAME executor -
+    /// [`PagedLlmTarget::fidelity`]'s batched-vs-sequential idea, generalised
+    /// to a target that knows nothing about its model.
+    ///
+    /// Both phases submit the same three [`fidelity_requests`] through the
+    /// caller's own payload builder, so the invocations are byte-identical and
+    /// the ONLY difference is how they reach the model: one at a time, drained
+    /// to completion, versus all in flight together - where the scheduler
+    /// groups them by instance key and hands them to ONE
+    /// [`residency::Instance::run_batch`] call. That is the seam this target
+    /// exists to measure and the one an optimisation can silently break
+    /// (batching, placement, lane reuse, a stale instance), so the comparison
+    /// is over the real output bytes and the gate demands exactness.
+    ///
+    /// Determinism is a precondition and is **measured, not assumed** - see
+    /// [`two_path_verdict`] for what a disagreement has to survive before it
+    /// is reported as a failure, and why a nondeterministic action reports no
+    /// verdict instead of a fabricated one.
+    fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
+        const REFERENCE: &str = "sequential-drain-same-executor";
+        let reqs = fidelity_requests();
+        let failed = |e: String| {
+            Some(crate::fidelity::Fidelity::probe_failed(crate::fidelity::BYTE_GATE, REFERENCE, e))
+        };
+        let sequential = match self.probe(&reqs, false) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        let concurrent = match self.probe(&reqs, true) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        two_path_verdict(REFERENCE, sequential, concurrent, || self.probe(&reqs, false))
     }
 }
 
@@ -657,6 +827,154 @@ mod tests {
         assert_eq!(arts, 3, "exactly the denoise-step callbacks are artifacts");
         assert_eq!(out.iter().filter(|e| e.kind == EmissionKind::Admitted).count(), 1);
         assert_eq!(out.iter().filter(|e| e.kind == EmissionKind::Done).count(), 1);
+    }
+
+    // ---- the executor target's own correctness gate ----
+
+    /// Boilerplate every fake resident below shares: one instance key, a
+    /// nominal cost, and a single streaming action.
+    macro_rules! fake_resident {
+        ($model:ident, $inst:ty, $name:literal) => {
+            impl residency::ResidentModel for $model {
+                fn manifest(&self) -> Manifest {
+                    Manifest::new($name, "test", vec![ActionSpec::new("gen", "generate").streaming()])
+                }
+                fn instance_key(&self, _a: &str, _i: &Invocation) -> residency::InstanceKey {
+                    residency::InstanceKey::new($name, "default")
+                }
+                fn estimate(&self, _k: &residency::InstanceKey) -> residency::MemCost {
+                    residency::MemCost::new(0, 1 << 20)
+                }
+                fn activate(
+                    &self,
+                    _k: &residency::InstanceKey,
+                    _d: residency::Device,
+                ) -> Result<Box<dyn residency::Instance>, String> {
+                    Ok(Box::<$inst>::default())
+                }
+            }
+        };
+    }
+
+    /// A run slow enough that the probe's later requests are still queued
+    /// behind the busy instance key when it finishes - which is what makes the
+    /// concurrent phase reach `run_batch` with a group rather than trickling
+    /// through one at a time.
+    fn work() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// A model with a **batching bug**: batched together it computes something
+    /// different from the same work run one at a time. Deterministic in both
+    /// paths, so the disagreement is real and reproducible.
+    struct BatchSensitive;
+    #[derive(Default)]
+    struct BatchSensitiveInst;
+    fake_resident!(BatchSensitive, BatchSensitiveInst, "batch-sensitive");
+    impl residency::Instance for BatchSensitiveInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            work();
+            Ok(Outcome::new().set("text", "single".into()))
+        }
+        fn run_batch(&mut self, a: &str, invs: &[Invocation], p: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+            if invs.len() == 1 {
+                return vec![self.run(a, &invs[0], &mut |x| p(0, x))];
+            }
+            work();
+            invs.iter().map(|_| Ok(Outcome::new().set("text", "batched".into()))).collect()
+        }
+    }
+
+    /// The honest baseline: same answer however it was scheduled.
+    struct Deterministic;
+    #[derive(Default)]
+    struct DeterministicInst;
+    fake_resident!(Deterministic, DeterministicInst, "deterministic");
+    impl residency::Instance for DeterministicInst {
+        fn run(&mut self, _a: &str, inv: &Invocation, p: &mut dyn FnMut(Progress)) -> ActionResult {
+            work();
+            let seed = inv.get_i64("seed").unwrap_or(0);
+            p(Progress::token(0, 1, format!("t{seed}")));
+            Ok(Outcome::new().set("text", format!("out{seed}").into()))
+        }
+    }
+
+    /// A genuinely stochastic action: every call answers differently, with no
+    /// seed knob to pin it. There is nothing here a self-check can gate.
+    struct Stochastic;
+    #[derive(Default)]
+    struct StochasticInst {
+        n: u64,
+    }
+    fake_resident!(Stochastic, StochasticInst, "stochastic");
+    impl residency::Instance for StochasticInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            work();
+            self.n += 1;
+            Ok(Outcome::new().set("text", format!("sample{}", self.n).into()))
+        }
+    }
+
+    fn executor_for(model: Arc<dyn residency::ResidentModel>) -> residency::Executor {
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Cpu, 1 << 30, 0);
+        residency::Executor::start(vec![model], budgets, residency::Policy::default())
+    }
+
+    fn executor_target(model: Arc<dyn residency::ResidentModel>, name: &str) -> ExecutorTarget {
+        ExecutorTarget::new(
+            executor_for(model),
+            name,
+            "gen",
+            "token",
+            Vec::new(),
+            Box::new(|r: &PerfRequest| Invocation::new().set("seed", r.seed.into())),
+        )
+    }
+
+    /// SPEC: a target whose two independent paths through the SAME executor
+    /// disagree must NOT produce a valid artifact. Before this gate existed,
+    /// `ExecutorTarget` had no `fidelity()` at all, so a provably inconsistent
+    /// computation still wrote `valid: true` with `correctness: not_checked()`
+    /// - a green light for an optimisation that broke the model.
+    #[test]
+    fn executor_target_batching_divergence_invalidates_the_artifact() {
+        let mut t = executor_target(Arc::new(BatchSensitive), "batch-sensitive");
+        let f = t.fidelity().expect("a deterministic action must produce a verdict");
+        assert!(!f.passed, "batched output differs from sequential; that is a real behavioural change: {f:?}");
+        assert!(f.compared > 0, "a verdict that compared nothing verifies nothing: {f:?}");
+
+        let opt = crate::scenarios::Options { num_requests: 2, warmup_requests: 0, ..Default::default() };
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt).expect("run");
+        assert!(!art.valid, "a run whose computation is provably inconsistent must be excluded from comparison");
+        assert_eq!(art.to_json()["correctness"]["passed"], false);
+    }
+
+    /// The other half of the gate: identical paths must not be flagged. A
+    /// check that cannot pass is as useless as one that cannot fail.
+    #[test]
+    fn executor_target_consistent_paths_pass_the_gate() {
+        let mut t = executor_target(Arc::new(Deterministic), "deterministic");
+        let opt = crate::scenarios::Options { num_requests: 2, warmup_requests: 0, ..Default::default() };
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt).expect("run");
+        assert!(art.valid, "identical outputs must stay comparable: {:?}", art.invalid_reason);
+        assert_eq!(art.to_json()["correctness"]["passed"], true);
+        assert!(art.to_json()["correctness"]["compared_positions"].as_u64().unwrap_or(0) > 0);
+    }
+
+    /// HONESTY: an action that answers differently on every identical call has
+    /// no deterministic output to gate. The target must report NO verdict
+    /// (`correctness` stays unchecked, the run stays comparable) rather than
+    /// invent a failure out of the model's own noise - a gate that fires on
+    /// legitimate nondeterminism gets deleted, and then nothing is checked.
+    #[test]
+    fn executor_target_reports_no_verdict_for_a_nondeterministic_action() {
+        let mut t = executor_target(Arc::new(Stochastic), "stochastic");
+        assert!(t.fidelity().is_none(), "nondeterminism is not a correctness failure");
+        let opt = crate::scenarios::Options { num_requests: 2, warmup_requests: 0, ..Default::default() };
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 2, &opt).expect("run");
+        assert!(art.valid);
+        assert!(art.to_json()["correctness"]["passed"].is_null(), "an unverifiable run must read as unverified, never as verified");
     }
 
     #[test]
