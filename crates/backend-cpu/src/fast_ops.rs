@@ -1448,7 +1448,6 @@ pub fn attn_scores_cross(
         }
     }
 }
-
 /// `attn_softmax_cross`: row softmax over the key axis, scores → probs.
 /// params = [bsz, heads, t_dec, t_enc].
 pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: usize) {
@@ -1494,23 +1493,45 @@ pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: us
 /// rows first (a plain contiguous read per row, `hd` floats each) makes the
 /// `d`-outer / `j`-inner write order possible without re-reading the source
 /// out of order.
+///
+/// The tile is sized in BYTES and blocked on BOTH axes, because callers do not
+/// agree on the row width: `attn_apply_cross` passes one head (64-128 floats),
+/// and a caller transposing a fused KV slab passes a whole `d_model` row
+/// (768-1536, and 128 is already past the old fixed tile). A tile fixed at some
+/// row count would overrun its staging buffer on the wide callers - and a
+/// `debug_assert` on the width is no guard, because every path that reaches
+/// this runs in release - while a tile derived only from the width degenerates
+/// to a single source row there, which is the untiled loop this exists to
+/// avoid. Deriving BOTH extents from the byte budget keeps the staged tile in
+/// L1 at every caller's shape.
 fn transpose_rows_tiled(src: &[f32], stride: usize, off: usize, tk: usize, hd: usize, vt: &mut [f32]) {
-    const JT: usize = 16;
-    let mut buf = [0f32; JT * 64]; // hd is <= 64 for every SamViTConfig this crate defines.
-    debug_assert!(hd <= 64, "transpose_rows_tiled: hd={hd} exceeds the 64-wide scratch tile");
-    let mut j0 = 0usize;
-    while j0 < tk {
-        let jn = (j0 + JT).min(tk);
-        for (jj, j) in (j0..jn).enumerate() {
-            buf[jj * hd..jj * hd + hd].copy_from_slice(&src[j * stride + off..j * stride + off + hd]);
-        }
-        for d in 0..hd {
-            let row = &mut vt[d * tk + j0..d * tk + jn];
-            for (jj, dst) in row.iter_mut().enumerate() {
-                *dst = buf[jj * hd + d];
+    const TILE: usize = 16 * 64; // 4 KiB of f32, the footprint the tiling is chosen for.
+    if tk == 0 || hd == 0 {
+        return;
+    }
+    let mut buf = [0f32; TILE];
+    let dt = hd.min(64); // columns per tile
+    let jt = (TILE / dt).max(1); // source rows per tile
+    let mut d0 = 0usize;
+    while d0 < hd {
+        let dn = (d0 + dt).min(hd);
+        let w = dn - d0;
+        let mut j0 = 0usize;
+        while j0 < tk {
+            let jn = (j0 + jt).min(tk);
+            for (jj, j) in (j0..jn).enumerate() {
+                let at = j * stride + off + d0;
+                buf[jj * w..jj * w + w].copy_from_slice(&src[at..at + w]);
             }
+            for (dd, d) in (d0..dn).enumerate() {
+                let row = &mut vt[d * tk + j0..d * tk + jn];
+                for (jj, dst) in row.iter_mut().enumerate() {
+                    *dst = buf[jj * w + dd];
+                }
+            }
+            j0 = jn;
         }
-        j0 = jn;
+        d0 = dn;
     }
 }
 
@@ -1558,13 +1579,28 @@ mod tests {
     }
 
     /// `transpose_rows_tiled` against the naive `vt[d*tk+j] = src[j*stride+off+d]`
-    /// definition, over shapes that are and are not multiples of the tile width
-    /// (`JT = 16`) and that exercise a non-zero `off`/`stride` (a real caller
-    /// slices one head out of a fused `[tk, heads*hd]` buffer).
+    /// definition, over shapes that are and are not multiples of the tile's row
+    /// count and that exercise a non-zero `off`/`stride` (a real caller slices
+    /// one head out of a fused `[tk, heads*hd]` buffer).
+    ///
+    /// `hd = 128` is a diffusion transformer's head width and is the case that
+    /// indexed a fixed 64-wide staging buffer out of bounds; `hd = 1500` is
+    /// wider than the whole tile, the case that falls back to one row at a
+    /// time. Both are here because the head width is the caller's, not this
+    /// function's, and the previous guard on it was a `debug_assert` in code
+    /// that only ever runs in release.
     #[test]
     fn transpose_rows_tiled_matches_the_naive_definition() {
         let mut seed = 3u32;
-        for &(tk, hd, stride, off) in &[(4096usize, 64usize, 768usize, 128usize), (17, 5, 5, 0), (1, 3, 3, 0), (33, 64, 64, 0)] {
+        for &(tk, hd, stride, off) in &[
+            (4096usize, 64usize, 768usize, 128usize),
+            (17, 5, 5, 0),
+            (1, 3, 3, 0),
+            (33, 64, 64, 0),
+            (512, 128, 1536, 0),
+            (7, 128, 384, 256),
+            (3, 1500, 1500, 0),
+        ] {
             let src: Vec<f32> = (0..tk * stride).map(|_| lcg(&mut seed)).collect();
             let mut vt = vec![0f32; hd * tk];
             transpose_rows_tiled(&src, stride, off, tk, hd, &mut vt);
