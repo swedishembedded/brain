@@ -63,16 +63,16 @@ fn psnr(a: &[f32], b: &[f32]) -> f64 {
 fn sdxl_vae_decode_matches_diffusers() {
     let fixture = testdata("golden/vae/sdxl_vae_decode.safetensors");
     if !Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata` (or tools/goldens/sdxl_dump_vae_decode.py)");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata` (or tools/goldens/sdxl_dump_vae_decode.py)"));
         return;
     }
     let Ok(root) = std::env::var("BRAIN_SDXL") else {
-        eprintln!("SKIP: BRAIN_SDXL unset (point it at stable-diffusion-xl-base-1.0)");
+        brain_testutil::skip("BRAIN_SDXL unset (point it at stable-diffusion-xl-base-1.0)");
         return;
     };
     let vae_dir = Path::new(&root).join("vae");
     if !vae_dir.exists() {
-        eprintln!("SKIP: {} absent", vae_dir.display());
+        brain_testutil::skip(&format!("{} absent", vae_dir.display()));
         return;
     }
 

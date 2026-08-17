@@ -18,7 +18,7 @@ fn cc() -> Option<&'static str> {
 #[test]
 fn ffi_constants_match_the_system_header() {
     let Some(cc) = cc() else {
-        eprintln!("SKIP: no C compiler to verify the V4L2 ABI");
+        brain_testutil::skip_unavailable("no C compiler to verify the V4L2 ABI");
         return;
     };
     let dir = std::env::temp_dir().join("brain_v4l2_abi");

@@ -123,7 +123,7 @@ fn memfd(data: &[u8]) -> std::os::fd::OwnedFd {
 #[test]
 fn run_roundtrips_a_result_over_an_fd() {
     if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        eprintln!("SKIP: no session bus (run under `dbus-run-session -- cargo test ...`)");
+        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -238,7 +238,7 @@ fn run_roundtrips_a_result_over_an_fd() {
 #[test]
 fn dbus_serve_stops_promptly_once_shutdown_fires() {
     if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        eprintln!("SKIP: no session bus (run under `dbus-run-session -- cargo test ...`)");
+        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     // A stateless resident is enough — this test is about the shutdown handshake,
@@ -295,7 +295,7 @@ fn dbus_serve_stops_promptly_once_shutdown_fires() {
 #[test]
 fn admit_deadline_sheds_a_saturated_lane() {
     if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        eprintln!("SKIP: no session bus (run under `dbus-run-session -- cargo test ...`)");
+        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();

@@ -14,3 +14,8 @@ brain-wm-core.workspace = true
 # Recording sink (`record::RecorderSink`) writes episode datasets.
 brain-data.workspace = true
 brain-imaging.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

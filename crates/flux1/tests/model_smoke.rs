@@ -92,7 +92,7 @@ fn traced_forward_matches_and_taps_every_block() {
 fn tiny_forward_int8_runs_and_tracks_fp32() {
     let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: int8 needs a GPU backend, current is {}", gpu.kind());
+        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
         return;
     }
     drop(gpu);

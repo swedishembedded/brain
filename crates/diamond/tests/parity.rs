@@ -34,7 +34,7 @@ impl Fixture {
         let dir = fixture_dir();
         let m = dir.join("manifest.json");
         if !m.exists() {
-            eprintln!("SKIP: {} absent — run `make wm-fixtures` (needs torch)", m.display());
+            brain_testutil::skip(&format!("{} absent - run `make wm-fixtures` (needs torch)", m.display()));
             return None;
         }
         let manifest: serde_json::Value =
@@ -83,7 +83,7 @@ impl Fixture {
 #[test]
 fn parity_tiny_unet_forward_matches_reference() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("SKIP: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let Some(fx) = Fixture::load() else { return };

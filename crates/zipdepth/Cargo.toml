@@ -27,4 +27,7 @@ bytemuck.workspace = true
 # row-parallelising it took it off the frame's critical path.
 
 [dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true
 brain-gradcheck.workspace = true

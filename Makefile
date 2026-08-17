@@ -64,7 +64,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx check/paths check/files hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity s3dit/int8-e2e \
+        perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity parity/strict s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
         release/github release/publish test/e2e/deb
 
@@ -93,6 +93,8 @@ help:
 	@echo "  make gradcheck               the FULL numerical backprop gate (every model check"
 	@echo "                               + kernel FD suite in crates/gradcheck)"
 	@echo "  make parity                  cross-backend parity gate: CPU == Vulkan == NPU"
+	@echo "  make parity/strict           reference-parity suites, skips DISABLED (needs the"
+	@echo "                               fixtures + checkpoints; PARITY_STRICT_SUITES=...)"
 	@echo "  make forecast/parity         forecasting fp32-exactness gate"
 	@echo "  make forecast/perf-gate      forecasting perf regression gate (vs baselines)"
 	@echo "  make wm/perf-gate            world-model perf regression gate (vs baselines)"
@@ -1024,3 +1026,52 @@ wan/parity:
 wan/t2v: release
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
 	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --output-path out/wan.mp4 $(WAN_FLAGS)
+
+# ---- Reference parity with skipping DISABLED -------------------------------
+# `wan/parity` generalized to every fixture-gated parity suite. Cargo reports a
+# skipped test as a PASS, so a green `cargo test -p <crate>` over any of these
+# is evidence of nothing on its own: the goldens are gitignored and the
+# reference weights are named by environment variable, so on a box that has
+# neither, the comparisons that matter quietly do not happen and the suite
+# still says ok.
+#
+# BRAIN_REQUIRE_FIXTURES=1 turns every absent-fixture skip into a hard failure.
+# Skips for absent HARDWARE (no discrete GPU, no NPU, no second card, no
+# session bus, no SDL) are a different helper and stay skips - a fixture flag
+# has nothing to say about missing silicon.
+#
+# RUN THIS WHERE THE CHECKPOINTS LIVE. The default list is the suites whose
+# goldens `make fetch/testdata` provides, or that need no released checkpoint
+# at all; several of them still want a reference-weight variable that only a
+# machine holding the checkpoint can set, and each suite names its own in the
+# message it used to skip with. Anywhere else it fails immediately, which is
+# the honest answer rather than a green run that proved nothing.
+#
+# Override the list to gate one suite, or to add a suite whose fixtures are not
+# mirrored (sdxl, controlnet, codeformer, vqgan, flux1, flux2, clip, sam2, ...):
+#
+#   make parity/strict PARITY_STRICT_SUITES="brain-clip:parity"
+PARITY_STRICT_SUITES ?= \
+        brain-deepseek2ocr:tiny_ref \
+        brain-t5encoder:tiny_ref \
+        brain-diffusion:discrete_parity,klein_schedule,wan_schedule_parity \
+        brain-data:clip_tokenizer_parity \
+        brain-lfm2:parity \
+        brain-qwen3:encoder_parity \
+        brain-vae:decode_parity,encode_parity \
+        brain-s3dit:block_parity,dev_parity,model_parity,real_parity \
+        brain-rrdbnet:parity \
+        brain-wan:dit_parity,vae_parity
+
+parity/strict:
+	@fail=0; \
+	for suite in $(PARITY_STRICT_SUITES); do \
+	    crate=$${suite%%:*}; tests=$${suite#*:}; args=""; \
+	    for t in $$(echo $$tests | tr ',' ' '); do args="$$args --test $$t"; done; \
+	    echo "=== $$crate$$args (BRAIN_REQUIRE_FIXTURES=1) ==="; \
+	    if BRAIN_REQUIRE_FIXTURES=1 $(CARGO_TEST) -p $$crate $$args; \
+	    then echo "  PASS: $$crate"; else echo "  FAIL: $$crate"; fail=1; fi; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "PARITY (STRICT): PASS - every comparison actually ran"; \
+	else echo "PARITY (STRICT): FAIL - a suite either regressed or could not run its comparisons"; fi; \
+	exit $$fail

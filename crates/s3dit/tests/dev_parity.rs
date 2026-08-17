@@ -35,7 +35,7 @@ fn small_cfg() -> ZImageConfig {
 fn zimage_dev_matches_reference_golden() {
     let fixture = testdata("golden/zimage/zimage_model.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let st = checkpoint::safetensors::read(&fixture).expect("read model golden");

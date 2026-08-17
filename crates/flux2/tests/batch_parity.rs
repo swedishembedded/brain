@@ -177,7 +177,7 @@ fn shared_timestep_batch_is_bit_identical() {
 fn int8_batched_forward_is_bit_identical() {
     let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: int8 needs a GPU backend, current is {}", gpu.kind());
+        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
         return;
     }
     // int8 additionally needs the JOINT token count to be a multiple of 64

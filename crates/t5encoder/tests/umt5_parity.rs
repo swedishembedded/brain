@@ -129,7 +129,7 @@ impl Golden {
     fn open(rel: &str) -> Option<Golden> {
         let p = testdata(rel);
         if !p.exists() {
-            eprintln!("SKIP: golden {} absent - run tools/goldens/wan_t5_dump_reference.py", p.display());
+            brain_testutil::skip(&format!("golden {} absent - run tools/goldens/wan_t5_dump_reference.py", p.display()));
             return None;
         }
         Some(Golden { t: checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden") })
@@ -152,7 +152,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
     let v = std::env::var(var).ok().filter(|s| !s.is_empty())?;
     let p = PathBuf::from(v);
     if !p.exists() {
-        eprintln!("SKIP: {var}={} not found", p.display());
+        brain_testutil::skip(&format!("{var}={} not found", p.display()));
         return None;
     }
     Some(p)
@@ -162,7 +162,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
 fn umt5_xxl_encoder_stage_parity() {
     let Some(g) = Golden::open("golden/wan/t5/encoder.safetensors") else { return };
     let Some(weights) = env_path("BRAIN_WAN_T5") else {
-        eprintln!("SKIP: set BRAIN_WAN_T5 to models_t5_umt5-xxl-enc-bf16.pth");
+        brain_testutil::skip("set BRAIN_WAN_T5 to models_t5_umt5-xxl-enc-bf16.pth");
         return;
     };
 
@@ -175,12 +175,10 @@ fn umt5_xxl_encoder_stage_parity() {
     let gpu = gpu_core::testgpu::dev(t5encoder::model::PIPELINES);
     let forced = std::env::var("BRAIN_WAN_T5_FORCE_GPU").is_ok_and(|v| v == "1");
     if gpu.caps().class != gpu_core::DeviceClass::Cpu && !forced {
-        eprintln!(
-            "SKIP: umT5-XXL is {:.2} GB in fp32 plus ~4 GB of activations at B=2, T=512, \
+        brain_testutil::skip_unavailable(&format!("umT5-XXL is {:.2} GB in fp32 plus ~4 GB of activations at B=2, T=512, \
              which exceeds this device; re-run with BRAIN_DEVICE=cpu (or \
              BRAIN_WAN_T5_FORCE_GPU=1 on a card that fits it)",
-            cfg.param_count() as f64 * 4.0 / 1e9
-        );
+            cfg.param_count() as f64 * 4.0 / 1e9));
         return;
     }
     let ids_shape = g.shape("input_ids").clone();
@@ -331,11 +329,11 @@ fn brain_tokenizes_the_golden_prompts_to_the_golden_ids() {
     let Some(g) = Golden::open("golden/wan/t5/encoder.safetensors") else { return };
     let dir = std::env::var("BRAIN_WAN_TOKENIZER").ok().filter(|s| !s.is_empty());
     let Some(dir) = dir else {
-        eprintln!("SKIP: set BRAIN_WAN_TOKENIZER to a google/umt5-xxl tokenizer directory");
+        brain_testutil::skip("set BRAIN_WAN_TOKENIZER to a google/umt5-xxl tokenizer directory");
         return;
     };
     if !Path::new(&format!("{dir}/tokenizer.json")).exists() {
-        eprintln!("SKIP: {dir}/tokenizer.json not found");
+        brain_testutil::skip(&format!("{dir}/tokenizer.json not found"));
         return;
     }
     let tok = data::unigram::UnigramTokenizer::from_dir(&dir).expect("load tokenizer");

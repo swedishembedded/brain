@@ -45,18 +45,18 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 fn qwen3_4b_penultimate_hidden_matches_transformers() {
     let fixture = testdata("golden/qwen/qwen3_4b_encoder.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let wpath = match std::env::var("BRAIN_QWEN3_4B") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_QWEN3_4B to the Qwen3-4B safetensors");
+            brain_testutil::skip("set BRAIN_QWEN3_4B to the Qwen3-4B safetensors");
             return;
         }
     };
     if !Path::new(&wpath).exists() {
-        eprintln!("SKIP: BRAIN_QWEN3_4B={wpath} not found");
+        brain_testutil::skip(&format!("BRAIN_QWEN3_4B={wpath} not found"));
         return;
     }
 

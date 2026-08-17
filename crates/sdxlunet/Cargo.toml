@@ -26,6 +26,9 @@ brain-data.workspace = true       # data::rng::Rng for init.rs; clip_bpe for the
 brain-clip.workspace = true       # pipeline: the two SDXL text towers
 brain-diffusion.workspace = true  # pipeline: the discrete schedulers
 brain-imaging.workspace = true    # pipeline: CHW -> HWC on the decoded image
-# No [dev-dependencies]: cargo links every [dependencies] entry into tests/,
-# and the parity test needs nothing beyond gpu-core, checkpoint, vae and model.
 serde_json.workspace = true
+
+[dev-dependencies]
+# `testutil::parity::Table` - the one implementation of the cosine/rel_l2 stage
+# table the parity test gates on.
+brain-testutil.workspace = true

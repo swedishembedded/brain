@@ -19,6 +19,7 @@
 //! `BRAIN_CODEFORMER_DEVICE=cpu` runs everything on the CPU JIT instead of the
 //! pooled test device.
 
+use brain_testutil::parity::WorstTable;
 use codeformer::{CodeFormer, CodeFormerConfig};
 
 /// Resolve a fixture under the fetched `testdata/` tree (override the root with
@@ -34,7 +35,7 @@ type Golden = std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>;
 fn load(rel: &str) -> Option<Golden> {
     let path = testdata(rel);
     if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: fixture {path} absent (goldens are gitignored)");
+        brain_testutil::skip(&format!("fixture {path} absent (goldens are gitignored)"));
         return None;
     }
     Some(
@@ -52,12 +53,12 @@ fn weights() -> Option<String> {
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|d| !d.is_empty()));
     let Some(dir) = dir else {
-        eprintln!("SKIP: set BRAIN_CODEFORMER_WEIGHTS to the dir holding codeformer.pth");
+        brain_testutil::skip("set BRAIN_CODEFORMER_WEIGHTS to the dir holding codeformer.pth");
         return None;
     };
     let p = format!("{dir}/codeformer.pth");
     if !std::path::Path::new(&p).exists() {
-        eprintln!("SKIP: {p} not found");
+        brain_testutil::skip(&format!("{p} not found"));
         return None;
     }
     Some(p)
@@ -87,76 +88,6 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| (x as f64 - y as f64).abs()).fold(0.0, f64::max)
 }
 
-/// Relative L2 error `‖got − want‖ / ‖want‖`. Cosine alone is scale-invariant -
-/// a stage uniformly 2× the reference still reports cosine 1.000000000 - so
-/// every gate below also carries this, which is scale-sensitive.
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for (&x, &y) in got.iter().zip(want) {
-        num += (x as f64 - y as f64).powi(2);
-        den += (y as f64).powi(2);
-    }
-    if den == 0.0 {
-        return if num == 0.0 { 0.0 } else { f64::INFINITY };
-    }
-    (num / den).sqrt()
-}
-
-struct Report {
-    rows: Vec<(String, f64, f64, f64)>,
-}
-
-impl Report {
-    fn new() -> Report {
-        Report { rows: Vec::new() }
-    }
-    fn add(&mut self, label: &str, got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len(), "{label}: {} values vs golden {}", got.len(), want.len());
-        self.rows.push((
-            label.to_string(),
-            cosine(got, want),
-            max_abs_diff(got, want),
-            rel_l2(got, want),
-        ));
-    }
-    fn finish(&self, title: &str, floor: f64, rel_floor: f64) {
-        println!("\n=== {title} ===");
-        let mut worst = (f64::INFINITY, String::new());
-        let mut worst_rel = (0.0f64, String::new());
-        for (name, cos, mad, rel) in &self.rows {
-            println!(
-                "  {name:<30} cosine {cos:.9} (1-cos {:.2e})  max|Δ| {mad:.3e}  relL2 {rel:.3e}",
-                1.0 - cos
-            );
-            if *cos < worst.0 {
-                worst = (*cos, name.clone());
-            }
-            if *rel > worst_rel.0 {
-                worst_rel = (*rel, name.clone());
-            }
-        }
-        println!("  worst: {} at cosine {:.9} (1-cos {:.2e})", worst.1, worst.0, 1.0 - worst.0);
-        println!("  worst relative L2: {} at {:.3e}", worst_rel.1, worst_rel.0);
-        assert!(worst.0 >= floor, "{title}: {} cosine {:.9} < {floor}", worst.1, worst.0);
-        assert!(
-            worst_rel.0 <= rel_floor,
-            "{title}: {} relative L2 {:.3e} > {rel_floor:.0e} - the direction matches but the \
-             MAGNITUDE does not",
-            worst_rel.1,
-            worst_rel.0
-        );
-    }
-}
-
-/// Serializes the 512² cases: a tapped build pins every activation (the shared
-/// builder's pool is off) and this graph holds the encoder, the transformer,
-/// four pinned encoder features AND the generator with four fuse blocks live at
-/// once. `crates/vqgan`'s smaller tapped 512² model already measured 6.9 GB on a
-/// P40; running these concurrently is how a suite fills a card.
-fn heavy() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// The w grid the dumper wrote, and the file-name tag it used.
 const WS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -175,6 +106,16 @@ fn imported(cfg: &CodeFormerConfig) -> Option<vae::blocks::Tensors> {
     );
     assert_eq!(im.source_tensors, 515, "the released checkpoint has 515 tensors");
     Some(im.tensors)
+}
+
+/// Serializes the 512² cases: a tapped build pins every activation (the shared
+/// builder's pool is off) and this graph holds the encoder, the transformer,
+/// four pinned encoder features AND the generator with four fuse blocks live at
+/// once. `crates/vqgan`'s smaller tapped 512² model already measured 6.9 GB on a
+/// P40; running these concurrently is how a suite fills a card.
+fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +157,7 @@ fn ladder(case: &str) {
 
     // ---- encoder + transformer -------------------------------------------
     let indices = m.predict_codes(&genc["input"].1);
-    let mut rep = Report::new();
+    let mut rep = WorstTable::new(30);
     for tp in cfg.taps() {
         rep.add(
             &format!("enc.{:02} ({}²)", tp.enc_block, tp.size),
@@ -265,7 +206,7 @@ fn ladder(case: &str) {
         let image = m.generate(&indices, w);
         assert_eq!(g["w"].1[0], w, "golden w tag mismatch");
 
-        let mut rep = Report::new();
+        let mut rep = WorstTable::new(30);
         rep.add("quant_feat", &tap("quant_feat"), &gtf["quant_feat"].1);
         for tp in cfg.taps() {
             let key = format!("gen.{:02}", tp.gen_block);

@@ -26,3 +26,8 @@ brain-data.workspace = true       # data::rng::Rng for init.rs
 # u8->[0,1] cast and the HWC->CHW permutation `src/cond.rs` needs. Hand-rolling
 # that loop here is the exact duplication `crates/imaging` was created to end.
 brain-imaging.workspace = true
+
+[dev-dependencies]
+# `testutil::parity::Table` - the one implementation of the cosine/rel_l2 stage
+# table the parity test gates on.
+brain-testutil.workspace = true

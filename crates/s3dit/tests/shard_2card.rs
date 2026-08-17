@@ -99,7 +99,7 @@ static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn two_card_pipeline_matches_single_device() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the 2-card pipeline test");
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the 2-card pipeline test");
         return;
     }
     let c = cfg();
@@ -128,7 +128,7 @@ fn two_card_pipeline_matches_single_device() {
 fn gpipe_microbatched_matches_summed_grads() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the GPipe microbatch test");
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the GPipe microbatch test");
         return;
     }
     let c = cfg();

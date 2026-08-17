@@ -31,7 +31,7 @@ fn synth_bars(t: usize, feat: usize) -> Vec<f32> {
 #[ignore]
 fn bench_forecast_cached() {
     let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
-        eprintln!("SKIP: set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
+        brain_testutil::skip("set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
         return;
     };
     let model = kronos::import::load_model(&tok, &dec).expect("load kronos");
@@ -83,7 +83,7 @@ fn bench_forecast_cached() {
 #[ignore]
 fn shared_prefill_parity_and_speed() {
     let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
-        eprintln!("SKIP: set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
+        brain_testutil::skip("set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
         return;
     };
     let model = kronos::import::load_model(&tok, &dec).expect("load kronos");
@@ -136,7 +136,7 @@ fn shared_prefill_parity_and_speed() {
 #[ignore]
 fn crosssection_batch_parity_and_speed() {
     let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
-        eprintln!("SKIP: set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
+        brain_testutil::skip("set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
         return;
     };
     let model = kronos::import::load_model(&tok, &dec).expect("load kronos");

@@ -78,7 +78,7 @@ use qwen35moe::model::Qwen35;
 #[ignore]
 fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
     let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
-        eprintln!("SKIP: BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
+        brain_testutil::skip("BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
         return;
     };
 
@@ -90,7 +90,7 @@ fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
     let need = gpus.iter().copied().max().unwrap_or(0) + 1;
     let have = gpu_core::discrete_gpu_count();
     if have < need {
-        eprintln!("SKIP: needs {need} discrete GPU(s) for {gpus:?}, found {have}");
+        brain_testutil::skip_unavailable(&format!("needs {need} discrete GPU(s) for {gpus:?}, found {have}"));
         return;
     }
 

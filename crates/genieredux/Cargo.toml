@@ -14,3 +14,8 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-wm-core.workspace = true
 brain-checkpoint.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

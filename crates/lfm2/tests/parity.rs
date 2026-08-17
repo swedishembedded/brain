@@ -71,18 +71,18 @@ fn run_parity(env_var: &str, fixture_name: &str, cfg: LfmConfig) {
     let hf_dir = match std::env::var(env_var) {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set {env_var} to the HF checkpoint dir");
+            brain_testutil::skip(&format!("set {env_var} to the HF checkpoint dir"));
             return;
         }
     };
     if !Path::new(&hf_dir).exists() {
-        eprintln!("SKIP: {env_var}={hf_dir} not found");
+        brain_testutil::skip(&format!("{env_var}={hf_dir} not found"));
         return;
     }
 
     let fx_path = fixture(fixture_name);
     if !std::path::Path::new(&fx_path).exists() {
-        eprintln!("SKIP: fixture {fx_path} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fx_path} absent - run `make fetch/testdata`"));
         return;
     }
     let golden = Golden { tensors: checkpoint::safetensors::read(&fx_path).expect("read fixture") };
@@ -161,7 +161,7 @@ fn t0_param_layout_matches_checkpoint() {
         ("BRAIN_LFM25_350M", LfmConfig::lfm25_encoder_350m()),
     ] {
         let Ok(hf_dir) = std::env::var(env_var) else {
-            eprintln!("SKIP: {env_var} unset");
+            brain_testutil::skip(&format!("{env_var} unset"));
             continue;
         };
         let cfg_json = std::fs::read_to_string(format!("{hf_dir}/config.json")).expect("config.json");

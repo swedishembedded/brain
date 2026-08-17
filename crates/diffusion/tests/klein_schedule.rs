@@ -42,7 +42,7 @@ fn klein_ramp_is_not_the_shared_linspace_spelling() {
 fn klein_sigmas_match_reference() {
     let fixture = testdata("flux2/klein-4b/schedule.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent");
+        brain_testutil::skip(&format!("fixture {fixture} absent"));
         return;
     }
     let fx = checkpoint::safetensors::read(&fixture).unwrap();

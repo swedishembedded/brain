@@ -20,7 +20,7 @@ use flux2::{position_ids, Flux2Config, Flux2Model, Precision, Sample};
 
 fn load_weights() -> Option<flux2::Tensors> {
     let Ok(dir) = std::env::var("BRAIN_FLUX2_TRANSFORMER") else {
-        eprintln!("SKIP: BRAIN_FLUX2_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX2_TRANSFORMER unset");
         return None;
     };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
@@ -49,7 +49,7 @@ fn load_weights() -> Option<flux2::Tensors> {
 fn gemm_throughput_vs_batch_rows() {
     let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: needs a GPU backend");
+        brain_testutil::skip_unavailable("needs a GPU backend");
         return;
     }
     // resolve `matmul_reg3` the way the model does (by registered name order)

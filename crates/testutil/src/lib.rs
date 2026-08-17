@@ -51,6 +51,25 @@ pub fn skip(reason: &str) {
     eprintln!("SKIP: {reason}");
 }
 
+/// Name what a test is skipping because this MACHINE cannot run it, and let no
+/// flag turn that into a failure.
+///
+/// [`skip`] and this one print the identical `SKIP: {reason}` line and differ
+/// only in what a caller may demand of them, which is the whole point of having
+/// two: `BRAIN_REQUIRE_FIXTURES` asserts "the data this suite needs is on this
+/// box", and that claim has nothing to say about a box with no discrete GPU, no
+/// NPU, no second card, no session bus, no SDL, no C compiler or no
+/// onnxruntime. Making those fatal under a *fixture* flag would mean the flag
+/// could only ever be set on one machine, and a gate nobody can run is a gate
+/// that stops being run.
+///
+/// The split is deliberately visible in the source: which bucket a skip is in
+/// is a judgement call that a reviewer has to be able to check by reading the
+/// call, not by reasoning about the message text.
+pub fn skip_unavailable(reason: &str) {
+    eprintln!("SKIP: {reason}");
+}
+
 /// The path to a testdata fixture, `<testdata-root>/<rel>`. The root is
 /// `$BRAIN_TESTDATA` if set (and non-empty), else `<repo>/testdata`.
 pub fn testdata(rel: &str) -> String {

@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
+use brain_testutil::parity::Table;
 use sdxlunet::config::UNetConfig;
 use sdxlunet::model::{Unet, KERNELS};
 
@@ -48,35 +49,6 @@ fn testdata(rel: &str) -> PathBuf {
     Path::new(&root).join(rel)
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f64 {
-    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        dot += x as f64 * y as f64;
-        na += x as f64 * x as f64;
-        nb += y as f64 * y as f64;
-    }
-    if na == 0.0 && nb == 0.0 {
-        return 1.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
-}
-
-fn max_abs(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b).map(|(&x, &y)| (x as f64 - y as f64).abs()).fold(0.0, f64::max)
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for (&x, &y) in got.iter().zip(want) {
-        num += (x as f64 - y as f64).powi(2);
-        den += (y as f64).powi(2);
-    }
-    if den == 0.0 {
-        return 0.0;
-    }
-    (num / den).sqrt()
-}
-
 struct Golden(Vec<checkpoint::safetensors::StTensor>);
 
 impl Golden {
@@ -88,39 +60,20 @@ impl Golden {
     }
 }
 
-struct Report {
-    rows: Vec<(String, f64, f64, f64)>,
-    failures: Vec<String>,
-}
-
-impl Report {
-    fn check(&mut self, label: &str, got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len(), "{label}: {} values, golden has {}", got.len(), want.len());
-        let (c, m, r) = (cosine(got, want), max_abs(got, want), rel_l2(got, want));
-        self.rows.push((label.to_string(), c, m, r));
-        if c < GATE {
-            self.failures.push(format!("{label}: cosine {c:.10} < {GATE}, max_abs {m:.3e}"));
-        }
-        if r > REL_GATE {
-            self.failures.push(format!("{label}: rel_l2 {r:.3e} > {REL_GATE:.0e}, max_abs {m:.3e}"));
-        }
-    }
-}
-
 #[test]
 fn sdxl_unet_forward_matches_diffusers() {
     let g = testdata("sdxl/unet/stages.safetensors");
     if !g.exists() {
-        eprintln!("SKIP: {} absent (run tools/goldens/sdxlunet_dump_reference.py)", g.display());
+        brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py)", g.display()));
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_SDXL") else {
-        eprintln!("SKIP: BRAIN_SDXL unset (point it at stable-diffusion-xl-base-1.0)");
+        brain_testutil::skip("BRAIN_SDXL unset (point it at stable-diffusion-xl-base-1.0)");
         return;
     };
     let unet_dir = Path::new(&weights).join("unet");
     if !unet_dir.exists() {
-        eprintln!("SKIP: {} absent", unet_dir.display());
+        brain_testutil::skip(&format!("{} absent", unet_dir.display()));
         return;
     }
     let gold = Golden(
@@ -142,7 +95,7 @@ fn sdxl_unet_forward_matches_diffusers() {
     let sample = gold.need("in.sample").to_vec();
     println!("latent {latent}x{latent}, t_enc {t_enc}, timestep {timestep}");
 
-    let mut r = Report { rows: Vec::new(), failures: Vec::new() };
+    let mut r = Table::new(GATE, REL_GATE);
 
     // ---- host conditioning first: it gates `hostemb` on its own, and every
     // stage below depends on it, so a failure here explains everything.
@@ -185,14 +138,8 @@ fn sdxl_unet_forward_matches_diffusers() {
     }
     r.check("out.sample", &out, gold.need("out.sample"));
 
-    let mut worst = ("".to_string(), 1.0f64);
-    println!("\n{:<40} {:>14} {:>11} {:>11}", "stage", "cosine", "max_abs", "rel_l2");
-    for (k, c, mx, rl) in &r.rows {
-        println!("{k:<40} {c:>14.10} {mx:>11.3e} {rl:>11.3e}");
-        if *c < worst.1 {
-            worst = (k.clone(), *c);
-        }
-    }
+    r.print();
+    let worst = r.worst_cosine();
     println!(
         "\n{} comparisons ({covered} device taps + 2 host + out), worst {} at cosine {:.10}\n",
         r.rows.len(),
@@ -205,10 +152,10 @@ fn sdxl_unet_forward_matches_diffusers() {
         .iter()
         .map(|t| t.name.as_str())
         .filter(|n| !n.starts_with("in.") && !n.starts_with("out.") && *n != "time_proj" && *n != "add_time_proj")
-        .filter(|n| !r.rows.iter().any(|(k, ..)| k == n))
+        .filter(|n| !r.has(n))
         .collect();
     assert!(untapped.is_empty(), "{} goldens have no matching tap: {untapped:?}", untapped.len());
-    assert!(r.failures.is_empty(), "{} failed:\n  {}", r.failures.len(), r.failures.join("\n  "));
+    r.assert_clean();
 }
 
 /// Does the whole thing fit ONE card at SDXL's native 1024x1024 (a 128x128
@@ -225,12 +172,12 @@ fn sdxl_unet_forward_matches_diffusers() {
 #[ignore = "residency measurement: ~11 GB of weights, no golden at this size"]
 fn native_resolution_fits_one_card() {
     let Ok(weights) = std::env::var("BRAIN_SDXL") else {
-        eprintln!("SKIP: BRAIN_SDXL unset");
+        brain_testutil::skip("BRAIN_SDXL unset");
         return;
     };
     let unet_dir = Path::new(&weights).join("unet");
     if !unet_dir.exists() {
-        eprintln!("SKIP: {} absent", unet_dir.display());
+        brain_testutil::skip(&format!("{} absent", unet_dir.display()));
         return;
     }
     let cfg = UNetConfig::sdxl_base();

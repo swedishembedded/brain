@@ -417,7 +417,7 @@ fn unknown_storage_dtype_errors() {
 #[test]
 fn real_torch_file_parses() {
     let Ok(path) = std::env::var("TORCHPT_REAL_PT") else {
-        eprintln!("SKIP: set TORCHPT_REAL_PT=<a real .pt/.pth> to run");
+        brain_testutil::skip("set TORCHPT_REAL_PT=<a real .pt/.pth> to run");
         return;
     };
     let r = torchpt::read_report(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));

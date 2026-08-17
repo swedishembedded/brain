@@ -45,7 +45,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 #[test]
 fn int8_gemm_matches_fp32() {
     if std::env::var("BRAIN_INT8_TEST").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_INT8_TEST=1 (needs a GPU) for the int8 DP4A parity test");
+        brain_testutil::skip_unavailable("set BRAIN_INT8_TEST=1 (needs a GPU) for the int8 DP4A parity test");
         return;
     }
     let (m, k, n) = (320usize, 3840usize, 3840usize);

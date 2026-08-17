@@ -126,7 +126,7 @@ impl Golden {
     fn open(rel: &str) -> Option<Golden> {
         let p = testdata(rel);
         if !p.exists() {
-            eprintln!("SKIP: golden {} absent", p.display());
+            brain_testutil::skip(&format!("golden {} absent", p.display()));
             return None;
         }
         Some(Golden { t: checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden") })
@@ -149,7 +149,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
     let v = std::env::var(var).ok().filter(|s| !s.is_empty())?;
     let p = PathBuf::from(v);
     if !p.exists() {
-        eprintln!("SKIP: {var}={} not found", p.display());
+        brain_testutil::skip(&format!("{var}={} not found", p.display()));
         return None;
     }
     Some(p)
@@ -159,7 +159,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
 fn t5_xxl_encoder_stage_parity() {
     let Some(g) = Golden::open("t5/t5xxl/encoder.safetensors") else { return };
     let Some(weights) = env_path("BRAIN_T5ENCODER_XXL") else {
-        eprintln!("SKIP: set BRAIN_T5ENCODER_XXL to a FLUX.1 text_encoder_2 directory");
+        brain_testutil::skip("set BRAIN_T5ENCODER_XXL to a FLUX.1 text_encoder_2 directory");
         return;
     };
 

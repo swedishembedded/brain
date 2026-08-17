@@ -64,7 +64,7 @@ fn lfm_onnx_graph_is_well_formed() {
 #[test]
 fn lfm_onnx_matches_brain_forward() {
     if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("SKIP: set BRAIN_OV_PROBE (and a working backend) for OpenVINO parity");
+        brain_testutil::skip_unavailable("set BRAIN_OV_PROBE (and a working backend) for OpenVINO parity");
         return;
     }
     use npu::openvino::{LfmSession, NpuConfig, NpuDevice};

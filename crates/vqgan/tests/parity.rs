@@ -23,13 +23,14 @@ use vqgan::{Vqgan, VqganConfig};
 
 /// Resolve a fixture under the fetched `testdata/` tree (override the root with
 /// `BRAIN_TESTDATA`).
+use brain_testutil::parity::WorstTable;
 use brain_testutil::testdata;
 
 type Golden = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 fn load(path: &str) -> Option<Golden> {
     if !std::path::Path::new(path).exists() {
-        eprintln!("SKIP: fixture {path} absent (step-1 goldens are gitignored)");
+        brain_testutil::skip(&format!("fixture {path} absent (step-1 goldens are gitignored)"));
         return None;
     }
     Some(
@@ -46,13 +47,13 @@ fn weights(variant: &str) -> Option<String> {
     let dir = match std::env::var("BRAIN_VQGAN_WEIGHTS") {
         Ok(d) if !d.is_empty() => d,
         _ => {
-            eprintln!("SKIP: set BRAIN_VQGAN_WEIGHTS to the dir holding codeformer.pth");
+            brain_testutil::skip("set BRAIN_VQGAN_WEIGHTS to the dir holding codeformer.pth");
             return None;
         }
     };
     let p = format!("{dir}/{variant}.pth");
     if !std::path::Path::new(&p).exists() {
-        eprintln!("SKIP: {p} not found");
+        brain_testutil::skip(&format!("{p} not found"));
         return None;
     }
     Some(p)
@@ -75,73 +76,6 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| (x as f64 - y as f64).abs()).fold(0.0, f64::max)
 }
 
-/// Relative L2 error `‖got − want‖ / ‖want‖`.
-///
-/// Cosine on its own is **scale-invariant**: a stage that is uniformly 2× the
-/// reference — a dropped `1/√C`, a doubled residual, a bias applied twice —
-/// still reports cosine 1.000000000. Every gate below therefore also carries
-/// this, which is scale-sensitive, so a wrong magnitude cannot pass as a right
-/// direction.
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for (&x, &y) in got.iter().zip(want) {
-        num += (x as f64 - y as f64).powi(2);
-        den += (y as f64).powi(2);
-    }
-    if den == 0.0 {
-        return if num == 0.0 { 0.0 } else { f64::INFINITY };
-    }
-    (num / den).sqrt()
-}
-
-/// One stage comparison; gates on cosine AND relative L2.
-struct Report {
-    rows: Vec<(String, f64, f64, f64)>,
-}
-
-impl Report {
-    fn new() -> Report {
-        Report { rows: Vec::new() }
-    }
-    fn add(&mut self, label: &str, got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len(), "{label}: {} values vs golden {}", got.len(), want.len());
-        self.rows.push((
-            label.to_string(),
-            cosine(got, want),
-            max_abs_diff(got, want),
-            rel_l2(got, want),
-        ));
-    }
-    /// Print every stage, then assert the worst cosine clears `floor` and the
-    /// worst relative L2 clears `rel_floor`.
-    fn finish(&self, title: &str, floor: f64, rel_floor: f64) {
-        println!("\n=== {title} ===");
-        let mut worst = (f64::INFINITY, String::new());
-        let mut worst_rel = (0.0f64, String::new());
-        for (name, cos, mad, rel) in &self.rows {
-            println!(
-                "  {name:<34} cosine {cos:.9} (1-cos {:.2e})  max|Δ| {mad:.3e}  relL2 {rel:.3e}",
-                1.0 - cos
-            );
-            if *cos < worst.0 {
-                worst = (*cos, name.clone());
-            }
-            if *rel > worst_rel.0 {
-                worst_rel = (*rel, name.clone());
-            }
-        }
-        println!("  worst: {} at cosine {:.9} (1-cos {:.2e})", worst.1, worst.0, 1.0 - worst.0);
-        println!("  worst relative L2: {} at {:.3e}", worst_rel.1, worst_rel.0);
-        assert!(worst.0 >= floor, "{title}: {} cosine {:.9} < {floor}", worst.1, worst.0);
-        assert!(
-            worst_rel.0 <= rel_floor,
-            "{title}: {} relative L2 {:.3e} > {rel_floor:.0e} — the direction matches but the \
-             MAGNITUDE does not",
-            worst_rel.1,
-            worst_rel.0
-        );
-    }
-}
 
 /// Serializes the 512² cases.
 ///
@@ -188,7 +122,7 @@ fn quantizer_unit(variant: &str) {
     };
     let (cb_shape, cb) = &g["codebook"];
     let (k, d) = (cb_shape[0] as u32, cb_shape[1] as u32);
-    let mut rep = Report::new();
+    let mut rep = WorstTable::new(34);
     for unit in ["u4", "u16"] {
         let (fshape, z_flat) = &g[&format!("{unit}.z_flat")];
         let m = fshape[0] as u32;
@@ -243,7 +177,7 @@ fn stages_128(variant: &str) {
     let m = Vqgan::new(cfg.clone(), &t, 128, 128, gpu(), true);
     let r = m.reconstruct(&g["input"].1);
 
-    let mut rep = Report::new();
+    let mut rep = WorstTable::new(34);
     let tap = |name: &str| m.read_tap(name).unwrap_or_else(|| panic!("no tap {name}"));
 
     for i in 0..cfg.encoder_blocks().len() {
@@ -387,7 +321,7 @@ fn e2e_512(variant: &str, fixture: &str) {
     let m = Vqgan::new(cfg, &t, 512, 512, gpu(), true);
     let r = m.reconstruct(&g["input"].1);
 
-    let mut rep = Report::new();
+    let mut rep = WorstTable::new(34);
     let tap = |name: &str| m.read_tap(name).unwrap_or_else(|| panic!("no tap {name}"));
     let mut keys: Vec<&String> = g.keys().filter(|k| k.starts_with("enc.") || k.starts_with("gen.")).collect();
     keys.sort();

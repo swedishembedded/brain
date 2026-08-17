@@ -34,7 +34,7 @@ fn maskgit_sampler_parity_and_loop() {
         let DIR = repo_path("scratchpad/parity");
     let pp = format!("{DIR}/genie_maskgit_prime.u32");
     if !std::path::Path::new(&DYN).exists() || !std::path::Path::new(&pp).exists() {
-        eprintln!("SKIP: checkpoints or maskgit dump absent");
+        brain_testutil::skip("checkpoints or maskgit dump absent");
         return;
     }
     let (h, w) = (16u32, 16u32);

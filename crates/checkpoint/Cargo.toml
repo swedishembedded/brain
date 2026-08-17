@@ -27,3 +27,8 @@ safetensors.workspace = true
 # wasm only needs the reader (parse_safetensors); the `std` feature pulls tempfile,
 # which does not build for wasm32. `alloc` gives serialize/deserialize/read_metadata.
 safetensors = { version = "0.8", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

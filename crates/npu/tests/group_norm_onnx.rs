@@ -134,13 +134,13 @@ fn the_emitted_graph_matches_the_host_formula() {
         .output();
 
     let Ok(out) = out else {
-        eprintln!("SKIP: could not run python3 — the numerical half did not run");
+        brain_testutil::skip_unavailable("could not run python3 - the numerical half did not run");
         return;
     };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("No module named") {
-            eprintln!("SKIP: onnxruntime not installed — the numerical half did not run\n{err}");
+            brain_testutil::skip_unavailable(&format!("onnxruntime not installed - the numerical half did not run\n{err}"));
             return;
         }
         panic!("onnx_eval.py failed:\n{err}");

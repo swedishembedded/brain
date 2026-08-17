@@ -37,18 +37,18 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 fn zimage_real_dit_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let dit = match std::env::var("BRAIN_S3DIT_DIT") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_S3DIT_DIT to the z_image_turbo_bf16 safetensors");
+            brain_testutil::skip("set BRAIN_S3DIT_DIT to the z_image_turbo_bf16 safetensors");
             return;
         }
     };
     if !Path::new(&dit).exists() {
-        eprintln!("SKIP: BRAIN_S3DIT_DIT={dit} not found");
+        brain_testutil::skip(&format!("BRAIN_S3DIT_DIT={dit} not found"));
         return;
     }
     let fx = checkpoint::safetensors::read(&fixture).expect("read real golden");
@@ -110,18 +110,18 @@ fn read_dit_tensors(path: &str) -> Vec<checkpoint::safetensors::StTensor> {
 fn zimage_real_dit_matches_diffusers_at_512() {
     let fixture = testdata("golden/zimage/zimage_real_512.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent - run `tools/goldens/s3dit_real_512_dump_reference.py`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `tools/goldens/s3dit_real_512_dump_reference.py`"));
         return;
     }
     let dit = match std::env::var("BRAIN_S3DIT_DIT") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_S3DIT_DIT to the Z-Image-Turbo transformer weights (file or HF dir)");
+            brain_testutil::skip("set BRAIN_S3DIT_DIT to the Z-Image-Turbo transformer weights (file or HF dir)");
             return;
         }
     };
     if !Path::new(&dit).exists() {
-        eprintln!("SKIP: BRAIN_S3DIT_DIT={dit} not found");
+        brain_testutil::skip(&format!("BRAIN_S3DIT_DIT={dit} not found"));
         return;
     }
 
@@ -154,11 +154,11 @@ fn zimage_real_dit_matches_diffusers_at_512() {
 fn zimage_shard_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     if std::env::var("BRAIN_S3DIT_SHARD").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_S3DIT_SHARD=1 (+ BRAIN_S3DIT_DIT, 2 GPUs) to run the 2-GPU shard parity");
+        brain_testutil::skip_unavailable("set BRAIN_S3DIT_SHARD=1 (+ BRAIN_S3DIT_DIT, 2 GPUs) to run the 2-GPU shard parity");
         return;
     }
     let dit = match std::env::var("BRAIN_S3DIT_DIT") {
@@ -195,11 +195,11 @@ fn zimage_shard_matches_diffusers() {
 fn zimage_int8_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_real.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent - run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     if std::env::var("BRAIN_S3DIT_I8").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_S3DIT_I8=1 (+ BRAIN_S3DIT_DIT, GPU) for the int8 parity test");
+        brain_testutil::skip_unavailable("set BRAIN_S3DIT_I8=1 (+ BRAIN_S3DIT_DIT, GPU) for the int8 parity test");
         return;
     }
     let dit = match std::env::var("BRAIN_S3DIT_DIT") {

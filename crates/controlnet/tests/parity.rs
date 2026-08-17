@@ -26,6 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
+use brain_testutil::parity::Table;
 use controlnet::adapter::ControlSource;
 use controlnet::config::ControlNetConfig;
 use controlnet::model::{ControlNet, KERNELS};
@@ -48,35 +49,6 @@ fn testdata(rel: &str) -> PathBuf {
     Path::new(&root).join(rel)
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f64 {
-    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        dot += x as f64 * y as f64;
-        na += x as f64 * x as f64;
-        nb += y as f64 * y as f64;
-    }
-    if na == 0.0 && nb == 0.0 {
-        return 1.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
-}
-
-fn max_abs(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b).map(|(&x, &y)| (x as f64 - y as f64).abs()).fold(0.0, f64::max)
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for (&x, &y) in got.iter().zip(want) {
-        num += (x as f64 - y as f64).powi(2);
-        den += (y as f64).powi(2);
-    }
-    if den == 0.0 {
-        return 0.0;
-    }
-    (num / den).sqrt()
-}
-
 struct Golden(Vec<checkpoint::safetensors::StTensor>);
 
 impl Golden {
@@ -94,25 +66,6 @@ impl Golden {
             .find(|t| t.name == name)
             .map(|t| t.shape.as_slice())
             .unwrap_or_else(|| panic!("golden missing {name}"))
-    }
-}
-
-struct Report {
-    rows: Vec<(String, f64, f64, f64)>,
-    failures: Vec<String>,
-}
-
-impl Report {
-    fn check(&mut self, label: &str, got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len(), "{label}: {} values, golden has {}", got.len(), want.len());
-        let (c, m, r) = (cosine(got, want), max_abs(got, want), rel_l2(got, want));
-        self.rows.push((label.to_string(), c, m, r));
-        if c < GATE {
-            self.failures.push(format!("{label}: cosine {c:.10} < {GATE}, max_abs {m:.3e}"));
-        }
-        if r > REL_GATE {
-            self.failures.push(format!("{label}: rel_l2 {r:.3e} > {REL_GATE:.0e}, max_abs {m:.3e}"));
-        }
     }
 }
 
@@ -138,15 +91,15 @@ fn sdxl_controlnet_residuals_match_diffusers_at_a_non_square_latent() {
 fn run_parity(rel: &str) {
     let g = testdata(rel);
     if !g.exists() {
-        eprintln!("SKIP: {} absent (run tools/goldens/controlnet_dump_reference.py)", g.display());
+        brain_testutil::skip(&format!("{} absent (run tools/goldens/controlnet_dump_reference.py)", g.display()));
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_CONTROLNET") else {
-        eprintln!("SKIP: BRAIN_CONTROLNET unset (point it at a diffusers ControlNetModel dir)");
+        brain_testutil::skip("BRAIN_CONTROLNET unset (point it at a diffusers ControlNetModel dir)");
         return;
     };
     if !Path::new(&weights).exists() {
-        eprintln!("SKIP: {weights} absent");
+        brain_testutil::skip(&format!("{weights} absent"));
         return;
     }
     let gold =
@@ -174,7 +127,7 @@ fn run_parity(rel: &str) {
     let cond = gold.need("in.controlnet_cond").to_vec();
     println!("== {rel}: latent {lh}x{lw}, cond {}x{}, t_enc {t_enc}, timestep {timestep}", lh * ds, lw * ds);
 
-    let mut r = Report { rows: Vec::new(), failures: Vec::new() };
+    let mut r = Table::new(GATE, REL_GATE);
 
     // ---- host conditioning first: it is byte-for-byte the UNet's, so a
     // failure here is a `model::hostmath` / `sdxlunet::hostemb` failure and
@@ -247,18 +200,9 @@ fn run_parity(rel: &str) {
         r.check(&format!("residual0.75[{}]", p.name), got, gold.need(&gname));
     }
 
-    let mut worst = ("".to_string(), 1.0f64);
-    let mut worst_rel = ("".to_string(), 0.0f64);
-    println!("\n{:<40} {:>14} {:>11} {:>11}", "stage", "cosine", "max_abs", "rel_l2");
-    for (k, c, mx, rl) in &r.rows {
-        println!("{k:<40} {c:>14.10} {mx:>11.3e} {rl:>11.3e}");
-        if *c < worst.1 {
-            worst = (k.clone(), *c);
-        }
-        if *rl > worst_rel.1 {
-            worst_rel = (k.clone(), *rl);
-        }
-    }
+    r.print();
+    let worst = r.worst_cosine();
+    let worst_rel = r.worst_rel_l2();
     // Both extremes, because at this parity level every cosine rounds to
     // 1.0000000000 and `rel_l2` is the only discriminating column left.
     println!(
@@ -277,8 +221,8 @@ fn run_parity(rel: &str) {
         .map(|t| t.name.as_str())
         .filter(|n| !n.starts_with("in.") && !n.starts_with("out.") && !n.starts_with("out0.75."))
         .filter(|n| *n != "time_proj" && *n != "add_time_proj")
-        .filter(|n| !r.rows.iter().any(|(k, ..)| k == n))
+        .filter(|n| !r.has(n))
         .collect();
     assert!(untapped.is_empty(), "{} goldens have no matching tap: {untapped:?}", untapped.len());
-    assert!(r.failures.is_empty(), "{} failed:\n  {}", r.failures.len(), r.failures.join("\n  "));
+    r.assert_clean();
 }

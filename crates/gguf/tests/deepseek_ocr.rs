@@ -25,12 +25,12 @@ const MMPROJ_FILE: &str = "mmproj-DeepSeek-OCR-Q8_0.gguf";
 /// The mmap'd checkpoint, or `None` (with a loud skip) when it is not fetched.
 fn open(file: &str) -> Option<MmapGguf> {
     let Some(dir) = brain_testutil::model_dir(REPO) else {
-        eprintln!("SKIP: no model store to resolve {REPO}");
+        brain_testutil::skip(&format!("no model store to resolve {REPO}"));
         return None;
     };
     let path = format!("{dir}/{file}");
     if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: {path} absent (brain fetch {REPO})");
+        brain_testutil::skip(&format!("{path} absent (brain fetch {REPO})"));
         return None;
     }
     Some(MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))

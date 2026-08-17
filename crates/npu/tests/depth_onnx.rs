@@ -23,7 +23,7 @@ use model::hostmath::cosine;
 
 fn export_and_run(device: NpuDevice) {
     let Some(path) = npu_pth() else {
-        eprintln!("SKIP: set ZIPDEPTH_NPU_PTH=<zipdepth_base_npu.pth>");
+        brain_testutil::skip("set ZIPDEPTH_NPU_PTH=<zipdepth_base_npu.pth>");
         return;
     };
     let cfg = ZipConfig { upsample_unfold: false, ..ZipConfig::base() };
@@ -50,7 +50,7 @@ fn export_and_run(device: NpuDevice) {
     let mut sess = match NpuSession::load_bytes(&bytes, &ncfg) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("SKIP: {device:?} unavailable ({e})");
+            brain_testutil::skip_unavailable(&format!("{device:?} unavailable ({e})"));
             return;
         }
     };

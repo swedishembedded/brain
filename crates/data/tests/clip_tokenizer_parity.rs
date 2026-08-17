@@ -73,7 +73,7 @@ fn clip_bpe_matches_the_hf_tokenizer_for_both_sdxl_towers() {
     let dir = testdata("clip/tokenizer");
     let golden = dir.join("ids.safetensors");
     if !golden.exists() || !dir.join("vocab.json").exists() || !dir.join("merges.txt").exists() {
-        eprintln!("SKIP: {} missing vocab.json/merges.txt/ids.safetensors (make fetch/testdata)", dir.display());
+        brain_testutil::skip(&format!("{} missing vocab.json/merges.txt/ids.safetensors (make fetch/testdata)", dir.display()));
         return;
     }
 
@@ -125,7 +125,7 @@ fn clip_bpe_matches_the_hf_tokenizer_for_both_sdxl_towers() {
 fn truncation_keeps_the_frame() {
     let dir = testdata("clip/tokenizer");
     if !dir.join("vocab.json").exists() {
-        eprintln!("SKIP: {} missing vocab.json (make fetch/testdata)", dir.display());
+        brain_testutil::skip(&format!("{} missing vocab.json (make fetch/testdata)", dir.display()));
         return;
     }
     let tok = ClipBpe::from_dir(&dir).expect("load CLIP tokenizer assets");
@@ -143,7 +143,7 @@ fn truncation_keeps_the_frame() {
 fn decode_roundtrips_normalized_text() {
     let dir = testdata("clip/tokenizer");
     if !dir.join("vocab.json").exists() {
-        eprintln!("SKIP: {} missing vocab.json (make fetch/testdata)", dir.display());
+        brain_testutil::skip(&format!("{} missing vocab.json (make fetch/testdata)", dir.display()));
         return;
     }
     let tok = ClipBpe::from_dir(&dir).expect("load CLIP tokenizer assets");
@@ -210,7 +210,7 @@ const CASES: &[(&str, &[u32], &[u32])] = &[
 fn clip_bpe_matches_hf_on_a_wider_tricky_corpus() {
     let dir = testdata("clip/tokenizer");
     if !dir.join("vocab.json").exists() || !dir.join("merges.txt").exists() {
-        eprintln!("SKIP: {} missing vocab.json/merges.txt (make fetch/testdata)", dir.display());
+        brain_testutil::skip(&format!("{} missing vocab.json/merges.txt (make fetch/testdata)", dir.display()));
         return;
     }
     let tok1 = ClipBpe::from_dir(&dir).expect("load CLIP tokenizer assets");

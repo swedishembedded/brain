@@ -17,7 +17,7 @@ fn sdl_texture_roundtrip_is_pixel_faithful() {
     let mut win = match SdlWindow::new("roundtrip", w, h, 1) {
         Ok(win) => win,
         Err(e) => {
-            eprintln!("SKIP: SDL unavailable ({e})");
+            brain_testutil::skip_unavailable(&format!("SDL unavailable ({e})"));
             return;
         }
     };

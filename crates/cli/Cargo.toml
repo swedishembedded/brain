@@ -100,6 +100,9 @@ ureq.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true
 # Drive a real `apiserve::router()` in-process for the HTTP-level serving
 # gates in `tests/` (concurrency/prefix-reuse) — mirrors `crates/apiserve`'s
 # own test setup, which cannot depend on `brain-cli` (wrong dependency

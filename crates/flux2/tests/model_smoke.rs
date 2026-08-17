@@ -48,7 +48,7 @@ fn tiny_forward_runs_and_is_finite() {
 fn tiny_forward_int8_runs_and_tracks_fp32() {
     let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: int8 needs a GPU backend, current is {}", gpu.kind());
+        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
         return;
     }
     let cfg = Flux2Config {

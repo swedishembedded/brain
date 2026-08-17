@@ -20,7 +20,7 @@ fn base_pth() -> Option<String> {
 #[test]
 fn imports_the_base_checkpoint_completely() {
     let Some(path) = base_pth() else {
-        eprintln!("SKIP: set ZIPDEPTH_PTH to run");
+        brain_testutil::skip("set ZIPDEPTH_PTH to run");
         return;
     };
     let cfg = ZipConfig::base();
@@ -42,7 +42,7 @@ fn imports_the_base_checkpoint_completely() {
 #[test]
 fn the_wrong_variant_is_rejected() {
     let Some(path) = base_pth() else {
-        eprintln!("SKIP: set ZIPDEPTH_PTH to run");
+        brain_testutil::skip("set ZIPDEPTH_PTH to run");
         return;
     };
     let npu = ZipConfig { upsample_unfold: false, ..ZipConfig::base() };
@@ -58,7 +58,7 @@ fn the_wrong_variant_is_rejected() {
 #[test]
 fn a_model_on_imported_weights_runs_forward() {
     let Some(path) = base_pth() else {
-        eprintln!("SKIP: set ZIPDEPTH_PTH to run");
+        brain_testutil::skip("set ZIPDEPTH_PTH to run");
         return;
     };
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);

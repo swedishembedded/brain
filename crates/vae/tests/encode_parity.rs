@@ -44,18 +44,18 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn zimage_vae_encode_matches_diffusers() {
     let fixture = testdata("golden/vae/zimage_vae_encode.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let vae_path = match std::env::var("BRAIN_S3DIT_VAE") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_S3DIT_VAE to the Z-Image vae/ safetensors");
+            brain_testutil::skip("set BRAIN_S3DIT_VAE to the Z-Image vae/ safetensors");
             return;
         }
     };
     if !Path::new(&vae_path).exists() {
-        eprintln!("SKIP: BRAIN_S3DIT_VAE={vae_path} not found");
+        brain_testutil::skip(&format!("BRAIN_S3DIT_VAE={vae_path} not found"));
         return;
     }
 

@@ -69,7 +69,7 @@ fn batch(c: &Cfg, r: &mut impl FnMut() -> f64) -> Batch {
 #[test]
 fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image Model-trait test");
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image Model-trait test");
         return;
     }
     let c = cfg();

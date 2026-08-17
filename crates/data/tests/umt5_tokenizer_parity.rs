@@ -60,11 +60,11 @@ fn prompts() -> Vec<String> {
 fn tokenizer() -> Option<UnigramTokenizer> {
     let dir = std::env::var("BRAIN_WAN_TOKENIZER").ok().filter(|s| !s.is_empty());
     let Some(dir) = dir else {
-        eprintln!("SKIP: set BRAIN_WAN_TOKENIZER to a google/umt5-xxl tokenizer directory");
+        brain_testutil::skip("set BRAIN_WAN_TOKENIZER to a google/umt5-xxl tokenizer directory");
         return None;
     };
     if !Path::new(&format!("{dir}/tokenizer.json")).exists() {
-        eprintln!("SKIP: {dir}/tokenizer.json not found");
+        brain_testutil::skip(&format!("{dir}/tokenizer.json not found"));
         return None;
     }
     Some(UnigramTokenizer::from_dir(&dir).expect("load umT5 tokenizer"))
@@ -74,7 +74,7 @@ fn tokenizer() -> Option<UnigramTokenizer> {
 fn umt5_unigram_matches_the_reference_ids() {
     let fx = testdata("golden/wan/t5/tokens.safetensors");
     if !Path::new(&fx).exists() {
-        eprintln!("SKIP: fixture {fx} absent - run tools/goldens/wan_t5_dump_reference.py");
+        brain_testutil::skip(&format!("fixture {fx} absent - run tools/goldens/wan_t5_dump_reference.py"));
         return;
     }
     let Some(tok) = tokenizer() else { return };

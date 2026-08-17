@@ -52,7 +52,7 @@ impl Golden {
     fn open() -> Option<Golden> {
         let p = testdata("sdxl/schedulers/steps.safetensors");
         if !p.exists() {
-            eprintln!("SKIP: {} absent (run tools/goldens/sdxlunet_dump_reference.py)", p.display());
+            brain_testutil::skip(&format!("{} absent (run tools/goldens/sdxlunet_dump_reference.py)", p.display()));
             return None;
         }
         Some(Golden(checkpoint::safetensors::read(p.to_str().expect("utf-8 path")).expect("read golden")))

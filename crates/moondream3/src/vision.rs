@@ -89,6 +89,11 @@ fn vit_ids() -> VitKernelIds {
         attn_scores_cross: 7,
         attn_softmax_cross: 8,
         attn_apply_cross: 9,
+        // The coalesced score path is not wired here: see the note on
+        // `VitKernelIds::kv_k_headt`. Two lines to opt in, once a model has a
+        // reference it can re-certify against.
+        kv_k_headt: model::vit::UNREGISTERED,
+        attn_scores_cross_kt: model::vit::UNREGISTERED,
         ln_head: 10,
         rope2d: 11,
     }

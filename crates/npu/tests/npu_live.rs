@@ -42,7 +42,7 @@ fn brain_onnx_runs_on_the_intel_npu() {
     let mut sess = match NpuSession::load_bytes(&bytes, &cfg) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("SKIP: NPU unavailable ({e})");
+            brain_testutil::skip_unavailable(&format!("NPU unavailable ({e})"));
             return;
         }
     };

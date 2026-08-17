@@ -92,6 +92,8 @@ fn vit_ids(base: usize) -> VitKernelIds {
         attn_scores_cross: base + K_ATTN_SCORES_CROSS,
         attn_softmax_cross: base + K_ATTN_SOFTMAX_CROSS,
         attn_apply_cross: base + K_ATTN_APPLY_CROSS,
+        kv_k_headt: model::vit::UNREGISTERED,
+        attn_scores_cross_kt: model::vit::UNREGISTERED,
         ln_head: base + K_LN_HEAD,
         rope2d: base + K_ROPE2D,
     }
@@ -319,6 +321,7 @@ impl<'g> Mirror<'g> {
             res: gpu.storage(rows_t as u64 * c as u64),
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
+            kt: gpu.storage(c as u64 * (td as u64).max(td_t as u64).max(rows_t as u64)),
         };
         let head_rows_buf = gpu.storage_init("mirror.head_rows", &self.head_rows);
         // Non-native grids interpolate the 37x37 patch pos-embed (reference:

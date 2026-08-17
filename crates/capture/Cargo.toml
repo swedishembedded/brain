@@ -8,3 +8,8 @@ description = "Minimal V4L2 webcam capture: hand-rolled ioctl FFI, YUYV->RGB, an
 [lib]
 name = "capture"
 path = "src/lib.rs"
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

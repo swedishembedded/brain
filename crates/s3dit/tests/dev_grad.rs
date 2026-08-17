@@ -48,7 +48,7 @@ fn rel_l2(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn device_block_backward_matches_host() {
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs a GPU) for the device block-backward parity test");
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the device block-backward parity test");
         return;
     }
     // A tile-friendly small config: dim 128 (1 tile), 4 heads (hd 32), 16 tokens.

@@ -26,15 +26,15 @@ fn euler_loop_and_decode_match_reference() {
     let f_e2e = testdata("flux2/klein-4b/e2e.safetensors");
     let f_text = testdata("flux2/klein-4b/text.safetensors");
     if !std::path::Path::new(&f_e2e).exists() {
-        eprintln!("SKIP: fixture {f_e2e} absent");
+        brain_testutil::skip(&format!("fixture {f_e2e} absent"));
         return;
     }
     let Ok(dit_dir) = std::env::var("BRAIN_FLUX2_TRANSFORMER") else {
-        eprintln!("SKIP: BRAIN_FLUX2_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX2_TRANSFORMER unset");
         return;
     };
     let Ok(vae_dir) = std::env::var("BRAIN_FLUX2_VAE") else {
-        eprintln!("SKIP: BRAIN_FLUX2_VAE unset");
+        brain_testutil::skip("BRAIN_FLUX2_VAE unset");
         return;
     };
 

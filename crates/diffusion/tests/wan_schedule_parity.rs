@@ -60,10 +60,8 @@ impl Golden {
     fn open() -> Option<Golden> {
         let p = testdata_path("golden/wan/schedule.safetensors");
         if !p.exists() {
-            eprintln!(
-                "SKIP: {} absent - run `python3 tools/goldens/wan_schedule_dump_reference.py`",
-                p.display()
-            );
+            brain_testutil::skip(&format!("{} absent - run `python3 tools/goldens/wan_schedule_dump_reference.py`",
+                p.display()));
             return None;
         }
         Some(Golden(

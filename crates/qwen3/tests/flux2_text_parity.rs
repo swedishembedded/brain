@@ -37,11 +37,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn klein_text_conditioning_matches_reference() {
     let fixture = testdata("flux2/klein-4b/text.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent");
+        brain_testutil::skip(&format!("fixture {fixture} absent"));
         return;
     }
     let Ok(te_dir) = std::env::var("BRAIN_FLUX2_TE") else {
-        eprintln!("SKIP: BRAIN_FLUX2_TE unset");
+        brain_testutil::skip("BRAIN_FLUX2_TE unset");
         return;
     };
 

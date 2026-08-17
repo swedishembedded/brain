@@ -27,7 +27,7 @@ a kernel can be 5/5 structurally and still be a defect at a given shape.
 `workgroupBarrier()` and no more; with two or more it does not fail cleanly, it
 **corrupts memory**, so those are `✗`
 (10 kernels) - cross-checked against the barrier count on every run.
-`native` marks the 44 kernels with a hand-written AVX2 path that runs instead
+`native` marks the 46 kernels with a hand-written AVX2 path that runs instead
 of the JIT; `native only` means that path is the *only* way it works there, because
 its WGSL has >1 barrier - under `BRAIN_NO_FASTCONV=1` or on a non-AVX2 host it would
 fall back to the JIT and corrupt memory. A `✓` says the JIT *can* run it, not that the
@@ -104,7 +104,7 @@ load of it must already be bare-identifier-indexed.
 | [`attn_scores_bidir_bias`](../../crates/kernels/wgsl/attn_scores_bidir_bias.wgsl) | Bidirectional (non-causal) attention scores with an additive per-head bias and a CONFIGURABLE scalar scale - the spatial-attention primitive for GenieRedux's ST transformer | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`attn_scores_causal_bias`](../../crates/kernels/wgsl/attn_scores_causal_bias.wgsl) | Causal attention scores with an additive per-head bias and a CONFIGURABLE scalar scale - the temporal-attention primitive for GenieRedux's ST transformer | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`attn_scores_cross`](../../crates/kernels/wgsl/attn_scores_cross.wgsl) | Cross-attention scores (materialised, for training) | one thread per output element, serial inner reduction | 2/5 | native | ✓ | - | - | f32 |
-| [`attn_scores_cross_kt`](../../crates/kernels/wgsl/attn_scores_cross_kt.wgsl) | Cross-attention scores against a key-minor K (`kv_k_headt` output) - same math as attn_scores_cross, coalesced | one thread per output element, serial inner reduction over head_dim | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`attn_scores_cross_kt`](../../crates/kernels/wgsl/attn_scores_cross_kt.wgsl) | Cross-attention scores against a key-minor K (`kv_k_headt` output) - same math as attn_scores_cross, coalesced | one thread per output element, serial inner reduction over head_dim | 3/5 | native | ✓ | - | - | f32 |
 | [`attn_scores_full`](../../crates/kernels/wgsl/attn_scores_full.wgsl) | Full (bidirectional, NON-causal) attention scores with an additive key mask and NO 1/sqrt(head_dim) scaling - the Chronos-2 encoder contract | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`attn_scores_masked`](../../crates/kernels/wgsl/attn_scores_masked.wgsl) | Attention scores with causal mask AND key-padding mask (no RoPE) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`attn_scores_qk`](../../crates/kernels/wgsl/attn_scores_qk.wgsl) | Attention scores from SEPARATE q,k buffers, with a configurable scale and an optional causal mask - covers Kronos's two attention modes | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
@@ -276,7 +276,7 @@ load of it must already be bare-identifier-indexed.
 | [`kv_append`](../../crates/kernels/wgsl/kv_append.wgsl) | Append one token's projected K (or V) into a KV cache | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`kv_expand`](../../crates/kernels/wgsl/kv_expand.wgsl) | GQA head expansion into a fused attention buffer (LFM2.5 bidirectional path) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`kv_expand_bwd`](../../crates/kernels/wgsl/kv_expand_bwd.wgsl) | Backward of kv_expand - the adjoint of head replication is a group-sum | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
-| [`kv_k_headt`](../../crates/kernels/wgsl/kv_k_headt.wgsl) | Transpose the K region of a fused KV slab to key-minor `[d_model, T_enc]`, the layout `attn_scores_cross_kt` reads coalesced | one thread per output element, key index fastest | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`kv_k_headt`](../../crates/kernels/wgsl/kv_k_headt.wgsl) | Transpose the K region of a fused KV slab to key-minor `[d_model, T_enc]`, the layout `attn_scores_cross_kt` reads coalesced | one thread per output element, key index fastest | 2/5 | native | ✓ | - | - | f32 |
 | [`l2norm_scale`](../../crates/kernels/wgsl/l2norm_scale.wgsl) | Per-row L2 normalization with a learnable per-dim scale - the QK-norm used by GenieRedux attention (applied to each head slice of q and k, over head_dim, before the scores kernel; the scores kernel then uses a constant scale of 8) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`l2norm_scale_dg`](../../crates/kernels/wgsl/l2norm_scale_dg.wgsl) | Backward w.r.t. the per-dim scale g for l2norm_scale | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`l2norm_scale_dx`](../../crates/kernels/wgsl/l2norm_scale_dx.wgsl) | Backward w.r.t. x for l2norm_scale | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |

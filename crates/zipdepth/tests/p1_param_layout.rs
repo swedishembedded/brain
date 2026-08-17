@@ -96,7 +96,7 @@ fn check(path: &str, cfg: ZipConfig) {
 #[test]
 fn base_param_list_matches_the_released_checkpoint() {
     let Ok(path) = std::env::var("ZIPDEPTH_PTH") else {
-        eprintln!("SKIP: set ZIPDEPTH_PTH=<zipdepth_base.pth> to run");
+        brain_testutil::skip("set ZIPDEPTH_PTH=<zipdepth_base.pth> to run");
         return;
     };
     check(&path, ZipConfig::base());
@@ -105,7 +105,7 @@ fn base_param_list_matches_the_released_checkpoint() {
 #[test]
 fn npu_param_list_matches_the_released_npu_checkpoint() {
     let Ok(path) = std::env::var("ZIPDEPTH_NPU_PTH") else {
-        eprintln!("SKIP: set ZIPDEPTH_NPU_PTH=<zipdepth_base_npu.pth> to run");
+        brain_testutil::skip("set ZIPDEPTH_NPU_PTH=<zipdepth_base_npu.pth> to run");
         return;
     };
     check(&path, ZipConfig { upsample_unfold: false, ..ZipConfig::base() });

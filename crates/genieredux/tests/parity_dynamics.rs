@@ -33,7 +33,7 @@ fn dynamics_parity_vs_reference() {
         let DIR = repo_path("scratchpad/parity");
     let idp = format!("{DIR}/genie_dynamics_ids.u32");
     if !std::path::Path::new(&DYN).exists() || !std::path::Path::new(&idp).exists() {
-        eprintln!("SKIP: checkpoints or dynamics dump absent");
+        brain_testutil::skip("checkpoints or dynamics dump absent");
         return;
     }
     let (b, t, h, w, na) = (1u32, 5u32, 16u32, 16u32, 7u32);

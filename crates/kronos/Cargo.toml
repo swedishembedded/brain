@@ -21,3 +21,8 @@ brain-kernels.workspace = true
 brain-forecast.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

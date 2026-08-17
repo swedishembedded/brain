@@ -20,3 +20,8 @@ anyhow.workspace = true
 zbus.workspace = true
 tokio.workspace = true
 nix = { version = "0.29", features = ["socket", "mman", "fs", "uio", "ioctl", "poll"] }
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
+# absent fixture can be made fatal and absent hardware cannot.
+brain-testutil.workspace = true

@@ -48,7 +48,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 /// each shard lands so a reduced-depth run never materializes 47.6 GiB.
 fn load(cfg: &Flux1Config) -> Option<flux1::Tensors> {
     let Ok(dir) = std::env::var("BRAIN_FLUX1_TRANSFORMER") else {
-        eprintln!("SKIP: BRAIN_FLUX1_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX1_TRANSFORMER unset");
         return None;
     };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
@@ -85,7 +85,7 @@ struct Fixture {
 impl Fixture {
     fn open(path: &str) -> Option<Fixture> {
         if !std::path::Path::new(path).exists() {
-            eprintln!("SKIP: fixture {path} absent (run tools/goldens/flux1_dump_reference.py)");
+            brain_testutil::skip(&format!("fixture {path} absent (run tools/goldens/flux1_dump_reference.py)"));
             return None;
         }
         Some(Fixture { tensors: checkpoint::safetensors::read(path).unwrap() })
@@ -166,7 +166,7 @@ fn reduced_depth_fp32_parity() {
             )
         }
         Err(_) => {
-            eprintln!("SKIP: {manifest} absent (run tools/goldens/flux1_dump_reference.py)");
+            brain_testutil::skip(&format!("{manifest} absent (run tools/goldens/flux1_dump_reference.py)"));
             return;
         }
     };
@@ -189,14 +189,14 @@ fn reduced_depth_fp32_parity() {
 #[test]
 fn full_depth_int8_parity() {
     if std::env::var("BRAIN_FLUX1_FULL").is_err() {
-        eprintln!("SKIP: set BRAIN_FLUX1_FULL=1 for the full-depth int8 run");
+        brain_testutil::skip_unavailable("set BRAIN_FLUX1_FULL=1 for the full-depth int8 run");
         return;
     }
     let cfg = Flux1Config::kontext_dev();
     let Some(ts) = load(&cfg) else { return };
     let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: int8 needs a GPU backend, current is {}", gpu.kind());
+        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
         return;
     }
     let model = Flux1Model::new_with(&cfg, &ts, gpu, 1024, Precision::Int8);

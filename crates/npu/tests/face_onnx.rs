@@ -66,7 +66,7 @@ fn weights_dir(var: &str) -> Option<PathBuf> {
 fn read(dir: &PathBuf, name: &str) -> Option<onnx::onnx::GraphProto> {
     let p = dir.join(name);
     if !p.exists() {
-        eprintln!("SKIP: {} absent", p.display());
+        brain_testutil::skip(&format!("{} absent", p.display()));
         return None;
     }
     let m = onnx::read::read_file(&p).unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -101,7 +101,7 @@ fn input_dims(g: &onnx::onnx::GraphProto) -> Vec<Option<i64>> {
 #[test]
 fn arcface_is_npu_ready_as_shipped() {
     let Some(dir) = weights_dir("BRAIN_ARCFACE_DIR") else {
-        eprintln!("SKIP: set BRAIN_ARCFACE_DIR to a directory holding glintr100.onnx");
+        brain_testutil::skip("set BRAIN_ARCFACE_DIR to a directory holding glintr100.onnx");
         return;
     };
     let Some(g) = read(&dir, "glintr100.onnx") else { return };
@@ -124,7 +124,7 @@ fn arcface_is_npu_ready_as_shipped() {
 #[test]
 fn scrfd_needs_its_shapes_frozen_before_the_npu_can_take_it() {
     let Some(dir) = weights_dir("BRAIN_SCRFD_DIR") else {
-        eprintln!("SKIP: set BRAIN_SCRFD_DIR to a directory holding scrfd_10g_bnkps.onnx");
+        brain_testutil::skip("set BRAIN_SCRFD_DIR to a directory holding scrfd_10g_bnkps.onnx");
         return;
     };
     let Some(g) = read(&dir, "scrfd_10g_bnkps.onnx") else { return };

@@ -29,7 +29,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 fn load_weights() -> Option<flux2::Tensors> {
     let Ok(dir) = std::env::var("BRAIN_FLUX2_TRANSFORMER") else {
-        eprintln!("SKIP: BRAIN_FLUX2_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX2_TRANSFORMER unset");
         return None;
     };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
@@ -84,7 +84,7 @@ fn dit_forward_matches_reference() {
     let f_t2i = testdata("flux2/klein-4b/dit.safetensors");
     let f_edit = testdata("flux2/klein-4b/dit_edit.safetensors");
     if !std::path::Path::new(&f_t2i).exists() {
-        eprintln!("SKIP: fixture {f_t2i} absent");
+        brain_testutil::skip(&format!("fixture {f_t2i} absent"));
         return;
     }
     let Some(map) = load_weights() else { return };
@@ -102,7 +102,7 @@ fn dit_forward_matches_reference() {
 fn position_ids_match_reference_layout() {
     let f_t2i = testdata("flux2/klein-4b/dit.safetensors");
     if !std::path::Path::new(&f_t2i).exists() {
-        eprintln!("SKIP: fixture {f_t2i} absent");
+        brain_testutil::skip(&format!("fixture {f_t2i} absent"));
         return;
     }
     let fx = checkpoint::safetensors::read(&f_t2i).unwrap();

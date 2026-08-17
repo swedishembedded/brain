@@ -43,13 +43,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn flux2_vae_parity() {
     let fixture = testdata("flux2/klein-4b/vae.safetensors");
     if !Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let vae_env = match std::env::var("BRAIN_FLUX2_VAE") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP: set BRAIN_FLUX2_VAE to the FLUX.2 Klein vae/ dir");
+            brain_testutil::skip("set BRAIN_FLUX2_VAE to the FLUX.2 Klein vae/ dir");
             return;
         }
     };
@@ -57,7 +57,7 @@ fn flux2_vae_parity() {
     let p = Path::new(&vae_env);
     let vae_path = if p.is_dir() { p.join("diffusion_pytorch_model.safetensors") } else { p.to_path_buf() };
     if !vae_path.exists() {
-        eprintln!("SKIP: BRAIN_FLUX2_VAE={vae_env} has no vae safetensors");
+        brain_testutil::skip(&format!("BRAIN_FLUX2_VAE={vae_env} has no vae safetensors"));
         return;
     }
 

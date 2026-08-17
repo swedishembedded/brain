@@ -35,11 +35,9 @@ fn deterministic_device(m: &Unet, i: &(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)) 
     let b = m.run(&i.0, 601.0, &i.1, &i.2, &i.3);
     let d = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
     if d != 0 {
-        eprintln!(
-            "SKIP: this backend is not run-to-run deterministic on this graph \
+        brain_testutil::skip_unavailable(&format!("this backend is not run-to-run deterministic on this graph \
              ({d} of {} outputs differ between two submits of ONE recorded graph)",
-            a.len()
-        );
+            a.len()));
     }
     d == 0
 }

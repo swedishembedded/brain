@@ -87,7 +87,7 @@ fn rel_l2(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn pipeline_cut_matches_single_device() {
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs a GPU) for the pipeline-sharding parity test");
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the pipeline-sharding parity test");
         return;
     }
     let c = cfg();

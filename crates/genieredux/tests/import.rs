@@ -18,7 +18,7 @@ fn repo_path(rel: &str) -> String {
 fn import_tokenizer_full_coverage() {
         let CK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
     if !std::path::Path::new(&CK).exists() {
-        eprintln!("SKIP: {CK} absent");
+        brain_testutil::skip(&format!("{CK} absent"));
         return;
     }
     let (w, cfg) = import_tokenizer(&CK).expect("import must succeed with full coverage");

@@ -33,7 +33,7 @@ fn tokenizer_parity_vs_reference() {
         let DIR = repo_path("scratchpad/parity");
     let inp = format!("{DIR}/genie_tokenizer_in.f32");
     if !std::path::Path::new(&CK).exists() || !std::path::Path::new(&inp).exists() {
-        eprintln!("SKIP: checkpoint or parity dump absent (run genie_tokenizer.py)");
+        brain_testutil::skip("checkpoint or parity dump absent (run genie_tokenizer.py)");
         return;
     }
     let (b, c, f, hw) = (1u32, 3u32, 5u32, 64u32);

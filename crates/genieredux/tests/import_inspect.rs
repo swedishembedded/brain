@@ -18,7 +18,7 @@ fn repo_path(rel: &str) -> String {
 fn inspect_tokenizer_checkpoint() {
         let CK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
     if !std::path::Path::new(&CK).exists() {
-        eprintln!("SKIP: {CK} absent");
+        brain_testutil::skip(&format!("{CK} absent"));
         return;
     }
     let rep = checkpoint::torchpt::read_report(&CK).expect("read");

@@ -34,7 +34,7 @@ fn write_ppm(path: &str, w: u32, h: u32) {
 #[test]
 fn depth_image_headless_is_deterministic() {
     let Ok(ckpt) = std::env::var("ZIPDEPTH_PTH") else {
-        eprintln!("SKIP: set ZIPDEPTH_PTH to run the zipdepth smoke test");
+        brain_testutil::skip("set ZIPDEPTH_PTH to run the zipdepth smoke test");
         return;
     };
     let dir = std::env::temp_dir().join("brain_zipdepth_smoke");

@@ -64,7 +64,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 fn goldens() -> Option<Vec<checkpoint::safetensors::StTensor>> {
     let p = testdata("golden/esrgan/rrdbnet.safetensors");
     if !std::path::Path::new(&p).exists() {
-        eprintln!("SKIP: {p} absent - run `make fetch/testdata` (or tools/goldens/rrdbnet_dump_reference.py)");
+        brain_testutil::skip(&format!("{p} absent - run `make fetch/testdata` (or tools/goldens/rrdbnet_dump_reference.py)"));
         return None;
     }
     Some(checkpoint::safetensors::read(&p).expect("read goldens"))
@@ -137,15 +137,15 @@ fn tiny_forward_matches_the_reference() {
 fn x4plus_forward_matches_the_reference() {
     let Some(g) = goldens() else { return };
     if !g.iter().any(|t| t.name == "x4plus_out") {
-        eprintln!("SKIP: goldens carry no x4plus_* (re-run the dumper with --ckpt)");
+        brain_testutil::skip("goldens carry no x4plus_* (re-run the dumper with --ckpt)");
         return;
     }
     let Ok(ckpt) = std::env::var("BRAIN_ESRGAN") else {
-        eprintln!("SKIP: BRAIN_ESRGAN unset (point it at RealESRGAN_x4plus.pth)");
+        brain_testutil::skip("BRAIN_ESRGAN unset (point it at RealESRGAN_x4plus.pth)");
         return;
     };
     if !std::path::Path::new(&ckpt).exists() {
-        eprintln!("SKIP: {ckpt} does not exist");
+        brain_testutil::skip(&format!("{ckpt} does not exist"));
         return;
     }
 
@@ -222,15 +222,15 @@ fn the_tile_seam_shrinks_with_the_halo() {
 fn the_tile_seam_on_the_released_net() {
     let Some(g) = goldens() else { return };
     let Ok(ckpt) = std::env::var("BRAIN_ESRGAN") else {
-        eprintln!("SKIP: BRAIN_ESRGAN unset");
+        brain_testutil::skip("BRAIN_ESRGAN unset");
         return;
     };
     if !std::path::Path::new(&ckpt).exists() {
-        eprintln!("SKIP: {ckpt} does not exist");
+        brain_testutil::skip(&format!("{ckpt} does not exist"));
         return;
     }
     let Some(input) = g.iter().find(|t| t.name == "x4plus_input") else {
-        eprintln!("SKIP: no x4plus goldens");
+        brain_testutil::skip("no x4plus goldens");
         return;
     };
     let (tensors, shapes, _) = rrdbnet::import::read(&ckpt).expect("read");

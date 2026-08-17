@@ -36,7 +36,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 
 fn load_weights() -> Option<flux2::Tensors> {
     let Ok(dir) = std::env::var("BRAIN_FLUX2_TRANSFORMER") else {
-        eprintln!("SKIP: BRAIN_FLUX2_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX2_TRANSFORMER unset");
         return None;
     };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
@@ -131,12 +131,12 @@ fn int8_bisect_keep_f32_families() {
 fn int8_forward_matches_fp32_and_reference() {
     let f_t2i = testdata("flux2/klein-4b/dit.safetensors");
     if !std::path::Path::new(&f_t2i).exists() {
-        eprintln!("SKIP: fixture {f_t2i} absent");
+        brain_testutil::skip(&format!("fixture {f_t2i} absent"));
         return;
     }
     let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        eprintln!("SKIP: int8 needs a GPU backend (DP4A), current is {}", gpu.kind());
+        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend (DP4A), current is {}", gpu.kind()));
         return;
     }
     let Some(map) = load_weights() else { return };

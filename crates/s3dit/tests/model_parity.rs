@@ -33,7 +33,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn zimage_full_model_matches_diffusers() {
     let fixture = testdata("golden/zimage/zimage_model.safetensors");
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        brain_testutil::skip(&format!("fixture {fixture} absent - run `make fetch/testdata`"));
         return;
     }
     let st = checkpoint::safetensors::read(&fixture).expect("read model golden");

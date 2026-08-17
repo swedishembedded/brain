@@ -969,7 +969,7 @@ impl Lfm {
                                 let spans: Vec<(u32, u32)> = (0..self.b).map(|i| (i * self.t, self.t)).collect();
                                 let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
                                 block::chunked_bidir_fwd(
-                                    &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                    &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                     &ab.ctx, &self.slab_scores, &self.slab_probs, &spans, chunk, None, &mut s,
                                 );
                             }
@@ -1007,7 +1007,7 @@ impl Lfm {
                             } else {
                                 let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
                                 block::chunked_bidir_fwd(
-                                    &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                    &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                     &ab.ctx, scores, probs, &spans, *chunk, None, &mut s,
                                 );
                             }
@@ -1203,7 +1203,7 @@ impl Lfm {
                             let fwd_ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
                             let bwd_ids = block::CrossBwdIds { dscores: DSCORES_CROSS, dq: DQ_CROSS, dk_acc: DK_CROSS_ACC, dv_acc: DV_CROSS_ACC };
                             block::chunked_bidir_bwd(
-                                &self.gpu, &fwd_ids, &bwd_ids, c.n_heads, hd, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                &self.gpu, &fwd_ids, None, &bwd_ids, c.n_heads, hd, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
                                 &bw.d_ctx, &bw.d_qkv, &self.slab_scores, &self.slab_probs, &self.slab_dscores,
                                 &spans, chunk, None, &mut s,
                             );

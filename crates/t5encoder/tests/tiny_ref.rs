@@ -65,7 +65,7 @@ fn tiny() -> T5Config {
 fn tiny_reference_stage_parity_with_distinct_dims() {
     let (ckpt, golden) = (testdata("t5/tiny/ckpt"), testdata("t5/tiny/golden.safetensors"));
     if !ckpt.exists() || !golden.exists() {
-        eprintln!("SKIP: {} / {} absent", ckpt.display(), golden.display());
+        brain_testutil::skip(&format!("{} / {} absent", ckpt.display(), golden.display()));
         return;
     }
     let g = checkpoint::safetensors::read(golden.to_str().unwrap()).expect("read golden");
