@@ -31,10 +31,9 @@ __pycache__/
 
 # Run-output artifacts: `brain bench eval`/`scale`, `brain perf run`/`compare`,
 # and ad-hoc script output (e.g. scripts/run_s3dit_int8_e2e.sh) all write here.
-# Nothing under it is committed; the directory itself is kept via
-# results/.gitkeep so it exists in a fresh checkout without being regenerated.
-/results/*
-!/results/.gitkeep
+# Nothing under it is committed, and no placeholder is needed to hold the
+# directory open: every writer calls create_dir_all on the parent first.
+/results/
 
 # Session-local agent machinery (worktrees, locks, loop state, workflows).
 .claude/*

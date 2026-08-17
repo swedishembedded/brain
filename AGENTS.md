@@ -1330,7 +1330,7 @@ a metric that isn't there was simply forgotten.
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),
   generated `data/`, `out/`, `build/`, `results/` (all `brain bench`/`brain perf`
-  artifacts and ad-hoc script output, dir kept via `results/.gitkeep`), and the
+  artifacts and ad-hoc script output, created on demand by its writers), and the
   world-model parity fixtures.
 
 ---
