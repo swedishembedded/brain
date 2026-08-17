@@ -110,6 +110,25 @@ impl KronosModel {
         self.tokenizer.encode(&x, t)
     }
 
+    /// Detokenize a finished rollout: `s1`/`s2` are the WHOLE stream (context ++
+    /// the `pred_len` generated tokens); returns the generated tail's bars
+    /// `[pred_len, feat]`, still normalized.
+    ///
+    /// The tokenizer's decoder is a **causal** transformer, so a token's bar is a
+    /// function of that token AND every token before it in the decoded window.
+    /// Feeding it the generated tail alone therefore reconstructs those bars from
+    /// a 24-token prefix instead of the 512-bar history the reference gives it -
+    /// a different function, not a cheaper one. The reference decodes the last
+    /// `max_context` tokens of context++generated and keeps the tail, which is
+    /// what this does.
+    fn detokenize_tail(&self, s1: &[u32], s2: &[u32], pred_len: usize) -> Vec<f32> {
+        let feat = self.feat();
+        let n = s1.len();
+        let w0 = n.saturating_sub(self.max_context());
+        let recon = self.tokenizer.decode(&s1[w0..], &s2[w0..]);
+        recon[(n - w0 - pred_len) * feat..].to_vec()
+    }
+
     /// Forecast `pred_len` future bars from `bars` `[T, feat]` (row-major
     /// OHLCV(+amount)). `ctx_stamp` is `[T, 5]` and `fut_stamp` is
     /// `[pred_len, 5]` calendar indices. Returns `[pred_len, feat]`.
@@ -164,17 +183,24 @@ impl KronosModel {
             let _ = step;
         }
 
-        // 4. decode the generated tail + denormalize
-        let gen1 = &s1[t..];
-        let gen2 = &s2[t..];
-        let recon = self.tokenizer.decode(gen1, gen2); // [pred_len, feat] (normalized)
+        // 4. decode the rollout's tail in its context window + denormalize
+        let recon = self.detokenize_tail(&s1, &s2, pred_len); // [pred_len, feat] (normalized)
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
 
-    /// KV-cached forecast — the fast path. Identical result to [`forecast`] (up to
-    /// float noise) but prefills the context once and advances one token at a time
-    /// over a per-layer K/V cache, turning the `O(T²)`-per-step rollout into an
-    /// `O(T²)` prefill + `O(T)`-per-step tail. See [`crate::kvcache`].
+    /// KV-cached forecast - the fast path. Prefills the context once and advances
+    /// one token at a time over a per-layer K/V cache, turning the `O(T²)`-per-step
+    /// rollout into an `O(T²)` prefill + `O(T)`-per-step tail. See [`crate::kvcache`].
+    ///
+    /// **Equal to [`forecast`](Self::forecast) - and so to the reference - while
+    /// `t + pred_len <= max_context`.** Past that the attention window slides, and
+    /// [`forecast`] (like the reference) re-runs the whole window from an origin one
+    /// bar later at every step, recomputing every position under the new origin. A
+    /// K/V cache cannot: its keys were computed under the previous origin. That is
+    /// not a rounding difference on this checkpoint - two correct un-cached runs
+    /// whose window origin differs by one bar disagree by ~1e-1 relative in the
+    /// final s1 logits, enough to move the argmax. Callers that need bit-parity
+    /// with the reference across a sliding window must use [`forecast`].
     pub fn forecast_cached(
         &self,
         bars: &[f32],
@@ -194,11 +220,13 @@ impl KronosModel {
         let mut cache = hw.new_cache();
         let mut rng = SplitMix64::new(opts.seed);
 
-        // prefill the context (absolute positions 0..t); attention self-windows to
-        // max_context, so this matches the reference's initial window.
+        // Prefill only the LAST `max_context` context bars - the reference seeds
+        // its rolling buffer from exactly that slice, so anything earlier is
+        // history the reference never gives the model.
+        let p0 = t.saturating_sub(self.max_context());
         let mut last_s1_logits = Vec::new();
-        for p in 0..t {
-            last_s1_logits = hw.step_token(s1[p], s2[p], &stamp[p * 5..p * 5 + 5], p, &mut cache);
+        for (pos, p) in (p0..t).enumerate() {
+            last_s1_logits = hw.step_token(s1[p], s2[p], &stamp[p * 5..p * 5 + 5], pos, &mut cache);
         }
 
         for step in 0..pred_len {
@@ -208,10 +236,10 @@ impl KronosModel {
             s1.push(samp_s1);
             s2.push(samp_s2);
             let ppos = t + step;
-            last_s1_logits = hw.step_token(samp_s1, samp_s2, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
+            last_s1_logits = hw.step_token(samp_s1, samp_s2, &stamp[ppos * 5..ppos * 5 + 5], t - p0 + step, &mut cache);
         }
 
-        let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+        let recon = self.detokenize_tail(&s1, &s2, pred_len);
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
 
@@ -219,8 +247,9 @@ impl KronosModel {
     /// prefill + dep-K/V are computed once, then the KV cache is forked per sample
     /// and only the `pred_len` decode steps differ (seed `opts.seed + i`). Result
     /// `i` is bit-identical to `forecast_cached` with `seed = opts.seed + i`, so a
-    /// samples=N eval drops from N prefills to one — the dominant cost on the
+    /// samples=N eval drops from N prefills to one - the dominant cost on the
     /// cross-section. `argmax` makes all samples equal (kept for API symmetry).
+    /// Inherits [`forecast_cached`](Self::forecast_cached)'s sliding-window caveat.
     pub fn forecast_cached_samples(
         &self,
         bars: &[f32],
@@ -240,8 +269,9 @@ impl KronosModel {
         let hw = self.decoder.host_weights();
         let mut base = hw.new_cache();
         let mut last0 = Vec::new();
-        for p in 0..t {
-            last0 = hw.step_token(s1_ctx[p], s2_ctx[p], &stamp[p * 5..p * 5 + 5], p, &mut base);
+        let p0 = t.saturating_sub(self.max_context());
+        for (pos, p) in (p0..t).enumerate() {
+            last0 = hw.step_token(s1_ctx[p], s2_ctx[p], &stamp[p * 5..p * 5 + 5], pos, &mut base);
         }
         hw.ensure_dep_kv(&mut base); // fill dep K/V once so forks share it
 
@@ -258,9 +288,9 @@ impl KronosModel {
                     s1.push(samp_s1);
                     s2.push(samp_s2);
                     let ppos = t + step;
-                    last = hw.step_token(samp_s1, samp_s2, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
+                    last = hw.step_token(samp_s1, samp_s2, &stamp[ppos * 5..ppos * 5 + 5], t - p0 + step, &mut cache);
                 }
-                let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+                let recon = self.detokenize_tail(&s1, &s2, pred_len);
                 preprocess::denormalize(&norm, &recon, pred_len, feat)
             })
             .collect()
@@ -300,6 +330,8 @@ impl KronosModel {
         // on backend-cpu's pool (the one `--device cpuN` governs) — never a direct
         // rayon dep — and fans out over the machine's cores automatically.
         let hw = self.decoder.host_weights();
+        // Returns the WHOLE token stream per series (context ++ generated): the
+        // tokenizer's causal decoder needs the context window, not just the tail.
         let gens: Vec<(Vec<u32>, Vec<u32>)> = backend_cpu::par::map(prepped.len(), |i| {
             let (_norm, s1_ctx, s2_ctx, stamp, t) = &prepped[i];
             {
@@ -307,8 +339,9 @@ impl KronosModel {
                 let mut cache = hw.new_cache();
                 let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
                 let mut last = Vec::new();
-                for p in 0..t {
-                    last = hw.step_token(s1[p], s2[p], &stamp[p * 5..p * 5 + 5], p, &mut cache);
+                let p0 = t.saturating_sub(hw.max_ctx);
+                for (pos, p) in (p0..t).enumerate() {
+                    last = hw.step_token(s1[p], s2[p], &stamp[p * 5..p * 5 + 5], pos, &mut cache);
                 }
                 let mut rng = SplitMix64::new(opts.seed);
                 for step in 0..pred_len {
@@ -318,9 +351,9 @@ impl KronosModel {
                     s1.push(a);
                     s2.push(b);
                     let ppos = t + step;
-                    last = hw.step_token(a, b, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
+                    last = hw.step_token(a, b, &stamp[ppos * 5..ppos * 5 + 5], t - p0 + step, &mut cache);
                 }
-                (s1[t..].to_vec(), s2[t..].to_vec())
+                (s1, s2)
             }
         });
         // 3. serial (device): detokenize + denormalize.
@@ -328,7 +361,7 @@ impl KronosModel {
             .iter()
             .zip(gens)
             .map(|((norm, _, _, _, _), (g1, g2))| {
-                let recon = self.tokenizer.decode(&g1, &g2);
+                let recon = self.detokenize_tail(&g1, &g2, pred_len);
                 preprocess::denormalize(norm, &recon, pred_len, feat)
             })
             .collect()
@@ -385,7 +418,7 @@ impl KronosModel {
             s1.push(samp_s1);
             s2.push(samp_s2);
         }
-        let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+        let recon = self.detokenize_tail(&s1, &s2, pred_len);
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
 }
@@ -437,9 +470,11 @@ impl KronosModel {
         let dec = &self.decoder;
         let mut rng = SplitMix64::new(opts.seed);
 
-        // prefill the context (absolute positions 0..t) via the cached backend.
-        let x_ctx = dec.embed_tokens(&s1, &s2, &stamp[..t * 5]);
-        let mut last_s1_logits = cores.prefill(&x_ctx, t);
+        // prefill the LAST `max_context` context bars via the cached backend -
+        // the slice the reference seeds its rolling buffer from.
+        let p0 = t.saturating_sub(self.max_context());
+        let x_ctx = dec.embed_tokens(&s1[p0..], &s2[p0..], &stamp[p0 * 5..t * 5]);
+        let mut last_s1_logits = cores.prefill(&x_ctx, t - p0);
 
         for step in 0..pred_len {
             let samp_s1 = sample(&last_s1_logits, opts, &mut rng);
@@ -453,7 +488,7 @@ impl KronosModel {
             last_s1_logits = cores.s1_step(&x1);
         }
 
-        let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+        let recon = self.detokenize_tail(&s1, &s2, pred_len);
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
 
@@ -480,8 +515,9 @@ impl KronosModel {
         stamp.extend_from_slice(fut_stamp);
         let dec = &self.decoder;
 
-        let x_ctx = dec.embed_tokens(&s1_ctx, &s2_ctx, &stamp[..t * 5]);
-        let last0 = cores.prefill(&x_ctx, t);
+        let p0 = t.saturating_sub(self.max_context());
+        let x_ctx = dec.embed_tokens(&s1_ctx[p0..], &s2_ctx[p0..], &stamp[p0 * 5..t * 5]);
+        let last0 = cores.prefill(&x_ctx, t - p0);
         cores.snapshot(); // seed once, fork per sample
 
         (0..n_samples)
@@ -501,7 +537,7 @@ impl KronosModel {
                     let x1 = dec.embed_tokens(&[samp_s1], &[samp_s2], &stamp[ppos * 5..ppos * 5 + 5]);
                     last = cores.s1_step(&x1);
                 }
-                let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+                let recon = self.detokenize_tail(&s1, &s2, pred_len);
                 preprocess::denormalize(&norm, &recon, pred_len, feat)
             })
             .collect()
