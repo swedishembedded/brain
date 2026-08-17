@@ -15,7 +15,9 @@
 //! Inputs are read **by name** (`open,high,low,close,volume`), independent of
 //! their `Role`, so a caller can mark `close` the `Target` and the others
 //! `PastCovariate`. If the tokenizer wants a sixth feature (`amount`/turnover),
-//! it is synthesised as `volume × close` — Yahoo & most feeds don't ship it.
+//! it is synthesised as `volume * mean(open, high, low, close)` - matching the
+//! reference `KronosPredictor`'s own synthesis, since Yahoo and most feeds
+//! don't ship it.
 //!
 //! Calendar: Kronos consumes per-bar time features (minute/hour/weekday/day/month,
 //! the reference `calc_time_stamps`). Since trading bars skip weekends/holidays,
@@ -44,6 +46,21 @@ const CAL_NAMES: [&str; 5] = ["minute", "hour", "weekday", "day", "month"];
 /// this many paths so a distribution is available to derive from.
 const SAMPLE_FLOOR: usize = 16;
 
+/// The `model_version` a decoder path reports: `<vendor>/<repo>` when the path
+/// came out of the model store (or any two-level layout), else the last path
+/// component, else the bare architecture name. Never a guess at which release
+/// this is.
+fn version_from_path(decoder: &str) -> String {
+    let p = std::path::Path::new(decoder);
+    let name = p.file_name().and_then(|n| n.to_str());
+    let vendor = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str());
+    match (vendor, name) {
+        (Some(v), Some(n)) if !v.is_empty() && v != "/" => format!("{v}/{n}"),
+        (_, Some(n)) => n.to_string(),
+        _ => "kronos".to_string(),
+    }
+}
+
 /// A [`KronosModel`] behind the object-safe [`ForecastModel`] seam.
 pub struct KronosForecaster {
     model: KronosModel,
@@ -52,12 +69,19 @@ pub struct KronosForecaster {
 
 impl KronosForecaster {
     pub fn new(model: KronosModel) -> KronosForecaster {
-        KronosForecaster { model, version: "NeoQuasar/Kronos-small".into() }
+        KronosForecaster { model, version: "kronos".into() }
     }
 
     /// Load from the two HF checkpoint dirs (tokenizer + decoder).
+    ///
+    /// The reported `model_version` is derived from the decoder path rather
+    /// than baked in: it used to be the literal `"NeoQuasar/Kronos-small"`, so
+    /// every forecast from a `Kronos-base` checkpoint - or from a fine-tuned
+    /// `.safetensors` - reported the wrong provenance on the wire.
     pub fn load(tokenizer_dir: &str, decoder_dir: &str) -> Result<KronosForecaster, String> {
-        Ok(KronosForecaster::new(import::load_model(tokenizer_dir, decoder_dir)?))
+        let mut f = KronosForecaster::new(import::load_model(tokenizer_dir, decoder_dir)?);
+        f.version = version_from_path(decoder_dir);
+        Ok(f)
     }
 
     /// Assemble a `[T, feat]` row-major bar matrix from the item's OHLCV
@@ -142,10 +166,11 @@ impl ForecastModel for KronosForecaster {
         }
         // Honor an explicit sample count; only fall back to the floor when the
         // caller asked for none (they still need a distribution to derive from).
-        // `KRONOS_ARGMAX=1` selects the deterministic modal rollout (argmax over
-        // the token distribution): a single stable draw, matching the reference
-        // RankIC evaluation's point path — no sampling noise, and ~N× cheaper.
-        let argmax = std::env::var("KRONOS_ARGMAX").map(|v| v != "0").unwrap_or(false);
+        // `BRAIN_KRONOS_ARGMAX=1` selects the deterministic modal rollout
+        // (argmax over the token distribution): a single stable draw, matching
+        // the reference RankIC evaluation's point path - no sampling noise, and
+        // ~N times cheaper.
+        let argmax = std::env::var("BRAIN_KRONOS_ARGMAX").map(|v| v != "0").unwrap_or(false);
         let n_samples = if argmax {
             1
         } else if spec.num_samples == 0 {
@@ -175,22 +200,29 @@ impl ForecastModel for KronosForecaster {
                 .map(|n| OHLCV.iter().position(|c| c == n).unwrap_or(3))
                 .collect();
 
+            let opts = GenOpts {
+                temperature: 1.0,
+                top_k: 0,
+                // nucleus truncation matching the reference KronosPredictor
+                // default; top_p=1.0 (no truncation) samples the full tails and
+                // makes the rollout wildly over-dispersed on real data.
+                top_p: 0.9,
+                argmax,
+                seed: spec.seed,
+            };
+            // KV-cached rollout with ONE shared prefill for all `n_samples`
+            // paths. `forecast_cached_samples` is bit-identical to a loop of
+            // `forecast_cached` at seeds `spec.seed + k` -- which is exactly
+            // what this used to be, and is what
+            // `tests/bench_cpu.rs::shared_prefill_parity_and_speed` gates --
+            // but it pays the O(T^2) prefill once instead of `n_samples`
+            // times. At the checkpoint's 512-bar context the prefill dominates
+            // a short horizon, so the loop made every extra sample cost a
+            // whole forecast.
+            let paths = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, spec.horizon, n_samples, &opts);
             // samples[k][col_i] = trajectory of length horizon for target col_i
             let mut per_target: Vec<Vec<f32>> = vec![Vec::with_capacity(n_samples * spec.horizon); cols.len()];
-            for k in 0..n_samples {
-                let opts = GenOpts {
-                    temperature: 1.0,
-                    top_k: 0,
-                    // nucleus truncation matching the reference KronosPredictor
-                    // default; top_p=1.0 (no truncation) samples the full tails and
-                    // makes the rollout wildly over-dispersed on real data.
-                    top_p: 0.9,
-                    argmax,
-                    seed: spec.seed.wrapping_add(k as u64),
-                };
-                // KV-cached rollout: exact-parity with the un-cached path but
-                // prefills the context once and advances one token at a time.
-                let path = self.model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, spec.horizon, &opts);
+            for path in &paths {
                 // path is [horizon, feat]
                 for (ci, &col) in cols.iter().enumerate() {
                     for h in 0..spec.horizon {
