@@ -192,6 +192,15 @@ the one place a machine-specific path may appear in this repo):
 - `BRAIN_BIN` - path to the `brain` binary for e2e/bats suites.
 - `BRAIN_TTS_SOCK` - socket path a TTS e2e test connects to.
 - `BRAIN_TESTDATA` - overrides the `testdata/` resolution root (see §1).
+- `BRAIN_REQUIRE_FIXTURES` - turns every `brain_testutil::skip` into a hard
+  failure. Skipping an absent fixture is the right default, but cargo reports a
+  skip as a PASS, so a green `cargo test -p <crate>` is on its own no evidence
+  that a parity comparison happened at all. Set this in any run whose PURPOSE is
+  to prove parity (`make wan/parity` is the worked example) and every comparison
+  that did not really run turns the suite red. This was not hypothetical: the
+  Wan suite reported `ok` while 7 of its 9 VAE stage comparisons and its real
+  1.3B transformer comparison were all silently skipping, because their weights
+  resolve from the environment.
 - `BRAIN_MODELS_DIR` - overrides the model-store root tests resolve checkpoints under.
 - `BRAIN_E2E` - enables the heavy, opt-in e2e suites (real weights + GPU).
 

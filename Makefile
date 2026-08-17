@@ -64,7 +64,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx check/paths hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v s3dit/int8-e2e \
+        perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
         release/github release/publish test/e2e/deb
 
@@ -128,6 +128,7 @@ help:
 	@echo "  make flux2/generate          generate one image with FLUX.2 Klein (BRAIN_FLUX2_* env)"
 	@echo "  make flux2/edit              reference-image edit with FLUX.2 Klein (FLUX2_REF=...)"
 	@echo "  make wan/t2v                 generate one video clip with Wan2.1 (BRAIN_WAN_* env)"
+	@echo "  make wan/parity              Wan parity vs the reference, skips DISABLED (BRAIN_WAN_* env)"
 	@echo "  make s3dit/int8-e2e          real z-image (s3dit) int8 e2e generation (no-OOM regression)"
 	@echo "  make data/tts                synthetic TTS text->codes dataset (Talker SFT smokes)"
 	@echo "  make docs                    build the full docs bundle (pandoc + xelatex)"
@@ -996,6 +997,15 @@ flux2/edit: release
 # WAN_FLAGS entirely for the real thing.
 WAN_PROMPT ?= a golden retriever running along a sandy beach at sunset, waves in the background, cinematic
 WAN_FLAGS ?= --frames 9 --width 416 --height 240 --steps 20 --seed 7
+# The Wan parity suite with skipping DISABLED. `cargo test -p brain-wan`
+# reports a skipped comparison as a pass, so a green run there proves nothing
+# about parity on its own - the weights come from the environment, and without
+# them most of the real-checkpoint comparisons quietly do not happen. This is
+# the form to run when the claim matters.
+wan/parity:
+	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE (and BRAIN_TESTDATA if the goldens are not in ./testdata)"; exit 2)
+	BRAIN_REQUIRE_FIXTURES=1 $(CARGO_TEST) -p brain-wan --test dit_parity --test vae_parity
+
 wan/t2v: release
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
 	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --output-path out/wan.mp4 $(WAN_FLAGS)

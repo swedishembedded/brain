@@ -181,11 +181,11 @@ impl Fixture {
 fn setup(frames: u32) -> Option<(Tensors, Fixture)> {
     let fx = testdata(&format!("golden/wan/vae/vae_t{frames}.safetensors"));
     if !Path::new(&fx).exists() {
-        eprintln!("SKIP: fixture {fx} absent - run tools/goldens/wan_vae_dump_reference.py");
+        brain_testutil::skip(&format!("fixture {fx} absent - run tools/goldens/wan_vae_dump_reference.py"));
         return None;
     }
     let Some(wp) = weights_path() else {
-        eprintln!("SKIP: set BRAIN_WAN_VAE to the Wan2.1 VAE safetensors");
+        brain_testutil::skip("set BRAIN_WAN_VAE to the Wan2.1 VAE safetensors");
         return None;
     };
     let cfg = WanVaeConfig::wan21();
@@ -296,7 +296,7 @@ fn wan_vae_round_trip() {
 #[test]
 fn wan_vae_import_covers_the_shipped_checkpoint() {
     let Some(wp) = weights_path() else {
-        eprintln!("SKIP: set BRAIN_WAN_VAE to the Wan2.1 VAE safetensors");
+        brain_testutil::skip("set BRAIN_WAN_VAE to the Wan2.1 VAE safetensors");
         return;
     };
     let cfg = WanVaeConfig::wan21();

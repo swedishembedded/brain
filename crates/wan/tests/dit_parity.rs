@@ -91,7 +91,7 @@ impl Fixture {
     fn open(rel: &str) -> Option<Fixture> {
         let p = testdata(rel);
         if !Path::new(&p).exists() {
-            eprintln!("SKIP: fixture {p} absent - run tools/goldens/wan_dit_dump_reference.py");
+            brain_testutil::skip(&format!("fixture {p} absent - run tools/goldens/wan_dit_dump_reference.py"));
             return None;
         }
         Some(Fixture { t: checkpoint::safetensors::read(&p).expect("read golden") })
@@ -129,7 +129,7 @@ fn tiny_cfg() -> WanConfig {
 fn tiny_weights() -> Option<Tensors> {
     let p = testdata("golden/wan/dit/dit_tiny_weights.safetensors");
     if !Path::new(&p).exists() {
-        eprintln!("SKIP: fixture {p} absent - run tools/goldens/wan_dit_dump_reference.py");
+        brain_testutil::skip(&format!("fixture {p} absent - run tools/goldens/wan_dit_dump_reference.py"));
         return None;
     }
     let raw = checkpoint::safetensors::read(&p).expect("read tiny weights");
@@ -334,7 +334,7 @@ fn dit_shards() -> Option<Vec<PathBuf>> {
 
 fn real_weights() -> Option<Tensors> {
     let Some(shards) = dit_shards() else {
-        eprintln!("SKIP: set BRAIN_WAN_DIT (a file or a shard directory) or BRAIN_MODELS_DIR");
+        brain_testutil::skip("set BRAIN_WAN_DIT (a file or a shard directory) or BRAIN_MODELS_DIR");
         return None;
     };
     let mut raw: Vec<StTensor> = Vec::new();

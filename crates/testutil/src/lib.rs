@@ -24,6 +24,33 @@
 
 pub mod parity;
 
+/// Name what a test is skipping, and let a caller demand it not be skipped.
+///
+/// Skipping an absent fixture is the right default: it keeps the suite
+/// runnable by someone who has none of the checkpoints. But the skip is
+/// reported by cargo as a PASS, so `cargo test -p <crate>` returning green is
+/// evidence of nothing on its own. That is not hypothetical - the Wan parity
+/// suite was quietly certifying nothing under a plain `cargo test`, because 7
+/// of its 9 VAE stage comparisons and the real 1.3B transformer comparison all
+/// resolve their weights from the environment.
+///
+/// So: printed and skipped by default, a hard failure when
+/// `BRAIN_REQUIRE_FIXTURES` is set. A run that means to *prove* parity sets it
+/// and gets a red suite for every comparison that did not actually happen.
+///
+/// ```no_run
+/// # fn load() -> Option<u8> { None }
+/// let Some(w) = load() else {
+///     return brain_testutil::skip("BRAIN_WAN_VAE unset and no fixture in the store");
+/// };
+/// ```
+pub fn skip(reason: &str) {
+    if std::env::var_os("BRAIN_REQUIRE_FIXTURES").is_some_and(|v| !v.is_empty() && v != "0") {
+        panic!("BRAIN_REQUIRE_FIXTURES is set, so this test may not skip: {reason}");
+    }
+    eprintln!("SKIP: {reason}");
+}
+
 /// The path to a testdata fixture, `<testdata-root>/<rel>`. The root is
 /// `$BRAIN_TESTDATA` if set (and non-empty), else `<repo>/testdata`.
 pub fn testdata(rel: &str) -> String {
