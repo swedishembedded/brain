@@ -246,8 +246,8 @@ impl WorldModel for DiamondNpuWorldModel {
             }
         }
         let n_act = ctx_actions.len().min(nsc);
-        for k in 0..n_act {
-            self.act_ring[nsc - n_act + k] = ctx_actions[k].min(self.npu.cfg.num_actions - 1);
+        for (k, &a) in ctx_actions.iter().enumerate().take(n_act) {
+            self.act_ring[nsc - n_act + k] = a.min(self.npu.cfg.num_actions - 1);
         }
     }
 

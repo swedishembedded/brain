@@ -106,8 +106,8 @@ fn dpt_tiny_stages() {
 
     let spat = [16 * ph * pw, 4 * ph * pw, ph * pw, 4]; // spatial per scale (4x4 grid: s3 = 2x2)
     let mut errs = Vec::new();
-    for i in 0..4 {
-        let got = gpu.read(&scr.rn[i], 256 * spat[i]);
+    for (i, &sp) in spat.iter().enumerate() {
+        let got = gpu.read(&scr.rn[i], 256 * sp);
         if let Some(e) = check(&format!("rn{i}"), &got) {
             errs.push(e);
         }

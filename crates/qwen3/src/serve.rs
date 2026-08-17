@@ -273,6 +273,13 @@ const ARGMAX_CHUNKS: u32 = 256;
 /// a wider top-p nucleus; a request asking for more is clamped to this.
 pub const TOPK_CAPACITY: u32 = 64;
 
+/// One batched decode step's paged-KV metadata, as
+/// [`Engine::append_meta`] returns it: `(batch size, positions, sequence
+/// lengths, block ids, in-block offsets, the flattened block table)`. The last
+/// four are one entry per sequence except `bt`, which is
+/// `bsz * max_blocks_per_seq` wide.
+type BatchMeta = (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
+
 fn fb(x: f32) -> u32 {
     x.to_bits()
 }
@@ -888,7 +895,7 @@ impl Engine {
     }
 
     /// Append one slot per sequence and gather the batched-forward metadata.
-    fn append_meta(&mut self, tables: &mut [&mut BlockTable]) -> (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    fn append_meta(&mut self, tables: &mut [&mut BlockTable]) -> BatchMeta {
         let mbt = self.max_blocks_per_seq as usize;
         let bsz = tables.len() as u32;
         assert!(bsz <= self.max_batch);
@@ -1009,7 +1016,7 @@ impl Engine {
         let cap = self.splitk_cap?;
         let tiles = m.div_ceil(128) * n.div_ceil(128);
         // Enough k to split at all: each slice must still hold whole BK chunks.
-        let slices = SPLITK_TARGET_WGS.div_ceil(tiles).min(k / 64).min(SPLITK_MAX_SLICES).max(1);
+        let slices = SPLITK_TARGET_WGS.div_ceil(tiles).min(k / 64).clamp(1, SPLITK_MAX_SLICES);
         let need = (m as u64) * (n as u64) * (slices as u64);
         if slices <= 1 || need > cap {
             return None;
@@ -1390,7 +1397,7 @@ impl Engine {
     /// from device work — see [`Self::submit_topk_head`]. `k` is clamped to
     /// [`TOPK_CAPACITY`].
     fn topk_from_hidden(&self, bsz: u32, k: u32) -> Vec<Vec<(u32, f32)>> {
-        let k = k.min(TOPK_CAPACITY).max(1);
+        let k = k.clamp(1, TOPK_CAPACITY);
         self.submit_topk_head(bsz, k);
         let vals = self.gpu.read(&self.topk_vals_dev, (bsz * TOPK_CAPACITY) as usize);
         let idx = self.gpu.read(&self.topk_idx_dev, (bsz * TOPK_CAPACITY) as usize);
@@ -2905,7 +2912,7 @@ mod tests {
         // Plenty of batch/block headroom: a single request must never fall
         // back to k=1 for lack of free blocks (serve.rs's own guard: `k > 1
         // && free_blocks < active.len() * k` => k=1).
-        assert!(DECODE_WINDOW > 1, "test is meaningless if the window is disabled");
+        const { assert!(DECODE_WINDOW > 1, "test is meaningless if the window is disabled") };
         for kv_int8 in [false, true] {
             let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 4, 8, 32, kv_int8, false);
             let mut sched = Scheduler::new(eng, 4);
@@ -3251,6 +3258,9 @@ mod tests {
             let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, kv_int8, false);
             let mut tables: Vec<BlockTable> = (0..n_streams).map(|_| BlockTable::new()).collect();
             let mut batched: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_streams];
+            // `s` is the step index into each stream's inner `Vec` (`embs[i][s]`), not an
+            // index into `embs` itself - `embs` has `n_streams` entries, not `steps`.
+            #[allow(clippy::needless_range_loop)]
             for s in 0..steps {
                 let flat: Vec<f32> = (0..n_streams).flat_map(|i| embs[i][s].clone()).collect();
                 let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();

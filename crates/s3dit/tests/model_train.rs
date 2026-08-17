@@ -114,7 +114,7 @@ fn run_loss(c: &Cfg, w: &ModelWeights, b: &Batch) -> f64 {
 #[test]
 fn full_model_gradcheck() {
     let c = cfg();
-    let mut r = rng(0xABCD_01);
+    let mut r = rng(0x00AB_CD01);
     let w0 = init(&c, &mut r);
     let b = batch(&c, &mut r);
     let (pred, cache) = forward(&c, &w0, &b.latent, &b.cap, b.t, &b.ic, &b.is, &b.cc, &b.cs);
@@ -127,7 +127,7 @@ fn full_model_gradcheck() {
     let mut worst_name = 0usize;
     // number of top-level params for labeling
     let nparam = { let mut w = w0.clone(); params_mut(&mut w).len() };
-    for pi in 0..nparam {
+    for (pi, ana) in analytic.iter().enumerate().take(nparam) {
         let plen = { let mut w = w0.clone(); params_mut(&mut w)[pi].len() };
         let step = (plen / 6).max(1);
         let mut worst = 0f64;
@@ -139,7 +139,7 @@ fn full_model_gradcheck() {
             params_mut(&mut wp)[pi][i] = orig - h;
             let lm = run_loss(&c, &wp, &b);
             let num = (lp - lm) / (2.0 * h);
-            let a = analytic[pi][i];
+            let a = ana[i];
             let denom = a.abs().max(num.abs()).max(1e-4);
             worst = worst.max((a - num).abs() / denom);
         }
@@ -155,7 +155,7 @@ fn full_model_gradcheck() {
 #[test]
 fn full_model_overfits() {
     let c = cfg();
-    let mut r = rng(0x1122_33);
+    let mut r = rng(0x0011_2233);
     let mut w = init(&c, &mut r);
     let b = batch(&c, &mut r);
 

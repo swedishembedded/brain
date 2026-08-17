@@ -144,7 +144,7 @@ pub fn context_features(scaled: &[f32], patch: usize, time_scale: f32) -> Patche
     let mut features = vec![0.0f32; n_patches * feat_dim];
     let mut attn_mask = vec![0.0f32; n_patches];
 
-    for p in 0..n_patches {
+    for (p, am) in attn_mask.iter_mut().enumerate() {
         let base = p * feat_dim;
         let mut any = false;
         for c in 0..patch {
@@ -162,7 +162,7 @@ pub fn context_features(scaled: &[f32], patch: usize, time_scale: f32) -> Patche
             features[base + patch + c] = value; // values channel
             features[base + 2 * patch + c] = m; // mask channel
         }
-        attn_mask[p] = if any { 1.0 } else { 0.0 };
+        *am = if any { 1.0 } else { 0.0 };
     }
 
     Patched { features, attn_mask, n_patches, feat_dim }

@@ -62,9 +62,9 @@ fn attn_multihead_backward_matches_reference() {
         let mut p = vec![0.0f32; t*t];
         for i in 0..t {
             let mut sc = vec![0.0f32; t];
-            for j in 0..t { let mut s=0.0; for d in 0..hd { s+=g(0,i,d)*g(c,j,d); } sc[j]=s*scale; }
+            for (j, scj) in sc.iter_mut().enumerate() { let mut s=0.0; for d in 0..hd { s+=g(0,i,d)*g(c,j,d); } *scj=s*scale; }
             let mx = sc.iter().cloned().fold(f32::MIN, f32::max);
-            let mut den=0.0; for j in 0..t { sc[j]=(sc[j]-mx).exp(); den+=sc[j]; }
+            let mut den=0.0; for scj in &mut sc { *scj=(*scj-mx).exp(); den+=*scj; }
             for j in 0..t { p[i*t+j]=sc[j]/den; }
         }
         // d_out for this head
@@ -75,7 +75,7 @@ fn attn_multihead_backward_matches_reference() {
         let mut dsc=vec![0.0f32;t*t];
         for i in 0..t {
             let mut dp=vec![0.0f32;t];
-            for j in 0..t { let mut s=0.0; for d in 0..hd { s+=dob(i,d)*g(2*c,j,d); } dp[j]=s; }
+            for (j, dpj) in dp.iter_mut().enumerate() { let mut s=0.0; for d in 0..hd { s+=dob(i,d)*g(2*c,j,d); } *dpj=s; }
             let dot:f32=(0..t).map(|j| p[i*t+j]*dp[j]).sum();
             for j in 0..t { dsc[i*t+j]=p[i*t+j]*(dp[j]-dot); }
         }

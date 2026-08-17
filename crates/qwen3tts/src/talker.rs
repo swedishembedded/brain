@@ -72,13 +72,13 @@ impl TextProjection {
         let mut mid = vec![0.0f32; self.inter];
         for r in 0..n {
             let x = &hidden[r * self.in_dim..(r + 1) * self.in_dim];
-            for j in 0..self.inter {
+            for (j, mj) in mid.iter_mut().enumerate() {
                 let w = &self.fc1_w[j * self.in_dim..(j + 1) * self.in_dim];
                 let mut acc = self.fc1_b[j];
                 for k in 0..self.in_dim {
                     acc += w[k] * x[k];
                 }
-                mid[j] = model::hostmath::silu(acc);
+                *mj = model::hostmath::silu(acc);
             }
             for o in 0..self.out {
                 let w = &self.fc2_w[o * self.inter..(o + 1) * self.inter];

@@ -307,6 +307,11 @@ impl<'a> DptCtx<'a> {
             (f2, ph.div_ceil(2), pw.div_ceil(2)),
         ];
 
+        // `i` is the pyramid-scale index, not a cursor over `tap_bufs`: it also
+        // selects `cfg.dpt_proj[i]`, `scr.pos[i]`, `scr.rn[i]` and the
+        // `resize_layers.{i}` weights, and the scale count is fixed at 4 while
+        // `tap_bufs` is caller-supplied, so its length is not provably 4.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..4 {
             steps.push(self.gpu.step_sliced(
                 self.k.layernorm,

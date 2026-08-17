@@ -309,8 +309,8 @@ fn worldmodel_action_consequence_pairwise_distinct() {
         })
         .collect();
     let noop = bits(&frames[0]);
-    for a in 1..5 {
-        assert_ne!(bits(&frames[a]), noop, "action {a} frame must differ from noop");
+    for (a, f) in frames.iter().enumerate().skip(1) {
+        assert_ne!(bits(f), noop, "action {a} frame must differ from noop");
     }
     for i in 0..5 {
         for j in (i + 1)..5 {

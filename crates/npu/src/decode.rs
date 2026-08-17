@@ -85,11 +85,10 @@ pub fn decode_npu_outputs(
 
     // Anchor geometry, scale-major then row-major — matching the repack order.
     let mut anchors = Vec::with_capacity(a);
-    for s in 0..3 {
-        let (_, h, w) = cls[s];
+    for (s, (_, h, w)) in cls.iter().enumerate() {
         let stride = cfg.strides[s] as f32;
-        for yy in 0..h {
-            for xx in 0..w {
+        for yy in 0..*h {
+            for xx in 0..*w {
                 let (ax, ay) = (xx as f32 + 0.5, yy as f32 + 0.5);
                 anchors.push(Anchor { cx: ax * stride, cy: ay * stride, ax, ay, stride });
             }

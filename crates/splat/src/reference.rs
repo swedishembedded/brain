@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Pure-Rust scalar rasterizer — the test oracle. Mirrors `splat_project.wgsl`
-//! + `splat_naive.wgsl` line for line (same culls, same thresholds, same
-//! termination semantics) so device kernels can be diffed against it exactly.
+//! Pure-Rust scalar rasterizer - the test oracle. Mirrors
+//! `splat_project.wgsl` + `splat_naive.wgsl` line for line (same culls, same
+//! thresholds, same termination semantics) so device kernels can be diffed
+//! against it exactly.
 
 use crate::types::{Camera, Mode, RenderOpts, Splats};
 
@@ -149,8 +150,8 @@ pub fn render(s: &Splats, cam: &Camera, o: &RenderOpts) -> Vec<f32> {
                     break;
                 }
                 let wgt = alpha * t;
-                for k in 0..3 {
-                    c[k] += s.colors[gi * 3 + k] * wgt;
+                for (k, ck) in c.iter_mut().enumerate() {
+                    *ck += s.colors[gi * 3 + k] * wgt;
                 }
                 dep += p.depth * wgt;
                 t = next_t;

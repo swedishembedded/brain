@@ -97,8 +97,7 @@ impl StreamTx {
                 return;
             }
             let mut fds = [PollFd::new(self.sock.as_fd(), PollFlags::POLLOUT)];
-            let timeout = PollTimeout::try_from(remaining.as_millis().min(u16::MAX as u128) as u16)
-                .unwrap_or(PollTimeout::MAX);
+            let timeout = PollTimeout::from(remaining.as_millis().min(u16::MAX as u128) as u16);
             match poll(&mut fds, timeout) {
                 Ok(_) => {} // writable, hung up, or timed out — the retry decides
                 Err(nix::errno::Errno::EINTR) => {}
@@ -226,13 +225,11 @@ mod tests {
     /// Fill the client's socket buffer with progress frames until one is
     /// dropped (back-pressure engaged), returning how many were actually sent.
     fn stall_subscriber(tx: &mut StreamTx) -> u64 {
-        let mut sent = 0u64;
-        for step in 0..1_000_000u32 {
+        for (sent, step) in (0..1_000_000u32).enumerate() {
             tx.progress(step, 1_000_000, "flood", None, None, None);
             if tx.dropped > 0 {
-                return sent;
+                return sent as u64;
             }
-            sent += 1;
         }
         panic!("could not fill the socket buffer");
     }

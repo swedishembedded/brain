@@ -96,11 +96,16 @@ pub struct Opts {
     pub hifi: bool,
 }
 
+/// The sampler's starting state: `(latent, first scheduler step, inpaint mask
+/// in latent space, the VAE-encoded init latent)`. The last two are `None` for
+/// a plain text2image run, which starts from pure noise at step 0.
+type LatentInit = (Vec<f32>, usize, Option<Vec<f32>>, Option<Vec<f32>>);
+
 /// The denoiser backend chosen by [`Opts::hifi`]. All three expose the same
 /// `forward(latent, cap, t)`; the sampler is identical either way.
 enum DitEngine {
-    I8(ZImageDitI8),
-    Shard(ZImageDitShard),
+    I8(Box<ZImageDitI8>),
+    Shard(Box<ZImageDitShard>),
     /// fp32 on a box with fewer than 2 GPUs: `ZImageDitShard` is
     /// unconditionally 2-GPU and fails outright there ("need 2 discrete
     /// GPUs, found 0"), so the single-GPU path streams the main layer stack
@@ -109,7 +114,7 @@ enum DitEngine {
     /// every call — the same checkpoint `build_from_source` opened, since a
     /// rotating slot's miss must be able to re-read it an unbounded number
     /// of calls later.
-    Windowed { dit: ZImageDitWindowed, dit_path: String, cfg: ZImageConfig },
+    Windowed { dit: Box<ZImageDitWindowed>, dit_path: String, cfg: ZImageConfig },
 }
 
 /// The fp32 ("hifi") DiT needs 2 GPUs to shard (`ZImageDitShard`) OR a
@@ -198,9 +203,9 @@ impl DitEngine {
         // unconditionally, the pre-existing (documented) 2-GPU requirement
         // for fp32 + a LoRA adapter together.
         if hifi {
-            DitEngine::Shard(ZImageDitShard::build(cfg, weights, 1, lh, lw, cap_len))
+            DitEngine::Shard(Box::new(ZImageDitShard::build(cfg, weights, 1, lh, lw, cap_len)))
         } else {
-            DitEngine::I8(ZImageDitI8::build(cfg, weights, 1, lh, lw, cap_len))
+            DitEngine::I8(Box::new(ZImageDitI8::build(cfg, weights, 1, lh, lw, cap_len)))
         }
     }
 
@@ -212,14 +217,14 @@ impl DitEngine {
     /// every later `forward` call.
     fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, dit_path: &str, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
         if !hifi {
-            return DitEngine::I8(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len));
+            return DitEngine::I8(Box::new(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len)));
         }
         if hifi_needs_window(gpu_core::devices::schedulable_gpu_count()) {
             let window = window_blocks_from_env();
             let dit = ZImageDitWindowed::build_from_source(cfg.clone(), src, window, 1, lh, lw, cap_len, Some("gpu"));
-            DitEngine::Windowed { dit, dit_path: dit_path.to_string(), cfg }
+            DitEngine::Windowed { dit: Box::new(dit), dit_path: dit_path.to_string(), cfg }
         } else {
-            DitEngine::Shard(ZImageDitShard::build_from_source(cfg, src, 1, lh, lw, cap_len))
+            DitEngine::Shard(Box::new(ZImageDitShard::build_from_source(cfg, src, 1, lh, lw, cap_len)))
         }
     }
     fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
@@ -335,20 +340,20 @@ fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpu_count: usize) -> Op
 /// Where/how the Qwen-4B text encoder runs.
 enum Encoder {
     /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
-    Cpu(Qwen),
+    Cpu(Box<Qwen>),
     /// Whole int8 encoder on one card. The 7 per-layer linears are DP4A int8
     /// (~4× smaller than fp32), so the whole Qwen3-4B encoder is ~9.5 GB resident
     /// and fits a single 24 GB card alongside nothing else — leaving the DiT its
     /// own card. Encode runs on-GPU (~1-2 s). The robust "superfast" path; the
     /// fp32 [`Encoder::Split`] does not fit two P40s (2× non-ReBAR overhead).
-    Gpu8(Qwen),
+    Gpu8(Box<Qwen>),
     /// Split across two cards: `s0` (embedding + the first `cut` layers) on the
     /// mostly-empty card, `s1` (the remaining layers up to the penultimate) on the
     /// DiT's card. The fp32 encoder is ~23 GB resident — too big for one 24 GB
     /// card, but a thin tail fits alongside the 13 GB int8 DiT while the bulk sits
     /// on the spare card. Encode runs on-GPU (~1-2 s) with one small host-staged
     /// residual at the cut.
-    Split { s0: Qwen, s1: Qwen, cap_len: u32 },
+    Split { s0: Box<Qwen>, s1: Box<Qwen>, cap_len: u32 },
     /// The single-GPU case: the int8 encoder (~9.5 GB) and the int8 DiT (~13 GB)
     /// would together exceed a 24 GB card's usable budget (and comfortably
     /// exceed a unified-memory box's smaller one) if both stayed resident at
@@ -540,14 +545,14 @@ impl HotPipeline {
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
-                Some(Encoder::Gpu8(e))
+                Some(Encoder::Gpu8(Box::new(e)))
             }
             _ => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
                 gpu_core::set_default_backend(gpu_core::Backend::Cpu);
                 let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                Some(Encoder::Cpu(e))
+                Some(Encoder::Cpu(Box::new(e)))
             }
         };
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
@@ -561,7 +566,7 @@ impl HotPipeline {
             (None, Some((s0, cut, n, di))) => {
                 progress(&format!("building Qwen-4B encoder tail (layers {cut}..{})", n - 1));
                 let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di as usize });
-                Encoder::Split { s0, s1, cap_len }
+                Encoder::Split { s0: Box::new(s0), s1: Box::new(s1), cap_len }
             }
             (None, None) => unreachable!("encoder neither CPU nor split"),
         };
@@ -653,14 +658,14 @@ impl HotPipeline {
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
-                Encoder::Gpu8(e)
+                Encoder::Gpu8(Box::new(e))
             }
             None => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
                 gpu_core::set_default_backend(gpu_core::Backend::Cpu);
                 let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                Encoder::Cpu(e)
+                Encoder::Cpu(Box::new(e))
             }
         };
         drop(qsrc);
@@ -704,7 +709,7 @@ impl HotPipeline {
                 let dsrc = crate::import::comfy_source(&dreader, &zcfg);
                 let (dit, cache) = gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::build_from_source_with_cache(zcfg, &dsrc, 1, lh, lw, cap_len))?;
                 *slot.borrow_mut() = Some(cache);
-                Ok(DitEngine::I8(dit))
+                Ok(DitEngine::I8(Box::new(dit)))
             },
             progress,
         )?;
@@ -722,7 +727,7 @@ impl HotPipeline {
             width,
             height,
             cap_len,
-            |dit_gpu, lh, lw| Ok(DitEngine::I8(gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::rebuild_from_cache(cache, 1, lh, lw, cap_len))?)),
+            |dit_gpu, lh, lw| Ok(DitEngine::I8(Box::new(gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::rebuild_from_cache(cache, 1, lh, lw, cap_len))?))),
             progress,
         )
     }
@@ -997,7 +1002,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     let n = (16 * lh * lw) as usize;
     let noise = randn(n, opts.seed);
     let plane = (lh * lw) as usize;
-    let (mut lat, start_step, mask_lat, lat0): (Vec<f32>, usize, Option<Vec<f32>>, Option<Vec<f32>>) = match &init {
+    let (mut lat, start_step, mask_lat, lat0): LatentInit = match &init {
         None => (noise.clone(), 0, None, None),
         Some(init) => {
             progress(1, total, "encoding image (VAE)");
@@ -1083,11 +1088,11 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
             if let (Some(mask), Some(lat0)) = (&mask_lat, &lat0) {
                 let snext = sig_full[i + 1];
                 for c in 0..16 {
-                    for p in 0..plane {
+                    for (p, &mp) in mask.iter().enumerate() {
                         let idx = c * plane + p;
-                        let keep = 1.0 - mask[p];
+                        let keep = 1.0 - mp;
                         let orig = (1.0 - snext) * lat0[idx] + snext * noise[idx];
-                        lat[idx] = mask[p] * lat[idx] + keep * orig;
+                        lat[idx] = mp * lat[idx] + keep * orig;
                     }
                 }
             }

@@ -364,8 +364,8 @@ impl DeviceTrainer {
         for (bw, inp) in main.iter().zip(inputs).rev() {
             let gg = self.eng.backward(bw, self.dims(ntot), inp, c32, uni_cos, uni_sin, true, &d);
             d = gg.dx.clone();
-            for j in 0..cdim {
-                dc[j] += gg.dc[j] as f64;
+            for (j, dcj) in dc.iter_mut().enumerate().take(cdim) {
+                *dcj += gg.dc[j] as f64;
             }
             g.push(gg);
         }
@@ -395,8 +395,8 @@ impl DeviceTrainer {
         for (bw, inp) in w.noise_ref.iter().zip(&f.noise_in).rev() {
             let g = self.eng.backward(bw, self.dims(n_img), inp, &f.c32, &f.ic, &f.is, true, &d_img32);
             d_img32 = g.dx.clone();
-            for j in 0..cdim {
-                dc[j] += g.dc[j] as f64;
+            for (j, dcj) in dc.iter_mut().enumerate().take(cdim) {
+                *dcj += g.dc[j] as f64;
             }
             noise_g.push(g);
         }

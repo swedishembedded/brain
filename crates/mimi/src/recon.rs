@@ -34,6 +34,7 @@
 //!     *metric* only — its STFT/mel backward is a TODO;
 //!   * the discriminator stack + feature-matching + WavLM distillation are not
 //!     implemented (see the codec README "Training" section and the TODOs below).
+//!
 //! No discriminator results are reported because none are computed.
 
 use audio::conv::{Conv1d, ConvKernels};
@@ -337,11 +338,11 @@ impl ConvReconAE {
         // Use the live VQ assignment for the step (straight-through).
         let (_, _, _, idx) = self.forward(x, None);
         let (dwe, dwd) = self.grads(x, &idx);
-        for i in 0..self.we.len() {
-            self.we[i] -= lr * dwe[i];
+        for (i, w) in self.we.iter_mut().enumerate() {
+            *w -= lr * dwe[i];
         }
-        for i in 0..self.wd.len() {
-            self.wd[i] -= lr * dwd[i];
+        for (i, w) in self.wd.iter_mut().enumerate() {
+            *w -= lr * dwd[i];
         }
         self.loss(x, None)
     }

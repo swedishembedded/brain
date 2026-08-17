@@ -107,8 +107,8 @@ fn dfl_decode_two_hot_roundtrip() {
     }
     let gpu = Gpu::new_cpu(&kernels());
     let dist = decode_gpu(&gpu, &logits, a, reg_max);
-    for side in 0..4 {
-        assert!((dist[side] - 3.25).abs() < 1e-3, "side {side}: {}", dist[side]);
+    for (side, &d) in dist.iter().enumerate() {
+        assert!((d - 3.25).abs() < 1e-3, "side {side}: {d}");
     }
 }
 
@@ -124,8 +124,8 @@ fn dfl_decode_peaked() {
     }
     let gpu = Gpu::new_cpu(&kernels());
     let dist = decode_gpu(&gpu, &logits, a, reg_max);
-    for side in 0..4 {
-        assert!((dist[side] - 5.0).abs() < 1e-3, "side {side}: {}", dist[side]);
+    for (side, &d) in dist.iter().enumerate() {
+        assert!((d - 5.0).abs() < 1e-3, "side {side}: {d}");
     }
 }
 

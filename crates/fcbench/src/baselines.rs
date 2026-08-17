@@ -249,10 +249,10 @@ impl ForecastModel for Arima {
                     let mut zf = Vec::with_capacity(h);
                     for _ in 0..h {
                         let mut yhat = coef[0];
-                        for j in 1..coef.len() {
+                        for (j, cj) in coef.iter().enumerate().skip(1) {
                             let idx = hist.len() as isize - j as isize;
                             let v = if idx >= 0 { hist[idx as usize] } else { 0.0 };
-                            yhat += coef[j] * v;
+                            yhat += cj * v;
                         }
                         zf.push(yhat);
                         hist.push(yhat);

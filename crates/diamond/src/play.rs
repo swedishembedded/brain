@@ -151,8 +151,8 @@ impl WorldModel for DiamondWorldModel {
             }
         }
         let n_act = ctx_actions.len().min(nsc);
-        for k in 0..n_act {
-            self.act_ring[nsc - n_act + k] = ctx_actions[k].min(self.unet.cfg.num_actions - 1);
+        for (k, &a) in ctx_actions.iter().enumerate().take(n_act) {
+            self.act_ring[nsc - n_act + k] = a.min(self.unet.cfg.num_actions - 1);
         }
         self.rng = NormalRng::new(self.seed);
         self.init_obs = self.obs_ring.clone();

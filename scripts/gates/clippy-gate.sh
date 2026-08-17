@@ -32,11 +32,15 @@ set -uo pipefail
 ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# The number of clippy warnings the workspace currently carries. Every one is
-# pre-existing. The largest group is
-# doc-list indentation, which needs per-site judgment - an automated pass
-# reattached a summary line to the wrong list item, which is a documentation
-# defect rather than a lint fix.
+# The number of clippy warnings the workspace currently carries. It is now
+# ZERO: the backlog is gone, so this is no longer a ratchet with slack in it -
+# it is a floor, and any new warning fails the gate on the commit that adds it.
+#
+# Everything below this line is the ledger of how the number moved while the
+# backlog was being burned down. Keep it: it is the record of which raises were
+# legitimate (a different TREE, verified against a pristine checkout) and which
+# were not, and the rule it encodes - lower by fixing, never raise to absorb -
+# is what got this to zero.
 #
 # 207 -> 183 by fixing, not by suppressing: bfe00f3, 86bf582, and the yolo doc pass.
 #
@@ -133,7 +137,24 @@ cd "$ROOT"
 # so it carries one `#[allow(dead_code)]` stating that. One annotation clears
 # both warnings: an allowed item seeds rustc's reachability worklist, so
 # everything it calls counts as live too.
-BASELINE="${BASELINE:-283}"
+#
+# Lowered 283 -> 0: the whole remaining backlog, fixed rather than silenced.
+# The two groups that were not mechanical:
+#
+#   * 127 `doc_lazy_continuation`/`doc_overindented_list_items`. Reflowed so no
+#     wrapped prose line opens with `-`/`+`/`>`, and so a paragraph that
+#     summarizes a list is separated from it by a blank line instead of being
+#     absorbed into its last item. The rendered documentation was wrong at
+#     every one of these sites, not merely the lint.
+#   * 69 `needless_range_loop` and friends. Rewritten to `enumerate()`/`zip`
+#     only where the loop provably walks the slice in step, so no accumulation
+#     order and no numeric result moved. Three sites index a different
+#     dimension or a bound not provably within the slice; those keep the range
+#     loop behind an `#[allow]` that states the reason.
+#
+# Six `#[allow]`s in total were added, each carrying its justification at the
+# site. Everything else was fixed at the cause.
+BASELINE="${BASELINE:-0}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

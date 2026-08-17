@@ -84,11 +84,11 @@ pub fn score_split(
             let (n, hh) = (s.shape[0], s.shape[1]);
             let mut acc = 0.0f32;
             let mut col = vec![0.0f32; n];
-            for t in 0..hh.min(h) {
-                for i in 0..n {
-                    col[i] = s.data[i * hh + t];
+            for (t, &actual) in future.iter().enumerate().take(hh.min(h)) {
+                for (i, c) in col.iter_mut().enumerate() {
+                    *c = s.data[i * hh + t];
                 }
-                acc += metrics::crps_ensemble(&col, future[t]);
+                acc += metrics::crps_ensemble(&col, actual);
             }
             out.insert("crps".into(), acc / hh.max(1) as f32);
         }

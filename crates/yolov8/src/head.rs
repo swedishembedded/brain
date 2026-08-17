@@ -29,6 +29,7 @@
 //!   * backward: `bias_grad(m=N, n=C*HW)` -> `dbcast[c*HW+p] = sum_n dy[...]`
 //!     (sum over the N images); then host-reduce `dbias[c] = sum_p dbcast[c*HW+p]`
 //!     (sum over spatial), giving the per-channel grad summed over N and H*W.
+//!
 //! Both use the EXISTING kernels verbatim; no new kernel is added.
 //!
 //! [`Head`] wires the three scales; [`Head::forward`] runs them. The raw logit
@@ -190,13 +191,13 @@ impl Branch {
         ctx.gpu.submit(&[&self.dbcast], &[s_bias]);
         let dbcast = ctx.gpu.read(&self.dbcast, n as usize);
         let mut dbias = vec![0.0f32; self.out_c as usize];
-        for ch in 0..self.out_c as usize {
+        for (ch, db) in dbias.iter_mut().enumerate() {
             let base = ch * hw as usize;
             let mut acc = 0.0f32;
             for p in 0..hw as usize {
                 acc += dbcast[base + p];
             }
-            dbias[ch] = acc;
+            *db = acc;
         }
         // Accumulate into the (pre-zeroed) grad buffer (single consumer/backward).
         let cur = ctx.gpu.read(ps.g(&bname), self.out_c as usize);

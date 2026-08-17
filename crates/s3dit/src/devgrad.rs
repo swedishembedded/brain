@@ -386,11 +386,11 @@ impl BlockDev {
             gr.fn2[cc] = df2[cc] * tgm;
             dmod[3 * dim + cc] = df2[cc] * w.fn2[cc] * (1.0 - tgm * tgm);
         }
-        for i in 0..4 * dim {
-            gr.adaln_b[i] = dmod[i];
-            for j in 0..d.cdim {
-                gr.adaln_w[i * d.cdim + j] = dmod[i] * c[j];
-                gr.dc[j] += dmod[i] * w.adaln_w[i * d.cdim + j];
+        for (i, &di) in dmod.iter().enumerate() {
+            gr.adaln_b[i] = di;
+            for (j, &cj) in c.iter().enumerate() {
+                gr.adaln_w[i * d.cdim + j] = di * cj;
+                gr.dc[j] += di * w.adaln_w[i * d.cdim + j];
             }
         }
         gr

@@ -23,8 +23,8 @@
 /// rotary channels, from the interleaved `mrope_section` layout.
 pub fn axis_map(mrope_section: [u32; 3], half: usize) -> Vec<usize> {
     let mut m = vec![0usize; half]; // default: temporal
-    for axis in 1..3usize {
-        for i in 0..mrope_section[axis] as usize {
+    for (axis, &sec) in mrope_section.iter().enumerate().skip(1) {
+        for i in 0..sec as usize {
             let slot = axis + 3 * i;
             if slot < half {
                 m[slot] = axis;
@@ -79,6 +79,12 @@ pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u
     get_rope_index_multi(tokens, &[(image_token_id, grids)])
 }
 
+/// One placeholder token kind and the `(t, h, w)` grid extent of each of its
+/// occurrences, in the order they appear in the prompt: `(placeholder token
+/// id, per-occurrence extents)`. A prompt mixing image, audio and video
+/// placeholders passes one of these per kind.
+pub type PlaceholderGrids<'a> = (u32, &'a [(u32, u32, u32)]);
+
 /// [`get_rope_index`] generalized to MULTIPLE placeholder token types in one
 /// scan — Qwen3-Omni's Thinker has three (image, audio, video); a "text" run
 /// is any token that isn't one of them. `placeholders` lists `(token_id,
@@ -113,7 +119,7 @@ pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u
 /// clear whichever axis actually grew, and for audio/video that is `t`, not
 /// `h`/`w`. Identical to the old formula whenever `t = 1`, so every existing
 /// image-only caller is unaffected.
-pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[(u32, &[(u32, u32, u32)])]) -> Vec<[u32; 3]> {
+pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[PlaceholderGrids<'_>]) -> Vec<[u32; 3]> {
     let mut pos = Vec::with_capacity(tokens.len());
     let mut cp = 0u32; // running anchor ("current_pos")
     let mut gi = vec![0usize; placeholders.len()];

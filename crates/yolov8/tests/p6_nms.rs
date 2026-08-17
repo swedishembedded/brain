@@ -48,8 +48,8 @@ fn dfl_decode_target_3_25() {
         buf.extend_from_slice(&logits);
     }
     let dist = dfl_decode_dist(&gpu, &buf, 1, reg_max);
-    for side in 0..4 {
-        assert!((dist[side] - 3.25).abs() < 1e-4, "side {side}: {} != 3.25", dist[side]);
+    for (side, &d) in dist.iter().enumerate() {
+        assert!((d - 3.25).abs() < 1e-4, "side {side}: {d} != 3.25");
     }
 }
 

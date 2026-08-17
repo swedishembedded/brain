@@ -57,7 +57,7 @@ fn host_fwd(qkv: &[f32], bias: &[f32], b: usize, heads: usize, t: usize, hd: usi
                 let mut den = 0.0; let mut e = vec![0.0f32; t];
                 for j in 0..t { if sc[j] > f32::NEG_INFINITY { e[j] = (sc[j]-mx).exp(); den += e[j]; } }
                 for d in 0..hd {
-                    let mut o = 0.0; for j in 0..t { o += (e[j]/den) * g(2*c,j,d); }
+                    let mut o = 0.0; for (j, &ej) in e.iter().enumerate() { o += (ej/den) * g(2*c,j,d); }
                     out[(bb*t + i)*c + h*hd + d] = o;
                 }
             }

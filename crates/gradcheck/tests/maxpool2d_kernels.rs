@@ -445,10 +445,10 @@ fn uncovered_pixels_get_exactly_zero_gradient() {
         in_h && in_w
     };
     let mut n_uncovered = 0;
-    for i in 0..p.x_len() {
+    for (i, g) in dx.iter().enumerate() {
         if !covered(i) {
             n_uncovered += 1;
-            assert_eq!(dx[i], 0.0, "uncovered input {i} received gradient {}", dx[i]);
+            assert_eq!(*g, 0.0, "uncovered input {i} received gradient {g}");
         }
     }
     // Ho = Wo = 3 windows of width 2 at stride 3 cover rows {0,1,3,4,6,7} of 8,

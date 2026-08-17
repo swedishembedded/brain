@@ -88,8 +88,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 fn f1_local_read_with_no_loop_is_not_stale() {
     let m = 5u32;
     let (out, _) = run_wg_kernel(F1, m, 1, false);
-    for row in 0..m as usize {
-        assert_eq!(out[row], val(row), "row {row}");
+    for (row, &got) in out.iter().enumerate() {
+        assert_eq!(got, val(row), "row {row}");
     }
 }
 
@@ -129,10 +129,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 fn f2_sum_reduction_local_matches_host_reference() {
     let (m, k) = (5u32, 37u32);
     let (out, _) = run_wg_kernel(F2, m, k, false);
-    for row in 0..m as usize {
+    for (row, &got) in out.iter().enumerate() {
         let base = row * k as usize;
         let want: f32 = (0..k as usize).map(|c| val(base + c)).sum();
-        assert_eq!(out[row], want, "row {row}");
+        assert_eq!(got, want, "row {row}");
     }
 }
 
@@ -174,10 +174,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 fn f3_max_reduction_local_matches_host_reference() {
     let (m, k) = (5u32, 37u32);
     let (out, _) = run_wg_kernel(F3, m, k, false);
-    for row in 0..m as usize {
+    for (row, &got) in out.iter().enumerate() {
         let base = row * k as usize;
         let want = (0..k as usize).map(|c| val(base + c).abs()).fold(0.0f32, f32::max);
-        assert_eq!(out[row], want, "row {row}");
+        assert_eq!(got, want, "row {row}");
     }
 }
 
@@ -278,10 +278,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 fn f5_store_nested_under_if_for_matches_host_reference() {
     let (m, k) = (5u32, 30u32); // < 64: some lanes' `if (t < p.k)` guard is false
     let (out, _) = run_wg_kernel(F5, m, k, false);
-    for row in 0..m as usize {
+    for (row, &got) in out.iter().enumerate() {
         let base = row * k as usize;
         let want: f32 = (0..k as usize).map(|c| val(base + c)).sum();
-        assert_eq!(out[row], want, "row {row}");
+        assert_eq!(got, want, "row {row}");
     }
 }
 

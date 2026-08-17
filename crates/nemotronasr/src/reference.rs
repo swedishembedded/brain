@@ -299,8 +299,8 @@ fn rel_pos_attention(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: u
         for i in 0..t {
             for pp in 0..l {
                 let mut acc = 0.0f32;
-                for d in 0..hd {
-                    acc += (qh(i, d) + bv[d]) * rkh(pp, d);
+                for (d, bvd) in bv.iter().enumerate() {
+                    acc += (qh(i, d) + *bvd) * rkh(pp, d);
                 }
                 bd_raw[i * l + pp] = acc;
             }
@@ -315,8 +315,8 @@ fn rel_pos_attention(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: u
                     continue; // padding mask (invalid key) AND chunked_limited band
                 }
                 let mut ac = 0.0f32;
-                for d in 0..hd {
-                    ac += (qh(i, d) + bu[d]) * kh(j, d);
+                for (d, bud) in bu.iter().enumerate() {
+                    ac += (qh(i, d) + *bud) * kh(j, d);
                 }
                 scores[j] = ac * scale + bd[i * l + j] * scale;
             }
@@ -329,8 +329,8 @@ fn rel_pos_attention(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: u
             let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 };
             for d in 0..hd {
                 let mut acc = 0.0f32;
-                for j in 0..t {
-                    acc += scores[j] * vh(j, d);
+                for (j, sj) in scores.iter().enumerate() {
+                    acc += *sj * vh(j, d);
                 }
                 ctx[i * c + h * hd + d] = acc * inv_den;
             }
@@ -408,8 +408,8 @@ fn rel_pos_attention_grads(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig
         for i in 0..t {
             for pp in 0..l {
                 let mut a = 0.0f32;
-                for d in 0..hd {
-                    a += (qh(i, d) + bvs[d]) * rkh(pp, d);
+                for (d, bvd) in bvs.iter().enumerate() {
+                    a += (qh(i, d) + *bvd) * rkh(pp, d);
                 }
                 bd_raw[i * l + pp] = a;
             }
@@ -423,8 +423,8 @@ fn rel_pos_attention_grads(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig
                     continue;
                 }
                 let mut ac = 0.0f32;
-                for d in 0..hd {
-                    ac += (qh(i, d) + bus[d]) * kh(j, d);
+                for (d, bud) in bus.iter().enumerate() {
+                    ac += (qh(i, d) + *bud) * kh(j, d);
                 }
                 sc[j] = ac * scale + bd[i * l + j] * scale;
             }
@@ -1043,9 +1043,7 @@ pub fn predictor_grads(tokens: &[u32], w: &W, cfg: &NemotronConfig, d_dec: &[Vec
                 d_input[j] = ai;
                 d_hprev[j] = ah;
             }
-            for j in 0..dh {
-                d_h[l][j] = d_hprev[j];
-            }
+            d_h[l].copy_from_slice(&d_hprev);
             if l > 0 {
                 for j in 0..dh {
                     d_h[l - 1][j] += d_input[j];

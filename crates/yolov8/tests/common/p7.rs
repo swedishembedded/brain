@@ -183,11 +183,11 @@ fn sigmoid(z: f32) -> f32 {
 /// `[4][reg_max]`; returns per-side expectations flat `[na, 4]`.
 fn dfl_decode_rust(box_logits: &[f32], na: usize, reg_max: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; na * 4];
-    for idx in 0..na * 4 {
+    for (idx, o) in out.iter_mut().enumerate() {
         let base = idx * reg_max;
         let mx = (0..reg_max).map(|i| box_logits[base + i]).fold(f32::MIN, f32::max);
         let sum: f32 = (0..reg_max).map(|i| (box_logits[base + i] - mx).exp()).sum();
-        out[idx] = (0..reg_max)
+        *o = (0..reg_max)
             .map(|i| i as f32 * (box_logits[base + i] - mx).exp() / sum)
             .sum();
     }

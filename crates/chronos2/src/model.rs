@@ -334,9 +334,9 @@ impl Chronos2 {
 
         // additive mask: ctx patches per observed-mask, REG + future attendable.
         let mut mask = vec![0.0f32; n_ctx + 1 + n_out];
-        for p in 0..n_ctx {
+        for (p, m) in mask.iter_mut().enumerate().take(n_ctx) {
             if ctx.attn_mask[p] == 0.0 {
-                mask[p] = -3.4e38;
+                *m = -3.4e38;
             }
         }
         (emb, mask, n_out, ls)
@@ -478,13 +478,13 @@ impl Chronos2 {
             for b in 0..bc {
                 let cx = &ctx[b * inner..b * inner + inner];
                 let dst = &mut state[(b * s + pos) * d..(b * s + pos) * d + d];
-                for dd in 0..d {
+                for (dd, o) in dst.iter_mut().enumerate() {
                     let mut acc = 0f32;
                     let base = dd * inner;
                     for j in 0..inner {
                         acc += cx[j] * wo[base + j];
                     }
-                    dst[dd] += acc;
+                    *o += acc;
                 }
             }
         }
@@ -565,9 +565,9 @@ impl Chronos2 {
             emb_host.extend_from_slice(&patch_emb_host[n_ctx * d..]);
             emb_bufs.push(self.gpu.storage_init("emb", &emb_host));
             let mut mask = vec![0.0f32; s];
-            for p in 0..n_ctx {
+            for (p, m) in mask.iter_mut().enumerate().take(n_ctx) {
                 if ctx.attn_mask[p] == 0.0 {
-                    mask[p] = -3.4e38;
+                    *m = -3.4e38;
                 }
             }
             mask_bufs.push(self.gpu.storage_init("mask", &mask));
@@ -591,8 +591,8 @@ impl Chronos2 {
             for bi in 0..bc {
                 emb_bufs[bi] = self.gpu.storage_init("emb", &state[bi * s * d..(bi + 1) * s * d]);
             }
-            for bi in 0..bc {
-                self.ffn(&pre, &emb_bufs[bi], s);
+            for emb in &emb_bufs {
+                self.ffn(&pre, emb, s);
             }
         }
 

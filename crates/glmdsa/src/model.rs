@@ -1010,8 +1010,8 @@ impl Glm {
                         false, // this is d_xn's FIRST touch in the MoE arm
                     ));
                     // router backward: d_gate[n,E] from each expert, then through sigmoid
-                    for ei in 0..e as usize {
-                        s.push(self.gpu.step(SCALE_ADD_DGATE, &[&expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
+                    for (ei, eo) in expert_out.iter().enumerate() {
+                        s.push(self.gpu.step(SCALE_ADD_DGATE, &[eo, &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
                     }
                     s.push(self.gpu.step(
                         ROUTER_SIG_BWD,

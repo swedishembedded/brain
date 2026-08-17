@@ -24,7 +24,7 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
     let mut slots: HashMap<[i64; 3], usize> = HashMap::new();
     let mut keys: Vec<[i64; 3]> = Vec::new();
     let mut acc: Vec<[f64; 15]> = Vec::new(); // wsum,w2sum, 3 mean, 4 quat, 3 scale, 3 color
-    for i in 0..n {
+    for (i, &wi) in weights.iter().enumerate() {
         let key = [
             (splats.means[i * 3] / voxel).floor() as i64,
             (splats.means[i * 3 + 1] / voxel).floor() as i64,
@@ -36,7 +36,7 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
             acc.len() - 1
         });
         let a = &mut acc[slot];
-        let w = weights[i] as f64;
+        let w = wi as f64;
         a[0] += w;
         a[1] += w * w;
         for d in 0..3 {

@@ -36,14 +36,14 @@ impl Projector {
         for t in 0..tokens {
             // h = gelu(fc1 · feat + b1)
             let mut h = vec![0f32; self.hidden];
-            for o in 0..self.hidden {
+            for (o, ho) in h.iter_mut().enumerate() {
                 let mut acc = self.fc1_b[o];
                 let wrow = &self.fc1_w[o * self.mm_hidden..(o + 1) * self.mm_hidden];
                 let frow = &feats[t * self.mm_hidden..(t + 1) * self.mm_hidden];
                 for i in 0..self.mm_hidden {
                     acc += wrow[i] * frow[i];
                 }
-                h[o] = gelu(acc);
+                *ho = gelu(acc);
             }
             // out = fc2 · h + b2
             for o in 0..self.hidden {
@@ -166,8 +166,6 @@ mod tests {
             })
             .collect();
         let n_visual = enc.tokens(); // 4
-        drop(enc);
-        drop(c);
 
         let projector = Projector {
             fc1_w: rvec(hidden * feature_dim as usize, &mut rng),

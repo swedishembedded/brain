@@ -301,8 +301,8 @@ impl Encoder {
                         for i in 0..t {
                             for pp in 0..l {
                                 let mut acc = 0.0f32;
-                                for d in 0..hd {
-                                    acc += (qh(i, d) + bvs[d]) * rkh(pp, d);
+                                for (d, bvd) in bvs.iter().enumerate() {
+                                    acc += (qh(i, d) + bvd) * rkh(pp, d);
                                 }
                                 bd_raw[i * l + pp] = acc;
                             }
@@ -316,8 +316,8 @@ impl Encoder {
                                     continue;
                                 }
                                 let mut ac = 0.0f32;
-                                for d in 0..hd {
-                                    ac += (qh(i, d) + bus[d]) * kh(j, d);
+                                for (d, bud) in bus.iter().enumerate() {
+                                    ac += (qh(i, d) + bud) * kh(j, d);
                                 }
                                 sc[j] = ac * scale + bd[i * l + j] * scale;
                             }
@@ -330,8 +330,8 @@ impl Encoder {
                             let inv = if den > 0.0 { 1.0 / den } else { 0.0 };
                             for d in 0..hd {
                                 let mut acc = 0.0f32;
-                                for j in 0..t {
-                                    acc += sc[j] * vh(j, d);
+                                for (j, pw) in sc.iter().enumerate() {
+                                    acc += pw * vh(j, d);
                                 }
                                 out[i * hd + d] = acc * inv;
                             }

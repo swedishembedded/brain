@@ -349,8 +349,8 @@ pub fn build_icl_prompt(
     for f in 0..t_ref {
         let frame = &ref_code[f * ncode..(f + 1) * ncode];
         let mut acc = gen.codec_embed(frame[0]).to_vec();
-        for j in 1..ncode {
-            add_into(&mut acc, mtp.codec_embed(j - 1, frame[j]));
+        for (j, &code) in frame.iter().enumerate().skip(1) {
+            add_into(&mut acc, mtp.codec_embed(j - 1, code));
         }
         codec_embed.extend_from_slice(&acc);
     }

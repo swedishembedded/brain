@@ -315,12 +315,12 @@ pub fn forward_m(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &
     // adaLN modulation: mod = adaln_w @ c + adaln_b, split 4×dim (zero when off).
     let m = if modulation {
         let mut m = w.adaln_b.clone();
-        for i in 0..4 * dim {
-            let mut a = m[i];
+        for (i, mi) in m.iter_mut().enumerate() {
+            let mut a = *mi;
             for (j, &cj) in c.iter().enumerate() {
                 a += w.adaln_w[i * d.cdim + j] * cj;
             }
-            m[i] = a;
+            *mi = a;
         }
         m
     } else {
@@ -368,9 +368,9 @@ pub fn forward_m(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &
                 mx = mx.max(row[j]);
             }
             let mut den = 0.0;
-            for j in 0..t {
-                row[j] = (row[j] - mx).exp();
-                den += row[j];
+            for rj in &mut row {
+                *rj = (*rj - mx).exp();
+                den += *rj;
             }
             for j in 0..t {
                 let p = row[j] / den;
@@ -479,8 +479,8 @@ pub fn backward(d: Dims, w: &Weights, cache: &Cache, dout: &[f64]) -> Grads {
             }
             // softmax jacobian: dscore[j] = p[j]·(dprobs[j] − Σ_j' p[j']·dprobs[j'])
             let mut sdot = 0.0;
-            for j in 0..t {
-                sdot += cache.probs[(h * t + i) * t + j] * dprobs[j];
+            for (j, &dpj) in dprobs.iter().enumerate() {
+                sdot += cache.probs[(h * t + i) * t + j] * dpj;
             }
             for j in 0..t {
                 let p = cache.probs[(h * t + i) * t + j];
@@ -542,11 +542,11 @@ pub fn backward(d: Dims, w: &Weights, cache: &Cache, dout: &[f64]) -> Grads {
         dmod[3 * dim + c] += d_fn2f[c] * w.fn2[c] * (1.0 - tgm * tgm);
     }
     // mod = adaln_w @ c + adaln_b
-    for i in 0..4 * dim {
-        g.adaln_b[i] += dmod[i];
+    for (i, &di) in dmod.iter().enumerate() {
+        g.adaln_b[i] += di;
         for j in 0..d.cdim {
-            g.adaln_w[i * d.cdim + j] += dmod[i] * cache.c[j];
-            g.dc[j] += dmod[i] * w.adaln_w[i * d.cdim + j];
+            g.adaln_w[i * d.cdim + j] += di * cache.c[j];
+            g.dc[j] += di * w.adaln_w[i * d.cdim + j];
         }
     }
     g

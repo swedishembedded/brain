@@ -286,11 +286,11 @@ pub fn plan_by_capacity(cost: &LayerBytes, devices: &[(usize, u64)]) -> Option<V
     let inf = f64::INFINITY;
     let mut best = vec![vec![inf; l + 1]; k];
     let mut cut = vec![vec![0usize; l + 1]; k];
-    for i in 0..=l {
+    for (i, b) in best[0].iter_mut().enumerate() {
         // A one-stage model must also carry the head, so stage 0 is the last
         // stage exactly when k == 1 - `util`'s `s`/`k` handles that.
         if let Some(u) = util(0, i, 0) {
-            best[0][i] = u;
+            *b = u;
         }
     }
     for s in 1..k {

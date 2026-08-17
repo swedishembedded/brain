@@ -20,6 +20,9 @@ fn synth_bars(t: usize, feat: usize) -> Vec<f32> {
     for i in 0..t {
         let p = 100.0 + (i as f32 * 0.1).sin() * 5.0;
         let ohlcv = [p, p * 1.005, p * 0.995, p, 1000.0 + i as f32];
+        // `f` runs to `feat`, which exceeds `ohlcv.len()` (5) - the columns past
+        // OHLCV push a constant, so enumerating `ohlcv` would drop those pushes.
+        #[allow(clippy::needless_range_loop)]
         for f in 0..feat {
             bars.push(if f < 5 { ohlcv[f] } else { 1.0 });
         }

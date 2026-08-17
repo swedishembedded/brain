@@ -105,7 +105,7 @@ pub fn decode_detections(
     let mut out: Vec<Vec<Detection>> = Vec::with_capacity(n);
     for img in 0..n {
         let mut dets: Vec<Detection> = Vec::new();
-        for i in 0..a {
+        for (i, &an) in anchors.iter().enumerate().take(a) {
             // Best class for this anchor (sigmoid is monotonic, so argmax over
             // logits == argmax over scores; sigmoid only the winner).
             let cbase = (img * a + i) * nc;
@@ -122,7 +122,6 @@ pub fn decode_detections(
             if best_s < conf_thresh {
                 continue;
             }
-            let an = anchors[i];
             let dbase = (img * a + i) * 4;
             let d = [dist[dbase], dist[dbase + 1], dist[dbase + 2], dist[dbase + 3]];
             let bx = dist_to_xyxy(d, an.ax, an.ay, an.stride); // input coords

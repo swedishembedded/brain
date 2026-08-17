@@ -100,11 +100,11 @@ fn eval_toolcall(model: &Qwen, t: &QwenBpe, cases: &[ToolCase]) -> (f64, f64) {
         let p = prompt.len();
         let mut preds = Vec::with_capacity(resp.len());
         let mut correct = 0usize;
-        for j in 0..resp.len() {
+        for (j, &want) in resp.iter().enumerate() {
             let pos = p - 1 + j;
             let pred = argmax(&logits[pos * vocab..(pos + 1) * vocab]) as u32;
             preds.push(pred);
-            if pred == resp[j] {
+            if pred == want {
                 correct += 1;
             }
         }
