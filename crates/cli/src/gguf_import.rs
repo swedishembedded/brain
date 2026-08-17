@@ -114,9 +114,31 @@ impl GgufArchitectureImporter for S3ditImporter {
     }
 }
 
+/// Wan2.1/2.2 video diffusion, DiT only (`general.architecture = "wan"`).
+///
+/// The contrast with [`S3ditImporter`] is the point: `wan`'s brain id IS its
+/// GGUF spelling, so `brain_arch::by_gguf("wan")` resolves and no
+/// ambiguous-tag exception is needed - nothing else in the ecosystem claims
+/// the tag, and Wan2.1 and Wan2.2 share it deliberately (see the `wan` row in
+/// `crates/arch`). The variant is read off the checkpoint's own tensor
+/// shapes rather than any metadata field; see `wan::import::import_gguf`.
+struct WanImporter;
+
+impl GgufArchitectureImporter for WanImporter {
+    fn architecture(&self) -> &'static str {
+        wan::import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "Wan2.1/2.2 text-to-video transformer (DiT only - VAE/umT5/tokenizer come from their own source)"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        wan::import::import_gguf(gguf, out_path, id_override)
+    }
+}
+
 /// Every registered architecture importer. ONE line per architecture - this is
 /// the whole registration surface (see this module's doc).
-const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter];
+const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter, &WanImporter];
 
 /// The importer claiming `architecture`, or `None` if none does.
 pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
@@ -336,6 +358,37 @@ mod tests {
         // (it needs the conversion, which is the whole design decision above).
         let ids: Vec<String> = crate::model_dir::discover(&dir).iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Wan's registration, and an honest statement of its coverage.
+    ///
+    /// **What this proves.** The tag `"wan"` routes to [`WanImporter`] (the
+    /// error is the wan importer's own, not the registry's "no importer
+    /// registered"); the id needs no `AMBIGUOUS_TAG_EXCEPTIONS` row because
+    /// brain's architecture id IS the GGUF spelling, unlike `s3dit`'s
+    /// `"lumina2"`; and a file that carries the tag but is not a Wan
+    /// transformer is refused by name rather than half-imported.
+    ///
+    /// **What this does NOT prove.** There is no Wan GGUF on this machine and
+    /// none was downloaded, so the dequantize -> `import_dit` -> safetensors
+    /// path has never been run against a real `city96/Wan2.1-*-gguf` file.
+    /// The tensor-name half of that path is covered by
+    /// `wan::import`'s own bijection tests over the full 825-tensor manifest,
+    /// and the variant derivation by `wan::import::gguf_tests` -- but the
+    /// combination, on real quantized bytes, is untested.
+    #[test]
+    fn the_wan_tag_dispatches_to_its_importer_with_no_ambiguous_tag_exception() {
+        assert_eq!(importer_for("wan").map(|i| i.architecture()), Some("wan"));
+        assert_eq!(brain_arch::by_gguf("wan").map(|a| a.id), Some("wan"), "wan's id is its own GGUF spelling; an alias here means the id drifted");
+
+        let dir = tmp("wan-dispatch");
+        let src = dir.join("wan.gguf").to_string_lossy().into_owned();
+        write_gguf(&src, wan::import::GGUF_ARCHITECTURE);
+        let err = import_file(&src, None, None).unwrap_err();
+        assert!(err.contains("patch_embedding.weight"), "must reach the wan importer's own check, got: {err}");
+        assert!(!err.contains("no importer registered"), "must not fall through to the unknown-architecture error: {err}");
+        assert!(!std::path::Path::new(&default_out_path(&src)).exists(), "a refused import must not leave an output file");
         std::fs::remove_dir_all(&dir).ok();
     }
 

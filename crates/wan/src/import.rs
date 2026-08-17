@@ -482,6 +482,176 @@ pub fn dit_native_to_diffusers(name: &str) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// GGUF
+// ---------------------------------------------------------------------------
+
+/// The `general.architecture` value a Wan GGUF carries. brain's own
+/// architecture id IS this spelling (`brain_arch::by_gguf("wan")` resolves
+/// without an alias) because `wan` names the family: Wan2.1 and Wan2.2 share
+/// one upstream architecture, one HF class and this one tag.
+///
+/// Unlike `s3dit`'s `"lumina2"`, nothing else claims it, so no
+/// tensor-presence discriminator is needed to tell whose file this is - the
+/// checks below are about which VARIANT it is, not whether it is Wan at all.
+pub const GGUF_ARCHITECTURE: &str = "wan";
+
+/// The [`WanConfig`] a checkpoint's own tensor shapes name, given
+/// `(name, shape)` pairs in either spelling.
+///
+/// Derived rather than taken on trust from a KV field: a GGUF repacked by a
+/// third-party tool may carry any metadata at all, but it cannot carry the
+/// wrong `patch_embedding.weight` and still be loadable. `(dim, num_layers)`
+/// separates every T2V variant brain serves; `in_channels` separates T2V from
+/// I2V, which this crate has no pipeline for yet and therefore refuses by
+/// name rather than importing into a model nothing can run.
+///
+/// Takes shapes, not tensors, so it costs no dequantization - and so it is
+/// testable without a checkpoint.
+pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<WanConfig, String> {
+    let patch = shapes
+        .iter()
+        .find(|(n, _)| n == "patch_embedding.weight")
+        .map(|(_, s)| s)
+        .ok_or("wan gguf import: no patch_embedding.weight - not a Wan transformer checkpoint")?;
+    if patch.len() < 2 {
+        return Err(format!("wan gguf import: patch_embedding.weight has shape {patch:?}, expected [dim, in_channels, pt, ph, pw]"));
+    }
+    let (dim, in_channels) = (patch[0], patch[1]);
+    // The block count is the highest `blocks.<l>.` index seen, not a KV field:
+    // a truncated or padded checkpoint should disagree with the manifest by
+    // name in `validate_dit`, not silently import as a smaller model.
+    let layers = shapes
+        .iter()
+        .filter_map(|(n, _)| n.strip_prefix("blocks.").and_then(|r| r.split('.').next()).and_then(|i| i.parse::<usize>().ok()))
+        .max()
+        .map(|m| m + 1)
+        .ok_or("wan gguf import: no blocks.<n>.* tensors - not a Wan transformer checkpoint")?;
+    if in_channels != 16 {
+        return Err(format!(
+            "wan gguf import: patch_embedding declares {in_channels} input channels, i.e. an I2V checkpoint - brain has no I2V pipeline yet (T2V is 16)"
+        ));
+    }
+    [WanConfig::t2v_1_3b(), WanConfig::t2v_14b()]
+        .into_iter()
+        .find(|c| c.dim == dim && c.num_layers == layers)
+        .ok_or_else(|| format!("wan gguf import: dim {dim} with {layers} blocks matches no known variant (t2v-1.3B is 1536/30, t2v-14B is 5120/40)"))
+}
+
+/// Convert a Wan DiT GGUF into a brain-native safetensors checkpoint at
+/// `out_path`, carrying a `ModelCard` with family `"wan"`.
+///
+/// **DiT only** - like `s3dit`'s GGUF importer, and for the same reason: a
+/// Wan GGUF is the transformer alone. The VAE, the umT5 encoder and the
+/// tokenizer come from their own source (the native `Wan-AI/…` repo, which
+/// `brain_modelstore::recipe::WanRecipe` fetches), so an imported GGUF
+/// replaces one of four roles rather than standing on its own.
+///
+/// Both tensor spellings are accepted, because [`import_dit`] already picks
+/// between them by a name only one of them has - a GGUF repacked from the
+/// diffusers release imports exactly as one repacked from the native one.
+pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+    let shapes: Vec<(String, Vec<usize>)> =
+        mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
+    // The native and diffusers name spaces disagree about everything except
+    // `patch_embedding.weight`, so the variant is read before any remapping.
+    let cfg = dit_config_from_shapes(&shapes)?;
+
+    let tensors: Vec<StTensor> = mg
+        .names()
+        .iter()
+        .map(|name| {
+            let shape = mg.shape(name).ok_or_else(|| format!("{name}: missing shape in GGUF tensor info"))?.to_vec();
+            let data = mg.tensor(name).ok_or_else(|| format!("{name}: missing tensor data"))?.map_err(|e| format!("{name}: dequant failed: {e}"))?;
+            Ok(StTensor { name: name.clone(), shape, data })
+        })
+        .collect::<Result<_, String>>()?;
+    let remapped = import_dit(tensors, &cfg)?;
+
+    let id = id_override.unwrap_or("brain/wan-gguf");
+    let mut card = checkpoint::st::ModelCard::new(id, "wan");
+    card.param_count = Some(remapped.values().map(|(_, data)| data.len() as u64).sum());
+    let config = serde_json::json!({
+        "name": cfg.name,
+        "dim": cfg.dim,
+        "ffn_dim": cfg.ffn_dim,
+        "num_heads": cfg.num_heads,
+        "num_layers": cfg.num_layers,
+        "in_channels": cfg.in_channels,
+        "out_channels": cfg.out_channels,
+        "freq_dim": cfg.freq_dim,
+        "text_dim": cfg.text_dim,
+        "text_len": cfg.text_len,
+        "eps": cfg.eps,
+    });
+    let out: Vec<(String, Vec<u64>, Vec<f32>)> =
+        remapped.into_iter().map(|(name, (shape, data))| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
+    checkpoint::st::save_safetensors(out_path, &out, &config, Some(&card)).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod gguf_tests {
+    use super::*;
+    use crate::config::WanConfig;
+
+    /// Shapes for a whole variant, in the NATIVE spelling - the manifest is
+    /// derived from the config, so this is exactly what a real checkpoint of
+    /// that variant carries.
+    fn shapes_of(cfg: &WanConfig) -> Vec<(String, Vec<usize>)> {
+        dit_manifest(cfg)
+    }
+
+    #[test]
+    fn the_variant_is_read_off_the_tensor_shapes_not_taken_on_trust() {
+        for cfg in [WanConfig::t2v_1_3b(), WanConfig::t2v_14b()] {
+            let got = dit_config_from_shapes(&shapes_of(&cfg)).unwrap();
+            assert_eq!(got.name, cfg.name);
+        }
+    }
+
+    /// The diffusers spelling renames every leaf but `patch_embedding.weight`
+    /// and keeps the `blocks.<l>.` indexing, which is precisely what this
+    /// derivation reads - so a GGUF repacked from either release resolves to
+    /// the same variant.
+    #[test]
+    fn the_diffusers_spelling_resolves_to_the_same_variant() {
+        let cfg = WanConfig::t2v_1_3b();
+        let renamed: Vec<(String, Vec<usize>)> =
+            shapes_of(&cfg).into_iter().map(|(n, s)| (dit_native_to_diffusers(&n).unwrap_or(n), s)).collect();
+        assert!(renamed.iter().any(|(n, _)| n == "blocks.0.attn1.to_q.weight"), "the fixture really is in the diffusers spelling");
+        assert_eq!(dit_config_from_shapes(&renamed).unwrap().name, cfg.name);
+    }
+
+    #[test]
+    fn a_checkpoint_that_is_not_a_wan_transformer_is_named_as_such() {
+        let e = dit_config_from_shapes(&[("model.embed_tokens.weight".to_string(), vec![32, 8])]).unwrap_err();
+        assert!(e.contains("patch_embedding.weight"), "{e}");
+        // A patch embedding but no blocks: also not importable, also by name.
+        let e = dit_config_from_shapes(&[("patch_embedding.weight".to_string(), vec![1536, 16, 1, 2, 2])]).unwrap_err();
+        assert!(e.contains("blocks."), "{e}");
+    }
+
+    /// I2V is refused explicitly rather than imported into a model this crate
+    /// cannot run: the 36-channel input needs the CLIP vision tower and a
+    /// 36-channel pipeline, neither of which exists here yet.
+    #[test]
+    fn an_i2v_checkpoint_is_refused_by_name() {
+        let e = dit_config_from_shapes(&shapes_of(&WanConfig::i2v_14b_480p())).unwrap_err();
+        assert!(e.contains("I2V"), "{e}");
+    }
+
+    /// A shape that is Wan-shaped but names no variant brain knows must fail
+    /// loudly - the alternative is importing into the nearest config and
+    /// producing a checkpoint whose every width is subtly wrong.
+    #[test]
+    fn an_unknown_width_or_depth_is_an_error_not_the_nearest_match() {
+        let mut shapes = shapes_of(&WanConfig::t2v_1_3b());
+        shapes[0].1[0] = 2048; // a dim no variant has
+        let e = dit_config_from_shapes(&shapes).unwrap_err();
+        assert!(e.contains("matches no known variant"), "{e}");
+    }
+}
+
 #[cfg(test)]
 mod dit_tests {
     use super::*;
