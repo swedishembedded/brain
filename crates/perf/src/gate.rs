@@ -13,6 +13,10 @@
 //!   baseline from different hardware is not a floor, it is a coincidence.
 //! * `valid: false` (failed correctness gate) refuses to gate in either
 //!   direction — a fast-but-broken run must not become a floor, nor pass one.
+//! * a run whose correctness gate NEVER RAN still gates (refusing would
+//!   invalidate every baseline committed before a target could self-check),
+//!   but the verdict says so: these floors bound speed only, and "unverified"
+//!   must never be read as "verified".
 //! * A smoke-sized candidate refuses: its numbers are not measurements.
 //! * A metric missing on either side is SKIPPED and said out loud — unmeasured
 //!   never gates and never passes silently.
@@ -38,6 +42,11 @@ pub struct Outcome {
     pub checks: Vec<Check>,
     pub skipped: Vec<&'static str>,
     pub refused: Option<String>,
+    /// Which side(s) of this gate never ran a correctness gate of their own.
+    /// Reported, not refused: a speed floor over an unverified number is still
+    /// a real speed floor, it just says nothing about correctness, and a reader
+    /// who is not told that will assume otherwise.
+    pub unverified: Vec<&'static str>,
 }
 
 impl Outcome {
@@ -77,6 +86,9 @@ pub fn gate(candidate: &Row, baseline: &Row, floor_frac: f64) -> Outcome {
                 r.invalid_reason.as_deref().unwrap_or("no reason recorded")
             ));
             return out;
+        }
+        if !r.fidelity_checked {
+            out.unverified.push(which);
         }
     }
     if candidate.smoke {
@@ -145,6 +157,11 @@ pub fn render(out: &Outcome, floor_frac: f64) -> String {
     for m in &out.skipped {
         s.push_str(&format!("  {m:<14} unmeasured on one side — skipped, not passed\n"));
     }
+    for w in &out.unverified {
+        s.push_str(&format!(
+            "  ! {w} never ran a correctness gate: these floors bound SPEED only, not correctness\n"
+        ));
+    }
     s.push_str(if out.passed() { "PASS\n" } else { "FAIL\n" });
     s
 }
@@ -163,6 +180,7 @@ mod tests {
             valid: true,
             invalid_reason: None,
             smoke: false,
+            fidelity_checked: true,
             software_gpu: false,
             output_per_s: Some(out),
             goodput_per_s: None,
@@ -230,6 +248,25 @@ mod tests {
         // The boundary itself is legal: floor 1.0 = no regression tolerated.
         assert!(!gate(&terrible, &base, 1.0).passed());
         assert!(gate(&row(100.0, 200.0), &base, 1.0).passed());
+    }
+
+    /// SPEC: a floor over a run that never self-checked is a SPEED floor and
+    /// nothing more. It still gates (refusing would invalidate every baseline
+    /// committed before targets could self-check), but the verdict has to stop
+    /// the reader from mistaking silence for verification.
+    #[test]
+    fn an_unverified_run_gates_on_speed_but_says_so() {
+        let base = row(100.0, 200.0);
+        let mut cand = row(100.0, 200.0);
+        cand.fidelity_checked = false;
+        let o = gate(&cand, &base, 0.85);
+        assert!(o.passed(), "an unchecked run is not a broken run: {o:?}");
+        assert_eq!(o.unverified, vec!["candidate"]);
+        let text = render(&o, 0.85);
+        assert!(text.contains("never ran a correctness gate"), "{text}");
+        assert!(text.contains("SPEED only"), "{text}");
+        // Both sides verified: no noise.
+        assert!(!render(&gate(&row(100.0, 200.0), &base, 0.85), 0.85).contains("never ran"));
     }
 
     #[test]

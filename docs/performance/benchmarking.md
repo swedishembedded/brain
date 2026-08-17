@@ -24,7 +24,9 @@ model or scenario you're running:
 - **Correctness** — every run carries a validity gate against a reference;
   a run whose output drifted outside tolerance is marked invalid and
   excluded from comparisons, so a "faster" result can never quietly also be
-  a wrong one.
+  a wrong one. Where a target genuinely cannot check itself, the result is
+  labelled unverified rather than counted as verified (see Self-verification
+  below).
 
 Every result records the hardware it ran on (device, backend, adapter
 string, core count, RAM) so a result from one machine is never silently
@@ -61,6 +63,24 @@ rises, past a floor — useful for catching a regression before it ships.
 Because results are just JSON files, you can diff them, graph them, or keep
 a history of them in your own tooling — `perf` doesn't lock you into a
 particular report format.
+
+## Self-verification
+
+A benchmark that doesn't check its own output rewards optimizations that
+quietly break the model, so after measuring, a target re-runs the same small
+set of requests two independent ways through the same engine (one at a time
+versus all in flight together) and demands the outputs agree exactly. That
+is what catches a batching, scheduling or serving-path change that made
+things faster by computing something else. A run that disagrees is written
+with `valid: false` and excluded from `compare` and `gate`.
+
+Determinism is measured, not assumed: if the same request answers differently
+on two sequential runs, the model is genuinely stochastic, so there is nothing
+to compare and no verdict is recorded. That case, and any target with no way
+to check itself, leaves `correctness.passed` as `null`, and `compare`,
+`gate` and the single-run report all say so by name. **Unverified is not a
+passing gate**; it means nothing tested that these numbers came from the
+right computation.
 
 ## Makefile shortcuts
 

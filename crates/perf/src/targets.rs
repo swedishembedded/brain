@@ -36,6 +36,26 @@ use crate::target::{Emission, EmissionKind, PerfRequest, PerfTarget, ReqId, Targ
 /// invocation to completion, timestamping every `Progress` callback as an
 /// artifact — so streaming models yield a real TTFA/IAL timeline and one-shot
 /// models collapse to a single artifact with no special-casing.
+///
+/// **This target has no correctness gate, and that is deliberate.** The other
+/// three adapters self-verify by running the same work two *independent* ways
+/// through one engine - batched vs sequential decode ([`PagedLlmTarget`]),
+/// grouped vs one-at-a-time through the scheduler ([`ExecutorTarget`]),
+/// concurrent vs serial over the served endpoint ([`HttpTarget`]) - and demand
+/// the outputs agree. A `Provider` reached through this adapter has no second
+/// path: `step` calls `Action::run` synchronously on the caller's thread, so
+/// there is exactly one code path and running it twice would compare an
+/// optimisation against *itself*. That check passes by construction, including
+/// for a provider whose kernels are silently wrong, and a gate that cannot
+/// fail is worse than an absent one because it reads as verification.
+///
+/// So the gap stays open and visible instead: this target's artifacts keep
+/// `correctness: not_checked()` (asserted by
+/// `capability_target_leaves_its_result_honestly_unverified`), and
+/// `report::compare`/`gate::render` say out loud that a compared result was
+/// never fidelity-checked rather than treating it as a verified pass. A
+/// provider that wants a real gate gets one by being benchmarked through
+/// [`ExecutorTarget`] - the residency seam production serving uses anyway.
 pub struct CapabilityTarget {
     provider: Arc<dyn Provider>,
     model: String,
@@ -750,6 +770,36 @@ mod tests {
         while t.step(&mut out) {}
         let arts = out.iter().filter(|e| e.kind == EmissionKind::Artifact).count();
         assert_eq!(arts, 1, "a non-streaming action still produced one unit of output");
+    }
+
+    /// HONESTY: a `Provider` driven through this adapter has exactly ONE code
+    /// path, so no two-run comparison could tell a correct engine from a
+    /// broken one - running it twice compares an optimisation against itself.
+    /// Rather than fake a check that passes by construction, the target
+    /// reports no verdict and the artifact stays explicitly UNVERIFIED. This
+    /// test exists so that gap is recorded and cannot be silently "fixed" with
+    /// a vacuous self-agreement gate.
+    #[test]
+    fn capability_target_leaves_its_result_honestly_unverified() {
+        let mut t = CapabilityTarget::new(
+            Arc::new(Streamer { steps: 2 }),
+            "gen",
+            "token",
+            Box::new(|_| Invocation::new()),
+        );
+        assert!(t.fidelity().is_none(), "a single-path synchronous target cannot check itself");
+
+        let opt = crate::scenarios::Options { num_requests: 2, warmup_requests: 0, ..Default::default() };
+        let art = crate::scenarios::run("serve", &mut t, "interactive", 1, &opt).expect("run");
+        assert!(art.valid, "an unchecked run is not a broken run");
+        assert!(
+            art.to_json()["correctness"]["passed"].is_null(),
+            "unchecked must never be recorded as verified"
+        );
+        assert!(
+            crate::scenarios::render(&art).contains("unverified"),
+            "the gap must be visible on the run's own report"
+        );
     }
 
     #[test]

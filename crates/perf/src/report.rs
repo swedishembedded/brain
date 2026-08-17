@@ -9,6 +9,10 @@
 //! * results whose `artifact_unit` differs are **never ranked** — tokens/s and
 //!   frames/s are not the same axis;
 //! * `valid: false` results are excluded entirely;
+//! * a result whose correctness gate **never ran** is warned about by name.
+//!   "checked and passed" and "never checked" are different facts, and a
+//!   comparison that renders them identically hands an optimisation a green
+//!   light nothing verified;
 //! * every environment/target/workload axis that differs between runs prints a
 //!   **warning line**, so an accidental apples-to-oranges comparison is loud
 //!   rather than silent;
@@ -26,6 +30,12 @@ pub struct Row {
     pub valid: bool,
     pub invalid_reason: Option<String>,
     pub smoke: bool,
+    /// Whether a correctness gate ran at all (`correctness.passed` non-null).
+    /// A `false` here is NOT a failed gate - a failed gate sets `valid: false`
+    /// and is excluded outright. It means nothing verified that these numbers
+    /// came from the right computation, which is a different fact from
+    /// "verified", and one the reader has to be told.
+    pub fidelity_checked: bool,
     pub software_gpu: bool,
     pub output_per_s: Option<f64>,
     pub goodput_per_s: Option<f64>,
@@ -77,6 +87,7 @@ pub fn load(path: &str) -> Result<Row, String> {
         valid: v["valid"].as_bool().unwrap_or(true),
         invalid_reason: v["invalid_reason"].as_str().map(|s| s.to_string()),
         smoke: v["smoke"].as_bool().unwrap_or(false),
+        fidelity_checked: !v["correctness"]["passed"].is_null(),
         software_gpu,
         output_per_s: f(&perf["output_artifacts_per_s"]),
         goodput_per_s: f(&perf["goodput_per_s"]),
@@ -156,6 +167,21 @@ pub fn compare(paths: &[String]) -> String {
     }
     if valid.iter().any(|r| r.smoke) && valid.iter().any(|r| !r.smoke) {
         out.push_str("WARNING: mixing --smoke and full runs; smoke numbers are not comparable.\n");
+    }
+    // "Never checked" and "checked and passed" render identically in the table
+    // below, so say the difference out loud: an unverified number ranks here on
+    // the assumption that its computation was still right, and nothing tested
+    // that assumption.
+    let unverified: Vec<&str> = valid.iter().filter(|r| !r.fidelity_checked).map(|r| r.path.as_str()).collect();
+    if !unverified.is_empty() {
+        out.push_str(&format!(
+            "WARNING: {} of {} compared runs never ran a correctness gate ({}).\n\
+             UNVERIFIED is not a passing gate: nothing here says those numbers came from the \
+             right computation.\n",
+            unverified.len(),
+            valid.len(),
+            unverified.join(", ")
+        ));
     }
     if valid.iter().any(|r| r.software_gpu) {
         out.push_str("NOTE: (sw) marks a software rasteriser — not a hardware GPU result.\n");
@@ -268,6 +294,29 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
         p.to_string_lossy().to_string()
+    }
+
+    /// SPEC: `compare` must distinguish "checked and passed" from "never
+    /// checked". Both used to render identically - a clean, comparable,
+    /// apparently-verified row - which is exactly how three of the four perf
+    /// targets handed an optimisation a green light nothing had verified.
+    #[test]
+    fn names_the_runs_whose_correctness_gate_never_ran() {
+        let d = tmp("unchecked");
+        let checked = write(&d, "checked.json", artifact("token", 100.0, true, false, "wgpu"));
+        let mut v = artifact("token", 300.0, true, false, "wgpu");
+        v["correctness"]["passed"] = Value::Null;
+        let never = write(&d, "never.json", v);
+
+        let out = compare(&[checked.clone(), never.clone()]);
+        assert!(out.contains("never ran a correctness gate"), "the gap must be loud:\n{out}");
+        assert!(out.contains("never.json"), "it must name WHICH run:\n{out}");
+        assert!(!out.contains("checked.json"), "a verified run must not be accused:\n{out}");
+
+        // A comparison where everything was checked stays quiet.
+        let quiet = compare(&[checked]);
+        assert!(!quiet.contains("never ran a correctness gate"), "{quiet}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn artifact(unit: &str, out_per_s: f64, valid: bool, software: bool, backend: &str) -> Value {
