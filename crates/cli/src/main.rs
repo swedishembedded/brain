@@ -62,6 +62,7 @@ mod splat_cli;
 mod supply;
 mod tts_cli;
 mod tts_serve;
+mod wan_cli;
 mod wm_cli;
 mod yolo_cli;
 
@@ -88,7 +89,8 @@ Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
 train ...` dispatch identically. `brain caps` lists every architecture brain
 knows about, along with its actions (its \"verbs\"). An architecture with its
 own dedicated flags (gpt2, qwen3, qwen35moe, glmdsa, lfm2, qwen3tts, yolov8,
-zipdepth, flux2, worldmirror2, splat, qwen3omnimoe, diamond, toypid, toymoe)
+zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe, diamond, toypid,
+toymoe)
 is documented below; every other one (`brain caps` shows the full list -
 s3dit, fastvlm, qwen3vl, sam2, scrfd, arcface, vqgan, codeformer, rrdbnet,
 clip, deepseek2ocr, nemotronasr, qwen3asr, chronos2, fincast, kronos, ...) is
@@ -140,6 +142,16 @@ FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
       (examples/imagegen); the manifest's text2image/edit/lora_train actions are
       D-Bus/HTTP only today -- this `brain flux2` CLI reaches generate/infer, not those
       9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
+
+WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)
+  brain wan t2v --prompt \"...\" --output-path out.mp4 [--seed S]
+      [--frames N (1+4k) --width W --height H --steps N --shift S --guidance G]
+      [--negative-prompt \"...\" --fps N --solver unipc|dpm++ --variant t2v-1.3B]
+      [--device cpu|gpu --t5-device cpu|gpu]
+      weights by flag or env: --dit/--vae/--t5/--tokenizer beat BRAIN_WAN_DIT,
+      BRAIN_WAN_VAE, BRAIN_WAN_T5, BRAIN_WAN_TOKENIZER
+      writing the file needs ffmpeg; without it the frames land in
+      <output-path>.frames/ and the assembling command is printed
 
 World models (playable action-conditioned video models; docs/models/world-models/)
   brain diamond play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window

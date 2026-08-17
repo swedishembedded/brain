@@ -48,6 +48,7 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
     ("flux2", crate::flux2_cli::run_flux2),
+    ("wan", crate::wan_cli::run_wan),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
@@ -222,7 +223,7 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
     // weights and the network is slow/unreachable) just to print itself.
     let wants_help = rest.iter().any(|a| a == "-h" || a == "--help");
-    if !wants_help {
+    if !wants_help && !weights_already_named(arch, &rest) {
         crate::supply::ensure_env_weights(arch);
     }
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
@@ -239,6 +240,35 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     }
     eprintln!("brain: architecture {arch:?} is registered but not reachable via the CLI yet (see `brain caps` and `brain serve`)");
     std::process::exit(1);
+}
+
+/// The flag twin of a `weights_env` variable, under the naming rule a
+/// multi-role architecture's own CLI follows: `BRAIN_<ARCH>_<ROLE>` is
+/// reachable as `--<role>`, so `BRAIN_WAN_DIT` is `--dit`. A variable that
+/// does not follow the pattern (`rrdbnet`'s `BRAIN_ESRGAN_WEIGHTS`) yields a
+/// name no command line will contain, which is the safe direction: it simply
+/// never suppresses the fetch.
+fn flag_twin(arch: &str, var: &str) -> String {
+    let prefix = format!("BRAIN_{}_", arch.to_ascii_uppercase());
+    format!("--{}", var.strip_prefix(&prefix).unwrap_or(var).to_ascii_lowercase())
+}
+
+/// True when this invocation has already supplied EVERY weight role the
+/// architecture declares - each one either set in the environment or named by
+/// its flag twin on the command line.
+///
+/// Without this, an architecture whose `default_ref` is tens of gigabytes
+/// (`wan`: 17.6 GB) starts downloading it for a command that named every path
+/// explicitly, because [`crate::supply::ensure_env_weights`] can only see the
+/// environment. The flag has to win over the variable AND over the fetch.
+fn weights_already_named(arch: &str, rest: &[String]) -> bool {
+    let Some(a) = brain_arch::by_id(arch) else { return false };
+    if a.weights_env.is_empty() {
+        return false; // nothing to name; `ensure_env_weights` no-ops anyway
+    }
+    a.weights_env.iter().all(|(var, _)| {
+        std::env::var_os(var).is_some_and(|v| !v.is_empty()) || rest.iter().any(|t| *t == flag_twin(arch, var))
+    })
 }
 
 /// For an `infer`-shaped verb with no `--weights` already given, auto-fetch
@@ -423,6 +453,27 @@ mod tests {
     #[test]
     fn empty_argv_is_empty() {
         assert!(matches!(resolve(&s(&[])), Resolved::Empty));
+    }
+
+    #[test]
+    fn explicit_weight_flags_suppress_the_auto_fetch() {
+        // `wan` declares four roles; naming all four on the command line must
+        // stop the 17.6 GB default-ref fetch, and naming three must not.
+        assert_eq!(flag_twin("wan", "BRAIN_WAN_DIT"), "--dit");
+        assert_eq!(flag_twin("wan", "BRAIN_WAN_TOKENIZER"), "--tokenizer");
+        // A variable that does not follow the pattern yields a flag nothing
+        // will match, so it never suppresses the fetch by accident.
+        assert_eq!(flag_twin("rrdbnet", "BRAIN_ESRGAN_WEIGHTS"), "--brain_esrgan_weights");
+
+        for (var, _) in brain_arch::by_id("wan").expect("wan row").weights_env {
+            std::env::remove_var(var);
+        }
+        let all = s(&["t2v", "--dit", "d", "--vae", "v", "--t5", "t", "--tokenizer", "k", "--prompt", "x"]);
+        assert!(weights_already_named("wan", &all));
+        let three = s(&["t2v", "--dit", "d", "--vae", "v", "--t5", "t", "--prompt", "x"]);
+        assert!(!weights_already_named("wan", &three));
+        // An architecture with no `weights_env` is unaffected either way.
+        assert!(!weights_already_named("gpt2", &all));
     }
 
     #[test]

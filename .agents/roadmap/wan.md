@@ -217,18 +217,65 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       trio is far too slow to be a GPU path at 4,680 tokens (it needs a raised
       `BRAIN_GPU_WAIT_S` to finish at all), and `model::block::gemm_bidir_fwd`
       is the measured answer when that ladder starts.
-- [ ] **The pipeline and the CLI wiring** on top of the parity-proven forward:
-      CFG's two forward passes per step, the UniPC/DPM++ loop, and
-      `brain wan t2v`.
+- [x] **The pipeline and the CLI wiring** on top of the parity-proven forward:
+      `crates/wan/src/pipeline.rs` (tokenize -> umT5 -> 512-pad -> seeded
+      latent -> UniPC/DPM++ with CFG -> VAE decode -> RGB frames) and
+      `crates/cli/src/wan_cli.rs` (`brain wan t2v`, one `ARCH_HANDLERS` row).
+      * **Three models, never resident together.** The staging is a design
+        constraint, not an optimisation: umT5-XXL is 22.72 GB in fp32 and
+        provably does not fit the 24 GB card, so `encode_text` is a *function*
+        whose return drops the encoder before the DiT allocates anything, and
+        the DiT is dropped before the VAE builds. Placement is
+        `--t5-device` / `BRAIN_WAN_T5_DEVICE`, defaulting to CPU - the
+        `BRAIN_FLUX2_TE_DEVICE` precedent.
+      * **Both prompts ride ONE `B = 2` text forward**, and both are embedded
+        through `text_embedding` ONCE (`WanDitDev::set_context_embed`, added
+        here). The MLP is ~9 GFLOP of host work per call at 1.3B widths and the
+        answer is fixed for the whole run; re-deriving it per CFG branch per
+        step would have put minutes of host math inside the loop.
+      * **A step's two forwards must bracket their own context upload.** The
+        engine has one context buffer, so hoisting either `set_context_embed`
+        out of the loop silently conditions every step on whichever prompt was
+        last uploaded - a defect that still produces plausible video.
+      * `--seed` is `data::rng::Rng` + Box-Muller, deliberately NOT torch's
+        Philox: no golden here asks for bit-identical noise, and claiming it
+        would be unbacked.
+      * **`BRAIN_GPU_WAIT_S`**: one forward is the whole 30-block stack in a
+        single submit, which at 480p is far past the backend's 30 s deadlock
+        guard - the first real 480p run died as "device likely wedged". The CLI
+        raises it (announced) unless the caller already set it.
+- [ ] **Perf.** First real end-to-end run: 33 frames at 832x480, 25 UniPC
+      steps with CFG (50 forwards of 14,040 tokens), P40 + Vulkan, **57.5 min
+      wall clock** - text 246 s, DiT load 20 s, denoise 2308 s (46 s/forward
+      under a contended CPU; 37 s on an idle box), VAE decode 876 s. Three
+      things that ladder points at:
+      * **the VAE decode is now a quarter of the run** and is pure `conv3d` at
+        every layer - the `im2col_at` + `matmul_reg3` lowering the VAE section
+        already names is the first measurement to take;
+      * **the text encode is a fixed ~4 min tax on every generation**, because
+        umT5-XXL runs on the CPU. INT8 (`t5encoder::model::int8`, already the
+        crate's own stated answer) is what would put it on the card;
+      * 81 frames at 480p is 32,760 tokens, 5.4x the attention work of the
+        measured point, so the flagship configuration is hours today.
 - [ ] **`capability::Media::Video`**. There is no video media type, and
       `.agents/rules/serving-contract.md` section 4 requires extending `Media`
       and the D-Bus frame handling rather than adding a side channel. This is a
       breaking enum change across `capability`, `dbus`, `apiserve`, `cli` and
       `server`, so it wants its own commit ahead of `caps.rs`.
-- [ ] **Video encoding.** `imaging::video` decodes via an `ffmpeg` subprocess but
-      cannot encode; nothing in the workspace writes mp4, webm, gif or y4m.
-      The mirror-image `encode_frames` belongs next to `decode_frames`, gated on
-      the existing `ffmpeg_available()` with a numbered-PPM fallback.
+- [x] **Video encoding.** `imaging::video::encode_frames`, the mirror image of
+      `decode_frames`: numbered PPMs into a temp directory, one `ffmpeg`
+      invocation, `-pix_fmt yuv420p` forced so the file plays outside the tool
+      that wrote it. Three things worth keeping:
+      * the no-ffmpeg fallback is a **separate public function**
+        (`write_frame_dir`), because on a machine that HAS ffmpeg a test
+        driving only `encode_frames` never reaches the fallback - the path that
+        exists precisely for machines the test never runs on;
+      * it returns `Encoded::{Video, Frames}` rather than an error, so a
+        generation that took an hour is never thrown away for want of an
+        encoder, and the `Frames` arm carries the exact command that finishes
+        the job;
+      * **odd dimensions are padded, loudly.** 4:2:0 cannot represent them;
+        libx264 rejects the stream and other encoders quietly drop a row.
 - [ ] **Training + LoRA** (`grad.rs`, `modelgrad.rs`, `devgrad.rs`, `train.rs`,
       `lora.rs`, `finetune.rs`) and `gradcheck::check_wan`.
 - [ ] **I2V branch**: 36-channel input (16 latent + 4 mask + 16 conditioning

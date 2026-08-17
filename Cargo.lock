@@ -616,6 +616,7 @@ dependencies = [
  "brain-vision",
  "brain-vqgan",
  "brain-vulkan",
+ "brain-wan",
  "brain-wm-core",
  "brain-wm-display",
  "brain-worldmirror2",
@@ -1720,11 +1721,14 @@ name = "brain-wan"
 version = "1.0.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
  "brain-dit",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-t5encoder",
  "brain-testutil",
  "brain-vae",
 ]

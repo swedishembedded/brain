@@ -17,6 +17,11 @@ brain-vae.workspace = true
 brain-model.workspace = true
 brain-dit.workspace = true
 brain-paramstore.workspace = true
+# The sampling pipeline: the flow-matching solvers, the umT5-XXL text tower and
+# its SentencePiece tokenizer, and the seeded RNG the initial latent comes from.
+brain-diffusion.workspace = true
+brain-t5encoder.workspace = true
+brain-data.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

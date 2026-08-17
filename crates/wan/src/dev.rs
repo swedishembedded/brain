@@ -173,7 +173,21 @@ impl WanDitDev {
     /// holds the context fixed across every step.
     pub fn set_context(&self, context: &[f32], rows: usize) {
         let emb = model::text_embed(&self.cfg, &self.host, context, rows);
-        self.gpu.write_f32(&self.ctx, &emb);
+        self.set_context_embed(&emb);
+    }
+
+    /// Upload an ALREADY-embedded context, `[text_len · dim]` - what
+    /// [`crate::model::text_embed`] returns.
+    ///
+    /// Classifier-free guidance alternates between two contexts on every step,
+    /// and `text_embedding` is a `[512, 4096] x [4096, dim]` plus a
+    /// `[512, dim] x [dim, dim]` on the HOST - ~9 GFLOP a call at 1.3B widths,
+    /// which is real time next to a device forward and is the same answer every
+    /// step. Embedding each prompt once and re-uploading is what keeps it out
+    /// of the loop.
+    pub fn set_context_embed(&self, emb: &[f32]) {
+        assert_eq!(emb.len(), self.d.text_len as usize * self.d.dim as usize, "embedded context length");
+        self.gpu.write_f32(&self.ctx, emb);
     }
 
     /// One forward. `latent` is `[C·F·H·W]`; the caller must have supplied the

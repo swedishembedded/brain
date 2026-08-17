@@ -131,6 +131,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_S3DIT_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
 | `BRAIN_S3DIT_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
 | `BRAIN_WAN_ATTN` | `flash`/`chunked` forces the Wan DiT's self-attention implementation | `flash` where the device supports it |
+| `BRAIN_WAN_T5_DEVICE` | where the umT5-XXL text encoder runs (`cpu`/`gpu`); it is 22.72 GB in fp32 and does not fit a 24 GB card | `cpu` |
 | `BRAIN_QWEN3TTS_LANG` / `BRAIN_QWEN3TTS_REF` / `BRAIN_QWEN3TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
 | `BRAIN_QWEN3TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |

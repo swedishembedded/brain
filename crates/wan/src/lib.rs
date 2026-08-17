@@ -32,6 +32,7 @@ pub mod config;
 pub mod dev;
 pub mod import;
 pub mod model;
+pub mod pipeline;
 pub mod rope;
 pub mod vae3d;
 
@@ -39,4 +40,5 @@ pub use block::{AttnMode, WanBlock};
 pub use config::{Task, WanConfig};
 pub use dev::WanDitDev;
 pub use model::WanDit;
+pub use pipeline::{generate, GenOpts, Paths, Solver, Timings, Video};
 pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};

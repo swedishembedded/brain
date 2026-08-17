@@ -19,19 +19,41 @@ is a matter of configuration, not a different model.
 
 | Capability | Supported |
 |---|---|
-| Inference | [ ] |
+| Inference (text to video) | [x] |
+| Inference (image to video) | [ ] |
 | LoRA fine-tune | [ ] |
 | INT8 | [ ] |
-| CLI (`brain wan <action>`) | [ ] |
+| CLI (`brain wan t2v`) | [x] |
 | HTTP API | [ ] |
 | D-Bus | [ ] |
 | Batched serving | [ ] |
 
-**The port is in progress.** The architecture id, the variant configuration and
-the naming contract are registered; the model, importer, VAE and pipeline are
-being built on top of them. `.agents/roadmap/wan.md` tracks what remains and
-carries the bug ledger. This page becomes a user-facing guide once the
-inference path lands - until then, treat the table above as the honest status.
+**The port is partly done.** Text-to-video runs end to end from one command;
+image-to-video, training and the serving surfaces do not exist yet.
+`.agents/roadmap/wan.md` tracks what remains and carries the bug ledger.
+
+## Generating a video
+
+```
+brain wan t2v --prompt "A belgian malinois running on a paved highway" \
+              --seed 42 --output-path out.mp4
+```
+
+Everything else has a default taken from the variant's own configuration, and
+every weight path is both a flag (`--dit`, `--vae`, `--t5`, `--tokenizer`) and
+an environment variable, with the flag winning. `--frames` must be `1 + 4k`,
+and `--width`/`--height` must be multiples of 16.
+
+Writing the file needs the `ffmpeg` CLI. Without it the frames are still
+written, as numbered PPMs in `<output-path>.frames/`, and the exact `ffmpeg`
+command that assembles them is printed - a generation is never thrown away for
+want of an encoder.
+
+`--steps` and `--frames` are the two knobs that decide how long a run takes.
+Halving the frame count more than halves the transformer cost, because
+attention is quadratic in the token count and the token count is linear in
+frames. Start small (`--frames 9 --width 256 --height 256 --steps 8`) to check
+a set of weights before committing to a long run.
 
 ## Variants
 
@@ -78,6 +100,18 @@ checkpoints rather than the text-to-video one.
 attention score matrix at those lengths would be 4.3 GB and 22.9 GB per head
 respectively, so Wan always runs through chunked or flash attention - that is a
 requirement here, not a tuning option.
+
+The three models are never resident at once. The text encoder runs first and is
+dropped before the transformer loads, because umT5-XXL is 22.72 GB in fp32 and
+does not fit a 24 GB card at all; it therefore runs on the CPU by default
+(`--t5-device`). The transformer is dropped in turn before the VAE decodes.
+
+One transformer forward is the whole 30-block stack in a single submit, which
+is minutes at 480p rather than seconds, so `brain wan t2v` raises the backend's
+<!-- perf-number: BRAIN_GPU_WAIT_S is a configured timeout the command sets, not a measurement -->
+`BRAIN_GPU_WAIT_S` deadlock guard to 1200 s unless the caller has already set
+it. Two forwards run per step whenever guidance is above 1, since that is what
+classifier-free guidance means.
 
 <!-- perf-number: 4x/8x are the VAE's fixed compression strides, an architectural constant, not a speedup -->
 The video autoencoder compresses time 4x and space 8x, and gives the first frame
