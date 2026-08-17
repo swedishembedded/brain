@@ -36,6 +36,14 @@ use residency::{Executor, InstanceKey};
 /// adapter file survives on disk; `resident.set_adapter` already pointed
 /// at it before the evict attempt, so the very next successful evict of
 /// this key, from any cause, picks it up).
+// Parked scaffolding, not dead weight: this is deliberately only the "one
+// cycle" primitive. The consumer it waits for is a timer/background-thread
+// loop spawned from `run_cli::run_apis` (`brain serve`'s startup path), which
+// cannot be verified without a real running server and has nothing real to
+// train on until the reward stamp on the trajectory writer side exists. The
+// `tests` module below already exercises both of its outcomes, so it is
+// covered, just not yet reachable from `main`.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn hot_swap_cycle(
     resident: &QwenResident,

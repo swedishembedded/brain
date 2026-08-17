@@ -121,9 +121,9 @@ impl Report {
 ///
 /// [`directional_check`] contracts a whole tensor onto one random ±1 direction
 /// and keeps the *best-agreeing* of `n_dirs`. That is the right trade for a
-/// large GEMM weight, but it is measurably blind to a **partial** gradient error
-/// - one where a *share* of the true gradient is missing rather than all of it -
-/// for two compounding reasons: the contraction `⟨∇L − ∇̃L, v⟩` can be
+/// large GEMM weight, but it is measurably blind to a **partial** gradient
+/// error - one where a *share* of the true gradient is missing rather than all
+/// of it - for two compounding reasons: the contraction `⟨∇L − ∇̃L, v⟩` can be
 /// numerically small even when `‖∇L − ∇̃L‖` is not, and best-of-`n_dirs`
 /// actively selects the direction where it is smallest.
 ///

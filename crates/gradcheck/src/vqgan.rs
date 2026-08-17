@@ -149,11 +149,11 @@ impl CheckModel for Harness {
 /// [`tiny_config`] with the channel count pushed OVER `vae::blocks::grad`'s
 /// GEMM-lowering threshold (`GEMM_CONV_BWD_MIN_COUT = 32`): `tiny_config`'s
 /// max `cout` is 8, so every FD sweep through it exercises only the naive
-/// `conv2d_dw`/`conv2d_dx` path — the `im2col_at` + `matmul_dw_reg`(+split-K)
-/// + `col2im` composition a REAL 128–512-channel training step takes had
-/// zero finite-difference coverage anywhere (audit F14). One level, no
-/// attention, minimal blocks: the point is crossing the threshold, not
-/// re-covering what `tiny_config` already covers.
+/// `conv2d_dw`/`conv2d_dx` path - the `im2col_at` + `matmul_dw_reg`(+split-K) + `col2im`
+/// composition a REAL 128–512-channel training step takes had zero
+/// finite-difference coverage anywhere (audit F14). One level, no attention,
+/// minimal blocks: the point is crossing the threshold, not re-covering what
+/// `tiny_config` already covers.
 pub fn lowered_config() -> VqganConfig {
     VqganConfig {
         in_channels: 3,

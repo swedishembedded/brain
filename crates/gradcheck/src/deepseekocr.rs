@@ -228,7 +228,7 @@ impl Blk {
         self.build_tables(g, &mut steps);
         let rel = self.relpos(false);
         block::chunked_bidir_fwd(
-            g, &FWD, HEADS, HEAD_DIM, C, &self.qkv, STRIDE, 0, C, 2 * C, &self.ctx, &self.scores, &self.probs,
+            g, &FWD, None, HEADS, HEAD_DIM, C, &self.qkv, STRIDE, 0, C, 2 * C, &self.ctx, &self.scores, &self.probs,
             &self.spans, CHUNK, Some(&rel), &mut steps,
         );
         g.submit(&[&self.ctx], &steps);
@@ -242,7 +242,7 @@ impl Blk {
         self.build_tables(g, &mut steps);
         let rel = self.relpos(true);
         block::chunked_bidir_bwd(
-            g, &FWD, &BWD, HEADS, HEAD_DIM, C, &self.qkv, STRIDE, 0, C, 2 * C, &self.d_ctx, &self.d_qkv,
+            g, &FWD, None, &BWD, HEADS, HEAD_DIM, C, &self.qkv, STRIDE, 0, C, 2 * C, &self.d_ctx, &self.d_qkv,
             &self.scores, &self.probs, &self.d_scores, &self.spans, CHUNK, Some(&rel), &mut steps,
         );
         // Dense-table adjoint -> learned-table adjoint, `emb_bwd` accumulating

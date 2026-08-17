@@ -116,7 +116,24 @@ cd "$ROOT"
 # (`crates/bench/tests/capscale.rs`, `crates/yolov8/tests/common/p7.rs`,
 # `crates/yolov8/tests/p7_unit.rs`) it found alongside its own work, rather
 # than leaving them as unrelated drift.
-BASELINE="${BASELINE:-291}"
+#
+# Lowered 291 -> 285: the six `doc_lazy_continuation` warnings in
+# `crates/gradcheck/src/lib.rs` and `crates/gradcheck/src/vqgan.rs`, fixed
+# rather than allowed. A wrapped prose line that happened to START with `-`
+# or `+` is a CommonMark list marker, so the three lines after it were parsed
+# as a lazy continuation of a list item that was never meant to exist: the
+# RENDERED doc was wrong, not just the lint. Reflowed so no line opens with a
+# list marker; the prose is unchanged.
+#
+# Lowered 285 -> 283: the two `never used` warnings on
+# `crates/cli/src/continuous_train.rs::hot_swap_cycle` and the
+# `crates/cli/src/resident_llm.rs::set_adapter` that it is the sole caller
+# of. Kept, not deleted - it is deliberate scaffolding whose consumer (a
+# hot-swap loop driven from `brain serve`'s startup path) is not written yet,
+# so it carries one `#[allow(dead_code)]` stating that. One annotation clears
+# both warnings: an allowed item seeds rustc's reachability worklist, so
+# everything it calls counts as live too.
+BASELINE="${BASELINE:-283}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.
