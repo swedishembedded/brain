@@ -1116,7 +1116,8 @@ a metric that isn't there was simply forgotten.
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
   `check_qwen_lora`, `check_qwen35`, `check_qwen35_lora`, `check_moe`,
   `check_glm`, `check_glm_mtp`, `check_pid`,
-  `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`, plus the
+  `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`,
+  `check_wan` (+ `_conditioning`), plus the
   imaging workstream's `check_sam2`, `check_arcface`, `check_vqgan`,
   `check_clip`, `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
   and `check_codeformer` (+ `_one_layer`). SSA-style forward (each stage

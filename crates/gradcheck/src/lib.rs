@@ -714,6 +714,155 @@ pub fn check_flux2(seed: u64) -> Report {
     Report { checks }
 }
 
+/// One fixed tiny-Wan gradcheck problem: weights, batch, and the two closures
+/// the FD loops need. Shared by [`check_wan`] and [`check_wan_conditioning`] so
+/// the two can never end up checking different models.
+struct WanFixture {
+    cfg: wan::modelgrad::Cfg,
+    w0: wan::modelgrad::ModelWeights<f64>,
+    b: wan::modelgrad::Batch<f64>,
+}
+
+impl WanFixture {
+    fn new(seed: u64) -> WanFixture {
+        let cfg = wan::modelgrad::Cfg::tiny();
+        let w0 = wan::modelgrad::init_model::<f64>(&cfg, seed);
+        let mut rng = Rng::new(seed ^ 0x7A2u64);
+        let mut rf = || rng.next_f64() - 0.5;
+        let x0: Vec<f64> = (0..cfg.latent_len()).map(|_| rf()).collect();
+        // Fewer caption rows than `text_len`, so the zero-pad rows the text MLP
+        // still transforms (a bias makes them non-zero) are part of the check.
+        let rows = cfg.text_len - 2;
+        let ctx: Vec<f64> = (0..rows * cfg.text_dim).map(|_| rf()).collect();
+        let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
+        let b = wan::modelgrad::make_flow_batch(&cfg, &x0, &ctx, rows, 0.45, &noise);
+        WanFixture { cfg, w0, b }
+    }
+
+    fn loss_of(&self, w: &wan::modelgrad::ModelWeights<f64>) -> f64 {
+        let (pred, _) = wan::modelgrad::forward(&self.cfg, w, &self.b.latent, &self.b.ctx, self.b.t, &self.b.cos, &self.b.sin);
+        wan::modelgrad::loss(&pred, &self.b.target).0
+    }
+
+    /// Analytic grads, in [`wan::modelgrad::params_mut`] order.
+    fn analytic(&self) -> Vec<(String, Vec<f64>)> {
+        let (_l, g) = wan::modelgrad::grads(&self.cfg, &self.w0, &self.b);
+        wan::modelgrad::grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect()
+    }
+}
+
+/// Gradient-check the Wan video-DiT **host** training reference at tiny dims:
+/// the f64 instantiation of `wan::modelgrad` (patchify + `patch_embedding`, the
+/// text-embedding MLP, the block stack with its QK-RMSNorm'd self-attention,
+/// three-axis RoPE, text cross-attention and GELU-tanh FFN, and the whole
+/// conditioning path - timestep sinusoid -> MLP -> `e`, `silu` ->
+/// `time_projection` -> `e0`, the per-block modulation fold, and the modulated
+/// head) under the flow-matching velocity-MSE loss.
+///
+/// Same shape as [`check_flux2`]: pure host f64, so no GPU and no
+/// `MOE_SKIP_GPU_TESTS` gate, and one random ±1 direction per parameter tensor
+/// compared against a central difference of the SAME forward the backward was
+/// derived from (the FD side calls nothing but `forward`).
+///
+/// **Every tensor of the checkpoint manifest is covered**, and that is a
+/// checkable claim rather than a promise: `wan::modelgrad`'s own
+/// `params_and_grads_cover_the_whole_manifest_in_the_same_order` asserts the
+/// enumerated names are exactly `wan::import::dit_manifest`'s, so a parameter
+/// added to the model without a grad view fails there, and this loop walks the
+/// whole enumeration. Use [`check_wan_conditioning`] alongside it: a
+/// *contraction* over a folded parameter can be small while the gradient is
+/// partially wrong, and every shared site in this model (`e0` across the block
+/// stack, `e` into both the head and `time_projection`, `ctx` across the block
+/// stack) is exactly that shape.
+pub fn check_wan(seed: u64) -> Report {
+    let f = WanFixture::new(seed);
+    let analytic = f.analytic();
+    let mut rng = Rng::new(seed ^ 0x5A5Au64);
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (pi, (name, ga)) in analytic.iter().enumerate() {
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let mut wp = f.w0.clone();
+        for (p, &vi) in wan::modelgrad::params_mut(&mut wp)[pi].1.iter_mut().zip(&v) {
+            *p += eps * vi;
+        }
+        let mut wm = f.w0.clone();
+        for (p, &vi) in wan::modelgrad::params_mut(&mut wm)[pi].1.iter_mut().zip(&v) {
+            *p -= eps * vi;
+        }
+        let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check {
+            param: name.clone(),
+            analytic: an as f32,
+            numeric: numeric as f32,
+            abs_err: abs_err as f32,
+            rel_err: (abs_err / denom) as f32,
+        });
+    }
+    Report { checks }
+}
+
+/// Per-**entry** finite differences on the Wan tensors that sit at a FOLDED or
+/// SHARED conditioning site - the ones [`check_wan`]'s per-tensor contraction is
+/// structurally weakest on (AGENTS.md: deleting T5's cross-block `rel_bias` fold
+/// left a 33 % error that every directional check still passed).
+///
+/// The four sites, and what dropping each would do:
+///
+/// * `time_projection.1.bias` - its gradient IS `d e0` summed over the whole
+///   block stack. Folding only the last block's contribution is the exact T5
+///   failure shape.
+/// * `time_embedding.2.bias` - its gradient IS `d e`, where the head's own
+///   modulation site and the entire block stack (through `silu'` and
+///   `time_projection`) meet. Dropping either arm leaves the other correct.
+/// * `blocks.{l}.modulation` - the six-vector modulation fold the device path
+///   collapses into two LayerNorm affines, per block.
+/// * `text_embedding.2.bias` - its gradient is `dctx` summed over every block's
+///   cross-attention and every text row.
+///
+/// This is [`elementwise_check`]'s recipe, hand-rolled because the host f64
+/// reference is not a [`CheckModel`] (it has no device parameter store): every
+/// entry is its own comparison, so a missing share cannot hide behind a
+/// contraction. Cost is `2·Σnumel` forwards, which is why it is restricted to
+/// these small vectors rather than run over the GEMM weights.
+pub fn check_wan_conditioning(seed: u64) -> Report {
+    let f = WanFixture::new(seed);
+    let analytic = f.analytic();
+    let mut targets: Vec<String> =
+        vec!["time_projection.1.bias".into(), "time_embedding.2.bias".into(), "text_embedding.2.bias".into(), "head.modulation".into()];
+    for l in 0..f.cfg.n_layers {
+        targets.push(format!("blocks.{l}.modulation"));
+    }
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for name in &targets {
+        let pi = analytic.iter().position(|(n, _)| n == name).unwrap_or_else(|| panic!("check_wan_conditioning: no parameter {name}"));
+        let ga = &analytic[pi].1;
+        for (i, &gi) in ga.iter().enumerate() {
+            let mut wp = f.w0.clone();
+            wan::modelgrad::params_mut(&mut wp)[pi].1[i] += eps;
+            let mut wm = f.w0.clone();
+            wan::modelgrad::params_mut(&mut wm)[pi].1[i] -= eps;
+            let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+            let abs_err = (gi - numeric).abs();
+            let denom = gi.abs().max(numeric.abs()).max(1e-6);
+            checks.push(Check {
+                param: format!("{name}[{i}]"),
+                analytic: gi as f32,
+                numeric: numeric as f32,
+                abs_err: abs_err as f32,
+                rel_err: (abs_err / denom) as f32,
+            });
+        }
+    }
+    Report { checks }
+}
+
 /// Build a tiny hybrid Qwen3.5-35B-A3B decoder (Gated DeltaNet + GQA + sparse
 /// MoE with a sigmoid-gated shared expert) and gradient-check it. This is the
 /// correctness gate for wiring `model::gdn::gdn_chunk_bwd` (full reverse-mode
@@ -1071,6 +1220,48 @@ mod tests {
             fails.is_empty(),
             "FLUX.2 gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn wan_analytic_grads_match_finite_differences() {
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate.
+        let report = check_wan(7);
+        report.print();
+        // The porting playbook's whole-model gate is 1e-3. f64 central
+        // differences land far inside it (see the test output), so this is not
+        // a tolerance tuned until it passed: 1e-6/1e-4 is the same pair
+        // `check_flux2` uses on the same recipe, and the gate the roadmap
+        // states is three orders looser again.
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "Wan gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        // A parameter whose analytic grad is exactly zero while the loss moves
+        // is the silently-frozen-tensor shape the atol floor cannot see.
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    #[test]
+    fn wan_conditioning_grads_match_elementwise_finite_differences() {
+        let report = check_wan_conditioning(7);
+        let worst = report.checks.iter().max_by(|a, b| a.abs_err.total_cmp(&b.abs_err)).expect("non-empty");
+        println!(
+            "wan conditioning: {} entries, worst {} abs={:.2e} rel={:.2e}",
+            report.checks.len(),
+            worst.param,
+            worst.abs_err,
+            worst.rel_err
+        );
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "Wan conditioning elementwise check failed for {:?}",
+            fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }
 
