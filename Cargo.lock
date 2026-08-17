@@ -589,6 +589,7 @@ dependencies = [
  "brain-imgpipe",
  "brain-kronos",
  "brain-lfm2",
+ "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
  "brain-model",
@@ -1106,12 +1107,16 @@ dependencies = [
 name = "brain-ltxv"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
  "brain-dit",
  "brain-gpu-core",
  "brain-kernels",
  "brain-testutil",
  "brain-vae",
+ "serde_json",
 ]
 
 [[package]]

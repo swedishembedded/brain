@@ -49,6 +49,7 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("zipdepth", crate::depth_cli::run_depth),
     ("flux2", crate::flux2_cli::run_flux2),
     ("wan", crate::wan_cli::run_wan),
+    ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick

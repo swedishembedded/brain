@@ -77,6 +77,9 @@ brain-s3dit.workspace = true
 brain-flux2.workspace = true
 # `brain wan t2v`: the video pipeline (DiT + umT5 + Wan-VAE) behind wan_cli.
 brain-wan.workspace = true
+# `brain ltxv t2v`: the smoke-test video pipeline (tiny random-weight DiT +
+# real VAE) behind ltxv_cli.
+brain-ltxv.workspace = true
 brain-events.workspace = true
 brain-runtime.workspace = true
 brain-forecast.workspace = true

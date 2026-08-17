@@ -212,3 +212,203 @@ pub fn klein_sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
     out.push(0.0);
     out
 }
+
+// ---- LTX-2.5 (`LTX2Scheduler`): token-count-dependent shift + terminal stretch ----
+
+/// `ltx_core.components.schedulers.LTX2Scheduler`'s two calibration anchors -
+/// the token counts at which `base_shift`/`max_shift` apply exactly; the
+/// shift is LINEARLY interpolated between them (and extrapolated outside),
+/// never clamped - `ltxv_schedule_dump_reference.py`'s golden cases span
+/// below, at, between, and above both anchors specifically to prove this.
+pub const LTX2_BASE_SHIFT_ANCHOR: f64 = 1024.0;
+pub const LTX2_MAX_SHIFT_ANCHOR: f64 = 4096.0;
+
+/// The real LTX-2.5 distilled-8-step sigma schedule, read verbatim from
+/// `ltx_pipelines.utils.constants.DISTILLED_SIGMA_VALUES` (not derived from
+/// [`ltx2_sigmas`] - this is a separate, hand-tuned constant table upstream
+/// ships for its distilled checkpoint, cross-checked bit-for-bit against
+/// `testdata/golden/ltxv/schedule/schedule.safetensors`'s
+/// `distilled_8step.sigmas`).
+pub const LTX2_DISTILLED_SIGMAS: [f32; 9] = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0];
+/// `STAGE_2_DISTILLED_SIGMA_VALUES` - the second stage of the distilled
+/// two-stage pipeline (`ti2vid_two_stages*.py`), a suffix of
+/// [`LTX2_DISTILLED_SIGMAS`].
+pub const LTX2_STAGE2_DISTILLED_SIGMAS: [f32; 4] = [0.909375, 0.725, 0.421875, 0.0];
+/// `TDP_DISTILLED_SIGMAS` - the temporal-duration-prediction pipeline's own
+/// 2-step distilled schedule.
+pub const LTX2_TDP_DISTILLED_SIGMAS: [f32; 3] = [0.625, 0.4, 0.0];
+
+/// `LTX2Scheduler.execute`'s sigma vector (`steps+1` entries): a
+/// resolution-independent `linspace(1,0,steps+1)` ramp, shifted by a
+/// token-count-dependent Flux-style `mu` (linear interpolation between
+/// `(BASE_SHIFT_ANCHOR, base_shift)` and `(MAX_SHIFT_ANCHOR, max_shift)`,
+/// extrapolated outside that range - never clamped), optionally followed by a
+/// terminal stretch so the last non-zero sigma lands exactly at `terminal`
+/// (keeps the final denoise step from a schedule that would otherwise end too
+/// close to fully clean, per `ltx_core`'s own docstring).
+///
+/// `token_count` is the LATENT token count (`lat_t * lh * lw` for video, no
+/// patch-size division - `LTXModel`'s own `in_channels`-wide tokens), the
+/// same quantity [`crate`]'s callers already compute for their DiT's `T`.
+///
+/// Computed in `f64` throughout, matching this module's other dynamic-shift
+/// functions ([`flow_shift`]'s doc explains why) and the reference's own
+/// numpy-`float64` closed-form self-check
+/// (`ltxv_schedule_dump_reference.py`'s `expected_sigmas`) - only the
+/// reference's OWN torch execution runs in f32, and the two are asserted to
+/// agree to `< 1e-6` relative there, which is the bound
+/// `crates/diffusion/tests/ltxv_schedule_parity.rs` re-checks against the
+/// dumped golden.
+pub fn ltx2_sigmas(token_count: usize, steps: usize, base_shift: f64, max_shift: f64, stretch: bool, terminal: f64) -> Vec<f64> {
+    assert!(steps >= 1, "ltx2_sigmas: steps must be >= 1");
+    // linspace(1.0, 0.0, steps+1) inclusive of both endpoints.
+    let sigmas: Vec<f64> = (0..=steps).map(|i| 1.0 - i as f64 / steps as f64).collect();
+
+    let mm = (max_shift - base_shift) / (LTX2_MAX_SHIFT_ANCHOR - LTX2_BASE_SHIFT_ANCHOR);
+    let b = base_shift - mm * LTX2_BASE_SHIFT_ANCHOR;
+    let sigma_shift = token_count as f64 * mm + b;
+    let e = sigma_shift.exp();
+
+    // `sigma == 0` (only the terminal linspace entry) maps to 0, never
+    // through the exponential-shift formula (which would divide by zero) -
+    // the reference's own `nz = sigmas != 0` mask.
+    let mut out: Vec<f64> = sigmas.iter().map(|&s| if s == 0.0 { 0.0 } else { e / (e + (1.0 / s - 1.0)) }).collect();
+
+    if stretch {
+        // Stretch every NON-ZERO entry (post-shift) so the last of them lands
+        // exactly at `terminal`: `scale = (1 - last)/(1 - terminal); out' = 1
+        // - (1 - out)/scale` - the reference's own `non_zero_mask` (computed
+        // on the SHIFTED sigmas, not the input ramp).
+        let idxs: Vec<usize> = (0..out.len()).filter(|&i| out[i] != 0.0).collect();
+        if let Some(&last) = idxs.last() {
+            let scale = (1.0 - out[last]) / (1.0 - terminal);
+            for &i in &idxs {
+                out[i] = 1.0 - (1.0 - out[i]) / scale;
+            }
+        }
+    }
+    out
+}
+
+/// Rectified-flow ancestral Euler step
+/// (`ltx_core.components.diffusion_steps.EulerAncestralDiffusionStep.step`,
+/// verified against `scratchpad/reference/ltxv/packages/ltx-core/src/
+/// ltx_core/components/diffusion_steps.py` rather than trusted from a
+/// transcription): advance deterministically from `sigma` to an intermediate
+/// `sigma_down <= sigma_next`, then renoise back up to `sigma_next`,
+/// rescaling the signal component by `alpha_next/alpha_down` (`alpha = 1 -
+/// sigma`) so the transition stays variance-preserving.
+///
+/// `x`/`denoised` are the current noisy sample and the model's denoised (x0)
+/// prediction, same length. `eta` interpolates between a plain Euler step
+/// (`eta=0`: `sigma_down == sigma_next`, `noise` unused and may be `None`)
+/// and a fully ancestral step (`eta=1`, upstream's own distilled-pipeline
+/// default - `ANCESTRAL_ETA`/`ANCESTRAL_S_NOISE` in `ltx_pipelines.
+/// distilled`). `noise` must be standard-normal, one value per element of
+/// `x`, and is REQUIRED (panics) whenever `eta > 0`.
+///
+/// `sigma_next == 0` is the schedule's terminal step: this returns
+/// `denoised` directly (no formula applies at zero noise), same as upstream.
+///
+/// Deliberately NOT the DDIM/variance-exploding ancestral coefficients
+/// (`_get_ancestral_step` in the same reference file) - that helper computes
+/// a different `sigma_down` and a different injected-noise amount for the
+/// same `eta`; the two agree only at `eta=0`. This is the rectified-flow
+/// (`alpha = 1-sigma`) parameterization, the one LTX-2 uses.
+pub fn euler_ancestral_step(x: &[f32], denoised: &[f32], sigma: f64, sigma_next: f64, eta: f64, s_noise: f64, noise: Option<&[f32]>) -> Vec<f32> {
+    assert_eq!(x.len(), denoised.len(), "euler_ancestral_step: x/denoised length mismatch");
+    if sigma_next == 0.0 {
+        return denoised.to_vec();
+    }
+    assert!(eta <= 0.0 || noise.is_some(), "euler_ancestral_step: eta > 0 requires a noise tensor");
+
+    let downstep_ratio = 1.0 + (sigma_next / sigma - 1.0) * eta;
+    let sigma_down = sigma_next * downstep_ratio;
+    let sigma_down_ratio = sigma_down / sigma;
+
+    let mut out: Vec<f32> = x.iter().zip(denoised).map(|(&xi, &di)| (sigma_down_ratio * xi as f64 + (1.0 - sigma_down_ratio) * di as f64) as f32).collect();
+
+    if eta > 0.0 {
+        let noise = noise.expect("checked above");
+        assert_eq!(noise.len(), x.len(), "euler_ancestral_step: noise length mismatch");
+        let alpha_next = 1.0 - sigma_next;
+        let alpha_down = 1.0 - sigma_down;
+        let renoise_coeff = (sigma_next * sigma_next - sigma_down * sigma_down * alpha_next * alpha_next / (alpha_down * alpha_down)).max(0.0).sqrt();
+        let ratio = alpha_next / alpha_down;
+        for (o, &n) in out.iter_mut().zip(noise) {
+            *o = (ratio * (*o as f64) + n as f64 * s_noise * renoise_coeff) as f32;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod ltx2_tests {
+    use super::*;
+
+    /// `eta=0` collapses the ancestral step to a plain Euler step
+    /// (`sigma_down == sigma_next`, no noise), and needs no noise tensor even
+    /// though `s_noise` is nonzero - the multiply is gated on `eta`, not
+    /// `s_noise`, matching the reference's own `if self.eta > 0`.
+    #[test]
+    fn eta_zero_is_a_plain_euler_step_and_needs_no_noise() {
+        let x = [1.0f32, -2.0, 0.5];
+        let denoised = [0.0f32, 0.0, 0.0];
+        let out = euler_ancestral_step(&x, &denoised, 0.8, 0.4, 0.0, 1.0, None);
+        // sigma_down_ratio = sigma_next/sigma = 0.5, x_next = 0.5*x + 0.5*0.
+        for (o, xi) in out.iter().zip(x) {
+            assert!((*o as f64 - 0.5 * xi as f64).abs() < 1e-6, "{o} vs {xi}");
+        }
+    }
+
+    /// The terminal step (`sigma_next == 0`) always returns the denoised
+    /// prediction directly, whatever `eta`/`x` are - and never touches
+    /// `noise`, so passing `None` at `eta>0` must not panic here.
+    #[test]
+    fn sigma_next_zero_returns_the_denoised_sample_directly() {
+        let x = [3.0f32, -1.0];
+        let denoised = [0.25f32, 0.75];
+        let out = euler_ancestral_step(&x, &denoised, 0.3, 0.0, 1.0, 1.0, None);
+        assert_eq!(out, denoised);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a noise tensor")]
+    fn eta_above_zero_without_noise_panics() {
+        euler_ancestral_step(&[1.0], &[0.0], 0.5, 0.2, 1.0, 1.0, None);
+    }
+
+    /// The distilled constant tables are literal transcriptions - pin their
+    /// lengths and endpoints (every LTX-2 schedule starts at sigma=1 and ends
+    /// at sigma=0) so a future edit that fat-fingers a digit is caught even
+    /// without the golden fixture.
+    #[test]
+    fn distilled_constants_are_well_formed() {
+        assert_eq!(LTX2_DISTILLED_SIGMAS.len(), 9);
+        assert_eq!(LTX2_DISTILLED_SIGMAS[0], 1.0);
+        assert_eq!(*LTX2_DISTILLED_SIGMAS.last().unwrap(), 0.0);
+        assert_eq!(LTX2_STAGE2_DISTILLED_SIGMAS.len(), 4);
+        assert_eq!(*LTX2_STAGE2_DISTILLED_SIGMAS.last().unwrap(), 0.0);
+        assert_eq!(LTX2_TDP_DISTILLED_SIGMAS.len(), 3);
+        assert_eq!(*LTX2_TDP_DISTILLED_SIGMAS.last().unwrap(), 0.0);
+    }
+
+    /// Weight-free structural checks that hold for ANY valid
+    /// `(base_shift, max_shift)` pair, independent of the golden fixture:
+    /// the ramp always starts at 1 and ends at 0, and stretching never moves
+    /// either endpoint (0 is never in the stretch mask; 1 stretches to
+    /// exactly 1 because `out[0] == e/(e + 0) == 1` for every finite `e`).
+    #[test]
+    fn the_schedule_always_starts_at_one_and_ends_at_zero() {
+        for &(tokens, steps, stretch) in &[(256usize, 8usize, true), (4096, 20, false), (8192, 50, true)] {
+            let s = ltx2_sigmas(tokens, steps, 0.95, 2.05, stretch, 0.1);
+            assert_eq!(s.len(), steps + 1);
+            assert!((s[0] - 1.0).abs() < 1e-9, "tokens={tokens} steps={steps}: sigma[0] = {}", s[0]);
+            assert_eq!(*s.last().unwrap(), 0.0, "tokens={tokens} steps={steps}: last sigma must be exactly 0");
+            // Monotonically non-increasing.
+            for w in s.windows(2) {
+                assert!(w[0] >= w[1] - 1e-12, "not monotone: {w:?}");
+            }
+        }
+    }
+}

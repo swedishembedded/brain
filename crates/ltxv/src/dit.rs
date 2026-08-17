@@ -49,6 +49,75 @@ pub fn load_tiny_weights(path: &str) -> Tensors {
     raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
 }
 
+/// Every tensor a [`LtxDit`] forward reads, name + shape, derived from
+/// `cfg` - the canonical name space [`load_tiny_weights`] and
+/// [`crate::block::LtxBlock`]'s `tget` calls already use. Exists so
+/// [`random_tiny_weights`] (this milestone's pipeline) and any future
+/// real-checkpoint importer enumerate the SAME list a forward actually
+/// reads, the same "manifest drives both sides" discipline
+/// `crate::vae3d::LtxVaeConfig::tensor_manifest` uses for the VAE.
+pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
+    let dim = cfg.inner_dim as usize;
+    let mut m: Vec<(String, Vec<usize>)> = vec![
+        ("patchify_proj.weight".into(), vec![dim, cfg.in_channels as usize]),
+        ("patchify_proj.bias".into(), vec![dim]),
+        ("adaln_single.emb.timestep_embedder.linear_1.weight".into(), vec![dim, 256]),
+        ("adaln_single.emb.timestep_embedder.linear_1.bias".into(), vec![dim]),
+        ("adaln_single.emb.timestep_embedder.linear_2.weight".into(), vec![dim, dim]),
+        ("adaln_single.emb.timestep_embedder.linear_2.bias".into(), vec![dim]),
+        ("adaln_single.linear.weight".into(), vec![cfg.adaln_rows() as usize * dim, dim]),
+        ("adaln_single.linear.bias".into(), vec![cfg.adaln_rows() as usize * dim]),
+        ("scale_shift_table".into(), vec![2, dim]),
+        ("proj_out.weight".into(), vec![cfg.out_channels as usize, dim]),
+        ("proj_out.bias".into(), vec![cfg.out_channels as usize]),
+    ];
+    if cfg.use_keyframes_abs_pos_embedding {
+        m.push(("keyframes_abs_pos_embedding".into(), vec![dim]));
+    }
+    for l in 0..cfg.num_layers {
+        let p = format!("transformer_blocks.{l}");
+        for attn in ["attn1", "attn2"] {
+            for proj in ["to_q", "to_k", "to_v"] {
+                m.push((format!("{p}.{attn}.{proj}.weight"), vec![dim, dim]));
+                m.push((format!("{p}.{attn}.{proj}.bias"), vec![dim]));
+            }
+            m.push((format!("{p}.{attn}.to_out.0.weight"), vec![dim, dim]));
+            m.push((format!("{p}.{attn}.to_out.0.bias"), vec![dim]));
+            m.push((format!("{p}.{attn}.q_norm.weight"), vec![dim]));
+            m.push((format!("{p}.{attn}.k_norm.weight"), vec![dim]));
+        }
+        m.push((format!("{p}.ff.net.0.proj.weight"), vec![4 * dim, dim]));
+        m.push((format!("{p}.ff.net.2.weight"), vec![dim, 4 * dim]));
+        m.push((format!("{p}.scale_shift_table"), vec![cfg.adaln_rows() as usize, dim]));
+        m.push((format!("{p}.prompt_scale_shift_table"), vec![2, dim]));
+    }
+    m
+}
+
+/// A random, seeded set of weights at `cfg`'s exact tensor manifest - what a
+/// pipeline uses when there is no real 22B checkpoint to import (this whole
+/// port's status: the real DiT is 42 GB bf16 and does not exist as a
+/// downloadable file this milestone's hardware could hold anyway). Biases
+/// are zero; every other tensor is i.i.d. `N(0, 0.02²)`, the same
+/// re-initialization std `tools/goldens/ltxv_dit_dump_reference.py` uses for
+/// the class's own `torch.empty(...)`-sourced parameters - reused here for
+/// every weight, not just those, because this is a WIRING smoke test, not a
+/// quality claim: nothing about generation fidelity is being asserted, only
+/// that noise in -> a forward -> a decodable video out, at the real op
+/// sequence. Deterministic in `seed` (same seed -> bit-identical weights),
+/// like every other seeded thing in this pipeline.
+pub fn random_tiny_weights(cfg: &LtxDitConfig, seed: u64) -> Tensors {
+    let mut rng = data::rng::Rng::new(seed);
+    dit_tensor_manifest(cfg)
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = if name.ends_with(".bias") { vec![0.0; n] } else { (0..n).map(|_| (rng.next_gaussian() * 0.02) as f32).collect() };
+            (name, (shape, data))
+        })
+        .collect()
+}
+
 /// `out[r,o] = b[o] + Σ_i x[r,i]·w[o,i]`, `w` row-major `[out_dim, in_dim]` -
 /// plain `nn.Linear`, sequential (this milestone's token/dim counts are far
 /// below where `wan::model::linear`'s row-parallel split would matter).

@@ -12,26 +12,35 @@ timesteps, and a 12B text encoder rather than an 11 GB one.
 one Hugging Face class (`AVTransformer3DModel`) and one GGUF architecture tag
 (`ltxv`); which release you have is a configuration, not a different model.
 
-**Status: in progress, not yet runnable.** This page describes the target shape;
-see `.agents/roadmap/ltxv.md` for the live checklist of what has actually landed.
+**Status: in progress - `brain ltxv t2v` runs end to end as a SMOKE TEST, not
+a quality claim yet.** This page describes the target shape; see
+`.agents/roadmap/ltxv.md` for the live checklist of what has actually landed.
 The 22B transformer and the 12B Gemma-4 text encoder are large enough that
-real-weight validation needs a machine this port was not built on - what has
-parity-gated real-weight coverage today is only the small, self-contained pieces
-(the two video VAE decoders, the audio VAE, the vocoder, the latent upscalers).
+real-weight validation needs a machine this port was not built on, and neither
+exists in this repo yet - what runs today is the real scheduler
+(`LTX2Scheduler` + the rectified-flow ancestral Euler step), the real causal
+3D video VAE decode, and the real CLI/capability/residency wiring, composed
+with a **tiny, random-weight** DiT and a **stub** text context (no real
+Gemma-4 encoder). See `crates/ltxv/src/pipeline.rs`'s module doc for exactly
+what is real and what is a placeholder. What has parity-gated real-weight
+coverage is the small, self-contained pieces (the video VAE, the audio VAE,
+the vocoder, the latent upscalers) plus the schedule math; the DiT itself is
+only tiny-config-parity-proven, not real-weight-proven (see "Getting the
+weights" below for why).
 
 ## Support
 
 | Capability | Supported |
 |---|---|
-| Inference (text to video) | [ ] |
+| Inference (text to video) | [~] smoke test only - tiny random-weight DiT, stub text context, see above |
 | Inference (text to video+audio) | [ ] |
 | Inference (image to video) | [ ] |
 | LoRA fine-tune | [ ] |
 | Full fine-tune | [ ] |
 | INT8 | [ ] |
-| CLI (`brain ltxv t2v`) | [ ] |
-| D-Bus | [ ] |
-| Batched serving | [ ] |
+| CLI (`brain ltxv t2v`) | [x] |
+| D-Bus | [x] (via the generalized `capability::Provider`/residency surface, same as every other model) |
+| Batched serving | [ ] nothing resident to batch yet - see `crates/cli/src/resident_ltxv.rs`'s module doc |
 | NPU | [ ] |
 
 ## Architecture, in brief
@@ -91,7 +100,25 @@ from the repository above.
 
 ## Running it
 
-Not yet - see the roadmap. Once the video-only milestone lands, the shape will
-match `wan`'s: `brain ltxv t2v --prompt … --output-path out.mp4`, plus discovery
-and a cancellable streaming job over the generalized capability interface
-(`brain caps brain/ltxv`, `brain serve --dbus`, `examples/videogen/`).
+The smoke-test path runs today, needing only the real VAE (no DiT/text-encoder
+weights - the DiT is always tiny-config with fresh random weights):
+
+```bash
+export BRAIN_LTXV_VAE=…/ltx-2.5-video-vae-conv-bf16.safetensors
+brain ltxv t2v --prompt "a cat walking on a beach" --frames 9 --width 64 \
+  --height 64 --steps 4 --output-path out.mp4
+```
+
+This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
+out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
+module doc.
+
+`ltxv` has a dedicated CLI module, so the resolver gives it precedence over
+generic capability dispatch (`brain ltxv t2v` runs that module, not a generic
+action call) - the same routing `wan` uses. The action is still reachable the
+same way every model in this repo is over other transports: discovery
+(`brain caps brain/ltxv`) and a cancellable streaming job over D-Bus
+(`brain serve --dbus`). A real 22B DiT and the Gemma-4 text encoder are
+tracked gaps (see the roadmap) - once they land, this same CLI/capability
+surface serves them with no shape change, only `--dit-config`/`dit_config`
+growing a second value.

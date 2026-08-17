@@ -63,9 +63,19 @@ this port:
       silently produce the wrong result if reused for LTX) into `crates/dit`, and
       migrate `wan` + `s3dit` onto them in the same change - no per-model copies,
       per [[brain-evolve-core-for-models]].
-- [ ] **`LTX2Scheduler`** (token-count-dependent Flux-style shift + terminal
-      stretch to 0.1) added to `crates/diffusion/src/scheduler.rs` next to the
-      existing `flow_shift`/`time_shift_exponential`, not inside `crates/ltxv`.
+- [x] **`LTX2Scheduler`** (`diffusion::scheduler::ltx2_sigmas`, token-count-
+      dependent Flux-style shift + terminal stretch to 0.1) added to
+      `crates/diffusion/src/scheduler.rs` next to the existing `flow_shift`/
+      `time_shift_exponential`, not inside `crates/ltxv`. Validated against
+      `testdata/golden/ltxv/schedule/` across all 10 dumped
+      `(tokens, steps, base_shift, max_shift, stretch, terminal)` cases -
+      worst max abs deviation 1.79e-7 (`crates/diffusion/tests/
+      ltxv_schedule_parity.rs`), plus the three real `DISTILLED_*_SIGMAS`
+      constant tables (`LTX2_DISTILLED_SIGMAS`/`LTX2_STAGE2_DISTILLED_SIGMAS`/
+      `LTX2_TDP_DISTILLED_SIGMAS`) matched bit-exactly against source. The
+      rectified-flow `euler_ancestral_step` (`EulerAncestralDiffusionStep`)
+      landed alongside it, structurally unit-tested (no golden numbers exist
+      for it - only the schedule was dumped).
 - [x] **Reference goldens** - `tools/goldens/ltxv_vae_dump_reference.py` (real
       conv-decoder VAE weights, encoder+decoder stage taps, per-channel-stats
       round trip self-validated, round-trip cosine 0.992-0.996),
@@ -119,8 +129,39 @@ this port:
       kernels. Real-22B-checkpoint import, the audio stream, the
       audio<->video cross-attention, and the text encoder are explicit,
       tracked gaps - only the tiny-config op sequence is proven so far.
-- [ ] **Pipeline + CLI + serving contract** - `brain ltxv t2v` to a playable mp4,
-      `crates/ltxv/src/caps.rs`, `resident_ltxv.rs`, GGUF importer entry.
+- [x] **Pipeline + CLI + serving contract (M4)** - `brain ltxv t2v` produces a
+      playable mp4 end to end: real `LTX2Scheduler` schedule + rectified-flow
+      ancestral Euler denoise loop + CFG fold (`crates/ltxv/src/pipeline.rs`)
+      over the tiny video-only DiT (M3) with FRESH RANDOM WEIGHTS
+      (`dit::random_tiny_weights`, seeded - there is no real 22B checkpoint to
+      load), decoded through the real causal 3D video VAE (M2). This is an
+      explicit SMOKE TEST of the pipeline WIRING, not a generation-quality
+      claim - recorded loudly in `crates/ltxv/src/pipeline.rs`'s module doc,
+      the same way M1/M2/M3 recorded their own out-of-scope pieces. Full
+      serving contract: `crates/ltxv/src/caps.rs` (manifest/`t2v` action,
+      weights-free manifest test, cancellation polled once per denoise step),
+      `crates/cli/src/ltxv_cli.rs` + `resident_ltxv.rs` (residency adapter -
+      deliberately holds NOTHING resident: the DiT is free to rebuild and the
+      VAE is read fresh per call, same precedent as `wan`'s own "VAE never
+      cached alongside the DiT" choice), registered in `resolve.rs`'s
+      `ARCH_HANDLERS` (`brain ltxv t2v` runs the dedicated CLI module, taking
+      precedence over generic capability dispatch, the same routing `wan`
+      uses - confirmed with `brain caps brain/ltxv`, which lists the manifest
+      correctly without a `catalog.rs` entry) and wired into
+      `resident.rs::build_executor` (env-gated on `BRAIN_LTXV_VAE`). Verified
+      end to end: `brain ltxv t2v --prompt "a cat walking on a beach" --frames
+      9 --width 64 --height 64 --steps 4 --seed 42 --device cpu` against the
+      real `ltx-2.5-video-vae-conv-bf16.safetensors` produced a real, playable
+      64x64 h264 mp4, 9 frames at 8 fps, ~4.9 KB, in ~54s wall clock (VAE
+      decode on the CPU-JIT backend dominates at this size). Two simplifications,
+      both documented inline where they land: the guidance fold is CFG-only
+      (no STG/audio-video joint guidance/rescale - those need machinery this
+      port hasn't built), and there is no real text encoder yet
+      (`pipeline::context_stub` folds the prompt's hash into a seeded, purely
+      structural context tensor). The real 22B DiT import and the Gemma-4 text
+      encoder (see the next two bullets) are the tracked gaps this milestone
+      exists to isolate, not to close. GGUF importer entry for `ltxv` is NOT
+      part of this milestone - deferred until real-weight DiT import lands.
 - [ ] **`crates/gemma4` text encoder** - own arch row, 5:1 sliding/full attention
       alternation, dual RoPE bases, `attention_k_eq_v` global layers, the
       49-hidden-state `aggregate_embed` projection. Tiny-config parity; real-weight

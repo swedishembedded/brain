@@ -118,6 +118,14 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
     }
+    // LTX-2.5 text-to-video (BRAIN_LTXV_VAE): a smoke-test pipeline (real VAE,
+    // tiny random-weight DiT, no real text encoder yet) with nothing worth
+    // caching resident - see resident_ltxv.rs's module doc.
+    if let Some(l) = crate::resident_ltxv::LtxvResident::from_env() {
+        models.push(Arc::new(l));
+    } else {
+        eprintln!("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE)");
+    }
     // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));

@@ -3,7 +3,7 @@ name = "brain-ltxv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE (encoder + conv decoder, crates/vae's blocks3d primitives) and the video-only DiT stream (tiny-config parity), built on brain-vae / brain-dit / brain-checkpoint / brain-gpu-core / brain-kernels; the audio stack, A<->V cross-attention, text encoder and NA diffusion decoder land in later milestones."
+description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE (encoder + conv decoder, crates/vae's blocks3d primitives), the video-only DiT stream (tiny-config parity), and the end-to-end t2v pipeline + serving contract (real VAE + tiny random-weight DiT + a stub text context, no real 22B DiT / Gemma-4 text encoder yet), built on brain-vae / brain-dit / brain-diffusion / brain-capability / brain-data / brain-checkpoint / brain-gpu-core / brain-kernels; the audio stack, A<->V cross-attention, real text encoder and NA diffusion decoder land in later milestones."
 
 [lib]
 name = "ltxv"
@@ -18,6 +18,16 @@ brain-vae.workspace = true
 # pixart_timestep_embed` (the PixArt sinusoid -> Linear -> SiLU -> Linear
 # shape the AdaLayerNormSingle embedder shares with wan/s3dit).
 brain-dit.workspace = true
+# `LTX2Scheduler`'s sigma schedule + the rectified-flow ancestral Euler step
+# (`crate::pipeline`'s denoise loop).
+brain-diffusion.workspace = true
+# The generalized capability interface (`crate::caps`) - manifest, actions,
+# cancellation - per the serving contract every model ships.
+brain-capability.workspace = true
+# Seeded noise/weight-init RNG (`data::rng::Rng`), the same SplitMix64 +
+# Box-Muller stream `wan::pipeline` uses, for reproducible `--seed` runs.
+brain-data.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
