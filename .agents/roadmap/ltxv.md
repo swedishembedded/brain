@@ -66,10 +66,22 @@ this port:
 - [ ] **`LTX2Scheduler`** (token-count-dependent Flux-style shift + terminal
       stretch to 0.1) added to `crates/diffusion/src/scheduler.rs` next to the
       existing `flow_shift`/`time_shift_exponential`, not inside `crates/ltxv`.
-- [ ] **Reference goldens** - `tools/goldens/ltxv_{vae,dit,audio,schedule}_dump_reference.py`,
-      real weights for the VAEs/upscalers, tiny random-weight configs (2 layers,
-      small dims) for the DiT/connector/Gemma-4 with forward-hook capture during
-      a real module call.
+- [x] **Reference goldens** - `tools/goldens/ltxv_vae_dump_reference.py` (real
+      conv-decoder VAE weights, encoder+decoder stage taps, per-channel-stats
+      round trip self-validated, round-trip cosine 0.992-0.996),
+      `tools/goldens/ltxv_dit_dump_reference.py` (tiny video-only config, every
+      real-config FLAG set correctly, adaLN row order pinned against source,
+      fresh-instantiation + batch-independence + RoPE-unit-rotation
+      self-validated), `tools/goldens/ltxv_audio_dump_reference.py` (real audio
+      VAE + base vocoder weights, mel front end cross-checked two independent
+      ways bit-exact, round-trip cosine 0.998; BWE deliberately out of scope),
+      `tools/goldens/ltxv_schedule_dump_reference.py` (`LTX2Scheduler` sigma
+      vectors + the real `DISTILLED_SIGMA_VALUES` read from source, cross-
+      checked against an independent fp64 numpy reimplementation). All four run
+      real weights or tiny configs on CPU; goldens land in the gitignored
+      `testdata/golden/ltxv/` (regenerate locally, never committed). The
+      diffusion (NA) video decoder and audio BWE stage are explicitly deferred
+      to their own later milestones, not dumped here.
 - [ ] **Video VAE** (`crates/ltxv/src/vae3d.rs` over `vae::blocks3d`) - encoder +
       conv decoder first (real weights, first milestone that runs everywhere),
       the NA diffusion decoder deferred to the DFR milestone.
