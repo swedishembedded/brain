@@ -23,6 +23,12 @@ BRAIN  ?= ./target/release/brain
 # an e2e run at a release build instead: `BRAIN_BIN=./target/release/brain make
 # test/e2e/api-conformance`.
 BRAIN_BIN ?= ./target/debug/brain
+# Rewritten in place by `make release/{patch,minor,major}` (bump2version) -
+# the single source the release targets below read AFTER the bump, since a
+# sub-make re-reads the Makefile from disk. Cargo.toml's [workspace.package]
+# version is the actual build-time source of truth (--version, D-Bus, the
+# .deb); this mirrors it for the release machinery only.
+BRAIN_VERSION := 0.1.1
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
@@ -58,7 +64,9 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e test/e2e/deb
+        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e \
+        release/patch release/minor release/major changelog release/notes \
+        release/github release/publish test/e2e/deb
 
 help:
 	@echo "brain targets:"
@@ -124,6 +132,9 @@ help:
 	@echo "  make wm-fixtures             regenerate DIAMOND parity fixtures (needs torch)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
+	@echo "  make release/patch|minor|major   bump version, commit, tag (local only)"
+	@echo "  make release/publish         push the tag + create the GitHub release"
+	@echo "  make deb                     build a self-contained Debian package"
 
 build:
 	cargo build
@@ -139,6 +150,85 @@ deb/debug: build
 
 deb/release: release
 	bash scripts/build/build-deb.sh
+
+# ---- release -----------------------------------------------------------------
+# Version bump + changelog + tag, mirroring vemu's release flow
+# (applications/emulators/vemu/Makefile) with one deliberate difference: these
+# targets stop at the local tag. Pushing and creating the GitHub release are a
+# separate, explicit release/publish step below - not folded into
+# release/{patch,minor,major} - because both need credentials (a working git
+# remote, `gh auth login`) that a routine version bump should not silently
+# assume are present.
+release/patch: ## Bump patch version, commit, tag (local only - see release/publish)
+	@[ -z "$$(git status --porcelain)" ] || \
+		{ echo "error: dirty working tree"; git status --short; exit 1; }
+	bump2version --no-tag patch
+	$(MAKE) _release/finalize
+
+release/minor: ## Bump minor version, commit, tag (local only - see release/publish)
+	@[ -z "$$(git status --porcelain)" ] || \
+		{ echo "error: dirty working tree"; git status --short; exit 1; }
+	bump2version --no-tag minor
+	$(MAKE) _release/finalize
+
+release/major: ## Bump major version, commit, tag (local only - see release/publish)
+	@[ -z "$$(git status --porcelain)" ] || \
+		{ echo "error: dirty working tree"; git status --short; exit 1; }
+	bump2version --no-tag major
+	$(MAKE) _release/finalize
+
+# Runs as a sub-make so BRAIN_VERSION is re-read AFTER bump2version rewrote
+# the Makefile (a sub-make always re-parses the Makefile from disk; the
+# parent make's variable value is stale the instant bump2version returns).
+# Refreshes Cargo.lock for the new workspace version (`--locked` at the tag
+# would otherwise fail), prepends the new CHANGELOG.md section, folds both
+# into the bump commit, and creates the release tag on the final commit -
+# same trick as vemu's _release/finalize, and the same reason its tag is
+# created last: every generated file must already be IN the commit the tag
+# points at, not added after.
+.PHONY: _release/finalize
+_release/finalize:
+	cargo update --workspace
+	$(MAKE) changelog
+	git add Cargo.lock CHANGELOG.md
+	git commit --amend --no-edit
+	git tag "v$(BRAIN_VERSION)"
+
+# Prepend the section for the version just bumped to CHANGELOG.md, generated
+# from conventional-commit history since the last tag (git-cliff, cliff.toml
+# at the repo root). `--prepend` only inserts at the top - the curated prose
+# above older sections (1.0.0's subsystem intro) is left alone.
+changelog:
+	@command -v git-cliff >/dev/null 2>&1 || \
+		{ echo "error: git-cliff not found - install with 'cargo install git-cliff'"; exit 1; }
+	git-cliff --config cliff.toml --tag "v$(BRAIN_VERSION)" --unreleased --prepend CHANGELOG.md
+
+# Render just the tag's own section, no running header - this is the GitHub
+# release body, not the cumulative changelog.
+release/notes:
+	@command -v git-cliff >/dev/null 2>&1 || \
+		{ echo "error: git-cliff not found - install with 'cargo install git-cliff'"; exit 1; }
+	mkdir -p target
+	git-cliff --config cliff.toml --latest --strip header > target/release-notes-v$(BRAIN_VERSION).md
+	@echo "wrote target/release-notes-v$(BRAIN_VERSION).md"
+
+# Create the GitHub release for the tag just cut, attaching the release .deb.
+# Needs `gh` installed and authenticated (`gh auth login`) - neither is
+# assumed here, this just fails loudly if either is missing.
+release/github: release/notes deb/release
+	@command -v gh >/dev/null 2>&1 || \
+		{ echo "error: gh (GitHub CLI) not found - install it and run 'gh auth login'"; exit 1; }
+	gh release create "v$(BRAIN_VERSION)" \
+		--title "v$(BRAIN_VERSION)" \
+		--notes-file target/release-notes-v$(BRAIN_VERSION).md \
+		target/debian/brain_$(BRAIN_VERSION)_$$(dpkg --print-architecture).deb
+
+# The one target in this section that touches the remote: push the tagged
+# bump commit + tag, then create the GitHub release. Deliberately not part of
+# release/{patch,minor,major} - see that section's note above.
+release/publish:
+	git push origin HEAD --tags
+	$(MAKE) release/github
 
 # ---- tests -----------------------------------------------------------------
 # `make test` is the FAST LANE and must stay fast: unit + integration tests

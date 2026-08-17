@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+# git-cliff config (`make changelog`, `make release/notes`). Groups commits by
+# brain's actual conventional-commit prefixes (see `git log --format=%s | sed
+# -E 's/^([a-z]+)(\(.*\))?:.*/\1/' | sort | uniq -c`); commits that don't match
+# any of these (a bare "crate: did a thing" subject, no type keyword) land in
+# the catch-all "Other" group rather than being silently dropped.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to brain (https://github.com/swedishembedded/brain) are
+documented here. Generated with git-cliff from conventional-commit history;
+see CONTRIBUTING or AGENTS.md for the commit-message convention.
+"""
+body = """
+{% if version %}\
+    ## [{{ version | trim_start_matches(pat="v") }}]{% if timestamp %} - {{ timestamp | date(format="%Y-%m-%d") }}{% endif %}
+{% else %}\
+    ## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+            {{ commit.message | upper_first }} \
+            ([{{ commit.id | truncate(length=8, end="") }}](https://github.com/swedishembedded/brain/commit/{{ commit.id }}))
+    {% endfor %}
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9]*"
+skip_tags = ""
+ignore_tags = ""
+topo_order = false
+sort_commits = "oldest"
+
+commit_parsers = [
+  { message = "^chore\\(release\\):", skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Testing" },
+  { message = "^build", group = "Build" },
+  { message = "^chore", group = "Miscellaneous" },
+  { message = ".*", group = "Other" },
+]
