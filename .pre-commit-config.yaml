@@ -28,6 +28,21 @@ repos:
         language: system
         pass_filenames: true
         stages: [pre-commit]
+      - id: no-large-or-binary-files
+        name: "No video, model weights, or oversized files"
+        description: >-
+          Refuses video containers and model weights at ANY size, and anything
+          else over 6 MiB. A generated clip or checkpoint differs byte-for-byte
+          on every regeneration, so each re-run adds a fresh copy that no later
+          commit can remove - by the time it is noticed the fix is a history
+          rewrite rather than a revert. .gitignore lists the weight extensions
+          already, but `git add -f` walks straight past it. Documentation
+          screenshots stay allowed; the ceiling sits above the largest one
+          already tracked. See scripts/gates/check-large-files.sh.
+        entry: bash scripts/gates/check-large-files.sh
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
       - id: no-machine-paths-in-crates
         name: "No baked-in absolute machine paths under crates/"
         description: >-

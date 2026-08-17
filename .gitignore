@@ -14,6 +14,15 @@ scratchpad/
 *.pt
 *.weights
 *.npy
+# Generated media. The quickstart and `brain wan t2v` write video next to the
+# stills the docs embed; the still is what gets committed, never the clip.
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4v
+
 
 # Python caches (reference scripts live under scratchpad/reference only).
 __pycache__/
