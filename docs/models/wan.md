@@ -24,13 +24,25 @@ is a matter of configuration, not a different model.
 | LoRA fine-tune | [ ] |
 | INT8 | [ ] |
 | CLI (`brain wan t2v`) | [x] |
+| Capability (`brain caps`, manifest + action schema) | [x] |
 | HTTP API | [ ] |
-| D-Bus | [ ] |
+| D-Bus | [x] |
 | Batched serving | [ ] |
 
-**The port is partly done.** Text-to-video runs end to end from one command;
-image-to-video, training and the serving surfaces do not exist yet.
-`.agents/roadmap/wan.md` tracks what remains and carries the bug ledger.
+**The port is partly done.** Text-to-video runs end to end from one command and
+is served like every other model - a weights-free manifest `brain caps
+brain/wan` prints, a residency adapter the scheduler budgets and places, and a
+cancellable `Subscribe` job over D-Bus. Image-to-video and training
+do not exist yet. `.agents/roadmap/wan.md` tracks what remains and carries the
+bug ledger.
+
+There is no HTTP surface because there is no OpenAI/Anthropic-shaped endpoint
+for video generation to fit; the D-Bus and capability paths are the served
+ones. Batched serving is listed as unsupported deliberately rather than
+silently: concurrent requests at the same size share one resident transformer,
+but each denoises in turn - the engine records one graph for one latent volume
+and holds a single text-context buffer, so a genuinely batched forward is a
+change to the engine, not to the adapter.
 
 ## Generating a video
 
@@ -55,6 +67,38 @@ attention is quadratic in the token count and the token count is linear in
 frames. Start small (`--frames 9 --width 256 --height 256 --steps 8`) to check
 a set of weights before committing to a long run.
 
+## Serving it
+
+Wan declares one action, `t2v`, through the generalized capability interface -
+the same schema `brain caps` prints and the D-Bus and event surfaces dispatch:
+
+```
+brain caps brain/wan
+```
+
+Only `--prompt` is required; every other parameter defaults from the action's
+own schema, which is the variant's own configuration. The output is a clip
+blob (N RGB frames plus the frame rate), which a client writes to a real
+container.
+
+Over D-Bus, `t2v` is a streaming `Subscribe` job: progress arrives per denoise
+step and the clip comes back as a file descriptor. It is **cancellable** -
+`Cancel(job)` flips the job's token and the denoise loop aborts at its next
+step boundary, which matters for a model whose default run occupies a card for
+a long time. `examples/videogen/` is the runnable client.
+
+The action is not reachable as a CLI verb of its own: `wan` has a dedicated
+CLI module, and the resolver gives those precedence over generic capability
+dispatch, so `brain wan t2v` runs that module rather than the action. Both
+drive the same pipeline, so this is a routing difference, not a behavioural
+one - the same state `flux2-klein` is in.
+
+Served, the transformer stays resident between requests, keyed on the variant
+and the latent extent - the only things that fix its graphs. Two requests that
+differ only in prompt, seed, steps, guidance or solver reuse the same build;
+changing the frame count or the size rebuilds it. The text encoder and the VAE
+are still built and dropped per request, for the memory reason below.
+
 ## Variants
 
 | Variant | Parameters | Sizes | Steps | Shift |
@@ -76,12 +120,30 @@ in the one repository. The `-Diffusers` variant of the same model is 28.9 GB
 because it stores the text encoder in fp32 rather than bf16; brain reads the
 native repository by default and uses the diffusers naming only for importing.
 
+You do not have to fetch it by hand. A command that names none of the four
+paths - and has none of the four variables exported - downloads that repository
+into the model store first and points itself at what landed:
+
+```
+brain wan t2v --prompt "..." --seed 42 --output-path out.mp4
+```
+
+Naming all four paths on the command line, or exporting all four variables,
+skips the fetch entirely; a partial set still fetches, because a fetch that
+resolved only the missing roles would mix two checkpoints.
+
 ```
 export BRAIN_WAN_DIT=.../diffusion_pytorch_model.safetensors
 export BRAIN_WAN_VAE=.../Wan2.1_VAE.pth
 export BRAIN_WAN_T5=.../models_t5_umt5-xxl-enc-bf16.pth
 export BRAIN_WAN_TOKENIZER=.../google/umt5-xxl
 ```
+
+A Wan GGUF (the transformer alone - `general.architecture = "wan"`) converts
+with `brain import <file>`, which reads the variant off the checkpoint's own
+tensor shapes. The VAE, text encoder and tokenizer still come from the native
+repository above, so an imported GGUF replaces one of the four roles rather
+than standing on its own.
 
 The tokenizer variable names the *directory*, not a file: brain reads that
 directory's `tokenizer.json` rather than the `spiece.model` protobuf beside it.

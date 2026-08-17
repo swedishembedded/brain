@@ -225,6 +225,20 @@ run_example() {
   [[ "$output" == *"'cancelled' (expected)"* ]]
 }
 
+# ------------------------------------------------------------- videogen/
+
+@test "examples/videogen/generate_video.py skips cleanly without Wan weights" {
+  # The mock model serves no `t2v` action, so this is a skip by design -- what
+  # it proves is that the client reaches `models()` and reports the missing
+  # model cleanly instead of tracebacking. A real run needs BRAIN_WAN_* and is
+  # tens of minutes even at the smoke-test size.
+  run_example "$REPO/examples/videogen/generate_video.py" --prompt test --model brain/wan --out "$OUT/wan.mp4"
+}
+
+@test "examples/videogen/cancel_generation.py skips cleanly without Wan weights" {
+  run_example "$REPO/examples/videogen/cancel_generation.py" --model brain/wan
+}
+
 # ------------------------------------------------------------- asr/
 
 @test "examples/asr/bench_streams.py skips cleanly without real ASR weights" {

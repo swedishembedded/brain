@@ -171,6 +171,16 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(flux2::caps::Flux2Provider::new()),
             resident: None,
         },
+        // Wan2.1 text-to-video. Like flux2, the four weight roles live in the
+        // provider (from `BRAIN_WAN_*`), not in an action param, so one
+        // manifest serves `brain caps`, `brain do` and the D-Bus surface. The
+        // residency adapter is registered from `resident.rs` (it is one of the
+        // env-gated `from_env` families that list explains), not from here.
+        ModelEntry {
+            manifest: wan::caps::manifest,
+            provider: always!(wan::caps::WanProvider::new()),
+            resident: None,
+        },
         ModelEntry {
             manifest: qwen3::caps::manifest,
             provider: always!(qwen3::caps::QwenProvider::new()),

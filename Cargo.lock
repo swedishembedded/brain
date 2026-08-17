@@ -1720,6 +1720,7 @@ dependencies = [
 name = "brain-wan"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",
@@ -1731,6 +1732,7 @@ dependencies = [
  "brain-t5encoder",
  "brain-testutil",
  "brain-vae",
+ "serde_json",
 ]
 
 [[package]]

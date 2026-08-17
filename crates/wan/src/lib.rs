@@ -28,6 +28,7 @@
 //! file the checkpoint ships.
 
 pub mod block;
+pub mod caps;
 pub mod config;
 pub mod dev;
 pub mod import;
@@ -40,5 +41,5 @@ pub use block::{AttnMode, WanBlock};
 pub use config::{Task, WanConfig};
 pub use dev::WanDitDev;
 pub use model::WanDit;
-pub use pipeline::{generate, GenOpts, Paths, Solver, Timings, Video};
+pub use pipeline::{generate, generate_hot, GenOpts, HotDit, Paths, Solver, Timings, Video};
 pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};

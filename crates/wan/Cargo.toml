@@ -10,6 +10,9 @@ name = "wan"
 path = "src/lib.rs"
 
 [dependencies]
+# The serving surface: the manifest/action types `caps.rs` declares, and the
+# cancel token a multi-minute generation has to poll.
+brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
@@ -22,6 +25,7 @@ brain-paramstore.workspace = true
 brain-diffusion.workspace = true
 brain-t5encoder.workspace = true
 brain-data.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

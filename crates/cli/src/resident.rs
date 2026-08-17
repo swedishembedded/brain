@@ -111,6 +111,13 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER)");
     }
+    // Wan2.1 text-to-video (BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}): a resident
+    // transformer per (variant, frames, size) - see resident_wan.rs.
+    if let Some(w) = crate::resident_wan::WanResident::from_env() {
+        models.push(Arc::new(w));
+    } else {
+        eprintln!("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
+    }
     // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));

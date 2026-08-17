@@ -29,6 +29,12 @@
 //! phase 1 as two `[512, 4096]` f32 blocks (16 MB), which is the whole point of
 //! doing it first.
 //!
+//! [`generate_hot`] is the one deliberate exception: a server that answers
+//! more than one request keeps the DiT resident across calls (and therefore
+//! across the VAE decode), trading the phase-2/phase-3 separation for not
+//! re-uploading 5.7 GB per request. [`generate`] - the one-shot path - is
+//! unchanged and still frees each stage before the next allocates.
+//!
 //! ## Reproducibility
 //!
 //! `--seed` selects the initial noise through [`data::rng::Rng`] (SplitMix64 +
@@ -274,14 +280,89 @@ fn seeded_noise(n: usize, seed: u64) -> Vec<f32> {
     (0..n).map(|_| rng.next_gaussian() as f32).collect()
 }
 
+/// What fixes a built [`WanDitDev`]: the variant, the latent extent
+/// `(frames, height, width)` the RoPE tables and every buffer are sized from,
+/// and the device it was built on. Nothing else in [`GenOpts`] changes the
+/// graph - prompt, seed, steps, guidance, solver and negative prompt are all
+/// per-call, which is exactly what makes a resident DiT worth holding.
+pub type DitKey = (&'static str, usize, usize, usize, Option<String>);
+
+/// The four host tensors [`crate::model::text_embed`] reads. They have to
+/// outlive the imported checkpoint (~35 MB against the DiT's 5.7 GB), because
+/// the text MLP runs per generation while the weight map is dropped right
+/// after the device build.
+const TEXT_MLP_TENSORS: [&str; 4] = ["text_embedding.0.weight", "text_embedding.0.bias", "text_embedding.2.weight", "text_embedding.2.bias"];
+
+/// A DiT kept resident across generations, for a server that answers more than
+/// one request (`wan::caps`, `resident_wan`). Holding it is worth roughly 20 s
+/// of load plus 5.7 GB of upload per call at 1.3B.
+///
+/// The VAE is deliberately NOT cached alongside it: it is 508 MB and its
+/// decoder graph is sized from the same latent extent, so caching it would
+/// change the "the three models are never resident together" staging this
+/// module is built around for a fraction of the win.
+pub struct HotDit {
+    key: DitKey,
+    dev: WanDitDev,
+    text_mlp: crate::model::Tensors,
+}
+
+impl HotDit {
+    pub fn key(&self) -> &DitKey {
+        &self.key
+    }
+}
+
 /// Text to video. `progress(done, total, phase)` is called before each phase
 /// and once per denoise step; a multi-minute silent run reads as a hang, so
-/// this is not optional decoration.
+/// this is not optional decoration. `cancel` is polled once per denoise step
+/// and between phases - a 57-minute generation that cannot be interrupted is
+/// not something a server can host.
 pub fn generate(
     cfg: &WanConfig,
     paths: &Paths,
     prompt: &str,
     o: &GenOpts,
+    cancel: &capability::CancelToken,
+    progress: impl FnMut(u32, u32, &str),
+) -> Result<(Video, Timings), String> {
+    // A one-shot caller (the CLI) has nothing to reuse: the cache is local,
+    // and `keep = false` frees the DiT before the VAE builds, exactly as this
+    // pipeline did before the cache existed.
+    let mut hot = None;
+    run(cfg, paths, prompt, o, cancel, &mut hot, false, progress)
+}
+
+/// [`generate`], reusing (and refreshing) a caller-owned resident DiT. `hot`
+/// is replaced whenever the request's [`DitKey`] differs from the built one -
+/// and replaced by DROPPING FIRST, so the old weights are freed before the new
+/// ones are allocated rather than both being resident at the swap.
+///
+/// **This holds the DiT across the VAE decode**, which [`generate`] does not:
+/// keeping it resident is the entire point, but it means a caller here must
+/// budget the DiT and the VAE decoder together (see `resident_wan`'s
+/// `estimate`), where the one-shot path only ever holds one of them.
+pub fn generate_hot(
+    cfg: &WanConfig,
+    paths: &Paths,
+    prompt: &str,
+    o: &GenOpts,
+    cancel: &capability::CancelToken,
+    hot: &mut Option<HotDit>,
+    progress: impl FnMut(u32, u32, &str),
+) -> Result<(Video, Timings), String> {
+    run(cfg, paths, prompt, o, cancel, hot, true, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(
+    cfg: &WanConfig,
+    paths: &Paths,
+    prompt: &str,
+    o: &GenOpts,
+    cancel: &capability::CancelToken,
+    hot: &mut Option<HotDit>,
+    keep: bool,
     mut progress: impl FnMut(u32, u32, &str),
 ) -> Result<(Video, Timings), String> {
     let (pt, ph, pw) = cfg.patch_size;
@@ -313,19 +394,35 @@ pub fn generate(
     let (ctx_cond, ctx_uncond) = encode_text(cfg, paths, o, prompt, &negative)?;
     timings.text = t.elapsed().as_secs_f32();
 
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+
     // ---- phase 2: denoise ------------------------------------------------
-    progress(1, total, "load transformer");
+    let key: DitKey = (cfg.name, lf, lh, lw, o.device.clone());
     let t = Instant::now();
-    let raw = read_any(&paths.dit)?;
-    let weights = crate::import::import_dit(raw, cfg)?;
-    // The text MLP runs on the host from these tensors, so both prompts are
-    // embedded HERE, while the map is still alive and before the loop starts.
-    let emb_cond = crate::model::text_embed(cfg, &weights, &ctx_cond, cfg.text_len);
-    let emb_uncond = crate::model::text_embed(cfg, &weights, &ctx_uncond, cfg.text_len);
+    if !matches!(hot.as_ref(), Some(h) if h.key == key) {
+        progress(1, total, "load transformer");
+        *hot = None; // free the old resident weights BEFORE building new
+        let raw = read_any(&paths.dit)?;
+        let weights = crate::import::import_dit(raw, cfg)?;
+        // The text MLP runs on the host from these four tensors, and it runs
+        // once per generation - so they are kept while the rest of the 5.7 GB
+        // map is dropped at the end of this block.
+        let mut text_mlp = crate::model::Tensors::new();
+        for name in TEXT_MLP_TENSORS {
+            let t = weights.get(name).ok_or_else(|| format!("wan: checkpoint has no {name}"))?;
+            text_mlp.insert(name.to_string(), t.clone());
+        }
+        let dev = WanDitDev::build(cfg, &weights, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[]);
+        *hot = Some(HotDit { key, dev, text_mlp });
+    }
+    let resident = hot.as_ref().expect("just built");
+    let dit = &resident.dev;
+    let emb_cond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_cond, cfg.text_len);
+    let emb_uncond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_uncond, cfg.text_len);
     drop(ctx_cond);
     drop(ctx_uncond);
-    let dit = WanDitDev::build(cfg, &weights, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[]);
-    drop(weights);
     timings.load_dit = t.elapsed().as_secs_f32();
 
     let mut latent = seeded_noise(n_latent, o.seed);
@@ -336,14 +433,14 @@ pub fn generate(
             let mut s = diffusion::flowsolvers::FlowUniPcScheduler::new(Default::default());
             s.set_timesteps(o.steps, o.shift as f64);
             let ts = s.timesteps().to_vec();
-            latent = denoise(&dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, &mut progress)?;
+            latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, &mut progress)?;
             ts
         }
         Solver::DpmPp => {
             let mut s = diffusion::flowsolvers::FlowDpmSolverPlusPlusScheduler::new(Default::default());
             s.set_timesteps(o.steps, o.shift as f64);
             let ts = s.timesteps().to_vec();
-            latent = denoise(&dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, &mut progress)?;
+            latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, &mut progress)?;
             ts
         }
     };
@@ -351,9 +448,18 @@ pub fn generate(
     timings.steps = timesteps.len();
     timings.tokens = tokens;
     timings.forwards_per_step = if cfg_on { 2 } else { 1 };
-    drop(dit);
 
     // ---- phase 3: decode -------------------------------------------------
+    // The one-shot path frees the DiT here, before the VAE decoder allocates
+    // anything - at 81 frames of 832x480 the decode's own activations are the
+    // largest single allocation this pipeline makes, and 5.7 GB of transformer
+    // nobody will read again is not something to hold next to it.
+    if !keep {
+        *hot = None;
+    }
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
     progress(total - 1, total, "vae decode");
     let t = Instant::now();
     let vcfg = WanVaeConfig::wan21();
@@ -439,10 +545,19 @@ fn denoise(
     o: &GenOpts,
     cfg_on: bool,
     total: u32,
+    cancel: &capability::CancelToken,
     progress: &mut impl FnMut(u32, u32, &str),
 ) -> Result<Vec<f32>, String> {
     let t0 = Instant::now();
     for (i, &t) in timesteps.iter().enumerate() {
+        // Once per step, not once per forward: a forward is a single submit of
+        // the whole block stack and is not interruptible from here, so the
+        // step boundary is the finest granularity that means anything. At 46
+        // s/forward that is a worst case of ~1.5 min to abort a run whose
+        // total is an hour.
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         // The context buffer is shared by both forwards, so the two uploads
         // have to bracket their own forward - hoisting either one out of the
         // loop silently conditions every step on whichever prompt was last.
@@ -548,12 +663,12 @@ mod tests {
         let cfg = WanConfig::t2v_1_3b();
         let paths = Paths { dit: "/nope".into(), vae: "/nope".into(), t5: "/nope".into(), tokenizer: "/nope".into() };
         let o = GenOpts { frames: 8, width: 128, height: 128, ..GenOpts::from_config(&cfg) };
-        let e = generate(&cfg, &paths, "x", &o, |_, _, _| {}).err().expect("must be rejected");
+        let e = generate(&cfg, &paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("1 + 4k"), "{e}");
 
         // Same for a size the patch grid cannot tile.
         let o = GenOpts { frames: 9, width: 130, height: 128, ..GenOpts::from_config(&cfg) };
-        let e = generate(&cfg, &paths, "x", &o, |_, _, _| {}).err().expect("must be rejected");
+        let e = generate(&cfg, &paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("multiple of"), "{e}");
     }
 
@@ -602,7 +717,7 @@ mod tests {
         // 0.0 unconditional.
         let (cond, uncond) = (vec![1.0f32; 4], vec![0.0f32; 4]);
         let ts = [999.0f32, 500.0];
-        let out = denoise(&dit, &mut sched, vec![0.0; 4], &ts, &cond, &uncond, &o, guidance > 1.0, 9, &mut |_, _, _: &str| {})
+        let out = denoise(&dit, &mut sched, vec![0.0; 4], &ts, &cond, &uncond, &o, guidance > 1.0, 9, &Default::default(), &mut |_, _, _: &str| {})
             .expect("the fake denoiser is finite");
         assert_eq!(out.len(), 4);
         let seen = dit.seen.borrow().clone();
@@ -634,6 +749,37 @@ mod tests {
         for p in &preds {
             assert!(p.iter().all(|&v| v == 1.0), "{p:?}");
         }
+    }
+
+    /// The denoise loop aborts at the next step boundary when the token is
+    /// flipped, and reports the exact string the D-Bus `Cancel` surface
+    /// expects. A 57-minute generation that ignores this is not servable.
+    #[test]
+    fn a_cancelled_denoise_aborts_at_the_next_step_and_says_so() {
+        let cfg = WanConfig::t2v_1_3b();
+        let o = GenOpts { guidance: 1.0, ..GenOpts::from_config(&cfg) };
+        let dit = FakeDit { seen: Default::default(), ctx: std::cell::Cell::new(f32::NAN) };
+        let mut sched = FakeSched(Default::default());
+        let (cond, uncond) = (vec![1.0f32; 4], vec![0.0f32; 4]);
+        let ts = [999.0f32, 750.0, 500.0, 250.0];
+        let cancel = capability::CancelToken::armed();
+        let handle = cancel.clone();
+        let err = denoise(&dit, &mut sched, vec![0.0; 4], &ts, &cond, &uncond, &o, false, 9, &cancel, &mut |step, _, _: &str| {
+            if step == 2 {
+                handle.cancel();
+            }
+        })
+        .expect_err("must abort");
+        assert_eq!(err, "cancelled");
+        // Step 0 ran, its progress callback flipped the token, step 1 refused:
+        // one forward, not four.
+        assert_eq!(dit.seen.borrow().len(), 1);
+
+        // An unarmed (Default) token never fires, so nothing else changes.
+        let dit = FakeDit { seen: Default::default(), ctx: std::cell::Cell::new(f32::NAN) };
+        let mut sched = FakeSched(Default::default());
+        denoise(&dit, &mut sched, vec![0.0; 4], &ts, &cond, &uncond, &o, false, 9, &Default::default(), &mut |_, _, _: &str| {}).expect("uncancelled runs to completion");
+        assert_eq!(dit.seen.borrow().len(), 4);
     }
 
     #[test]

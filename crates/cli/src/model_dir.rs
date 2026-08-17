@@ -34,9 +34,14 @@
 //! `checkpoint::save`, which never carries one) for a checkpoint to be
 //! reachable here at all — a `from_card` resident constructor alone is not
 //! enough (`gpt`/`glm` had working dispatch arms for a while with no carded
-//! checkpoint ever able to reach them). Single-file models only: `z-image`
-//! and `flux2` are each FOUR distinct-role files (DiT/VAE/text-encoder/
-//! tokenizer) with no directory/manifest registration shape here yet.
+//! checkpoint ever able to reach them).
+//!
+//! A model that is FOUR distinct-role files (DiT/VAE/text-encoder/tokenizer)
+//! has no single weights path, so it registers through
+//! [`resident_for_compound`] instead, keyed on the roles a
+//! `brain.manifest.json` names: `zimage` and `wan` today. `flux2` is the same
+//! shape and still has no arm there -- it is reachable only through its own
+//! `BRAIN_FLUX2_*` variables.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -304,6 +309,15 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
                 None
             }
         },
+        "wan" => match wan_paths_from_roles(roles) {
+            // Unlike zimage's, this construction cannot fail: the four roles
+            // ARE the model, and the weights are read lazily at activate().
+            Ok(paths) => Some(Arc::new(crate::resident_wan::WanResident::from_paths(card.id.clone(), paths))),
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
         other => {
             eprintln!("brain: skip {} (compound family '{other}' not servable from the model dir yet)", card.id);
             None
@@ -318,6 +332,17 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
 fn zimage_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<s3dit::pipeline::Paths, String> {
     let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
     Ok(s3dit::pipeline::Paths { dit: get("dit")?, vae: get("vae")?, qwen: get("text_encoder")?, tokenizer: get("tokenizer")? })
+}
+
+/// Build a `wan::Paths` from a compound manifest's roles -- the SAME role
+/// names `brain_modelstore::recipe::WanRecipe::ROLES` writes, from a
+/// `brain.manifest.json` this crate's `supply::convert_wan` produced. The
+/// `text_encoder` role is umT5-XXL rather than z-image's Qwen, but the role
+/// NAMES are deliberately the same four as zimage's, so the two compound
+/// families read alike.
+fn wan_paths_from_roles(roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<wan::Paths, String> {
+    let get = |role: &str| roles.get(role).and_then(|p| p.to_str()).map(str::to_string).ok_or_else(|| format!("compound manifest missing role {role:?}"));
+    Ok(wan::Paths { dit: get("dit")?, vae: get("vae")?, t5: get("text_encoder")?, tokenizer: get("tokenizer")? })
 }
 
 #[cfg(test)]

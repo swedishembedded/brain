@@ -167,7 +167,11 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // size is minutes on a P40, and a silent run is indistinguishable from a
     // hang.
     let t0 = std::time::Instant::now();
-    let (video, timings) = wan::generate(&cfg, &paths, &prompt, &o, |done, total, phase| {
+    // A one-shot CLI run has no second party to cancel it: Ctrl-C already
+    // ends the process. The unarmed `Default` token never fires, so the
+    // per-step poll the served path needs costs this path nothing.
+    let cancel = capability::CancelToken::default();
+    let (video, timings) = wan::generate(&cfg, &paths, &prompt, &o, &cancel, |done, total, phase| {
         eprint!("\rwan [{done}/{total}] {phase}                    ");
     })?;
     eprintln!();

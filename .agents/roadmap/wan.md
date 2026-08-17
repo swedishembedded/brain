@@ -257,11 +257,25 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         crate's own stated answer) is what would put it on the card;
       * 81 frames at 480p is 32,760 tokens, 5.4x the attention work of the
         measured point, so the flagship configuration is hours today.
-- [ ] **`capability::Media::Video`**. There is no video media type, and
-      `.agents/rules/serving-contract.md` section 4 requires extending `Media`
-      and the D-Bus frame handling rather than adding a side channel. This is a
-      breaking enum change across `capability`, `dbus`, `apiserve`, `cli` and
-      `server`, so it wants its own commit ahead of `caps.rs`.
+- [x] **`capability::Media::Video`**, landed ahead of `caps.rs` as its own unit
+      of work, exactly as `.agents/rules/serving-contract.md` section 4 asks --
+      extending `Media` rather than adding a side channel. Three things it
+      turned out to be:
+      * the wire format already existed (`blob::video_blob` /
+        `decode_video_hwc`, written for Qwen3-Omni's video INPUT) and was
+        tagged `Media::Bytes` with a comment saying "there is no
+        `Media::Video`". So this is a retag plus a rename to `decode_video`
+        (the `decode_image` parallel), not a new codec. `decode_video` still
+        accepts an untyped `Bytes` payload, the same leniency `decode_hwc`
+        gives images, so a client that sends no media tag is unaffected.
+      * **the D-Bus layer needed no change at all**: it carries the media kind
+        as its `Media::parse`-able string, so a new variant rides the existing
+        frames. That is the design working -- it is also why the change had to
+        be `Media`, not a bespoke channel.
+      * the CLI DID need real work: `caps_cli`'s `load_blob`/`save_blob` had a
+        `_ => raw bytes` catch-all, so `--out video=out.mp4` would have written
+        f32 frames into a file no player opens (the exact bug the audio arm
+        exists to fix). Both arms now go through `imaging::video`.
 - [x] **Video encoding.** `imaging::video::encode_frames`, the mirror image of
       `decode_frames`: numbered PPMs into a temp directory, one `ffmpeg`
       invocation, `-pix_fmt yuv420p` forced so the file plays outside the tool
@@ -276,6 +290,59 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         the job;
       * **odd dimensions are padded, loudly.** 4:2:0 cannot represent them;
         libx264 rejects the stream and other encoders quietly drop a row.
+- [x] **The serving contract** (`.agents/rules/serving-contract.md`), all five
+      obligations: `crates/wan/src/caps.rs` (a weights-free manifest with one
+      `t2v` action whose defaults ARE `WanConfig`'s), `crates/cli/src/
+      resident_wan.rs` (residency), the D-Bus surface (unchanged - `t2v` is a
+      `Subscribe` job and a `Cancel`able one) with `examples/videogen/`, and a
+      catalog row so `brain caps` / `brain do brain/wan t2v` reach the same
+      manifest the scheduler serves. Four things worth keeping:
+      * **Cancellation is the obligation that bites here.** The measured run is
+        57.5 minutes; `pipeline::denoise` now polls `inv.cancel` once per step
+        (not per forward - a forward is one submit of the whole block stack and
+        is not interruptible from the host), so the worst-case abort latency is
+        one step, ~1.5 min at 480p.
+      * **The hot cache is the DiT alone** (`pipeline::HotDit`), keyed on
+        `(variant, latent extent, device)` - the only things that fix the built
+        graphs. The umT5 encoder cannot be resident (22.72 GB) and the VAE is
+        508 MB against the DiT's 5.7 GB, so caching either would trade the
+        "three models are never resident together" staging for very little.
+        `generate` (one-shot, the CLI) still frees each stage before the next
+        allocates; `generate_hot` (served) holds the DiT across the VAE decode
+        and `resident_wan::estimate` budgets both together.
+      * **`run_batch` is sequential, and says so.** What the batch shares is the
+        expensive thing - one resident DiT for every job at the key. What it
+        cannot share is the forward: the engine records one graph for one latent
+        volume and holds ONE context buffer, which the CFG loop already
+        re-uploads between its own two forwards. A real batched forward means a
+        batch axis through the engine, RoPE and the flash slabs; at 46 s per
+        forward that is a measurement-led change, not a wiring one.
+      * **`brain/wan` needs no `ARCH_HANDLER_CATALOG_ID_OVERRIDES` row**,
+        unlike flux2: the catalog id is `brain/<arch id>`, the pattern
+        `caps_cli` already assumes.
+- [x] **GGUF import**: one `GgufArchitectureImporter` impl plus one line in
+      `crates/cli/src/gguf_import.rs`'s `IMPORTERS`, delegating to
+      `wan::import::import_gguf`. DiT only, like s3dit's - a Wan GGUF is the
+      transformer alone, so it replaces one of four roles rather than standing
+      on its own. Two things it does differently:
+      * **No `AMBIGUOUS_TAG_EXCEPTIONS` row.** s3dit needs one because its tag
+        (`lumina2`) is shared with real Lumina2 releases and `brain_arch`
+        therefore refuses to claim it; `wan`'s id IS its GGUF spelling, so
+        `by_gguf("wan")` resolves and the registry's own drift test passes
+        without an exception.
+      * **The variant is read off the tensor shapes**
+        (`dit_config_from_shapes`), not off a KV field: a repacked GGUF can
+        carry any metadata, but it cannot carry the wrong
+        `patch_embedding.weight` and still be loadable. `(dim, num_layers)`
+        separates the T2V tiers; a 36-channel patch embedding is an I2V
+        checkpoint and is refused by name rather than imported into a pipeline
+        that does not exist. Both name spaces resolve, since the diffusers
+        export renames every leaf but that one tensor.
+      **Coverage is honest and incomplete**: there is no Wan GGUF on this
+      machine and none was downloaded, so the dequantize -> `import_dit` ->
+      safetensors path has never run against real quantized bytes. The tests
+      are synthetic (dispatch by tag, variant derivation over the full 825-name
+      manifest in both spellings, and the refusals), and say so.
 - [ ] **Training + LoRA** (`grad.rs`, `modelgrad.rs`, `devgrad.rs`, `train.rs`,
       `lora.rs`, `finetune.rs`) and `gradcheck::check_wan`.
 - [ ] **I2V branch**: 36-channel input (16 latent + 4 mask + 16 conditioning
@@ -332,6 +399,28 @@ with a VAE and text encoder from `Wan-AI/` cannot be expressed, which is the
 same limitation `.agents/roadmap/s3dit.md` records. Choosing the *native*
 `Wan-AI/Wan2.1-T2V-1.3B` repo as `default_ref` sidesteps it entirely for the
 default path, because that one repo carries all four roles.
+
+**Auto-fetch reached that bar** with `modelstore::recipe::WanRecipe` + a
+`convert_wan` finish step + a `wan` arm in `model_dir::resident_for_compound`.
+The failure it fixes is worth recording, because the diagnosis was not the
+obvious one: the flagless command reported
+`Wan-AI/Wan2.1-T2V-1.3B: unsupported architecture "t2v"`, which reads like a
+missing `brain_arch` row. It was not. That repo DOES ship a root `config.json`
+- 249 bytes, `{"_class_name": "WanModel", "model_type": "t2v", ...}` with no
+`architectures` key - so `TransformersRecipe` (the catch-all) claimed it,
+`declared_architecture` fell back to `model_type`, and the gate rejected
+`"t2v"`. The fix is a recipe with first refusal, not a wider architecture
+table: adding `"t2v"` to `Arch::hf` would have made the catch-all fetch the
+curated transformers file set, which for this repo is `config.json` and
+nothing else.
+
+Two shapes it handles, confirmed against the live HF listing rather than the
+local checkout (which is a deliberately partial `allow_patterns` download and
+therefore evidence of nothing): the 1.3B tier's single
+`diffusion_pytorch_model.safetensors`, and the 14B tiers' six-way shard set
+plus index - where the `dit` role becomes the repo directory itself, since
+`checkpoint::safetensors::read_model_dir` follows the index there and reads
+only the shards, never the two `.pth` siblings.
 
 ## Scope that collapsed once the reference was read
 

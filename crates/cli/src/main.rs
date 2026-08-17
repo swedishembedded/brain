@@ -51,6 +51,7 @@ mod resident_omni;
 mod resident_qwen35moe;
 mod resident_tts;
 mod resident_upscale;
+mod resident_wan;
 mod resident_clip;
 mod resident_scrfd;
 mod resident_arcface;

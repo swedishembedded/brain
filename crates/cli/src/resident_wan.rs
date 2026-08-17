@@ -1,0 +1,280 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Wan2.1 text-to-video behind the residency scheduler
+//! (`resident::build_executor`).
+//!
+//! A resident instance is a built transformer for one
+//! `(variant, frames, WxH)` fingerprint - the only things that fix the DiT's
+//! graphs and buffer sizes - held across requests by
+//! `wan::pipeline::HotDit`; dropping the instance frees it. All action
+//! execution goes through the shared helpers in `wan::caps`, so this adapter
+//! and `WanProvider` cannot decode a request differently.
+//!
+//! The umT5 encoder and the VAE decoder are deliberately NOT resident: umT5
+//! is 22.72 GB in fp32 and provably does not fit next to the DiT on a 24 GB
+//! card (it defaults to the CPU for exactly that reason), and the VAE is 508
+//! MB against the DiT's 5.7 GB. What residency buys here is the transformer
+//! load and upload, which is what a second request actually re-pays.
+
+use capability::{ActionResult, Invocation, Manifest, Progress};
+use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+
+/// Wan resident model family, gated on the four weight env vars
+/// (`BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}`).
+pub struct WanResident {
+    /// The id this registers under. `wan::caps::MODEL` for the env-configured
+    /// build, but a FETCHED checkpoint registers under its own reference
+    /// (`Wan-AI/Wan2.1-T2V-1.3B`) - a client that asked the supplier for that
+    /// name has to find it afterwards, and the compiled-in constant would
+    /// leave the request that triggered the fetch looking at nothing. Same
+    /// reason `ZImageResident::from_paths` takes an id.
+    id: String,
+    paths: wan::Paths,
+}
+
+impl WanResident {
+    /// `None` (not registered) unless all four `BRAIN_WAN_*` vars are set.
+    pub fn from_env() -> Option<WanResident> {
+        wan::Paths::from_env().ok().map(|paths| WanResident { id: wan::caps::MODEL.to_string(), paths })
+    }
+
+    /// The same adapter over explicitly-named role paths - what a fetched
+    /// compound checkpoint's `brain.manifest.json` supplies
+    /// (`crate::model_dir::wan_paths_from_roles`), with no `BRAIN_WAN_*`
+    /// variable involved anywhere. `id` is the checkpoint's own model-card id.
+    pub fn from_paths(id: String, paths: wan::Paths) -> WanResident {
+        WanResident { id, paths }
+    }
+}
+
+/// `(variant, frames, width, height)` from an instance key
+/// (`"{variant}:{frames}:{w}x{h}"`). `None` if the key does not parse.
+fn parse_key(config: &str) -> Option<(String, usize, usize, usize)> {
+    let mut it = config.split(':');
+    let variant = it.next()?.to_string();
+    let frames: usize = it.next()?.parse().ok()?;
+    let (w, h) = it.next()?.split_once('x')?;
+    Some((variant, frames, w.parse().ok()?, h.parse().ok()?))
+}
+
+impl ResidentModel for WanResident {
+    fn manifest(&self) -> Manifest {
+        // The shared schema, under THIS instance's own id -- see `id`'s doc.
+        Manifest { model: self.id.clone(), ..wan::caps::manifest() }
+    }
+
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        // Exactly the fields `wan::pipeline::DitKey` is built from: the
+        // variant and the latent extent. Steps, seed, guidance, solver and
+        // the prompts are per-call and must NOT split the instance - a
+        // different seed re-uploading 5.7 GB would defeat residency entirely.
+        let variant = inv.get_str("variant").unwrap_or_else(|| "t2v-1.3B".into());
+        let d = wan::GenOpts::from_config(&wan::WanConfig::t2v_1_3b());
+        let frames = inv.get_i64("frames").unwrap_or(d.frames as i64);
+        let w = inv.get_i64("width").unwrap_or(d.width as i64);
+        let h = inv.get_i64("height").unwrap_or(d.height as i64);
+        InstanceKey::new(&self.id, format!("{variant}:{frames}:{w}x{h}"))
+    }
+
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        // Derived, not measured-and-hardcoded: the two terms that actually
+        // scale are the fp32 weights (a function of the variant) and the
+        // resident token slabs (a function of the latent extent), and both
+        // are computable from the key.
+        //
+        // The measured reference point this is calibrated against is the
+        // 480p/81-frame 1.3B run: 5.2 GB of weights, 32,760 tokens.
+        let Some((variant, frames, w, h)) = parse_key(&key.config) else {
+            // An unparseable key must not read as "free"; charge the 1.3B
+            // default rather than 0.
+            return MemCost::new(8u64 << 30, 4u64 << 30);
+        };
+        let cfg = wan::caps::config_from_name(&variant).unwrap_or_else(|_| wan::WanConfig::t2v_1_3b());
+        let tokens = cfg.token_count(frames, w, h).unwrap_or(0) as u64;
+        // Parameter count, closed form over the block stack rather than a
+        // measured constant per variant: per block, EIGHT dim*dim projections
+        // (q/k/v/o for self- AND cross-attention - cross-attention's k/v are
+        // dim*dim too, because the text is projected to `dim` by
+        // `text_embedding` before any block sees it) plus the two dim*ffn_dim
+        // feed-forward matrices. Everything else (biases, norms, the timestep
+        // MLPs, the head) is a rounding error. The one non-block term worth
+        // keeping is `text_embedding.0`, which is dim*text_dim.
+        let (dim, ffn, layers, text_dim) = (cfg.dim as u64, cfg.ffn_dim as u64, cfg.num_layers as u64, cfg.text_dim as u64);
+        let params = layers * (8 * dim * dim + 2 * dim * ffn) + dim * text_dim;
+        let weights = params * 4;
+        // Two alternating `[tokens, dim]` residual slabs plus the block
+        // scratch the engine keeps live; the VAE decoder's own activations
+        // are the other large allocation and are charged here too, since
+        // `generate_hot` holds the DiT across the decode.
+        let activations = tokens * dim * 4 * 8;
+        let vae = (frames as u64 * w as u64 * h as u64 * 3 * 4) * 4;
+        // Host side: the imported checkpoint is materialized before upload,
+        // plus staging. The umT5 encoder's own ~22.72 GB fp32 host peak is
+        // deliberately NOT charged here: it is per-request and transient (the
+        // encoder is built, run and dropped before the DiT is touched), and
+        // `MemCost` has no way to say "transient peak" - reserving it for the
+        // instance's whole life would make this model unplaceable on any box
+        // that can actually run it, which is a worse failure than not knowing
+        // about a peak the pipeline itself is structured to survive.
+        MemCost::new(weights + activations + vae, weights + (2u64 << 30))
+    }
+
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        let (variant, _, _, _) = parse_key(&key.config).ok_or_else(|| format!("wan: bad instance key {:?}", key.config))?;
+        // Validate the variant at activation, not at the first run: a key
+        // naming a variant this build cannot construct should fail placement
+        // rather than a request.
+        wan::caps::config_from_name(&variant)?;
+        // The DiT itself is built lazily, on the first run, because building
+        // it needs the request's own latent extent AND its text conditioning
+        // ordering (the text encoder must run and be dropped first - see
+        // `wan::pipeline`'s memory note). What `activate` fixes is the device.
+        Ok(Box::new(WanInstance { paths: self.paths.clone(), device, hot: None }))
+    }
+}
+
+/// A resident Wan instance: the four weight paths, the assigned device, and
+/// the transformer once a request has built it.
+struct WanInstance {
+    paths: wan::Paths,
+    device: Device,
+    hot: Option<wan::HotDit>,
+}
+
+impl WanInstance {
+    /// The `device` string `wan::GenOpts` takes for the scheduler's placement.
+    /// A CPU placement is a real (very slow) answer, not an error; an NPU has
+    /// no Wan path, so it falls back to the ambient default rather than
+    /// claiming one.
+    fn device_name(&self) -> Option<String> {
+        match self.device {
+            Device::Cpu => Some("cpu".to_string()),
+            Device::Gpu(_) => Some("gpu".to_string()),
+            Device::Npu(_) => None,
+        }
+    }
+}
+
+impl Instance for WanInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        match action {
+            "t2v" => {
+                let mut p = wan::caps::gen_params_from(inv)?;
+                p.opts.device = self.device_name();
+                crate::resident_llm::on_device(self.device, || wan::caps::generate_on(&self.paths, &mut self.hot, inv, &p, progress))?
+            }
+            other => Err(format!("wan: unknown action '{other}'")),
+        }
+    }
+
+    /// Sequential, deliberately - and this override exists to say so rather
+    /// than to inherit the default silently.
+    ///
+    /// What a batch CAN share here is the expensive thing: every job at this
+    /// key runs against the SAME resident `HotDit`, so N requests pay one
+    /// load and one 5.7 GB upload between them. What it cannot share is the
+    /// forward. `wan::dev::WanDitDev` records one graph for one latent volume
+    /// and holds ONE context buffer, which the CFG loop already has to
+    /// re-upload between its own two forwards
+    /// (`wan::pipeline::denoise`'s bracketing note) - so two jobs with
+    /// different prompts cannot be in flight against it at once, and a real
+    /// batched forward means a batch axis through the engine, the RoPE tables
+    /// and the flash-attention slabs. At 32,760 tokens and ~46 s per forward
+    /// that is a measurement-led change, not a wiring one.
+    ///
+    /// Per-request cancellation still works: each job's own `inv.cancel` is
+    /// polled inside its own denoise loop, so cancelling job 2 does not
+    /// disturb job 1.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn resident() -> WanResident {
+        WanResident::from_paths(wan::caps::MODEL.to_string(), wan::Paths { dit: "/dit".into(), vae: "/vae".into(), t5: "/t5".into(), tokenizer: "/tok".into() })
+    }
+
+    /// The key must fix the built graphs and NOTHING else: two requests that
+    /// differ only in seed/steps/guidance/prompt share one instance, which is
+    /// the whole point of holding 5.7 GB resident.
+    #[test]
+    fn the_instance_key_is_exactly_the_variant_and_the_latent_extent() {
+        let r = resident();
+        let base = Invocation::new().set("prompt", json!("a"));
+        let a = r.instance_key("t2v", &base);
+        assert_eq!(a.config, "t2v-1.3B:81:832x480", "the defaults must key on the manifest's own defaults");
+        let b = r.instance_key("t2v", &Invocation::new().set("prompt", json!("something else")).set("seed", json!(7)).set("steps", json!(3)).set("guidance", json!(1.0)).set("solver", json!("dpm++")));
+        assert_eq!(a.config, b.config, "per-call params must not split the instance");
+        // Anything that resizes the latent volume, or changes the weights, must.
+        for (k, v) in [("frames", json!(9)), ("width", json!(256)), ("height", json!(256)), ("variant", json!("t2v-14B"))] {
+            assert_ne!(a.config, r.instance_key("t2v", &base.clone().set(k, v)).config, "{k} must split the instance");
+        }
+    }
+
+    #[test]
+    fn key_parsing_round_trips_and_a_bad_key_still_costs_something() {
+        assert_eq!(parse_key("t2v-1.3B:81:832x480"), Some(("t2v-1.3B".to_string(), 81, 832, 480)));
+        assert_eq!(parse_key("garbage"), None);
+        // An unparseable key must never estimate as free -- a 0-cost model is
+        // placeable anywhere, including where it does not fit.
+        let cost = resident().estimate(&InstanceKey::new(wan::caps::MODEL, "garbage".to_string()));
+        assert!(cost.vram > 0 && cost.ram > 0, "{cost:?}");
+    }
+
+    /// The estimate has to land on the real parameter counts, or the budget
+    /// means nothing. The closed form is checked against the numbers the
+    /// variants are NAMED for: 1.3 G and 14 G parameters.
+    #[test]
+    fn the_estimate_tracks_the_real_parameter_counts() {
+        let r = resident();
+        // Isolate the weight term by asking for the smallest representable
+        // clip, where activations and the VAE decode are negligible.
+        let params = |variant: &str| r.estimate(&InstanceKey::new(wan::caps::MODEL, format!("{variant}:1:16x16"))).vram / 4;
+        let g = 1_000_000_000u64;
+        let small = params("t2v-1.3B");
+        assert!((1_250_000_000..1_500_000_000).contains(&small), "t2v-1.3B must land near 1.3 G parameters, got {small}");
+        let big = params("t2v-14B");
+        assert!((13 * g..15 * g).contains(&big), "t2v-14B must land near 14 G parameters, got {big}");
+
+        // At a real clip size the total is still single-digit GB for 1.3B.
+        let gb = 1u64 << 30;
+        let full = r.estimate(&InstanceKey::new(wan::caps::MODEL, "t2v-1.3B:81:832x480".to_string()));
+        assert!((5 * gb..12 * gb).contains(&full.vram), "1.3B at 480p should be single-digit GB, got {} GB", full.vram / gb);
+        // A smaller clip costs less at the same weights.
+        let tiny = r.estimate(&InstanceKey::new(wan::caps::MODEL, "t2v-1.3B:9:256x256".to_string()));
+        assert!(tiny.vram < full.vram);
+    }
+
+    /// A key naming a variant this build cannot construct must fail placement,
+    /// not a request an hour later.
+    #[test]
+    fn activate_rejects_an_unknown_variant() {
+        // `.err()`, not `.unwrap_err()`: the Ok arm is a `Box<dyn Instance>`,
+        // which has no `Debug`.
+        let e = resident().activate(&InstanceKey::new(wan::caps::MODEL, "i2v-14B:81:832x480".to_string()), Device::Cpu).err().expect("an unknown variant must not activate");
+        assert!(e.contains("unknown wan variant"), "{e}");
+    }
+
+    /// The adapter and the provider must advertise the SAME manifest -- a
+    /// client that discovers over D-Bus and one that runs `brain do` are
+    /// looking at one model.
+    #[test]
+    fn the_adapter_advertises_the_shared_manifest() {
+        let m = resident().manifest();
+        assert_eq!(m.model, wan::caps::MODEL);
+        assert_eq!(m.actions.len(), wan::caps::manifest().actions.len());
+        // A FETCHED checkpoint advertises the same actions under its own
+        // reference: the request that triggered the fetch asked for that name,
+        // and the compiled-in constant would leave it finding nothing.
+        let fetched = WanResident::from_paths("Wan-AI/Wan2.1-T2V-1.3B".to_string(), wan::Paths { dit: "d".into(), vae: "v".into(), t5: "t".into(), tokenizer: "k".into() });
+        assert_eq!(fetched.manifest().model, "Wan-AI/Wan2.1-T2V-1.3B");
+        assert_eq!(fetched.manifest().actions.len(), m.actions.len());
+        assert_eq!(fetched.instance_key("t2v", &Invocation::new()).model, "Wan-AI/Wan2.1-T2V-1.3B");
+    }
+}
