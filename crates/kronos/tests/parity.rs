@@ -10,7 +10,7 @@
 //! the imported weights + the golden dump; skips otherwise so CI stays green.
 //! Regenerate goldens with `tools/goldens/kronos_dump_reference.py`.
 
-use kronos::{import, KronosConfig, KronosTokenizerConfig};
+use kronos::{import, KronosTokenizerConfig};
 use std::path::Path;
 
 fn read_f32(p: &Path) -> Vec<f32> {
@@ -40,19 +40,17 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn tokenizer_and_decoder_match_the_reference() {
     let (Ok(tok_dir), Ok(dec_dir)) =
-        (std::env::var("KRONOS_TOKENIZER_DIR"), std::env::var("KRONOS_DECODER_DIR"))
+        (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER"))
     else {
-        eprintln!("KRONOS_TOKENIZER_DIR / KRONOS_DECODER_DIR unset; skipping Kronos parity");
-        return;
+        return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no Kronos parity");
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
     }
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let ctx_p = golden.join("t_context.f32");
     if !ctx_p.exists() {
-        eprintln!("golden dump missing; run tools/goldens/kronos_dump_reference.py — skipping");
-        return;
+        return brain_testutil::skip("golden dump missing; run tools/goldens/kronos_dump_reference.py");
     }
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(golden.join("t_meta.json")).unwrap()).unwrap();
@@ -65,17 +63,30 @@ fn tokenizer_and_decoder_match_the_reference() {
     let ref_recon = read_f32(&golden.join("t2_recon.f32"));
     let ref_logits = read_f32(&golden.join("t4_s1_logits.f32"));
 
-    // load both nets
+    // Load the decoder from ITS OWN config.json rather than
+    // `KronosConfig::default()`. The hardcoded default is the Kronos-small
+    // tier, so pointing this test at any other release used to fail deep in
+    // the importer with "embedding.emb_s1.weight has 851968 elems, expected
+    // 524288" -- a tensor-shape error where the real problem is "these
+    // goldens are not for this checkpoint". Now the tier is checked against
+    // the golden's own record of what produced it, and a mismatch is a
+    // MISSING FIXTURE (skip, or a hard failure under BRAIN_REQUIRE_FIXTURES),
+    // not a parity violation.
+    let (dec_cfg, dec_w) = import::load_decoder(&dec_dir).unwrap();
+    let golden_d_model = meta["d_model"].as_u64().map(|v| v as usize);
+    if golden_d_model != Some(dec_cfg.d_model) {
+        return brain_testutil::skip(&format!(
+            "golden dump is from a d_model={} Kronos decoder but BRAIN_KRONOS_DECODER is d_model={}; re-dump with tools/goldens/kronos_dump_reference.py against this checkpoint, or point at the matching tier",
+            golden_d_model.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            dec_cfg.d_model
+        ));
+    }
     let tok = kronos::KronosTokenizer::from_weights(
         KronosTokenizerConfig::default(),
         &import::load_hf(&KronosTokenizerConfig::default().param_list(), &tok_dir).unwrap(),
     )
     .unwrap();
-    let dec = kronos::KronosDecoder::from_weights(
-        KronosConfig::default(),
-        &import::load_hf(&KronosConfig::default().param_list(), &dec_dir).unwrap(),
-    )
-    .unwrap();
+    let dec = kronos::KronosDecoder::from_weights(dec_cfg, &dec_w).unwrap();
 
     // T1 — encode: integer-exact tokens
     let (s1, s2) = tok.encode(&context, t);

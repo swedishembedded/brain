@@ -14,7 +14,7 @@
 //! the host's client/server flakiness. Env-gated; skips without checkpoints + data.
 //!
 //! Env:
-//!   KRONOS_TOKENIZER_DIR, KRONOS_DECODER_DIR  — checkpoints (required)
+//!   BRAIN_KRONOS_TOKENIZER, BRAIN_KRONOS_DECODER  - checkpoints (required)
 //!   RANKIC_DATA   — dir of `<TICKER>.csv` (Date,open,high,low,close,volume)
 //!   RANKIC_OUT    — output JSON path
 //!   RANKIC_TICKERS — comma list, or "all" (default: all *.csv in RANKIC_DATA)
@@ -128,13 +128,11 @@ fn predict_return(
 
 #[test]
 fn rankic_backtest() {
-    let (Ok(tok), Ok(dec)) = (std::env::var("KRONOS_TOKENIZER_DIR"), std::env::var("KRONOS_DECODER_DIR")) else {
-        eprintln!("KRONOS_{{TOKENIZER,DECODER}}_DIR unset; skipping RankIC backtest");
-        return;
+    let (Ok(tok), Ok(dec)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) else {
+        return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no RankIC backtest");
     };
     let Ok(data) = std::env::var("RANKIC_DATA") else {
-        eprintln!("RANKIC_DATA unset; skipping RankIC backtest");
-        return;
+        return brain_testutil::skip("RANKIC_DATA unset; no RankIC backtest");
     };
     let out = std::env::var("RANKIC_OUT")
         .unwrap_or_else(|_| std::env::temp_dir().join("rankic.json").to_string_lossy().into_owned());

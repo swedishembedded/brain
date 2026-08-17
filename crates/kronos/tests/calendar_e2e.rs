@@ -4,7 +4,7 @@
 //! End-to-end calendar check (in-process, no server): run KronosForecaster on a
 //! real AAPL window WITH real daily calendar vs WITHOUT, and print both. With the
 //! calendar wired, the forecast should shift toward the official (real-calendar)
-//! result. Env-gated on `KRONOS_TOKENIZER_DIR` + `KRONOS_DECODER_DIR` and an AAPL
+//! result. Env-gated on `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` and an AAPL
 //! CSV at `$KRONOS_AAPL_CSV` (date,open,high,low,close,volume); skips otherwise.
 
 use forecast::{ForecastModel, ForecastSpec, Kind, Panel, Representation, Role, Variate};
@@ -30,16 +30,14 @@ fn samples_mean_last(fc: &forecast::Forecast) -> f32 {
 
 #[test]
 fn calendar_shifts_the_forecast_toward_the_official() {
-    let (Ok(tok), Ok(dec)) = (std::env::var("KRONOS_TOKENIZER_DIR"), std::env::var("KRONOS_DECODER_DIR")) else {
-        eprintln!("KRONOS_{{TOKENIZER,DECODER}}_DIR unset; skipping calendar e2e");
-        return;
+    let (Ok(tok), Ok(dec)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) else {
+        return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no calendar e2e");
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
     }
     let Ok(csv) = std::env::var("KRONOS_AAPL_CSV") else {
-        eprintln!("KRONOS_AAPL_CSV unset; skipping calendar e2e");
-        return;
+        return brain_testutil::skip("KRONOS_AAPL_CSV unset; no calendar e2e");
     };
     let Ok(text) = std::fs::read_to_string(&csv) else {
         eprintln!("no AAPL csv at {csv}; skipping");

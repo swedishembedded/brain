@@ -4,11 +4,13 @@
 //! T0 — the device-free parameter-layout gate for BOTH Kronos nets.
 //!
 //! Always-on: each `param_list()` is internally well-formed. Env-gated live
-//! gates: with `KRONOS_TOKENIZER_CKPT` / `KRONOS_DECODER_CKPT` pointing at the
+//! gates: with `BRAIN_KRONOS_TOKENIZER` / `BRAIN_KRONOS_DECODER` pointing at the
 //! real safetensors (single file or HF dir), assert `param_list()` matches the
 //! checkpoint's tensor header name-for-name and shape-for-shape (bar the known
-//! non-persistent BSQ / RoPE buffers). This is the mechanical diff that must
-//! pass before any kernel is written.
+//! non-persistent BSQ / RoPE buffers). Each config comes from the
+//! checkpoint's own `config.json`, so the gate holds for any release tier and
+//! `from_hf`'s parse is part of what it proves. This is the mechanical diff
+//! that must pass before any kernel is written.
 
 use kronos::{KronosConfig, KronosTokenizerConfig};
 use std::collections::{HashMap, HashSet};
@@ -37,12 +39,34 @@ fn is_non_persistent(name: &str) -> bool {
         || name.contains("rotary")
 }
 
-fn live_gate(env: &str, ours: HashMap<String, Vec<usize>>, label: &str) {
+/// The `param_list` for whatever tier `path` actually is, read from the
+/// checkpoint's OWN `config.json`.
+///
+/// This used to be `KronosConfig::default().param_list()` - the Kronos-small
+/// tier, hardcoded - so pointing the gate at any other release reported
+/// `shape mismatch for transformer.4.self_attn.v_proj.bias: left [832] right
+/// [512]`, which reads like a layout defect and is really "this is a different
+/// size of model". Deriving the config from the checkpoint makes the gate work
+/// on every tier AND widens what it proves: `from_hf`'s parse of the real
+/// `config.json` is now part of what has to line up, not just a constant.
+fn config_param_list(path: &std::path::Path, label: &str) -> Option<HashMap<String, Vec<usize>>> {
+    let cfg_path = if path.is_dir() { path.join("config.json") } else { path.parent()?.join("config.json") };
+    let bytes = std::fs::read(&cfg_path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(match label {
+        "tokenizer" => KronosTokenizerConfig::from_hf(&v).ok()?.param_list().into_iter().collect(),
+        _ => KronosConfig::from_hf(&v).ok()?.param_list().into_iter().collect(),
+    })
+}
+
+fn live_gate(env: &str, label: &str) {
     let Ok(path) = std::env::var(env) else {
-        eprintln!("{env} unset; skipping the live Kronos {label} layout gate");
-        return;
+        return brain_testutil::skip(&format!("{env} unset; no live Kronos {label} layout gate"));
     };
     let p = std::path::Path::new(&path);
+    let Some(ours) = config_param_list(p, label) else {
+        return brain_testutil::skip(&format!("{env}={path} has no readable config.json; no live Kronos {label} layout gate"));
+    };
     let tensors = if p.is_dir() {
         checkpoint::safetensors::read_model_dir(p)
     } else {
@@ -72,18 +96,10 @@ fn live_gate(env: &str, ours: HashMap<String, Vec<usize>>, label: &str) {
 
 #[test]
 fn live_tokenizer_layout_matches_checkpoint() {
-    live_gate(
-        "KRONOS_TOKENIZER_CKPT",
-        KronosTokenizerConfig::default().param_list().into_iter().collect(),
-        "tokenizer",
-    );
+    live_gate("BRAIN_KRONOS_TOKENIZER", "tokenizer");
 }
 
 #[test]
 fn live_decoder_layout_matches_checkpoint() {
-    live_gate(
-        "KRONOS_DECODER_CKPT",
-        KronosConfig::default().param_list().into_iter().collect(),
-        "decoder",
-    );
+    live_gate("BRAIN_KRONOS_DECODER", "decoder");
 }

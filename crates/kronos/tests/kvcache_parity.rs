@@ -4,7 +4,7 @@
 //! KV-cache parity + speed: the cached rollout must reproduce the un-cached
 //! decoder's forecast (cosine > 0.999) while being much faster.
 //!
-//! Env-gated on `KRONOS_TOKENIZER_DIR` + `KRONOS_DECODER_DIR` (the HF checkpoint
+//! Env-gated on `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` (the HF checkpoint
 //! dirs); skips otherwise so CI without the weights stays green.
 
 use kronos::{import, GenOpts, KronosDecoder};
@@ -22,12 +22,11 @@ fn write_f32(path: &str, a: &[f32]) {
 /// AR-loop driver needs to build `decode_s1`'s input on the host.
 #[test]
 fn dump_embedding_tables() {
-    let Ok(dec) = std::env::var("KRONOS_DECODER_DIR") else {
-        eprintln!("KRONOS_DECODER_DIR unset; skipping embedding dump");
-        return;
+    let Ok(dec) = std::env::var("BRAIN_KRONOS_DECODER") else {
+        return brain_testutil::skip("BRAIN_KRONOS_DECODER unset; no embedding tables to dump");
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
     }
     let (cfg, w) = import::load_decoder(&dec).expect("load kronos decoder");
     let d = cfg.d_model;
@@ -51,12 +50,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn cached_matches_uncached_and_is_faster() {
-    let (Ok(tok), Ok(dec)) = (std::env::var("KRONOS_TOKENIZER_DIR"), std::env::var("KRONOS_DECODER_DIR")) else {
-        eprintln!("KRONOS_{{TOKENIZER,DECODER}}_DIR unset; skipping KV-cache parity");
-        return;
+    let (Ok(tok), Ok(dec)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) else {
+        return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no KV-cache parity");
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
     }
     let m = import::load_model(&tok, &dec).expect("load kronos model");
     let feat = m.feat();

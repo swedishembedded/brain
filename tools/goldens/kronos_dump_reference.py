@@ -59,6 +59,18 @@ def write_u32(path, arr):
         f.write(struct.pack("<%dI" % a.size, *a.tolist()))
 
 
+def _cfg(model, key):
+    """Read a decoder dim off the reference model. Upstream `Kronos` stores its
+    dims as plain attributes; the HF mixin may also expose a `config` object.
+    Try both rather than pinning this dumper to one upstream revision."""
+    if hasattr(model, key):
+        return getattr(model, key)
+    cfg = getattr(model, "config", None)
+    if cfg is not None and hasattr(cfg, key):
+        return getattr(cfg, key)
+    raise SystemExit(f"reference model exposes no {key}; cannot record the decoder tier in t_meta.json")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -97,10 +109,16 @@ def main():
     write_u32(os.path.join(args.out, "t1_s2.u32"), s2)
     write_f32(os.path.join(args.out, "t2_recon.f32"), recon)
     write_f32(os.path.join(args.out, "t4_s1_logits.f32"), s1_logits)
+    # `d_model`/`n_layers` identify the DECODER TIER these logits came from.
+    # Without them a Kronos-small dump is indistinguishable from a Kronos-base
+    # one, and crates/kronos/tests/parity.rs can only find out by failing deep
+    # in the importer with a tensor-shape error.
     meta = {
         "context_len": int(args.context),
         "feat": int(raw.shape[1]),
         "s1_vocab": int(s1_logits.shape[-1]),
+        "d_model": int(_cfg(model, "d_model")),
+        "n_layers": int(_cfg(model, "n_layers")),
     }
     with open(os.path.join(args.out, "t_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
