@@ -60,7 +60,7 @@ pub trait ArtifactRecipe: Send + Sync {
 /// and always matches (the historical, still-default family) -- more
 /// specific recipes get first refusal, ahead of it.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
-    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(YoloRecipe)];
+    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
     v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
     v.push(Box::new(TransformersRecipe));
     v
@@ -305,6 +305,100 @@ impl ArtifactRecipe for ZimageRecipe {
     }
 }
 
+/// A NATIVE Wan release repo (`Wan-AI/Wan2.1-T2V-1.3B`, `-T2V-14B`,
+/// `-I2V-14B-480P`, confirmed live via the HF API): four model roles in ONE
+/// flat listing, which is the whole reason `wan`'s `default_ref` names this
+/// repo rather than the `-Diffusers` sibling (brain's fetch plan is one
+/// `ModelRef` -> one listing -> one `Plan`).
+///
+/// It DOES ship a root `config.json`, so ordering matters: that config
+/// declares `"model_type": "t2v"` and no `architectures`, so
+/// [`TransformersRecipe`] claims it and then rejects it with `unsupported
+/// architecture "t2v"` -- which is exactly what a flagless `brain wan t2v`
+/// used to fail with. This recipe has to get first refusal.
+///
+/// No tensor rewrite is needed to serve one (`wan::import::import_dit`
+/// remaps names in memory at load time, and the VAE/T5 are read straight from
+/// their `.pth`), so the finish step
+/// (`crates/cli/src/supply.rs::convert_wan`) only writes the
+/// [`crate::CompoundManifest`] naming these roles.
+pub struct WanRecipe;
+
+impl WanRecipe {
+    /// Role name -> the path (relative to the repo dir) that role's loader
+    /// accepts. The single source of truth for wan's role layout: this
+    /// recipe's [`matches_listing`](ArtifactRecipe::matches_listing) probes
+    /// it and the finish-side manifest writer reuses it verbatim.
+    ///
+    /// `dit` is the single-file 1.3B form; the 14B tiers ship a shard set
+    /// instead, which `convert_wan` resolves to the repo directory itself
+    /// (`checkpoint::safetensors::read_model_dir` follows the
+    /// `diffusion_pytorch_model.safetensors.index.json` there and reads only
+    /// the shards, never the two `.pth` siblings) -- so the shard case is
+    /// [`SHARDED_DIT`], not a missing role.
+    pub const ROLES: &'static [(&'static str, &'static str)] = &[
+        ("dit", "diffusion_pytorch_model.safetensors"),
+        ("vae", "Wan2.1_VAE.pth"),
+        ("text_encoder", "models_t5_umt5-xxl-enc-bf16.pth"),
+        // The directory, not `tokenizer.json` inside it:
+        // `data::unigram::UnigramTokenizer` takes either, and the directory
+        // keeps `spiece.model`/`tokenizer_config.json` reachable next to it.
+        ("tokenizer", "google/umt5-xxl"),
+    ];
+
+    /// The `dit` role for a sharded (14B) checkpoint: the repo directory.
+    pub const SHARDED_DIT: &'static str = ".";
+
+    /// Files that must ALL be present for this to be a native Wan repo. The
+    /// DiT is deliberately NOT in here (single file at 1.3B, a shard set at
+    /// 14B); these three are byte-identical across every 2.1 release and
+    /// distinctive enough that nothing else can match by accident.
+    const SIGNATURE: &'static [&'static str] = &["Wan2.1_VAE.pth", "models_t5_umt5-xxl-enc-bf16.pth", "google/umt5-xxl/tokenizer.json"];
+
+    /// Everything under here is fetched (the tokenizer's four files).
+    const TOKENIZER_DIR: &'static str = "google/umt5-xxl/";
+
+    fn is_dit(file: &str) -> bool {
+        file.starts_with("diffusion_pytorch_model") && (file.ends_with(".safetensors") || file == "diffusion_pytorch_model.safetensors.index.json")
+    }
+}
+
+impl ArtifactRecipe for WanRecipe {
+    fn id(&self) -> &'static str {
+        "wan"
+    }
+
+    fn matches_listing(&self, listing: &[String]) -> bool {
+        Self::SIGNATURE.iter().all(|sig| listing.iter().any(|f| f == sig)) && listing.iter().any(|f| Self::is_dit(f))
+    }
+
+    fn artifacts(&self, reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        // The DiT: the single file when the repo has one, else the whole
+        // shard set plus its index. Never both -- a repo that shipped both
+        // would otherwise download the model twice.
+        let single = listing.iter().any(|f| f == "diffusion_pytorch_model.safetensors");
+        let mut artifacts: Vec<Artifact> = Vec::new();
+        for f in listing {
+            let take = if Self::is_dit(f) {
+                if single {
+                    f == "diffusion_pytorch_model.safetensors"
+                } else {
+                    true
+                }
+            } else {
+                f.starts_with(Self::TOKENIZER_DIR) || Self::SIGNATURE.contains(&f.as_str()) || f == "config.json"
+            };
+            if take {
+                artifacts.push(artifact(f.clone(), f.clone()));
+            }
+        }
+        if !artifacts.iter().any(|a| Self::is_dit(&a.file)) {
+            return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no diffusion_pytorch_model*.safetensors in repo".to_string())));
+        }
+        Ok(artifacts)
+    }
+}
+
 /// The original (and still catch-all/default) family this crate ever
 /// supported: an HF `transformers`-shaped repo -- `config.json` with a
 /// recognized architecture, then single-file or sharded safetensors weights.
@@ -460,6 +554,104 @@ mod tests {
             let covered = ZimageRecipe::ROLE_DIRS.iter().any(|prefix| rel.starts_with(prefix) || *rel == prefix.trim_end_matches('/'));
             assert!(covered, "role path {rel:?} is not under any of ROLE_DIRS -- the manifest writer and the downloader would disagree");
         }
+    }
+
+    /// The exact `Wan-AI/Wan2.1-T2V-1.3B` file listing, confirmed live via
+    /// the HF API this session -- NOT the local checkout, which is a
+    /// deliberately partial `allow_patterns` download and therefore no
+    /// evidence of what the repo contains.
+    fn wan_t2v_1_3b_listing() -> Vec<String> {
+        [
+            ".gitattributes",
+            "LICENSE.txt",
+            "README.md",
+            "Wan2.1_VAE.pth",
+            "assets/comp_effic.png",
+            "assets/logo.png",
+            "config.json",
+            "diffusion_pytorch_model.safetensors",
+            "examples/i2v_input.JPG",
+            "google/umt5-xxl/special_tokens_map.json",
+            "google/umt5-xxl/spiece.model",
+            "google/umt5-xxl/tokenizer.json",
+            "google/umt5-xxl/tokenizer_config.json",
+            "models_t5_umt5-xxl-enc-bf16.pth",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    /// `Wan-AI/Wan2.1-T2V-14B`, same session: identical shape except the DiT
+    /// is a six-way shard set plus an index.
+    fn wan_t2v_14b_listing() -> Vec<String> {
+        let mut v: Vec<String> = wan_t2v_1_3b_listing().into_iter().filter(|f| f != "diffusion_pytorch_model.safetensors").collect();
+        for i in 1..=6 {
+            v.push(format!("diffusion_pytorch_model-0000{i}-of-00006.safetensors"));
+        }
+        v.push("diffusion_pytorch_model.safetensors.index.json".to_string());
+        v
+    }
+
+    /// The bug this recipe exists to fix: `Wan-AI/Wan2.1-T2V-1.3B` ships a
+    /// root `config.json` whose `model_type` is `"t2v"` and which declares no
+    /// `architectures`, so `TransformersRecipe` claims it and then fails with
+    /// `unsupported architecture "t2v"` -- which is exactly what a flagless
+    /// `brain wan t2v` reported before this row existed.
+    #[test]
+    fn wan_recipe_claims_the_native_repo_ahead_of_transformers() {
+        let listing = wan_t2v_1_3b_listing();
+        let matched = recipes().into_iter().find(|r| r.matches_listing(&listing)).unwrap();
+        assert_eq!(matched.id(), "wan", "the native Wan repo must not fall through to the transformers catch-all");
+        assert_eq!(recipes().into_iter().find(|r| r.matches_listing(&wan_t2v_14b_listing())).unwrap().id(), "wan");
+    }
+
+    #[test]
+    fn wan_recipe_does_not_match_the_other_shapes_this_store_knows() {
+        assert!(!WanRecipe.matches_listing(&["config.json".to_string(), "model.safetensors".to_string()]));
+        assert!(!WanRecipe.matches_listing(&zimage_turbo_listing()));
+        assert!(!WanRecipe.matches_listing(&ultralytics_yolov8_listing()));
+        // The three signature files alone are not enough: no DiT, no model.
+        let no_dit: Vec<String> = wan_t2v_1_3b_listing().into_iter().filter(|f| !f.starts_with("diffusion_pytorch_model")).collect();
+        assert!(!WanRecipe.matches_listing(&no_dit));
+    }
+
+    #[test]
+    fn wan_recipe_downloads_the_four_roles_and_none_of_the_documentation() {
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("Wan-AI", "Wan2.1-T2V-1.3B", None);
+        let artifacts = WanRecipe.artifacts(&r, &wan_t2v_1_3b_listing(), &hub).unwrap();
+        let files: Vec<&str> = artifacts.iter().map(|a| a.file.as_str()).collect();
+        for (_, rel) in WanRecipe::ROLES {
+            // Every role path is either a file that landed, or the directory
+            // whose files did.
+            let covered = files.contains(rel) || files.iter().any(|f| f.starts_with(&format!("{rel}/")));
+            assert!(covered, "role path {rel:?} is not covered by what this recipe downloads");
+        }
+        // Nothing renamed -- the manifest writer's role paths are the listing's
+        // own paths.
+        assert!(artifacts.iter().all(|a| a.file == a.dest_name));
+        // 3.6 MB of README/LICENSE/screenshots is 3.6 MB nobody asked for.
+        assert!(!files.iter().any(|f| f.starts_with("assets/") || f.starts_with("examples/") || *f == "README.md" || *f == "LICENSE.txt"), "{files:?}");
+        // The root config.json rides along: it is 249 bytes and it is the
+        // only on-disk record of which variant this checkpoint is.
+        assert!(files.contains(&"config.json"));
+    }
+
+    #[test]
+    fn wan_recipe_takes_the_shard_set_when_there_is_no_single_dit_file() {
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("Wan-AI", "Wan2.1-T2V-14B", None);
+        let files: Vec<String> = WanRecipe.artifacts(&r, &wan_t2v_14b_listing(), &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(files.iter().filter(|f| f.ends_with(".safetensors")).count(), 6);
+        assert!(files.iter().any(|f| f == "diffusion_pytorch_model.safetensors.index.json"), "the index is what makes the shard set readable");
+
+        // ... and NOT the single-file form alongside them, which would
+        // download the model twice.
+        let mut both = wan_t2v_14b_listing();
+        both.push("diffusion_pytorch_model.safetensors".to_string());
+        let files: Vec<String> = WanRecipe.artifacts(&r, &both, &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(files.iter().filter(|f| f.ends_with(".safetensors")).collect::<Vec<_>>(), ["diffusion_pytorch_model.safetensors"]);
     }
 
     /// The exact `Ultralytics/YOLOv8` file listing, confirmed live via the HF

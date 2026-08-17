@@ -25,7 +25,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
 use brain_modelref::ModelRef;
-use brain_modelstore::recipe::ZimageRecipe;
+use brain_modelstore::recipe::{WanRecipe, ZimageRecipe};
 use brain_modelstore::{CompoundManifest, Hub, Step, Store, MANIFEST_FILE};
 use residency::{Executor, ModelSupplier, Supply};
 
@@ -39,6 +39,7 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
     match recipe {
         "transformers" => convert_transformers(store, vendor, repo),
         "zimage" => convert_zimage(store, vendor, repo),
+        "wan" => convert_wan(store, vendor, repo),
         "yolo" => convert_yolo(store, vendor, repo),
         // Real conversion (four output files, two roles), not a passthrough
         // manifest -- special-cased ahead of the generic `files_recipe_roles`
@@ -119,6 +120,37 @@ fn convert_zimage(store: &Store, vendor: &str, repo: &str) -> Result<(), String>
         roles.insert(role.to_string(), rel.to_string());
     }
     let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: "zimage".to_string(), roles };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
+    std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
+}
+
+/// The wan recipe: like [`convert_zimage`], no tensor rewrite is needed
+/// (`wan::import::import_dit` remaps names in memory at load time, and the
+/// VAE/umT5 are read straight from their `.pth`), so "finish" is writing the
+/// `brain.manifest.json` naming the four roles
+/// [`WanRecipe::ROLES`](brain_modelstore::recipe::WanRecipe::ROLES) declares.
+///
+/// The one path that is decided HERE rather than in the table: the 1.3B tier
+/// ships a single `diffusion_pytorch_model.safetensors` and the 14B tiers
+/// ship a shard set plus an index, so the `dit` role is the file when it
+/// exists and the repo directory otherwise -- `wan::pipeline`'s reader takes
+/// either, and `checkpoint::safetensors::read_model_dir` follows the index
+/// there rather than sweeping the two `.pth` siblings into the DiT.
+fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let mut roles = BTreeMap::new();
+    for (role, rel) in WanRecipe::ROLES {
+        let rel = if *role == "dit" && !dir.join(rel).exists() && dir.join("diffusion_pytorch_model.safetensors.index.json").exists() {
+            WanRecipe::SHARDED_DIT
+        } else {
+            rel
+        };
+        if !dir.join(rel).exists() {
+            return Err(format!("{vendor}/{repo}: convert: role {role:?} ({rel}) did not download"));
+        }
+        roles.insert(role.to_string(), rel.to_string());
+    }
+    let manifest = CompoundManifest { id: format!("{vendor}/{repo}"), family: "wan".to_string(), roles };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("{vendor}/{repo}: convert: encode manifest: {e}"))?;
     std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
@@ -835,6 +867,64 @@ mod tests {
         assert_eq!(manifest.roles.len(), 4);
         let base = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
         assert!(Store::new(dir).local(&base).is_some());
+    }
+
+    /// The whole point of the `wan` recipe: `Wan-AI/Wan2.1-T2V-1.3B` has a
+    /// root `config.json` declaring `"model_type": "t2v"` and no
+    /// `architectures`, so before `WanRecipe` existed this plan reached
+    /// `TransformersRecipe` and died with `unsupported architecture "t2v"` --
+    /// which is exactly what a flagless `brain wan t2v` reported. This drives
+    /// the real path end to end (plan -> download every role -> `convert_wan`
+    /// writes brain.manifest.json -> `resident_for_local` builds a real
+    /// WanResident from the manifest's roles) with stub bytes, so it needs no
+    /// network and none of the 17.6 GB.
+    #[test]
+    fn ensure_completes_the_native_wan_plan_and_registers_a_wan_resident() {
+        let mut hub = FakeHub::new();
+        // The real listing, confirmed live via the HF API -- including the
+        // README/LICENSE/assets the recipe must NOT fetch.
+        for f in [
+            "README.md",
+            "LICENSE.txt",
+            "assets/logo.png",
+            "config.json",
+            "diffusion_pytorch_model.safetensors",
+            "Wan2.1_VAE.pth",
+            "models_t5_umt5-xxl-enc-bf16.pth",
+            "google/umt5-xxl/tokenizer.json",
+            "google/umt5-xxl/tokenizer_config.json",
+            "google/umt5-xxl/special_tokens_map.json",
+            "google/umt5-xxl/spiece.model",
+        ] {
+            hub.add_file("Wan-AI", "Wan2.1-T2V-1.3B", "main", f, b"stub".to_vec());
+        }
+        let dir = store("supply-test-wan-compound").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("Wan-AI/Wan2.1-T2V-1.3B", &e, &mut |_, _, _| {}).unwrap();
+
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
+        assert_eq!(names, vec!["Wan-AI/Wan2.1-T2V-1.3B".to_string()], "must register under the fetched ref, not the compiled-in brain/wan constant");
+
+        let repo = dir.join("Wan-AI").join("Wan2.1-T2V-1.3B");
+        let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&std::fs::read(repo.join(brain_modelstore::MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.family, "wan");
+        assert_eq!(manifest.roles["dit"], "diffusion_pytorch_model.safetensors");
+        assert_eq!(manifest.roles["vae"], "Wan2.1_VAE.pth");
+        assert_eq!(manifest.roles["text_encoder"], "models_t5_umt5-xxl-enc-bf16.pth");
+        assert_eq!(manifest.roles["tokenizer"], "google/umt5-xxl");
+        // The 3.6 MB of documentation and screenshots stayed upstream.
+        assert!(!repo.join("README.md").exists());
+        assert!(!repo.join("assets").exists());
+
+        // ... and the roles resolve to real paths, which is what
+        // `ensure_env_weights` sets BRAIN_WAN_{DIT,VAE,T5,TOKENIZER} from.
+        let local = Store::new(dir).local(&ModelRef::new("Wan-AI", "Wan2.1-T2V-1.3B", None)).expect("servable");
+        let roles = local.roles.expect("a compound manifest");
+        for (var, role) in brain_arch::by_id("wan").unwrap().weights_env {
+            let p = roles.get(*role).unwrap_or_else(|| panic!("{var} has no role {role:?}"));
+            assert!(p.exists(), "{var} -> {} does not exist", p.display());
+        }
     }
 
     /// Opt-in: exercises the full `ensure()` pipeline (plan -> download ->
