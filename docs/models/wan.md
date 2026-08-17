@@ -21,7 +21,7 @@ is a matter of configuration, not a different model.
 |---|---|
 | Inference (text to video) | [x] |
 | Inference (image to video) | [ ] |
-| LoRA fine-tune | [ ] |
+| LoRA fine-tune | [x] (library, no command yet) |
 | INT8 | [ ] |
 | CLI (`brain wan t2v`) | [x] |
 | Capability (`brain caps`, manifest + action schema) | [x] |
@@ -32,9 +32,16 @@ is a matter of configuration, not a different model.
 **The port is partly done.** Text-to-video runs end to end from one command and
 is served like every other model - a weights-free manifest `brain caps
 brain/wan` prints, a residency adapter the scheduler budgets and places, and a
-cancellable `Subscribe` job over D-Bus. Image-to-video and training
-do not exist yet. `.agents/roadmap/wan.md` tracks what remains and carries the
-bug ledger.
+cancellable `Subscribe` job over D-Bus. Image-to-video does not exist yet.
+`.agents/roadmap/wan.md` tracks what remains and carries the bug ledger.
+
+LoRA fine-tuning exists as a gradient-checked library path (`wan::finetune`)
+rather than a command: the transformer's forward and backward, the adapter, and
+the captioned-clip dataset are all there and gated, but nothing yet exposes them
+as `brain wan ...` or as a capability action, so training today means calling
+`wan::finetune::run` from Rust. The trainer runs on the host, which is fine for
+short adapter runs at small latent extents and is not a path to training the
+full 1.3B model.
 
 There is no HTTP surface because there is no OpenAI/Anthropic-shaped endpoint
 for video generation to fit; the D-Bus and capability paths are the served

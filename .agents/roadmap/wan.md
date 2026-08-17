@@ -343,8 +343,56 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       safetensors path has never run against real quantized bytes. The tests
       are synthetic (dispatch by tag, variant derivation over the full 825-name
       manifest in both spellings, and the refusals), and say so.
-- [ ] **Training + LoRA** (`grad.rs`, `modelgrad.rs`, `devgrad.rs`, `train.rs`,
-      `lora.rs`, `finetune.rs`) and `gradcheck::check_wan`.
+- [x] **Training + LoRA**, HOST ONLY -- `grad.rs` (one block, fwd + analytic
+      bwd), `modelgrad.rs` (the whole DiT under flow-matching velocity MSE),
+      `lora.rs`, `finetune.rs`, plus `gradcheck::check_wan` and
+      `check_wan_conditioning`. One implementation generic over the float type:
+      the f64 instantiation is the FD oracle, the f32 instantiation is the
+      trainer, so oracle and trainer cannot drift.
+      * **All four gates, with numbers.** Block FD (`tests/block_grad.rs`, 27
+        weight tensors **plus the three input adjoints** `dx`, `dctx`, `de0`):
+        worst error **1.8e-9** against a 1e-4 gate. Whole-model FD
+        (`check_wan`, all **69** tensors of the checkpoint manifest): worst
+        **1.7e-8** against a 1e-3 gate. Host f32 forward vs the device forward
+        (`tests/host_forward_parity.rs`): **cosine 1.000000000** on the P40's
+        flash path AND on the CPU JIT's chunked path, rel_l2 1.7e-7. LoRA
+        (`tests/lora_train.rs`): exact no-op at init (bit-identical weights),
+        loss 0.2373 -> 0.1415 over 40 rank-4 steps, and fold-vs-apply
+        **bit-equal**. Overfit (`tests/overfit.rs`): 0.549 -> 3.9e-6 in 400
+        Adam steps over every parameter.
+      * **A directional check alone would have been a false certificate here.**
+        This model has three folded/shared conditioning sites -- `e0` summed
+        across the whole block stack, `e` feeding BOTH the head site and
+        `time_projection`, and one `ctx` slab read by every block's
+        cross-attention -- and a contraction onto one random direction can be
+        small while a *share* of such a gradient is missing.
+        `check_wan_conditioning` therefore does per-ENTRY differences on the
+        four tensors that sit exactly at those folds
+        (`time_projection.1.bias` = `d e0`, `time_embedding.2.bias` = `d e`,
+        `text_embedding.2.bias` = summed `dctx`, and every
+        `blocks.{l}.modulation`): 528 entries, worst 4.7e-11.
+      * **The block backward differentiates the UNFOLDED modulation**, and the
+        six-vector grad it returns is ONE vector used twice -- `d(modulation)`
+        and the block's contribution to `d e0` -- because the fold's operand is
+        their sum. `block_grad.rs` asserts that identity directly (perturbing
+        `e0` and perturbing `modulation` move the loss identically).
+      * **Wan fuses nothing**, so the "one adapter pair per fused slice" rule
+        collapses: `self_attn.{q,k,v,o}`, `cross_attn.{q,k,v,o}`, `ffn.0` and
+        `ffn.2` are ten independently-named tensors, each pair covers a whole
+        tensor at offset 0, and that is why fold-vs-apply can be asserted
+        bit-equal rather than close.
+      * **The dataset is `data::episode`, not a new format.** A video clip and
+        a recorded episode are the same object: a run of frames that must never
+        be sampled across. `finetune::ClipSet` is an episode dataset (one
+        episode per clip) plus one `captions.json`; the windowing is
+        `sample_window`/`iter_windows` verbatim.
+      * **No device trainer.** The host f32 path is the trainer, as `flux2` is
+        -- practical for short adapter runs at small latent extents, not a path
+        to a 1.3B training run. `s3dit`'s `devgrad.rs`/`train.rs`/`shard.rs` is
+        the precedent to follow when that ladder starts, and it is a separate
+        measurement-led change.
+      * Not wired to a `lora_train` capability action yet (flux2 and s3dit both
+        expose theirs that way); `finetune::run` is the entry point.
 - [ ] **I2V branch**: 36-channel input (16 latent + 4 mask + 16 conditioning
       frame) and the CLIP ViT-H/14 vision tower's 257 tokens through `img_emb`.
       Only `clip.visual(...)` is used -- the checkpoint's XLM-RoBERTa text side
