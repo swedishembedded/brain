@@ -67,6 +67,10 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
+    // The coalesced score path `model::rowemit` dispatches: K transposed to
+    // key-minor once, then a score sweep whose lanes read contiguous keys.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
     ("add2", kernels::ADD2),
     ("axpy", kernels::AXPY),
     ("region_copy", kernels::REGION_COPY),
@@ -194,6 +198,8 @@ pub struct IdFormer {
     kv: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[inner, t_enc]` key-minor K for the coalesced score path.
+    xkt: DeviceBuffer,
     actx: DeviceBuffer,
     aout: DeviceBuffer,
     fh: DeviceBuffer,
@@ -238,6 +244,7 @@ impl IdFormer {
             kv: gpu.storage(kr * 2 * inner),
             scores: gpu.storage(cfg.heads as u64 * lr * kr),
             probs: gpu.storage(cfg.heads as u64 * lr * kr),
+            xkt: gpu.storage(inner * kr),
             actx: gpu.storage(lr * inner),
             aout: gpu.storage(lr * d),
             fh: gpu.storage(lr * ff),
@@ -337,7 +344,7 @@ impl IdFormer {
                 e.ln(&mut s, &self.lat_a, 0, self.w(&format!("{b}.attn.norm2.weight")), self.w(&format!("{b}.attn.norm2.bias")), &self.nkv, cr, lr, d);
                 e.linear(&mut s, &self.nkv, cr, self.w(&format!("{b}.attn.to_q.weight")), None, &self.q, 0, lr, d, c.inner_dim());
                 e.linear(&mut s, &self.nkv, 0, self.w(&format!("{b}.attn.to_kv.weight")), None, &self.kv, 0, kr, d, 2 * c.inner_dim());
-                e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.actx, c.heads, c.dim_head, lr, kr);
+                e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.actx, &self.xkt, c.heads, c.dim_head, lr, kr);
                 e.linear(&mut s, &self.actx, 0, self.w(&format!("{b}.attn.to_out.weight")), None, &self.aout, 0, lr, c.inner_dim(), d);
                 s.push(self.gpu.step(self.ki.add2, &[&self.lat_a, &self.aout, &self.lat_b], &[(lr * d) as u32], (lr * d) as u32));
                 tap(&mut taps, &s, &format!("layer{l}_attn"), &self.lat_b, 0, lr * d);
@@ -423,6 +430,8 @@ pub struct PulidCa {
     kv: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[inner, t_enc]` key-minor K for the coalesced score path.
+    xkt: DeviceBuffer,
     ctx: DeviceBuffer,
     out: DeviceBuffer,
     /// Image rows of the most recent `inject_steps`, so [`PulidCa::read_stage`]
@@ -459,6 +468,7 @@ impl PulidCa {
             kv: gpu.storage(nq * 2 * inner),
             scores: gpu.storage(cfg.ca_heads as u64 * mi * nq),
             probs: gpu.storage(cfg.ca_heads as u64 * mi * nq),
+            xkt: gpu.storage(inner * nq),
             ctx: gpu.storage(mi * inner),
             out: gpu.storage(mi * dm),
             last_n_img: Cell::new(0),
@@ -507,7 +517,7 @@ impl PulidCa {
         e.ln(s, x, r0, w("norm2.weight"), w("norm2.bias"), &self.imn, 0, n_img, dm);
         e.linear(s, &self.imn, 0, w("to_q.weight"), None, &self.q, 0, n_img, dm, inner);
         e.linear(s, &self.idn, 0, w("to_kv.weight"), None, &self.kv, 0, nq, kvd, 2 * inner);
-        e.cross_attn(s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, c.ca_heads, c.ca_dim_head, n_img, nq);
+        e.cross_attn(s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, &self.xkt, c.ca_heads, c.ca_dim_head, n_img, nq);
         e.linear(s, &self.ctx, 0, w("to_out.weight"), None, &self.out, 0, n_img, inner, dm);
         // `axpy` Params: [n, s] — `out += s * in`, out bound to the image rows.
         s.push(self.gpu.step_sliced(

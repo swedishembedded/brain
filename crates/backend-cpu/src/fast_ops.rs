@@ -1448,6 +1448,63 @@ pub fn attn_scores_cross(
         }
     }
 }
+
+/// `kv_k_headt`: transpose the K region of a fused KV slab to key-minor,
+/// `kt[c*t_enc + j] = kv[j*kv_stride + k_off + c]`.
+/// params = [t_enc, d_model, kv_stride, k_off].
+///
+/// The same shuffle [`attn_apply_cross`] already does to V, so it shares
+/// [`transpose_rows_tiled`] and its cache-locality argument verbatim.
+pub fn kv_k_headt(kv: &[f32], kt: &mut [f32], t_enc: usize, d_model: usize, kv_stride: usize, k_off: usize) {
+    if t_enc == 0 || d_model == 0 {
+        return;
+    }
+    transpose_rows_tiled(kv, kv_stride, k_off, t_enc, d_model, kt);
+}
+
+/// `attn_scores_cross_kt`: the same scores as [`attn_scores_cross`], with K
+/// already key-minor - `kt` is `[d_model, t_enc]`, head `h` occupying rows
+/// `h*hd .. (h+1)*hd`.
+/// params = [bsz, heads, t_dec, t_enc, head_dim, q_stride, q_off].
+///
+/// Head `h`'s slice of `kt` IS `Kᵀ` `[hd, t_enc]` row-major, so where
+/// [`attn_scores_cross`] packs K and uses the `A·Bᵀ` GEMM, this one packs only
+/// `q` and multiplies straight through with the row-major `A·B` GEMM
+/// [`matmul_dx`] (named for its backward role; the arithmetic is a plain
+/// product). Undoing the transpose per head to reach [`matmul_abt`] instead
+/// measured SLOWER on SAM-1's 4096-key global attention - a second full shuffle
+/// costs more than the two GEMMs differ by.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_scores_cross_kt(
+    q: &[f32],
+    kt: &[f32],
+    scores: &mut [f32],
+    bsz: usize,
+    heads: usize,
+    tq: usize,
+    tk: usize,
+    hd: usize,
+    q_stride: usize,
+    q_off: usize,
+) {
+    let scale = 1.0 / (hd as f32).sqrt();
+    let mut qh = vec![0f32; tq * hd];
+    for b in 0..bsz {
+        for h in 0..heads {
+            for i in 0..tq {
+                let src = (b * tq + i) * q_stride + q_off + h * hd;
+                for d in 0..hd {
+                    qh[i * hd + d] = q[src + d] * scale;
+                }
+            }
+            let mut kh = vec![0f32; tk * hd];
+            transpose_rows_tiled(&kt[h * hd * tk..], tk, 0, hd, tk, &mut kh);
+            let out = &mut scores[((b * heads + h) * tq) * tk..((b * heads + h) * tq + tq) * tk];
+            matmul_abt(&qh, &kh, out, tq, hd, tk);
+        }
+    }
+}
+
 /// `attn_softmax_cross`: row softmax over the key axis, scores → probs.
 /// params = [bsz, heads, t_dec, t_enc].
 pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: usize) {

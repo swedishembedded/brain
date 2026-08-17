@@ -1224,6 +1224,8 @@ const C_POS_BWD: usize = 33;
 const C_EMB_BWD: usize = 34;
 const C_CONV2D_DW: usize = 35;
 const C_RESIZE_BICUBIC_DX: usize = 36;
+const C_KV_K_HEADT: usize = 37;
+const C_SCORES_KT: usize = 38;
 
 /// A `VitKernelIds` / `VitBwdIds` slot this tower never dispatches. `usize::MAX`
 /// makes an accidental dispatch panic on the pipeline lookup instead of quietly
@@ -1272,6 +1274,12 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     ("emb_bwd", kernels::EMB_BWD),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("resize_bicubic_dx", kernels::RESIZE_BICUBIC_DX),
+    // Coalesced cross-attention scores: `attn_scores_cross` reads the fused
+    // KV slab with the KEY index as the fastest thread index, so every lane of
+    // a warp lands on its own cache line. Transposing K to key-minor once per
+    // span buys the same sweep coalesced loads.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 /// **Where [`ClipVision`]'s patch tokens come from.** The tower is IDENTICAL
@@ -1466,6 +1474,8 @@ impl ClipVision {
             attn_scores_cross: C_SCORES,
             attn_softmax_cross: C_SOFTMAX,
             attn_apply_cross: C_APPLY,
+            kv_k_headt: C_KV_K_HEADT,
+            attn_scores_cross_kt: C_SCORES_KT,
             ln_head: UNREGISTERED, // no QK-norm
             rope2d: UNREGISTERED,  // learned absolute positions, not RoPE
         }

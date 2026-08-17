@@ -4,7 +4,7 @@
 // @what  Transpose the K region of a fused KV slab to key-minor `[d_model, T_enc]`, the layout `attn_scores_cross_kt` reads coalesced
 // @how   one thread per output element, key index fastest
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

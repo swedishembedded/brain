@@ -4,7 +4,7 @@
 // @what  Cross-attention scores against a key-minor K (`kv_k_headt` output) - same math as attn_scores_cross, coalesced
 // @how   one thread per output element, serial inner reduction over head_dim
 // @opt   3
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

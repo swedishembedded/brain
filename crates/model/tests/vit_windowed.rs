@@ -50,6 +50,8 @@ const PIPES: &[(&str, &str)] = &[
     ("axpy", kernels::AXPY),
     ("ln_stats", kernels::LN_STATS),
     ("layernorm_dx", kernels::LAYERNORM_DX),
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 const K_EMBED: usize = 12;
@@ -61,6 +63,8 @@ const K_MAXPOOL_DX: usize = 17;
 const K_AXPY: usize = 22;
 const K_LN_STATS: usize = 23;
 const K_LAYERNORM_DX: usize = 24;
+const K_KV_K_HEADT: usize = 25;
+const K_SCORES_KT: usize = 26;
 
 fn fwd_ids() -> VitKernelIds {
     VitKernelIds {
@@ -73,6 +77,8 @@ fn fwd_ids() -> VitKernelIds {
         attn_scores_cross: 6,
         attn_softmax_cross: 7,
         attn_apply_cross: 8,
+        kv_k_headt: K_KV_K_HEADT,
+        attn_scores_cross_kt: K_SCORES_KT,
         ln_head: 9,
         rope2d: 10,
         matmul_rows: 11,
@@ -120,6 +126,12 @@ fn qpool_ids() -> VitQPoolIds {
 
 fn cross_ids() -> CrossIds {
     CrossIds { scores: 6, softmax: 7, apply: 8 }
+}
+/// The coalesced score path, bound to `kt`. The gradcheck below runs the
+/// forward through it and the backward through the fused-KV kernels, which is
+/// exactly the pairing the migrated models use.
+fn key_minor(kt: &gpu_core::DeviceBuffer) -> model::block::KeyMinor<'_> {
+    model::block::KeyMinor { transpose: K_KV_K_HEADT, scores: K_SCORES_KT, kt }
 }
 fn dev() -> Gpu {
     gpu_core::testgpu::dev(PIPES)
@@ -570,6 +582,7 @@ fn pooled_attention_gradcheck() {
     // single slab; `probs` is CACHED for every span -> the sum.
     let scores = g.storage(max_slab(&spans, sh.heads));
     let probs = g.storage(probs_len(&spans, sh.heads));
+    let kt = g.storage((c * spans.iter().map(|s| s.kn).max().unwrap_or(0)) as u64);
 
     let loss_of = |qkv_h: &[f32]| -> f64 {
         let qkv = g.storage_init("qkv", qkv_h);
@@ -578,6 +591,7 @@ fn pooled_attention_gradcheck() {
         cross_q_fwd(
             &g,
             &cross_ids(),
+            Some(&key_minor(&kt)),
             &sh,
             &cache.q_pooled,
             c,
@@ -608,6 +622,7 @@ fn pooled_attention_gradcheck() {
     cross_q_fwd(
         &g,
         &cross_ids(),
+        Some(&key_minor(&kt)),
         &sh,
         &cache.q_pooled,
         c,
@@ -711,7 +726,8 @@ fn measure_gather_vs_windowed_attention() {
         let scores = g.storage(slab);
         let probs = g.storage(slab);
         let mut attn_steps = Vec::new();
-        model::vit::chunked_attn_fwd(&g, &k, &sh, &qkv, &ctx, &scores, &probs, plan.spans(), ws, &mut attn_steps);
+        let kt_scr = g.storage((c * ws) as u64);
+        model::vit::chunked_attn_fwd(&g, &k, &sh, &qkv, &ctx, &scores, &probs, &kt_scr, plan.spans(), ws, &mut attn_steps);
 
         // the q_pool chain (4 dispatches) for the same partition
         let pool = QPoolPlan::per_window(&plan, 2, 2, 0);

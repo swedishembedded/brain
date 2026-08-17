@@ -22,6 +22,8 @@ const PIPES: &[(&str, &str)] = &[
     ("ln_head", kernels::LN_HEAD),
     ("rope2d", kernels::ROPE2D),
     ("matmul_rows", kernels::MATMUL_ROWS),
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 fn ids() -> VitKernelIds {
@@ -35,6 +37,8 @@ fn ids() -> VitKernelIds {
         attn_scores_cross: 6,
         attn_softmax_cross: 7,
         attn_apply_cross: 8,
+        kv_k_headt: 12,
+        attn_scores_cross_kt: 13,
         ln_head: 9,
         rope2d: 10,
         matmul_rows: 11,
@@ -52,8 +56,9 @@ fn run(chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
     let slab = 2 * rows as u64 * rows as u64;
     let scores = g.storage(slab);
     let probs = g.storage(slab);
+    let kt = g.storage(32 * rows as u64);
     let mut steps = Vec::new();
-    chunked_attn_fwd(&g, &k, &sh, &qkv, &ctx, &scores, &probs, spans, chunk, &mut steps);
+    chunked_attn_fwd(&g, &k, &sh, &qkv, &ctx, &scores, &probs, &kt, spans, chunk, &mut steps);
     g.submit(&[&ctx], &steps);
     g.read(&ctx, rows as usize * 32)
 }

@@ -110,6 +110,13 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("mse_grad", kernels::MSE_GRAD),
     ("bce_logits", kernels::BCE_LOGITS),
     ("bce_logits_grad", kernels::BCE_LOGITS_GRAD),
+    // ---- coalesced cross-attention scores ----
+    // `attn_scores_cross` reads the fused KV slab with the KEY index as the
+    // fastest thread index, so every lane of a warp lands on its own cache
+    // line. Transposing K to key-minor once per span buys the same sweep
+    // coalesced loads.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 /// Query rows per `chunked_bidir_fwd` dispatch. A multiple of 64 is REQUIRED,
@@ -144,6 +151,8 @@ pub(crate) struct Ids {
     resize_bilinear: usize,
     resize_nearest: usize,
     pub(crate) cross: CrossIds,
+    /// `(kv_k_headt, attn_scores_cross_kt)` - the coalesced score path.
+    pub(crate) key_minor: (usize, usize),
     pub(crate) permute: VitPermuteIds,
     qpool: VitQPoolIds,
     pub(crate) ln: LayerNormIds,
@@ -154,6 +163,10 @@ pub(crate) fn idx(g: &Gpu, name: &str) -> usize {
 }
 
 impl Ids {
+    /// The coalesced score path bound to `kt` (`[dim_out, max_kn]`).
+    pub(crate) fn key_minor<'a>(&self, kt: &'a DeviceBuffer) -> block::KeyMinor<'a> {
+        block::KeyMinor { transpose: self.key_minor.0, scores: self.key_minor.1, kt }
+    }
     fn resolve(g: &Gpu) -> Ids {
         let permute = VitPermuteIds { embed: idx(g, "embed"), row_scatter: idx(g, "row_scatter") };
         Ids {
@@ -177,6 +190,7 @@ impl Ids {
                 softmax: idx(g, "attn_softmax_cross"),
                 apply: idx(g, "attn_apply_cross"),
             },
+            key_minor: (idx(g, "kv_k_headt"), idx(g, "attn_scores_cross_kt")),
             permute,
             qpool: VitQPoolIds {
                 permute,
@@ -666,10 +680,17 @@ impl Sam2 {
             };
             let scores = g.storage(model::vit::max_slab(&spans, heads));
             let probs = g.storage(model::vit::probs_len(&spans, heads));
-            cross_q_fwd(g, &self.ids.cross, &sh, &q_pooled, co, 0, &qkv, 3 * co, co, 2 * co, &ctxb, &scores, &probs, &spans, &mut steps);
+            let max_kn = spans.iter().map(|s| s.kn).max().unwrap_or(0);
+            let kt = g.storage(co as u64 * max_kn as u64);
+            let km = self.ids.key_minor(&kt);
+            cross_q_fwd(
+                g, &self.ids.cross, Some(&km), &sh, &q_pooled, co, 0, &qkv, 3 * co, co, 2 * co, &ctxb, &scores, &probs,
+                &spans, &mut steps,
+            );
             keep.push(q_pooled);
             keep.push(scores);
             keep.push(probs);
+            keep.push(kt);
         } else {
             let spans: Vec<(u32, u32)> = match &plan {
                 Some(pl) => pl.spans().to_vec(),
@@ -679,9 +700,12 @@ impl Sam2 {
             let slab = heads as u64 * ATTN_CHUNK.min(max_span).max(1) as u64 * max_span as u64;
             let scores = g.storage(slab);
             let probs = g.storage(slab);
+            let kt = g.storage(co as u64 * max_span as u64);
+            let km = self.ids.key_minor(&kt);
             block::chunked_bidir_fwd(
                 g,
                 &self.ids.cross,
+                Some(&km),
                 heads,
                 sh.head_dim(),
                 co,
@@ -700,6 +724,7 @@ impl Sam2 {
             );
             keep.push(scores);
             keep.push(probs);
+            keep.push(kt);
         }
 
         let attn = g.storage(rows_po as u64 * co as u64);
@@ -1232,7 +1257,11 @@ impl Sam2 {
         let scores = g.storage(heads as u64 * tq as u64 * tk as u64);
         let probs = g.storage(heads as u64 * tq as u64 * tk as u64);
         let ctxb = g.storage(tq as u64 * io as u64);
-        steps.push(g.step(self.ids.cross.scores, &[&q, &k, &scores], &[1, heads, tq, tk, hd, io, io, 0, 0], heads * tq * tk));
+        // K to key-minor once, then the coalesced sweep - `k` here is a plain
+        // `[tk, io]` buffer, so `kv_stride` is `io` and `k_off` is 0.
+        let kt = g.storage(io as u64 * tk as u64);
+        steps.push(g.step(self.ids.key_minor.0, &[&k, &kt], &[tk, io, io, 0], io * tk));
+        steps.push(g.step(self.ids.key_minor.1, &[&q, &kt, &scores], &[1, heads, tq, tk, hd, io, 0], heads * tq * tk));
         steps.push(g.step(self.ids.cross.softmax, &[&scores, &probs], &[1, heads, tq, tk], heads * tq));
         steps.push(g.step(self.ids.cross.apply, &[&probs, &v, &ctxb], &[1, heads, tq, tk, hd, io, 0, io], heads * tq * hd));
         self.linear(&mut steps, &ctxb, out, tq, io, d, &format!("{prefix}.out_proj.weight"), &format!("{prefix}.out_proj.bias"));

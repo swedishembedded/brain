@@ -540,9 +540,15 @@ pub(crate) fn build_block_steps(
         AttnMode::Flash => {
             flash_bidir_fwd(gpu, sel.flash, nh, hd, dim, &scr.qkv, 3 * dim, 0, dim, 2 * dim, &scr.ctx, &[(0, t)], s)
         }
+        // The self-attention span is the WHOLE video latent (33k rows at
+        // dim 1536), so a key-minor K would be a 200 MB scratch on the
+        // fallback path of a card that already cannot run flash attention.
+        // Cross-attention, whose K is the 512-row text memory, is where this
+        // model transposes (see `push_cross`).
         AttnMode::Chunked => chunked_bidir_fwd(
             gpu,
             &sel.cross,
+            None,
             nh,
             hd,
             dim,

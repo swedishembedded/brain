@@ -33,6 +33,8 @@ fn vit_ids() -> VitKernelIds {
         attn_scores_cross: kidx("attn_scores_cross"),
         attn_softmax_cross: kidx("attn_softmax_cross"),
         attn_apply_cross: kidx("attn_apply_cross"),
+        kv_k_headt: kidx("kv_k_headt"),
+        attn_scores_cross_kt: kidx("attn_scores_cross_kt"),
         ln_head: 0,
         rope2d: 0,
     }
@@ -116,6 +118,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dv_cross", kernels::ATTN_BWD_DV_CROSS),
     ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS),
+    // Coalesced cross-attention scores: `attn_scores_cross` reads the fused
+    // KV slab with the KEY index as the fastest thread index, so every lane of
+    // a warp lands on its own cache line. Transposing K to key-minor once per
+    // span buys the same sweep coalesced loads.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 /// Cached conv kernel-id resolution against [`PIPELINES`].
@@ -546,6 +554,8 @@ pub struct AttentionBlock {
     ctxb: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[ch, rows]` key-minor K for the coalesced score path.
+    kt: DeviceBuffer,
     proj: DeviceBuffer,
     back: DeviceBuffer,
     scaled1: DeviceBuffer,
@@ -581,6 +591,7 @@ impl AttentionBlock {
             ctxb: g.storage(rc),
             scores: g.storage(slab),
             probs: g.storage(slab),
+            kt: g.storage(rc),
             proj: g.storage(rc),
             back: g.storage(rc),
             scaled1: g.storage(rc),
@@ -622,7 +633,7 @@ impl AttentionBlock {
         s.push(g.step(kidx("matmul_rows"), &[&self.normed, ps.w(&self.qkv_w), &self.qkv], &[rows, ch, c3], rows.div_ceil(8) * c3));
         // Full attention over the H*W tokens.
         let sh = VitShape { dim: ch, heads: self.heads, mlp: 0, eps };
-        chunked_attn_fwd(g, &vit_ids(), &sh, &self.qkv, &self.ctxb, &self.scores, &self.probs, &[(0, rows)], rows, &mut s);
+        chunked_attn_fwd(g, &vit_ids(), &sh, &self.qkv, &self.ctxb, &self.scores, &self.probs, &self.kt, &[(0, rows)], rows, &mut s);
         // proj + bias, back to NCHW, ls1 residual.
         s.push(g.step(kidx("matmul_rows"), &[&self.ctxb, ps.w(&self.proj_w), &self.proj], &[rows, ch, ch], rows.div_ceil(8) * ch));
         s.push(g.step(kidx("bias_add"), &[&self.proj, ps.w(&self.proj_b)], &[rows, ch], rows * ch));

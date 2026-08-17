@@ -136,6 +136,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_relpos_drw", kernels::ATTN_RELPOS_DRW),
     ("attn_relpos_dq", kernels::ATTN_RELPOS_DQ),
     ("attn_relpos_dr", kernels::ATTN_RELPOS_DR),
+    // ---- coalesced cross-attention scores ----
+    // `attn_scores_cross` reads the fused KV slab with the KEY index as the
+    // fastest thread index, so every lane of a warp lands on its own cache
+    // line. SAM-1 global attention is the worst case for that: one span of
+    // 4096 keys re-read once per query chunk. Transposing K to key-minor
+    // once per span buys the same sweep coalesced loads.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 /// Pipeline indices resolved by NAME.
@@ -157,6 +165,9 @@ struct Ids {
     nchw_nlc: usize,
     perm: VitPermuteIds,
     cross: CrossIds,
+    /// The coalesced score path both the forward and the backward recompute
+    /// dispatch through.
+    key_minor: (usize, usize),
     cross_bwd: CrossBwdIds,
     rel: RelPosIds,
     tbl: RelPosTableIds,
@@ -183,6 +194,7 @@ impl Ids {
             nchw_nlc: k("nchw_nlc"),
             perm: VitPermuteIds { embed: k("embed"), row_scatter: k("row_scatter") },
             cross: CrossIds { scores: k("attn_scores_cross"), softmax: k("attn_softmax_cross"), apply: k("attn_apply_cross") },
+            key_minor: (k("kv_k_headt"), k("attn_scores_cross_kt")),
             cross_bwd: CrossBwdIds {
                 dscores: k("attn_bwd_dscores_cross"),
                 dq: k("attn_bwd_dq_cross"),
@@ -264,6 +276,8 @@ struct Block {
     ctx: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[c, max_span]` key-minor K for the coalesced score path.
+    kt: DeviceBuffer,
     proj: DeviceBuffer,
     attn_out: DeviceBuffer,
     res: DeviceBuffer,
@@ -340,6 +354,7 @@ impl Block {
             ctx: g.storage(ar * c as u64),
             scores: g.storage(slab),
             probs: g.storage(slab),
+            kt: g.storage(c as u64 * span_qn as u64),
             proj: g.storage(ar * c as u64),
             attn_out: g.storage(rc),
             res: g.storage(rc),
@@ -383,6 +398,11 @@ impl Block {
         .iter()
         .map(|leaf| self.p(leaf))
         .collect()
+    }
+
+    /// This block's coalesced score path, bound to its own `kt` scratch.
+    fn key_minor<'a>(&'a self, ids: &Ids) -> block::KeyMinor<'a> {
+        block::KeyMinor { transpose: ids.key_minor.0, scores: ids.key_minor.1, kt: &self.kt }
     }
 
     fn relpos(&self, ids: &Ids, bwd: bool) -> RelPos<'_> {
@@ -754,9 +774,10 @@ impl SamEncoder {
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
+        let km = b.key_minor(&self.ids);
         block::chunked_bidir_fwd(
-            g, &self.ids.cross, cfg.n_heads, cfg.head_dim(), c, &b.qkv, 3 * c, 0, c, 2 * c, &b.ctx, &b.scores, &b.probs,
-            &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
+            g, &self.ids.cross, Some(&km), cfg.n_heads, cfg.head_dim(), c, &b.qkv, 3 * c, 0, c, 2 * c, &b.ctx,
+            &b.scores, &b.probs, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
         );
 
         let (mk, mt) = self.gemm(ar, c);
@@ -877,9 +898,10 @@ impl SamEncoder {
         steps.push(g.step(self.ids.bias_grad, &[d_branch, gr("attn.proj.bias")], &[ar, c], c));
 
         let rel = b.relpos(&self.ids, true);
+        let km = b.key_minor(&self.ids);
         block::chunked_bidir_bwd(
-            g, &self.ids.cross, &self.ids.cross_bwd, heads, hd, c, &b.qkv, 3 * c, 0, c, 2 * c, &bb.d_ctx, &bb.d_qkv,
-            &b.scores, &b.probs, &bb.d_scores, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
+            g, &self.ids.cross, Some(&km), &self.ids.cross_bwd, heads, hd, c, &b.qkv, 3 * c, 0, c, 2 * c, &bb.d_ctx,
+            &bb.d_qkv, &b.scores, &b.probs, &bb.d_scores, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
         );
         // Dense-table adjoint -> learned-table adjoint. `emb_bwd` ACCUMULATES,
         // which is what sums the two interpolation taps; the destination is a

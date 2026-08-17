@@ -113,7 +113,7 @@ impl Golden {
     fn open(rel: &str) -> Option<Golden> {
         let p = testdata(rel);
         if !p.exists() {
-            eprintln!("SKIP: golden {} absent", p.display());
+            brain_testutil::skip(&format!("golden {} absent", p.display()));
             return None;
         }
         Some(Golden { t: checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden") })
@@ -133,7 +133,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
     let v = std::env::var(var).ok().filter(|s| !s.is_empty())?;
     let p = PathBuf::from(v);
     if !p.exists() {
-        eprintln!("SKIP: {var}={} not found", p.display());
+        brain_testutil::skip(&format!("{var}={} not found", p.display()));
         return None;
     }
     Some(p)
@@ -256,7 +256,7 @@ fn run_text_tower(
 #[test]
 fn sdxl_text_towers_and_conditioning_parity() {
     let Some(sdxl) = env_path("BRAIN_SDXL") else {
-        eprintln!("SKIP: set BRAIN_SDXL to the sdxl-base-1.0 directory");
+        brain_testutil::skip("set BRAIN_SDXL to the sdxl-base-1.0 directory");
         return;
     };
     let (Some(gl), Some(gg)) =
@@ -300,7 +300,7 @@ fn sdxl_text_towers_and_conditioning_parity() {
 #[test]
 fn eva02_l336_image_tower_parity() {
     let Some(ckpt) = env_path("BRAIN_EVA_CLIP") else {
-        eprintln!("SKIP: set BRAIN_EVA_CLIP to EVA02_CLIP_L_336_psz14_s6B.pt");
+        brain_testutil::skip("set BRAIN_EVA_CLIP to EVA02_CLIP_L_336_psz14_s6B.pt");
         return;
     };
     let Some(g) = Golden::open("clip/eva02_l336/image.safetensors") else { return };

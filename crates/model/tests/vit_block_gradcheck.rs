@@ -47,6 +47,8 @@ const PIPES: &[(&str, &str)] = &[
     ("region_copy", kernels::REGION_COPY),
     ("axpy", kernels::AXPY),
     ("matmul_rows", kernels::MATMUL_ROWS),
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 fn ids() -> (VitKernelIds, VitBwdIds) {
@@ -61,6 +63,8 @@ fn ids() -> (VitKernelIds, VitBwdIds) {
             attn_scores_cross: 6,
             attn_softmax_cross: 7,
             attn_apply_cross: 8,
+            kv_k_headt: 29,
+            attn_scores_cross_kt: 30,
             ln_head: 9,
             rope2d: 10,
             matmul_rows: 28,

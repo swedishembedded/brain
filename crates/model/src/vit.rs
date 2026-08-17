@@ -42,8 +42,36 @@ pub struct VitKernelIds {
     pub attn_scores_cross: usize,
     pub attn_softmax_cross: usize,
     pub attn_apply_cross: usize,
+    /// The coalesced score path: `kv_k_headt` transposes the span's K to
+    /// key-minor and `attn_scores_cross_kt` reads that instead of the fused KV
+    /// slab, for the same values (see [`crate::block::KeyMinor`]).
+    ///
+    /// [`UNREGISTERED`] in EITHER slot keeps the `attn_scores_cross` dispatch
+    /// exactly as it was. Opting in is per model and deliberate: it is the one
+    /// change in this struct that a model has to re-certify its own parity
+    /// against, so it may not arrive by inheritance.
+    pub kv_k_headt: usize,
+    pub attn_scores_cross_kt: usize,
     pub ln_head: usize,
     pub rope2d: usize,
+}
+
+/// The "this model registered no kernel for this slot" sentinel. A slot holding
+/// it must never be dispatched; the builders that can do without a slot check
+/// for it, and the ones that cannot will fail loudly on an out-of-range
+/// pipeline index rather than silently running the wrong kernel.
+pub const UNREGISTERED: usize = usize::MAX;
+
+impl VitKernelIds {
+    /// The coalesced score path bound to `kt`, or `None` when this model has
+    /// not registered both of its kernels.
+    pub fn key_minor<'a>(&self, kt: &'a DeviceBuffer) -> Option<crate::block::KeyMinor<'a>> {
+        (self.kv_k_headt != UNREGISTERED && self.attn_scores_cross_kt != UNREGISTERED).then_some(crate::block::KeyMinor {
+            transpose: self.kv_k_headt,
+            scores: self.attn_scores_cross_kt,
+            kt,
+        })
+    }
 }
 
 /// Block shape: `dim` (C), `heads`, `mlp` hidden width, LayerNorm eps.
@@ -111,6 +139,10 @@ pub struct VitScratch {
     pub res: DeviceBuffer,
     pub scores: DeviceBuffer,
     pub probs: DeviceBuffer,
+    /// `[dim, max_span]` key-minor K for [`VitKernelIds::key_minor`]. Allocated
+    /// whether or not the model registered that path - it is `1/heads` the size
+    /// of one score slab, which is not worth a second constructor.
+    pub kt: DeviceBuffer,
 }
 
 impl VitScratch {
@@ -128,6 +160,7 @@ impl VitScratch {
             res: gpu.storage(rc),
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
+            kt: gpu.storage(sh.dim as u64 * max_span as u64),
         }
     }
 }
@@ -150,6 +183,7 @@ pub fn chunked_attn_fwd(
     ctx: &DeviceBuffer,
     scores: &DeviceBuffer,
     probs: &DeviceBuffer,
+    kt: &DeviceBuffer,
     spans: &[(u32, u32)],
     chunk: u32,
     steps: &mut Vec<Step>,
@@ -162,8 +196,26 @@ pub fn chunked_attn_fwd(
         softmax: k.attn_softmax_cross,
         apply: k.attn_apply_cross,
     };
+    let km = k.key_minor(kt);
     crate::block::chunked_bidir_fwd(
-        g, &ids, sh.heads, sh.head_dim(), c, qkv, 3 * c, 0, c, 2 * c, ctx, scores, probs, spans, chunk, None, steps,
+        g,
+        &ids,
+        km.as_ref(),
+        sh.heads,
+        sh.head_dim(),
+        c,
+        qkv,
+        3 * c,
+        0,
+        c,
+        2 * c,
+        ctx,
+        scores,
+        probs,
+        spans,
+        chunk,
+        None,
+        steps,
     );
 }
 
@@ -213,6 +265,10 @@ pub struct VitBlockCache {
     pub h: DeviceBuffer,        // fc1 out (pre-gelu)
     pub h2: DeviceBuffer,       // gelu out
     pub mlp_out: DeviceBuffer,  // fc2 out (pre-LayerScale)
+    /// `[dim, max_span]` key-minor K for [`VitKernelIds::key_minor`]. Not a
+    /// cache entry - the backward pass reads K from `qkv`, so this is rewritten
+    /// per span and never read after the forward.
+    pub kt: DeviceBuffer,
 }
 
 impl VitBlockCache {
@@ -235,6 +291,7 @@ impl VitBlockCache {
             h: gpu.storage(rows as u64 * sh.mlp as u64),
             h2: gpu.storage(rows as u64 * sh.mlp as u64),
             mlp_out: gpu.storage(rc),
+            kt: gpu.storage(sh.dim as u64 * max_span as u64),
         }
     }
 }
@@ -274,7 +331,7 @@ pub fn vit_block_fwd(
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, 0, r.tmod, f(1.0)], rows * sh.heads * half));
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
     }
-    chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, spans, chunk, steps);
+    chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, &scr.kt, spans, chunk, steps);
     steps.push(g.step(k.matmul_rows, &[&scr.ctx, w.proj_w, &scr.ln], &[rows, c, c], rows.div_ceil(8) * c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
@@ -411,9 +468,10 @@ pub fn vit_block_fwd_cached(
         apply: k.attn_apply_cross,
     };
     let att: Vec<AttnSpan> = spans.iter().map(|&(row0, len)| AttnSpan::span(row0, len)).collect();
+    let km = k.key_minor(&cache.kt);
     cross_q_fwd(
-        g, &cross, sh, &cache.qkv, stride, 0, &cache.qkv, stride, c, 2 * c, &cache.ctx, scores, &cache.probs, &att,
-        steps,
+        g, &cross, km.as_ref(), sh, &cache.qkv, stride, 0, &cache.qkv, stride, c, 2 * c, &cache.ctx, scores,
+        &cache.probs, &att, steps,
     );
     steps.push(g.step(k.matmul, &[&cache.ctx, w.proj_w, &cache.attn_proj], &[rows, c, c], rows * c));
     steps.push(g.step(k.bias_add, &[&cache.attn_proj, w.proj_b], &[rows, c], rows * c));
@@ -1297,15 +1355,26 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 /// Kernel Params (`CrossIds`), per span:
 ///   * `attn_scores_cross`  `[1, heads, qn, kn, hd, q_stride, kv_stride,
 ///     q0*q_stride + q_off, k0*kv_stride + k_off]`, bufs `[q, kv, scores]`
-///     bound whole, threads `heads*qn*kn`
+///     bound whole, threads `heads*qn*kn` - or, with `km`, the two dispatches
+///     `kv_k_headt` `[kn, d_out, kv_stride, k0*kv_stride + k_off]`, bufs
+///     `[kv, kt]`, threads `d_out*kn`, then `attn_scores_cross_kt`
+///     `[1, heads, qn, kn, hd, q_stride, q0*q_stride + q_off]`, bufs
+///     `[q, kt, scores]`, same thread count and same output
 ///   * `attn_softmax_cross` `[1, heads, qn, kn]`, bufs `[scores, probs]`,
 ///     slices `[(0,0), (probs_at,0)]`, threads `heads*qn`
 ///   * `attn_apply_cross`   `[1, heads, qn, kn, hd, kv_stride,
 ///     k0*kv_stride + v_off, d_out]`, bufs `[probs, kv, ctx]`,
 ///     slices `[(probs_at,0), (0,0), (q0*d_out,0)]`, threads `heads*qn*hd`
+///
+/// `km` swaps the score dispatch for the coalesced pair
+/// (`crate::block::KeyMinor`). There is no query chunking here, so the
+/// transpose is amortised over the span's `qn` query rows only - still the
+/// whole win at ViT window sizes (`qn = kn = 196` for a 14x14 window), and
+/// still cheap at `qn` in the tens.
 pub fn cross_q_fwd(
     g: &Gpu,
     ids: &crate::block::CrossIds,
+    km: Option<&crate::block::KeyMinor>,
     sh: &VitShape,
     q: &DeviceBuffer,
     q_stride: u32,
@@ -1328,12 +1397,20 @@ pub fn cross_q_fwd(
         let vo = row_param(s.k0, kv_stride, v_off);
         let cs = aligned_ctx(s.q0, d_out);
         let ps = at[i];
-        steps.push(g.step(
-            ids.scores,
-            &[q, kv, scores],
-            &[1, heads, s.qn, s.kn, hd, q_stride, kv_stride, qo, ko],
-            heads * s.qn * s.kn,
-        ));
+        if let Some(km) = km {
+            steps.push(crate::block::key_minor_step(g, km, d_out, kv, (0, 0), kv_stride, ko, s.kn));
+        }
+        let sa = crate::block::CrossScoreArgs {
+            heads,
+            head_dim: hd,
+            q_stride,
+            q_off: qo,
+            kv_stride,
+            k_off: ko,
+            qn: s.qn,
+            kn: s.kn,
+        };
+        steps.push(crate::block::cross_scores_step(g, ids, km, sa, q, (0, 0), kv, (0, 0), scores));
         steps.push(g.step_sliced(ids.softmax, &[scores, probs], &[(0, 0), (ps, 0)], &[1, heads, s.qn, s.kn], heads * s.qn));
         steps.push(g.step_sliced(
             ids.apply,

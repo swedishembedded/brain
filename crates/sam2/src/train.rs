@@ -201,6 +201,8 @@ struct AttnCache {
     v: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// `[io, tk]` key-minor K for the coalesced score path.
+    kt: DeviceBuffer,
     ctx: DeviceBuffer,
     d_q: DeviceBuffer,
     d_k: DeviceBuffer,
@@ -229,6 +231,7 @@ impl AttnCache {
             v: g.storage(tk as u64 * io as u64),
             scores: g.storage(sl),
             probs: g.storage(sl),
+            kt: g.storage(io as u64 * tk as u64),
             ctx: g.storage(tq as u64 * io as u64),
             d_q: g.storage(tq as u64 * io as u64),
             d_k: g.storage(tk as u64 * io as u64),
@@ -253,6 +256,16 @@ impl AttnCache {
     /// — the `attn_scores_cross` / `attn_bwd_{dq,dk}_cross` uniform.
     fn p_qk(&self) -> [u32; 9] {
         [1, self.heads, self.tq, self.tk, self.hd(), self.io, self.io, 0, 0]
+    }
+    /// `[t_enc, d_model, kv_stride, k_off]` - the `kv_k_headt` uniform. `k` is
+    /// compact `[tk, io]`, so the stride is `io` and the offset 0.
+    fn p_kt(&self) -> [u32; 4] {
+        [self.tk, self.io, self.io, 0]
+    }
+    /// `[bsz, heads, t_dec, t_enc, head_dim, q_stride, q_off]` - the
+    /// `attn_scores_cross_kt` uniform (no kv stride: K is key-minor).
+    fn p_qkt(&self) -> [u32; 7] {
+        [1, self.heads, self.tq, self.tk, self.hd(), self.io, 0]
     }
 }
 
@@ -719,7 +732,9 @@ impl MaskDecoderTrainer {
         self.sam.linear(s, v_in, &a.v, a.tk, d, io, &format!("{p}.v_proj.weight"), &format!("{p}.v_proj.bias"));
         let ids = &self.sam.ids.cross;
         let g = self.g();
-        s.push(g.step(ids.scores, &[&a.q, &a.k, &a.scores], &a.p_qk(), a.heads * a.tq * a.tk));
+        let km = self.sam.ids.key_minor;
+        s.push(g.step(km.0, &[&a.k, &a.kt], &a.p_kt(), a.io * a.tk));
+        s.push(g.step(km.1, &[&a.q, &a.kt, &a.scores], &a.p_qkt(), a.heads * a.tq * a.tk));
         s.push(g.step(ids.softmax, &[&a.scores, &a.probs], &[1, a.heads, a.tq, a.tk], a.heads * a.tq));
         s.push(g.step(ids.apply, &[&a.probs, &a.v, &a.ctx], &a.p_v(), a.heads * a.tq * a.hd()));
         self.sam.linear(s, &a.ctx, out, a.tq, io, d, &format!("{p}.out_proj.weight"), &format!("{p}.out_proj.bias"));

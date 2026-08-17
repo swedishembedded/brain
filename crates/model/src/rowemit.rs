@@ -62,12 +62,17 @@ pub struct RowKernels {
     pub xscores: usize,
     pub xsoftmax: usize,
     pub xapply: usize,
+    /// The coalesced score path (`crate::block::KeyMinor`): `kv_k_headt`
+    /// transposes the encoder memory's K to key-minor once, and
+    /// `attn_scores_cross_kt` reads that instead of the fused KV slab.
+    pub xkt_transpose: usize,
+    pub xkt_scores: usize,
     pub copy: usize,
 }
 
 /// The kernels [`RowKernels::resolve`] requires, so a model can concatenate them
 /// into its own `PIPELINES` list without transcribing the names.
-pub const REQUIRED: [&str; 11] = [
+pub const REQUIRED: [&str; 13] = [
     "layernorm",
     "layernorm_rows",
     "matmul",
@@ -78,6 +83,8 @@ pub const REQUIRED: [&str; 11] = [
     "attn_scores_cross",
     "attn_softmax_cross",
     "attn_apply_cross",
+    "kv_k_headt",
+    "attn_scores_cross_kt",
     "region_copy",
 ];
 
@@ -102,6 +109,8 @@ impl RowKernels {
             xscores: f("attn_scores_cross"),
             xsoftmax: f("attn_softmax_cross"),
             xapply: f("attn_apply_cross"),
+            xkt_transpose: f("kv_k_headt"),
+            xkt_scores: f("attn_scores_cross_kt"),
             copy: f("region_copy"),
         }
     }
@@ -228,8 +237,14 @@ impl<'a> RowEmit<'a> {
     ///
     /// The fused-kv layout is the load-bearing detail: `k` occupies each row's
     /// first `inner` floats and `v` the second, so the kv stride is `2*inner`
-    /// and `v_off` is `inner`. Passing `inner` as the stride — the natural
-    /// mistake when the buffer is not fused — reads `v` as `k` and still runs.
+    /// and `v_off` is `inner`. Passing `inner` as the stride - the natural
+    /// mistake when the buffer is not fused - reads `v` as `k` and still runs.
+    ///
+    /// `kt` is `[inner, t_enc]` scratch for the coalesced score path
+    /// (`crate::block::KeyMinor`): K is transposed to key-minor once, here, and
+    /// the score sweep reads it with the key index contiguous. The transpose is
+    /// `t_enc·inner` and the sweep it feeds is `t_dec·t_enc·inner`, so it costs
+    /// one query row's worth of the work it replaces.
     #[allow(clippy::too_many_arguments)]
     pub fn cross_attn(
         &self,
@@ -240,6 +255,7 @@ impl<'a> RowEmit<'a> {
         scores: &DeviceBuffer,
         probs: &DeviceBuffer,
         ctx: &DeviceBuffer,
+        kt: &DeviceBuffer,
         heads: usize,
         head_dim: usize,
         t_dec: usize,
@@ -247,13 +263,15 @@ impl<'a> RowEmit<'a> {
     ) {
         let inner = (heads * head_dim) as u32;
         let (h, hd, td, te) = (heads as u32, head_dim as u32, t_dec as u32, t_enc as u32);
-        // `attn_scores_cross` Params:
-        //   [bsz, n_heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off]
+        // `kv_k_headt` Params: [t_enc, d_model, kv_stride, k_off]
+        s.push(self.g.step(self.k.xkt_transpose, &[kv, kt], &[te, inner, 2 * inner, 0], inner * te));
+        // `attn_scores_cross_kt` Params:
+        //   [bsz, n_heads, t_dec, t_enc, head_dim, q_stride, q_off]
         s.push(self.g.step_sliced(
-            self.k.xscores,
-            &[q, kv, scores],
+            self.k.xkt_scores,
+            &[q, kt, scores],
             &[rows(q_r0, t_dec, inner as usize), (0, 0), (0, 0)],
-            &[1, h, td, te, hd, inner, 2 * inner, 0, 0],
+            &[1, h, td, te, hd, inner, 0],
             h * td * te,
         ));
         // `attn_softmax_cross` Params: [bsz, n_heads, t_dec, t_enc]

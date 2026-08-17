@@ -19,6 +19,17 @@
 //     kv_stride = 2*d_model, k region at k_off=0), indexed by key position j in
 //     [0,T_enc).
 // scores layout: ((b*H + h)*T_dec + i)*T_enc + j. One invocation per (b,h,i,j).
+//
+// THE KEY INDEX IS THE FASTEST THREAD INDEX AND K IS KEY-MAJOR, so consecutive
+// lanes read addresses `kv_stride` floats apart and each load is its own memory
+// transaction. That cannot be fixed inside this kernel: the stride belongs to
+// the caller's fused-KV layout, all four bindings are spoken for, and staging a
+// coalesced tile would need a `head_dim`-sized `var<workgroup>` array (32 KB at
+// head_dim 128, over the portable limit) plus a loop-carried barrier. It is
+// fixed by giving the kernel a different K: `kv_k_headt` transposes K to
+// key-minor once and `attn_scores_cross_kt` reads that, for the same values.
+// This kernel stays as the layout-generic reference and as the path for callers
+// with nowhere to put the transpose.
 
 struct Params {
     bsz: u32,

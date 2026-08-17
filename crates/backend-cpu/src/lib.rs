@@ -144,6 +144,12 @@ struct FastIdx {
     conv2d_gd: Option<usize>,
     conv2d_gd_reg: Option<usize>,
     attn_scores_cross: Option<usize>,
+    // The coalesced twin of `attn_scores_cross` and the transpose that feeds
+    // it. Without a native path here, a model that adopts the coalesced GPU
+    // pair would LOSE the AVX2 GEMM on this backend - a GPU win paid for on
+    // CPU.
+    attn_scores_cross_kt: Option<usize>,
+    kv_k_headt: Option<usize>,
     attn_softmax_cross: Option<usize>,
     attn_apply_cross: Option<usize>,
     moe_linear_gated: Option<usize>,
@@ -213,6 +219,8 @@ impl CpuBackend {
                 matmul_reg2: find("matmul_reg2"),
                 matmul_reg3: find("matmul_reg3"),
                 attn_scores_cross: find("attn_scores_cross"),
+                attn_scores_cross_kt: find("attn_scores_cross_kt"),
+                kv_k_headt: find("kv_k_headt"),
                 attn_softmax_cross: find("attn_softmax_cross"),
                 attn_apply_cross: find("attn_apply_cross"),
                 moe_linear_gated: find("moe_linear_gated"),
@@ -492,6 +500,28 @@ impl CpuBackend {
                 let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, ko, h, hd));
                 let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * tq * tk);
                 fast_ops::attn_scores_cross(q, kv, sc, b, h, tq, tk, hd, qs, kvs, qo, ko);
+            }
+            return;
+        }
+        if Some(kind) == f.kv_k_headt && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let (te, dm, kvs, ko) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
+                let kv = std::slice::from_raw_parts(bufs[0] as *const f32, span_len(te, kvs, ko, 1, dm));
+                let kt = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, dm * te);
+                fast_ops::kv_k_headt(kv, kt, te, dm, kvs, ko);
+            }
+            return;
+        }
+        if Some(kind) == f.attn_scores_cross_kt && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 7);
+                let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let (qs, qo) = (pu[5] as usize, pu[6] as usize);
+                let q = std::slice::from_raw_parts(bufs[0] as *const f32, span_len(b * tq, qs, qo, h, hd));
+                let kt = std::slice::from_raw_parts(bufs[1] as *const f32, h * hd * tk);
+                let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * tq * tk);
+                fast_ops::attn_scores_cross_kt(q, kt, sc, b, h, tq, tk, hd, qs, qo);
             }
             return;
         }

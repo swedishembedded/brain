@@ -53,6 +53,10 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
+    // The coalesced score path `model::rowemit` dispatches: K transposed to
+    // key-minor once, then a score sweep whose lanes read contiguous keys.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
     ("region_copy", kernels::REGION_COPY),
     ("add2", kernels::ADD2),
     ("axpy", kernels::AXPY),
@@ -127,6 +131,7 @@ impl Resampler {
         let scores = gpu.storage((cfg.heads * nq * kvr) as u64);
         let probs = gpu.storage((cfg.heads * nq * kvr) as u64);
         let ctx = gpu.storage((nq * inner) as u64);
+        let xkt = gpu.storage((inner * kvr) as u64);
         let aout = gpu.storage((nq * d) as u64);
         let ffn = gpu.storage((nq * d) as u64);
         let fh = gpu.storage((nq * ff) as u64);
@@ -158,7 +163,7 @@ impl Resampler {
             e.ln(&mut s, &lat_a, 0, wb(&p("0.norm2.weight")), wb(&p("0.norm2.bias")), &nkv, 1, nq, d);
             e.linear(&mut s, &nkv, 1, wb(&p("0.to_q.weight")), None, &q, 0, nq, d, inner);
             e.linear(&mut s, &nkv, 0, wb(&p("0.to_kv.weight")), None, &kv, 0, kvr, d, 2 * inner);
-            e.cross_attn(&mut s, &q, 0, &kv, &scores, &probs, &ctx, cfg.heads, cfg.dim_head, nq, kvr);
+            e.cross_attn(&mut s, &q, 0, &kv, &scores, &probs, &ctx, &xkt, cfg.heads, cfg.dim_head, nq, kvr);
             e.linear(&mut s, &ctx, 0, wb(&p("0.to_out.weight")), None, &aout, 0, nq, inner, d);
             // latents = attn(...) + latents
             s.push(gpu.step(k_add2, &[&lat_a, &aout, &lat_b], &[(nq * d) as u32], (nq * d) as u32));
@@ -254,6 +259,8 @@ pub struct SiteAttn {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     ctx: DeviceBuffer,
+    /// `[inner, num_queries]` key-minor K for the coalesced score path.
+    xkt: DeviceBuffer,
     max_img: usize,
 }
 
@@ -284,6 +291,7 @@ impl SiteAttn {
             scores: gpu.storage((heads * max_img * num_queries) as u64),
             probs: gpu.storage((heads * max_img * num_queries) as u64),
             ctx: gpu.storage((max_img * hidden) as u64),
+            xkt: gpu.storage((hidden * num_queries) as u64),
             gpu,
             k,
             cfg,
@@ -312,7 +320,7 @@ impl SiteAttn {
         // One linear over the FUSED weight produces `[nq, 2*hidden]` laid out as
         // k | v per row — the layout the cross-attention kernels expect.
         e.linear(&mut s, &self.id, 0, &self.kv_w, None, &self.kv, 0, self.num_queries, self.cfg.token_dim, 2 * hidden);
-        e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, hidden / 64, 64, n_img, self.num_queries);
+        e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, &self.xkt, hidden / 64, 64, n_img, self.num_queries);
         self.gpu.submit(&[], &s);
         self.gpu.read(&self.ctx, n_img * hidden)
     }
@@ -379,6 +387,8 @@ struct SiteScratch {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     ctx: DeviceBuffer,
+    /// `[inner, num_queries]` key-minor K for the coalesced score path.
+    xkt: DeviceBuffer,
 }
 
 impl SiteAttnSet {
@@ -408,6 +418,7 @@ impl SiteAttnSet {
                 scores: gpu.storage((heads * max_t * num_queries) as u64),
                 probs: gpu.storage((heads * max_t * num_queries) as u64),
                 ctx: gpu.storage((max_t * s.hidden) as u64),
+                xkt: gpu.storage((s.hidden * num_queries) as u64),
             });
             base.push(fused.clone());
             kv_w.push(b);
@@ -479,7 +490,7 @@ impl model::attninject::CrossAttnInject for SiteAttnSet {
         // One linear over the FUSED weight yields `[nq, 2*hidden]` = k | v per
         // row, which is the layout the cross-attention kernels read.
         e.linear(steps, &self.id, 0, &self.kv_w[k], None, &sc.kv, 0, nq, site.token_dim, 2 * hidden);
-        e.cross_attn(steps, q, 0, &sc.kv, &sc.scores, &sc.probs, &sc.ctx, hidden / 64, 64, t as usize, nq);
+        e.cross_attn(steps, q, 0, &sc.kv, &sc.scores, &sc.probs, &sc.ctx, &sc.xkt, hidden / 64, 64, t as usize, nq);
         // ctx += ip_ctx. The scale is already inside `v`, so this is a plain add
         // (`axpy` with s = 1) rather than a second scaling.
         steps.push(gpu.step(self.k_axpy, &[ctx, &sc.ctx], &[t * c, 1.0f32.to_bits()], t * c));

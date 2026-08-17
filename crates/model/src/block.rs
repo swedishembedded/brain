@@ -647,6 +647,108 @@ pub struct CrossIds {
     pub apply: usize,
 }
 
+/// The coalesced replacement for the `attn_scores_cross` dispatch: `kv_k_headt`
+/// transposes a span's K region into the key-minor `[d_model, kn]` scratch
+/// `kt`, and `attn_scores_cross_kt` reads that instead of the fused KV slab.
+///
+/// `attn_scores_cross` parallelises over the KEY index and reduces over
+/// `head_dim`, so consecutive lanes land `kv_stride` floats apart and every
+/// lane costs its own memory transaction. Its twin `attn_apply_cross` moves the
+/// same bytes with a contiguous thread index and is several times faster on the
+/// same device, which is what identifies this as a layout defect rather than a
+/// roofline. The transpose is O(kn·d_model) and the sweep it feeds is
+/// O(qn·kn·d_model), so it pays for itself as soon as a span has more than a
+/// couple of query rows.
+///
+/// `None` at every call site leaves the fused-KV dispatch byte for byte what it
+/// was, which is what lets a model adopt this one at a time against its own
+/// parity numbers.
+#[derive(Clone, Copy)]
+pub struct KeyMinor<'a> {
+    /// `kv_k_headt` pipeline index.
+    pub transpose: usize,
+    /// `attn_scores_cross_kt` pipeline index.
+    pub scores: usize,
+    /// `[d_model, max_kn]` scratch, `d_model = heads*head_dim`. Sized for the
+    /// LONGEST span the caller will pass; it is rewritten per span.
+    pub kt: &'a DeviceBuffer,
+}
+
+/// One score-slab dispatch, through whichever of the two paths the caller
+/// enabled. Same output buffer, same `((h*qn)+i)*kn + j` layout, same values -
+/// only where K is read from differs.
+///
+/// The `kt` path needs [`key_minor_step`] to have run for this span first, and
+/// that dispatch must be HOISTED out of any query-chunk loop: K does not vary
+/// with the query chunk, and re-transposing per chunk throws away the reuse the
+/// transpose exists to buy.
+///
+/// `q_slice`/`kv_slice` are the binding-level `(offset, len)` in floats, for
+/// callers that slice their row window rather than folding it into `q_off`/
+/// `k_off`; `(0, 0)` binds whole.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cross_scores_step(
+    g: &Gpu,
+    k: &CrossIds,
+    km: Option<&KeyMinor>,
+    a: CrossScoreArgs,
+    q: &DeviceBuffer,
+    q_slice: (u64, u64),
+    kv: &DeviceBuffer,
+    kv_slice: (u64, u64),
+    scores: &DeviceBuffer,
+) -> Step {
+    let CrossScoreArgs { heads, head_dim, q_stride, q_off, kv_stride, k_off, qn, kn } = a;
+    match km {
+        Some(km) => g.step_sliced(
+            km.scores,
+            &[q, km.kt, scores],
+            &[q_slice, (0, 0), (0, 0)],
+            &[1, heads, qn, kn, head_dim, q_stride, q_off],
+            heads * qn * kn,
+        ),
+        None => g.step_sliced(
+            k.scores,
+            &[q, kv, scores],
+            &[q_slice, kv_slice, (0, 0)],
+            &[1, heads, qn, kn, head_dim, q_stride, kv_stride, q_off, k_off],
+            heads * qn * kn,
+        ),
+    }
+}
+
+/// The nine numbers [`cross_scores_step`] needs that are not buffers - grouped
+/// so the two layouts' parameter lists stay one argument list rather than two.
+#[derive(Clone, Copy)]
+pub(crate) struct CrossScoreArgs {
+    pub heads: u32,
+    pub head_dim: u32,
+    pub q_stride: u32,
+    pub q_off: u32,
+    pub kv_stride: u32,
+    pub k_off: u32,
+    pub qn: u32,
+    pub kn: u32,
+}
+
+/// The `kv_k_headt` dispatch that fills [`KeyMinor::kt`] with this span's `kn`
+/// key rows. `k_off` is the region offset with the span's first row folded in
+/// exactly as the scores kernel's own `k_off` carries it, unless the caller
+/// slices `kv` instead (`kv_slice`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn key_minor_step(
+    g: &Gpu,
+    km: &KeyMinor,
+    d_model: u32,
+    kv: &DeviceBuffer,
+    kv_slice: (u64, u64),
+    kv_stride: u32,
+    k_off: u32,
+    kn: u32,
+) -> Step {
+    g.step_sliced(km.transpose, &[kv, km.kt], &[kv_slice, (0, 0)], &[kn, d_model, kv_stride, k_off], d_model * kn)
+}
+
 /// Span + query-chunked bidirectional self-attention over a fused qkv buffer:
 /// for each span `(row0, len)`, queries attend that span's keys/values
 /// (non-causal); results land in `ctx` at the same absolute rows. `chunk`
@@ -660,9 +762,16 @@ pub struct CrossIds {
 /// in-place fold into each chunk's score slab before the softmax). `None`
 /// leaves the dispatch sequence byte-for-byte what it was; there is deliberately
 /// no second copy of this loop for the biased case.
+///
+/// `km` swaps the score dispatch for the coalesced [`KeyMinor`] pair. This loop
+/// is the best case for it: the transpose is hoisted to once per SPAN while the
+/// score sweep runs once per query CHUNK, so a span of `len` rows at chunk size
+/// `c` amortises one `len·d_out` transpose over `len/c` sweeps of `c·len·d_out`
+/// reads each.
 pub fn chunked_bidir_fwd(
     g: &Gpu,
     k: &CrossIds,
+    km: Option<&KeyMinor>,
     heads: u32,
     head_dim: u32,
     d_out: u32,
@@ -686,20 +795,19 @@ pub fn chunked_bidir_fwd(
             // rows it owns, addressed by `q0`.
             r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
         }
+        let kv_row_off = row0 as u64 * stride as u64;
+        if let Some(km) = km {
+            // Once per span, outside the chunk loop - see [`KeyMinor`].
+            steps.push(key_minor_step(g, km, d_out, qkv, (kv_row_off, 0), stride, k_off, len));
+        }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
             // q view: rows [row0+q0 ..); kv view + ctx view: rows [row0 ..).
             let q_row_off = (row0 + q0) as u64 * stride as u64;
-            let kv_row_off = row0 as u64 * stride as u64;
             let ctx_off = (row0 + q0) as u64 * d_out as u64;
-            steps.push(g.step_sliced(
-                k.scores,
-                &[qkv, qkv, scores],
-                &[(q_row_off, 0), (kv_row_off, 0), (0, 0)],
-                &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off],
-                heads * qn * len,
-            ));
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
+            steps.push(cross_scores_step(g, k, km, sa, qkv, (q_row_off, 0), qkv, (kv_row_off, 0), scores));
             if let Some(r) = rel {
                 steps.push(r.add_step(g, heads, qn, len, q0, scores));
             }
@@ -974,6 +1082,7 @@ pub struct CrossBwdIds {
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,
+    km: Option<&KeyMinor>,
     bwd: &CrossBwdIds,
     heads: u32,
     head_dim: u32,
@@ -998,16 +1107,21 @@ pub fn chunked_bidir_bwd(
             r.check_span(len);
             r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
         }
+        let kv_row_off = row0 as u64 * stride as u64;
+        if let Some(km) = km {
+            // Once per span, outside the chunk loop - see [`KeyMinor`].
+            steps.push(key_minor_step(g, km, d_out, qkv, (kv_row_off, 0), stride, k_off, len));
+        }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
             let q_row_off = (row0 + q0) as u64 * stride as u64;
-            let kv_row_off = row0 as u64 * stride as u64;
             let dc_off = (row0 + q0) as u64 * d_out as u64;
             let p_qk = [1, heads, qn, len, head_dim, stride, stride, q_off, k_off];
             let p_v = [1, heads, qn, len, head_dim, stride, v_off, d_out];
             // Recompute this chunk's scores + probs from the cached qkv.
-            steps.push(g.step_sliced(fwd.scores, &[qkv, qkv, scores], &[(q_row_off, 0), (kv_row_off, 0), (0, 0)], &p_qk, heads * qn * len));
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
+            steps.push(cross_scores_step(g, fwd, km, sa, qkv, (q_row_off, 0), qkv, (kv_row_off, 0), scores));
             if let Some(r) = rel {
                 steps.push(r.add_step(g, heads, qn, len, q0, scores));
             }

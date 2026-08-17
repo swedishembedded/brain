@@ -43,8 +43,9 @@
 //! `patch_bypass: true`, which only a fixture may set.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use brain_testutil::parity::{compare, load, Report};
 use checkpoint::safetensors::StTensor;
 use deepseek2ocr::config::{BYPASS_B, BYPASS_W, IMAGE_NEWLINE, PROJECTOR_B, PROJECTOR_W, VIEW_SEPARATOR};
 use deepseek2ocr::prompt::Prompt;
@@ -59,64 +60,9 @@ fn testdata(rel: &str) -> PathBuf {
     brain_testutil::testdata_path(rel)
 }
 
-fn load(path: &Path) -> HashMap<String, StTensor> {
-    checkpoint::safetensors::read(path.to_str().expect("utf-8 path"))
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-        .into_iter()
-        .map(|t| (t.name.clone(), t))
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// the parity accumulator (this repo's `Report { rows, floor }` convention)
-// ---------------------------------------------------------------------------
-
-fn compare(a: &[f32], b: &[f32]) -> (f64, f64) {
-    assert_eq!(a.len(), b.len(), "length mismatch {} vs {}", a.len(), b.len());
-    let (mut dot, mut na, mut nb, mut mx) = (0f64, 0f64, 0f64, 0f64);
-    for (x, y) in a.iter().zip(b) {
-        let (x, y) = (*x as f64, *y as f64);
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-        mx = mx.max((x - y).abs());
-    }
-    if na == 0.0 && nb == 0.0 {
-        return (1.0, 0.0);
-    }
-    (dot / (na.sqrt() * nb.sqrt()).max(1e-30), mx)
-}
-
-struct Report {
-    rows: Vec<(String, f64, f64)>,
-    floor: f64,
-}
-
-impl Report {
-    fn new(floor: f64) -> Report {
-        Report { rows: Vec::new(), floor }
-    }
-    /// Cosine AND max_abs, always both: cosine alone cannot see a scale error,
-    /// max_abs alone cannot see a shape error.
-    fn check(&mut self, name: &str, got: &[f32], want: &[f32]) {
-        let (c, m) = compare(got, want);
-        println!("  {name:<22} cos {c:.10}  max_abs {m:.3e}  n={}", want.len());
-        // A tap that is identically zero on both sides compares "perfectly" and
-        // proves nothing; the fixture's random weights make that a real defect.
-        assert!(want.iter().any(|v| v.abs() > 1e-6), "{name}: the REFERENCE tap is all ~zero -- degenerate comparison");
-        self.rows.push((name.to_string(), c, m));
-    }
-    fn against(&mut self, name: &str, got: &[f32], golden: &HashMap<String, StTensor>) {
-        let want = golden.get(name).unwrap_or_else(|| panic!("golden tap {name} missing"));
-        self.check(name, got, &want.data);
-    }
-    fn finish(self, label: &str) {
-        let worst = self.rows.iter().min_by(|a, b| a.1.total_cmp(&b.1)).expect("no stages compared");
-        println!("  [{label}] {} taps, worst cosine {:.10} at {}", self.rows.len(), worst.1, worst.0);
-        let bad: Vec<&(String, f64, f64)> = self.rows.iter().filter(|r| r.1.is_nan() || r.1 < self.floor).collect();
-        assert!(bad.is_empty(), "{label}: {} tap(s) below cosine {}: {bad:?}", bad.len(), self.floor);
-    }
-}
+/// The tap-name column stays 22 wide so this suite's printed report lines keep
+/// the alignment the certified numbers were read at.
+const TAP_COL: usize = 22;
 
 // ---------------------------------------------------------------------------
 // import: the reference's flat attribute-path names -> brain's manifests
@@ -272,7 +218,7 @@ fn tiny_reference_stage_parity() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        eprintln!("SKIP: {} / {} absent -- run tools/goldens/deepseek_ocr_dump_reference.py", ckpt.display(), golden_path.display());
+        brain_testutil::skip(&format!("{} / {} absent -- run tools/goldens/deepseek_ocr_dump_reference.py", ckpt.display(), golden_path.display()));
         return;
     }
     let ck = load(&ckpt);
@@ -332,7 +278,7 @@ fn tiny_reference_stage_parity() {
     let clip = enc.clip();
     let rd = |b: &gpu_core::DeviceBuffer, n: usize| sam.gpu.read(b, n);
     let rows_c = (sam.cfg.rows() * sam.cfg.d_model) as usize;
-    let mut r = Report::new(GATE);
+    let mut r = Report::wide(GATE, TAP_COL);
 
     // ---- SAM tower ----
     r.against("sam_patch_embed", &rd(sam.patch_tokens(), rows_c), &g);
@@ -428,7 +374,7 @@ fn composite_backward_reaches_the_image_and_descends() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        eprintln!("SKIP: fixtures absent");
+        brain_testutil::skip("fixtures absent");
         return;
     }
     let ck = load(&ckpt);
@@ -552,7 +498,7 @@ fn composite_lora_backward_freezes_the_base_and_descends() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        eprintln!("SKIP: fixtures absent");
+        brain_testutil::skip("fixtures absent");
         return;
     }
     let ck = load(&ckpt);
@@ -680,7 +626,7 @@ fn the_real_layout_splices_the_learned_rows_verbatim_and_trains_them() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        eprintln!("SKIP: fixtures absent");
+        brain_testutil::skip("fixtures absent");
         return;
     }
     let ck = load(&ckpt);
@@ -821,7 +767,7 @@ fn split_device_vision_wgpu_decoder_cpu_matches_all_cpu() {
     let ckpt = testdata("deepseek-ocr/tiny/ckpt/model.safetensors");
     let golden_path = testdata("deepseek-ocr/tiny/golden.safetensors");
     if !ckpt.exists() || !golden_path.exists() {
-        eprintln!("SKIP: fixtures absent");
+        brain_testutil::skip("fixtures absent");
         return;
     }
     let ck = load(&ckpt);
