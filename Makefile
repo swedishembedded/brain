@@ -58,7 +58,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
         clippy check/scripts check/spdx hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/scheduler test/e2e/ready \
-        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e
+        perf/lfm perf/flux2 flux2/generate flux2/edit s3dit/int8-e2e test/e2e/deb
 
 help:
 	@echo "brain targets:"
@@ -135,7 +135,7 @@ release:
 deb: deb/release
 
 deb/debug: build
-	bash scripts/build/build-deb.sh --binary target/debug/brain
+	bash scripts/build/build-deb.sh --binary target/debug/brain --flavor debug
 
 deb/release: release
 	bash scripts/build/build-deb.sh
@@ -361,6 +361,13 @@ test/e2e/ready: build
 # re-fetching itself.
 test/e2e/quickstart: release
 	BRAIN_QUICKSTART_E2E=1 BRAIN_BIN=$(BRAIN) bats tests/e2e/quickstart.bats
+
+# End-to-end: the release .deb is a real, correctly-formed Debian package -
+# Depends actually derived from the binary, a real Installed-Size, md5sums for
+# every shipped file, and the debug flavor never collides with it. Needs
+# dpkg-deb + both flavors built.
+test/e2e/deb: deb/release deb/debug
+	bats tests/e2e/deb.bats
 
 # Every fast (no real weights, no GPU) end-to-end bats suite, in one target.
 test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/ready
