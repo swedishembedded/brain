@@ -50,6 +50,8 @@ const K_MUL: usize = 22;
 const K_NLC_NCHW: usize = 23;
 const K_ADD_INPLACE: usize = 24;
 const K_MATMUL_ROWS: usize = 25;
+const K_KV_K_HEADT: usize = 26;
+const K_ATTN_SCORES_CROSS_KT: usize = 27;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
@@ -78,6 +80,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("nlc_nchw", kernels::NLC_NCHW),
     ("add_inplace", kernels::ADD_INPLACE),
     ("matmul_rows", kernels::MATMUL_ROWS),
+    // ---- coalesced cross-attention scores ----
+    // `attn_scores_cross` walks the fused KV slab with the KEY index as the
+    // fastest thread index, so every lane of a warp lands on its own cache
+    // line. The trunk's global block is the worst case here: one span of every
+    // frame's tokens, re-read once per query chunk. Transposing K to key-minor
+    // once per span buys the same sweep coalesced loads.
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
 ];
 
 fn vit_ids(base: usize) -> VitKernelIds {
@@ -92,8 +102,8 @@ fn vit_ids(base: usize) -> VitKernelIds {
         attn_scores_cross: base + K_ATTN_SCORES_CROSS,
         attn_softmax_cross: base + K_ATTN_SOFTMAX_CROSS,
         attn_apply_cross: base + K_ATTN_APPLY_CROSS,
-        kv_k_headt: model::vit::UNREGISTERED,
-        attn_scores_cross_kt: model::vit::UNREGISTERED,
+        kv_k_headt: base + K_KV_K_HEADT,
+        attn_scores_cross_kt: base + K_ATTN_SCORES_CROSS_KT,
         ln_head: base + K_LN_HEAD,
         rope2d: base + K_ROPE2D,
     }
@@ -531,7 +541,8 @@ impl<'g> Mirror<'g> {
             };
             dctx.head_frame(&hwt, &taps, fi, td_t, (hp, wp), 3, &gs_depth_out[fi], Some(&gsb), &mut steps);
         }
-        let cam = CamBufs::new(gpu, s, 2 * c, &self.cam_init9);
+        let cam_sh = crate::cam::cam_shape(c as u32, cfg.heads as u32, cfg.mlp_ratio as u32);
+        let cam = CamBufs::new(gpu, s, &cam_sh, &self.cam_init9);
         let ck = CamKernels {
             vit: ids,
             silu: self.base + K_SILU,
@@ -539,7 +550,7 @@ impl<'g> Mirror<'g> {
             axpy: self.base + K_AXPY,
         };
         let cwt = CamWeights { ps: &self.ps };
-        record_cam_head(gpu, &ck, &cwt, &cam, &taps[cfg.tap_levels.len() - 1], s, td_t, 2 * c, 4, cfg.cam_blocks, &mut steps);
+        record_cam_head(gpu, &ck, &cwt, &cam, &taps[cfg.tap_levels.len() - 1], s, td_t, &cam_sh, 4, cfg.cam_blocks, &mut steps);
 
         self.built = Some(Built {
             s,

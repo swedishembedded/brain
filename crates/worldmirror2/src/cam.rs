@@ -47,13 +47,16 @@ pub struct CamBufs {
 }
 
 impl CamBufs {
-    pub fn new(gpu: &Gpu, s: usize, dim2: usize, init_token: &[f32]) -> CamBufs {
+    /// `sh` is the refine-net block shape - it MUST be [`cam_shape`] for the
+    /// same config the weights were laid out for, or the block's MLP dispatch
+    /// runs past the end of `mlp.fc1.weight`.
+    pub fn new(gpu: &Gpu, s: usize, sh: &VitShape, init_token: &[f32]) -> CamBufs {
+        let dim2 = sh.dim as usize;
         let sd = (s * dim2) as u64;
         let mut init9 = Vec::with_capacity(s * 9);
         for _ in 0..s {
             init9.extend_from_slice(init_token);
         }
-        let sh = VitShape { dim: dim2 as u32, heads: 16, mlp: 4 * dim2 as u32, eps: 1e-5 };
         CamBufs {
             cam_tok: gpu.storage(sd),
             cam_n: gpu.storage(sd),
@@ -73,9 +76,20 @@ impl CamBufs {
             init9: gpu.storage_init("cam.init9", &init9),
             ones: gpu.storage_init("cam.ones", &vec![1.0f32; dim2]),
             zerosc: gpu.storage_init("cam.zeros", &vec![0.0f32; dim2]),
-            scr: VitScratch::new(gpu, &sh, s as u32, s as u32, s as u32),
+            scr: VitScratch::new(gpu, sh, s as u32, s as u32, s as u32),
         }
     }
+}
+
+/// The refine-net block shape for a config: width `2*dim` (the frame‖global
+/// tap), the config's own head count and MLP ratio.
+///
+/// It has to be derived rather than assumed, because it is also what
+/// `MirrorConfig::param_list` sizes `cam_head.refine_net.*` from - the two read
+/// the SAME numbers or the block dispatches past the end of its own weights.
+pub fn cam_shape(dim: u32, heads: u32, mlp_ratio: u32) -> VitShape {
+    let d2 = 2 * dim;
+    VitShape { dim: d2, heads, mlp: mlp_ratio * d2, eps: 1e-5 }
 }
 
 /// Weight accessor bound to the `cam_head.` prefix.
@@ -90,7 +104,8 @@ impl<'a> CamWeights<'a> {
 }
 
 /// Record the full camera head. `last_tap` = `[s*td, 2C]`; `pred` must be in
-/// the submit clears list (deltas accumulate with axpy).
+/// the submit clears list (deltas accumulate with axpy). `sh` is the refine-net
+/// block shape - [`cam_shape`] for the config the weights came from.
 #[allow(clippy::too_many_arguments)]
 pub fn record_cam_head(
     gpu: &Gpu,
@@ -100,13 +115,14 @@ pub fn record_cam_head(
     last_tap: &DeviceBuffer,
     s: usize,
     td: usize,
-    dim2: usize,
+    sh: &VitShape,
     iters: usize,
     blocks: usize,
     steps: &mut Vec<Step>,
 ) {
     let su = s as u32;
-    let d2 = dim2 as u32;
+    let d2 = sh.dim;
+    let dim2 = d2 as usize;
     let n2 = su * d2;
     // gather cam tokens (row 0 of each frame) - cam_tok is in the clears list
     for fi in 0..s {
@@ -133,7 +149,6 @@ pub fn record_cam_head(
         su,
     ));
 
-    let sh = VitShape { dim: d2, heads: 16, mlp: 4 * d2, eps: 1e-5 };
     for it in 0..iters {
         // net_in = param_embed(init | prev raw pred)
         let src9 = if it == 0 { &b.init9 } else { &b.pred };
@@ -191,7 +206,7 @@ pub fn record_cam_head(
                 fc2_b: cw.get(&p("mlp.fc2.bias")),
                 ls2: Some(cw.get(&p("ls2.gamma"))),
             };
-            vit_block_fwd(gpu, &k.vit, &sh, &w, &b.x, su, &[(0, su)], su, &b.scr, steps);
+            vit_block_fwd(gpu, &k.vit, sh, &w, &b.x, su, &[(0, su)], su, &b.scr, steps);
         }
         // delta = fc2(gelu(fc1(out_norm(x))))
         steps.push(gpu.step(
