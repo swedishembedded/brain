@@ -300,4 +300,12 @@ libc = "0.2"
 
 [profile.release]
 opt-level = 3
-lto = true
+# Thin, not fat: `cargo test --release` links a separate binary per test
+# crate (100+ of them), and fat LTO re-optimizes each one's whole dependency
+# closure from scratch at link time - one previously took 2m45s to relink
+# alone with deps already built. Thin LTO still does cross-crate inlining
+# (the WGSL kernel dispatch this profile exists for is unaffected either way:
+# the GPU shaders are compiled by the driver at runtime, not by rustc/LLVM)
+# at a fraction of the link cost. Revisit only with a measured regression on
+# a real perf-gate baseline, not by assumption.
+lto = "thin"
