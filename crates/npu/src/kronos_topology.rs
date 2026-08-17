@@ -5,9 +5,9 @@
 //! a fixed context length `T`, for whole-graph compilation on OpenVINO
 //! (NPU/GPU/CPU).
 //!
-//! The host keeps the cheap, awkward-in-ONNX pieces — the hierarchical (s1,s2)
+//! The host keeps the cheap, awkward-in-ONNX pieces - the hierarchical (s1,s2)
 //! embedding gather + `×√d` scale, the `fusion_proj`, and the summed calendar
-//! embeddings — exactly how the Chronos-2 / GLM / Qwen exports keep embedding +
+//! embeddings - exactly how the Chronos-2 / GLM / Qwen exports keep embedding +
 //! sampling on host. The graph is the compute-heavy transformer stack + final
 //! norm + the `proj_s1` head:
 //!   input:   `x:[1,T,D]` (host-assembled fused embedding)
@@ -40,7 +40,7 @@ pub fn build_kronos_decoder_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource
 }
 
 /// s1 PREFILL: the full-window decoder, additionally emitting per-layer RoPE'd
-/// `k_{l}`/`v_{l}` `[1,heads,T,hd]` — these seed the single-token decode's KV cache
+/// `k_{l}`/`v_{l}` `[1,heads,T,hd]` - these seed the single-token decode's KV cache
 /// (`build_kronos_s1_decode_graph`). Same math as the plain decoder graph.
 pub fn build_kronos_s1_prefill_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant) {
     s1_stack(cfg, w, t, g, quant, true);
@@ -114,7 +114,7 @@ fn s1_stack(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBui
         let qt = tp.transpose(&q4, &[0, 2, 1, 3]); // [1,heads,T,hd]
         // When seeding the decode cache, the RoPE'd K/V transposes write directly to
         // the graph outputs `k_{b}`/`v_{b}` (a declared output can still be consumed
-        // downstream — writing via an Identity lets OpenVINO fold+drop the output).
+        // downstream - writing via an Identity lets OpenVINO fold+drop the output).
         let (kt, vt) = if emit_kv {
             let (kn, vn) = (format!("k_{b}"), format!("v_{b}"));
             tp.g.output_f32(&kn, &[1, heads as i64, t as i64, hd as i64]);
@@ -152,8 +152,10 @@ fn s1_stack(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBui
 }
 
 /// dep PREFILL: project the whole context `ctx:[1,T,D]` to the cross-attention
-/// K/V once, `dep_k`/`dep_v:[1,dep_heads,T,dep_hd]` (K RoPE'd at each position),
-/// seeding the dep decode cache — mirrors host `ensure_dep_kv`.
+/// K/V once, `dep_k`/`dep_v:[1,dep_heads,T,dep_hd]`, seeding the dep decode
+/// cache - mirrors host `ensure_dep_kv`. No rotary: the reference's dependency
+/// cross-attention builds its rotary table from the QUERY length, which is 1 at
+/// inference, so the rotation is the identity (see `KronosDecoder::dep_forward`).
 pub fn build_kronos_dep_prefill_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     build_kronos_dep_prefill_graph_quant(cfg, w, t, g, Quant::F32);
 }
@@ -161,7 +163,6 @@ pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &dyn WeightSo
     let d = cfg.d_model;
     let heads = cfg.dep_n_heads;
     let hd = d / heads;
-    let half = hd / 2;
     let ti = t as i64;
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
 
@@ -169,41 +170,25 @@ pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &dyn WeightSo
     tp.g.output_f32("dep_k", &[1, heads as i64, ti, hd as i64]);
     tp.g.output_f32("dep_v", &[1, heads as i64, ti, hd as i64]);
 
-    let (mut cos, mut sin) = (vec![0f32; t * half], vec![0f32; t * half]);
-    for p in 0..t {
-        for j in 0..half {
-            let ang = p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32);
-            cos[p * half + j] = ang.cos();
-            sin[p * half + j] = ang.sin();
-        }
-    }
-    tp.f32("rope_cos", &[1, ti, 1, half as i64], cos);
-    tp.f32("rope_sin", &[1, ti, 1, half as i64], sin);
     tp.i64("sh_heads", &[4], vec![1, ti, heads as i64, hd as i64]);
-    tp.i64("h_lo0", &[1], vec![0]);
-    tp.i64("h_hi0", &[1], vec![half as i64]);
-    tp.i64("h_lo1", &[1], vec![half as i64]);
-    tp.i64("h_hi1", &[1], vec![hd as i64]);
-    tp.i64("h_ax", &[1], vec![3]);
-    tp.i64("h_st", &[1], vec![1]);
 
     let cx = "dep_layer.cross_attn";
     let k = tp.linear_biased("ctx", &format!("{cx}.k_proj"), w, d, d);
     let v = tp.linear_biased("ctx", &format!("{cx}.v_proj"), w, d, d);
     let k4 = tp.reshape(&k, "sh_heads");
     let v4 = tp.reshape(&v, "sh_heads");
-    let k4 = tp.rope_neox(&k4);
     tp.g.add(Node::new("Transpose", &[&k4], &["dep_k"]).attr_ints("perm", &[0, 2, 1, 3]));
     tp.g.add(Node::new("Transpose", &[&v4], &["dep_v"]).attr_ints("perm", &[0, 2, 1, 3]));
 }
 
-/// dep DECODE (single token): `sib:[1,1,D]` (RAW emb_s1 of the sampled s1) +
-/// `ctx_last:[1,1,D]` (this position's s1 context) + `rope_cos`/`rope_sin:
-/// [1,1,1,dep_hd/2]` + `dep_mask:[1,1,1,cap]` + `past_dep_k`/`past_dep_v:
-/// [1,dep_heads,cap,dep_hd]` → `new_dep_k`/`new_dep_v:[1,dep_heads,1,dep_hd]`,
-/// `s2_logits:[1,1,s2v]`. The dep cross-attn is non-causal but during the rollout
-/// only positions `0..=pos` exist, so `dep_mask` (0 on filled slots) + the self
-/// score attends exactly the same set the full-window dep graph would.
+/// dep DECODE (single token): `sib:[1,1,D]` (RAW emb_s1 of the sampled s1),
+/// `ctx_last:[1,1,D]` (this position's s1 context), `dep_mask:[1,1,1,cap]` and
+/// `past_dep_k`/`past_dep_v:[1,dep_heads,cap,dep_hd]` in;
+/// `new_dep_k`/`new_dep_v:[1,dep_heads,1,dep_hd]` and `s2_logits:[1,1,s2v]` out.
+/// The dep cross-attn is non-causal but during the rollout only positions
+/// `0..=pos` exist, so `dep_mask` (0 on filled slots) + the self score attends
+/// exactly the same set the full-window dep graph would. Rotary-free, like the
+/// host path.
 pub fn build_kronos_dep_decode_graph(cfg: &KronosConfig, w: &dyn WeightSource, cap: usize, g: &mut GraphBuilder) {
     build_kronos_dep_decode_graph_quant(cfg, w, cap, g, Quant::F32);
 }
@@ -211,15 +196,12 @@ pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &dyn WeightSou
     let d = cfg.d_model;
     let heads = cfg.dep_n_heads;
     let hd = d / heads;
-    let half = hd / 2;
     let s2v = cfg.s2_vocab();
     let ci = cap as i64;
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
 
     tp.g.input_f32("sib", &[1, 1, d as i64]);
     tp.g.input_f32("ctx_last", &[1, 1, d as i64]);
-    tp.g.input_f32("rope_cos", &[1, 1, 1, half as i64]);
-    tp.g.input_f32("rope_sin", &[1, 1, 1, half as i64]);
     tp.g.input_f32("dep_mask", &[1, 1, 1, ci]);
     tp.g.input_f32("past_dep_k", &[1, heads as i64, ci, hd as i64]);
     tp.g.input_f32("past_dep_v", &[1, heads as i64, ci, hd as i64]);
@@ -231,12 +213,6 @@ pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &dyn WeightSou
     tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
     tp.i64("sh_heads1", &[4], vec![1, 1, heads as i64, hd as i64]);
     tp.i64("sh_flat1", &[3], vec![1, 1, d as i64]);
-    tp.i64("h_lo0", &[1], vec![0]);
-    tp.i64("h_hi0", &[1], vec![half as i64]);
-    tp.i64("h_lo1", &[1], vec![half as i64]);
-    tp.i64("h_hi1", &[1], vec![hd as i64]);
-    tp.i64("h_ax", &[1], vec![3]);
-    tp.i64("h_st", &[1], vec![1]);
     tp.i64("sl_ax", &[1], vec![3]);
     tp.i64("sl_0", &[1], vec![0]);
     tp.i64("sl_cap", &[1], vec![ci]);
@@ -249,8 +225,6 @@ pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &dyn WeightSou
     let q4 = tp.reshape(&q, "sh_heads1");
     let k4 = tp.reshape(&k, "sh_heads1");
     let v4 = tp.reshape(&v, "sh_heads1");
-    let q4 = tp.rope_neox(&q4);
-    let k4 = tp.rope_neox(&k4);
     let qt = tp.transpose(&q4, &[0, 2, 1, 3]); // [1,heads,1,hd]
     tp.g.add(Node::new("Transpose", &[&k4], &["new_dep_k"]).attr_ints("perm", &[0, 2, 1, 3]));
     tp.g.add(Node::new("Transpose", &[&v4], &["new_dep_v"]).attr_ints("perm", &[0, 2, 1, 3]));
@@ -284,8 +258,8 @@ pub fn build_kronos_dep_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize
 /// As [`build_kronos_dep_graph`] with a weight-quantization mode. Inputs `ctx`
 /// (the `decode_s1` final-norm context) and `sib` (host-gathered RAW `emb_s1`
 /// rows for the just-sampled s1), both `[1,T,D]`; output `s2_logits:[1,T,s2v]`.
-/// Cross-attention is **non-causal, SCALED** with `dep_n_heads` heads (head dim
-/// `D/dep_n_heads`, so its own RoPE tables); then `norm(ctx + attn)` → `proj_s2`.
+/// Cross-attention is **non-causal, SCALED, rotary-free** with `dep_n_heads`
+/// heads (head dim `D/dep_n_heads`); then `norm(ctx + attn)` → `proj_s2`.
 pub fn build_kronos_dep_graph_quant(
     cfg: &KronosConfig,
     w: &dyn WeightSource,
@@ -306,25 +280,8 @@ pub fn build_kronos_dep_graph_quant(
 
     tp.f32("c_eps", &[1], vec![1e-5]);
     tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
-    let half = hd / 2;
-    let (mut cos, mut sin) = (vec![0f32; t * half], vec![0f32; t * half]);
-    for p in 0..t {
-        for j in 0..half {
-            let ang = p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32);
-            cos[p * half + j] = ang.cos();
-            sin[p * half + j] = ang.sin();
-        }
-    }
-    tp.f32("rope_cos", &[1, ti, 1, half as i64], cos);
-    tp.f32("rope_sin", &[1, ti, 1, half as i64], sin);
     tp.i64("sh_heads", &[4], vec![1, ti, heads as i64, hd as i64]);
     tp.i64("sh_flat", &[3], vec![1, ti, d as i64]);
-    tp.i64("h_lo0", &[1], vec![0]);
-    tp.i64("h_hi0", &[1], vec![half as i64]);
-    tp.i64("h_lo1", &[1], vec![half as i64]);
-    tp.i64("h_hi1", &[1], vec![hd as i64]);
-    tp.i64("h_ax", &[1], vec![3]);
-    tp.i64("h_st", &[1], vec![1]);
 
     let cx = "dep_layer.cross_attn";
     let q = tp.linear_biased("sib", &format!("{cx}.q_proj"), w, d, d);
@@ -333,8 +290,6 @@ pub fn build_kronos_dep_graph_quant(
     let q4 = tp.reshape(&q, "sh_heads");
     let k4 = tp.reshape(&k, "sh_heads");
     let v4 = tp.reshape(&v, "sh_heads");
-    let q4 = tp.rope_neox(&q4);
-    let k4 = tp.rope_neox(&k4);
     let qt = tp.transpose(&q4, &[0, 2, 1, 3]);
     let kt = tp.transpose(&k4, &[0, 2, 1, 3]);
     let vt = tp.transpose(&v4, &[0, 2, 1, 3]);
@@ -359,7 +314,7 @@ pub fn build_kronos_dep_graph_quant(
 // context, then a single-token DECODE graph appends one token, attending the
 // cached K/V (O(cap)/step). Mirrors qwen's build_talker_{prefill,decode}_graph.
 // RoPE is shift-invariant (`q_i·k_j` depends only on `i−j`), so keys cached at
-// absolute positions stay valid — the same property the qwen decode graph uses.
+// absolute positions stay valid - the same property the qwen decode graph uses.
 
 /// s1 DECODE (single token): `x:[1,1,D]` + per-layer `past_k_{l}`/`past_v_{l}:
 /// [1,heads,cap,hd]` + `rope_cos`/`rope_sin:[1,1,1,hd/2]` (this token's absolute

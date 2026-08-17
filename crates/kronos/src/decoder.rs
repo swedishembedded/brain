@@ -207,6 +207,15 @@ impl KronosDecoder {
 
     /// Shared dependency-layer body: non-causal scaled cross-attention (q from
     /// `sibd`, k/v from `context`) → `norm(context + attn)` → `proj_s2`.
+    ///
+    /// **No RoPE.** The reference's cross-attention builds its rotary table from
+    /// the QUERY length, and `decode_s2` is only ever called with a single
+    /// sampled `s1` (query length 1), so the table is position 0 - `cos=1`,
+    /// `sin=0` - and the rotation is the identity for the keys too (the length-1
+    /// table broadcasts over the whole key window). The dependency layer is
+    /// therefore position-agnostic at inference, and rotating q at the last
+    /// position against keys at their own positions is a different operator: it
+    /// changed the sampled `s2` token from the second rollout step onward.
     fn dep_forward(&self, context: &DeviceBuffer, sibd: &DeviceBuffer, t: usize) -> Vec<f32> {
         let cfg = &self.cfg;
         let d = cfg.d_model;
@@ -215,12 +224,11 @@ impl KronosDecoder {
         let scale = 1.0 / (hd as f32).sqrt();
         let ops = self.ops();
 
-        // cross-attention: q from sibling, k/v from context (non-causal, scaled)
+        // cross-attention: q from sibling, k/v from context (non-causal, scaled,
+        // no rotary - see the note above)
         let q = ops.linear(sibd, "dep_layer.cross_attn.q_proj.weight", "dep_layer.cross_attn.q_proj.bias", t, d, d);
         let k = ops.linear(context, "dep_layer.cross_attn.k_proj.weight", "dep_layer.cross_attn.k_proj.bias", t, d, d);
         let v = ops.linear(context, "dep_layer.cross_attn.v_proj.weight", "dep_layer.cross_attn.v_proj.bias", t, d, d);
-        ops.rope(&q, t, heads, hd);
-        ops.rope(&k, t, heads, hd);
         let scores = self.gpu.storage((heads * t * t) as u64);
         let sc = self.gpu.step(
             ATTN_SCORES_QK,

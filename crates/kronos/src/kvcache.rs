@@ -82,11 +82,12 @@ pub struct Cache {
     pub k: Vec<Vec<f32>>, // [nl][len*d] RoPE'd keys
     pub v: Vec<Vec<f32>>, // [nl][len*d]
     pub ctx: Vec<f32>,    // [len*d] decode_s1 final-norm output per position
-    /// Dependency (cross-attention, S2) K/V, RoPE'd at each ctx position's
-    /// absolute index and grown incrementally alongside `ctx`. Lets
-    /// `dep_step_cached` project each position's dep K/V **once** instead of
-    /// re-projecting the whole window every decode step. Valid across window
-    /// slides by the same RoPE shift-invariance as the main K cache.
+    /// Dependency (cross-attention, S2) K/V, grown incrementally alongside
+    /// `ctx`. Lets `dep_step_cached` project each position's dep K/V **once**
+    /// instead of re-projecting the whole window every decode step. The dep
+    /// cross-attention carries no rotary at all (see
+    /// `KronosDecoder::dep_forward`), so these entries stay valid verbatim as
+    /// the window slides.
     pub dep_k: Vec<f32>,
     pub dep_v: Vec<f32>,
 }
@@ -169,16 +170,15 @@ impl HostW {
         let scale = 1.0 / (hd as f32).sqrt();
 
         let sib = &self.emb_s1[sampled_s1 as usize * d..sampled_s1 as usize * d + d];
-        let mut q = linear(sib, &self.dqw, &self.dqb, d, d);
-        hostmath::rope_neox_row(&mut q, heads, hd, pos_last, THETA);
-        // k/v from the cached context (non-causal cross-attention over w0..len)
+        let q = linear(sib, &self.dqw, &self.dqb, d, d);
+        // k/v from the cached context (non-causal cross-attention over w0..len,
+        // no rotary - see `KronosDecoder::dep_forward`)
         let win = len - w0;
         let mut kbuf = vec![0f32; win * d];
         let mut vbuf = vec![0f32; win * d];
         for (wi, j) in (w0..len).enumerate() {
             let cj = &ctx[j * d..j * d + d];
-            let mut kj = linear(cj, &self.dkw, &self.dkb, d, d);
-            hostmath::rope_neox_row(&mut kj, heads, hd, j, THETA);
+            let kj = linear(cj, &self.dkw, &self.dkb, d, d);
             let vj = linear(cj, &self.dvw, &self.dvb, d, d);
             kbuf[wi * d..wi * d + d].copy_from_slice(&kj);
             vbuf[wi * d..wi * d + d].copy_from_slice(&vj);
@@ -194,30 +194,28 @@ impl HostW {
         linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
     }
 
-    /// KV-cached [`dep_step`]: project each **new** ctx position's dependency K/V
-    /// once (RoPE'd at its absolute index) into `cache.dep_k/dep_v`, then do a
-    /// single windowed cross-attention. Turns the per-decode-step cost from
-    /// `O(window)` projections (the whole context, re-projected every step) into
-    /// `O(1)` new projections + attention. Numerically identical to [`dep_step`]
-    /// (parity gate: `tests/kvcache_parity.rs`).
-    /// Extend the dep K/V cache to cover every `ctx` position (RoPE'd at its
-    /// absolute index). Idempotent; call once after prefill to share the dep K/V
-    /// across sampling forks, or per decode step for the single new position.
+    /// Extend the dep K/V cache to cover every `ctx` position. Idempotent; call
+    /// once after prefill to share the dep K/V across sampling forks, or per
+    /// decode step for the single new position.
     pub fn ensure_dep_kv(&self, cache: &mut Cache) {
         let d = self.d;
-        let (heads, hd) = (self.dep_heads, self.dep_hd);
         let len = cache.ctx.len() / d;
         let have = cache.dep_k.len() / d;
         for j in have..len {
             let cj = &cache.ctx[j * d..j * d + d];
-            let mut kj = linear(cj, &self.dkw, &self.dkb, d, d);
-            hostmath::rope_neox_row(&mut kj, heads, hd, j, THETA);
+            let kj = linear(cj, &self.dkw, &self.dkb, d, d);
             let vj = linear(cj, &self.dvw, &self.dvb, d, d);
             cache.dep_k.extend_from_slice(&kj);
             cache.dep_v.extend_from_slice(&vj);
         }
     }
 
+    /// KV-cached [`dep_step`]: project each **new** ctx position's dependency K/V
+    /// once into `cache.dep_k/dep_v`, then do a single windowed cross-attention.
+    /// Turns the per-decode-step cost from `O(window)` projections (the whole
+    /// context, re-projected every step) into `O(1)` new projections +
+    /// attention. Numerically identical to [`dep_step`] (parity gate:
+    /// `tests/kvcache_parity.rs`).
     pub fn dep_step_cached(&self, sampled_s1: u32, cache: &mut Cache) -> Vec<f32> {
         let d = self.d;
         let (heads, hd) = (self.dep_heads, self.dep_hd);
@@ -227,8 +225,7 @@ impl HostW {
         let pos_last = len - 1;
         let scale = 1.0 / (hd as f32).sqrt();
         let sib = &self.emb_s1[sampled_s1 as usize * d..sampled_s1 as usize * d + d];
-        let mut q = linear(sib, &self.dqw, &self.dqb, d, d);
-        hostmath::rope_neox_row(&mut q, heads, hd, pos_last, THETA);
+        let q = linear(sib, &self.dqw, &self.dqb, d, d);
         let win = len - w0;
         let attn = attend(&q, &cache.dep_k[w0 * d..len * d], &cache.dep_v[w0 * d..len * d], 0, win, heads, hd, d, scale);
         let o = linear(&attn, &self.dow, &self.dob, d, d);

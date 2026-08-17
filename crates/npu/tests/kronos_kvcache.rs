@@ -156,7 +156,6 @@ fn dep_cached_rollout_matches_full_window() {
     let (d, s2v) = (cfg.d_model, cfg.s2_vocab());
     let heads = cfg.dep_n_heads;
     let hd = d / heads;
-    let half = hd / 2;
     let (cap, t_ctx) = (8usize, 5usize);
 
     // random s1 context + per-position sibling embeddings [cap, d].
@@ -200,15 +199,11 @@ fn dep_cached_rollout_matches_full_window() {
             .expect("run dep full");
         let ref_last = &get(&rout, "s2_logits")[p * s2v..(p + 1) * s2v];
 
-        let cos_t: Vec<f32> = (0..half).map(|j| (p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32)).cos()).collect();
-        let sin_t: Vec<f32> = (0..half).map(|j| (p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32)).sin()).collect();
         let mask: Vec<f32> = (0..cap).map(|j| if j < p { 0.0 } else { -1e9 }).collect();
         let dout = {
             let feeds: Vec<(&str, Feed)> = vec![
                 ("sib", Feed::F32(&sib[p * d..(p + 1) * d], vec![1, 1, d as i64])),
                 ("ctx_last", Feed::F32(&ctx[p * d..(p + 1) * d], vec![1, 1, d as i64])),
-                ("rope_cos", Feed::F32(&cos_t, vec![1, 1, 1, half as i64])),
-                ("rope_sin", Feed::F32(&sin_t, vec![1, 1, 1, half as i64])),
                 ("dep_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
                 ("past_dep_k", Feed::F32(&dk, vec![1, heads as i64, cap as i64, hd as i64])),
                 ("past_dep_v", Feed::F32(&dv, vec![1, heads as i64, cap as i64, hd as i64])),

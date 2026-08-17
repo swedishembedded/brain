@@ -878,17 +878,12 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
 
     fn dep_step(&mut self, sib: &[f32]) -> Vec<f32> {
         let (d, cap, dep_heads, dep_hd) = (self.d, self.cap, self.dep_heads, self.dep_hd);
-        let half = dep_hd / 2;
-        let pos = self.s1_pos - 1; // the ctx_last (self) absolute position
-        let (cos, sin) = rope_tables(pos, half, dep_hd);
         let mask: Vec<f32> = (0..cap).map(|j| if j < self.dep_valid { 0.0 } else { -1e9 }).collect();
         let ctx_last = std::mem::take(&mut self.ctx_last);
         let out = {
             let feeds: Vec<(&str, Feed)> = vec![
                 ("sib", Feed::F32(sib, vec![1, 1, d as i64])),
                 ("ctx_last", Feed::F32(&ctx_last, vec![1, 1, d as i64])),
-                ("rope_cos", Feed::F32(&cos, vec![1, 1, 1, half as i64])),
-                ("rope_sin", Feed::F32(&sin, vec![1, 1, 1, half as i64])),
                 ("dep_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
                 ("past_dep_k", Feed::F32(&self.dk, vec![1, dep_heads as i64, cap as i64, dep_hd as i64])),
                 ("past_dep_v", Feed::F32(&self.dv, vec![1, dep_heads as i64, cap as i64, dep_hd as i64])),
