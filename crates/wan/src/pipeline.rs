@@ -203,7 +203,7 @@ pub struct Video {
 
 /// Read a checkpoint from a directory of safetensors shards, one safetensors
 /// file, or a torch `.pth` - the three forms the Wan repos actually ship.
-fn read_any(path: &str) -> Result<Vec<StTensor>, String> {
+pub(crate) fn read_any(path: &str) -> Result<Vec<StTensor>, String> {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         return checkpoint::safetensors::read_model_dir(p);
