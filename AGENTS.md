@@ -299,6 +299,27 @@ fast and scalable kernel - not a naive one.
     path**, so the arcface/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
     is NOT claimed.)*
 
+12h. **Wan2.1 / Wan2.2 text-to-video** (`crates/wan`) - the first VIDEO model:
+    a DiT denoising a 3D `(frame, height, width)` latent volume under flow
+    matching, SDXL's attention topology (self-attention over the volume, then a
+    *separate* cross-attention into the text encoding - not FLUX/Z-Image's joint
+    sequence), 3-axis RoPE, umT5-XXL conditioning, and a **causal 3D VAE** at a
+    (4, 8, 8) stride. Modulation is token-independent and folds into LayerNorm
+    affines. Adds **four kernels total** - `conv3d`/`conv3d_dx`/`conv3d_dw` for
+    the VAE and `attn_keypad_mask` for umT5's key padding; the whole transformer
+    is existing kernels at Wan's shapes. Parity-gated: VAE every boundary at
+    cosine 1.000000, the real 1.3B DiT at 4,680 tokens at cosine 1.000000000
+    (rel_l2 3.755e-6) against BOTH the official repo and diffusers, on Vulkan and
+    the CPU JIT. **Serving contract met**: `wan::caps` (one `t2v` action),
+    `resident_wan::WanResident`, D-Bus `Subscribe` + `Cancel`,
+    `examples/videogen/`. **Training done, host only**: `grad.rs`/`modelgrad.rs`/
+    `lora.rs`/`finetune.rs`, gated by `gradcheck::check_wan`
+    (block FD 1.8e-9, model FD 1.7e-8, LoRA a bit-exact no-op at init).
+    `brain wan t2v` is one command to a playable mp4, with auto-fetch.
+    *(**No image-to-video**, no INT8, no `lora_train` action, no batched forward,
+    and NOT optimized - see `.agents/roadmap/wan.md` for the published per-kernel
+    profile that a later optimization pass is measured against.)*
+
 ### Audio / speech
 
 13. **Qwen3-TTS** (`crates/qwen3tts` + `crates/mimi` + `crates/ecapatdnn` +
@@ -558,7 +579,8 @@ front-end to depend on.
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
 | `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
-| `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL text-conditioning encoder |
+| `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL and umT5-XXL text-conditioning encoders |
+| `wan` | Wan2.1/2.2 text-to-video: the 3D-latent DiT, the causal 3D VAE, the sampling pipeline, both importers, and the host trainer/LoRA |
 | `sdxlunet` / `controlnet` / `pulid` / `instantid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1; InstantID's IP-Adapter-FaceID shapes (**forward not implemented** - see `crates/instantid/src/lib.rs`) |
 | `vqgan` / `codeformer` / `rrdbnet` | VQGAN/CodeFormer VQ autoencoder; CodeFormer face restoration; Real-ESRGAN super-resolution - the imaging pipeline's code/restore/upscale tail |
 | `audio` / `mimi` / `ecapatdnn` / `qwen3tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
@@ -652,6 +674,7 @@ front-end to depend on.
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/{wm-core,wm-display,diamond,genieredux}`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/s3dit/{readme,status}.md`; `crates/{s3dit,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |
+| **Video generation (Wan)**: guide / roadmap + perf baseline | `docs/models/wan.md`, `.agents/roadmap/wan.md`; `crates/wan`, `crates/cli/src/{wan_cli,resident_wan}.rs`, `crates/wan/src/bin/wan_bench.rs`, `examples/videogen/`; goldens via `tools/goldens/wan_{dit,vae,t5,schedule}_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` - the bit-exactness contract and why it holds is in its module docs |
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` - check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |

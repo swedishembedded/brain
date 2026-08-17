@@ -244,19 +244,290 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         single submit, which at 480p is far past the backend's 30 s deadlock
         guard - the first real 480p run died as "device likely wedged". The CLI
         raises it (announced) unless the caller already set it.
-- [ ] **Perf.** First real end-to-end run: 33 frames at 832x480, 25 UniPC
-      steps with CFG (50 forwards of 14,040 tokens), P40 + Vulkan, **57.5 min
-      wall clock** - text 246 s, DiT load 20 s, denoise 2308 s (46 s/forward
-      under a contended CPU; 37 s on an idle box), VAE decode 876 s. Three
-      things that ladder points at:
-      * **the VAE decode is now a quarter of the run** and is pure `conv3d` at
-        every layer - the `im2col_at` + `matmul_reg3` lowering the VAE section
-        already names is the first measurement to take;
-      * **the text encode is a fixed ~4 min tax on every generation**, because
-        umT5-XXL runs on the CPU. INT8 (`t5encoder::model::int8`, already the
-        crate's own stated answer) is what would put it on the card;
-      * 81 frames at 480p is 32,760 tokens, 5.4x the attention work of the
-        measured point, so the flagship configuration is hours today.
+- [ ] **Perf. Three of the four named defects are FIXED; self-attention is
+      not.** The baseline below is rung 2 of `.agents/rules/porting.md` section
+      10; the "after" tables at the end of this entry are rungs 3-5 for the VAE
+      convolution, the cross-attention scores and the host stages. Everything
+      here is a measurement, not a plan, and every "after" number was taken with
+      the parity gates green at their existing bars (DiT cosine 1.000000000 at
+      every block tap against the real 1.3B checkpoint, VAE cosine 1.000000 at
+      every stage tap against the real VAE checkpoint).
+
+      **End to end**, `brain wan t2v` on one Tesla P40 (24 GB, Vulkan), umT5-XXL
+      on the CPU, fp32 throughout:
+
+      | Request | text | DiT load | denoise | VAE decode | total |
+      |---|---|---|---|---|---|
+      | 33 frames 832x480, 25 steps | 246 s | 20 s | 2308 s (46 s/fwd) | 876 s | 57.5 min |
+      | 9 frames 416x240, 20 steps | 241 s | 19 s | 81 s (2.0 s/fwd) | 41 s | 6.4 min |
+      | 9 frames 256x256, 4 steps | 240 s | 19 s | 12 s (1.5 s/fwd) | 28 s | 5.0 min |
+
+      The 46 s/forward row was taken under a contended CPU; an idle box gives
+      37 s. The three rows exist to separate the FIXED cost from the
+      size-dependent one: **the text encode does not shrink**, so at any size
+      worth calling a smoke test it is most of the wall clock.
+
+      **Per kernel kind** - `crates/wan/src/bin/wan_bench.rs`, which builds the
+      REAL graphs (`WanDitDev::build` / `WanVaeDecoder::build`) over a
+      zero-filled source of the checkpoint's own manifest shapes, so it needs no
+      weights on disk and cannot drift from what a generation submits. Each kind
+      is timed by submitting only its own steps; the per-dispatch floor is
+      0.074 ms of queue round-trip (`wan_bench floor`), so the isolation costs
+      about 1 ms per table.
+
+      **DiT, one forward at 14,040 tokens** (33 frames at 832x480), 1140
+      dispatches, 34.26 s in one submit, 72,915 GFLOP -> 2128 GFLOP/s = **18.1%
+      of the P40's 11.76 TFLOP/s fp32 peak**:
+
+      | kernel | disp | ms | % | GFLOP/s | % peak |
+      |---|---|---|---|---|---|
+      | `flash_attn_bidir_split` (self-attn) | 30 | 19029 | 53.2% | 1909 | 16.2% |
+      | `matmul_reg3` (every projection + FFN) | 300 | 7330 | 20.5% | 4810 | 40.9% |
+      | `attn_scores_cross` | 30 | 7062 | 19.7% | 94 | 0.80% |
+      | `attn_apply_cross` | 30 | 1557 | 4.4% | 426 | 3.6% |
+      | everything else (9 kinds) | 750 | 787 | 2.2% | | |
+
+      Sum of kinds 35.76 s against 34.26 s in one submit, i.e. the
+      instrumentation is worth about 4%.
+
+      **The surprise is cross-attention, and it is the kind of surprise section
+      10 rung 3 exists for.** `attn_scores_cross` and `attn_apply_cross` do
+      *identical* arithmetic - 662 GFLOP each over the whole stack, `q·kᵀ` and
+      `p·v` against the same 512 text keys - and scores takes **4.5x** as long.
+      Nobody would have guessed that the 512-key cross-attention costs as much
+      as all 300 GEMMs put together; the GEMMs are the healthiest thing in the
+      table at 40.9% of peak. Two independent reasons this is a defect rather
+      than a ceiling: the two halves of the same computation disagree by 4.5x,
+      and 0.80% of peak is two orders of magnitude under the roofline.
+
+      Self-attention is the majority and is a genuine `O(t²)` cost, but 16.2% of
+      peak against `matmul_reg3`'s 40.9% says the flash kernel is not close to
+      what the same silicon does on a plain GEMM either.
+
+      **VAE decode, 9 frames at 832x480** (latent `[16,3,60,104]`), 762
+      dispatches, 199.6 s in one submit:
+
+      | kernel | disp | ms | % |
+      |---|---|---|---|
+      | `conv3d` | 113 | 204687 | **96.5%** |
+      | `attn_scores_bidir` | 3 | 3132 | 1.5% |
+      | `l2norm_scale` | 90 | 1369 | 0.6% |
+      | `nchw_nlc` / `nlc_nchw` | 186 | 1904 | 0.9% |
+      | everything else (10 kinds) | 370 | 1030 | 0.5% |
+
+      The decode is ONE kernel. The two heaviest shapes are
+      `[cin 192, (6,240,416)] -> [cout 192, (4,240,416)]` and
+      `[cin 96, (6,480,832)] -> [cout 96, (4,480,832)]`, both 3x3x3: **795 GFLOP
+      per dispatch, six dispatches each, 35.6 s and 35.5 s** - i.e.
+      **134 GFLOP/s, 1.14% of peak**. Minimum traffic for one of those is about
+      1.53 GB in 5.9 s = 259 MB/s against the card's 346 GB/s, so it is not
+      bandwidth-bound either. Under 10% of BOTH rooflines is section 10 rung 5's
+      definition of a defect, and rung 5 also names the fix: this is the
+      structural case for an algorithmic change (`im2col_at` + `matmul_reg3`),
+      not for tuning - the same `matmul_reg3` reaches 40.9% of peak in the table
+      above, a 36x gap.
+
+      Three things follow, in the order the shares put them:
+      * **`conv3d` is the single biggest win available** and it is one kernel
+        against one already-fast alternative. The VAE section above already
+        named the lowering; this is the measurement that says to take it.
+        **Done** - see "VAE decode, after" below, 10.8x.
+      * **`attn_scores_cross` is the cheapest win available** - 20% of the DiT
+        for arithmetic its own twin does 4.5x faster. **Done** - see
+        "cross-attention, after" below, 5.96x.
+      * **the text encode is a fixed tax** and no kernel change touches it:
+        umT5-XXL runs on the CPU because 22.72 GB of fp32 does not fit the card.
+        INT8 (`t5encoder::model::int8`, already the crate's own stated answer)
+        is what would put it on the card, and section 10 rung 6 is the warning
+        that comes with it - quantization buys residency first and speed only
+        if the profile says arithmetic is the limiter. **Not done.**
+
+      ## What 20x would require, and why fp32 cannot give it
+
+      Settle this before reading the "after" tables, because it bounds them. One
+      DiT forward is 72,915 GFLOP. At the P40's **entire** 11.76 TFLOP/s fp32
+      peak that is 6.20 s, so the 50 forwards of a 25-step CFG request cannot go
+      below **310 s in fp32 no matter what any kernel does** - and that is 1.8x
+      the 173 s that a 20x speedup of the 3454 s baseline would allow for the
+      whole pipeline, text encode and VAE included. Self-attention alone is
+      36,333 GFLOP a forward (49.8% of the total) and floors at 3.09 s.
+
+      So 20x is not a hard optimization target here, it is an arithmetically
+      unreachable one at fp32, and no amount of kernel work reaches it. The
+      honest ceiling in fp32 is bounded by that 310 s denoise floor; INT8 (rung
+      6) is the only lever that moves the floor itself, because the P40's DP4A
+      rate is ~4x its fp32 rate.
+
+      ## After
+
+      Same machine, same bench, same shapes. Hardware named exactly: one Tesla
+      P40 (24 GB, Vulkan, sm_61), 48-core Xeon E5-2690 v3 host.
+
+      **End to end, the baseline request re-run** (33 frames 832x480, 25 steps,
+      seed 42, the same prompt), `brain wan t2v`:
+
+      | phase | before | after | |
+      |---|---|---|---|
+      | text encode (umT5-XXL, CPU) | 245.8 s | 236.8 s | 1.04x |
+      | DiT load | 20.1 s | 11.5 s | 1.75x |
+      | denoise (50 forwards) | 2308.3 s (46.2 s/fwd) | 1763.7 s (35.3 s/fwd) | 1.31x |
+      | VAE decode | 876.1 s | **101.6 s** | **8.62x** |
+      | **total** | **3454 s (57.5 min)** | **2115.6 s (35.3 min)** | **1.63x** | <!-- perf-number: a real end-to-end run of the shipped CLI on one named card, the same request the baseline row above reports -->
+
+      The clip is visually identical to the pre-optimization reference at the
+      same seed (same subject, framing, lighting and motion at frames 0/10/20/32;
+      374,655 vs 374,946 bytes encoded).
+
+      **The card thermally throttles, and it matters to every number here.**
+      Under sustained load GPU 0 sits at 89-90 C and drops to **999 MHz of its
+      1531 MHz** clock (`clocks_event_reasons.active = 0x20`, SW thermal
+      slowdown), recovering to ~1300 MHz intermittently. So:
+      * the per-step cost *rises* through a run - the cumulative average went
+        57.4 s/step at step 2 to 70.5 s/step at step 26;
+      * `wan_bench`'s best-of-N numbers are taken in short bursts at a higher
+        clock and are therefore OPTIMISTIC against a 30-minute request. The
+        bench predicts 31.8 s/forward; the sustained run measured 35.3 s;
+      * **the honest sustained fp32 peak is ~7.67 TFLOP/s, not 11.76**, which
+        raises the 50-forward denoise floor from 310 s to about **475 s**. Every
+        roofline percentage in the tables above is quoted against the boost
+        figure and is thus a lower bound on true utilisation.
+
+      **Host stages, per forward** (`wan_bench host`, 33 frames at 832x480).
+      `wan::model::linear` was a single-threaded scalar triple loop; it is now
+      row-parallel through `backend_cpu::par` (the workspace's only rayon seam).
+      The split is over output rows with each row's dot product untouched, so it
+      is **bit-identical**, not merely close - which is what lets a
+      parity-gated path take it unconditionally.
+
+      | stage | before | after | |
+      |---|---|---|---|
+      | `embed_tokens` (patchify + proj) | 872.0 ms | 43.3 ms | 20.1x |
+      | `postprocess` (head + unpatchify) | 1285.5 ms | 154.4 ms | 8.3x |
+      | RoPE tables | 8.2 ms | **0** (hoisted to build) | - |
+      | `timestep_cond` | 14.6 ms | 19.3 ms | ~1x |
+      | **per-forward total** | **2.188 s** | **0.225 s** | **9.7x** |
+      | `text_embed` (once a prompt) | 3881.2 ms | 118.2 ms | 32.8x |
+
+      The RoPE tables are a pure function of the (f, h, w) patch grid and the
+      grid is fixed for the life of an engine, so they were being recomputed and
+      re-uploaded (~1.8 M sin/cos pairs, ~14 MB) on every one of the 50 forwards
+      for nothing. They are built once in `WanDitDev::build` now.
+
+      This is also why the baseline's 46 s/forward and an idle box's 37 s
+      disagreed: a single-threaded 2.2 s host leg is exactly the part that
+      degrades under CPU contention. At 0.225 s the pipeline is far less
+      sensitive to what else the box is doing.
+
+      **Cross-attention, after.** `attn_scores_cross` parallelises over the KEY
+      index and reduces over `head_dim`, so against the natural `[text_len,
+      dim]` K every lane of a warp landed on its own cache line. `attn_apply_cross`
+      moves the *same* bytes of the *same* slab with `d` as its thread index -
+      contiguous - which is the whole of the 4.5x. Transposing K once a block
+      (`kv_k_headt`, a 512x1536 shuffle, 1.4 ms across all 30 blocks) and
+      reading it key-minor (`attn_scores_cross_kt`) buys that coalescing:
+
+      | kernel | before | after | |
+      |---|---|---|---|
+      | `attn_scores_cross` -> `_kt` | 7303.4 ms | 1224.7 ms | **5.96x** |
+      | `kv_k_headt` (new, once a block) | - | 1.4 ms | |
+
+      It lands at 1225 ms against `attn_apply_cross`'s 1333 ms - i.e. exactly
+      the rate its twin already got for identical traffic, which is the
+      confirmation that coalescing was the entire defect. Both kernels are
+      additive: `attn_scores_cross` is unchanged and still serves the chunked
+      self-attention fallback and every other model that dispatches it.
+
+      **DiT, one forward at 14,040 tokens, after** - 1170 dispatches, 28.106 s
+      in one submit, 72,915 GFLOP -> 2594 GFLOP/s = **22.1% of peak** (was
+      34.147 s / 2135 GFLOP/s / 18.2%):
+
+      | kernel | disp | ms | % | note |
+      |---|---|---|---|---|
+      | `flash_attn_bidir_split` | 30 | 17960 | **63.6%** | unchanged - the wall |
+      | `matmul_reg3` | 300 | 6927 | 24.5% | healthy, ~41% of peak |
+      | `attn_apply_cross` | 30 | 1333 | 4.7% | |
+      | `attn_scores_cross_kt` | 30 | 1225 | 4.3% | was 7303 |
+      | everything else (10 kinds) | 780 | 661 | 2.3% | |
+
+      A full forward including host stages, uploads and the readback is
+      **37.82 s -> 31.8 s**; the 3.67 s gap between the graph and the whole
+      forward is upload/readback, and is NOT host math (that is the 0.225 s
+      above). Nobody has attacked it.
+
+      **VAE decode, after** (9 frames at 416x240, the size the before-table was
+      re-taken at). `conv3d` measured a **flat 134-138 GFLOP/s, 1.14-1.17% of
+      peak, across four very different shapes** - a rate that does not move with
+      shape is structural, which is rung 5's definition of "needs an algorithmic
+      change, not tuning". The change is the one the 2D builder already made and
+      documented (`im2col_at` + `matmul_reg3` + `nlc_bias_nchw`), lifted to the
+      time axis as `im2col3d_at`; `conv3d`'s weight index is already
+      `(((co*Cin + cl)*KT + kt)*KH + kh)*KW + kw`, so the same weight tensor is
+      the GEMM's B operand with no repacking.
+
+      | | before | after | |
+      |---|---|---|---|
+      | whole decode graph | 46.016 s | **4.268 s** | **10.8x** |
+      | `conv3d` | 113 disp, 49515 ms, 98.1% | 4 disp, 66 ms, 1.5% | |
+      | `matmul_reg3` | - | 250 disp, 1965 ms, 46.1% | |
+      | `im2col3d_at` | - | 250 disp, 1343 ms, 31.5% | |
+
+      The four surviving `conv3d` dispatches are the low-channel ones the
+      `GEMM_CONV3D_MIN_COUT` guard correctly keeps direct. `im2col3d_at` at
+      31.5% is now the obvious next VAE target - it is pure data movement.
+
+      ## Hypotheses killed, with numbers
+
+      Negative results, so the next person does not re-run them:
+      * **INT8 is not the DiT's answer, at least not first.** The GEMMs are the
+        *healthiest* thing in the profile at ~41% of peak and only 24.5% of the
+        graph; attention is 68% and no GEMM precision touches the flash kernel.
+        A perfect 4x on every `matmul_reg3` would take 28.1 s to 22.9 s - 1.23x.
+        Rung 6 in one line.
+      * **Batching the two CFG forwards to B=2 is not "close to a straight
+        2x".** It does not reduce FLOPs at all; it only amortises per-forward
+        fixed cost, and at 14,040 tokens the card is already saturated
+        (`matmul_reg3` at 41% of peak, a 6.2 s/forward fp32 floor). The engine's
+        attention slab *would* take it - `model::block::flash_bidir_step`
+        documents `bsz > 1` as sample-major and bit-identical - so the ceiling
+        is the 3.67 s/forward of upload/readback, not 2x.
+      * **The GEMMs are already on the register-tiled kernel.** `matmul_reg3` is
+        what all 300 projection/FFN dispatches land on, at 4300-4836 GFLOP/s
+        across the four shapes Wan uses. There is no naive-`matmul` bug to find.
+      * **`flash_attn_bidir` vs `_split` is not a live choice on this card.**
+        `flash_bidir_variant` takes the split kernel whenever
+        `max_workgroup_size >= 256`, which the P40 satisfies; there is no shape
+        knob to sweep here without writing a third variant.
+
+      ## What is left, in the order the shares now put it
+
+      * **`flash_attn_bidir_split` is THE wall.** 17.96 s of a 28.11 s forward
+        (63.6%), ~900 s of the 2116 s request, and untouched. It runs at 2023
+        GFLOP/s = 17.2% of the boost-clock peak while `matmul_reg3` on the same
+        silicon reaches 41%. That gap is worth ~10 s a forward (~500 s a
+        request) and it is the only remaining item big enough to change the
+        headline. It is not a defect by rung 5's test (17.2% is over the 10%
+        line), so it needs a better kernel, not a bug fix.
+      * **The text encode is untouched and is now 11% of the request.** 236.8 s
+        of fixed CPU tax. bf16 weight storage (`crates/model/src/half.rs`, the
+        `@dtype` kernel headers) would fit umT5-XXL's 22.72 GB in 11.4 GB and
+        put it on the card; INT8 is the crate's own stated answer.
+      * **3.67 s a forward of upload/readback** - the gap between the 28.11 s
+        graph and the 31.8 s full forward, and NOT host math (that is 0.225 s).
+        ~185 s a request in `write_f32`/`read` of the 86 MB token slab either
+        side of each submit. Nobody has looked at it.
+      * **`im2col3d_at` is 31.5% of the new VAE decode**, pure data movement,
+        and is the obvious next VAE step now that `conv3d` is gone.
+      * **`attn_scores_cross` itself is still slow for every OTHER model that
+        dispatches it** - `sam1`, `sam2`, `clip`, `pulid`, `instantid`,
+        `fastvlm`, `deepseekocr`, `vit`. Wan now routes around it via the
+        additive `attn_scores_cross_kt`; the shared kernel was deliberately not
+        changed, because its callers were not measured here. The same transpose
+        would help all of them and is the single highest-leverage follow-up
+        outside this model.
+
+      Not measured, and worth saying so: 81 frames at 480p is 32,760 tokens,
+      5.4x the attention work of the profiled point, and no per-kernel table was
+      taken there; the flagship configuration is extrapolated, not measured.
 - [x] **`capability::Media::Video`**, landed ahead of `caps.rs` as its own unit
       of work, exactly as `.agents/rules/serving-contract.md` section 4 asks --
       extending `Media` rather than adding a side channel. Three things it

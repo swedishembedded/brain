@@ -161,6 +161,27 @@ assert bg_drift > dog_drift * 3, f'background barely changed relative to the dog
   [ "$status" -eq 0 ]
 }
 
+@test "quickstart: wan produced a real clip whose frames actually differ" {
+  [ -s "$IMG_DIR/wan.mp4" ] || skip "step 6b (wan t2v) has not run yet"
+  [ -s "$IMG_DIR/wan-strip.png" ] || skip "step 6b contact strip missing"
+  # A video model that produced a still (every frame identical) would satisfy
+  # "the file exists" and "it decodes" while having done nothing a text-to-image
+  # model could not - so assert MOTION, not just bytes. The strip is 5 tiles of
+  # one frame each, so comparing the first tile to the last is comparing frame 1
+  # to frame 9 of the clip.
+  run python3 -c "
+from PIL import Image
+import numpy as np
+im = np.array(Image.open('$IMG_DIR/wan-strip.png').convert('RGB'), dtype=np.int16)
+h, w = im.shape[0], im.shape[1] // 5
+assert w > 0 and h > 0, f'degenerate strip {im.shape}'
+first, last = im[:, :w], im[:, 4 * w:5 * w]
+drift = np.abs(first - last).mean()
+assert drift > 2.0, f'first and last frame are near-identical (mean abs diff {drift:.2f}) -- no motion'
+"
+  [ "$status" -eq 0 ]
+}
+
 @test "quickstart: TTS -> ASR round trip recovered recognizable words from the synthesized sentence" {
   [ -s "$IMG_DIR/roundtrip.txt" ] || skip "step 7 (tts/asr round trip) has not run yet"
   run cat "$IMG_DIR/roundtrip.txt"

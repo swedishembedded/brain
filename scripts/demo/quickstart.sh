@@ -200,6 +200,33 @@ ImageOps.invert(Image.open('$IMG_DIR/dog-mask.png').convert('L')).save('$IMG_DIR
   rm -f "$IMG_DIR/.bg-mask.png"
 fi
 
+# ---------------------------------------------------------------- 6b. text -> video
+
+step "6b. text-to-video (wan, auto-fetches Wan-AI/Wan2.1-T2V-1.3B - ~17.6 GB)"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "   skipped: wan needs the ffmpeg CLI, both to write a container and to tile the strip below"
+elif ! need "$IMG_DIR/wan-strip.png"; then
+  # Deliberately NOT the model's own sampling defaults (81 frames at 832x480
+  # over 50 steps), which occupy a Tesla P40 for the better part of an hour:
+  # this script is re-run by `make docs/quickstart` and asserted on by
+  # `make test/e2e/quickstart`, and an hour-long step in it would simply stop
+  # being run. Half-scale 16:9 (416x240) at 9 frames and 20 steps is the
+  # smallest setting measured here that still produces a recognizable subject
+  # moving across the frame. Most of its wall clock is the umT5-XXL text
+  # encode, which runs on the CPU (22.72 GB in fp32 does not fit the card) and
+  # costs the same at every size, so shrinking further buys very little.
+  "$BRAIN" --device gpu wan t2v \
+    --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
+    --frames 9 --width 416 --height 240 --steps 20 --seed 7 \
+    --output-path "$IMG_DIR/wan.mp4"
+  # Every other step here publishes a PNG the README embeds; a video cannot be
+  # embedded, so publish every other frame as one contact strip instead. The
+  # .mp4 is kept beside it - the strip is the still that proves motion, the
+  # file is the thing the command actually produced.
+  ffmpeg -y -v error -i "$IMG_DIR/wan.mp4" \
+    -vf "select='not(mod(n\,2))',tile=5x1" -frames:v 1 "$IMG_DIR/wan-strip.png"
+fi
+
 # ---------------------------------------------------------------- 7. tts -> asr -> text (round trip)
 
 step "7. text -> speech -> text -> text (qwen3tts synth, auto-fetches Qwen/Qwen3-TTS-12Hz-0.6B-Base; nemotronasr + qwen3asr transcribe, two independent ASR models on the same audio; qwen3 infer)"

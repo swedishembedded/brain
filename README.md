@@ -149,6 +149,30 @@ chin - so it kept reinforcing an apple-shaped ghost into the regenerated
 cake regardless of step count. sam2's mask already follows the dog's real
 silhouette, so a hard edge doesn't need softening to hide a straight line.
 
+**Text → video** - the same one-command shape, a different modality: prompt in,
+playable `.mp4` out, no second step to turn frames into a file:
+
+```bash
+$ brain --device gpu wan t2v \
+    --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
+    --frames 9 --width 416 --height 240 --steps 20 --seed 7 \
+    --output-path wan.mp4                                   # auto-fetches Wan-AI/Wan2.1-T2V-1.3B (~17.6 GB)
+wan: wrote wan.mp4 (416x240, 9 frames at 16 fps)
+```
+
+![five frames of the generated clip side by side: a dog running left to right along the waterline at sunset](docs/quickstart/img/wan-strip.png)
+
+Every second frame of the clip, side by side. The subject moves across the
+frame and the sea and sky stay put, which is the thing a video model has to do
+and an image model cannot.
+
+Those are not Wan's own defaults, and the difference is the point: 81 frames at
+832x480 over 50 steps is what upstream ships and it occupies a Tesla P40 for
+the better part of an hour, so this page runs a half-scale 9-frame clip that
+finishes in minutes. Most of even that is the umT5-XXL text encoder, which runs
+on the CPU because 22.72 GB of fp32 weights do not fit a 24 GB card.
+[`docs/models/wan.md`](docs/models/wan.md) has the measured breakdown.
+
 **Speech: text → speech → text → text**, a full TTS → ASR → LLM round trip,
 through two independently-trained ASR models on the exact same audio:
 
@@ -239,6 +263,7 @@ including those.
 | [`brain/codeformer`](docs/models/codeformer.md) | Image | blind face restoration |
 | [`brain/rrdbnet`](docs/models/rrdbnet.md) | Image | super-resolution |
 | [`brain/vqgan`](docs/models/vqgan.md) | Image | VQ autoencoder (CodeFormer's codebook) |
+| [`brain/wan`](docs/models/wan.md) | Video | text-to-video diffusion (3D-latent DiT + causal 3D VAE) |
 | [`worldmirror2`](docs/models/worldmirror2.md) | 3D | multi-view images -> 3D Gaussian Splatting scene |
 | [`splat`](docs/models/splat.md) | 3D | 3D Gaussian Splatting viewer/renderer |
 | [`brain/chronos2`](docs/models/chronos2.md) | Forecasting | probabilistic time-series forecasting |

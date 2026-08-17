@@ -16,8 +16,8 @@ already in flight is one submit of the whole block stack and finishes first).
 
     dbus-run-session -- bash -c '
       BRAIN_WAN_DIT=… BRAIN_WAN_VAE=… BRAIN_WAN_T5=… BRAIN_WAN_TOKENIZER=… \
-      brain serve --dbus & sleep 2
-      python3 examples/videogen/cancel_generation.py --frames 9 --width 256 --height 256'
+      BRAIN_GPU_WAIT_S=1200 brain serve --dbus & sleep 2
+      python3 examples/videogen/cancel_generation.py'
 
 Requires: jeepney -- `pip install -e brain-py`.
 """
@@ -41,9 +41,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt", default="a lighthouse in a storm", help="prompt (the clip is never produced)")
     ap.add_argument("--model", default=MODEL, help="a streaming, cancellable t2v model")
-    ap.add_argument("--frames", type=int, default=0, help="video frames, of the form 1 + 4k (0 = the model's default)")
-    ap.add_argument("--width", type=int, default=0)
-    ap.add_argument("--height", type=int, default=0)
+    # Small by default, for the same reason `generate_video.py` is: the clip is
+    # never produced, but the two steps before the cancel are real forwards and
+    # at the model's own size they are minutes each. 0 = the model's default.
+    ap.add_argument("--frames", type=int, default=9, help="video frames, of the form 1 + 4k (0 = the model's default, 81)")
+    ap.add_argument("--width", type=int, default=416)
+    ap.add_argument("--height", type=int, default=240)
     args = ap.parse_args()
 
     with BrainDBus() as brain:

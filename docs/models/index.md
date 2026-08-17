@@ -55,6 +55,12 @@ named on the model's own page (see
 | [`vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
 | [`imgpipe`](imgpipe.md) | composed segment → restore → upscale, one call | [x] | |
 
+## Video generation
+
+| Architecture | Solves | Infer | LoRA |
+|---|---|:---:|:---:|
+| [`wan`](wan.md) ⤓ | text-to-video (image-to-video not implemented) | [x] | library only |
+
 ## Vision and 3D
 
 | Architecture | Solves | Infer | Train |

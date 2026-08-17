@@ -231,7 +231,8 @@ run_example() {
   # The mock model serves no `t2v` action, so this is a skip by design -- what
   # it proves is that the client reaches `models()` and reports the missing
   # model cleanly instead of tracebacking. A real run needs BRAIN_WAN_* and is
-  # tens of minutes even at the smoke-test size.
+  # minutes even at the script's own reduced default size, most of it the
+  # umT5-XXL text encode on the CPU.
   run_example "$REPO/examples/videogen/generate_video.py" --prompt test --model brain/wan --out "$OUT/wan.mp4"
 }
 

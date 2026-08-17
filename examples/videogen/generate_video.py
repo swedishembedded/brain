@@ -19,12 +19,15 @@ Run under a private session bus (weights via env -- see the README):
 
     dbus-run-session -- bash -c '
       BRAIN_WAN_DIT=… BRAIN_WAN_VAE=… BRAIN_WAN_T5=… BRAIN_WAN_TOKENIZER=… \
-      brain serve --dbus & sleep 2
+      BRAIN_GPU_WAIT_S=1200 brain serve --dbus & sleep 2
       python3 examples/videogen/generate_video.py --prompt "a cat on a beach" \
-          --frames 9 --width 256 --height 256 --steps 4 --out cat.mp4'
+          --out cat.mp4'
 
-Start small. The defaults are upstream's (81 frames at 832x480, 50 steps),
-which is ~1 hour on a P40; the invocation above is the smoke-test size.
+This example's own defaults (9 frames at 416x240 over 20 steps) are NOT the
+model's: upstream's are 81 frames at 832x480 over 50 steps, which is about an
+hour on a P40, and an example nobody runs to the end teaches nothing. Pass
+`--frames 81 --width 832 --height 480 --steps 50` for the real thing. The
+README says what each costs.
 
 Requires: jeepney -- `pip install -e brain-py`.
 """
@@ -89,10 +92,13 @@ def main() -> int:
     ap.add_argument("--prompt", required=True, help="text description of the desired clip")
     ap.add_argument("--model", default=MODEL, help="a streaming t2v model")
     ap.add_argument("--out", default="wan.mp4", help="output container path")
-    ap.add_argument("--frames", type=int, default=0, help="video frames, of the form 1 + 4k (0 = the model's default, 81)")
-    ap.add_argument("--width", type=int, default=0, help="output width (0 = the model's default, 832)")
-    ap.add_argument("--height", type=int, default=0, help="output height (0 = the model's default, 480)")
-    ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = the model's default, 50)")
+    # Sizing defaults are this EXAMPLE's, not the model's (which are 81 frames
+    # at 832x480 over 50 steps, ~1 hour on a P40): a demo has to finish. 0
+    # forwards the model's own default instead, for a caller who wants it.
+    ap.add_argument("--frames", type=int, default=9, help="video frames, of the form 1 + 4k (0 = the model's default, 81)")
+    ap.add_argument("--width", type=int, default=416, help="output width (0 = the model's default, 832)")
+    ap.add_argument("--height", type=int, default=240, help="output height (0 = the model's default, 480)")
+    ap.add_argument("--steps", type=int, default=20, help="denoise steps (0 = the model's default, 50)")
     ap.add_argument("--guidance", type=float, default=-1.0, help="CFG scale; <= 1.0 halves the cost (-1 = the model's default, 5.0)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--solver", default="", choices=["", "unipc", "dpm++"], help="multistep solver (blank = the model's default)")
