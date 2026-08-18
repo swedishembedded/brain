@@ -62,29 +62,34 @@ BRAIN_KRONOS_TOKENIZER=kronos-tokenizer-base BRAIN_KRONOS_DECODER=kronos-small \
 
 ```bash
 brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
-  --horizon 24 --samples 16 --origins 4 --gnuplot chart.png
+  --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
 ```
 
-It is synthetic on purpose, and not trivially so. The latent log price is a
-deterministic backbone (a slow drift plus two-harmonic intraday and weekly
-profiles) plus a **mean-reverting AR(1) residual**, so the h-step conditional
-mean is known in closed form and everything left over is irreducible noise -
-which means "how good is this forecast" has an arithmetic answer rather than an
-aesthetic one. Bars are built from an intrabar Brownian bridge, so the OHLC
-invariants hold by construction and the validator in
-`crates/forecast/src/csv.rs` is a real test of the data rather than a
-formality.
+It is synthetic on purpose, and built to be **in distribution** for a model
+trained on real market bars rather than easy to forecast. The log price is a
+near-unit-root random walk with a small drift and a mild pull back to it; its
+innovations follow a **GARCH(1,1)** with fat (Student-t) tails, so volatility
+clusters the way a real tape's does; volume peaks at the session open and close
+and scales with the bar's own move. There is deliberately no periodic component
+in the LEVEL: a hard daily cycle makes a seasonal-naive baseline unbeatable and
+turns the demo into a test of seasonal decomposition, which is not what a
+candlestick model is. Bars come from an intrabar Brownian bridge scaled to each
+bar's own volatility, so the OHLC invariants hold by construction (the
+validator in `crates/forecast/src/csv.rs` is a real test of the data rather
+than a formality) and mean(high-low)/sd(return) lands at 1.4, which is what two
+real 5-minute equity series measure.
 
 Regenerate it (or make a different one) with
-`tools/forecast/make_synthetic_ohlcv.py`, which also prints the oracle
-(conditional-mean) error and the two naive baselines - the numbers that say
-what "good" means on the series it just wrote:
+`tools/forecast/make_synthetic_ohlcv.py`, which also prints the series'
+statistical fingerprint and the oracle (exact conditional-mean) error beside
+three naive baselines - the numbers that say what "good" means on the series it
+just wrote:
 
 ```bash
-python3 tools/forecast/make_synthetic_ohlcv.py --out examples/forecast/synthetic_hourly.csv --bars 720 --seed 7
+python3 tools/forecast/make_synthetic_ohlcv.py --out examples/forecast/synthetic_hourly.csv --bars 720 --seed 18
 ```
 
-Feed a real series instead of the synthetic sine-with-trend:
+Feed a real series instead of the synthetic one:
 
 ```bash
 python3 examples/forecast/forecast_client.py --model chronos2 --series my_series.txt
