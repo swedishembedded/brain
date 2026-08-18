@@ -336,31 +336,48 @@ pub fn dit_manifest(cfg: &WanConfig) -> Vec<(String, Vec<usize>)> {
     v
 }
 
-/// Check a name->tensor map against the DiT manifest in both directions.
-fn validate_dit(map: Tensors, cfg: &WanConfig) -> Result<Tensors, String> {
+/// Check a name->shape view against the DiT manifest in both directions.
+///
+/// Shapes only, so the same check answers "does this checkpoint cover the
+/// manifest" for a map already in memory AND for a file whose tensors have not
+/// been decoded yet - the GGUF importer runs it before it dequantizes a single
+/// block, which is what lets it refuse a mismatched file without paying for it.
+fn validate_dit_shapes(shapes: &HashMap<&str, &[usize]>, cfg: &WanConfig) -> Result<(), String> {
     let manifest = dit_manifest(cfg);
     for (name, shape) in &manifest {
-        match map.get(name) {
-            None => return Err(format!("wan dit import: missing tensor {name}")),
-            Some((s, d)) => {
-                let n: usize = shape.iter().product();
-                // A conv weight and its flattened form are the same tensor; the
-                // element count is what the graph depends on, and reporting the
-                // declared shape keeps a genuine width mismatch readable.
-                if s.iter().product::<usize>() != n {
-                    return Err(format!("wan dit import: {name} shape {s:?}, expected {shape:?}"));
-                }
-                if d.len() != n {
-                    return Err(format!("wan dit import: {name} has {} values, expected {n}", d.len()));
-                }
-            }
+        let Some(s) = shapes.get(name.as_str()) else {
+            return Err(format!("wan dit import: missing tensor {name}"));
+        };
+        let n: usize = shape.iter().product();
+        // A conv weight and its flattened form are the same tensor; the element
+        // count is what the graph depends on, and reporting the declared shape
+        // keeps a genuine width mismatch readable.
+        if s.iter().product::<usize>() != n {
+            return Err(format!("wan dit import: {name} shape {s:?}, expected {shape:?}"));
         }
     }
-    if map.len() != manifest.len() {
+    if shapes.len() != manifest.len() {
         let expected: std::collections::HashSet<&str> = manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&String> = map.keys().filter(|k| !expected.contains(k.as_str())).collect();
-        extra.sort();
+        let mut extra: Vec<&str> = shapes.keys().copied().filter(|k| !expected.contains(k)).collect();
+        extra.sort_unstable();
         return Err(format!("wan dit import: unused source tensors: {extra:?}"));
+    }
+    Ok(())
+}
+
+/// Check a name->tensor map against the DiT manifest in both directions.
+fn validate_dit(map: Tensors, cfg: &WanConfig) -> Result<Tensors, String> {
+    let view: HashMap<&str, &[usize]> = map.iter().map(|(n, (s, _))| (n.as_str(), s.as_slice())).collect();
+    validate_dit_shapes(&view, cfg)?;
+    // What a shape-only check cannot see: a tensor whose DATA is short of its
+    // own declared shape. Walked in manifest order so the name reported first
+    // does not depend on hash iteration order.
+    for (name, _) in dit_manifest(cfg) {
+        let (shape, d) = &map[&name];
+        let n: usize = shape.iter().product();
+        if d.len() != n {
+            return Err(format!("wan dit import: {name} has {} values, expected {n}", d.len()));
+        }
     }
     Ok(map)
 }
@@ -547,9 +564,29 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<WanConf
 /// `brain_modelstore::recipe::WanRecipe` fetches), so an imported GGUF
 /// replaces one of four roles rather than standing on its own.
 ///
-/// Both tensor spellings are accepted, because [`import_dit`] already picks
-/// between them by a name only one of them has - a GGUF repacked from the
-/// diffusers release imports exactly as one repacked from the native one.
+/// Both tensor spellings are accepted, for the same reason [`import_dit`]
+/// accepts both - a GGUF repacked from the diffusers release imports exactly as
+/// one repacked from the native one. The name is resolved here rather than by
+/// calling [`import_dit`] because that entry point takes tensors that have
+/// already been decoded, and this one must never hold more than one.
+///
+/// **Streaming, one tensor at a time.** The names and shapes come from the
+/// header, the two-way manifest check runs on those shapes alone, and only then
+/// is each tensor dequantized from the mmap, written through
+/// [`checkpoint::weightio::StWriter`] and dropped. Peak host memory is one
+/// tensor's fp32 expansion (270 MiB at 14B, whose largest is each block's
+/// `ffn.0.weight`, 13824x5120), not the whole model: the released T2V-14B
+/// checkpoint is 14.3 G parameters, so materializing it as fp32 is 53 GiB - and
+/// handing that to
+/// `checkpoint::st::save_safetensors`, which copies every tensor to a byte
+/// buffer and then serializes those into one more contiguous blob, needs about
+/// three times that at once. `MmapGguf` exists precisely to avoid the first
+/// copy; taking it and then decoding the whole file threw that away.
+///
+/// Not `brain_gguf::import::to_st` (the LM importers' shared streaming driver)
+/// for one reason: it plans every output tensor as a FLAT one-dimensional
+/// shape, which suits a parameter store of flat buffers and loses the rank of
+/// `patch_embedding.weight`'s 5-D conv kernel and of every `modulation` table.
 pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
     let shapes: Vec<(String, Vec<usize>)> =
         mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
@@ -557,20 +594,29 @@ pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override:
     // `patch_embedding.weight`, so the variant is read before any remapping.
     let cfg = dit_config_from_shapes(&shapes)?;
 
-    let tensors: Vec<StTensor> = mg
-        .names()
-        .iter()
-        .map(|name| {
-            let shape = mg.shape(name).ok_or_else(|| format!("{name}: missing shape in GGUF tensor info"))?.to_vec();
-            let data = mg.tensor(name).ok_or_else(|| format!("{name}: missing tensor data"))?.map_err(|e| format!("{name}: dequant failed: {e}"))?;
-            Ok(StTensor { name: name.clone(), shape, data })
-        })
-        .collect::<Result<_, String>>()?;
-    let remapped = import_dit(tensors, &cfg)?;
+    // Reference name -> the source name carrying it, so the write loop can walk
+    // the manifest (the output's own order) and pull each tensor by name.
+    let diffusers = mg.names().iter().any(|n| n == "blocks.0.scale_shift_table");
+    let mut source_of: HashMap<String, String> = HashMap::with_capacity(shapes.len());
+    for (name, _) in &shapes {
+        let native = if diffusers {
+            dit_diffusers_to_native(name).ok_or_else(|| format!("wan dit import: unmapped diffusers tensor {name}"))?
+        } else {
+            name.clone()
+        };
+        if source_of.insert(native.clone(), name.clone()).is_some() {
+            return Err(format!("wan dit import: two source tensors map to {native}"));
+        }
+    }
+    let shape_of: HashMap<&str, &[usize]> = shapes.iter().map(|(n, s)| (n.as_str(), s.as_slice())).collect();
+    let by_shape: HashMap<&str, &[usize]> =
+        source_of.iter().map(|(native, src)| (native.as_str(), shape_of[src.as_str()])).collect();
+    validate_dit_shapes(&by_shape, &cfg)?;
 
+    let manifest = dit_manifest(&cfg);
     let id = id_override.unwrap_or("brain/wan-gguf");
     let mut card = checkpoint::st::ModelCard::new(id, "wan");
-    card.param_count = Some(remapped.values().map(|(_, data)| data.len() as u64).sum());
+    card.param_count = Some(manifest.iter().map(|(_, s)| s.iter().product::<usize>() as u64).sum());
     let config = serde_json::json!({
         "name": cfg.name,
         "dim": cfg.dim,
@@ -584,11 +630,33 @@ pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override:
         "text_len": cfg.text_len,
         "eps": cfg.eps,
     });
-    let out: Vec<(String, Vec<u64>, Vec<f32>)> =
-        remapped.into_iter().map(|(name, (shape, data))| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
-    checkpoint::st::save_safetensors(out_path, &out, &config, Some(&card)).map_err(|e| e.to_string())
+    // The MANIFEST shape is what is declared, not the source's: a GGUF may
+    // carry `patch_embedding.weight` flattened (the element count is all
+    // `validate_dit_shapes` demands of it), and the checkpoint brain writes has
+    // to name the rank the graph indexes with.
+    let plan: Vec<(String, Vec<u64>)> =
+        manifest.iter().map(|(n, s)| (n.clone(), s.iter().map(|&d| d as u64).collect())).collect();
+    let mut w = checkpoint::weightio::StWriter::create(out_path, &plan, &config, Some(&card)).map_err(|e| e.to_string())?;
+    for (native, _) in &manifest {
+        let src = &source_of[native];
+        let data = mg
+            .tensor(src)
+            .ok_or_else(|| format!("{src}: missing tensor data"))?
+            .map_err(|e| format!("{src}: dequant failed: {e}"))?;
+        w.write(native, &data).map_err(|e| e.to_string())?;
+    }
+    w.finish().map_err(|e| e.to_string())
 }
 
+/// Unit coverage for the GGUF entry points, on shapes this module invents.
+///
+/// Synthetic by construction and deliberately so - the point of these is the
+/// NEGATIVE cases (an I2V file, an unknown width, a checkpoint that is not a
+/// Wan transformer at all), none of which exists as a released `.gguf` anyone
+/// could put on a disk. The positive case is covered against a real file by
+/// `tests/gguf_import_real.rs`, which runs the whole path - header, variant
+/// derivation, Q3_K dequant of all 400 quantized tensors and the safetensors
+/// conversion - on `city96/Wan2.1-T2V-14B-gguf`.
 #[cfg(test)]
 mod gguf_tests {
     use super::*;

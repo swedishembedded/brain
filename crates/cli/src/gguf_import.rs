@@ -370,13 +370,12 @@ mod tests {
     /// `"lumina2"`; and a file that carries the tag but is not a Wan
     /// transformer is refused by name rather than half-imported.
     ///
-    /// **What this does NOT prove.** There is no Wan GGUF on this machine and
-    /// none was downloaded, so the dequantize -> `import_dit` -> safetensors
-    /// path has never been run against a real `city96/Wan2.1-*-gguf` file.
-    /// The tensor-name half of that path is covered by
-    /// `wan::import`'s own bijection tests over the full 825-tensor manifest,
-    /// and the variant derivation by `wan::import::gguf_tests` -- but the
-    /// combination, on real quantized bytes, is untested.
+    /// **What this does NOT prove.** Only the dispatch. The dequantize ->
+    /// `import_dit` -> safetensors path itself is exercised against a real
+    /// `city96/Wan2.1-T2V-14B-gguf` file by `crates/wan`'s
+    /// `gguf_import_real` suite (`BRAIN_WAN_GGUF`), which is where the
+    /// manifest coverage, the Q3_K dequantization and the round-tripped
+    /// checkpoint are actually certified on real quantized bytes.
     #[test]
     fn the_wan_tag_dispatches_to_its_importer_with_no_ambiguous_tag_exception() {
         assert_eq!(importer_for("wan").map(|i| i.architecture()), Some("wan"));

@@ -89,6 +89,12 @@ shapes. The VAE, text encoder and tokenizer still come from the repository
 above, so an imported GGUF replaces one of the four roles rather than standing
 on its own.
 
+The conversion is fp32, so plan for disk, not RAM: the released 14B
+(`city96/Wan2.1-T2V-14B-gguf`, 7.0 GB at Q3_K_S) becomes a ~53 GiB
+safetensors checkpoint. Host memory stays bounded at a few GiB regardless of
+model size, because the importer streams tensor by tensor rather than
+materialising the whole model.
+
 ## Running it
 
 ```bash

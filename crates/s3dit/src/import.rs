@@ -89,10 +89,21 @@ const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
 /// **DiT-only.** The GGUF release does not bundle the VAE or the Qwen-4B text
 /// encoder; `BRAIN_S3DIT_VAE`/`BRAIN_S3DIT_QWEN` still need their own source,
 /// same as the safetensors path. Dequantizes every tensor eagerly into host
-/// memory (the whole DiT, ~24 GB fp32) rather than streaming, since - unlike
-/// Qwen3.5-35B-A3B - that comfortably fits this workspace's boxes; see
+/// memory rather than streaming, since - unlike Qwen3.5-35B-A3B - that fits
+/// this workspace's boxes; see
 /// `qwen35moe::import::import_gguf_truncated_to_map`'s doc comment for the
 /// streaming alternative this deliberately isn't, and why.
+///
+/// **Budget ~3x the fp32 size, not 1x** (so ~72 GB for this DiT's ~24 GB, not
+/// ~24 GB as this comment used to claim): the dequantized `tensors` are live,
+/// [`checkpoint::st::save_safetensors`] then copies each one into its own
+/// little-endian `Vec<u8>`, and `safetensors::serialize` concatenates those
+/// into one more contiguous blob before anything is written. `crates/wan`'s
+/// GGUF importer hit exactly this and had to be moved onto
+/// `checkpoint::weightio::StWriter`, which writes tensor by tensor and holds
+/// one at a time; that is the shape to copy here the moment a Z-Image GGUF
+/// stops fitting. Uncorrected, a 3x understatement reads as "this is fine on a
+/// 32 GB box" when it is not.
 pub fn import_gguf(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
     if mg.shape(DISCRIMINATOR_TENSOR).is_none() {
         return Err(format!(
