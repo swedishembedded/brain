@@ -54,7 +54,7 @@ fn read_dump(path: &str) -> Vec<f32> {
 #[test]
 fn import_consumes_every_speaker_tensor() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let out = shared_weights();
@@ -73,7 +73,7 @@ fn import_consumes_every_speaker_tensor() {
 #[test]
 fn forward_finite_random_mel() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let out = shared_weights();
@@ -96,13 +96,13 @@ fn forward_finite_random_mel() {
 fn parity_against_reference_dump() {
         let DUMP_DIR = testdata("tts/dumps/spk_ref");
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let mel_path = format!("{DUMP_DIR}/mel.f32");
     let emb_path = format!("{DUMP_DIR}/embedding.f32");
     if !std::path::Path::new(&mel_path).exists() || !std::path::Path::new(&emb_path).exists() {
-        eprintln!("skip: reference dump not present");
+        brain_testutil::skip("reference dump not present");
         return;
     }
     let mel = read_dump(&mel_path);
@@ -126,7 +126,7 @@ fn parity_against_reference_dump() {
 #[test]
 fn embed_wav_runs() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let out = shared_weights();

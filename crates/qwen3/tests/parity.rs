@@ -39,7 +39,7 @@ fn forward_matches_hf_reference() {
     let dir = match std::env::var("QWEN_PARITY_DIR") {
         Ok(d) => d,
         Err(_) => {
-            eprintln!("QWEN_PARITY_DIR unset; skipping Qwen forward-parity test");
+            brain_testutil::skip("QWEN_PARITY_DIR unset");
             return;
         }
     };

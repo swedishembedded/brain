@@ -33,7 +33,7 @@ fn backend() -> Option<VulkanBackend> {
     match VulkanBackend::try_new(&[("axpy", kernels::AXPY)]) {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!("skipping (no Vulkan device): {e}");
+            brain_testutil::skip_unavailable(&format!("no Vulkan device: {e}"));
             None
         }
     }
@@ -44,7 +44,7 @@ fn kernel_times_reports_real_device_time_less_than_host_wall_clock() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.set_kernel_timing(true) {
-        eprintln!("skipping: this queue cannot write timestamps (timestamp_valid_bits == 0)");
+        brain_testutil::skip_unavailable("this queue cannot write timestamps (timestamp_valid_bits == 0)");
         return;
     }
 
@@ -82,7 +82,7 @@ fn kernel_times_also_works_on_the_serialized_intel_workaround_path() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.set_kernel_timing(true) {
-        eprintln!("skipping: this queue cannot write timestamps");
+        brain_testutil::skip_unavailable("this queue cannot write timestamps");
         return;
     }
     // Force the serialized (submit+fence per dispatch) branch regardless of

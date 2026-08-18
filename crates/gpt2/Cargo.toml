@@ -21,3 +21,6 @@ serde_json.workspace = true
 bytemuck.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

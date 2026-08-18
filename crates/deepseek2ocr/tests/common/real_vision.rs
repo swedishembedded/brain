@@ -44,21 +44,31 @@ pub fn pin_cpu_backend() {
     unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
 }
 
+/// The model-store directory holding the real DeepSeek-OCR checkpoints, or
+/// `None`.
+///
+/// **These helpers own the skip.** A `None` here has already gone through
+/// [`brain_testutil::skip`], so it has printed its reason and, under
+/// `BRAIN_REQUIRE_FIXTURES=1`, has already panicked. A caller may therefore
+/// write the bare `let Some(d) = store_dir() else { return };` and still be
+/// covered - the decision lives in exactly one place. It used to live in two:
+/// the helper printed and the caller returned in silence, so a caller that
+/// forgot to print was indistinguishable from one that ran.
 pub fn store_dir() -> Option<std::path::PathBuf> {
     match brain_testutil::model_dir(STORE).map(std::path::PathBuf::from) {
         Some(d) => Some(d),
         None => {
-            eprintln!("skip: no model store");
+            brain_testutil::skip("no model store (set BRAIN_MODELS_DIR or HOME)");
             None
         }
     }
 }
 
-/// The mmproj's path, or `None` (with a skip message) when it is absent.
+/// The mmproj's path, or `None`. Owns its skip - see [`store_dir`].
 pub fn mmproj_path() -> Option<std::path::PathBuf> {
     let p = store_dir()?.join(MMPROJ);
     if !p.exists() {
-        eprintln!("skip: {} absent", p.display());
+        brain_testutil::skip(&format!("{} absent", p.display()));
         return None;
     }
     Some(p)

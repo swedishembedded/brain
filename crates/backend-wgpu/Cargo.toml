@@ -29,6 +29,7 @@ futures-channel = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-kernels.workspace = true
 # B11 native-f16 tests: an independent host reference for the correctness
 # check (`half::f16`) and a real compile attempt against the CPU JIT's own

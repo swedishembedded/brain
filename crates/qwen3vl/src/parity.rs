@@ -38,7 +38,7 @@ use brain_testutil::read_f32;
         let REF = testdata("vl/parity/qwenvl_dec_ref.bin");
         let TOK = testdata("vl/parity/qwenvl_dec_tokens.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: Qwen3-VL decoder reference not present (run tools/goldens/qwen3vl_decoder_dump_reference.py)");
+            brain_testutil::skip("Qwen3-VL decoder reference not present (run tools/goldens/qwen3vl_decoder_dump_reference.py)");
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");
@@ -48,7 +48,7 @@ use brain_testutil::read_f32;
         let mut shards: Vec<_> = match std::fs::read_dir(DIR) {
             Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "safetensors")).collect(),
             Err(_) => {
-                eprintln!("skip: Qwen3-VL checkpoint not present");
+                brain_testutil::skip("Qwen3-VL checkpoint not present");
                 return;
             }
         };

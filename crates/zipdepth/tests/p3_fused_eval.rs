@@ -175,7 +175,7 @@ fn fused_eval_matches_unfused_reference() {
 fn fused_eval_gpu_matches_cpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("skipping fused GPU parity (MOE_SKIP_GPU_TESTS)");
+        brain_testutil::skip_unavailable("fused GPU parity (MOE_SKIP_GPU_TESTS)");
         return;
     }
     let gpu = Gpu::new_wgpu(zipdepth::net::PIPELINES);
@@ -271,7 +271,7 @@ fn qarep_fused_eval_matches_unfused() {
 fn grouped_reg_conv_gpu_matches_cpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("skipping grouped GPU parity (MOE_SKIP_GPU_TESTS)");
+        brain_testutil::skip_unavailable("grouped GPU parity (MOE_SKIP_GPU_TESTS)");
         return;
     }
     let gpu = Gpu::new_wgpu(zipdepth::net::PIPELINES);

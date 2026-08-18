@@ -96,7 +96,7 @@ const HF_VECTORS: &[(&str, &[u32])] = &[
 #[test]
 fn real_tokenizer_reserved_tokens_and_prompt() {
     let Some(lm) = lm_path() else {
-        eprintln!("skip: {STORE}/{LM} is not in the model store");
+        brain_testutil::skip(&format!("{STORE}/{LM} is not in the model store"));
         return;
     };
 

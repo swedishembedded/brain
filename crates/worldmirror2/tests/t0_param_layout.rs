@@ -76,7 +76,9 @@ fn cam_block_shape_matches_its_declared_weights() {
 /// Live gate against the real checkpoint (slow, needs the 5 GB file).
 #[test]
 fn live_import_strict() {
-    let Ok(path) = std::env::var("MIRROR_CKPT") else { return };
+    let Ok(path) = std::env::var("MIRROR_CKPT") else {
+        return brain_testutil::skip("MIRROR_CKPT unset (the strict import needs the real 5 GB checkpoint)");
+    };
     let cfg = MirrorConfig::default();
     let map = worldmirror2::import::load(&path, &cfg).expect("strict import");
     assert_eq!(map.len(), 1545);

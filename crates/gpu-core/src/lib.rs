@@ -1035,7 +1035,7 @@ mod tests {
         let gpu = match Gpu::try_new_vulkan(&[("add2", kernels::ADD2)]) {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("skipping vulkan test (no Vulkan device): {e}");
+                brain_testutil::skip_unavailable(&format!("no Vulkan device: {e}"));
                 return;
             }
         };

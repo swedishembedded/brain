@@ -31,7 +31,7 @@ fn farr(v: &serde_json::Value) -> Vec<f32> {
 #[test]
 fn end_to_end_matches_reference() {
     let Ok(ckpt) = std::env::var("FINCAST_CKPT") else {
-        eprintln!("FINCAST_CKPT unset; skipping FinCast end-to-end parity");
+        brain_testutil::skip("FINCAST_CKPT unset");
         return;
     };
     let g = read_golden();

@@ -37,16 +37,16 @@ fn talker_logits_match_reference() {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
         let DUMP = testdata("tts/dumps/talker_ref");
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
     }
     let (Some(tokens), Some(ref_logits)) =
         (read_u32(&format!("{DUMP}/tokens.u32")), read_f32(&format!("{DUMP}/logits.f32")))
     else {
-        eprintln!("skip: talker golden dump not present");
+        brain_testutil::skip("talker golden dump not present");
         return;
     };
     if !std::path::Path::new(&CKPT).join("model.safetensors").exists() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let vocab = 3072usize;

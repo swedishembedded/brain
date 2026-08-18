@@ -21,5 +21,6 @@ brain-splat.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # `data::rng::Lcg` — the one deterministic test PRNG (tests only).
 brain-data.workspace = true

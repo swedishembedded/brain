@@ -59,20 +59,20 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_code_predictor() {
     let Some(dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().map(PathBuf::from) else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     let Some(layer0_shard) = shard_for(&dir, "talker.code_predictor.model.layers.0.self_attn.q_proj.weight") else {
-        eprintln!("skip: index doesn't (yet) have the shard holding talker.code_predictor.model.layers.0");
+        brain_testutil::skip("index doesn't (yet) have the shard holding talker.code_predictor.model.layers.0");
         return;
     };
     let Some(lm_head_shard) = shard_for(&dir, "talker.code_predictor.lm_head.0.weight") else {
-        eprintln!("skip: index doesn't (yet) have the shard holding talker.code_predictor.lm_head");
+        brain_testutil::skip("index doesn't (yet) have the shard holding talker.code_predictor.lm_head");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code_predictor.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run `make fetch/testdata`)");
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
         return;
     }
 

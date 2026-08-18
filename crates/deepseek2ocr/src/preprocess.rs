@@ -412,12 +412,12 @@ mod tests {
     #[test]
     fn the_normalization_is_the_shipped_files_own() {
         let Some(dir) = brain_testutil::model_dir("ggml-org/DeepSeek-OCR-GGUF") else {
-            eprintln!("skip: no model store");
+            brain_testutil::skip("no model store");
             return;
         };
         let mmproj = std::path::Path::new(&dir).join("mmproj-DeepSeek-OCR-Q8_0.gguf");
         if !mmproj.exists() {
-            eprintln!("skip: mmproj absent");
+            brain_testutil::skip("mmproj absent");
             return;
         }
         let mg = checkpoint::gguf::MmapGguf::open(mmproj.to_str().expect("utf-8 path")).expect("open mmproj");

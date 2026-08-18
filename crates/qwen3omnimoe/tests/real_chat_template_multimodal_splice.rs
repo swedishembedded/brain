@@ -52,7 +52,7 @@ fn sven_shaped_messages() -> serde_json::Value {
 #[ignore]
 fn real_template_places_image_and_audio_placeholders_inline_after_their_own_captions() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
+        brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
     let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
@@ -105,7 +105,7 @@ fn real_template_places_image_and_audio_placeholders_inline_after_their_own_capt
 #[ignore]
 fn real_template_renders_the_tools_preamble_when_tools_are_forwarded() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
+        brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
     let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
@@ -145,7 +145,7 @@ fn real_template_renders_the_tools_preamble_when_tools_are_forwarded() {
 #[ignore]
 fn typed_array_plus_strip_matches_the_old_always_flatten_prompt_byte_for_byte() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
+        brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
     let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");

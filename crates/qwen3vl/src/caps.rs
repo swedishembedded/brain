@@ -299,7 +299,7 @@ mod tests {
     fn served_generate_path_runs_on_real_weights() {
         let dir = default_weights();
         if dir.is_empty() || !std::path::Path::new(&dir).join("config.json").exists() {
-            eprintln!("skip: BRAIN_QWEN3VL_WEIGHTS not set / checkpoint absent");
+            brain_testutil::skip("BRAIN_QWEN3VL_WEIGHTS not set / checkpoint absent");
             return;
         }
         let (w, h) = (64u32, 64u32);

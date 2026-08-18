@@ -49,13 +49,13 @@ fn golden_mel(num_mel: u32, n_frames: u32) -> Vec<f32> {
 #[ignore]
 fn matches_the_real_audio_tower() {
     let Some(shard) = shard_with_audio_tower() else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.audio_tower");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.audio_tower");
         return;
     };
     let golden_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_audio.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run `make fetch/testdata`)");
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
         return;
     }
 

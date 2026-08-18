@@ -250,7 +250,7 @@ mod tests {
         }
         let gpu = gpu_core::testgpu::dev(vqgan::TRAIN_PIPELINES);
         if !gpu.caps().workgroup_reductions {
-            eprintln!("skipping: backend has no workgroup_reductions, the GEMM-lowered conv backward cannot be selected here");
+            brain_testutil::skip_unavailable("backend has no workgroup_reductions, the GEMM-lowered conv backward cannot be selected here");
             return;
         }
         drop(gpu);

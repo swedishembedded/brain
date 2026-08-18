@@ -44,7 +44,7 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn multivariate_forward_matches_the_reference() {
     let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-        eprintln!("CHRONOS2_WEIGHTS unset; skipping multivariate parity");
+        brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -58,7 +58,7 @@ fn multivariate_forward_matches_the_reference() {
         golden.join("mv_meta.json"),
     );
     if !tp.exists() || !cp.exists() || !qp.exists() {
-        eprintln!("mv golden missing; run tools/goldens/chronos2_dump_mv_reference.py — skipping");
+        brain_testutil::skip("mv golden missing; run tools/goldens/chronos2_dump_mv_reference.py");
         return;
     }
 

@@ -33,3 +33,6 @@ brain-events.workspace = true
 # `pnm` is deliberately NOT enabled: P6 has exactly one implementation in this
 # workspace and it is `events::ppm`.
 image = { workspace = true, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+brain-testutil.workspace = true

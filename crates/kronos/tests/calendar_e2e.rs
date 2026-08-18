@@ -40,7 +40,7 @@ fn calendar_shifts_the_forecast_toward_the_official() {
         return brain_testutil::skip("KRONOS_AAPL_CSV unset; no calendar e2e");
     };
     let Ok(text) = std::fs::read_to_string(&csv) else {
-        eprintln!("no AAPL csv at {csv}; skipping");
+        brain_testutil::skip(&format!("no AAPL csv at {csv}"));
         return;
     };
 

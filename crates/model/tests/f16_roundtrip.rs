@@ -312,7 +312,7 @@ fn f16_matmul_matches_f32_reference_on_cpu() {
 #[test]
 fn f16_matmul_matches_f32_reference_on_gpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("f16_matmul_matches_f32_reference_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
+        brain_testutil::skip_unavailable("f16_matmul_matches_f32_reference_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("f16_matmul_matches_f32_reference_on_gpu: running on a real wgpu device");

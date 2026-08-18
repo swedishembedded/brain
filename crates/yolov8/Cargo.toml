@@ -28,6 +28,7 @@ serde_json.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # The P2 per-block gradient-check gate (tests/p2_blocks.rs) drives each block
 # through the repo's finite-difference checker. gradcheck does not depend on
 # brain-yolo, so this dev-only edge introduces no cycle.

@@ -585,16 +585,19 @@ mod tests {
     /// activate() and promote() so "promote is faster" is a measured
     /// number, not an assertion resting on the design alone.
     #[test]
-    #[ignore = "slow: real checkpoint + GPU; set BRAIN_ZIMAGE_* and run with --ignored"]
+    #[ignore = "slow: real checkpoint + GPU; set BRAIN_S3DIT_* and run with --ignored"]
     fn zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster() {
         std::env::set_var("BRAIN_S3DIT_RETAIN_INT8_CACHE", "1");
-        let model = match ZImageResident::from_env() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("SKIP: {e}");
-                return;
-            }
+        // Two different failures used to share one skip: "the checkpoint paths
+        // are not on this box" (a fixture that is legitimately absent) and
+        // "the paths resolved but the provider would not load" (a real
+        // failure). Resolve them separately so only the first is a skip.
+        let paths = match s3dit::pipeline::Paths::from_env() {
+            Ok(p) => p,
+            Err(e) => return brain_testutil::skip(&format!("Z-Image checkpoint paths not set: {e}")),
         };
+        let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths)
+            .expect("BRAIN_S3DIT_* all resolved, so the Z-Image provider must load");
         let key = InstanceKey::new(s3dit::caps::MODEL, "256x256:int8:");
 
         let t0 = std::time::Instant::now();

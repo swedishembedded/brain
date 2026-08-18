@@ -122,7 +122,7 @@ fn device_and_brain_device_agree_on_every_token() {
 fn brain_device_gpu_index_pins_the_specific_card_not_just_the_backend() {
     let inv = gpu_core::Inventory::probe();
     if inv.gpus == 0 {
-        eprintln!("skipping: no GPU present on this machine");
+        brain_testutil::skip_unavailable("no GPU present on this machine");
         return;
     }
     let idx = inv.gpus - 1;

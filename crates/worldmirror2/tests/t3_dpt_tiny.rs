@@ -40,7 +40,7 @@ fn resize_bilinear_matches_torch() {
 #[test]
 fn dpt_tiny_stages() {
     let Ok(dir) = std::env::var("MIRROR_DPT_TINY") else {
-        eprintln!("MIRROR_DPT_TINY not set — skipping");
+        brain_testutil::skip("MIRROR_DPT_TINY not set");
         return;
     };
     let stages: serde_json::Value =

@@ -138,7 +138,7 @@ fn chronos2_npu_graph_output_matches_parity_ref_when_openvino_available() {
     let mut graph = match npu_model.compile(&ov_cfg) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("no OpenVINO runtime, skipping chronos2 NPU graph parity: {e}");
+            brain_testutil::skip_unavailable(&format!("no OpenVINO runtime for the chronos2 NPU graph parity: {e}"));
             let _ = std::fs::remove_file(&path);
             return;
         }
@@ -235,7 +235,7 @@ fn fincast_npu_graph_output_matches_parity_ref_when_openvino_available() {
     let mut graph = match npu_model.compile(&ov_cfg) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("no OpenVINO runtime, skipping fincast NPU graph parity: {e}");
+            brain_testutil::skip_unavailable(&format!("no OpenVINO runtime for the fincast NPU graph parity: {e}"));
             let _ = std::fs::remove_file(&path);
             return;
         }

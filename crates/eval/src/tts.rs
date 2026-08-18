@@ -266,11 +266,15 @@ mod tests {
     #[test]
     fn speaker_similarity_identical_is_one_gated() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            return;
+            return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         }
         let weights = match std::env::var("BRAIN_QWEN3TTS_SPEAKER") {
             Ok(p) => p,
-            Err(_) => return, // no checkpoint available -> skip
+            Err(_) => {
+                return brain_testutil::skip(
+                    "set BRAIN_QWEN3TTS_SPEAKER to a real speaker checkpoint to run this",
+                )
+            }
         };
         let w = tone(220.0, 24000);
         let sim = speaker_similarity(&w, &w, &weights, EVAL_SR);

@@ -15,7 +15,9 @@ fn write_ppm(p: &str, rgb: &[u8], w: u32, h: u32) {
 
 #[test]
 fn render() {
-    let (Ok(ppm),Ok(pth))=(std::env::var("STEREO_PPM"),std::env::var("ZIPDEPTH_NPU_PTH")) else { eprintln!("SKIP"); return; };
+    let (Ok(ppm), Ok(pth)) = (std::env::var("STEREO_PPM"), std::env::var("ZIPDEPTH_NPU_PTH")) else {
+        return brain_testutil::skip("set STEREO_PPM to an input image and ZIPDEPTH_NPU_PTH to the ZipDepth checkpoint");
+    };
     let img = imaging::load(&ppm).unwrap();
     let (hwc, w, h) = (img.to_hwc_unit(), img.w, img.h);
     let cfg=ZipConfig{upsample_unfold:false,..ZipConfig::base()};

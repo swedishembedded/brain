@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn pinned_reference_vectors() {
         let Some(t) = tok() else {
-            eprintln!("QWEN_TOKENIZER unset; skipping");
+            brain_testutil::skip("QWEN_TOKENIZER unset");
             return;
         };
         // Ground truth from the HF tokenizer (gen_tok.py).
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn lfm_pinned_reference_vectors() {
         let Some(t) = lfm_tok() else {
-            eprintln!("LFM_TOKENIZER unset; skipping");
+            brain_testutil::skip("LFM_TOKENIZER unset");
             return;
         };
         // Ground truth from HF `tokenizers` on LFM2.5-Encoder-230M/tokenizer.json

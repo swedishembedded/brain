@@ -38,7 +38,7 @@ fn skip(g: &Gpu) -> bool {
         return true;
     }
     if !g.caps().workgroup_reductions {
-        eprintln!("skipping: backend has no workgroup_reductions; production never selects the split-K kernels here");
+        brain_testutil::skip_unavailable("backend has no workgroup_reductions; production never selects the split-K kernels here");
         return true;
     }
     false

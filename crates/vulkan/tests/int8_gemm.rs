@@ -169,8 +169,13 @@ fn time_dispatch(ctx: &VkContext, p: &Pipe, groups: u32, reps: usize) -> f64 {
 #[test]
 #[ignore]
 fn int8_gemm() {
-    let ctx = match VkContext::new() { Ok(c) => c, Err(e) => { eprintln!("no vulkan: {e}"); return; } };
-    if !ctx.prec.dp4a { eprintln!("device has no accelerated DP4A; skipping"); return; }
+    let ctx = match VkContext::new() {
+        Ok(c) => c,
+        Err(e) => return brain_testutil::skip_unavailable(&format!("no Vulkan device: {e}")),
+    };
+    if !ctx.prec.dp4a {
+        return brain_testutil::skip_unavailable("device has no accelerated DP4A");
+    }
     println!("\n=== INT8 DP4A GEMM on {} ===", ctx.adapter_name);
     println!("{:<30} {:>10} {:>10} {:>8} {:>9} {:>9}", "shape", "int8 GOP/s", "f32 GOP/s", "speedup", "cos(f32)", "kernel-rel");
 

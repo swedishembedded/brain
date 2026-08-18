@@ -49,7 +49,7 @@ fn import_to_temp() -> String {
 #[test]
 fn import_consumes_every_decoder_tensor() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let out = import_to_temp();
@@ -94,7 +94,7 @@ fn import_consumes_every_decoder_tensor() {
 #[test]
 fn decode_random_codes_is_finite_and_bounded() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let out = import_to_temp();
@@ -132,7 +132,7 @@ fn parity_against_golden_dump() {
     let codes_p = std::path::Path::new(&DUMP_DIR).join("codes.bin");
     let wav_p = std::path::Path::new(&DUMP_DIR).join("waveform.bin");
     if !ckpt_available() || !codes_p.exists() || !wav_p.exists() {
-        eprintln!("skip: golden dump not present");
+        brain_testutil::skip("golden dump not present");
         return;
     }
     let out = import_to_temp();

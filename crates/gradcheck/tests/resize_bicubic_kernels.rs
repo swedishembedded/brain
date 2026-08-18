@@ -52,7 +52,7 @@ const K_DX: usize = 1;
 /// its value — the repo-wide idiom.
 fn skip() -> bool {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("skipping resize_bicubic kernels (MOE_SKIP_GPU_TESTS)");
+        brain_testutil::skip_unavailable("resize_bicubic kernels (MOE_SKIP_GPU_TESTS)");
         return true;
     }
     false

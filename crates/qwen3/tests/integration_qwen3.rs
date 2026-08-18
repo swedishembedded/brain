@@ -127,7 +127,7 @@ fn eval_toolcall(model: &Qwen, t: &QwenBpe, cases: &[ToolCase]) -> (f64, f64) {
 #[ignore]
 fn qwen3_inference_coherent() {
     let Some(d) = dir() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
     setup();
@@ -148,7 +148,7 @@ fn qwen3_inference_coherent() {
 #[ignore]
 fn qwen3_training_validity() {
     let Some(d) = dir() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
     setup();
@@ -193,7 +193,7 @@ fn qwen3_training_validity() {
 #[ignore]
 fn qwen3_toolcall_finetune() {
     let Some(d) = dir() else {
-        eprintln!("QWEN3_DIR unset; skipping");
+        brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
     setup();

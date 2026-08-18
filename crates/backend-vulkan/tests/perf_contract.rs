@@ -34,7 +34,7 @@ fn backend() -> Option<VulkanBackend> {
     match VulkanBackend::try_new(&[("add2", kernels::ADD2)]) {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!("skipping (no Vulkan device): {e}");
+            brain_testutil::skip_unavailable(&format!("no Vulkan device: {e}"));
             None
         }
     }
@@ -141,7 +141,7 @@ fn storage_buffers_skip_staging_on_a_unified_memory_device() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(be) = backend() else { return };
     if !be.caps().unified_memory {
-        eprintln!("skipping: this device is not unified memory (a real staging path is correct here)");
+        brain_testutil::skip_unavailable("this device is not unified memory (a real staging path is correct here)");
         return;
     }
     let base = be.queue_submits();

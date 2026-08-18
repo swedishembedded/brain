@@ -182,7 +182,7 @@ fn repo_path(rel: &str) -> String {
     fn real_index_fully_covered() {
         let path = format!("{}/model.safetensors.index.json", model_dir("Qwen/Qwen3-VL-4B-Instruct").unwrap_or_default());
         let Ok(txt) = std::fs::read_to_string(path) else {
-            eprintln!("skip real_index_fully_covered: checkpoint not present");
+            brain_testutil::skip("real_index_fully_covered: checkpoint not present");
             return;
         };
         let idx: serde_json::Value = serde_json::from_str(&txt).unwrap();

@@ -60,7 +60,7 @@ fn param_list_matches_golden_header() {
 #[test]
 fn live_layout_matches_checkpoint() {
     let Ok(path) = std::env::var("FINCAST_CKPT") else {
-        eprintln!("FINCAST_CKPT unset; skipping the live FinCast layout gate");
+        brain_testutil::skip("FINCAST_CKPT unset");
         return;
     };
     let p = std::path::Path::new(&path);

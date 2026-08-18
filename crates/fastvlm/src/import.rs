@@ -94,7 +94,7 @@ fn repo_path(rel: &str) -> String {
         use std::io::Read;
         let path = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let Ok(mut f) = std::fs::File::open(path) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         let mut len = [0u8; 8];

@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn config_and_tokenizer_extract_from_the_real_checkpoint() {
         let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
-            eprintln!("SKIP: BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
+            brain_testutil::skip("BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
             return;
         };
         let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));

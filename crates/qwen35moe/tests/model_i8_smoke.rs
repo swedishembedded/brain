@@ -272,7 +272,7 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
 #[test]
 fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
     if gpu_core::backend_name() == "cpu" {
-        eprintln!("skipping: default backend resolved to cpu (matmul_i8_dyn cannot run there — see this test's own doc)");
+        brain_testutil::skip_unavailable("default backend resolved to cpu (matmul_i8_dyn cannot run there - see this test's own doc)");
         return;
     }
     run_parity(Gpu::new(PIPELINES), Gpu::new(PIPELINES));

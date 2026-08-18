@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn tokenizer_present_runs_the_shared_chat_parse_with_tools() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
             return;
         };
 

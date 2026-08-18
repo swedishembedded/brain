@@ -46,7 +46,7 @@ fn load_template() -> Option<ChatTemplate> {
 #[test]
 fn matches_qwen_chat_on_a_tool_call_conversation() {
     let Some(tmpl) = load_template() else {
-        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
+        brain_testutil::skip("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store)");
         return;
     };
 
@@ -85,7 +85,7 @@ fn matches_qwen_chat_on_a_tool_call_conversation() {
 #[test]
 fn matches_qwen_chat_with_a_tools_schema_and_generation_prompt() {
     let Some(tmpl) = load_template() else {
-        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
+        brain_testutil::skip("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store)");
         return;
     };
 
@@ -107,7 +107,7 @@ fn matches_qwen_chat_with_a_tools_schema_and_generation_prompt() {
 #[test]
 fn matches_qwen_chat_with_enable_thinking_false_generation_prompt() {
     let Some(tmpl) = load_template() else {
-        eprintln!("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store); skipping");
+        brain_testutil::skip("Qwen3 tokenizer_config.json not found (set QWEN3_DIR or fetch Qwen/Qwen3-0.6B into the model store)");
         return;
     };
     let qc_msgs = vec![QcMessage::user("hi")];

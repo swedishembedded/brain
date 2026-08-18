@@ -128,7 +128,7 @@ fn t1_pil_bicubic_exact() {
 #[test]
 fn t2_dinov2_patch_tokens() {
     let Ok(ckpt) = std::env::var("MIRROR_CKPT") else {
-        eprintln!("MIRROR_CKPT not set - skipping");
+        brain_testutil::skip("MIRROR_CKPT not set");
         return;
     };
     let m = meta();
@@ -235,6 +235,6 @@ fn t2_dinov2_patch_tokens() {
         }
         assert!(errs7.is_empty(), "T7 rect mismatches:\n{}", errs7.join("\n"));
     } else {
-        eprintln!("no t7 goldens in meta - regenerate with tools/goldens/worldmirror2_dump_reference.py");
+        brain_testutil::skip("no t7 goldens in meta - regenerate with tools/goldens/worldmirror2_dump_reference.py");
     }
 }

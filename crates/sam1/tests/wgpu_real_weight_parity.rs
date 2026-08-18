@@ -47,7 +47,7 @@ fn real_mmproj_sam_tower_agrees_cpu_vs_wgpu_at_full_depth() {
         return;
     }
     let Some(mmproj) = mmproj_path() else {
-        eprintln!("skip: DeepSeek-OCR-GGUF mmproj not in the model store");
+        brain_testutil::skip("DeepSeek-OCR-GGUF mmproj not in the model store");
         return;
     };
     let mg = checkpoint::gguf::MmapGguf::open(mmproj.to_str().expect("utf-8 path")).expect("open mmproj");

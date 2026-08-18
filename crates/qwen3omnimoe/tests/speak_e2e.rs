@@ -30,7 +30,7 @@ use qwen3omnimoe::caps::OmniProvider;
 #[ignore]
 fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     let Some(hf_dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()) else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
 

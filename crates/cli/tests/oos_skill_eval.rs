@@ -184,11 +184,11 @@ struct ModelOut {
 #[test]
 fn oos_skill_eval() {
     let Ok(data) = std::env::var("OOS_DATA") else {
-        eprintln!("OOS_DATA unset; skipping OOS skill eval");
+        brain_testutil::skip("OOS_DATA unset");
         return;
     };
     let Ok(out) = std::env::var("OOS_OUT") else {
-        eprintln!("OOS_OUT unset; skipping OOS skill eval");
+        brain_testutil::skip("OOS_OUT unset");
         return;
     };
     let ctx_len = envu("OOS_CTX", 200);
@@ -207,7 +207,7 @@ fn oos_skill_eval() {
 
     let models = build_models();
     if models.is_empty() {
-        eprintln!("no models loaded (set CHRONOS2_WEIGHTS / KRONOS_*_DIR / FINCAST_WEIGHTS); skipping");
+        brain_testutil::skip("no models loaded (set CHRONOS2_WEIGHTS / KRONOS_*_DIR / FINCAST_WEIGHTS)");
         return;
     }
 

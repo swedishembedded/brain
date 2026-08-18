@@ -133,7 +133,7 @@ fn i8_model_reports_int_ops_on_an_int8_dot_capable_device() {
     let init = init_weights(&cfg, 3);
     let m8 = Qwen::new_shard_i8(cfg.clone(), 1, cfg.block_size, &init, Shard::whole(cfg.n_layers as usize));
     if !m8.gpu().caps().numeric.int8_dot {
-        eprintln!("i8_model_reports_int_ops_on_an_int8_dot_capable_device: SKIP (ambient device has no int8_dot capability)");
+        brain_testutil::skip_unavailable("ambient device has no int8_dot capability");
         return;
     }
 

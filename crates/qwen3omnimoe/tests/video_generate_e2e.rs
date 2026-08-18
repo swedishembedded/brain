@@ -45,11 +45,11 @@ use qwen3omnimoe::caps::OmniProvider;
 #[ignore]
 fn video_blob_generates_real_text_end_to_end() {
     let Some(hf_dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()) else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     if !ffmpeg_available() {
-        eprintln!("skip: ffmpeg not installed");
+        brain_testutil::skip_unavailable("ffmpeg not installed");
         return;
     }
 

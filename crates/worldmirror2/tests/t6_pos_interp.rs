@@ -31,7 +31,7 @@ fn identity_resize_is_exact() {
 #[test]
 fn matches_torch_refs() {
     let Ok(dir) = std::env::var("MIRROR_BICUBIC_REFS") else {
-        eprintln!("MIRROR_BICUBIC_REFS not set — skipping");
+        brain_testutil::skip("MIRROR_BICUBIC_REFS not set");
         return;
     };
     let (_, x) = read_npy(&format!("{dir}/bicubic_in.npy"));

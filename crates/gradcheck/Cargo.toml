@@ -44,3 +44,6 @@ brain-data.workspace = true
 # `check_deepseekocr_relpos` (src/deepseekocr.rs) - the SAM rel-pos kernels have
 # no model crate yet, so this check registers their WGSL directly.
 brain-kernels.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

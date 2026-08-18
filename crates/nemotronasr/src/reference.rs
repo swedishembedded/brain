@@ -1820,7 +1820,7 @@ mod tests {
         let GOLD = crate::testdata("asr/golden/nemotron");
         let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/block0.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
-            eprintln!("skipping: goldens/checkpoint absent");
+            brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
@@ -1843,7 +1843,7 @@ mod tests {
         let GOLD = crate::testdata("asr/golden/nemotron");
         let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
-            eprintln!("skipping: goldens/checkpoint absent");
+            brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
@@ -1865,7 +1865,7 @@ mod tests {
         let GOLD = crate::testdata("asr/golden/nemotron");
         let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
-            eprintln!("skipping: goldens/checkpoint absent");
+            brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();

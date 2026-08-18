@@ -35,7 +35,7 @@ fn gen_cfg() -> TtsGenConfig {
 #[test]
 fn talker_from_scratch_overfits() {
     if skip() {
-        eprintln!("skip: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("scratch_data");
@@ -69,7 +69,7 @@ fn talker_from_scratch_overfits() {
 #[test]
 fn talker_lora_finetune_decreases_loss() {
     if skip() {
-        eprintln!("skip: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("lora_data");

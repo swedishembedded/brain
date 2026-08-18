@@ -16,6 +16,7 @@ brain-wgsl-cpu.workspace = true
 rayon = "1"
 
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 

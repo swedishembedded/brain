@@ -37,6 +37,7 @@ brain-backend-cpu = { workspace = true }
 # not part of the library-target build graph, only the test-target one, so
 # this is not a real cycle.
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-gradcheck.workspace = true
 # Test-only: `crates/model/tests/causal_conv1d_step.rs` gates
 # `gdn::gdn_causal_conv1d_step` against `audio::conv::conv1d_fwd`'s

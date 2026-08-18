@@ -132,11 +132,11 @@ fn mmproj_path() -> Option<std::path::PathBuf> {
 fn real_mmproj_sam_tower_matches_llamacpp() {
     let fixture = testdata("deepseek-ocr/real/vision.safetensors");
     if !fixture.exists() {
-        eprintln!("skip sam1 parity: fixture missing at {}", fixture.display());
+        brain_testutil::skip(&format!("sam1 parity: fixture missing at {}", fixture.display()));
         return;
     }
     let Some(mmproj) = mmproj_path() else {
-        eprintln!("skip sam1 parity: {MMPROJ} mmproj not in the model store");
+        brain_testutil::skip(&format!("sam1 parity: {MMPROJ} mmproj not in the model store"));
         return;
     };
     pin_cpu_backend();
@@ -205,7 +205,7 @@ fn real_mmproj_sam_tower_matches_llamacpp() {
 fn clip_class_token_row_is_the_imported_class_embd() {
     let fixture = testdata("deepseek-ocr/real/vision.safetensors");
     let (Some(mmproj), true) = (mmproj_path(), fixture.exists()) else {
-        eprintln!("skip: real mmproj or vision fixture missing");
+        brain_testutil::skip("real mmproj or vision fixture missing");
         return;
     };
     let golden = load(&fixture);

@@ -39,11 +39,11 @@ use brain_testutil::read_f32;
         let REF = testdata("vl/parity/moondream_dec_ref.bin");
         let TOK = testdata("vl/parity/moondream_dec_tokens.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: Moondream decoder reference not present (run tools/goldens/moondream3_decoder_dump_reference.py)");
+            brain_testutil::skip("Moondream decoder reference not present (run tools/goldens/moondream3_decoder_dump_reference.py)");
             return;
         };
         let Ok(rd) = std::fs::read_dir(DIR) else {
-            eprintln!("skip: Moondream checkpoint not present");
+            brain_testutil::skip("Moondream checkpoint not present");
             return;
         };
         let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();

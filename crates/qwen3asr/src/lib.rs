@@ -61,7 +61,7 @@ mod tests {
         let dg = crate::testdata("asr/golden/qwen_decode");
         let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
         if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
-            eprintln!("skipping: goldens/checkpoint absent");
+            brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
         let cfg = QwenAsrConfig::qwen3_asr_1_7b();
@@ -102,7 +102,7 @@ mod tests {
         let GOLD = crate::testdata("asr/golden/qwen_encoder");
         let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
         if !have(&format!("{GOLD}/encoder_out.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
-            eprintln!("skipping: goldens/checkpoint absent");
+            brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
         let cfg = AudioEncoderConfig::qwen3_asr();

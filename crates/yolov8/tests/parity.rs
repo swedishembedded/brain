@@ -53,9 +53,8 @@ fn yolov8n_reference_parity() {
     let weights_path = match std::env::var("YOLO_PARITY_WEIGHTS") {
         Ok(p) if std::path::Path::new(&p).exists() => p,
         _ => {
-            eprintln!(
-                "SKIP yolov8n_reference_parity: set YOLO_PARITY_WEIGHTS to an exported \
-                 yolov8n.brain.safetensors (see crates/yolo/README.md). Nothing to do here."
+            brain_testutil::skip(
+                "set YOLO_PARITY_WEIGHTS to an exported yolov8n.brain.safetensors (see crates/yolo/README.md)",
             );
             return;
         }
@@ -89,7 +88,7 @@ fn yolov8n_reference_parity() {
         if std::path::Path::new(&p).exists() {
             Some(checkpoint::load(&p))
         } else {
-            eprintln!("YOLO_PARITY_ACTS set but file missing; using a fixed synthetic input.");
+            brain_testutil::skip("YOLO_PARITY_ACTS is set but names no file; falling back to a fixed synthetic input");
             None
         }
     });
@@ -111,12 +110,15 @@ fn yolov8n_reference_parity() {
     // --- stage-by-stage comparison (head scales are the readable end stages) ---
     const TOL: f32 = 1e-3;
     let Some(acts) = acts else {
-        eprintln!(
-            "parity: weights loaded + forward ran ({} cls logits, {} box logits). \
-             No YOLO_PARITY_ACTS dump given, so no reference comparison performed.",
+        // This is the silent half of this suite: the weights load and the
+        // forward runs, so the test "passes" - having compared nothing at all
+        // against the reference. Say so, and let BRAIN_REQUIRE_FIXTURES=1 make
+        // it red in any run whose purpose is to certify parity.
+        brain_testutil::skip(&format!(
+            "no YOLO_PARITY_ACTS dump, so NO reference comparison ran (the forward itself did: {} cls logits, {} box logits)",
             cls.len(),
             boxl.len()
-        );
+        ));
         return;
     };
 

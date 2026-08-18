@@ -2450,7 +2450,7 @@ mod tests {
     #[test]
     fn row_abt_avx512_matches_scalar_when_available() {
         if !crate::fast_conv::avx512_available() {
-            eprintln!("row_abt_avx512: AVX-512 not available on this host, skipping execution-verification (compiled-only)");
+            brain_testutil::skip_unavailable("row_abt_avx512: AVX-512 not available on this host");
             return;
         }
         let mut s = 71u32;

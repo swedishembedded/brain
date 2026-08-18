@@ -94,10 +94,10 @@ fn talker_analytic_grads_match_finite_differences() {
 #[test]
 fn talker_real_import_and_forward() {
     let Ok(dir) = std::env::var("BRAIN_QWEN3TTS_CKPT") else {
-        return;
+        return brain_testutil::skip("set BRAIN_QWEN3TTS_CKPT to a real Qwen3-TTS checkpoint dir");
     };
     if gpu_disabled() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
     }
     let out = std::env::temp_dir().join("brain_talker_test.safetensors");
     let out = out.to_str().unwrap();

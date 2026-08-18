@@ -76,7 +76,7 @@ fn scan(reader: &WeightReader, names: &[String], label: &str) {
 #[ignore = "real-weight diagnostic, not a correctness gate; run in its own process, see module doc"]
 fn construction_order() {
     let Some((gguf, st)) = real_lm::paths() else {
-        eprintln!("skip: real DeepSeek-OCR checkpoint not in the model store");
+        brain_testutil::skip("real DeepSeek-OCR checkpoint not in the model store");
         return;
     };
     let st_path = real_lm::expanded(&gguf, &st);
@@ -91,7 +91,7 @@ fn construction_order() {
 #[ignore = "real-weight diagnostic, not a correctness gate; run in its own process, see module doc"]
 fn file_order() {
     let Some((gguf, st)) = real_lm::paths() else {
-        eprintln!("skip: real DeepSeek-OCR checkpoint not in the model store");
+        brain_testutil::skip("real DeepSeek-OCR checkpoint not in the model store");
         return;
     };
     let st_path = real_lm::expanded(&gguf, &st);

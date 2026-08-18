@@ -78,7 +78,7 @@ pub fn expanded(gguf: &std::path::Path, st: &std::path::Path) -> String {
 /// silently changed shape fails here rather than as a numeric mismatch later.
 pub fn open(t: u32) -> Option<DeepseekV2> {
     let Some((gguf, st)) = paths() else {
-        eprintln!("skip: {STORE}/{GGUF} not in the model store");
+        brain_testutil::skip(&format!("{STORE}/{GGUF} not in the model store"));
         return None;
     };
     pin_cpu_backend();

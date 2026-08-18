@@ -14,7 +14,11 @@ use paramstore::ParamStore;
 fn full_pipeline_matches_reference() {
     let (Ok(ppm), Ok(refb), Ok(pth)) = (
         std::env::var("NATIVE_PPM"), std::env::var("REF_FULL_BIN"), std::env::var("ZIPDEPTH_NPU_PTH"),
-    ) else { eprintln!("SKIP"); return; };
+    ) else {
+        return brain_testutil::skip(
+            "set NATIVE_PPM to an input image, REF_FULL_BIN to the full-pipeline reference dump and ZIPDEPTH_NPU_PTH to the ZipDepth checkpoint",
+        );
+    };
 
     let img = imaging::load(&ppm).unwrap();
     let (hwc, w, h) = (img.to_hwc_unit(), img.w, img.h);

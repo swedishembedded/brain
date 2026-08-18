@@ -19,7 +19,7 @@ macro_rules! check {
         #[test]
         fn $name() {
             if skip_gpu() {
-                eprintln!("{}: skipped (MOE_SKIP_GPU_TESTS)", $label);
+                brain_testutil::skip_unavailable(&format!("{}: MOE_SKIP_GPU_TESTS set", $label));
                 return;
             }
             println!("--- {} ---", $label);

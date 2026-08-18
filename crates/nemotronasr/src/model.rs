@@ -62,7 +62,7 @@ mod tests {
         let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
         let gold = crate::testdata("asr/golden/nemotron");
         if !Path::new(&wav_path).exists() || !Path::new(&format!("{ckpt}/model.safetensors")).exists() {
-            eprintln!("skipping: assets absent (run `make fetch/testdata`)");
+            brain_testutil::skip("assets absent (run `make fetch/testdata`)");
             return;
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();

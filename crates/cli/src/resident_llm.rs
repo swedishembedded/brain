@@ -880,12 +880,12 @@ mod tests {
     #[ignore = "slow: real checkpoint"]
     fn kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget() {
         let Ok(dir) = std::env::var("QWEN3_DIR") else {
-            eprintln!("SKIP: set QWEN3_DIR to a real Qwen3-0.6B checkpoint dir to run this test");
+            brain_testutil::skip("set QWEN3_DIR to a real Qwen3-0.6B checkpoint dir to run this test");
             return;
         };
         let path = std::path::Path::new(&dir).join("qwen.brain.safetensors");
         if !path.is_file() {
-            eprintln!("SKIP: {} not found under QWEN3_DIR", path.display());
+            brain_testutil::skip(&format!("{} not found under QWEN3_DIR", path.display()));
             return;
         }
         // SAFETY: this test is `#[ignore]`d (never runs under the default
@@ -1000,7 +1000,7 @@ mod tests {
     #[test]
     fn prefix_cache_hit_rate_is_observable_through_the_real_http_router() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
             return;
         };
         let path = write_tiny_checkpoint(5, "prefix");
@@ -1070,7 +1070,7 @@ mod tests {
     #[test]
     fn rejected_admission_resolves_promptly_instead_of_hanging() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
             return;
         };
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&tok_path).expect("load tokenizer");

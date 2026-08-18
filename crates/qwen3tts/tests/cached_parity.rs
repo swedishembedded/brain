@@ -32,14 +32,33 @@ fn maxabs(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
+/// True when this suite can really run; otherwise it has already named what
+/// it is skipping and in which of the two buckets.
+///
+/// Those buckets are unrelated and used to share one boolean: `MOE_SKIP_GPU_TESTS`
+/// is a machine opting out of GPU work, which no flag may turn into a failure,
+/// while an absent checkpoint or an unimported weight file is a missing
+/// fixture that `BRAIN_REQUIRE_FIXTURES=1` is entitled to fail on. Folded
+/// together, the fixture case was unreportable.
 fn ready() -> bool {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
         let TALKER = repo_path("out/tts/talker.safetensors");
         let MTP = repo_path("out/tts/mtp.safetensors");
-    std::env::var("MOE_SKIP_GPU_TESTS").is_err()
-        && std::path::Path::new(&TALKER).exists()
-        && std::path::Path::new(&MTP).exists()
-        && std::path::Path::new(&CKPT).join("config.json").exists()
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+        return false;
+    }
+    for (what, p) in [("talker.safetensors", &TALKER), ("mtp.safetensors", &MTP)] {
+        if !std::path::Path::new(p).exists() {
+            brain_testutil::skip(&format!("out/tts/{what} absent (import the TTS weights first)"));
+            return false;
+        }
+    }
+    if !std::path::Path::new(&CKPT).join("config.json").exists() {
+        brain_testutil::skip(&format!("{CKPT}/config.json absent (run `make fetch/testdata`)"));
+        return false;
+    }
+    true
 }
 
 #[test]
@@ -50,7 +69,6 @@ fn cached_matches_cachefree() {
         let SPEAKER = repo_path("out/tts/speaker.safetensors");
         let REF_WAV = testdata("tts/voice-clone-example-voice.wav");
     if !ready() {
-        eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
         return;
     }
 
@@ -185,7 +203,6 @@ fn cached_clone_audio_quality() {
         let CODEC = repo_path("out/tts/codec.safetensors");
         let GOLD = testdata("tts/dumps/codec_ref/codes.bin");
     if !ready() {
-        eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
         return;
     }
     let paths = qwen3tts::pipeline::TtsPaths {

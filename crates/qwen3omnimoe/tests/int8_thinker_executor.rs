@@ -56,11 +56,11 @@ use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 fn skip() -> bool {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("skipping: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return true;
     }
     if gpu_core::discrete_gpu_count() < 2 {
-        eprintln!("skipping: fewer than two discrete GPUs visible");
+        brain_testutil::skip_unavailable("fewer than two discrete GPUs visible");
         return true;
     }
     false

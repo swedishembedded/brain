@@ -58,16 +58,16 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_code2wav() {
     let Some(dir) = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().map(PathBuf::from) else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
     let Some(shard) = shard_for(&dir, "code2wav.code_embedding.weight") else {
-        eprintln!("skip: index doesn't (yet) have the shard holding code2wav.*");
+        brain_testutil::skip("index doesn't (yet) have the shard holding code2wav.*");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code2wav.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run `make fetch/testdata`)");
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
         return;
     }
 

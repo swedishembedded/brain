@@ -31,7 +31,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 #[test]
 fn decode_only_model_from_folded_tensors_matches_the_live_trained_forward() {
     if skip() {
-        eprintln!("skip: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
 

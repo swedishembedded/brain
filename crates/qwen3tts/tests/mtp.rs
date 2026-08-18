@@ -7,10 +7,10 @@ use qwen3tts::MtpModel;
 #[test]
 fn mtp_real_import_and_forward() {
     let Ok(dir) = std::env::var("BRAIN_QWEN3TTS_CKPT") else {
-        return;
+        return brain_testutil::skip("set BRAIN_QWEN3TTS_CKPT to a real Qwen3-TTS checkpoint dir");
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return;
+        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
     }
     let out = std::env::temp_dir().join("brain_mtp_test.safetensors");
     let out = out.to_str().unwrap();

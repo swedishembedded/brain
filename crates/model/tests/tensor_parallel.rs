@@ -126,7 +126,7 @@ fn gpu_disabled() -> bool {
     let need = stage_gpus().iter().copied().max().unwrap_or(0) + 1;
     let have = gpu_core::discrete_gpu_count();
     if have < need {
-        eprintln!("skipping: needs {need} discrete GPU(s), found {have}");
+        brain_testutil::skip_unavailable(&format!("needs {need} discrete GPU(s), found {have}"));
         return true;
     }
     false

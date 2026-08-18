@@ -29,7 +29,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 #[test]
 fn lora_adapter_survives_save_and_reload() {
     if skip() {
-        eprintln!("skip: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let base_cfg = QwenConfig::tiny();
@@ -91,7 +91,7 @@ fn lora_adapter_survives_save_and_reload() {
 #[test]
 fn checkpoint_without_lora_key_loads_as_plain_model() {
     if skip() {
-        eprintln!("skip: MOE_SKIP_GPU_TESTS set");
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = QwenConfig::tiny();

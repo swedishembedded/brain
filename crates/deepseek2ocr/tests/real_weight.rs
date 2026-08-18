@@ -79,7 +79,7 @@ fn real_weight_composite_forward() {
     let Some(dir) = store_dir() else { return };
     let (mmproj, lm, expanded) = (dir.join(real_vision::MMPROJ), dir.join(real_vision::LM), dir.join(EXPANDED));
     if !fixture.exists() || !mmproj.exists() || !lm.exists() {
-        eprintln!("skip: real checkpoints or the vision fixture are missing");
+        brain_testutil::skip("real checkpoints or the vision fixture are missing");
         return;
     }
     pin_cpu_backend();
@@ -100,10 +100,7 @@ fn real_weight_composite_forward() {
     println!("== deepseek-ocr real-weight composite (seq {seq}, image rows [{row0}, {}))", row0 + n_rows);
 
     if !expanded.exists() {
-        eprintln!(
-            "skip: {} absent (run crates/deepseekv2's parity test first, it builds the expansion)",
-            expanded.display()
-        );
+        brain_testutil::skip(&format!("{} absent (run crates/deepseekv2's parity test first, it builds the expansion)", expanded.display()));
         return;
     }
 

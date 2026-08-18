@@ -40,7 +40,7 @@ fn is_non_persistent(name: &str) -> bool {
 #[test]
 fn live_layout_matches_checkpoint() {
     let Ok(path) = std::env::var("CHRONOS2_CKPT") else {
-        eprintln!("CHRONOS2_CKPT unset; skipping the live Chronos-2 layout gate");
+        brain_testutil::skip("CHRONOS2_CKPT unset");
         return;
     };
     let p = std::path::Path::new(&path);

@@ -44,12 +44,12 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_vision_tower() {
     let Some(shard) = shard_with_visual() else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.visual");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.visual");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_vision.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run `make fetch/testdata`)");
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
         return;
     }
 

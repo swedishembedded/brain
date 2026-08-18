@@ -423,7 +423,7 @@ fn kv_bf16_long_context_parity_on_cpu() {
 fn kv_bf16_long_context_parity_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("kv_bf16_long_context_parity_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
+        brain_testutil::skip_unavailable("kv_bf16_long_context_parity_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("kv_bf16_long_context_parity_on_gpu: running on a real wgpu device");
@@ -439,7 +439,7 @@ fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_cpu() {
 fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        eprintln!("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: SKIPPED (MOE_SKIP_GPU_TESTS set)");
+        brain_testutil::skip_unavailable("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: MOE_SKIP_GPU_TESTS set");
         return;
     }
     eprintln!("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: running on a real wgpu device");

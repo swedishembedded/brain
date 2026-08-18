@@ -100,7 +100,7 @@ fn tail<'a>(got: &'a [f32], want: &StTensor, width: usize) -> &'a [f32] {
 fn build() -> Option<(DeepseekV2, std::collections::HashMap<String, StTensor>)> {
     let fixture = testdata("deepseek-ocr/real/decoder.safetensors");
     if !fixture.exists() {
-        eprintln!("skip deepseekv2 parity: fixture missing at {}", fixture.display());
+        brain_testutil::skip(&format!("deepseekv2 parity: fixture missing at {}", fixture.display()));
         return None;
     }
     let golden = load(&fixture);

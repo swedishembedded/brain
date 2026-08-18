@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn round_trips_a_real_synthetic_clip() {
         if !ffmpeg_available() {
-            eprintln!("skip: ffmpeg not installed");
+            brain_testutil::skip_unavailable("ffmpeg not installed");
             return;
         }
         let dir = std::env::temp_dir().join("brain-imaging-video-test");
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn encodes_a_real_playable_clip() {
         if !ffmpeg_available() {
-            eprintln!("skip: ffmpeg not installed");
+            brain_testutil::skip_unavailable("ffmpeg not installed");
             return;
         }
         let dir = std::env::temp_dir().join("brain-imaging-video-encode-test");
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn odd_dimensions_are_padded_not_dropped() {
         if !ffmpeg_available() {
-            eprintln!("skip: ffmpeg not installed");
+            brain_testutil::skip_unavailable("ffmpeg not installed");
             return;
         }
         let dir = std::env::temp_dir().join("brain-imaging-video-odd-test");
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn missing_file_is_a_clean_error() {
         if !ffmpeg_available() {
-            eprintln!("skip: ffmpeg not installed");
+            brain_testutil::skip_unavailable("ffmpeg not installed");
             return;
         }
         let err = decode_frames(Path::new("/nonexistent/brain-video-test.mp4"), &VideoDecodeOpts::default()).unwrap_err();

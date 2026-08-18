@@ -77,7 +77,7 @@ fn write_dataset(dir: &Path) {
 #[ignore]
 fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     let Some(qwen_dir) = qwen3_dir() else {
-        eprintln!("QWEN3_DIR unset (or missing qwen.brain.safetensors); skipping -- needs a real Qwen3-0.6B checkpoint");
+        brain_testutil::skip("QWEN3_DIR unset (or missing qwen.brain.safetensors)");
         return;
     };
 

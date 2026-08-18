@@ -37,7 +37,7 @@ fn load_template(dir: &std::path::Path) -> ChatTemplate {
 #[test]
 fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
     let Some(dir) = qwen3_dir() else {
-        eprintln!("QWEN3_DIR unset; skipping (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
+        brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
         return;
     };
     let tok = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).expect("load tokenizer");
@@ -88,7 +88,7 @@ fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_convers
     // ChatSample::encode must propagate that as an error, not silently
     // produce a wrong mask boundary.
     let Some(dir) = qwen3_dir() else {
-        eprintln!("QWEN3_DIR unset; skipping (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
+        brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
         return;
     };
     let tok = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).expect("load tokenizer");

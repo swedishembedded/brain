@@ -28,11 +28,11 @@ fn imports_a_real_yolov8n_checkpoint_with_exact_coverage() {
     let path = match std::env::var("YOLO_RAW_PT") {
         Ok(p) if std::path::Path::new(&p).is_file() => p,
         Ok(p) => {
-            println!("SKIP imports_a_real_yolov8n_checkpoint_with_exact_coverage: YOLO_RAW_PT={p:?} does not exist");
+            brain_testutil::skip(&format!("imports_a_real_yolov8n_checkpoint_with_exact_coverage: YOLO_RAW_PT={p:?} does not exist"));
             return;
         }
         Err(_) => {
-            println!("SKIP imports_a_real_yolov8n_checkpoint_with_exact_coverage: set YOLO_RAW_PT to a real yolov8n.pt");
+            brain_testutil::skip("imports_a_real_yolov8n_checkpoint_with_exact_coverage: set YOLO_RAW_PT to a real yolov8n.pt");
             return;
         }
     };

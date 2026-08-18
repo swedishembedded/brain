@@ -95,7 +95,7 @@ fn reclaim_events_for_one_forward(cfg: &MoeTextConfig, n: u32, seed: u64) -> u64
 #[test]
 fn reclaim_events_scale_with_layer_count_not_flat() {
     if gpu_core::backend_name() != "vulkan" {
-        eprintln!("skip: needs BRAIN_DEVICE=vulkan (reclaim_event_count is 0-by-contract on every other backend)");
+        brain_testutil::skip_unavailable("needs BRAIN_DEVICE=vulkan (reclaim_event_count is 0-by-contract on every other backend)");
         return;
     }
 

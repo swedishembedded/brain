@@ -29,7 +29,7 @@ fn randvec(seed: u64, n: usize) -> Vec<f32> {
 #[test]
 fn detect_runs_end_to_end_finite() {
     if skip() {
-        eprintln!("skipping detect smoke (MOE_SKIP_GPU_TESTS)");
+        brain_testutil::skip_unavailable("detect smoke (MOE_SKIP_GPU_TESTS)");
         return;
     }
     let cfg = YoloConfig::tiny(2);

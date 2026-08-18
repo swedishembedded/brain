@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn sam2_mask_decoder_gradients_match_finite_differences() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            eprintln!("skipping check_sam2 (MOE_SKIP_GPU_TESTS)");
+            brain_testutil::skip_unavailable("check_sam2 (MOE_SKIP_GPU_TESTS)");
             return;
         }
         let r = check_sam2(7);

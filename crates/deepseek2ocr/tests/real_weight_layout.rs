@@ -91,7 +91,7 @@ fn real_weight_full_row_layout() {
     let Some(dir) = real_vision::store_dir() else { return };
     let lm = dir.join(real_vision::LM);
     if !lm.exists() {
-        eprintln!("skip: {} absent (the tokenizer lives in its KV block)", lm.display());
+        brain_testutil::skip(&format!("{} absent (the tokenizer lives in its KV block)", lm.display()));
         return;
     }
     real_vision::pin_cpu_backend();
@@ -169,12 +169,12 @@ fn real_weight_full_row_layout() {
     // ---- stage 2: the composite, when the decoder's expansion exists ------
     let expanded = dir.join(real_vision::EXPANDED);
     if !expanded.exists() {
-        println!("  (decoder stage skipped: {} absent - run crates/deepseekv2's parity test to build it)", expanded.display());
+        brain_testutil::skip(&format!("decoder stage: {} absent (run crates/deepseekv2's parity test to build it)", expanded.display()));
         return;
     }
     let avail = mem_available_gib();
     if avail < DECODER_GIB {
-        println!("  (decoder stage skipped: MemAvailable {avail:.1} GiB < {DECODER_GIB} GiB - the composite peaks near 24 GiB)");
+        brain_testutil::skip_unavailable(&format!("decoder stage: MemAvailable {avail:.1} GiB < {DECODER_GIB} GiB (the composite peaks near 24 GiB)"));
         return;
     }
     println!("  decoder stage: MemAvailable {avail:.1} GiB");

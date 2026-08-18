@@ -25,7 +25,7 @@ fn hf_dir() -> Option<PathBuf> {
 #[ignore]
 fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
         return;
     };
     let idx_json = std::fs::read_to_string(dir.join("model.safetensors.index.json")).expect("read index");
@@ -88,7 +88,7 @@ fn every_real_tensor_name_maps_or_is_a_known_qkv_leaf() {
 #[ignore]
 fn full_real_import_produces_a_two_way_covered_checkpoint() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset or model.safetensors.index.json missing");
         return;
     };
     let shards = std::fs::read_dir(&dir).expect("read hf dir").filter(|e| e.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "safetensors"))).count();

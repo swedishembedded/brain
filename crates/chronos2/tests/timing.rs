@@ -12,7 +12,7 @@ use std::time::Instant;
 #[test]
 fn forecast_timing() {
     let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-        eprintln!("CHRONOS2_WEIGHTS unset; skipping timing");
+        brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {

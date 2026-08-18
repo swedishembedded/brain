@@ -285,7 +285,7 @@ mod paged_scoring_tests {
     #[test]
     fn paged_fp32_scoring_matches_the_legacy_backend() {
         let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
             return;
         };
         let tok = QwenBpe::from_file(&tok_path).expect("load QWEN_TOKENIZER");
@@ -293,7 +293,7 @@ mod paged_scoring_tests {
         let tmpl = match ChatTemplate::from_model_dir(base_dir) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("SKIP: no chat template beside QWEN_TOKENIZER ({base_dir:?}): {e}");
+                brain_testutil::skip(&format!("no chat template beside QWEN_TOKENIZER ({base_dir:?}): {e}"));
                 return;
             }
         };

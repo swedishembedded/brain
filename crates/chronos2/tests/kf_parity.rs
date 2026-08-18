@@ -33,7 +33,7 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn known_future_forward_matches_the_reference() {
     let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-        eprintln!("CHRONOS2_WEIGHTS unset; skipping KF parity");
+        brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -45,7 +45,7 @@ fn known_future_forward_matches_the_reference() {
         g.join("kf_quantiles.f32"), g.join("kf_meta.json"),
     );
     if !tp.exists() || !fp.exists() || !qp.exists() {
-        eprintln!("kf golden missing; run tools/goldens/chronos2_dump_kf_reference.py — skipping");
+        brain_testutil::skip("kf golden missing; run tools/goldens/chronos2_dump_kf_reference.py");
         return;
     }
     let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();

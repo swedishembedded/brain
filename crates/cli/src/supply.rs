@@ -961,7 +961,7 @@ mod tests {
         let path = match std::env::var("YOLO_RAW_PT") {
             Ok(p) if std::path::Path::new(&p).is_file() => p,
             _ => {
-                println!("SKIP ensure_completes_a_flat_release_plan_and_registers_a_yolo_resident: set YOLO_RAW_PT to a real yolov8n.pt");
+                brain_testutil::skip("ensure_completes_a_flat_release_plan_and_registers_a_yolo_resident: set YOLO_RAW_PT to a real yolov8n.pt");
                 return;
             }
         };

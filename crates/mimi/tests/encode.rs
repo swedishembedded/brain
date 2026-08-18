@@ -68,7 +68,7 @@ fn synth_wav(n: usize) -> Vec<f32> {
 #[test]
 fn round_trip_encode_decode_is_finite() {
     if !ckpt_available() {
-        eprintln!("skip: checkpoint not present");
+        brain_testutil::skip("checkpoint not present");
         return;
     }
     let codec = Codec::load_inference(&import_to_temp());
@@ -99,7 +99,7 @@ fn encode_matches_reference_codes() {
     let wav_p = std::path::Path::new(&ENC_DUMP).join("wav.bin");
     let codes_p = std::path::Path::new(&ENC_DUMP).join("codes.bin");
     if !ckpt_available() || !wav_p.exists() || !codes_p.exists() {
-        eprintln!("skip: encode golden dump not present");
+        brain_testutil::skip("encode golden dump not present");
         return;
     }
     let codec = Codec::load_inference(&import_to_temp());

@@ -34,14 +34,14 @@ use brain_testutil::{read_f32, read_i32};
         let TOK = testdata("vl/parity/fastvlm_dec_tokens.bin");
         let GEN = testdata("vl/parity/fastvlm_dec_gen.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: FastVLM decoder reference dump not present (run tools/goldens/fastvlm_decoder_dump_reference.py)");
+            brain_testutil::skip("FastVLM decoder reference dump not present (run tools/goldens/fastvlm_decoder_dump_reference.py)");
             return;
         };
         // The tied vocab table (151936×896×4 ≈ 544 MB) exceeds a typical GPU storage-
         // buffer binding limit, so run the decoder on the CPU-JIT backend.
         std::env::set_var("BRAIN_DEVICE", "cpu");
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
@@ -119,11 +119,11 @@ use brain_testutil::{read_f32, read_i32};
         // the real weights: same preprocessed pixels → the [256, 3072] features must
         // match (fully-in-brain vision, closing the loop for a native image caption).
         let (Some(px), Some(feat)) = (read_f32(VIS_PX), read_f32(VIS_FEAT)) else {
-            eprintln!("skip: vision reference not present (run tools/goldens/fastvlm_vision_dump_reference.py)");
+            brain_testutil::skip("vision reference not present (run tools/goldens/fastvlm_vision_dump_reference.py)");
             return;
         };
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");
@@ -170,11 +170,11 @@ use brain_testutil::{read_f32, read_i32};
         let (Some(px), Some(layout), Some(ids), Some(gen_ref)) =
             (read_f32(VIS_PX), read_i32(CAP_LAYOUT), read_i32(CAP_IDS), read_i32(CAP_GEN))
         else {
-            eprintln!("skip: FastVLM full-pipeline reference not present");
+            brain_testutil::skip("FastVLM full-pipeline reference not present");
             return;
         };
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");
@@ -266,11 +266,11 @@ use brain_testutil::{read_f32, read_i32};
         let (Some(embeds), Some(layout), Some(ids), Some(gen_ref)) =
             (read_f32(CAP_EMB), read_i32(CAP_LAYOUT), read_i32(CAP_IDS), read_i32(CAP_GEN))
         else {
-            eprintln!("skip: FastVLM caption reference not present (run tools/goldens/fastvlm_caption_dump_reference.py)");
+            brain_testutil::skip("FastVLM caption reference not present (run tools/goldens/fastvlm_caption_dump_reference.py)");
             return;
         };
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");

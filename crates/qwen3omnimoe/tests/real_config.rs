@@ -22,7 +22,7 @@ fn hf_dir() -> Option<PathBuf> {
 #[ignore]
 fn matches_the_released_checkpoint() {
     let Some(dir) = hf_dir() else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset or config.json missing");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset or config.json missing");
         return;
     };
     let json = std::fs::read_to_string(dir.join("config.json")).expect("read config.json");

@@ -162,10 +162,8 @@ const F16_MIN_NORMAL: f32 = 6.103_515_6e-5;
 fn native_f16_elementwise_fma_matches_f32_reference_on_real_gpu() {
     let probe = probe_device();
     if !probe.supports_shader_f16() {
-        eprintln!(
-            "SKIP native_f16_elementwise_fma_matches_f32_reference_on_real_gpu: \
-             this adapter does not report wgpu::Features::SHADER_F16"
-        );
+        brain_testutil::skip_unavailable("native_f16_elementwise_fma_matches_f32_reference_on_real_gpu: \
+             this adapter does not report wgpu::Features::SHADER_F16");
         return;
     }
     eprintln!("running on a real wgpu device with SHADER_F16 available");
@@ -295,10 +293,8 @@ fn calibrated_seconds_per_iter(gpu: &WgpuBackend, kind: usize, inp: &wgpu::Buffe
 fn native_f16_roof_fma_throughput_vs_f32_one_shot() {
     let probe = probe_device();
     if !probe.supports_shader_f16() {
-        eprintln!(
-            "SKIP native_f16_roof_fma_throughput_vs_f32_one_shot: \
-             this adapter does not report wgpu::Features::SHADER_F16"
-        );
+        brain_testutil::skip_unavailable("native_f16_roof_fma_throughput_vs_f32_one_shot: \
+             this adapter does not report wgpu::Features::SHADER_F16");
         return;
     }
     let (f16_name, f16_src) = native_f16_variant("roof_fma_f16", native_f16_poc::ROOF_FMA);

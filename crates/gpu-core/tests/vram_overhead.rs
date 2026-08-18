@@ -188,11 +188,11 @@ fn print_row(p: &Probe) {
 #[ignore]
 fn measure_storage_buffer_resident_overhead() {
     if Command::new("nvidia-smi").arg("-L").output().map(|o| !o.status.success()).unwrap_or(true) {
-        eprintln!("skip: nvidia-smi not available");
+        brain_testutil::skip_unavailable("nvidia-smi not available");
         return;
     }
     let Ok(Ok(gpu)) = std::panic::catch_unwind(|| Gpu::new_on_index(0, KERNELS)) else {
-        eprintln!("skip: could not build a GPU 0 device");
+        brain_testutil::skip_unavailable("could not build a GPU 0 device");
         return;
     };
     if let Some((name, discrete)) = gpu_core::adapter_info() {
@@ -229,7 +229,7 @@ fn measure_storage_buffer_resident_overhead() {
             //    nothing is ever released.
             rows.push(probe_drop_releases(&vk_gpu, "native-vulkan-drop-x4", 1024, 4));
         }
-        Err(e) => eprintln!("skip native-vulkan probe: {e}"),
+        Err(e) => brain_testutil::skip_unavailable(&format!("native-vulkan probe: {e}")),
     }
 
     eprintln!("\n{:<28} {:>10} {:>4} {:>10} {:>8}", "probe", "logical", "on", "delta", "ratio");

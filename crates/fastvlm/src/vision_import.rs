@@ -197,7 +197,7 @@ fn repo_path(rel: &str) -> String {
         // from the real checkpoint's vision tensors (skips if the checkpoint absent).
         let path = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let Ok(tensors) = checkpoint::safetensors::read(&path) else {
-            eprintln!("skip: FastVLM checkpoint not present");
+            brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
         let vt: Vec<(String, Vec<f32>)> = tensors.into_iter().filter(|t| t.name.contains("vision_tower")).map(|t| (t.name, t.data)).collect();

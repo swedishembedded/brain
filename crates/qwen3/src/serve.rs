@@ -2423,7 +2423,7 @@ mod tests {
                 !eng8.gpu().caps().numeric.int8_dot,
                 "device reports int8_dot but the engine fell back to fp32"
             );
-            eprintln!("skipping int8 comparison: device has no packed-int8 path");
+            brain_testutil::skip_unavailable("int8 comparison: device has no packed-int8 path");
             return;
         }
         let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 2, 8, 32, false, false);
@@ -3169,7 +3169,7 @@ mod tests {
         // `unwrap_or(0)` silently turn "not counted" into a false failure.
         let probe = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         if probe.device_stats().is_none() {
-            println!("prefill_submits_scale_with_chunks_not_with_token_count: SKIP (this backend does not count device submits)");
+            brain_testutil::skip_unavailable("this backend does not count device submits");
             return;
         }
         for kv_int8 in [false, true] {

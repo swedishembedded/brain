@@ -14,3 +14,5 @@ brain-modelref.workspace = true
 brain-modelstore.workspace = true
 # `parity::Report::against` reads goldens as `checkpoint::safetensors::StTensor`.
 brain-checkpoint.workspace = true
+# `golden::Source` reads the provenance block out of a dumper's manifest.json.
+serde_json.workspace = true

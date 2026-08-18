@@ -77,7 +77,8 @@ help:
 	@echo "  make test                    FAST lane: unit+integration, no doc-tests"
 	@echo "  make test/doc                doc-tests (slow: one link per crate)"
 	@echo "  make test/slow               #[ignore]d long-running tests"
-	@echo "  make test/full               test + test/doc + test/slow"
+	@echo "  make test/full               test + test/doc + test/slow + test/e2e + the check/*"
+	@echo "                               gates + parity/strict (needs make fetch/testdata)"
 	@echo "  make test/times              rank test binaries by wall time"
 	@echo "  make test/e2e                every fast end-to-end bats suite (api-conformance|"
 	@echo "                               shutdown|examples|ready; test/e2e/<name> runs one;"
@@ -377,6 +378,7 @@ check/scripts:
 	bash scripts/gates/check-device-env-single-source.sh
 	bash scripts/gates/check-arch-names.sh
 	bash scripts/gates/check-linear-history.sh
+	bash scripts/gates/check-golden-source.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"
@@ -414,7 +416,21 @@ hooks/install:
 	@echo "installed: .git/hooks/{pre-commit,commit-msg,pre-push}"
 
 # Everything, for a release gate.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check
+#
+# `parity/strict` is in this list on purpose, and it is the only member that
+# can fail for want of DATA rather than for want of correct code. That is the
+# point of it. Every other target here is green on a box with no fixtures at
+# all, because cargo reports a skipped test as a PASS - so `test`, on its own,
+# cannot distinguish "every reference comparison matched" from "no reference
+# comparison ran". It has failed to distinguish exactly that, repeatedly, and
+# each time the suite stayed green while the model was wrong.
+#
+# The default suite list is the one `make fetch/testdata` provisions, so the
+# prerequisite for a release gate is one documented command. Where a suite
+# genuinely cannot be provisioned, narrow the list explicitly and visibly
+# (`make test/full PARITY_STRICT_SUITES="..."`) rather than dropping the
+# target - a narrowed list still says which comparisons were certified.
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files kernels-table/check parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.

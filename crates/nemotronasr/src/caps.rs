@@ -237,7 +237,7 @@ mod tests {
         let ckpt = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
         if !Path::new(&wav_path).exists() || !Path::new(&format!("{ckpt}/model.safetensors")).exists() {
-            eprintln!("skipping: assets absent (run `make fetch/testdata`)");
+            brain_testutil::skip("assets absent (run `make fetch/testdata`)");
             return;
         }
         let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();

@@ -89,7 +89,7 @@ fn gate(label: &str, got: &[f32], want: &[f32], min_cos: f32, max_abs: f32) {
 #[test]
 fn import_covers_the_graph_in_both_directions() {
     if !have(&["scrfd_10g_bnkps.onnx"]) {
-        eprintln!("skip: scrfd_10g_bnkps.onnx not under {}", dir());
+        brain_testutil::skip(&format!("scrfd_10g_bnkps.onnx not under {}", dir()));
         return;
     }
     let scr = weights();
@@ -106,7 +106,7 @@ fn import_covers_the_graph_in_both_directions() {
 #[test]
 fn a_config_that_disagrees_with_the_graph_errors_instead_of_zero_filling() {
     if !have(&["scrfd_10g_bnkps.onnx"]) {
-        eprintln!("skip: scrfd_10g_bnkps.onnx not under {}", dir());
+        brain_testutil::skip(&format!("scrfd_10g_bnkps.onnx not under {}", dir()));
         return;
     }
     let m = onnx::read_file(format!("{}/scrfd_10g_bnkps.onnx", dir())).unwrap();
@@ -123,7 +123,7 @@ fn a_config_that_disagrees_with_the_graph_errors_instead_of_zero_filling() {
 #[test]
 fn scrfd_forward_parity_stage_by_stage() {
     if !have(&["scrfd_10g_bnkps.onnx", "scrfd.safetensors"]) {
-        eprintln!("skip: scrfd fixtures not under {}", dir());
+        brain_testutil::skip(&format!("scrfd fixtures not under {}", dir()));
         return;
     }
     let g = golden("scrfd.safetensors");
@@ -180,7 +180,7 @@ fn scrfd_forward_parity_stage_by_stage() {
 #[test]
 fn scrfd_decode_and_nms_reproduce_the_reference_detections() {
     if !have(&["scrfd_10g_bnkps.onnx", "e2e.safetensors"]) {
-        eprintln!("skip: e2e fixtures not under {}", dir());
+        brain_testutil::skip(&format!("e2e fixtures not under {}", dir()));
         return;
     }
     let g = golden("e2e.safetensors");

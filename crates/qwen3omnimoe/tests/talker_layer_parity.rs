@@ -47,12 +47,12 @@ fn cosine_max_abs(got: &[f32], want: &[f32]) -> (f64, f32) {
 #[ignore]
 fn matches_the_real_talker_layer0() {
     let Some(shard) = shard_for("talker.model.layers.0.mlp.gate.weight") else {
-        eprintln!("skip: BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding talker.model.layers.0");
+        brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding talker.model.layers.0");
         return;
     };
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_talker_layer0.safetensors");
     if !golden_path.exists() {
-        eprintln!("skip: {golden_path:?} missing (run `make fetch/testdata`)");
+        brain_testutil::skip(&format!("{golden_path:?} missing (run `make fetch/testdata`)"));
         return;
     }
 

@@ -11,7 +11,7 @@ use flux2::{import_bfl, import_diffusers, Flux2Config};
 #[test]
 fn diffusers_4b_imports_with_full_coverage() {
     let Ok(path) = std::env::var("BRAIN_FLUX2_TRANSFORMER") else {
-        eprintln!("skip: BRAIN_FLUX2_TRANSFORMER unset");
+        brain_testutil::skip("BRAIN_FLUX2_TRANSFORMER unset");
         return;
     };
     let p = std::path::Path::new(&path);
@@ -47,7 +47,7 @@ fn diffusers_4b_imports_with_full_coverage() {
 #[test]
 fn gguf_9b_imports_with_full_coverage() {
     let Ok(path) = std::env::var("BRAIN_FLUX2_GGUF") else {
-        eprintln!("skip: BRAIN_FLUX2_GGUF unset");
+        brain_testutil::skip("BRAIN_FLUX2_GGUF unset");
         return;
     };
     let tensors = checkpoint::gguf::read(&path).unwrap();

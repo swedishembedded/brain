@@ -48,7 +48,7 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn full_forward_matches_the_reference() {
     let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-        eprintln!("CHRONOS2_WEIGHTS unset; skipping T5 Chronos-2 parity");
+        brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -59,7 +59,7 @@ fn full_forward_matches_the_reference() {
     let q_path = golden.join("t5_quantiles.f32");
     let meta_path = golden.join("t5_meta.json");
     if !ctx_path.exists() || !q_path.exists() {
-        eprintln!("golden dump missing; run tools/goldens/chronos2_dump_reference.py — skipping");
+        brain_testutil::skip("golden dump missing; run tools/goldens/chronos2_dump_reference.py");
         return;
     }
 

@@ -15,7 +15,7 @@ use qwen3::{Qwen, QwenConfig};
 #[ignore]
 fn step_timing() {
     let Some(d) = std::env::var("QWEN3_DIR").ok() else {
-        return;
+        return brain_testutil::skip("set QWEN3_DIR to a real Qwen3 checkpoint dir");
     };
     set_default_backend(Backend::Wgpu);
     if std::env::var("BRAIN_TILE_BUDGET_WORDS").is_err() {

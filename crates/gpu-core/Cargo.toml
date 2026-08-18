@@ -34,3 +34,6 @@ brain-backend-wgpu.workspace = true
 # build path, and already transitively present via cranelift-jit / wgpu-hal).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

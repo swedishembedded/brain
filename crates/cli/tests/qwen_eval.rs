@@ -72,7 +72,7 @@ fn write_dataset(dir: &Path) {
 #[ignore]
 fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
     let Some(qwen_dir) = qwen3_dir() else {
-        eprintln!("QWEN3_DIR unset (or missing qwen.brain.safetensors); skipping -- needs a real Qwen3-0.6B checkpoint");
+        brain_testutil::skip("QWEN3_DIR unset (or missing qwen.brain.safetensors)");
         return;
     };
 

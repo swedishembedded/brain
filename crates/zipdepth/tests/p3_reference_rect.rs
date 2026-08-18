@@ -13,7 +13,7 @@ use vision::Ctx;
 #[test]
 fn matches_reference_at_384x512() {
     let (Ok(pth), Ok(refbin)) = (std::env::var("ZIPDEPTH_NPU_PTH"), std::env::var("BRAIN_REF_RECT")) else {
-        eprintln!("SKIP"); return;
+        return brain_testutil::skip("set ZIPDEPTH_NPU_PTH to the ZipDepth checkpoint and BRAIN_REF_RECT to the 384x512 reference dump");
     };
     let (h, w) = (384usize, 512usize);
     let cfg = ZipConfig { upsample_unfold: false, ..ZipConfig::base() };

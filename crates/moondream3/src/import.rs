@@ -169,7 +169,7 @@ fn repo_path(rel: &str) -> String {
         use std::io::Read;
         let path = format!("{}/model.safetensors.index.json", model_dir("moondream/moondream3-preview").unwrap_or_default());
         let Ok(mut f) = std::fs::File::open(path) else {
-            eprintln!("skip: moondream3 index not present");
+            brain_testutil::skip("moondream3 index not present");
             return;
         };
         let mut s = String::new();
