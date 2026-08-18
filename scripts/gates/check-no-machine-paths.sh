@@ -23,6 +23,15 @@
 #   With no arguments, scans the whole crates/ tree. With arguments (how the
 #   pre-commit hook calls it), scans only those, ignoring anything outside
 #   crates/.
+#
+# BOTH modes look at crates/**/*.rs and nothing else, which they have to: the
+# rule is about how brain's own source resolves a path. The per-file mode used
+# to scan every staged file under crates/, so a vendored third-party fixture
+# with a machine path in it (crates/apiserve/tests/specs/openrouter.json is
+# OpenRouter's published OpenAPI document, and its request examples carry an
+# upstream "/root/worker") failed the hook while `make check/paths` over the
+# same tree passed. Two modes of one gate disagreeing is worse than either
+# answer: the one that is easy to run says OK.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -35,7 +44,7 @@ if [ "$#" -gt 0 ]; then
   files=()
   for f in "$@"; do
     case "$f" in
-    crates/*) [ -f "$f" ] && files+=("$f") ;;
+    crates/*.rs) [ -f "$f" ] && files+=("$f") ;;
     esac
   done
   [ "${#files[@]}" -eq 0 ] && exit 0

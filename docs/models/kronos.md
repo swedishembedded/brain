@@ -116,14 +116,18 @@ for the full how-to.
 - Kronos is a candlestick model, not a seasonal decomposition: its skill is
   concentrated at short horizons. Score it at several rolling origins
   (`--origins`) before believing a single window's number.
-- **The predictive band is over-confident, and worsens with lead time.** On the
-  committed example series its nominal 10-90% band covers 60% of held-out bars
-  at a 6-bar horizon, 44% at 12 and 30% at 24; on a real 5-minute equity series
-  (at the nominal 512-bar window), 45% at 12 and 20% at 24. This is the
-  checkpoint, not the port - upstream's own `KronosPredictor` measures the same
-  on the same input - and it is not nucleus truncation either: relaxing
-  `--top-p` all the way to 1.0 only moves real-data coverage from 20% to 38%,
-  at a worse CRPS. Treat the band as a relative sharpness signal, not as an 80%
+- **The predictive band is over-confident, and worsens with lead time.** The
+  numbers below are interval COVERAGE - what fraction of held-out bars the
+  nominal 10-90% band actually contains - not throughput; the warning IS that <!-- perf-number: names the band being scored, not a measurement -->
+  the nominal percentage and the empirical one disagree, so each figure is the
+  claim rather than an incidental measurement.
+  On the committed example series that band covers 60% of held-out bars <!-- perf-number: prediction-interval coverage, not throughput -->
+  at a 6-bar horizon, 44% at 12 and 30% at 24; on a real 5-minute equity <!-- perf-number: prediction-interval coverage, not throughput -->
+  series (at the nominal 512-bar window), 45% at 12 and 20% at 24. This is <!-- perf-number: prediction-interval coverage, not throughput -->
+  the checkpoint, not the port - upstream's own `KronosPredictor` measures the
+  same on the same input - and it is not nucleus truncation either: relaxing
+  `--top-p` all the way to 1.0 only moves real-data coverage from 20% to 38%, <!-- perf-number: prediction-interval coverage, not throughput -->
+  at a worse CRPS. Treat the band as a relative sharpness signal, not as an 80% <!-- perf-number: prediction-interval coverage, not throughput -->
   interval, and calibrate it against your own held-out data before sizing
   anything on it.
 - **Skill is concentrated at short horizons, and it is a CRPS skill, not a

@@ -1264,7 +1264,17 @@ a metric that isn't there was simply forgotten.
      `$BRAIN_TESTDATA` (default `<repo>/testdata`) via **`brain_testutil::testdata`**
      (`crates/testutil`, a dev-dependency - the one implementation; it used to be
      36 byte-identical copy-pasted helpers, one per crate). A test **skips
-     itself** when its fixture is absent. Populate the tree with
+     itself** when its fixture is absent - through **`brain_testutil::skip`**
+     (absent FIXTURE: a hard failure under `BRAIN_REQUIRE_FIXTURES=1`, which is
+     what `make parity/strict` sets) or **`brain_testutil::skip_unavailable`**
+     (absent HARDWARE - no discrete GPU, no NPU, no OpenVINO, no ffmpeg - which
+     no flag may turn fatal, or the gate becomes one nobody can run). Never a
+     bare `eprintln!` + `return`: cargo reports a skipped test as a PASS, so an
+     unnamed skip is indistinguishable from a comparison that ran. A golden also
+     records WHICH checkpoint produced it (`tools/goldens/golden_source.py`,
+     enforced by `brain_testutil::golden::Source`), so a golden paired with the
+     wrong tier is a named skip rather than a shape error deep in the importer.
+     Populate the tree with
      **`make fetch/testdata`** (`scripts/data/fetch-testdata.sh`) - it hard-links from
      a local mirror, fetching only files not already present, organised as a tree
      (`testdata/<domain>/<model>/…`); there is currently no URL-download fallback
@@ -1276,7 +1286,12 @@ a metric that isn't there was simply forgotten.
      as an absolute literal.
   Runtime weight locations come from an **env var or CLI flag**, never a baked-in
   path. Grep gate (a string literal that *starts* an absolute machine path):
-  `grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates` must stay empty. (A `/data/`
+  `grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates --include='*.rs'` must stay
+  empty. **`*.rs` only**, and `scripts/gates/check-no-machine-paths.sh` scopes
+  itself the same way in both of its modes: the rule is about how brain's own
+  source resolves a path, and `crates/**` also holds vendored third-party
+  fixtures (`crates/apiserve/tests/specs/*.json` are upstream OpenAPI documents)
+  whose example values are not ours to edit. (A `/data/`
   substring mid-string - a URL, or a torch-archive-internal `…/data/<key>` - is
   not a filesystem path and is fine.) `scripts/` and `tools/` get the equivalent
   check via `make check/scripts` (below) - they are not `crates/**`, but they are
