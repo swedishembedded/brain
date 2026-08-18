@@ -60,7 +60,8 @@ const GRAD_SCALE_BUF: usize = 28;
 const EMBED: usize = 29;
 const EMB_BWD: usize = 30;
 const SC_BIDIR: usize = 31;
-const SM_BIDIR: usize = 32;
+// 32 is `attn_softmax_bidir`: registered (the indices below are positional) but
+// not used - the dependency layer's softmax is the CAUSAL `ATTN_SOFTMAX`.
 const AP_BIDIR: usize = 33;
 const DSC_BIDIR: usize = 34;
 const DQ_BIDIR: usize = 35;
@@ -655,7 +656,7 @@ impl KronosTrain {
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, s1v, IGNORE], n));
 
         // ---- dependency cross-attention (q from sampled-s1 sibling, k/v from
-        // ctx=xn_final; non-causal) + s2 head ----
+        // ctx=xn_final; CAUSAL - see below) + s2 head ----
         let s2v = c.s2_vocab() as u32;
         let dep_h = c.dep_n_heads as u32;
         let dep_hd = d / dep_h;
@@ -674,9 +675,19 @@ impl KronosTrain {
         // pack q,k,v → fused qkv[n,3d]
         s.push(self.gpu.step(CONCAT2, &[&self.dep_q, &self.dep_k, &self.qk], &[n, d, d, 1, 1], n * 2 * d));
         s.push(self.gpu.step(CONCAT2, &[&self.qk, &self.dep_v, &self.qkv], &[n, 2 * d, d, 1, 1], n * 3 * d));
-        // non-causal attention — per-batch-element t×t (leading dim = b)
+        // Causal attention, per-batch-element t×t (leading dim = b). The reference
+        // dependency layer attends with `is_causal=self.training`: with `q_len == 1`
+        // (its whole inference path) causality is vacuous, but in TRAINING it runs
+        // `q_len == t` and each position may only condition on context up to and
+        // including itself. Attending forward here would train the model on
+        // information it never has at inference - a leak no self-consistency check
+        // can see, because forward and backward would agree on the wrong function.
+        // The scores kernel stays bidirectional (it computes every j); the CAUSAL
+        // softmax is what applies the mask, zeroing probs at j>i. That is also what
+        // makes the bidir backward below exactly right: d_scores = probs·(...) is 0
+        // wherever probs is, so the masked entries contribute to no gradient.
         s.push(self.gpu.step(SC_BIDIR, &[&self.qkv, &self.dep_scores], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * t));
-        s.push(self.gpu.step(SM_BIDIR, &[&self.dep_scores, &self.dep_probs], &[b, dep_h, t], b * dep_h * t));
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.dep_scores, &self.dep_probs], &[b, dep_h, t], b * dep_h * t));
         s.push(self.gpu.step(AP_BIDIR, &[&self.dep_probs, &self.qkv, &self.dep_ctxo], &[b, dep_h, t, dep_hd, s3, 2 * d, d], b * dep_h * t * dep_hd));
         // out proj (reuse mlp_out scratch as dep_o), residual with ctx, norm, s2 head
         self.matmul(&mut s, &self.dep_ctxo, &dp("out_proj.weight"), &self.mlp_out, n, d, d);
@@ -718,7 +729,9 @@ impl KronosTrain {
         self.rms_bwd(&mut s, &self.dep_sum, "dep_layer.norm.weight", &self.d_normed, &self.d_sum, d, n);
         // dep out_proj bwd (d_o = d_sum) → d_ctxo
         self.proj_bwd(&mut s, &self.d_sum, &self.dep_ctxo, &dp("out_proj.weight"), &dp("out_proj.bias"), &self.d_ctxo, n, d, d, 0);
-        // non-causal attention backward → d_qkv (fused; disjoint q/k/v slices)
+        // attention backward → d_qkv (fused; disjoint q/k/v slices). The bidir
+        // kernels sum over every j, which is exactly the causal backward because the
+        // causal softmax left probs[j>i] = 0 (so d_scores[j>i] = 0 too).
         s.push(self.gpu.step(DSC_BIDIR, &[&self.d_ctxo, &self.qkv, &self.dep_probs, &self.d_dscores], &[b, dep_h, t, dep_hd, s3, 2 * d, d], b * dep_h * t * t));
         s.push(self.gpu.step(DQ_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * dep_hd));
         s.push(self.gpu.step(DK_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * dep_hd));
@@ -826,6 +839,26 @@ impl KronosTrain {
         let l1: f32 = self.gpu.read(&self.ce_buf, t).iter().sum();
         let l2: f32 = self.gpu.read(&self.ce_buf2, t).iter().sum();
         (l1 + l2) / (2.0 * self.count.get())
+    }
+    /// The s1 logits of the last [`Self::forward`], `[b*t, s1_vocab]` row-major.
+    /// The training forward's own output field: what the reference's training-mode
+    /// `Kronos.forward` returns as `s1_logits`, and therefore comparable to it.
+    pub fn s1_logits(&self) -> Vec<f32> {
+        self.gpu.read(&self.logits, (self.b * self.t) as usize * self.cfg.s1_vocab())
+    }
+    /// The s2 logits of the last [`Self::forward`], `[b*t, s2_vocab]` row-major -
+    /// the dependency layer's output, i.e. the half of the objective that the
+    /// training-time causal mask acts on.
+    pub fn s2_logits(&self) -> Vec<f32> {
+        self.gpu.read(&self.s2_logits, (self.b * self.t) as usize * self.cfg.s2_vocab())
+    }
+    /// The dependency layer's attention probabilities of the last
+    /// [`Self::forward`], `[b, dep_heads, t, t]` with row `(b,h,i)` over keys `j`.
+    /// Exposed so a gate can assert the training mask STRUCTURALLY - that no
+    /// position attends beyond itself - without a reference dump.
+    pub fn dep_probs(&self) -> Vec<f32> {
+        let n = (self.b * self.cfg.dep_n_heads as u32 * self.t * self.t) as usize;
+        self.gpu.read(&self.dep_probs, n)
     }
     pub fn backward(&self) {
         // 2·count folds the /2 of (CE_s1+CE_s2)/2 into both grad scalings.
