@@ -647,6 +647,18 @@ impl LtxVaeDecoder {
     pub fn frames(&self) -> u32 {
         self.frames
     }
+
+    /// The recorded decode graph, e.g. for `ltxv_bench`'s per-kernel-kind
+    /// profile (the `wan::WanVaeDecoder::steps` precedent) - not used by
+    /// [`LtxVaeDecoder::decode`] itself, which submits `self.steps` directly.
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// The device this graph was built on.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
 }
 
 #[cfg(test)]

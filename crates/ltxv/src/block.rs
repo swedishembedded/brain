@@ -628,6 +628,39 @@ impl LtxBlock {
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
     }
+
+    /// Build (but do not submit or read back) one block's step sequence over
+    /// an already device-resident `x_buf`/`ctx_buf`, returning `(steps,
+    /// output_buffer)` - the same op sequence [`LtxBlock::forward`] submits
+    /// and reads back on its own, minus the host round trip.
+    ///
+    /// Exists for `crates/ltxv/src/bin/ltxv_bench.rs`'s per-kernel-kind
+    /// profile: `forward` pays a host readback every block, which is this
+    /// DiT's real op sequence at the tiny-config token counts this crate has
+    /// parity-gated so far, but chaining that same round trip 48 times at
+    /// REAL widths would report upload/readback cost, not kernel cost - the
+    /// bench instead threads a device-resident buffer through N calls of
+    /// this method and profiles the combined graph in ONE submit, the same
+    /// "whole graph" shape `wan::WanDitDev` records directly. Does not
+    /// change what [`LtxBlock::forward`] does or how it is dispatched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_steps(&self, x_buf: &DeviceBuffer, adaln_table: &[f32], ctx_buf: &DeviceBuffer, cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<Step>, DeviceBuffer) {
+        let gpu = &self.gpu;
+        let cfg = &self.cfg;
+        let dim = cfg.inner_dim;
+        let heads = cfg.num_heads;
+        let head_dim = cfg.head_dim();
+        let eps = cfg.norm_eps;
+        let ctx_len = self.context_len;
+
+        let combined = dit::adaln::add_table(adaln_table, &self.w.scale_shift_table, t as usize, 9 * dim as usize);
+        let m = slice_mod(&combined, t as usize, dim as usize);
+
+        let mut s: Vec<Step> = Vec::new();
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca(gpu, &mut s, &self.w, &self.ones_t, x_buf, &m, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x3, _ff_out) = mlp_sublayer(gpu, &mut s, &self.w.ff, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
+        (s, x3)
+    }
 }
 
 /// One block's audio<->video cross-attention state: the two Attention

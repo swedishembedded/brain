@@ -458,8 +458,80 @@ this port:
       `s3dit::train::ZTrainModel` already documents for itself);
       `residency::multi::MultiDeviceResidentModel` (inference-time placement)
       is untouched, a separate later lift.
-- [ ] **Performance profiling, NPU export scope decision** - only after
-      parity is frozen, per porting.md sec10.
+- [x] **Performance profiling pass** (`crates/ltxv/src/bin/ltxv_bench.rs`,
+      new) - per porting.md sec10's mandatory profile-before-touching-code
+      discipline, on the shared `gpu_core::profile`/`gpu_core::roof` facility
+      (`crates/vqgan/src/bin/vqgan_bench.rs`'s precedent, graded against this
+      DEVICE's own measured roofline - an Intel Arc integrated GPU, not a
+      hardcoded discrete-card peak). Two small additive enablers:
+      `LtxBlock::build_steps` (chains N blocks' already-recorded steps into
+      ONE combined submit over a device-resident buffer, without touching
+      `LtxBlock::forward`) and `LtxVaeDecoder::steps()`/`::gpu()` (read
+      accessors onto an already-built decode graph), plus a `gate_row` cost
+      formula in `crates/gpu-core/src/cost.rs` so the DiT pass's whole-pass
+      rate is computable. DiT table: real width (`inner_dim=4096`, 32 heads),
+      1 of 48 real layers at 64 tokens/32 context (108 dispatches) - forced
+      down from the planned 8-layer/512-token shape by genuine host GPU
+      contention (three parallel agents plus a coordinator all profiling/
+      testing on this box's one GPU at once; confirmed via `/proc/<pid>/wchan
+      == drm_syncobj_array_wait_timeout`, a real fence wait, not a bug) that
+      also made absolute timings untrustworthy this pass (the identical
+      108-dispatch graph measured 5.01 s vs 14.02 s back to back) and revealed
+      this host's device-timestamp-query kernel attribution is unreliable
+      (one run attributed 1.17M ms to a 2-call kernel against a 14 s whole-
+      pass total) - both recorded as killed hypotheses, not findings about the
+      kernels. `matmul` (the 8 attention projections + 2 FFN matmuls per
+      block) is essentially the whole pass by dispatch-count share at this
+      token count, the expected shape when `O(tokens x dim^2)` GEMMs dwarf
+      `O(tokens^2)` self-attention at small token counts - no kernel-kind
+      stood out as a share-based target given the contention caveat, so
+      nothing was changed in the DiT path. VAE table: real weights
+      (`ltx-2.5-video-vae-conv-bf16.safetensors`), 9 frames at 128x128 (457
+      dispatches, this table trustworthy in absolute terms too - it ran
+      isolated after the contended DiT attempts were killed) - a "nothing to
+      fix, already fixed upstream" finding: `wan.md`'s own Perf section
+      documents fixing exactly this shape of defect for Wan's VAE (`conv3d`
+      dominating at ~96-98%, far under roofline) via an `im2col3d_at`+
+      `matmul_reg3`+`nlc_bias_nchw` GEMM lowering in the SHARED `vae::
+      blocks3d` crate; `ltxv`'s video VAE decoder is built on that same
+      shared crate and inherited the fix for free (the lowered path is 66.7%
+      of this pass combined, direct `conv3d` only 10.4% - the 6 surviving
+      direct-conv dispatches are the low-`Cout` convs the `GEMM_CONV3D_MIN_
+      COUT` guard correctly keeps direct, same pattern `wan.md` records
+      post-fix). Recorded follow-ups, not attempted this pass (out of a
+      "profiling infrastructure only" scope): six kernel kinds in the VAE
+      table (`im2col3d_at`, `conv3d`, `l2norm_scale`, `nlc_bias_nchw`,
+      `depth_to_space3d`, `add_chan_bcast`) have no `gpu_core::cost` formula
+      yet, so the VAE pass's whole-pass GFLOP/s rate reads unavailable; a
+      re-run of the DiT bench at the originally planned 8-layer/512-token
+      shape on a quiet host; investigating the device-timestamp-query path
+      before trusting DEVICE-timed (not HOST-bracketed) per-kernel numbers on
+      this host/backend.
+- [x] **NPU export - deliberate scope exclusion, not a silent omission.**
+      `crates/npu/src/lib.rs`'s `NpuModel` trait has exactly three real
+      implementors (`DepthNpuModel`, `Chronos2NpuModel`, `FincastNpuModel`),
+      all sharing one shape: the host does patching/tokenizing/embedding in
+      plain Rust, and only a SMALL, FIXED-SHAPE core is exported/compiled onto
+      the NPU. A 48-layer/4096-dim video DiT (coupled every block to a second
+      2048-dim audio stream in the full `LtxAvDit`) has no equivalent small
+      fixed core to peel off - the block stack IS the model, at a width/depth
+      that dwarfs every existing NPU target in this repo by two-plus orders of
+      magnitude (the forecast/depth cores are single-digit-to-low-double-digit
+      MB graphs; this DiT's real checkpoint is 42 GB bf16). NPUs are
+      structurally an edge-inference target for models far smaller than a 22B
+      video DiT in this repo's own portfolio; this model's real deployment
+      targets are GPU/CPU. NPU firmware is also already a recorded, diagnosed-
+      elsewhere blocker on this exact host (`.agents/roadmap/dtype.md`:
+      `/dev/accel/accel0` is present and `Inventory::probe().npus == 1`, but
+      the firmware is not functional, so `NpuConfig{allow_fallback:true}`
+      silently retargets OpenVINO's GPU plugin instead of erroring) - not
+      re-diagnosed here, cited as the already-settled reason a working NPU
+      path could not even be smoke-tested on this hardware regardless of the
+      scale question. If NPU export is ever revisited for `ltxv`, the open
+      question is architectural first: is there ANY small fixed-shape core
+      worth exporting (the embeddings connector, or the duration head - both
+      already small, real-weight components) versus the 22B block stack,
+      which is not a candidate under this trait's existing pattern at all.
 
 ## Convention questions settled from source, not experiment
 
@@ -523,8 +595,10 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 - Full 22B DiT and 12B Gemma-4 real-weight parity: not run, needs hardware that
   can hold the full checkpoints.
-- NPU device execution: not yet diagnosed for this port; treat as unproven
-  until a specific host and blocker (or lack of one) are recorded.
+- NPU device execution: `ltxv` gets no `NpuModel` implementation at all this
+  port (see the M9 perf entry's NPU write-up above for the full reasoning) -
+  the firmware-not-functional blocker on this exact host is separately
+  diagnosed in `.agents/roadmap/dtype.md`, not re-run here.
 - `vae::blocks3d` has no backward (`blocks/grad.rs` only covers the 2D builder),
   so video-VAE fine-tuning is out of scope until that lands separately.
 - Multi-device residents (needed for a sharded 22B DiT across multiple cards)

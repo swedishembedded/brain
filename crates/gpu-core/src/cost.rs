@@ -647,6 +647,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, n) = (p(0)?, p(1)?);
             f(m * n, 4 * (m * n + 2 * n))
         }
+        // params [rows, dim, rows_per_cond]: y[r,d] = x[r,d] + g[k,d]*h[r,d],
+        // k = r/rows_per_cond - the per-token/per-forward gated residual add
+        // `ltxv::block::gate_row` dispatches (one gate row per token at
+        // rows_per_cond=1, one shared row at rows_per_cond=rows).
+        "gate_row" => {
+            let (rows, dim, rpc) = (p(0)?, p(1)?, p(2)?.max(1));
+            let g_rows = rows.div_ceil(rpc);
+            f(2 * rows * dim, 4 * (3 * rows * dim + g_rows * dim))
+        }
         // params [b, t, d_model]: dpos[i,c] += Σ_b dx.
         "pos_bwd" => {
             let (b, t, d) = (p(0)?, p(1)?, p(2)?);
