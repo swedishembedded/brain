@@ -203,9 +203,41 @@ this port:
       `snake_beta`/`axpy` (vocoder, reusing `crates/mimi`'s established
       pattern) cover everything. Bandwidth-extension (48kHz upsampling,
       needs the checkpoint-basis STFT) is explicitly out of scope, same as
-      the goldens that back this. **Not yet done**: the audio DiT stream and
-      bidirectional A<->V cross-attention (reversed table order, cross-
-      modality-sigma gate) - a separate, later task.
+      the goldens that back this.
+- [x] **Audio DiT stream + bidirectional A<->V cross-attention**
+      (`LtxAudioDitConfig`/`LtxAvDitConfig` in `config.rs`, `LtxAvBlock` in
+      `block.rs`, `LtxAvDit` in `dit.rs`) - extends the video-only DiT (M3)
+      rather than duplicating it; the video-only path and its existing test
+      are untouched (confirmed byte-for-byte via `git diff` on that test
+      file). Exact op order pinned against `transformer.py`'s
+      `BasicAVTransformerBlock.forward` directly: video self-attn+text-CA
+      runs fully, then audio self-attn+text-CA runs fully, THEN A2V/V2A off
+      a shared pre-AV snapshot of both (so direction order does not bias the
+      result), THEN both MLPs. A2V/V2A both run at the AUDIO stream's head
+      geometry (asymmetric Q/O projections on the video side); the two
+      per-block `[5,dim]` AV tables (video-side, audio-side) use a REVERSED
+      row order vs the main 9-row table (`scale,shift` not `shift,scale`,
+      rows 0-1 for the A2V direction, rows 2-3 for V2A, row 4 the gate) -
+      traced call-by-call against `get_av_ca_ada_values`'s two call sites,
+      not assumed from the roadmap's own earlier prose summary. The A2V
+      gate is driven by the VIDEO table's row 4 at the CROSS (audio)
+      modality's scalar sigma; V2A's gate is the AUDIO table's row 4 at
+      video's sigma - the asymmetry already recorded above, now implemented.
+      `crate::rope::ltx_rope_tables` generalized from a hardcoded 3-axis
+      construction to axis-count-generic, since audio's 1-axis self RoPE
+      and the shared cross-modal time-only RoPE are both instances of the
+      same math, not a separate construction. Parity: every new tap >=
+      0.999999951 cosine (`crates/ltxv/tests/av_dit_parity.rs`) against a
+      new golden (`tools/goldens/ltxv_av_dit_dump_reference.py`, a sibling
+      of the video-only dumper, not a modification of it). One open
+      judgment call, flagged inline rather than silently assumed:
+      `audio_ff_bias` has no independently-verified real-checkpoint value
+      on this ledger (only video's `ff_bias=false` is confirmed) and is set
+      to `false` as the consistent assumption pending verification.
+      `av_ca_timestep_scale_multiplier` is a plain config field, not
+      hardcoded, for the same reason (metadata reportedly `1000.0` vs. the
+      class default `1`, not confirmed empirically - see the "Convention
+      questions" section above).
 - [ ] **Training** - `grad.rs`/`modelgrad.rs` generic over `trait Fp`,
       `gradcheck::check_ltxv{,_lora}`, LoRA in the ComfyUI key layout, finetune,
       single- and batch-overfit-to-zero gates.

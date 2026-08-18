@@ -49,6 +49,13 @@
 //! `positions` is read as `[n_pos_dims, T, 2]` row-major (axis outermost,
 //! then token, then `[start,end)`) - exactly the shape the golden's
 //! `positions` tensor and `Modality.positions[0]` (`B` sliced) carry.
+//! `n_pos_dims` is 3 for video's own self-attention RoPE, but this
+//! construction is genuinely axis-count-generic: audio's own self-attention
+//! RoPE (1 axis, time only) and the SHARED cross-modal (A2V/V2A) RoPE space
+//! (also 1 axis, each stream's own time axis - `axis 0` of video's 3-axis
+//! grid, audio's own single axis - built at `audio_cross_attention_dim`, see
+//! `crate::block`'s doc) reuse this exact same function at `n_pos_dims=1`,
+//! inferred from `max_pos.len()` rather than hardcoded.
 //!
 //! Computed in `f64` throughout (angle accumulation, `cos`/`sin`), cast to
 //! `f32` only at the end - the reference's own `double_precision_rope=False`
@@ -86,18 +93,22 @@ impl LtxRopeTables {
     }
 }
 
-/// Build [`LtxRopeTables`] for a `(frame, height, width)` video grid.
+/// Build [`LtxRopeTables`] for an `n_pos_dims`-axis position grid -
+/// `n_pos_dims=3` for video's `(frame, height, width)` self-attention RoPE,
+/// `n_pos_dims=1` for audio's own (time-only) self-attention RoPE AND for
+/// either stream's cross-modal RoPE table (see this module's doc).
 ///
-/// `positions`: `[3, t, 2]` row-major `[start, end)` patch bounds per axis
-/// per token (see this module's doc, step 3). `max_pos`: the three
-/// `positional_embedding_max_pos` normalizers.
-pub fn ltx_rope_tables(inner_dim: u32, num_heads: u32, theta: f64, max_pos: [u32; 3], positions: &[f32], t: usize) -> LtxRopeTables {
-    const N_POS: usize = 3;
-    assert_eq!(positions.len(), N_POS * t * 2, "positions must be [3, t, 2] = {} values, got {}", N_POS * t * 2, positions.len());
+/// `positions`: `[n_pos_dims, t, 2]` row-major `[start, end)` patch bounds
+/// per axis per token (see this module's doc, step 3). `max_pos`: one
+/// `positional_embedding_max_pos` normalizer per axis, `n_pos_dims = max_pos.len()`.
+pub fn ltx_rope_tables(inner_dim: u32, num_heads: u32, theta: f64, max_pos: &[u32], positions: &[f32], t: usize) -> LtxRopeTables {
+    let n_pos = max_pos.len();
+    assert!(n_pos >= 1, "ltx_rope_tables: max_pos must have at least one axis");
+    assert_eq!(positions.len(), n_pos * t * 2, "positions must be [{n_pos}, t, 2] = {} values, got {}", n_pos * t * 2, positions.len());
     let total_half = (inner_dim / 2) as usize; // inner_dim/2, the full per-token table width
-    let l = (inner_dim as usize) / (2 * N_POS); // band count
-    assert!(l >= 1, "inner_dim {inner_dim} too small for {N_POS}-axis RoPE");
-    let current_freqs = l * N_POS;
+    let l = (inner_dim as usize) / (2 * n_pos); // band count
+    assert!(l >= 1, "inner_dim {inner_dim} too small for {n_pos}-axis RoPE");
+    let current_freqs = l * n_pos;
     assert!(current_freqs <= total_half, "band width {current_freqs} exceeds inner_dim/2 {total_half}");
     let pad = total_half - current_freqs;
 
@@ -128,7 +139,7 @@ pub fn ltx_rope_tables(inner_dim: u32, num_heads: u32, theta: f64, max_pos: [u32
                 let mid = (start + end) / 2.0;
                 let frac_pos = mid / mp as f64;
                 let angle = indices[k] * (2.0 * frac_pos - 1.0);
-                let idx = pad + k * N_POS + a;
+                let idx = pad + k * n_pos + a;
                 cos_full[ti * total_half + idx] = angle.cos() as f32;
                 sin_full[ti * total_half + idx] = angle.sin() as f32;
             }
@@ -188,7 +199,7 @@ mod tests {
     /// golden dumper self-validates with (a genuine `(cos(theta),
     /// sin(theta))` table, not corrupted data).
     #[test]
-    fn tables_are_unit_rotations() {
+    fn tables_are_unit_rotations_3axis() {
         let positions: Vec<f32> = {
             // A tiny 2x2x2 grid's [start,end) bounds, matching the golden's
             // own construction (integer grid coords, end = start+1).
@@ -217,8 +228,27 @@ mod tests {
             }
             v
         };
-        let r = ltx_rope_tables(64, 4, 10000.0, [20, 2048, 2048], &positions, 8);
+        let r = ltx_rope_tables(64, 4, 10000.0, &[20, 2048, 2048], &positions, 8);
         assert_eq!(r.cos.len(), 4 * 8 * 8);
+        for (c, s) in r.cos.iter().zip(&r.sin) {
+            let dev = (*c as f64 * *c as f64 + *s as f64 * *s as f64 - 1.0).abs();
+            assert!(dev < 1e-5, "cos^2+sin^2 deviates by {dev}");
+        }
+    }
+
+    /// The `n_pos_dims=1` path (audio's own self-attention RoPE, and both
+    /// streams' shared cross-modal RoPE table) - same unit-rotation
+    /// invariant, at the axis count this milestone's generalization adds.
+    #[test]
+    fn tables_are_unit_rotations_1axis() {
+        let t = 5;
+        let mut positions = vec![0f32; t * 2];
+        for ti in 0..t {
+            positions[ti * 2] = ti as f32;
+            positions[ti * 2 + 1] = ti as f32 + 1.0;
+        }
+        let r = ltx_rope_tables(32, 4, 10000.0, &[20], &positions, t);
+        assert_eq!(r.cos.len(), 4 * t * 4);
         for (c, s) in r.cos.iter().zip(&r.sin) {
             let dev = (*c as f64 * *c as f64 + *s as f64 * *s as f64 - 1.0).abs();
             assert!(dev < 1e-5, "cos^2+sin^2 deviates by {dev}");

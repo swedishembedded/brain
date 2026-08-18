@@ -29,8 +29,18 @@
 //!
 //! Also (M6, first half): the 2D causal-conv **audio VAE** ([`audio_vae`])
 //! and the BigVGAN/snakebeta **base vocoder** ([`vocoder`], no bandwidth
-//! extension), both real weights, real parity - the audio DiT stream and the
-//! audio<->video cross-attention are a separate, later task.
+//! extension), both real weights, real parity.
+//!
+//! (M6, second half): the **audio DiT stream + bidirectional audio<->video
+//! cross-attention** (`config::LtxAvDitConfig`/`block::LtxAvBlock`/
+//! `dit::LtxAvDit`, `LTXModelType::AudioVideo`) - own self-/text-cross-
+//! attention/FFN/adaLN conditioning for the audio stream (structurally
+//! identical to the video-only path, narrower dims), coupled every block by
+//! the A2V/V2A cross-attention (own per-block `[5,dim]` adaLN tables, a
+//! cross-modality-sigma-driven gate, a shared time-only cross-modal RoPE
+//! space - see `block`'s and `rope`'s module docs). Tiny-config op-sequence
+//! parity only, same bar and same real-checkpoint-import gap as the
+//! video-only stream (`crates/ltxv/tests/dit_parity.rs`).
 
 pub mod audio_vae;
 pub mod block;
@@ -44,7 +54,7 @@ pub mod rope;
 pub mod vae3d;
 pub mod vocoder;
 
-pub use config::LtxDitConfig;
-pub use dit::{load_tiny_weights, DitTaps, LtxDit};
+pub use config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
+pub use dit::{load_tiny_weights, AvDitTaps, DitTaps, LtxAvDit, LtxDit};
 pub use pipeline::{GenOpts, Paths};
 pub use vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};

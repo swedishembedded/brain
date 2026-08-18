@@ -110,6 +110,114 @@ impl LtxDitConfig {
     }
 }
 
+/// The audio stream's shape configuration - the audio-side counterpart of
+/// [`LtxDitConfig`], narrower per-head-dim than video (real LTX-2.5: 64 vs
+/// video's 128) but the SAME head COUNT (real config: 32 both streams) -
+/// that equality is what keeps the shared cross-modal RoPE table's per-head
+/// split consistent regardless of which stream's preprocessor built it, see
+/// [`LtxAvDitConfig::assert_supported`] and `crate::rope`'s doc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LtxAudioDitConfig {
+    pub inner_dim: u32,
+    pub num_heads: u32,
+    pub in_channels: u32,
+    pub out_channels: u32,
+    /// Doubles as (a) audio's own text-cross-attention context width
+    /// (`audio_attn2.context_dim`) and (b) the shared cross-modal (A2V/V2A)
+    /// RoPE table + attention geometry width (`ltx_core...model.LTXModel`'s
+    /// single `audio_cross_attention_dim` field feeds both uses) - asserted
+    /// `== inner_dim` in [`LtxAvDitConfig::assert_supported`], the same
+    /// "caption already at inner_dim, no projection module" judgment call
+    /// `config.rs`'s module doc records for video's own `cross_attention_dim`
+    /// (true of the real LTX-2.5 checkpoint's 2048==2048, not a structural
+    /// requirement of the reference class).
+    pub cross_attention_dim: u32,
+    pub ff_bias: bool,
+    /// Single-axis (time only) RoPE max-pos normalizer - `[max_pos]`, class
+    /// default `[20]`.
+    pub positional_embedding_max_pos: [u32; 1],
+}
+
+impl LtxAudioDitConfig {
+    /// `inner_dim / num_heads`.
+    pub fn head_dim(&self) -> u32 {
+        assert_eq!(self.inner_dim % self.num_heads, 0, "audio inner_dim {} not a multiple of num_heads {}", self.inner_dim, self.num_heads);
+        self.inner_dim / self.num_heads
+    }
+
+    /// `tools/goldens/ltxv_av_dit_dump_reference.py`'s `TINY_CONFIG` audio
+    /// half - `inner_dim` 32 (4 heads x 8), proportionally narrower than the
+    /// video tiny config's 64 (half), same head COUNT (4) as video.
+    pub fn tiny() -> LtxAudioDitConfig {
+        LtxAudioDitConfig { inner_dim: 32, num_heads: 4, in_channels: 128, out_channels: 128, cross_attention_dim: 32, ff_bias: false, positional_embedding_max_pos: [20] }
+    }
+}
+
+/// The bundled audio<->video DiT configuration - `LTXModelType::AudioVideo`.
+/// Video and audio each keep their OWN adaLN-single conditioning (own
+/// `scale_shift_table`, own timestep MLP), own self-/text-cross-attention,
+/// coupled every block by bidirectional cross-attention (`crate::block`'s
+/// doc has the exact op order and adaLN table layout).
+///
+/// This milestone implements exactly the ONE real-config point the
+/// reference's own `LTXModelConfigurator` asserts every real checkpoint
+/// satisfies (`check_config_value(config, "use_audio_video_cross_attention",
+/// True)`, `check_config_value(config, "av_cross_ada_norm", True)`) - the
+/// reference `LTXModel` class does not even expose these as constructor
+/// knobs, only as configurator-side asserts, so unlike [`LtxDitConfig::
+/// assert_supported`]'s per-field panics there is no "off" path to reject
+/// here; [`LtxAvDitConfig::assert_supported`] instead pins the cross-stream
+/// geometry invariants this milestone's op sequence actually depends on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LtxAvDitConfig {
+    pub video: LtxDitConfig,
+    pub audio: LtxAudioDitConfig,
+    /// `ltx_core...model.LTXModel.av_ca_timestep_scale_multiplier` - scales
+    /// the CROSS modality's scalar sigma feeding the A2V/V2A gate MLP (see
+    /// `crate::block`'s doc). Real checkpoint value UNVERIFIED (this port's
+    /// roadmap ledger: metadata reportedly carries `1000.0` vs. the
+    /// reference class's own default `1` - not confirmed empirically), so
+    /// this crate takes it as a plain config field rather than hardcoding
+    /// either number.
+    pub av_ca_timestep_scale_multiplier: f32,
+}
+
+impl LtxAvDitConfig {
+    /// `max(video.positional_embedding_max_pos[0],
+    /// audio.positional_embedding_max_pos[0])` -
+    /// `ltx_core...model.LTXModel.__init__`'s `cross_pe_max_pos`, the
+    /// normalizer for the SHARED cross-modal (A2V/V2A) time-only RoPE table.
+    pub fn cross_pe_max_pos(&self) -> u32 {
+        self.video.positional_embedding_max_pos[0].max(self.audio.positional_embedding_max_pos[0])
+    }
+
+    /// Panics if this config is outside what this milestone's op sequence
+    /// implements: every [`LtxDitConfig::assert_supported`] video invariant,
+    /// plus the two AV-specific geometry invariants the block/RoPE forward
+    /// would otherwise silently compute the WRONG cross-modal shapes for -
+    /// see [`LtxAudioDitConfig::cross_attention_dim`]'s doc and this
+    /// struct's doc for why each one matters.
+    pub fn assert_supported(&self) {
+        self.video.assert_supported();
+        assert_eq!(self.audio.cross_attention_dim, self.audio.inner_dim, "ltxv AV milestone assumes audio.cross_attention_dim == audio.inner_dim (see LtxAudioDitConfig::cross_attention_dim's doc)");
+        assert_eq!(
+            self.audio.num_heads, self.video.num_heads,
+            "ltxv AV milestone requires equal head COUNT across streams (see LtxAudioDitConfig's doc) - only per-head dim differs, matching the real LTX-2.5 config's own 32/32 split"
+        );
+    }
+
+    /// `tools/goldens/ltxv_av_dit_dump_reference.py`'s `TINY_CONFIG` - video
+    /// half identical to [`LtxDitConfig::tiny`], audio half
+    /// [`LtxAudioDitConfig::tiny`], every AV flag at its real-LTX-2.5
+    /// structural value (see this struct's doc); `av_ca_timestep_scale_
+    /// multiplier` picked as a non-1 value (not the unverified real number,
+    /// see that field's doc) so a parity test that hardcodes the class
+    /// default `1` instead of reading the config would fail loudly.
+    pub fn tiny() -> LtxAvDitConfig {
+        LtxAvDitConfig { video: LtxDitConfig::tiny(), audio: LtxAudioDitConfig::tiny(), av_ca_timestep_scale_multiplier: 3.0 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +235,22 @@ mod tests {
     fn assert_supported_rejects_unimplemented_flags() {
         let mut c = LtxDitConfig::tiny();
         c.cross_attention_adaln = false;
+        c.assert_supported();
+    }
+
+    #[test]
+    fn av_tiny_config_matches_the_golden_manifest() {
+        let c = LtxAvDitConfig::tiny();
+        c.assert_supported();
+        assert_eq!(c.audio.head_dim(), 8);
+        assert_eq!(c.cross_pe_max_pos(), 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "equal head COUNT")]
+    fn av_assert_supported_rejects_mismatched_head_counts() {
+        let mut c = LtxAvDitConfig::tiny();
+        c.audio.num_heads = 2;
         c.assert_supported();
     }
 }
