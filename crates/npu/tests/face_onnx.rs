@@ -48,10 +48,15 @@ const NPU_SAFE: &[&str] = &[
 /// a style complaint: the NPU plugin needs static shapes.
 const DYNAMIC_SHAPE_OPS: &[&str] = &["Shape", "Slice", "Gather", "Unsqueeze", "NonMaxSuppression"];
 
-/// The antelopev2 ONNX pair, from `var` or from the model store
-/// `BRAIN_MODELS_DIR` names. Neither is a literal: a baked-in path resolves on
-/// one machine and skips silently everywhere else, which is indistinguishable
-/// from the fixture simply being absent.
+/// The antelopev2 ONNX pair, from `var`, else from the model store under the
+/// fully-qualified reference it is published as. Neither is a literal: a
+/// baked-in path resolves on one machine and skips silently everywhere else,
+/// which is indistinguishable from the fixture simply being absent.
+///
+/// The store lookup goes through `brain_testutil::model_dir`, so it honours the
+/// same resolution order as every other checkpoint (`$BRAIN_MODELS_DIR`, else
+/// `$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models`) rather
+/// than reading `BRAIN_MODELS_DIR` alone.
 fn weights_dir(var: &str) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(var) {
         let p = PathBuf::from(p);
@@ -59,7 +64,7 @@ fn weights_dir(var: &str) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let p = PathBuf::from(std::env::var("BRAIN_MODELS_DIR").ok()?).join("identity/weights/antelopev2");
+    let p = PathBuf::from(brain_testutil::model_dir("DIAMONIK7777/antelopev2")?);
     p.is_dir().then_some(p)
 }
 
