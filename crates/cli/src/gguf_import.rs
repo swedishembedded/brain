@@ -100,6 +100,11 @@ impl GgufArchitectureImporter for Qwen35MoeImporter {
 /// and checks for a Z-Image-only tensor before converting anything, since
 /// this registry has no per-architecture discriminator the way
 /// `crates/gguf::registry`'s `clip.projector_type` case does).
+///
+/// The dequantize -> remap -> safetensors path behind it is exercised against a
+/// real `unsloth/Z-Image-Turbo-GGUF` file by `crates/s3dit`'s
+/// `gguf_import_real` suite (`BRAIN_S3DIT_GGUF`), the same arrangement
+/// [`WanImporter`] has: only the dispatch is covered here.
 struct S3ditImporter;
 
 impl GgufArchitectureImporter for S3ditImporter {

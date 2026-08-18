@@ -29,6 +29,21 @@ The slower, non-distilled `Tongyi-MAI/Z-Image` base model auto-fetches the
 same way when requested by name (use it with a higher `guidance` and more
 `steps`).
 
+### From a GGUF
+
+`brain import-gguf` also accepts a quantized Z-Image DiT (unsloth publishes
+`Z-Image-GGUF` and `Z-Image-Turbo-GGUF`), converting it to a brain-native
+safetensors checkpoint that `BRAIN_S3DIT_DIT` can point at. These files declare
+`general.architecture = "lumina2"`, which real Lumina2 releases also use, so the
+importer refuses anything without Z-Image's own `cap_embedder.0.weight` rather
+than guessing, and reads the variant off the tensor shapes.
+
+DiT only: the VAE and the Qwen3-4B text encoder are not in the GGUF and still
+come from the repository above. The conversion is fp32, so plan for disk, not
+RAM: the 6.15 G-parameter DiT (3.4 GB at Q2_K) becomes a ~24 GB safetensors
+checkpoint. Host memory stays bounded at a few hundred MB regardless, because
+the importer streams tensor by tensor rather than materialising the whole model.
+
 ## Running it
 
 Over HTTP:

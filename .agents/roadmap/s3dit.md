@@ -104,19 +104,29 @@ cleanly end to end (real image, `docs/quickstart/img/seed.png`). Worth a
 default review for this card generation - 30s as the FIRST-submit bound (as
 opposed to steady-state) is tight for a decade-old GPU with a large model.
 
-## Q8_0 GGUF import - implemented (DiT only), not yet wired into auto-fetch
+## GGUF import - implemented (DiT only), not yet wired into auto-fetch
 
 `s3dit::import::import_gguf` (called from `brain import <gguf-file>`, registered
-alongside `Qwen35MoeImporter` in `crates/cli/src/gguf_import.rs`) converts
-`unsloth/Z-Image-Turbo-GGUF`'s `z-image-turbo-Q8_0.gguf` into a brain-native
-single-file safetensors checkpoint `BRAIN_S3DIT_DIT` can point at directly -
-eager dequant of every tensor (no streaming; the whole DiT fits comfortably in
-host RAM), through the exact same `import_comfy` remap the safetensors path
-already uses, since the GGUF's tensor names are unchanged from the original/
-Comfy layout. Guarded against `general.architecture = "lumina2"` being shared
-with real Lumina2 releases (see [below](#the-lumina2-discriminator)) by
-requiring a Z-Image-only tensor (`cap_embedder.0.weight`) before converting
-anything.
+alongside `Qwen35MoeImporter` in `crates/cli/src/gguf_import.rs`) converts any
+`unsloth/Z-Image-{Turbo-,}GGUF` quantization into a brain-native single-file
+safetensors checkpoint `BRAIN_S3DIT_DIT` can point at directly, through the same
+rename rules the safetensors path uses, since the GGUF's tensor names are
+unchanged from the original/Comfy layout. Guarded against
+`general.architecture = "lumina2"` being shared with real Lumina2 releases (see
+[below](#the-lumina2-discriminator)) by requiring a Z-Image-only tensor
+(`cap_embedder.0.weight`) before converting anything.
+
+It streams: header shapes give the config and the two-way manifest check, then
+each source tensor is dequantized, written through `StWriter` and dropped, so
+peak host memory is one tensor (169 MiB, the fused `attention.qkv.weight`).
+It used to dequantize the whole DiT into a map and hand that to
+`save_safetensors`, which copies each tensor to bytes and concatenates those
+into one more blob - about 74 GB live at once for a 24.6 GB fp32 model, on an
+input that arrives as an `MmapGguf` precisely to avoid the first copy. Measured
+peak RSS for the full `z-image-turbo-Q2_K.gguf` -> 521-tensor / 24.6 GB
+conversion after the fix: **3.55 GiB in 175 s**, most of it the GGUF's own
+file-backed mapping. `crates/s3dit/tests/gguf_import_real.rs` runs that whole
+path against the released file (`#[ignore]`d, since it writes the 24.6 GB).
 
 **Not wired into `brain s3dit text2image`'s own auto-fetch.** The GGUF release
 is DiT-only (7.2 GB vs the safetensors checkpoint's ~25 GB for that one
