@@ -142,6 +142,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("ce_grad", kernels::CE_GRAD_MASKED), // 70
     ("scale_add", kernels::SCALE_ADD), // 71
     ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX), // 72
+    // -- LoRA tier (M8) -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
+    ("axpy", kernels::AXPY), // 73
 ];
 
 const RMSNORM: usize = 0;
@@ -217,6 +219,7 @@ const EMB_BWD: usize = 69;
 const CE_GRAD: usize = 70;
 const SCALE_ADD: usize = 71;
 const L2NORM_SCALE_DX: usize = 72;
+const AXPY: usize = 73;
 
 fn kernel_ids() -> KernelIds {
     KernelIds {
@@ -452,6 +455,20 @@ pub struct Qwen35 {
     /// "forward reallocates fresh, backward takes it" contract as
     /// `train_acts`.
     mtp_acts: RefCell<Option<MtpActs>>,
+
+    // ---- LoRA scratch (persistent, reused across every targeted linear) ----
+    // Sized once at construction for `cfg.lora`'s rank and the widest output
+    // dimension across the 12 targetable leaves (`crate::config::
+    // lora_targets`). See [`Self::lora_fwd`]/[`Self::proj_bwd`]'s LoRA
+    // branch. Size-1 dummies when `cfg.lora` is `None` (rank forced to 1 in
+    // `new_impl_on`, never read) - mirrors `qwen35moe::model::Qwen35`'s own
+    // `lora_a`/`lora_da`/`lora_out` fields exactly.
+    /// `[n*r]` : `a = x @ Aᵀ`.
+    lora_a: DeviceBuffer,
+    /// `[n*r]` : grad wrt `a`.
+    lora_da: DeviceBuffer,
+    /// `[n*max_out]` : `delta = a @ Bᵀ`.
+    lora_out: DeviceBuffer,
 }
 
 impl Qwen35 {
@@ -477,10 +494,52 @@ impl Qwen35 {
              this assert failing would mean a logic error in gdn_chunk_size itself"
         );
 
-        let role = if train { Role::Trainable } else { Role::Frozen };
-        let roles: Vec<(String, usize, Role)> = cfg.param_list().into_iter().map(|(n, c)| (n, c, role)).collect();
+        // Role assignment:
+        //  - inference (`!train`): every weight Role::Frozen (no grad/Adam
+        //    buffers allocated at all).
+        //  - LoRA training (`train && cfg.lora.is_some()`): only the
+        //    `.lora_a`/`.lora_b` adapter tensors `Qwen35Config::param_list`
+        //    added for each targeted leaf are Trainable; every other weight
+        //    (including a LoRA-targeted leaf's own frozen base) is Frozen -
+        //    mirrors `qwen35moe::model::Qwen35::new_impl_on`'s own role
+        //    filter exactly.
+        //  - full training (`train && cfg.lora.is_none()`): every weight
+        //    Role::Trainable (full-parameter backward).
+        let roles: Vec<(String, usize, Role)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, c)| {
+                let role = if !train {
+                    Role::Frozen
+                } else if cfg.lora.is_some() {
+                    if n.ends_with(".lora_a") || n.ends_with(".lora_b") { Role::Trainable } else { Role::Frozen }
+                } else {
+                    Role::Trainable
+                };
+                (n, c, role)
+            })
+            .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
+
+        // LoRA scratch (rank `r`; max projection output across all 12
+        // targetable leaves - `crate::config::lora_targets` - mirrors
+        // `qwen35moe::model::Qwen35::new_impl_on`'s own sizing, plus
+        // `intermediate_size` for this model's dense-MLP `gate`/`up` leaves,
+        // which qwen35moe never targets). `.max(1)` so a `cfg.lora: None`
+        // build still gets a valid (unused) 1-element rank.
+        let lora_r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
+        let lora_max_out = cfg
+            .linear_conv_dim()
+            .max(cfg.linear_value_dim())
+            .max(cfg.linear_num_value_heads)
+            .max(cfg.d_model)
+            .max(cfg.q_proj_dim())
+            .max(cfg.kv_dim())
+            .max(cfg.intermediate_size) as u64;
+        let lora_a = gpu.storage((b * t) as u64 * lora_r);
+        let lora_da = gpu.storage((b * t) as u64 * lora_r);
+        let lora_out = gpu.storage((b * t) as u64 * lora_max_out);
 
         let ones_khd = gpu.storage_init("qwen35.ones_khd", &vec![1.0f32; cfg.linear_key_head_dim as usize]);
 
@@ -530,6 +589,9 @@ impl Qwen35 {
             mtp_logits,
             mtp_ce_buf,
             mtp_acts: RefCell::new(None),
+            lora_a,
+            lora_da,
+            lora_out,
         }
     }
 
@@ -539,12 +601,37 @@ impl Qwen35 {
 
     /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
     /// parameters have none, so their weight-gradient dispatches must be
-    /// skipped. Mirrors `qwen35moe::model::Qwen35::trainable` exactly (this
-    /// model has no LoRA-frozen-base case yet, M8, so today it is simply
-    /// `self.is_train`, but kept as a named method for the same reason
-    /// qwen35moe keeps it - the reader shouldn't need to know that).
+    /// skipped - on a LoRA build this is exactly the targeted leaves' own
+    /// frozen base weights (their `.lora_a`/`.lora_b` adapters are the only
+    /// trainable tensors; see [`Self::new_impl_on`]'s role filter). Mirrors
+    /// `qwen35moe::model::Qwen35::trainable` exactly.
     fn trainable(&self, name: &str) -> bool {
         self.ps.grad.contains_key(name)
+    }
+
+    /// `Some((rank, alpha/rank))` if `leaf` (one of `crate::config::
+    /// lora_targets`'s 12 names) has a LoRA adapter configured; `None`
+    /// otherwise (either `cfg.lora` is unset, or this leaf isn't targeted -
+    /// e.g. `"fc_e"`/`"fc_h"`/`"lm_head"`, which are never LoRA-targetable).
+    /// Mirrors `qwen35moe::model::Qwen35::lora_for` exactly.
+    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
+        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
+    }
+
+    /// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*A^t)*B^t`.
+    /// No-op for an untargeted leaf. `m`x`k` is the input, `nout` the output -
+    /// mirrors `qwen35moe::model::Qwen35::lora_fwd` exactly (same two-matmul +
+    /// `AXPY` fusion, using this file's own persistent `lora_a`/`lora_out`
+    /// scratch).
+    #[allow(clippy::too_many_arguments)]
+    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(leaf) else { return };
+        let g = &self.gpu;
+        let a = format!("{wname}.lora_a");
+        let bnm = format!("{wname}.lora_b");
+        s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+        s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
+        s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
     }
 
     /// The gradient buffer for a trainable weight - only valid on a
@@ -588,17 +675,41 @@ impl Qwen35 {
         }
     }
 
-    /// Backward for a linear `y = x*Wt`. Accumulates the input gradient into
-    /// `dx` (flag `acc`); `dW += d_out^t*x` (skipped when `wname` is Frozen).
-    /// No LoRA branch yet (M8) - mirrors `qwen35moe::model::proj_bwd`'s own
-    /// `None` (non-LoRA) arm exactly.
+    /// Backward for a (possibly-LoRA) linear `y = x*Wt`. Accumulates the input
+    /// gradient into `dx` (flag `acc`). For a full weight: `dW += d_out^t*x`
+    /// (skipped when `wname` is Frozen - a LoRA-mode base, or an untargeted
+    /// weight under a LoRA build), `dx = d_out*W`. For a LoRA-targeted leaf:
+    /// the base weight is always frozen (dX only, no dW), and the adapter
+    /// grads `gA`/`gB` are produced (scale folded into the private
+    /// `lora_a`/`lora_da` scratch). `leaf` is the bare leaf name (e.g.
+    /// `"q_proj"`, `"gate"`) `crate::config::lora_targets` matches against -
+    /// mirrors `qwen35moe::model::Qwen35::proj_bwd` exactly.
     #[allow(clippy::too_many_arguments)]
-    fn proj_bwd(&self, steps: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+    fn proj_bwd(&self, steps: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         let g = &self.gpu;
-        if self.trainable(wname) {
-            steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+        match self.lora_for(leaf) {
+            Some((r, scale)) => {
+                // base: dx += d_out*W (frozen weight - no dW).
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                let a = format!("{wname}.lora_a");
+                let bnm = format!("{wname}.lora_b");
+                // a = (alpha/r)*(x*A^t)  -> gB += d_out^t*a
+                steps.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
+                steps.push(g.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
+                steps.push(g.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
+                // da = (alpha/r)*(d_out*B) -> gA += da^t*x ; dx += da*A
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
+                steps.push(g.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
+                steps.push(g.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
+                steps.push(g.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+            }
+            None => {
+                if self.trainable(wname) {
+                    steps.push(g.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+                }
+                steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+            }
         }
-        steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
     }
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
@@ -622,7 +733,11 @@ impl Qwen35 {
 
         // 1. mixed_qkv = in_proj_qkv(xn1).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)]);
+        {
+            let mut s = vec![g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)];
+            self.lora_fwd(&mut s, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
+            g.submit(&[], &s);
+        }
 
         // 2. Depthwise causal conv1d + SiLU (activation AFTER the conv).
         // conv1d.wgsl is NCL ([N,Cin,L]); mixed_qkv is token-major ([B,T,C]).
@@ -666,14 +781,17 @@ impl Qwen35 {
         let bproj = g.storage((n * nvh) as u64);
         let aproj = g.storage((n * nvh) as u64);
         let z = g.storage((n * value_dim) as u64);
-        g.submit(
-            &[],
-            &[
+        {
+            let mut s = vec![
                 g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
                 g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
                 g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
-            ],
-        );
+            ];
+            self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
+            self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
+            self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            g.submit(&[], &s);
+        }
         let beta = g.storage((n * nvh) as u64);
         let g_decay = g.storage((n * nvh) as u64);
         g.submit(
@@ -775,7 +893,11 @@ impl Qwen35 {
 
         // 11. out_proj.
         let out = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)]);
+        {
+            let mut s = vec![g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)];
+            self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            g.submit(&[], &s);
+        }
 
         let acts = scratch_train.map(|scratch_train| GdnLayerActs {
             shape,
@@ -817,14 +939,17 @@ impl Qwen35 {
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
-        g.submit(
-            &[],
-            &[
+        {
+            let mut s = vec![
                 g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
                 g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
                 g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
-            ],
-        );
+            ];
+            self.lora_fwd(&mut s, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
+            self.lora_fwd(&mut s, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
+            self.lora_fwd(&mut s, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
+            g.submit(&[], &s);
+        }
 
         // Per-head de-interleaved split of q_full's [query|gate] halves -
         // NOT a whole-row split. Fold n_heads into concat_split's own N so
@@ -867,14 +992,15 @@ impl Qwen35 {
         let gate = g.storage((n * qd) as u64);
         let ctx_gated = g.storage((n * qd) as u64);
         let out = g.storage((n * d) as u64);
-        g.submit(
-            &[],
-            &[
+        {
+            let mut s = vec![
                 g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
                 g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
                 g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
-            ],
-        );
+            ];
+            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, qd, d);
+            g.submit(&[], &s);
+        }
 
         let acts = self.is_train.then(|| GqaLayerActs { q_normed, k_normed, v, q_value, k, q_gate, probs, ctx, gate, ctx_gated });
         (out, acts)
@@ -893,17 +1019,23 @@ impl Qwen35 {
 
         let gate_pre = g.storage((n * ff) as u64);
         let up = g.storage((n * ff) as u64);
-        g.submit(
-            &[],
-            &[
+        {
+            let mut s = vec![
                 g.step(MATMUL, &[xn2, self.w(&p("gate.weight")), &gate_pre], &[n, d, ff], n * ff),
                 g.step(MATMUL, &[xn2, self.w(&p("up.weight")), &up], &[n, d, ff], n * ff),
-            ],
-        );
+            ];
+            self.lora_fwd(&mut s, "gate", xn2, &p("gate.weight"), &gate_pre, n, d, ff);
+            self.lora_fwd(&mut s, "up", xn2, &p("up.weight"), &up, n, d, ff);
+            g.submit(&[], &s);
+        }
         let h = g.storage((n * ff) as u64);
         g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
         let down = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(MATMUL, &[&h, self.w(&p("down.weight")), &down], &[n, ff, d], n * d)]);
+        {
+            let mut s = vec![g.step(MATMUL, &[&h, self.w(&p("down.weight")), &down], &[n, ff, d], n * d)];
+            self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
+            g.submit(&[], &s);
+        }
 
         let acts = self.is_train.then(|| MlpLayerActs { xn2: xn2.clone(), gate_pre, up, h });
         (down, acts)
@@ -1009,7 +1141,7 @@ impl Qwen35 {
         let d_final_h = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_mtp_logits, &ma.final_h, head, &d_final_h, n, d, v, 0);
+            self.proj_bwd(&mut s, "lm_head", &d_mtp_logits, &ma.final_h, head, &d_final_h, n, d, v, 0);
             g.submit(&[], &s);
         }
 
@@ -1051,8 +1183,8 @@ impl Qwen35 {
         let d_hn = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_ehp, &ma.en, "mtp.fc_e.weight", &d_en, n, d, d, 0);
-            self.proj_bwd(&mut s, &d_ehp, &ma.hn, "mtp.fc_h.weight", &d_hn, n, d, d, 0);
+            self.proj_bwd(&mut s, "fc_e", &d_ehp, &ma.en, "mtp.fc_e.weight", &d_en, n, d, d, 0);
+            self.proj_bwd(&mut s, "fc_h", &d_ehp, &ma.hn, "mtp.fc_h.weight", &d_hn, n, d, d, 0);
             g.submit(&[], &s);
         }
 
@@ -1163,7 +1295,7 @@ impl Qwen35 {
         let d_gated = g.storage((n * value_dim) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, d_out, &la.gated, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0);
+            self.proj_bwd(&mut s, "out_proj", d_out, &la.gated, &p("out_proj.weight"), &d_gated, n, value_dim, d, 0);
             g.submit(&[], &s);
         }
 
@@ -1276,9 +1408,9 @@ impl Qwen35 {
             }
             // FIRST touch to d_xn1 in this function (acc=0) -- in_proj_a/z below
             // accumulate on top; in_proj_qkv (processed last here) accumulates last of all.
-            self.proj_bwd(&mut s, &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
-            self.proj_bwd(&mut s, &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
-            self.proj_bwd(&mut s, &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
+            self.proj_bwd(&mut s, "in_proj_b", &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
+            self.proj_bwd(&mut s, "in_proj_a", &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
+            self.proj_bwd(&mut s, "in_proj_z", &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
             g.submit(&[], &s);
         }
 
@@ -1326,7 +1458,7 @@ impl Qwen35 {
         // ---- 1. in_proj_qkv backward (last accumulate into d_xn1) ----
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
+            self.proj_bwd(&mut s, "in_proj_qkv", &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
             g.submit(&[], &s);
         }
     }
@@ -1346,7 +1478,7 @@ impl Qwen35 {
         let d_ctx_gated = g.storage((n * qd) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, d_out, &la.ctx_gated, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0);
+            self.proj_bwd(&mut s, "o_proj", d_out, &la.ctx_gated, &p("o_proj.weight"), &d_ctx_gated, n, qd, d, 0);
             g.submit(&[], &s);
         }
 
@@ -1398,9 +1530,9 @@ impl Qwen35 {
         // ---- 1. q/k/v proj backward ----
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);
-            self.proj_bwd(&mut s, &d_k, xn1, &p("k_proj.weight"), d_xn1, n, d, kvd, 1);
-            self.proj_bwd(&mut s, &d_v, xn1, &p("v_proj.weight"), d_xn1, n, d, kvd, 1);
+            self.proj_bwd(&mut s, "q_proj", &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);
+            self.proj_bwd(&mut s, "k_proj", &d_k, xn1, &p("k_proj.weight"), d_xn1, n, d, kvd, 1);
+            self.proj_bwd(&mut s, "v_proj", &d_v, xn1, &p("v_proj.weight"), d_xn1, n, d, kvd, 1);
             g.submit(&[], &s);
         }
     }
@@ -1422,7 +1554,7 @@ impl Qwen35 {
         let d_h = g.storage((n * ff) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, d_mlp_out, &la.h, &p("down.weight"), &d_h, n, ff, d, 0);
+            self.proj_bwd(&mut s, "down", d_mlp_out, &la.h, &p("down.weight"), &d_h, n, ff, d, 0);
             g.submit(&[], &s);
         }
 
@@ -1434,8 +1566,8 @@ impl Qwen35 {
         {
             let mut s = Vec::new();
             // FIRST touch to d_xn2 (acc=0); gate accumulates on top.
-            self.proj_bwd(&mut s, &d_up, &la.xn2, &p("up.weight"), &d_xn2, n, d, ff, 0);
-            self.proj_bwd(&mut s, &d_gate_pre, &la.xn2, &p("gate.weight"), &d_xn2, n, d, ff, 1);
+            self.proj_bwd(&mut s, "up", &d_up, &la.xn2, &p("up.weight"), &d_xn2, n, d, ff, 0);
+            self.proj_bwd(&mut s, "gate", &d_gate_pre, &la.xn2, &p("gate.weight"), &d_xn2, n, d, ff, 1);
             g.submit(&[], &s);
         }
         d_xn2
@@ -1464,7 +1596,7 @@ impl Qwen35 {
         let d_xn_final = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            self.proj_bwd(&mut s, &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
+            self.proj_bwd(&mut s, "lm_head", &d_logits, &ta.xn_final, self.cfg.head_weight(), &d_xn_final, n, d, v, 0);
             g.submit(&[], &s);
         }
 
@@ -1542,8 +1674,19 @@ impl Qwen35 {
         self.gpu.poll_wait();
     }
 
+    /// Every fp32-store name for an inference or full-training build
+    /// (`self.ps.params`). A LoRA training build (`self.is_train &&
+    /// cfg.lora.is_some()`) instead lists only the trainable `.lora_a`/
+    /// `.lora_b` adapter tensors (`self.ps.trainable`) - the frozen base has
+    /// no gradient buffer (see [`Self::trainable`]), so listing it here would
+    /// make any `read_grad` caller (gradcheck's `directional_check`) panic.
+    /// Mirrors `qwen35moe::model::Qwen35::param_names` exactly.
     pub fn param_names(&self) -> Vec<String> {
-        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        if self.is_train && self.cfg.lora.is_some() {
+            self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+        } else {
+            self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        }
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {

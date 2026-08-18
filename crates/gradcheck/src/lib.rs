@@ -1259,6 +1259,54 @@ pub fn check_qwen35moe_lora(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// [`check_qwen35moe_lora`]'s dense-decoder analogue - rank-2 adapters on
+/// every one of the 12 targetable leaves (`qwen35::config::lora_targets()`:
+/// qwen35moe's same 9 GDN/GQA projections PLUS the dense MLP's `gate`/`up`/
+/// `down`, which qwen35moe never targets since its MLP is a 256-expert MoE)
+/// over `Qwen35Config::tiny()`'s hybrid schedule (layers 0-2 `Linear`/GDN,
+/// layer 3 `Full`/GQA), gradient-checking the adapters. This is the
+/// correctness gate for `Qwen35::lora_fwd`'s two-matmul + `AXPY` fusion and
+/// the LoRA branch of `Qwen35::proj_bwd`, through every leaf this model can
+/// target in one config.
+///
+/// Same reasoning as `check_qwen35moe_lora`'s own doc for every design
+/// choice here: `directional_check`'s `param_names()` walks only the
+/// trainable `.lora_a`/`.lora_b` tensors (proving the frozen base never
+/// receives a gradient-buffer write); a few AdamW warm-up steps move the
+/// zero-initialised `B` adapter (and hence `A`'s gradient) off zero before
+/// the FD comparison; the wide `std=1.0` `in_proj_qkv.weight`/
+/// `conv1d.weight` init dodges the same GDN numerical-conditioning gap
+/// [`qwen35_gradcheck_harness`]'s own doc explains, LoRA or not.
+pub fn check_qwen35_lora(seed: u64) -> Report {
+    use qwen35::config::{lora_cfg, Qwen35Config};
+    use qwen35::model::Qwen35;
+    let cfg = Qwen35Config { lora: Some(lora_cfg(2, 4.0)), ..Qwen35Config::tiny() };
+    let mut init = <Qwen35 as model::Model>::init_weights(&cfg, seed);
+    let mut conv_rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);
+    for l in 0..cfg.n_layers as usize {
+        for leaf in ["in_proj_qkv.weight", "conv1d.weight"] {
+            if let Some(v) = init.get_mut(&format!("blocks.{l}.linear_attn.{leaf}")) {
+                for x in v.iter_mut() {
+                    *x = conv_rng.scaled(1.0);
+                }
+            }
+        }
+    }
+    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::PIPELINES), cfg, 1, 12, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
+    model.set_batch(&x, &y);
+    // Move the adapters off the B=0 init so both A and B carry real gradients.
+    for step in 1..=5 {
+        model.zero_grads();
+        model.forward();
+        model.backward();
+        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.poll_wait();
+    }
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny bottleneck autoencoder, set a fixed float batch, and
 /// gradient-check it. This is the correctness gate for the `Regression` head
 /// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
@@ -1639,6 +1687,26 @@ mod tests {
         assert!(
             fails.is_empty(),
             "qwen35 MTP gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen35_lora_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        // Probed seeds 7/8/9/10/11/42: zero tolerance failures at every one -
+        // unlike the base (non-LoRA) gradcheck, LoRA's adapters are tiny
+        // (rank 2) low-dimensional projections, so directional FD noise
+        // never lands a false failure here.
+        let report = check_qwen35_lora(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "qwen35 LoRA gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

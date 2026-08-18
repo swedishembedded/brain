@@ -48,11 +48,26 @@ structurally and never parity-claimed here.
   still reduces the combined loss; zeroing `mtp.fc_e`/`mtp.fc_h` moves the loss,
   proving the head is load-bearing rather than merely wired). Structural only -
   no reference oracle available here, see below.
+- [x] M8: LoRA (rank/alpha adapters on all 12 targetable leaves -
+  `crate::config::lora_targets()`: qwen35moe's 9 GDN/GQA projections plus this
+  model's own dense-MLP `gate`/`up`/`down`, which qwen35moe never targets since
+  its MLP is MoE) + full finetune (`crates/qwen35/src/finetune.rs`, mirrors
+  `qwen3::finetune` - `Mode::FullOffload`/`Mode::Lora`, genuinely new surface
+  for this family, qwen35moe has none). `Qwen35::lora_fwd`/`proj_bwd`'s LoRA
+  branch mirror `qwen35moe::model::Qwen35`'s exactly (two-matmul + `AXPY`
+  forward fusion, frozen-base dX-only backward + `A`/`B` adapter grads).
+  Gated by `gradcheck::check_qwen35_lora` (every `.lora_a`/`.lora_b` tensor
+  across both mixer types, zero tolerance failures across 6 probed seeds);
+  `tests/lora_freezes_base.rs` (a real training loop changes only the
+  adapters, every frozen base weight bit-identical); `tests/lora_roundtrip.rs`
+  (adapters survive a save+reload cycle with real optimizer steps, reloaded
+  logits reproduce the trained model and differ from the untrained base by a
+  real margin, plus a `lora`-key-absent checkpoint loads as a plain model);
+  `tests/convergence.rs` (full finetune and LoRA both drive a fixed batch's
+  loss down, plus a cyclic-sequence memorization floor).
 
 ## Not yet done
 
-- [ ] M8: LoRA (extend targets to the dense MLP's `gate`/`up`/`down`) + full
-  finetune (`crates/qwen35/src/finetune.rs`, new surface - qwen35moe has none).
 - [ ] M9: vision tower splice (`crates/qwen35/src/vl.rs`, copied from
   `crates/qwen35moe/src/vl.rs`; real-dims parity vs M2's vision golden).
 - [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
