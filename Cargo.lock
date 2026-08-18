@@ -1025,6 +1025,7 @@ dependencies = [
  "brain-ltxv",
  "brain-model",
  "brain-qwen3",
+ "brain-qwen35",
  "brain-qwen35moe",
  "brain-sam2",
  "brain-t5encoder",
