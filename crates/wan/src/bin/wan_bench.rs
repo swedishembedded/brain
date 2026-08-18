@@ -19,6 +19,7 @@
 //!   wan_bench vae  [reps] [frames] [w] [h]   the VAE decode graph, per kind
 //!   wan_bench host [reps] [frames] [w] [h]   the HOST stages either side of it
 //!   wan_bench floor [n]                      per-dispatch floor (tiny kernel x n)
+//!   wan_bench flash [reps] [T] [nh] [hd]     A/B every bidirectional flash kernel
 //!
 //! Defaults are the measured end-to-end point: 33 frames at 832x480, i.e.
 //! 14,040 DiT tokens and a 9-latent-frame decode.
@@ -260,6 +261,86 @@ fn bench_host(reps: usize, frames: usize, w: usize, h: usize) {
     println!("\nper-forward host total: {:.3} s (text_embed excluded: once a prompt)", per_forward);
 }
 
+// ------------------------------------------------------------ flash ------
+
+/// A/B the bidirectional flash-attention kernels at ONE shape, for speed and
+/// for agreement, in the SAME harness - a faster kernel that disagrees is not
+/// a faster kernel, and kernel-vs-kernel timings printed without a numeric
+/// cross-check beside them have shipped wrong answers here before.
+///
+/// Defaults are Wan 1.3B's self-attention at the measured end-to-end point:
+/// T = 14040, 12 heads, head_dim 128. Every variant computes the same thing;
+/// the first registered one is the reference the others are compared against,
+/// and the achieved rate is graded against the device's own MEASURED fp32 roof
+/// (`gpu_core::roof`), not a datasheet constant - the P40 clocks down hard
+/// under sustained load, so a datasheet percentage flatters a long kernel.
+///
+/// `BR` differs per variant (the two-query-row kernel owns 128 rows, not 64),
+/// so the grid is sized from each kernel's own BR rather than a shared
+/// constant.
+fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
+    const VARIANTS: [(&str, &str, u32, u32); 4] = [
+        ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR, 64, 64),
+        ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT, 256, 64),
+        ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG, 256, 64),
+        ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2, 256, 128),
+    ];
+    let ks: Vec<(&str, &str)> = VARIANTS.iter().map(|(n, s, _, _)| (*n, *s)).collect();
+    let gpu = Gpu::new_wgpu(&ks);
+    let c = gpu.caps();
+    eprintln!("max_workgroup_size {} workgroup_mem {} B", c.max_workgroup_size, c.workgroup_mem_bytes);
+    let roof = gpu_core::roof::ensure(&gpu);
+    let peak = roof.map(|r| r.gflops as f64).unwrap_or(P40_FP32_TFLOPS * 1e3);
+    println!("\n=== bidirectional flash attention: T={t} heads={nh} head_dim={hd} ===");
+    match roof {
+        Some(r) => println!("measured roof: {:.0} GFLOP/s fp32, {:.0} GB/s DRAM", r.gflops, r.gbs),
+        None => println!("measured roof unavailable - grading against the P40 datasheet peak"),
+    }
+
+    let d = nh * hd;
+    let qkv = gpu.storage(t as u64 * 3 * d as u64);
+    let src: Vec<f32> =
+        (0..(t as usize * 3 * d as usize)).map(|i| ((i as f64 * 0.7).sin() * 0.5) as f32).collect();
+    gpu.write_f32(&qkv, &src);
+    drop(src);
+    let prm = [1, nh, t, hd, 3 * d, 0, d, 2 * d, d];
+
+    // The fused trio's FLOP: scores (2·T²·hd) + apply (2·T²·hd), per head.
+    let gf = 4.0 * t as f64 * t as f64 * d as f64 / 1e9;
+    let mut refout: Option<Vec<f32>> = None;
+    println!("\n{:<26} {:>10} {:>12} {:>9} {:>12} {:>11}", "kernel", "ms", "GFLOP/s", "% roof", "cosine", "max_abs");
+    for (idx, (name, _, ws, br)) in VARIANTS.iter().enumerate() {
+        let o = gpu.storage(t as u64 * d as u64);
+        let nwg = nh * t.div_ceil(*br);
+        let st = vec![gpu.step(idx, &[&qkv, &o], &prm, nwg * ws)];
+        let secs = time_steps(&gpu, &st, reps);
+        let got = gpu.read(&o, (t * d) as usize);
+        let (cos, mx) = match &refout {
+            None => (1.0, 0.0f32),
+            Some(r) => {
+                let (mut dot, mut na, mut nb, mut mx) = (0f64, 0f64, 0f64, 0f32);
+                for (&x, &y) in r.iter().zip(&got) {
+                    dot += x as f64 * y as f64;
+                    na += x as f64 * x as f64;
+                    nb += y as f64 * y as f64;
+                    mx = mx.max((x - y).abs());
+                }
+                (dot / (na.sqrt() * nb.sqrt()), mx)
+            }
+        };
+        println!(
+            "{name:<26} {:>10.1} {:>12.0} {:>8.1}% {:>12.9} {mx:>11.2e}",
+            secs * 1e3,
+            gf / secs,
+            100.0 * gf / secs / peak,
+            cos
+        );
+        if refout.is_none() {
+            refout = Some(got);
+        }
+    }
+}
+
 // ------------------------------------------------------------ floor -------
 
 /// Per-dispatch floor: `n` one-element matmuls in ONE submit. Isolates
@@ -278,6 +359,20 @@ fn bench_floor(n: usize) {
 }
 
 fn main() {
+    // The backend's readback deadlock guard defaults to 30 s, which is sized
+    // for a token-at-a-time decoder. Every mode here submits a whole graph at
+    // a real generation's shape - the DiT stack alone was 28 s a forward when
+    // this bench was written - so the default turned `wan_bench dit` at its
+    // OWN documented default shape into "device likely wedged" right after it
+    // had printed the table. `brain wan t2v` already raises it for the same
+    // reason; a profiler that cannot finish its own headline measurement is
+    // worse than one that hangs, because the table above the panic looks fine.
+    // Raise it only when the caller has expressed no opinion: the guard is
+    // still what turns a genuinely wedged queue into an error instead of a
+    // hang.
+    if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
+        std::env::set_var("BRAIN_GPU_WAIT_S", "1200");
+    }
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("dit");
     let arg = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -286,8 +381,9 @@ fn main() {
         "vae" => bench_vae(arg(2, 3), arg(3, 33), arg(4, 832), arg(5, 480)),
         "host" => bench_host(arg(2, 3), arg(3, 33), arg(4, 832), arg(5, 480)),
         "floor" => bench_floor(arg(2, 500)),
+        "flash" => bench_flash(arg(2, 3), arg(3, 14040) as u32, arg(4, 12) as u32, arg(5, 128) as u32),
         other => {
-            eprintln!("unknown mode {other} (dit|vae|host|floor)");
+            eprintln!("unknown mode {other} (dit|vae|host|floor|flash)");
             std::process::exit(1);
         }
     }

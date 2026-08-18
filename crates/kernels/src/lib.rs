@@ -341,6 +341,10 @@ pub const FILM_ROW_DSB: &str = include_str!("../wgsl/film_row_dsb.wgsl");
 pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
 /// `wgsl/flash_attn_bidir.wgsl`
 pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl");
+/// `wgsl/flash_attn_bidir_reg.wgsl`
+pub const FLASH_ATTN_BIDIR_REG: &str = include_str!("../wgsl/flash_attn_bidir_reg.wgsl");
+/// `wgsl/flash_attn_bidir_reg2.wgsl`
+pub const FLASH_ATTN_BIDIR_REG2: &str = include_str!("../wgsl/flash_attn_bidir_reg2.wgsl");
 /// `wgsl/flash_attn_bidir_split.wgsl`
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
 /// `wgsl/flash_attn_causal_gqa.wgsl`
@@ -1018,6 +1022,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("film_row_dsb", FILM_ROW_DSB),
     ("film_row_dx", FILM_ROW_DX),
     ("flash_attn_bidir", FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_reg", FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", FLASH_ATTN_BIDIR_REG2),
     ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_causal_gqa", FLASH_ATTN_CAUSAL_GQA),
     ("focal_dice_grad", FOCAL_DICE_GRAD),

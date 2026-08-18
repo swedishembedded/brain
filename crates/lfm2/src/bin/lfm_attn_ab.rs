@@ -42,6 +42,8 @@ const KERNELS: &[(&str, &str)] = &[
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 const K_KV_EXPAND: usize = 0;
 const K_FLASH: usize = 1;
@@ -52,6 +54,9 @@ const K_HEAD_UNPACK: usize = 5;
 const K_SOFTMAX_ROWS: usize = 6;
 const K_MATMUL: usize = 7;
 const K_MATMUL_REG3: usize = 8;
+/// Appended, so every slot above is unchanged.
+const K_REG: usize = 9;
+const K_REG2: usize = 10;
 
 fn time_steps(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
     gpu.submit(&[], steps);
@@ -157,7 +162,7 @@ fn main() {
     let split_expand_len = split_steps.len();
     block::flash_bidir_fwd(
         &gpu,
-        block::FlashIds { bidir: K_FLASH, split: Some(K_SPLIT) },
+        block::FlashIds { bidir: K_FLASH, split: Some(K_SPLIT), reg: Some(K_REG), reg2: Some(K_REG2) },
         nh, hd, hq, &qkv, 3 * d, 0, d, 2 * d, &ctx_flash, &spans, &mut split_steps,
     );
     let t_split = time_steps(&gpu, &split_steps, reps);
@@ -167,7 +172,7 @@ fn main() {
     let mut base_steps = expand(&qkv);
     block::flash_bidir_fwd(
         &gpu,
-        block::FlashIds { bidir: K_FLASH, split: None },
+        block::FlashIds { bidir: K_FLASH, split: None, reg: None, reg2: None },
         nh, hd, hq, &qkv, 3 * d, 0, d, 2 * d, &ctx_flash_base, &spans, &mut base_steps,
     );
     let t_base = time_steps(&gpu, &base_steps, reps);

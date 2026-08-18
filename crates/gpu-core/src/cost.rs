@@ -562,7 +562,11 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // bytes are the ideal-tiling traffic the kernel exists to achieve — the
         // packed QKV read once, O written once, and NO materialised [T,T]
         // scores/probs (that absence is the whole point of the kernel).
-        "flash_attn_bidir" | "flash_attn_bidir_split" => {
+        // The whole family shares one formula: same Params, same fused trio,
+        // same ideal traffic. They differ only in how the inner loops are
+        // scheduled (see `model::block::FlashIds`), which is a constant factor
+        // on the achieved rate, not on the work.
+        "flash_attn_bidir" | "flash_attn_bidir_split" | "flash_attn_bidir_reg" | "flash_attn_bidir_reg2" => {
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(
                 b * h * t * t * (2 * hd + 1) + b * h * t * (6 * t + 1) + 2 * b * h * hd * t * t,

@@ -126,6 +126,11 @@ const HEAD_PACK_T: usize = 53;
 const HEAD_UNPACK: usize = 54;
 const SOFTMAX_ROWS: usize = 55;
 const FLASH_BIDIR_SPLIT: usize = 56;
+// 57, 58 are `gradnorm_part` / `clip_coef_wg`, which `optim::Optim` resolves by
+// NAME rather than through a const here.
+/// The register-tiled flash pair, appended so every slot above is unchanged.
+const FLASH_BIDIR_REG: usize = 59;
+const FLASH_BIDIR_REG2: usize = 60;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
@@ -190,6 +195,8 @@ const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
@@ -764,17 +771,25 @@ impl Lfm {
     /// The two interchangeable fused bidirectional flash kernels, as this
     /// model's pipeline slots.
     fn flash_ids() -> block::FlashIds {
-        block::FlashIds { bidir: FLASH_BIDIR, split: Some(FLASH_BIDIR_SPLIT) }
+        block::FlashIds {
+            bidir: FLASH_BIDIR,
+            split: Some(FLASH_BIDIR_SPLIT),
+            reg: Some(FLASH_BIDIR_REG),
+            reg2: Some(FLASH_BIDIR_REG2),
+        }
     }
 
     /// Whether the fused flash path is worth taking on THIS device: only when
-    /// `block::flash_bidir_variant` actually resolves to the split kernel. The
-    /// baseline kernel is 3.1x SLOWER than `gemm_bidir_fwd` at lfm's shape (see
-    /// the `FLASH_BIDIR` comment), so "cooperative device" is not the gate -
-    /// "the split kernel is selectable" is.
+    /// `block::flash_bidir_variant` resolves to something better than the
+    /// BASELINE kernel. That kernel is 3.1x SLOWER than `gemm_bidir_fwd` at
+    /// lfm's shape (see the `FLASH_BIDIR` comment), so "cooperative device" is
+    /// not the gate - "the selector found a lane-split variant" is, and the
+    /// test is written against `FLASH_BIDIR` rather than against whichever
+    /// variant is currently top of the ladder so a new one cannot silently
+    /// turn this off.
     fn flash_selectable(gpu: &Gpu) -> bool {
         let caps = gpu.caps();
-        caps.workgroup_reductions && block::flash_bidir_variant(Self::flash_ids(), &caps).0 == FLASH_BIDIR_SPLIT
+        caps.workgroup_reductions && block::flash_bidir_variant(Self::flash_ids(), &caps).0 != FLASH_BIDIR
     }
 
     fn bidir_ids() -> BidirIds {
@@ -1563,6 +1578,8 @@ mod tests {
             (super::HEAD_UNPACK, "head_unpack"),
             (super::SOFTMAX_ROWS, "softmax_rows"),
             (super::FLASH_BIDIR_SPLIT, "flash_attn_bidir_split"),
+            (super::FLASH_BIDIR_REG, "flash_attn_bidir_reg"),
+            (super::FLASH_BIDIR_REG2, "flash_attn_bidir_reg2"),
         ] {
             assert_eq!(PIPELINES[slot].0, want, "slot {slot} is not '{want}'");
         }

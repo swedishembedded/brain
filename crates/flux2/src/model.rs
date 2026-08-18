@@ -63,6 +63,8 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
@@ -81,6 +83,11 @@ const K_GATE: usize = 13;
 const K_MAXABS: usize = 14;
 const K_QUANT: usize = 15;
 const K_MATMUL_I8: usize = 16;
+/// The register-tiled flash-attention pair, appended so every index above is
+/// unchanged. `model::block::flash_bidir_variant` picks between all four from
+/// the device's queried caps.
+const K_FLASH_REG: usize = 17;
+const K_FLASH_REG2: usize = 18;
 
 const EPS: f32 = 1e-6;
 
@@ -700,7 +707,12 @@ impl Flux2Model {
             // `model::block::FlashIds`), else the baseline.
             s.push(model::block::flash_bidir_step(
                 &self.gpu,
-                model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+                model::block::FlashIds {
+                    bidir: K_FLASH,
+                    split: Some(K_FLASH_SPLIT),
+                    reg: Some(K_FLASH_REG),
+                    reg2: Some(K_FLASH_REG2),
+                },
                 bsz,
                 nh,
                 n,

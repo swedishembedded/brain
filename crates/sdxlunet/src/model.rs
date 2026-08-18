@@ -79,9 +79,12 @@ const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 10;
 /// beside it and send every linear there — the slower of two kernels it was
 /// already carrying.
 const K_MATMUL_REG: usize = vae::blocks::MATMUL_REG3_SLOT;
-// `layernorm_rows` occupies the last slot and is resolved BY NAME through
+// `layernorm_rows` occupies slot +11 and is resolved BY NAME through
 // `block::LayerNormIds::resolve_fwd`, never indexed directly.
-const N_EXTRA: usize = 12;
+/// The register-tiled flash pair, appended so every slot above is unchanged.
+const K_FLASH_REG: usize = vae::blocks::NEXT_SLOT + 12;
+const K_FLASH_REG2: usize = vae::blocks::NEXT_SLOT + 13;
+const N_EXTRA: usize = 14;
 
 /// This model's kernel set: the shared block kernels (slots `0..NEXT_SLOT`,
 /// copied — never restated — by [`vae::blocks::kernels_with`]) then the extras
@@ -104,6 +107,8 @@ const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT +
     k[K_FLASH_SPLIT] = ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT);
     k[K_ADD_CHAN] = ("add_chan_bcast", kernels::ADD_CHAN_BCAST);
     k[vae::blocks::NEXT_SLOT + 11] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
+    k[K_FLASH_REG] = ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG);
+    k[K_FLASH_REG2] = ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2);
     k
 }
 
@@ -199,7 +204,12 @@ impl<'a> Rec<'a> {
             if coop { None } else { Some((gpu.storage(slab_words.max(1)), gpu.storage(slab_words.max(1)))) };
         let b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
         let ln = block::LayerNormIds::resolve_fwd(gpu, K_LAYERNORM);
-        let flash = block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) };
+        let flash = block::FlashIds {
+            bidir: K_FLASH,
+            split: Some(K_FLASH_SPLIT),
+            reg: Some(K_FLASH_REG),
+            reg2: Some(K_FLASH_REG2),
+        };
         Rec { b, ln, flash, coop, slab, t_enc, inject: None, site: 0, temb_act: None }
     }
 
@@ -1084,6 +1094,8 @@ mod tests {
             (super::K_XAPPLY, "attn_apply_cross"),
             (super::K_FLASH, "flash_attn_bidir"),
             (super::K_FLASH_SPLIT, "flash_attn_bidir_split"),
+            (super::K_FLASH_REG, "flash_attn_bidir_reg"),
+            (super::K_FLASH_REG2, "flash_attn_bidir_reg2"),
             (super::K_ADD_CHAN, "add_chan_bcast"),
         ] {
             assert_eq!(super::KERNELS[slot].0, name, "slot {slot}");

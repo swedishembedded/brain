@@ -39,8 +39,11 @@ pub(crate) const K_MATMUL_I8: usize = 11;
 pub(crate) const K_MAX_ABS_ROW: usize = 12;
 pub(crate) const K_FLASH: usize = 13;
 pub(crate) const K_FLASH_SPLIT: usize = 14;
+/// The register-tiled flash pair, appended so every index above is unchanged.
+pub(crate) const K_FLASH_REG: usize = 15;
+pub(crate) const K_FLASH_REG2: usize = 16;
 
-pub(crate) const KERNELS: [(&str, &str); 15] = [
+pub(crate) const KERNELS: [(&str, &str); 17] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -61,6 +64,8 @@ pub(crate) const KERNELS: [(&str, &str); 15] = [
     // memory (no materialised [nh·T·T]). Enables high-resolution latents.
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 
 /// Host tensors by name → `(shape, row-major f32 data)`. Implements
@@ -496,7 +501,12 @@ pub(crate) fn push_attention(gpu: &Gpu, s: &mut Vec<Step>, scr: &Scratch, nh: u3
     if flash {
         s.push(model::block::flash_bidir_step(
             gpu,
-            model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+            model::block::FlashIds {
+                bidir: K_FLASH,
+                split: Some(K_FLASH_SPLIT),
+                reg: Some(K_FLASH_REG),
+                reg2: Some(K_FLASH_REG2),
+            },
             1, // Z-Image's S³-DiT graph is built for a single joint sequence
             nh,
             t,

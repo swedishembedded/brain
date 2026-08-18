@@ -201,7 +201,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         still looks like video.
       * **Attention**: 32,760 tokens at 480p makes a materialised score matrix
         51 GB across 12 heads against the P40's 2047 MiB per-binding ceiling, so
-        self-attention is `flash_attn_bidir{,_split}` on any device with
+        self-attention is the `flash_attn_bidir{,_split,_reg,_reg2}` family on any device with
         workgroup reductions and query-chunked `[heads, chunk, t]` slabs
         otherwise (the CPU JIT cannot run the flash barriers). Cross-attention
         is query-chunked against the 512 text keys. A weight-free test builds
@@ -496,7 +496,9 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       * **`flash_attn_bidir` vs `_split` is not a live choice on this card.**
         `flash_bidir_variant` takes the split kernel whenever
         `max_workgroup_size >= 256`, which the P40 satisfies; there is no shape
-        knob to sweep here without writing a third variant.
+        knob to sweep here without writing a third variant. **Two were written -
+        see below. The shape knob was then swept anyway and there is still no
+        crossover: the faster kernel wins at every T from 256 to 14040.**
 
       ## What is left, in the order the shares now put it
 
@@ -506,7 +508,9 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         silicon reaches 41%. That gap is worth ~10 s a forward (~500 s a
         request) and it is the only remaining item big enough to change the
         headline. It is not a defect by rung 5's test (17.2% is over the 10%
-        line), so it needs a better kernel, not a bug fix.
+        line), so it needs a better kernel, not a bug fix. **Done - see "Self-
+        attention: the wall, taken down" below; the kernel is 1.98x and the
+        forward is no longer attention-dominated.**
       * **The text encode is untouched and is now 11% of the request.** 236.8 s
         of fixed CPU tax. bf16 weight storage (`crates/model/src/half.rs`, the
         `@dtype` kernel headers) would fit umT5-XXL's 22.72 GB in 11.4 GB and
@@ -528,6 +532,187 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       Not measured, and worth saying so: 81 frames at 480p is 32,760 tokens,
       5.4x the attention work of the profiled point, and no per-kernel table was
       taken there; the flagship configuration is extrapolated, not measured.
+
+      ## Self-attention: the wall, taken down
+
+      The section above closed with "`flash_attn_bidir_split` is THE wall" -
+      17.96 s of a 28.11 s forward, 63.6%, at 2023 GFLOP/s. It is now
+      `flash_attn_bidir_reg2` at 9.06 s, and the DiT graph is 19.30 s.
+
+      **What the profile actually said.** The kernel was not bandwidth-bound and
+      not occupancy-limited, and the online-softmax bookkeeping was not the
+      cost. Both inner loops issued exactly ONE shared load per fused
+      multiply-add:
+
+          s   = s   + q[c]  * ksh[ko + c*LANES]
+          acc = acc + pj[j] * vsh[j*HD + vo]
+
+      A Pascal SM issues an FFMA warp-instruction every clock but retires a
+      shared load-store warp-instruction only every fourth (32 LD/ST units
+      against 128 fp32 lanes), so a 1:1 mix cannot exceed a QUARTER of the
+      card's fp32 rate however well the loads are laid out. That is the number
+      that was measured: 2023 GFLOP/s against the device's own measured
+      10542 GFLOP/s roof = 19.2%, i.e. sitting on a 25% structural ceiling. The
+      tile reads were ALREADY broadcast across the 8 query rows of a warp and
+      already hit 16 distinct banks, so shared memory itself was nowhere near
+      saturated - there was no bank-conflict bug to find, and rung 5's
+      "<10% of both rooflines" defect test correctly did not fire.
+
+      **The fix, in the four steps that were each measured separately** (Tesla
+      P40, T=14040, 12 heads, head_dim 128, `wan_bench flash`, min-of-N, graded
+      against the MEASURED roof, not the datasheet):
+
+      | kernel | ms | GFLOP/s | % of measured roof | vs split |
+      |---|---|---|---|---|
+      | `flash_attn_bidir` | 16494 | 73 | 0.7% | 0.04x |
+      | `flash_attn_bidir_split` | 599 | 2022 | 19.2% | 1.00x |
+      | `flash_attn_bidir_reg` - vec4 tiles, mix 1:4 | 483 | 2508 | 23.8% | 1.24x |
+      | + 2 query rows per thread, mix ~1:7 | 346 | 3486 | 33.1% | 1.73x |
+      | + tile depth 8 -> 16, half the barriers per key | 330 | 3669 | 34.8% | 1.82x |
+      | + vec4 cross-lane partials | 327 | 3702 | 35.1% | 1.83x |
+      | `flash_attn_bidir_reg2` - + prefetch, 3 barriers -> 2 per tile | **302** | **4003** | **38.0%** | **1.98x** |
+
+      Every row agrees with `flash_attn_bidir` to **cosine 1.000000000**
+      (max_abs 4.8e-6 over the [14040, 1536] context slab).
+
+      Tile depth 4 was measured too and is WORSE (440 ms): below 8 the barrier
+      and per-key bookkeeping dominate. Depth 32 does not fit - `reg2` already
+      uses 49152 B of workgroup memory, exactly the limit this card reports.
+
+      **Where it sits against the roof now.** 38.0% of the card's own measured
+      fp32 roof, against `matmul_reg3`'s 41% on the same silicon - the best
+      kernel class this engine has. The mix is now ~7:1 FMA:LDS so the LD/ST
+      ceiling is no longer binding; what remains is the two-query-row block's
+      register pressure holding the kernel to ONE workgroup per SM (8 warps to
+      hide latency with) and the two barriers per tile. Getting to one barrier
+      means removing the cross-lane partial reduction, and with no subgroups and
+      128 channels per query row there is no way to do that inside a
+      255-register budget. **This is close to the wall, not short of it.**
+
+      **The card does NOT throttle on this kernel, though it does on the
+      request.** The section above records 999 MHz of 1531 at 89-90 C under
+      sustained load and warns that short benches overstate. Re-measured with a
+      155-second continuous attention load and a one-second clock sample:
+      **1531 MHz throughout, 83 C, 169 W** of a 250 W board, and the 40-rep and
+      3-rep numbers agree within 1%. Attention alone does not draw enough power
+      to trip the thermal slowdown. During a real request the card WAS observed
+      at 1088-1227 MHz and 89 C - so the throttling is driven by the GEMM-heavy
+      phases around attention, not by attention. Consequence: the kernel table
+      above is a sustained-regime measurement, but the per-request cost of the
+      same kernel is higher because the GEMMs beside it heat the card.
+
+      **A shape sweep, because BR changed and BR is a grid parameter.** `reg2`
+      owns 128 query rows where every other member owns 64, which halves its
+      global K/V traffic (38 GB -> 19 GB per attention call at Wan's shape) but
+      also halves the workgroup count, and an underfilled grid is a real way to
+      lose. Swept at 12 heads, head_dim 128, ms:
+
+      | T | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 14040 |
+      |---|---|---|---|---|---|---|---|
+      | `split` | 0.6 | 1.2 | 4.0 | 13.6 | 51.0 | 206.0 | 599.0 |
+      | `reg` | 0.6 | 1.1 | 3.5 | 11.4 | 41.5 | 162.8 | 483.0 |
+      | `reg2` | **0.4** | **0.8** | **2.4** | **7.6** | **26.8** | **104.8** | **302.5** |
+
+      `reg2` wins at every point over a 55x range of T, including T=256 where it
+      launches only 24 workgroups for 30 SMs. **There is no crossover to encode**
+      - the selection rule is device caps only, and deliberately not shape.
+
+      **The fix is in the SELECTOR, not the call sites.**
+      `model::block::FlashIds` grew `reg` and `reg2`, and `flash_bidir_variant`
+      now returns `(kernel, workgroup size, BR)` - BR is no longer a family
+      constant, so a caller must take it from the selector. Gating is on queried
+      `DeviceCaps` only: `reg2` needs `max_workgroup_size >= 256` AND
+      `workgroup_mem_bytes >= 49152` (four times the 16 KiB a Vulkan
+      implementation is only *required* to offer), with `reg` as the 16 KiB rung
+      below and the old pair below that. The two new fields are REQUIRED rather
+      than defaulted, so the change broke all six consumers at compile time -
+      `flux1`, `flux2`, `lfm2`, `sdxlunet`, `s3dit`, `wan` - and each was
+      adopted deliberately instead of being silently missed, which is the
+      failure mode a `..Default::default()` would have invited.
+
+      **Gates.** DiT cosine 1.000000000 at every block tap (0, 4, 8, 12, 16, 20,
+      24, 28, 29) and at the output against both the reference transformer and
+      diffusers, on the real 1.3B checkpoint at 4680 tokens; VAE unchanged. The
+      gate was mutation-verified: swapping the second query row's `q1` for `q0`
+      inside the register block drops block.0 to cosine 0.999183774 and fails
+      five tests, so the suite does exercise the two-row path rather than
+      passing on the first row alone. `lfm2`'s `pipelines_fully_costed` caught a
+      genuine omission - the new kernels had no `gpu_core::cost` formula and
+      their dispatches would have been reported UNCOVERED - which is exactly
+      what that gate exists for.
+
+      **Pre-existing bug found and fixed.** `wan_bench` never raised
+      `BRAIN_GPU_WAIT_S` from its 30-second default, which is sized for a
+      token-at-a-time decoder. At the bench's OWN documented default shape a DiT
+      forward was 28 s of device time, so `wan_bench dit` printed its whole
+      table and then panicked with "device likely wedged" on the readback that
+      follows. `brain wan t2v` already raised the limit to 1200 s for the same
+      reason; the bench now does too. The failure was silent in the worst way -
+      the table above the panic looked correct.
+
+      **What is left after this.** The forward is no longer
+      attention-dominated: `flash_attn_bidir_reg2` is 46.7% of a 19.30 s graph
+      and `matmul_reg3` is 35.7%, so the GEMMs are now the largest single
+      addressable block and they are already at ~41% of the roof. The next
+      items by share are unchanged and none of them is the kernel:
+      `attn_apply_cross` (7.2%), `attn_scores_cross_kt` (6.3%), the 3.6 s a
+      forward of upload/readback, and the CPU text encoder.
+
+      **DiT forward, one submit at 14,040 tokens**, 1170 dispatches:
+
+      | kernel | disp | before ms | after ms | |
+      |---|---|---|---|---|
+      | self-attention | 30 | 17959 (63.4%) | **9064 (46.7%)** | **1.98x** |
+      | `matmul_reg3` | 300 | 6950 | 6922 | untouched |
+      | `attn_apply_cross` | 30 | 1390 | 1395 | untouched |
+      | `attn_scores_cross_kt` | 30 | 1229 | 1232 | untouched |
+      | everything else (10 kinds) | 780 | 690 | 685 | untouched |
+      | **whole graph** | 1170 | **28.119 s** | **19.298 s** | **1.46x** |
+
+      Graph utilisation went 2593 -> 3778 GFLOP/s on 72,915 GFLOP of work.
+
+      **End to end, the baseline request re-run** (33 frames 832x480, 25 steps,
+      seed 42, same prompt), `brain wan t2v`, twice from the SAME binary. Both
+      runs produced a **bit-identical** MP4 (md5 757d6cf0..., 301,813 bytes), so
+      the spread between them is thermal, not algorithmic:
+
+      | phase | baseline | run A (card already hot) | run B (card cold) |
+      |---|---|---|---|
+      | text encode (umT5-XXL, CPU) | 236.8 s | 395.7 s | 396.4 s |
+      | DiT load | 11.5 s | 39.3 s | 41.6 s |
+      | **denoise (50 forwards)** | **1763.7 s (35.3 s/fwd)** | **1343.7 s (26.9 s/fwd)** | **982.4 s (19.6 s/fwd)** |
+      | VAE decode | 101.6 s | 91.4 s | 84.2 s |
+      | total | 2115.6 s (35.3 min) | 1870.7 s (31.2 min) | 1505.4 s (25.1 min) |
+
+      **Read this table carefully; two things in it are not the kernel.**
+
+      1. **The thermal spread is large and it is the dominant uncertainty.** Run
+         A began on a card heat-soaked by the kernel benchmarks and ran the
+         denoise at 1088-1227 MHz and 89 C. Run B began cool and held **1531 MHz
+         at 67 C for the entire denoise** - it never throttled. Same binary, same
+         seed, bit-identical output, and 1.37x between them. The baseline was
+         itself recorded on a throttling card, so run A is the like-for-like
+         comparison (**1.31x on the denoise**) and run B is what the change gives
+         when the card is not thermally limited (**1.80x**). A plausible
+         second-order effect worth testing deliberately: a forward that is 1.46x
+         shorter deposits less heat, so the request is now more likely to stay
+         off the thermal limit - but one cold run is not evidence of that, and
+         it is NOT claimed here.
+
+      2. **The CPU phases regressed, and NOT from this change.** Text encode
+         measured 395.7 and 396.4 s against the baseline's 236.8 s, and DiT load
+         39.3 and 41.6 s against 11.5 s - consistently across both runs, so it is
+         deterministic rather than contention. Nothing in this change can reach
+         either phase: the flash kernels are dispatched only by the DiT
+         self-attention inside the denoise graph, and the umT5 encoder runs on
+         the CPU backend, which does not register them at all. The ~190 s is a
+         pre-existing drift in the working tree (or the box) relative to when the
+         baseline row was taken, and it means the TOTAL column understates the
+         change. Normalising text+load back to the baseline's 248.3 s puts run A
+         at 28.1 min and run B at **21.9 min**. **This wants its own
+         investigation and its own re-baseline before the headline table in
+         `docs/models/wan.md` is rewritten** - which is why that table was left
+         alone here.
 - [x] **`capability::Media::Video`**, landed ahead of `caps.rs` as its own unit
       of work, exactly as `.agents/rules/serving-contract.md` section 4 asks --
       extending `Media` rather than adding a side channel. Three things it
@@ -609,11 +794,15 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         checkpoint and is refused by name rather than imported into a pipeline
         that does not exist. Both name spaces resolve, since the diffusers
         export renames every leaf but that one tensor.
-      **Coverage is honest and incomplete**: there is no Wan GGUF on this
-      machine and none was downloaded, so the dequantize -> `import_dit` ->
-      safetensors path has never run against real quantized bytes. The tests
-      are synthetic (dispatch by tag, variant derivation over the full 825-name
-      manifest in both spellings, and the refusals), and say so.
+      **Covered on real bytes**: `crates/wan/tests/gguf_import_real.rs`
+      (`BRAIN_WAN_GGUF`, `brain_testutil::skip` when absent) runs the whole
+      dequantize -> `import_dit` -> safetensors path against the released
+      `city96/Wan2.1-T2V-14B-gguf` Q3_K_S file - 1095 tensors, set-equal to
+      `dit_manifest(t2v_14b)` in both directions, the 5-D `patch_embedding`
+      rank GGUF stores above `GGML_MAX_DIMS`, and Q3_K values pinned bit-exact
+      against an independent reimplementation of `dequantize_row_q3_K`. The
+      synthetic tests (dispatch by tag, variant derivation over the full
+      manifest in both spellings, the refusals) stay as the fast lane.
 - [x] **Training + LoRA**, HOST ONLY -- `grad.rs` (one block, fwd + analytic
       bwd), `modelgrad.rs` (the whole DiT under flow-matching velocity MSE),
       `lora.rs`, `finetune.rs`, plus `gradcheck::check_wan` and

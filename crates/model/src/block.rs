@@ -824,38 +824,77 @@ pub fn chunked_bidir_fwd(
     }
 }
 
-/// The two interchangeable bidirectional flash-attention kernels, as a model's
-/// own pipeline indices. `split` is optional (`None` = the model only registered
-/// the baseline), which keeps this additive for callers that have not adopted it.
+/// The interchangeable bidirectional flash-attention kernels, as a model's own
+/// pipeline indices. Every field past `bidir` is optional (`None` = the model
+/// has not registered that kernel), which keeps adoption additive.
 ///
-/// `flash_attn_bidir_split` computes the same thing as `flash_attn_bidir` to
-/// cosine 1.00000000 and is faster at every head_dim measured on a P40
-/// (29× at hd=128, 4.4× at hd=32 - see the kernel header for the table),
-/// because the baseline's per-thread `q[128]`/`o[128]` arrays cannot live in
-/// registers and its inner loop therefore runs at local-memory bandwidth. The
-/// split kernel needs `@workgroup_size(256)`, so selection is gated on the
-/// device's queried `max_workgroup_size`, never assumed.
+/// All four compute the same thing to cosine 1.000000000 of each other and
+/// differ only in how the inner loops are scheduled. They form a ladder, and
+/// [`flash_bidir_variant`] walks it from the top:
+///
+/// | field | kernel | workgroup | BR | shared | needs |
+/// |---|---|---|---|---|---|
+/// | `reg2` | `flash_attn_bidir_reg2` | 256 | 128 | 48 KiB | `max_workgroup_size ≥ 256`, `workgroup_mem_bytes ≥ 49152` |
+/// | `reg` | `flash_attn_bidir_reg` | 256 | 64 | 16 KiB | `max_workgroup_size ≥ 256` |
+/// | `split` | `flash_attn_bidir_split` | 256 | 64 | 16 KiB | `max_workgroup_size ≥ 256` |
+/// | `bidir` | `flash_attn_bidir` | 64 | 64 | 16 KiB | - |
+///
+/// What separates them is the ratio of shared-memory loads to fused
+/// multiply-adds in the inner loops, which is what a Pascal-class SM is
+/// actually limited by here: it issues an FFMA warp-instruction every clock
+/// but retires a shared load only every fourth, so a 1:1 mix cannot exceed a
+/// quarter of the card's fp32 rate however well it is laid out. `bidir` spills
+/// its per-thread `q[128]`/`o[128]` to local memory and runs at local-memory
+/// bandwidth; `split` fixed the spill but left the mix at 1:1; `reg` vectorises
+/// the tile reads to 1:4; `reg2` adds a second query row per thread and a
+/// software-pipelined tile for ~1:7, which also halves the kernel's global K/V
+/// traffic because a workgroup owns twice the query rows.
+///
+/// Measured on a Tesla P40 at Wan 1.3B's self-attention (T=14040, 12 heads,
+/// head_dim 128), against that device's own measured 10542 GFLOP/s fp32 roof:
+/// `bidir` 16494 ms, `split` 599 ms (19.2% of roof), `reg` 483 ms (23.8%),
+/// `reg2` 302 ms (38.0%) - for reference the register-tiled GEMM `matmul_reg3`
+/// reaches 41% on the same card. `reg2` wins at every T measured from 256 to
+/// 14040, so the ladder is walked on device caps alone and never on shape.
+///
+/// Both new kernels need `@workgroup_size(256)` and `reg2` additionally needs
+/// 48 KiB of workgroup memory - four times the 16 KiB a Vulkan implementation
+/// is only *required* to offer - so both are gated on queried `DeviceCaps`,
+/// never assumed.
 #[derive(Clone, Copy)]
 pub struct FlashIds {
     pub bidir: usize,
     pub split: Option<usize>,
+    pub reg: Option<usize>,
+    pub reg2: Option<usize>,
 }
 
+/// Workgroup memory `flash_attn_bidir_reg2` needs: `ksh` + `vsh` (BC·HD·4 B
+/// each) + `part0` + `part1` (BC·RG·4·4 B each) at its BC=16, RG=64, HD=128.
+const FLASH_REG2_SHARED: u32 = 49152;
+
 /// The flash variant to dispatch on this device: `(kernel index, workgroup
-/// size)`. Pure in its inputs - `caps` comes from `DeviceCaps`, so no backend
-/// name is consulted.
-pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32) {
-    match ids.split {
-        Some(i) if caps.max_workgroup_size >= 256 => (i, 256),
-        _ => (ids.bidir, 64),
+/// size, query rows per workgroup)`. The third element is NOT a constant across
+/// the family - `flash_attn_bidir_reg2` owns 128 query rows where the others
+/// own 64 - so a caller must size its grid from this and never from a BR of its
+/// own. Pure in its inputs: `caps` comes from `DeviceCaps`, so no backend name
+/// is consulted.
+pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32, u32) {
+    let wide = caps.max_workgroup_size >= 256;
+    match (ids.reg2, ids.reg, ids.split) {
+        (Some(i), _, _) if wide && caps.workgroup_mem_bytes >= FLASH_REG2_SHARED => (i, 256, 128),
+        (_, Some(i), _) if wide => (i, 256, 64),
+        (_, _, Some(i)) if wide => (i, 256, 64),
+        _ => (ids.bidir, 64, 64),
     }
 }
 
 /// One fused bidirectional flash-attention dispatch over `bsz` samples of `t`
 /// rows each in a packed qkv slab - the variant chosen by
-/// [`flash_bidir_variant`]. Both kernels take the SAME Params and produce the
-/// SAME output layout, so only the pipeline index and the per-workgroup thread
-/// count differ; the workgroup still owns BR = 64 query rows in both.
+/// [`flash_bidir_variant`]. Every kernel in the family takes the SAME Params
+/// and produces the SAME output layout, so only the pipeline index, the
+/// per-workgroup thread count and the query rows per workgroup differ - and
+/// all three come from the selector, which is why BR is not a constant here.
 ///
 /// `bsz > 1` is a **sample-major** slab: sample `b` occupies rows
 /// `[b·t, (b+1)·t)` of `qkv` (`[bsz·t, 3·d_model]`) and of `ctx`
@@ -874,9 +913,8 @@ pub fn flash_bidir_step(
     ctx: &DeviceBuffer,
 ) -> Step {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    const BR: u32 = 64; // query rows per workgroup - the same in both kernels
-    let (kind, ws) = flash_bidir_variant(ids, &g.caps());
-    let nwg = bsz * heads * t.div_ceil(BR);
+    let (kind, ws, br) = flash_bidir_variant(ids, &g.caps());
+    let nwg = bsz * heads * t.div_ceil(br);
     g.step(
         kind,
         &[qkv, ctx],
@@ -909,10 +947,9 @@ pub fn flash_bidir_fwd(
     steps: &mut Vec<Step>,
 ) {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    const BR: u32 = 64; // query rows per workgroup - the same in both kernels
-    let (kind, ws) = flash_bidir_variant(ids, &g.caps());
+    let (kind, ws, br) = flash_bidir_variant(ids, &g.caps());
     for &(row0, len) in spans {
-        let nwg = heads * len.div_ceil(BR);
+        let nwg = heads * len.div_ceil(br);
         steps.push(g.step_sliced(
             kind,
             &[qkv, ctx],

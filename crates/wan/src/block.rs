@@ -67,10 +67,15 @@ pub(crate) const K_SOFTMAX_ROWS: usize = 18;
 /// unchanged: a one-off K transpose plus the scores kernel that reads it.
 pub(crate) const K_KV_K_HEADT: usize = 19;
 pub(crate) const K_XSCORES_KT: usize = 20;
+/// The register-tiled flash-attention pair, appended for the same reason: every
+/// index above is unchanged, and `model::block::flash_bidir_variant` picks
+/// between all four from the device's queried caps.
+pub(crate) const K_FLASH_REG: usize = 21;
+pub(crate) const K_FLASH_REG2: usize = 22;
 
 /// Every kernel the DiT dispatches. Nothing here is new: the whole model is
 /// existing kernels at Wan's shapes.
-pub const KERNELS: [(&str, &str); 21] = [
+pub const KERNELS: [(&str, &str); 23] = [
     ("layernorm", kernels::LAYERNORM),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
@@ -104,6 +109,8 @@ pub const KERNELS: [(&str, &str); 21] = [
     // coalesce. See `attn_scores_cross_kt.wgsl` for the measured numbers.
     ("kv_k_headt", kernels::KV_K_HEADT),
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 
 /// Shape parameters of one Wan block.
@@ -436,7 +443,12 @@ impl Sel {
             rms_rows: Some(K_RMSNORM_ROWS),
             softmax_rows: fast.then_some(K_SOFTMAX_ROWS),
             cross: CrossIds { scores: K_XSCORES, softmax: K_XSOFTMAX, apply: K_XAPPLY },
-            flash: FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+            flash: FlashIds {
+                bidir: K_FLASH,
+                split: Some(K_FLASH_SPLIT),
+                reg: Some(K_FLASH_REG),
+                reg2: Some(K_FLASH_REG2),
+            },
         }
     }
 }
