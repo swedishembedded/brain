@@ -11,7 +11,8 @@ It is a self-contained Cargo **workspace** of ~60 crates under `crates/` - no
 Python in the build/test path; backprop correctness is gated by an in-repo
 finite-difference gradient checker (`crates/gradcheck`), not a PyTorch oracle.
 
-The engine is **architecture-agnostic**: the 320 WGSL kernels (`crates/kernels`)
+The engine is **architecture-agnostic**: the WGSL kernels (`crates/kernels`, see
+[`docs/reference/kernels.md`](docs/reference/kernels.md) for the generated catalogue)
 are reusable building blocks, not a fixed model. New architectures should be
 composed from them, keeping the gradient-check discipline. If a new architecture
 requires new kernels, they should be created only after checking whether an
@@ -545,7 +546,7 @@ front-end to depend on.
 
 | Crate | Responsibility |
 |---|---|
-| `kernels` | all 320 WGSL kernels (the source of truth) as consts + `src()` |
+| `kernels` | every WGSL kernel (the source of truth) as consts + `src()` |
 | `gpu-core` | compute-device facade: selects and forwards to an eager `Backend` |
 | `backend-api` | `Backend`/`GraphBackend` traits, neutral buffer/step handles, registry - a new backend depends only on this |
 | `backend-wgpu` | wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager backend - **the default** |
@@ -625,7 +626,7 @@ front-end to depend on.
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
 | **Profile a forward or a BACKWARD, per kernel kind** | `crates/sdxlunet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `.agents/rules/kernels.md` §F.1 |
 | **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** - read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
-| **Which kernels already exist** (before writing a new one) | the catalogue in **`README.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
+| **Which kernels already exist** (before writing a new one) | the catalogue in **`docs/reference/kernels.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** - the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/training/federated-experts.md`; `crates/federated/src/{shard,sha256}.rs` |

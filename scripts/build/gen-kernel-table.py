@@ -197,10 +197,18 @@ def build_table():
         counts["dtype_na"] += meta["dtype"] == "n/a"
         counts["dtype_tiered"] += meta["dtype"] not in ("f32", "n/a")
 
-    n, lvl = len(rows), counts["lvl"]
+    # No kernel COUNT appears in this prose, total or per-tier, on purpose:
+    # every one drifts on almost any kernel addition/removal/re-tiering, so a
+    # single kernel change would ripple through five or six unrelated numbers
+    # in one paragraph, and each of those was a source-controlled diff that
+    # said nothing beyond "the count moved by one" - noise indistinguishable
+    # from a real content change in `git log` on this file. The table BELOW
+    # is still the exhaustive, generated, drift-checked source of truth for
+    # exactly how many kernels are in each bucket; count its rows instead of
+    # reading a number that goes stale between one regeneration and the next.
     out = [BEGIN, ""]
     out += [
-        f"**{n} kernels.** Every column is a field the kernel DECLARES in its own header",
+        "Every column is a field the kernel DECLARES in its own header",
         "(`@what` / `@how` / `@opt` / `@cpu` / `@gpu` / `@npu` / `@quant` / `@dtype`) - nothing",
         "here is inferred. `make kernels-table` regenerates; `make kernels-table/check` fails",
         "when a kernel is missing a field, when a declaration contradicts the code, or when this",
@@ -212,14 +220,13 @@ def build_table():
         "",
     ]
     for k in sorted(LEVELS, reverse=True):
-        out.append(f"* **{k}/5** - {LEVELS[k]} ({lvl.get(k, 0)} kernels)")
+        out.append(f"* **{k}/5** - {LEVELS[k]}")
     out += [
         "",
         "**cpu** - `backend-cpu`'s Cranelift JIT splits a kernel body at ONE top-level",
         "`workgroupBarrier()` and no more; with two or more it does not fail cleanly, it",
-        "**corrupts memory**, so those are `✗`",
-        f"({counts['cpu_no']} kernels) - cross-checked against the barrier count on every run.",
-        f"`native` marks the {counts['native']} kernels with a hand-written AVX2 path that runs instead",
+        "**corrupts memory**, so those are `✗`, cross-checked against the barrier count on",
+        "every run. `native` marks the kernels with a hand-written AVX2 path that runs instead",
         "of the JIT; `native only` means that path is the *only* way it works there, because",
         "its WGSL has >1 barrier - under `BRAIN_NO_FASTCONV=1` or on a non-AVX2 host it would",
         "fall back to the JIT and corrupt memory. A `✓` says the JIT *can* run it, not that the",
@@ -230,16 +237,15 @@ def build_table():
         "`DeviceCaps::max_workgroup_size` allows it (256 is the WebGPU floor).",
         "**npu** - the Intel NPU never runs WGSL: it is a whole-graph OpenVINO path fed by an",
         "exported ONNX graph, so `✓` means `crates/npu`'s topology DSL can emit an equivalent",
-        f"op ({counts['npu']} kernels), not that this file runs there.",
-        f"**quant** - part of the INT8 path ({counts['quant']} kernels) or the "
-        f"int4-weight/int8-activation (W4A8) q4 path ({counts['quant_q4']} kernels).",
+        "op, not that this file runs there.",
+        "**quant** - part of the INT8 path or the int4-weight/int8-activation (W4A8) q4 path.",
         "**dtype** - whether the kernel supports bf16/f16 WEIGHT STORAGE (the packed bytes can be",
         "held and decoded to f32 with plain integer WGSL), not native COMPUTE in that format:",
         "`f32` is the default (no float storage binding worth templatizing);",
-        f"`n/a` means literally none exists at all ({counts['dtype_na']} kernels - every storage",
-        "binding is already `array<u32>`, auto-verified); `f32|bf16`/`f32|bf16|f16` means the",
-        f"kernel is wired through `kernels::template::dtype_variant` ({counts['dtype_tiered']}",
-        "kernels today) - also auto-verified: a binding must be declared `array<f32>` and every",
+        "`n/a` means literally none exists at all - every storage",
+        "binding is already `array<u32>`, auto-verified; `f32|bf16`/`f32|bf16|f16` means the",
+        "kernel is wired through `kernels::template::dtype_variant` - also auto-verified: a",
+        "binding must be declared `array<f32>` and every",
         "load of it must already be bare-identifier-indexed.",
         "",
         "| kernel | what it does | how | opt | cpu | gpu | npu | quant | dtype |",
