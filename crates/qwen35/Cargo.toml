@@ -1,0 +1,31 @@
+[package]
+name = "brain-qwen35"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3.5/3.8-27B dense hybrid Gated-DeltaNet/GQA decoder Transformer (qwen35moe's dense sibling): forward + backprop in WGSL."
+
+[lib]
+name = "qwen35"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-gguf.workspace = true
+brain-kernels.workspace = true
+brain-data.workspace = true
+brain-qwen3.workspace = true
+brain-qwen3vl.workspace = true
+brain-audio.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+wgpu = "29"
+pollster = "0.4"
+
+[dev-dependencies]
+brain-testutil.workspace = true
