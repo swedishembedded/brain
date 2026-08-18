@@ -26,6 +26,7 @@ pub mod rowemit;
 pub mod serve;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
+pub mod fp8;
 pub mod gdn;
 pub mod grid;
 /// bf16 pack/unpack (B4's storage tier) - see this module's own doc comment.

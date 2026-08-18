@@ -58,6 +58,29 @@ pub(crate) fn bf16_to_f32(h: u16) -> f32 {
     f32::from_bits((h as u32) << 16)
 }
 
+/// Decode an `E4M3FN` (OCP/PyTorch `float8_e4m3fn`) byte to its OWN f32
+/// value: 1 sign, 4 exponent (bias 7), 3 mantissa bits, **no infinities**
+/// (the "fn" variant): only `0x7F`/`0xFF` are NaN, so `exponent=0b1111` with
+/// any OTHER mantissa is a regular (the largest) finite value (max magnitude
+/// `1.75 * 2^8 = 448`). This is the raw per-element value ONLY, a
+/// `weight_block_size`-quantized checkpoint (DeepSeek-V3/Qwen3.5-FP8 style)
+/// needs a SEPARATE blockwise scale multiply on top, which is not a
+/// byte-decode concern and does not belong here (see `model::fp8`).
+pub(crate) fn e4m3fn_to_f32(b: u8) -> f32 {
+    let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
+    let exp = (b >> 3) & 0x0F;
+    let mant = (b & 0x07) as f32;
+    if exp == 0x0F && b & 0x07 == 0x07 {
+        return f32::NAN;
+    }
+    if exp == 0 {
+        // subnormal: mant/8 * 2^(1-bias), bias=7 -> 2^-6
+        return sign * (mant / 8.0) * 2f32.powi(-6);
+    }
+    // normal: (1 + mant/8) * 2^(exp-bias)
+    sign * (1.0 + mant / 8.0) * 2f32.powi(exp as i32 - 7)
+}
+
 /// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
 pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
     if bytes.len() < 8 {
@@ -109,6 +132,13 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
                 .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)
                 .collect(),
             "U8" => raw.iter().map(|&b| b as f32).collect(),
+            "F8_E4M3" => raw.iter().map(|&b| e4m3fn_to_f32(b)).collect(),
+            // Named explicitly rather than falling into the generic `other`
+            // arm below: E5M2 is a real, if rarer, FP8 checkpoint format
+            // (more exponent range, less mantissa) - silently decoding its
+            // bytes as if they were E4M3 would produce plausible-looking but
+            // badly wrong values instead of a loud, name-it error.
+            "F8_E5M2" => return Err(format!("safetensors: F8_E5M2 not supported for {name} (only F8_E4M3 is)")),
             other => return Err(format!("safetensors: unsupported dtype {other} for {name}")),
         };
         out.push(StTensor { name: name.clone(), shape, data });
@@ -214,10 +244,61 @@ mod tests {
     }
 
     #[test]
+    fn f8_e4m3_parses_via_the_full_reader() {
+        let header = serde_json::json!({
+            "w": {"dtype": "F8_E4M3", "shape": [2], "data_offsets": [0, 2]},
+        });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(hbytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hbytes);
+        buf.push(0x38); // 1.0
+        buf.push(0xB8); // -1.0
+        let ts = parse(&buf).unwrap();
+        let w = ts.iter().find(|t| t.name == "w").unwrap();
+        assert_eq!(w.data, vec![1.0, -1.0]);
+    }
+
+    #[test]
+    fn f8_e5m2_errors_loudly_by_name_instead_of_silently_misdecoding() {
+        let header = serde_json::json!({
+            "w": {"dtype": "F8_E5M2", "shape": [1], "data_offsets": [0, 1]},
+        });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(hbytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hbytes);
+        buf.push(0x38);
+        let err = match parse(&buf) {
+            Ok(_) => panic!("F8_E5M2 must not parse"),
+            Err(e) => e,
+        };
+        assert!(err.contains("F8_E5M2"), "error must name the unsupported dtype: {err}");
+        assert!(err.contains('w'), "error must name the tensor: {err}");
+    }
+
+    #[test]
     fn f16_half_decode() {
         assert_eq!(f16_to_f32(0x3C00), 1.0); // 1.0
         assert_eq!(f16_to_f32(0xC000), -2.0); // -2.0
         assert_eq!(f16_to_f32(0x0000), 0.0); // +0
+    }
+
+    #[test]
+    fn e4m3fn_decode_known_values() {
+        assert_eq!(e4m3fn_to_f32(0x00), 0.0); // +0
+        assert_eq!(e4m3fn_to_f32(0x80), -0.0); // -0
+        assert_eq!(e4m3fn_to_f32(0x38), 1.0); // exp=0111(7,bias7->0), mant=0 -> 1.0
+        assert_eq!(e4m3fn_to_f32(0xB8), -1.0);
+        assert_eq!(e4m3fn_to_f32(0x7E), 448.0); // exp=1111, mant=110 -> the known e4m3fn max
+        assert!(e4m3fn_to_f32(0x7F).is_nan()); // the ONE reserved NaN pattern (positive)
+        assert!(e4m3fn_to_f32(0xFF).is_nan()); // and its negative twin
+        // exp=1111 with mantissa != 111 is a REGULAR finite value, unlike
+        // standard IEEE float - this is the "fn" (no-infinity) variant's
+        // whole point, and the one easiest detail to get wrong.
+        assert!(e4m3fn_to_f32(0x7D).is_finite());
+        assert_eq!(e4m3fn_to_f32(0x08), 2f32.powi(-6)); // smallest normal (exp=1,mant=0)
+        assert_eq!(e4m3fn_to_f32(0x01), 2f32.powi(-9)); // smallest subnormal (exp=0,mant=1)
     }
 
     /// Build a one-tensor F32 safetensors byte buffer for the shard tests.

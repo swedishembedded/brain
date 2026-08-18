@@ -15,6 +15,7 @@
 //! `tools/goldens/qwen35_dump_reference.py`.
 
 pub mod config;
+pub mod import;
 pub mod init;
 
 pub use config::{LayerType, Qwen35Config};
