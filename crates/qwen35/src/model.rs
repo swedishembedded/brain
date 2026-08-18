@@ -144,6 +144,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX), // 72
     // -- LoRA tier (M8) -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
     ("axpy", kernels::AXPY), // 73
+    // -- vision-language splice tier (M9) -- see `Qwen35::enable_mm_splice`.
+    ("splice", kernels::SPLICE), // 74
+    ("splice_bwd", kernels::SPLICE_BWD), // 75
 ];
 
 const RMSNORM: usize = 0;
@@ -220,6 +223,8 @@ const CE_GRAD: usize = 70;
 const SCALE_ADD: usize = 71;
 const L2NORM_SCALE_DX: usize = 72;
 const AXPY: usize = 73;
+const SPLICE: usize = 74;
+const SPLICE_BWD: usize = 75;
 
 fn kernel_ids() -> KernelIds {
     KernelIds {
@@ -469,6 +474,19 @@ pub struct Qwen35 {
     lora_da: DeviceBuffer,
     /// `[n*max_out]` : `delta = a @ Bᵀ`.
     lora_out: DeviceBuffer,
+
+    // ---- vision-language embedding splice seam (M9, see `crate::vl::Qwen35Vl`) ----
+    /// `Some((row0, n_rows))` once [`Self::enable_mm_splice`] has run: the
+    /// image-placeholder rows `run_forward` overwrites and `backward` routes
+    /// to [`Self::read_d_img_embeds`]. `None` (the default) makes both a
+    /// pure no-op, matching `qwen35moe::model::Qwen35`'s own splice seam.
+    mm_splice: Cell<Option<(u32, u32)>>,
+    /// `[n_rows*d_model]` : the projected image tokens to splice in on the
+    /// next `forward()`. 1-element dummy until `enable_mm_splice` resizes it.
+    img_embeds: DeviceBuffer,
+    /// `[n_rows*d_model]` : gradient of the spliced image tokens after
+    /// `backward()`. 1-element dummy until `enable_mm_splice` resizes it.
+    d_img_embeds: DeviceBuffer,
 }
 
 impl Qwen35 {
@@ -564,6 +582,9 @@ impl Qwen35 {
         let mtp_logits = gpu.storage(if cfg.mtp { n * cfg.vocab as u64 } else { 1 });
         let mtp_ce_buf = gpu.storage(if cfg.mtp { n } else { 1 });
 
+        let img_embeds = gpu.storage(1);
+        let d_img_embeds = gpu.storage(1);
+
         Qwen35 {
             gpu,
             cfg,
@@ -592,6 +613,9 @@ impl Qwen35 {
             lora_a,
             lora_da,
             lora_out,
+            mm_splice: Cell::new(None),
+            img_embeds,
+            d_img_embeds,
         }
     }
 
@@ -710,6 +734,54 @@ impl Qwen35 {
                 steps.push(g.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
             }
         }
+    }
+
+    // ---- vision-language embedding splice seam (M9, see `crate::vl::Qwen35Vl`) --
+
+    /// Enable the VLM embedding splice at residual rows `[row0, row0+n_rows)`:
+    /// after the token-embedding gather, `run_forward` overwrites those rows
+    /// with the image tokens written via [`Self::write_img_embeds`], and - on
+    /// a `new_train_on` build - `backward` routes their gradient to
+    /// [`Self::read_d_img_embeds`] (zeroing them in the residual grad first so
+    /// `EMB_BWD` never trains the image-placeholder token id). `run_forward`/
+    /// `backward` already build their step lists fresh on every call, so
+    /// enabling the splice is pure buffer allocation + a flag - call once
+    /// after construction, before the first `forward()`. Mirrors
+    /// `qwen35moe::model::Qwen35::enable_mm_splice` exactly.
+    pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
+        let sz = (n_rows * self.cfg.d_model) as u64;
+        self.img_embeds = self.gpu.storage(sz);
+        self.d_img_embeds = self.gpu.storage(sz);
+        self.mm_splice.set(Some((row0, n_rows)));
+    }
+
+    /// Write the projected image tokens `[n_rows, d_model]` (row-major) to
+    /// splice into the residual stream on the next `forward()`.
+    pub fn write_img_embeds(&self, data: &[f32]) {
+        self.gpu.write_f32(&self.img_embeds, data);
+    }
+
+    /// Number of spliced image-embedding elements (`n_rows*d_model`); 0 if off.
+    fn img_numel(&self) -> usize {
+        self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model) as usize)
+    }
+
+    /// Read the gradient of the spliced image embeddings after `backward()` -
+    /// feeds the vision tower/connector backward. Requires a `new_train_on`
+    /// build (see [`Self::backward`]'s splice-gradient step).
+    pub fn read_d_img_embeds(&self) -> Vec<f32> {
+        self.gpu.read(&self.d_img_embeds, self.img_numel())
+    }
+
+    /// Overwrite the M-RoPE `cos`/`sin` tables (`[b*t, rotary_dim/2]`
+    /// row-major - see `qwen3vl::mrope::{get_rope_index, mrope_tables}` for
+    /// how to build them from real 2-D image-grid positions) for the next
+    /// `forward()`. RoPE here is unconditionally table-driven already - this
+    /// simply replaces the plain-sequential-position table built at
+    /// construction.
+    pub fn write_mrope_tables(&self, cos: &[f32], sin: &[f32]) {
+        self.gpu.write_f32(&self.cos, cos);
+        self.gpu.write_f32(&self.sin, sin);
     }
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
@@ -1216,6 +1288,13 @@ impl Qwen35 {
 
         g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &res[0]], &[d, n], n * d)]);
 
+        // Vision-language splice: overwrite the image-placeholder rows of the
+        // freshly-gathered residual stream with the projected image tokens
+        // (see `Self::enable_mm_splice`'s doc). No-op unless enabled.
+        if let Some((row0, n_rows)) = self.mm_splice.get() {
+            g.submit(&[], &[model::vlm::splice_fwd(g, SPLICE, &self.img_embeds, &res[0], row0 * d, n_rows * d)]);
+        }
+
         let types = self.cfg.layer_types();
         for (l, ty) in types.iter().enumerate() {
             let xres = &res[l];
@@ -1655,6 +1734,14 @@ impl Qwen35 {
             d_res_next = d_res_l;
         }
         drop(res);
+
+        // ---- vision-language splice backward: route the image rows' grad to
+        // `d_img_embeds` and ZERO them in `d_res_next` BEFORE `EMB_BWD`, so the
+        // image-placeholder token id never accumulates a spurious `tok.weight`
+        // gradient from those rows. No-op unless `enable_mm_splice` was called.
+        if let Some((row0, n_rows)) = self.mm_splice.get() {
+            g.submit(&[], &[model::vlm::splice_bwd(g, SPLICE_BWD, &d_res_next, &self.d_img_embeds, row0 * d, n_rows * d)]);
+        }
 
         // ---- embedding backward (tok.weight) ----
         if self.trainable("tok.weight") {

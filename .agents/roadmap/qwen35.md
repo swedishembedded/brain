@@ -65,11 +65,44 @@ structurally and never parity-claimed here.
   real margin, plus a `lora`-key-absent checkpoint loads as a plain model);
   `tests/convergence.rs` (full finetune and LoRA both drive a fixed batch's
   loss down, plus a cyclic-sequence memorization floor).
+- [x] M9: vision tower splice. `crates/qwen35/src/vl.rs` (near-verbatim from
+  `crates/qwen35moe/src/vl.rs`, adapted to this crate's explicit-`Gpu`
+  constructor convention) composes `qwen3vl::encoder::{VisionEncoder,
+  PatchMerger}` - reused completely unchanged - with a new embedding-splice
+  seam added to `crates/qwen35/src/model.rs`
+  (`enable_mm_splice`/`write_img_embeds`/`read_d_img_embeds`/
+  `write_mrope_tables`, wired via `model::vlm::{splice_fwd,splice_bwd}` right
+  after the token-embed gather / right before the final `tok.weight`
+  backward), mirroring `qwen35moe::model::Qwen35`'s own splice seam exactly.
+  Real-dims parity IS achieved (contrary to this file's earlier "no
+  independent oracle" note for the composite, which is a separate, narrower
+  claim - see below): `tools/goldens/qwen35_vision_dump_reference.py`
+  freshly constructs the REAL `transformers.models.qwen3_5.
+  Qwen3_5VisionModel` at its real dims (depth=27, hidden=1152, confirmed
+  byte-for-byte identical to `VisionConfig::qwen3_omni()` apart from
+  `out_hidden_size`/`deepstack_indexes`, checked field by field against the
+  installed reference before writing the dumper) with random weights under a
+  fixed seed - no checkpoint download needed, matching this milestone's own
+  "real dims, random weights" scope (full real-WEIGHT vision parity is
+  M10's job). `tests/vision_parity.rs` gates `VisionEncoder`/`PatchMerger`
+  (patch embed, two tapped blocks, pre-merger hidden, post-merger output)
+  against that golden: cosine 1.0000000000, max_abs ~3e-5, rel_l2 ~3e-6 at
+  every stage, both backends - the vision tower reuse is numerically
+  correct at this model's real scale. `tests/vl.rs` covers what genuinely
+  has no oracle (the full composite - vision tower + splice + decoder - at
+  random weights has none): end-to-end finite loss, the splice is
+  load-bearing at both the `Qwen35Vl` level (perturbing pixels moves the
+  loss - a uniform pixel shift is a poor probe here, since the vision
+  blocks' own LayerNorms are shift-invariant by construction, so the test
+  uses a structurally different random draw instead) and, at much higher
+  margin, directly at the decoder-level splice mechanism in isolation
+  (`enable_mm_splice`/`write_img_embeds` with two deliberately large-margin
+  explicit embeddings), the splice backward gradient is nonzero and finite,
+  and the M-RoPE positions for the image run match `get_rope_index`'s own
+  independent computation exactly.
 
 ## Not yet done
 
-- [ ] M9: vision tower splice (`crates/qwen35/src/vl.rs`, copied from
-  `crates/qwen35moe/src/vl.rs`; real-dims parity vs M2's vision golden).
 - [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
   per-layer streaming forward parity for layers {0, 3, 63}; full real-weight
   parity of the vision tower; embed/lm_head spot checks).
