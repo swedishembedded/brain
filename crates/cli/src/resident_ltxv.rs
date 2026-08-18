@@ -120,6 +120,16 @@ impl Instance for LtxvInstance {
                 p.opts.device = self.device_name();
                 crate::resident_llm::on_device(self.device, || ltxv::caps::generate_on(&self.paths, inv, &p, progress))?
             }
+            "dfr" => {
+                // DFR needs the two latent-upscaler paths on top of the VAE
+                // `self.paths` already carries - resolved fresh from the
+                // environment per call, the same "nothing worth caching yet"
+                // reasoning this module's own doc gives for the VAE path.
+                let mut p = ltxv::caps::dfr_params_from(inv)?;
+                p.opts.base.device = self.device_name();
+                let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
+                crate::resident_llm::on_device(self.device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
+            }
             other => Err(format!("ltxv: unknown action '{other}'")),
         }
     }

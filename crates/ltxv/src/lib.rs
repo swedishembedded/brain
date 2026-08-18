@@ -59,13 +59,36 @@
 //! real-weight **duration-prediction head** ([`duration_head`], eager host
 //! math - `Linear` + a 1-query `MultiheadAttention` pooler + a small MLP).
 //! Both real parity, same bar as every other small real-weight component
-//! this port has landed. The NA diffusion decoder and the rest of DFR remain
-//! the tracked gap this milestone does not close.
+//! this port has landed.
+//!
+//! (M8b): the **NA diffusion decoder** ([`na_decoder`]) - the convolution-free
+//! `DiffusionVideoDecoder` (3D neighborhood-attention blocks + AdaLN-Zero
+//! modulation), real weights, real parity on every tap including the full
+//! `CombinedDiffusionNABlock` stack. General overlapping-tile chunked
+//! decode, the `CHUNKED`/`BLACKWELL_DSL` block variants, and multi-step
+//! Euler sampling remain a tracked gap (moot for the real checkpoint, whose
+//! own config collapses sampling to one step - see `na_decoder.rs`'s doc).
+//!
+//! (M8c): **DFR (Diffusion Fidelity Rendering) geometry + a smoke-level
+//! multi-stage pipeline** ([`dfr`]/[`pipeline::generate_dfr`]) - the real,
+//! weight-free tile-boundary/keyframe-segment-canvas/generated-keyframe-
+//! slot-token-append math ([`dfr`], unit-tested, no `#[ignore]` needed), and
+//! a pipeline that runs it end to end: half-res base generation with
+//! appended keyframe slots, a REAL spatial x2 latent upscale, a full-res
+//! detailing pass (re-noised from the upscaled result, no IC-LoRA - one does
+//! not exist in this repo), and 0-2 REAL temporal x2 upsample rounds with
+//! tile-based stitching. Still the tiny random-weight DiT and the stub text
+//! context M4 established - see [`pipeline`]'s module doc for exactly which
+//! DFR mechanics are real here and which remain a documented gap (the
+//! IC-LoRA spatial-detailing adapter, real 22B quality, per-token/partial-
+//! strength anchor-keyframe carry-forward across temporal rounds, and the NA
+//! decoder as an alternative decode path).
 
 pub mod audio_vae;
 pub mod block;
 pub mod caps;
 pub mod config;
+pub mod dfr;
 pub mod dit;
 pub mod duration_head;
 pub mod finetune;

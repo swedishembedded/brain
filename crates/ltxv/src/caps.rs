@@ -9,11 +9,16 @@
 //! same way `wan::caps`'s VAE is never cached alongside its hot DiT.
 //!
 //! The manifest is **static** (no weights needed) so capability *discovery*
-//! is free; only [`LtxvProvider`] (execution) reads anything from disk. One
-//! action, `t2v`, whose `prompt` param is REQUIRED even though no real text
-//! encoder consumes it yet (see `crate::pipeline::context_stub`'s doc) - the
-//! capability surface is meant to look like the real target shape a later
-//! milestone fills in, not a smaller one this milestone happens to support.
+//! is free; only [`LtxvProvider`] (execution) reads anything from disk. Two
+//! actions, `t2v` and `dfr` (M8c's multi-stage DFR pipeline,
+//! `crate::pipeline::generate_dfr`), both with a `prompt` param that is
+//! REQUIRED even though no real text encoder consumes it yet (see
+//! `crate::pipeline::context_stub`'s doc) - the capability surface is meant
+//! to look like the real target shape a later milestone fills in, not a
+//! smaller one this milestone happens to support. `brain ltxv {t2v,dfr}`
+//! being a dedicated CLI module does not exempt either action from this
+//! surface - the serving contract's obligation 1 is explicit that a bespoke
+//! subcommand must never be the ONLY entry point.
 //!
 //! `inv.cancel` is polled once per denoise step - the poll lives in
 //! `crate::pipeline::denoise`'s loop, shared by every caller, per the
@@ -22,7 +27,7 @@
 use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
-use crate::pipeline::{dit_config_from_name, GenOpts, Paths};
+use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Paths};
 
 /// The model id advertised on the capability surface (`brain caps
 /// brain/ltxv`) and the event API - NOT reachable as a CLI verb of its own,
@@ -60,10 +65,32 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("dit_config", ParamType::Enum(DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights, no real 22B checkpoint yet) is implemented").default(json!("tiny")))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
+    let dfr = ActionSpec::new(
+        "dfr",
+        "generate a video clip via DFR (Diffusion Fidelity Rendering): half-res base generation with generated keyframe slots, a real spatial x2 latent upscale, a full-res re-noised detailing pass (no IC-LoRA - see crate::pipeline's DFR doc), and 0-2 real temporal x2 upsample rounds with tile-based stitching. M8c gap: same tiny random-weight DiT and stub text context t2v has - see crate::pipeline's module doc (search \"M8c\") for exactly what is real.",
+    )
+    .streaming()
+    .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
+    .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)").default(json!(d.frames)))
+    .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 64: stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)").default(json!(d.width)))
+    .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 64)").default(json!(d.height)))
+    .param(ParamSpec::new("steps", ParamType::Int, "denoise steps per stage/tile").default(json!(d.steps)))
+    .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance; <= 1.0 runs ONE forward per step instead of two").default(json!(d.guidance)))
+    .param(ParamSpec::new("seed", ParamType::Int, "initial-noise/weight/context seed (omit for 0)").default(json!(0)))
+    .param(ParamSpec::new("fps", ParamType::Int, "stage-1 frame rate; the reported fps is this times 2^temporal_upsample_rounds").default(json!(d.fps)))
+    .param(ParamSpec::new("base_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 1024 tokens").default(json!(d.base_shift)))
+    .param(ParamSpec::new("max_shift", ParamType::Float, "LTX2Scheduler token-count shift anchor at 4096 tokens").default(json!(d.max_shift)))
+    .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
+    .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
+    .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
+    .param(ParamSpec::new("dit_config", ParamType::Enum(DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights, no real 22B checkpoint yet) is implemented").default(json!("tiny")))
+    .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 real temporal x2 refine rounds").default(json!(0)))
+    .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
+
     Manifest::new(
         MODEL,
-        "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. M4: real VAE + real scheduler + tiny random-weight DiT smoke pipeline; the real 22B DiT and Gemma-4 text encoder are tracked gaps, not yet implemented.",
-        vec![t2v],
+        "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. M4: real VAE + real scheduler + tiny random-weight DiT smoke pipeline; M8c adds a DFR multi-stage pipeline with real latent upscalers. The real 22B DiT and Gemma-4 text encoder are tracked gaps, not yet implemented.",
+        vec![t2v, dfr],
     )
 }
 
@@ -126,6 +153,62 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
 pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let (video, timings) = crate::pipeline::generate(paths, &prompt, &p.opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
+    Ok(video_outcome(&video, &timings))
+}
+
+/// A decoded `dfr` request - [`GenParams`]'s DFR analogue.
+#[derive(Debug)]
+pub struct DfrParams {
+    pub opts: DfrOpts,
+}
+
+/// Decode + validate `dfr`'s params from an invocation - [`gen_params_from`]'s
+/// DFR analogue, same "reject before any weight load" discipline plus the
+/// `temporal_upsample_rounds` bound `crate::pipeline::generate_dfr` itself
+/// enforces.
+pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
+    let d = GenOpts::default();
+    let dit_config = inv.get_str("dit_config").unwrap_or_else(|| "tiny".into());
+    dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
+    let base = GenOpts {
+        frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
+        width: inv.get_i64("width").unwrap_or(d.width as i64).max(64) as usize,
+        height: inv.get_i64("height").unwrap_or(d.height as i64).max(64) as usize,
+        steps: inv.get_i64("steps").unwrap_or(d.steps as i64).max(1) as usize,
+        guidance: inv.get_f64("guidance").unwrap_or(d.guidance as f64) as f32,
+        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
+        base_shift: inv.get_f64("base_shift").unwrap_or(d.base_shift),
+        max_shift: inv.get_f64("max_shift").unwrap_or(d.max_shift),
+        stretch: inv.get_bool("stretch").unwrap_or(d.stretch),
+        terminal: inv.get_f64("terminal").unwrap_or(d.terminal),
+        eta: inv.get_f64("eta").unwrap_or(d.eta),
+        s_noise: d.s_noise,
+        context_len: d.context_len,
+        dit_config,
+        device: None,
+    };
+    let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
+    let opts = DfrOpts { base, temporal_upsample_rounds };
+    use crate::vae3d::LtxVaeConfig;
+    let vcfg = LtxVaeConfig::conv25();
+    if vcfg.latent_frames(opts.base.frames as u32).is_none() {
+        return Err(format!("frames must be of the form 1 + 8k (1, 9, 17, … ); got {}", opts.base.frames));
+    }
+    if !opts.base.width.is_multiple_of(64) || !opts.base.height.is_multiple_of(64) {
+        return Err(format!("{}x{} is not a multiple of 64 for DFR (stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)", opts.base.width, opts.base.height));
+    }
+    if opts.temporal_upsample_rounds > 2 {
+        return Err(format!("temporal_upsample_rounds must be 0, 1, or 2, got {}", opts.temporal_upsample_rounds));
+    }
+    Ok(DfrParams { opts })
+}
+
+/// Run one DFR generation and wrap the result as a video-output [`Outcome`] -
+/// [`generate_on`]'s DFR analogue.
+pub fn dfr_on(paths: &DfrPaths, inv: &Invocation, p: &DfrParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
+    let (video, timings) = crate::pipeline::generate_dfr(paths, &prompt, &p.opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     Ok(video_outcome(&video, &timings))
 }
 
@@ -197,6 +280,11 @@ impl Action for LtxvAction {
                 let paths = Paths::from_env()?;
                 generate_on(&paths, inv, &p, progress)
             }
+            "dfr" => {
+                let p = dfr_params_from(inv)?;
+                let paths = DfrPaths::from_env()?;
+                dfr_on(&paths, inv, &p, progress)
+            }
             other => Err(format!("ltxv '{other}': unknown action")),
         }
     }
@@ -213,7 +301,7 @@ mod tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["t2v"]);
+        assert_eq!(names, ["t2v", "dfr"]);
         let t2v = &m.actions[0];
         assert!(t2v.streaming, "a multi-step denoise run without progress reads as a hang");
         let required: Vec<&str> = t2v.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
@@ -280,6 +368,56 @@ mod tests {
         inv.cancel.cancel();
         let inv = spec.validate(inv).unwrap();
         assert!(inv.cancel.is_cancelled(), "validate must carry the token through to the action");
+    }
+
+    /// `dfr`'s own analogue of [`manifest_declares_the_full_surface`] - the
+    /// action `brain ltxv dfr --help` documents must also be reachable
+    /// through `capability::Provider`, not just the CLI (serving contract
+    /// obligation 1).
+    #[test]
+    fn dfr_is_advertised_with_its_own_full_surface() {
+        let m = manifest();
+        let dfr = m.actions.iter().find(|a| a.name == "dfr").expect("dfr must be an advertised action");
+        assert!(dfr.streaming, "a multi-stage DFR run without progress reads as a hang");
+        let required: Vec<&str> = dfr.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
+        assert_eq!(required, ["prompt"]);
+        let def = |name: &str| dfr.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("no param {name}")).default.clone();
+        assert_eq!(def("frames"), Some(json!(9)));
+        assert_eq!(def("width"), Some(json!(64)));
+        assert_eq!(def("height"), Some(json!(64)));
+        assert_eq!(def("temporal_upsample_rounds"), Some(json!(0)));
+        assert_eq!(dfr.outputs.len(), 1);
+        assert_eq!(dfr.outputs[0].name, "video");
+        assert_eq!(dfr.outputs[0].media, Media::Video);
+    }
+
+    /// [`the_advertised_defaults_and_dit_configs_decode`]'s DFR analogue.
+    #[test]
+    fn dfr_advertised_defaults_decode() {
+        let spec = manifest().actions.into_iter().find(|a| a.name == "dfr").unwrap();
+        let inv = spec.validate(Invocation::new().set("prompt", json!("a cat"))).unwrap();
+        let p = dfr_params_from(&inv).unwrap();
+        assert_eq!((p.opts.base.frames, p.opts.base.width, p.opts.base.height, p.opts.base.steps), (9, 64, 64, 4));
+        assert_eq!(p.opts.temporal_upsample_rounds, 0);
+    }
+
+    /// [`impossible_geometry_is_rejected_before_any_weight_is_read`]'s DFR
+    /// analogue - `dfr`'s own multiple-of-64 rule (not t2v's multiple-of-32)
+    /// and the 0-2 `temporal_upsample_rounds` bound must both be rejected
+    /// before any weight is read.
+    #[test]
+    fn dfr_impossible_params_are_rejected_before_any_weight_is_read() {
+        let spec = manifest().actions.into_iter().find(|a| a.name == "dfr").unwrap();
+        let decode = |inv: Invocation| dfr_params_from(&spec.validate(inv).unwrap());
+        let base = || Invocation::new().set("prompt", json!("x"));
+        let e = decode(base().set("frames", json!(8))).unwrap_err();
+        assert!(e.contains("1 + 8k"), "{e}");
+        let e = decode(base().set("width", json!(96))).unwrap_err();
+        assert!(e.contains("multiple of 64"), "{e}");
+        let e = decode(base().set("temporal_upsample_rounds", json!(3))).unwrap_err();
+        assert!(e.contains("temporal_upsample_rounds"), "{e}");
+        let p = decode(base().set("frames", json!(17)).set("width", json!(128)).set("height", json!(128)).set("temporal_upsample_rounds", json!(2))).unwrap();
+        assert_eq!((p.opts.base.frames, p.opts.base.width, p.opts.base.height, p.opts.temporal_upsample_rounds), (17, 128, 128, 2));
     }
 
     #[test]

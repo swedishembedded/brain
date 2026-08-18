@@ -333,13 +333,47 @@ this port:
       (`diffusion_tiling.py`'s overlapping-tile trapezoidal blend), the
       CHUNKED/BLACKWELL_DSL block variants, and multi-step Euler sampling
       (moot for this checkpoint) remain explicit, tracked gaps - see below.
-- [ ] **DFR: general tiling, CHUNKED/BLACKWELL_DSL NA block variants,
-      multi-step Euler sampling** - the NA diffusion decoder above proves the
-      COMBINED pathway (full-volume attention, `w_chunks=1`) at real-weight
-      parity; overlapping-tile chunked decode for clips larger than one NA
-      window's comfortable reach, the deferred-stage-4 `ChunkedDiffusionNABlock`/
-      `BLACKWELL_DSL` pathways, and a real (`N>1`, `model_output_type="v"`)
-      Euler sampling loop are all still out of scope.
+- [x] **DFR geometry + a smoke-level multi-stage pipeline** (`crates/ltxv/src/
+      dfr.rs`, `pipeline::generate_dfr`, `brain ltxv dfr`, plus a `dfr`
+      `capability::Action` in `caps.rs`/`resident_ltxv.rs` alongside `t2v` -
+      the serving contract's obligation 1 is explicit that a CLI subcommand
+      must never be the ONLY entry point, so `dfr` is reachable through
+      `brain do brain/ltxv dfr` and `Subscribe` over D-Bus too, not just the
+      dedicated CLI module) - the real,
+      weight-free bookkeeping (`resolve_canvas`, `pixel_to_latent_index`,
+      `keyframe_slots` building the `keyframes_mask` seam
+      `dit::LtxDit::forward` has accepted since M3, `tile_ranges`/
+      `stitch_tile_latents` for the overlapping-tile temporal-round stitch,
+      `target_frame_count`) is unit-tested with most cases pinned against a
+      LIVE run of the reference `dfr_layout.py` functions, not hand-derived
+      (`crates/ltxv/src/dfr.rs`'s own test doc comments record the exact
+      `python3 -c "..."` invocation each number came from). `generate_dfr`
+      wires it into a real end-to-end pipeline: half-res base generation with
+      appended keyframe-slot tokens, a REAL spatial x2 latent upscale
+      (M8a's `upsampler.rs`, applied to both the video and its slots), a
+      full-res detailing pass that re-noises the real upscaled result via
+      `GaussianNoiser`'s own `torch.lerp(seed, noise, sigma0)` formula (not a
+      fresh unrelated noise draw), and 0-2 real temporal x2 upsample rounds
+      (M8a's temporal upsampler) with tile-based re-noise + stitch, ending in
+      the same real VAE conv-decoder decode `generate` uses. Still the tiny
+      random-weight DiT and stub text-context seed M4 established - no real
+      22B checkpoint exists to load. Explicit, tracked gaps beyond the
+      already-recorded IC-LoRA absence: no per-token/partial-strength
+      anchor-keyframe carry-forward across temporal-round seams (real DFR
+      pins seam keyframes at `strength=0.95` via per-token timesteps; this
+      pipeline broadcasts one scalar sigma to every token, same limit
+      `denoise`'s own doc already records for M4 - `TileRange::
+      anchor_kf_global` still computes the real anchor position for a future
+      milestone to wire in), the NA diffusion decoder (M8b) is not wired in
+      as an alternative decode path (its tiling/scale contract differs
+      enough to be a separate integration), no real distilled-schedule sigma
+      tables (every stage uses the same generic `ltx2_sigmas` M4 already
+      proved), and keyframe-slot RoPE positions use this port's existing
+      plain-integer-latent-grid convention rather than upstream's
+      fps-normalized units (see `dfr.rs`'s module doc). General overlapping-
+      tile chunked NA-decoder decode, the CHUNKED/BLACKWELL_DSL block
+      variants, and multi-step Euler sampling (all recorded under M8b above)
+      are unaffected by this milestone.
 - [ ] **NPU export, INT8, sharding, optimization pass** - only after parity is
       frozen, per porting.md sec10.
 
@@ -414,6 +448,13 @@ land. Known traps already identified from reading (not yet test-pinned):
   contract exploration, not new to this port.
 - Image-to-video, IC-LoRA pipelines, and the `DubIt` speaker-identity pipeline
   are out of scope for this port.
+- `examples/videogen/` is `wan`-authored and generic enough to drive `brain/
+  ltxv`'s `t2v` action as-is (same param names, `--model brain/ltxv` plus
+  explicit `--width`/`--height` compatible with the 32-stride VAE), but its
+  own CLI defaults (416x240) are wan's, not a multiple of ltxv's stride, and
+  it has no `dfr` coverage (a different action name, a different size-stride
+  rule, and `dfr`'s own `temporal_upsample_rounds` param) - a dedicated
+  example/README for `dfr` has not been added.
 
 ## Scope that collapsed once the reference was read
 

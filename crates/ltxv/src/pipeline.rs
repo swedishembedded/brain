@@ -74,6 +74,7 @@ use vae::blocks::Tensors;
 
 use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
+use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas};
 
@@ -503,6 +504,422 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     timings.decode = decode_t.elapsed().as_secs_f32();
     progress(total, total, "done");
     Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out }, timings))
+}
+
+// ============================================================================
+// DFR (Diffusion Fidelity Rendering) - M8c
+// ============================================================================
+
+use crate::dfr;
+
+/// DFR-specific weight paths: the video VAE (decode only, same file
+/// [`Paths`] already names) plus the two real latent upscalers
+/// (spatial x2 always required, temporal x2 only when
+/// [`DfrOpts::temporal_upsample_rounds`] is nonzero). Kept as its OWN struct
+/// rather than adding fields to [`Paths`], so [`generate`]/[`Paths`] stay
+/// exactly what M4 shipped - this milestone EXTENDS the pipeline, it does
+/// not touch M4's own surface (see this crate's module doc).
+///
+/// ## What's real in [`generate_dfr`], precisely (read before assuming this
+/// ## generates anything real)
+///
+/// Same honesty bar [`generate`]'s own doc sets for M4, extended for DFR's
+/// own additional gaps. REAL:
+///
+/// * The canvas/keyframe-segment geometry ([`crate::dfr::resolve_canvas`]),
+///   the generated-keyframe-slot token append + `keyframes_mask`
+///   construction ([`crate::dfr::keyframe_slots`], landing squarely on the
+///   `keyframes_mask` seam [`crate::dit::LtxDit::forward`] has accepted
+///   since M3), the tile-boundary/lead-in/stitch math
+///   ([`crate::dfr::tile_ranges`]/[`crate::dfr::stitch_tile_latents`]), and
+///   the final frame-count contract ([`crate::dfr::target_frame_count`]).
+/// * The two real-weight latent upscalers ([`crate::upsampler`], M8a) -
+///   stage 1's half-res video AND its generated keyframe slots are BOTH
+///   really spatially upscaled x2, and each temporal round really runs the
+///   real temporal x2 upscaler before tiling.
+/// * Stage 2 and every temporal-round tile genuinely RE-NOISE a real seed
+///   (the upscaled stage-1 result, a tile's temporally-upsampled local
+///   segment) via the same `torch.lerp(seed, noise, sigma0)` formula
+///   `GaussianNoiser` uses, not a fresh unrelated noise draw - see
+///   [`noised_seed`].
+/// * The tiny random-weight DiT ([`generate`]'s own M4 stand-in), the same
+///   real `LTX2Scheduler`/CFG-fold/ancestral-Euler [`denoise`] loop
+///   [`generate`] uses (called once per stage/tile), and the real VAE
+///   conv-decoder decode.
+///
+/// NOT real, by explicit scope (see this crate's module doc, "M8c"):
+///
+/// * **No IC-LoRA at all.** Stage 2's real spatial-detailing adapter does
+///   not exist in this repo (a LoRA on the real 22B model this hardware
+///   cannot run regardless) - `_detailing_lora`/`VideoConditionByReferenceLatent`
+///   have no counterpart here. Stage 2 here is "re-noise the upscaled
+///   result and denoise again with the SAME tiny DiT", which exercises the
+///   real re-noise/keyframe-reseed mechanics but claims no detailing
+///   quality whatsoever.
+/// * **No per-token/partial-strength anchor-keyframe carry-forward.** Real
+///   DFR pins a temporal round's seam keyframes at `strength=0.95`
+///   (`_ANCHOR_KEYFRAME_STRENGTH`) via genuinely PER-TOKEN timesteps -
+///   `denoise`'s own doc already records that this whole pipeline broadcasts
+///   one scalar sigma to every token (no partial/keyframe denoising), and
+///   building real per-token stepping was judged out of scope for a
+///   smoke-level milestone (it would touch the already-parity-tested Euler-
+///   ancestral step machinery, not just pipeline orchestration). Concretely:
+///   each round's tiles regenerate their seam region as ordinary noise
+///   re-seeded only from the temporally-upsampled video (not from a
+///   carried-forward anchor still), so seam continuity across tiles is not
+///   modeled here even though [`crate::dfr::TileRange::anchor_kf_global`]
+///   computes the real anchor positions a future milestone could wire in.
+/// * **The NA diffusion decoder (M8b) is not wired in as an alternative
+///   decode path.** [`generate_dfr`] decodes through the same real conv
+///   decoder [`generate`] uses. `na_decoder::NADecoder`'s tiling/scale
+///   requirements (overlapping-tile chunked decode, `w_chunks`) differ
+///   enough from this decoder's single-shot call that wiring it in was
+///   judged a separate, nontrivial integration - the same "land what's
+///   solid" call M8b's own agent made for its own stage-5/full-chain
+///   question.
+/// * **No real distilled-schedule sigma tables.** Real DFR uses fixed
+///   `DISTILLED_SIGMAS`/`STAGE_2_DISTILLED_SIGMAS`/a `DISTILLED_SIGMAS[4:]`
+///   subrange for temporal rounds; every stage here instead calls the same
+///   generic [`ltx2_sigmas`] at [`GenOpts::steps`] steps, for the same
+///   "one real schedule generator already proven, no second one" reasoning
+///   [`generate`] follows.
+/// * **Position units.** See `crate::dfr`'s module doc: keyframe-slot RoPE
+///   positions live in this port's own fractional-latent-grid convention,
+///   not real LTX's fps-normalized pixel time.
+#[derive(Clone, Debug)]
+pub struct DfrPaths {
+    pub vae: String,
+    pub spatial_upsampler: String,
+    /// Required only when `DfrOpts::temporal_upsample_rounds > 0`.
+    pub temporal_upsampler: Option<String>,
+}
+
+/// `(variable, human name)` - the DFR analogue of [`PATH_VARS`], one row
+/// added per new weight role this milestone needs.
+pub const DFR_PATH_VARS: [(&str, &str); 3] = [("BRAIN_LTXV_VAE", "VAE"), ("BRAIN_LTXV_UPSAMPLER_SPATIAL", "spatial latent upscaler"), ("BRAIN_LTXV_UPSAMPLER_TEMPORAL", "temporal latent upscaler")];
+
+impl DfrPaths {
+    pub fn from_env() -> Result<DfrPaths, String> {
+        DfrPaths::resolve(None, None, None)
+    }
+
+    /// The explicit flag wins over the environment variable, same precedence
+    /// [`Paths::resolve`] uses. The temporal upscaler path is OPTIONAL (only
+    /// `--temporal-upsample-rounds > 0` requires it) - callers that need it
+    /// check `Option::is_none()` themselves, same as
+    /// [`DfrOpts::temporal_upsample_rounds`]'s own validation in
+    /// [`generate_dfr`].
+    pub fn resolve(vae: Option<&str>, spatial_upsampler: Option<&str>, temporal_upsampler: Option<&str>) -> Result<DfrPaths, String> {
+        let required = |flag: Option<&str>, var: &str, role: &str| -> Result<String, String> {
+            match flag.filter(|s| !s.is_empty()) {
+                Some(v) => Ok(v.to_string()),
+                None => match std::env::var(var) {
+                    Ok(v) if !v.is_empty() => Ok(v),
+                    _ => Err(format!("no {role} weights: pass the matching flag or set {var}")),
+                },
+            }
+        };
+        let vae = required(vae, DFR_PATH_VARS[0].0, DFR_PATH_VARS[0].1)?;
+        let spatial_upsampler = required(spatial_upsampler, DFR_PATH_VARS[1].0, DFR_PATH_VARS[1].1)?;
+        let temporal_upsampler = match temporal_upsampler.filter(|s| !s.is_empty()) {
+            Some(v) => Some(v.to_string()),
+            None => std::env::var(DFR_PATH_VARS[2].0).ok().filter(|v| !v.is_empty()),
+        };
+        Ok(DfrPaths { vae, spatial_upsampler, temporal_upsampler })
+    }
+}
+
+/// Everything a single DFR generation varies: the same knobs [`GenOpts`]
+/// already exposes (`width`/`height` are the FULL, stage-2/final resolution
+/// - stage 1 runs at half that), plus DFR's own multi-round knob.
+#[derive(Clone, Debug)]
+pub struct DfrOpts {
+    pub base: GenOpts,
+    /// 0, 1, or 2 temporal x2 refine rounds - `dfr_pipeline.py`'s own
+    /// `temporal_upsample_rounds` contract. `> 0` requires
+    /// [`DfrPaths::temporal_upsampler`].
+    pub temporal_upsample_rounds: usize,
+}
+
+impl Default for DfrOpts {
+    fn default() -> DfrOpts {
+        DfrOpts { base: GenOpts::default(), temporal_upsample_rounds: 0 }
+    }
+}
+
+/// `torch.lerp(seed, noise, sigma0)`: `(1-sigma0)*seed + sigma0*noise` -
+/// `GaussianNoiser.__call__`'s own partial re-noise formula
+/// (`ltx_core.components.noisers`), used everywhere DFR seeds a stage from a
+/// previous stage's REAL content (the upscaled stage-1 video/keyframes for
+/// stage 2, a tile's temporally-upsampled local segment for a round) instead
+/// of the pure noise [`seeded_noise`] draws for stage 1 (which has no prior
+/// content to seed from - `sigma0` there is always effectively 1.0, so this
+/// formula would collapse to plain noise anyway).
+fn noised_seed(seed_content: &[f32], sigma0: f32, seed: u64) -> Vec<f32> {
+    let noise = seeded_noise(seed_content.len(), seed);
+    seed_content.iter().zip(&noise).map(|(&c, &n)| (1.0 - sigma0) * c + sigma0 * n).collect()
+}
+
+/// DFR text to video: half-res base + keyframe slots -> real spatial x2
+/// upscale -> full-res re-noised detailing pass -> 0-2 real temporal x2
+/// upscale + tile-stitch rounds -> real VAE decode. See this section's own
+/// doc (right above [`DfrPaths`]) for exactly what's real and what isn't.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    let base = &o.base;
+    if o.temporal_upsample_rounds > 2 {
+        return Err(format!("temporal_upsample_rounds must be 0, 1, or 2, got {}", o.temporal_upsample_rounds));
+    }
+    if o.temporal_upsample_rounds > 0 && paths.temporal_upsampler.is_none() {
+        return Err("temporal_upsample_rounds > 0 requires a temporal upsampler path".into());
+    }
+    let vcfg = LtxVaeConfig::conv25();
+    if vcfg.latent_frames(base.frames as u32).is_none() {
+        return Err(format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", base.frames));
+    }
+    if !base.width.is_multiple_of(64) || !base.height.is_multiple_of(64) {
+        return Err(format!("{}x{} is not a multiple of 64 for DFR (stage 1 halves it, and the half must still be a multiple of the VAE's 32 spatial stride)", base.width, base.height));
+    }
+    if base.steps == 0 {
+        return Err("--steps must be at least 1".into());
+    }
+
+    let dit_cfg = dit_config_from_name(&base.dit_config)?;
+    if dit_cfg.in_channels != vcfg.latent_channels {
+        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
+    }
+    let in_channels = dit_cfg.in_channels as usize;
+
+    let (canvas_frames, _segment, kf_positions) = dfr::resolve_canvas(base.frames, dfr::VIDEO_TEMPORAL_SCALE)?;
+    let lat_t = vcfg.latent_frames(canvas_frames as u32).expect("resolve_canvas always returns a 1+8k frame count") as usize;
+    let k = kf_positions.len();
+
+    let mut timings = Timings::default();
+    let total_phases = (3 + o.temporal_upsample_rounds + 1) as u32; // build, stage1, stage2, N rounds, decode
+
+    // Every per-stage `denoise` call below gets its OWN no-op progress
+    // closure (a fresh literal each call site, not a shared `&mut` binding -
+    // `&mut impl FnMut` is not `Copy`/`Clone`, so one binding could not be
+    // reused across the several `denoise` calls this function makes). This
+    // function reports progress itself, once per stage/tile, instead of
+    // forwarding `denoise`'s own per-step granularity - a deliberate
+    // simplification for a multi-stage pipeline (see this section's doc).
+
+    // ---- build the DiT once - shared by every stage/tile (see this
+    // section's doc: no detailing LoRA, so stage 2 reuses the SAME weights
+    // stage 1 and every round tile use) ----
+    progress(0, total_phases, "build transformer");
+    let build_t = Instant::now();
+    let weight_seed = base.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT"
+    let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
+    let dit = LtxDit::new(dit_cfg, weights, base.device.as_deref());
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+
+    let prompt_mix = base.seed ^ fnv1a(prompt);
+    let ctx_cond = context_stub(base.context_len, dit_cfg.cross_attention_dim as usize, prompt_mix);
+    let ctx_uncond = vec![0f32; base.context_len * dit_cfg.cross_attention_dim as usize];
+
+    let denoise_t = Instant::now();
+
+    // ---- Stage 1: half-res base + keyframe slots, pure noise (no prior
+    // stage exists to seed from) ----
+    progress(1, total_phases, "stage1 denoise");
+    let (lh1, lw1) = (base.height / 2 / 32, base.width / 2 / 32);
+    let t0_1 = lat_t * lh1 * lw1;
+    let base_positions_1 = grid_positions(lat_t, lh1, lw1);
+    let layout1 = dfr::keyframe_slots(t0_1, &base_positions_1, lh1, lw1, &kf_positions, dfr::VIDEO_TEMPORAL_SCALE, true)?;
+    let t1 = layout1.total_tokens;
+    let sigmas1 = ltx2_sigmas(t1, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
+    let latent1_0 = seeded_noise(t1 * in_channels, base.seed ^ 0x53_31);
+    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+
+    let reserved_half_res_video = tc_to_chw(&final1[..t0_1 * in_channels], in_channels, lat_t, lh1, lw1);
+    let slot1_chw = tc_to_chw(&final1[t0_1 * in_channels..], in_channels, k, lh1, lw1);
+
+    // ---- real spatial x2 upscale (M8a) of BOTH the video and its slots ----
+    progress(1, total_phases, "spatial upscale");
+    let sraw = read_any(&paths.spatial_upsampler)?;
+    let scfg = LatentUpsamplerConfig::spatial_x2();
+    let sweights = crate::import::import_upsampler(sraw, &scfg)?;
+    let video_upsampler = LatentUpsampler::build(&scfg, &sweights, lat_t as u32, lh1 as u32, lw1 as u32, base.device.as_deref());
+    let upscaled_video_chw = video_upsampler.upsample(&reserved_half_res_video);
+    let (_, _, lh2u, lw2u) = video_upsampler.out_shape();
+    let slots_upsampler = LatentUpsampler::build(&scfg, &sweights, k as u32, lh1 as u32, lw1 as u32, base.device.as_deref());
+    let upscaled_slots_chw = slots_upsampler.upsample(&slot1_chw);
+    drop(sweights);
+
+    let (lh2, lw2) = (lh2u as usize, lw2u as usize);
+    let (want_lh2, want_lw2) = (base.height / 32, base.width / 32);
+    if (lh2, lw2) != (want_lh2, want_lw2) {
+        return Err(format!("spatial upscaler produced a {lh2}x{lw2} latent grid, expected {want_lh2}x{want_lw2} for {}x{}", base.width, base.height));
+    }
+
+    // ---- Stage 2: full-res detailing, RE-NOISED from the real upscaled
+    // seed (no IC-LoRA - see this section's doc) ----
+    progress(2, total_phases, "stage2 denoise");
+    let t0_2 = lat_t * lh2 * lw2;
+    let base_positions_2 = grid_positions(lat_t, lh2, lw2);
+    let layout2 = dfr::keyframe_slots(t0_2, &base_positions_2, lh2, lw2, &kf_positions, dfr::VIDEO_TEMPORAL_SCALE, true)?;
+    let t2 = layout2.total_tokens;
+    let sigmas2 = ltx2_sigmas(t2, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
+    let sigma2_0 = sigmas2[0] as f32;
+    let mut seed2 = chw_to_tc(&upscaled_video_chw, in_channels, lat_t, lh2, lw2);
+    seed2.extend_from_slice(&chw_to_tc(&upscaled_slots_chw, in_channels, k, lh2, lw2));
+    let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x53_32);
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+
+    let mut video_chw = tc_to_chw(&final2[..t0_2 * in_channels], in_channels, lat_t, lh2, lw2);
+    let mut cur_lat_t = lat_t;
+
+    // ---- 0-2 temporal x2 upsample rounds, tile-based ----
+    if o.temporal_upsample_rounds > 0 {
+        let traw = read_any(paths.temporal_upsampler.as_ref().expect("checked above"))?;
+        let tcfg = LatentUpsamplerConfig::temporal_x2();
+        let tweights = crate::import::import_upsampler(traw, &tcfg)?;
+
+        for round_idx in 1..=o.temporal_upsample_rounds {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(2 + round_idx as u32, total_phases, &format!("temporal round {round_idx}"));
+
+            let tup = LatentUpsampler::build(&tcfg, &tweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref());
+            let upsampled_video = tup.upsample(&video_chw);
+            let (_, ut, _, _) = tup.out_shape();
+            let new_lat_t = ut as usize;
+
+            let round_num_frames = dfr::target_frame_count(canvas_frames, round_idx as u32);
+            let seam_positions: Vec<usize> = kf_positions.iter().map(|&p| p * (1usize << round_idx)).collect();
+            let num_tiles = 1usize << round_idx;
+            let tiles = dfr::tile_ranges(&seam_positions, round_num_frames, num_tiles, dfr::VIDEO_TEMPORAL_SCALE, dfr::TILE_LEAD_SEGMENTS)?;
+
+            let mut tile_video_outputs: Vec<Vec<f32>> = Vec::with_capacity(tiles.len());
+            for (tile_index, tile) in tiles.iter().enumerate() {
+                if cancel.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                let lat_t_local = tile.latent_end_exclusive - tile.latent_start;
+                let tile_video_chw = dfr::slice_time_chw(&upsampled_video, in_channels, new_lat_t, lh2, lw2, tile.latent_start, tile.latent_end_exclusive);
+                let tile_video_tc = chw_to_tc(&tile_video_chw, in_channels, lat_t_local, lh2, lw2);
+
+                let local_slot_positions = dfr::remap_positions_to_local(&tile.slot_kf_global, tile.pixel_start);
+                let base_positions_tile = grid_positions(lat_t_local, lh2, lw2);
+                let t0_tile = lat_t_local * lh2 * lw2;
+                let layout_tile = dfr::keyframe_slots(t0_tile, &base_positions_tile, lh2, lw2, &local_slot_positions, dfr::VIDEO_TEMPORAL_SCALE, true)?;
+                let t_tile = layout_tile.total_tokens;
+
+                // Slot content seeds from the nearest local video latent
+                // frame's tokens (`_slot_initials_from_video`'s own
+                // nearest-frame rule).
+                let mut seed_tile = tile_video_tc.clone();
+                let hw = lh2 * lw2;
+                for &lp in &local_slot_positions {
+                    let fi = ((lp as f64 / dfr::VIDEO_TEMPORAL_SCALE as f64).round() as usize).min(lat_t_local.saturating_sub(1));
+                    let start = fi * hw * in_channels;
+                    seed_tile.extend_from_slice(&tile_video_tc[start..start + hw * in_channels]);
+                }
+
+                let sigmas_tile = ltx2_sigmas(t_tile, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
+                let sigma_tile_0 = sigmas_tile[0] as f32;
+                let reseed_seed = base.seed ^ 0x52_53 ^ (1000 * round_idx as u64) ^ tile_index as u64;
+                let latent_tile_0 = noised_seed(&seed_tile, sigma_tile_0, reseed_seed);
+                // Tiles are positionally identical across rounds, so a
+                // shared noise seed would inject byte-identical ancestral
+                // noise into every one of them - offset per round/tile, the
+                // same reasoning `dfr_pipeline.py`'s own `noise_seed=seed +
+                // 1000*round_idx + tile_index` documents.
+                let noise_seed_tile = base.seed ^ 0x54_49 ^ (1000 * round_idx as u64) ^ tile_index as u64;
+                let final_tile = denoise(
+                    &dit,
+                    &sigmas_tile,
+                    latent_tile_0,
+                    &layout_tile.positions,
+                    &layout_tile.keyframes_mask,
+                    &ctx_cond,
+                    &ctx_uncond,
+                    base.context_len,
+                    t_tile,
+                    base.guidance,
+                    base.eta,
+                    base.s_noise,
+                    noise_seed_tile,
+                    base.steps as u32,
+                    cancel,
+                    &mut |_, _, _: &str| {},
+                )?;
+                tile_video_outputs.push(tc_to_chw(&final_tile[..t0_tile * in_channels], in_channels, lat_t_local, lh2, lw2));
+            }
+
+            video_chw = dfr::stitch_tile_latents(&tile_video_outputs, &tiles, in_channels, lh2, lw2)?;
+            let expected_t = (round_num_frames - 1) / dfr::VIDEO_TEMPORAL_SCALE + 1;
+            let actual_t = video_chw.len() / (in_channels * lh2 * lw2);
+            if actual_t != expected_t {
+                return Err(format!("temporal round {round_idx}: stitched latent T={actual_t} != expected {expected_t}"));
+            }
+            cur_lat_t = actual_t;
+        }
+    }
+
+    // ---- trim to the caller's frame-count contract (see
+    // `dfr::target_frame_count`'s doc) - applies even at rounds=0, since the
+    // canvas may have padded past the requested frame count on its own ----
+    let target_frames = dfr::target_frame_count(base.frames, o.temporal_upsample_rounds as u32);
+    let keep_latents = (target_frames - 1) / dfr::VIDEO_TEMPORAL_SCALE + 1;
+    if keep_latents > cur_lat_t {
+        return Err(format!("target {target_frames} frames exceeds the generated canvas ({cur_lat_t} latent frames)"));
+    }
+    if keep_latents != cur_lat_t {
+        video_chw = dfr::slice_time_chw(&video_chw, in_channels, cur_lat_t, lh2, lw2, 0, keep_latents);
+        cur_lat_t = keep_latents;
+    }
+    timings.denoise = denoise_t.elapsed().as_secs_f32();
+    timings.steps = base.steps;
+    timings.tokens = t2;
+    timings.forwards_per_step = if base.guidance > 1.0 { 2 } else { 1 };
+
+    // ---- decode -------------------------------------------------------------
+    progress(total_phases - 1, total_phases, "vae decode");
+    let decode_t = Instant::now();
+    let vraw = read_any(&paths.vae)?;
+    let vweights = crate::import::import_vae(vraw, &vcfg)?;
+    let dec = LtxVaeDecoder::build(&vcfg, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref());
+    drop(vweights);
+    let pixels = dec.decode(&video_chw);
+    let frames = dec.frames() as usize;
+    let (w, h) = (base.width, base.height);
+    if pixels.len() != 3 * frames * h * w {
+        return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
+    }
+    let plane = frames * h * w;
+    let out: Vec<Vec<u8>> = (0..frames)
+        .map(|f| {
+            let mut px = vec![0u8; h * w * 3];
+            for c in 0..3 {
+                // Deliberately NOT named `base` (this closure's own plane
+                // offset) - `generate_dfr`'s `base: &GenOpts` is in scope
+                // here, and this repo's own porting playbook flags exactly
+                // this kind of unrelated shadow as a readability trap.
+                let plane_base = c * plane + f * h * w;
+                for i in 0..h * w {
+                    px[i * 3 + c] = (127.5 * (pixels[plane_base + i].clamp(-1.0, 1.0) + 1.0)) as u8;
+                }
+            }
+            px
+        })
+        .collect();
+    timings.decode = decode_t.elapsed().as_secs_f32();
+    let fps = base.fps * (1usize << o.temporal_upsample_rounds);
+    progress(total_phases, total_phases, "done");
+    Ok((Video { width: w as u32, height: h as u32, fps, frames: out }, timings))
 }
 
 #[cfg(test)]

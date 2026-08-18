@@ -17,7 +17,7 @@
 //! deterministic noise/context seed). See `ltxv::pipeline`'s module doc for
 //! the full account of what is real here and what is not.
 
-use ltxv::pipeline::{GenOpts, Paths};
+use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, Paths};
 
 const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
@@ -50,7 +50,54 @@ Weights (flag wins over the environment variable):
   --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
 
 Devices:
-  --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)"#;
+  --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
+
+Subcommands:
+  brain ltxv t2v --help       text to video (this command)
+  brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#;
+
+const DFR_HELP: &str = r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering) smoke test
+
+  brain ltxv dfr --prompt <text> --output-path <out.mp4> [options]
+
+DFR runs half-res base generation with generated keyframe slots, a REAL
+spatial x2 latent upscale, a full-res re-noised detailing pass (no
+IC-LoRA - none is downloaded, see `ltxv::pipeline`'s DFR doc), and 0-2
+REAL temporal x2 upsample rounds with tile-based stitching. Same tiny
+random-weight DiT and stub text context `t2v` uses - see
+`ltxv::pipeline`'s module doc (search "M8c") for exactly what DFR
+mechanics are real here and which remain a documented gap.
+
+Required:
+  --prompt <text>            folded into a deterministic noise/context seed
+                             only - there is no real text encoder yet
+  --output-path <file>       .mp4 / .mkv / .webm / .gif
+
+Sampling (same shape as `t2v`; --width/--height are the FULL, stage-2
+resolution - stage 1 halves it, so both must be a multiple of 64):
+  --frames <N>                video frames, must be 1 + 8k (default 9)
+  --width <W> --height <H>    pixels, multiples of 64 (default 64x64)
+  --steps <N>                  denoise steps per stage/tile (default 4)
+  --guidance <G>               classifier-free guidance (default 1.0)
+  --seed <S>                   initial-noise/weight/context seed (default 0)
+  --fps <N>                    stage-1 frame rate; the written fps is this
+                               times 2^rounds (default 8)
+  --base-shift <F>             LTX2Scheduler shift anchor at 1024 tokens (0.95)
+  --max-shift <F>              LTX2Scheduler shift anchor at 4096 tokens (2.05)
+  --no-stretch                  skip the terminal-sigma stretch (on by default)
+  --terminal <F>                stretch target sigma (default 0.1)
+  --eta <F>                     ancestral-Euler eta (default 1.0)
+  --dit-config <name>           DiT size; only "tiny" is implemented (default)
+  --temporal-upsample-rounds <N> 0, 1, or 2 real temporal x2 refine rounds
+                                 (default 0; > 0 needs --temporal-upsampler)
+
+Weights (flag wins over the environment variable):
+  --vae <path>                 $BRAIN_LTXV_VAE       the causal 3D video VAE
+  --spatial-upsampler <path>   $BRAIN_LTXV_UPSAMPLER_SPATIAL
+  --temporal-upsampler <path>  $BRAIN_LTXV_UPSAMPLER_TEMPORAL
+
+Devices:
+  --device <cpu|gpu>            DiT + VAE + upscalers (default: BRAIN_DEVICE)"#;
 
 pub fn run_ltxv(args: &[String]) {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
@@ -61,6 +108,12 @@ pub fn run_ltxv(args: &[String]) {
         "t2v" | "text2video" => {
             if let Err(e) = t2v(&args[1..]) {
                 eprintln!("ltxv t2v: {e}");
+                std::process::exit(1);
+            }
+        }
+        "dfr" => {
+            if let Err(e) = dfr(&args[1..]) {
+                eprintln!("ltxv dfr: {e}");
                 std::process::exit(1);
             }
         }
@@ -168,6 +221,105 @@ fn t2v(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn dfr(args: &[String]) -> Result<(), String> {
+    let mut o = DfrOpts::default();
+    let mut prompt: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut vae: Option<String> = None;
+    let mut spatial_upsampler: Option<String> = None;
+    let mut temporal_upsampler: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        let flt = |i: usize, what: &str| -> Result<f32, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        let dbl = |i: usize, what: &str| -> Result<f64, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        match args[i].as_str() {
+            "--prompt" => {
+                prompt = Some(need(i)?.clone());
+            }
+            "--output-path" | "--out" => {
+                out = Some(need(i)?.clone());
+            }
+            "--frames" => o.base.frames = num(i, "--frames")?,
+            "--width" => o.base.width = num(i, "--width")?,
+            "--height" => o.base.height = num(i, "--height")?,
+            "--steps" => o.base.steps = num(i, "--steps")?,
+            "--fps" => o.base.fps = num(i, "--fps")?,
+            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--base-shift" => o.base.base_shift = dbl(i, "--base-shift")?,
+            "--max-shift" => o.base.max_shift = dbl(i, "--max-shift")?,
+            "--terminal" => o.base.terminal = dbl(i, "--terminal")?,
+            "--eta" => o.base.eta = dbl(i, "--eta")?,
+            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--temporal-upsample-rounds" => o.temporal_upsample_rounds = num(i, "--temporal-upsample-rounds")?,
+            "--device" => {
+                o.base.device = Some(need(i)?.clone());
+            }
+            "--vae" => {
+                vae = Some(need(i)?.clone());
+            }
+            "--spatial-upsampler" => {
+                spatial_upsampler = Some(need(i)?.clone());
+            }
+            "--temporal-upsampler" => {
+                temporal_upsampler = Some(need(i)?.clone());
+            }
+            // `--no-stretch` is a bare flag (no value), unlike every other
+            // option above - handled separately so the `i += 2` stride below
+            // stays uniform for everything else.
+            "--no-stretch" => {
+                o.base.stretch = false;
+                i += 1;
+                continue;
+            }
+            "--help" | "-h" => {
+                println!("{DFR_HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{DFR_HELP}")),
+        }
+        i += 2;
+    }
+    let prompt = prompt.ok_or("--prompt is required")?;
+    let out = out.ok_or("--output-path is required")?;
+    let paths = DfrPaths::resolve(vae.as_deref(), spatial_upsampler.as_deref(), temporal_upsampler.as_deref())?;
+
+    eprintln!(
+        "ltxv dfr (M8c smoke test - tiny random-weight DiT, real VAE + real upscalers): {} frames -> canvas, {}x{}, {} steps, {} temporal round(s), seed {}",
+        o.base.frames, o.base.width, o.base.height, o.base.steps, o.temporal_upsample_rounds, o.base.seed
+    );
+
+    let t0 = std::time::Instant::now();
+    // A one-shot CLI run has no second party to cancel it - see `t2v`'s
+    // identical reasoning.
+    let cancel = capability::CancelToken::default();
+    let (video, timings) = ltxv::pipeline::generate_dfr(&paths, &prompt, &o, &cancel, |done, total, phase| {
+        eprint!("\rltxv dfr [{done}/{total}] {phase}                    ");
+    })?;
+    eprintln!();
+    eprintln!(
+        "ltxv dfr: {:.1}s total  (build {:.2}s, denoise+upsample {:.1}s, vae {:.1}s)",
+        t0.elapsed().as_secs_f32(),
+        timings.build_dit,
+        timings.denoise,
+        timings.decode
+    );
+
+    let frames: Vec<imaging::Rgb8> = video.frames.iter().map(|px| imaging::Rgb8::new(video.width, video.height, px.clone())).collect::<Result<_, _>>()?;
+    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())? {
+        imaging::video::Encoded::Video(p) => {
+            eprintln!("ltxv dfr: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
+        }
+        imaging::video::Encoded::Frames { dir, command } => {
+            eprintln!("ltxv dfr: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
+            eprintln!("ltxv dfr: finish the job with:\n  {command}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// The help text is the whole user interface: every flag the parser
@@ -200,6 +352,41 @@ mod tests {
         }
         for (var, _) in ltxv::pipeline::PATH_VARS {
             assert!(super::HELP.contains(var), "{var} is read but not in --help");
+        }
+    }
+
+    /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
+    /// scoped to `dfr`'s own flags and help text.
+    #[test]
+    fn every_dfr_flag_the_parser_accepts_is_documented() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in [
+            "--prompt",
+            "--output-path",
+            "--frames",
+            "--width",
+            "--height",
+            "--steps",
+            "--fps",
+            "--guidance",
+            "--seed",
+            "--base-shift",
+            "--max-shift",
+            "--no-stretch",
+            "--terminal",
+            "--eta",
+            "--dit-config",
+            "--temporal-upsample-rounds",
+            "--device",
+            "--vae",
+            "--spatial-upsampler",
+            "--temporal-upsampler",
+        ] {
+            assert!(super::DFR_HELP.contains(flag), "{flag} is parsed but not in dfr --help");
+            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in dfr --help but not parsed");
+        }
+        for (var, _) in ltxv::pipeline::DFR_PATH_VARS {
+            assert!(super::DFR_HELP.contains(var), "{var} is read but not in dfr --help");
         }
     }
 }
