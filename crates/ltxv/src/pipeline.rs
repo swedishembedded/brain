@@ -632,19 +632,13 @@ impl DfrPaths {
 /// Everything a single DFR generation varies: the same knobs [`GenOpts`]
 /// already exposes (`width`/`height` are the FULL, stage-2/final resolution
 /// - stage 1 runs at half that), plus DFR's own multi-round knob.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DfrOpts {
     pub base: GenOpts,
     /// 0, 1, or 2 temporal x2 refine rounds - `dfr_pipeline.py`'s own
     /// `temporal_upsample_rounds` contract. `> 0` requires
-    /// [`DfrPaths::temporal_upsampler`].
+    /// [`DfrPaths::temporal_upsampler`]. Defaults to 0: no refine round.
     pub temporal_upsample_rounds: usize,
-}
-
-impl Default for DfrOpts {
-    fn default() -> DfrOpts {
-        DfrOpts { base: GenOpts::default(), temporal_upsample_rounds: 0 }
-    }
 }
 
 /// `torch.lerp(seed, noise, sigma0)`: `(1-sigma0)*seed + sigma0*noise` -
