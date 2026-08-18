@@ -7,7 +7,7 @@
 //! bases, plus every never-targeted weight: norms, the routed MoE experts,
 //! the shared expert, the router, embeddings, `A_log`/`dt_bias`,
 //! `conv1d.weight`) must come out of a real training loop bit-identical to
-//! where it started. Not a gradcheck (that's `gradcheck::check_qwen35_lora`,
+//! where it started. Not a gradcheck (that's `gradcheck::check_qwen35moe_lora`,
 //! which validates the ADAPTER gradients are numerically correct) — this is
 //! the complementary "did the freeze actually hold" check the
 //! "close the loop on features that silently do nothing" convention asks

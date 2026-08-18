@@ -46,7 +46,7 @@
 //! `import::tests::config_and_tokenizer_extract_from_the_real_checkpoint`'s
 //! own convention -- this is a measured demonstration to run and report on
 //! honestly, not a CI correctness gate (that is
-//! `gradcheck::check_qwen35_lora` for the LoRA math, and
+//! `gradcheck::check_qwen35moe_lora` for the LoRA math, and
 //! `crates/qwen35moe/tests/shard_parity.rs` for the sharding itself, both of
 //! which run on tiny synthetic configs on every `cargo test`).
 //!
@@ -149,7 +149,7 @@ fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
 
     let steps = std::env::var("BRAIN_QWEN35_SMOKE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(8usize);
     // A real pretrained checkpoint's gradient scale is nothing like a
-    // freshly-initialised toy config's -- `gradcheck::check_qwen35_lora`'s
+    // freshly-initialised toy config's -- `gradcheck::check_qwen35moe_lora`'s
     // own `5e-2` (fine on tiny random weights) sent this test's loss into a
     // visible AdamW overshoot before this default was lowered (see the
     // single-GPU-truncated predecessor of this test for the measured

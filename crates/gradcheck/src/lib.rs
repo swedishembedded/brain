@@ -1034,8 +1034,8 @@ pub fn check_ltxv_conditioning(seed: u64) -> Report {
 /// same chunk COUNT, for less FD compute. `b: 1` (a single sequence) is enough
 /// to exercise every op; nothing here is batch-shaped in a way `b: 2` would add
 /// coverage for.
-pub fn check_qwen35(seed: u64) -> Report {
-    let model = qwen35_gradcheck_harness(seed);
+pub fn check_qwen35moe(seed: u64) -> Report {
+    let model = qwen35moe_gradcheck_harness(seed);
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
@@ -1070,10 +1070,10 @@ pub fn check_qwen35(seed: u64) -> Report {
 /// therefore needs an init scale that survives it. `std=1.0` for just these
 /// two GDN-specific tensors (everything else keeps the standard init) was
 /// confirmed to restore real, non-degenerate FD sensitivity to `A_log`
-/// (`check_qwen35_a_log_elementwise`) without needing to touch
+/// (`check_qwen35moe_a_log_elementwise`) without needing to touch
 /// `qwen35moe::init`'s production init or `model::gdn`'s `eps`, neither of
 /// which is wrong for the REAL model's much wider `d_model`.
-fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
+fn qwen35moe_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
     use qwen35moe::config::Qwen35Config;
     use qwen35moe::model::Qwen35;
     let cfg = Qwen35Config { n_layers: 4, n_experts: 3, top_k: 3, ..Qwen35Config::tiny() };
@@ -1104,7 +1104,7 @@ fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
 /// fold error (see `check_t5_rel_bias_elementwise`'s measured T5 case).
 ///
 /// This is not a hypothetical concern for THIS config: in
-/// [`check_qwen35`], every `blocks.{0,1,2}.linear_attn.*` parameter's
+/// [`check_qwen35moe`], every `blocks.{0,1,2}.linear_attn.*` parameter's
 /// numeric finite difference reads exactly `0.0` (the true per-tensor
 /// directional derivative is far below fp32 resolution at this depth from
 /// the loss, with only one `Full`-attention layer at the end pulling
@@ -1114,15 +1114,15 @@ fn qwen35_gradcheck_harness(seed: u64) -> qwen35moe::model::Qwen35 {
 /// difference is `eps·|∂L/∂wᵢ|` with no `√numel` contraction, so it stays
 /// resolvable even when the tensor-level directional derivative would round
 /// to zero.
-pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
-    let model = qwen35_gradcheck_harness(seed);
+pub fn check_qwen35moe_a_log_elementwise(seed: u64) -> Report {
+    let model = qwen35moe_gradcheck_harness(seed);
     elementwise_check(&model, "blocks.2.linear_attn.A_log", 3e-1)
 }
 
 /// Build a tiny **LoRA** hybrid Qwen3.5-35B-A3B decoder (rank-2 adapters on
 /// every one of the 9 targetable GDN/GQA projections - `qwen35moe::config
 /// ::lora_targets()` - over the same `n_layers: 4, n_experts: 3, top_k: 3`
-/// shape [`check_qwen35`] uses, so BOTH layer types are exercised: layers 0-2
+/// shape [`check_qwen35moe`] uses, so BOTH layer types are exercised: layers 0-2
 /// are `Linear` (GDN), layer 3 is `Full` (GQA)) and gradient-check the
 /// adapters. This is the correctness gate for `Qwen35::lora_fwd` (the
 /// two-matmul + `AXPY` fusion) and the LoRA branch of `Qwen35::proj_bwd` (the
@@ -1141,10 +1141,10 @@ pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
 /// A few AdamW steps run first so the zero-initialised `B` adapter (and hence
 /// `A`'s gradient) is non-trivial before the FD comparison - same reasoning
 /// as `check_qwen_lora`'s own doc, and the same `in_proj_qkv.weight`/
-/// `conv1d.weight` wide-init workaround [`qwen35_gradcheck_harness`]'s own
+/// `conv1d.weight` wide-init workaround [`qwen35moe_gradcheck_harness`]'s own
 /// doc explains (this harness hits the identical numerical-conditioning gap
 /// through the same GDN pipeline, LoRA or not).
-pub fn check_qwen35_lora(seed: u64) -> Report {
+pub fn check_qwen35moe_lora(seed: u64) -> Report {
     use qwen35moe::config::{lora_cfg, Qwen35Config};
     use qwen35moe::model::Qwen35;
     let cfg = Qwen35Config { n_layers: 4, n_experts: 3, top_k: 3, lora: Some(lora_cfg(2, 4.0)), ..Qwen35Config::tiny() };
@@ -1446,11 +1446,11 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_analytic_grads_match_finite_differences() {
+    fn qwen35moe_analytic_grads_match_finite_differences() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let report = check_qwen35(7);
+        let report = check_qwen35moe(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);
@@ -1463,11 +1463,11 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_a_log_elementwise_grads_match_finite_differences() {
+    fn qwen35moe_a_log_elementwise_grads_match_finite_differences() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let report = check_qwen35_a_log_elementwise(7);
+        let report = check_qwen35moe_a_log_elementwise(7);
         report.print();
         let (atol, rtol) = (4e-3, 8e-2);
         let fails = report.failures(atol, rtol);
@@ -1479,11 +1479,11 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_lora_analytic_grads_match_finite_differences() {
+    fn qwen35moe_lora_analytic_grads_match_finite_differences() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let report = check_qwen35_lora(7);
+        let report = check_qwen35moe_lora(7);
         report.print();
         let (atol, rtol) = (4e-3, 8e-2);
         let fails = report.failures(atol, rtol);

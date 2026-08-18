@@ -1720,7 +1720,7 @@ token fails loudly.
       by exactly ONE matmul chain per targeted projection, not folded/summed
       across several call sites the way T5's `rel_bias` is; that is the same
       choice `qwen3::gradcheck::check_qwen_lora`/`qwen35moe::gradcheck::
-      check_qwen35_lora` already made for the identical shape). The composite
+      check_qwen35moe_lora` already made for the identical shape). The composite
       smoke test (`deepseekocr/tests/tiny_ref.rs::
       composite_lora_backward_freezes_the_base_and_descends`) is modelled
       directly on `composite_backward_reaches_the_image_and_descends`'s own

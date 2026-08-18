@@ -188,6 +188,18 @@ pub const ARCHS: &[Arch] = &[
     // class name.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B")),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
+    // The DENSE sibling of qwen35moe - llama.cpp registers the two as
+    // separate architectures (`LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`)
+    // despite sharing one HF `model_type` ("qwen3_5"): same hybrid Gated
+    // DeltaNet / gated-GQA mixer split, but a plain dense SwiGLU MLP instead
+    // of qwen35moe's 256-expert MoE, plus a single-layer MTP head and a
+    // spliced Qwen3-VL-style vision tower (no DeepStack) - hence `Multimodal`
+    // here even though llama.cpp's own arch classifies it as text-only (its
+    // GGUF conversion path drops the vision tower). `hf` carries both the
+    // real `architectures[0]` class and the `model_type` fallback spelling,
+    // same convention as `qwen3`'s row - a config lacking `architectures`
+    // still resolves via `model_type: "qwen3_5"`.
+    arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"), weights_env: &[("BRAIN_QWEN35_DIR", "dir")]),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M")),
@@ -465,6 +477,20 @@ mod tests {
         assert_eq!(by_gguf("qwen35moe").map(|a| a.id), Some("qwen35moe"));
         assert_eq!(by_gguf("deepseek2-ocr").map(|a| a.id), Some("deepseek2ocr"));
         assert_eq!(by_gguf("deepseek2ocr"), None); // the id itself is NOT the gguf spelling here
+    }
+
+    #[test]
+    fn qwen35_and_qwen35moe_are_distinct_rows_despite_the_shared_prefix() {
+        // "qwen35" is a literal prefix of "qwen35moe" - every lookup here
+        // (`by_id`/`by_hf`/`by_gguf`) is `==`/exact-slice-contains, never
+        // `starts_with`, so this is a regression guard against that ever
+        // changing, not a fix for a live bug.
+        assert_eq!(by_id("qwen35").map(|a| a.id), Some("qwen35"));
+        assert_eq!(by_id("qwen35moe").map(|a| a.id), Some("qwen35moe"));
+        assert_eq!(by_gguf("qwen35").map(|a| a.id), Some("qwen35"));
+        assert_eq!(by_gguf("qwen35moe").map(|a| a.id), Some("qwen35moe"));
+        assert_eq!(by_hf("Qwen3_5ForConditionalGeneration").map(|a| a.id), Some("qwen35"));
+        assert_eq!(by_hf("qwen3_5").map(|a| a.id), Some("qwen35"));
     }
 
     #[test]

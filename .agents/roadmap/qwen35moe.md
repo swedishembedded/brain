@@ -15,8 +15,11 @@ Qwen3.5-35B-A3B: a hybrid decoder mixing Gated DeltaNet (chunked linear-attentio
 - [ ] Overlapped (GPipe-style) pipeline execution - the sharded pipeline currently runs strictly sequentially, one GPU active at a time.
 - [ ] An INT4/INT8 frozen base with a trainable (backward-capable) path - needs a dequantizing backward matmul kernel that doesn't exist yet.
 - [ ] Register-tiled (non-naive) GEMM for weight gradients - a performance gap, not a correctness one.
-- [ ] Multi-token prediction (MTP) head - currently dropped during import, out of scope for this port.
-- [ ] A dense (non-MoE) Qwen3.5-27B sibling configuration.
 - [ ] Numerical parity against the reference implementation - only structural correctness of the forward pass is currently established.
+
+The dense (non-MoE) sibling and its MTP head are **not** in scope for this
+crate - they are `crates/qwen35` (llama.cpp `LLM_ARCH_QWEN35`, distinct from
+this crate's `LLM_ARCH_QWEN35MOE`), a separate architecture with its own
+roadmap. See `.agents/roadmap/qwen35.md`.
 
 A full-precision import of this model is impractical at its parameter count and does not fit alongside everything else on typical development hardware, so quantized (INT8/INT4) device buffers must be constructed directly from the compressed checkpoint format rather than via an intermediate full-precision file.

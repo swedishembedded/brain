@@ -30,7 +30,7 @@
 //! **Smooth (`top_k == n_experts`).** A hard top-k selection is a discontinuity
 //! finite differences cannot see through: perturbing the router weight can flip
 //! *which* experts a token selects, and the central difference then straddles a
-//! kink. `check_moe`, `check_glm` and `check_qwen35` all take this mitigation,
+//! kink. `check_moe`, `check_glm` and `check_qwen35moe` all take this mitigation,
 //! and it is the only shape in which the **router weight's own** gradient can be
 //! gated at all. Every tensor is checked here, router included.
 //!
@@ -93,7 +93,7 @@ fn cfg_of(n_experts: u32, top_k: u32, norm_topk_prob: bool, routed_scaling: f32)
 ///
 /// The production init is not wrong for the real model's 1280-wide `d_model`;
 /// this is a harness conditioning fix, the same resolution (and the same
-/// reasoning) as `gradcheck::check_qwen35`'s own `in_proj_qkv`/`conv1d` rescale.
+/// reasoning) as `gradcheck::check_qwen35moe`'s own `in_proj_qkv`/`conv1d` rescale.
 /// Norm gains keep their `1.0` identity init - rescaling those would test a
 /// configuration no checkpoint ever has.
 const FIXTURE_INIT_STD: f32 = 0.15;
@@ -279,7 +279,7 @@ fn grads_match_finite_differences_smooth() {
 /// (`q_proj`/`k_proj`/`v_proj`/`o_proj`) owns its own private `A`/`B`, read
 /// and written by exactly ONE matmul chain in the whole graph - nothing sums
 /// contributions from several sites into it. `qwen3::gradcheck::check_qwen_lora`
-/// and `qwen35moe::gradcheck::check_qwen35_lora` (this crate's own two
+/// and `qwen35moe::gradcheck::check_qwen35moe_lora` (this crate's own two
 /// precedents for gating a LoRA decoder) both gate with `directional_check`
 /// alone for the identical reason, and this test follows them rather than
 /// inventing a different rule.

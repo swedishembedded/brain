@@ -43,7 +43,7 @@ fast and scalable kernel - not a naive one.
    at fp32), INT8 (`q8.rs`), rank-8 LoRA on the 9 targetable GDN/GQA
    projections (never the MoE experts), and cross-GPU pipeline sharding
    (`model::shard::Shardable`) for real weights that exceed one card.
-   Gradient-checked (`gradcheck::check_qwen35`, `check_qwen35_lora`).
+   Gradient-checked (`gradcheck::check_qwen35moe`, `check_qwen35moe_lora`).
    `brain qwen35moe {infer,export}`; the GGUF
    conversion runs through the generic `brain import` (see below).
    See `.agents/roadmap/qwen35moe.md`.
@@ -1138,7 +1138,7 @@ a metric that isn't there was simply forgotten.
   modes already paid for; do not rediscover them.
 - **Backprop is gated by `gradcheck`** (finite differences) - run it after any
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
-  `check_qwen_lora`, `check_qwen35`, `check_qwen35_lora`, `check_moe`,
+  `check_qwen_lora`, `check_qwen35moe`, `check_qwen35moe_lora`, `check_moe`,
   `check_glm`, `check_glm_mtp`, `check_pid`,
   `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`,
   `check_wan` (+ `_conditioning`), plus the

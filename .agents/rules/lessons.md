@@ -1151,7 +1151,9 @@ this before it shipped, not after.
 
 ## 40. A tiny gradcheck config can numerically starve a normalization op, producing a hollow — but *passing* — gradcheck
 
-`gradcheck::check_qwen35` (qwen35's model-level backward integration) passed
+`gradcheck::check_qwen35` (qwen35moe's model-level backward integration -
+renamed to `check_qwen35moe` once the dense `qwen35` sibling arch took the
+plain name; this entry is left as originally written) passed
 clean on first run: every parameter's finite-difference check fell inside
 the workspace's `(4e-3, 8e-2)` gate. Every Gated-DeltaNet-layer parameter
 (`A_log`, `dt_bias`, `in_proj_a.weight`, `in_proj_b.weight`) reported its
@@ -1183,7 +1185,8 @@ this normalization/init interaction never had a chance to manifest there.
 
 Fix: **do not touch `model::gdn`'s `eps` or the model's production
 `std=0.02` init** — both are correct for the real model's scale. Instead, the
-gradcheck harness itself (`qwen35_gradcheck_harness` in
+gradcheck harness itself (`qwen35_gradcheck_harness`, now
+`qwen35moe_gradcheck_harness`, in
 `crates/gradcheck/src/lib.rs`) overrides just `in_proj_qkv.weight`/
 `conv1d.weight` to `std=1.0` post-init, restoring a real, non-degenerate
 finite-difference signal (confirmed: `blocks.N.linear_attn.conv1d.weight`
