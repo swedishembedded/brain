@@ -20,9 +20,9 @@
 //! The real 22B checkpoint is 48 layers at `inner_dim=4096`/`num_heads=32`
 //! (this port's own architecture note; `crate::config`'s doc has every other
 //! flag). Building that many DISTINCT weight sets, even zero-filled, is ~1.07 GB per
-//! layer in f32 (16*dim^2 + 23*dim floats, `crate::dit::dit_tensor_manifest`)
-//! - 48 layers is ~51 GB, and this host has ~24 GB free (`free -h`, checked
-//! before writing this bench), so that is a real OOM, not a caution.
+//! layer in f32 (16*dim^2 + 23*dim floats,
+//! `crate::dit::dit_tensor_manifest`) - 48 layers is ~51 GB, and this host
+//! has ~24 GB free (`free -h`), so that is a real OOM, not a caution.
 //!
 //! [`LtxBlock::build_steps`] sidesteps the WEIGHT half of that entirely: a
 //! dispatch's cost is a pure function of its shape, not the values in its
@@ -171,7 +171,7 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
     let cfg = LtxVaeConfig::conv25();
     let lat_t = cfg.latent_frames(frames).unwrap_or_else(|| panic!("{frames} frames must be 1 + 8k"));
     let (lh, lw) = (height / 32, width / 32);
-    assert!(lh > 0 && lw > 0 && height % 32 == 0 && width % 32 == 0, "height/width must be multiples of 32");
+    assert!(lh > 0 && lw > 0 && height.is_multiple_of(32) && width.is_multiple_of(32), "height/width must be multiples of 32");
 
     println!("\n=== ltxv video VAE decode (real weights): latent [{}, {lat_t}, {lh}, {lw}] -> {frames} frames at {width}x{height} ===", cfg.latent_channels);
     let t0 = Instant::now();

@@ -931,7 +931,7 @@ impl<'a> Builder3d<'a> {
     /// `[C,T,H,W]` with no batch axis, and needs THREE factors folded out of
     /// one channel axis at once, not one).
     pub fn space_to_depth(&mut self, x: &T3, pt: u32, ph: u32, pw: u32) -> T3 {
-        assert!(x.t % pt == 0 && x.h % ph == 0 && x.w % pw == 0, "space_to_depth: {x:?} not divisible by ({pt},{ph},{pw})");
+        assert!(x.t.is_multiple_of(pt) && x.h.is_multiple_of(ph) && x.w.is_multiple_of(pw), "space_to_depth: {x:?} not divisible by ({pt},{ph},{pw})");
         let (to, ho, wo) = (x.t / pt, x.h / ph, x.w / pw);
         let y = self.act3(x.c * pt * ph * pw, to, ho, wo);
         self.steps.push(self.gpu.step(
@@ -948,7 +948,7 @@ impl<'a> Builder3d<'a> {
     /// H*ph, W*pw]`. The decoder's `DepthToSpaceUpsample` resample.
     pub fn depth_to_space(&mut self, x: &T3, pt: u32, ph: u32, pw: u32) -> T3 {
         let g = pt * ph * pw;
-        assert!(x.c % g == 0, "depth_to_space: {} channels not divisible by {g}", x.c);
+        assert!(x.c.is_multiple_of(g), "depth_to_space: {} channels not divisible by {g}", x.c);
         let cout = x.c / g;
         let y = self.act3(cout, x.t * pt, x.h * ph, x.w * pw);
         self.steps.push(self.gpu.step(
@@ -974,7 +974,7 @@ impl<'a> Builder3d<'a> {
     /// `n*group_size + k`, matching the `(c g)` - c outer, g inner - grouping
     /// upstream's rearrange assumes). No new kernel.
     pub fn group_mean(&mut self, x: &T3, group_size: u32) -> T3 {
-        assert!(x.c % group_size == 0, "group_mean: {} channels not divisible by group_size {group_size}", x.c);
+        assert!(x.c.is_multiple_of(group_size), "group_mean: {} channels not divisible by group_size {group_size}", x.c);
         let cout = x.c / group_size;
         let inner = x.t * x.h * x.w;
         let mut acc: Option<T3> = None;

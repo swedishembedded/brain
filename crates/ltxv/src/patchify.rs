@@ -35,7 +35,7 @@
 /// `q` INNER: `y[(c*pw+iw)*ph+ih, t, ho, wo] = x[c, t, ho*ph+ih, wo*pw+iw]`.
 pub fn patchify(x: &[f32], c: usize, t: usize, h: usize, w: usize, ph: usize, pw: usize) -> Vec<f32> {
     assert_eq!(x.len(), c * t * h * w, "patchify: {} values, expected {}", x.len(), c * t * h * w);
-    assert!(h % ph == 0 && w % pw == 0, "patchify: {h}x{w} not divisible by ({ph},{pw})");
+    assert!(h.is_multiple_of(ph) && w.is_multiple_of(pw), "patchify: {h}x{w} not divisible by ({ph},{pw})");
     let (ho, wo) = (h / ph, w / pw);
     let mut out = vec![0f32; c * ph * pw * t * ho * wo];
     for ci in 0..c {
@@ -119,7 +119,8 @@ mod tests {
             12.0, 13.0, 14.0, 15.0,
         ];
         let y = patchify(&x, 1, 1, 4, 4, 2, 2);
-        assert_eq!(y.len(), 4 * 1 * 2 * 2);
+        // c*p*p = 4 channels out, t = 1, (h/p)*(w/p) = 2*2.
+        assert_eq!(y.len(), 4 * 2 * 2);
         // co=0 (iw=0,ih=0): top-left of each 2x2 block -> [0, 2, 8, 10]
         assert_eq!(&y[0..4], &[0.0, 2.0, 8.0, 10.0]);
         // co=1 (iw=0,ih=1): bottom-left -> [4, 6, 12, 14]

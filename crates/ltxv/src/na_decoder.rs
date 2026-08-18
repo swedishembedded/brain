@@ -255,7 +255,7 @@ impl NaDecoderConfig {
     /// checkpoint's real widths, confirmed against every real
     /// `mlp.w_gate.weight` shape in the header).
     fn hidden(dim: u32) -> u32 {
-        (dim * 4 + 15) / 16 * 16
+        (dim * 4).div_ceil(16) * 16
     }
 
     /// Every tensor this decoder reads, checkpoint-side name + shape (the
@@ -395,7 +395,7 @@ fn default_rope_dim_split(head_dim: u32) -> (u32, u32, u32) {
     assert_eq!(head_dim % 8, 0, "default_rope_dim_split: head_dim {head_dim} must be a multiple of 8");
     let mut d_t = (head_dim / 4) / 2 * 2;
     let mut d_hw = (head_dim - d_t) / 2;
-    if d_hw % 2 != 0 {
+    if !d_hw.is_multiple_of(2) {
         d_t -= 2;
         d_hw = (head_dim - d_t) / 2;
     }

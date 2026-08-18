@@ -72,14 +72,14 @@ pub struct QuantizedTensors {
 /// audio/cross-attention counterparts) - never a bias or a norm gain, since
 /// those are 1D.
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1] % 4 == 0 && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
 }
 
-/// Quantize every eligible 2D weight in `w` via `model::int8::quantize_weight`
-/// - storage format only, no kernel and no change to either DiT's forward
-/// dispatch. Returns the eligible tensors packed in `int8` and everything
-/// else (never-quantized names, biases, 1D norm/scale vectors) copied as-is
-/// into `full`.
+/// Quantize every eligible 2D weight in `w` via
+/// `model::int8::quantize_weight` - storage format only, no kernel and no
+/// change to either DiT's forward dispatch. Returns the eligible tensors
+/// packed in `int8` and everything else (never-quantized names, biases, 1D
+/// norm/scale vectors) copied as-is into `full`.
 pub fn quantize_tensors(w: &Tensors) -> QuantizedTensors {
     let mut full = Tensors::new();
     let mut int8 = HashMap::new();

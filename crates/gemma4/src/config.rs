@@ -81,7 +81,7 @@ impl Gemma4Config {
     /// module's doc.
     pub fn layer_type(&self, layer_idx: u32) -> LayerType {
         assert!(layer_idx < self.num_hidden_layers);
-        if (layer_idx + 1) % SLIDING_WINDOW_PATTERN != 0 {
+        if !(layer_idx + 1).is_multiple_of(SLIDING_WINDOW_PATTERN) {
             LayerType::Sliding
         } else {
             LayerType::Full

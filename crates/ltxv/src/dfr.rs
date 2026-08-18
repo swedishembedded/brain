@@ -62,9 +62,9 @@ pub const VIDEO_TEMPORAL_SCALE: usize = 8;
 
 /// Pick the keyframe segment length from [`SEGMENT_CANDIDATES`], preferring
 /// whichever pads `content_frames` least; ties keep the larger segment.
-/// `content_frames` is `num_frames - 1` (frame 0 is never part of a segment
-/// - see [`resolve_canvas`]). Mirrors `dfr_layout.py::choose_segment_length`
-/// exactly.
+/// `content_frames` is `num_frames - 1` (frame 0 is never part of a
+/// segment - see [`resolve_canvas`]). Mirrors
+/// `dfr_layout.py::choose_segment_length` exactly.
 pub fn choose_segment_length(content_frames: usize) -> Result<usize, String> {
     if content_frames < 1 {
         return Err(format!("content_frames must be >= 1, got {content_frames}"));
@@ -92,7 +92,7 @@ pub fn resolve_canvas(num_frames: usize, temporal_scale: usize) -> Result<(usize
     if num_frames < 1 {
         return Err(format!("num_frames must be >= 1, got {num_frames}"));
     }
-    if (num_frames - 1) % temporal_scale != 0 {
+    if !(num_frames - 1).is_multiple_of(temporal_scale) {
         return Err(format!("num_frames must satisfy (num_frames - 1) % {temporal_scale} == 0 (got {num_frames})"));
     }
     let content = num_frames - 1;
@@ -108,7 +108,7 @@ pub fn resolve_canvas(num_frames: usize, temporal_scale: usize) -> Result<(usize
 /// Map an x-`temporal_scale`-border pixel frame to its latent index.
 /// Mirrors `dfr_layout.py::pixel_to_latent_index`.
 pub fn pixel_to_latent_index(pixel_frame: usize, temporal_scale: usize) -> Result<usize, String> {
-    if pixel_frame != 0 && pixel_frame % temporal_scale != 0 {
+    if pixel_frame != 0 && !pixel_frame.is_multiple_of(temporal_scale) {
         return Err(format!("pixel_frame {pixel_frame} is not on the x{temporal_scale} latent border"));
     }
     Ok(pixel_frame / temporal_scale)
@@ -204,7 +204,7 @@ pub fn tile_ranges(seam_positions: &[usize], num_frames: usize, num_tiles: usize
             return Err(format!("seam_positions must be strictly increasing, got {seam_positions:?}"));
         }
         let span = span as usize;
-        if span % temporal_scale != 0 {
+        if !span.is_multiple_of(temporal_scale) {
             return Err(format!("segment span {span} is not a multiple of temporal scale {temporal_scale}"));
         }
         if span / temporal_scale < 2 {
@@ -408,10 +408,14 @@ mod tests {
 
     // ------------------------------------------------------------ resolve_canvas
 
+    /// One [`resolve_canvas`] case: `num_frames` in, and the
+    /// `(padded_frames, segment, seam_positions)` it must return.
+    type CanvasCase = (usize, (usize, usize, &'static [usize]));
+
     /// Pinned against a live reference `resolve_canvas(...)` run.
     #[test]
     fn resolve_canvas_matches_reference_numbers() {
-        let cases: [(usize, (usize, usize, &[usize])); 8] = [
+        let cases: [CanvasCase; 8] = [
             (9, (25, 24, &[24])),
             (17, (25, 24, &[24])),
             (25, (25, 24, &[24])),
@@ -609,7 +613,7 @@ mod tests {
 
     #[test]
     fn keyframe_slots_rejects_a_base_positions_length_mismatch() {
-        let e = keyframe_slots(2, &vec![0f32; 3 * 2], 1, 1, &[8], VIDEO_TEMPORAL_SCALE, true).unwrap_err();
+        let e = keyframe_slots(2, &[0f32; 3 * 2], 1, 1, &[8], VIDEO_TEMPORAL_SCALE, true).unwrap_err();
         assert!(e.contains("values, expected"), "{e}");
     }
 }
