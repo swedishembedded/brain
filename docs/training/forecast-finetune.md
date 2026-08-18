@@ -26,6 +26,37 @@ liquid instruments and more history per instrument make for a better
 fine-tune — breadth across many instruments matters as much as depth in any
 one of them.
 
+### Validation
+
+Every file is validated before any weights are loaded, with the same checks
+`brain forecast predict` applies: the header names the six columns in order,
+every row has six fields that all parse, dates are strictly increasing,
+values are finite, prices are positive, `high >= max(open, close)`,
+`low <= min(open, close)`, and the file is long enough for at least one
+`context + horizon` window. Every rejection names the file and the 1-based
+line inside it.
+
+**A file that fails stops the run.** A fine-tune is a long job whose whole
+output is one promote/keep verdict about one universe, so a universe that
+quietly lost names would produce a verdict about an experiment you did not
+ask for - and nothing afterwards would tell you which. Validation takes
+milliseconds and happens before the checkpoint loads, so the refusal is
+immediate.
+
+If refusing the whole run is the wrong trade - a several-hundred-name vendor
+dump with one bad row in one file - pass `--skip-invalid`. It trains on the
+files that parsed, still lists every rejection with its file and line, and
+prints the loaded/rejected split either way:
+
+```
+finetune: BAD.csv: csv: line 118: 5 fields, expected 6
+finetune: excluded QQQ.csv (QQQ is the benchmark index, not one of its constituents)
+finetune: /your/ohlcv-dir: 402 of 403 series loaded, 1 rejected
+```
+
+`--holdout-data` is validated the same way, up front, so a typo there cannot
+cost you the generalization report at the end of a finished run.
+
 ## Running a fine-tune
 
 ```
@@ -47,6 +78,8 @@ brain forecast finetune \
 - `--lora RANK` — LoRA rank; omit for a full-parameter fine-tune.
 - `--out` — where to write the resulting checkpoint, if the fine-tune is
   promoted (see below).
+- `--skip-invalid` - train on the files that passed validation instead of
+  refusing the run (see [Validation](#validation)).
 
 The tokenizer stays frozen throughout — only the decoder is fine-tuned.
 
