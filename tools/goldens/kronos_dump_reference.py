@@ -44,6 +44,9 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 CLIP = 5.0
 # How many trailing positions of the s1-logit field are stored as floats. The
 # argmax id is stored for EVERY position (cheap, and a wrong causal mask or a
@@ -107,6 +110,16 @@ def _cfg(model, key):
     if cfg is not None and hasattr(cfg, key):
         return getattr(cfg, key)
     raise SystemExit(f"reference model exposes no {key}; cannot record the decoder tier in t_meta.json")
+
+
+def _weight_files(d):
+    """The decoder's weight files, for the manifest's forensic record. Names
+    only get hashed - the identity block is what a test compares."""
+    return sorted(
+        os.path.join(d, f)
+        for f in os.listdir(d)
+        if f.endswith((".safetensors", ".bin", ".pt"))
+    )
 
 
 def main():
@@ -193,10 +206,6 @@ def main():
     write_u32(os.path.join(args.out, "t6_gen_s1.u32"), p1[0, args.context:].cpu().numpy().astype(np.uint32))
     write_u32(os.path.join(args.out, "t6_gen_s2.u32"), p2[0, args.context:].cpu().numpy().astype(np.uint32))
     write_f32(os.path.join(args.out, "t6_pred.f32"), pred)
-    # `d_model`/`n_layers` identify the DECODER TIER these tensors came from.
-    # Without them a Kronos-small dump is indistinguishable from a Kronos-base
-    # one, and crates/kronos/tests/parity.rs can only find out by failing deep
-    # in the importer with a tensor-shape error.
     meta = {
         "context_len": int(args.context),
         "pred_len": int(args.pred_len),
@@ -206,9 +215,25 @@ def main():
         "logit_tail": LOGIT_TAIL,
         "s1_vocab": int(s1_logits.shape[-1]),
         "s2_vocab": int(s2_logits.shape[-1]),
-        "d_model": int(_cfg(model, "d_model")),
-        "n_layers": int(_cfg(model, "n_layers")),
     }
+    # WHICH decoder these tensors came from. `d_model`/`n_layers` fix every
+    # dumped tensor's shape, so no two Kronos tiers can agree on them; without
+    # this block a Kronos-small dump is indistinguishable from a Kronos-base one
+    # and crates/kronos/tests/parity.rs can only find out by failing deep in the
+    # importer with a tensor-shape error. The shape of the block is
+    # tools/goldens/golden_source.py's, shared with every other dumper, and
+    # brain_testutil::golden::Source is what enforces it.
+    meta["source"] = source_block(
+        checkpoint=args.repo,
+        files=_weight_files(args.decoder),
+        identity={
+            "d_model": int(_cfg(model, "d_model")),
+            "n_layers": int(_cfg(model, "n_layers")),
+            "max_context": int(max_context),
+            "s1_vocab": int(s1_logits.shape[-1]),
+            "s2_vocab": int(s2_logits.shape[-1]),
+        },
+    )
     with open(os.path.join(args.out, "t_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     print("reference: s1[:5]=", s1[:5].tolist(), "s2[:5]=", s2[:5].tolist())

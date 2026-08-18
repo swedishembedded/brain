@@ -7,7 +7,18 @@
   "logit_tail": 16,
   "s1_vocab": 1024,
   "s2_vocab": 1024,
-  "d_model": 832,
-  "n_layers": 12,
-  "t7_context_len": 500
+  "t7_context_len": 500,
+  "source": {
+    "identity": {
+      "d_model": 832,
+      "n_layers": 12,
+      "max_context": 512,
+      "s1_vocab": 1024,
+      "s2_vocab": 1024
+    },
+    "checkpoint": "NeoQuasar/Kronos-base",
+    "files": {
+      "model.safetensors": "sha256:abff193acab6db1a0368e9773e75799d11403b6d054ee6d5f0a11aeabc5f4b83"
+    }
+  }
 }

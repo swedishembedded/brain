@@ -75,10 +75,22 @@ Populate both with `make fetch/testdata` (hard-links from a local mirror -
 `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path may appear in
 this repo, per `AGENTS.md` - into `testdata/` for goldens/media, `$BRAIN_MODELS_DIR`
 or its default for checkpoints). A test whose fixture is still absent **skips
-itself** (`eprintln!` + early return, never `panic!`) - verify a change here by
-removing `testdata/`, re-running `make fetch/testdata`, and re-running the
-crates in the table above; a fixture that stopped resolving shows up as a new
-skip, not a failure, which is itself the bug to look for.
+itself**, and it does so through **`brain_testutil::skip(reason)`** - never a
+bare `eprintln!` + early return, and never `panic!`. The helper exists because
+cargo reports a skipped test as a PASS, so a skip that does not name itself is
+indistinguishable from a comparison that ran; routing through it also lets
+`BRAIN_REQUIRE_FIXTURES=1` (what `make parity/strict` sets) turn every
+absent-fixture skip into a hard failure in a run whose purpose is to prove
+parity. A skip for absent HARDWARE is the other helper,
+**`brain_testutil::skip_unavailable(reason)`**, which no flag may turn fatal -
+`BRAIN_REQUIRE_FIXTURES` asserts "the data is on this box" and has nothing to
+say about a box with no discrete GPU, no NPU, no OpenVINO and no ffmpeg. Which
+bucket a skip is in is a judgement a reviewer must be able to check by reading
+the call, which is why there are two functions and not one flag.
+
+Verify a change here by removing `testdata/`, re-running `make fetch/testdata`,
+and re-running the crates in the table above; a fixture that stopped resolving
+shows up as a new skip, not a failure, which is itself the bug to look for.
 
 ## 2. Backprop correctness gate - numerical gradient check
 
@@ -141,6 +153,19 @@ cargo lanes. `claude-code` and `scheduler` stay separate targets - they need rea
 weights/a real `claude` install/a GPU, which the fast lane deliberately does not
 require.
 
+`make test/full` also runs **`make parity/strict`**, and that is the one member
+of the release gate that can fail for want of DATA rather than for want of
+correct code. Everything else in the list is green on a box with no fixtures at
+all, because cargo reports a skipped test as a PASS - so the cargo lanes cannot,
+by construction, tell "every reference comparison matched" apart from "no
+reference comparison ran". `parity/strict` re-runs the fixture-gated parity
+suites with `BRAIN_REQUIRE_FIXTURES=1`, which turns each absent-fixture skip
+into a hard failure, so a green run is evidence the comparisons happened. Its
+default suite list is what `make fetch/testdata` provisions; where a suite
+genuinely cannot be provisioned, narrow the list visibly
+(`make test/full PARITY_STRICT_SUITES="..."`) rather than dropping the target,
+because a narrowed list still says which comparisons were certified.
+
 **Server lifecycle discipline**, followed by every suite above that starts a
 process: record `$!` into a file immediately, poll readiness (never a fixed
 sleep), and `teardown_file` kills **only** that recorded PID - never `pkill`. The
@@ -165,7 +190,9 @@ tuned from the environment instead of a recompile.
 - `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.
 
 **Golden/fixture file paths:**
-- `BRAIN_GGUF_TESTFILE` - path to a GGUF fixture for GGUF-reader tests.
+- `BRAIN_GGUF_TESTFILE` - path to a GGUF fixture for GGUF-reader tests. Also
+  satisfied automatically by any `*.gguf` already in the model store, so the
+  reader smoke does not need this set on a box that has fetched one.
 - `BRAIN_INT8_TEST` - enables/points at an int8-specific test fixture.
 
 **Model-weights-required test gates** (each enables a parity/import/training test
@@ -179,7 +206,11 @@ that needs a real checkpoint; unset means the test skips):
 `BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
 `BRAIN_MOONDREAM3_CKPT`, `BRAIN_QWEN3VL_CKPT`, `BRAIN_FASTVLM_CKPT`,
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`,
-`BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`.
+`BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`, `BRAIN_WAN_GGUF` (a
+released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`
+suite; falls back to whatever `*.gguf` the model store already holds for that
+repo), `BRAIN_WAN_GGUF_OUT` (where that suite's `#[ignore]`d full conversion
+writes its ~53 GiB checkpoint; a temp dir otherwise).
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make fetch/testdata`;
 the one place a machine-specific path may appear in this repo):
@@ -201,6 +232,16 @@ the one place a machine-specific path may appear in this repo):
   Wan suite reported `ok` while 7 of its 9 VAE stage comparisons and its real
   1.3B transformer comparison were all silently skipping, because their weights
   resolve from the environment.
+- `BRAIN_REQUIRE_GOLDEN_SOURCE` - turns "this golden does not record which
+  checkpoint produced it" into a hard failure. A golden dump is tensors plus a
+  claim, and the claim only means anything together with the checkpoint that
+  produced it; `tools/goldens/golden_source.py` writes that provenance and
+  `brain_testutil::golden::Source` enforces it. A *mismatch* is always loud (it
+  routes through `brain_testutil::skip`, so it is fatal under
+  `BRAIN_REQUIRE_FIXTURES` too). This flag is about the weaker case: a dump from
+  before the convention, which prints `UNVERIFIED GOLDEN SOURCE` and still runs.
+  It is a ratchet, like the clippy one - switch it on per suite as each dumper
+  is re-run, rather than taking every suite red at once.
 - `BRAIN_MODELS_DIR` - overrides the model-store root tests resolve checkpoints under.
 - `BRAIN_E2E` - enables the heavy, opt-in e2e suites (real weights + GPU).
 

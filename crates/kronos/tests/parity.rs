@@ -103,13 +103,17 @@ fn tokenizer_and_decoder_match_the_reference() {
     // MISSING FIXTURE (skip, or a hard failure under BRAIN_REQUIRE_FIXTURES),
     // not a parity violation.
     let (dec_cfg, _) = import::load_decoder(&dec_dir).unwrap();
-    let golden_d_model = meta["d_model"].as_u64().map(|v| v as usize);
-    if golden_d_model != Some(dec_cfg.d_model) {
-        return brain_testutil::skip(&format!(
-            "golden dump is from a d_model={} Kronos decoder but BRAIN_KRONOS_DECODER is d_model={}; re-dump with tools/goldens/kronos_dump_reference.py against this checkpoint, or point at the matching tier",
-            golden_d_model.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-            dec_cfg.d_model
-        ));
+    const DUMPER: &str = "tools/goldens/kronos_dump_reference.py";
+    let Some(src) = brain_testutil::golden::Source::open_manifest(&golden.join("t_meta.json"), DUMPER)
+    else {
+        return;
+    };
+    if !src.require(&[
+        ("d_model", dec_cfg.d_model as i64),
+        ("n_layers", dec_cfg.n_layers as i64),
+        ("max_context", dec_cfg.max_context as i64),
+    ]) {
+        return;
     }
     assert_eq!(max_ctx, dec_cfg.max_context, "golden window != checkpoint window");
 
