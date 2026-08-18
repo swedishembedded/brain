@@ -863,6 +863,148 @@ pub fn check_wan_conditioning(seed: u64) -> Report {
     Report { checks }
 }
 
+/// One fixed tiny-LTX gradcheck problem: weights, batch, and the closures
+/// the FD loops need - the `ltxv` twin of [`WanFixture`], same reasoning
+/// (shared so [`check_ltxv`] and [`check_ltxv_conditioning`] can never end
+/// up checking different models).
+struct LtxvFixture {
+    cfg: ltxv::modelgrad::Cfg,
+    w0: ltxv::modelgrad::ModelWeights<f64>,
+    b: ltxv::modelgrad::Batch<f64>,
+}
+
+impl LtxvFixture {
+    fn new(seed: u64) -> LtxvFixture {
+        let cfg = ltxv::modelgrad::Cfg::tiny();
+        let w0 = ltxv::modelgrad::init_model::<f64>(&cfg, seed);
+        let mut rng = Rng::new(seed ^ 0x17C2u64);
+        let mut rf = || rng.next_f64() - 0.5;
+        let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|_| rf()).collect();
+        let ctx: Vec<f64> = (0..cfg.context_len * cfg.dim).map(|_| rf()).collect();
+        let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
+        let b = ltxv::modelgrad::make_flow_batch(&cfg, &x0, &ctx, 0.42, &noise);
+        LtxvFixture { cfg, w0, b }
+    }
+
+    fn loss_of(&self, w: &ltxv::modelgrad::ModelWeights<f64>) -> f64 {
+        let (pred, _) = ltxv::modelgrad::forward(&self.cfg, w, &self.b.latent, &self.b.timesteps, &self.b.keyframes_mask, &self.b.ctx, &self.b.cos, &self.b.sin);
+        ltxv::modelgrad::loss(&pred, &self.b.target).0
+    }
+
+    /// Analytic grads, in [`ltxv::modelgrad::params_mut`] order.
+    fn analytic(&self) -> Vec<(String, Vec<f64>)> {
+        let (_l, g) = ltxv::modelgrad::grads(&self.cfg, &self.w0, &self.b);
+        ltxv::modelgrad::grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect()
+    }
+}
+
+/// Gradient-check the LTX-2.5 video-only DiT **host** training reference at
+/// tiny dims: the f64 instantiation of `ltxv::modelgrad` (`patchify_proj` +
+/// the keyframe embedding, the PixArt timestep MLP -> adaLN-single raw
+/// table, the block stack with its QK-RMSNorm'd self-attention,
+/// split/rotate-half RoPE, AdaLN-modulated text cross-attention and
+/// GELU-tanh FFN, and the `LayerNorm`-based output stage) under the
+/// flow-matching velocity-MSE loss.
+///
+/// Same shape as [`check_wan`]: pure host f64, so no GPU and no
+/// `MOE_SKIP_GPU_TESTS` gate, one random ±1 direction per parameter tensor
+/// compared against a central difference of the SAME forward the backward
+/// was derived from. **Every tensor of the checkpoint manifest is
+/// covered** - `ltxv::modelgrad`'s own
+/// `params_and_grads_cover_the_whole_manifest_in_the_same_order` asserts
+/// the enumerated names are exactly `ltxv::dit::dit_tensor_manifest`'s, and
+/// this loop walks the whole enumeration. Use [`check_ltxv_conditioning`]
+/// alongside it: LTX's own fold sites (`adaln_shared` across every block,
+/// `embedded_timestep` into both `adaln_single.linear` AND the output
+/// stage directly) are exactly the shape a per-tensor directional
+/// contraction can under-cover, per the porting playbook's own T5
+/// precedent.
+pub fn check_ltxv(seed: u64) -> Report {
+    let f = LtxvFixture::new(seed);
+    let analytic = f.analytic();
+    let mut rng = Rng::new(seed ^ 0xA5A5u64);
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (pi, (name, ga)) in analytic.iter().enumerate() {
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let mut wp = f.w0.clone();
+        for (p, &vi) in ltxv::modelgrad::params_mut(&mut wp)[pi].1.iter_mut().zip(&v) {
+            *p += eps * vi;
+        }
+        let mut wm = f.w0.clone();
+        for (p, &vi) in ltxv::modelgrad::params_mut(&mut wm)[pi].1.iter_mut().zip(&v) {
+            *p -= eps * vi;
+        }
+        let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check {
+            param: name.clone(),
+            analytic: an as f32,
+            numeric: numeric as f32,
+            abs_err: abs_err as f32,
+            rel_err: (abs_err / denom) as f32,
+        });
+    }
+    Report { checks }
+}
+
+/// Per-**entry** finite differences on the LTX tensors that sit at a FOLDED
+/// or SHARED conditioning site - [`check_ltxv`]'s per-tensor contraction is
+/// structurally weakest exactly here (the same T5/Wan precedent
+/// `check_wan_conditioning`'s own doc explains).
+///
+/// The sites, and what dropping each would do:
+///
+/// * `adaln_single.linear.bias` - its gradient IS `d(adaln_shared)` summed
+///   over the whole block stack. Folding only the last block's contribution
+///   is the exact T5 failure shape.
+/// * `adaln_single.emb.timestep_embedder.linear_2.bias` - its gradient IS
+///   `d(embedded_timestep)`, where the output stage's own direct use and the
+///   whole block stack (through `adaln_single.linear`) meet. Dropping either
+///   arm leaves the other correct.
+/// * `transformer_blocks.{l}.scale_shift_table` - the nine-site modulation
+///   fold the device path exploits via `dit::adaln::add_table`, per block.
+///
+/// This is [`elementwise_check`]'s recipe, hand-rolled the same way
+/// [`check_wan_conditioning`] is (the host f64 reference has no device
+/// parameter store): every entry is its own comparison, so a missing share
+/// cannot hide behind a contraction.
+pub fn check_ltxv_conditioning(seed: u64) -> Report {
+    let f = LtxvFixture::new(seed);
+    let analytic = f.analytic();
+    let mut targets: Vec<String> = vec!["adaln_single.linear.bias".into(), "adaln_single.emb.timestep_embedder.linear_2.bias".into()];
+    for l in 0..f.cfg.num_layers {
+        targets.push(format!("transformer_blocks.{l}.scale_shift_table"));
+    }
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for name in &targets {
+        let pi = analytic.iter().position(|(n, _)| n == name).unwrap_or_else(|| panic!("check_ltxv_conditioning: no parameter {name}"));
+        let ga = &analytic[pi].1;
+        for (i, &gi) in ga.iter().enumerate() {
+            let mut wp = f.w0.clone();
+            ltxv::modelgrad::params_mut(&mut wp)[pi].1[i] += eps;
+            let mut wm = f.w0.clone();
+            ltxv::modelgrad::params_mut(&mut wm)[pi].1[i] -= eps;
+            let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+            let abs_err = (gi - numeric).abs();
+            let denom = gi.abs().max(numeric.abs()).max(1e-6);
+            checks.push(Check {
+                param: format!("{name}[{i}]"),
+                analytic: gi as f32,
+                numeric: numeric as f32,
+                abs_err: abs_err as f32,
+                rel_err: (abs_err / denom) as f32,
+            });
+        }
+    }
+    Report { checks }
+}
+
 /// Build a tiny hybrid Qwen3.5-35B-A3B decoder (Gated DeltaNet + GQA + sparse
 /// MoE with a sigmoid-gated shared expert) and gradient-check it. This is the
 /// correctness gate for wiring `model::gdn::gdn_chunk_bwd` (full reverse-mode
@@ -1261,6 +1403,44 @@ mod tests {
         assert!(
             fails.is_empty(),
             "Wan conditioning elementwise check failed for {:?}",
+            fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ltxv_analytic_grads_match_finite_differences() {
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate.
+        let report = check_ltxv(7);
+        report.print();
+        // f64 central differences land far inside the porting playbook's own
+        // model-level gate (1e-3) - see `check_wan`'s own comment for why
+        // this is not a loosened tolerance.
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "ltxv gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    #[test]
+    fn ltxv_conditioning_grads_match_elementwise_finite_differences() {
+        let report = check_ltxv_conditioning(7);
+        let worst = report.checks.iter().max_by(|a, b| a.abs_err.total_cmp(&b.abs_err)).expect("non-empty");
+        println!(
+            "ltxv conditioning: {} entries, worst {} abs={:.2e} rel={:.2e}",
+            report.checks.len(),
+            worst.param,
+            worst.abs_err,
+            worst.rel_err
+        );
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "ltxv conditioning elementwise check failed for {:?}",
             fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

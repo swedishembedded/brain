@@ -25,6 +25,9 @@ brain-flux2.workspace = true
 # `check_wan` / `check_wan_conditioning` (src/lib.rs) - the Wan video DiT's host
 # training reference.
 brain-wan.workspace = true
+# `check_ltxv` / `check_ltxv_conditioning` (src/lib.rs) - the LTX-2.5
+# video-only DiT's host training reference.
+brain-ltxv.workspace = true
 brain-sam2.workspace = true
 brain-vqgan.workspace = true
 brain-vae.workspace = true

@@ -238,9 +238,25 @@ this port:
       hardcoded, for the same reason (metadata reportedly `1000.0` vs. the
       class default `1`, not confirmed empirically - see the "Convention
       questions" section above).
-- [ ] **Training** - `grad.rs`/`modelgrad.rs` generic over `trait Fp`,
-      `gradcheck::check_ltxv{,_lora}`, LoRA in the ComfyUI key layout, finetune,
-      single- and batch-overfit-to-zero gates.
+- [x] **Training (video-only DiT)** - `crates/ltxv/src/{grad,modelgrad,lora,
+      finetune}.rs`, `gradcheck::{check_ltxv,check_ltxv_conditioning}`, the
+      `wan::grad` template. Scoped to `LtxDitConfig`/`LtxBlock`/`LtxDit`
+      only - the audio-extended `LtxAvDitConfig`/`LtxAvBlock`/`LtxAvDit`
+      (M6b) has no training support yet, a tracked gap. Two real structural
+      differences from Wan's own oracle required new primitives rather than
+      reuse: LTX's modulation/gate are per-token `[T,dim]` (Wan's are
+      per-block `[dim]`), and RoPE reads per-head sub-tables (Wan's is one
+      shared table) - see `grad.rs`'s module doc for the gradient-duality
+      argument this implies for the adaLN-table split. Gates: block FD
+      3.03e-10 (bound 1e-4), model FD ~7.9e-8 (bound 1e-3), the conditioning
+      elementwise-fold gate 2.01e-10, host f32 forward vs the GPU-dispatched
+      `LtxDit::forward` at cosine 1.0000000000 (max_abs 1.49e-6) - the
+      load-bearing cross-check that the from-scratch host reimplementation
+      computes the SAME thing as the already-correct GPU path, not a
+      restatement of the same code. LoRA: bit-exact no-op at init, fold-vs-
+      apply bit-equal after real training steps, standalone descent
+      0.377658->0.170922 over 40 steps. Whole-model overfit (Adam, 400
+      steps): loss 1.08134715->0.00000051.
 - [ ] **NA diffusion decoder, upscalers, duration head, DFR** - the one genuinely
       new kernel family (3D neighborhood/windowed attention), gated against the
       reference's own eager tiled-masked-SDPA fallback before any fast kernel.

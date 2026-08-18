@@ -41,13 +41,28 @@
 //! space - see `block`'s and `rope`'s module docs). Tiny-config op-sequence
 //! parity only, same bar and same real-checkpoint-import gap as the
 //! video-only stream (`crates/ltxv/tests/dit_parity.rs`).
+//!
+//! (M7): **training for the video-only DiT** ([`grad`]/[`modelgrad`]/
+//! [`lora`]/[`finetune`]) - a from-scratch, float-type-generic host
+//! reimplementation of [`LtxDit::forward`]'s exact op sequence (forward +
+//! analytic backward, `f64` for the finite-difference gradcheck oracle,
+//! `f32` for the trainer), a flow-matching training-target helper, LoRA in
+//! the ComfyUI key layout, and a synthetic-data fine-tune loop -
+//! `gradcheck::check_ltxv`/`check_ltxv_conditioning`, `crates/ltxv/tests/
+//! {block_grad,host_forward_parity,lora_train,overfit}.rs`. The audio
+//! stream's own training reference (`LtxAvDitConfig`/`LtxAvBlock`/
+//! `LtxAvDit`) is explicitly out of scope, a later milestone.
 
 pub mod audio_vae;
 pub mod block;
 pub mod caps;
 pub mod config;
 pub mod dit;
+pub mod finetune;
+pub mod grad;
 pub mod import;
+pub mod lora;
+pub mod modelgrad;
 pub mod patchify;
 pub mod pipeline;
 pub mod rope;

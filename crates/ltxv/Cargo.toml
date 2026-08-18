@@ -14,6 +14,10 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-vae.workspace = true
+# `model::hostmath::matvec_par` (the f32 `grad::Fp` instantiation's hot
+# matvec) and `model::lora::{Pair, LoraCfg, proj_step, randn}` (the shared
+# host-side LoRA machinery `crate::lora` builds on, same as `wan::lora`).
+brain-model.workspace = true
 # `dit::adaln::add_table` (per-token adaLN table combine) and `dit::timestep::
 # pixart_timestep_embed` (the PixArt sinusoid -> Linear -> SiLU -> Linear
 # shape the AdaLayerNormSingle embedder shares with wan/s3dit).
