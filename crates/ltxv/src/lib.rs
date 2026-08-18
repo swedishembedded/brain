@@ -94,6 +94,7 @@ pub mod duration_head;
 pub mod finetune;
 pub mod grad;
 pub mod import;
+pub mod int8;
 pub mod lora;
 pub mod modelgrad;
 pub mod na_decoder;

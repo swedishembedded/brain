@@ -374,8 +374,40 @@ this port:
       tile chunked NA-decoder decode, the CHUNKED/BLACKWELL_DSL block
       variants, and multi-step Euler sampling (all recorded under M8b above)
       are unaffected by this milestone.
-- [ ] **NPU export, INT8, sharding, optimization pass** - only after parity is
-      frozen, per porting.md sec10.
+- [x] **INT8 storage for the video-only DiT's weights** (`crates/ltxv/src/
+      int8.rs`, new) - STORAGE format only, per porting.md sec10 point 6 (a
+      precision change is not a speed change until profiling says arithmetic
+      is the limiter): no new WGSL kernel, no compute-time DP4A activation
+      quantization, and no change to `LtxDit::forward`/`LtxAvDit::forward`'s
+      dispatch path. Reuses `model::int8::{quantize_weight,dequantize_weight}`
+      (the shared per-channel symmetric int8 primitives zimage's DiT / the
+      Qwen encoder-decoder / FLUX.2's DiT already use for the same purpose).
+      `is_never_quantized` implements this port's own already-recorded
+      "upstream never quantizes" list (`patchify_proj`, every
+      `*adaln_single*` table, `caption_projection`, `proj_out`,
+      `to_gate_logits`, `scale_shift_table` - every variant, including the
+      `audio_`/`av_ca_`-prefixed twins, matched by the same substring since
+      the prefix sits in front of it) by substring match against the REAL
+      tensor names `dit_tensor_manifest` emits, pinned by a test against
+      exact real names (`crates/ltxv/tests/int8_storage.rs`).
+      `quantize_tensors`/`dequantize_tensors` split/rejoin a `Tensors` weight
+      map; every eligible `[n,k]` projection (`to_q`/`to_k`/`to_v`/`to_out.0`,
+      `ff.net.0.proj`/`ff.net.2`) round-trips at a worst per-tensor cosine of
+      0.999975 (20 eligible tensors, tiny config, `k%4==0` required for
+      `model::int8`'s packing width) - never-quantized/1D tensors pass through
+      `full` untouched, checked bit-for-bit. The test that actually matters -
+      the SAME tiny `LtxDit` forward run twice, once at plain f32 and once
+      with every eligible weight round-tripped through int8 storage first -
+      lands at final-output cosine 0.999999995 and every per-block output
+      cosine >= 0.999999995 (2-layer, dim-64 tiny config; the modulation/
+      patchify/output tables staying at full f32 keeps int8 noise from
+      compounding across more than a couple of projections). Gap: not wired
+      into any real checkpoint importer's load path yet (`dit::
+      load_tiny_weights`/`random_tiny_weights` still produce plain f32), and
+      whether this port ever wants a compute-time int8 kernel for the DiT at
+      all is an open question this milestone did not settle.
+- [ ] **Pipeline-parallel sharding, performance profiling, NPU export scope
+      decision** - only after parity is frozen, per porting.md sec10.
 
 ## Convention questions settled from source, not experiment
 
@@ -455,6 +487,11 @@ land. Known traps already identified from reading (not yet test-pinned):
   it has no `dfr` coverage (a different action name, a different size-stride
   rule, and `dfr`'s own `temporal_upsample_rounds` param) - a dedicated
   example/README for `dfr` has not been added.
+- INT8 storage for the DiT (`crate::int8`) is not wired into any real
+  checkpoint importer's load path, and whether this port ever wants a
+  compute-time int8 kernel (vs. storage-format-only) is unsettled - that
+  needs the DiT's own performance profile to say arithmetic is the
+  bottleneck first, per porting.md sec10 point 6.
 
 ## Scope that collapsed once the reference was read
 
