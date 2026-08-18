@@ -145,15 +145,16 @@ const GROUPS: u32 = 32;
 
 /// Which real checkpoint's forward shape this config builds - the two real
 /// LTX-2.5 upscalers share every field except which axis the `upsampler`
-/// stage grows (and the mid-channel width, `LatentUpsamplerConfig::mid_channels`)
-/// - not enough divergence to justify two separate config structs the way
-/// e.g. `LtxVaeConfig`'s encoder/decoder block LISTS differ block-by-block;
-/// one struct with a mode flag mirrors how `LtxAvDitConfig` extends
-/// `LtxDitConfig` by field, not by type.
+/// stage grows, and the mid-channel width
+/// `LatentUpsamplerConfig::mid_channels` - not enough divergence to justify
+/// two separate config structs the way e.g. `LtxVaeConfig`'s encoder/decoder
+/// block LISTS differ block-by-block; one struct with a mode flag mirrors
+/// how `LtxAvDitConfig` extends `LtxDitConfig` by field, not by type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpsamplerMode {
-    /// `spatial_upsample=true, temporal_upsample=false, rational_resampler=false`
-    /// - `upsampler` is `Conv3d::spatial(3,1,1)` + `depth_to_space(x,1,2,2)`.
+    /// `spatial_upsample=true, temporal_upsample=false,
+    /// rational_resampler=false` - `upsampler` is `Conv3d::spatial(3,1,1)`
+    /// + `depth_to_space(x,1,2,2)`.
     Spatial,
     /// `spatial_upsample=false, temporal_upsample=true` (the checkpoint's own
     /// `rational_resampler: true` is dead - the `elif temporal_upsample`
@@ -186,8 +187,8 @@ impl LatentUpsamplerConfig {
     }
 
     /// Every tensor this model reads, in the checkpoint's own (bare, no
-    /// prefix) name space - 72 tensors for either real config: `initial_conv`
-    /// + `initial_norm` (4) + `res_blocks.{0..n}` (8 each) +
+    /// prefix) name space - 72 tensors for either real config:
+    /// `initial_conv` + `initial_norm` (4) + `res_blocks.{0..n}` (8 each) +
     /// `post_upsample_res_blocks.{0..n}` (8 each) + `upsampler.0` (2) +
     /// `final_conv` (2).
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {

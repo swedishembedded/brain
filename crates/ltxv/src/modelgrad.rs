@@ -18,9 +18,10 @@
 //! Unlike `wan::modelgrad`, there is no patchify/unpatchify here: LTX's own
 //! `LtxDit::forward` takes `latent: [T, in_channels]` - already the
 //! per-token sequence (video-to-token patchification is a separate,
-//! upstream concern outside the DiT's own math scope, see `crate::patchify`)
-//! - so the training target lives directly in that same `[T, out_channels]`
-//! space and [`make_flow_batch`] needs no patch geometry at all.
+//! upstream concern outside the DiT's own math scope, see
+//! `crate::patchify`) - so the training target lives directly in that same
+//! `[T, out_channels]` space and [`make_flow_batch`] needs no patch geometry
+//! at all.
 //!
 //! ## The conditioning graph is what makes this one model
 //!
@@ -396,8 +397,8 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
     for (bw, bc) in w.blocks.iter().zip(&cache.blocks).rev() {
         let g = block_backward(d, bw, bc, &dx);
         dx = g.dx.clone();
-        for i in 0..t * 9 * dim {
-            dadaln_shared[i] += g.dadaln_shared[i];
+        for (acc, &gi) in dadaln_shared.iter_mut().zip(&g.dadaln_shared) {
+            *acc += gi;
         }
         blocks.push(g);
     }

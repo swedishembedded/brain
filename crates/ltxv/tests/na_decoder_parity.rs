@@ -55,9 +55,10 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
 }
 
 /// The shipped NA decoder weights: `BRAIN_LTXV_NA_VAE`, else the
-/// repo-relative `resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors`
-/// - the file paired with the NA decoder (as opposed to `-conv-bf16`, M2's
-/// own conv decoder).
+/// repo-relative
+/// `resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors` - the
+/// file paired with the NA decoder (as opposed to `-conv-bf16`, M2's own
+/// conv decoder).
 fn weights_path() -> Option<String> {
     if let Ok(p) = std::env::var("BRAIN_LTXV_NA_VAE") {
         return (!p.is_empty() && Path::new(&p).exists()).then_some(p);

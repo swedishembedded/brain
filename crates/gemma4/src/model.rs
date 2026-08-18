@@ -158,8 +158,8 @@ impl Gemma4Model {
 
         let mut hidden_states = Vec::with_capacity(n as usize + 1);
         hidden_states.push(embed_out);
-        for l in 0..(n as usize - 1) {
-            hidden_states.push(raw_outputs[l].clone());
+        for raw in raw_outputs.iter().take(n as usize - 1) {
+            hidden_states.push(raw.clone());
         }
         hidden_states.push(last_hidden_state.clone());
 
@@ -210,10 +210,10 @@ impl AggregateEmbed {
         AggregateEmbed::new(weight, bias, hidden * n_states, out_dim)
     }
 
-    /// `hidden_states`: the FULL tuple (length `n_states`, each `[t, hidden]`)
-    /// - see this module's doc for the exact per-entry semantics this
-    /// concatenation assumes. Plain host math (T is tiny; see this module's
-    /// doc for why the outer stage stays on the host).
+    /// `hidden_states`: the FULL tuple (length `n_states`, each `[t,
+    /// hidden]`) - see this module's doc for the exact per-entry semantics
+    /// this concatenation assumes. Plain host math (T is tiny; see this
+    /// module's doc for why the outer stage stays on the host).
     pub fn forward(&self, hidden_states: &[Vec<f32>], t: usize, hidden: usize) -> Vec<f32> {
         let n_states = hidden_states.len();
         assert_eq!(self.in_dim, hidden * n_states, "AggregateEmbed: in_dim {} != hidden*n_states {}", self.in_dim, hidden * n_states);

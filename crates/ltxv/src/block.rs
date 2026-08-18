@@ -736,6 +736,7 @@ pub struct AvBlockTaps {
 ///      tables respectively (still each operand's OWN per-token AV
 ///      scale/shift timestep), `gate_v2a` from the AUDIO table's row 4 at a
 ///      timestep built from VIDEO's scalar sigma.
+///
 ///    Both directions run at the AUDIO stream's head geometry
 ///    (`heads=audio.heads, dim_head=audio.d_head`) - see [`attention`]'s
 ///    doc - and both use the SHARED cross-modal (time-only) RoPE space:
