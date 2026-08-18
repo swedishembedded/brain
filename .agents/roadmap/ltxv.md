@@ -276,9 +276,70 @@ this port:
       Rust port's target. The checkpoint's own `rational_resampler: true`
       metadata field is dead code upstream (the `elif temporal_upsample`
       branch never reads it) - noted, not implemented.
-- [ ] **NA diffusion decoder, DFR** - the one genuinely new kernel family (3D
-      neighborhood/windowed attention), gated against the reference's own
-      eager tiled-masked-SDPA fallback before any fast kernel.
+- [x] **NA diffusion decoder** (`crates/ltxv/src/na_decoder.rs`) - the one
+      genuinely new kernel family this whole port needs (3D
+      neighborhood/windowed self-attention), gated against the reference's
+      own eager tiled-masked-SDPA fallback (`fallback_na/eager.py`) before
+      any Rust was written. Real weights
+      (`ltx-2.5-video-vae-bf16.safetensors`'s `decoder.*` tree - a DIFFERENT
+      file from the conv decoder's `-conv-bf16`), real parity at cosine
+      1.000000000 on every tap (`crates/ltxv/tests/na_decoder_parity.rs`):
+      stages 1-4 (the deterministic context path: `NA(RMSNorm) -> SwiGLU`
+      pre-norm blocks x4 stages + `LinearPixelShuffleUpsample`, at a
+      (3,7,7) latent - the smallest volume stage 0's own kernel allows,
+      producing a real (17,56,56,256) context), AND stage 5 (all 8
+      `CombinedDiffusionNABlock`s, context injection + AdaLN-Zero
+      scale/shift modulation, at a DECOUPLED synthetic (13,13,13) context/
+      noised-pixel input - see `tools/goldens/ltxv_na_decoder_dump_
+      reference.py`'s doc for why the diffusion tap does not chain from the
+      real (17,56,56) context: a naive gather-then-dense NA kernel at that
+      volume dispatches ~284M score threads, fine for one Python reference
+      run, excessive for a routinely-rerun Rust test fixture - correctness
+      is proven at both scales via the same code path, just not composed
+      end to end in one golden). Two new kernels
+      (`na3d_scores`/`na3d_apply.wgsl`, gather-the-window-then-dense-attend,
+      per-axis inward-shifting bounds computed inline - `gqa_scores_win`/
+      `attn_decode_scores_win` are 1-D sequence-position windows, checked
+      and refuted first) plus one more (`pixel_shuffle3d_cl.wgsl`,
+      channels-last `LinearPixelShuffleUpsample` - same `(c,p1=T,p2=H,
+      p3=W)` sub-order as `vae::blocks3d`'s internal resample kernels,
+      confirmed against the einops string, genuinely NOT `crate::patchify`'s
+      outer-boundary convention which this decoder ALSO uses unchanged for
+      the noised-pixel patchify/unpatchify boundary - both conventions
+      appear in this one decoder, verified independently rather than
+      assumed from precedent either way); everything else (Linear/RMSNorm/
+      SwiGLU/the PixArt timestep embedder/the per-token-table adaLN combine)
+      reuses existing kernels/host-math (`matmul`, `rmsnorm_eps`, `silu_mul`,
+      `attn_softmax_cross` reused unmodified for the NA softmax since NATTEN
+      windows are never masked, `rope_interleave_table` for this module's
+      genuinely-interleaved-pair RoPE, `dit::timestep::pixart_timestep_
+      embed`, `dit::adaln::add_table`). The real checkpoint's
+      `default_num_inference_steps=1` + `model_output_type="x0"` collapse
+      the usual multi-step Euler sampling loop to exactly ONE stage-5
+      forward at `t=1.0` whose output IS the x0 prediction directly - so
+      the "sampling loop" milestone stage and the "single block forward"
+      stage are the SAME real-weight-parity-proven tap for this checkpoint,
+      not two. The "legacy static gates folded into Linear weights" the
+      class docstring mentions is confirmed EMPIRICALLY dead for this
+      checkpoint two independent ways: `DiffusionNABlock._modulation` only
+      reads 4 of `scale_shift_table`'s 7 rows (scale/shift for attn/mlp;
+      the 3 gate rows are computed then discarded) and NEITHER residual
+      function (`combined/attn.py::full`, `combined/mlp.py::residual_mlp`)
+      multiplies by a gate anywhere; separately, `model_configurator.
+      _read_diff_vae_gates` (the production loader's own gate-fold
+      pre-read) returns an EMPTY dict against the real header - no
+      `gate_msa`/`gate_mlp`/`gate_ctx` sibling tensors exist to fold, so
+      brain's own importer needs no analogous fold step. General tiling
+      (`diffusion_tiling.py`'s overlapping-tile trapezoidal blend), the
+      CHUNKED/BLACKWELL_DSL block variants, and multi-step Euler sampling
+      (moot for this checkpoint) remain explicit, tracked gaps - see below.
+- [ ] **DFR: general tiling, CHUNKED/BLACKWELL_DSL NA block variants,
+      multi-step Euler sampling** - the NA diffusion decoder above proves the
+      COMBINED pathway (full-volume attention, `w_chunks=1`) at real-weight
+      parity; overlapping-tile chunked decode for clips larger than one NA
+      window's comfortable reach, the deferred-stage-4 `ChunkedDiffusionNABlock`/
+      `BLACKWELL_DSL` pathways, and a real (`N>1`, `model_output_type="v"`)
+      Euler sampling loop are all still out of scope.
 - [ ] **NPU export, INT8, sharding, optimization pass** - only after parity is
       frozen, per porting.md sec10.
 

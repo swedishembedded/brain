@@ -46,9 +46,9 @@ use crate::vocoder::VocoderConfig;
 
 /// Check a name→tensor map against a manifest in both directions. Generic
 /// over the manifest slice (not `LtxVaeConfig` specifically) so
-/// [`import_audio_vae`]/[`import_vocoder`] reuse the same two-way check
-/// rather than restating it.
-fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)], who: &str) -> Result<Tensors, String> {
+/// [`import_audio_vae`]/[`import_vocoder`]/`crate::na_decoder::import_na_decoder`
+/// reuse the same two-way check rather than restating it.
+pub(crate) fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)], who: &str) -> Result<Tensors, String> {
     for (name, shape) in manifest {
         match map.get(name) {
             None => return Err(format!("ltxv {who} import: missing tensor {name}")),

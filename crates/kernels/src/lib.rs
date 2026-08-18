@@ -611,6 +611,10 @@ pub const MSE_VALUE: &str = include_str!("../wgsl/mse_value.wgsl");
 pub const MSE_VALUE_W: &str = include_str!("../wgsl/mse_value_w.wgsl");
 /// `wgsl/mul.wgsl`
 pub const MUL: &str = include_str!("../wgsl/mul.wgsl");
+/// `wgsl/na3d_apply.wgsl`
+pub const NA3D_APPLY: &str = include_str!("../wgsl/na3d_apply.wgsl");
+/// `wgsl/na3d_scores.wgsl`
+pub const NA3D_SCORES: &str = include_str!("../wgsl/na3d_scores.wgsl");
 /// `wgsl/nchw_nlc.wgsl`
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 /// `wgsl/nlc_bias_nchw.wgsl`
@@ -645,6 +649,8 @@ pub const PAGED_KV_APPEND_BATCHED_WORD: &str = include_str!("../wgsl/paged_kv_ap
 pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
 /// `wgsl/pixel_shuffle.wgsl`
 pub const PIXEL_SHUFFLE: &str = include_str!("../wgsl/pixel_shuffle.wgsl");
+/// `wgsl/pixel_shuffle3d_cl.wgsl`
+pub const PIXEL_SHUFFLE3D_CL: &str = include_str!("../wgsl/pixel_shuffle3d_cl.wgsl");
 /// `wgsl/pixel_shuffle_dx.wgsl`
 pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl");
 /// `wgsl/pos_add.wgsl`
@@ -1147,6 +1153,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("mse_value", MSE_VALUE),
     ("mse_value_w", MSE_VALUE_W),
     ("mul", MUL),
+    ("na3d_apply", NA3D_APPLY),
+    ("na3d_scores", NA3D_SCORES),
     ("nchw_nlc", NCHW_NLC),
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
@@ -1164,6 +1172,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append_batched_word", PAGED_KV_APPEND_BATCHED_WORD),
     ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("pixel_shuffle", PIXEL_SHUFFLE),
+    ("pixel_shuffle3d_cl", PIXEL_SHUFFLE3D_CL),
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),

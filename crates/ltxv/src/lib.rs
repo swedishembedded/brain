@@ -73,6 +73,7 @@ pub mod grad;
 pub mod import;
 pub mod lora;
 pub mod modelgrad;
+pub mod na_decoder;
 pub mod patchify;
 pub mod pipeline;
 pub mod rope;
