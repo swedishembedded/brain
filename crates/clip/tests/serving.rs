@@ -26,9 +26,20 @@
 
 use clip::caps::Session;
 
+/// The served model directory, or `None` with the reason BOOKED as a skip
+/// here, the one place that knows which of the two reasons applies. A caller
+/// that merely `return`ed on a silent `None` would be invisible to
+/// `BRAIN_REQUIRE_FIXTURES=1`, and cargo would report it as a pass.
 fn dir() -> Option<String> {
-    let d = std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty())?;
-    std::path::Path::new(&d).join("tokenizer").exists().then_some(d)
+    let Some(d) = std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty()) else {
+        brain_testutil::skip("BRAIN_CLIP_DIR unset (a converted clip serving directory)");
+        return None;
+    };
+    if !std::path::Path::new(&d).join("tokenizer").exists() {
+        brain_testutil::skip(&format!("BRAIN_CLIP_DIR={d} has no tokenizer/"));
+        return None;
+    }
+    Some(d)
 }
 
 fn session() -> Option<Session> {
@@ -49,10 +60,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// `run_batch` quietly returning a different answer than `run`.
 #[test]
 fn a_batch_agrees_with_one_at_a_time() {
-    let Some(s) = session() else {
-        eprintln!("skip: set BRAIN_CLIP_DIR");
-        return;
-    };
+    let Some(s) = session() else { return };
     let texts: Vec<String> =
         ["a photo of a cat", "a photo of a dog", "an empty street at night"].iter().map(|s| s.to_string()).collect();
 
@@ -71,10 +79,7 @@ fn a_batch_agrees_with_one_at_a_time() {
 /// sequence for everything, which still has the right shape and norm.
 #[test]
 fn distinct_texts_give_distinct_embeddings() {
-    let Some(s) = session() else {
-        eprintln!("skip: set BRAIN_CLIP_DIR");
-        return;
-    };
+    let Some(s) = session() else { return };
     let v = s
         .embed_text_batch("clip_l", &["a photo of a cat".into(), "an empty street at night".into()])
         .expect("batch");
@@ -87,10 +92,7 @@ fn distinct_texts_give_distinct_embeddings() {
 /// batch is two forwards and the widths must not be swapped.
 #[test]
 fn both_towers_serve_at_their_own_width() {
-    let Some(s) = session() else {
-        eprintln!("skip: set BRAIN_CLIP_DIR");
-        return;
-    };
+    let Some(s) = session() else { return };
     let t = vec!["a photo of a cat".to_string()];
     assert_eq!(s.embed_text_batch("clip_l", &t).expect("clip_l")[0].len(), 768);
     if std::path::Path::new(&dir().unwrap()).join("tokenizer_2").exists() {
@@ -103,10 +105,7 @@ fn both_towers_serve_at_their_own_width() {
 /// have no way to tell.
 #[test]
 fn an_unknown_tower_is_an_error() {
-    let Some(s) = session() else {
-        eprintln!("skip: set BRAIN_CLIP_DIR");
-        return;
-    };
+    let Some(s) = session() else { return };
     let e = s.embed_text_batch("clip_h", &["x".to_string()]).unwrap_err();
     assert!(e.contains("clip_h"), "error should name the tower, got: {e}");
 }

@@ -66,8 +66,7 @@ fn pin_cpu_backend() {
 #[test]
 fn real_mmproj_clip_import_covers_the_manifest_both_ways() {
     let Some(path) = mmproj() else {
-        eprintln!("skip: {STORE} mmproj not in the model store");
-        return;
+        return brain_testutil::skip(&format!("{STORE} mmproj not in the model store"));
     };
     let mg = MmapGguf::open(path.to_str().expect("utf-8 path")).expect("open mmproj");
     let (cfg, stats) = clip::import::gguf_mmproj::dry_run(&mg).expect("clip dry run");
@@ -115,8 +114,10 @@ fn real_mmproj_clip_import_covers_the_manifest_both_ways() {
 fn real_mmproj_clip_forward_on_the_reference_tokens_is_sane() {
     let fixture = testdata("deepseek-ocr/real/vision.safetensors");
     let (Some(path), true) = (mmproj(), fixture.exists()) else {
-        eprintln!("skip: real mmproj or the vision fixture is missing");
-        return;
+        return brain_testutil::skip(&format!(
+            "{STORE} mmproj or {} is missing",
+            fixture.display()
+        ));
     };
     pin_cpu_backend();
     let golden = brain_testutil::parity::load(&fixture);

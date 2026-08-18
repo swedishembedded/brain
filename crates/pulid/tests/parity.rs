@@ -24,27 +24,24 @@
 //!
 //! Fixtures resolve from `$BRAIN_TESTDATA` (default `<repo>/testdata`); weights
 //! are named by env var. Every test SKIPS itself when a fixture or a weight file
-//! is absent:
+//! is absent, through [`brain_testutil::skip`], so `BRAIN_REQUIRE_FIXTURES=1`
+//! turns each of those skips into a hard failure - cargo reports a skip as a
+//! pass, and a green run of this file proves nothing without that flag:
 //!
 //! ```text
 //! BRAIN_PULID=/path/to/pulid_flux_v0.9.1.safetensors
 //! BRAIN_FLUX1_TRANSFORMER=/path/to/FLUX.1-Kontext-dev/transformer   # test 3 only
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use brain_testutil::testdata_path as testdata;
 use pulid::config::PulidConfig;
 use pulid::model::{IdFormer, PulidCa};
 
 /// Per-stage floor. These are fp32 replays of an fp32 reference through the
 /// same arithmetic, so the bar is high; the printed `1-cos` is the deliverable.
 const GATE: f64 = 0.999999;
-
-fn testdata(rel: &str) -> PathBuf {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    Path::new(&root).join(rel)
-}
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
@@ -118,10 +115,18 @@ struct Golden {
 }
 
 impl Golden {
+    /// `None` when the golden is absent - and the skip is BOOKED HERE, in the
+    /// one place that discovered the reason, not by the caller's bare `return`.
+    /// That split is what let this suite report a green `flux1_conditioned_parity`
+    /// while comparing nothing: the reason never reached
+    /// [`brain_testutil::skip`], so `BRAIN_REQUIRE_FIXTURES=1` could not see it.
     fn open(rel: &str) -> Option<Golden> {
         let p = testdata(rel);
         if !p.exists() {
-            eprintln!("SKIP: golden {} absent (run tools/goldens/pulid_dump_reference.py)", p.display());
+            brain_testutil::skip(&format!(
+                "golden {} absent (run tools/goldens/pulid_dump_reference.py)",
+                p.display()
+            ));
             return None;
         }
         Some(Golden { t: checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden") })
@@ -131,24 +136,24 @@ impl Golden {
     }
 }
 
-fn env_path(var: &str) -> Option<PathBuf> {
-    let v = std::env::var(var).ok().filter(|s| !s.is_empty())?;
+/// A reference-weight path named by environment. Both reasons it can be
+/// missing - unset, or set to something that is not there - are booked as a
+/// skip here, so neither can reach a caller as a silent `None`.
+fn env_path(var: &str, what: &str) -> Option<PathBuf> {
+    let Some(v) = std::env::var(var).ok().filter(|s| !s.is_empty()) else {
+        brain_testutil::skip(&format!("{var} unset ({what})"));
+        return None;
+    };
     let p = PathBuf::from(&v);
     if !p.exists() {
-        eprintln!("SKIP: {var}={v} not found");
+        brain_testutil::skip(&format!("{var}={v} not found"));
         return None;
     }
     Some(p)
 }
 
 fn weights(cfg: &PulidConfig) -> Option<pulid::PulidWeights> {
-    let p = match env_path("BRAIN_PULID") {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: BRAIN_PULID unset (pulid_flux_v0.9.1.safetensors)");
-            return None;
-        }
-    };
+    let p = env_path("BRAIN_PULID", "pulid_flux_v0.9.1.safetensors")?;
     let w = pulid::read(p.to_str().unwrap(), cfg).expect("pulid import");
     eprintln!(
         "imported {} encoder + {} ca tensors ({} modules)",
@@ -257,13 +262,7 @@ fn ca_stage_parity() {
 /// each shard lands (the `flux1::dit_parity` idiom — a reduced-depth run must
 /// never materialize 47.6 GiB).
 fn load_flux(cfg: &flux1::Flux1Config) -> Option<flux1::Tensors> {
-    let dir = match env_path("BRAIN_FLUX1_TRANSFORMER") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: BRAIN_FLUX1_TRANSFORMER unset");
-            return None;
-        }
-    };
+    let dir = env_path("BRAIN_FLUX1_TRANSFORMER", "FLUX.1[-Kontext]-dev/transformer")?;
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("transformer dir")
         .filter_map(|e| e.ok())
@@ -289,8 +288,7 @@ fn flux1_conditioned_parity() {
     // depth of the truncation the goldens were dumped from
     let mpath = testdata("pulid/manifest.json");
     let Ok(mtxt) = std::fs::read_to_string(&mpath) else {
-        eprintln!("SKIP: {} absent", mpath.display());
-        return;
+        return brain_testutil::skip(&format!("{} absent", mpath.display()));
     };
     let mv: serde_json::Value = serde_json::from_str(&mtxt).unwrap();
     let sd = mv["params"]["small_double"].as_u64().unwrap() as usize;

@@ -18,11 +18,18 @@
 //!     cargo test --release -p brain-instantid --test parity -- --nocapture
 //!
 //! Fixtures resolve from `$BRAIN_TESTDATA` (default `<repo>/testdata`); the test
-//! skips itself when either the checkpoint or the goldens are absent.
+//! skips itself when either the checkpoint or the goldens are absent, and
+//! `BRAIN_REQUIRE_FIXTURES=1` turns that skip into a hard failure - a run that
+//! means to PROVE parity sets it, because cargo reports a skip as a pass.
+//!
+//! Reported per stage: **cosine**, **max_abs** and **rel_l2**. Cosine alone is
+//! scale-invariant, max_abs alone is one outlier, and rel_l2 alone cannot see a
+//! rotation; the three together are the claim.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use brain_testutil::testdata_path as testdata;
 use instantid::config::ResamplerConfig;
 use instantid::model::{Resampler, KERNELS};
 
@@ -30,10 +37,30 @@ use instantid::model::{Resampler, KERNELS};
 /// 1.0 to ten digits; anything below this is a defect, not noise.
 const GATE: f64 = 0.999_999_9;
 
-fn testdata(rel: &str) -> PathBuf {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    PathBuf::from(root).join(rel)
+/// The two inputs BOTH tests need, with the skip decided in ONE place.
+///
+/// Cargo reports a skipped test as a pass, so the reason a comparison did not
+/// happen has to reach [`brain_testutil::skip`] - that is what makes
+/// `BRAIN_REQUIRE_FIXTURES=1` able to turn "the goldens are not here" into a
+/// red suite instead of a green one that proved nothing.
+fn fixtures() -> Option<(PathBuf, String)> {
+    let gp = testdata("instantid/resampler.safetensors");
+    if !gp.exists() {
+        brain_testutil::skip(&format!(
+            "{} absent (run tools/goldens/instantid_dump_reference.py)",
+            gp.display()
+        ));
+        return None;
+    }
+    let Some(ckpt) = std::env::var("BRAIN_INSTANTID").ok().filter(|s| !s.is_empty()) else {
+        brain_testutil::skip("BRAIN_INSTANTID unset (ip-adapter.bin)");
+        return None;
+    };
+    if !Path::new(&ckpt).exists() {
+        brain_testutil::skip(&format!("BRAIN_INSTANTID={ckpt} does not exist"));
+        return None;
+    }
+    Some((gp, ckpt))
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -50,21 +77,23 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
 }
 
+/// Relative L2 error. Cosine is scale-invariant and `max_abs` is a single
+/// outlier, so a stage is only reported honestly with all three.
+fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (&x, &y) in got.iter().zip(want) {
+        num += (x as f64 - y as f64).powi(2);
+        den += (y as f64).powi(2);
+    }
+    if den == 0.0 {
+        return 0.0;
+    }
+    (num / den).sqrt()
+}
+
 #[test]
 fn resampler_forward_matches_the_reference() {
-    let gp = testdata("instantid/resampler.safetensors");
-    if !gp.exists() {
-        eprintln!("SKIP: {} absent (run tools/goldens/instantid_dump_reference.py)", gp.display());
-        return;
-    }
-    let Ok(ckpt) = std::env::var("BRAIN_INSTANTID") else {
-        eprintln!("SKIP: BRAIN_INSTANTID unset (ip-adapter.bin)");
-        return;
-    };
-    if !std::path::Path::new(&ckpt).exists() {
-        eprintln!("SKIP: {ckpt} does not exist");
-        return;
-    }
+    let Some((gp, ckpt)) = fixtures() else { return };
 
     // The released file is a torch archive whose nested dicts flatten with '.'
     // joins, so the Resampler's tensors arrive under an `image_proj.` prefix.
@@ -118,7 +147,7 @@ fn resampler_forward_matches_the_reference() {
         assert_eq!(got.len(), want.len(), "{name}: got {} floats, want {}", got.len(), want.len());
         let c = cosine(&got, want);
         let ma = max_abs(&got, want);
-        eprintln!("  {name:16} cosine={c:.10}  max_abs={ma:.3e}");
+        eprintln!("  {name:16} cosine={c:.10}  max_abs={ma:.3e}  rel_l2={:.3e}", rel_l2(&got, want));
         if c < worst {
             worst = c;
             worst_at = name.clone();
@@ -139,19 +168,7 @@ fn resampler_forward_matches_the_reference() {
 /// exactly that term.
 #[test]
 fn decoupled_attention_matches_the_reference() {
-    let gp = testdata("instantid/resampler.safetensors");
-    if !gp.exists() {
-        eprintln!("SKIP: {} absent", gp.display());
-        return;
-    }
-    let Ok(ckpt) = std::env::var("BRAIN_INSTANTID") else {
-        eprintln!("SKIP: BRAIN_INSTANTID unset");
-        return;
-    };
-    if !std::path::Path::new(&ckpt).exists() {
-        eprintln!("SKIP: {ckpt} does not exist");
-        return;
-    }
+    let Some((gp, ckpt)) = fixtures() else { return };
 
     let tensors = checkpoint::torchpt::read(&ckpt).expect("read ip-adapter.bin");
     let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
@@ -210,7 +227,12 @@ fn decoupled_attention_matches_the_reference() {
             (format!("site{idx}_out"), &got, want_out),
         ] {
             let c = cosine(got, want);
-            eprintln!("  {tag:14} (hidden {:4})  cosine={c:.10}  max_abs={:.3e}", sc.hidden, max_abs(got, want));
+            eprintln!(
+                "  {tag:14} (hidden {:4})  cosine={c:.10}  max_abs={:.3e}  rel_l2={:.3e}",
+                sc.hidden,
+                max_abs(got, want),
+                rel_l2(got, want)
+            );
             assert!(c >= GATE, "{tag} cosine {c:.10}");
             checked += 1;
         }

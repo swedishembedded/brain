@@ -35,3 +35,4 @@ brain-arcface.workspace = true    # idcond: detect + align + the RAW ArcFace emb
 
 [dev-dependencies]
 serde_json.workspace = true
+brain-testutil.workspace = true   # testdata() + the skip()/skip_unavailable() split

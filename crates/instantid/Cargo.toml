@@ -18,3 +18,6 @@ brain-sdxlunet.workspace = true
 brain-controlnet.workspace = true
 brain-clip.workspace = true
 brain-imaging.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true   # testdata() + the skip()/skip_unavailable() split

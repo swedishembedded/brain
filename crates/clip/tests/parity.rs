@@ -129,8 +129,16 @@ impl Golden {
     }
 }
 
-fn env_path(var: &str) -> Option<PathBuf> {
-    let v = std::env::var(var).ok().filter(|s| !s.is_empty())?;
+/// A reference-weight path named by environment. Both reasons it can be
+/// missing (unset, or set to something that is not there) are booked as a skip
+/// here, so a caller cannot receive a silent `None` and quietly `return`: that
+/// is what makes `BRAIN_REQUIRE_FIXTURES=1` able to see a comparison that did
+/// not happen.
+fn env_path(var: &str, what: &str) -> Option<PathBuf> {
+    let Some(v) = std::env::var(var).ok().filter(|s| !s.is_empty()) else {
+        brain_testutil::skip(&format!("{var} unset ({what})"));
+        return None;
+    };
     let p = PathBuf::from(v);
     if !p.exists() {
         brain_testutil::skip(&format!("{var}={} not found", p.display()));
@@ -255,10 +263,7 @@ fn run_text_tower(
 
 #[test]
 fn sdxl_text_towers_and_conditioning_parity() {
-    let Some(sdxl) = env_path("BRAIN_SDXL") else {
-        brain_testutil::skip("set BRAIN_SDXL to the sdxl-base-1.0 directory");
-        return;
-    };
+    let Some(sdxl) = env_path("BRAIN_SDXL", "the sdxl-base-1.0 directory") else { return };
     let (Some(gl), Some(gg)) =
         (Golden::open("clip/clip_l/text.safetensors"), Golden::open("clip/openclip_bigg/text.safetensors"))
     else {
@@ -299,10 +304,7 @@ fn sdxl_text_towers_and_conditioning_parity() {
 
 #[test]
 fn eva02_l336_image_tower_parity() {
-    let Some(ckpt) = env_path("BRAIN_EVA_CLIP") else {
-        brain_testutil::skip("set BRAIN_EVA_CLIP to EVA02_CLIP_L_336_psz14_s6B.pt");
-        return;
-    };
+    let Some(ckpt) = env_path("BRAIN_EVA_CLIP", "EVA02_CLIP_L_336_psz14_s6B.pt") else { return };
     let Some(g) = Golden::open("clip/eva02_l336/image.safetensors") else { return };
 
     let cfg = EvaVisionConfig::eva02_l336();

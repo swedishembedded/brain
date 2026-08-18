@@ -18,31 +18,35 @@
 //! the dumped `id_cond` has `‖[:512]‖ = 20.11` and `‖[512:]‖ = 1.0000`.
 //!
 //! Fixtures resolve from `$BRAIN_TESTDATA` (default `<repo>/testdata`); the test
-//! skips itself when the golden is absent.
+//! skips itself when the golden is absent, and `BRAIN_REQUIRE_FIXTURES=1` makes
+//! that skip fatal.
 
-use std::path::PathBuf;
-
-fn testdata(rel: &str) -> PathBuf {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    PathBuf::from(root).join(rel)
-}
+use brain_testutil::testdata_path as testdata;
 
 fn norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// The dumped `id_cond`, or `None` with the skip booked here - both tests need
+/// the same golden, so the reason it is absent is stated in one place.
+fn id_cond() -> Option<Vec<f32>> {
+    let p = testdata("pulid/idformer.safetensors");
+    if !p.exists() {
+        brain_testutil::skip(&format!(
+            "{} absent (run tools/goldens/pulid_dump_reference.py)",
+            p.display()
+        ));
+        return None;
+    }
+    let t = checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden");
+    Some(t.into_iter().find(|x| x.name == "id_cond").expect("golden has id_cond").data)
 }
 
 /// The dumped `id_cond` must show the reference's asymmetry, and `compose` must
 /// reproduce that exact vector from its own two halves.
 #[test]
 fn compose_reproduces_the_reference_id_cond() {
-    let p = testdata("pulid/idformer.safetensors");
-    if !p.exists() {
-        eprintln!("SKIP: {} absent (run tools/goldens/pulid_dump_reference.py)", p.display());
-        return;
-    }
-    let t = checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden");
-    let want = &t.iter().find(|x| x.name == "id_cond").expect("golden has id_cond").data;
+    let Some(want) = id_cond() else { return };
 
     let cfg = pulid::config::PulidConfig::v0_9_1();
     assert_eq!(want.len(), cfg.id_cond_dim);
@@ -74,13 +78,7 @@ fn compose_reproduces_the_reference_id_cond() {
 /// still wrong.
 #[test]
 fn normalising_the_arcface_half_would_be_detectably_wrong() {
-    let p = testdata("pulid/idformer.safetensors");
-    if !p.exists() {
-        eprintln!("SKIP: {} absent", p.display());
-        return;
-    }
-    let t = checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden");
-    let want = &t.iter().find(|x| x.name == "id_cond").expect("golden has id_cond").data;
+    let Some(want) = id_cond() else { return };
     let d = pulid::idcond::ARCFACE_DIM;
 
     let wrong = model::hostmath::l2_normalize(&want[..d]);
