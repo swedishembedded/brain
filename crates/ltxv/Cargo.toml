@@ -28,6 +28,9 @@ brain-capability.workspace = true
 # Box-Muller stream `wan::pipeline` uses, for reproducible `--seed` runs.
 brain-data.workspace = true
 serde_json.workspace = true
+# `audio::conv::{Conv1d, conv1d_fwd, convtr1d_fwd}` - the vocoder's 1D
+# (transposed) conv `Step`-builders, reused rather than reimplemented.
+brain-audio.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

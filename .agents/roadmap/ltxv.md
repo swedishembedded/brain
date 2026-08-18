@@ -188,9 +188,24 @@ this port:
       with zero-padded identity columns past `rope_angles` and reusing plain
       `rope2d` for both layer types. Real-weight (12B/26 GB) parity remains
       an explicit, tracked gap - needs a machine that can hold it.
-- [ ] **Audio stream** - audio VAE, BigVGAN+snakebeta vocoder + BWE, audio DiT
-      stream, bidirectional A<->V cross-attention (reversed table order, cross-
-      modality-sigma gate).
+- [x] **Audio VAE + base vocoder** (`crates/ltxv/src/{audio_vae,vocoder}.rs`) -
+      real weights, real parity: encoder/decoder/round-trip and the vocoder
+      all at cosine 1.0000000000 against `testdata/golden/ltxv/audio/`. 2D
+      causal conv (`[channels, time, mel_bins]`), several conventions genuinely
+      differ from the video VAE (asymmetric zero-pad on time vs the video
+      VAE's replicate padding, a real strided downsample conv rather than
+      space-to-depth, `PixelNorm` at eps 1e-6 not 1e-8, a per-(channel,freq)
+      not per-channel bottleneck affine) - see `audio_vae.rs`'s module doc.
+      The vocoder is BigVGAN v2/AMP1 (snakebeta + the anti-aliased
+      `Activation1d` up/downsample against checkpoint-supplied Kaiser-sinc
+      filter buffers). Zero new kernels either file - `pad2d`/`crop2d`/
+      `conv_bias_reg`/`l2norm_scale` (audio VAE) and `conv1d`/`convtr1d`/
+      `snake_beta`/`axpy` (vocoder, reusing `crates/mimi`'s established
+      pattern) cover everything. Bandwidth-extension (48kHz upsampling,
+      needs the checkpoint-basis STFT) is explicitly out of scope, same as
+      the goldens that back this. **Not yet done**: the audio DiT stream and
+      bidirectional A<->V cross-attention (reversed table order, cross-
+      modality-sigma gate) - a separate, later task.
 - [ ] **Training** - `grad.rs`/`modelgrad.rs` generic over `trait Fp`,
       `gradcheck::check_ltxv{,_lora}`, LoRA in the ComfyUI key layout, finetune,
       single- and batch-overfit-to-zero gates.

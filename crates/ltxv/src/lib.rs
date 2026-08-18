@@ -26,7 +26,13 @@
 //! (`dit::load_tiny_weights` is a simple name-keyed loader for the golden's
 //! OWN tiny weights only, not a real-checkpoint importer;
 //! `dit::random_tiny_weights` is what [`pipeline::generate`] actually uses).
+//!
+//! Also (M6, first half): the 2D causal-conv **audio VAE** ([`audio_vae`])
+//! and the BigVGAN/snakebeta **base vocoder** ([`vocoder`], no bandwidth
+//! extension), both real weights, real parity - the audio DiT stream and the
+//! audio<->video cross-attention are a separate, later task.
 
+pub mod audio_vae;
 pub mod block;
 pub mod caps;
 pub mod config;
@@ -36,6 +42,7 @@ pub mod patchify;
 pub mod pipeline;
 pub mod rope;
 pub mod vae3d;
+pub mod vocoder;
 
 pub use config::LtxDitConfig;
 pub use dit::{load_tiny_weights, DitTaps, LtxDit};
