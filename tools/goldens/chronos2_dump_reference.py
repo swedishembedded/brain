@@ -12,7 +12,7 @@ Usage:
   python3 tools/goldens/chronos2_dump_reference.py \
       --repo   resources/.../chronos-forecasting \
       --ckpt   resources/.../chronos-2 \
-      --out    crates/chronos2/tests/golden
+      --out    testdata/golden/chronos2
 """
 import argparse
 import os

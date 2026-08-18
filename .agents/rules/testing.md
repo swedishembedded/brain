@@ -44,7 +44,8 @@ with no GPU to skip the device-dependent tests.
 
 Parity/import tests across many crates (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
 `qwen-asr`, `sam2`, `zimage`, `vae`, `clip`, `scrfd`, `arcface`, `tts`, `codec`, `speaker`,
-`vqgan`, `wm-genie`, `flux2`, `qwen`, `diffusion`, `npu`, `audio`) resolve their
+`vqgan`, `wm-genie`, `flux2`, `qwen`, `diffusion`, `npu`, `audio`, `kronos`, `chronos2`,
+`wan`, `s3dit`, `ltxv`, `gemma4`) resolve their
 fixtures through `brain_testutil::testdata(rel)` (one implementation, shared as a
 dev-dependency, rather than a byte-identical function copy-pasted into every one of
 those crates). It resolves to `$BRAIN_TESTDATA` if set, else the gitignored
@@ -71,10 +72,14 @@ unresolvable, which every call site turns into an empty path via `unwrap_or_defa
 so the existing `Path::new(&format!("{ckpt}/…")).exists()` skip check stays correct
 either way.
 
-Populate both with `make fetch/testdata` (hard-links from a local mirror -
-`BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path may appear in
-this repo, per `AGENTS.md` - into `testdata/` for goldens/media, `$BRAIN_MODELS_DIR`
-or its default for checkpoints). A test whose fixture is still absent **skips
+Populate `testdata/` with `make fetch/testdata` (hard-links goldens and media from
+a local mirror - `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path
+may appear in this repo, per `AGENTS.md`). It does **not** download or copy the
+store's checkpoints: it reports each one present or absent and names the
+`brain fetch <vendor>/<repo>` that fetches it, because `$BRAIN_MODELS_DIR` is
+usually on a different filesystem from any mirror, where the hard link fails and
+a fallback copy would silently duplicate tens of gigabytes.
+A test whose fixture is still absent **skips
 itself**, and it does so through **`brain_testutil::skip(reason)`** - never a
 bare `eprintln!` + early return, and never `panic!`. The helper exists because
 cargo reports a skipped test as a PASS, so a skip that does not name itself is
@@ -213,10 +218,22 @@ repo), `BRAIN_WAN_GGUF_OUT` (where that suite's `#[ignore]`d full conversion
 writes its ~53 GiB checkpoint; a temp dir otherwise).
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make fetch/testdata`;
-the one place a machine-specific path may appear in this repo):
-`BRAIN_SAM2_MIRROR`, `BRAIN_ASR_MIRROR`, `BRAIN_TTS_MIRROR`, `BRAIN_UNET_MIRROR`,
-`BRAIN_VL_MIRROR`, `BRAIN_IDENTITY_MIRROR`, `BRAIN_GOLDEN_MIRROR`,
-`BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
+the one place a machine-specific path may appear in this repo). Two kinds:
+
+- `BRAIN_MODEL_MIRROR` - a populated **model store** (`<vendor>/<repo>` layout) to
+  hard-link out of, for the handful of checkpoints whose tests read them from
+  `testdata/` rather than the store (the antelopev2 ONNX pair, the Qwen3-TTS
+  checkpoint, SDXL's CLIP tokenizer). Defaults to `$BRAIN_MODELS_DIR` when set,
+  since that IS the store on a configured box. It replaced the per-domain
+  `BRAIN_SAM2_MIRROR` / `BRAIN_IDENTITY_MIRROR` / `BRAIN_UNET_MIRROR` roots, whose
+  `<root>/<domain>/weights/…` layout predates the model store.
+- `BRAIN_ASR_MIRROR`, `BRAIN_VL_MIRROR`, `BRAIN_TTS_MIRROR`, `BRAIN_GOLDEN_MIRROR` -
+  dumped goldens and raw test media, which are not checkpoints, are not in the
+  model store, and have no canonical address. Regenerated per box (the script
+  names the `tools/goldens/*_dump_reference.py` for each), so a run that reports
+  them absent is reporting the normal state, not a misconfiguration.
+
+Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
 
 **Test/bench infrastructure:**
 - `BRAIN_LOG_WEIGHTS` - verbose weight-loading logging in a test/bench run.
@@ -280,7 +297,8 @@ host RAM instead of device memory).
 from the Qwen3-Omni int8 resident), `BRAIN_FLUX2_BENCH_BASELINE`,
 `BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_LAYERS` (truncates the Z-Image DiT
 to N layers in the benchmark binary only), `BRAIN_WAN_VAE_TAPS` (record every
-Wan-VAE block output for parity debugging), `BRAIN_VAE3D_NOPOOL` (disable the
+Wan-VAE block output for parity debugging), `BRAIN_LTXV_VAE_TAPS` (the same tap
+recording for the LTX-Video VAE), `BRAIN_VAE3D_NOPOOL` (disable the
 3D VAE builder's buffer pooling, which a tap would otherwise read after reuse),
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card).

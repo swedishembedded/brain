@@ -15,6 +15,8 @@
 use chronos2::Chronos2;
 use std::path::Path;
 
+use brain_testutil::testdata_path;
+
 fn read_f32(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
@@ -50,7 +52,7 @@ fn multivariate_forward_matches_the_reference() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let golden = testdata_path("golden/chronos2");
     let (tp, cp, qp, mp) = (
         golden.join("mv_target.f32"),
         golden.join("mv_cov.f32"),

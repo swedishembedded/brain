@@ -40,6 +40,8 @@
 use kronos::{import, GenOpts};
 use std::path::Path;
 
+use brain_testutil::testdata_path;
+
 fn read_f32(p: &Path) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
@@ -79,7 +81,7 @@ fn tokenizer_and_decoder_match_the_reference() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
     }
-    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let golden = testdata_path("golden/kronos");
     let ctx_p = golden.join("t_context.f32");
     if !ctx_p.exists() {
         return brain_testutil::skip("golden dump missing; run tools/goldens/kronos_dump_reference.py");

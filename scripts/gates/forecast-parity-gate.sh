@@ -12,8 +12,15 @@
 #      dependency layer, and the composed argmax rollout end to end. This is the
 #      only rung whose answer does not come from brain - every other check here
 #      compares one brain path against another, and a defect present on both
-#      passes them all. Goldens: crates/kronos/tests/golden, re-dumped with
+#      passes them all. Goldens: testdata/golden/kronos, re-dumped with
 #      tools/goldens/kronos_dump_reference.py against the SHIPPED checkpoint.
+#   0b. the TRAINING forward vs the same upstream reference, which rung 0 cannot
+#      reach: upstream's dependency layer attends with `is_causal=self.training`,
+#      and every inference entry point runs that flag off (and with one query
+#      row), so the training mask exists in exactly one regime and is gated in
+#      exactly one place. Goldens: testdata/golden/kronos/tr_*, dumped by
+#      tools/goldens/kronos_train_dump_reference.py. The mask half of it is
+#      structural and needs no fixture at all.
 #   1. batched training == per-window finite-difference gradcheck  AND
 #      a b-batched step == the mean of the b single-window steps (grads allclose)
 #   2. kronos KV-cache path == brain's OWN un-cached growing-window rollout
@@ -57,6 +64,12 @@ run() { local desc="$1"; shift; echo "=== $desc ==="; if "$@"; then echo "  PASS
 # them under BRAIN_REQUIRE_FIXTURES=1.
 run "kronos == upstream reference, rung by rung (tokens exact, rollout exact)" \
     cargo test --release -q -p brain-kronos --test parity
+
+# (0b) the upstream anchor for TRAINING: the causal dependency mask (structural,
+# always runs) and the training-mode logits/objective against the reference's own
+# training forward (golden-gated).
+run "kronos TRAINING forward == upstream (causal dependency mask)" \
+    cargo test --release -q -p brain-kronos --test train_parity
 
 # (1) batched-training gates - self-contained (KronosConfig::tiny random weights).
 run "batched training == gradcheck + == mean-of-singles" \

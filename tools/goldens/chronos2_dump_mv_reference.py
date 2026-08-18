@@ -11,7 +11,7 @@ row and compare it against brain's `forecast_quantiles_mv([target, cov], h)`.
 
 Usage:
   python3 tools/goldens/chronos2_dump_mv_reference.py \
-      --repo <chronos-forecasting> --ckpt <chronos-2 dir> --out crates/chronos2/tests/golden
+      --repo <chronos-forecasting> --ckpt <chronos-2 dir> --out testdata/golden/chronos2
 """
 import argparse, os, struct, sys, json
 import numpy as np

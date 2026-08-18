@@ -35,7 +35,7 @@ CSV path actually runs in.
 
 Usage:
   python3 tools/goldens/kronos_dump_reference.py --repo <Kronos repo> \
-      --tokenizer <tokenizer dir> --decoder <decoder dir> --out crates/kronos/tests/golden
+      --tokenizer <tokenizer dir> --decoder <decoder dir> --out testdata/golden/kronos
 """
 import argparse
 import json

@@ -11,7 +11,7 @@ covariate's future values flow into the future patches. We keep the target's
 quantile row and compare against brain's forecast_quantiles_mv_kf.
 
 Usage: python3 tools/goldens/chronos2_dump_kf_reference.py --repo <chronos-forecasting>
-       --ckpt <chronos-2 dir> --out crates/chronos2/tests/golden
+       --ckpt <chronos-2 dir> --out testdata/golden/chronos2
 """
 import argparse, os, struct, sys, json
 import numpy as np
