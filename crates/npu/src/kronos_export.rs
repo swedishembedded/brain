@@ -140,7 +140,7 @@ mod tests {
         let mut s1_sess = match KronosS1Session::load_bytes(&s1_bytes, &npu_cfg) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("no OpenVINO runtime, skipping: {e:?}");
+                brain_testutil::skip_unavailable(&format!("no OpenVINO runtime: {e:?}"));
                 return;
             }
         };
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn export_real_checkpoint_to_onnx() {
         let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
-            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos ONNX export");
+            brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
         let out = std::env::var("KRONOS_ONNX_OUT")
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn dump_core_reference_for_onnx_parity() {
         let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
-            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos core-reference dump");
+            brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn export_real_dep_to_onnx() {
         let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
-            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos dep ONNX export");
+            brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
         let out = std::env::var("KRONOS_DEP_ONNX_OUT")
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn dump_dep_reference_for_onnx_parity() {
         let Ok(dir) = std::env::var("BRAIN_KRONOS_DECODER") else {
-            eprintln!("BRAIN_KRONOS_DECODER unset; skipping Kronos dep reference dump");
+            brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {

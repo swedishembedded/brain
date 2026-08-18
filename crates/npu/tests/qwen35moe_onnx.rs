@@ -90,7 +90,7 @@ fn qwen35moe_onnx_graph_is_well_formed() {
 #[test]
 fn qwen35moe_onnx_compiles_on_openvino_cpu() {
     if std::env::var("BRAIN_OV_PROBE").is_err() {
-        return;
+        return brain_testutil::skip_unavailable("BRAIN_OV_PROBE unset (this needs an OpenVINO runtime)");
     }
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
 

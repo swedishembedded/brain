@@ -113,7 +113,7 @@ mod tests {
         let mut cpu = match FincastSession::load_bytes(&bytes, &cpu_cfg) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("no OpenVINO runtime, skipping session parity: {e:?}");
+                brain_testutil::skip_unavailable(&format!("no OpenVINO runtime: {e:?}"));
                 return;
             }
         };

@@ -48,7 +48,7 @@ use model::hostmath::cosine;
 #[test]
 fn s1_cached_rollout_matches_full_window() {
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
-        eprintln!("skip: no OpenVINO runtime");
+        brain_testutil::skip_unavailable("no OpenVINO runtime");
         return;
     }
     let cfg = KronosConfig::tiny();
@@ -148,7 +148,7 @@ fn s1_cached_rollout_matches_full_window() {
 #[test]
 fn dep_cached_rollout_matches_full_window() {
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
-        eprintln!("skip: no OpenVINO runtime");
+        brain_testutil::skip_unavailable("no OpenVINO runtime");
         return;
     }
     let cfg = KronosConfig::tiny();
@@ -235,7 +235,7 @@ fn dep_cached_rollout_matches_full_window() {
 #[test]
 fn cached_rollout_driver_matches_full_window() {
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
-        eprintln!("skip: no OpenVINO runtime");
+        brain_testutil::skip_unavailable("no OpenVINO runtime");
         return;
     }
     let cfg = KronosConfig::tiny();

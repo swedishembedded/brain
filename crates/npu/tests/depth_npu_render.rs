@@ -18,8 +18,9 @@ fn render() {
         std::env::var("DEPTH_RENDER_IMG"),
         std::env::var("DEPTH_RENDER_OUT"),
     ) else {
-        eprintln!("SKIP");
-        return;
+        return brain_testutil::skip(
+            "set ZIPDEPTH_NPU_PTH to the ZipDepth checkpoint, DEPTH_RENDER_IMG to an input image and DEPTH_RENDER_OUT to the output path",
+        );
     };
     let cfg = zipdepth::ZipConfig { upsample_unfold: false, ..zipdepth::ZipConfig::base() };
     let sz = cfg.input as usize;

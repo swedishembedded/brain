@@ -26,11 +26,11 @@ fn subsampling_matches_golden_on_cpu() {
     let ckpt = model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
     let gold = testdata("asr/golden/nemotron");
     if !Path::new(&format!("{ckpt}/model.safetensors")).exists() || !Path::new(&format!("{gold}/subsampling.f32")).exists() {
-        eprintln!("skip: nemotron checkpoint/golden absent (run `make fetch/testdata`)");
+        brain_testutil::skip("nemotron checkpoint/golden absent (run `make fetch/testdata`)");
         return;
     }
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
-        eprintln!("skip: no OpenVINO runtime");
+        brain_testutil::skip_unavailable("no OpenVINO runtime");
         return;
     }
 

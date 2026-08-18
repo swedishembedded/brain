@@ -34,8 +34,21 @@ fn dir() -> String {
     testdata("face/antelopev2")
 }
 
+/// True when every one of `files` is present. Otherwise the skip is BOOKED
+/// HERE, naming the files that are missing: cargo reports a skipped test as a
+/// pass, so the reason has to reach [`brain_testutil::skip`] for
+/// `BRAIN_REQUIRE_FIXTURES=1` to turn a suite that compared nothing red.
 fn have(files: &[&str]) -> bool {
-    files.iter().all(|f| std::path::Path::new(&format!("{}/{f}", dir())).exists())
+    let missing: Vec<&str> = files
+        .iter()
+        .copied()
+        .filter(|f| !std::path::Path::new(&format!("{}/{f}", dir())).exists())
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    brain_testutil::skip(&format!("{} not under {}", missing.join(", "), dir()));
+    false
 }
 
 /// Load a golden safetensors file as name -> (shape, data).
@@ -85,7 +98,6 @@ fn gate(label: &str, got: &[f32], want: &[f32], min_cos: f32, max_abs: f32) {
 #[test]
 fn import_covers_the_graph_in_both_directions() {
     if !have(&["glintr100.onnx"]) {
-        eprintln!("skip: glintr100.onnx not under {}", dir());
         return;
     }
     let arc = weights();
@@ -102,7 +114,6 @@ fn import_covers_the_graph_in_both_directions() {
 #[test]
 fn a_truncated_graph_errors_instead_of_zero_filling() {
     if !have(&["glintr100.onnx"]) {
-        eprintln!("skip: glintr100.onnx not under {}", dir());
         return;
     }
     let m = onnx::read_file(format!("{}/glintr100.onnx", dir())).unwrap();
@@ -119,7 +130,6 @@ fn a_truncated_graph_errors_instead_of_zero_filling() {
 #[test]
 fn alignment_matches_the_reference_transform_and_grid() {
     if !have(&["align.safetensors"]) {
-        eprintln!("skip: align.safetensors not under {}", dir());
         return;
     }
     let g = golden("align.safetensors");
@@ -172,7 +182,6 @@ fn alignment_matches_the_reference_transform_and_grid() {
 #[test]
 fn arcface_forward_parity_stage_by_stage() {
     if !have(&["glintr100.onnx", "arcface.safetensors", "arcface_blocks.safetensors"]) {
-        eprintln!("skip: arcface fixtures not under {}", dir());
         return;
     }
     let g = golden("arcface.safetensors");
@@ -238,7 +247,6 @@ fn arcface_forward_parity_stage_by_stage() {
 #[test]
 fn arcface_end_to_end_on_real_photos() {
     if !have(&["glintr100.onnx", "e2e.safetensors"]) {
-        eprintln!("skip: e2e fixtures not under {}", dir());
         return;
     }
     let g = golden("e2e.safetensors");
@@ -246,9 +254,20 @@ fn arcface_end_to_end_on_real_photos() {
     let cfg = ArcFaceConfig::iresnet100();
     let m = ArcFace::new(gpu.share(), cfg.clone(), weights());
 
-    println!("arcface e2e:");
+    // How many photos the dump actually holds, read from the goldens rather
+    // than hardcoded: the dumper writes one entry per `--photos` argument plus
+    // a deterministic re-capture of the FIRST one, so the count is a property
+    // of the run. Hardcoding it made a dump with a different photo list panic
+    // with `no entry found for key` instead of gating what it does carry.
+    let n = (0..).take_while(|p| g.contains_key(&format!("photo{p}_embedding"))).count();
+    assert!(
+        n >= 3,
+        "e2e.safetensors holds {n} photo(s); the identity structure needs at least two \
+         distinct faces plus the re-capture of the first (dump with >= 2 --photos)"
+    );
+    println!("arcface e2e: {n} entries (last is the re-capture of photo0)");
     let mut ours: Vec<Vec<f32>> = Vec::new();
-    for p in 0..4usize {
+    for p in 0..n {
         // alignment: our M from the reference landmarks
         let lmk = &g[&format!("photo{p}_kps")].1;
         let mm = arcface::estimate_norm(lmk).unwrap();
@@ -268,16 +287,18 @@ fn arcface_end_to_end_on_real_photos() {
 
     // The identity structure must survive the port, not just the vectors.
     let want = &g["cosine_matrix"].1;
+    assert_eq!(want.len(), n * n, "cosine_matrix is not {n}x{n}");
     let mut worst = 0.0f32;
-    for i in 0..4 {
-        for j in 0..4 {
-            let d = (cosine(&ours[i], &ours[j]) - want[i * 4 + j]).abs();
+    for i in 0..n {
+        for j in 0..n {
+            let d = (cosine(&ours[i], &ours[j]) - want[i * n + j]).abs();
             worst = worst.max(d);
         }
     }
     println!("  {:<22} max |Δcos| {:.3e}", "cosine_matrix", worst);
     assert!(worst < 5e-3, "cosine matrix drifted by {worst:.3e}");
-    // same identity (photo0 vs its re-capture) must stay far above cross-identity
-    assert!(cosine(&ours[0], &ours[3]) > 0.99, "same-identity cosine collapsed");
+    // same identity (photo0 vs its re-capture, always the LAST entry) must stay
+    // far above cross-identity
+    assert!(cosine(&ours[0], &ours[n - 1]) > 0.99, "same-identity cosine collapsed");
     assert!(cosine(&ours[0], &ours[1]) < 0.3, "cross-identity cosine is implausibly high");
 }

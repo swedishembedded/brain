@@ -72,11 +72,20 @@ mod tests {
     /// parameter of the manifest is produced exactly once.
     #[test]
     fn real_mmproj_covers_the_whole_sam_manifest() {
-        let Some(home) = std::env::var_os("HOME") else { return };
-        let path = std::path::Path::new(&home)
-            .join(".local/share/brain/models/ggml-org/DeepSeek-OCR-GGUF/mmproj-DeepSeek-OCR-Q8_0.gguf");
+        // Resolve through the model store, NOT by hand from $HOME. This test
+        // used to build `$HOME/.local/share/brain/models/<repo>/<file>`
+        // literally, which is the store's default layout but not its only one:
+        // a box that sets BRAIN_MODELS_DIR keeps its checkpoints somewhere
+        // else, so the path missed, the test skipped, and cargo reported a
+        // pass - a misconfigured run indistinguishable from an absent fixture,
+        // on a box that had the file all along.
+        const REPO: &str = "ggml-org/DeepSeek-OCR-GGUF";
+        let Some(dir) = brain_testutil::model_dir(REPO) else {
+            return brain_testutil::skip(&format!("no model store to resolve {REPO}"));
+        };
+        let path = std::path::Path::new(&dir).join("mmproj-DeepSeek-OCR-Q8_0.gguf");
         if !path.exists() {
-            eprintln!("skipping: {} not present", path.display());
+            brain_testutil::skip(&format!("{} not present (brain fetch {REPO})", path.display()));
             return;
         }
         let mg = MmapGguf::open(path.to_str().expect("utf-8 path")).expect("open mmproj");

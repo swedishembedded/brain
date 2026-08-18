@@ -10,7 +10,7 @@
 #[test]
 fn tiny_onnx_matches_brain_cpu() {
     if std::env::var("BRAIN_OV_PROBE").is_err() {
-        return;
+        return brain_testutil::skip_unavailable("BRAIN_OV_PROBE unset (this needs an OpenVINO runtime)");
     }
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
     use qwen3::{Qwen, QwenConfig};

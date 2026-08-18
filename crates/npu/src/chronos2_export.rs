@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn export_real_checkpoint_to_onnx() {
         let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-            eprintln!("CHRONOS2_WEIGHTS unset; skipping Chronos-2 ONNX export");
+            brain_testutil::skip("CHRONOS2_WEIGHTS unset");
             return;
         };
         let out = std::env::var("CHRONOS2_ONNX_OUT")
@@ -106,7 +106,7 @@ mod tests {
         let mut sess = match Chronos2Session::load_bytes(&bytes, &npu_cfg) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("no OpenVINO runtime, skipping session parity: {e:?}");
+                brain_testutil::skip_unavailable(&format!("no OpenVINO runtime: {e:?}"));
                 return;
             }
         };
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn dump_core_reference_for_onnx_parity() {
         let Ok(weights) = std::env::var("CHRONOS2_WEIGHTS") else {
-            eprintln!("CHRONOS2_WEIGHTS unset; skipping core-reference dump");
+            brain_testutil::skip("CHRONOS2_WEIGHTS unset");
             return;
         };
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {

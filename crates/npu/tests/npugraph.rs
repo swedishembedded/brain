@@ -11,7 +11,7 @@ use npu::openvino::{npu_present, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint}
 #[test]
 fn npugraph_matmul_relu_on_npu() {
     if !npu_present() {
-        eprintln!("skip: no NPU/OpenVINO present");
+        brain_testutil::skip_unavailable("no NPU/OpenVINO present");
         return;
     }
     // y = relu(x @ w),  x:[1,64], w:[64,64]

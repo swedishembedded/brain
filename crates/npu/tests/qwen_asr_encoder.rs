@@ -84,7 +84,7 @@ fn audio_encoder_head_matches_reference_on_cpu() {
         return;
     }
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
-        eprintln!("skip: no OpenVINO runtime");
+        brain_testutil::skip_unavailable("no OpenVINO runtime");
         return;
     }
     let (cfg, topo) = tiny();
@@ -111,13 +111,14 @@ fn audio_encoder_head_matches_reference_on_cpu() {
     let bytes = g.finish_with(onnx::DEFAULT_OPSET, onnx::DEFAULT_IR_VERSION);
 
     let cfgv = NpuConfig { device: NpuDevice::Cpu, perf_hint: PerfHint::Latency, allow_fallback: true, ..Default::default() };
-    let mut graph = match NpuGraph::compile_bytes(&bytes, &cfgv) {
-        Ok(gr) => gr,
-        Err(e) => {
-            eprintln!("skip: OpenVINO compile failed: {e:?}");
-            return;
-        }
-    };
+    // NOT a skip. The test already established above that an OpenVINO runtime
+    // is present, and this compiles OUR OWN emitted ONNX onto the always-present
+    // CPU plugin with fallback allowed - so a failure here is a malformed graph
+    // out of brain's exporter, not an unavailable machine. Swallowing it as a
+    // skip is exactly how a broken exporter reports a green suite.
+    let mut graph = NpuGraph::compile_bytes(&bytes, &cfgv).unwrap_or_else(|e| {
+        panic!("OpenVINO is present but refused brain's emitted Qwen ASR audio-encoder head ONNX graph: {e:?}")
+    });
     let ovout = graph.run(&[("x", Feed::F32(&packed, vec![n_audio as i64, c as i64]))]).expect("run head");
     let (_n, shape, data) = &ovout[0];
     eprintln!("audio_embeds out shape {shape:?} ({} elems)", data.len());
