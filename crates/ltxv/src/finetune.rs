@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn the_synthetic_finetune_loop_runs_and_the_loss_descends() {
         let cfg = Cfg::tiny();
-        let base = init_model::<f32>(&cfg, 0xF17E7_007);
+        let base = init_model::<f32>(&cfg, 0xF17E_7007);
         let dir = std::env::temp_dir().join(format!("ltxv-finetune-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("adapter.brain");

@@ -142,7 +142,8 @@ fn linear(x: &[f32], rows: usize, in_dim: usize, out_dim: usize, w: &[f32], b: &
 
 /// `F.gelu(x, approximate="tanh")`.
 fn gelu_tanh(x: f32) -> f32 {
-    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    // sqrt(2/pi), written as the shortest literal with this exact f32 value.
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
     0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + 0.044715 * x * x * x)).tanh())
 }
 
@@ -328,7 +329,7 @@ mod tests {
     fn gelu_tanh_matches_known_points() {
         assert!((gelu_tanh(0.0)).abs() < 1e-6);
         // gelu(1.0, approximate="tanh") ~= 0.8411919906082768 (reference value).
-        assert!((gelu_tanh(1.0) - 0.8411920).abs() < 1e-5);
+        assert!((gelu_tanh(1.0) - 0.841_192).abs() < 1e-5);
         assert!((gelu_tanh(-1.0) - (-0.15880804)).abs() < 1e-5);
     }
 }
