@@ -132,13 +132,13 @@ pub fn ltx_rope_tables(inner_dim: u32, num_heads: u32, theta: f64, max_pos: &[u3
             cos_full[ti * total_half + k] = 1.0;
             sin_full[ti * total_half + k] = 0.0;
         }
-        for k in 0..l {
+        for (k, &angle_base) in indices.iter().enumerate() {
             for (a, &mp) in max_pos.iter().enumerate() {
                 let start = positions[(a * t + ti) * 2] as f64;
                 let end = positions[(a * t + ti) * 2 + 1] as f64;
                 let mid = (start + end) / 2.0;
                 let frac_pos = mid / mp as f64;
-                let angle = indices[k] * (2.0 * frac_pos - 1.0);
+                let angle = angle_base * (2.0 * frac_pos - 1.0);
                 let idx = pad + k * n_pos + a;
                 cos_full[ti * total_half + idx] = angle.cos() as f32;
                 sin_full[ti * total_half + idx] = angle.sin() as f32;

@@ -183,10 +183,10 @@ mod tests {
         let row1 = &tbl.sin[8..16];
         assert_ne!(row1[0], 0.0, "column 0 must be a genuine rotated frequency");
         assert_ne!(row1[1], 0.0, "column 1 must be a genuine rotated frequency");
-        for k in 2..8 {
+        for (k, &r1) in row1.iter().enumerate().skip(2) {
             assert_eq!(tbl.cos[k], 1.0, "row 0 column {k} must be the identity (cos=1)");
             assert_eq!(tbl.sin[k], 0.0, "row 0 column {k} must be the identity (sin=0)");
-            assert_eq!(row1[k], 0.0, "row 1 column {k} must be the identity (sin=0)");
+            assert_eq!(r1, 0.0, "row 1 column {k} must be the identity (sin=0)");
         }
     }
 }
