@@ -118,11 +118,11 @@ impl Qwen35Config {
     /// `TINY_TEXT` exactly**, dimension for dimension, so the golden and this
     /// config agree by construction rather than by a hand-maintained parallel
     /// list. Every dimension that is distinct in the real config stays
-    /// distinct here (a degenerate/collapsed toy dim hides whole bug classes
-    /// - e.g. the real config's `head_dim == linear_key_head_dim ==
+    /// distinct here (a degenerate/collapsed toy dim hides whole bug classes:
+    /// the real config's `head_dim == linear_key_head_dim ==
     /// linear_value_head_dim == 128` would let a head-width/head-count swap
     /// pass at cosine 1.0; this tiny config avoids that coincidence on
-    /// purpose - see `qwen35_tiny_dims_are_pairwise_distinct` below).
+    /// purpose, see `qwen35_tiny_dims_are_pairwise_distinct` below).
     /// `full_attention_interval = 4` with `n_layers = 4` exercises both layer
     /// types (only layer 3 is `Full`).
     pub fn tiny() -> Qwen35Config {
