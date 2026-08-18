@@ -286,13 +286,15 @@ if ! need "$IMG_DIR/kronos-forecast.png" || ! need "$IMG_DIR/kronos-forecast.txt
   if ! command -v gnuplot >/dev/null 2>&1; then
     echo "   skipped: the forecast chart needs the gnuplot CLI (apt-get install gnuplot)"
   else
-    # ~90 s on CPU, the longest compute-bound step on this page: a 512-bar
-    # prefill per origin is the cost, and 4 origins is the smallest number
-    # that makes "beats persistence" a measurement rather than one draw (at
-    # origin 0 alone kronos LOSES to persistence on this series -- which is
-    # exactly why one origin is not a result).
+    # ~4.5 min on CPU, the longest compute-bound step on this page: a 506-bar
+    # prefill per origin is the cost, and 16 origins is 16 disjoint held-out
+    # windows rather than one draw. Worth the minutes - the same measurement
+    # over 8 origins moves by 14 points, so a cheaper run would be reporting
+    # luck. The horizon is 6 because that is where this checkpoint's skill
+    # actually is: it beats persistence on CRPS at 6 bars and loses at 12 and
+    # 24, and both numbers are in the README next to this one.
     "$BRAIN" forecast predict --csv examples/forecast/synthetic_hourly.csv \
-      --horizon 24 --samples 16 --origins 4 --gnuplot "$IMG_DIR/kronos-forecast.png" \
+      --horizon 6 --samples 16 --origins 16 --gnuplot "$IMG_DIR/kronos-forecast.png" \
       2>/dev/null | grep -v '^  chart:' > "$IMG_DIR/kronos-forecast.txt"
   fi
 fi

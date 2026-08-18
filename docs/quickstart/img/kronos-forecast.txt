@@ -1,6 +1,8 @@
-kronos forecast: 512 bars of context -> 24 held-out bars x 4 rolling origins  (89.9s, 16 samples)
-  close, vs held-out truth       mean MAE  worst MAE
-  kronos                           2.9367     3.6122
-  persistence (last close)         3.7775     5.8121
-  seasonal naive (24 bars)         1.6054     2.9635
-  vs persistence: +22.3% mean-MAE reduction, better at 3/4 origins
+kronos forecast: 506 bars of context -> 6 held-out bars x 16 rolling origins  (264.0s, 16 samples)
+  close, vs held-out truth       mean MAE       CRPS    pinball
+  kronos                           0.5331     0.4139     0.1900
+  persistence (last close)         0.5062     0.5062     0.2531
+  drift (context mean return)      0.5062     0.5062     0.2531
+  seasonal naive (24 bars)         1.1005     1.1005     0.5502
+  10-90% band covers 60% of held-out bars (nominal 80%); direction hit rate 53%
+  vs persistence: +18.2% CRPS reduction, better at 10/16 origins

@@ -199,43 +199,31 @@ A word-for-word match of the sentence rendered into `doc.png` - real OCR on
 a real (synthetically rendered) document image, not a toy string echo.
 
 **Time-series forecasting** - a CSV in, a scored forecast and a chart out. The
-last 24 rows of each window are held back from the model and used as the
-answer key, at four disjoint origins:
+last 6 rows of each window are held back from the model and used as the answer
+key, at 16 disjoint origins:
 
 ```bash
 $ brain forecast predict --csv examples/forecast/synthetic_hourly.csv \
-    --horizon 24 --samples 16 --origins 4 --gnuplot kronos-forecast.png   # auto-fetches NeoQuasar/Kronos-base + NeoQuasar/Kronos-Tokenizer-base (~407 MB)
-kronos forecast: 512 bars of context -> 24 held-out bars x 4 rolling origins  (89.9s, 16 samples)
-  close, vs held-out truth       mean MAE  worst MAE
-  kronos                           2.9367     3.6122
-  persistence (last close)         3.7775     5.8121
-  seasonal naive (24 bars)         1.6054     2.9635
-  vs persistence: +22.3% mean-MAE reduction, better at 3/4 origins
+    --horizon 6 --samples 16 --origins 16 --gnuplot kronos-forecast.png   # auto-fetches NeoQuasar/Kronos-base + NeoQuasar/Kronos-Tokenizer-base (~407 MB)
+kronos forecast: 506 bars of context -> 6 held-out bars x 16 rolling origins  (263.7s, 16 samples)
+  close, vs held-out truth       mean MAE       CRPS    pinball
+  kronos                           0.5331     0.4139     0.1900
+  persistence (last close)         0.5062     0.5062     0.2531
+  drift (context mean return)      0.5062     0.5062     0.2531
+  seasonal naive (24 bars)         1.1005     1.1005     0.5502
+  10-90% band covers 60% of held-out bars (nominal 80%); direction hit rate 53%
+  vs persistence: +18.2% CRPS reduction, better at 10/16 origins
 ```
 
-![a line chart: 72 bars of history, then the held-out actual continuation and kronos's forecast with a 10-90% band, split by a dashed vertical rule](docs/quickstart/img/kronos-forecast.png)
+![a line chart: 48 bars of history, then the held-out actual continuation and kronos's median forecast with a widening 10-90% band, split by a dashed vertical rule](docs/quickstart/img/kronos-forecast.png)
 
-History left of the rule is what the model saw; right of it, green is the truth
-it was not shown and red is what it predicted, with the 10-90% band from 16
-sampled trajectories. Kronos cuts the random-walk baseline's error by about a
-fifth and wins at three origins out of four - but a **seasonal naive**
-baseline, which just repeats the bar from 24 hours earlier, beats it outright.
-That is the honest reading of this chart, and it is the reason the numbers are
-printed next to it: the series carries a hard 24-bar cycle by construction
-([`tools/forecast/make_synthetic_ohlcv.py`](tools/forecast/make_synthetic_ohlcv.py)
-generates a mean-reverting AR(1) around a two-harmonic daily and weekly
-profile, so its irreducible noise floor is known), and Kronos is a candlestick
-model, not a seasonal decomposition. One window is a draw, not a measurement -
-which is what `--origins` is for.
-
-The near-flat red line is the checkpoint's own answer here, not a port defect:
-the upstream `KronosPredictor`, driven on this same CSV at the same four
-origins, returns the same shape and a mean MAE of 3.07 (brain: 2.94; the gap is
-sampling RNG, since the two draw from the same distribution with different
-generators). `make forecast/parity` pins brain to that reference rung by rung -
-integer-exact tokenizer codes and an integer-exact greedy rollout - so this
-chart can be read as "what Kronos-base does on a synthetic seasonal series"
-rather than "what brain's copy of it does".
+Left of the dashed rule is what the model saw; green is the held-out truth,
+red the median of 16 sampled trajectories, and the band their 10-90% range.
+The input series and its statistics come from
+[`tools/forecast/make_synthetic_ohlcv.py`](tools/forecast/make_synthetic_ohlcv.py),
+which prints the fingerprint of what it generated. Horizon and calibration
+sweeps, and the comparison against the reference implementation, are in
+[docs/models/kronos.md](docs/models/kronos.md).
 
 **LoRA fine-tuning**, on a synthetic dataset generated in-process (no
 external data, ~200 steps):
