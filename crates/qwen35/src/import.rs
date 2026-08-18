@@ -107,7 +107,13 @@ pub fn dequantize_fp8_pairs(tensors: &mut Tensors, block: usize) -> Result<(), S
 /// the final `norm`) - see this module's doc, "The `(1+w)` RMSNorm fold".
 /// Takes brain-canonical names (post-[`classify`]), so it cannot accidentally
 /// touch `linear_attn.norm` (a different leaf name, never matched here).
-fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
+/// `pub` (not just import-internal): the golden parity tests load
+/// `tools/goldens/qwen35_dump_reference.py`'s raw saved weights directly
+/// (bypassing this whole import module, since that dumper already renames
+/// to brain's `blocks.{l}.*` convention), so they need this exact fold
+/// applied by hand - reusing it here is what keeps the test and the real
+/// import path from silently drifting apart on this one detail.
+pub fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
     for (name, data) in tensors.iter_mut() {
         let is_plain_norm = name == "norm.weight"
             || name.ends_with(".ln1.weight")

@@ -17,5 +17,7 @@
 pub mod config;
 pub mod import;
 pub mod init;
+pub mod model;
 
 pub use config::{LayerType, Qwen35Config};
+pub use model::Qwen35;
