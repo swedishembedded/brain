@@ -60,13 +60,26 @@ fn predict(args: &[String]) {
     let item = a.str_or("--item", "series");
     let freq = a.str_or("--freq", "1h");
     let gnuplot = a.take_str("--gnuplot");
+    let top_p = a.f32_or("--top-p", 0.0);
+    let temperature = a.f32_or("--temperature", 0.0);
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
     a.finish();
 
+    // The two sampling knobs that set how WIDE the predicted band is. Left
+    // unset, the model keeps the reference defaults; the coverage line below is
+    // what says whether those defaults are calibrated on this series.
+    if top_p > 0.0 {
+        std::env::set_var("BRAIN_KRONOS_TOP_P", top_p.to_string());
+    }
+    if temperature > 0.0 {
+        std::env::set_var("BRAIN_KRONOS_TEMPERATURE", temperature.to_string());
+    }
+
     if csv_path.is_empty() {
         eprintln!("usage: brain forecast predict --csv <ohlcv.csv> [--horizon 48] [--context N] [--samples N]");
         eprintln!("         [--origins 1] [--seed 7] [--season 24] [--gnuplot chart.png]");
+        eprintln!("         [--top-p 0.9] [--temperature 1.0]");
         eprintln!("         [--kronos-tokenizer D --kronos-decoder D]");
         eprintln!();
         eprintln!("The CSV is timestamp,open,high,low,close,volume. The last --horizon rows are held out");
@@ -118,8 +131,22 @@ fn predict(args: &[String]) {
             std::process::exit(1);
         }
     };
+    // Default context: as much history as the checkpoint's window allows while
+    // leaving room for the horizon INSIDE it. Past `max_context - horizon` the
+    // rollout's attention window slides, and the KV-cached rollout stops being
+    // equal to the reference's re-run-the-whole-window one. That is not a
+    // rounding difference: on this checkpoint the sampled cloud drifts
+    // measurably away from the reference's once the window moves, while inside
+    // this regime the two agree sample for sample. A default that is silently
+    // an approximation is the wrong default; ask for the longer window
+    // explicitly with `--context` if you want it.
     let max_context = forecast::ForecastModel::capabilities(&model).max_context;
-    let context = if context == 0 { max_context } else { context.min(max_context) };
+    let exact_context = max_context.saturating_sub(horizon).max(1);
+    let context = if context == 0 { exact_context } else { context.min(max_context) };
+    if context > exact_context {
+        eprintln!("brain forecast predict: --context {context} + --horizon {horizon} exceeds the model's {max_context}-bar window,");
+        eprintln!("  so the cached rollout slides it and is an approximation of the reference (use --context {exact_context} or less for exactness)");
+    }
 
     // `samples == 1` means the deterministic modal rollout: one stable path,
     // reproducible run to run, and N times cheaper than drawing a cloud. More
@@ -140,7 +167,8 @@ fn predict(args: &[String]) {
     // bars earlier, so the held-out windows are disjoint and no bar is scored
     // twice. Metrics are averaged over all of them - one origin is a draw, not
     // a measurement.
-    let mut acc: Vec<(String, Vec<f32>)> = Vec::new(); // (model name, per-origin MAE)
+    let mut acc: Vec<(String, Vec<Score>)> = Vec::new(); // (model name, per-origin scores)
+    let mut calib: Vec<(f32, f32)> = Vec::new(); // per-origin (band coverage, direction hit rate)
     let mut first: Option<(forecast::csv::Split, Vec<f32>, forecast::TargetForecast)> = None;
     let t0 = std::time::Instant::now();
     for o in 0..origins.max(1) {
@@ -168,22 +196,28 @@ fn predict(args: &[String]) {
             std::process::exit(1);
         };
 
-        // The two baselines. Persistence is the random-walk answer; seasonal
-        // naive is the same bar one period ago, read from the CONTEXT so it
-        // stays leak-free.
+        // The baselines. Persistence is the random-walk answer; drift
+        // extrapolates the context's own mean log return; seasonal naive is the
+        // same bar one period ago. All three are read from the CONTEXT only, so
+        // they stay leak-free.
         let ctx_close: Vec<f32> = split.context.iter().map(|b| b.ohlcv[forecast::csv::CLOSE]).collect();
         let actual: Vec<f32> = split.actual.iter().map(|b| b.ohlcv[forecast::csv::CLOSE]).collect();
         let last = *ctx_close.last().expect("split guarantees a non-empty context");
-        let mut row: Vec<(String, Vec<f32>)> = vec![("kronos".into(), pred.clone()), ("persistence (last close)".into(), vec![last; horizon])];
+        let mut row: Vec<(String, Score)> = vec![
+            ("kronos".into(), Score::probabilistic(&pred, &tf, &actual)),
+            ("persistence (last close)".into(), Score::point(&vec![last; horizon], &actual)),
+            ("drift (context mean return)".into(), Score::point(&drift_path(&ctx_close, horizon), &actual)),
+        ];
         if let Some(s) = seasonal_naive(&ctx_close, horizon, season) {
-            row.push((format!("seasonal naive ({season} bars)"), s));
+            row.push((format!("seasonal naive ({season} bars)"), Score::point(&s, &actual)));
         }
-        for (i, (name, p)) in row.iter().enumerate() {
+        for (i, (name, s)) in row.into_iter().enumerate() {
             if acc.len() <= i {
-                acc.push((name.clone(), Vec::new()));
+                acc.push((name, Vec::new()));
             }
-            acc[i].1.push(forecast::metrics::mae(p, &actual));
+            acc[i].1.push(s);
         }
+        calib.push((band_coverage(&tf, &actual).unwrap_or(f32::NAN), forecast::metrics::directional_accuracy(&pred, &actual, last)));
         // Only the most recent origin is charted: it is the one whose held-out
         // window a reader can line up against the end of the input file.
         if o == 0 {
@@ -200,16 +234,31 @@ fn predict(args: &[String]) {
         spec.num_samples,
         if spec.num_samples == 1 { "" } else { "s" }
     );
-    println!("  {:<28} {:>10} {:>10}", "close, vs held-out truth", "mean MAE", "worst MAE");
-    for (name, maes) in &acc {
-        let mean = maes.iter().sum::<f32>() / maes.len() as f32;
-        let worst = maes.iter().copied().fold(f32::MIN, f32::max);
-        println!("  {name:<28} {mean:>10.4} {worst:>10.4}");
+    println!("  {:<28} {:>10} {:>10} {:>10}", "close, vs held-out truth", "mean MAE", "CRPS", "pinball");
+    for (name, scores) in &acc {
+        println!(
+            "  {name:<28} {:>10.4} {:>10.4} {:>10.4}",
+            mean_of(scores, |s| s.mae),
+            mean_of(scores, |s| s.crps),
+            mean_of(scores, |s| s.pinball)
+        );
+    }
+    // Calibration is the claim a band forecast is actually making, so it is
+    // printed as a number rather than left to the eye on the chart.
+    let cov = calib.iter().map(|c| c.0).sum::<f32>() / calib.len() as f32;
+    let dir = calib.iter().map(|c| c.1).sum::<f32>() / calib.len() as f32;
+    // A one-sample run is the deterministic modal rollout: there is no band, so
+    // a coverage line would read 0% and mean nothing.
+    if cov.is_finite() && spec.num_samples > 1 {
+        println!("  10-90% band covers {:.0}% of held-out bars (nominal 80%); direction hit rate {:.0}%", cov * 100.0, dir * 100.0);
     }
     if let (Some(k), Some(p)) = (acc.first(), acc.get(1)) {
-        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
-        let wins = k.1.iter().zip(&p.1).filter(|(a, b)| a < b).count();
-        println!("  vs persistence: {:+.1}% mean-MAE reduction, better at {wins}/{n} origins", (1.0 - mean(&k.1) / mean(&p.1)) * 100.0);
+        // CRPS, not MAE, is the headline: it is the proper score for the
+        // distribution the model emits, and it reduces to MAE for the point
+        // baselines - so the two rows are comparable on the same axis.
+        let wins = k.1.iter().zip(&p.1).filter(|(a, b)| a.crps < b.crps).count();
+        let (kc, pc) = (mean_of(&k.1, |s| s.crps), mean_of(&p.1, |s| s.crps));
+        println!("  vs persistence: {:+.1}% CRPS reduction, better at {wins}/{n} origins", (1.0 - kc / pc) * 100.0);
     }
 
     if let (Some(path), Some((split, pred, tf))) = (gnuplot, &first) {
@@ -221,6 +270,103 @@ fn predict(args: &[String]) {
             }
         }
     }
+}
+
+/// One forecaster's score on one held-out window.
+///
+/// Three numbers rather than one, because a point error alone cannot judge a
+/// probabilistic forecast of a near-random-walk: nothing beats persistence on
+/// the LEVEL by much, and a model whose value is a calibrated interval would
+/// look like a failure on MAE alone.
+///
+/// - `mae` - the point error of the median path.
+/// - `crps` - the Continuous Ranked Probability Score of the whole predicted
+///   distribution. For a deterministic forecast it collapses exactly to MAE,
+///   which is what makes the model row and the baseline rows comparable.
+/// - `pinball` - mean quantile loss over the emitted levels, the same judgement
+///   read off the quantiles instead of the sample cloud.
+struct Score {
+    mae: f32,
+    crps: f32,
+    pinball: f32,
+}
+
+impl Score {
+    /// Score a distributional forecast: CRPS from the sample ensemble (the
+    /// model's native representation) and pinball from its quantile grid.
+    fn probabilistic(pred: &[f32], tf: &forecast::TargetForecast, actual: &[f32]) -> Score {
+        let h = actual.len();
+        let crps = match &tf.samples {
+            // samples are [n_samples, horizon], row-major.
+            Some(s) if s.shape.len() == 2 && s.data.len() == s.shape[0] * s.shape[1] && s.shape[1] >= h => {
+                let (n, hh) = (s.shape[0], s.shape[1]);
+                let mut acc = 0.0;
+                for (t, &y) in actual.iter().enumerate() {
+                    let col: Vec<f32> = (0..n).map(|k| s.data[k * hh + t]).collect();
+                    acc += forecast::metrics::crps_ensemble(&col, y);
+                }
+                acc / h as f32
+            }
+            // No ensemble: the point path IS the distribution, and its CRPS is
+            // its MAE.
+            _ => forecast::metrics::mae(pred, actual),
+        };
+        let pinball = match &tf.quantiles {
+            Some(q) if !tf.levels.is_empty() && q.data.len() >= h * tf.levels.len() => {
+                forecast::metrics::mean_pinball(&q.data[..h * tf.levels.len()], &tf.levels, actual)
+            }
+            _ => forecast::metrics::mean_pinball(&repeat_levels(pred, 1), &[0.5], actual),
+        };
+        Score { mae: forecast::metrics::mae(pred, actual), crps, pinball }
+    }
+
+    /// Score a point forecast on the same three axes. A deterministic forecast
+    /// is a degenerate distribution: its CRPS is its MAE, and its quantile grid
+    /// is the same value at every level.
+    fn point(pred: &[f32], actual: &[f32]) -> Score {
+        let mae = forecast::metrics::mae(pred, actual);
+        let levels = [0.1f32, 0.5, 0.9];
+        Score { mae, crps: mae, pinball: forecast::metrics::mean_pinball(&repeat_levels(pred, levels.len()), &levels, actual) }
+    }
+}
+
+/// A `[H]` point path widened into the `[H, Q]` grid `mean_pinball` wants, with
+/// the same value at every level.
+fn repeat_levels(pred: &[f32], q: usize) -> Vec<f32> {
+    pred.iter().flat_map(|v| std::iter::repeat_n(*v, q)).collect()
+}
+
+/// The mean of one field over the per-origin scores.
+fn mean_of(scores: &[Score], f: impl Fn(&Score) -> f32) -> f32 {
+    scores.iter().map(f).sum::<f32>() / scores.len().max(1) as f32
+}
+
+/// Empirical coverage of the outermost predicted interval: the fraction of
+/// held-out bars that landed inside it. Read against the nominal level (80% for
+/// a 10-90% band) it says whether the model's uncertainty is honest - the one
+/// question a point metric cannot answer. `None` when the model emitted no
+/// usable band.
+fn band_coverage(tf: &forecast::TargetForecast, actual: &[f32]) -> Option<f32> {
+    let q = tf.quantiles.as_ref()?;
+    let n = tf.levels.len();
+    if n < 2 || q.data.len() < actual.len() * n {
+        return None;
+    }
+    let lo: Vec<f32> = (0..actual.len()).map(|h| q.data[h * n]).collect();
+    let hi: Vec<f32> = (0..actual.len()).map(|h| q.data[h * n + n - 1]).collect();
+    Some(forecast::metrics::coverage(&lo, &hi, actual))
+}
+
+/// "Carry the context's own mean log return forward" - the drift baseline, and
+/// the right one to beat on a series with a trend: persistence forecasts no
+/// move at all, which is a different (and weaker) claim.
+fn drift_path(ctx: &[f32], horizon: usize) -> Vec<f32> {
+    let last = *ctx.last().unwrap_or(&0.0);
+    if ctx.len() < 2 || last <= 0.0 || ctx.iter().any(|v| *v <= 0.0) {
+        return vec![last; horizon];
+    }
+    let mu = (last.ln() - ctx[0].ln()) / (ctx.len() - 1) as f32;
+    (1..=horizon).map(|h| last * (mu * h as f32).exp()).collect()
 }
 
 /// The forecast's point path over the horizon: the median quantile when the
@@ -257,10 +403,12 @@ fn render_chart(
     item: &str,
     horizon: usize,
 ) -> Result<std::path::PathBuf, String> {
-    // Show at most three horizons of history: enough to read the seasonal
-    // structure the forecast is or is not continuing, without squeezing the
-    // part under judgement into the right-hand margin.
-    let show = (horizon * 3).min(split.context.len());
+    // Four horizons of history, and never less than two days of hourly bars:
+    // enough to read the volatility regime the forecast is continuing (a
+    // couple of dozen bars of a random walk read as a smooth trend, which is
+    // exactly the wrong impression), without squeezing the part under
+    // judgement into the right-hand margin.
+    let show = (horizon * 4).max(48).min(split.context.len());
     let first = split.context.len() - show;
     let mut chart = forecast::chart::ForecastChart::new(format!("{item}: kronos {horizon}-bar forecast vs held-out actual"));
     chart.y_label = "close".to_string();

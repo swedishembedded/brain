@@ -51,7 +51,7 @@ action.
 
 ```bash
 # one command, CSV in, scored forecast (and a chart) out
-brain forecast predict --csv examples/forecast/synthetic_hourly.csv --horizon 24 --samples 16 --gnuplot chart.png
+brain forecast predict --csv examples/forecast/synthetic_hourly.csv --horizon 6 --samples 16 --origins 16 --gnuplot chart.png
 
 # backtest against statistical baselines before trusting it
 brain forecast compare --kronos-tokenizer <tok-dir> --kronos-decoder <dec-dir> --windows 24 --seed 1337
@@ -78,13 +78,17 @@ BRAIN_KRONOS_TOKENIZER=<tok-dir> BRAIN_KRONOS_DECODER=<dec-dir> \
 ## Options
 
 - `predict`: `--csv <file>` (required, `timestamp,open,high,low,close,volume`),
-  `--horizon <n>` (default 48), `--context <n>` (default: the checkpoint's own
-  512-bar maximum), `--samples <n>` (default 1 = the deterministic modal
+  `--horizon <n>` (default 48), `--context <n>` (default: `512 - horizon`, the
+  longest window that keeps the rollout exact against the reference - see
+  Hardware and limits), `--samples <n>` (default 1 = the deterministic modal
   rollout; more draws real trajectories and adds a decile-to-ninth-decile
   uncertainty band to the chart),
   `--origins <n>` (default 1; score at N disjoint held-out windows and average,
   because one origin is a draw and not a measurement), `--season <n>` (default
-  24, the seasonal-naive baseline's period), `--seed`, `--gnuplot <png>`.
+  24, the seasonal-naive baseline's period), `--seed`, `--gnuplot <png>`,
+  `--top-p <p>` / `--temperature <t>` (the sampler's two width knobs; default to
+  the reference `KronosPredictor` values 0.9 and 1.0, and also readable as
+  `BRAIN_KRONOS_TOP_P` / `BRAIN_KRONOS_TEMPERATURE`).
   The CSV is validated structurally and semantically at entry - column order,
   ragged rows, non-finite values, non-monotonic timestamps, non-positive
   prices and the OHLC invariants - and every rejection names the file line.
@@ -112,6 +116,24 @@ for the full how-to.
 - Kronos is a candlestick model, not a seasonal decomposition: its skill is
   concentrated at short horizons. Score it at several rolling origins
   (`--origins`) before believing a single window's number.
+- **The predictive band is over-confident, and worsens with lead time.** On the
+  committed example series its nominal 10-90% band covers 60% of held-out bars
+  at a 6-bar horizon, 44% at 12 and 30% at 24; on a real 5-minute equity series
+  (at the nominal 512-bar window), 45% at 12 and 20% at 24. This is the
+  checkpoint, not the port - upstream's own `KronosPredictor` measures the same
+  on the same input - and it is not nucleus truncation either: relaxing
+  `--top-p` all the way to 1.0 only moves real-data coverage from 20% to 38%,
+  at a worse CRPS. Treat the band as a relative sharpness signal, not as an 80%
+  interval, and calibrate it against your own held-out data before sizing
+  anything on it.
+- **Skill is concentrated at short horizons, and it is a CRPS skill, not a
+  point-accuracy one.** On the example series, over 16 disjoint origins: at 6
+  bars kronos beats persistence by 18% on CRPS (and loses to it on MAE); at 12
+  bars it loses by 50%; at 24 bars, by 74%.
+- On a single series, point accuracy is a tie with persistence at best: the
+  model's own published metric is cross-sectional rank IC across a universe of
+  instruments (`crates/kronos/tests/rankic_eval.rs`), which is a different
+  question from level accuracy on one name.
 - The KV-cached rollout (`--samples`, the D-Bus path, the resident server) is
   **exact against the upstream implementation only while `context + horizon
   <= 512`**, the model's attention window. Beyond that the upstream rollout
@@ -119,7 +141,11 @@ for the full how-to.
   which no K/V cache reproduces - and this checkpoint is unusually sensitive to
   that shift: two otherwise identical un-cached runs whose window origin
   differs by a single bar disagree by ~1e-1 relative in the final token logits,
-  enough to change which token is sampled. Pass `--context 488` (or any
-  `context <= 512 - horizon`) when you need the cached path to reproduce the
-  reference bar for bar; leave it at the default when you want the full window.
+  enough to change which token is sampled. **`brain forecast predict` therefore
+  defaults `--context` to `512 - horizon`, not 512**, so the shipped path is the
+  exact one: at `--context 500 --horizon 12` brain's 128-sample cloud and the
+  reference's agree at every step (largest |z| 0.9 on the per-step means),
+  while at `--context 512` the same comparison drifts apart to |z| 6.0 and the
+  sampled band is ~15% narrower. Ask for the longer window explicitly if you
+  want it; the command says on stderr that it is then an approximation.
   `make forecast/parity` gates both regimes.

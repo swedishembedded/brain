@@ -38,6 +38,13 @@ use forecast::{
 /// Fixed input column order the adapter builds bars in.
 const OHLCV: [&str; 5] = ["open", "high", "low", "close", "volume"];
 
+/// A sampling knob read from the environment, falling back to the reference
+/// default. Ignores an unparseable or non-finite value rather than failing a
+/// forecast over a typo in a shell variable.
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(default)
+}
+
 /// Calendar variate names, in the reference's stamp order
 /// (`decoder::CAL`): minute, hour, weekday, day, month.
 const CAL_NAMES: [&str; 5] = ["minute", "hour", "weekday", "day", "month"];
@@ -201,12 +208,16 @@ impl ForecastModel for KronosForecaster {
                 .collect();
 
             let opts = GenOpts {
-                temperature: 1.0,
+                temperature: env_f32("BRAIN_KRONOS_TEMPERATURE", 1.0),
                 top_k: 0,
-                // nucleus truncation matching the reference KronosPredictor
-                // default; top_p=1.0 (no truncation) samples the full tails and
-                // makes the rollout wildly over-dispersed on real data.
-                top_p: 0.9,
+                // Nucleus truncation. The reference `KronosPredictor` default is
+                // 0.9, and it is what this ships, but it is a CALIBRATION knob:
+                // truncation compounds over an autoregressive rollout, so a
+                // tighter `top_p` narrows the predictive band step after step.
+                // `BRAIN_KRONOS_TOP_P` (and `brain forecast predict --top-p`)
+                // exposes it so the band can be scored against its nominal
+                // coverage rather than assumed calibrated.
+                top_p: env_f32("BRAIN_KRONOS_TOP_P", 0.9),
                 argmax,
                 seed: spec.seed,
             };
