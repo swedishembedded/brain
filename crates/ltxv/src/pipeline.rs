@@ -771,8 +771,10 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let sigma2_0 = sigmas2[0] as f32;
     let mut seed2 = chw_to_tc(&upscaled_video_chw, in_channels, lat_t, lh2, lw2);
     seed2.extend_from_slice(&chw_to_tc(&upscaled_slots_chw, in_channels, k, lh2, lw2));
-    let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x53_32);
-    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    // The per-stage seed tags are ASCII ("S2", "N2"), written unsplit because
+    // `0x53_32` reads to clippy as `0x53` with a mistyped `i32` suffix.
+    let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         return Err("cancelled".into());
     }
