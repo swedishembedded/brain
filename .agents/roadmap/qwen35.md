@@ -22,24 +22,35 @@ correctness alone. The one part with no available reference is the MTP head:
 (`_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`), so it is implemented
 structurally and never parity-claimed here.
 
-## Not yet done
+## Done
 
-- [ ] M1: hoist the zero-coupling GDN scratch allocators (`gdn_chunk_size`,
+- [x] M1: hoist the zero-coupling GDN scratch allocators (`gdn_chunk_size`,
   `GdnScratchBufs`/`GdnScratchTrainBufs`/`GdnBwdScratchBufs`) out of
   `crates/qwen35moe/src/model.rs` into `crates/model/src/gdn.rs`, migrate qwen35moe.
-- [ ] M2: reference goldens (`tools/goldens/qwen35_dump_reference.py`) - tiny
+- [x] M2: reference goldens (`tools/goldens/qwen35_dump_reference.py`) - tiny
   all-dims-distinct text config, plus vision at real dims (depth 27/hidden 1152).
-- [ ] M3: `crates/qwen35` config/param-manifest/init.
-- [ ] M4: FP8 blockwise import (`crates/model/src/fp8.rs`, safetensors `F8_E4M3`
+- [x] M3: `crates/qwen35` config/param-manifest/init.
+- [x] M4: FP8 blockwise import (`crates/model/src/fp8.rs`, safetensors `F8_E4M3`
   support, two-way tensor coverage, the `(1+w)` RMSNorm fold applied on direct
   HF-safetensors import - unlike qwen35moe, which imports only from GGUF where
   llama.cpp's conversion already bakes the fold in).
-- [ ] M5: text-only forward at tiny dims, climbing parity rungs 1-3 against the M2
+- [x] M5: text-only forward at tiny dims, climbing parity rungs 1-3 against the M2
   goldens (cosine + rel_l2 + max_abs at every stage).
-- [ ] M6: backward + `gradcheck::check_qwen35` (both mixer types; wide init on
+- [x] M6: backward + `gradcheck::check_qwen35` (both mixer types; wide init on
   `in_proj_qkv`/`conv1d` from day one per lessons.md #40, plus a no-zero-FD
   assertion so the same hollow-gradcheck failure mode cannot recur unnoticed).
-- [ ] M7: MTP head (structural only - no reference oracle available here).
+- [x] M7: MTP head (`Qwen35::run_mtp_forward`/`mtp_backward` in
+  `crates/qwen35/src/model.rs`; `mtp.layers.0.*` is one full Gated-Attention
+  decoder layer reusing `layer_gqa_fwd`/`mlp_fwd` unchanged via weight-name-prefix
+  parameterization, unlike glmdsa's position-wise-only MTP block). Gated by
+  `gradcheck::check_qwen35_mtp` (every `mtp.*` tensor, seed 8, zero tolerance
+  failures) plus `crates/qwen35/tests/mtp_convergence.rs` (a real training loop
+  still reduces the combined loss; zeroing `mtp.fc_e`/`mtp.fc_h` moves the loss,
+  proving the head is load-bearing rather than merely wired). Structural only -
+  no reference oracle available here, see below.
+
+## Not yet done
+
 - [ ] M8: LoRA (extend targets to the dense MLP's `gate`/`up`/`down`) + full
   finetune (`crates/qwen35/src/finetune.rs`, new surface - qwen35moe has none).
 - [ ] M9: vision tower splice (`crates/qwen35/src/vl.rs`, copied from

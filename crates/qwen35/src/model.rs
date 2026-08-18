@@ -360,6 +360,35 @@ struct TrainActs {
     xn_final: DeviceBuffer,
 }
 
+/// Everything the MTP head's forward (M7) saves for its own backward -
+/// DeepSeek-V3-style: normalize the next token's own embedding and the main
+/// stack's final hidden state independently, fuse them with a `fc_e`/`fc_h`
+/// projection pair, run through ONE standard full-attention decoder layer
+/// (`mtp.layers.0.*` - same shape as any other `Full` block, reusing
+/// [`Qwen35::layer_gqa_fwd`]/[`Qwen35::mlp_fwd`] via the `"mtp.layers.0.*"`
+/// prefix), then `mtp.norm` and the SHARED `lm_head`. No reference oracle
+/// exists for this head on this box (`transformers`' own loader discards
+/// `mtp.*` on load) - structural only, gradchecked and overfit-tested, never
+/// parity-claimed.
+struct MtpActs {
+    /// Raw next-token embedding (pre `pre_fc_norm_embedding`).
+    e: DeviceBuffer,
+    /// `norm(e, "mtp.pre_fc_norm_embedding.weight")` - the `fc_e` matmul's input.
+    en: DeviceBuffer,
+    /// `norm(res[last], "mtp.pre_fc_norm_hidden.weight")` - the `fc_h` matmul's input.
+    hn: DeviceBuffer,
+    /// `fc_e(en) + fc_h(hn)` - the one extra layer's residual-stream INPUT
+    /// (`mlp_fwd`/`layer_gqa_fwd`'s doc calls this role `xres`).
+    ehp: DeviceBuffer,
+    /// The one extra full-attention decoder layer's own saved activations -
+    /// same shape [`LayerTrainActs`] gives every other layer.
+    layer: LayerTrainActs,
+    /// The layer's output (post both residual adds), pre `mtp.norm`.
+    block_out: DeviceBuffer,
+    /// `norm(block_out, "mtp.norm.weight")` - the shared `lm_head` matmul's input.
+    final_h: DeviceBuffer,
+}
+
 pub struct Qwen35 {
     pub gpu: Gpu,
     pub cfg: Qwen35Config,
@@ -406,6 +435,23 @@ pub struct Qwen35 {
 
     /// Backward's activation cache - see [`TrainActs`]'s own doc.
     train_acts: RefCell<Option<TrainActs>>,
+
+    // ---- multi-token prediction head (M7, `cfg.mtp`) ----------------------
+    // Size-1 dummies when `cfg.mtp` is false, matching this file's own
+    // "size-1 dummy where a value doesn't apply" convention.
+    /// Next-token input for the MTP embedding gather (`x` shifted by 1),
+    /// written by [`Self::set_batch`].
+    mtp_input: DeviceBuffer,
+    /// MTP's own target (`x` shifted by 2 - predicts token `t+2`), written
+    /// by [`Self::set_batch`].
+    mtp_target: DeviceBuffer,
+    mtp_logits: DeviceBuffer,
+    mtp_ce_buf: DeviceBuffer,
+    /// MTP's own activation cache - see [`MtpActs`]'s own doc. `Some` only
+    /// right after a `forward()` call on a `cfg.mtp` training build, same
+    /// "forward reallocates fresh, backward takes it" contract as
+    /// `train_acts`.
+    mtp_acts: RefCell<Option<MtpActs>>,
 }
 
 impl Qwen35 {
@@ -454,6 +500,11 @@ impl Qwen35 {
         let d = cfg.d_model as u64;
         let res = RefCell::new((0..=cfg.n_layers).map(|_| gpu.storage(n * d)).collect());
 
+        let mtp_input = gpu.storage(if cfg.mtp { n } else { 1 });
+        let mtp_target = gpu.storage(if cfg.mtp { n } else { 1 });
+        let mtp_logits = gpu.storage(if cfg.mtp { n * cfg.vocab as u64 } else { 1 });
+        let mtp_ce_buf = gpu.storage(if cfg.mtp { n } else { 1 });
+
         Qwen35 {
             gpu,
             cfg,
@@ -474,6 +525,11 @@ impl Qwen35 {
             ce_grad_uni,
             res,
             train_acts: RefCell::new(None),
+            mtp_input,
+            mtp_target,
+            mtp_logits,
+            mtp_ce_buf,
+            mtp_acts: RefCell::new(None),
         }
     }
 
@@ -510,6 +566,26 @@ impl Qwen35 {
         self.gpu.write(&self.targets, targets);
         let c = targets.iter().filter(|&&v| v != model::IGNORE).count();
         self.count.set(c.max(1) as f32);
+
+        if self.cfg.mtp {
+            // MTP predicts token t+2 from hidden_t + embed(x[t+1]). Per
+            // sequence (b seqs of `self.t`): input = x shifted +1, target =
+            // x shifted +2 - same construction as `glmdsa::model`'s own MTP
+            // input/target shift.
+            let seqlen = self.t as usize;
+            let bsz = self.b as usize;
+            let mut inp = vec![0u32; tokens.len()];
+            let mut tgt = vec![model::IGNORE; tokens.len()];
+            for s in 0..bsz {
+                for ti in 0..seqlen {
+                    let i = s * seqlen + ti;
+                    inp[i] = if ti + 1 < seqlen { tokens[s * seqlen + ti + 1] } else { 0 };
+                    tgt[i] = if ti + 2 < seqlen { tokens[s * seqlen + ti + 2] } else { model::IGNORE };
+                }
+            }
+            self.gpu.write(&self.mtp_input, &inp);
+            self.gpu.write(&self.mtp_target, &tgt);
+        }
     }
 
     /// Backward for a linear `y = x*Wt`. Accumulates the input gradient into
@@ -726,13 +802,17 @@ impl Qwen35 {
 
     // ---- one GQA (Full) layer ----------------------------------------------
 
-    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
+    /// `prefix` is the weight-name prefix up to (not including) the leaf
+    /// name - `"blocks.{l}.self_attn"` for a normal layer, `"mtp.layers.0.
+    /// self_attn"` for the MTP head's own full-attention sublayer (M7) -
+    /// reusing this function unchanged, since the mechanism is identical.
+    fn layer_gqa_fwd(&self, prefix: &str, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
-        let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
+        let p = |s: &str| format!("{prefix}.{s}");
 
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
@@ -802,12 +882,14 @@ impl Qwen35 {
 
     // ---- dense SwiGLU MLP, universal for every layer -----------------------
 
-    fn mlp_fwd(&self, l: usize, xn2: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
+    /// `prefix` is the weight-name prefix - `"blocks.{l}.mlp"` for a normal
+    /// layer, `"mtp.layers.0.mlp"` for the MTP head (M7).
+    fn mlp_fwd(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         let ff = c.intermediate_size;
-        let p = |s: &str| format!("blocks.{l}.mlp.{s}");
+        let p = |s: &str| format!("{prefix}.{s}");
 
         let gate_pre = g.storage((n * ff) as u64);
         let up = g.storage((n * ff) as u64);
@@ -825,6 +907,172 @@ impl Qwen35 {
 
         let acts = self.is_train.then(|| MlpLayerActs { xn2: xn2.clone(), gate_pre, up, h });
         (down, acts)
+    }
+
+    // ---- multi-token-prediction head (M7, `cfg.mtp`) -----------------------
+
+    /// Forward pass for the MTP head - see [`MtpActs`]'s own doc for the
+    /// exact chain: `embed(mtp_input)` -> two independent pre-norms (one over
+    /// the embedding, one over `res_last`) -> `fc_e`/`fc_h` fused into one
+    /// residual-stream input -> ONE full Gated-Attention decoder layer
+    /// (`"mtp.layers.0.*"`, reusing [`Self::layer_gqa_fwd`]/[`Self::mlp_fwd`]
+    /// unchanged - the exact per-layer shape [`Self::run_forward`]'s own loop
+    /// body uses) -> `mtp.norm` -> the SHARED `lm_head`/`tok.weight` matmul
+    /// into `self.mtp_logits` -> CE against `self.mtp_target` into
+    /// `self.mtp_ce_buf`. Always writes `mtp_logits`/`mtp_ce_buf` (mirrors the
+    /// main head always having somewhere to write); returns the saved
+    /// activations for [`Self::backward`] only when `is_train`.
+    fn run_mtp_forward(&self, res_last: &DeviceBuffer, n: u32) -> Option<MtpActs> {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let v = c.vocab;
+
+        let e = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(EMBED, &[&self.mtp_input, self.w("tok.weight"), &e], &[d, n], n * d)]);
+
+        let en = g.storage((n * d) as u64);
+        let hn = g.storage((n * d) as u64);
+        g.submit(
+            &[],
+            &[
+                rmsnorm_fwd(g, &kernel_ids(), &e, self.w("mtp.pre_fc_norm_embedding.weight"), &en, d, n),
+                rmsnorm_fwd(g, &kernel_ids(), res_last, self.w("mtp.pre_fc_norm_hidden.weight"), &hn, d, n),
+            ],
+        );
+
+        let ehp_e = g.storage((n * d) as u64);
+        let ehp_h = g.storage((n * d) as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(MATMUL, &[&en, self.w("mtp.fc_e.weight"), &ehp_e], &[n, d, d], n * d),
+                g.step(MATMUL, &[&hn, self.w("mtp.fc_h.weight"), &ehp_h], &[n, d, d], n * d),
+            ],
+        );
+        let ehp = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[&ehp_e, &ehp_h, &ehp], &[n * d], n * d)]);
+
+        let xn1 = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &ehp, self.w("mtp.layers.0.ln1.weight"), &xn1, d, n)]);
+        let (mixer_out, mixer_acts) = self.layer_gqa_fwd("mtp.layers.0.self_attn", &xn1, n);
+
+        let xmid = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[&ehp, &mixer_out, &xmid], &[n * d], n * d)]);
+
+        let xn2 = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w("mtp.layers.0.ln2.weight"), &xn2, d, n)]);
+        let (mlp_out, mlp_acts) = self.mlp_fwd("mtp.layers.0.mlp", &xn2, n);
+
+        let block_out = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &block_out], &[n * d], n * d)]);
+
+        let final_h = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &block_out, self.w("mtp.norm.weight"), &final_h, d, n)]);
+        g.submit(&[], &[g.step(MATMUL, &[&final_h, self.w(c.head_weight()), &self.mtp_logits], &[n, d, v], n * v)]);
+        g.submit(&[], &[g.step(CE_VALUE, &[&self.mtp_logits, &self.mtp_target, &self.mtp_ce_buf], &[n, v, model::IGNORE], n)]);
+
+        self.is_train.then(|| MtpActs {
+            e,
+            en,
+            hn,
+            ehp,
+            layer: LayerTrainActs {
+                xn1,
+                mixer: MixerActs::Gqa(mixer_acts.expect("qwen35: is_train but layer_gqa_fwd returned no acts for the MTP layer")),
+                xmid,
+                mlp: mlp_acts.expect("qwen35: is_train but mlp_fwd returned no acts for the MTP layer"),
+            },
+            block_out,
+            final_h,
+        })
+    }
+
+    /// Reverse of [`Self::run_mtp_forward`]. Must run before
+    /// [`Self::backward`]'s main reverse layer loop consumes `d_res_next` -
+    /// returns the updated gradient (the `pre_fc_norm_hidden` branch's
+    /// contribution folded in), mirroring `glmdsa::model::Qwen35::
+    /// build_backward`'s own MTP-before-layer-loop ordering
+    /// (`crates/glmdsa/src/model.rs:930-960`), adapted for a full
+    /// self-attention sublayer instead of glmdsa's position-wise-only block.
+    fn mtp_backward(&self, ma: &MtpActs, res_last: &DeviceBuffer, d_res_next: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let v = c.vocab;
+        let head = c.head_weight();
+
+        g.write(&self.ce_grad_uni, &[n, v, model::IGNORE, f(self.count.get())]);
+        let d_mtp_logits = g.storage((n * v) as u64);
+        g.submit(&[], &[g.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.mtp_logits, &self.mtp_target, &d_mtp_logits], n * v)]);
+
+        let d_final_h = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_mtp_logits, &ma.final_h, head, &d_final_h, n, d, v, 0);
+            g.submit(&[], &s);
+        }
+
+        let d_block_out = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &ma.block_out, "mtp.norm.weight", &d_final_h, &d_block_out, d, n);
+            g.submit(&[], &s);
+        }
+
+        // ---- reverse of the one decoder layer (mirrors `backward`'s own per-layer body) ----
+        let d_xn2 = self.mlp_bwd("mtp.layers.0.mlp", &ma.layer.mlp, &d_block_out, n);
+        let d_ln2_dx = g.storage((n * d) as u64);
+        let d_xmid = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &ma.layer.xmid, "mtp.layers.0.ln2.weight", &d_xn2, &d_ln2_dx, d, n);
+            s.push(g.step(ADD2, &[&d_block_out, &d_ln2_dx, &d_xmid], &[n * d], n * d));
+            g.submit(&[], &s);
+        }
+
+        let d_xn1 = g.storage((n * d) as u64);
+        match &ma.layer.mixer {
+            MixerActs::Gqa(acts) => self.gqa_mixer_bwd("mtp.layers.0.self_attn", &ma.layer.xn1, acts, &d_xmid, &d_xn1, n),
+            MixerActs::Gdn(_) => unreachable!("qwen35: the MTP layer is always Full-attention, never GDN"),
+        }
+
+        let d_ln1_dx = g.storage((n * d) as u64);
+        let d_ehp = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &ma.ehp, "mtp.layers.0.ln1.weight", &d_xn1, &d_ln1_dx, d, n);
+            s.push(g.step(ADD2, &[&d_xmid, &d_ln1_dx, &d_ehp], &[n * d], n * d));
+            g.submit(&[], &s);
+        }
+
+        // ---- ehp = fc_e(en) + fc_h(hn) backward ----
+        let d_en = g.storage((n * d) as u64);
+        let d_hn = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &d_ehp, &ma.en, "mtp.fc_e.weight", &d_en, n, d, d, 0);
+            self.proj_bwd(&mut s, &d_ehp, &ma.hn, "mtp.fc_h.weight", &d_hn, n, d, d, 0);
+            g.submit(&[], &s);
+        }
+
+        // ---- pre-fc norms backward ----
+        let d_e = g.storage((n * d) as u64);
+        let d_res_from_hn = g.storage((n * d) as u64);
+        {
+            let mut s = Vec::new();
+            self.rmsnorm_bwd_step(&mut s, &ma.e, "mtp.pre_fc_norm_embedding.weight", &d_en, &d_e, d, n);
+            self.rmsnorm_bwd_step(&mut s, res_last, "mtp.pre_fc_norm_hidden.weight", &d_hn, &d_res_from_hn, d, n);
+            g.submit(&[], &s);
+        }
+
+        if self.trainable("tok.weight") {
+            g.submit(&[], &[g.step(EMB_BWD, &[&self.mtp_input, &d_e, self.g("tok.weight")], &[n, d, v], v * d)]);
+        }
+
+        let d_res_next2 = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[d_res_next, &d_res_from_hn, &d_res_next2], &[n * d], n * d)]);
+        d_res_next2
     }
 
     pub(crate) fn run_forward(&self) {
@@ -848,7 +1096,7 @@ impl Qwen35 {
                     (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
                 }
                 LayerType::Full => {
-                    let (o, a) = self.layer_gqa_fwd(l, &xn1, n);
+                    let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n);
                     (o, a.map(MixerActs::Gqa))
                 }
             };
@@ -859,7 +1107,7 @@ impl Qwen35 {
             let xn2 = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n)]);
 
-            let (mlp_out, mlp_acts) = self.mlp_fwd(l, &xn2, n);
+            let (mlp_out, mlp_acts) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
             g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res[l + 1]], &[n * d], n * d)]);
 
             if self.is_train {
@@ -876,6 +1124,11 @@ impl Qwen35 {
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n)]);
         let v = self.cfg.vocab;
         g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+
+        if self.cfg.mtp {
+            let mtp_acts = self.run_mtp_forward(&res[self.cfg.n_layers as usize], n);
+            *self.mtp_acts.borrow_mut() = mtp_acts;
+        }
 
         if self.is_train {
             *self.train_acts.borrow_mut() = Some(TrainActs { layers: layer_acts, xn_final });
@@ -1079,14 +1332,15 @@ impl Qwen35 {
     }
 
     /// Reverse of [`Self::layer_gqa_fwd`]'s 7 steps. Mirrors
-    /// `qwen35moe::model::Qwen35::gqa_mixer_bwd` exactly.
-    fn gqa_mixer_bwd(&self, l: usize, xn1: &DeviceBuffer, la: &GqaLayerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32) {
+    /// `qwen35moe::model::Qwen35::gqa_mixer_bwd` exactly. `prefix` matches
+    /// the forward call's own (see [`Self::layer_gqa_fwd`]'s doc).
+    fn gqa_mixer_bwd(&self, prefix: &str, xn1: &DeviceBuffer, la: &GqaLayerActs, d_out: &DeviceBuffer, d_xn1: &DeviceBuffer, n: u32) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
-        let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
+        let p = |s: &str| format!("{prefix}.{s}");
 
         // ---- 7. o_proj backward ----
         let d_ctx_gated = g.storage((n * qd) as u64);
@@ -1158,12 +1412,12 @@ impl Qwen35 {
     /// this is just `qwen3::model.rs`'s own dense-MLP backward pattern:
     /// `down`'s proj_bwd, `swiglu_bwd`, then `up`/`gate`'s proj_bwd
     /// accumulating into one `d_xn2`).
-    fn mlp_bwd(&self, l: usize, la: &MlpLayerActs, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    fn mlp_bwd(&self, prefix: &str, la: &MlpLayerActs, d_mlp_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         let ff = c.intermediate_size;
-        let p = |s: &str| format!("blocks.{l}.mlp.{s}");
+        let p = |s: &str| format!("{prefix}.{s}");
 
         let d_h = g.storage((n * ff) as u64);
         {
@@ -1221,13 +1475,25 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
+        if self.cfg.mtp {
+            let ma = self.mtp_acts.borrow_mut().take().expect(
+                "qwen35: backward() called with cfg.mtp but no MTP activations cached -- \
+                 run_forward must populate mtp_acts whenever is_train && cfg.mtp, same \
+                 \"forward reallocates fresh, backward takes it\" contract as train_acts",
+            );
+            let res_borrow = self.res.borrow();
+            let res_last = &res_borrow[self.cfg.n_layers as usize];
+            d_res_next = self.mtp_backward(&ma, res_last, &d_res_next, n);
+            drop(res_borrow);
+        }
+
         let res = self.res.borrow();
         for l in (0..self.cfg.n_layers as usize).rev() {
             let la = &ta.layers[l];
 
             // ---- second residual add backward: res[l+1] = xmid + mlp_out ----
             let d_mlp_out = &d_res_next;
-            let d_xn2 = self.mlp_bwd(l, &la.mlp, d_mlp_out, n);
+            let d_xn2 = self.mlp_bwd(&format!("blocks.{l}.mlp"), &la.mlp, d_mlp_out, n);
 
             let d_ln2_dx = g.storage((n * d) as u64);
             let d_xmid = g.storage((n * d) as u64);
@@ -1242,7 +1508,7 @@ impl Qwen35 {
             let d_xn1 = g.storage((n * d) as u64);
             match &la.mixer {
                 MixerActs::Gdn(acts) => self.gdn_mixer_bwd(l, &la.xn1, acts, &d_xmid, &d_xn1, n),
-                MixerActs::Gqa(acts) => self.gqa_mixer_bwd(l, &la.xn1, acts, &d_xmid, &d_xn1, n),
+                MixerActs::Gqa(acts) => self.gqa_mixer_bwd(&format!("blocks.{l}.self_attn"), &la.xn1, acts, &d_xmid, &d_xn1, n),
             }
 
             // ---- ln1 backward: xn1 = rmsnorm(res[l]) -> d_res[l] = d_xmid + d_tmp ----
@@ -1298,7 +1564,14 @@ impl Qwen35 {
         let n = self.b * self.t;
         self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
         let vals = self.gpu.read(&self.ce_buf, n as usize);
-        vals.iter().sum::<f32>() / self.count.get()
+        let mut total = vals.iter().sum::<f32>();
+        if self.cfg.mtp {
+            // Unweighted sum, matching `glmdsa::model::Qwen35::forward`'s own
+            // MTP loss addition - `run_forward` already dispatched this
+            // buffer's CE_VALUE inside `run_mtp_forward`.
+            total += self.gpu.read(&self.mtp_ce_buf, n as usize).iter().sum::<f32>();
+        }
+        total / self.count.get()
     }
 
     /// The residual stream at layer boundary `l` (`0` = embeddings, `l+1` =

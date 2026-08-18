@@ -110,6 +110,18 @@ pub struct Qwen35Config {
     /// `Some` selects LoRA fine-tuning (frozen base + adapters); `None` is a
     /// full (all-parameter) model.
     pub lora: Option<LoraCfg>,
+
+    /// Multi-token prediction head (`mtp_num_hidden_layers: 1` in the real
+    /// config - always exactly one extra layer, so this is a plain bool, not
+    /// a layer count). The real checkpoint carries `mtp.*` tensors, but
+    /// `transformers`' own loader discards them
+    /// (`_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`) - there is no
+    /// reference oracle for this head on this box, so it is gradchecked and
+    /// overfit-tested but never parity-claimed. `false` by default - matches
+    /// `qwen35moe`, whose own MTP support is deferred entirely; `true` opts
+    /// into `param_list()`'s `mtp.*` tensors and `Qwen35::run_forward`'s MTP
+    /// forward pass.
+    pub mtp: bool,
 }
 
 impl Qwen35Config {
@@ -153,6 +165,7 @@ impl Qwen35Config {
             intermediate_size: 112,
 
             lora: None,
+            mtp: false,
         }
     }
 
@@ -188,6 +201,7 @@ impl Qwen35Config {
             intermediate_size: 17408,
 
             lora: None,
+            mtp: false,
         }
     }
 
@@ -260,6 +274,7 @@ impl Qwen35Config {
             "linear_value_head_dim": self.linear_value_head_dim,
             "linear_conv_kernel_dim": self.linear_conv_kernel_dim,
             "intermediate_size": self.intermediate_size,
+            "mtp": self.mtp,
         });
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
@@ -319,6 +334,7 @@ impl Qwen35Config {
                     .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
                     .unwrap_or_default(),
             }),
+            mtp: c["mtp"].as_bool().unwrap_or(false),
         }
     }
 
@@ -397,6 +413,38 @@ impl Qwen35Config {
         out.push(("norm.weight".to_string(), d));
         if !self.tie_embeddings {
             out.push(("lm_head.weight".to_string(), v * d));
+        }
+
+        // Multi-token prediction head (M7) - one extra FULL Gated-Attention
+        // decoder layer (same self_attn/mlp shapes as any other `Full`
+        // block, real config's own `mtp.layers.0.*`), fed by concatenating
+        // the next token's own embedding and the final hidden state
+        // (`mtp.fc [d,2d]` split at import into `fc_e`/`fc_h`, each `[d,d]`
+        // - see `crate::import`'s module doc). `tok.weight`/`lm_head.weight`
+        // are SHARED with the main head, not duplicated here.
+        if self.mtp {
+            out.push(("mtp.pre_fc_norm_embedding.weight".to_string(), d));
+            out.push(("mtp.pre_fc_norm_hidden.weight".to_string(), d));
+            lin(&mut out, "mtp.fc_e.weight".to_string(), "fc_e", d, d);
+            lin(&mut out, "mtp.fc_h.weight".to_string(), "fc_h", d, d);
+
+            out.push(("mtp.layers.0.ln1.weight".to_string(), d));
+            let hq = self.q_dim() as usize;
+            let hqp = self.q_proj_dim() as usize;
+            let hkv = self.kv_dim() as usize;
+            let hd = self.head_dim as usize;
+            lin(&mut out, "mtp.layers.0.self_attn.q_proj.weight".to_string(), "q_proj", hqp, d);
+            lin(&mut out, "mtp.layers.0.self_attn.k_proj.weight".to_string(), "k_proj", hkv, d);
+            lin(&mut out, "mtp.layers.0.self_attn.v_proj.weight".to_string(), "v_proj", hkv, d);
+            out.push(("mtp.layers.0.self_attn.q_norm.weight".to_string(), hd));
+            out.push(("mtp.layers.0.self_attn.k_norm.weight".to_string(), hd));
+            lin(&mut out, "mtp.layers.0.self_attn.o_proj.weight".to_string(), "o_proj", d, hq);
+            out.push(("mtp.layers.0.ln2.weight".to_string(), d));
+            lin(&mut out, "mtp.layers.0.mlp.gate.weight".to_string(), "gate", ff, d);
+            lin(&mut out, "mtp.layers.0.mlp.up.weight".to_string(), "up", ff, d);
+            lin(&mut out, "mtp.layers.0.mlp.down.weight".to_string(), "down", d, ff);
+
+            out.push(("mtp.norm.weight".to_string(), d));
         }
         out
     }
@@ -527,6 +575,60 @@ mod tests {
         // Every layer gets exactly one dense gate/up/down triple.
         let gate_tensors = names.iter().filter(|(n, _)| n.ends_with("mlp.gate.weight")).count();
         assert_eq!(gate_tensors, 64);
+    }
+
+    #[test]
+    fn mtp_off_by_default_and_adds_no_tensors() {
+        let cfg = Qwen35Config::tiny();
+        assert!(!cfg.mtp);
+        assert!(cfg.param_list().iter().all(|(n, _)| !n.starts_with("mtp.")));
+    }
+
+    #[test]
+    fn mtp_on_adds_exactly_the_expected_tensors_no_duplicate_head_or_embedding() {
+        let cfg = Qwen35Config { mtp: true, ..Qwen35Config::tiny() };
+        let names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
+        let mtp_names: Vec<&String> = names.iter().filter(|n| n.starts_with("mtp.")).collect();
+        let expect = [
+            "mtp.pre_fc_norm_embedding.weight",
+            "mtp.pre_fc_norm_hidden.weight",
+            "mtp.fc_e.weight",
+            "mtp.fc_h.weight",
+            "mtp.layers.0.ln1.weight",
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.layers.0.self_attn.k_proj.weight",
+            "mtp.layers.0.self_attn.v_proj.weight",
+            "mtp.layers.0.self_attn.q_norm.weight",
+            "mtp.layers.0.self_attn.k_norm.weight",
+            "mtp.layers.0.self_attn.o_proj.weight",
+            "mtp.layers.0.ln2.weight",
+            "mtp.layers.0.mlp.gate.weight",
+            "mtp.layers.0.mlp.up.weight",
+            "mtp.layers.0.mlp.down.weight",
+            "mtp.norm.weight",
+        ];
+        for e in expect {
+            assert!(mtp_names.iter().any(|n| n.as_str() == e), "missing {e}, got {mtp_names:?}");
+        }
+        assert_eq!(mtp_names.len(), expect.len(), "unexpected extra mtp.* tensors: {mtp_names:?}");
+        // tok.weight/lm_head.weight stay singular - MTP shares the main head.
+        assert_eq!(names.iter().filter(|n| n.as_str() == "tok.weight").count(), 1);
+        assert_eq!(names.iter().filter(|n| n.as_str() == "lm_head.weight").count(), 1);
+    }
+
+    #[test]
+    fn mtp_round_trips_through_json() {
+        let cfg = Qwen35Config { mtp: true, ..Qwen35Config::tiny() };
+        let back = Qwen35Config::from_json(&cfg.to_json());
+        assert!(back.mtp);
+    }
+
+    #[test]
+    fn mtp_self_attn_leaves_are_lora_targetable_like_a_normal_full_layer() {
+        let cfg = Qwen35Config { mtp: true, lora: Some(lora_cfg(4, 8.0)), ..Qwen35Config::tiny() };
+        let names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
+        assert!(names.iter().any(|n| n == "mtp.layers.0.self_attn.q_proj.weight.lora_a"));
+        assert!(names.iter().any(|n| n == "mtp.layers.0.mlp.down.weight.lora_a"));
     }
 
     #[test]
