@@ -29,7 +29,11 @@
 //! port's own roadmap ledger - the op sequence is proven here, real-weight
 //! import is a later milestone).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use gpu_core::{DeviceBuffer, Gpu};
+use model::Shard;
 use vae::blocks::Tensors;
 
 use crate::block::{open_device, BlockTaps, LtxAvBlock, LtxBlock};
@@ -116,6 +120,49 @@ pub fn random_tiny_weights(cfg: &LtxDitConfig, seed: u64) -> Tensors {
             (name, (shape, data))
         })
         .collect()
+}
+
+/// Build one pipeline stage's `Tensors` weight subset from a FLAT (name ->
+/// data, no shape) checkpoint - `model::Model`/`Shardable`'s own
+/// representation - filtered to exactly the names [`LtxDit::run_stage_forward`]
+/// reads for `shard` (see [`shard_owns_weight`]). Shapes come from
+/// [`dit_tensor_manifest`], the same manifest [`random_tiny_weights`] uses,
+/// so a partial shard's tensors are shaped identically to the full model's
+/// own. Panics if a needed name is missing from `init`, the same "loud, not
+/// silent" convention [`tget`] uses.
+pub(crate) fn shard_weights(cfg: &LtxDitConfig, init: &HashMap<String, Vec<f32>>, shard: &Shard) -> Tensors {
+    dit_tensor_manifest(cfg)
+        .into_iter()
+        .filter(|(name, _)| shard_owns_weight(shard, name))
+        .map(|(name, shape)| {
+            let data = init.get(&name).unwrap_or_else(|| panic!("ltxv dit shard: missing weight {name}")).clone();
+            let want: usize = shape.iter().product();
+            assert_eq!(data.len(), want, "ltxv dit shard: {name} wrong length ({} vs {want})", data.len());
+            (name, (shape, data))
+        })
+        .collect()
+}
+
+/// Whether pipeline stage `shard` needs weight `name` at all - the ONLY
+/// weights a stage loads, so a partial shard never materializes the full
+/// 48-block stack just to discard most of it (see [`shard_weights`]).
+/// `transformer_blocks.{l}.*` follows the block range (`shard.owns(l)`);
+/// `adaln_single.*` is REPLICATED - every stage recomputes its own per-token
+/// adaLN table from the shared batch (see [`LtxDit::run_stage_forward`]'s
+/// doc: the only thing that actually crosses a stage boundary is the
+/// residual `x`); `patchify_proj.*`/`keyframes_abs_pos_embedding` are
+/// embed-only (they produce the FIRST stage's initial `x`);
+/// `scale_shift_table`/`proj_out.*` are head-only (the final projection).
+pub(crate) fn shard_owns_weight(shard: &Shard, name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix("transformer_blocks.") {
+        let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+        return shard.owns(l);
+    }
+    if name.starts_with("adaln_single.") {
+        return true;
+    }
+    matches!(name, "patchify_proj.weight" | "patchify_proj.bias" | "keyframes_abs_pos_embedding") && shard.embed
+        || matches!(name, "scale_shift_table" | "proj_out.weight" | "proj_out.bias") && shard.head
 }
 
 /// `out[r,o] = b[o] + Σ_i x[r,i]·w[o,i]`, `w` row-major `[out_dim, in_dim]` -
@@ -259,23 +306,236 @@ pub struct DitTaps {
     pub out: Vec<f32>,
 }
 
+/// One pipeline-stage/training batch for [`LtxDit`] - the DiT's own input
+/// shape (a latent + per-token timesteps/RoPE bounds/keyframes + raw text
+/// context, optionally a training target), since `model::Batch`'s stock
+/// variants (LM tokens, seq2seq, image-splice) carry none of that. Owned
+/// data (not `model::Batch<'a>`'s borrowed slices) because it is set via
+/// [`LtxDit::load_shard_batch`] and read back across an arbitrary number of
+/// later `Model`/`Shardable` calls - the same reason `s3dit::train::
+/// ZTrainModel` keeps its own owned `Batch` behind a `load_batch` method
+/// instead of trying to fit through `Model::set_batch` (which this type
+/// leaves a documented no-op, see `crate::shard`'s module doc).
+pub struct DitBatch {
+    /// `[t, in_channels]` - only read on the EMBED stage (a non-embed stage's
+    /// input `x` comes from [`LtxDit::write_in_res`] instead).
+    pub latent: Vec<f32>,
+    /// `[t]`, RAW (pre `timestep_scale_multiplier`) per-token sigma.
+    pub timesteps: Vec<f32>,
+    /// `[3, t, 2]`.
+    pub positions: Vec<f32>,
+    /// `[t]`, only read on the embed stage.
+    pub keyframes_mask: Vec<f32>,
+    /// `[context_len, cross_attention_dim]`.
+    pub context: Vec<f32>,
+    pub context_len: usize,
+    pub t: usize,
+    /// `[t, out_channels]` training target (flow-matching velocity); `None`
+    /// for a forward-only run - [`LtxDit::run_stage_forward`] then returns
+    /// `None` even on the head stage (nothing to compute a loss against).
+    pub target: Option<Vec<f32>>,
+}
+
 /// The tiny video-only DiT, weights resident on the host (device residency
 /// is per-block, see `LtxBlock::on`).
 pub struct LtxDit {
     cfg: LtxDitConfig,
     w: Tensors,
     device: Option<String>,
+    /// Pipeline-parallel placement (`Shard::whole` for the ordinary,
+    /// non-sharded path every other module in this crate uses) - see
+    /// `crate::shard`'s module doc.
+    shard: Shard,
+    batch: RefCell<Option<DitBatch>>,
+    /// This stage's INPUT-side residual (`res[shard.start]`), written by the
+    /// previous stage via [`LtxDit::write_in_res`]; read instead of
+    /// patchifying `batch.latent` on a non-embed stage.
+    res_in: RefCell<Option<Vec<f32>>>,
+    /// This stage's OUTPUT-side residual (`res[shard.end]`, PRE-output-stage)
+    /// - set by [`LtxDit::run_stage_forward`], read by [`LtxDit::read_out_res`].
+    res_out: RefCell<Option<Vec<f32>>>,
+    /// The head stage's last `output_stage` result - the actual generation
+    /// output, distinct from `res_out` (which never runs through
+    /// `output_stage`). Read by [`LtxDit::take_stage_output`].
+    stage_out: RefCell<Option<Vec<f32>>>,
 }
 
 impl LtxDit {
     pub fn new(cfg: LtxDitConfig, weights: Tensors, device: Option<&str>) -> LtxDit {
+        let shard = Shard::whole(cfg.num_layers as usize);
+        LtxDit::build(cfg, weights, device, shard)
+    }
+
+    /// Shared constructor: validates `cfg`, wires `weights`/`device`/`shard`,
+    /// and zeroes the pipeline-stage scratch (batch + boundary residuals +
+    /// last stage output) every shard needs regardless of whether it is ever
+    /// actually used as one (see `crate::shard`'s module doc).
+    fn build(cfg: LtxDitConfig, weights: Tensors, device: Option<&str>, shard: Shard) -> LtxDit {
         cfg.assert_supported();
         assert_eq!(cfg.cross_attention_dim, cfg.inner_dim, "M3 assumes cross_attention_dim == inner_dim (caption_projection=None) - see config.rs's doc");
-        LtxDit { cfg, w: weights, device: device.map(str::to_string) }
+        LtxDit {
+            cfg,
+            w: weights,
+            device: device.map(str::to_string),
+            shard,
+            batch: RefCell::new(None),
+            res_in: RefCell::new(None),
+            res_out: RefCell::new(None),
+            stage_out: RefCell::new(None),
+        }
+    }
+
+    /// Build one pipeline stage from a FLAT checkpoint (`model::Model`/
+    /// `Shardable`'s own representation) - `crate::shard`'s `Shardable::
+    /// new_shard`/`Model::new` both delegate here (`Shard::whole` for the
+    /// latter). `b`/`t` are accepted only for `Shardable`'s fixed signature
+    /// and unused: unlike a GPU-resident model with persistent per-layer
+    /// buffers sized at construction (e.g. `qwen3::Qwen`), `LtxBlock::on`
+    /// allocates fresh device buffers on every [`Self::forward_blocks`] call,
+    /// so a stage's construction needs only its own weight subset
+    /// ([`shard_weights`]).
+    pub(crate) fn from_flat_weights(cfg: LtxDitConfig, init: &HashMap<String, Vec<f32>>, shard: Shard) -> LtxDit {
+        let w = shard_weights(&cfg, init, &shard);
+        LtxDit::build(cfg, w, None, shard)
     }
 
     pub fn config(&self) -> &LtxDitConfig {
         &self.cfg
+    }
+
+    /// This instance's pipeline placement.
+    pub fn shard(&self) -> &Shard {
+        &self.shard
+    }
+
+    /// Set this stage's diffusion batch - see [`DitBatch`]'s doc for why this
+    /// (owned, richer) seam exists instead of `model::Batch`.
+    pub fn load_shard_batch(&self, b: DitBatch) {
+        *self.batch.borrow_mut() = Some(b);
+    }
+
+    /// The head stage's last `output_stage` result (after
+    /// [`Self::run_stage_forward`] has run) - the actual generation output,
+    /// distinct from the `Shardable` residual seam (which only ever carries
+    /// the PRE-`output_stage` residual across a stage boundary).
+    pub fn take_stage_output(&self) -> Vec<f32> {
+        self.stage_out.borrow().clone().expect("LtxDit::take_stage_output: run_stage_forward has not produced a head-stage output yet")
+    }
+
+    pub(crate) fn weight_names(&self) -> Vec<String> {
+        self.w.keys().cloned().collect()
+    }
+    pub(crate) fn weight(&self, name: &str) -> Vec<f32> {
+        tget(&self.w, name).to_vec()
+    }
+
+    /// `model::Shardable::read_out_res`'s implementation: this stage's
+    /// OUTPUT-side residual (`res[shard.end]`), the pre-`output_stage` `x`
+    /// after its own block range - set by [`Self::run_stage_forward`].
+    pub(crate) fn read_out_res(&self) -> Vec<f32> {
+        self.res_out.borrow().clone().expect("LtxDit::read_out_res: run_stage_forward has not run yet")
+    }
+    /// `model::Shardable::write_in_res`'s implementation: this stage's
+    /// INPUT-side residual (`res[shard.start]`), read by
+    /// [`Self::run_stage_forward`] on a non-embed stage instead of
+    /// patchifying `batch.latent`.
+    pub(crate) fn write_in_res(&self, data: &[f32]) {
+        *self.res_in.borrow_mut() = Some(data.to_vec());
+    }
+
+    /// Run this stage's forward: patchify (embed stage only, from
+    /// `batch.latent`) or the previous stage's residual ([`Self::write_in_res`])
+    /// -> this stage's own block range ([`Self::forward_blocks`]) ->
+    /// `output_stage` (head stage only). Every stage independently
+    /// recomputes the per-token adaLN table and RoPE tables from `batch` and
+    /// its OWN (replicated) `adaln_single.*` weights - the only thing that
+    /// crosses the stage boundary over the wire is the residual `x` (see
+    /// [`shard_owns_weight`]'s doc). Returns the head stage's MSE loss
+    /// against `batch.target` (`None` with no target, or on a non-head
+    /// stage).
+    pub fn run_stage_forward(&self) -> Option<f32> {
+        let cfg = &self.cfg;
+        let dim = cfg.inner_dim as usize;
+        let batch_ref = self.batch.borrow();
+        let batch = batch_ref.as_ref().expect("LtxDit::run_stage_forward: no batch (call load_shard_batch first)");
+        if self.shard.embed {
+            assert_eq!(batch.latent.len(), batch.t * cfg.in_channels as usize, "LtxDit::run_stage_forward: latent length mismatch");
+        }
+
+        let ts_scaled: Vec<f32> = batch.timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
+        let (adaln_table, embedded_timestep) = ada_layer_norm_single(&self.w, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
+        let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, &batch.positions, batch.t);
+        let gpu = open_device(self.device.as_deref());
+        let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
+
+        let x0 = if self.shard.embed {
+            let pw = tget(&self.w, "patchify_proj.weight");
+            let pb = tget(&self.w, "patchify_proj.bias");
+            let mut xx = linear(&batch.latent, batch.t, cfg.in_channels as usize, pw, Some(pb), dim);
+            if cfg.use_keyframes_abs_pos_embedding {
+                let kf = tget(&self.w, "keyframes_abs_pos_embedding");
+                for ti in 0..batch.t {
+                    if batch.keyframes_mask[ti] > 0.0 {
+                        for d in 0..dim {
+                            xx[ti * dim + d] += kf[d];
+                        }
+                    }
+                }
+            }
+            xx
+        } else {
+            self.res_in.borrow().clone().expect("LtxDit::run_stage_forward: non-embed stage needs write_in_res first")
+        };
+
+        let (x_final, _block_out, _taps) =
+            self.forward_blocks(&gpu, &x0, &adaln_table, &batch.context, &cos_bufs, &sin_bufs, batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
+        *self.res_out.borrow_mut() = Some(x_final.clone());
+
+        if self.shard.head {
+            let out = output_stage(&self.w, "scale_shift_table", "proj_out", &x_final, &embedded_timestep, batch.t, dim, cfg.out_channels as usize, cfg.norm_eps);
+            *self.stage_out.borrow_mut() = Some(out.clone());
+            batch.target.as_ref().map(|target| {
+                assert_eq!(out.len(), target.len(), "LtxDit::run_stage_forward: target length mismatch");
+                out.iter().zip(target).map(|(o, g)| (o - g) * (o - g)).sum::<f32>() / out.len().max(1) as f32
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Run transformer blocks `[lo, hi)` over `x` (the residual-stream host
+    /// slice), returning the resulting `x` plus each block's own output copy
+    /// and full [`BlockTaps`] (one entry per block in range, index 0 = block
+    /// `lo`). The SAME op sequence [`Self::forward`] runs for its own
+    /// `[0, num_layers)` range and [`Self::run_stage_forward`] runs for one
+    /// pipeline stage's `[shard.start, shard.end)` - a single source of
+    /// truth (one function, different bounds) rather than two loops that
+    /// could silently drift apart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_blocks(
+        &self,
+        gpu: &Gpu,
+        x: &[f32],
+        adaln_table: &[f32],
+        context: &[f32],
+        cos_bufs: &[DeviceBuffer],
+        sin_bufs: &[DeviceBuffer],
+        t: u32,
+        context_len: u32,
+        lo: u32,
+        hi: u32,
+    ) -> (Vec<f32>, Vec<Vec<f32>>, Vec<BlockTaps>) {
+        let mut xx = x.to_vec();
+        let mut block_out = Vec::with_capacity((hi - lo) as usize);
+        let mut taps = Vec::with_capacity((hi - lo) as usize);
+        for l in lo..hi {
+            let blk = LtxBlock::on(gpu.share(), &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len);
+            let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
+            xx = out;
+            block_out.push(xx.clone());
+            taps.push(tp);
+        }
+        (xx, block_out, taps)
     }
 
     /// One forward pass, replaying the golden's own inputs.
@@ -322,18 +582,10 @@ impl LtxDit {
         let gpu = open_device(self.device.as_deref());
         let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
-        let mut block_out = Vec::with_capacity(cfg.num_layers as usize);
-        let mut b0: Option<BlockTaps> = None;
-        for l in 0..cfg.num_layers {
-            let blk = LtxBlock::on(gpu.share(), cfg, &self.w, &format!("transformer_blocks.{l}"), t as u32, context_len as u32);
-            let (out, taps) = blk.forward(&x, &adaln_table, context, &cos_bufs, &sin_bufs, t as u32);
-            if l == 0 {
-                b0 = Some(taps);
-            }
-            x = out;
-            block_out.push(x.clone());
-        }
-        let b0 = b0.expect("num_layers must be >= 1");
+        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table, context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
+        x = x_final;
+        assert!(!taps.is_empty(), "num_layers must be >= 1");
+        let b0 = taps.remove(0);
 
         // ---- output stage: LayerNorm(no affine) -> modulate -> proj_out ----
         let out = output_stage(&self.w, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps);

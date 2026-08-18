@@ -101,11 +101,12 @@ pub mod na_decoder;
 pub mod patchify;
 pub mod pipeline;
 pub mod rope;
+pub mod shard;
 pub mod upsampler;
 pub mod vae3d;
 pub mod vocoder;
 
 pub use config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
-pub use dit::{load_tiny_weights, AvDitTaps, DitTaps, LtxAvDit, LtxDit};
+pub use dit::{load_tiny_weights, AvDitTaps, DitBatch, DitTaps, LtxAvDit, LtxDit};
 pub use pipeline::{GenOpts, Paths};
 pub use vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};

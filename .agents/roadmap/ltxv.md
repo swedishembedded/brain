@@ -406,8 +406,60 @@ this port:
       load_tiny_weights`/`random_tiny_weights` still produce plain f32), and
       whether this port ever wants a compute-time int8 kernel for the DiT at
       all is an open question this milestone did not settle.
-- [ ] **Pipeline-parallel sharding, performance profiling, NPU export scope
-      decision** - only after parity is frozen, per porting.md sec10.
+- [x] **Pipeline-parallel sharding for the video-only DiT** (`model::Shardable`
+      for `crate::dit::LtxDit`, `crates/ltxv/src/shard.rs` new) - wires
+      `LtxDit` onto the generic `model::shard`/`plan_balanced`/`model::
+      Pipeline` seam `qwen3`/`gpt2`/`qwen35moe` already use for their own
+      transformer stacks. `LtxAvDit` (audio+video) is explicitly OUT of scope
+      - its bidirectional cross-attention couples the two streams every
+      block, a materially bigger seam than one block stack. Every stage loads
+      its own copy of the (small) `adaln_single.*` weights and independently
+      recomputes the per-token adaLN table and RoPE tables from the shared
+      batch, rather than shipping those over the wire - only the residual `x`
+      crosses a stage boundary, matching `model::shard`'s own "residual only"
+      contract; `patchify_proj.*`/`keyframes_abs_pos_embedding` are
+      embed-stage-only and `scale_shift_table`/`proj_out.*` are head-stage-
+      only (`crate::dit::shard_owns_weight`). `crate::dit::forward_blocks` (a
+      new block-range helper `LtxDit::forward`'s own `[0,num_layers)` loop was
+      refactored to call, no behavior change - confirmed by every pre-existing
+      `crates/ltxv` parity/gradcheck/overfit test still passing unchanged)
+      is the single source of truth both the ordinary and the sharded forward
+      path share. `Model`'s diffusion-shaped batch (`crate::dit::DitBatch`)
+      does not fit `model::Batch`'s LM/seq2seq/image-splice variants, so
+      `Model::set_batch` is a documented no-op and the real seam is
+      `LtxDit::load_shard_batch` - the same shortcut `s3dit::train::
+      ZTrainModel` already takes for its own diffusion batch. Tested
+      (`crates/ltxv/tests/shard_parity.rs` + `crates/ltxv/src/shard.rs`'s own
+      unit tests): `shard_cost` fed to `plan_balanced` produces a well-formed
+      partition (contiguous, complete, exactly one embed/one head stage, no
+      empty stage) for both the tiny test config AND the real 22B config's
+      shape (48 layers, `inner_dim` 4096) at 2/4/8 stages - a plan can be
+      COMPUTED for the real model even though it cannot be built or run on
+      this port's hardware (see "Validation policy" above); `new_shard`
+      genuinely loads only its block range's weight subset (a 1-of-2-layer
+      shard's total float count is strictly less than the whole model's, and
+      a whole shard's parameter set equals the full manifest exactly); the
+      single-shard degenerate case (one stage owns every block) matches
+      non-sharded `LtxDit::forward` at cosine=1.000000000, max_abs=0.000e0;
+      a genuine two-stage split (real block-range partition, boundary handed
+      off through `write_in_res`/`read_out_res`, run sequentially on this
+      host's one GPU) composes to the same cosine=1.000000000, max_abs=0.000e0
+      against the same reference. Explicit, tracked gaps: no real multi-device
+      execution was or could be performed (this host has exactly one GPU -
+      the two-stage test proves the boundary-handoff logic is correct, not
+      that two real cards agree); `LtxDit` has no backward/training pass at
+      all (`Shardable::run_backward_stage`/`read_in_dres`/`write_out_dres`
+      and `Model::backward`/`read_grad`/`write_weight` all `unimplemented!()`
+      loudly, matching this repo's own honest-loud-stub precedent rather than
+      a silent wrong-zero-gradient); `model::Pipeline<LtxDit>` type-checks but
+      is not a usable end-to-end entry point (`Pipeline::forward` drives a
+      stage through `Model::set_batch`, a no-op here - the tests above
+      hand-drive `Shardable`'s methods directly instead, the same limitation
+      `s3dit::train::ZTrainModel` already documents for itself);
+      `residency::multi::MultiDeviceResidentModel` (inference-time placement)
+      is untouched, a separate later lift.
+- [ ] **Performance profiling, NPU export scope decision** - only after
+      parity is frozen, per porting.md sec10.
 
 ## Convention questions settled from source, not experiment
 
@@ -492,6 +544,13 @@ land. Known traps already identified from reading (not yet test-pinned):
   compute-time int8 kernel (vs. storage-format-only) is unsettled - that
   needs the DiT's own performance profile to say arithmetic is the
   bottleneck first, per porting.md sec10 point 6.
+- No real multi-device pipeline-parallel execution has been run for `LtxDit`
+  (`model::Shardable`) - this host has exactly one GPU, so only the
+  single-shard degenerate case and a sequential two-stage boundary-handoff
+  test could be executed; two real cards agreeing is unverified.
+- `LtxDit` has no backward/training pass through the `model::Shardable`/
+  `model::Pipeline` seam - `crate::grad`/`crate::modelgrad`'s existing
+  host-math training path is separate and does not build on it.
 
 ## Scope that collapsed once the reference was read
 
