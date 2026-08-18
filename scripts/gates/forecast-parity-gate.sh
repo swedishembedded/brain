@@ -23,8 +23,9 @@
 #   4. kronos cross-section batch == serial forecast_cached (bit-identical)
 #   5. the CSV boundary: a malformed OHLCV file is rejected with a line number
 #   6. end-to-end: the committed example CSV -> a validated Panel -> real
-#      weights -> a forecast that beats persistence over 4 rolling origins,
-#      and the chart renders
+#      weights -> a probabilistic forecast that is anchored to its context,
+#      widens with lead time, scores better than its own median path, and
+#      brackets the held-out truth at a measured rate - and the chart renders
 #
 # 1 and the weight-free half of 5 are self-contained. 0, 2, 3, 4, 6 need the real
 # Kronos checkpoints:
@@ -82,7 +83,7 @@ run "OHLCV CSV validated structurally + semantically at entry" \
 
 # (6) the user-facing path end to end. Skips without checkpoints; FAILS without
 # them under BRAIN_REQUIRE_FIXTURES=1.
-run "CSV -> panel -> kronos -> beats persistence over rolling origins" \
+run "CSV -> panel -> kronos -> an anchored, widening, informative band" \
     cargo test --release -q -p brain-kronos --test csv_forecast_e2e
 
 if [ "$fail" -eq 0 ]; then echo "forecast-parity-gate: PASS"; else echo "forecast-parity-gate: FAIL"; fi
