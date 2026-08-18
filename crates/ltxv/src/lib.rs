@@ -52,12 +52,22 @@
 //! {block_grad,host_forward_parity,lora_train,overfit}.rs`. The audio
 //! stream's own training reference (`LtxAvDitConfig`/`LtxAvBlock`/
 //! `LtxAvDit`) is explicitly out of scope, a later milestone.
+//!
+//! (M8, first half): the two real-weight **latent upscalers** ([`upsampler`],
+//! spatial x2 / temporal x2 - small conv/resblock nets over
+//! `vae::blocks3d::Builder3d`, no timestep/conditioning of any kind) and the
+//! real-weight **duration-prediction head** ([`duration_head`], eager host
+//! math - `Linear` + a 1-query `MultiheadAttention` pooler + a small MLP).
+//! Both real parity, same bar as every other small real-weight component
+//! this port has landed. The NA diffusion decoder and the rest of DFR remain
+//! the tracked gap this milestone does not close.
 
 pub mod audio_vae;
 pub mod block;
 pub mod caps;
 pub mod config;
 pub mod dit;
+pub mod duration_head;
 pub mod finetune;
 pub mod grad;
 pub mod import;
@@ -66,6 +76,7 @@ pub mod modelgrad;
 pub mod patchify;
 pub mod pipeline;
 pub mod rope;
+pub mod upsampler;
 pub mod vae3d;
 pub mod vocoder;
 

@@ -257,9 +257,28 @@ this port:
       apply bit-equal after real training steps, standalone descent
       0.377658->0.170922 over 40 steps. Whole-model overfit (Adam, 400
       steps): loss 1.08134715->0.00000051.
-- [ ] **NA diffusion decoder, upscalers, duration head, DFR** - the one genuinely
-      new kernel family (3D neighborhood/windowed attention), gated against the
-      reference's own eager tiled-masked-SDPA fallback before any fast kernel.
+- [x] **Latent upscalers + duration head** (`crates/ltxv/src/{upsampler,
+      duration_head}.rs`) - real weights, real parity, cosine 1.0 throughout.
+      Both real checkpoints (spatial x2, temporal x2) share the same
+      `dims: 3` architecture down to `nn.Conv3d` everywhere - only the
+      middle `upsampler` stage and `mid_channels` differ. `ResBlock`'s op
+      order is genuinely unusual (activation AFTER the residual add, not
+      before - the opposite of the video VAE's own resnet block). Zero new
+      kernels: the per-frame `Conv2d`+`PixelShuffleND(2)` collapses exactly
+      to `Builder3d::depth_to_space` at `pt=1` (a real mathematical
+      equivalence, not an approximation - see `upsampler.rs`'s doc), and
+      `GroupNorm` reuses the existing `gn_part`/`gn_stats2`/`gn_apply`
+      kernels (previously wired only into the 2D builder) via the same
+      `kernels_with` extension idiom `sdxlunet`/`vqgan` already use. The
+      duration head's `nn.MultiheadAttention` was decomposed by hand and
+      cross-checked against a from-scratch second derivation inside the
+      golden dumper itself (cosine 1.0-1e-6) before trusting either as the
+      Rust port's target. The checkpoint's own `rational_resampler: true`
+      metadata field is dead code upstream (the `elif temporal_upsample`
+      branch never reads it) - noted, not implemented.
+- [ ] **NA diffusion decoder, DFR** - the one genuinely new kernel family (3D
+      neighborhood/windowed attention), gated against the reference's own
+      eager tiled-masked-SDPA fallback before any fast kernel.
 - [ ] **NPU export, INT8, sharding, optimization pass** - only after parity is
       frozen, per porting.md sec10.
 

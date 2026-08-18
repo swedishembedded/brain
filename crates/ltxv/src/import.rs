@@ -39,6 +39,8 @@ use checkpoint::safetensors::StTensor;
 use vae::blocks::Tensors;
 
 use crate::audio_vae::AudioVaeConfig;
+use crate::duration_head::DurationHeadConfig;
+use crate::upsampler::LatentUpsamplerConfig;
 use crate::vae3d::LtxVaeConfig;
 use crate::vocoder::VocoderConfig;
 
@@ -114,6 +116,29 @@ pub fn import_vocoder(tensors: Vec<StTensor>, cfg: &VocoderConfig) -> Result<Ten
         .filter_map(|t| t.name.strip_prefix("vocoder.vocoder.").map(|n| (n.to_string(), (t.shape, t.data))))
         .collect();
     validate_manifest(map, &cfg.tensor_manifest(), "vocoder")
+}
+
+/// Import a latent upscaler (spatial or temporal x2, `cfg` selects which)
+/// from its own single-subsystem file - the real checkpoints carry bare
+/// names (no `latent_upsampler.`-style prefix, confirmed against both real
+/// 72-tensor headers), so this is [`validate_manifest`] with no renaming at
+/// all, the same shape [`import_vae`] takes for the video VAE's own
+/// already-bare checkpoint.
+pub fn import_upsampler(tensors: Vec<StTensor>, cfg: &LatentUpsamplerConfig) -> Result<Tensors, String> {
+    let map: Tensors = tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
+    validate_manifest(map, &cfg.tensor_manifest(), "latent upsampler")
+}
+
+/// Import the duration head from `ltx-2.5-duration-head-bf16.safetensors`'s
+/// `duration_head.*` tensors, strip that prefix, and validate two-way
+/// coverage against [`DurationHeadConfig::tensor_manifest`] - the same
+/// prefix-then-validate shape [`import_audio_vae`] takes.
+pub fn import_duration_head(tensors: Vec<StTensor>, cfg: &DurationHeadConfig) -> Result<Tensors, String> {
+    let map: Tensors = tensors
+        .into_iter()
+        .filter_map(|t| t.name.strip_prefix("duration_head.").map(|n| (n.to_string(), (t.shape, t.data))))
+        .collect();
+    validate_manifest(map, &cfg.tensor_manifest(), "duration head")
 }
 
 #[cfg(test)]
@@ -228,5 +253,49 @@ mod tests {
         }
         let e = import_audio_vae(wrong, &vae_cfg).unwrap_err();
         assert!(e.contains("encoder.conv_in.conv.weight") && e.contains("expected"), "{e}");
+    }
+
+    /// [`import_upsampler`] against both real configs' bare-name manifests,
+    /// both directions.
+    #[test]
+    fn upsampler_import_validates_both_directions_and_both_modes() {
+        for cfg in [LatentUpsamplerConfig::spatial_x2(), LatentUpsamplerConfig::temporal_x2()] {
+            let manifest = cfg.tensor_manifest();
+            let w = import_upsampler(build("", &manifest), &cfg).expect("bare names");
+            assert_eq!(w.len(), manifest.len());
+            drop(w);
+
+            let mut missing = build("", &manifest);
+            missing.retain(|t| t.name != "final_conv.weight");
+            let e = import_upsampler(missing, &cfg).unwrap_err();
+            assert!(e.contains("final_conv.weight"), "{e}");
+
+            let mut extra = build("", &manifest);
+            extra.push(StTensor { name: "res_blocks.99.conv1.weight".into(), shape: vec![1], data: vec![0.0] });
+            let e = import_upsampler(extra, &cfg).unwrap_err();
+            assert!(e.contains("unused source tensors"), "{e}");
+        }
+    }
+
+    /// [`import_duration_head`] strips the `duration_head.` prefix and
+    /// validates both directions.
+    #[test]
+    fn duration_head_import_validates_both_directions() {
+        let cfg = DurationHeadConfig::ltx25();
+        let manifest = cfg.tensor_manifest();
+
+        let w = import_duration_head(build("duration_head.", &manifest), &cfg).expect("prefixed names");
+        assert_eq!(w.len(), manifest.len());
+        drop(w);
+
+        let mut missing = build("duration_head.", &manifest);
+        missing.retain(|t| t.name != "duration_head.mlp_out.weight");
+        let e = import_duration_head(missing, &cfg).unwrap_err();
+        assert!(e.contains("mlp_out.weight"), "{e}");
+
+        let mut extra = build("duration_head.", &manifest);
+        extra.push(StTensor { name: "duration_head.mlp_out.extra".into(), shape: vec![1], data: vec![0.0] });
+        let e = import_duration_head(extra, &cfg).unwrap_err();
+        assert!(e.contains("unused source tensors"), "{e}");
     }
 }
