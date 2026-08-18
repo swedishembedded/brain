@@ -12,36 +12,44 @@ timesteps, and a 12B text encoder rather than an 11 GB one.
 one Hugging Face class (`AVTransformer3DModel`) and one GGUF architecture tag
 (`ltxv`); which release you have is a configuration, not a different model.
 
-**Status: in progress - `brain ltxv t2v` runs end to end as a SMOKE TEST, not
-a quality claim yet.** This page describes the target shape; see
-`.agents/roadmap/ltxv.md` for the live checklist of what has actually landed.
-The 22B transformer and the 12B Gemma-4 text encoder are large enough that
-real-weight validation needs a machine this port was not built on, and neither
-exists in this repo yet - what runs today is the real scheduler
-(`LTX2Scheduler` + the rectified-flow ancestral Euler step), the real causal
-3D video VAE decode, and the real CLI/capability/residency wiring, composed
-with a **tiny, random-weight** DiT and a **stub** text context (no real
-Gemma-4 encoder). See `crates/ltxv/src/pipeline.rs`'s module doc for exactly
-what is real and what is a placeholder. What has parity-gated real-weight
-coverage is the small, self-contained pieces (the video VAE, the audio VAE,
-the vocoder, the latent upscalers) plus the schedule math; the DiT itself is
-only tiny-config-parity-proven, not real-weight-proven (see "Getting the
-weights" below for why).
+**Status: in progress - `brain ltxv t2v`/`brain ltxv dfr` run end to end as
+SMOKE TESTS, not a quality claim yet.** This page describes the target shape;
+see `.agents/roadmap/ltxv.md` for the live, milestone-by-milestone checklist
+of what has actually landed (it goes into far more numeric detail - exact
+cosine parity per component, exact gaps - than this page tries to). The 22B
+transformer and the 12B Gemma-4 text encoder are large enough that real-weight
+validation needs a machine this port was not built on, and neither exists in
+this repo yet - what runs today is the real scheduler (`LTX2Scheduler` + the
+rectified-flow ancestral Euler step), the real causal 3D video VAE decode
+(plus, for `dfr`, real latent upscalers), and the real CLI/capability/
+residency wiring, composed with a **tiny, random-weight** DiT and a **stub**
+text context (no real Gemma-4 encoder in the pipeline yet, even though a
+tiny-config-parity-proven `crates/gemma4` crate exists on its own). See
+`crates/ltxv/src/pipeline.rs`'s module doc for exactly what is real and what
+is a placeholder in each command. What has real-weight parity coverage is
+every small, self-contained piece this port has ported so far - both video
+VAE decoders (the conv mirror and the 3D neighborhood-attention "diffusion
+decoder"), the audio VAE, the vocoder, both latent upscalers, the duration
+head - plus the schedule math; the DiT (video-only and audio+video) and
+Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
+"Getting the weights" below for why).
 
 ## Support
 
 | Capability | Supported |
 |---|---|
-| Inference (text to video) | [~] smoke test only - tiny random-weight DiT, stub text context, see above |
-| Inference (text to video+audio) | [ ] |
+| Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
+| Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
+| Inference (text to video+audio) | [ ] the audio-extended DiT (`LtxAvDit`) and A<->V cross-attention exist at tiny-config parity as a library, but nothing wires them into a pipeline/CLI action yet |
 | Inference (image to video) | [ ] |
-| LoRA fine-tune | [ ] |
-| Full fine-tune | [ ] |
-| INT8 | [ ] |
-| CLI (`brain ltxv t2v`) | [x] |
-| D-Bus | [x] (via the generalized `capability::Provider`/residency surface, same as every other model) |
+| LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
+| Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
+| INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
+| CLI (`brain ltxv {t2v,dfr}`) | [x] |
+| D-Bus | [x] (via the generalized `capability::Provider`/residency surface, same as every other model - both `t2v` and `dfr` are reachable as actions, not just CLI subcommands) |
 | Batched serving | [ ] nothing resident to batch yet - see `crates/cli/src/resident_ltxv.rs`'s module doc |
-| NPU | [ ] |
+| Multi-device sharding | [~] `model::Shardable` plumbing for the video-only DiT is implemented and tested (partition planning, weight-subset loading, the single-shard and sequential-two-stage cases) - no real multi-device execution has been run, this host has one GPU |
+| NPU | [ ] deliberate scope exclusion, not a gap expected to close later - see the roadmap's M9 entry: no existing `NpuModel` implementation pattern fits a model this large, and this model's realistic deployment target is GPU/CPU |
 
 ## Architecture, in brief
 
@@ -113,12 +121,28 @@ This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
 out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
 module doc.
 
+`brain ltxv dfr` runs the same smoke-test DiT through DFR (Diffusion Fidelity
+Rendering): a half-res base generation with generated keyframe slots, a REAL
+spatial x2 latent upscale, a full-res re-noised detailing pass (no IC-LoRA -
+none exists in this repo), and 0-2 REAL temporal x2 upsample rounds with
+tile-based stitching, needing the VAE plus both real latent-upscaler
+checkpoints:
+
+```bash
+export BRAIN_LTXV_VAE=…/ltx-2.5-video-vae-conv-bf16.safetensors
+export BRAIN_LTXV_UPSAMPLER_SPATIAL=…/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors
+export BRAIN_LTXV_UPSAMPLER_TEMPORAL=…/ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors
+brain ltxv dfr --prompt "a cat walking on a beach" --frames 9 --width 64 \
+  --height 64 --steps 4 --output-path out.mp4
+```
+
 `ltxv` has a dedicated CLI module, so the resolver gives it precedence over
-generic capability dispatch (`brain ltxv t2v` runs that module, not a generic
-action call) - the same routing `wan` uses. The action is still reachable the
-same way every model in this repo is over other transports: discovery
-(`brain caps brain/ltxv`) and a cancellable streaming job over D-Bus
-(`brain serve --dbus`). A real 22B DiT and the Gemma-4 text encoder are
-tracked gaps (see the roadmap) - once they land, this same CLI/capability
-surface serves them with no shape change, only `--dit-config`/`dit_config`
-growing a second value.
+generic capability dispatch (`brain ltxv {t2v,dfr}` runs that module, not a
+generic action call) - the same routing `wan` uses. Both actions are still
+reachable the same way every model in this repo is over other transports:
+discovery (`brain caps brain/ltxv`), `brain do brain/ltxv {t2v,dfr}`, and a
+cancellable streaming job over D-Bus (`brain serve --dbus`) - a bespoke CLI
+subcommand is never the only entry point, per this repo's serving contract. A
+real 22B DiT and the Gemma-4 text encoder are tracked gaps (see the roadmap) -
+once they land, this same CLI/capability surface serves them with no shape
+change, only `--dit-config`/`dit_config` growing a second value.
