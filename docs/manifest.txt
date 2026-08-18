@@ -62,6 +62,7 @@ models/s3dit.md
 models/flux2.md
 models/flux1.md
 models/t5encoder.md
+models/gemma4.md
 models/sdxlunet.md
 models/controlnet.md
 models/pulid.md
@@ -71,6 +72,7 @@ models/rrdbnet.md
 models/vqgan.md
 models/imgpipe.md
 models/wan.md
+models/ltxv.md
 models/worldmirror2.md
 models/splat.md
 models/forecast.md

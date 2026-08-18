@@ -190,9 +190,33 @@ for f in "$MODELS_DIR"/*.md; do
   fail=1
 done
 
+# ---- 4. every model page is in the docs manifest ---------------------------
+
+# docs/manifest.txt is the ordered reading list docs/pandoc/build-docs.py
+# compiles into the PDF, so a page that is not listed there is invisible: it
+# passes section 3 (the file exists), it renders fine on its own, and it simply
+# never reaches a reader. ltxv.md sat in exactly that state - written, correct,
+# and unpublished - which is why this check exists rather than being assumed.
+MANIFEST=docs/manifest.txt
+for f in "$MODELS_DIR"/*.md; do
+  [ -e "$f" ] || continue
+  rel="models/$(basename "$f")"
+  grep -qxF "$rel" "$MANIFEST" || {
+    echo "PAGE NOT PUBLISHED: $f exists but is not listed in $MANIFEST, so the docs build never includes it"
+    fail=1
+  }
+done
+# And the other direction: a manifest entry naming a page that is gone would
+# break the build outright, so catch it here rather than at pandoc time.
+while read -r rel; do
+  case "$rel" in
+  models/*) [ -f "docs/$rel" ] || { echo "MANIFEST NAMES A MISSING PAGE: $MANIFEST lists $rel, which does not exist"; fail=1; } ;;
+  esac
+done <"$MANIFEST"
+
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "check-arch-names: architecture-naming consistency violated (see above). Fix crates/arch/src/lib.rs, crates/cli/src/main.rs, or docs/models/ to agree."
+  echo "check-arch-names: architecture-naming consistency violated (see above). Fix crates/arch/src/lib.rs, crates/cli/src/main.rs, docs/models/, or docs/manifest.txt to agree."
   exit 1
 fi
 echo "check-arch-names: OK"
