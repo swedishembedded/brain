@@ -421,21 +421,35 @@ pub(crate) fn av_shard_owns_weight(shard: &Shard, name: &str) -> bool {
 }
 
 /// `out[r,o] = b[o] + Σ_i x[r,i]·w[o,i]`, `w` row-major `[out_dim, in_dim]` -
-/// plain `nn.Linear`, sequential (this milestone's token/dim counts are far
-/// below where `wan::model::linear`'s row-parallel split would matter).
+/// plain `nn.Linear`.
+///
+/// Row-parallel through `backend_cpu::par::rows_mut` - `wan::model::linear`'s
+/// own precedent, reused verbatim rather than reimplemented (kernels.md §F.3):
+/// the split is over OUTPUT ROWS and each row's dot products are left exactly
+/// as they were (still a straight sequential `+=` walk over `in_dim`, one
+/// thread per row), so every output element accumulates in the SAME order
+/// regardless of thread count - bit-identical to the old serial form, not
+/// merely close, which is what a parity/gradcheck gate can accept
+/// unconditionally rather than re-tolerating.
+///
+/// Measured, not assumed: `ada_layer_norm_single`'s call into this function
+/// (the `[t,4096]x[36864,4096]^T` 9-row adaLN table) cost a flat ~21 s per
+/// real forward call at the real 22B checkpoint's width - ~11% of one real
+/// denoise step - as a naive, single-core scalar loop; this fix replaces that
+/// loop without changing one bit of the output.
 fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {
     let mut out = vec![0f32; rows * out_dim];
-    for r in 0..rows {
+    backend_cpu::par::rows_mut(&mut out, out_dim, |r, orow| {
         let xr = &x[r * in_dim..r * in_dim + in_dim];
-        for o in 0..out_dim {
+        for (o, slot) in orow.iter_mut().enumerate() {
             let wr = &w[o * in_dim..o * in_dim + in_dim];
             let mut acc = b.map(|b| b[o]).unwrap_or(0.0);
             for (xi, wi) in xr.iter().zip(wr) {
                 acc += xi * wi;
             }
-            out[r * out_dim + o] = acc;
+            *slot = acc;
         }
-    }
+    });
     out
 }
 

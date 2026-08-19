@@ -10,6 +10,12 @@ name = "ltxv"
 path = "src/lib.rs"
 
 [dependencies]
+# `backend_cpu::par::rows_mut` - the workspace's ONLY rayon seam. `dit.rs::linear`
+# (the host GEMM behind `ada_layer_norm_single`/`output_stage`/patchify) is
+# GFLOP-scale at real-checkpoint width (`ada_layer_norm_single`'s own table is
+# `[t,4096]x[36864,4096]^T`) and must not run on one core - see `wan::model::
+# linear`'s identical precedent, reused here rather than reimplemented.
+brain-backend-cpu.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true

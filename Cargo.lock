@@ -1148,6 +1148,7 @@ name = "brain-ltxv"
 version = "1.0.0"
 dependencies = [
  "brain-audio",
+ "brain-backend-cpu",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
