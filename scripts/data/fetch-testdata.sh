@@ -223,7 +223,8 @@ for ref in \
   moondream/moondream3-preview \
   Qwen/Qwen3-VL-4B-Instruct \
   facebook/sam2.1-hiera-tiny \
-  facebook/sam2.1-hiera-large
+  facebook/sam2.1-hiera-large \
+  Lightricks/LTX-2.5
 do
   if [ -d "$MODELS_DIR/$ref" ]; then
     echo "  ✓ $ref (model store)"
@@ -256,6 +257,10 @@ ORIGIN="tools/goldens/rrdbnet_dump_reference.py"
 golden_tree "esrgan"       "golden/esrgan"
 ORIGIN="tools/goldens/qwen3omnimoe_dump_reference.py"
 golden_tree "omni"         "golden/omni"
+ORIGIN="tools/goldens/ltxv_{vae,audio,upsampler,duration_head,na_decoder,schedule,dit,av_dit}_dump_reference.py, against Lightricks/LTX-2.5 in the store"
+golden_tree "ltxv"         "golden/ltxv"
+ORIGIN="tools/goldens/gemma4_dump_reference.py, against Lightricks/LTX-2.5's gemma4-12b-with-proj text encoder in the store"
+golden_tree "gemma4"       "golden/gemma4"
 
 # --- SAM 2.1 stage goldens (promptable segmentation, image path) -------------
 # The CHECKPOINTS come from the store above (`facebook/sam2.1-hiera-*`), which is

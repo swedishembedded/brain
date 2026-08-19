@@ -216,6 +216,15 @@ released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`
 suite; falls back to whatever `*.gguf` the model store already holds for that
 repo), `BRAIN_WAN_GGUF_OUT` (where that suite's `#[ignore]`d full conversion
 writes its ~53 GiB checkpoint; a temp dir otherwise).
+`BRAIN_LTXV_VAE`, `BRAIN_LTXV_AUDIO_VAE`, `BRAIN_LTXV_NA_VAE`,
+`BRAIN_LTXV_UPSAMPLER_SPATIAL`, `BRAIN_LTXV_UPSAMPLER_TEMPORAL`,
+`BRAIN_LTXV_DURATION_HEAD` - the real-weight `crates/ltxv` component parity
+suites (`tests/{vae,audio,upsampler,duration_head,na_decoder}_parity.rs`); each
+falls back to `resources/ltxv/weights/<role>/<file>` under
+`CARGO_MANIFEST_DIR/../..` when unset, per that suite's own `setup()`.
+`BRAIN_LTXV_DIT`, `BRAIN_LTXV_TEXT_ENCODER`, `BRAIN_LTXV_TOKENIZER` - the real
+22B DiT and 12B Gemma-4 text encoder, read from the model store entry
+`Lightricks/LTX-2.5` (a released GGUF; see `docs/models/ltxv.md`).
 
 **`fetch-testdata` mirror paths** (local-mirror source for `make fetch/testdata`;
 the one place a machine-specific path may appear in this repo). Two kinds:
