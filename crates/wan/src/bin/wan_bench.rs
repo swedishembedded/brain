@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Wan2.1 profiler: where a generation's device time actually goes, per kernel
-//! kind, against the Tesla P40 fp32 peak (11.76 TFLOP/s).
+//! kind, against the device's own MEASURED roofline.
 //!
 //! Both graphs a generation submits are a fixed sequence of dispatches whose
 //! *cost depends only on shape*, so this drives correctly-shaped scratch and
@@ -14,45 +14,86 @@
 //! `WanDitDev::build` / `WanVaeDecoder::build` themselves, so it cannot drift
 //! from what a generation runs.
 //!
+//! Method for `dit`/`vae` lives in `gpu_core::profile` - the shared per-kernel
+//! profiler this and every other model bench call, rather than each carrying
+//! a copy: device-timed where the backend supports it (one timed submit of
+//! the WHOLE production pass, per-kernel totals read back from timestamp
+//! queries - no group slicing, no per-group drain, no launch+fence floor
+//! folded into a kernel's number), and the utilisation columns divide by the
+//! device's own *measured* roofline (`gpu_core::roof`), never a hardcoded
+//! peak.
+//!
+//! `host` and `train` are wall-clock, min-of-N host-side timings - there is no
+//! device graph to profile there, so `Instant`-bracketing IS the honest method
+//! for them. `flash` and `floor` are microbenchmarks against a hand-built
+//! kernel list, already using `gpu_core::roof`/`gpu_core::profile::best_of`.
+//!
 //! Usage:
-//!   wan_bench dit  [reps] [frames] [w] [h]   the DiT block stack, per kind
-//!   wan_bench vae  [reps] [frames] [w] [h]   the VAE decode graph, per kind
-//!   wan_bench host [reps] [frames] [w] [h]   the HOST stages either side of it
-//!   wan_bench floor [n]                      per-dispatch floor (tiny kernel x n)
-//!   wan_bench flash [reps] [T] [nh] [hd]     A/B every bidirectional flash kernel
+//!   wan_bench dit   [reps] [frames] [w] [h]   the DiT block stack, per kind
+//!   wan_bench vae   [reps] [frames] [w] [h]   the VAE decode graph, per kind
+//!   wan_bench host  [reps] [frames] [w] [h]   the HOST stages either side of it
+//!   wan_bench train [reps] [t] [te]            the HOST trainer's block fwd/bwd
+//!   wan_bench floor [n]                       per-dispatch floor (tiny kernel x n)
+//!   wan_bench flash [reps] [T] [nh] [hd]      A/B every bidirectional flash kernel
 //!
 //! Defaults are the measured end-to-end point: 33 frames at 832x480, i.e.
 //! 14,040 DiT tokens and a 9-latent-frame decode.
 //!
-//! `BRAIN_GPU_INDEX=0` selects a card. Per-kind timings drain the queue between
-//! kinds; that adds one queue round-trip (~the `floor` number) per kind, which
-//! is why `floor` exists and why the sum-of-kinds is reported next to the
-//! single-submit whole-graph time.
+//! `BRAIN_GPU_INDEX=0` selects a card. `dit`/`vae` also print a full
+//! host-to-host round trip (upload, submit, readback, and for `dit` the host
+//! patchify/head) next to the device-graph number, so the gap between them -
+//! everything a per-kernel table structurally cannot show - is visible too.
 
-use std::collections::BTreeMap;
 use std::time::Instant;
 
+use gpu_core::roof::Roofs;
 use gpu_core::{Gpu, Step};
 use wan::{WanConfig, WanVaeConfig, WanVaeDecoder};
 
-const P40_FP32_TFLOPS: f64 = 11.76;
-
-fn pct(gflops: f64) -> f64 {
-    100.0 * gflops / (P40_FP32_TFLOPS * 1e3)
+/// Best-of-`reps` wall seconds for one submitted-and-drained step list.
+/// Thin wrapper over the shared implementation - see `gpu_core::profile`'s
+/// module doc for why every timed region here is `poll_wait`-bracketed.
+fn best_of(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
+    gpu_core::profile::best_of(gpu, steps, reps)
 }
 
-/// Best-of-`reps` wall seconds for one submitted-and-drained step list.
-fn time_steps(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
-    gpu.submit(&[], steps);
-    gpu.poll_wait();
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t0 = Instant::now();
-        gpu.submit(&[], steps);
-        gpu.poll_wait();
-        best = best.min(t0.elapsed().as_secs_f64());
+/// One profile pass, printed against the device's MEASURED roofline. Same
+/// shape as `vqgan_bench`'s `report()` and `sdxlunet`'s `unet_bench` - the
+/// table, the grouping, the drain accounting and the coverage honesty all
+/// live in `gpu_core::profile`, so every bench that calls this gets a fix in
+/// one place rather than N private copies drifting on their own `PEAK_TFLOPS`
+/// literal.
+fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize, roofs: Option<Roofs>) -> f64 {
+    let p = gpu_core::profile::profile(gpu, label, steps, reps);
+    p.print_top(roofs, 14);
+    if let Some(r) = roofs {
+        for (row, bound, pct) in p.defects(r, 5.0) {
+            println!(
+                "  DEFECT  {:<24} {:>5.1}% of its {} roof (floor {:.0}%) - {:.1}% of this pass",
+                row.name,
+                pct,
+                bound.as_str(),
+                bound.defect_pct(),
+                100.0 * row.secs / p.summed_secs,
+            );
+        }
     }
-    best
+    p.total_secs
+}
+
+fn print_roofline(gpu: &Gpu) -> Option<Roofs> {
+    let roofs = gpu_core::roof::ensure(gpu);
+    match roofs {
+        Some(r) => println!(
+            "measured roofline: {:.0} GFLOP/s, {:.1} GB/s DRAM, {:.1} GB/s cache, ridge {:.1} FLOP/byte",
+            r.gflops,
+            r.gbs,
+            r.cache_gbs,
+            r.ridge()
+        ),
+        None => println!("roofline unmeasured - utilisation columns print '-' rather than a guess"),
+    }
+    roofs
 }
 
 /// A weight-free tensor source: every name in `manifest` at its real shape,
@@ -68,87 +109,7 @@ fn zeros(manifest: &[(String, Vec<usize>)]) -> wan::model::Tensors {
         .collect()
 }
 
-/// Per-kernel-kind profile of an arbitrary recorded graph.
-///
-/// Every `Step` built through the `gpu_core` facade carries a `StepMeta` naming
-/// the kernel slot it dispatches, so this table is derived from the graph
-/// itself rather than hand-annotated. Each kind is timed by submitting *only*
-/// its steps: one queue round-trip per kind, and the isolation is sound because
-/// a dispatch's cost depends on its shape, not on what ran before it. The whole
-/// graph in one submit is timed too, so the sum-vs-whole gap bounds the
-/// instrumentation error.
-fn profile_kinds(gpu: &Gpu, steps: &[Step], names: &[(&str, &str)], reps: usize, flop: f64) {
-    let whole = time_steps(gpu, steps, reps);
-    println!("\nwhole graph, single submit: {:.3} s ({} dispatches)", whole, steps.len());
-    if flop > 0.0 {
-        println!(
-            "work: {:.0} GFLOP -> {:.0} GFLOP/s ({:.2}% of P40 fp32 peak)",
-            flop / 1e9,
-            flop / 1e9 / whole,
-            pct(flop / 1e9 / whole)
-        );
-    }
-
-    let mut by_kind: BTreeMap<usize, Vec<Step>> = Default::default();
-    for s in steps {
-        let k = s.meta().expect("step built through the facade").kernel;
-        by_kind.entry(k).or_default().push(s.clone());
-    }
-    let mut rows: Vec<(usize, usize, f64)> = Vec::new();
-    let mut sum = 0.0;
-    for (k, v) in &by_kind {
-        let t = time_steps(gpu, v, reps);
-        sum += t;
-        rows.push((*k, v.len(), t));
-    }
-    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
-    println!("\n{:<24} {:>7} {:>11} {:>9}", "kernel", "disp", "ms", "% graph");
-    for (k, c, t) in &rows {
-        println!("{:<24} {c:>7} {:>11.1} {:>8.1}%", names[*k].0, t * 1e3, 100.0 * t / sum);
-    }
-    println!("sum of kinds: {:.3} s (vs {:.3} s in one submit)", sum, whole);
-
-    // The three dominant kinds again, split by uniform params (= by shape):
-    // WHICH instance of a kind is the cost, not just which kernel. Three
-    // rather than one because the top kind is rarely a majority on its own,
-    // and an optimization pass needs the runner-up's shapes too.
-    for (top, _, _) in rows.iter().take(3) {
-        let mut by_shape: BTreeMap<Vec<u32>, Vec<Step>> = Default::default();
-        for s in &by_kind[top] {
-            let m = s.meta().unwrap();
-            by_shape.entry(m.params.clone().unwrap_or_default()).or_default().push(s.clone());
-        }
-        let mut sh: Vec<(String, usize, f64)> =
-            by_shape.iter().map(|(p, v)| (format!("{p:?}"), v.len(), time_steps(gpu, v, reps))).collect();
-        sh.sort_by(|a, b| b.2.total_cmp(&a.2));
-        println!("\n{} by shape (params):", names[*top].0);
-        for (p, c, t) in sh.iter().take(12) {
-            println!("  {p:<52} {c:>5} {:>10.1} ms", t * 1e3);
-        }
-    }
-}
-
 // -------------------------------------------------------------- dit -------
-
-/// Analytic FLOP of one DiT forward's device graph: the eight `dim x dim`
-/// projections and two feed-forward matrices per block, plus both attentions.
-/// The host ends (patchify, the timestep MLPs, `text_embedding`, the head) are
-/// not in the graph and are not counted here.
-fn dit_flop(cfg: &WanConfig, t: f64) -> f64 {
-    let (d, ff, te) = (cfg.dim as f64, cfg.ffn_dim as f64, cfg.text_len as f64);
-    let per_block =
-        // self q,k,v,o
-        4.0 * 2.0 * t * d * d
-        // self attention: scores + apply
-        + 4.0 * t * t * d
-        // cross q,o over t rows; cross k,v over the 512 text rows
-        + 2.0 * 2.0 * t * d * d + 2.0 * 2.0 * te * d * d
-        // cross attention: scores + apply
-        + 4.0 * t * te * d
-        // ffn
-        + 2.0 * 2.0 * t * d * ff;
-    per_block * cfg.num_layers as f64
-}
 
 fn bench_dit(reps: usize, frames: usize, w: usize, h: usize) {
     let cfg = WanConfig::t2v_1_3b();
@@ -166,13 +127,15 @@ fn bench_dit(reps: usize, frames: usize, w: usize, h: usize) {
     let dit = wan::WanDitDev::build(&cfg, &src, lf as u32, lh as u32, lw as u32, Some("gpu"), &[]);
     drop(src);
     eprintln!("built in {:.1} s ({} tensors, weight-free)", t0.elapsed().as_secs_f64(), manifest.len());
-    profile_kinds(dit.gpu(), dit.steps(), &wan::block::KERNELS, reps, dit_flop(&cfg, tokens as f64));
+
+    let roofs = print_roofline(dit.gpu());
+    let graph_secs = report(dit.gpu(), "DiT forward, one submit", dit.steps(), reps, roofs);
 
     // The WHOLE forward, not just the recorded graph: host pre/post, the
-    // uploads, the submit and the readback. `profile_kinds` above times the
-    // graph alone, so the difference between these two numbers is every cost a
-    // per-kind table structurally cannot show - and a seconds-per-forward
-    // figure from a real generation is this number, not that one.
+    // uploads, the submit and the readback. `report` above times the graph
+    // alone, so the gap to this number is every cost a per-kind table
+    // structurally cannot show - and a seconds-per-forward figure from a real
+    // generation is THIS number, not that one.
     let latent = vec![0.0f32; cfg.in_channels * lf * lh * lw];
     dit.set_context_embed(&vec![0.0f32; cfg.text_len * cfg.dim]);
     let mut best = f64::INFINITY;
@@ -182,6 +145,15 @@ fn bench_dit(reps: usize, frames: usize, w: usize, h: usize) {
         best = best.min(t.elapsed().as_secs_f64());
     }
     println!("\nfull forward (host + upload + submit + readback): {best:.3} s");
+    let gap = (best - graph_secs).max(0.0);
+    println!(
+        "upload+readback+host overhead: {:.3} s ({:.1}% of the full forward) - full forward minus the \
+         single-submit graph device time above. This bundles host patchify/head/upload/readback into one \
+         number (indirect method: `wan_bench host` breaks the host-only part out separately; nothing here \
+         instruments `write_f32`/`read` in isolation, which would need restructuring `WanDitDev::forward`).",
+        gap,
+        100.0 * gap / best,
+    );
 }
 
 // -------------------------------------------------------------- vae -------
@@ -197,7 +169,20 @@ fn bench_vae(reps: usize, frames: usize, w: usize, h: usize) {
     let dec = WanVaeDecoder::build(&cfg, &src, lat_t, lh, lw, Some("gpu"));
     drop(src);
     eprintln!("built in {:.1} s ({} tensors, weight-free)", t0.elapsed().as_secs_f64(), manifest.len());
-    profile_kinds(dec.gpu(), dec.steps(), &vae::blocks3d::KERNELS, reps, 0.0);
+
+    let roofs = print_roofline(dec.gpu());
+    let graph_secs = report(dec.gpu(), "VAE decode, one submit", dec.steps(), reps, roofs);
+
+    let latent = vec![0.0f32; (cfg.z_dim as usize) * lat_t as usize * lh as usize * lw as usize];
+    let mut best = f64::INFINITY;
+    for _ in 0..reps.max(1) {
+        let t = Instant::now();
+        std::hint::black_box(dec.decode(&latent));
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    println!("\nfull decode (upload + submit + readback): {best:.3} s");
+    let gap = (best - graph_secs).max(0.0);
+    println!("upload+readback overhead: {:.3} s ({:.1}% of the full decode)", gap, 100.0 * gap / best);
 }
 
 // ------------------------------------------------------------- host -------
@@ -261,6 +246,112 @@ fn bench_host(reps: usize, frames: usize, w: usize, h: usize) {
     println!("\nper-forward host total: {:.3} s (text_embed excluded: once a prompt)", per_forward);
 }
 
+// ------------------------------------------------------------ train -------
+
+/// The HOST trainer's per-block forward/backward, stage by stage.
+///
+/// Wan training is host-only (`crate::grad`'s `f32` instantiation of `Fp`
+/// routes through `model::hostmath::matvec_par`, a CPU rayon path) - there is
+/// no recorded device `&[Step]` graph for it, so `gpu_core::profile::profile`
+/// does not apply here. Wall-clock min-of-N IS the honest method for host
+/// code: every stage below is a plain function call with no device
+/// involvement to bracket incorrectly.
+///
+/// The default `t` is a small-shape token count (9 frames at 256x256), not
+/// the 14,040-token flagship shape `dit`/`vae`/`host` default to: `attn_fwd`/
+/// `attn_bwd` in `grad.rs` are plain nested loops, not routed through
+/// `matvec_par` like the linear layers, so their cost is O(t^2) on ONE
+/// thread. At 14,040 tokens that loop alone is minutes per call; a caller who
+/// wants that shape can still pass it explicitly, but the default here stays
+/// in a range `reps` calls actually finish in.
+fn bench_train(reps: usize, t: usize, te: usize) {
+    use wan::grad::{block_backward, block_forward, layernorm_bwd, rmsnorm_bwd, rope_bwd, Dims};
+
+    let cfg = WanConfig::t2v_1_3b();
+    let d = Dims { t, te, dim: cfg.dim, nh: cfg.num_heads, ffn: cfg.ffn_dim, eps: cfg.eps as f64 };
+    println!("\n=== Wan host trainer: t={t} te={te} dim={} nh={} ffn={} ===", d.dim, d.nh, d.ffn);
+
+    let mut rng = data::rng::Rng::new(11);
+    let mut u = || 0.1 * (2.0 * rng.next_f32() - 1.0);
+    let lin = |out: usize, inn: usize, u: &mut dyn FnMut() -> f32| wan::grad::Lin::<f32> {
+        w: (0..out * inn).map(|_| u()).collect(),
+        b: (0..out).map(|_| u()).collect(),
+    };
+    let vecf = |n: usize, u: &mut dyn FnMut() -> f32| (0..n).map(|_| u()).collect::<Vec<f32>>();
+    let w = wan::grad::BlockW::<f32> {
+        modulation: vecf(6 * d.dim, &mut u),
+        sq: lin(d.dim, d.dim, &mut u),
+        sk: lin(d.dim, d.dim, &mut u),
+        sv: lin(d.dim, d.dim, &mut u),
+        so: lin(d.dim, d.dim, &mut u),
+        snq: vecf(d.dim, &mut || 1.0),
+        snk: vecf(d.dim, &mut || 1.0),
+        cq: lin(d.dim, d.dim, &mut u),
+        ck: lin(d.dim, d.dim, &mut u),
+        cv: lin(d.dim, d.dim, &mut u),
+        co: lin(d.dim, d.dim, &mut u),
+        cnq: vecf(d.dim, &mut || 1.0),
+        cnk: vecf(d.dim, &mut || 1.0),
+        norm3_w: vecf(d.dim, &mut || 1.0),
+        norm3_b: vecf(d.dim, &mut u),
+        ff1: lin(d.ffn, d.dim, &mut u),
+        ff2: lin(d.dim, d.ffn, &mut u),
+    };
+    let x = vecf(t * d.dim, &mut u);
+    let e0 = vecf(6 * d.dim, &mut u);
+    let ctx = vecf(te * d.dim, &mut u);
+    let dout = vecf(t * d.dim, &mut u);
+    let half = d.hd() / 2;
+    let cos = vecf(t * half, &mut || rng.next_f32());
+    let sin = vecf(t * half, &mut || rng.next_f32());
+
+    let best = |f: &dyn Fn()| {
+        let mut b = f64::INFINITY;
+        for _ in 0..reps.max(1) {
+            let t0 = Instant::now();
+            f();
+            b = b.min(t0.elapsed().as_secs_f64());
+        }
+        b
+    };
+
+    let t_fwd = best(&|| {
+        std::hint::black_box(block_forward(d, &w, &x, &e0, &ctx, &cos, &sin));
+    });
+    let (_, cache) = block_forward(d, &w, &x, &e0, &ctx, &cos, &sin);
+    let t_bwd = best(&|| {
+        std::hint::black_box(block_backward(d, &w, &cache, &dout));
+    });
+
+    // A few named primitives inside the block, isolated, since `block_forward`
+    // /`block_backward` above are the whole thing at once and do not say which
+    // op dominates.
+    let inv = vecf(t, &mut || 1.0);
+    let t_ln_bwd = best(&|| {
+        std::hint::black_box(layernorm_bwd(&x, &inv, t, d.dim, &dout));
+    });
+    let t_rms_bwd = best(&|| {
+        let mut dw_dummy = vec![0.0f32; d.dim];
+        std::hint::black_box(rmsnorm_bwd(&x, t, d.dim, &w.snq, &inv, &dout, &mut dw_dummy));
+    });
+    let t_rope_bwd = best(&|| {
+        std::hint::black_box(rope_bwd(&dout, t, d.nh, d.hd(), &cos, &sin));
+    });
+
+    println!("\n{:<32} {:>11}", "stage (min-of-{reps}, host wall clock)", "ms");
+    println!("{:<32} {:>11.1}", "block_forward (whole block)", t_fwd * 1e3);
+    println!("{:<32} {:>11.1}", "block_backward (whole block)", t_bwd * 1e3);
+    println!("{:<32} {:>11.1}", "  layernorm_bwd (one call)", t_ln_bwd * 1e3);
+    println!("{:<32} {:>11.1}", "  rmsnorm_bwd (one call)", t_rms_bwd * 1e3);
+    println!("{:<32} {:>11.1}", "  rope_bwd (one call)", t_rope_bwd * 1e3);
+    println!(
+        "\nbackward/forward = {:.2}x. This is CPU wall-clock (rayon row-parallel `matvec_par`), not a \
+         device roofline - there is no GB/s to report against without a CPU `Roofs`, and \
+         `gpu_core::roof::ensure` measures a `Gpu`, not the host, so it is not attempted here.",
+        t_bwd / t_fwd
+    );
+}
+
 // ------------------------------------------------------------ flash ------
 
 /// A/B the bidirectional flash-attention kernels at ONE shape, for speed and
@@ -290,11 +381,11 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
     let c = gpu.caps();
     eprintln!("max_workgroup_size {} workgroup_mem {} B", c.max_workgroup_size, c.workgroup_mem_bytes);
     let roof = gpu_core::roof::ensure(&gpu);
-    let peak = roof.map(|r| r.gflops as f64).unwrap_or(P40_FP32_TFLOPS * 1e3);
+    let peak = roof.map(|r| r.gflops as f64).unwrap_or(11.76e3);
     println!("\n=== bidirectional flash attention: T={t} heads={nh} head_dim={hd} ===");
     match roof {
         Some(r) => println!("measured roof: {:.0} GFLOP/s fp32, {:.0} GB/s DRAM", r.gflops, r.gbs),
-        None => println!("measured roof unavailable - grading against the P40 datasheet peak"),
+        None => println!("measured roof unavailable - grading against a 11.76 TFLOP/s P40 fallback"),
     }
 
     let d = nh * hd;
@@ -313,7 +404,7 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
         let o = gpu.storage(t as u64 * d as u64);
         let nwg = nh * t.div_ceil(*br);
         let st = vec![gpu.step(idx, &[&qkv, &o], &prm, nwg * ws)];
-        let secs = time_steps(&gpu, &st, reps);
+        let secs = best_of(&gpu, &st, reps);
         let got = gpu.read(&o, (t * d) as usize);
         let (cos, mx) = match &refout {
             None => (1.0, 0.0f32),
@@ -351,8 +442,8 @@ fn bench_floor(n: usize) {
     let k = wan::block::KERNELS.iter().position(|(name, _)| *name == "matmul").expect("matmul slot");
     let (x, w, o) = (gpu.storage(4), gpu.storage(4), gpu.storage(4));
     let steps: Vec<Step> = (0..n).map(|_| gpu.step(k, &[&x, &w, &o], &[1, 1, 1], 1)).collect();
-    let s = time_steps(&gpu, &steps, 20);
-    let one = time_steps(&gpu, &steps[..1], 20);
+    let s = best_of(&gpu, &steps, 20);
+    let one = best_of(&gpu, &steps[..1], 20);
     println!("\n=== dispatch floor (1x1x1 matmul, one workgroup) ===");
     println!("  1 dispatch + queue round-trip: {:.3} ms", one * 1e3);
     println!("  {n} dispatches in one submit:   {:.3} ms total, {:.4} ms/dispatch", s * 1e3, s * 1e3 / n as f64);
@@ -361,15 +452,9 @@ fn bench_floor(n: usize) {
 fn main() {
     // The backend's readback deadlock guard defaults to 30 s, which is sized
     // for a token-at-a-time decoder. Every mode here submits a whole graph at
-    // a real generation's shape - the DiT stack alone was 28 s a forward when
-    // this bench was written - so the default turned `wan_bench dit` at its
-    // OWN documented default shape into "device likely wedged" right after it
-    // had printed the table. `brain wan t2v` already raises it for the same
-    // reason; a profiler that cannot finish its own headline measurement is
-    // worse than one that hangs, because the table above the panic looks fine.
-    // Raise it only when the caller has expressed no opinion: the guard is
-    // still what turns a genuinely wedged queue into an error instead of a
-    // hang.
+    // a real generation's shape, far past that default. Raise it only when the
+    // caller has expressed no opinion: the guard is still what turns a
+    // genuinely wedged queue into an error instead of a hang.
     if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
         std::env::set_var("BRAIN_GPU_WAIT_S", "1200");
     }
@@ -380,10 +465,11 @@ fn main() {
         "dit" => bench_dit(arg(2, 3), arg(3, 33), arg(4, 832), arg(5, 480)),
         "vae" => bench_vae(arg(2, 3), arg(3, 33), arg(4, 832), arg(5, 480)),
         "host" => bench_host(arg(2, 3), arg(3, 33), arg(4, 832), arg(5, 480)),
+        "train" => bench_train(arg(2, 5), arg(3, 768), arg(4, 512)),
         "floor" => bench_floor(arg(2, 500)),
         "flash" => bench_flash(arg(2, 3), arg(3, 14040) as u32, arg(4, 12) as u32, arg(5, 128) as u32),
         other => {
-            eprintln!("unknown mode {other} (dit|vae|host|floor|flash)");
+            eprintln!("unknown mode {other} (dit|vae|host|train|floor|flash)");
             std::process::exit(1);
         }
     }

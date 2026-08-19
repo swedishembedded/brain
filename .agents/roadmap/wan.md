@@ -713,6 +713,93 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
          investigation and its own re-baseline before the headline table in
          `docs/models/wan.md` is rewritten** - which is why that table was left
          alone here.
+
+      ## Profiler rewrite and a re-baseline under real host load
+
+      `crates/wan/src/bin/wan_bench.rs`'s `dit`/`vae` modes host-bracketed
+      per-kernel-KIND groups with a hardcoded `P40_FP32_TFLOPS = 11.76` and a
+      local `dit_flop()` formula - the exact anti-pattern `.agents/rules/lessons.md`
+      warns about. Rewritten onto `gpu_core::profile::profile` +
+      `gpu_core::roof::ensure` + `gpu_core::cost::kernel_cost`, matching
+      `vqgan_bench`'s `report()` shape; a `train` mode was added for the host
+      trainer (below).
+
+      **The old ranking, checked against the new one, was NOT inverted for
+      these two graphs** - both agree within 2 points on every kernel's share
+      (e.g. `flash_attn_bidir_reg2` 46.8% old / 45.8% new on the DiT,
+      `matmul_reg3` 35.2% old / 35.1% new on the VAE). Grouping by kind vs by
+      contiguous submit-run happens to coincide here because each kernel kind
+      runs in one contiguous burst per block. What the rewrite actually
+      changes: the assumed peak was 11.76 TFLOP/s; the MEASURED roof on this
+      card is **10.542 TFLOP/s** - about 10% lower - so every old %-of-peak
+      number was overstated by roughly that much, and the new tool reports
+      against the measured figure. It also adds bound classification
+      (compute/memory) and a DEFECT flag for a kernel underperforming its OWN
+      roof by more than a floor, which the old tool had no concept of.
+
+      **Two new DEFECT findings, neither previously recorded:**
+      - DiT forward: `attn_apply_cross` (cross-attention's apply step) reaches
+        only **4.7% of its own compute roof** (floor 30%) while costing 6.6% of
+        the graph - underperforming worse than either GEMM class beside it.
+      - VAE decode: `attn_scores_bidir` reaches only **0.3% of its own compute
+        roof** (floor 30%) while costing **11.7%** of the whole decode - the
+        single worst-utilised kernel measured anywhere in this file, at 9 calls
+        totalling 9.4 s. Neither is fixed here; both are recorded as the next
+        addressable items ahead of `im2col3d_at`'s 34.0% (pure data movement,
+        no defect flag - it is not underperforming a roof, it is simply large).
+
+      **`wan_bench train`** (new): times the HOST trainer
+      (`grad::block_forward`/`block_backward`) with min-of-N wall clock, since
+      it is CPU rayon code with no device `Step` graph to profile and no CPU
+      `Roofs` to grade against. At the full T=14040 shape it did not complete
+      in a practical time budget; at T=768 (tiny-cfg scale):
+      `block_forward` 4416.7 ms, `block_backward` 9548.8 ms,
+      **backward/forward = 2.16x**.
+
+      **Upload/readback, measured directly for the first time**: 0.453 s of a
+      20.394 s DiT forward (2.2%) and 0.135 s of an 81.184 s VAE decode
+      (0.2%). A 3.6 s/forward figure carried into this validation effort's own
+      plan going in was an unmeasured assumption and was wrong by roughly 8x -
+      this line item is not worth pursuing.
+
+      **A third and fourth end-to-end run, same shape as the table above** (33
+      frames 832x480, 25 steps, seed 42), on the same card:
+
+      | phase | run 1 | run 2 (see caveat below) |
+      |---|---|---|
+      | text encode | 451.7 s | 535.7 s |
+      | DiT load | 16.8 s | 94.4 s |
+      | denoise (50 forwards) | 982.4 s (19.6 s/fwd) | 980.4 s (19.6 s/fwd) |
+      | VAE decode | 95.3 s | 86.0 s |
+      | total | 1547.0 s (25.8 min) | 1697.4 s (28.3 min) |
+
+      **Denoise reproduces to 0.2%** and matches run B above almost exactly
+      (982.4 s here vs 982.4 s there) - the strongest evidence yet that the
+      GPU-side number is stable and the earlier "1.98x on attention, 1.46x on
+      the graph" result is not a measurement artifact.
+
+      **Run 2 was NOT an isolated measurement, and that is the finding.** It
+      ran while a second process (`crates/wan/tests/lora_train.rs`'s new
+      held-out-loss gate, this same validation effort's own finetune-validation
+      work) was doing real host CPU training at 2000-2800% CPU across the
+      box's 48 threads. Text encode and DiT load are BOTH CPU/host-bound
+      stages (umT5-XXL on the CPU backend; weight deserialize+upload), and
+      both are the worst of any run recorded in this file: text 535.7 s (vs
+      run 1's 451.7 s, vs the "baseline" row's 236.8 s above), load 94.4 s (vs
+      run 1's 16.8 s, vs run A/B's ~40 s above). The GPU-only denoise phase is
+      untouched (980.4 s vs 982.4 s) because it does not compete for CPU
+      threads with the other process.
+
+      This complicates the earlier claim that the ~190 s regression "is
+      deterministic rather than contention" (that claim rested on run A and
+      run B agreeing with EACH OTHER, not on either being confirmed
+      contention-free). Run 1's own text-encode number (451.7 s) is already
+      elevated without a KNOWN concurrent contender, so host contention is not
+      shown to be the SOLE cause of the original drift either - it is shown
+      to be A real, measurable contributor on top of whatever the original
+      drift was. **The isolated, nothing-else-running re-measurement this file
+      already asked for is still outstanding** and should be taken before
+      `docs/models/wan.md`'s headline table is touched.
 - [x] **`capability::Media::Video`**, landed ahead of `caps.rs` as its own unit
       of work, exactly as `.agents/rules/serving-contract.md` section 4 asks --
       extending `Media` rather than adding a side channel. Three things it
