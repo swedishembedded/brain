@@ -89,6 +89,12 @@ class BrainDBus(BrainBase):
         """The full self-describing stats document (what braintop renders)."""
         return json.loads(self._call("StatsSnapshot")[0])
 
+    def resident_models(self) -> list[dict[str, Any]]:
+        """Just the currently-resident models (``stats_snapshot()["models"]``
+        filtered to ``resident: true``), each with its per-device instances --
+        for a caller that only wants to know what is warm right now."""
+        return json.loads(self._call("ResidentModels")[0])
+
     def version(self) -> str:
         """The server's version string (D-Bus property)."""
         return self._get_prop("Version")
