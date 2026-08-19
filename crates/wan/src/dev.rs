@@ -26,10 +26,75 @@ use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use crate::block::{build_block_steps, open_device, BlockDims, BlockWeights, ModBufs, Scratch, Sel};
+use crate::block::{
+    build_block_steps, build_block_steps_q, open_device, BlockDims, BlockWeights, ModBufs, QBlockWeights, QScratch, QTier, Scratch, Sel,
+};
 use crate::config::WanConfig;
 use crate::model::{self, Tensors};
 use crate::rope::tables;
+
+/// Storage dtype for the DiT's linear weights. Compute stays fp32 throughout
+/// (this repo's core-compute-only invariant) - what varies is how each weight
+/// is STORED and, for the quantized tiers, which GEMM kernel dequantizes it.
+///
+/// This is a MEMORY play, not a speed one: quantizing a forward pass's
+/// arithmetic does not pay for itself once attention (not the GEMMs) is the
+/// dominant cost. What int8 storage buys instead is fit: at fp32 the largest
+/// variant's weights do not fit one card; packed int8 with per-row fp32
+/// scales does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WanDtype {
+    /// Every weight resident fp32 - today's only path, unchanged.
+    F32,
+    /// Source values widened to fp32 on upload (a GGUF's native F16/BF16
+    /// tensors dequantize to fp32 through `with_tensor` either way; this
+    /// variant exists so a caller can name the storage precision without
+    /// implying a compute change - Pascal's fp16 ARITHMETIC rate is ~1/64 of
+    /// fp32's, so this engine never computes in fp16). Behaves identically to
+    /// `F32` for a [`checkpoint::TensorSource`], since every source here
+    /// already decodes to fp32 before this crate sees it.
+    F16,
+    /// Packed int8 (4 lanes/`u32`) with a per-output-row fp32 scale, DP4A
+    /// GEMM. GPU-only: `matmul_i8_dyn.wgsl` is a multi-barrier workgroup
+    /// kernel with no CPU-JIT lowering (see its own `@cpu no`).
+    Int8,
+    /// Packed int4 (8 lanes/`u32`, W4A8: activations stay int8) with a
+    /// per-output-row fp32 scale. Correctness-only - no GEMM tuning attempted
+    /// here (see `crates/model/src/int4.rs`'s own doc on the naive kernel).
+    /// Unlike `Int8`, `matmul_q4_dyn.wgsl` is one-thread-per-output with no
+    /// workgroup barrier, so it runs on the CPU JIT too.
+    Int4,
+}
+
+impl WanDtype {
+    /// Parse `--dit-dtype`/`BRAIN_WAN_DIT_DTYPE`'s spelling.
+    pub fn from_name(s: &str) -> Result<WanDtype, String> {
+        match s {
+            "f32" => Ok(WanDtype::F32),
+            "f16" => Ok(WanDtype::F16),
+            "int8" | "i8" => Ok(WanDtype::Int8),
+            "int4" | "i4" => Ok(WanDtype::Int4),
+            other => Err(format!("wan: unknown --dit-dtype {other:?} (f32, f16, int8, int4)")),
+        }
+    }
+
+    /// The short spelling `resident_wan`'s instance key embeds.
+    pub fn key(self) -> &'static str {
+        match self {
+            WanDtype::F32 => "f32",
+            WanDtype::F16 => "f16",
+            WanDtype::Int8 => "int8",
+            WanDtype::Int4 => "int4",
+        }
+    }
+
+    /// Whether this tier's GEMM has no CPU-JIT lowering (DP4A's multi-barrier
+    /// workgroup), so a `device == Some("cpu")` build must be refused early
+    /// with a clear error rather than failing deep inside kernel dispatch.
+    pub fn gpu_only(self) -> bool {
+        matches!(self, WanDtype::Int8)
+    }
+}
 
 /// The non-block tensors, kept on the host because the ops that read them are
 /// a rounding error of the forward and every one of them is shared with
@@ -59,6 +124,18 @@ fn host_tensor_names() -> Vec<String> {
     v
 }
 
+/// The resident block-weight storage this engine was built with - the payload
+/// [`WanDtype`] names. Kept as an enum (not two optional fields) so a built
+/// engine can never end up holding both, or neither.
+#[allow(dead_code)] // held only to keep the resident buffers alive for `steps`, same as `_scr`
+enum Blocks {
+    Dense(Vec<BlockWeights>),
+    /// Quantized-storage tier (int8/int4): the packed blocks plus the
+    /// dynamic-activation-quant scratch [`build_block_steps_q`] needs, kept
+    /// alive for the same reason `_scr` is - referenced by the recorded steps.
+    Quant(Vec<QBlockWeights>, QScratch),
+}
+
 /// A Wan DiT with the block stack resident on one device.
 pub struct WanDitDev {
     gpu: Gpu,
@@ -80,14 +157,15 @@ pub struct WanDitDev {
     tap_idx: HashMap<usize, usize>,
     mods: Vec<ModBufs>,
     host: Tensors,
-    _blocks: Vec<BlockWeights>,
+    _blocks: Blocks,
     _scr: Scratch,
 }
 
 impl WanDitDev {
-    /// Upload every weight and record the whole stack. `taps` names block
-    /// indices whose output must survive the rest of the stack (each costs one
-    /// extra `[tokens, dim]` buffer).
+    /// [`Self::build_dtype`] at [`WanDtype::F32`] - the original entry point,
+    /// signature UNCHANGED so every existing caller (the pipeline, the
+    /// parity tests, `wan_bench`) keeps compiling without touching those
+    /// files.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         cfg: &WanConfig,
@@ -98,6 +176,32 @@ impl WanDitDev {
         device: Option<&str>,
         taps: &[usize],
     ) -> WanDitDev {
+        Self::build_dtype(cfg, src, f, h, w, device, taps, WanDtype::F32)
+    }
+
+    /// Upload every weight in the given storage `dtype` and record the whole
+    /// stack. `taps` names block indices whose output must survive the rest
+    /// of the stack (each costs one extra `[tokens, dim]` buffer).
+    ///
+    /// `dtype`'s only effect is which weight upload / block-step builder runs
+    /// per block ([`BlockWeights`]/[`build_block_steps`] for
+    /// `F32`/`F16`, [`QBlockWeights`]/[`build_block_steps_q`] for
+    /// `Int8`/`Int4`) - everything else (RoPE tables, the host tensors, the
+    /// residual pool, the taps) is dtype-agnostic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_dtype(
+        cfg: &WanConfig,
+        src: &dyn checkpoint::TensorSource,
+        f: u32,
+        h: u32,
+        w: u32,
+        device: Option<&str>,
+        taps: &[usize],
+        dtype: WanDtype,
+    ) -> WanDitDev {
+        if dtype.gpu_only() && device == Some("cpu") {
+            panic!("wan: --dit-dtype {} has no CPU-JIT lowering (DP4A) - build on a GPU device", dtype.key());
+        }
         let gpu = open_device(device);
         let d = BlockDims::new(cfg);
         let sel = Sel::new(&gpu);
@@ -111,8 +215,6 @@ impl WanDitDev {
             host.insert(name, (vec![data.len()], data));
         }
 
-        let blocks: Vec<BlockWeights> =
-            (0..cfg.num_layers).map(|l| BlockWeights::upload(&gpu, src, &format!("blocks.{l}"))).collect();
         let mods: Vec<ModBufs> =
             (0..cfg.num_layers).map(|l| ModBufs::new(&gpu, src, &format!("blocks.{l}"), d.dim)).collect();
 
@@ -137,20 +239,31 @@ impl WanDitDev {
         let mut tap_idx = HashMap::new();
         let mut steps = Vec::new();
         let mut cur = 0usize;
-        for l in 0..cfg.num_layers {
-            let out = if taps.contains(&l) {
-                pool.push(gpu.storage(td));
-                let i = pool.len() - 1;
-                tap_idx.insert(l, i);
-                i
-            } else if cur == 1 {
-                2
-            } else {
-                1
-            };
-            build_block_steps(&gpu, &mut steps, &sel, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &cos, &sin, &ctx, d, tokens);
-            cur = out;
-        }
+
+        let blocks = match dtype {
+            WanDtype::F32 | WanDtype::F16 => {
+                let blocks: Vec<BlockWeights> =
+                    (0..cfg.num_layers).map(|l| BlockWeights::upload(&gpu, src, &format!("blocks.{l}"))).collect();
+                for l in 0..cfg.num_layers {
+                    let out = Self::next_out(&mut pool, &mut tap_idx, taps, l, cur, td, &gpu);
+                    build_block_steps(&gpu, &mut steps, &sel, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &cos, &sin, &ctx, d, tokens);
+                    cur = out;
+                }
+                Blocks::Dense(blocks)
+            }
+            WanDtype::Int8 | WanDtype::Int4 => {
+                let tier = if dtype == WanDtype::Int8 { QTier::Int8 } else { QTier::Int4 };
+                let blocks: Vec<QBlockWeights> =
+                    (0..cfg.num_layers).map(|l| QBlockWeights::upload(&gpu, src, &format!("blocks.{l}"), d, tier)).collect();
+                let qscr = QScratch::new(&gpu, d, tokens);
+                for l in 0..cfg.num_layers {
+                    let out = Self::next_out(&mut pool, &mut tap_idx, taps, l, cur, td, &gpu);
+                    build_block_steps_q(&gpu, &mut steps, &sel, tier, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &qscr, &cos, &sin, &ctx, d, tokens);
+                    cur = out;
+                }
+                Blocks::Quant(blocks, qscr)
+            }
+        };
 
         WanDitDev {
             gpu,
@@ -170,6 +283,23 @@ impl WanDitDev {
             host,
             _blocks: blocks,
             _scr: scr,
+        }
+    }
+
+    /// Which pool slot block `l`'s output lands in - a tapped block gets a
+    /// fresh dedicated buffer, everything else alternates between the two
+    /// residual slabs. Shared by both the dense and quantized build loops so
+    /// the pool/tap bookkeeping cannot drift between them.
+    fn next_out(pool: &mut Vec<DeviceBuffer>, tap_idx: &mut HashMap<usize, usize>, taps: &[usize], l: usize, cur: usize, td: u64, gpu: &Gpu) -> usize {
+        if taps.contains(&l) {
+            pool.push(gpu.storage(td));
+            let i = pool.len() - 1;
+            tap_idx.insert(l, i);
+            i
+        } else if cur == 1 {
+            2
+        } else {
+            1
         }
     }
 

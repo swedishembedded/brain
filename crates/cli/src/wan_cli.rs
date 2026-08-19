@@ -41,11 +41,24 @@ Sampling (defaults from WanConfig, i.e. upstream's own generate.py defaults):
   --fps <N>                frame rate written into the container (default 16)
   --variant <name>         t2v-1.3B (default) | t2v-14B
 
+  --adapter <path>         fold in a trained LoRA adapter (from `finetune`)
+                           before generating
+
 Weights (flag wins over the environment variable):
-  --dit <path>             $BRAIN_WAN_DIT        transformer dir/file
+  --dit <path>             $BRAIN_WAN_DIT        transformer dir/file/.gguf
   --vae <path>             $BRAIN_WAN_VAE        Wan2.1_VAE.pth or vae/
   --t5 <path>              $BRAIN_WAN_T5         umT5-XXL encoder
   --tokenizer <path>       $BRAIN_WAN_TOKENIZER  tokenizer.json or its dir
+  --dit-dtype <dtype>      $BRAIN_WAN_DIT_DTYPE  f32 (default) | f16 | int8 |
+                           int4 - the DiT's weight STORAGE precision;
+                           arithmetic always stays fp32. int8/int4 are a
+                           MEMORY play (14B fp32 is ~53 GiB, does not fit a
+                           24 GiB card; int8 is ~14.4 GiB, fits), not a speed
+                           one. A `--dit *.gguf` file loads DIRECTLY (no
+                           safetensors conversion on disk); a GGUF that is
+                           itself quantized (Q3_K, …) and requested at
+                           int8/int4 is RE-quantized through fp32, which adds
+                           real error on top of the file's own quantization
 
 Devices:
   --device <cpu|gpu>       DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -57,7 +70,33 @@ Cost: a step is TWO transformer forwards whenever guidance > 1. 81 frames at
 832x480 is 32,760 tokens per forward; start smaller (--frames 9 --width 256
 --height 256 --steps 8) to check the whole path before a long run.
 $BRAIN_GPU_WAIT_S is raised to 1200s unless already set: a forward here is one
-submit of the whole block stack, far past the backend's 30s deadlock guard."#;
+submit of the whole block stack, far past the backend's 30s deadlock guard.
+
+brain wan finetune - train a LoRA adapter on a folder of captioned video clips
+
+  brain wan finetune --data <dir> --save <adapter.brain> [options]
+
+Required:
+  --data <dir>             a data::episode dataset plus captions.json
+  --save <path>            where to write the trained adapter
+
+Training:
+  --rank <N>               LoRA rank (default 16)
+  --steps <N>              training steps (default 200)
+  --frames <N>             window length in frames, must be 1 + 4k (default 9)
+  --samples <N>            windows drawn and encoded up front (default 8)
+  --lr <F>                 learning rate (default 1e-4)
+  --seed <S>               RNG seed (default 0)
+  --ckpt-every <N>         write a checkpoint every N steps (default 50; 0 = final only)
+  --variant <name>         t2v-1.3B (default) | t2v-14B
+  --device <cpu|gpu>       VAE encode + DiT trainer (default: the ambient
+                           BRAIN_DEVICE; the GPU trainer is used whenever that
+                           resolves to a real accelerator, `cpu` forces the
+                           host f32 trainer)
+  --te-device <cpu|gpu>    umT5 text encoder device, else $BRAIN_WAN_T5_DEVICE
+  --report <dir>           write a human-readable run report (base vs. adapted
+                           clips, contact sheets, loss curve, G2 scores) to
+                           this directory after training"#;
 
 pub fn run_wan(args: &[String]) {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
@@ -72,6 +111,12 @@ pub fn run_wan(args: &[String]) {
         "t2v" | "text2video" => {
             if let Err(e) = t2v(&args[1..]) {
                 eprintln!("wan t2v: {e}");
+                std::process::exit(1);
+            }
+        }
+        "finetune" => {
+            if let Err(e) = finetune(&args[1..]) {
+                eprintln!("wan finetune: {e}");
                 std::process::exit(1);
             }
         }
@@ -101,6 +146,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
     let (mut dit, mut vae, mut t5, mut tokenizer) = (None, None, None, None);
+    let mut dit_dtype: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -128,6 +174,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--vae" => vae = Some(need(i)?.clone()),
             "--t5" => t5 = Some(need(i)?.clone()),
             "--tokenizer" => tokenizer = Some(need(i)?.clone()),
+            "--adapter" => o.adapter = Some(need(i)?.clone()),
+            "--dit-dtype" => dit_dtype = Some(need(i)?.clone()),
             "--variant" => {}
             // `brain wan --help` is caught by the verb dispatch, but `brain wan
             // t2v --help` lands here, and reporting the help flag itself as an
@@ -144,6 +192,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
     let paths = Paths::resolve(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
+    // Flag wins over the environment variable, same precedence as every other
+    // wan CLI option that has both (see `Paths::resolve`'s own doc).
+    let dtype_name = dit_dtype.or_else(|| std::env::var("BRAIN_WAN_DIT_DTYPE").ok().filter(|s| !s.is_empty()));
+    if let Some(s) = dtype_name {
+        o.dit_dtype = wan::WanDtype::from_name(&s)?;
+    }
 
     // One Wan forward is the WHOLE 30-block stack in a single submit, which at
     // 480p is minutes rather than seconds. The backend's 30 s bounded wait is
@@ -202,6 +256,82 @@ fn t2v(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn finetune(args: &[String]) -> Result<(), String> {
+    let (mut data, mut save, mut report) = (None, None, None);
+    let mut variant = "t2v-1.3B".to_string();
+    let mut opts = wan::finetune::TrainOpts {
+        steps: 200,
+        rank: 16,
+        lr: 1e-4,
+        frames: 9,
+        samples: 8,
+        seed: 0,
+        save_path: String::new(),
+        ckpt_every: 50,
+        device: None,
+        te_device: None,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        match args[i].as_str() {
+            "--data" => data = Some(need(i)?.clone()),
+            "--save" => save = Some(need(i)?.clone()),
+            "--report" => report = Some(need(i)?.clone()),
+            "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
+            "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
+            "--frames" => opts.frames = need(i)?.parse().map_err(|e| format!("--frames: {e}"))?,
+            "--samples" => opts.samples = need(i)?.parse().map_err(|e| format!("--samples: {e}"))?,
+            "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
+            "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
+            "--variant" => variant.clone_from(need(i)?),
+            "--device" => opts.device = Some(need(i)?.clone()),
+            "--te-device" => opts.te_device = Some(need(i)?.clone()),
+            "--help" | "-h" => {
+                println!("{HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{HELP}")),
+        }
+        i += 2;
+    }
+    let data = data.ok_or("--data is required")?;
+    let save = save.ok_or("--save is required")?;
+    opts.save_path = save.clone();
+    let cfg = match variant.as_str() {
+        "t2v-1.3B" | "1.3b" | "1.3B" => WanConfig::t2v_1_3b(),
+        "t2v-14B" | "14b" | "14B" => WanConfig::t2v_14b(),
+        other => return Err(format!("unknown --variant {other:?} (t2v-1.3B, t2v-14B)")),
+    };
+    let paths = Paths::from_env()?;
+
+    eprintln!("wan finetune: {} rank {} steps {} frames {} samples {} lr {} -> {}", cfg.name, opts.rank, opts.steps, opts.frames, opts.samples, opts.lr, save);
+    let cancel = capability::CancelToken::default();
+    let t0 = std::time::Instant::now();
+    let mut losses: Vec<(u32, f32)> = Vec::new();
+    wan::finetune::run(&paths, std::path::Path::new(&data), &cfg, &opts, &cancel, |done, total, msg| {
+        eprint!("\rwan finetune [{done}/{total}] {msg}                    ");
+        if let Some(rest) = msg.strip_prefix("step ") {
+            if let Some((step_part, loss_part)) = rest.split_once("  loss ") {
+                if let (Some((step, _)), Ok(loss)) = (step_part.split_once('/'), loss_part.trim().parse::<f32>()) {
+                    if let Ok(step) = step.parse::<u32>() {
+                        losses.push((step, loss));
+                    }
+                }
+            }
+        }
+    })?;
+    eprintln!();
+    eprintln!("wan finetune: {:.1}s total -> {save}", t0.elapsed().as_secs_f32());
+
+    if let Some(report_dir) = report {
+        crate::wan_report::write_report(&paths, &cfg, &opts, std::path::Path::new(&data), std::path::Path::new(&save), &losses, std::path::Path::new(&report_dir))?;
+        eprintln!("wan finetune: report written to {report_dir}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// The help text is the whole user interface for a model that takes an
@@ -215,7 +345,8 @@ mod tests {
         for flag in [
             "--prompt", "--output-path", "--negative-prompt", "--frames", "--width", "--height",
             "--steps", "--fps", "--shift", "--guidance", "--seed", "--solver", "--device",
-            "--t5-device", "--dit", "--vae", "--t5", "--tokenizer", "--variant",
+            "--t5-device", "--dit", "--vae", "--t5", "--tokenizer", "--variant", "--adapter",
+            "--dit-dtype", "--data", "--save", "--rank", "--samples", "--lr", "--ckpt-every", "--te-device", "--report",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");

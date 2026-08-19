@@ -68,6 +68,7 @@ mod supply;
 mod tts_cli;
 mod tts_serve;
 mod wan_cli;
+mod wan_report;
 mod wm_cli;
 mod yolo_cli;
 

@@ -908,6 +908,30 @@ impl crate::TensorSource for MmapGguf {
             None => false,
         }
     }
+
+    /// Zero-copy: `name`'s on-disk bytes reinterpreted as `u32` words, borrowed
+    /// straight from the mapping. `None` unless the tensor's own ggml type is
+    /// already `F32` (nothing to dequantize) AND its byte range is 4-byte
+    /// aligned in the mapping - `bytemuck::try_cast_slice` is the alignment
+    /// check, so a misaligned range cleanly falls through to `None` rather
+    /// than panicking. A GGUF release commonly leaves 1-D tensors (norms,
+    /// biases) in plain F32 while quantizing the 2-D weights, so this fires
+    /// selectively per tensor, not per file.
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        let &(ty, start, nbytes, _numel) = self.index.get(name)?;
+        if ty != T_F32 {
+            return None;
+        }
+        bytemuck::try_cast_slice::<u8, u32>(&self.mmap[start..start + nbytes]).ok()
+    }
+
+    /// Element count of `name`, without decoding - known from the header for
+    /// every ggml type, quantized or not, since the caller only needs to know
+    /// how many f32s a dequantized [`with_tensor`](Self::with_tensor) call
+    /// will produce.
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.index.get(name).map(|&(_, _, _, numel)| numel)
+    }
 }
 
 /// Convert one GGUF metadata value to `serde_json::Value` (arrays recurse).
@@ -1408,6 +1432,67 @@ mod tests {
         let found_missing = mg.with_tensor("does_not_exist", &mut |_| never_called = false);
         assert!(!found_missing, "with_tensor must report an absent name as false, not panic");
         assert!(never_called, "the closure must never run for an absent name");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `raw_words`/`numel` must not report a present tensor as missing (the D1
+    /// bug: both used to default to `None` for every `MmapGguf` tensor, which
+    /// made `raw_words(name).or_else(|| numel(name))` panic "missing" on a
+    /// tensor that was actually there). `raw_words` fires zero-copy for the
+    /// F32 tensor, declines (but still reports a `numel`) for the Q4_0 one.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raw_words_and_numel_see_every_present_tensor() {
+        use crate::gguf_write::{write, TensorOut};
+        use crate::TensorSource;
+
+        let path = std::env::temp_dir()
+            .join(format!("gguf-rawwords-test-{}.gguf", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let f32_vals = [-2.0f32, -0.5, 1.0, 2.5, 4.0, 5.5];
+        let f32_data: Vec<u8> = f32_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // One Q4_0 block: d=2.0, qs[0]=0x3A, rest 0x88 (same fixture as q4_0_block).
+        let mut q_data = Vec::new();
+        q_data.extend(half::f16::from_f32(2.0).to_le_bytes());
+        q_data.push(0x3A);
+        q_data.extend([0x88u8; 15]);
+        let tensors = vec![
+            TensorOut { name: "f.weight".to_string(), shape: vec![2, 3], ty: T_F32, data: f32_data },
+            TensorOut { name: "q.weight".to_string(), shape: vec![32], ty: T_Q4_0, data: q_data },
+        ];
+        write(&path, &[], &tensors, 32).unwrap();
+
+        let mg = MmapGguf::open(&path).unwrap();
+
+        // numel is known for BOTH tensors without decoding.
+        assert_eq!(mg.numel("f.weight"), Some(6));
+        assert_eq!(mg.numel("q.weight"), Some(32));
+        assert_eq!(mg.numel("does_not_exist"), None);
+
+        // raw_words zero-copies the F32 tensor and matches with_tensor's bits.
+        let words = mg.raw_words("f.weight").expect("F32 tensor must be zero-copyable");
+        let via_words: Vec<f32> = words.iter().map(|&w| f32::from_bits(w)).collect();
+        assert_eq!(via_words, f32_vals);
+
+        // raw_words declines the quantized tensor (nothing to bind as-is)
+        // but with_tensor still dequantizes it correctly, and neither call
+        // panics claiming the tensor is missing.
+        assert!(mg.raw_words("q.weight").is_none());
+        let mut seen = None;
+        assert!(mg.with_tensor("q.weight", &mut |d| seen = Some(d.to_vec())));
+        let seen = seen.unwrap();
+        assert_eq!(seen.len(), 32);
+        assert_eq!(seen[0], 4.0);
+        assert_eq!(seen[16], -10.0);
+
+        // The exact D1 caller pattern (crate::wan's upload_named) must now
+        // resolve both tensors instead of panicking "missing".
+        for name in ["f.weight", "q.weight"] {
+            let resolved = mg.raw_words(name).map(|w| w.len()).or_else(|| mg.numel(name));
+            assert!(resolved.is_some(), "{name} must resolve via raw_words or numel");
+        }
 
         std::fs::remove_file(&path).ok();
     }

@@ -72,10 +72,19 @@ pub(crate) const K_XSCORES_KT: usize = 20;
 /// between all four from the device's queried caps.
 pub(crate) const K_FLASH_REG: usize = 21;
 pub(crate) const K_FLASH_REG2: usize = 22;
+/// The quantized-storage tier (int8/int4, see [`QTier`]): dynamic per-token
+/// activation quantization (`max_abs_row` -> `quant_pack`, unchanged from
+/// every other model's int8 path) plus the two DP4A-family GEMMs. Appended so
+/// every index above is unchanged; unused (and therefore free) on an
+/// [`crate::dev::WanDtype::F32`]/[`crate::dev::WanDtype::F16`] build.
+pub(crate) const K_MAX_ABS_ROW: usize = 23;
+pub(crate) const K_QUANT_PACK: usize = 24;
+pub(crate) const K_MATMUL_I8_DYN: usize = 25;
+pub(crate) const K_MATMUL_Q4_DYN: usize = 26;
 
 /// Every kernel the DiT dispatches. Nothing here is new: the whole model is
 /// existing kernels at Wan's shapes.
-pub const KERNELS: [(&str, &str); 23] = [
+pub const KERNELS: [(&str, &str); 27] = [
     ("layernorm", kernels::LAYERNORM),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
@@ -111,6 +120,10 @@ pub const KERNELS: [(&str, &str); 23] = [
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
 ];
 
 /// Shape parameters of one Wan block.
@@ -603,6 +616,268 @@ pub(crate) fn build_block_steps(
     linear(gpu, s, sel, &scr.n2, &w.ff1, &scr.h1, t, dim, ff);
     s.push(gpu.step(K_GELU, &[&scr.h1, &scr.hg], &[t * ff], t * ff));
     linear(gpu, s, sel, &scr.hg, &w.ff2, &scr.ff, t, ff, dim);
+    s.push(gpu.step(K_GATE_ROW, &[&scr.x2, &m.gate2, &scr.ff, out], &[t, dim, t], t * dim));
+}
+
+// ---------------------------------------------------------------------------
+// Quantized-storage (int8/int4) block path
+// ---------------------------------------------------------------------------
+//
+// A MEMORY tier, not a speed one - quantizing the GEMMs does not pay for
+// itself once attention dominates the forward pass. Every linear weight is
+// stored packed (int8, 4 lanes/u32, or int4, 8 lanes/u32) with a per-output-
+// row fp32 scale, and dequantized back to fp32 ON THE WAY OUT of each GEMM -
+// exactly brain's established "quantized storage, fp32 arithmetic" contract
+// (`model::int8`/`model::int4`, the same one `s3dit`'s int8 DiT path uses).
+// The 14B model's weights: 14.3e9 params * 4 bytes (fp32) is ~53 GiB and does
+// not fit a 24 GiB card; int8-packed + per-row fp32 scales is ~14.4 GiB and
+// does. Norms, biases and the host-side modulation/embedding tensors are
+// never quantized - they are a rounding error of the total and quantizing
+// them would only add error for no memory win.
+//
+// W4A8 for int4 (activations stay int8-quantized, only weights drop to 4
+// bits): the SAME activation-quantization steps (`max_abs_row` ->
+// `quant_pack`) serve both tiers, only the weight-side GEMM kernel and its
+// packed word stride differ (`matmul_i8_dyn`'s k/4 vs `matmul_q4_dyn`'s k/8).
+
+/// Which packed-weight tier a quantized block uses. int4 is W4A8 (weights
+/// only), not W4A4 - see the module doc above and `model::int4`'s own doc for
+/// why a second activation-quant tier is not worth building.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QTier {
+    Int8,
+    Int4,
+}
+
+/// One quantized linear: packed weight + its per-output-row fp32 scale, plus
+/// the (never-quantized) fp32 bias.
+pub(crate) struct QLinear {
+    w: DeviceBuffer,
+    sw: DeviceBuffer,
+    b: DeviceBuffer,
+}
+
+impl QLinear {
+    fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize) -> QLinear {
+        let wname = format!("{prefix}.weight");
+        let mut packed: Option<(Vec<u32>, Vec<f32>)> = None;
+        let found = t.with_tensor(&wname, &mut |data| {
+            packed = Some(match tier {
+                QTier::Int8 => model::int8::quantize_weight(data, out_dim, in_dim),
+                QTier::Int4 => model::int4::quantize_weight_q4(data, out_dim, in_dim),
+            });
+        });
+        assert!(found, "wan: missing {wname}");
+        let (packed, sw) = packed.expect("with_tensor found the tensor, so it must have set packed");
+        let wb = gpu.storage(packed.len() as u64);
+        gpu.write(&wb, &packed);
+        let swb = gpu.storage(sw.len() as u64);
+        wf(gpu, &swb, &sw);
+        QLinear { w: wb, sw: swb, b: upload_named(gpu, t, &format!("{prefix}.bias")) }
+    }
+}
+
+/// Resident quantized weights of one block - the [`BlockWeights`] analogue for
+/// the int8/int4 tier. Ten linears are packed (self/cross attention's q/k/v/o
+/// plus the two FFN linears); the QK-norm weights and the affine cross-attn
+/// LayerNorm stay fp32, same as [`BlockWeights`].
+pub(crate) struct QBlockWeights {
+    sq: QLinear,
+    sk: QLinear,
+    sv: QLinear,
+    so: QLinear,
+    snq: DeviceBuffer,
+    snk: DeviceBuffer,
+    cq: QLinear,
+    ck: QLinear,
+    cv: QLinear,
+    co: QLinear,
+    cnq: DeviceBuffer,
+    cnk: DeviceBuffer,
+    xnorm_w: DeviceBuffer,
+    xnorm_b: DeviceBuffer,
+    ff1: QLinear,
+    ff2: QLinear,
+}
+
+impl QBlockWeights {
+    pub fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims, tier: QTier) -> QBlockWeights {
+        let (dim, ffn) = (d.dim as usize, d.ffn_dim as usize);
+        let qlin = |n: &str, out_dim: usize, in_dim: usize| QLinear::upload(gpu, t, &format!("{prefix}.{n}"), tier, out_dim, in_dim);
+        let dev = |n: &str| upload_named(gpu, t, &format!("{prefix}.{n}"));
+        QBlockWeights {
+            sq: qlin("self_attn.q", dim, dim),
+            sk: qlin("self_attn.k", dim, dim),
+            sv: qlin("self_attn.v", dim, dim),
+            so: qlin("self_attn.o", dim, dim),
+            snq: dev("self_attn.norm_q.weight"),
+            snk: dev("self_attn.norm_k.weight"),
+            cq: qlin("cross_attn.q", dim, dim),
+            ck: qlin("cross_attn.k", dim, dim),
+            cv: qlin("cross_attn.v", dim, dim),
+            co: qlin("cross_attn.o", dim, dim),
+            cnq: dev("cross_attn.norm_q.weight"),
+            cnk: dev("cross_attn.norm_k.weight"),
+            xnorm_w: dev("norm3.weight"),
+            xnorm_b: dev("norm3.bias"),
+            ff1: qlin("ffn.0", ffn, dim),
+            ff2: qlin("ffn.2", dim, ffn),
+        }
+    }
+}
+
+/// Reused dynamic-activation-quantization scratch for the quantized block
+/// path - one (packed-int8, per-token-scale) pair per DISTINCT `(rows, width)`
+/// shape a block quantizes, reused sequentially across every linear that
+/// shape feeds (mirrors [`Scratch`]'s "allocate once, reuse across the whole
+/// stack" discipline).
+pub(crate) struct QScratch {
+    /// `[t]` / `[t·dim/4]` - every `dim`-wide, `t`-row activation: `n1` (feeds
+    /// q/k/v), the self-attention context (feeds `o`), `n3` (feeds cq), the
+    /// cross-attention context (feeds `co`), `n2` (feeds `ff1`).
+    sx_t: DeviceBuffer,
+    xq_t_dim: DeviceBuffer,
+    /// `[te]` / `[te·dim/4]` - the shared text context `ctx` (feeds ck/cv).
+    /// Separate from `sx_t`/`xq_t_dim`: `te` (`text_len`) and `t` (the video
+    /// token count) are different row counts.
+    sx_te: DeviceBuffer,
+    xq_te_dim: DeviceBuffer,
+    /// `[t·ffn_dim/4]` - the post-GELU FFN hidden activation (feeds `ff2`).
+    /// `sx_t` is reused for its per-row scale (same `t` rows, only the width
+    /// differs, and a scale is one value per row regardless of width).
+    xq_t_ffn: DeviceBuffer,
+}
+
+impl QScratch {
+    pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> QScratch {
+        QScratch {
+            sx_t: gpu.storage(t as u64),
+            xq_t_dim: gpu.storage((t * d.dim / 4) as u64),
+            sx_te: gpu.storage(d.text_len as u64),
+            xq_te_dim: gpu.storage((d.text_len * d.dim / 4) as u64),
+            xq_t_ffn: gpu.storage((t * d.ffn_dim / 4) as u64),
+        }
+    }
+}
+
+/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with a fresh dynamic per-row
+/// scale - the shared activation-quant step both int8 and int4 (W4A8) read.
+fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
+    s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
+    s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
+}
+
+/// `out = dequant(xq @ Wᵀ) + b`: one quantized linear, tier-dispatched.
+/// `xq`/`sx` must already hold `x`'s quantization at this `(rows, k)` shape
+/// (from [`qquant`]).
+#[allow(clippy::too_many_arguments)]
+fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+    match tier {
+        QTier::Int8 => s.push(gpu.step(
+            K_MATMUL_I8_DYN,
+            &[xq, &w.w, sx, &w.sw, out],
+            &[rows, k / 4, n],
+            rows.div_ceil(128) * n.div_ceil(128) * 256,
+        )),
+        // Naive one-thread-per-output kernel (see matmul_q4_dyn.wgsl's doc):
+        // `k` here is the LOGICAL (undivided) K, unlike the int8 branch's
+        // `k/4` - the two operands have different packing densities (4 vs 8
+        // values/u32), so the kernel divides internally per operand.
+        QTier::Int4 => s.push(gpu.step(K_MATMUL_Q4_DYN, &[xq, &w.w, sx, &w.sw, out], &[rows, k, n], rows * n)),
+    }
+    s.push(gpu.step(K_BIAS_ADD, &[out, &w.b], &[rows, n], rows * n));
+}
+
+/// [`build_block_steps`]'s quantized-storage twin: identical graph shape and
+/// identical fp32 attention/norm/RoPE math - only the ten linears run through
+/// [`qlinear`] instead of [`linear`], each preceded by [`qquant`] on whichever
+/// scratch buffer matches its input's `(rows, width)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_block_steps_q(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    sel: &Sel,
+    tier: QTier,
+    w: &QBlockWeights,
+    m: &ModBufs,
+    x_in: &DeviceBuffer,
+    out: &DeviceBuffer,
+    scr: &Scratch,
+    q: &QScratch,
+    cos: &DeviceBuffer,
+    sin: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+    d: BlockDims,
+    t: u32,
+) {
+    let (dim, nh, hd, ff, te) = (d.dim, d.n_heads, d.head_dim, d.ffn_dim, d.text_len);
+    let half = hd / 2;
+
+    // --- self-attention -------------------------------------------------
+    s.push(model::block::layernorm_fwd(gpu, &sel.ln, x_in, &m.ln1_g, &m.ln1_b, &scr.n1, dim, t, d.eps));
+    qquant(gpu, s, &scr.n1, &q.xq_t_dim, &q.sx_t, t, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sq, &scr.q, t, dim, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sk, &scr.k, t, dim, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.sv, &scr.v, t, dim, dim);
+    qk_norm(gpu, s, sel, &scr.q, &w.snq, &scr.qn, t, dim, d.eps);
+    qk_norm(gpu, s, sel, &scr.k, &w.snk, &scr.kn, t, dim, d.eps);
+    s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_PACK_QKV, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
+    match scr.mode {
+        AttnMode::Flash => {
+            flash_bidir_fwd(gpu, sel.flash, nh, hd, dim, &scr.qkv, 3 * dim, 0, dim, 2 * dim, &scr.ctx, &[(0, t)], s)
+        }
+        AttnMode::Chunked => chunked_bidir_fwd(
+            gpu,
+            &sel.cross,
+            None,
+            nh,
+            hd,
+            dim,
+            &scr.qkv,
+            3 * dim,
+            0,
+            dim,
+            2 * dim,
+            &scr.ctx,
+            &scr.scores,
+            &scr.probs,
+            &[(0, t)],
+            scr.self_chunk,
+            None,
+            s,
+        ),
+    }
+    qquant(gpu, s, &scr.ctx, &q.xq_t_dim, &q.sx_t, t, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.so, &scr.ao, t, dim, dim);
+    s.push(gpu.step(K_GATE_ROW, &[x_in, &m.gate1, &scr.ao, &scr.x1], &[t, dim, t], t * dim));
+
+    // --- cross-attention into the text encoding --------------------------
+    s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x1, &w.xnorm_w, &w.xnorm_b, &scr.n3, dim, t, d.eps));
+    qquant(gpu, s, &scr.n3, &q.xq_t_dim, &q.sx_t, t, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.cq, &scr.xq, t, dim, dim);
+    // `ctx` is shared by every block (the embedded text encoding does not
+    // change), so this re-quantizes it once per block - wasteful next to
+    // hoisting it out of the stack, but correct, and int8 here is a memory
+    // play, not a speed one (see the module doc).
+    qquant(gpu, s, ctx, &q.xq_te_dim, &q.sx_te, te, dim);
+    qlinear(gpu, s, tier, &q.xq_te_dim, &q.sx_te, &w.ck, &scr.xk, te, dim, dim);
+    qlinear(gpu, s, tier, &q.xq_te_dim, &q.sx_te, &w.cv, &scr.xv, te, dim, dim);
+    qk_norm(gpu, s, sel, &scr.xq, &w.cnq, &scr.xqn, t, dim, d.eps);
+    qk_norm(gpu, s, sel, &scr.xk, &w.cnk, &scr.xkn, te, dim, d.eps);
+    push_cross(gpu, s, sel, scr, d, t, &scr.xqn, &scr.xkn, &scr.xv, &scr.xctx);
+    qquant(gpu, s, &scr.xctx, &q.xq_t_dim, &q.sx_t, t, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.co, &scr.xo, t, dim, dim);
+    s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.xo, &scr.x2], &[t * dim], t * dim));
+
+    // --- FFN -------------------------------------------------------------
+    s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x2, &m.ln2_g, &m.ln2_b, &scr.n2, dim, t, d.eps));
+    qquant(gpu, s, &scr.n2, &q.xq_t_dim, &q.sx_t, t, dim);
+    qlinear(gpu, s, tier, &q.xq_t_dim, &q.sx_t, &w.ff1, &scr.h1, t, dim, ff);
+    s.push(gpu.step(K_GELU, &[&scr.h1, &scr.hg], &[t * ff], t * ff));
+    qquant(gpu, s, &scr.hg, &q.xq_t_ffn, &q.sx_t, t, ff);
+    qlinear(gpu, s, tier, &q.xq_t_ffn, &q.sx_t, &w.ff2, &scr.ff, t, ff, dim);
     s.push(gpu.step(K_GATE_ROW, &[&scr.x2, &m.gate2, &scr.ff, out], &[t, dim, t], t * dim));
 }
 

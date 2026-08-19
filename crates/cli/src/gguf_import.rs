@@ -28,11 +28,18 @@
 //! auto-discovery picks up the resulting `.safetensors` on the next scan.
 //! The reasons, in the order that decided it:
 //!
-//! 1. **Disk.** brain's engine is fp32-only (dequant-on-load), so importing a
-//!    quantized GGUF materializes a much larger file: a 22 GB Q4_K_M GGUF of a
-//!    35B model becomes roughly 140 GB of fp32 safetensors. A server-startup
-//!    scan that can fill a disk is not a defensible default, and there is no
-//!    honest way to ask for consent from inside a directory walk.
+//! 1. **Disk.** This importer's output is ALWAYS fp32 safetensors - brain's
+//!    core-compute-only invariant is that ARITHMETIC stays fp32, not that
+//!    on-disk storage does (some architectures, e.g. `wan`, load a GGUF
+//!    DIRECTLY at inference and keep its weights quantized in device storage,
+//!    dequantizing only inside the GEMM), but this command's whole contract
+//!    is "produce a brain-native checkpoint the registry can discover
+//!    uniformly", and that checkpoint format is fp32. So importing a
+//!    quantized GGUF still materializes a much larger file here: a 22 GB
+//!    Q4_K_M GGUF of a 35B model becomes roughly 140 GB of fp32 safetensors. A
+//!    server-startup scan that can fill a disk is not a defensible default,
+//!    and there is no honest way to ask for consent from inside a directory
+//!    walk.
 //! 2. **Startup time.** `discover` runs on every `brain serve` start and is
 //!    expected to be a header-read-only pass (`read_card` / GGUF KV only, no
 //!    tensor data). A conversion is a minutes-to-hours full dequantize+rewrite

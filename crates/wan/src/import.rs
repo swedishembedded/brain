@@ -555,6 +555,27 @@ pub fn dit_config_from_shapes(shapes: &[(String, Vec<usize>)]) -> Result<WanConf
         .ok_or_else(|| format!("wan gguf import: dim {dim} with {layers} blocks matches no known variant (t2v-1.3B is 1536/30, t2v-14B is 5120/40)"))
 }
 
+/// Reference tensor name -> the GGUF's own source name carrying it, read off
+/// the header's names alone (no dequant). Shared by [`import_gguf`] (the
+/// ahead-of-time converter) and `crate::gguf_src::WanGgufSource` (the direct
+/// streaming loader) so the two code paths can never silently drift apart on
+/// tensor naming - one mapping table, two consumers.
+pub(crate) fn source_map(mg: &checkpoint::gguf::MmapGguf) -> Result<HashMap<String, String>, String> {
+    let diffusers = mg.names().iter().any(|n| n == "blocks.0.scale_shift_table");
+    let mut source_of: HashMap<String, String> = HashMap::with_capacity(mg.names().len());
+    for name in mg.names() {
+        let native = if diffusers {
+            dit_diffusers_to_native(name).ok_or_else(|| format!("wan dit import: unmapped diffusers tensor {name}"))?
+        } else {
+            name.clone()
+        };
+        if source_of.insert(native.clone(), name.clone()).is_some() {
+            return Err(format!("wan dit import: two source tensors map to {native}"));
+        }
+    }
+    Ok(source_of)
+}
+
 /// Convert a Wan DiT GGUF into a brain-native safetensors checkpoint at
 /// `out_path`, carrying a `ModelCard` with family `"wan"`.
 ///
@@ -594,20 +615,7 @@ pub fn import_gguf(mg: &checkpoint::gguf::MmapGguf, out_path: &str, id_override:
     // `patch_embedding.weight`, so the variant is read before any remapping.
     let cfg = dit_config_from_shapes(&shapes)?;
 
-    // Reference name -> the source name carrying it, so the write loop can walk
-    // the manifest (the output's own order) and pull each tensor by name.
-    let diffusers = mg.names().iter().any(|n| n == "blocks.0.scale_shift_table");
-    let mut source_of: HashMap<String, String> = HashMap::with_capacity(shapes.len());
-    for (name, _) in &shapes {
-        let native = if diffusers {
-            dit_diffusers_to_native(name).ok_or_else(|| format!("wan dit import: unmapped diffusers tensor {name}"))?
-        } else {
-            name.clone()
-        };
-        if source_of.insert(native.clone(), name.clone()).is_some() {
-            return Err(format!("wan dit import: two source tensors map to {native}"));
-        }
-    }
+    let source_of = source_map(mg)?;
     let shape_of: HashMap<&str, &[usize]> = shapes.iter().map(|(n, s)| (n.as_str(), s.as_slice())).collect();
     let by_shape: HashMap<&str, &[usize]> =
         source_of.iter().map(|(native, src)| (native.as_str(), shape_of[src.as_str()])).collect();

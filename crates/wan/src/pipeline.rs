@@ -165,6 +165,16 @@ pub struct GenOpts {
     /// Device for the text encoder. Defaults to `cpu` because umT5-XXL is
     /// 22.72 GB in fp32 and a 24 GB card cannot hold it plus its activations.
     pub te_device: Option<String>,
+    /// Server-side path to a trained LoRA adapter ([`crate::finetune::run`]'s
+    /// output) to fold into the DiT before it is built. `None` runs the base
+    /// checkpoint unchanged.
+    pub adapter: Option<String>,
+    /// Storage dtype for the DiT's weights (see [`crate::dev::WanDtype`]).
+    /// Independent of `paths.dit`'s FORMAT (safetensors/`.pth`/GGUF) - a
+    /// GGUF's own quantization is a separate, on-disk fact this only
+    /// interacts with when re-quantizing (Q3_K -> int8 is a real,
+    /// documented-lossy re-quantization, not a repack).
+    pub dit_dtype: crate::dev::WanDtype,
 }
 
 impl GenOpts {
@@ -184,6 +194,8 @@ impl GenOpts {
             fps: cfg.sample_fps,
             device: None,
             te_device: None,
+            adapter: None,
+            dit_dtype: crate::dev::WanDtype::F32,
         }
     }
 }
@@ -218,6 +230,26 @@ pub(crate) fn read_any(path: &str) -> Result<Vec<StTensor>, String> {
             .collect());
     }
     checkpoint::safetensors::read(path)
+}
+
+/// Where the DiT's weights live once loaded: a fully-materialized host map
+/// (safetensors/`.pth`, or a GGUF that was converted ahead of time), or a
+/// GGUF opened directly and streamed one tensor at a time. Both coerce to
+/// `&dyn checkpoint::TensorSource`, so `WanDitDev::build_dtype` (and the text
+/// MLP extraction above) consumes either uniformly - the DiT never has to
+/// know which one it was handed.
+enum DitWeights {
+    Host(crate::model::Tensors),
+    Gguf(Box<crate::gguf_src::WanGgufSource>),
+}
+
+impl DitWeights {
+    fn as_source(&self) -> &dyn checkpoint::TensorSource {
+        match self {
+            DitWeights::Host(t) => t,
+            DitWeights::Gguf(g) => g.as_ref(),
+        }
+    }
 }
 
 /// Phase 1: prompt and negative prompt through umT5-XXL, returned as two
@@ -282,10 +314,18 @@ fn seeded_noise(n: usize, seed: u64) -> Vec<f32> {
 
 /// What fixes a built [`WanDitDev`]: the variant, the latent extent
 /// `(frames, height, width)` the RoPE tables and every buffer are sized from,
-/// and the device it was built on. Nothing else in [`GenOpts`] changes the
-/// graph - prompt, seed, steps, guidance, solver and negative prompt are all
-/// per-call, which is exactly what makes a resident DiT worth holding.
-pub type DitKey = (&'static str, usize, usize, usize, Option<String>);
+/// the device it was built on, the folded LoRA adapter (if any), and the
+/// weight storage dtype. Nothing else in [`GenOpts`] changes the graph -
+/// prompt, seed, steps, guidance, solver and negative prompt are all
+/// per-call, which is exactly what makes a resident DiT worth holding. The
+/// adapter path MUST be part of this key: the weights it folds in are baked
+/// into the uploaded graph, so a request naming a different adapter (or none)
+/// than the resident build must never reuse it. The dtype must be too: an
+/// int8-built stack has different weight buffers AND a different recorded
+/// kernel graph (DP4A GEMMs, not the fp32 ones) than an f32 build at the same
+/// size, so a request switching dtypes must rebuild, not silently run the
+/// wrong arithmetic tier against the requested one.
+pub type DitKey = (&'static str, usize, usize, usize, Option<String>, Option<String>, crate::dev::WanDtype);
 
 /// The four host tensors [`crate::model::text_embed`] reads. They have to
 /// outlive the imported checkpoint (~35 MB against the DiT's 5.7 GB), because
@@ -399,22 +439,60 @@ fn run(
     }
 
     // ---- phase 2: denoise ------------------------------------------------
-    let key: DitKey = (cfg.name, lf, lh, lw, o.device.clone());
+    let key: DitKey = (cfg.name, lf, lh, lw, o.device.clone(), o.adapter.clone(), o.dit_dtype);
     let t = Instant::now();
     if !matches!(hot.as_ref(), Some(h) if h.key == key) {
         progress(1, total, "load transformer");
         *hot = None; // free the old resident weights BEFORE building new
-        let raw = read_any(&paths.dit)?;
-        let weights = crate::import::import_dit(raw, cfg)?;
+
+        let is_gguf = std::path::Path::new(&paths.dit).extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+        let dit_weights: DitWeights = if is_gguf {
+            if o.adapter.is_some() {
+                // A read-only mmap has nothing to fold a LoRA delta INTO: the
+                // host `Tensors` map every other path builds is exactly what
+                // `import_gguf` (the ahead-of-time converter) produces for
+                // finetune/LoRA use - convert once, then run with `--dit` on
+                // the converted safetensors.
+                return Err(format!(
+                    "wan: --adapter is not supported with a .gguf transformer ({}) - convert it first with `brain import`, then pass the converted safetensors as --dit",
+                    paths.dit
+                ));
+            }
+            let src = crate::gguf_src::WanGgufSource::open(&paths.dit)?;
+            if src.config().name != cfg.name {
+                return Err(format!(
+                    "wan: {} is a {} checkpoint but --variant asked for {}",
+                    paths.dit,
+                    src.config().name,
+                    cfg.name
+                ));
+            }
+            DitWeights::Gguf(Box::new(src))
+        } else {
+            let raw = read_any(&paths.dit)?;
+            let mut weights = crate::import::import_dit(raw, cfg)?;
+            if let Some(path) = &o.adapter {
+                let tcfg = crate::modelgrad::Cfg::from_wan(cfg, lf, lh, lw);
+                let adapter = crate::lora::load_adapter(path, &tcfg).map_err(|e| format!("wan: loading adapter {path}: {e}"))?;
+                adapter.fold_into_tensors(&mut weights).map_err(|e| format!("wan: folding adapter {path}: {e}"))?;
+            }
+            DitWeights::Host(weights)
+        };
+
         // The text MLP runs on the host from these four tensors, and it runs
         // once per generation - so they are kept while the rest of the 5.7 GB
-        // map is dropped at the end of this block.
+        // source (host map or GGUF mmap) is dropped at the end of this block.
+        let src: &dyn checkpoint::TensorSource = dit_weights.as_source();
         let mut text_mlp = crate::model::Tensors::new();
         for name in TEXT_MLP_TENSORS {
-            let t = weights.get(name).ok_or_else(|| format!("wan: checkpoint has no {name}"))?;
-            text_mlp.insert(name.to_string(), t.clone());
+            let mut data = None;
+            if !src.with_tensor(name, &mut |d| data = Some(d.to_vec())) {
+                return Err(format!("wan: checkpoint has no {name}"));
+            }
+            let data = data.expect("with_tensor found the tensor, so it must have set data");
+            text_mlp.insert(name.to_string(), (vec![data.len()], data));
         }
-        let dev = WanDitDev::build(cfg, &weights, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[]);
+        let dev = WanDitDev::build_dtype(cfg, src, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[], o.dit_dtype);
         *hot = Some(HotDit { key, dev, text_mlp });
     }
     let resident = hot.as_ref().expect("just built");

@@ -83,12 +83,29 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
     .param(ParamSpec::new("solver", ParamType::Enum(SOLVERS.iter().map(|s| s.to_string()).collect()), "multistep flow-matching solver").default(json!("unipc")))
     .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; the checkpoint at BRAIN_WAN_DIT must match").default(json!("t2v-1.3B")))
+    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to fold in before generation"))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
+
+    let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned video clips (a data::episode dataset plus captions.json; GPU-resident DiT trainer where a device is available, host f32 otherwise)")
+        .streaming()
+        .param(ParamSpec::new("data", ParamType::Str, "server-side folder holding a data::episode dataset plus captions.json").required())
+        .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required())
+        .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(16)))
+        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(200)))
+        .param(ParamSpec::new("frames", ParamType::Int, "training window length in frames; must be 1 + 4k").default(json!(9)))
+        .param(ParamSpec::new("samples", ParamType::Int, "training windows to draw and encode up front").default(json!(8)))
+        .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("ckpt_every", ParamType::Int, "write a checkpoint every N steps (0 = final only)").default(json!(50)))
+        .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt").default(json!("t2v-1.3B")))
+        .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))
+        .param(ParamSpec::new("te_device", ParamType::Str, "device for the umT5 text encoder (omit for $BRAIN_WAN_T5_DEVICE, then cpu)"))
+        .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
         MODEL,
         "Wan2.1 (Alibaba) - text-to-video diffusion transformer over a 3D latent volume: umT5-XXL text conditioning, flow-matching UniPC/DPM++ sampling with CFG, causal 3D VAE at (4, 8, 8) stride.",
-        vec![t2v],
+        vec![t2v, lora_train],
     )
 }
 
@@ -134,6 +151,11 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         device: None,
         te_device: None,
+        adapter: inv.get_str("adapter").filter(|s| !s.is_empty()),
+        dit_dtype: match inv.get_str("dit_dtype").filter(|s| !s.is_empty()) {
+            Some(s) => crate::dev::WanDtype::from_name(&s)?,
+            None => d.dit_dtype,
+        },
     };
     if cfg.latent_shape(opts.frames, opts.width, opts.height).is_none() {
         return Err(format!("frames must be of the form 1 + 4k (1, 5, 9, … 81); got {}", opts.frames));
@@ -186,6 +208,38 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
         .set("fps", json!(video.fps))
         .set("seconds_per_forward", json!(timings.secs_per_forward()))
         .blob("video", blob)
+}
+
+/// Run `lora_train` from an invocation: train via [`crate::finetune::run`]
+/// (which polls `inv.cancel` every step), then return the trained artifact
+/// itself as an output blob - a remote client has no access to the server's
+/// filesystem.
+pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
+    let save = inv.get_str("save").ok_or("lora_train: 'save' path is required")?;
+    let variant = inv.get_str("variant").unwrap_or_else(|| "t2v-1.3B".into());
+    let cfg = config_from_name(&variant)?;
+    let opts = crate::finetune::TrainOpts {
+        steps: inv.get_i64("steps").unwrap_or(200).max(1) as u32,
+        rank: inv.get_i64("rank").unwrap_or(16).max(1) as usize,
+        lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
+        frames: inv.get_i64("frames").unwrap_or(9).max(1) as usize,
+        samples: inv.get_i64("samples").unwrap_or(8).max(1) as usize,
+        seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        save_path: save.clone(),
+        ckpt_every: inv.get_i64("ckpt_every").unwrap_or(50).max(0) as u32,
+        device: inv.get_str("device").filter(|s| !s.is_empty()),
+        te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
+    };
+    let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
+    let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &cfg, &opts, &inv.cancel, &mut prog)?;
+    use capability::Blob;
+    let bytes = std::fs::read(&save).map_err(|e| format!("read trained adapter '{save}': {e}"))?;
+    Ok(Outcome::new()
+        .set("adapter", json!(save))
+        .set("steps", json!(opts.steps))
+        .set("tensors", json!(tensors.len()))
+        .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
 }
 
 // ===================== execution (hot-DiT provider) =====================
@@ -244,6 +298,10 @@ impl Action for WanAction {
                 let mut guard = self.hot.lock().map_err(|_| "hot DiT lock poisoned")?;
                 generate_on(&paths, &mut guard, inv, &p, progress)
             }
+            "lora_train" => {
+                let paths = Paths::from_env()?;
+                train_action(&paths, inv, progress)
+            }
             other => Err(format!("wan '{other}': unknown action")),
         }
     }
@@ -258,7 +316,7 @@ mod tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["t2v"]);
+        assert_eq!(names, ["t2v", "lora_train"]);
         let t2v = &m.actions[0];
         // Long-running and progress-bearing: a silent hour is a hang.
         assert!(t2v.streaming);
@@ -289,10 +347,21 @@ mod tests {
         assert_eq!(t2v.outputs[0].media, Media::Video);
         assert!(t2v.outputs[0].required);
         assert!(t2v.inputs.is_empty(), "t2v takes no binary input");
+        // The adapter param is optional and folded in only when set.
+        let adapter_param = t2v.params.iter().find(|p| p.name == "adapter").expect("t2v must advertise 'adapter'");
+        assert!(!adapter_param.required);
+
+        // `lora_train`: `data`/`save` required, produces a retrievable adapter.
+        let lt = &m.actions[1];
+        assert!(lt.streaming);
+        let required: Vec<&str> = lt.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
+        assert_eq!(required, ["data", "save"]);
+        assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
+
         // The whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["model"], MODEL);
-        assert_eq!(j["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(j["actions"].as_array().unwrap().len(), 2);
         assert_eq!(j["actions"][0]["outputs"][0]["media"], "video");
         assert_eq!(j["actions"][0]["streaming"], true);
         assert_eq!(j["actions"][0]["params"][0]["name"], "prompt");
