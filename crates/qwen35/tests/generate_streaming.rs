@@ -79,7 +79,7 @@ fn real_prompt_generates_real_text_greedy_and_sampled() {
 
     brain_testutil::mem("generate: before greedy");
     let t0 = Instant::now();
-    let greedy = generate(&dir, &cfg, &tokenizer, prompt, max_new, 0.0, 0, 1.0, window_budget, 20260819)
+    let greedy = generate(&dir, &cfg, &tokenizer, prompt, max_new, 0.0, 0, 1.0, window_budget, 20260819, false)
         .unwrap_or_else(|e| panic!("generate (greedy): {e}"));
     let greedy_elapsed = t0.elapsed();
     brain_testutil::mem("generate: after greedy");
@@ -91,7 +91,7 @@ fn real_prompt_generates_real_text_greedy_and_sampled() {
 
     brain_testutil::mem("generate: before sampled");
     let t1 = Instant::now();
-    let sampled = generate(&dir, &cfg, &tokenizer, prompt, max_new, 0.8, 40, 0.9, window_budget, 42)
+    let sampled = generate(&dir, &cfg, &tokenizer, prompt, max_new, 0.8, 40, 0.9, window_budget, 42, false)
         .unwrap_or_else(|e| panic!("generate (sampled): {e}"));
     let sampled_elapsed = t1.elapsed();
     brain_testutil::mem("generate: after sampled");

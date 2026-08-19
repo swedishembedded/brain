@@ -316,11 +316,17 @@ impl GenerateAction {
         let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
         let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
         let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+        // Opt-in MTP-accelerated greedy decode (`crate::stream::generate`'s
+        // own `use_mtp` doc) - `false` by default, matching `streaming`'s
+        // own opt-in convention above; `generate` itself rejects
+        // `use_mtp=true` with a non-zero `temp` (loud, not a silent
+        // fallback to the plain path).
+        let use_mtp = inv.get_bool("use_mtp").unwrap_or(false);
 
         const WINDOW_BUDGET: u32 = 4; // see this function's own doc comment
 
         let cfg = Qwen35Config::qwen38_27b();
-        let text = crate::stream::generate(dir, &cfg, Path::new(&tokenizer), &prompt, max_new, temp, top_k, top_p, WINDOW_BUDGET, seed)?;
+        let text = crate::stream::generate(dir, &cfg, Path::new(&tokenizer), &prompt, max_new, temp, top_k, top_p, WINDOW_BUDGET, seed, use_mtp)?;
         Ok(Outcome::new().set("text", json!(text.clone())).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
 }

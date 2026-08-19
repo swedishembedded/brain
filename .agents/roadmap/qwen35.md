@@ -747,12 +747,191 @@ over the whole growing sequence instead); `docs/models/qwen35.md` (M20);
 transcript longer than a couple of tokens (impractical at this per-step
 cost - not attempted, and not a bug).
 
+### M17: MTP-accelerated greedy streaming decode ("confirm, advance, speculate")
+
+The key insight: since M16's streaming decode re-pays the SAME fixed
+per-pass weight-streaming cost (all 64 real layers, from disk, every decode
+step) regardless of how many token positions that pass computes output
+for, running the MTP head (`crate::model::Qwen35::run_mtp_forward`,
+training-only until this landed, `mtp.*` real weights never imported
+before this either) as one extra, CHEAP, resident-weights computation
+within the SAME pass that produces the main next-token prediction lets one
+streaming pass yield genuine progress on TWO tokens instead of one - an
+I/O-bound-regime-specific win (amortizing the fixed per-pass cost over more
+confirmed tokens), not `qwen3::serve::spec_decode`'s FLOPs-bound kind.
+
+**Phase 1 - real-weight MTP import** (`crates/qwen35/src/import.rs`):
+`classify()`'s per-layer leaf-rename table hoisted into a new
+`classify_layer_leaf(leaf, ty)` (returns a bare suffix, no `blocks.{l}.`
+prefix), so the new `pub fn import_mtp(reader, cfg, block) ->
+Result<HashMap<String, Vec<f32>>, String>` can reuse it for
+`mtp.layers.0.*` (architecturally a plain `Full`-layer leaf set) instead of
+hand-duplicating the rename rules. `classify()` itself had always
+deliberately dropped every `mtp.*` tensor (this module's own doc, "a
+DELIBERATE out-of-scope drop") - no real-weight MTP import existed
+anywhere in this crate before this milestone, despite `mtp.safetensors`
+being downloaded and the MTP architecture being gradchecked against
+synthetic weights since M7.
+- Splits the real checkpoint's ONE fused `mtp.fc.weight [d, 2d]` into
+  `mtp.fc_e.weight [d,d]` (columns `[0,d)`) and `mtp.fc_h.weight [d,d]`
+  (columns `[d,2d)`) - exactly the order `config.rs`'s own `param_list()`
+  doc comment already committed to. **No external oracle exists to check
+  this column order against** (confirmed again this session: the installed
+  `transformers.models.qwen3_5` loader ignores every `mtp.*` key on load,
+  `_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`) - this reuses the
+  ONE convention the already-gradchecked forward/backward math assumes
+  rather than inventing an unverifiable second one. **Validated structurally,
+  not numerically**: on the real checkpoint, `fc_e`/`fc_h` are genuinely
+  different sub-tensors (not an aliasing bug), both finite, both the
+  expected `[5120, 5120]` shape - that is the full extent of what is
+  checkable here.
+- `fold_plain_rmsnorm_weights` extended (judgment call, documented in its
+  own doc comment) to fold MTP's own three norms
+  (`mtp.pre_fc_norm_embedding.weight`/`mtp.pre_fc_norm_hidden.weight`/
+  `mtp.norm.weight`) by EXACT name, matched by analogy with every other
+  plain (non-gated) norm in this checkpoint - MTP has no gated norm
+  anywhere in its own architecture (its only mixer is GQA-shaped, never
+  Gated DeltaNet), so the gated-norm reparameterization that motivates the
+  ONE exception (`linear_attn.norm`) never applies here.
+- Two-way coverage validated against `Qwen35Config { mtp: true, ..cfg
+  }.param_list()`'s own `mtp.*` subset, mirroring `import_dir`'s own
+  discipline; every real tensor either classified onto an expected name or
+  a loud, by-name error (missing `mtp.fc.weight`, unrecognized leaf, or any
+  tensor left over after classification).
+- New tests: `import_mtp_splits_fc_folds_norms_and_matches_full_two_way_coverage`
+  + `import_mtp_missing_fc_weight_errors_by_name` (fast, synthetic fixture,
+  real on-disk safetensors via `checkpoint::mmap::MmapSafetensors`, no real
+  checkpoint needed) plus a new `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated
+  `crates/qwen35/tests/import_mtp_real_weight.rs`.
+  **Real-checkpoint result** (`mtp.safetensors`, `BRAIN_QWEN35_DIR=
+  /data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+  import_mtp_real_weight -- --ignored --nocapture`): all 16 expected
+  `mtp.*` tensors present with the exact `param_list()` shapes, all finite,
+  `fc_e != fc_h` confirmed on real data - **pass**, 19.18 s.
+
+**Phase 2/3 - wiring into `crate::stream`** (`crates/qwen35/src/stream.rs`):
+- `OwnedMtpLayer`: reuses `OwnedGqaLayer` directly for `mtp.layers.0.*`'s
+  self-attn+MLP leaves (real dims confirmed to match a main-stack `Full`
+  layer's exactly), loaded ONCE per `generate()` call via a new
+  `StreamState::load_mtp` (the SAME `Weight::upload(..., Dtype::I8)` int8
+  path the 64 main layers use for the quantizable leaves; `fc_e`/`fc_h`
+  and the three norm vectors stay fp32-resident via the same
+  `Weight::upload` façade requesting `Dtype::F32` - genuinely negligible
+  memory next to a single main layer's own streamed footprint, not worth
+  quantizing).
+- New free functions `single_position_mrope`/`mtp_mixer_forward`/
+  `mtp_forward` reimplement `run_mtp_forward`'s own math (embed candidate
+  token -> two pre-norms -> `fc_e(en)+fc_h(hn)` -> one GQA-shaped decoder
+  layer via the SAME shared `model::gqa_mixer::gqa_mixer_fwd` the main-layer
+  GQA path already calls -> `mtp.norm` -> the already-resident int8
+  `lm_head`) for a SINGLE row (`n=1`) rather than the whole training batch
+  `run_mtp_forward` computes over - sound specifically because of the
+  decode loop's own causality argument below (a wrong MTP guess never
+  corrupts correctness, only wastes one pass's worth of speculation).
+- `generate`/`generate_with_stats` gained a `use_mtp: bool` parameter
+  (`generate` is now a thin wrapper over `generate_with_stats`, which
+  additionally returns the real number of `stream_all_layers` passes
+  issued - the instrumentation gate 2 needed). `use_mtp: true` with a
+  non-zero `temperature` is a loud `Err`, never a silent fallback: **scoped
+  to GREEDY decoding only** - verifying a stochastic MTP draft against a
+  stochastic target needs rejection-sampling machinery this milestone
+  deliberately does not build (unlike `qwen3::serve::spec_decode`, which
+  never needs it either, since it drafts deterministically then verifies
+  against the target's OWN greedy choice - but a temperature-sampled
+  target makes "the correct next token" ill-defined for a single
+  verification check here). `crate::caps`'s `generate` action gained a
+  matching `use_mtp` manifest param (default `false`).
+- New private `generate_mtp_accelerated`: the "confirm, advance, speculate"
+  decode loop. Maintains a confirmed prefix plus at most one PENDING
+  (MTP-guessed, unverified) tail token; every pass feeds the streaming
+  forward the confirmed history + the one pending tail (end-padded, same
+  as M16), then reads main-head logits at the last-confirmed position
+  (always - the model's own true prediction, independent of whatever
+  `pending` guessed) and, ONLY on a match, a SECOND time at the
+  now-confirmed pending position too - free, since causal attention
+  guarantees that row's output is identical to what a genuine serial
+  continuation would have produced there (its own input really was the
+  now-known-correct token). A fresh pending guess for the next round comes
+  from one `mtp_forward` call against THIS pass's own already-computed
+  hidden state, never an extra pass. On a mismatch, the wrong pending token
+  is simply never included in the next pass's input sequence - no
+  persistent-KV rollback needed (unlike `qwen3::serve::spec_decode`'s
+  `model::paged::truncate`), a deliberate simplification M16's own
+  growing-prefix-recompute architecture (no persistent KV/GDN state across
+  passes at all) already enables. `head_logits` extracted as a shared
+  helper both the plain loop and this loop call, so gate 1's byte-identical
+  claim is true by construction (one implementation of "apply the final
+  norm + project to vocab logits" for either path to possibly diverge on),
+  not just by argument.
+
+**Phase 4 gates** (`crates/qwen35/tests/generate_streaming_mtp.rs`,
+`#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, `BRAIN_QWEN35_DIR=
+/data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+generate_streaming_mtp -- --ignored --nocapture --test-threads=1`), same
+prompt `"The capital of France is"`, `max_new=4`, `window_budget=4`,
+`seed=20260819`, greedy (`temperature=0.0`) both paths:
+
+- **Plain** (`use_mtp=false`): output `" Paris.\nThe"` - **4 passes**,
+  79.1 min total.
+- **MTP-accelerated** (`use_mtp=true`): output `" Paris.\nThe"` - **3
+  passes**, 52.4 min total.
+- **Gate 1 (exact-match determinism): PASS** - `assert_eq!(mtp_text,
+  plain_text)` held: both paths produced the BYTE-IDENTICAL token
+  sequence, confirming the causality argument above holds in the real
+  code (the MTP head's own guesses never change WHAT text comes out, only
+  how many streaming passes it costs).
+- **Gate 2 (real pass-count reduction): PASS** - measured ratio
+  **plain/MTP = 4/3 = 1.333x**, not the ~2x upper bound (this checkpoint's
+  real MTP head guessed correctly on 1 of the 3 pending predictions it
+  made against this real prompt/prefix - "somewhere close to but not
+  necessarily exactly 2x", exactly as scoped; the real number, not
+  assumed).
+- Whole test: 7890.64 s (~131.5 min) for both settings together.
+- **Per-pass cost was measured much higher here (~19.8 min/pass plain,
+  ~17.5 min/pass MTP-accelerated) than the ~3-4-minute/pass figure the
+  M15 perf follow-up's OWN doc flagged as an untested extrapolation** ("not
+  re-measured via a full `generate_streaming` re-run" - that section's own
+  words). This run's own process accounting (`ps`/`free`/`loadavg`) showed
+  heavy concurrent CPU contention for a large share of its wall-clock time
+  - this milestone's own `cargo test -p brain-gradcheck --lib` (full suite,
+  ~14 min) and `make gradcheck` (release rebuild + full suite, ~20 min)
+  ran concurrently on the same shared, multi-session box, competing for
+  the same CPU cores the per-layer FP8/int8 host-side dequant work needs.
+  Recorded here as the likely cause, not confirmed by an isolated
+  re-measurement (impractical to repeat at this per-run cost) - a gap in
+  measurement rigor, not evidence the earlier throughput fixes regressed.
+
+**Verification:**
+- `cargo test -p brain-qwen35 --lib --bins --tests`: all green, 0 failed
+  (13 new `import::tests::*`/`import_mtp_*` unit tests included).
+- `cargo test -p brain-qwen35 --test import_mtp_real_weight -- --ignored
+  --nocapture` and `--test generate_streaming_mtp -- --ignored --nocapture
+  --test-threads=1` against the real checkpoint: both pass (numbers above).
+- `cargo test -p brain-gradcheck --lib qwen35 -- --nocapture` (targeted
+  re-confirmation) AND the full `cargo test -p brain-gradcheck --lib` (51
+  tests) AND `make gradcheck` (20 suites, release): all green, 0 failed -
+  **`qwen35_mtp_analytic_grads_match_finite_differences` explicitly
+  re-confirmed passing in all three runs**, proving this milestone's new
+  import/streaming-decode code never touched `model.rs`'s shared
+  forward/backward math.
+- `cargo clippy -p brain-qwen35 --all-targets -- -D warnings`: clean.
+- `make build` (whole workspace, dev profile): succeeds.
+
+**Not done, left for later milestones (explicitly out of this one's
+scope):** sampled (non-greedy) MTP-accelerated decode (needs
+rejection-sampling machinery - see Phase 2/3 above); MTP wired into
+`crate::caps`'s manifest for anything beyond the plain boolean pass-through
+(no dedicated response field reporting pass counts/speculation hit-rate to
+an HTTP caller); an isolated, non-contended re-measurement of real
+per-pass cost (see Phase 4's own note above); `docs/models/qwen35.md`
+(M20, carried over from M16).
+
 ## Not yet done
 
-Nothing - all milestones (M0-M16) are complete. Remaining scope is the
+Nothing - all milestones (M0-M17) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's own
-"not done" items just above.
+machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's/M17's
+own "not done" items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
@@ -773,7 +952,14 @@ machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's own
   claim it protects a refactor here is a claim about a different machine.
 - No serving throughput/latency or residency measurement on real weights.
 - MTP head: structurally implemented, **no reference oracle** (see above) -
-  gradchecked and overfit-tested, never parity-claimed.
+  gradchecked and overfit-tested, never parity-claimed. M17 landed the
+  first real-weight import (`crate::import::import_mtp`) and wired it into
+  a real greedy-decode speedup (`crate::stream::generate`'s `use_mtp`
+  path) - both still without any external numerical reference to validate
+  the head's own predictions against (the "no reference oracle" gap is
+  about MTP's OWN correctness as a predictor, not about whether the
+  overall decode loop it feeds into stays correct - M17's gate 1 proves
+  the latter unconditionally, by causality, regardless of the former).
 - Vision + decoder fused end-to-end on real weights is not runnable (needs both
   towers resident simultaneously).
 - Vision tower's OWN standalone real-weight parity (M10's original plan
