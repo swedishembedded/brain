@@ -80,3 +80,14 @@ Unlike the face stack, CLIP's `run_batch` is a **genuine batched forward**: the
 residency adapter groups a batch by tower and runs one forward per group at
 `b = N`, because every row is the same fixed 77-token context. See
 `crates/cli/src/resident_clip.rs`.
+
+`clip_embed.py` is the D-Bus-side runnable example - text embedding (showing
+the batched grouping above via concurrent calls) and image embedding through
+the EVA-CLIP-L/336 tower:
+
+```bash
+BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/embedding/clip_embed.py \
+    --text "a photo of a cat" --text "a photo of a dog" --image photo.ppm'
+```

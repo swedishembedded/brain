@@ -251,9 +251,11 @@ fast and scalable kernel - not a naive one.
     only what differs (`</w>` word-end marker, CLIP's pre-tokenization, lowercase
     + whitespace collapse, the 77-token `<|startoftext|>`…`<|endoftext|>` frame),
     gated at **exact id equality** vs HF `CLIPTokenizer` on both SDXL tokenizers.
-    *(Forward only: the tokenizer is not yet wired into `crates/clip`'s own tests,
-    image preprocessing is not implemented, and backward/gradcheck + the serving
-    contract are deferred - see the Limits section of `docs/models/clip.md`.)*
+    **Serving contract met**: `clip::caps` (`embed_text` batched per-tower,
+    `embed_image`), `resident_clip::ClipResident` (`BRAIN_CLIP_DIR`), D-Bus
+    `Run` - still missing a runnable `examples/` entry. *(Forward only:
+    backward/gradcheck is deferred - see the Limits section of
+    `docs/models/clip.md`.)*
 
 12e. **SDXL UNet2DConditionModel** (`crates/sdxlunet`) - the first UNet *diffusion
     backbone* in the imaging stack (`crates/diamond` has a UNet-shaped world
@@ -1224,13 +1226,15 @@ a metric that isn't there was simply forgotten.
   and driven over D-Bus is **incomplete**.
 
   **Imaging workstream status, so nobody has to infer it:** the contract is met
-  for **`sam2`, `scrfd`, `arcface`, `vqgan` and `codeformer`** - five models, each
-  with a `caps` module, a `resident_*.rs` registered in `build_executor`, the
-  existing D-Bus `Run`, and an example under `examples/{vision,restore}/`. Only
-  `sam2`'s `run_batch` does real grouping (by image); the others are the serial
-  default and each says why in-file. It is **not** met for `clip`, `t5encoder`, `flux1`,
-  `sdxlunet`, `controlnet` or `pulid` - those six have no capability manifest, no
-  residency adapter and no D-Bus surface at all.
+  for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer` and `clip`** - six models,
+  each with a `caps` module, a `resident_*.rs` registered via `catalog.rs` (read
+  generically by `build_executor`), and the existing D-Bus `Run`. `sam2`'s
+  `run_batch` does real grouping (by image), `clip`'s batches text rows into one
+  forward; the rest are the serial default and each says why in-file. `clip` has
+  no `examples/` entry yet (every other one of the six does, under
+  `examples/{vision,restore,embedding}/`). It is **not** met for `t5encoder`,
+  `flux1`, `sdxlunet`, `controlnet` or `pulid` - those five have no capability
+  manifest, no residency adapter and no D-Bus surface at all.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
