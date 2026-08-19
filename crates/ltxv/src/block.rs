@@ -94,10 +94,14 @@ const K_GELU: usize = 3;
 const K_MUL: usize = 4;
 const K_ADD2: usize = 5;
 const K_GATE_ROW: usize = 6;
-const K_ATTN_SCORES: usize = 7;
-const K_ATTN_SOFTMAX: usize = 8;
-const K_ATTN_APPLY: usize = 9;
-const K_ROPE2D: usize = 10;
+/// `attn_scores_cross` (the non-transposed reference) is deliberately ABSENT:
+/// both attention call sites in this crate now go exclusively through
+/// [`attn_scores_kt`]'s coalesced `attn_scores_cross_kt` path (see
+/// [`K_KV_K_HEADT`]'s doc) - keeping the slow kernel registered here would
+/// build a pipeline this crate never dispatches.
+const K_ATTN_SOFTMAX: usize = 7;
+const K_ATTN_APPLY: usize = 8;
+const K_ROPE2D: usize = 9;
 /// Gated attention's `sigmoid(gate_logits)` (`crate::config::LtxDitConfig::
 /// apply_gated_attention`'s doc, `2*sigmoid` - the `2*` is folded into the
 /// per-head "expand to `inner_dim`" matmul's constant matrix in [`attention`]
@@ -109,21 +113,59 @@ const K_ROPE2D: usize = 10;
 /// nothing existing matches the per-HEAD, per-TOKEN, no-residual broadcast
 /// gated attention needs, so it composes from `matmul`+`sigmoid`+`mul`
 /// instead - see [`attention`]'s doc).
-const K_SIGMOID: usize = 11;
+const K_SIGMOID: usize = 10;
 /// The quantized-compute tier (int8/int4 - see [`QTier`]): dynamic per-token
 /// activation quantization (`max_abs_row` -> `quant_pack`, the same recipe
 /// `crates/wan/src/block.rs`'s `QTier` path and `crates/model/src/int8.rs`'s
 /// `QuantRows` use) plus the two DP4A-family GEMMs. Appended so every index
 /// above is unchanged; unused (and therefore free) on a plain-f32 [`LtxBlock`].
-const K_MAX_ABS_ROW: usize = 12;
-const K_QUANT_PACK: usize = 13;
-const K_MATMUL_I8_DYN: usize = 14;
-const K_MATMUL_Q4_DYN: usize = 15;
+const K_MAX_ABS_ROW: usize = 11;
+const K_QUANT_PACK: usize = 12;
+const K_MATMUL_I8_DYN: usize = 13;
+const K_MATMUL_Q4_DYN: usize = 14;
+/// The fp32 fast-tier GEMM pair `linear()` now selects between via
+/// `model::block::gemm_variant` (Phase 8 finding: `linear()` used to
+/// hardcode `K_MATMUL`, the one-thread-per-output reference kernel,
+/// unconditionally - measured ~14 GFLOP/s, 0.1% of this device's roofline,
+/// on every fp32 projection in the block. `matmul_reg3`/`matmul_gemv` are
+/// the same pipelines `crates/wan/src/block.rs::Sel::new` registers for the
+/// identical 10-linear block shape - see that module's `Sel`/`GemmVariants`
+/// precedent, which this mirrors). Only the fp32 reference path
+/// ([`LtxBlock`]/[`LtxAvBlock`], used by `LtxDit::forward`/gradcheck/
+/// `ltxv_bench dit`) needed this - the quantized path ([`LtxBlockQ`]'s
+/// `qlinear`) already dispatches `matmul_i8_dyn`/`matmul_q4_dyn`
+/// unconditionally, which for DP4A has no naive sibling to fall back to.
+const K_MATMUL_REG3: usize = 15;
+const K_MATMUL_GEMV: usize = 16;
+/// Phase 8 finding #2: `attn_scores_cross` parallelises over the KEY index
+/// and reduces over `head_dim`, so at THIS crate's real width (heads=32,
+/// head_dim=128, 1024-token self-attention) it measured 45 GFLOP/s - 0.4% of
+/// this device's roofline - and was the single largest kernel in a whole-pass
+/// profile (54.4% of `ltxv_bench dit`'s real-width total), ahead of even the
+/// pre-fix naive `matmul`. `attn_scores_cross.wgsl`'s OWN doc already names
+/// the fix: transpose K to key-minor once (`kv_k_headt`) so the score sweep's
+/// reads coalesce (`attn_scores_cross_kt`) - the same defect and the same fix
+/// `crates/wan/src/block.rs` already carries (`K_XSCORES_KT`/`kv_k_headt`).
+/// Since [`attention`]/[`attention_q`] share their score/softmax/apply trio
+/// with the int8 tier (only the four projections are quantized - see
+/// [`attention_q`]'s doc), this fix reaches the real 22B checkpoint's
+/// generation path too, not just the fp32 bench.
+const K_KV_K_HEADT: usize = 17;
+const K_ATTN_SCORES_CROSS_KT: usize = 18;
+/// Phase 8 finding #3: with #2 fixed, `attn_softmax_cross` (one THREAD per
+/// row, 3 serial `t_enc`-wide passes) became the new #2 kernel by share
+/// (25.3% of a real-width whole pass) at only 2.1% of the measured roof.
+/// `softmax_rows.wgsl`'s own doc names `attn_softmax_cross` as exactly the
+/// kernel it exists to replace (one WORKGROUP per row instead of one
+/// thread), gated behind `DeviceCaps::workgroup_reductions` the same way
+/// `crates/wan/src/block.rs::Sel.softmax_rows` already gates it - mirrored
+/// here rather than re-derived.
+const K_SOFTMAX_ROWS: usize = 19;
 
 /// Every kernel this block dispatches - all pre-existing, all at their
 /// documented general contract (see this module's doc for why no new kernel
 /// was needed anywhere in the block).
-pub const KERNELS: [(&str, &str); 16] = [
+pub const KERNELS: [(&str, &str); 20] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -131,7 +173,6 @@ pub const KERNELS: [(&str, &str); 16] = [
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
     ("gate_row", kernels::GATE_ROW),
-    ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("rope2d", kernels::ROPE2D),
@@ -140,6 +181,11 @@ pub const KERNELS: [(&str, &str); 16] = [
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("kv_k_headt", kernels::KV_K_HEADT),
+    ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -270,11 +316,51 @@ fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
     gpu.write_f32(buf, data);
 }
 
-/// `out = x @ Wᵀ (+ b)`, `x: [m,k]`, `w: [n,k]`, `out: [m,n]`.
+/// `out = x @ Wᵀ (+ b)`, `x: [m,k]`, `w: [n,k]`, `out: [m,n]` - through
+/// `model::block::gemm_variant`, the same shared GEMM selection rule
+/// `crates/wan/src/block.rs::linear` uses for its identical 10-linear block
+/// shape (see [`K_MATMUL_REG3`]'s doc for why this was hardcoded to the
+/// naive reference kernel before). `gpu.caps()` is a cheap accessor (cached
+/// device capabilities, not a device round trip), so it is queried per call
+/// rather than threading a precomputed `Sel` through every call site -
+/// simpler for this crate's much shallower call graph than wan's.
 fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, b: Option<&DeviceBuffer>, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
-    s.push(gpu.step(K_MATMUL, &[x, w, out], &[m, k, n], m * n));
+    let variant = if gpu.caps().workgroup_reductions {
+        model::block::GemmVariants::Fast { gemv: Some(K_MATMUL_GEMV), tiled: K_MATMUL_REG3 }
+    } else {
+        model::block::GemmVariants::Reference(K_MATMUL)
+    };
+    let (kind, threads) = model::block::gemm_variant(variant, m, n);
+    s.push(gpu.step(kind, &[x, w, out], &[m, k, n], threads));
     if let Some(b) = b {
         s.push(gpu.step(K_BIAS_ADD, &[out, b], &[m, n], m * n));
+    }
+}
+
+/// Attention scores against a key-minor transpose of `k`, replacing the
+/// `attn_scores_cross` dispatch - see [`K_KV_K_HEADT`]'s doc for why. `q`/`k`
+/// are plain `[rows, inner_dim]` buffers (this crate's attention never uses a
+/// fused-QKV stride - see this module's doc), so `kv_stride == inner_dim` and
+/// `k_off == 0` at both the transpose and the scores step. Returns the
+/// `[heads, nq, nk]` scores buffer; caller still owns softmax + apply.
+#[allow(clippy::too_many_arguments)]
+fn attn_scores_kt(gpu: &Gpu, s: &mut Vec<Step>, q: &DeviceBuffer, k: &DeviceBuffer, heads: u32, head_dim: u32, inner_dim: u32, nq: u32, nk: u32) -> DeviceBuffer {
+    let kt = gpu.storage((inner_dim * nk) as u64);
+    s.push(gpu.step(K_KV_K_HEADT, &[k, &kt], &[nk, inner_dim, inner_dim, 0], inner_dim * nk));
+    let scores = gpu.storage((heads * nq * nk) as u64);
+    s.push(gpu.step(K_ATTN_SCORES_CROSS_KT, &[q, &kt, &scores], &[1, heads, nq, nk, head_dim, inner_dim, 0], heads * nq * nk));
+    scores
+}
+
+/// Row softmax over `[rows, cols]` scores - `softmax_rows` (one WORKGROUP
+/// per row) when the device supports workgroup reductions, else
+/// `attn_softmax_cross` (one thread per row, the CPU JIT's native fast
+/// path) - see [`K_SOFTMAX_ROWS`]'s doc.
+fn attn_softmax(gpu: &Gpu, s: &mut Vec<Step>, scores: &DeviceBuffer, probs: &DeviceBuffer, heads: u32, nq: u32, nk: u32) {
+    if gpu.caps().workgroup_reductions {
+        s.push(gpu.step(K_SOFTMAX_ROWS, &[scores, probs], &[heads * nq, nk], heads * nq * 64));
+    } else {
+        s.push(gpu.step(K_ATTN_SOFTMAX, &[scores, probs], &[1, heads, nq, nk], heads * nq));
     }
 }
 
@@ -421,11 +507,10 @@ fn attention(
         }
     }
 
-    let scores = gpu.storage((heads * nq * nk) as u64);
+    let scores = attn_scores_kt(gpu, s, &q, &k, heads, head_dim, inner_dim, nq, nk);
     let probs = gpu.storage((heads * nq * nk) as u64);
     let ctx = gpu.storage((nq * inner_dim) as u64);
-    s.push(gpu.step(K_ATTN_SCORES, &[&q, &k, &scores], &[1, heads, nq, nk, head_dim, inner_dim, inner_dim, 0, 0], heads * nq * nk));
-    s.push(gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, nq, nk], heads * nq));
+    attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
     s.push(gpu.step(K_ATTN_APPLY, &[&probs, &v, &ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
 
     let ctx_gated = if let Some(gate) = &w.gate {
@@ -1301,11 +1386,10 @@ fn attention_q(
         }
     }
 
-    let scores = gpu.storage((heads * nq * nk) as u64);
+    let scores = attn_scores_kt(gpu, s, &q, &k, heads, head_dim, inner_dim, nq, nk);
     let probs = gpu.storage((heads * nq * nk) as u64);
     let ctx = gpu.storage((nq * inner_dim) as u64);
-    s.push(gpu.step(K_ATTN_SCORES, &[&q, &k, &scores], &[1, heads, nq, nk, head_dim, inner_dim, inner_dim, 0, 0], heads * nq * nk));
-    s.push(gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, nq, nk], heads * nq));
+    attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
     s.push(gpu.step(K_ATTN_APPLY, &[&probs, &v, &ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
 
     // Gating stays fp32 - `to_gate_logits` is never quantized (small,

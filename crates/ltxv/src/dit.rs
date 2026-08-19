@@ -1109,6 +1109,7 @@ pub fn forward_q_streamed(
     assert_eq!(keyframes_mask.len(), t);
     assert_eq!(context.len(), context_len * cfg.cross_attention_dim as usize);
 
+    let s_patch = std::time::Instant::now();
     let pw = tget(head, "patchify_proj.weight");
     let pb = tget(head, "patchify_proj.bias");
     let mut x = linear(latent, t, cfg.in_channels as usize, pw, Some(pb), dim);
@@ -1122,15 +1123,23 @@ pub fn forward_q_streamed(
             }
         }
     }
+    gpu_core::profile::stage_time("forward_q_streamed: patchify + keyframes (host)", s_patch);
 
+    let s_adaln = std::time::Instant::now();
     let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
     let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
+    gpu_core::profile::stage_time("forward_q_streamed: adaLN-single table (host)", s_adaln);
 
+    let s_rope = std::time::Instant::now();
     let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+    gpu_core::profile::stage_time("forward_q_streamed: RoPE table build (host, f64)", s_rope);
 
+    let s_open = std::time::Instant::now();
     let gpu = open_device(device);
+    gpu_core::profile::stage_time("forward_q_streamed: open_device (fresh Gpu + shader pipeline compile)", s_open);
     let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
+    let s_conn = std::time::Instant::now();
     #[rustfmt::skip]
     let (connector_context, _connector_out) = route_context_through_connector(
         &gpu, head, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
@@ -1138,14 +1147,37 @@ pub fn forward_q_streamed(
         cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
         cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
     );
+    gpu_core::profile::stage_time("forward_q_streamed: embeddings connector routing", s_conn);
 
+    // Phase 8 attribution: `forward_q_streamed` was never profiled against a
+    // real checkpoint before this pass, so the ~200s/step number this design
+    // implies (re-reading and re-quantizing every one of `cfg.num_layers`
+    // blocks from `src` on EVERY forward call) had never been split into its
+    // three real components. Accumulate each block's own three stage
+    // durations across the whole loop and report ONE coarse total per stage
+    // under `BRAIN_PROFILE` (`gpu_core::profile::stage_time`'s own
+    // convention: a coarse timeline, not a per-iteration log) - this is what
+    // tells apart hypothesis (a) GPU dispatch/compute, (b) GGUF
+    // read+dequantize-to-fp32 I/O, and (c) host-side int8 quantize+upload.
+    let mut t_load = std::time::Duration::ZERO;
+    let mut t_quant = std::time::Duration::ZERO;
+    let mut t_gpu = std::time::Duration::ZERO;
     for l in 0..cfg.num_layers {
         let prefix = format!("transformer_blocks.{l}");
+        let s0 = std::time::Instant::now();
         let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
+        t_load += s0.elapsed();
+        let s1 = std::time::Instant::now();
         let blk = LtxBlockQ::on(gpu.share(), cfg, &block_tensors, &prefix, t as u32, context_len as u32, tier);
+        t_quant += s1.elapsed();
+        let s2 = std::time::Instant::now();
         let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
+        t_gpu += s2.elapsed();
         x = out;
     }
+    gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers)", std::time::Instant::now() - t_load);
+    gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize+upload (sum over all layers)", std::time::Instant::now() - t_quant);
+    gpu_core::profile::stage_time("forward_q_streamed: block GPU forward+wait (sum over all layers)", std::time::Instant::now() - t_gpu);
 
     output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
 }

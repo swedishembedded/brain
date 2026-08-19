@@ -40,12 +40,16 @@
 //! `Vec<Step>` is submitted. One layer's own scratch (every temp buffer
 //! inside `self_attn_and_text_ca` + `mlp_sublayer`, dominated by the
 //! `[heads, tokens, tokens]` self-attention score matrix and the FFN's
-//! `[tokens, 4*dim]` hidden buffers) is ~0.51 GB at this bench's default
-//! `tokens=512`/`ctx_len=256`. 48 layers chained into ONE submit would need
-//! ~24 GB of CONCURRENTLY live scratch - easily a modest box's entire free
-//! RAM (`free -h`, checked before writing this bench), with nothing left for
-//! the OS, the weights, or any other build/test activity sharing the same
-//! machine. So the default below is `layers=8` (~4.1 GB of scratch) -
+//! `[tokens, 4*dim]` hidden buffers) is on the order of ~1 GB at this
+//! bench's default `tokens=1024`/`ctx_len=256` (the score matrix term grows
+//! quadratically with `tokens`, so this is NOT a fixed per-layer constant -
+//! rerun with `--layers 1` and watch `nvidia-smi`/RSS if a different
+//! `tokens` needs a fresh bound). 48 layers chained into ONE submit would
+//! need on the order of ~48 GB of CONCURRENTLY live scratch - easily a
+//! modest box's entire free RAM (`free -h`, checked before writing this
+//! bench), with nothing left for the OS, the weights, or any other
+//! build/test activity sharing the same machine. So the default below is
+//! `layers=8` (a fraction of that) -
 //! "4-8 real-width layers" per this milestone's own scoping - not because
 //! the WEIGHTS don't fit (they always do, by construction above) but because
 //! a single-submit PROFILE of more layers needs more concurrent scratch than
@@ -56,8 +60,9 @@
 //! identical shape sequence.
 //!
 //! Usage:
-//!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]   video DiT block stack
-//!   ltxv_bench vae [reps] [frames] [height] [width]     real video VAE decode
+//!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
+//!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len]       real int8 checkpoint, forward_q_streamed's own stage breakdown
 //!
 //! `vae` needs `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
 
@@ -72,19 +77,17 @@ use ltxv::dit::random_tiny_weights;
 use ltxv::rope::ltx_rope_tables;
 use ltxv::vae3d::{LtxVaeConfig, LtxVaeDecoder};
 
-/// The real LTX-2.5 video-stream DiT shape - 48 layers, video stream 32
-/// heads x 128 = 4096 dim, every other flag at M3's one implemented point
-/// (`LtxDitConfig::assert_supported`). `num_layers` is the caller's `layers`
-/// argument, not necessarily 48 - see this module's doc for why.
-///
-/// [`LtxDitConfig::ltx25_22b`] plus TWO overrides this bench needs:
-/// `num_layers` (the caller's layer count, not necessarily the real 48 - see
-/// this module's doc) and `apply_gated_attention: false` (the real
-/// checkpoint's true value is not yet implemented in [`LtxBlock::forward`] -
-/// see `crate::config::LtxDitConfig::assert_supported`'s doc - so this bench
-/// profiles the op sequence that IS implemented, not the real one).
+/// The real LTX-2.5 video-stream DiT shape - `LtxDitConfig::ltx25_22b()`
+/// (48 layers, video stream 32 heads x 128 = 4096 dim, gated attention ON)
+/// with only `num_layers` overridden to the caller's `layers` argument (not
+/// necessarily 48 - see this module's doc for why). Gated attention is now
+/// implemented and parity-proven (`LtxBlock::forward`), so this profiles the
+/// REAL op sequence, not a reduced one - the private config this function
+/// used to hand-transcribe (and had drifted to `apply_gated_attention:
+/// false`, silently profiling a stale op sequence) is gone in favour of the
+/// one source of truth in `config.rs`.
 fn real_video_dit_config(num_layers: u32) -> LtxDitConfig {
-    LtxDitConfig { num_layers, apply_gated_attention: false, ..LtxDitConfig::ltx25_22b() }
+    LtxDitConfig { num_layers, ..LtxDitConfig::ltx25_22b() }
 }
 
 fn upload_zeros(gpu: &Gpu, n: usize) -> DeviceBuffer {
@@ -182,6 +185,71 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
     p.print_top(roofs, 20);
 }
 
+// -------------------------------------------------------------- streamed ---
+
+/// The REAL production forward path (`ltxv::dit::forward_q_streamed`,
+/// int8 compute, streaming each of `layers` blocks fresh off the real GGUF
+/// on every call - `RealDit::forward` in `crate::pipeline` dispatches
+/// exactly this), timed end to end AND with the stage_time breakdown
+/// (`forward_q_streamed`'s own instrumentation, added this milestone) that
+/// splits GGUF read+dequant, host int8 quantize+upload, and GPU forward+wait
+/// into three separately attributable totals. This is what Phase 8 step 2
+/// needed and `bench_dit` above cannot answer: `bench_dit` profiles the
+/// FP32 reference block stack with synthetic weights already resident on
+/// device, never touching the checkpoint file or the quantized tier at all.
+///
+/// `layers` defaults to 4, not the real 48: this crate's own "small shapes
+/// first" convention (`bin/ltxv_bench.rs`'s module doc, this port's roadmap)
+/// - a handful of layers is enough to attribute where each block's own time
+/// goes, and scales linearly to the full 48 (each block streams/quantizes/
+/// runs independently, so per-block cost does not change with layer count).
+/// Needs `BRAIN_LTXV_DIT=<path to the real distilled Q8_0 or Q4_K_M GGUF>`,
+/// the same env var `crate::pipeline::Paths::dit` resolves.
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32) {
+    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
+    // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
+    // bench's whole purpose is that breakdown, so turn it on unconditionally
+    // rather than asking the caller to remember an extra env var.
+    std::env::set_var("BRAIN_PROFILE", "1");
+
+    let cfg = LtxDitConfig { num_layers: layers, use_embeddings_connector: false, ..LtxDitConfig::ltx25_22b() };
+    cfg.assert_supported();
+    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context ===");
+
+    let t0 = Instant::now();
+    let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
+    let head = ltxv::dit::load_head_tensors_from_source(&src, &cfg);
+    eprintln!("GGUF opened + head tensors loaded in {:.2} s", t0.elapsed().as_secs_f64());
+
+    let dim = cfg.in_channels as usize;
+    let latent = vec![0f32; t as usize * dim];
+    let timesteps = vec![500.0f32; t as usize];
+    let positions = vec![0f32; 3 * t as usize * 2];
+    let keyframes_mask = vec![0f32; t as usize];
+    let context = vec![0f32; ctx_len as usize * cfg.cross_attention_dim as usize];
+    let context_valid = vec![1f32; ctx_len as usize];
+
+    let t1 = Instant::now();
+    let _out = ltxv::dit::forward_q_streamed(
+        &cfg,
+        &src,
+        &head,
+        Some("gpu"),
+        ltxv::block::QTier::Int8,
+        &latent,
+        &timesteps,
+        &positions,
+        &keyframes_mask,
+        &context,
+        ctx_len as usize,
+        t as usize,
+        &context_valid,
+    );
+    let wall = t1.elapsed().as_secs_f64();
+    println!("wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
+    println!("(the three `stage forward_q_streamed: ...` lines above are the GGUF read+dequant / int8 quantize+upload / GPU forward+wait split, summed over these {layers} layers)");
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("dit");
@@ -189,8 +257,9 @@ fn main() {
     match mode {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256)),
         other => {
-            eprintln!("unknown mode {other} (dit|vae)");
+            eprintln!("unknown mode {other} (dit|vae|streamed)");
             std::process::exit(1);
         }
     }
