@@ -148,9 +148,36 @@ impl GgufArchitectureImporter for WanImporter {
     }
 }
 
+/// LTX-2.5 two-stream audio+video diffusion transformer, DiT only
+/// (`general.architecture = "ltxv"`).
+///
+/// Same shape as [`WanImporter`]: `ltxv`'s brain id IS its GGUF spelling
+/// (`crates/arch`'s `ltxv` row, `gguf: None`), so `brain_arch::by_gguf
+/// ("ltxv")` resolves and no ambiguous-tag exception is needed. Unlike
+/// `wan::import::import_gguf`, there is no diffusers<->native name
+/// remapping to choose between - the real checkpoint carries only one
+/// tensor spelling, which already IS `crate::block::LtxBlock`/`LtxAvBlock`'s
+/// own `tget` names (see `ltxv::gguf_src`'s module doc). The config comes
+/// from the checkpoint's own embedded `config` KV (a JSON blob), not from
+/// tensor shapes - see `ltxv::import::av_dit_config_from_kv`'s doc for why
+/// that differs from Wan's shape-derived variant lookup.
+struct LtxvImporter;
+
+impl GgufArchitectureImporter for LtxvImporter {
+    fn architecture(&self) -> &'static str {
+        ltxv::import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "LTX-2.5 audio+video diffusion transformer (AV DiT only - VAEs/text-encoder/tokenizer come from their own source)"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        ltxv::import::import_gguf(gguf, out_path, id_override)
+    }
+}
+
 /// Every registered architecture importer. ONE line per architecture - this is
 /// the whole registration surface (see this module's doc).
-const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter, &WanImporter];
+const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter];
 
 /// The importer claiming `architecture`, or `None` if none does.
 pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
@@ -400,6 +427,98 @@ mod tests {
         assert!(err.contains("patch_embedding.weight"), "must reach the wan importer's own check, got: {err}");
         assert!(!err.contains("no importer registered"), "must not fall through to the unknown-architecture error: {err}");
         assert!(!std::path::Path::new(&default_out_path(&src)).exists(), "a refused import must not leave an output file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ltxv's registration, dispatch AND a full convert - unlike the Wan test
+    /// above (which only proves dispatch, because a real Wan fixture is too
+    /// large to build here), a small-but-structurally-complete AV DiT
+    /// manifest is cheap enough to build in-process, so this exercises the
+    /// WHOLE convert path: registry dispatch -> `av_dit_config_from_kv` off
+    /// the embedded `config` KV -> two-way manifest coverage -> streamed
+    /// dequant+write, and reads the result back.
+    ///
+    /// **What this does NOT prove.** `model_dir::resident_for`/
+    /// `resident_for_compound` serving the converted checkpoint - `ltxv` is
+    /// a COMPOUND model (DiT + two VAEs + text encoder + tokenizer, like
+    /// `wan`'s own `zimage`/`wan` arms in `resident_for_compound`), and
+    /// wiring a compound residency arm for it is a distinct, later concern
+    /// from this converter (this crate's `ltxv_cli`/`crate::pipeline`
+    /// already loads real+random weights through its own `BRAIN_LTXV_*`
+    /// env-var convention, independent of `model_dir`'s residency registry).
+    #[test]
+    fn the_ltxv_tag_dispatches_and_converts() {
+        assert_eq!(importer_for("ltxv").map(|i| i.architecture()), Some("ltxv"));
+        assert_eq!(brain_arch::by_gguf("ltxv").map(|a| a.id), Some("ltxv"), "ltxv's id is its own GGUF spelling; an alias here means the id drifted");
+
+        use checkpoint::gguf::GgufValue;
+        use checkpoint::gguf_write::{write, TensorOut};
+        use ltxv::config::LtxAvDitConfig;
+        use ltxv::dit::av_dit_tensor_manifest;
+
+        let dir = tmp("ltxv-dispatch");
+        let src = dir.join("ltxv.gguf").to_string_lossy().into_owned();
+
+        let cfg = LtxAvDitConfig::tiny();
+        let manifest = av_dit_tensor_manifest(&cfg);
+        let mut seed = 0u64;
+        let tensors: Vec<TensorOut> = manifest
+            .iter()
+            .map(|(name, shape)| {
+                seed += 1;
+                let n: usize = shape.iter().product();
+                let data: Vec<u8> = (0..n).flat_map(|i| (((i as u64 + seed) % 997) as f32 * 0.01 - 5.0).to_le_bytes()).collect();
+                TensorOut { name: name.clone(), shape: shape.clone(), ty: 0u32, data }
+            })
+            .collect();
+        let config_kv = serde_json::json!({
+            "transformer": {
+                "num_attention_heads": cfg.video.num_heads,
+                "attention_head_dim": cfg.video.head_dim(),
+                "num_layers": cfg.video.num_layers,
+                "in_channels": cfg.video.in_channels,
+                "out_channels": cfg.video.out_channels,
+                "cross_attention_dim": cfg.video.cross_attention_dim,
+                "ff_bias": cfg.video.ff_bias,
+                "cross_attention_adaln": cfg.video.cross_attention_adaln,
+                "use_keyframes_abs_pos_embedding": cfg.video.use_keyframes_abs_pos_embedding,
+                "norm_eps": cfg.video.norm_eps,
+                "positional_embedding_theta": cfg.video.positional_embedding_theta,
+                "positional_embedding_max_pos": cfg.video.positional_embedding_max_pos,
+                "timestep_scale_multiplier": cfg.video.timestep_scale_multiplier,
+                "use_middle_indices_grid": cfg.video.use_middle_indices_grid,
+                "apply_gated_attention": cfg.video.apply_gated_attention,
+                "connector_num_layers": cfg.video.connector_num_layers,
+                "connector_num_attention_heads": cfg.video.connector_num_attention_heads,
+                "connector_attention_head_dim": cfg.video.connector_attention_head_dim,
+                "connector_num_learnable_registers": cfg.video.connector_num_learnable_registers,
+                "connector_positional_embedding_max_pos": cfg.video.connector_positional_embedding_max_pos,
+                "connector_norm_output": cfg.video.connector_norm_output,
+                "caption_proj_before_connector": cfg.video.caption_proj_before_connector,
+                "audio_num_attention_heads": cfg.audio.num_heads,
+                "audio_attention_head_dim": cfg.audio.head_dim(),
+                "audio_out_channels": cfg.audio.out_channels,
+                "audio_cross_attention_dim": cfg.audio.cross_attention_dim,
+                "audio_positional_embedding_max_pos": cfg.audio.positional_embedding_max_pos,
+                "audio_connector_num_attention_heads": cfg.audio.connector_num_attention_heads,
+                "audio_connector_attention_head_dim": cfg.audio.connector_attention_head_dim,
+                "av_ca_timestep_scale_multiplier": cfg.av_ca_timestep_scale_multiplier,
+            },
+        })
+        .to_string();
+        let kvs = vec![("general.architecture".to_string(), GgufValue::String("ltxv".to_string())), ("config".to_string(), GgufValue::String(config_kv))];
+        write(&src, &kvs, &tensors, 32).unwrap();
+
+        let out = import_file(&src, None, Some("test/ltxv-tiny")).expect("registry dispatch must convert a fully-covered fixture");
+        assert_eq!(out, default_out_path(&src));
+
+        let reader = checkpoint::weightio::WeightReader::open(&out).unwrap();
+        assert!(reader.tensor("patchify_proj.weight").is_some(), "the importer really ran");
+        assert_eq!(reader.card().expect("a model card must be written").id, "test/ltxv-tiny");
+        for (name, shape) in &manifest {
+            let n: usize = shape.iter().product();
+            assert_eq!(reader.tensor(name).map(|d| d.len()), Some(n), "{name}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

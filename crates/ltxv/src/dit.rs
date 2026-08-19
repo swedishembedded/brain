@@ -76,7 +76,10 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
         ("proj_out.bias".into(), vec![cfg.out_channels as usize]),
     ];
     if cfg.use_keyframes_abs_pos_embedding {
-        m.push(("keyframes_abs_pos_embedding".into(), vec![dim]));
+        // Real checkpoint shape `[1, dim]` (torch order, GGUF `ne` reversed -
+        // confirmed by range-reading the real header), not the `[dim, 1]`
+        // an earlier paraphrase of this field transposed.
+        m.push(("keyframes_abs_pos_embedding".into(), vec![1, dim]));
     }
     for l in 0..cfg.num_layers {
         let p = format!("transformer_blocks.{l}");
@@ -95,6 +98,159 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
         m.push((format!("{p}.scale_shift_table"), vec![cfg.adaln_rows() as usize, dim]));
         m.push((format!("{p}.prompt_scale_shift_table"), vec![2, dim]));
     }
+    m
+}
+
+/// Push one `Attention` module's 12 tensors (`q_norm`/`k_norm`/
+/// `to_gate_logits.{weight,bias}`/`to_q`/`to_k`/`to_v`/`to_out.0`, each
+/// `{weight,bias}` pair except the norms and the gate bias) - shared by
+/// every attention in [`av_dit_tensor_manifest`] (self-, text-cross-, and
+/// the two audio<->video cross-attention modules), since all four are the
+/// SAME `Attention` class at different `(q_dim, kv_dim, inner_dim)` triples
+/// (`crate::block::attention`'s doc has the exact shape algebra this
+/// mirrors - confirmed against the real header: `to_out.0`'s output width
+/// and `to_gate_logits`' input width both equal `q_dim`, never `inner_dim`,
+/// for the audio<->video directions where the two differ).
+fn push_attn(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, q_dim: usize, kv_dim: usize, inner_dim: usize) {
+    m.push((format!("{prefix}.q_norm.weight"), vec![inner_dim]));
+    m.push((format!("{prefix}.k_norm.weight"), vec![inner_dim]));
+    m.push((format!("{prefix}.to_gate_logits.weight"), vec![32, q_dim]));
+    m.push((format!("{prefix}.to_gate_logits.bias"), vec![32]));
+    m.push((format!("{prefix}.to_q.weight"), vec![inner_dim, q_dim]));
+    m.push((format!("{prefix}.to_q.bias"), vec![inner_dim]));
+    m.push((format!("{prefix}.to_k.weight"), vec![inner_dim, kv_dim]));
+    m.push((format!("{prefix}.to_k.bias"), vec![inner_dim]));
+    m.push((format!("{prefix}.to_v.weight"), vec![inner_dim, kv_dim]));
+    m.push((format!("{prefix}.to_v.bias"), vec![inner_dim]));
+    m.push((format!("{prefix}.to_out.0.weight"), vec![q_dim, inner_dim]));
+    m.push((format!("{prefix}.to_out.0.bias"), vec![q_dim]));
+}
+
+/// Push one FFN's two linears (`net.0.proj`, `net.2`), optionally biased.
+/// `has_bias` is a per-instance FACT read off the real header, not derived
+/// from `cfg.*.ff_bias`: the real checkpoint's video-stream `ff` truly has
+/// no bias (`ff_bias: false` governs it) but its `audio_ff` and BOTH
+/// embeddings-connector FFNs carry bias tensors regardless - confirmed by
+/// range-reading the real header at every block (0 and 47) and both
+/// connectors, not assumed from the single shared `ff_bias` config key.
+fn push_ff(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, dim: usize, ff_dim: usize, has_bias: bool) {
+    m.push((format!("{prefix}.net.0.proj.weight"), vec![ff_dim, dim]));
+    if has_bias {
+        m.push((format!("{prefix}.net.0.proj.bias"), vec![ff_dim]));
+    }
+    m.push((format!("{prefix}.net.2.weight"), vec![dim, ff_dim]));
+    if has_bias {
+        m.push((format!("{prefix}.net.2.bias"), vec![dim]));
+    }
+}
+
+/// Push one `AdaLayerNormSingle`'s 6 tensors (`emb.timestep_embedder.
+/// linear_{1,2}.{weight,bias}`, `linear.{weight,bias}`) - shared by every
+/// adaLN table in [`av_dit_tensor_manifest`] (the model-level tables AND the
+/// four AV cross-modal tables), all the same shape family at `(dim, rows)` -
+/// see [`ada_layer_norm_single`]'s doc.
+fn push_adaln_group(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, dim: usize, rows: usize) {
+    m.push((format!("{prefix}.emb.timestep_embedder.linear_1.weight"), vec![dim, 256]));
+    m.push((format!("{prefix}.emb.timestep_embedder.linear_1.bias"), vec![dim]));
+    m.push((format!("{prefix}.emb.timestep_embedder.linear_2.weight"), vec![dim, dim]));
+    m.push((format!("{prefix}.emb.timestep_embedder.linear_2.bias"), vec![dim]));
+    m.push((format!("{prefix}.linear.weight"), vec![rows * dim, dim]));
+    m.push((format!("{prefix}.linear.bias"), vec![rows * dim]));
+}
+
+/// Push one embeddings connector's `1 + num_layers*16` tensors
+/// (`learnable_registers` plus `num_layers` pre-LN 1-D transformer blocks,
+/// each a self-attention-only [`push_attn`] (12 tensors, no cross-attention -
+/// the real header carries no `attn2` under either connector) plus a biased
+/// [`push_ff`] (4 tensors, `ff_mult*dim` hidden width) - see
+/// [`av_dit_tensor_manifest`]'s doc for the real header's exact counts (129
+/// per connector: 1 + 8*16).
+fn push_connector(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, num_registers: usize, dim: usize, num_layers: u32, ff_mult: usize) {
+    m.push((format!("{prefix}.learnable_registers"), vec![num_registers, dim]));
+    for l in 0..num_layers {
+        let p = format!("{prefix}.transformer_1d_blocks.{l}");
+        push_attn(m, &format!("{p}.attn1"), dim, dim, dim);
+        push_ff(m, &format!("{p}.ff"), dim, ff_mult * dim, true);
+    }
+}
+
+/// Every tensor an [`LtxAvDit`] forward reads OR the real 22B/4349-tensor
+/// checkpoint carries (some real tensors - `prompt_adaln_single`/
+/// `audio_prompt_adaln_single`, `to_gate_logits`, both embeddings
+/// connectors - are not yet consumed by [`LtxAvBlock::forward`]/
+/// [`LtxAvDit::forward`]; see `crate::config`'s doc on each field this reads
+/// for which). Name + shape, derived from `cfg`, the same "manifest drives
+/// both sides" discipline [`dit_tensor_manifest`] uses - this is what a
+/// later real-weight-import milestone validates two-way coverage against,
+/// so every shape here was cross-checked against the real header (range-read
+/// and parsed, 4349 tensors, `general.architecture = "ltxv"`) rather than
+/// transcribed from a paraphrase; see this crate's own porting notes for the
+/// two shapes that paraphrase got backwards (`keyframes_abs_pos_embedding`
+/// and the connectors' `learnable_registers`, both transposed) and the one
+/// real asymmetry a naive reading of `ff_bias` would miss (audio's FFN and
+/// both connectors' FFNs carry bias; video's main FFN does not).
+///
+/// Tensor count breaks down exactly as the real header does: 59 top-level +
+/// 48 blocks * 84 + 129 * 2 (both connectors) = 4349.
+pub fn av_dit_tensor_manifest(cfg: &LtxAvDitConfig) -> Vec<(String, Vec<usize>)> {
+    let vcfg = &cfg.video;
+    let acfg = &cfg.audio;
+    let vdim = vcfg.inner_dim as usize;
+    let adim = acfg.inner_dim as usize;
+    let rows9 = vcfg.adaln_rows() as usize;
+    let mut m: Vec<(String, Vec<usize>)> = Vec::new();
+
+    // ---- top-level embed/head tensors, one pair per stream -------------
+    m.push(("patchify_proj.weight".into(), vec![vdim, vcfg.in_channels as usize]));
+    m.push(("patchify_proj.bias".into(), vec![vdim]));
+    m.push(("audio_patchify_proj.weight".into(), vec![adim, acfg.in_channels as usize]));
+    m.push(("audio_patchify_proj.bias".into(), vec![adim]));
+    m.push(("proj_out.weight".into(), vec![vcfg.out_channels as usize, vdim]));
+    m.push(("proj_out.bias".into(), vec![vcfg.out_channels as usize]));
+    m.push(("audio_proj_out.weight".into(), vec![acfg.out_channels as usize, adim]));
+    m.push(("audio_proj_out.bias".into(), vec![acfg.out_channels as usize]));
+    m.push(("scale_shift_table".into(), vec![2, vdim]));
+    m.push(("audio_scale_shift_table".into(), vec![2, adim]));
+    if vcfg.use_keyframes_abs_pos_embedding {
+        m.push(("keyframes_abs_pos_embedding".into(), vec![1, vdim]));
+    }
+
+    // ---- the 8 model-level adaLN-single tables --------------------------
+    push_adaln_group(&mut m, "adaln_single", vdim, rows9);
+    push_adaln_group(&mut m, "audio_adaln_single", adim, rows9);
+    push_adaln_group(&mut m, "prompt_adaln_single", vdim, 2);
+    push_adaln_group(&mut m, "audio_prompt_adaln_single", adim, 2);
+    push_adaln_group(&mut m, "av_ca_video_scale_shift_adaln_single", vdim, 4);
+    push_adaln_group(&mut m, "av_ca_audio_scale_shift_adaln_single", adim, 4);
+    push_adaln_group(&mut m, "av_ca_a2v_gate_adaln_single", vdim, 1);
+    push_adaln_group(&mut m, "av_ca_v2a_gate_adaln_single", adim, 1);
+
+    // ---- per-block tensors -----------------------------------------------
+    for l in 0..vcfg.num_layers {
+        let p = format!("transformer_blocks.{l}");
+        push_attn(&mut m, &format!("{p}.attn1"), vdim, vdim, vdim);
+        push_attn(&mut m, &format!("{p}.attn2"), vdim, vdim, vdim);
+        push_attn(&mut m, &format!("{p}.audio_attn1"), adim, adim, adim);
+        push_attn(&mut m, &format!("{p}.audio_attn2"), adim, adim, adim);
+        // Both AV cross-attention directions run at the AUDIO stream's
+        // geometry (`inner_dim = adim`) regardless of which stream is
+        // query - `crate::block::LtxAvBlock`'s doc.
+        push_attn(&mut m, &format!("{p}.audio_to_video_attn"), vdim, adim, adim);
+        push_attn(&mut m, &format!("{p}.video_to_audio_attn"), adim, vdim, adim);
+        push_ff(&mut m, &format!("{p}.ff"), vdim, 4 * vdim, false);
+        push_ff(&mut m, &format!("{p}.audio_ff"), adim, 4 * adim, true);
+        m.push((format!("{p}.scale_shift_table"), vec![rows9, vdim]));
+        m.push((format!("{p}.prompt_scale_shift_table"), vec![2, vdim]));
+        m.push((format!("{p}.audio_scale_shift_table"), vec![rows9, adim]));
+        m.push((format!("{p}.audio_prompt_scale_shift_table"), vec![2, adim]));
+        m.push((format!("{p}.scale_shift_table_a2v_ca_video"), vec![5, vdim]));
+        m.push((format!("{p}.scale_shift_table_a2v_ca_audio"), vec![5, adim]));
+    }
+
+    // ---- both embeddings connectors --------------------------------------
+    push_connector(&mut m, "video_embeddings_connector", vcfg.connector_num_learnable_registers as usize, vcfg.connector_inner_dim() as usize, vcfg.connector_num_layers, 4);
+    push_connector(&mut m, "audio_embeddings_connector", vcfg.connector_num_learnable_registers as usize, acfg.connector_inner_dim() as usize, vcfg.connector_num_layers, 4);
+
     m
 }
 
@@ -819,5 +975,62 @@ impl LtxAvDit {
             b0_a2v_out: b0_a2v,
             b0_v2a_out: b0_v2a,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LtxAvDitConfig;
+    use std::collections::HashSet;
+
+    /// [`av_dit_tensor_manifest`] at the REAL LTX-2.5 22B config must produce
+    /// exactly the real checkpoint's own tensor count and breakdown - 4349
+    /// total (range-read and parsed off the real GGUF header), split 59
+    /// top-level + 48*84 per-block + 129*2 across both embeddings
+    /// connectors. This is the guard a later real-weight-import milestone
+    /// leans on: if this count ever drifts from the real header, two-way
+    /// coverage there fails loudly by name rather than silently importing a
+    /// wrong shape.
+    #[test]
+    fn av_manifest_matches_the_real_22b_checkpoint_header_count() {
+        let cfg = LtxAvDitConfig::ltx25();
+        let m = av_dit_tensor_manifest(&cfg);
+        assert_eq!(m.len(), 4349, "total tensor count must match the real header");
+
+        let top_level = m.iter().filter(|(n, _)| !n.starts_with("transformer_blocks.") && !n.contains("embeddings_connector")).count();
+        assert_eq!(top_level, 59, "top-level (non-block, non-connector) tensor count");
+
+        let per_block = m.iter().filter(|(n, _)| n.starts_with("transformer_blocks.0.")).count();
+        assert_eq!(per_block, 84, "block 0's own tensor count");
+
+        let video_connector = m.iter().filter(|(n, _)| n.starts_with("video_embeddings_connector.")).count();
+        assert_eq!(video_connector, 129, "video connector tensor count (1 register + 8*16)");
+        let audio_connector = m.iter().filter(|(n, _)| n.starts_with("audio_embeddings_connector.")).count();
+        assert_eq!(audio_connector, 129, "audio connector tensor count (1 register + 8*16)");
+
+        // No duplicate names, and no accidental shape mismatch on the two
+        // shapes an earlier paraphrase transposed.
+        let names: HashSet<&str> = m.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names.len(), m.len(), "manifest must not contain duplicate tensor names");
+        assert_eq!(m.iter().find(|(n, _)| n == "keyframes_abs_pos_embedding").unwrap().1, vec![1, 4096]);
+        assert_eq!(m.iter().find(|(n, _)| n == "video_embeddings_connector.learnable_registers").unwrap().1, vec![128, 4096]);
+        assert_eq!(m.iter().find(|(n, _)| n == "audio_embeddings_connector.learnable_registers").unwrap().1, vec![128, 2048]);
+
+        // The real asymmetry: video's main FFN has no bias, audio's and both
+        // connectors' FFNs do.
+        assert!(!names.contains("transformer_blocks.0.ff.net.0.proj.bias"));
+        assert!(names.contains("transformer_blocks.0.audio_ff.net.0.proj.bias"));
+        assert!(names.contains("video_embeddings_connector.transformer_1d_blocks.0.ff.net.0.proj.bias"));
+        assert!(names.contains("audio_embeddings_connector.transformer_1d_blocks.0.ff.net.0.proj.bias"));
+
+        // `to_gate_logits` really is on every attention module, including
+        // the two audio<->video cross-attention directions - the real
+        // header confirms this, not just the two per-stream self-/text-
+        // cross-attentions.
+        assert!(names.contains("transformer_blocks.0.audio_to_video_attn.to_gate_logits.weight"));
+        assert!(names.contains("transformer_blocks.0.video_to_audio_attn.to_gate_logits.weight"));
+        assert_eq!(m.iter().find(|(n, _)| n == "transformer_blocks.0.audio_to_video_attn.to_gate_logits.weight").unwrap().1, vec![32, 4096]);
+        assert_eq!(m.iter().find(|(n, _)| n == "transformer_blocks.0.video_to_audio_attn.to_gate_logits.weight").unwrap().1, vec![32, 2048]);
     }
 }

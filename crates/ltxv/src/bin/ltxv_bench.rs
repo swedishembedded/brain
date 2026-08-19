@@ -74,25 +74,15 @@ use ltxv::vae3d::{LtxVaeConfig, LtxVaeDecoder};
 /// heads x 128 = 4096 dim, every other flag at M3's one implemented point
 /// (`LtxDitConfig::assert_supported`). `num_layers` is the caller's `layers`
 /// argument, not necessarily 48 - see this module's doc for why.
+///
+/// [`LtxDitConfig::ltx25_22b`] plus TWO overrides this bench needs:
+/// `num_layers` (the caller's layer count, not necessarily the real 48 - see
+/// this module's doc) and `apply_gated_attention: false` (the real
+/// checkpoint's true value is not yet implemented in [`LtxBlock::forward`] -
+/// see `crate::config::LtxDitConfig::assert_supported`'s doc - so this bench
+/// profiles the op sequence that IS implemented, not the real one).
 fn real_video_dit_config(num_layers: u32) -> LtxDitConfig {
-    LtxDitConfig {
-        inner_dim: 4096,
-        num_heads: 32,
-        num_layers,
-        in_channels: 128,
-        out_channels: 128,
-        cross_attention_dim: 4096,
-        ff_bias: false,
-        cross_attention_adaln: true,
-        use_prompt_adaln_single: false,
-        use_keyframes_abs_pos_embedding: true,
-        norm_eps: 1e-6,
-        positional_embedding_theta: 10000.0,
-        positional_embedding_max_pos: [20, 2048, 2048],
-        timestep_scale_multiplier: 1000,
-        use_middle_indices_grid: true,
-        apply_gated_attention: false,
-    }
+    LtxDitConfig { num_layers, apply_gated_attention: false, ..LtxDitConfig::ltx25_22b() }
 }
 
 fn upload_zeros(gpu: &Gpu, n: usize) -> DeviceBuffer {

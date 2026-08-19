@@ -56,6 +56,34 @@ pub struct LtxDitConfig {
     /// `false` for the real LTX-2.5 config - the per-head `2*sigmoid(gate)`
     /// multiply is NOT implemented here; see [`LtxDitConfig::assert_supported`].
     pub apply_gated_attention: bool,
+    /// `video_embeddings_connector.transformer_1d_blocks` depth - real value
+    /// 8. Read but not yet consumed by `forward()`: the connector's own
+    /// forward pass is a later milestone (see `crate::dit::av_dit_tensor_
+    /// manifest`'s doc); this field only makes the real checkpoint's tensor
+    /// count representable.
+    pub connector_num_layers: u32,
+    /// `video_embeddings_connector`'s own attention head count - real value
+    /// 32 (`connector_num_attention_heads`).
+    pub connector_num_attention_heads: u32,
+    /// `video_embeddings_connector`'s own per-head dim - real value 128
+    /// (`connector_attention_head_dim`); `connector_num_attention_heads *
+    /// connector_attention_head_dim` is the connector's own working width
+    /// (4096 for the real checkpoint, same as `inner_dim` - not a structural
+    /// requirement, just true of this checkpoint).
+    pub connector_attention_head_dim: u32,
+    /// `video_embeddings_connector.learnable_registers` row count - real
+    /// value 128 (`connector_num_learnable_registers`).
+    pub connector_num_learnable_registers: u32,
+    /// Single-axis RoPE max-pos normalizer for the connector's own attention
+    /// - `[max_pos]`, real value `[4096]` (`connector_positional_embedding_
+    /// max_pos`).
+    pub connector_positional_embedding_max_pos: [u32; 1],
+    /// Whether the connector applies a final norm to its output - real value
+    /// `true` (`connector_norm_output`).
+    pub connector_norm_output: bool,
+    /// Whether the caption projection runs before the connector consumes its
+    /// output - real value `true` (`caption_proj_before_connector`).
+    pub caption_proj_before_connector: bool,
 }
 
 impl LtxDitConfig {
@@ -63,6 +91,12 @@ impl LtxDitConfig {
     pub fn head_dim(&self) -> u32 {
         assert_eq!(self.inner_dim % self.num_heads, 0, "inner_dim {} not a multiple of num_heads {}", self.inner_dim, self.num_heads);
         self.inner_dim / self.num_heads
+    }
+
+    /// `connector_num_attention_heads * connector_attention_head_dim` -
+    /// `video_embeddings_connector`'s own working width.
+    pub fn connector_inner_dim(&self) -> u32 {
+        self.connector_num_attention_heads * self.connector_attention_head_dim
     }
 
     /// Rows of the per-block `scale_shift_table` / the adaLN-single raw
@@ -106,6 +140,48 @@ impl LtxDitConfig {
             timestep_scale_multiplier: 1000,
             use_middle_indices_grid: true,
             apply_gated_attention: false,
+            connector_num_layers: 2,
+            connector_num_attention_heads: 2,
+            connector_attention_head_dim: 8,
+            connector_num_learnable_registers: 4,
+            connector_positional_embedding_max_pos: [64],
+            connector_norm_output: true,
+            caption_proj_before_connector: true,
+        }
+    }
+
+    /// The real LTX-2.5 22B video-stream config, transcribed field-by-field
+    /// from the GGUF's own embedded `config` KV (`AVTransformer3DModel`,
+    /// range-read and parsed against the real 4349-tensor header - see
+    /// `crate::dit::av_dit_tensor_manifest`'s doc). `apply_gated_attention:
+    /// true` here means [`Self::assert_supported`] panics on this config -
+    /// intentional: this milestone makes the real config REPRESENTABLE, not
+    /// runnable end to end (gated attention's forward is a later milestone).
+    pub fn ltx25_22b() -> LtxDitConfig {
+        LtxDitConfig {
+            inner_dim: 4096,
+            num_heads: 32,
+            num_layers: 48,
+            in_channels: 128,
+            out_channels: 128,
+            cross_attention_dim: 4096,
+            ff_bias: false,
+            cross_attention_adaln: true,
+            use_prompt_adaln_single: false,
+            use_keyframes_abs_pos_embedding: true,
+            norm_eps: 1e-6,
+            positional_embedding_theta: 10000.0,
+            positional_embedding_max_pos: [20, 2048, 2048],
+            timestep_scale_multiplier: 1000,
+            use_middle_indices_grid: true,
+            apply_gated_attention: true,
+            connector_num_layers: 8,
+            connector_num_attention_heads: 32,
+            connector_attention_head_dim: 128,
+            connector_num_learnable_registers: 128,
+            connector_positional_embedding_max_pos: [4096],
+            connector_norm_output: true,
+            caption_proj_before_connector: true,
         }
     }
 }
@@ -136,6 +212,14 @@ pub struct LtxAudioDitConfig {
     /// Single-axis (time only) RoPE max-pos normalizer - `[max_pos]`, class
     /// default `[20]`.
     pub positional_embedding_max_pos: [u32; 1],
+    /// `audio_embeddings_connector`'s own attention head count - real value
+    /// 32 (`audio_connector_num_attention_heads`). See [`LtxDitConfig::
+    /// connector_num_attention_heads`]'s doc for the "read, not yet
+    /// consumed" caveat, which applies identically here.
+    pub connector_num_attention_heads: u32,
+    /// `audio_embeddings_connector`'s own per-head dim - real value 64
+    /// (`audio_connector_attention_head_dim`).
+    pub connector_attention_head_dim: u32,
 }
 
 impl LtxAudioDitConfig {
@@ -145,11 +229,47 @@ impl LtxAudioDitConfig {
         self.inner_dim / self.num_heads
     }
 
+    /// `connector_num_attention_heads * connector_attention_head_dim` -
+    /// `audio_embeddings_connector`'s own working width.
+    pub fn connector_inner_dim(&self) -> u32 {
+        self.connector_num_attention_heads * self.connector_attention_head_dim
+    }
+
     /// `tools/goldens/ltxv_av_dit_dump_reference.py`'s `TINY_CONFIG` audio
     /// half - `inner_dim` 32 (4 heads x 8), proportionally narrower than the
     /// video tiny config's 64 (half), same head COUNT (4) as video.
     pub fn tiny() -> LtxAudioDitConfig {
-        LtxAudioDitConfig { inner_dim: 32, num_heads: 4, in_channels: 128, out_channels: 128, cross_attention_dim: 32, ff_bias: false, positional_embedding_max_pos: [20] }
+        LtxAudioDitConfig {
+            inner_dim: 32,
+            num_heads: 4,
+            in_channels: 128,
+            out_channels: 128,
+            cross_attention_dim: 32,
+            ff_bias: false,
+            positional_embedding_max_pos: [20],
+            connector_num_attention_heads: 2,
+            connector_attention_head_dim: 4,
+        }
+    }
+
+    /// The real LTX-2.5 22B audio-stream config - `audio_num_attention_heads:
+    /// 32`, `audio_attention_head_dim: 64` (`inner_dim` 2048),
+    /// `audio_cross_attention_dim: 2048` (`== inner_dim`, matching
+    /// [`LtxAvDitConfig::assert_supported`]'s invariant),
+    /// `audio_positional_embedding_max_pos: [20]`. See [`LtxDitConfig::
+    /// ltx25_22b`]'s doc for provenance.
+    pub fn ltx25() -> LtxAudioDitConfig {
+        LtxAudioDitConfig {
+            inner_dim: 2048,
+            num_heads: 32,
+            in_channels: 128,
+            out_channels: 128,
+            cross_attention_dim: 2048,
+            ff_bias: false,
+            positional_embedding_max_pos: [20],
+            connector_num_attention_heads: 32,
+            connector_attention_head_dim: 64,
+        }
     }
 }
 
@@ -216,6 +336,15 @@ impl LtxAvDitConfig {
     pub fn tiny() -> LtxAvDitConfig {
         LtxAvDitConfig { video: LtxDitConfig::tiny(), audio: LtxAudioDitConfig::tiny(), av_ca_timestep_scale_multiplier: 3.0 }
     }
+
+    /// The real LTX-2.5 22B AV config - [`LtxDitConfig::ltx25_22b`] +
+    /// [`LtxAudioDitConfig::ltx25`] + `av_ca_timestep_scale_multiplier:
+    /// 1000.0`, confirmed against the real GGUF's embedded config KV (this
+    /// port's roadmap ledger previously flagged this value as UNVERIFIED;
+    /// range-reading the real header settles it).
+    pub fn ltx25() -> LtxAvDitConfig {
+        LtxAvDitConfig { video: LtxDitConfig::ltx25_22b(), audio: LtxAudioDitConfig::ltx25(), av_ca_timestep_scale_multiplier: 1000.0 }
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +381,60 @@ mod tests {
         let mut c = LtxAvDitConfig::tiny();
         c.audio.num_heads = 2;
         c.assert_supported();
+    }
+
+    /// Pins every real-LTX-2.5-22B field to the value transcribed from the
+    /// GGUF's own embedded `config` KV (this module's doc / `crate::dit::
+    /// av_dit_tensor_manifest`'s doc) - guards against a future GGUF-KV-
+    /// parsing constructor silently drifting from these checkpoint-derived
+    /// numbers. `apply_gated_attention: true` means `assert_supported` is
+    /// deliberately NOT called here (see [`LtxDitConfig::ltx25_22b`]'s doc).
+    #[test]
+    fn ltx25_config_matches_the_real_checkpoint_header() {
+        let v = LtxDitConfig::ltx25_22b();
+        assert_eq!(v.inner_dim, 4096);
+        assert_eq!(v.num_heads, 32);
+        assert_eq!(v.head_dim(), 128);
+        assert_eq!(v.num_layers, 48);
+        assert_eq!(v.in_channels, 128);
+        assert_eq!(v.out_channels, 128);
+        assert_eq!(v.cross_attention_dim, 4096);
+        assert!(!v.ff_bias);
+        assert!(v.cross_attention_adaln);
+        assert!(!v.use_prompt_adaln_single);
+        assert!(v.use_keyframes_abs_pos_embedding);
+        assert_eq!(v.norm_eps, 1e-6);
+        assert_eq!(v.positional_embedding_theta, 10000.0);
+        assert_eq!(v.positional_embedding_max_pos, [20, 2048, 2048]);
+        assert_eq!(v.timestep_scale_multiplier, 1000);
+        assert!(v.use_middle_indices_grid);
+        assert!(v.apply_gated_attention);
+        assert_eq!(v.connector_num_layers, 8);
+        assert_eq!(v.connector_num_attention_heads, 32);
+        assert_eq!(v.connector_attention_head_dim, 128);
+        assert_eq!(v.connector_inner_dim(), 4096);
+        assert_eq!(v.connector_num_learnable_registers, 128);
+        assert_eq!(v.connector_positional_embedding_max_pos, [4096]);
+        assert!(v.connector_norm_output);
+        assert!(v.caption_proj_before_connector);
+
+        let a = LtxAudioDitConfig::ltx25();
+        assert_eq!(a.inner_dim, 2048);
+        assert_eq!(a.num_heads, 32);
+        assert_eq!(a.head_dim(), 64);
+        assert_eq!(a.in_channels, 128);
+        assert_eq!(a.out_channels, 128);
+        assert_eq!(a.cross_attention_dim, 2048);
+        assert!(!a.ff_bias);
+        assert_eq!(a.positional_embedding_max_pos, [20]);
+        assert_eq!(a.connector_num_attention_heads, 32);
+        assert_eq!(a.connector_attention_head_dim, 64);
+        assert_eq!(a.connector_inner_dim(), 2048);
+
+        let av = LtxAvDitConfig::ltx25();
+        assert_eq!(av.video, v);
+        assert_eq!(av.audio, a);
+        assert_eq!(av.av_ca_timestep_scale_multiplier, 1000.0);
+        assert_eq!(av.cross_pe_max_pos(), 20);
     }
 }

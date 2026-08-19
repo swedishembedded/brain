@@ -115,12 +115,22 @@ impl ModelConfig for LtxDitConfig {
             "timestep_scale_multiplier": self.timestep_scale_multiplier,
             "use_middle_indices_grid": self.use_middle_indices_grid,
             "apply_gated_attention": self.apply_gated_attention,
+            "connector_num_layers": self.connector_num_layers,
+            "connector_num_attention_heads": self.connector_num_attention_heads,
+            "connector_attention_head_dim": self.connector_attention_head_dim,
+            "connector_num_learnable_registers": self.connector_num_learnable_registers,
+            "connector_positional_embedding_max_pos": self.connector_positional_embedding_max_pos,
+            "connector_norm_output": self.connector_norm_output,
+            "caption_proj_before_connector": self.caption_proj_before_connector,
         })
     }
     fn from_json(v: &serde_json::Value) -> LtxDitConfig {
         let u = |k: &str| v[k].as_u64().unwrap_or_else(|| panic!("LtxDitConfig::from_json: missing {k}")) as u32;
         let b = |k: &str| v[k].as_bool().unwrap_or_else(|| panic!("LtxDitConfig::from_json: missing {k}"));
         let max_pos = v["positional_embedding_max_pos"].as_array().unwrap_or_else(|| panic!("LtxDitConfig::from_json: missing positional_embedding_max_pos"));
+        let connector_max_pos = v["connector_positional_embedding_max_pos"]
+            .as_array()
+            .unwrap_or_else(|| panic!("LtxDitConfig::from_json: missing connector_positional_embedding_max_pos"));
         LtxDitConfig {
             inner_dim: u("inner_dim"),
             num_heads: u("num_heads"),
@@ -138,6 +148,13 @@ impl ModelConfig for LtxDitConfig {
             timestep_scale_multiplier: u("timestep_scale_multiplier"),
             use_middle_indices_grid: b("use_middle_indices_grid"),
             apply_gated_attention: b("apply_gated_attention"),
+            connector_num_layers: u("connector_num_layers"),
+            connector_num_attention_heads: u("connector_num_attention_heads"),
+            connector_attention_head_dim: u("connector_attention_head_dim"),
+            connector_num_learnable_registers: u("connector_num_learnable_registers"),
+            connector_positional_embedding_max_pos: [connector_max_pos[0].as_u64().unwrap() as u32],
+            connector_norm_output: b("connector_norm_output"),
+            caption_proj_before_connector: b("caption_proj_before_connector"),
         }
     }
     fn vocab(&self) -> u32 {

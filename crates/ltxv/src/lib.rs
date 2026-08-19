@@ -93,6 +93,7 @@ pub mod dit;
 pub mod duration_head;
 pub mod finetune;
 pub mod grad;
+pub mod gguf_src;
 pub mod import;
 pub mod int8;
 pub mod lora;
