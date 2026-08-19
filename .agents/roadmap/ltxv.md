@@ -1156,6 +1156,51 @@ this port:
       the `NpuModel` trait's small-fixed-shape-core pattern could address
       either, even setting the 22B-scale objection aside. No further NPU
       work follows from this phase's findings.
+- [x] **Model-specific optimization, exact win 1: parallelize `ada_layer_
+      norm_single`'s host `linear()` (Phase 9)** - `crates/ltxv/src/dit.rs::
+      linear`, `crates/ltxv/Cargo.toml` (new `brain-backend-cpu` dependency).
+      Closes the Phase 8 tracked gap named above: `ada_layer_norm_single`'s
+      call into this function (the `[t,4096]x[36864,4096]^T` 9-row adaLN
+      table, ~11% of the real per-step total) was a naive, single-core,
+      unthreaded scalar loop. Fix per kernels.md §F.3 (grep for a faster
+      sibling before writing anything new): `wan::model::linear` already
+      solved this exact formula/layout with `backend_cpu::par::rows_mut`
+      (row-parallel, each row's own dot product left as a straight
+      sequential accumulation) - reused verbatim rather than reimplemented.
+      Every output element accumulates in the identical order regardless of
+      thread count, so the result is bit-identical to the old serial form,
+      not merely close - the gate every exact win in this phase uses.
+
+      **Correctness**: `dit_parity`/`av_dit_parity`/`block_grad`/
+      `av_block_grad`/`host_forward_parity` (including the real-weight
+      `real_weight::ltxv_real_dit_tiny_layers_matches_reference` test, real
+      Q8_0 GGUF, 2 of 48 real layers) all green, every cosine/max_abs number
+      unchanged from its pre-fix value (e.g. `adaln_table` cosine
+      1.000000000 both before and after).
+
+      **Measured** (`ltxv_bench streamed`, 4 real layers/128 tokens/64
+      context, real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, both P40s
+      idle at 0 MiB/0% before each run per `nvidia-smi`): the adaLN-single
+      table stage 21284 ms -> 5889 ms then 6311 ms across two repeated runs
+      (~3.4-3.6x, reproducible), whole streamed-forward wall time 35.59s ->
+      19.40s/19.91s (~1.8x at this small shape, where the flat per-call
+      adaLN cost is a much larger share of only 4 layers than it is of the
+      real 48). Extrapolated the same way Phase 8's own attribution did (the
+      adaLN cost is flat regardless of layer count, the streaming costs
+      scale linearly): the real ~186.3s/step estimate becomes ~171.2s/step
+      (~1.09x on the whole real per-step total) - a real, exact,
+      bit-identical win, but a modest share of the ~200s/step total because
+      the ~86% GGUF-streaming cost (a separate, NOT-yet-attempted item, see
+      below) still dominates.
+
+      Bandwidth-bound, not thread-count-bound, and recorded as such rather
+      than claimed as a full fix: 48 cores were available but only ~3.5x was
+      measured, because the naive loop's own defect (re-walking the whole
+      ~604 MB weight matrix once per output row) is still present per-thread
+      - row-parallelizing it hides the serial-core cost behind aggregate
+      DRAM bandwidth, it does not remove the redundant re-reads. A
+      blocked/tiled rewrite that reads each weight row once regardless of
+      row count remains an unattempted further win, tracked below.
 
 ## Convention questions settled from source, not experiment
 
@@ -1293,13 +1338,15 @@ land. Known traps already identified from reading (not yet test-pinned):
   the highest-value fix - not attempted, a genuine architectural change to
   `pipeline.rs`'s denoise loop and `RealDit`'s lifetime, out of scope for
   a kernel-selector pass.
-- `ada_layer_norm_single`'s host-side `linear()` call (`crates/ltxv/src/
-  dit.rs`) is a naive, unthreaded, unblocked scalar loop that re-streams
-  its ~604 MB weight matrix from host RAM once per output row - a
-  measured flat ~21s/forward call (~11% of the real per-step total, Phase
-  8's entry above), not yet parallelized/blocked. Shared with other call
-  sites in the same file, so left as a scoped follow-up rather than a
-  same-pass rewrite.
+- `ada_layer_norm_single`'s host-side `linear()` call was a naive,
+  unthreaded, unblocked scalar loop re-streaming its ~604 MB weight matrix
+  from host RAM once per output row (Phase 8's flat ~21s/forward
+  measurement, ~11% of the real per-step total) - **closed in Phase 9**
+  (see below): row-parallelized, bit-identical, ~3.5x on the stage itself.
+  Not fully closed: the fix is bandwidth-, not thread-count-, bound (48
+  cores measured only ~3.5x, since every thread still re-walks the same
+  604 MB matrix), so a blocked/tiled rewrite that avoids the redundant
+  re-reads entirely remains a further, unattempted win.
 - The residency executor's GPU-lane device-opening path can fail to match
   the expected physical adapter by PCI id, falling back to a software
   adapter with too small a `max_storage_buffer_binding_size` for even the
