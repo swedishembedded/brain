@@ -20,7 +20,7 @@ use data::rng::Rng;
 
 use crate::model::Qwen35;
 
-fn argmax(s: &[f32]) -> usize {
+pub(crate) fn argmax(s: &[f32]) -> usize {
     let mut bi = 0;
     for i in 1..s.len() {
         if s[i] > s[bi] {
@@ -34,7 +34,15 @@ fn argmax(s: &[f32]) -> usize {
 /// `qwen3::sample::sample_logits`: `temperature <= 0.0` is greedy argmax,
 /// `top_k == 0` disables top-k filtering, `top_p` outside `(0,1)` disables
 /// nucleus filtering.
-fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng: &mut Rng) -> u32 {
+///
+/// `pub(crate)` (not just this module's own private helper): `crate::stream`'s
+/// real-generation entry point (real prompt -> real streaming forward -> real
+/// lm_head logits) needs the exact same temperature/top-k/top-p/greedy
+/// contract over a bare `&[f32]` logits slice this already implements -
+/// reusing it here, rather than re-implementing the same ~30 lines a second
+/// time in `stream.rs`, is what this visibility bump is for. Still not `pub`:
+/// no caller outside this crate needs it.
+pub(crate) fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng: &mut Rng) -> u32 {
     if temperature <= 0.0 {
         return argmax(logits) as u32;
     }

@@ -551,22 +551,182 @@ time here) - a follow-up profiling `e4m3fn_to_f32`/the decode loop itself
 `advise_dontneed_tensor` right after every decode) is the natural next step,
 but belongs to whoever owns `mmap.rs` next, not this fix.
 
+### M16: real end-to-end generation (real prompt -> real tokenizer -> streaming engine -> real lm_head -> real sampling -> real text)
+
+Extends M15's synthetic-input streaming forward into real, human-readable
+generation: a real prompt, the real `Qwen/Qwen3.8-27B-FP8` tokenizer, real
+embedding rows, the same 64-real-layer sliding-window streaming forward
+(now driven per decode step over the growing prompt+generated sequence,
+not a single synthetic pass), a real resident int8 `lm_head`, and real
+sampling (greedy and temperature/top-k/top-p) - producing a transcript a
+human can read directly.
+
+**New `checkpoint::mmap::MmapSafetensors` accessor:**
+```rust
+pub fn tensor_f32_range(&self, name: &str, start_elem: usize, len_elem: usize) -> Option<Vec<f32>>
+```
+Decodes a flat, row-major element range straight off the mmap (byte-sliced
+by the tensor's own dtype width), reusing the same `decode_into` helper
+`tensor_f32`/`with_tensor_chunks` already share - never touches bytes
+outside the requested range, unlike `tensor_f32` (whole tensor) or
+`with_tensor_chunks` (scans from offset 0). `None` on an out-of-bounds
+range (no panic), including a `start_elem` near `usize::MAX` (checked add).
+Used to pull ONE embedding-table row (`O(d_model)` bytes) per prompt/
+generated token, instead of decoding or scanning the whole `[248320, 5120]`
+table. Two new tests in `crates/checkpoint/src/mmap.rs`: range reads match
+the corresponding slice of a full decode; out-of-bounds (partial overlap,
+past-the-end, `usize::MAX`, unknown name) all return `None` cleanly.
+
+**`crates/qwen35/src/stream.rs` additions:**
+- `load_layer` split into `load_layer` (disk shard -> host map, via
+  `import_layer`, unchanged) + a new private `build_layer` (host map ->
+  device `OwnedStreamedLayer`) - so a test can drive the device-upload half
+  against synthetic weights (`crate::init::init_weights`) with no
+  checkpoint on disk.
+- `run`'s per-layer windowed load/evict loop factored into a private
+  `stream_all_layers(state, dir, cfg, xres0, n, window_budget) ->
+  DeviceBuffer`, shared by `run` (M15's synthetic-input gate, unchanged
+  behavior) and the new `generate` (below).
+- `pub fn generate(dir: &Path, cfg: &Qwen35Config, tokenizer_path: &Path, prompt: &str, max_new: usize, temperature: f32, top_k: usize, top_p: f32, window_budget: u32, seed: u64) -> Result<String, String>`:
+  tokenizes `prompt` (`data::qwen_tokenizer::QwenBpe`, mirrors
+  `crate::caps::GenerateAction::run`'s own tokenizer-present path and its
+  `<|im_end|>`/`<|endoftext|>` EOS fallback); each decode step re-embeds
+  the WHOLE growing (prompt + generated-so-far) sequence via real
+  `tensor_f32_range` rows off `outside.safetensors`'s
+  `model.language_model.embed_tokens.weight`, end-pads to the next
+  multiple of 64 (`GDN_DECODE_CHUNK` - the reference GDN chunk size) with
+  dummy token id `0` (design decision 2: `model::gdn`'s chunked recurrence
+  asserts `t % chunk == 0`), runs `stream_all_layers` over the padded
+  sequence, reads back ONLY the last real position's hidden state, applies
+  the model's final `norm.weight` RMSNorm (read + `(1+w)`-folded via
+  `crate::import::fold_plain_rmsnorm_weights`, reusing the exact same fold
+  every other plain-RMSNorm weight in this crate gets) and a resident int8
+  `lm_head` (quantized ONCE before the decode loop, kept resident for the
+  whole call - never re-quantized per step), and samples via the now-
+  `pub(crate)` `crate::sample::sample_logits`/`argmax`. No persistent
+  incremental KV/GDN state between decode steps (design decision 1) - every
+  step is a full non-incremental forward over the whole sequence so far,
+  since every step already re-streams every layer's weights from disk
+  regardless (the dominant, unavoidable per-step cost).
+- `quantize_i8_from_mmap_rows`: quantizes `lm_head.weight`/
+  `embed_tokens.weight` (`[248320, 5120]`, plain BF16, ~4.74 GiB
+  dequantized to f32) to int8 (~1.18 GiB packed) directly from the mmap in
+  row-chunks (`model::int8::quantize_weight`'s scale is per-ROW, so
+  chunking never crosses a scale boundary), writing straight into a
+  pre-sized device buffer via `Gpu::write_at`/`write_f32_at` - **never**
+  holding the whole dequantized `[n, k]` f32 array in host RAM at once.
+  Chosen over the simpler one-shot `Weight::upload` after checking `free
+  -h` on this shared box at the time: only ~8.3 GiB "available" RAM (~22
+  GiB already in use by other concurrent sessions), too close to the 4.74
+  GiB one-shot peak for comfort.
+- New test `gdn_end_padding_does_not_change_real_position_outputs`
+  (fast, CPU backend, NOT `#[ignore]`d - no real checkpoint needed):
+  directly proves the causality assumption design decision 2 depends on,
+  against the REAL code path (`StreamState::build_layer` +
+  `layer_forward`, not a hand-rolled parallel replay) - two residual
+  streams that agree on the first 5 rows but differ arbitrarily in a
+  64-row padded tail produce IDENTICAL layer output on those first 5 rows
+  (max abs diff < 1e-5), while the padded tail itself genuinely differs
+  (so the test could actually catch a leak). **Passed** - confirms GDN's
+  intra-chunk strict-lower-triangular masking and the causal
+  (left-padded, `pad: kw-1`) depthwise conv1d really do keep end-padding
+  from leaking backward into real positions, matching what `model::gdn`'s
+  and `model::gdn_mixer`'s own module docs already claimed.
+
+**`crates/qwen35/src/sample.rs`:** `argmax`/`sample_logits` bumped from
+private to `pub(crate)` - reused directly by `stream::generate` instead of
+duplicated.
+
+**`crates/qwen35/src/caps.rs`:** new boolean param `streaming` (default
+`false`) on the existing `generate` action. `streaming=true` routes
+`GenerateAction::run` through `crate::stream::generate` (new
+`GenerateAction::run_streaming`) instead of building a resident `Qwen35`;
+`weights` is then the CHECKPOINT DIRECTORY (not a single `.safetensors`
+file), a tokenizer is required, and `messages`/`chat`/`tools`/`stop` are
+not supported (the streaming engine takes a plain prompt string, not a
+chat request - a recorded scope gap, not an oversight). `window_budget` is
+fixed at 4 (M15's own measured-safe value), config fixed at
+`Qwen35Config::qwen38_27b`. The `streaming=false` (default) path is
+byte-for-byte unchanged. No "hot" resident-model cache for the streaming
+path - every call re-streams every layer regardless, so there is nothing
+to keep warm.
+
+**Real generated transcripts** (`crates/qwen35/tests/generate_streaming.rs`,
+`#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, run with `BRAIN_QWEN35_DIR=
+/data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+generate_streaming -- --ignored --nocapture --test-threads=1`), prompt
+`"The capital of France is"`, `max_new=2`, `window_budget=4`:
+
+- **GREEDY** (`temperature=0`): output `" Paris."` - 64.1 min total, 32.0
+  min/decode step (2 steps).
+- **SAMPLED** (`temperature=0.8, top_k=40, top_p=0.9, seed=42`): output
+  `" Paris."` - 55.8 min total, 27.9 min/decode step (2 steps). Landed on
+  the SAME text as greedy - not required (the two settings' outputs are
+  never asserted equal), but unsurprising: "Paris" is evidently a very
+  high-confidence next token here, so top-p=0.9/top-k=40 sampling still
+  concentrates on it most of the time.
+- Both real, coherent, grammatically correct continuations of the prompt -
+  the actual proof this milestone exists to produce, not a synthetic
+  smoke value.
+- Whole test: 7193.28 s (~119.9 min) for both settings, 4 decode-forward
+  passes total. Per-step cost (~28-32 min) is noticeably faster than M15's
+  own 74.8-min full-pass measurement - consistent with the M15 perf
+  follow-up's `dequant_block128`/`quantize_weight` speedups (see that
+  section above) having already landed before this milestone ran, plus
+  warm page-cache reads across the two settings' repeated layer-shard
+  access in one process.
+- Peak RSS across the whole run (both settings, one process): **2.74
+  GiB** (`brain_testutil::mem`) - well inside this box's available RAM,
+  consistent with M15's own per-layer streaming footprint plus the ~1.18
+  GiB resident int8 `lm_head`.
+
+**Verification:**
+- `cargo test -p brain-checkpoint` (new `tensor_f32_range` tests included):
+  96/96 pass (80 lib + 16 torchpt).
+- `cargo test -p brain-qwen35` (non-ignored, includes the new causality
+  test): all pass, 0 failed.
+- `cargo test -p brain-qwen35 --test generate_streaming -- --ignored
+  --nocapture --test-threads=1` against the real checkpoint: pass (see
+  transcripts above).
+- `cargo clippy -p brain-qwen35 -p brain-checkpoint --all-targets -- -D
+  warnings`: clean.
+- `make build` (whole workspace, dev profile): succeeds.
+- `make gradcheck`: succeeds (20 test binaries, 0 failed) - this milestone
+  only touches inference-only forward paths, but confirms the shared
+  `model::gdn`/`model::gdn_mixer`/`model::gqa_mixer`/`model::ops`/
+  `model::int8` machinery it reuses is unaffected.
+
+**Not done, left for later milestones (explicitly out of this one's
+scope):** throughput tuning (the ~30-min/decode-step cost is unoptimized
+by design, deferred to a later milestone that gates the residency policy
+by real `brain-perf` measurement); persistent incremental KV/GDN decode
+state across steps (design decision 1 - every step re-runs a full forward
+over the whole growing sequence instead); `docs/models/qwen35.md` (M20);
+`messages`/`chat`/tools support in the streaming `caps.rs` path; any
+transcript longer than a couple of tokens (impractical at this per-step
+cost - not attempted, and not a bug).
+
 ## Not yet done
 
-Nothing - all milestones (M0-M15) are complete. Remaining scope is the
+Nothing - all milestones (M0-M16) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's own "not done"
-items just above.
+machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's own
+"not done" items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
-- No whole-model torch reference at 27B (no e2e generation or perplexity number
-  on real weights) - unreachable with no discrete GPU regardless of streaming.
-  Rungs 4-5 of the parity ladder are out of reach here. M15's `stream::run` DOES
-  now chain all 64 real layers' real weights in one process (streamed, not
-  resident), but over a synthetic seed input with no real embedding/lm_head/
-  tokenizer (M16) - a bounded-memory plumbing smoke test, not the e2e/perplexity
-  number this gap is about.
+- No whole-model torch reference at 27B (no perplexity number on real
+  weights, no rung 4-5 parity ladder comparison) - unreachable with no
+  discrete GPU regardless of streaming. M16's `stream::generate` DOES now
+  produce real, human-readable end-to-end generation (real prompt -> real
+  tokenizer -> real embeddings -> all 64 real streamed layers -> real
+  lm_head -> real sampling -> real text - see that milestone's own section
+  above for verbatim transcripts), closing the "no e2e generation" half of
+  this gap; what remains unreachable here is a NUMBER to compare against
+  (perplexity, or a token-by-token match against a real HF `generate()`
+  run) and anything past a couple of tokens (~30 min/decode step at this
+  milestone's own measured, unoptimized-by-design streaming cost makes a
+  longer transcript impractical on this box, not merely undesirable).
 - No multi-GPU shard parity (`discrete_gpu_count() == 0` self-skips it) - and note
   qwen35moe's own `shard_parity.rs` does not run on this machine either, so any
   claim it protects a refactor here is a claim about a different machine.

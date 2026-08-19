@@ -87,6 +87,14 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
+        .param(ParamSpec::new(
+            "streaming",
+            ParamType::Bool,
+            "stream all 64 real decoder layers from disk a few at a time (crate::stream::generate) instead of building a full resident model; \
+             `weights` must then be the CHECKPOINT DIRECTORY (layers-N.safetensors + outside.safetensors), a tokenizer is required, `messages`/`chat`/ \
+             `tools`/`stop` are not supported yet, and generation is extremely slow (~75 min/decode step on real hardware) - keep `max_new` small (2-4)",
+        )
+        .default(json!(false)))
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
     Manifest::new(MODEL, "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder - autoregressive text generation with per-token streaming.", vec![generate])
 }
@@ -143,6 +151,10 @@ impl Action for GenerateAction {
         if !Path::new(&weights).exists() {
             return Err(format!("qwen35 generate: weights not found at '{weights}'"));
         }
+        if inv.get_bool("streaming").unwrap_or(false) {
+            return Self::run_streaming(inv, &weights);
+        }
+
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
         if precision != "fp32" && precision != "int8" {
             return Err(format!("qwen35 generate: precision must be fp32 or int8, got {precision:?}"));
@@ -253,6 +265,63 @@ impl Action for GenerateAction {
                     .blob("text", Blob::new(Media::Text, text.into_bytes())))
             }
         }
+    }
+}
+
+impl GenerateAction {
+    /// The `streaming=true` path: `crate::stream::generate` (real prompt,
+    /// real embeddings, real streaming forward over all 64 real decoder
+    /// layers a few at a time, real int8 `lm_head`, real sampling) instead
+    /// of building a full resident [`Qwen35`] - the "wire the M16 streaming
+    /// generation engine into this crate's existing CLI/serve surface"
+    /// deliverable, reusing this action's own manifest/param-validation/
+    /// dispatch rather than a bespoke new CLI subcommand.
+    ///
+    /// Deliberately narrower than the non-streaming path above: `weights`
+    /// here is the CHECKPOINT DIRECTORY (`layers-N.safetensors` +
+    /// `outside.safetensors`, `BRAIN_QWEN35_DIR`'s own layout), a tokenizer
+    /// is required (no raw-token-id path), and `messages`/`chat`/`tools`/
+    /// `stop` (the shared `qwen3::chat` machinery the non-streaming path
+    /// reuses) are not wired here - `crate::stream::generate` itself takes a
+    /// plain prompt string, not a chat request. There is also no "hot"
+    /// resident-model cache to reuse across calls: every call re-streams
+    /// every layer's weights from disk regardless (`crate::stream`'s own
+    /// module doc), so there is nothing to keep warm between requests.
+    ///
+    /// `window_budget` is fixed at 4 (not exposed as a param) - the exact
+    /// value M15's own `streaming_forward.rs` full-chain test measured as
+    /// comfortably RSS-bounded (`brain-testutil::mem`, real hardware); the
+    /// config is fixed at [`Qwen35Config::qwen38_27b`] - the one real
+    /// checkpoint this streaming path exists for.
+    ///
+    /// Progress reporting is not per-token here (unlike the non-streaming
+    /// path's one `Progress` per generated token): `crate::stream::generate`
+    /// has no per-token callback (each decode step is itself a ~75-minute-
+    /// class pass at real scale, so a caller watching for progress needs
+    /// out-of-band visibility - e.g. this action's own `eprintln!`-based
+    /// diagnostics in the integration test - not a token-granularity
+    /// callback this action does not have to offer).
+    fn run_streaming(inv: &Invocation, weights: &str) -> ActionResult {
+        let dir = Path::new(weights);
+        if !dir.is_dir() {
+            return Err(format!("qwen35 generate: streaming=true requires 'weights' to be a checkpoint DIRECTORY (layers-N.safetensors + outside.safetensors), got a non-directory path '{weights}'"));
+        }
+        let tokenizer = inv.get_str("tokenizer").filter(|p| !p.is_empty()).ok_or("qwen35 generate: streaming=true requires 'tokenizer'")?;
+        let prompt = inv.get_str("prompt").unwrap_or_default();
+        if prompt.is_empty() {
+            return Err("qwen35 generate: streaming=true requires a non-empty 'prompt' (messages/chat are not supported in streaming mode)".to_string());
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(32).max(0) as usize;
+        let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
+        let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
+        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+        let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+
+        const WINDOW_BUDGET: u32 = 4; // see this function's own doc comment
+
+        let cfg = Qwen35Config::qwen38_27b();
+        let text = crate::stream::generate(dir, &cfg, Path::new(&tokenizer), &prompt, max_new, temp, top_k, top_p, WINDOW_BUDGET, seed)?;
+        Ok(Outcome::new().set("text", json!(text.clone())).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
 }
 
