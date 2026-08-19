@@ -14,11 +14,14 @@
 //! gated by real per-stage parity against goldens dumped by
 //! `tools/goldens/qwen35_dump_reference.py`.
 
+pub mod caps;
 pub mod config;
 pub mod finetune;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod sample;
+pub mod serve;
 pub mod shard;
 pub mod vl;
 
