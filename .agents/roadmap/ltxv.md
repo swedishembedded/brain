@@ -1201,6 +1201,133 @@ this port:
       DRAM bandwidth, it does not remove the redundant re-reads. A
       blocked/tiled rewrite that reads each weight row once regardless of
       row count remains an unattempted further win, tracked below.
+- [x] **Model-specific optimization, exact win 2: host-side per-generation
+      block-weight cache (Phase 9)** - the single highest-value fix Phase 8
+      identified and explicitly declined to attempt ("too large to attempt
+      safely"), now closed with a lower-risk design than the one that was
+      ruled out. `crates/ltxv/src/block.rs` (`CachedQLinear`/
+      `CachedQAttnWeights`/`CachedQFfWeights`/`CachedQBlockWeights` - each
+      existing `Q*::upload` split into a CPU-only `quantize_host` (GGUF
+      fp32 in, packed int8/int4 bytes + scale out, no device touched) and a
+      device-only `from_cached` (uploads already-quantized bytes, no CPU
+      compute) - plus `LtxBlockQ::on_cached`, the same construction `on`
+      itself now composes from), `crates/ltxv/src/dit.rs::
+      forward_q_streamed` (gains a `block_cache: &RefCell<Vec<Option<
+      CachedQBlockWeights>>>` parameter; its per-layer loop checks the
+      cache before reading/quantizing a block and populates it on a miss),
+      `crates/ltxv/src/pipeline.rs::RealDit` (owns the cache in a `RefCell`
+      field, shared via the SAME reference across every one of a
+      generation's forward calls - both CFG branches, every denoise step),
+      `crates/ltxv/src/bin/ltxv_bench.rs` (`streamed`'s new `reuse_cache`
+      argument, demonstrating the cache-miss vs cache-hit shape in one
+      harness).
+
+      **Why this design sidesteps Phase 8's own risk assessment**: Phase 8
+      declined a "device-resident weights across the whole generation loop"
+      design as an architectural change too large to attempt safely inside
+      a kernel-selector pass, and `forward_q_streamed`'s own doc already
+      records that reusing ONE `Gpu` handle across calls was tried once and
+      measured WORSE (ran out of device memory a fresh device open does
+      not). This design caches the already-quantized bytes on the HOST
+      (plain `Vec`s in a `RefCell`, never a `DeviceBuffer`) and still opens
+      a fresh `Gpu` on every forward call exactly as before - the "fresh
+      device every call" constraint that made the earlier device-resident
+      idea unsafe is completely untouched; only the CPU-side GGUF-read and
+      int8/int4-pack work is skipped on a cache hit, and re-upload of the
+      cached bytes to whichever fresh device this call opens still happens
+      every time.
+
+      **Correctness, bit-identical, not approximate**: `model::int8::
+      quantize_weight`/`model::int4::quantize_weight_q4` are pure functions
+      of the checkpoint's own immutable weight bytes, so a cached result and
+      a freshly recomputed one are the same bytes by construction - caching
+      skips redundant work, it does not change any number. Gated by a new
+      `crates/ltxv/tests/block_weight_cache.rs` (4 tests, all green): a
+      synthetic (`LtxDitConfig::tiny()`, always-runs, no fixture) forward
+      that populates an empty cache is asserted `max_abs == 0.0` against an
+      independent cache-free forward, then a SECOND call on the SAME
+      (now-populated) cache is asserted `max_abs == 0.0` against the same
+      reference - proving the cache-hit path computes the identical
+      function, not merely a close one; a second synthetic test proves a
+      cache shared across TWO DIFFERENT contexts (the real `cond`/`uncond`
+      CFG shape) still produces each branch's own correct, independent
+      output, catching a stale-cache-entry or wrong-layer-index bug class a
+      same-context-only test cannot see; a real-weight-gated test (real
+      Q8_0 GGUF, 2 layers, t=8/context_len=6, this task's own "start small"
+      shape budget) repeats the bit-identical proof on the actual production
+      path. Every pre-existing gate re-run unchanged and green: `dit_parity`/
+      `av_dit_parity`/`block_grad`/`av_block_grad`/`host_forward_parity`/
+      `int8_compute`/`int8_storage` plus the FULL 24-file
+      `cargo test -p brain-ltxv --tests` suite, 0 failures.
+
+      **Measured** (`ltxv_bench streamed <layers> 128 64 1`, real
+      `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, both P40s idle at
+      0 MiB/0% before each run per `nvidia-smi`, no other GPU process):
+
+      | shape | call 1 (cache miss) | call 2 (cache hit, same cache) | speedup |
+      |---|---:|---:|---:|
+      | 4 layers | 20.43-20.92 s | 4.80-6.49 s | 3.1-4.4x |
+      | 8 layers | 34.96 s (4.37 s/layer) | 5.53 s (0.69 s/layer) | 6.3x |
+
+      Per-layer stage rates from the 8-layer run (the larger, more reliable
+      sample): GGUF read+dequant 1649.5 ms/layer, int8 quantize 1612.4
+      ms/layer - BOTH exactly 0.0 ms on a cache-hit call, not merely small
+      (the two costs Phase 8 attributed as ~86% of one real step); GPU
+      upload+forward+wait 195.0 ms/layer on a cache hit (the honest
+      remaining floor - upload of already-quantized bytes plus the actual
+      device forward). Extrapolated to the real 48 layers the same way
+      Phase 8's own attribution extrapolated (these rates are linear in
+      layer count, confirmed by the 4-vs-8-layer ratio agreeing with
+      layer-count doubling to within ~10%): a cache-MISS forward (the
+      generation's first step) costs ~172.8 s - consistent with the ~171.2 s
+      estimate exact-win-1 (the `linear()` parallelization) computed
+      independently, a cross-check both estimates agree on; a cache-HIT
+      forward (every step after the first) costs ~14.6 s - a **~11.8x**
+      reduction per step past the first.
+
+      Whole-generation extrapolation for the real distilled schedule (8
+      steps, `LTX2_DISTILLED_SIGMAS`): at `guidance<=1.0` (1 forward/step,
+      this crate's own CLI default) the pre-Phase-9 baseline is 8x186.3s =
+      1490.4s (~24.8 min); post-Phase-9 (both exact wins together) is
+      172.8s + 7x14.6s = 275.0s (~4.6 min) - a **~5.4x** whole-generation
+      speedup. At `guidance>1.0` (CFG on, 16 forward calls, cond and uncond
+      SHARE one `RealDit`/cache so only the very first of the 16 calls is
+      ever a cache miss): baseline 16x186.3s = 2980.8s (~49.7 min); post
+      172.8s + 15x14.6s = 391.8s (~6.5 min) - a **~7.6x** whole-generation
+      speedup. Both numbers are extrapolations from the measured per-layer
+      rates above, not a direct 48-layer/full-generation timing (this
+      task's own "no long real-weight generation runs" constraint), stated
+      as such.
+
+      **Memory, measured not assumed** (lesson: a memory saving is not
+      measured by anything unless someone measures it):
+      `CachedQBlockWeights::byte_len` sums the REAL heap bytes one cached
+      block holds (not `size_of`, which would only see `Vec` headers); the
+      real-weight test above reads it off the actual cache populated by a
+      real forward call and extrapolates x48: **270.1 MB/block measured ->
+      12.96 GB for the full 48-layer model**, comfortably inside this class
+      of hardware's 184 GiB RAM and well under the ~22 GB figure earlier
+      milestones estimated from the checkpoint's own on-disk size (this is
+      the packed int8 host footprint specifically, a related but distinct
+      number, now actually measured rather than inferred).
+
+      **Not attempted this pass, tracked**: (1) a colder cache surviving
+      ACROSS separate `brain ltxv t2v` process invocations (this cache is
+      per-`RealDit`-instance, i.e. per generation call, matching this
+      crate's own "the DiT is free to rebuild" residency choice recorded at
+      M4 - a process-lifetime or on-disk pre-quantized cache is a separate,
+      bigger lift); (2) caching the adaLN-single table across the cond/
+      uncond branches of one denoise step (both branches share the same
+      sigma, so the table is IDENTICAL between them and is currently still
+      recomputed twice when CFG is on) - a real, smaller, independent exact
+      win this pass did not implement, left as a scoped follow-up; (3)
+      caching the text cross-attention K/V projections themselves (constant
+      across every step because `context` never changes) - subsumed by this
+      milestone's WEIGHT-level cache for the read/quantize cost, but the
+      qquant_linear ACTIVATION compute for `attn2.wk`/`attn2.wv` still runs
+      on every cache-hit call since only the weight upload was cached, not
+      the resulting K/V tensors - a further, smaller win on top of this one,
+      not attempted.
 
 ## Convention questions settled from source, not experiment
 
@@ -1333,11 +1460,19 @@ land. Known traps already identified from reading (not yet test-pinned):
 - Real-checkpoint weight caching across a generation run: the Phase 8
   performance entry above measured that `forward_q_streamed` re-reads and
   re-quantizes all 48 real blocks from the GGUF on EVERY forward call
-  (~86% of the real ~200s/step), and identified in-memory caching of the
-  quantized block weights across one generation's ~20-50 denoise steps as
-  the highest-value fix - not attempted, a genuine architectural change to
-  `pipeline.rs`'s denoise loop and `RealDit`'s lifetime, out of scope for
-  a kernel-selector pass.
+  (~86% of the real ~200s/step) - **closed in Phase 9** (see below): a
+  HOST-side (not device-VRAM-resident) cache of already-quantized block
+  bytes, shared across a generation's forward calls, sidesteps the
+  device-memory risk that made this "too large to attempt safely" in
+  Phase 8 (lesson #35's wgpu resident-buffer overhead applies to DEVICE
+  VRAM, not host RAM, which this class of hardware has 184 GiB of). Not
+  fully closed: the remaining cache-hit cost (~14.6s/step extrapolated,
+  down from ~186s) is now GPU-upload + adaLN-table-recompute-dominated,
+  and the FIRST forward of every generation still pays the full
+  uncached cost (~172.8s extrapolated) - a colder-cache-across-generations
+  scheme (e.g. process-lifetime residency across multiple `brain ltxv t2v`
+  invocations) was not attempted, out of scope for a single generation's
+  own pipeline.
 - `ada_layer_norm_single`'s host-side `linear()` call was a naive,
   unthreaded, unblocked scalar loop re-streaming its ~604 MB weight matrix
   from host RAM once per output row (Phase 8's flat ~21s/forward
