@@ -91,3 +91,20 @@ BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 dbus-run-session -- bash -c
   python3 examples/embedding/clip_embed.py \
     --text "a photo of a cat" --text "a photo of a dog" --image photo.ppm'
 ```
+
+---
+
+## T5-XXL / umT5-XXL text encoding (`brain t5encoder encode`)
+
+The text conditioning FLUX.1/2 need alongside CLIP-L, and the text tower
+Wan2.1/2.2 condition on - one `encode` action, `variant` selects the model
+(`flux_xxl`, unmasked; `wan_umt5`, masked). Like CLIP's text towers, batching
+is a genuine forward at `b = N`: `crates/cli/src/resident_t5encoder.rs` groups
+concurrent calls by `(variant, max_len)`.
+
+```bash
+BRAIN_T5ENCODER_DIR=/path/to/FLUX.1-dev dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/embedding/t5_embed.py \
+    --text "a red cube on a wooden table" --variant flux_xxl --concurrent 4'
+```

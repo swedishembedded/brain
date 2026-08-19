@@ -17,8 +17,11 @@ brain-paramstore.workspace = true
 brain-checkpoint.workspace = true
 # `train` - the workspace's only test/gradcheck PRNG (`data::rng::Rng`); the
 # umT5 parity test additionally drives `data::unigram`, so the tokenizer and
-# the encoder are gated against the same golden prompts.
+# the encoder are gated against the same golden prompts. `caps` reuses the
+# same tokenizer for the served `encode` action.
 brain-data.workspace = true
+brain-capability.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # The shared testdata resolution + the parity report's rel_l2.

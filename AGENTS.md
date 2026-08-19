@@ -183,9 +183,13 @@ fast and scalable kernel - not a naive one.
     - because at XXL those three numbers are all equal and a swap would be
     invisible. See `.agents/roadmap/t5encoder.md`. **Backward exists**: a full
     hand-written T5 backward (`crates/t5encoder/src/train.rs`) gated by
-    `gradcheck::check_t5{,_one_block,_tiled}`. *(**T=512 - the length FLUX.1
-    actually uses - is untested**; no tokenizer; the serving contract is
-    deferred.)*
+    `gradcheck::check_t5{,_one_block,_tiled}`. **Serving contract met**:
+    `t5encoder::caps` (`encode`, `variant` picks flux_xxl/wan_umt5, tokenized
+    via `data::unigram`), `resident_t5encoder::T5encoderResident`
+    (`BRAIN_T5ENCODER_DIR`), D-Bus `Run`, `examples/embedding/t5_embed.py`.
+    *(**T=512 - the length FLUX.1 actually uses - is untested** at the model
+    level, and the served path has no fixture to verify end to end in this
+    workspace's checked-in test data - see `.agents/roadmap/t5encoder.md`.)*
 
 12c. **VQGAN / CodeFormer VQ autoencoder** (`crates/vqgan`) - the VQ
     encoder/codebook/generator that CodeFormer's face restoration is built on:
@@ -1225,16 +1229,17 @@ a metric that isn't there was simply forgotten.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
 
-  **Imaging workstream status, so nobody has to infer it:** the contract is met
-  for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer` and `clip`** - six models,
-  each with a `caps` module, a `resident_*.rs` registered via `catalog.rs` (read
-  generically by `build_executor`), and the existing D-Bus `Run`. `sam2`'s
-  `run_batch` does real grouping (by image), `clip`'s batches text rows into one
-  forward; the rest are the serial default and each says why in-file. `clip` has
-  no `examples/` entry yet (every other one of the six does, under
-  `examples/{vision,restore,embedding}/`). It is **not** met for `t5encoder`,
-  `flux1`, `sdxlunet`, `controlnet` or `pulid` - those five have no capability
-  manifest, no residency adapter and no D-Bus surface at all.
+  **Imaging/conditioning workstream status, so nobody has to infer it:** the
+  contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
+  `clip` and `t5encoder`** - seven models, each with a `caps` module, a
+  `resident_*.rs` registered via `catalog.rs` (read generically by
+  `build_executor`), and the existing D-Bus `Run`. `sam2`'s `run_batch` does
+  real grouping (by image), `clip`'s and `t5encoder`'s batch rows into one
+  forward at a shared context length; the rest are the serial default and each
+  says why in-file. `clip` has no `examples/` entry yet (every other one of
+  the seven does, under `examples/{vision,restore,embedding}/`). It is **not**
+  met for `flux1`, `sdxlunet`, `controlnet` or `pulid` - those four have no
+  capability manifest, no residency adapter and no D-Bus surface at all.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

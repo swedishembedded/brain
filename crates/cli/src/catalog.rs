@@ -300,6 +300,15 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_clip::ClipResident::from_env),
         },
+        ModelEntry {
+            manifest: t5encoder::caps::manifest,
+            provider: from_env!(
+                t5encoder::caps::T5encoderProvider::from_env,
+                "set BRAIN_T5ENCODER_DIR to a checkpoint root holding text_encoder_2/+tokenizer_2/ \
+                 (flux_xxl) and/or wan/ (wan_umt5)"
+            ),
+            resident: resident!(crate::resident_t5encoder::T5encoderResident::from_env),
+        },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. CPU-resident by declaration - see

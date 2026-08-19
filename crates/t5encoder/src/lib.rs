@@ -94,6 +94,7 @@
 //! ~2.4 MB of scales - comfortably single-card at T=512 for either variant, and
 //! the reason INT8 is the first tool here rather than sharding.
 
+pub mod caps;
 pub mod config;
 pub mod hostbias;
 pub mod import;
