@@ -202,12 +202,54 @@ structurally and never parity-claimed here.
   `check_qwen35_mtp` and `check_qwen35moe`/`check_qwen35moe_a_log_elementwise`/
   `check_qwen35moe_lora` gradcheck (all pass, values unchanged from before
   the hoist).
+- [x] M10: real-weight streaming parity, under a self-imposed 16 GB RAM
+  ceiling. Fetched only the shards this milestone's own tests ever read
+  (~7.6 GB: `layers-{0,3,63}.safetensors`, `outside.safetensors`,
+  `mtp.safetensors`, tokenizer files) rather than the full 30.9 GB - the
+  other 61 layer shards are never touched by any test here. New
+  `qwen35::import::import_layer` streams exactly one `layers-{l}.safetensors`
+  shard via `checkpoint::mmap::MmapSafetensors`, dequantizing only that
+  layer's own FP8 tensors (never the whole checkpoint, never a full-model
+  `HashMap` - ~108 GB dequantized, impossible on this box regardless of
+  streaming). `crates/qwen35/tests/real_weight_streaming.rs` (4 `#[ignore]`d
+  tests, self-skip loudly without `BRAIN_QWEN35_DIR`) drives the
+  already-hoisted `model::gdn_mixer`/`model::gqa_mixer` (M12) directly on a
+  standalone `Gpu` - never constructs a `Qwen35` (that path still assumes
+  every layer's weights are present, which a real 27B checkpoint on this
+  18 GiB box cannot do; a recorded gap, not something this milestone works
+  around). Layers 0 (Gated DeltaNet), 3 and 63 (gated GQA, first and last
+  full-attention layer) each match `tools/goldens/
+  qwen35_dump_real_layer_reference.py`'s dump of the REAL `transformers.
+  models.qwen3_5.Qwen3_5DecoderLayer` forward at cosine=1.000000000,
+  rel_l2≈1e-6, peak RSS 2.45 GiB (measured via `brain_testutil::mem`, well
+  under the 16 GB ceiling). `embed_tokens`/`lm_head` row spot check
+  (`tools/goldens/qwen35_dump_embed_lm_head_rows.py`) matches exactly
+  (cosine=1.0, max_abs=0.0), peak RSS 2.37 GiB. Vision-tower real-weight
+  parity is NOT done (see gaps below) - the two decoder-mixer types plus
+  embed/lm_head were this milestone's load-bearing claim; the vision splice
+  already has real-dims (random-weight) parity from M9.
+  **Found and fixed two real, confirmed pre-existing bugs, both only
+  reachable with actual checkpoint bytes:**
+  (1) `checkpoint::mmap::MmapSafetensors` (`open`/`tensor_f32`/
+  `with_tensor_chunks`) never got F8_E4M3 support when `crate::safetensors::
+  parse`'s eager path gained it - `try_dtype_width` didn't know the dtype's
+  byte width, so `open()` failed outright ("unknown dtype 'F8_E4M3'") on any
+  file containing one, before `decode_into` (which also lacked an F8_E4M3
+  arm) was ever reached. Blocked the streaming mmap path entirely for this
+  (or any) real blockwise-FP8 checkpoint. Fixed both functions, mirroring
+  `crate::safetensors::parse`'s own F8_E4M3/F8_E5M2 split exactly, with two
+  new regression tests. (2) `qwen35::import::classify`'s embedding-tensor
+  name was wrong: `model.embed_tokens.weight` (claimed "confirmed" from
+  `quantization_config.modules_to_not_convert`, which the embedding was
+  never actually a candidate for, since it is never FP8-quantized) versus
+  the real checkpoint's actual `model.language_model.embed_tokens.weight`.
+  `import_dir`'s own two-way coverage check would have caught this the
+  moment `import_dir` ran against the real checkpoint (never a silent
+  wrong-tensor placement) - fixed the name, corrected the module doc's
+  now-falsified "confirmed" claim, added a regression test pinning the fix.
 
 ## Not yet done
 
-- [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
-  per-layer streaming forward parity for layers {0, 3, 63}; full real-weight
-  parity of the vision tower; embed/lm_head spot checks).
 - [ ] M13: performance pass (profile-first; native device-side FP8 GEMM only if
   the profile says arithmetic is the limiter, not before).
 
@@ -226,6 +268,11 @@ structurally and never parity-claimed here.
   gradchecked and overfit-tested, never parity-claimed.
 - Vision + decoder fused end-to-end on real weights is not runnable (needs both
   towers resident simultaneously).
+- Vision tower's OWN standalone real-weight parity (M10's original plan
+  bullet 2, `outside.safetensors`'s `model.visual.*`, ~0.9 GB) was not done -
+  M10 landed the two decoder-mixer types (both now cosine=1.0 against the
+  real reference) plus embed/lm_head; the vision tower still only has M9's
+  real-DIMS/random-weight parity, not real-weight parity.
 - No NPU (`NpuModel`) implementation this port - the firmware blocker on this
   exact host is diagnosed separately, not re-run here.
 - `crate::serve::Engine` (M11) is single-GPU, one truly-active sequence at a

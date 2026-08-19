@@ -5,30 +5,30 @@
 //! (imported from a pre-quantized GGUF release), this port reads the real
 //! checkpoint's own HF safetensors directly, blockwise-FP8 weights and all.
 //!
-//! ## Real tensor names (confirmed vs. best-effort)
+//! ## Real tensor names (verified against the real checkpoint, M10)
 //!
-//! Confirmed directly from the real checkpoint's `config.json`
-//! `quantization_config.modules_to_not_convert` list (which enumerates every
-//! tensor by its REAL name, whether or not this port's own scope reaches it
-//! yet): every per-layer tensor lives under `model.language_model.layers.
-//! {i}.`, with leaf names `input_layernorm`/`post_attention_layernorm`
-//! (plain RMSNorm), `linear_attn.{in_proj_qkv,in_proj_z,in_proj_a,in_proj_b,
+//! Every per-layer tensor lives under `model.language_model.layers.{i}.`,
+//! with leaf names `input_layernorm`/`post_attention_layernorm` (plain
+//! RMSNorm), `linear_attn.{in_proj_qkv,in_proj_z,in_proj_a,in_proj_b,
 //! out_proj}` + `linear_attn.{conv1d,A_log,dt_bias,norm}`, `self_attn.
 //! {q_proj,k_proj,v_proj,o_proj,q_norm,k_norm}`, `mlp.{gate_proj,up_proj,
-//! down_proj}`; the embedding is `model.embed_tokens.weight` (NOT nested
-//! under `language_model`) and the head is the top-level `lm_head.weight`.
-//! MTP (`mtp.*`) and vision (`model.visual.*`) tensors are real and present
-//! but out of THIS import's scope - MTP's own import lands with the M7
-//! model code, vision's with M9.
+//! down_proj}`. The final norm is `model.language_model.norm.weight` and the
+//! head is the top-level `lm_head.weight` (both confirmed against the real
+//! `model.safetensors.index.json`). MTP (`mtp.*`) and vision
+//! (`model.visual.*`) tensors are real and present but out of THIS import's
+//! scope - MTP's own import lands with the M7 model code, vision's with M9.
 //!
-//! **Best-effort, not yet checkpoint-verified:** the final norm's exact path
-//! (`model.language_model.norm.weight`, inferred from the per-layer prefix
-//! convention - a plain RMSNorm vector is never an FP8 quantization
-//! candidate, so unlike every tensor above it never appears in
-//! `modules_to_not_convert` to confirm it by name). If this guess is wrong,
-//! [`import_dir`]'s two-way coverage fails LOUDLY, by name, the moment a
-//! real checkpoint is available (M10) - never a silent placement of the
-//! wrong tensor.
+//! One name this module got wrong before real-checkpoint access (M10) caught
+//! it: the embedding is `model.language_model.embed_tokens.weight`, nested
+//! under `language_model` unlike `lm_head.weight`. The original guess
+//! (`model.embed_tokens.weight`, "confirmed" from `quantization_config.
+//! modules_to_not_convert`) was never actually confirmed by that list - the
+//! embedding is never FP8-quantized in the first place, so it was never a
+//! *candidate* for that list to exclude by name, and the inference from "not
+//! listed" to "not nested" did not follow. [`import_dir`]'s two-way coverage
+//! would have failed LOUDLY, by name, the moment a real checkpoint was
+//! available, rather than silently placing the wrong tensor - which is
+//! exactly what caught this.
 //!
 //! ## FP8 handling
 //!
@@ -143,7 +143,7 @@ fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
     if name.starts_with("mtp.") || name.starts_with("model.visual.") || name == "model.visual" {
         return Ok(None);
     }
-    if name == "model.embed_tokens.weight" {
+    if name == "model.language_model.embed_tokens.weight" {
         return Ok(Some("tok.weight".to_string()));
     }
     if name == "lm_head.weight" {
@@ -263,6 +263,50 @@ pub fn import_dir(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<HashMa
     import_from_tensors(raw, cfg)
 }
 
+/// Stream just layer `l`'s own tensors from an already-opened per-shard mmap
+/// (e.g. `layers-{l}.safetensors`, one real checkpoint file, never the whole
+/// 30.9 GB directory), dequantize its FP8 pairs, classify, and fold - the
+/// real-weight-streaming (M10) counterpart of [`import_dir`], which needs
+/// the WHOLE checkpoint present and, at real 27B scale, far more RAM than
+/// any single layer needs (peak host here is bounded by one layer's own
+/// dequantized weights, a few hundred MB at the real config, never the
+/// ~108 GB a whole-model dequant would take). Skips [`import_from_tensors`]'s
+/// two-way `param_list()` coverage check by design (only one layer's tensors
+/// are ever present here) but still asserts every classified name actually
+/// belongs to `blocks.{l}.*` - the same "loud, by name" discipline this
+/// module's doc describes for the whole-checkpoint path.
+pub fn import_layer(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Config, l: usize, block: usize) -> Result<HashMap<String, Vec<f32>>, String> {
+    let prefix = format!("model.language_model.layers.{l}.");
+    let names: Vec<String> = reader.names().iter().filter(|n| n.starts_with(&prefix)).cloned().collect();
+    if names.is_empty() {
+        return Err(format!("import_layer: no tensors found with prefix {prefix}"));
+    }
+    let mut raw: Tensors = HashMap::with_capacity(names.len());
+    for name in &names {
+        let shape: Vec<usize> = reader.shape(name).ok_or_else(|| format!("import_layer: missing shape for {name}"))?.to_vec();
+        let data = reader.tensor_f32(name).ok_or_else(|| format!("import_layer: missing data for {name}"))?;
+        raw.insert(name.clone(), (shape, data));
+    }
+    dequantize_fp8_pairs(&mut raw, block)?;
+    squeeze_conv1d(&mut raw);
+
+    let mut renamed: HashMap<String, Vec<f32>> = HashMap::with_capacity(raw.len());
+    for (name, (_, data)) in raw {
+        if let Some(canon) = classify(&name, cfg)? {
+            if renamed.insert(canon.clone(), data).is_some() {
+                return Err(format!("import_layer: two source tensors mapped onto {canon}"));
+            }
+        }
+    }
+    fold_plain_rmsnorm_weights(&mut renamed);
+
+    let want_prefix = format!("blocks.{l}.");
+    if let Some(bad) = renamed.keys().find(|n| !n.starts_with(&want_prefix)) {
+        return Err(format!("import_layer: {bad} does not belong to layer {l} (naming-convention bug in classify(), not a checkpoint problem)"));
+    }
+    Ok(renamed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,7 +323,7 @@ mod tests {
     fn synthetic(cfg: &Qwen35Config) -> Tensors {
         let d = cfg.d_model as usize;
         let mut t: Tensors = HashMap::new();
-        t.insert("model.embed_tokens.weight".into(), one_f32(vec![cfg.vocab as usize, d], 0.01));
+        t.insert("model.language_model.embed_tokens.weight".into(), one_f32(vec![cfg.vocab as usize, d], 0.01));
         t.insert("lm_head.weight".into(), one_f32(vec![cfg.vocab as usize, d], 0.02));
         t.insert("model.language_model.norm.weight".into(), one_f32(vec![d], 0.0));
         for (l, ty) in cfg.layer_types().iter().enumerate() {
@@ -367,13 +411,66 @@ mod tests {
         assert_eq!(out[&format!("blocks.{linear_layer}.linear_attn.conv1d.weight")].len(), expect_len);
     }
 
+    /// Write ONLY layer `l`'s own tensors (from [`synthetic`]) to a real
+    /// on-disk safetensors file - a synthetic stand-in for one real
+    /// `layers-{l}.safetensors` shard, letting [`import_layer`] be tested
+    /// through an actual [`checkpoint::mmap::MmapSafetensors`] without a real
+    /// checkpoint (deferred to M10's own real-weight tests).
+    fn write_one_layer_shard(cfg: &Qwen35Config, l: usize) -> std::path::PathBuf {
+        let all = synthetic(cfg);
+        let prefix = format!("model.language_model.layers.{l}.");
+        let plan: Vec<(String, Vec<u64>)> =
+            all.iter().filter(|(n, _)| n.starts_with(&prefix)).map(|(n, (shape, _))| (n.clone(), shape.iter().map(|&s| s as u64).collect())).collect();
+        assert!(!plan.is_empty(), "test bug: no synthetic tensors for layer {l}");
+        let path = std::env::temp_dir().join(format!("qwen35_import_layer_{l}_{}.safetensors", std::process::id()));
+        let mut w = checkpoint::weightio::StWriter::create(path.to_str().unwrap(), &plan, &serde_json::json!({}), None).unwrap();
+        for (name, _) in &plan {
+            w.write(name, &all[name].1).unwrap();
+        }
+        w.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn import_layer_streams_one_shard_and_matches_the_whole_directory_import() {
+        let cfg = Qwen35Config::tiny();
+        let whole = import_from_tensors(synthetic(&cfg), &cfg).unwrap();
+
+        for l in 0..cfg.n_layers as usize {
+            let path = write_one_layer_shard(&cfg, l);
+            let reader = checkpoint::mmap::MmapSafetensors::open(&path).unwrap();
+            let out = import_layer(&reader, &cfg, l, 128).unwrap();
+            std::fs::remove_file(&path).ok();
+
+            let want_prefix = format!("blocks.{l}.");
+            let want: Vec<&String> = whole.keys().filter(|n| n.starts_with(&want_prefix)).collect();
+            assert_eq!(out.len(), want.len(), "layer {l}: wrong tensor count");
+            for name in want {
+                assert_eq!(out[name], whole[name], "layer {l}: {name} diverged from the whole-directory import");
+            }
+        }
+    }
+
     #[test]
     fn missing_tensor_errors_by_name() {
         let cfg = Qwen35Config::tiny();
         let mut raw = synthetic(&cfg);
-        raw.remove("model.embed_tokens.weight");
+        raw.remove("model.language_model.embed_tokens.weight");
         let err = import_from_tensors(raw, &cfg).unwrap_err();
         assert!(err.contains("tok.weight"), "error must name the missing tensor: {err}");
+    }
+
+    /// M10 (real-checkpoint access) caught this module's own doc comment
+    /// mis-stating the embedding's real name as `model.embed_tokens.weight`
+    /// (unnested); the real checkpoint's `model.safetensors.index.json` has
+    /// `model.language_model.embed_tokens.weight` instead - nested, like
+    /// every per-layer tensor, unlike `lm_head.weight`. Pins the fix so a
+    /// future edit cannot silently revert to the unverified guess.
+    #[test]
+    fn embed_tokens_classifies_at_its_real_nested_name_not_the_unverified_guess() {
+        let cfg = Qwen35Config::tiny();
+        assert_eq!(classify("model.language_model.embed_tokens.weight", &cfg).unwrap(), Some("tok.weight".to_string()));
+        assert!(classify("model.embed_tokens.weight", &cfg).is_err(), "the old unverified name must no longer classify as anything");
     }
 
     #[test]
