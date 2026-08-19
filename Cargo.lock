@@ -1139,6 +1139,7 @@ dependencies = [
  "brain-data",
  "brain-diffusion",
  "brain-dit",
+ "brain-gemma4",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

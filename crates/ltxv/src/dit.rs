@@ -32,11 +32,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use checkpoint::TensorSource;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QTier};
+use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QTier};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -104,6 +105,26 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
         m.push((format!("{p}.ff.net.2.weight"), vec![dim, 4 * dim]));
         m.push((format!("{p}.scale_shift_table"), vec![cfg.adaln_rows() as usize, dim]));
         m.push((format!("{p}.prompt_scale_shift_table"), vec![2, dim]));
+    }
+    // `video_embeddings_connector`'s 1 + num_layers*16 tensors - gated on
+    // `use_embeddings_connector` (unlike `to_gate_logits` above, which is
+    // never gated) the same way `keyframes_abs_pos_embedding` just above
+    // is: conditional inclusion, so `LtxDitConfig::tiny()` (connector
+    // disabled) keeps its exact pre-existing manifest and every test built
+    // against it stays byte-identical. Real gap this closes: before this,
+    // `random_tiny_weights`/`import_dit` at a connector-enabled config
+    // (`LtxDitConfig::ltx25_22b`/`tiny_gated`) built a weight map missing
+    // `video_embeddings_connector.*` entirely, so `LtxDit::forward`'s own
+    // `route_context_through_connector` call would panic on a missing
+    // tensor the first time either config's forward actually ran through
+    // this crate's own weight-building path (as opposed to a fixture file
+    // loaded directly via `load_tiny_weights`, which bypasses this
+    // manifest, the tests/dit_parity.rs `setup_gated` case) - never
+    // previously exercised because every existing caller of
+    // `random_tiny_weights` passes `LtxDitConfig::tiny()`, not
+    // `tiny_gated()`/`ltx25_22b()`.
+    if cfg.use_embeddings_connector {
+        push_connector(&mut m, "video_embeddings_connector", cfg.connector_num_learnable_registers as usize, cfg.connector_inner_dim() as usize, cfg.connector_num_layers, 4);
     }
     m
 }
@@ -1002,6 +1023,131 @@ impl LtxDit {
             out,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Real-checkpoint streamed forward (video-only): the int8-compute path
+// ([`LtxDit::forward_q`]) still requires the WHOLE model resident as host
+// fp32 in `self.w` before it can run a single block, because
+// [`LtxDit::forward_blocks_q`] looks up `transformer_blocks.{l}.*` off that
+// one map every iteration - fine for a tiny config, not for the real 22B
+// checkpoint (88 GB of fp32 for a model this port's own int8 tier exists
+// specifically to avoid materializing). [`load_head_tensors_from_source`] +
+// [`forward_q_streamed`] are this function's streamed twin: only the small
+// non-block tensors are kept resident, and each block is loaded, quantized,
+// run, and dropped one at a time straight off a `checkpoint::TensorSource`
+// (`crate::gguf_src::LtxvGgufSource` for the real GGUF) - the same bound
+// `crate::block::load_block_tensors_from_source`'s own doc documents at
+// "one block" granularity, applied here to a full model-level forward.
+// ---------------------------------------------------------------------------
+
+/// Every tensor a real checkpoint carries OUTSIDE the 48
+/// `transformer_blocks.N.*` families (`patchify_proj`, `adaln_single.*`,
+/// `keyframes_abs_pos_embedding`, `video_embeddings_connector.*`, the
+/// top-level `scale_shift_table`, `proj_out`) - the "head"
+/// [`forward_q_streamed`] keeps resident in host fp32 for an entire
+/// generation run, since summed together (a few GB, dominated by the
+/// 8-layer connector) they are a small fraction of the 22B model. The other
+/// 48/49ths streams in one block at a time inside [`forward_q_streamed`]
+/// itself via [`load_block_tensors_from_source`].
+pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig) -> Tensors {
+    let manifest = dit_tensor_manifest(cfg);
+    let mut out = Tensors::new();
+    for (name, shape) in manifest {
+        if name.starts_with("transformer_blocks.") {
+            continue;
+        }
+        let mut data = Vec::new();
+        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
+        assert!(found, "load_head_tensors_from_source: missing {name}");
+        let want: usize = shape.iter().product();
+        assert_eq!(data.len(), want, "load_head_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
+        out.insert(name, (shape, data));
+    }
+    out
+}
+
+/// [`LtxDit::forward_q`]'s streamed twin: identical op sequence and output
+/// (patchify -> keyframes embed -> adaLN-single table -> RoPE tables ->
+/// connector routing -> block stack -> output stage), but never requires
+/// the whole 22B model resident as host fp32. `head` is this function's own
+/// [`load_head_tensors_from_source`] output; each of `cfg.num_layers`
+/// blocks is instead streamed fresh from `src` via
+/// [`load_block_tensors_from_source`], quantized to `tier` on the way to
+/// the device by [`LtxBlockQ::on`], and dropped once that block's own
+/// forward call returns - peak EXTRA host memory (beyond `head`) is one
+/// block's own fp32 expansion, never the whole model. Returns only the
+/// final `[t, out_channels]` prediction: a real generation run only needs
+/// this, not the full parity-test tap set [`LtxDit::forward_q`] returns.
+/// `device`: opens a FRESH [`Gpu`] every call, the same convention
+/// [`LtxDit::forward`]/[`LtxDit::forward_q`] already use - measured at the
+/// real 22B checkpoint's own scale (a real multi-step generation run, not
+/// just the tiny-config case) to reliably release each call's device VRAM
+/// before the next call's own block-by-block allocations begin; reusing
+/// ONE [`Gpu`] handle across calls instead was tried and measured worse
+/// (a second real forward then ran out of device memory that a fresh
+/// device open does not).
+#[allow(clippy::too_many_arguments)]
+pub fn forward_q_streamed(
+    cfg: &LtxDitConfig,
+    src: &dyn TensorSource,
+    head: &Tensors,
+    device: Option<&str>,
+    tier: QTier,
+    latent: &[f32],
+    timesteps: &[f32],
+    positions: &[f32],
+    keyframes_mask: &[f32],
+    context: &[f32],
+    context_len: usize,
+    t: usize,
+    context_valid: &[f32],
+) -> Vec<f32> {
+    let dim = cfg.inner_dim as usize;
+    assert_eq!(latent.len(), t * cfg.in_channels as usize);
+    assert_eq!(timesteps.len(), t);
+    assert_eq!(keyframes_mask.len(), t);
+    assert_eq!(context.len(), context_len * cfg.cross_attention_dim as usize);
+
+    let pw = tget(head, "patchify_proj.weight");
+    let pb = tget(head, "patchify_proj.bias");
+    let mut x = linear(latent, t, cfg.in_channels as usize, pw, Some(pb), dim);
+    if cfg.use_keyframes_abs_pos_embedding {
+        let kf = tget(head, "keyframes_abs_pos_embedding");
+        for ti in 0..t {
+            if keyframes_mask[ti] > 0.0 {
+                for d in 0..dim {
+                    x[ti * dim + d] += kf[d];
+                }
+            }
+        }
+    }
+
+    let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
+    let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
+
+    let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+
+    let gpu = open_device(device);
+    let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
+
+    #[rustfmt::skip]
+    let (connector_context, _connector_out) = route_context_through_connector(
+        &gpu, head, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+        cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
+        cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
+        cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
+    );
+
+    for l in 0..cfg.num_layers {
+        let prefix = format!("transformer_blocks.{l}");
+        let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
+        let blk = LtxBlockQ::on(gpu.share(), cfg, &block_tensors, &prefix, t as u32, context_len as u32, tier);
+        let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
+        x = out;
+    }
+
+    output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
 }
 
 /// Every AV tap a parity test bisects with, beyond one [`DitTaps`] per

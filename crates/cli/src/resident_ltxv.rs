@@ -151,7 +151,7 @@ mod tests {
     use serde_json::json;
 
     fn resident() -> LtxvResident {
-        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into() } }
+        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None } }
     }
 
     /// The key must fix exactly the fields that would size a real DiT's
@@ -210,7 +210,7 @@ mod tests {
         let m = resident().manifest();
         assert_eq!(m.model, ltxv::caps::MODEL);
         assert_eq!(m.actions.len(), ltxv::caps::manifest().actions.len());
-        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into() } };
+        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None } };
         assert_eq!(fetched.manifest().model, "Lightricks/LTX-2.5");
         assert_eq!(fetched.instance_key("t2v", &Invocation::new()).model, "Lightricks/LTX-2.5");
     }

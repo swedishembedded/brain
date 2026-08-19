@@ -44,10 +44,19 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --terminal <F>              stretch target sigma (default 0.1)
   --eta <F>                   ancestral-Euler eta: 0 deterministic, 1 fully
                              ancestral (default 1.0)
-  --dit-config <name>         DiT size; only "tiny" is implemented (default)
+  --dit-config <name>         DiT config; "tiny" (default, fresh random
+                             weights) or "ltx25_22b" (the real 22B
+                             checkpoint, needs --dit/$BRAIN_LTXV_DIT)
 
 Weights (flag wins over the environment variable):
   --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
+  --dit <path>              $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
+                                                   read when --dit-config
+                                                   ltx25_22b)
+  --text-encoder <path>     $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
+                                                   encoder (optional; the
+                                                   deterministic prompt
+                                                   stub runs without it)
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -129,6 +138,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
     let mut vae: Option<String> = None;
+    let mut dit: Option<String> = None;
+    let mut text_encoder: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -160,6 +171,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--vae" => {
                 vae = Some(need(i)?.clone());
             }
+            "--dit" => {
+                dit = Some(need(i)?.clone());
+            }
+            "--text-encoder" => {
+                text_encoder = Some(need(i)?.clone());
+            }
             // `--no-stretch` is a bare flag (no value), unlike every other
             // option above - handled separately so the `i += 2` stride below
             // stays uniform for everything else.
@@ -178,7 +195,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    let paths = Paths::resolve(vae.as_deref())?;
+    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref())?;
 
     let tokens = {
         let vcfg = ltxv::LtxVaeConfig::conv25();
@@ -186,8 +203,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
         (lat_t as usize) * (o.height / 32) * (o.width / 32)
     };
     let forwards = if o.guidance > 1.0 { 2 } else { 1 };
+    let dit_desc = if o.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
+    let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     eprintln!(
-        "ltxv (M4 smoke test - tiny random-weight DiT, real VAE): {} frames at {}x{}, {} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}",
         o.frames, o.width, o.height, o.steps, o.eta, o.guidance, o.seed
     );
 
@@ -346,11 +365,16 @@ mod tests {
             "--dit-config",
             "--device",
             "--vae",
+            "--dit",
+            "--text-encoder",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
         }
         for (var, _) in ltxv::pipeline::PATH_VARS {
+            assert!(super::HELP.contains(var), "{var} is read but not in --help");
+        }
+        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
             assert!(super::HELP.contains(var), "{var} is read but not in --help");
         }
     }

@@ -9,31 +9,32 @@
 //! CFG fold against a fake) as closely as the two architectures' real
 //! differences allow.
 //!
-//! ## M4's scope, precisely (read before assuming this generates anything
-//! ## real)
+//! ## Real weights are opt-in, not the default (read before assuming this
+//! ## generates anything at production quality)
 //!
-//! This milestone's job is to prove the pipeline WIRING - real scheduler
-//! math, real CLI/capability/residency plumbing, an actual mp4 out the other
-//! end - not generation quality. Two pieces of the real LTX-2.5 stack do not
-//! exist in this repo yet and cannot run on the hardware this port was
-//! written on even if they did:
+//! By default `GenOpts::dit_config == "tiny"` and `Paths::text_encoder ==
+//! None`, and [`generate`] runs the ORIGINAL smoke-test path this module
+//! shipped with: the DiT is [`crate::config::LtxDitConfig::tiny`] with
+//! FRESH RANDOM WEIGHTS ([`crate::dit::random_tiny_weights`], seeded so
+//! `--seed` is reproducible) and [`context_stub`] fabricates a
+//! deterministic-but-meaningless `[context_len, cross_attention_dim]`
+//! context from the prompt string's hash folded into the seed - the
+//! "prompt" changes the output only because it changes the stub, carrying
+//! no semantic meaning whatsoever.
 //!
-//! * **The DiT is always [`crate::config::LtxDitConfig::tiny`]**, with
-//!   FRESH RANDOM WEIGHTS synthesized by [`crate::dit::random_tiny_weights`]
-//!   (seeded, so `--seed` is reproducible) - never the real 42 GB bf16 22B
-//!   checkpoint, which does not exist as a file this pipeline could load
-//!   even if the hardware could hold it. `GenOpts::dit_config` exists as the
-//!   escape hatch a later milestone's real-checkpoint importer will extend;
-//!   `"tiny"` is the only value implemented today (see
-//!   [`dit_config_from_name`]).
-//! * **There is no text encoder.** [`context_stub`] fabricates a
-//!   deterministic-but-meaningless `[context_len, cross_attention_dim]`
-//!   tensor from the prompt string's hash folded into the seed, purely so
-//!   the cross-attention wiring has something shaped correctly to read - the
-//!   "prompt" therefore changes the OUTPUT (because it changes the stub) but
-//!   carries no semantic meaning whatsoever. The real Gemma-4 encoder
-//!   (`crates/gemma4`, not yet built) replaces this outright in a later
-//!   milestone; nothing here should be read as an approximation of it.
+//! Setting `GenOpts::dit_config = "ltx25_22b"` plus [`Paths::dit`]
+//! (`--dit`/`$BRAIN_LTXV_DIT`) switches to the real 22B distilled
+//! checkpoint, loaded straight off its GGUF via
+//! [`crate::gguf_src::LtxvGgufSource`] and run at int8 compute
+//! ([`RealDit`], [`crate::dit::forward_q_streamed`]) - real weights were
+//! only ever proven correct at REDUCED DEPTH / one block before this, so
+//! treat a real-weight clip as a wiring proof, not a quality claim, exactly
+//! the framing this module always carried for the tiny path. Setting
+//! [`Paths::text_encoder`] (`--text-encoder`/`$BRAIN_LTXV_TEXT_ENCODER`)
+//! independently switches [`context_stub`] out for [`real_text_context`]'s
+//! real Gemma-4 encoding. The two switches are independent (a real DiT with
+//! a stub context, or vice versa, both run) but only "real DiT + real text
+//! encoder" is an honest end-to-end real-weight generation.
 //!
 //! Everything else is real: [`ltx2_sigmas`]'s token-count-dependent shift,
 //! [`euler_ancestral_step`]'s rectified-flow ancestral formula, the RoPE
@@ -93,26 +94,53 @@ fn read_any(path: &str) -> Result<Vec<checkpoint::safetensors::StTensor>, String
     checkpoint::safetensors::read(path)
 }
 
-/// Where the real VAE weights live. There is no `dit` role: see this
-/// module's doc for why the DiT is always tiny-config, random weights.
+/// Where the real weights live. `vae` is the one REQUIRED role (see this
+/// module's doc for why the DiT/text-encoder were always tiny-config/stub
+/// until this milestone). `dit`/`text_encoder` are OPTIONAL: absent,
+/// [`generate`] falls back exactly to the tiny random-weight DiT /
+/// [`context_stub`] path every earlier milestone shipped; present, it loads
+/// the real 22B GGUF / real Gemma-4 checkpoint instead - see
+/// [`dit_config_from_name`] and [`generate`]'s own body for exactly which
+/// value of `GenOpts::dit_config` selects which path.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub vae: String,
+    /// The real 22B distilled DiT GGUF (`ltx-2.5-22b-distilled-transformer-
+    /// {Q8_0,Q4_K_M}.gguf`) - required only when `GenOpts::dit_config` names
+    /// a real config (`"ltx25_22b"`), read via
+    /// `crate::gguf_src::LtxvGgufSource`.
+    pub dit: Option<String>,
+    /// The real Gemma-4-12B text encoder (`gemma4-*-with-proj-ltx-2.5-
+    /// bf16.safetensors`, tokenizer embedded as its own `tokenizer_json`
+    /// tensor - see `gemma4::tokenizer`'s doc) - when absent, [`generate`]
+    /// keeps using [`context_stub`].
+    pub text_encoder: Option<String>,
 }
 
 /// `(variable, human name)` - kept as a table (one row today) for the same
 /// reason `wan::pipeline::PATH_VARS` is: the env reader and the "you are
-/// missing X" error must never disagree about the spelling.
+/// missing X" error must never disagree about the spelling. Covers only the
+/// REQUIRED role; see [`OPTIONAL_PATH_VARS`] for the two real-checkpoint
+/// roles that are opt-in, not required.
 pub const PATH_VARS: [(&str, &str); 1] = [("BRAIN_LTXV_VAE", "VAE")];
+
+/// `(variable, human name)` for the two OPTIONAL real-checkpoint roles
+/// [`Paths::resolve`] also reads - kept out of [`PATH_VARS`] (whose own
+/// callers, e.g. `ltxv_cli`'s doc self-check, document every entry as a
+/// REQUIRED weight) since missing either of these is not an error, only a
+/// fallback to this module's tiny-DiT/stub-context path. Spellings match
+/// `crates/arch`'s own `ltxv` row's `weights_env` (`"dit"`/`"text_encoder"`).
+pub const OPTIONAL_PATH_VARS: [(&str, &str); 2] = [("BRAIN_LTXV_DIT", "real DiT checkpoint"), ("BRAIN_LTXV_TEXT_ENCODER", "real text encoder checkpoint")];
 
 impl Paths {
     pub fn from_env() -> Result<Paths, String> {
-        Paths::resolve(None)
+        Paths::resolve(None, None, None)
     }
 
     /// The explicit flag wins over the environment variable, same precedence
-    /// as every other weight path in this workspace.
-    pub fn resolve(vae: Option<&str>) -> Result<Paths, String> {
+    /// as every other weight path in this workspace. `dit`/`text_encoder`
+    /// are optional in both forms (flag and env) - see this struct's doc.
+    pub fn resolve(vae: Option<&str>, dit: Option<&str>, text_encoder: Option<&str>) -> Result<Paths, String> {
         let (var, role) = PATH_VARS[0];
         let vae = match vae.filter(|s| !s.is_empty()) {
             Some(v) => v.to_string(),
@@ -121,18 +149,26 @@ impl Paths {
                 _ => return Err(format!("no {role} weights: pass --vae <path> or set {var}")),
             },
         };
-        Ok(Paths { vae })
+        let optional = |flag: Option<&str>, var: &str| -> Option<String> {
+            flag.filter(|s| !s.is_empty()).map(str::to_string).or_else(|| std::env::var(var).ok().filter(|v| !v.is_empty()))
+        };
+        let dit = optional(dit, OPTIONAL_PATH_VARS[0].0);
+        let text_encoder = optional(text_encoder, OPTIONAL_PATH_VARS[1].0);
+        Ok(Paths { vae, dit, text_encoder })
     }
 }
 
-/// Which tiny-config DiT to build. Only `"tiny"` exists today (see this
-/// module's doc) - the name is a real parameter, not a constant, so a future
-/// real-checkpoint importer can extend this match without moving the CLI
-/// flag or the capability schema.
+/// Which DiT config to build. `"tiny"` (the default) is the fresh-random-
+/// weight smoke-test config every earlier milestone shipped. `"ltx25_22b"`
+/// is the real 22B checkpoint's own config - selecting it requires
+/// [`Paths::dit`] (`--dit`/`$BRAIN_LTXV_DIT`) to also be set, checked in
+/// [`generate`] itself (this function only maps a name to a shape; it does
+/// not know about weight paths).
 pub fn dit_config_from_name(name: &str) -> Result<LtxDitConfig, String> {
     match name {
         "tiny" => Ok(LtxDitConfig::tiny()),
-        other => Err(format!("unknown ltxv dit-config {other:?} (tiny)")),
+        "ltx25_22b" => Ok(LtxDitConfig::ltx25_22b()),
+        other => Err(format!("unknown ltxv dit-config {other:?} (tiny, ltx25_22b)")),
     }
 }
 
@@ -262,6 +298,126 @@ pub fn context_stub(context_len: usize, dim: usize, seed: u64) -> Vec<f32> {
     seeded_noise(context_len * dim, seed).into_iter().map(|v| 0.5 * v).collect()
 }
 
+/// Round `n` up to a multiple of `cfg.connector_num_learnable_registers`
+/// when `cfg.use_embeddings_connector` is set - `crate::block::
+/// EmbeddingsConnector::forward` requires its own input sequence length to
+/// be an EXACT multiple of its own register count (register substitution
+/// tiles the registers round-robin over invalid positions, see that
+/// function's doc), and neither a real tokenizer's own prompt length nor
+/// [`GenOpts::context_len`]'s fixed stub size is naturally shaped that way.
+/// Shared by [`real_text_context`] and [`generate`]'s own stub-context
+/// branch, so a connector-enabled real config (`LtxDitConfig::ltx25_22b`)
+/// never sees an unpadded context from EITHER path. A disabled connector
+/// reads `context` directly as real caption content, so `n` passes through
+/// unchanged in that case - padding it would inject zero rows the DiT has
+/// no way to ignore.
+fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
+    if cfg.use_embeddings_connector && cfg.connector_num_learnable_registers > 0 {
+        let m = cfg.connector_num_learnable_registers as usize;
+        n.div_ceil(m).max(1) * m
+    } else {
+        n
+    }
+}
+
+/// Real Gemma-4 text conditioning, replacing [`context_stub`] when
+/// [`Paths::text_encoder`] is set: read the checkpoint, extract its
+/// embedded tokenizer (`gemma4::tokenizer`'s doc - it is the checkpoint's
+/// own `tokenizer_json` tensor, not a separate file), tokenize `prompt`
+/// (and, only if `guidance > 1.0`, the empty string for the unconditional
+/// branch), run `gemma4::Gemma4Model::forward`, and project the full
+/// `hidden_states` tuple through `gemma4::AggregateEmbed`'s video head -
+/// the real `[t, cross_attention_dim]` context `LtxDit::forward`/
+/// `crate::dit::forward_q_streamed` expect.
+///
+/// Returns `(ctx_cond, ctx_uncond, context_valid, context_len)`.
+/// `context_len` is the COND prompt's real token count, PADDED up to a
+/// multiple of `dit_cfg.connector_num_learnable_registers` when
+/// `dit_cfg.use_embeddings_connector` is set (NOT [`GenOpts::context_len`],
+/// which only sizes [`context_stub`]'s fake context): `crate::block::
+/// EmbeddingsConnector::forward` requires its own input length to be an
+/// exact multiple of its register count (register substitution tiles the
+/// registers round-robin over the INVALID positions - see that function's
+/// doc), and a real config's register count (128 for
+/// `LtxDitConfig::ltx25_22b`) will essentially never divide a real short
+/// prompt's own token count. `context_valid` marks the real (`1.0`) vs
+/// padded (`0.0`) positions so the connector substitutes its own learnable
+/// registers into the padded tail rather than the DiT reading zeros as if
+/// they were real caption content - the padded rows in `ctx_cond`/
+/// `ctx_uncond` are zero exactly because the connector rewrites them before
+/// any block reads them (see `EmbeddingsConnector::forward`'s step 1).
+///
+/// `denoise`'s own CFG fold shares ONE `context_len`/`context_valid` pair
+/// across both branches, so when `guidance > 1.0` the empty-prompt
+/// encoding is zero-padded/truncated to match `ctx_cond`'s length - a
+/// documented simplification real per-branch attention masking would
+/// avoid, not exercised by this pipeline's own default (`guidance <= 1.0`
+/// skips the unconditional forward entirely, per this module's doc);
+/// `ctx_uncond` there is an all-zero vector of the same shape,
+/// [`context_stub`]'s own "closest honest stand-in" convention.
+fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, usize), String> {
+    use data::Tokenizer as _;
+    let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
+
+    let raw = checkpoint::safetensors::read(path)?;
+    let tok = gemma4::load_tokenizer(&raw)?;
+    let cfg = gemma4::Gemma4Config::gemma4_12b();
+    let hidden = cfg.hidden_size as usize;
+    let n_states = cfg.num_hidden_layers as usize + 1;
+    let weights = gemma4::import_gemma4(raw, &cfg)?;
+    // Extracted from `weights` by reference BEFORE `Gemma4Model::new` takes
+    // ownership of it below - the video aggregate-embed head's own two
+    // tensors are cloned out, not borrowed, so this ordering is only about
+    // avoiding a second file read/import, not a borrow-checker requirement.
+    let agg = gemma4::AggregateEmbed::from_weights(&weights, hidden, n_states);
+    let model = gemma4::Gemma4Model::new(cfg, weights, device);
+
+    // A real tokenizer can legitimately return zero tokens for an empty (or
+    // whitespace-only) string; `T=0` has no representable RoPE/attention
+    // shape anywhere in this pipeline, so fall back to token id 0 (the
+    // tokenizer's own id-0 entry, whatever it is) exactly the way an
+    // all-zero fallback context already stands in for "no real content" in
+    // the guidance<=1.0 branch below.
+    let tokenize = |s: &str| -> Vec<u32> {
+        let ids = tok.encode(s);
+        if ids.is_empty() {
+            vec![0u32]
+        } else {
+            ids
+        }
+    };
+    let ids_cond = tokenize(prompt);
+    let n_cond = ids_cond.len();
+    let context_len = padded_context_len(dit_cfg, n_cond);
+    let out_cond = model.forward(&ids_cond);
+    let raw_cond = agg.forward(&out_cond.hidden_states, n_cond, hidden);
+    if raw_cond.len() != n_cond * cross_attention_dim {
+        return Err(format!(
+            "ltxv real text encoder: aggregate-embed produced {} values, expected {} ({n_cond} tokens x {cross_attention_dim} cross_attention_dim) - checkpoint/config mismatch",
+            raw_cond.len(),
+            n_cond * cross_attention_dim
+        ));
+    }
+    let mut ctx_cond = vec![0f32; context_len * cross_attention_dim];
+    ctx_cond[..n_cond * cross_attention_dim].copy_from_slice(&raw_cond);
+    let mut context_valid = vec![0f32; context_len];
+    context_valid[..n_cond].fill(1.0);
+
+    let ctx_uncond = if guidance > 1.0 {
+        let ids_u = tokenize("");
+        let out_u = model.forward(&ids_u);
+        let raw_u = agg.forward(&out_u.hidden_states, ids_u.len(), hidden);
+        let mut v = vec![0f32; context_len * cross_attention_dim];
+        let rows = ids_u.len().min(context_len);
+        v[..rows * cross_attention_dim].copy_from_slice(&raw_u[..rows * cross_attention_dim]);
+        v
+    } else {
+        vec![0f32; context_len * cross_attention_dim]
+    };
+
+    Ok((ctx_cond, ctx_uncond, context_valid, context_len))
+}
+
 /// `[3, T, 2]` row-major RoPE position bounds for a `(f, h, w)` latent grid -
 /// `ltx_core.components.patchifiers.VideoLatentPatchifier.
 /// get_patch_grid_bounds`'s construction at `patch_size=1` (latent-token
@@ -326,11 +482,12 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 /// cancellation/step bookkeeping are testable against a fake instead of a
 /// real (if tiny) GPU forward - the `wan::pipeline::Denoiser` pattern.
 trait Denoiser {
-    fn forward(&self, latent: &[f32], sigma: f32, positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize) -> Vec<f32>;
+    #[allow(clippy::too_many_arguments)]
+    fn forward(&self, latent: &[f32], sigma: f32, positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32>;
 }
 
 impl Denoiser for LtxDit {
-    fn forward(&self, latent: &[f32], sigma: f32, positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize) -> Vec<f32> {
+    fn forward(&self, latent: &[f32], sigma: f32, positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32> {
         // Per-token timesteps = denoise_mask * sigma; denoise_mask is
         // all-ones here (every token is denoised uniformly - see this
         // module's doc on keyframes_mask), so this is `sigma` broadcast to
@@ -338,12 +495,43 @@ impl Denoiser for LtxDit {
         // internally, so this passes the RAW sigma, matching the golden's
         // own convention (see `crate::dit::LtxDit::forward`'s doc).
         let timesteps = vec![sigma; t];
-        // All-valid (no padding): `use_embeddings_connector` is `false` for
-        // every config this pipeline's stub context path uses today, so
-        // this mask is unread - see `crate::config::LtxDitConfig::
-        // use_embeddings_connector`'s doc.
-        let context_valid = vec![1.0f32; context_len];
-        LtxDit::forward(self, latent, &timesteps, positions, keyframes_mask, context, context_len, t, &context_valid).out
+        LtxDit::forward(self, latent, &timesteps, positions, keyframes_mask, context, context_len, t, context_valid).out
+    }
+}
+
+/// The real 22B checkpoint's own [`Denoiser`] - `LtxDit`'s counterpart when
+/// [`Paths::dit`] is set: holds an open GGUF source plus the small resident
+/// "head" tensors ([`crate::dit::load_head_tensors_from_source`]) and
+/// streams each of the 48 blocks fresh from `src` on every forward call via
+/// [`crate::dit::forward_q_streamed`] - see that function's doc for the
+/// memory bound this buys over materializing the whole model as host fp32.
+/// Int8 compute (not int4): this milestone's own "start small, prove it
+/// works first" choice - see [`generate`]'s doc for why.
+struct RealDit {
+    cfg: LtxDitConfig,
+    src: crate::gguf_src::LtxvGgufSource,
+    head: Tensors,
+    device: Option<String>,
+}
+
+impl Denoiser for RealDit {
+    fn forward(&self, latent: &[f32], sigma: f32, positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32> {
+        let timesteps = vec![sigma; t];
+        crate::dit::forward_q_streamed(
+            &self.cfg,
+            &self.src,
+            &self.head,
+            self.device.as_deref(),
+            crate::block::QTier::Int8,
+            latent,
+            &timesteps,
+            positions,
+            keyframes_mask,
+            context,
+            context_len,
+            t,
+            context_valid,
+        )
     }
 }
 
@@ -370,6 +558,7 @@ fn denoise(
     ctx_cond: &[f32],
     ctx_uncond: &[f32],
     context_len: usize,
+    context_valid: &[f32],
     t: usize,
     guidance: f32,
     eta: f64,
@@ -391,9 +580,9 @@ fn denoise(
             return Err("cancelled".into());
         }
         let (sigma, sigma_next) = (sigmas[i], sigmas[i + 1]);
-        let cond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_cond, context_len, t);
+        let cond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_cond, context_len, context_valid, t);
         let velocity = if cfg_on {
-            let uncond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_uncond, context_len, t);
+            let uncond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_uncond, context_len, context_valid, t);
             cond.iter().zip(&uncond).map(|(&c, &u)| u + guidance * (c - u)).collect()
         } else {
             cond
@@ -435,12 +624,26 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     let total = o.steps as u32 + 2;
     let mut timings = Timings::default();
 
-    // ---- build the DiT (tiny config, random weights - see this module's doc) ----
+    // ---- build the DiT: tiny config, random weights (this pipeline's
+    // original path); or the real 22B checkpoint, streamed int8-compute,
+    // when `--dit-config ltx25_22b` names it (needs `Paths::dit` - see this
+    // module's doc and `RealDit`'s doc) ----
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
-    let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
-    let dit = LtxDit::new(dit_cfg, weights, o.device.as_deref());
+    let dit: Box<dyn Denoiser> = if o.dit_config == "tiny" {
+        let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
+        let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
+        Box::new(LtxDit::new(dit_cfg, weights, o.device.as_deref()))
+    } else {
+        let dit_path = paths.dit.as_ref().ok_or_else(|| format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config))?;
+        let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
+        let real_cfg = src.config().video;
+        if real_cfg != dit_cfg {
+            return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
+        }
+        let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone() })
+    };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     if cancel.is_cancelled() {
         return Err("cancelled".into());
@@ -454,20 +657,53 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // marks a keyframe token). An all-1.0 mask would add
     // `keyframes_abs_pos_embedding` to every token for no semantic reason.
     let keyframes_mask = vec![0f32; t];
-    let prompt_mix = o.seed ^ fnv1a(prompt);
-    let ctx_cond = context_stub(o.context_len, dit_cfg.cross_attention_dim as usize, prompt_mix);
-    // The "unconditional" branch has no real empty-prompt encoding either;
-    // an all-zero context is the closest honest stand-in (most text
-    // encoders map an empty string close to zero after their own
-    // normalization) and, crucially, is DIFFERENT from `ctx_cond` - so the
-    // CFG fold in `denoise` is exercised for real rather than folding two
-    // identical branches.
-    let ctx_uncond = vec![0f32; o.context_len * dit_cfg.cross_attention_dim as usize];
+    // Real Gemma-4 conditioning when `Paths::text_encoder` is set
+    // ([`real_text_context`]); otherwise the same deterministic-but-
+    // meaningless stub every earlier milestone used (see this module's doc
+    // on [`context_stub`]). `context_len` therefore comes from the real
+    // tokenizer's own output length in the former case, not
+    // `GenOpts::context_len` (which only ever sized the stub).
+    let (ctx_cond, ctx_uncond, context_valid, context_len) = match &paths.text_encoder {
+        Some(te_path) => real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())?,
+        None => {
+            let prompt_mix = o.seed ^ fnv1a(prompt);
+            let dim = dit_cfg.cross_attention_dim as usize;
+            let n = o.context_len;
+            // Padded exactly like [`real_text_context`]'s own real context
+            // (see [`padded_context_len`]'s doc) - a no-op (`context_len ==
+            // n`) for every config whose connector is disabled, e.g.
+            // `LtxDitConfig::tiny`, so this stays byte-identical to the
+            // pre-real-DiT behavior there.
+            let context_len = padded_context_len(&dit_cfg, n);
+            let stub = context_stub(n, dim, prompt_mix);
+            let mut ctx_cond = vec![0f32; context_len * dim];
+            ctx_cond[..stub.len()].copy_from_slice(&stub);
+            // The "unconditional" branch has no real empty-prompt encoding
+            // either; an all-zero context is the closest honest stand-in
+            // (most text encoders map an empty string close to zero after
+            // their own normalization) and, crucially, is DIFFERENT from
+            // `ctx_cond` - so the CFG fold in `denoise` is exercised for
+            // real rather than folding two identical branches.
+            let ctx_uncond = vec![0f32; context_len * dim];
+            // Real for the first `n` positions, invalid (register-
+            // substituted by the connector when enabled) for the padded
+            // tail - all-valid when `context_len == n` (connector
+            // disabled), unchanged from the pre-padding behavior.
+            let mut context_valid = vec![0f32; context_len];
+            context_valid[..n].fill(1.0);
+            (ctx_cond, ctx_uncond, context_valid, context_len)
+        }
+    };
 
     let sigmas = ltx2_sigmas(t, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal);
     let latent0 = seeded_noise(t * in_channels, o.seed);
     let denoise_t = Instant::now();
-    let final_latent = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, &ctx_cond, &ctx_uncond, o.context_len, t, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, cancel, &mut progress)?;
+    let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions, &keyframes_mask, &ctx_cond, &ctx_uncond, context_len, &context_valid, t, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, cancel, &mut progress)?;
+    // Release the DiT's own device context (for `RealDit`, its resident
+    // `Gpu`) before the VAE decode below opens its own - real device memory
+    // is not this pipeline's to hold onto once the denoise loop is done
+    // with it.
+    drop(dit);
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     timings.steps = o.steps;
     timings.tokens = t;
@@ -733,7 +969,8 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let t1 = layout1.total_tokens;
     let sigmas1 = ltx2_sigmas(t1, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
     let latent1_0 = seeded_noise(t1 * in_channels, base.seed ^ 0x53_31);
-    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    let ctx_valid = vec![1.0f32; base.context_len]; // DFR's DiT is always tiny-config (connector disabled) - see this section's doc.
+    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         return Err("cancelled".into());
     }
@@ -773,7 +1010,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // The per-stage seed tags are ASCII ("S2", "N2"), written unsplit because
     // `0x53_32` reads to clippy as `0x53` with a mistyped `i32` suffix.
     let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
-    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         return Err("cancelled".into());
     }
@@ -848,6 +1085,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
                     &ctx_cond,
                     &ctx_uncond,
                     base.context_len,
+                    &ctx_valid,
                     t_tile,
                     base.guidance,
                     base.eta,
@@ -939,20 +1177,45 @@ mod tests {
     #[test]
     fn an_explicit_vae_path_beats_the_environment_variable() {
         std::env::set_var("BRAIN_LTXV_VAE", "env-vae");
-        let p = Paths::resolve(None).expect("from env");
+        let p = Paths::resolve(None, None, None).expect("from env");
         assert_eq!(p.vae, "env-vae");
-        let p = Paths::resolve(Some("/flag/vae")).expect("flag wins");
+        assert_eq!(p.dit, None);
+        assert_eq!(p.text_encoder, None);
+        let p = Paths::resolve(Some("/flag/vae"), None, None).expect("flag wins");
         assert_eq!(p.vae, "/flag/vae");
-        let p = Paths::resolve(Some("")).expect("empty flag falls through");
+        let p = Paths::resolve(Some(""), None, None).expect("empty flag falls through");
         assert_eq!(p.vae, "env-vae");
         std::env::remove_var("BRAIN_LTXV_VAE");
-        let e = Paths::resolve(None).unwrap_err();
+        let e = Paths::resolve(None, None, None).unwrap_err();
         assert!(e.contains("--vae") && e.contains("BRAIN_LTXV_VAE"), "{e}");
+    }
+
+    /// [`Paths::dit`]/[`Paths::text_encoder`] follow the exact same
+    /// flag-over-env, optional (not error-on-absent) resolution
+    /// [`OPTIONAL_PATH_VARS`] documents.
+    #[test]
+    fn the_optional_real_checkpoint_paths_resolve_flag_over_env_and_are_none_when_absent() {
+        std::env::remove_var("BRAIN_LTXV_DIT");
+        std::env::remove_var("BRAIN_LTXV_TEXT_ENCODER");
+        let p = Paths::resolve(Some("/vae"), None, None).expect("vae only");
+        assert_eq!(p.dit, None);
+        assert_eq!(p.text_encoder, None);
+
+        std::env::set_var("BRAIN_LTXV_DIT", "env-dit");
+        std::env::set_var("BRAIN_LTXV_TEXT_ENCODER", "env-te");
+        let p = Paths::resolve(Some("/vae"), None, None).expect("from env");
+        assert_eq!(p.dit, Some("env-dit".to_string()));
+        assert_eq!(p.text_encoder, Some("env-te".to_string()));
+        let p = Paths::resolve(Some("/vae"), Some("/flag-dit"), Some("/flag-te")).expect("flag wins");
+        assert_eq!(p.dit, Some("/flag-dit".to_string()));
+        assert_eq!(p.text_encoder, Some("/flag-te".to_string()));
+        std::env::remove_var("BRAIN_LTXV_DIT");
+        std::env::remove_var("BRAIN_LTXV_TEXT_ENCODER");
     }
 
     #[test]
     fn a_bad_frame_count_is_rejected_before_any_weight_is_read() {
-        let paths = Paths { vae: "/nope".into() };
+        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None };
         let o = GenOpts { frames: 8, ..GenOpts::default() };
         let e = generate(&paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("1 + 8k"), "{e}");
@@ -1003,7 +1266,7 @@ mod tests {
         seen: std::cell::RefCell<Vec<f32>>,
     }
     impl Denoiser for FakeDit {
-        fn forward(&self, latent: &[f32], _sigma: f32, _positions: &[f32], _keyframes_mask: &[f32], context: &[f32], _context_len: usize, _t: usize) -> Vec<f32> {
+        fn forward(&self, latent: &[f32], _sigma: f32, _positions: &[f32], _keyframes_mask: &[f32], context: &[f32], _context_len: usize, _context_valid: &[f32], _t: usize) -> Vec<f32> {
             self.seen.borrow_mut().push(context[0]);
             vec![context[0]; latent.len()]
         }
@@ -1015,7 +1278,8 @@ mod tests {
         let positions = grid_positions(1, 1, 1);
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
-        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, 1, guidance, eta, 1.0, 7, 4, &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        let context_valid = vec![1.0f32; 1];
+        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, guidance, eta, 1.0, 7, 4, &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         let seen = dit.seen.borrow().clone();
         (seen, out)
     }
@@ -1059,9 +1323,10 @@ mod tests {
         let positions = grid_positions(1, 1, 1);
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
+        let context_valid = vec![1.0f32; 1];
         let cancel = capability::CancelToken::armed();
         let handle = cancel.clone();
-        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, 1, 1.0, 0.0, 1.0, 7, 6, &cancel, &mut |step, _, _: &str| {
+        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, 1.0, 0.0, 1.0, 7, 6, &cancel, &mut |step, _, _: &str| {
             if step == 2 {
                 handle.cancel();
             }

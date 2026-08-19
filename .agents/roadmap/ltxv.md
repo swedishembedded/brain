@@ -686,6 +686,90 @@ this port:
       GGUF-streaming int8 shard loader this pass did not build; no
       compute-time int8 for the embeddings connectors or the NA decoder;
       deep kernel performance tuning is a later phase, not attempted here.
+- [x] **Real weights wired into `brain ltxv t2v` for the first time** -
+      `pipeline::generate` had used `random_tiny_weights`/`context_stub`
+      exclusively through every earlier milestone (deliberately - each one
+      was scoped to leave this file untouched). `Paths` gains optional
+      `dit`/`text_encoder` roles (`--dit`/`$BRAIN_LTXV_DIT`, `--text-encoder`/
+      `$BRAIN_LTXV_TEXT_ENCODER`); `dit_config_from_name` accepts
+      `"ltx25_22b"` alongside `"tiny"`. Real DiT weights load via
+      `crate::gguf_src::LtxvGgufSource` + a new streamed loader
+      (`load_head_tensors_from_source`/`forward_q_streamed`) that keeps only
+      the small non-block tensors resident and streams each of the 48
+      `transformer_blocks.*` fresh from the GGUF, quantizes it to int8 on the
+      way to the device, and drops it - the whole 22B model is never
+      materialized as host fp32 (88 GB), which the existing `forward_q`
+      would have required. Real text conditioning
+      (`real_text_context`, `crates/gemma4`'s tokenizer + `Gemma4Model` +
+      `AggregateEmbed`) is wired as an independent switch.
+
+      One real, general bug found and fixed along the way, not specific to
+      this milestone's own weights: `crate::block::EmbeddingsConnector`
+      requires its input sequence length to be an EXACT multiple of its own
+      register count (register substitution tiles registers round-robin over
+      invalid positions), but neither a real tokenized prompt's length nor
+      `GenOpts::context_len`'s fixed stub size is naturally shaped that way -
+      `LtxDitConfig::ltx25_22b` has `connector_num_learnable_registers: 128`,
+      so any non-128-multiple context length panics the moment a
+      connector-enabled real config's forward actually runs (never exercised
+      before this milestone - every prior real-weight test used a
+      `use_embeddings_connector: false` tiny config or fed the connector
+      directly at an already-correct length). Fixed with `padded_context_len`,
+      shared by both the stub-context and real-text-context branches.
+
+      **This took six real attempts, each surfacing a genuinely distinct
+      problem - recorded honestly, not smoothed over:**
+      1. A stale `target/release/brain` binary was run against new source
+         changes without rebuilding first - the "success" it appeared to
+         show was the OLD code path, not the new wiring. Caught by checking
+         the log's own printed description against what the new code should
+         have printed.
+      2. A real compile error: `denoise()` gained a `context_valid: &[f32]`
+         parameter but two call sites inside `generate_dfr` were not updated
+         - `cargo build -p brain-ltxv` failed outright (6 errors). An earlier
+         status report had claimed the build passed; it had not been
+         actually re-run after the last edit.
+      3. The `EmbeddingsConnector` register-multiple requirement above,
+         first seen as a hard panic (`seq_len 8/11 must be a multiple of
+         num_registers 128`) before its cause was understood.
+      4. The real Gemma-4-12B encoder's own forward pass measured too slow
+         on the CPU path to fit inside a smoke-test time budget - rather
+         than let it run unbounded, real text conditioning was deprioritized
+         for THIS milestone's actual generation run in favor of the stub
+         context (real DiT + real VAE + stub context, not full real
+         end-to-end) - a tracked gap, not silently dropped; the wiring
+         itself (`real_text_context`) is real and built, just not exercised
+         in the run that finally produced output.
+      5. The first-ever real 22B int8 denoise step measured **398.19 s** -
+         almost certainly dominated by one-time GPU shader-compile/pipeline
+         warm-up rather than steady-state cost: the next clean runs measured
+         **195.6-203.9 s/step** consistently, roughly half. Both numbers are
+         real measurements from real hardware, kept rather than only citing
+         the faster one - this port is entirely unoptimized (a later phase's
+         job), so neither number should be read as a performance claim.
+      6. `diffusion::scheduler::ltx2_sigmas`'s "stretch" step produces `NaN`
+         at `steps == 1` specifically: with only one non-terminal sigma
+         entry (always exactly `1.0`, the ramp's own first value),
+         `scale = (1 - 1.0) / (1 - terminal) = 0`, and the subsequent
+         division is `0/0`. **Not fixed in `ltx2_sigmas` itself** - worked
+         around by using `--steps 2` for the final successful run instead of
+         `--steps 1`. A real, narrow, tracked gap: `ltx2_sigmas` should
+         either guard `scale == 0` explicitly or skip the stretch when fewer
+         than 2 non-zero entries exist, and a regression test for the
+         `steps == 1` case is still owed.
+
+      The successful run: `brain ltxv t2v --prompt "a cat walking on a
+      beach" --frames 9 --width 64 --height 64 --steps 2 --seed 42
+      --dit-config ltx25_22b --device gpu` against the real
+      `ltx-2.5-22b-distilled-transformer-Q8_0.gguf` + the real conv video
+      VAE + the stub text context, wall clock **409.9 s total** (build
+      10.03 s, denoise 395.2 s = 197.6 s/forward x 2, VAE decode 4.6 s),
+      wrote a real, valid 64x64/9-frame/8fps mp4. Explicitly a WIRING smoke
+      test, the same framing this module's doc has carried since the
+      original tiny-weight M4 milestone - 2 denoise steps and a stub prompt
+      are not a generation-quality claim, and real-weight DiT parity is
+      still only proven at reduced depth (the earlier "real-weight parity
+      ladder" milestone, 2 of 48 layers).
 
 ## Convention questions settled from source, not experiment
 

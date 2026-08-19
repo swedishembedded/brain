@@ -35,6 +35,11 @@ serde_json.workspace = true
 # `audio::conv::{Conv1d, conv1d_fwd, convtr1d_fwd}` - the vocoder's 1D
 # (transposed) conv `Step`-builders, reused rather than reimplemented.
 brain-audio.workspace = true
+# The real Gemma-4-12B text encoder (`crate::pipeline`'s real-checkpoint
+# text-context path) - `Gemma4Model::forward` + `AggregateEmbed` + the
+# checkpoint-embedded tokenizer, replacing `crate::pipeline::context_stub`
+# when a real text-encoder checkpoint is configured.
+brain-gemma4.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
