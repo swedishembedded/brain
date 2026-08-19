@@ -10,10 +10,10 @@
 //! Method follows the shared `gpu_core::profile`/`gpu_core::roof` facility
 //! (`crates/vqgan/src/bin/vqgan_bench.rs`, `crates/qwen3/src/bin/qwen_bench.rs`
 //! are the precedent) rather than a hand-rolled per-kind loop: one whole-pass
-//! timing plus a per-kind breakdown, graded against this DEVICE's own
-//! measured roofline (never a hardcoded peak - this host has no discrete
-//! card, only an integrated GPU, so a P40 literal would be a statement about
-//! hardware that is not here).
+//! timing plus a per-kind breakdown, graded against the selected DEVICE's own
+//! measured roofline (never a hardcoded peak - an integrated GPU with no
+//! discrete card present would make a P40 literal a statement about
+//! hardware that is not there).
 //!
 //! ## Why the DiT bench replays FEWER than 48 layers, at REAL width
 //!
@@ -21,8 +21,9 @@
 //! (this port's own architecture note; `crate::config`'s doc has every other
 //! flag). Building that many DISTINCT weight sets, even zero-filled, is ~1.07 GB per
 //! layer in f32 (16*dim^2 + 23*dim floats,
-//! `crate::dit::dit_tensor_manifest`) - 48 layers is ~51 GB, and this host
-//! has ~24 GB free (`free -h`), so that is a real OOM, not a caution.
+//! `crate::dit::dit_tensor_manifest`) - 48 layers is ~51 GB, well past the
+//! free RAM a modest box has (`free -h`), so that is a real OOM, not a
+//! caution.
 //!
 //! [`LtxBlock::build_steps`] sidesteps the WEIGHT half of that entirely: a
 //! dispatch's cost is a pure function of its shape, not the values in its
@@ -41,15 +42,16 @@
 //! `[heads, tokens, tokens]` self-attention score matrix and the FFN's
 //! `[tokens, 4*dim]` hidden buffers) is ~0.51 GB at this bench's default
 //! `tokens=512`/`ctx_len=256`. 48 layers chained into ONE submit would need
-//! ~24 GB of CONCURRENTLY live scratch - this host's entire free RAM
-//! (`free -h`, checked before writing this bench), with nothing left for the
-//! OS, the weights, or the two other agents building in this same tree. So
-//! the default below is `layers=8` (~4.1 GB of scratch) - "4-8 real-width
-//! layers" per this milestone's own scoping - not because the WEIGHTS don't
-//! fit (they always do, by construction above) but because a single-submit
-//! PROFILE of more layers needs more concurrent scratch than this host has
-//! spare. Override `layers`/`tokens` if run on a bigger box; the per-kernel-
-//! kind SHARES (not just the totals) are the number that matters and are not
+//! ~24 GB of CONCURRENTLY live scratch - easily a modest box's entire free
+//! RAM (`free -h`, checked before writing this bench), with nothing left for
+//! the OS, the weights, or any other build/test activity sharing the same
+//! machine. So the default below is `layers=8` (~4.1 GB of scratch) -
+//! "4-8 real-width layers" per this milestone's own scoping - not because
+//! the WEIGHTS don't fit (they always do, by construction above) but because
+//! a single-submit PROFILE of more layers needs more concurrent scratch than
+//! a modest box has spare. Override `layers`/`tokens` if run on a bigger box;
+//! the per-kernel-kind SHARES (not just the totals) are the number that
+//! matters and are not
 //! expected to move much with layer count, since every layer dispatches the
 //! identical shape sequence.
 //!

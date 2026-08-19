@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Pipeline-parallel sharding (`crate::shard`'s `Shardable` impl for
-//! `LtxDit`) proven the only way this host's single GPU allows: fully
+//! `LtxDit`) proven the only way a single-GPU run allows: fully
 //! EXECUTED degenerate/boundary cases, not a mocked second device. See
 //! `ltxv::shard`'s module doc for the full design and its explicit gaps
-//! (no real multi-device run is possible here; cost-model/partition-plan
+//! (no real multi-device run is exercised by this test file; cost-model/partition-plan
 //! correctness is covered separately by `crate::shard`'s own unit tests,
 //! which need no forward pass at all).
 //!
@@ -127,7 +127,7 @@ fn single_shard_matches_the_non_sharded_reference() {
 /// A genuine two-stage split (real block-range partition - stage 0 owns
 /// block 0, stage 1 owns block 1, NOT both secretly owning everything), the
 /// boundary handed off through `write_in_res`/`read_out_res`, run
-/// SEQUENTIALLY on the one device this host has (not concurrently on two -
+/// SEQUENTIALLY on a single device (not concurrently on two -
 /// see `ltxv::shard`'s module doc for why that is the honest limit here).
 /// Composed result checked against the same non-sharded reference: this
 /// proves the boundary handoff itself, not just the whole-shard passthrough

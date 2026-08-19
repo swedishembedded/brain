@@ -58,7 +58,7 @@ fn run(gpu: Gpu) {
     let logits = m.logits_all(&tokens);
 
     // Achieved in practice: cosine 1.0000000000, rel_l2/max_abs ~1e-7 at
-    // every stage (fp32 float-op-order noise between this host replay and
+    // every stage (fp32 float-op-order noise between this replay and
     // the reference's own torch ops) - the floor stays well above that so a
     // real regression (not just fp32 noise) trips it.
     let mut table = Table::new(0.999999, 1e-4);

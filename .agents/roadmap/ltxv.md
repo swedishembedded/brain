@@ -442,12 +442,13 @@ this port:
       single-shard degenerate case (one stage owns every block) matches
       non-sharded `LtxDit::forward` at cosine=1.000000000, max_abs=0.000e0;
       a genuine two-stage split (real block-range partition, boundary handed
-      off through `write_in_res`/`read_out_res`, run sequentially on this
-      host's one GPU) composes to the same cosine=1.000000000, max_abs=0.000e0
+      off through `write_in_res`/`read_out_res`, run sequentially on a
+      single GPU) composes to the same cosine=1.000000000, max_abs=0.000e0
       against the same reference. Explicit, tracked gaps: no real multi-device
-      execution was or could be performed (this host has exactly one GPU -
-      the two-stage test proves the boundary-handoff logic is correct, not
-      that two real cards agree); `LtxDit` has no backward/training pass at
+      execution was or could be performed at this milestone (only one GPU
+      was available at the time - the two-stage test proves the
+      boundary-handoff logic is correct, not that two real cards agree);
+      `LtxDit` has no backward/training pass at
       all (`Shardable::run_backward_stage`/`read_in_dres`/`write_out_dres`
       and `Model::backward`/`read_grad`/`write_weight` all `unimplemented!()`
       loudly, matching this repo's own honest-loud-stub precedent rather than
@@ -471,13 +472,13 @@ this port:
       formula in `crates/gpu-core/src/cost.rs` so the DiT pass's whole-pass
       rate is computable. DiT table: real width (`inner_dim=4096`, 32 heads),
       1 of 48 real layers at 64 tokens/32 context (108 dispatches) - forced
-      down from the planned 8-layer/512-token shape by genuine host GPU
+      down from the planned 8-layer/512-token shape by genuine GPU
       contention (three parallel agents plus a coordinator all profiling/
-      testing on this box's one GPU at once; confirmed via `/proc/<pid>/wchan
+      testing on the same single GPU at once; confirmed via `/proc/<pid>/wchan
       == drm_syncobj_array_wait_timeout`, a real fence wait, not a bug) that
       also made absolute timings untrustworthy this pass (the identical
       108-dispatch graph measured 5.01 s vs 14.02 s back to back) and revealed
-      this host's device-timestamp-query kernel attribution is unreliable
+      the device-timestamp-query kernel attribution on that machine is unreliable
       (one run attributed 1.17M ms to a 2-call kernel against a 14 s whole-
       pass total) - both recorded as killed hypotheses, not findings about the
       kernels. `matmul` (the 8 attention projections + 2 FFN matmuls per
@@ -504,9 +505,9 @@ this port:
       `depth_to_space3d`, `add_chan_bcast`) have no `gpu_core::cost` formula
       yet, so the VAE pass's whole-pass GFLOP/s rate reads unavailable; a
       re-run of the DiT bench at the originally planned 8-layer/512-token
-      shape on a quiet host; investigating the device-timestamp-query path
-      before trusting DEVICE-timed (not HOST-bracketed) per-kernel numbers on
-      this host/backend.
+      shape on an uncontended device; investigating the device-timestamp-query
+      path before trusting DEVICE-timed (not machine-clock-bracketed)
+      per-kernel numbers on this backend.
 - [x] **NPU export - deliberate scope exclusion, not a silent omission.**
       `crates/npu/src/lib.rs`'s `NpuModel` trait has exactly three real
       implementors (`DepthNpuModel`, `Chronos2NpuModel`, `FincastNpuModel`),
@@ -521,12 +522,12 @@ this port:
       structurally an edge-inference target for models far smaller than a 22B
       video DiT in this repo's own portfolio; this model's real deployment
       targets are GPU/CPU. NPU firmware is also already a recorded, diagnosed-
-      elsewhere blocker on this exact host (`.agents/roadmap/dtype.md`:
+      elsewhere blocker (`.agents/roadmap/dtype.md`:
       `/dev/accel/accel0` is present and `Inventory::probe().npus == 1`, but
       the firmware is not functional, so `NpuConfig{allow_fallback:true}`
       silently retargets OpenVINO's GPU plugin instead of erroring) - not
       re-diagnosed here, cited as the already-settled reason a working NPU
-      path could not even be smoke-tested on this hardware regardless of the
+      path could not even be smoke-tested regardless of the
       scale question. If NPU export is ever revisited for `ltxv`, the open
       question is architectural first: is there ANY small fixed-shape core
       worth exporting (the embeddings connector, or the duration head - both
@@ -573,7 +574,7 @@ this port:
          loosened one). Shape: grid `(2,2,2)` -> 8 tokens, context_len 6 - the
          SAME small shape `ltxv_dit_dump_reference.py`'s `TINY_CONFIG`/`GRID`
          already establish, per this task's own small-first constraint;
-         real-weight-subset load ~25 s, forward ~19 s on this host's CPU-JIT
+         real-weight-subset load ~25 s, forward ~19 s on the CPU-JIT
          path. Dumper run itself (real GGUF -> golden) took ~3.5 min, mostly
          a pure-Python Q8_0 decode loop over ~2.7 GB of real Q8_0 blocks - the
          one step in this milestone that ran past the "a few minutes" target,
@@ -609,11 +610,32 @@ this port:
       (both embeddings connectors' own real-weight parity is unattempted -
       8 more real-width layers plus 128 learnable registers apiece, a
       materially bigger check than the block-stack gate above), Q8_0 only
-      (Q4_K_M untested - no such file was on this host this session), and no
+      (Q4_K_M untested at this milestone), and no
       int8/int4 COMPUTE parity (Phase 5 territory - there is no compute-time
       int8 kernel yet for the DiT to compare against, so the plan's
       "int8-vs-fp32 at the model level" comparison is deferred wholesale,
       not attempted at a reduced bar).
+- [x] **Audio golden regenerated via a librosa-backed `torchaudio` shim**
+      (`tools/goldens/torchaudio_shim/`) - the audio VAE/vocoder dumper
+      (`tools/goldens/ltxv_audio_dump_reference.py`) needs `torchaudio` only
+      for one self-check (`torchaudio.transforms.MelSpectrogram` at
+      `mel_scale="slaney", norm="slaney"`, cross-checked against the
+      dumper's own primary mel computation), and a real environment can end
+      up with a CUDA-linked `torchaudio` wheel that will not load against a
+      CPU-only torch build. Rather than leave `testdata/golden/ltxv/audio/
+      audio.safetensors` unregeneratable, a small stand-in package
+      (`tools/goldens/torchaudio_shim/torchaudio/`) reimplements exactly
+      that one call using `librosa.filters.mel(..., htk=False,
+      norm="slaney")` + `librosa.stft` - the documented interoperability
+      target `torchaudio`'s own slaney mode is designed to reproduce.
+      Run with `PYTHONPATH=tools/goldens/torchaudio_shim` prepended when a
+      real `torchaudio` will not import; the dumper itself is unmodified.
+      Verified, not assumed: the dumper's own self-check reported
+      `max_abs == 0.0` between the shim and its primary computation (i.e.
+      bit-exact agreement with the algorithm the shim stands in for), and
+      all 6 `crates/ltxv/tests/audio_parity.rs` tests (previously silently
+      skipping - the golden was simply absent, a lesson-#1-shaped gap of its
+      own) now pass for real under `BRAIN_REQUIRE_FIXTURES=1`.
 
 ## Convention questions settled from source, not experiment
 
@@ -685,32 +707,16 @@ land. Known traps already identified from reading (not yet test-pinned):
   (`LtxAvDit`), either embeddings connector's own real-weight parity, the
   Q4_K_M quant tier, and any int8/int4 COMPUTE-path comparison (no such
   kernel exists yet for the DiT - `crate::int8` is storage-format-only).
-- Audio VAE/vocoder golden fixture (`testdata/golden/ltxv/audio/audio.safetensors`,
-  `tools/goldens/ltxv_audio_dump_reference.py`) cannot be regenerated on this
-  host: the dumper's mel-front-end self-validation imports `torchaudio`, and
-  no working CPU build exists for the installed `torch==2.13.0+cpu` here -
-  every candidate (`pip install torchaudio`, and `torchaudio==2.9.0`/`2.11.0`
-  pinned explicitly via `--index-url https://download.pytorch.org/whl/cpu`)
-  resolves to a CUDA-linked `_torchaudio.abi3.so` that fails to load
-  (`OSError: libcudart.so.13: cannot open shared object file`) - a genuine
-  package-index mismatch, not a code defect. `ltxv_audio_encoder_matches_
-  reference`/`ltxv_audio_decoder_matches_reference`/`ltxv_vocoder_matches_
-  reference`/`ltxv_audio_vae_round_trip` (`crates/ltxv/tests/audio_parity.rs`)
-  therefore still skip on this host; the two import-coverage tests in the
-  same file (which need only the real checkpoint, not this golden) pass.
-  Regenerate on a host with a working `torchaudio` CPU install, or patch the
-  dumper to make its one `torchaudio.transforms.MelSpectrogram` cross-check
-  optional - neither attempted here.
-- 12B Gemma-4 real-weight parity: not run. The 26 GB bf16 checkpoint IS now
-  local on this host (`~/.local/share/brain/models/Lightricks/LTX-2.5/
-  gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`, verified byte-exact +
-  structurally against the real header) - the "needs hardware that can hold
-  the checkpoint" reason no longer applies. Genuinely unattempted, out of
-  scope for the DiT real-weight milestone above (which did not touch
-  `crates/gemma4`) - remains open for a dedicated pass.
+- 12B Gemma-4 real-weight parity: not run. The 26 GB bf16 checkpoint has
+  since been fetched and verified byte-exact + structurally against the real
+  header (`gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`) - the "needs
+  hardware that can hold the checkpoint" reason no longer applies.
+  Genuinely unattempted, out of scope for the DiT real-weight milestone
+  above (which did not touch `crates/gemma4`) - remains open for a
+  dedicated pass.
 - NPU device execution: `ltxv` gets no `NpuModel` implementation at all this
   port (see the M9 perf entry's NPU write-up above for the full reasoning) -
-  the firmware-not-functional blocker on this exact host is separately
+  the firmware-not-functional blocker is separately
   diagnosed in `.agents/roadmap/dtype.md`, not re-run here.
 - `vae::blocks3d` has no backward (`blocks/grad.rs` only covers the 2D builder),
   so video-VAE fine-tuning is out of scope until that lands separately.
@@ -732,9 +738,9 @@ land. Known traps already identified from reading (not yet test-pinned):
   needs the DiT's own performance profile to say arithmetic is the
   bottleneck first, per porting.md sec10 point 6.
 - No real multi-device pipeline-parallel execution has been run for `LtxDit`
-  (`model::Shardable`) - this host has exactly one GPU, so only the
+  (`model::Shardable`) at this milestone - only the
   single-shard degenerate case and a sequential two-stage boundary-handoff
-  test could be executed; two real cards agreeing is unverified.
+  test on a single GPU have been executed; two real cards agreeing is unverified.
 - `LtxDit` has no backward/training pass through the `model::Shardable`/
   `model::Pipeline` seam - `crate::grad`/`crate::modelgrad`'s existing
   host-math training path is separate and does not build on it.

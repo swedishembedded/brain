@@ -131,7 +131,7 @@ def build_decoder(weights_path):
     COMBINED pathway (`CombinedDiffusionNABlock`, full-volume attention,
     `w_chunks=1` - what `DiffVAEMode.COMBINED_COMPILE` selects in
     production, minus `torch.compile`) with the eager tiled-SDPA NA backend
-    (no `natten`/Triton dependency needed on this host - this IS this port's
+    (no `natten`/Triton dependency needed - this IS this port's
     correctness oracle, not a fallback being tolerated).
     """
     loader = SafetensorsModelStateDictLoader()

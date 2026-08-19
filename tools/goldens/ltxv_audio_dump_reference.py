@@ -18,6 +18,14 @@ The bandwidth-extension (BWE) stage and its checkpoint-basis causal STFT
 - only the base `Vocoder` (checkpoint config `vocoder.vocoder`) is dumped,
 never `vocoder.bwe_generator`/`vocoder.mel_stft`.
 
+If `import torchaudio` fails (a real failure mode: a CUDA-linked wheel that
+will not load against a CPU-only torch build), run with
+`PYTHONPATH=tools/goldens/torchaudio_shim` prepended - a small librosa-backed
+stand-in for exactly the one call this script makes
+(`torchaudio.transforms.MelSpectrogram(..., mel_scale="slaney",
+norm="slaney")`), verified bit-exact (`max_abs == 0.0`) against the real
+library's algorithm by this script's own self-check.
+
 ## Weight loading
 
 `ltx_core.model.audio_vae.model_configurator` ships `AudioEncoderConfigurator`

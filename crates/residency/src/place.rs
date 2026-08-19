@@ -160,8 +160,8 @@ pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
         }
     }
     // Same CPU-fallback shape as pick_device: a weight-holding model spills to
-    // CPU only when the accelerator class it needs doesn't exist on this host
-    // at all — an EXISTING but merely-full accelerator is not an invitation
+    // CPU only when the accelerator class it needs doesn't exist at all - an
+    // EXISTING but merely-full accelerator is not an invitation
     // to spill to RAM, it is exactly the eviction case the caller must try.
     let cpu_need = cost
         .ram

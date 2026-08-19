@@ -58,12 +58,12 @@
 //! * A genuine two-stage split (real block-range partition, NOT both stages
 //!   secretly owning everything) with the boundary handed off through
 //!   [`LtxDit::write_in_res`]/[`LtxDit::read_out_res`], run sequentially on
-//!   the one device this host has, composed and checked against the same
+//!   a single device, composed and checked against the same
 //!   non-sharded reference.
 //!
 //! Explicit gaps, not silently glossed over:
-//! * **No real multi-device execution.** This host has exactly one GPU; nothing
-//!   here has been run, or could be run, with two stages resident on two
+//! * **No real multi-device execution proven by this test file's own
+//!   coverage.** A single-GPU run cannot exercise two stages resident on two
 //!   different physical devices. The two-stage test above proves the
 //!   BOUNDARY HANDOFF is correct, not that two real cards agree.
 //! * **No backward pass.** [`LtxDit`] has no gradient/training machinery at
@@ -341,7 +341,7 @@ mod tests {
     /// [`plan_balanced`] over [`Shardable::shard_cost`] produces a sane,
     /// well-formed partition - no forward pass required, this is a pure
     /// cost-model/partition-logic check. Run at two scales: the tiny test
-    /// config (a config this host can actually instantiate) and the REAL
+    /// config (small enough to actually instantiate) and the REAL
     /// LTX-2.5 22B config's shape (48 layers, `inner_dim` 4096 = 32 heads x
     /// 128) - the cost model only needs the layer count and per-layer dims,
     /// which does not require building or running the 22B checkpoint itself
@@ -372,8 +372,8 @@ mod tests {
     #[test]
     fn plan_balanced_is_well_formed_for_the_real_22b_config_shape() {
         // The real LTX-2.5 video stream: 48 layers, 32 heads x 128 = 4096
-        // `inner_dim` - too large to instantiate on this host (see this
-        // crate's own module doc), but `shard_cost` only reads `cfg`'s
+        // `inner_dim` - too large to fully instantiate on modest hardware
+        // (see this crate's own module doc), but `shard_cost` only reads `cfg`'s
         // plain numeric fields, so the PLAN can be computed without ever
         // allocating the 22B checkpoint's weights.
         let cfg = LtxDitConfig {
