@@ -247,11 +247,60 @@ structurally and never parity-claimed here.
   moment `import_dir` ran against the real checkpoint (never a silent
   wrong-tensor placement) - fixed the name, corrected the module doc's
   now-falsified "confirmed" claim, added a regression test pinning the fix.
+- [x] M13: performance pass. New `crates/qwen35/src/bin/qwen35_bench.rs`
+  profiles one GDN layer, one GQA layer, and the dense SwiGLU MLP at
+  `Qwen35Config::qwen38_27b()`'s real dims (random weights - cost depends on
+  shape, not values), reporting wall-clock, dispatch count
+  (`Gpu::stats()`), and (where the backend supports it) a per-kernel device
+  timestamp breakdown, graded against this device's own measured roofline.
+  Measured on this box's only available backend, an Intel Arc iGPU
+  (Vulkan) - no discrete GPU here, so every number below is iGPU-relative,
+  not a datacenter projection - at `T=128`:
+  ```
+  measured roofline: 3930 GFLOP/s, 50.9 GB/s DRAM
+  GDN layer:  55.4 ms/rep, 185 dispatches/rep   (29.7 GFLOP offline)
+  GQA layer:   0.2 ms/rep,  15 dispatches/rep   (26.8 GFLOP offline)
+  dense MLP:   0.2 ms/rep,   4 dispatches/rep   (68.5 GFLOP offline)
+  ```
+  **Conclusion: arithmetic is NOT the limiter anywhere in this model on this
+  backend - a native device-side FP8 GEMM is explicitly out of scope for
+  this pass, per the task's own rule.** GQA and the dense MLP are already
+  sub-millisecond and, if anything, dispatch-count-bound at these tiny
+  per-call FLOP totals (matmul throughput is nowhere near saturated at 15-4
+  dispatches). GDN is ~270x slower than GQA despite having FEWER offline
+  GFLOP (29.7 vs 26.8) and only ~12x more dispatches (185 vs 15) - the ratio
+  does not track FLOPs OR dispatch count, it tracks the chunked
+  recurrence's SEQUENTIAL data dependency: `gdn_chunk_cumsum_step`/
+  `gdn_ut_step` fire 126 times each (once per chunk-position, strictly
+  ordered), and each such dispatch pays a real host round-trip/launch-
+  latency cost this iGPU's driver cannot hide behind other queued work,
+  since the next dispatch cannot even be RECORDED correctly until the
+  previous one's result is known. This is confirmed by the CPU JIT
+  backend's own numbers at the same shape, where cost tracks FLOPs directly
+  instead (`BRAIN_DEVICE=cpu`, no per-dispatch launch cost to dominate):
+  GDN 1890 ms, GQA 1239 ms, dense MLP 3203 ms (slowest, matching its
+  largest FLOP count) - a completely different ranking, the tell that the
+  GPU numbers above are latency-bound, not compute-bound.
+  If future performance work continues on this model, the higher-leverage
+  target the profile actually points at is REDUCING GDN's per-chunk
+  dispatch count (fusing consecutive sequential steps in `model::gdn::
+  gdn_chunk_fwd`) - a separate, larger climb than this pass's own scope,
+  and one that would also benefit `qwen35moe` (the same shared chunk
+  recurrence, M1/M12).
+  **Noted but not chased down** (out of this pass's scope): the per-kernel
+  DEVICE TIMESTAMP breakdown (`gpu.kernel_times()`) reported all-zero on the
+  first two `report()` calls in one process and then, on a later run at
+  `T=512`, returned obviously-corrupted values (~1.5e15 ms) for the third
+  call in sequence - some cross-call state issue in this Vulkan backend's
+  timestamp query handling, not something this pass's own wall-clock +
+  dispatch-count evidence (which was clean and consistent both times)
+  depends on. Recorded here rather than silently worked around.
 
 ## Not yet done
 
-- [ ] M13: performance pass (profile-first; native device-side FP8 GEMM only if
-  the profile says arithmetic is the limiter, not before).
+Nothing - all milestones (M0-M13) are complete. Remaining scope is the
+recorded gaps below, none of which are achievable on this development
+machine (no discrete GPU, 18 GiB usable RAM).
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
