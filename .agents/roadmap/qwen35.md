@@ -296,11 +296,92 @@ structurally and never parity-claimed here.
   dispatch-count evidence (which was clean and consistent both times)
   depends on. Recorded here rather than silently worked around.
 
+- [x] M14: int8 (DP4A) weight tier. Unlike qwen35moe's own `q8.rs` (a
+  bespoke, model-owned quantizer), this model dispatches every one of its 12
+  per-layer mixer/MLP linears (5 GDN `in_proj_{qkv,z,b,a}`/`out_proj`, 4 GQA
+  `{q,k,v,o}_proj`, 3 MLP `gate`/`up`/`down`) through the shared
+  `model::ops::{Ops, Weight}` façade - see `crate::model::is_i8_linear`'s own
+  doc for the exact leaf-name list, and the module doc's "int8 (DP4A)
+  inference tier" note for the kernel wiring
+  (`max_abs_row`/`quant_pack`/`matmul_i8_dyn`, appended to what is now
+  `crate::model::pipelines()` - a `OnceLock`-cached function, replacing the
+  old `PIPELINES` const so the int8 façade kernels and the bf16/f16 dtype
+  variants `Ops::REQUIRED_KERNELS` demands can be appended without a second
+  hand-maintained list). `Qwen35::new_i8`/`Qwen35::new_on_i8` build the
+  quantized instance (inference-only - asserted mutually exclusive with
+  `new_train_on`'s LoRA/full-finetune path); `caps.rs` gained a `precision`
+  manifest param (`fp32`/`int8`) wired into the `qwen35 generate` action's
+  `Hot` cache key, so switching precision rebuilds the resident model. The KV
+  cache itself stays fp32 always (no int8 KV path, matching qwen35moe's own
+  documented scope note).
+  **Verification, exact test names and measured numbers:**
+  - `cargo test -p brain-qwen35 --lib --bins --tests` (`--test-threads=8`):
+    18 test binaries, all green, 0 failed (including the two new ones
+    below) - `int8_real_weight_sanity.rs`'s 2 tests self-skip (`ignored`)
+    without `BRAIN_QWEN35_DIR`, `real_weight_streaming.rs`'s pre-existing 4
+    likewise.
+  - `crates/qwen35/tests/model_i8_smoke.rs` (fresh tiny-init weights, no
+    real checkpoint needed) - `--nocapture` output:
+    `tiny_cfg_clears_the_int8_packing_bar` ok;
+    `int8_model_excludes_quantized_names_from_the_fp32_param_store` ok;
+    `int8_forward_tracks_fp32_within_quant_tolerance_default_backend`
+    (Intel Arc iGPU, Vulkan): cosine=0.999999999 rel_l2=0.000033401;
+    `int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion`
+    (CPU JIT - `Weight::upload` demotes int8 requests it can't execute back
+    to fp32, so this is a same-arithmetic sanity check, not a quantization
+    check): cosine=1.000000000 rel_l2=0.000000000;
+    `int8_forward_covers_the_mtp_head_when_mtp_is_enabled`: cosine=0.999999999.
+  - `crates/qwen35/tests/int8_real_weight_sanity.rs`, run against the REAL
+    `Qwen/Qwen3.8-27B-FP8` checkpoint (`BRAIN_QWEN35_DIR=/data/workspace/
+    resources/qwen3.8 cargo test -p brain-qwen35 --test
+    int8_real_weight_sanity -- --ignored --nocapture`): both
+    `layer_0_gated_delta_net_int8_tracks_fp32_on_real_weights` and
+    `layer_3_gated_gqa_int8_tracks_fp32_on_real_weights` pass - every one of
+    the 15 real-weight leaves checked (8 in layer 0's GDN mixer + MLP, 7 in
+    layer 3's GQA mixer + MLP) scores cosine in [0.999928306, 0.999951862]
+    against the fp32 tier on the SAME real dequantized weight values (not a
+    full-model forward - see that file's own doc for why a real 27B forward
+    still can't be built on this box). Peak RSS stayed well under the 16 GB
+    self-imposed ceiling (one layer streamed at a time, same discipline as
+    M10's `real_weight_streaming.rs`).
+  - Full regression sweep, all green: `cargo test -p brain-gradcheck --lib`
+    (51 tests, including `qwen35_analytic_grads_match_finite_differences`,
+    `qwen35_lora_analytic_grads_match_finite_differences`,
+    `qwen35_mtp_analytic_grads_match_finite_differences`,
+    `qwen35_a_log_elementwise_grads_match_finite_differences` - the int8
+    wiring only touches the forward-only `new_i8`/`new_on_i8` paths, but the
+    shared `ops_linear` dispatch point sits inline in the fp32/LoRA forward
+    too, so these confirm backward is unaffected); `cargo test -p
+    brain-gradcheck` (full integration suite, 20 test binaries); `cargo test
+    -p brain-model` (35 test binaries, including
+    `gdn_mixer_equivalence.rs`'s 2 hoisted-mixer cross-pipeline tests);
+    `cargo clippy -p brain-qwen35 -p brain-qwen35moe -p brain-gradcheck -p
+    brain-model --all-targets -- -D warnings` exits 0, 0 warnings; `make
+    clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
+    baseline; `make build` (dev profile, whole workspace) succeeds; `make
+    gradcheck` succeeds (20 test binaries, 0 failed).
+  Found and fixed one real bug while doing this: `crates/cli/src/
+  qwen35_cli.rs`'s `infer` subcommand still imported the old `qwen35::
+  model::PIPELINES` const directly - the `pipelines()` function this
+  milestone introduced (a `OnceLock`-cached appender, needed so the int8
+  façade kernels and `Ops::REQUIRED_KERNELS`'s dtype-variant kernels have
+  somewhere to be added without a second hand-maintained kernel-index list)
+  broke that one caller. Fixed by switching the CLI to `pipelines()` too;
+  caught by the whole-workspace `make clippy` gate, not by the
+  crate-scoped one (a scoped clippy/test run cannot see a caller living in
+  a different crate).
+  **Not done, left for a future pass**: no int8 KV cache; no int8 tier
+  wired into `crate::serve::Engine` (the paged serving path still always
+  builds fp32); the CLI's `qwen35 infer` subcommand (as opposed to the
+  `qwen35 generate` capability action) has no `--precision` flag of its
+  own, so it never builds an int8 model directly, only via the caps path.
+
 ## Not yet done
 
-Nothing - all milestones (M0-M13) are complete. Remaining scope is the
+Nothing - all milestones (M0-M14) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM).
+machine (no discrete GPU, 18 GiB usable RAM), plus M14's own "not done"
+items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
@@ -310,8 +391,6 @@ machine (no discrete GPU, 18 GiB usable RAM).
 - No multi-GPU shard parity (`discrete_gpu_count() == 0` self-skips it) - and note
   qwen35moe's own `shard_parity.rs` does not run on this machine either, so any
   claim it protects a refactor here is a claim about a different machine.
-- No int8 tier at all for this crate (no `q8.rs`, unlike qwen35moe) - not in
-  the approved M11 scope; `caps.rs` has no `precision` param as a result.
 - No serving throughput/latency or residency measurement on real weights.
 - MTP head: structurally implemented, **no reference oracle** (see above) -
   gradchecked and overfit-tested, never parity-claimed.

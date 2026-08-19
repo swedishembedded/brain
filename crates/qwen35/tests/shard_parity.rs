@@ -61,7 +61,7 @@ fn shard_forward_and_grad_parity() {
     let (x, y) = batch(&cfg, b, t, 0);
 
     // Single-device reference.
-    let single = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::PIPELINES), cfg.clone(), b, t, &init);
+    let single = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg.clone(), b, t, &init);
     single.set_batch(&x, &y);
     single.zero_grads();
     let l_single = single.forward();

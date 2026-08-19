@@ -172,13 +172,13 @@ fn splice_is_load_bearing() {
 #[test]
 fn splice_at_decoder_level_moves_logits_substantially() {
     use gpu_core::Gpu;
-    use qwen35::model::{Qwen35, PIPELINES};
+    use qwen35::model::{pipelines, Qwen35};
     let dcfg = Qwen35Config::tiny();
     let dweights = init_weights(&dcfg, 3);
     let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
     let seq_len = tokens.len() as u32;
 
-    let mut m = Qwen35::new_on(Gpu::new(PIPELINES), dcfg.clone(), 1, seq_len, &dweights);
+    let mut m = Qwen35::new_on(Gpu::new(pipelines()), dcfg.clone(), 1, seq_len, &dweights);
     m.enable_mm_splice(2, 4);
     let img_a: Vec<f32> = vec![0.0; (4 * dcfg.d_model) as usize];
     let img_b: Vec<f32> = (0..(4 * dcfg.d_model)).map(|i| if i % 2 == 0 { 10.0 } else { -10.0 }).collect();
@@ -207,10 +207,10 @@ fn splice_at_decoder_level_moves_logits_substantially() {
 #[test]
 fn splice_backward_is_nonzero_and_finite() {
     use gpu_core::Gpu;
-    use qwen35::model::{Qwen35, PIPELINES};
+    use qwen35::model::{pipelines, Qwen35};
     let dcfg = Qwen35Config::tiny();
     let dweights = init_weights(&dcfg, 3);
-    let mut m = Qwen35::new_train_on(Gpu::new(PIPELINES), dcfg.clone(), 1, dcfg.block_size, &dweights);
+    let mut m = Qwen35::new_train_on(Gpu::new(pipelines()), dcfg.clone(), 1, dcfg.block_size, &dweights);
     let n_rows = 3u32;
     let row0 = 1u32;
     m.enable_mm_splice(row0, n_rows);

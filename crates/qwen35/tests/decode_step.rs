@@ -25,7 +25,7 @@
 
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 fn maxabs(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
@@ -73,7 +73,7 @@ fn run(gpu: Gpu) {
 
 #[test]
 fn decode_step_matches_full_prefill_cpu() {
-    run(Gpu::new_cpu(PIPELINES));
+    run(Gpu::new_cpu(pipelines()));
 }
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
@@ -81,5 +81,5 @@ fn decode_step_matches_full_prefill_cpu() {
 /// can silently misbehave on exactly one backend.
 #[test]
 fn decode_step_matches_full_prefill_default_backend() {
-    run(Gpu::new(PIPELINES));
+    run(Gpu::new(pipelines()));
 }

@@ -1,27 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3.5/3.8-27B dense hybrid decoder - forward AND backward, text-only,
-//! no LoRA/int8/decode-step/vision-splice/sharding yet (each lands as its
-//! own later milestone, mirroring `qwen35moe::model`'s own structure once it
-//! does). See `crate::config` for the architecture summary.
+//! Qwen3.5/3.8-27B dense hybrid decoder - forward AND backward, text-only.
+//! See `crate::config` for the architecture summary.
 //!
-//! **Scope, strictly, matching the M5+M6 milestones**: a single
-//! whole-sequence prefill forward/backward (`t` must already be a multiple
-//! of the derived GDN chunk size - asserted loudly in [`Qwen35::new_on`],
-//! see [`gdn_chunk_size`]). Two construction paths, mirroring
-//! `qwen35moe::model` exactly: [`Qwen35::new_on`] builds a frozen
-//! (`Role::Frozen`), forward-only instance (`backward`/`zero_grads`/
+//! **Scope**: a single whole-sequence prefill forward/backward (`t` must
+//! already be a multiple of the derived GDN chunk size - asserted loudly in
+//! [`Qwen35::new_impl_on`], see [`gdn_chunk_size`]). Two base construction
+//! paths, mirroring `qwen35moe::model` exactly: [`Qwen35::new_on`] builds a
+//! frozen (`Role::Frozen`), forward-only instance (`backward`/`zero_grads`/
 //! `adamw_step` all assert and panic on such an instance); [`Qwen35::new_train_on`]
-//! builds a fully trainable (`Role::Trainable` everywhere, full-parameter -
-//! no LoRA-specific subset yet, that is M8) instance whose `forward()`
-//! additionally saves the activation cache `backward()` reads (the
-//! `train_acts` field's own doc has the exact "one forward, one backward,
-//! then the cache is gone" contract). The MTP head (M7),
-//! LoRA/full finetune beyond this full-parameter path (M8), the vision
-//! splice (M9), and int8/decode/sharding land as their own milestones, each
-//! mirroring the matching piece of `qwen35moe::model` the way this file's
-//! forward/backward already does.
+//! builds a fully trainable (`Role::Trainable` everywhere, or - when
+//! `cfg.lora` is `Some` - frozen base + trainable LoRA adapters) instance
+//! whose `forward()` additionally saves the activation cache `backward()`
+//! reads (the `train_acts` field's own doc has the exact "one forward, one
+//! backward, then the cache is gone" contract). [`Qwen35::new_i8`]/
+//! [`Qwen35::new_on_i8`] build the same forward-only shape as `new_on`, but
+//! with the 12 per-layer mixer/MLP linears [`is_i8_linear`] names quantized
+//! to int8 (DP4A) wherever the device's capabilities support it - see
+//! [`Qwen35::ops_linear`]'s own doc. [`Qwen35::new_shard`] builds a single
+//! pipeline stage (`crate::shard`'s `model::Shardable` impl). Also present:
+//! an MTP head (`cfg.mtp`, one extra full-attention decoder layer sharing the
+//! main `lm_head`), LoRA/full finetune (`cfg.lora`), a vision-language
+//! embedding splice seam (`crate::vl::Qwen35Vl`), single-sequence incremental
+//! decode (`Self::step`), and pipeline-parallel sharding (`crate::shard`) -
+//! each mirrors the matching piece of `qwen35moe::model`.
 //!
 //! ## Layer forward, verified against the installed
 //! `transformers.models.qwen3_5` reference (not a secondhand description -
@@ -47,6 +50,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
@@ -54,17 +58,17 @@ use audio::conv::ConvKernels;
 use model::block::{gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
 use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
 pub use model::gdn::gdn_chunk_size;
+use model::ops::{Act, Ops, Weight};
 use model::Shard;
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
-// Forward + backward subset of qwen35moe::model::PIPELINES (no MoE - this
-// model has none; no int8/decode/LoRA/splice tiers yet - each lands with
-// its own milestone).
+// Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
+// this model has none).
 
-pub const PIPELINES: &[(&str, &str)] = &[
+const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM), // 0
     ("matmul", kernels::MATMUL), // 1
     ("embed", kernels::EMBED), // 2
@@ -150,7 +154,82 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 78
     ("decode_softmax", kernels::DECODE_SOFTMAX), // 79
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY), // 80
+    // -- int8 (DP4A) inference tier -- see `crate::model::is_i8_linear`.
+    ("max_abs_row", kernels::MAX_ABS_ROW), // 81
+    ("quant_pack", kernels::QUANT_PACK), // 82
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN), // 83
 ];
+
+/// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
+/// const above indexes into this - unchanged positions 0..83) followed by
+/// the `model::ops::Ops` façade's own required kernels, appended with NO
+/// named consts of their own - resolved by `Ops::new` purely BY NAME
+/// (`Gpu::kernel_index`), never by position. Mirrors `qwen35moe::model::
+/// pipelines`'s own recipe (including the `matmul_reg2` -> `matmul_reg3`
+/// bit-identical-faster-twin registration) exactly.
+pub fn pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = STATIC_PIPELINES.to_vec();
+        v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        v.push(("matmul_reg2", kernels::MATMUL_REG3));
+        v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
+        v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
+        v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
+        // This model has no MoE tier at all (see the module doc), so unlike
+        // `qwen35moe::model::STATIC_PIPELINES` - which already carries
+        // `moe_linear_gated` for its own routed experts - the plain (f32)
+        // `moe_linear_gated` name is never registered above; `Ops::
+        // REQUIRED_KERNELS` still demands it (see the bf16/f16 loop below,
+        // which only adds the DTYPE VARIANTS, not this base name).
+        v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
+        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
+        // variants even though this crate never builds a `Weight::BF16`/
+        // `Weight::F16` and never dispatches the generic `paged_*_batched`
+        // family - see `Ops::new`'s own doc comment ("every model that
+        // builds an `Ops` must register the full façade kernel set, not just
+        // the tiers it plans to use"). Compiled, never dispatched.
+        for dt in [Dtype::BF16, Dtype::F16] {
+            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
+        }
+        v.push(("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED));
+        v.push(
+            kernels::template::dtype_variant_store(
+                "paged_kv_append_batched_word",
+                kernels::PAGED_KV_APPEND_BATCHED_WORD,
+                "pool",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_scores_batched",
+                kernels::PAGED_DECODE_SCORES_BATCHED,
+                "pool_k",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_apply_batched",
+                kernels::PAGED_DECODE_APPLY_BATCHED,
+                "pool_v",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
+        v
+    })
+}
 
 const RMSNORM: usize = 0;
 const MATMUL: usize = 1;
@@ -505,6 +584,15 @@ pub struct Qwen35 {
     /// `train_acts`.
     mtp_acts: RefCell<Option<MtpActs>>,
 
+    /// The `model::ops` façade driving every per-layer mixer/MLP linear's
+    /// dispatch - see [`Self::ops_linear`]'s own doc.
+    ops: Ops,
+    /// Every per-layer mixer/MLP linear [`is_i8_linear`] names, as a
+    /// `model::ops::Weight` - `F32` unless this instance was built int8 AND
+    /// the device caps support the DP4A path, in which case `Weight::upload`
+    /// promotes it to `Weight::I8` (see [`Self::ops_linear`]).
+    weights: HashMap<String, Weight>,
+
     // ---- LoRA scratch (persistent, reused across every targeted linear) ----
     // Sized once at construction for `cfg.lora`'s rank and the widest output
     // dimension across the 12 targetable leaves (`crate::config::
@@ -642,10 +730,53 @@ fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
         .collect()
 }
 
+/// Names one of this model's 12 per-layer quantizable linears (5 GDN +
+/// 4 GQA + 3 MLP leaves) regardless of prefix - matches both the main
+/// decoder stack (`blocks.{l}.{linear_attn,self_attn,mlp}.*`) and the MTP
+/// head's own single extra layer (`mtp.layers.0.{self_attn,mlp}.*`, see
+/// `Self::run_mtp_forward` - it reuses `layer_gqa_fwd`/`mlp_fwd` unchanged,
+/// so it must be quantized identically or `ops_linear` would panic looking
+/// up a name `Self::new_impl_on` never uploaded). Embeddings, norms, the LM
+/// head, and (on a LoRA build) `.lora_a`/`.lora_b` adapters always stay fp32
+/// - none of their leaf names appear here.
+fn is_i8_linear(name: &str) -> bool {
+    const LEAVES: &[&str] = &[
+        "in_proj_qkv.weight",
+        "in_proj_z.weight",
+        "in_proj_b.weight",
+        "in_proj_a.weight",
+        "out_proj.weight",
+        "q_proj.weight",
+        "k_proj.weight",
+        "v_proj.weight",
+        "o_proj.weight",
+        "gate.weight",
+        "up.weight",
+        "down.weight",
+    ];
+    LEAVES.iter().any(|leaf| name.ends_with(leaf))
+}
+
 impl Qwen35 {
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false, shard)
+    }
+
+    /// [`Self::new_on`] with the int8 (DP4A) inference tier: the 12
+    /// per-layer mixer/MLP linears [`is_i8_linear`] names are quantized
+    /// (see that function's own doc); embeddings, norms and the LM head stay
+    /// fp32. Inference-only, same as the fp32 path (`Qwen35::backward` panics
+    /// regardless).
+    pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, true, false, shard)
+    }
+
+    /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
+    pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false, shard)
     }
 
     /// Build a fully trainable instance (every weight `Role::Trainable`,
@@ -653,7 +784,7 @@ impl Qwen35 {
     /// trainable LoRA adapters). See the struct's own `is_train` doc.
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -667,14 +798,15 @@ impl Qwen35 {
     /// function's own assert.
     pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(PIPELINES)
+            Gpu::new(pipelines())
         } else {
-            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
+            Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
         };
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen35 {
+    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool, shard: Shard) -> Qwen35 {
+        assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train_on is fp32-only)");
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -701,8 +833,14 @@ impl Qwen35 {
         //    filter exactly.
         //  - full training (`train && cfg.lora.is_none()`): every weight
         //    Role::Trainable (full-parameter backward).
+        // In int8 mode the 12 per-layer mixer/MLP linears `is_i8_linear`
+        // names live in `weights` (below), NOT the fp32 store - filter them
+        // out here so no redundant fp32 copy is ever uploaded. int8 and
+        // LoRA/training are mutually exclusive (the `assert!` above), so
+        // `i8` and `cfg.lora.is_some()` never both hold here.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
+            .filter(|(n, _)| !(i8 && is_i8_linear(n)))
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -714,8 +852,82 @@ impl Qwen35 {
                 (n, c, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
+
+        // Per-layer mixer/MLP linears: every layer this shard owns gets its
+        // own 12 leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA:
+        // {q,k,v,o}_proj; MLP: gate/up/down) as a `model::ops::Weight`, built
+        // ONCE here. `i8` asks `Weight::upload` for `Dtype::I8`, streaming
+        // straight from `src` (these names are excluded from `ps` above);
+        // the `else` (fp32) arm wraps a `.clone()` of the buffer `ps`
+        // already holds (a cheap `Arc` bump), so the common non-i8 case
+        // costs no extra VRAM or re-upload. Mirrors `qwen35moe::model::
+        // Qwen35::new_impl_on`'s own `weights` construction exactly.
+        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
+        let (d_u, ff_u, vdim_u, nvh_u, hqp_u, hkv_u, hq_u) = (
+            cfg.d_model as usize,
+            cfg.intermediate_size as usize,
+            cfg.linear_value_dim() as usize,
+            cfg.linear_num_value_heads as usize,
+            cfg.q_proj_dim() as usize,
+            cfg.kv_dim() as usize,
+            cfg.q_dim() as usize,
+        );
+        let conv_dim_u = cfg.linear_conv_dim() as usize;
+        let mut weights: HashMap<String, Weight> = HashMap::new();
+        let mut upload = |name: String, wn: usize, wk: usize| {
+            let w = if i8 {
+                let mut built: Option<Weight> = None;
+                let found = src.with_tensor(&name, &mut |raw| {
+                    built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
+                });
+                if !found {
+                    panic!("qwen35: missing init weight {name}");
+                }
+                built.unwrap()
+            } else {
+                Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
+            };
+            weights.insert(name, w);
+        };
+        for (l, ty) in cfg.layer_types().iter().enumerate() {
+            if !shard.owns(l) {
+                continue;
+            }
+            match ty {
+                LayerType::Linear => {
+                    let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
+                    upload(p("in_proj_qkv.weight"), conv_dim_u, d_u);
+                    upload(p("in_proj_z.weight"), vdim_u, d_u);
+                    upload(p("in_proj_b.weight"), nvh_u, d_u);
+                    upload(p("in_proj_a.weight"), nvh_u, d_u);
+                    upload(p("out_proj.weight"), d_u, vdim_u);
+                }
+                LayerType::Full => {
+                    let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
+                    upload(p("q_proj.weight"), hqp_u, d_u);
+                    upload(p("k_proj.weight"), hkv_u, d_u);
+                    upload(p("v_proj.weight"), hkv_u, d_u);
+                    upload(p("o_proj.weight"), d_u, hq_u);
+                }
+            }
+            let pm = |s: &str| format!("blocks.{l}.mlp.{s}");
+            upload(pm("gate.weight"), ff_u, d_u);
+            upload(pm("up.weight"), ff_u, d_u);
+            upload(pm("down.weight"), d_u, ff_u);
+        }
+        if cfg.mtp && shard.head {
+            let p = |s: &str| format!("mtp.layers.0.self_attn.{s}");
+            upload(p("q_proj.weight"), hqp_u, d_u);
+            upload(p("k_proj.weight"), hkv_u, d_u);
+            upload(p("v_proj.weight"), hkv_u, d_u);
+            upload(p("o_proj.weight"), d_u, hq_u);
+            let pm = |s: &str| format!("mtp.layers.0.mlp.{s}");
+            upload(pm("gate.weight"), ff_u, d_u);
+            upload(pm("up.weight"), ff_u, d_u);
+            upload(pm("down.weight"), d_u, ff_u);
+        }
 
         // LoRA scratch (rank `r`; max projection output across all 12
         // targetable leaves - `crate::config::lora_targets` - mirrors
@@ -823,6 +1035,8 @@ impl Qwen35 {
             mtp_logits,
             mtp_ce_buf,
             mtp_acts: RefCell::new(None),
+            ops,
+            weights,
             lora_a,
             lora_da,
             lora_out,
@@ -881,6 +1095,17 @@ impl Qwen35 {
         s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// Dispatch one of the 12 per-layer mixer/MLP linears via `self.ops`/
+    /// `self.weights`. Returns whether the dispatch was `F32` (LoRA only
+    /// ever targets an unquantized base weight, so a caller only runs
+    /// `lora_fwd` when this is `true`). Mirrors `qwen35moe::model::Qwen35::
+    /// ops_linear` exactly.
+    fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
+        let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen35: no Ops weight for {wname}"));
+        self.ops.matmul(s, w, act, out, 0);
+        matches!(w, Weight::F32 { .. })
     }
 
     /// The gradient buffer for a trainable weight - only valid on a
@@ -1022,32 +1247,39 @@ impl Qwen35 {
         let vhd = c.linear_value_head_dim;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
 
-        // in_proj_qkv (LoRA dispatch stays local).
+        // in_proj_qkv (LoRA/int8 dispatch stays local - see `model::gdn_mixer`'s
+        // own module doc). `xn1` quantized once here (`Ops::act`), reused
+        // unchanged by in_proj_b/a/z below (no further `act` call on `xn1`
+        // happens in between).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
-        {
-            let mut s = vec![g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)];
-            self.lora_fwd(&mut s, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
-            g.submit(&[], &s);
+        let mut s1 = Vec::new();
+        let act1 = self.ops.act(&mut s1, xn1, 0, n, d);
+        if self.ops_linear(&mut s1, &act1, &p("in_proj_qkv.weight"), &mixed_qkv) {
+            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
         }
+        g.submit(&[], &s1);
 
-        // in_proj_b/a/z (LoRA dispatch stays local).
+        // in_proj_b/a/z (LoRA/int8 dispatch stays local). Reuses `act1`
+        // (xn1 quantized once, shared) - no fresh `Ops::act` call needed.
         let bproj = g.storage((n * nvh) as u64);
         let aproj = g.storage((n * nvh) as u64);
         let z = g.storage((n * value_dim) as u64);
         {
-            let mut s = vec![
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
-            ];
-            self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
-            self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
-            self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            let mut s = Vec::new();
+            if self.ops_linear(&mut s, &act1, &p("in_proj_b.weight"), &bproj) {
+                self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_a.weight"), &aproj) {
+                self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_z.weight"), &z) {
+                self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            }
             g.submit(&[], &s);
         }
 
-        // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA-agnostic,
-        // shared with `crates/qwen35moe` (`model::gdn_mixer`).
+        // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
+        // agnostic, shared with `crates/qwen35moe` (`model::gdn_mixer`).
         let shape = model::gdn_mixer::GdnMixerShape {
             gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
             nkh: c.linear_num_key_heads,
@@ -1062,11 +1294,15 @@ impl Qwen35 {
         };
         let (gated, internals) = model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train);
 
-        // out_proj (LoRA dispatch stays local).
+        // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
+        // `gated` is a different activation from `xn1` above.
         let out = g.storage((n * d) as u64);
         {
-            let mut s = vec![g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)];
-            self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            let mut s = Vec::new();
+            let act3 = self.ops.act(&mut s, &gated, 0, n, value_dim);
+            if self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out) {
+                self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            }
             g.submit(&[], &s);
         }
 
@@ -1088,33 +1324,39 @@ impl Qwen35 {
         let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
         let p = |s: &str| format!("{prefix}.{s}");
 
-        // q/k/v proj (LoRA dispatch stays local).
+        // q/k/v proj (LoRA/int8 dispatch stays local - see `model::gqa_mixer`'s
+        // own module doc). xn1 quantized once (`Ops::act`), shared by q/k/v.
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
-        {
-            let mut s = vec![
-                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
-                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
-                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
-            ];
-            self.lora_fwd(&mut s, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
-            self.lora_fwd(&mut s, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
-            self.lora_fwd(&mut s, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
-            g.submit(&[], &s);
+        let mut s1 = Vec::new();
+        let act1 = self.ops.act(&mut s1, xn1, 0, n, d);
+        if self.ops_linear(&mut s1, &act1, &p("q_proj.weight"), &q_full) {
+            self.lora_fwd(&mut s1, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
         }
+        if self.ops_linear(&mut s1, &act1, &p("k_proj.weight"), &k) {
+            self.lora_fwd(&mut s1, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
+        }
+        if self.ops_linear(&mut s1, &act1, &p("v_proj.weight"), &v) {
+            self.lora_fwd(&mut s1, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
+        }
+        g.submit(&[], &s1);
 
-        // split+qknorm+rope+attention+gating - LoRA-agnostic, shared with
-        // `crates/qwen35moe` (`model::gqa_mixer`).
+        // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
+        // with `crates/qwen35moe` (`model::gqa_mixer`).
         let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
         let (ctx_gated, internals) = model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train);
 
-        // o_proj (LoRA dispatch stays local).
+        // o_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
+        // `ctx_gated` is a different activation from `xn1` above.
         let out = g.storage((n * d) as u64);
         {
-            let mut s = vec![g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, shape.qd(), d], n * d)];
-            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
+            let mut s = Vec::new();
+            let act2 = self.ops.act(&mut s, &ctx_gated, 0, n, shape.qd());
+            if self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out) {
+                self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
+            }
             g.submit(&[], &s);
         }
 
@@ -1125,7 +1367,11 @@ impl Qwen35 {
     // ---- dense SwiGLU MLP, universal for every layer -----------------------
 
     /// `prefix` is the weight-name prefix - `"blocks.{l}.mlp"` for a normal
-    /// layer, `"mtp.layers.0.mlp"` for the MTP head (M7).
+    /// layer, `"mtp.layers.0.mlp"` for the MTP head (M7). `gate`/`up` share
+    /// ONE `Ops::act` call on `xn2` (both consume the same activation);
+    /// `down` gets its own fresh `Ops::act` call on `h` (a different
+    /// activation) - same "quantize once, share across sibling linears"
+    /// discipline `layer_gdn_fwd`/`layer_gqa_fwd` use.
     fn mlp_fwd(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
@@ -1136,20 +1382,25 @@ impl Qwen35 {
         let gate_pre = g.storage((n * ff) as u64);
         let up = g.storage((n * ff) as u64);
         {
-            let mut s = vec![
-                g.step(MATMUL, &[xn2, self.w(&p("gate.weight")), &gate_pre], &[n, d, ff], n * ff),
-                g.step(MATMUL, &[xn2, self.w(&p("up.weight")), &up], &[n, d, ff], n * ff),
-            ];
-            self.lora_fwd(&mut s, "gate", xn2, &p("gate.weight"), &gate_pre, n, d, ff);
-            self.lora_fwd(&mut s, "up", xn2, &p("up.weight"), &up, n, d, ff);
+            let mut s = Vec::new();
+            let act1 = self.ops.act(&mut s, xn2, 0, n, d);
+            if self.ops_linear(&mut s, &act1, &p("gate.weight"), &gate_pre) {
+                self.lora_fwd(&mut s, "gate", xn2, &p("gate.weight"), &gate_pre, n, d, ff);
+            }
+            if self.ops_linear(&mut s, &act1, &p("up.weight"), &up) {
+                self.lora_fwd(&mut s, "up", xn2, &p("up.weight"), &up, n, d, ff);
+            }
             g.submit(&[], &s);
         }
         let h = g.storage((n * ff) as u64);
         g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
         let down = g.storage((n * d) as u64);
         {
-            let mut s = vec![g.step(MATMUL, &[&h, self.w(&p("down.weight")), &down], &[n, ff, d], n * d)];
-            self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
+            let mut s = Vec::new();
+            let act2 = self.ops.act(&mut s, &h, 0, n, ff);
+            if self.ops_linear(&mut s, &act2, &p("down.weight"), &down) {
+                self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
+            }
             g.submit(&[], &s);
         }
 
@@ -2131,7 +2382,7 @@ impl model::Model for Qwen35 {
     type Config = Qwen35Config;
 
     fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
-        Qwen35::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
+        Qwen35::new_on(Gpu::new(pipelines()), cfg, b, t, init)
     }
     fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)

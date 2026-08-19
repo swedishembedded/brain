@@ -9,7 +9,7 @@
 
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{gdn_chunk_size, Qwen35, PIPELINES};
+use qwen35::model::{gdn_chunk_size, pipelines, Qwen35};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
     qwen35::init::init_weights(cfg, seed)
@@ -44,10 +44,10 @@ fn tiny_config_chunk_is_smaller_than_t_and_divides_it() {
 
 #[test]
 fn forward_is_finite_and_deterministic_cpu() {
-    run_smoke(Gpu::new_cpu(PIPELINES));
+    run_smoke(Gpu::new_cpu(pipelines()));
 }
 
 #[test]
 fn forward_is_finite_and_deterministic_default_backend() {
-    run_smoke(Gpu::new(PIPELINES));
+    run_smoke(Gpu::new(pipelines()));
 }

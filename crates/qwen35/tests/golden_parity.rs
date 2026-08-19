@@ -15,7 +15,7 @@ use std::path::Path;
 use checkpoint::safetensors::StTensor;
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 use brain_testutil::parity::Table;
 
 fn to_map(tensors: Vec<StTensor>) -> HashMap<String, Vec<f32>> {
@@ -73,10 +73,10 @@ fn run(gpu: Gpu) {
 
 #[test]
 fn tiny_text_logits_match_the_reference_cpu() {
-    run(Gpu::new_cpu(PIPELINES));
+    run(Gpu::new_cpu(pipelines()));
 }
 
 #[test]
 fn tiny_text_logits_match_the_reference_default_backend() {
-    run(Gpu::new(PIPELINES));
+    run(Gpu::new(pipelines()));
 }

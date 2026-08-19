@@ -35,7 +35,7 @@ use qwen3vl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
 use qwen3vl::mrope::{get_rope_index, mrope_tables};
 
 use crate::config::Qwen35Config;
-use crate::model::{Qwen35, PIPELINES};
+use crate::model::{pipelines, Qwen35};
 
 /// An assembled Qwen3.8-27B vision-language model (forward path only). Image
 /// tokens occupy a contiguous run of `image_token_id` in the text stream
@@ -71,7 +71,7 @@ impl Qwen35Vl {
         assert!(vcfg.deepstack_indexes.is_empty(), "this model has no DeepStack -- see this module's own doc");
         let merge = vcfg.spatial_merge_size;
         let mrope_section = dcfg.mrope_section;
-        let mut decoder = Qwen35::new_on(Gpu::new(PIPELINES), dcfg, 1, seq_len, dweights);
+        let mut decoder = Qwen35::new_on(Gpu::new(pipelines()), dcfg, 1, seq_len, dweights);
         decoder.enable_mm_splice(image_row0, n_visual);
         Qwen35Vl { vgpu: Gpu::new_cpu(vision_pipelines()), vcfg, vweights, merger_weights, decoder, merge, image_token_id, mrope_section }
     }

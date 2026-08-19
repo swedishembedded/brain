@@ -1274,7 +1274,7 @@ fn qwen35_gradcheck_harness(seed: u64) -> qwen35::model::Qwen35 {
             }
         }
     }
-    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::PIPELINES), cfg, 1, 12, &init);
+    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
     model.set_batch(&x, &y);
@@ -1321,7 +1321,7 @@ fn qwen35_mtp_gradcheck_harness(seed: u64) -> qwen35::model::Qwen35 {
             }
         }
     }
-    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::PIPELINES), cfg, 1, 12, &init);
+    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
     model.set_batch(&x, &y);
@@ -1423,7 +1423,7 @@ pub fn check_qwen35_lora(seed: u64) -> Report {
             }
         }
     }
-    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::PIPELINES), cfg, 1, 12, &init);
+    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();
     model.set_batch(&x, &y);

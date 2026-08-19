@@ -18,7 +18,7 @@ use gpu_core::Gpu;
 use model::{cosine_lr, FitOpts, IGNORE};
 
 use crate::config::{lora_targets, LoraCfg, Qwen35Config};
-use crate::model::{Qwen35, PIPELINES};
+use crate::model::{pipelines, Qwen35};
 
 /// Which fine-tuning scheme.
 #[derive(Clone, Debug)]
@@ -60,7 +60,7 @@ pub fn finetune(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str) 
         init.insert(k, v);
     }
 
-    let m = Qwen35::new_train_on(Gpu::new(PIPELINES), cfg, opts.batch_size, opts.block_size, &init);
+    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &init);
     match prev_off {
         Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
         None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),

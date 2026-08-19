@@ -22,7 +22,7 @@ use data::rng::Rng;
 use gpu_core::Gpu;
 use model::serve::Request;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 use qwen35::serve::{Engine, Scheduler};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> {
@@ -39,7 +39,7 @@ fn run(make_gpu: fn(&[(&str, &str)]) -> Gpu) {
     // Reference: `Qwen35::step`'s own single-sequence decode, driven by
     // `crate::sample::generate_kv` (greedy) - already proven correct against
     // `logits_all` by `decode_step.rs`.
-    let reference = Qwen35::new_on(make_gpu(PIPELINES), cfg.clone(), 1, max_seq_len, &init);
+    let reference = Qwen35::new_on(make_gpu(pipelines()), cfg.clone(), 1, max_seq_len, &init);
     let mut rng = Rng::new(1);
     let want = qwen35::sample::generate_kv(&reference, &prompt, max_new, 0.0, 0, 1.0, &[], &mut rng);
     assert_eq!(want.len(), max_new, "greedy decode with no eos must always produce exactly max_new tokens");
@@ -50,7 +50,7 @@ fn run(make_gpu: fn(&[(&str, &str)]) -> Gpu) {
     // test actually admits, so a bug that only shows up when
     // `blocks()[0] != 0` (i.e. hard-coded to the first physical block) would
     // have a chance to surface if a later change reordered allocation.
-    let engine = Engine::from_map_on(&make_gpu(PIPELINES), cfg, &init, max_seq_len, 2);
+    let engine = Engine::from_map_on(&make_gpu(pipelines()), cfg, &init, max_seq_len, 2);
     println!("kv_pool_bytes={} kv_pool_capacity_tokens={}", engine.kv_pool_bytes(), engine.kv_pool_capacity_tokens());
     let mut sched = Scheduler::new(engine, 1);
     let id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });

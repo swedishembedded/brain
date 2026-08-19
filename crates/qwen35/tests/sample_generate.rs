@@ -10,14 +10,14 @@
 use data::rng::Rng;
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 use qwen35::sample::generate_kv;
 
 fn tiny_model() -> (Qwen35, Vec<u32>) {
     let cfg = Qwen35Config::tiny();
     let init = qwen35::init::init_weights(&cfg, 11);
     let cap = cfg.block_size;
-    let model = Qwen35::new_on(Gpu::new(PIPELINES), cfg.clone(), 1, cap, &init);
+    let model = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, cap, &init);
     let prompt: Vec<u32> = (0..4).map(|i| (i * 7 + 1) % cfg.vocab).collect();
     (model, prompt)
 }

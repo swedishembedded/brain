@@ -15,7 +15,7 @@
 
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 fn mtp_cfg() -> Qwen35Config {
     Qwen35Config { mtp: true, ..Qwen35Config::tiny() }
@@ -49,12 +49,12 @@ fn run_overfit(gpu: Gpu) {
 
 #[test]
 fn qwen35_mtp_overfits_fixed_batch_cpu() {
-    run_overfit(Gpu::new_cpu(PIPELINES));
+    run_overfit(Gpu::new_cpu(pipelines()));
 }
 
 #[test]
 fn qwen35_mtp_overfits_fixed_batch_default_backend() {
-    run_overfit(Gpu::new(PIPELINES));
+    run_overfit(Gpu::new(pipelines()));
 }
 
 /// `Qwen35::new_on` (frozen, no training) is enough here - a plain forward
@@ -83,10 +83,10 @@ fn run_mutation_check(gpu: Gpu) {
 
 #[test]
 fn qwen35_mtp_head_is_load_bearing_cpu() {
-    run_mutation_check(Gpu::new_cpu(PIPELINES));
+    run_mutation_check(Gpu::new_cpu(pipelines()));
 }
 
 #[test]
 fn qwen35_mtp_head_is_load_bearing_default_backend() {
-    run_mutation_check(Gpu::new(PIPELINES));
+    run_mutation_check(Gpu::new(pipelines()));
 }

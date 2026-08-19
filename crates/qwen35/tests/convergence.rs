@@ -8,7 +8,7 @@
 
 use gpu_core::Gpu;
 use qwen35::config::{lora_cfg, Qwen35Config};
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -36,7 +36,7 @@ fn qwen35_full_finetune_overfits_fixed_batch() {
     let cfg = Qwen35Config::tiny();
     let t = cfg.block_size;
     let init = qwen35::init::init_weights(&cfg, 11);
-    let m = Qwen35::new_train_on(Gpu::new(PIPELINES), cfg.clone(), 2, t, &init);
+    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg.clone(), 2, t, &init);
     let x: Vec<u32> = (0..2 * t).map(|i| (i * 7) % cfg.vocab).collect();
     let y: Vec<u32> = (0..2 * t).map(|i| (i * 7 + 1) % cfg.vocab).collect();
     m.set_batch(&x, &y);
@@ -57,7 +57,7 @@ fn qwen35_memorizes_cyclic_sequence() {
     let cfg = Qwen35Config { vocab, ..Qwen35Config::tiny() };
     let t = cfg.block_size;
     let init = qwen35::init::init_weights(&cfg, 3);
-    let m = Qwen35::new_train_on(Gpu::new(PIPELINES), cfg.clone(), 2, t, &init);
+    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg.clone(), 2, t, &init);
     // Two overlapping windows over the cycle 0,1,2,...,6,0,1,... (predict next).
     let half = (t / 2) as usize;
     let cyc: Vec<u32> = (0..(t as usize + half + 1)).map(|i| (i as u32) % vocab).collect();
@@ -78,7 +78,7 @@ fn qwen35_lora_overfits_fixed_batch() {
     let cfg = Qwen35Config { lora: Some(lora_cfg(4, 8.0)), ..Qwen35Config::tiny() };
     let t = cfg.block_size;
     let init = qwen35::init::init_weights(&cfg, 13);
-    let m = Qwen35::new_train_on(Gpu::new(PIPELINES), cfg.clone(), 2, t, &init);
+    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg.clone(), 2, t, &init);
     let x: Vec<u32> = (0..2 * t).map(|i| (i * 7) % cfg.vocab).collect();
     let y: Vec<u32> = (0..2 * t).map(|i| (i * 7 + 1) % cfg.vocab).collect();
     m.set_batch(&x, &y);

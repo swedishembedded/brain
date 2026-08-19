@@ -25,7 +25,7 @@
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 pub fn run_qwen35(args: &[String]) {
     match args.first().map(|s| crate::args::canon_verb(s)) {
@@ -122,7 +122,7 @@ fn infer(args: &[String]) {
     let cap = (ids.len() + max_new) as u32;
 
     let t_load = std::time::Instant::now();
-    let model = Qwen35::new_on(gpu_core::Gpu::new(PIPELINES), cfg, 1, cap, &init);
+    let model = Qwen35::new_on(gpu_core::Gpu::new(pipelines()), cfg, 1, cap, &init);
     let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
 
     let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| tok.encode(s).first().copied()).collect();

@@ -16,7 +16,7 @@
 
 use gpu_core::Gpu;
 use qwen35::config::{lora_cfg, Qwen35Config};
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 fn run(gpu: Gpu) {
     let mut cfg = Qwen35Config::tiny();
@@ -72,7 +72,7 @@ fn run(gpu: Gpu) {
 
 #[test]
 fn lora_training_only_updates_adapters_cpu() {
-    run(Gpu::new_cpu(PIPELINES));
+    run(Gpu::new_cpu(pipelines()));
 }
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
@@ -80,5 +80,5 @@ fn lora_training_only_updates_adapters_cpu() {
 /// silently misbehave on exactly one backend.
 #[test]
 fn lora_training_only_updates_adapters_default_backend() {
-    run(Gpu::new(PIPELINES));
+    run(Gpu::new(pipelines()));
 }

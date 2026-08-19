@@ -10,10 +10,10 @@
 //! own doc for the design.
 //!
 //! What differs from `qwen35moe::caps`:
-//! - No `precision` param: this crate has no int8 tier (`q8.rs`) - out of
-//!   scope for M11 (not called out in the approved port plan, unlike
-//!   qwen35moe's own int8 support which predates this port). fp32 weights
-//!   only.
+//! - `precision` selects fp32 or int8 WEIGHTS only (`Qwen35::new_on` vs
+//!   `Qwen35::new_i8`, dispatching through `model::ops::{Ops, Weight}` - see
+//!   `crate::model::is_i8_linear`); the KV cache itself is always fp32 (no
+//!   int8 KV path for this model, same scope note as `qwen35moe::caps`).
 //! - Decoding is `crate::sample::generate_kv_stream_with_head`, itself a thin
 //!   wrapper around [`Qwen35::step`] fed one token at a time (M11's
 //!   single-sequence incremental decode primitive) - no fast batched prefill
@@ -71,6 +71,10 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(
+            ParamSpec::new("precision", ParamType::Str, "model WEIGHT precision: fp32, or int8 (per-channel weights + dynamic activation quant); the KV cache is always fp32")
+                .default(json!("fp32")),
+        )
         .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the tokenizer's <|im_end|>/<|endoftext|> when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
         .param(ParamSpec::new(
@@ -92,6 +96,7 @@ pub fn manifest() -> Manifest {
 /// capacity covers the request; rebuilt (freeing the old weights first)
 /// otherwise.
 struct Hot {
+    precision: String,
     weights: String,
     cap: u32,
     model: Qwen35,
@@ -137,6 +142,10 @@ impl Action for GenerateAction {
         let weights = inv.get_str("weights").ok_or("qwen35 generate: missing required param 'weights'")?;
         if !Path::new(&weights).exists() {
             return Err(format!("qwen35 generate: weights not found at '{weights}'"));
+        }
+        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
+        if precision != "fp32" && precision != "int8" {
+            return Err(format!("qwen35 generate: precision must be fp32 or int8, got {precision:?}"));
         }
 
         // Tokenizer is optional: without one the prompt is raw token ids and the
@@ -191,16 +200,17 @@ impl Action for GenerateAction {
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
         let mut guard = self.hot.lock().map_err(|_| "qwen35: hot model lock poisoned")?;
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need);
+        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
         if !reuse {
             *guard = None; // free the old resident weights before loading new
             let cap = need.max(64);
             let container = checkpoint::load(&weights);
             let cfg = Qwen35Config::from_json(&container.header["config"]);
             let init = container.by_role("");
-            let model = Qwen35::new_on(gpu_core::Gpu::new(crate::model::PIPELINES), cfg, 1, cap, &init);
+            let model =
+                if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg, 1, cap, &init) };
             let head = model.read_weight(model.cfg.head_weight());
-            *guard = Some(Hot { weights: weights.clone(), cap, model, head });
+            *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
         }
         let hot = guard.as_ref().unwrap();
         let model = &hot.model;

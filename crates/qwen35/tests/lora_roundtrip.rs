@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use gpu_core::Gpu;
 use qwen35::config::{lora_cfg, Qwen35Config};
-use qwen35::model::{Qwen35, PIPELINES};
+use qwen35::model::{pipelines, Qwen35};
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -53,7 +53,7 @@ fn lora_adapter_survives_save_and_reload() {
     let x: Vec<u32> = (0..t).map(|i| (i * 5 + 1) % base_cfg.vocab).collect();
     let y: Vec<u32> = (0..t).map(|i| (i * 5 + 2) % base_cfg.vocab).collect();
 
-    let trained = Qwen35::new_train_on(Gpu::new(PIPELINES), lora_cfg_.clone(), 1, t, &init);
+    let trained = Qwen35::new_train_on(Gpu::new(pipelines()), lora_cfg_.clone(), 1, t, &init);
     trained.set_batch(&x, &y);
     // Move the adapters off the B=0 init so the fold is non-trivial.
     for step in 1..=8 {
@@ -72,10 +72,10 @@ fn lora_adapter_survives_save_and_reload() {
     let reloaded_cfg = Qwen35Config::from_json(&c.header["config"]);
     assert!(reloaded_cfg.lora.is_some(), "the lora field must survive the checkpoint round-trip");
     let tensors = c.by_role("");
-    let reloaded = Qwen35::new_on(Gpu::new(PIPELINES), reloaded_cfg, 1, t, &tensors);
+    let reloaded = Qwen35::new_on(Gpu::new(pipelines()), reloaded_cfg, 1, t, &tensors);
     let logits_after_reload = reloaded.logits_all(&x);
 
-    let base = Qwen35::new_on(Gpu::new(PIPELINES), base_cfg, 1, t, &base_init);
+    let base = Qwen35::new_on(Gpu::new(pipelines()), base_cfg, 1, t, &base_init);
     let logits_base = base.logits_all(&x);
 
     // The reloaded checkpoint must reproduce the trained model, not the base.
@@ -102,7 +102,7 @@ fn checkpoint_without_lora_key_loads_as_plain_model() {
     let cfg = Qwen35Config::tiny();
     let init = qwen35::init::init_weights(&cfg, 3);
     let t = cfg.block_size;
-    let m = Qwen35::new_on(Gpu::new(PIPELINES), cfg.clone(), 1, t, &init);
+    let m = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, t, &init);
 
     let path = tmp("no_lora").join("qwen35_base.safetensors");
     m.save(path.to_str().unwrap());
