@@ -544,12 +544,53 @@ wasm32 builds only - wasm32 keeps the identical-arithmetic sequential loop):
 - `make build` / `make gradcheck`: see this task's own commit for the
   confirmed run.
 
-**Not fixed (explicitly out of scope):** `checkpoint::mmap::MmapSafetensors`'s
-raw-byte decode is the real majority cost (~90% of a big FP8 tensor's import
-time here) - a follow-up profiling `e4m3fn_to_f32`/the decode loop itself
-(possibly page-fault/`madvise` interaction, since `tensor_f32` calls
-`advise_dontneed_tensor` right after every decode) is the natural next step,
-but belongs to whoever owns `mmap.rs` next, not this fix.
+**Not fixed by this task (explicitly out of scope at the time):**
+`checkpoint::mmap::MmapSafetensors`'s raw-byte decode was the real majority
+cost (~90% of a big FP8 tensor's import time here) - flagged as the natural
+next step for whoever owns `mmap.rs` next. Fixed immediately below, once
+`mmap.rs` was free of concurrent M16 work.
+
+### mmap.rs FP8 decode fix: the actual dominant cost
+
+Root cause: `checkpoint::safetensors::e4m3fn_to_f32` (the per-byte E4M3
+decode `mmap.rs::decode_into`'s `F8_E4M3` arm calls once per element) computed
+its value from scratch every call, including two `f32::powi` calls - a
+branchy, non-inlined function invoked 89.1 million times for one real
+`down_proj` tensor. But an E4M3 byte has only 256 possible values, so the
+whole function is a pure lookup: rewrote it to build a `[f32; 256]` table
+once (`std::sync::OnceLock`, same lazy-init pattern this crate's own
+`pipelines()` functions already use) from the original scalar formula
+(kept, renamed `e4m3fn_to_f32_scalar`, called only 256 times total now) and
+index into it thereafter. Bit-for-bit identical output (it's the same
+function, just memoized) - `cargo test -p brain-checkpoint` (80 lib + 16
+`torchpt` tests, including the exact-value E4M3 edge-case assertions) stayed
+green.
+
+**Measured, real checkpoint, same tensor as the profiling task above**
+(`import_profile`, `layers-5.safetensors`, `mlp.down_proj`, 89.1M elements):
+`MmapSafetensors::tensor_f32` (FP8 decode): **408.04 ms (218.4 Melem/s)**,
+down from ~5.0 s (~17-20 Melem/s) - roughly **6-12x**. Full-tensor stage
+breakdown after this fix: decode 58.2%, dequant 9.3%, quantize 32.5% (of
+700.71 ms total) - decode is no longer the dominant stage at all, though
+still the largest single one.
+
+**End-to-end validation** (`import_layer_bench`, real layers 0-5, same real
+checkpoint): 17.962 s / 6 layers = 2.994 s/layer avg, extrapolating to
+**~3.19 min for a full 64-layer import** - down from the original 74.8 min
+(**~23x** total) and from the prior fix's own 22.9 min estimate (**~7x**
+further). This directly bounds the real cost of every future real-checkpoint
+streaming run in this repo (M15's/M16's own ignored tests, and any future
+milestone that streams the real checkpoint) - a decode step that previously
+cost ~28-32 min (M16's own measured number) should now cost roughly a few
+minutes, though this was not re-measured via a full `generate_streaming`
+re-run (impractical to repeat for every fix in a tight loop - the isolated
++ partial-layer numbers above are the validated evidence).
+
+Verification: `cargo test -p brain-checkpoint` (96 tests), `cargo test -p
+brain-model` (full), `cargo test -p brain-qwen35 --lib` (30 tests, including
+`stream::tests::gdn_end_padding_does_not_change_real_position_outputs`),
+`cargo clippy -p brain-checkpoint --all-targets -- -D warnings`, `make
+build`, `make gradcheck` (20 suites) - all clean.
 
 ### M16: real end-to-end generation (real prompt -> real tokenizer -> streaming engine -> real lm_head -> real sampling -> real text)
 

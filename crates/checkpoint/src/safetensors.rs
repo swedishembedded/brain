@@ -66,7 +66,19 @@ pub(crate) fn bf16_to_f32(h: u16) -> f32 {
 /// `weight_block_size`-quantized checkpoint (DeepSeek-V3/Qwen3.5-FP8 style)
 /// needs a SEPARATE blockwise scale multiply on top, which is not a
 /// byte-decode concern and does not belong here (see `model::fp8`).
+///
+/// Only 256 distinct input bytes exist, so this is a lookup into a table
+/// built once from [`e4m3fn_to_f32_scalar`] rather than re-deriving the
+/// value (branches + `powi`) on every one of a real tensor's tens of
+/// millions of elements - measured as the dominant cost of importing a real
+/// FP8 checkpoint layer, far more than the blockwise-scale multiply or the
+/// int8 requantization downstream of it.
 pub(crate) fn e4m3fn_to_f32(b: u8) -> f32 {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|i| e4m3fn_to_f32_scalar(i as u8)))[b as usize]
+}
+
+fn e4m3fn_to_f32_scalar(b: u8) -> f32 {
     let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
     let exp = (b >> 3) & 0x0F;
     let mant = (b & 0x07) as f32;
