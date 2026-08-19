@@ -169,8 +169,18 @@ fast and scalable kernel - not a naive one.
     only needs to catch a broken port, not reproduce this specific
     measurement)** - the full-depth fp32 number does NOT fit a 24 GiB card
     and is not claimed. See `.agents/roadmap/flux1.md`.
-    *(Transformer forward only: **no sampler loop, no VAE glue, no CLI, no
-    serving surface**; backward/gradcheck deferred.)*
+    **The sampler loop, VAE and text-encoder glue exist**
+    (`pipeline::Flux1::generate` - T5-XXL context + CLIP-L pooled
+    conditioning, BFL's own linear `calculate_shift` schedule - NOT FLUX.2
+    Klein's `empirical_mu`, different constants - a 16-channel VAE decode via
+    its scalar affine, not FLUX.2's BatchNorm packing). **Serving contract
+    met**: `flux1::caps` (`text2image`), `resident_flux1::Flux1Resident`
+    (`BRAIN_FLUX1_DIR`), D-Bus `Run`, `examples/imagegen/flux1_generate.py`.
+    *(Text-to-image only - no Kontext editing, img2img or LoRA yet; no batch >
+    1; backward/gradcheck deferred. Unlike this cluster's other served
+    models, the PIPELINE glue has no end-to-end fixture in this workspace to
+    verify it against - see `crates/flux1/src/pipeline.rs`'s module docs for
+    the honest scope of what is and is not checked.)*
 
 12b-ter. **T5-XXL encoder** (`crates/t5encoder`) - the text encoder FLUX.1 conditions
     on: bidirectional encoder-only T5 (RMSNorm, no bias, **no** `1/√d_kv`
@@ -1242,23 +1252,25 @@ a metric that isn't there was simply forgotten.
 
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
-  `clip`, `t5encoder`, `sdxlunet` and `controlnet`** - nine models, each with
-  a `caps` module, a `resident_*.rs` registered via `catalog.rs` (read
-  generically by `build_executor`), and the existing D-Bus `Run`. `sam2`'s
-  `run_batch` does real grouping (by image), `clip`'s and `t5encoder`'s batch
-  rows into one forward at a shared context length; the rest - including
-  `sdxlunet` and `controlnet`, each a full multi-step sample per call with no
-  batch axis to fill - are the serial default and each says why in-file.
-  `clip` has no `examples/` entry yet (every other one of the nine does,
-  under `examples/{vision,restore,embedding,imagegen}/`). `controlnet`'s
-  `caps` is its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a
-  per-step residual), built on `Unet::new_controlled` +
-  `Unet::run_with_control` rather than composed on top of `pipeline::Sdxl` -
-  see `crates/controlnet/src/caps.rs`'s module docs. It is **not** met for
-  `flux1` or `pulid` - those two have no capability manifest, no residency
-  adapter and no D-Bus surface at all; `pulid` is a conditioning add-on with
-  no standalone pipeline of its own yet (it needs `flux1`'s, which does not
-  exist).
+  `clip`, `t5encoder`, `sdxlunet`, `controlnet` and `flux1`** - ten models,
+  each with a `caps` module, a `resident_*.rs` registered via `catalog.rs`
+  (read generically by `build_executor`), and the existing D-Bus `Run`.
+  `sam2`'s `run_batch` does real grouping (by image), `clip`'s and
+  `t5encoder`'s batch rows into one forward at a shared context length; the
+  rest - including `sdxlunet`, `controlnet` and `flux1`, each a full
+  multi-step sample per call with no batch axis to fill - are the serial
+  default and each says why in-file. `clip` has no `examples/` entry yet
+  (every other one of the ten does, under
+  `examples/{vision,restore,embedding,imagegen}/`). `controlnet`'s `caps` is
+  its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a per-step
+  residual), built on `Unet::new_controlled` + `Unet::run_with_control`
+  rather than composed on top of `pipeline::Sdxl` - see
+  `crates/controlnet/src/caps.rs`'s module docs. `flux1::pipeline` is the
+  newest of the ten and the only one with no end-to-end fixture in this
+  workspace to verify it against - see its module docs' honest scope note.
+  It is **not** met for `pulid` - a conditioning add-on with no capability
+  manifest, no residency adapter and no D-Bus surface, now unblocked
+  (`flux1`'s pipeline exists) but not yet built.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

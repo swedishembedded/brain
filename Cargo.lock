@@ -584,6 +584,7 @@ dependencies = [
  "brain-fcbench",
  "brain-federated",
  "brain-fincast",
+ "brain-flux1",
  "brain-flux2",
  "brain-forecast",
  "brain-glmdsa",
@@ -898,8 +899,10 @@ dependencies = [
 name = "brain-flux1"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-clip",
+ "brain-data",
  "brain-diffusion",
  "brain-dit",
  "brain-gpu-core",

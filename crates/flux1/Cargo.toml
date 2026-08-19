@@ -21,6 +21,11 @@ brain-clip.workspace = true
 brain-t5encoder.workspace = true
 brain-imaging.workspace = true
 bytemuck.workspace = true
+# `pipeline`/`caps`: the text2image sampling loop + the served action -
+# CLIP-L's tokenizer + T5-XXL's forward's own PRNG for the initial latent.
+brain-data.workspace = true
+brain-capability.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an

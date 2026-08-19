@@ -60,6 +60,7 @@ mod resident_clip;
 mod resident_t5encoder;
 mod resident_sdxl;
 mod resident_controlnet;
+mod resident_flux1;
 mod resident_scrfd;
 mod resident_arcface;
 mod resident_sam2;

@@ -326,6 +326,14 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_controlnet::ControlnetResident::from_env),
         },
+        ModelEntry {
+            manifest: flux1::caps::manifest,
+            provider: from_env!(
+                flux1::caps::Flux1Provider::from_env,
+                "set BRAIN_FLUX1_DIR to a released diffusers FLUX.1 checkpoint root holding transformer/"
+            ),
+            resident: resident!(crate::resident_flux1::Flux1Resident::from_env),
+        },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. CPU-resident by declaration - see

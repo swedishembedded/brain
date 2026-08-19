@@ -127,3 +127,32 @@ dbus-run-session -- bash -c '
 
 The conditioning image is resized on the device to the output size, so it
 need not be pre-sized to match `--width`/`--height`.
+
+---
+
+## FLUX.1 (`brain flux1 text2image`)
+
+`flux1_generate.py` drives FLUX.1's `text2image` action - T5-XXL context +
+CLIP-L pooled conditioning, `crates/flux1/src/pipeline.rs`'s own rectified-flow
+schedule (BFL's linear `calculate_shift`, not FLUX.2 Klein's empirical fit -
+the two use different constants and the module docs explain why reusing
+Klein's would be silently wrong), 16-channel VAE decode. `dev`/`kontext-dev`
+are guidance-distilled (`--guidance`); `schnell` is timestep-distilled and
+ignores it.
+
+```bash
+BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/imagegen/flux1_generate.py --prompt "a red fox in the snow"'
+```
+
+**Scope**: text-to-image only - no Kontext reference-image editing, img2img,
+or LoRA yet (`flux2::pipeline` is the fuller reference for what each needs
+when they land here). No batching, same reasoning as plain SDXL.
+
+**On verification**: every piece this composes (the DiT forward, the T5/CLIP
+towers, the VAE) is independently parity-gated elsewhere in this workspace.
+The pipeline glue - patchify layout, position ids, the schedule, the affine
+latent normalization - has not been run against a real FLUX.1 checkpoint in
+the environment that wrote it; there is no fixture here to verify it end to
+end. Treat a first real generation as the actual test of this file.

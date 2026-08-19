@@ -26,10 +26,12 @@
 //! sampling pipeline (schedule + VAE + text encoders) and the serving contract
 //! are follow-ups.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod inject;
 pub mod model;
+pub mod pipeline;
 
 pub use config::Flux1Config;
 pub use import::{import_bfl, import_diffusers, truncate_to_depth, Tensors};
