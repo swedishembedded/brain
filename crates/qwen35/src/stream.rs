@@ -6,8 +6,8 @@
 //! at once - the piece that lets this model run a real chain of real layer
 //! weights on a box with far less RAM than a whole-model build would need
 //! (`crate::model::Qwen35::new_*` all require every layer's weights resolved
-//! in one host `HashMap` before building anything, which M14's own doc
-//! already flags as impossible at this config on a constrained machine).
+//! in one host `HashMap` before building anything, which is impossible at
+//! this config's real 27B size on a constrained machine).
 //!
 //! # Scope
 //!
@@ -55,11 +55,11 @@
 //!    still called out explicitly at the one call site in [`run`] where the
 //!    ordering matters.
 //!
-//! # What is reused, unchanged, from earlier milestones
+//! # What is reused, unchanged
 //!
 //! - [`crate::import::import_layer`] - the already-proven, already-measured
-//!   (2.37-2.45 GiB peak RSS per layer, M10) per-shard host loader. Nothing
-//!   in this module re-decodes a checkpoint tensor by hand.
+//!   (2.37-2.45 GiB peak RSS per layer) per-shard host loader. Nothing in
+//!   this module re-decodes a checkpoint tensor by hand.
 //! - `model::gdn_mixer::gdn_mixer_fwd` / `model::gqa_mixer::gqa_mixer_fwd` -
 //!   the shared mixer math both `crate::model::Qwen35`'s own
 //!   `layer_gdn_fwd`/`layer_gqa_fwd` and `tests/real_weight_streaming.rs`
@@ -69,8 +69,8 @@
 //!   `self.weights` (`Qwen35`'s own instance-wide stores, which this module
 //!   exists precisely because we cannot afford to build).
 //! - `model::ops::{Ops, Weight}` - the same int8 (DP4A) façade `Qwen35::
-//!   new_impl_on`'s own `upload` closure drives (M14); the 12 quantizable
-//!   leaf names and their `(n, k)` shapes below mirror that closure exactly.
+//!   new_impl_on`'s own `upload` closure drives; the 12 quantizable leaf
+//!   names and their `(n, k)` shapes below mirror that closure exactly.
 //!
 //! `paramstore::upload::Uploader` (the chunked-decode-from-mmap host-RAM
 //! bounder `qwen3omnimoe::generate` needs) is deliberately NOT used here -
@@ -295,8 +295,8 @@ impl StreamState {
     /// everything else (norms, GDN's `A_log`/`dt_bias`/gated-norm weight,
     /// GQA's `q_norm`/`k_norm`) as plain fp32 `storage_init` buffers - the
     /// same quantizable/non-quantizable split `crate::model::is_i8_linear`
-    /// and `Qwen35::new_impl_on`'s own `upload` closure already establish
-    /// (M14), just for one layer at a time instead of every layer up front.
+    /// and `Qwen35::new_impl_on`'s own `upload` closure already establish,
+    /// just for one layer at a time instead of every layer up front.
     pub fn load_layer(&self, dir: &Path, cfg: &Qwen35Config, l: usize) -> OwnedStreamedLayer {
         let ty = cfg.layer_types()[l];
         let shard = dir.join(format!("layers-{l}.safetensors"));

@@ -20,7 +20,7 @@
 //!    non-streaming replay. A high cosine against the real Python reference
 //!    here proves the new plumbing did not silently change the numerical
 //!    result versus the already-proven path - modulo the SAME int8
-//!    quantization error M14's `int8_real_weight_sanity.rs` already measured
+//!    quantization error `int8_real_weight_sanity.rs` already measured
 //!    per-leaf (cosine in [0.9999283, 0.9999519] there), now propagated
 //!    through one whole layer's chain of 8-12 quantized linears plus the
 //!    mixer nonlinearities instead of measured leaf-by-leaf.
@@ -120,8 +120,9 @@ fn run_layer_gate(l: usize) {
     let rel = brain_testutil::parity::rel_l2(&got, &want_out);
     eprintln!("layer {l} (streamed, int8): cosine={cos:.9} rel_l2={rel:.6} max_abs={max_abs:.4}");
     // int8 quantizes every one of this layer's 8-12 mixer/MLP linears (see
-    // `is_i8_linear`) - M14's own leaf-level measurement on these same real
-    // weights put per-leaf int8-vs-fp32 cosine in [0.9999283, 0.9999519];
+    // `is_i8_linear`) - `int8_real_weight_sanity.rs`'s own leaf-level
+    // measurement on these same real weights put per-leaf int8-vs-fp32
+    // cosine in [0.9999283, 0.9999519];
     // chained through a whole layer (multiple quantized linears in series
     // plus the mixer's nonlinearities) some further drift is expected, but
     // nowhere near enough to threaten a 0.99 floor - well short of
@@ -158,7 +159,7 @@ fn layer_63_streamed_matches_the_real_reference() {
 /// below, not merely asserted.
 ///
 /// Budget derivation: `crate::import::import_layer`'s own measured peak is
-/// 2.37-2.45 GiB per layer (`real_weight_streaming.rs`'s doc, M10) - that
+/// 2.37-2.45 GiB per layer (`real_weight_streaming.rs`'s own doc) - that
 /// figure already reflects the FP8-dequantize working set for one shard, and
 /// since layers are imported strictly sequentially here (never two `import_
 /// layer` calls overlapping), the process-wide high-water mark should track
