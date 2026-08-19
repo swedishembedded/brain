@@ -362,12 +362,16 @@ def _dbus_error_text(e: DBusErrorResponse) -> str:
 
 
 def _read_stream(raw_fd: int, timeout: float) -> Iterator[tuple[dict[str, Any], list[int]]]:
+    """Yield frames until a terminal `done`/`error`. A socket EOF that arrives
+    BEFORE one is exactly what a killed/crashed brain's now-closed peer fd
+    produces -- raise rather than returning silently, or a dead server looks
+    identical to an action that simply produced no frames and succeeded."""
     with socket.socket(fileno=raw_fd) as sock:
         sock.settimeout(timeout)
         while True:
             data, ancillary, _flags, _addr = sock.recvmsg(1 << 16, socket.CMSG_SPACE(8 * 4))
             if not data:
-                return
+                raise BrainError("stream closed before a terminal frame (brain died or the connection dropped)")
             frame = json.loads(data)
             yield frame, _scm_rights(ancillary)
             if frame.get("type") in ("done", "error"):
