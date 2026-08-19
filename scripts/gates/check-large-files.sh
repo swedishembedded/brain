@@ -4,8 +4,8 @@
 
 # Keep binaries that do not belong in a source tree out of git.
 #
-# Two separate rules, because "too big" and "wrong kind of file" are different
-# problems:
+# Three separate rules, because "too big", "wrong kind of file", and "machine-
+# specific measurement" are different problems:
 #
 #   1. Some kinds NEVER belong here at any size - video containers, model
 #      weights, and RAW TENSOR DUMPS (`.f32`/`.u32`/`.i32`/`.f16`/`.raw`/`.dat`,
@@ -21,7 +21,19 @@
 #      a checkpoint: .gitignore already lists the weight extensions, but
 #      `git add -f` walks straight past that, and by the time anyone
 #      notices, removing it means rewriting history rather than a revert.
-#   2. Everything else has a size ceiling. Documentation screenshots are
+#   2. A `brain perf` baseline JSON never belongs here either, for the same
+#      "differs on every regeneration" reason plus one more: its absolute
+#      numbers are a snapshot of ONE machine's CPU/GPU/thermal state at
+#      capture time. A perf-gate script's own generous floor (0.5x baseline)
+#      exists to absorb session-to-session drift on a single box, not
+#      cross-machine variance - committing the baseline invites exactly the
+#      false-fail (or false-pass) a differently-shaped machine would produce,
+#      and each `--update` re-capture would silently rewrite it in history
+#      forever regardless. Every `scripts/gates/*-perf-gate.sh` script now
+#      reads/writes its baseline from a gitignored `scripts/gates/
+#      *-perf-baselines*` path instead - captured locally via `--update`
+#      before the gate means anything, never committed.
+#   3. Everything else has a size ceiling. Documentation screenshots are
 #      legitimate and some are genuinely a few megabytes; the ceiling sits
 #      above the largest one already tracked so it constrains growth without
 #      relitigating what is here.
@@ -29,7 +41,10 @@
 # This exists because a generated demo clip was committed during the Wan port.
 # It was 100 KB, which is exactly the size that slips through review. Two
 # crates were later found tracking raw `.f32`/`.u32` golden dumps the same
-# way - the ban above closes that specific gap.
+# way - the ban above closes that specific gap. Rule 2 exists because four
+# perf-gate scripts (forecast/wm/qwen-serving/ltxv) had each independently
+# committed a baseline JSON the same way, on the same reasoning each time -
+# the pattern needed closing once, here, rather than caught per-model.
 #
 # Usage: scripts/gates/check-large-files.sh [file ...]
 #   No arguments scans every tracked file. With arguments (how the pre-commit
@@ -39,6 +54,13 @@ cd "$(dirname "$0")/../.."
 
 # Regenerable media and model weights. Anything matching is refused outright.
 BANNED_EXT='mp4|mkv|webm|mov|avi|m4v|mpg|mpeg|wmv|flv|safetensors|gguf|ckpt|pth|pt|npy|npz|onnx|h5|tflite|pb|msgpack|bin|f32|f16|u32|i32|raw|dat'
+
+# A committed `brain perf` baseline - any file whose path names it, regardless
+# of extension (today always .json, but the ban is on the ROLE, not the
+# suffix). Matches `scripts/gates/wm-perf-baselines.json` (flat) and
+# `scripts/gates/<model>-perf-baselines/<name>.json` (per-scenario directory)
+# alike.
+BANNED_PATH_RE='scripts/gates/.*perf-baseline'
 
 # Ceiling for everything else. The largest tracked file today is a ~4.9 MB
 # quickstart screenshot, so this leaves headroom for a comparable one without
@@ -60,6 +82,16 @@ for f in "${files[@]}"; do
     echo "    testdata/ tree via brain_testutil::testdata_path, not crates/**/tests/."
     echo "    For a still image, publish a PNG instead and let whatever produces the"
     echo "    original artifact produce it on demand."
+    fail=1
+    continue
+  fi
+
+  if [[ "$f" =~ $BANNED_PATH_RE ]]; then
+    echo "BANNED FILE: $f (a committed perf-gate baseline)"
+    echo "    A perf baseline is a snapshot of one machine's absolute numbers, not"
+    echo "    portable source. Capture it locally with the matching *-perf-gate.sh"
+    echo "    script's --update flag; the baseline directory is gitignored, so it"
+    echo "    stays on your machine, not in history."
     fail=1
     continue
   fi

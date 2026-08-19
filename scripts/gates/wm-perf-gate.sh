@@ -3,11 +3,14 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 # wm-perf-gate.sh — world-model fps regression gate (pattern: vemu's
-# perf-gate.sh: best-of-N against committed baselines; hard floors only, since
-# this laptop-class 155H throttles and soft deltas would flap).
+# perf-gate.sh: best-of-N against a local baseline; hard floors only, since a
+# throttling laptop-class CPU makes soft deltas flap).
 #
-# Dev-box gate, NOT CI: needs out/diamond-breakout.weights (brain diamond import).
-# Usage: scripts/gates/wm-perf-gate.sh [--update]   (--update rewrites baselines)
+# Dev-box gate, NOT CI: needs out/diamond-breakout.weights (brain diamond
+# import). The baseline file (scripts/gates/wm-perf-baselines.json) is
+# gitignored, not committed: its absolute numbers are one machine's snapshot,
+# not portable source (scripts/gates/check-large-files.sh rule 2).
+# Usage: scripts/gates/wm-perf-gate.sh [--update]   (--update rewrites the local baseline)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 

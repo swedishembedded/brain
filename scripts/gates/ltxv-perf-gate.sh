@@ -7,7 +7,7 @@
 # target (`ltxv[:<frames>x<W>x<H>x<steps>]` - the residency executor running
 # `ltxv::caps::generate_on`, real kernels/scheduler, tiny random-weight DiT
 # so no checkpoint is required) through `brain perf run latency` at a fixed
-# small shape and checks the report against the committed baseline with
+# small shape and checks the report against the local baseline with
 # `brain perf gate --floor`. `latency`, not `serve`: this crate's own
 # `LtxvInstance::run_batch` runs requests one at a time (no concurrent
 # batching to gate the way qwen's admission/batching gate does), and never
@@ -17,8 +17,13 @@
 # Dev-box gate, NOT CI: a shared dev box's absolute numbers drift across a
 # session - the floor is deliberately generous (0.5, i.e. half of baseline)
 # to absorb that drift while still catching an order-of-magnitude
-# regression. Capture the baseline on a rested, uncontended device via
-# --update, then hand-review the diff.
+# regression.
+#
+# The baseline directory (scripts/gates/ltxv-perf-baselines/) is gitignored,
+# not committed: its absolute numbers are one machine's snapshot, not
+# portable source (scripts/gates/check-large-files.sh rule 2). Capture it
+# locally on a rested, uncontended device via --update, then hand-review the
+# diff.
 #
 # Deliberately `--device cpu`, not gpu: Phase 8's own investigation found
 # that the residency executor's GPU-lane device-opening path can fail to

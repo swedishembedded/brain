@@ -5,14 +5,19 @@
 # forecast-perf-gate.sh — forecast latency regression gate (pattern:
 # wm-perf-gate.sh). Runs each foundation forecaster through `brain perf run`
 # (best-of-3, warmup 1, so the first-request model-build is excluded) and checks
-# the report against the committed baseline with `brain perf gate --floor`.
+# the report against the local baseline with `brain perf gate --floor`.
 #
-# Dev-box gate, NOT CI: this 155H throttles ~2-3x under load, so the floor is
-# deliberately generous (0.33 ≈ the wm-perf-gate's 3x headroom) — it catches
-# order-of-magnitude pathologies (a serial reduction, a lost AVX path, a
-# software-adapter fallback) while absorbing thermal/load swings, NOT a 20%
-# thermal delta. On a rested machine or CI, tighten with FORECAST_PERF_FLOOR=0.8.
-# Capture baselines on a rested machine via --update, then hand-review the diff.
+# Dev-box gate, NOT CI: a throttling laptop-class CPU can swing ~2-3x under
+# load, so the floor is deliberately generous (0.33 ≈ the wm-perf-gate's 3x
+# headroom) - it catches order-of-magnitude pathologies (a serial reduction, a
+# lost AVX path, a software-adapter fallback) while absorbing thermal/load
+# swings, NOT a 20% thermal delta. On a rested machine or CI, tighten with
+# FORECAST_PERF_FLOOR=0.8.
+#
+# The baseline directory (scripts/gates/forecast-perf-baselines/) is
+# gitignored, not committed: its absolute numbers are one machine's snapshot,
+# not portable source (scripts/gates/check-large-files.sh rule 2). Capture it
+# locally on a rested machine via --update, then hand-review the diff.
 #
 # Weights via env (a model with unset weights is SKIPPED, not failed):
 #   BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER   kronos  (checkpoint dirs)

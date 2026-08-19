@@ -600,21 +600,24 @@ forecast/parity:
 	scripts/gates/forecast-parity-gate.sh
 
 # Forecasting latency regression gate: each forecaster through `brain perf run`
-# vs the committed baseline (scripts/gates/forecast-perf-baselines/, `--update` to
-# refresh). Weights via env (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
+# vs a local baseline (scripts/gates/forecast-perf-baselines/, gitignored -
+# `--update` to capture/refresh it on this machine). Weights via env
+# (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
 forecast/perf-gate: release
 	scripts/gates/forecast-perf-gate.sh
 
-# World-model fps regression gate (best-of-3 vs scripts/gates/wm-perf-baselines.json,
-# hard floors only). Dev-box gate, not CI: needs out/diamond-breakout.weights
-# (brain diamond import ...) and a real display/GPU. `--update` rewrites baselines.
+# World-model fps regression gate (best-of-3 vs a local
+# scripts/gates/wm-perf-baselines.json, gitignored; hard floors only).
+# Dev-box gate, not CI: needs out/diamond-breakout.weights (brain diamond
+# import ...) and a real display/GPU. `--update` captures/rewrites it.
 wm/perf-gate: release
 	scripts/gates/wm-perf-gate.sh
 
 # Concurrent-serving-performance regression gate: the real HTTP-served path
 # (http:qwen-synth: target, random weights, no checkpoint needed) through
-# `brain perf run sweep` at concurrency 1,2, vs the committed baseline
-# (scripts/gates/qwen-serving-perf-baselines/, `--update` to refresh).
+# `brain perf run sweep` at concurrency 1,2, vs a local baseline
+# (scripts/gates/qwen-serving-perf-baselines/, gitignored - `--update` to
+# capture/refresh it on this machine).
 # Needs a real tokenizer via QWEN_TOKENIZER; SKIPS (not fails) when unset.
 qwen/serving-perf-gate: release
 	scripts/gates/qwen-serving-perf-gate.sh

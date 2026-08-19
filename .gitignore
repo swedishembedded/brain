@@ -62,6 +62,12 @@ out/depth.ppm
 # Test fixtures (checkpoints/goldens/audio) — populated by `make fetch/testdata`, never committed.
 /testdata/
 
+# brain perf baselines are a snapshot of one machine's absolute numbers, not
+# portable source - capture locally via each *-perf-gate.sh script's --update
+# flag, never commit (see scripts/gates/check-large-files.sh rule 2).
+scripts/gates/*-perf-baselines/
+scripts/gates/*-perf-baselines.json
+
 # Binary model tensors must NEVER be committed — they are multi-MB blobs that bloat
 # history irreversibly. Test goldens are regenerated/fetched, not tracked.
 *.safetensors

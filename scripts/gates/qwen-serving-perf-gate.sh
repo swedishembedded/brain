@@ -7,17 +7,21 @@
 # investigation both asked for (pattern: forecast-perf-gate.sh): drives the REAL served path
 # (`apiserve::router()`, `http:qwen-synth:` target — random weights, real
 # kernels/batching/admission, no checkpoint needed) through `brain perf run
-# serve` at a fixed concurrency and checks the report against the committed
+# serve` at a fixed concurrency and checks the report against the local
 # baseline with `brain perf gate --floor`. NOT `sweep`: a sweep's `curve`
 # artifact carries no flat `ttfa_p99`/`output_per_s` field for `perf gate` to
 # read (see `crates/perf/src/gate.rs`'s own "nothing was actually gated"
 # refusal) — `serve` at one concurrency is the scenario shaped for gating.
 #
-# Dev-box gate, NOT CI: this box's absolute numbers drift across a session —
-# the floor is deliberately generous (0.5, i.e. half of baseline) to absorb that drift
-# while still catching an order-of-magnitude regression (e.g. a rewiring
-# that serializes concurrent requests again). Capture the baseline on a
-# rested machine via --update, then hand-review the diff.
+# Dev-box gate, NOT CI: a shared dev box's absolute numbers drift across a
+# session - the floor is deliberately generous (0.5, i.e. half of baseline)
+# to absorb that drift while still catching an order-of-magnitude regression
+# (e.g. a rewiring that serializes concurrent requests again).
+#
+# The baseline directory (scripts/gates/qwen-serving-perf-baselines/) is
+# gitignored, not committed: its absolute numbers are one machine's snapshot,
+# not portable source (scripts/gates/check-large-files.sh rule 2). Capture it
+# locally on a rested machine via --update, then hand-review the diff.
 #
 # Needs a real tokenizer (chat-template rendering is part of the served
 # path) via QWEN_TOKENIZER — SKIPPED, not failed, when unset.

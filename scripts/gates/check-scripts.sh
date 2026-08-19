@@ -51,8 +51,7 @@ while IFS= read -r -d '' f; do
     echo "  ORPHAN: $f (not named anywhere else in the repo)"
     orphans=$((orphans + 1))
   fi
-done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py' 'tools/*.txt' \
-  | grep -zv '/forecast-perf-baselines/\|/wm-perf-baselines\.json$')
+done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py' 'tools/*.txt')
 if [ "$orphans" -gt 0 ]; then
   echo "  $orphans orphan(s) — delete them, or wire them into a Makefile target /"
   echo "  bats test / doc / crate reference so the next run finds the citation."
