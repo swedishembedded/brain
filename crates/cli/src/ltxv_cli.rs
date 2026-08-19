@@ -205,9 +205,18 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let forwards = if o.guidance > 1.0 { 2 } else { 1 };
     let dit_desc = if o.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
+    // The real distilled checkpoint ignores `--steps` entirely (see
+    // `ltxv::pipeline::generate`'s doc on why) - report the fixed real
+    // schedule's own step count here instead of echoing a flag that will
+    // not be honored, so this line never lies about what actually runs.
+    let steps_desc = if o.dit_config == "ltx25_22b" {
+        format!("{} distilled-schedule (fixed)", ltxv::pipeline::LTX2_DISTILLED_STEPS)
+    } else {
+        format!("{}", o.steps)
+    };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}",
-        o.frames, o.width, o.height, o.steps, o.eta, o.guidance, o.seed
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}",
+        o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
 
     let t0 = std::time::Instant::now();

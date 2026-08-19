@@ -77,7 +77,13 @@ use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder};
-use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas};
+use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS};
+
+/// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len()
+/// - 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
+/// progress line) can report it without hardcoding a number that would drift
+/// from the table itself.
+pub const LTX2_DISTILLED_STEPS: usize = LTX2_DISTILLED_SIGMAS.len() - 1;
 
 /// Read a checkpoint from a directory of safetensors shards or one
 /// safetensors file - the real VAE ships as a single file, so this is a
@@ -621,7 +627,29 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
     }
     let in_channels = dit_cfg.in_channels as usize;
-    let total = o.steps as u32 + 2;
+    // The real `ltx25_22b` checkpoint is the DISTILLED variant
+    // (`ltx-2.5-22b-distilled-transformer-*.gguf`) - distillation trains the
+    // model to denoise correctly at a small set of SPECIFIC, non-uniformly-
+    // spaced sigma values baked in during training
+    // (`diffusion::scheduler::LTX2_DISTILLED_SIGMAS`, matched bit-exactly
+    // against source), not at arbitrary intermediate noise levels a generic
+    // continuous-time schedule formula would produce. Using the generic
+    // `ltx2_sigmas` formula (this pipeline's ONLY schedule until now, per
+    // this module's own doc) with the real checkpoint produces reasonable-
+    // looking sigma numbers that the distilled weights were never trained
+    // to denoise from - confirmed empirically to produce non-recognizable
+    // output. `--steps`/`--base-shift`/`--max-shift`/`--stretch`/
+    // `--terminal` are therefore ignored for `ltx25_22b`: the real schedule
+    // has a fixed shape, not a user-tunable one. The tiny random-weight path
+    // is unaffected (never distilled, so the generic formula is the correct
+    // choice there, same as always).
+    let is_real_distilled = o.dit_config == "ltx25_22b";
+    let sigmas: Vec<f64> = if is_real_distilled {
+        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
+    } else {
+        ltx2_sigmas(t, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal)
+    };
+    let total = sigmas.len() as u32 - 1 + 2;
     let mut timings = Timings::default();
 
     // ---- build the DiT: tiny config, random weights (this pipeline's
@@ -695,7 +723,6 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
     };
 
-    let sigmas = ltx2_sigmas(t, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal);
     let latent0 = seeded_noise(t * in_channels, o.seed);
     let denoise_t = Instant::now();
     let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions, &keyframes_mask, &ctx_cond, &ctx_uncond, context_len, &context_valid, t, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, cancel, &mut progress)?;
@@ -705,7 +732,9 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // with it.
     drop(dit);
     timings.denoise = denoise_t.elapsed().as_secs_f32();
-    timings.steps = o.steps;
+    // `sigmas.len() - 1`, not `o.steps`: the real distilled schedule ignores
+    // `--steps` entirely (see where `sigmas` is built, above).
+    timings.steps = sigmas.len() - 1;
     timings.tokens = t;
     timings.forwards_per_step = if o.guidance > 1.0 { 2 } else { 1 };
 
@@ -1164,6 +1193,17 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the real distilled schedule's step count so a future edit to
+    /// `LTX2_DISTILLED_SIGMAS` (or to this constant) cannot silently drift
+    /// the two apart - `ltxv_cli`'s progress line and `generate`'s own
+    /// `total` computation both depend on this staying in sync with the
+    /// table's real length.
+    #[test]
+    fn distilled_steps_matches_the_real_sigma_table() {
+        assert_eq!(LTX2_DISTILLED_STEPS, LTX2_DISTILLED_SIGMAS.len() - 1);
+        assert_eq!(LTX2_DISTILLED_STEPS, 8, "the real LTX2_DISTILLED_SIGMAS table has 9 entries (8 steps) - update this pin if that table is deliberately changed");
+    }
 
     #[test]
     fn gen_opts_defaults_are_a_representable_tiny_clip() {
