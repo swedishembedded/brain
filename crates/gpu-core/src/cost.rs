@@ -181,8 +181,14 @@ impl fmt::Display for CostReport {
 
 /// True iff `name` has a cost formula (all-ones probe shape; formulas are
 /// polynomial in their params, so shape never changes coverage).
+///
+/// 32 slots, not 16: `conv3d`/`conv3d_dx`/`conv3d_dw`/`im2col3d_at`'s `Params`
+/// structs run to 19 fields (the NCTHW conv family plus its im2col lowering),
+/// so a 16-slot probe silently reported them UNCOVERED even with a correct
+/// formula in place - the probe's shape must cover the widest real `Params`
+/// struct, not just the kernels already in this file when it was 16.
 pub fn covers(name: &str) -> bool {
-    kernel_cost(name, Some(&[1; 16]), 1).is_some()
+    kernel_cost(name, Some(&[1; 32]), 1).is_some()
 }
 
 /// Fold `steps` into `report`, resolving kernel indices through `names` (the
@@ -447,6 +453,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * d + d, 4 * (rows * d + 2 * d))
         }
+        // Per-row L2 norm with a learnable per-dim scale (GenieRedux QK-norm):
+        // params [n, d, eps_bits]. One thread per (n,d) output element, EACH
+        // thread redoing the whole row's sum-of-squares (no cross-thread
+        // reduction) - real duplicated work, so flops scale as n*d*d, not
+        // n*d. Per thread: d*(mul+add) + rsqrt(SFU, 1) + 2 closing muls =
+        // 2*d+3. Bytes are the idealized "each operand once" streaming total
+        // (x and y are [n,d], g is [d]), not the per-thread redundant reads.
+        "l2norm_scale" => {
+            let (n, d) = (p(0)?, p(1)?);
+            f(n * d * (2 * d + 3), 4 * (2 * n * d + d))
+        }
 
         // ---- RoPE: rows·heads·hd/2 pairs; angle (pow+mul) + cos + sin + the
         // 6-op rotation = 10 per pair. rope2d reads its angles from tables (7).
@@ -459,6 +476,43 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "rope2d" | "rope2d_partial" => {
             let (rows, h, half) = (p(0)?, p(1)?, p(2)?);
             f(7 * rows * h * half, 24 * rows * h * half)
+        }
+        // Interleaved-pair variants sharing rope_base's exact per-pair op count
+        // (pow + cos + sin + 4 mul + 2 add/sub = 10 ops/pair, 8 B/pair): `rope`
+        // (in-place fused-qkv, analytic angle), `rope_neox` (half-split,
+        // configurable theta - subsumed by rope_partial at rot_dim==head_dim
+        // per that kernel's own seam note, but still dispatched by
+        // kronos/chronos2), `rope_train`/`rope_train_bwd` (batched, within-
+        // sequence position). All four share Params[rows, heads, head_dim, ...]
+        // at slots 0,1,2.
+        "rope" | "rope_neox" | "rope_train" | "rope_train_bwd" => {
+            let (rows, h, hd) = (p(0)?, p(1)?, p(2)?);
+            f(5 * rows * h * hd, 8 * rows * h * hd)
+        }
+        // Moondream partial RoPE fwd/bwd: same 10-op/pair rotation as rope_base,
+        // over only `rot_dim` (not the full head_dim) channels of each head.
+        // Params[n_rows, n_heads, head_dim, row_stride, base_off, tcols,
+        // rope_base, rot_dim] - rot_dim at slot 7.
+        "rope_partial" | "rope_partial_bwd" => {
+            let (rows, h, rot_dim) = (p(0)?, p(1)?, p(7)?);
+            f(5 * rows * h * rot_dim, 8 * rows * h * rot_dim)
+        }
+        // DSA-indexer interleaved RoPE on the first `rope_dim` channels of a
+        // [rope|pass] head. Same per-pair cost as rope_train, over `rope_dim`
+        // (slot 3) instead of the full head_dim.
+        "rope_sub" => {
+            let (rows, h, rope_dim) = (p(0)?, p(1)?, p(3)?);
+            f(5 * rows * h * rope_dim, 8 * rows * h * rope_dim)
+        }
+        // Table-driven interleaved RoPE (Z-Image): angle comes from a
+        // host-precomputed cos/sin table, so there is no pow/cos/sin per pair -
+        // just 4 mul + 2 add/sub = 6 flops/pair. Params[seq_len, n_heads,
+        // head_dim, half] gives `half` (pair count per head) directly at slot 3.
+        // Bytes: x[seq,heads,hd] read once, cos/sin tables [seq,half] read once
+        // each (shared across heads, so NOT multiplied by n_heads), y write once.
+        "rope_interleave_table" => {
+            let (rows, h, half) = (p(0)?, p(1)?, p(3)?);
+            f(6 * rows * h * half, 4 * (4 * rows * h * half + 2 * rows * half))
         }
 
         // ---- attention, causal (t(t+1)/2 pairs) -----------------------------
@@ -575,10 +629,23 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
 
         // ---- attention, cross (t_dec × t_enc); params [b, h, td, te, hd, ...].
-        "attn_scores_cross" => {
+        // `attn_scores_cross_kt` (params [bsz,n_heads,t_dec,t_enc,head_dim,
+        // q_stride,q_off] - the same first 5 slots) is the coalesced twin
+        // reading a key-minor `kt` instead of the fused `kv` slab: same
+        // output values, same MAC count, same total q/k/scores element
+        // counts (`kt` has exactly `k`'s element count, just transposed), so
+        // it costs identically - ltxv's Phase 8 profiling adopted it in
+        // place of `attn_scores_cross` for every attention call in that
+        // crate (see `crates/ltxv/src/block.rs::attn_scores_kt`).
+        "attn_scores_cross" | "attn_scores_cross_kt" => {
             let (b, h, td, te, hd) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
             f(b * h * td * te * (2 * hd + 1), 4 * (b * h * td * te + b * hd * h * (td + te)))
         }
+        // The transpose `attn_scores_cross_kt` reads from: params [t_enc,
+        // d_model, kv_stride, k_off]. Pure movement, one thread per (c,j)
+        // output element - the same "read+write each moved element once"
+        // accounting as `im2col_at`/`concat2`.
+        "kv_k_headt" => f(0, 8 * p(0)? * p(1)?),
         // params [b, h, td, te].
         "attn_softmax_cross" => {
             let (b, h, td, te) = (p(0)?, p(1)?, p(2)?, p(3)?);
@@ -620,6 +687,26 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "silu_bwd_da" => f(8 * n0(), 16 * n0()),
         "gelu" => f(10 * n0(), 8 * n0()),
         "gelu_bwd" => f(15 * n0(), 12 * n0()),
+        // Exact erf-GELU (A&S 7.1.26 rational approximation, matching torch's
+        // default F.gelu): arg-scale(1) + abs(1) + t=1/(1+c*ax)(3) + 4-term
+        // Horner poly(8) + ax*ax+negate+exp+poly*exp+1-.+s*.(6) + 0.5*v*(1+erf)
+        // (3) = 24 ops/element (transcendentals/div count 1, per this file's
+        // own convention).
+        "gelu_erf" => f(24 * n0(), 8 * n0()),
+        // Moondream MoE expert activation: gelu_erf(h) * (g+1) - the same 24
+        // ops plus one read of g, one add, one mul.
+        "geglu_shift" => f(26 * n0(), 12 * n0()),
+        // SnakeBeta (codec SEANet/BigVGAN vocoder activation): params
+        // [total, c, inner, eps]. y = x + exp(-beta)*sin(exp(alpha)*x)^2, with
+        // alpha/beta indexed per-channel and RECOMPUTED (exp) by every element
+        // sharing that channel - real work, so flops scale with `total` not
+        // `c`. 9 ops/element: 2 exp + 1 add(eps) + 1 mul(x*a) + 1 sin(SFU) +
+        // 1 mul(s*s) + 1 div(1/b) + 1 mul + 1 add. Bytes: x/out are [total],
+        // alpha/beta are [c] (each operand's true size once).
+        "snake_beta" => {
+            let (total, ch) = (p(0)?, p(1)?);
+            f(9 * total, 4 * (2 * total + 2 * ch))
+        }
         // `silu`/`silu_bwd` were uncovered, which is why a VQGAN forward could
         // not report a whole-pass rate at all: one kind without a formula makes
         // the pass numerator partial, and a partial numerator over the full
@@ -869,6 +956,113 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let rows = n * c;
             let km1 = k.saturating_sub(1);
             f(2 * rows * k, 4 * (2 * rows + c * k + 2 * rows * km1))
+        }
+
+        // ---- LTX-2.5 (ltxv): 3D conv, 3D neighborhood attention, layout ----
+        //
+        // conv3d family: params [N, Cin, T, H, W, Cout, KT, KH, KW, st, sh, sw,
+        // pt, ph, pw, groups, To, Ho, Wo] - conv2d's family lifted to NCTHW,
+        // WITH grouping (conv2d has none). Bias is tiny and omitted, matching
+        // the conv2d precedent above. `cin_g`/`cout_g` are the per-group
+        // channel counts the WGSL loops actually bound over.
+        "conv3d" => {
+            let (n, cin, t, h, w, cout, kt, kh, kw, groups, to, ho, wo) = (
+                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?, p(8)?, p(15)?, p(16)?,
+                p(17)?, p(18)?,
+            );
+            let cin_g = cin / groups.max(1);
+            let ktkhkw = kt * kh * kw;
+            f(
+                2 * n * cout * to * ho * wo * cin_g * ktkhkw,
+                4 * (n * cin * t * h * w + cout * cin_g * ktkhkw + n * cout * to * ho * wo),
+            )
+        }
+        // GATHER form (one thread per INPUT element, reduces cout_g*KT*KH*KW) -
+        // same Params as conv3d.
+        "conv3d_dx" => {
+            let (n, cin, t, h, w, cout, kt, kh, kw, groups, to, ho, wo) = (
+                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?, p(8)?, p(15)?, p(16)?,
+                p(17)?, p(18)?,
+            );
+            let cin_g = cin / groups.max(1);
+            let cout_g = cout / groups.max(1);
+            let ktkhkw = kt * kh * kw;
+            f(
+                2 * n * cin * t * h * w * cout_g * ktkhkw,
+                4 * (n * cout * to * ho * wo + cout * cin_g * ktkhkw + n * cin * t * h * w),
+            )
+        }
+        // Accumulating weight gradient (dw is read AND written, like
+        // conv2d_dw) - same Params as conv3d.
+        "conv3d_dw" => {
+            let (n, cin, t, h, w, cout, kt, kh, kw, groups, to, ho, wo) = (
+                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?, p(8)?, p(15)?, p(16)?,
+                p(17)?, p(18)?,
+            );
+            let cin_g = cin / groups.max(1);
+            let ktkhkw = kt * kh * kw;
+            f(
+                2 * cout * cin_g * ktkhkw * n * to * ho * wo,
+                4 * (n * cout * to * ho * wo + n * cin * t * h * w + 2 * cout * cin_g * ktkhkw),
+            )
+        }
+        // 3D im2col over a position RANGE - im2col_at lifted to NCTHW; pure
+        // movement, same "read+write each moved element once" accounting.
+        // Params: [cin,t,h,w,kt,kh,kw,st,sh,sw,pt,ph,pw,to,ho,wo,cinkkk,pos0,cnt].
+        "im2col3d_at" => {
+            let (cinkkk, cnt) = (p(16)?, p(18)?);
+            f(0, 8 * cnt * cinkkk)
+        }
+        // space_to_depth3d / depth_to_space3d: pure rearrange, element count
+        // preserved (Cout*To*Ho*Wo == Cin*T*H*W by construction), so both cost
+        // the same "read once, write once" traffic over the INPUT's element
+        // count - params share [Cin,T,H,W,...] at slots 0..3.
+        "space_to_depth3d" | "depth_to_space3d" => {
+            let (cin, t, h, w) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(0, 8 * cin * t * h * w)
+        }
+        // Channels-last 3D pixel shuffle (depth-to-space): params
+        // [T,H,W,Cout,p1,p2,p3]; element count = Cin*T*H*W = Cout*p1*p2*p3*T*H*W.
+        "pixel_shuffle3d_cl" => {
+            let (t, h, w, cout, p1, p2, p3) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?);
+            f(0, 8 * t * h * w * cout * p1 * p2 * p3)
+        }
+        // 3D neighborhood-attention (NATTEN-style windowed self-attention)
+        // scores: params [t,h,w,heads,head_dim,kt,kh,kw]. One thread per
+        // (head,query,window-slot), serial hd-deep dot product. q/k are the
+        // SAME [t*h*w,heads,head_dim] volume (self-attention).
+        "na3d_scores" => {
+            let (t, h, w, heads, hd, kt, kh, kw) = (
+                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?,
+            );
+            let nq = t * h * w;
+            let window = kt * kh * kw;
+            let total = heads * nq * window;
+            f(2 * hd * total, 4 * (2 * nq * heads * hd + total))
+        }
+        // na3d_scores' twin: probs*V apply. params identical; one thread per
+        // (query,head,dim), serial window-deep reduction.
+        "na3d_apply" => {
+            let (t, h, w, heads, hd, kt, kh, kw) = (
+                p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(6)?, p(7)?,
+            );
+            let nq = t * h * w;
+            let window = kt * kh * kw;
+            let total_out = nq * heads * hd;
+            f(2 * window * total_out, 4 * (heads * nq * window + 2 * nq * heads * hd))
+        }
+        // NLC -> NCHW transpose with a fused per-channel bias (64x64 tiled,
+        // the conv-lowering epilogue). Params [total(unused), c, l]; x/y are
+        // [l,c]/[c,l] (same size), bias is [c].
+        "nlc_bias_nchw" => {
+            let (c, l) = (p(1)?, p(2)?);
+            f(c * l, 4 * (2 * c * l + c))
+        }
+        // Per-(image,channel) scalar broadcast-add, NCHW: params [N,C,HW].
+        // x/y are [N,C,HW], v is [N,C].
+        "add_chan_bcast" => {
+            let (n, ch, hw) = (p(0)?, p(1)?, p(2)?);
+            f(n * ch * hw, 4 * (2 * n * ch * hw + n * ch))
         }
 
         // ---- bmm/bmm_acc: batched matmul, both operands vary per batch.
@@ -1140,6 +1334,107 @@ mod tests {
         assert_eq!(cost("conv1d_dw", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 36).flops, 1440);
     }
 
+    /// Hand-computed expectations for the ltxv (Phase 8) formulas: 3D conv,
+    /// 3D neighborhood attention, the rope*/gelu_erf/geglu_shift/snake_beta/
+    /// l2norm_scale/nlc_bias_nchw/add_chan_bcast family, and the 3D layout
+    /// kernels (space_to_depth3d/depth_to_space3d/pixel_shuffle3d_cl/
+    /// im2col3d_at).
+    #[test]
+    fn ltxv_kernel_costs() {
+        // conv3d [N=1,Cin=1,T=3,H=1,W=1,Cout=1,KT=3,KH=1,KW=1,st=1,sh=1,sw=1,
+        // pt=0,ph=0,pw=0,groups=1,To=1,Ho=1,Wo=1]: 1 output x (1 cin_g x 3 KT)
+        // taps x 2 = 6 flops; bytes = 4*(x=3 + wt=3 + y=1) = 28.
+        let p3d = [1u32, 1, 3, 1, 1, 1, 3, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1];
+        assert_eq!(cost("conv3d", &p3d, 1).flops, 6);
+        assert_eq!(cost("conv3d", &p3d, 1).bytes, 28);
+        // dX gather form: 2*(N*Cin*T*H*W)*cout_g*KT*KH*KW = 2*3*1*3 = 18.
+        assert_eq!(cost("conv3d_dx", &p3d, 1).flops, 18);
+        assert_eq!(cost("conv3d_dx", &p3d, 1).bytes, 28);
+        // dW: 2*Cout*cin_g*KT*KH*KW*N*To*Ho*Wo = 2*3*1 = 6; dw is read+written.
+        assert_eq!(cost("conv3d_dw", &p3d, 1).flops, 6);
+        assert_eq!(cost("conv3d_dw", &p3d, 1).bytes, 40);
+
+        // na3d_scores/apply [t=2,h=1,w=1,heads=1,head_dim=2,kt=2,kh=1,kw=1]:
+        // nq=2, window=2, total=4 -> 2*hd*total = 16 flops each.
+        let pna = [2u32, 1, 1, 1, 2, 2, 1, 1];
+        assert_eq!(cost("na3d_scores", &pna, 4).flops, 16);
+        assert_eq!(cost("na3d_scores", &pna, 4).bytes, 48);
+        assert_eq!(cost("na3d_apply", &pna, 4).flops, 16);
+        assert_eq!(cost("na3d_apply", &pna, 4).bytes, 48);
+
+        // rope [seq_len=2,n_heads=1,head_dim=4,row_stride=4,base_off=0]:
+        // 5*rows*h*hd = 40 flops, 8*rows*h*hd = 64 bytes - the rope_base
+        // family's exact per-pair accounting, shared by rope/rope_neox/
+        // rope_train/rope_train_bwd (same Params slots 0,1,2).
+        let prope = [2u32, 1, 4, 4, 0];
+        assert_eq!(cost("rope", &prope, 4).flops, 40);
+        assert_eq!(cost("rope_neox", &[2, 1, 4, 4, 0, 10000], 4).flops, 40);
+        assert_eq!(cost("rope_train", &[2, 1, 4, 4, 0, 2], 4).flops, 40);
+        assert_eq!(cost("rope_train_bwd", &[2, 1, 4, 4, 0, 2], 4).flops, 40);
+        // rope_partial: rot_dim (slot 7) stands in for head_dim.
+        let pp = [2u32, 1, 8, 8, 0, 2, 10000, 4];
+        assert_eq!(cost("rope_partial", &pp, 4).flops, 40);
+        assert_eq!(cost("rope_partial_bwd", &pp, 4).flops, 40);
+        // rope_sub: rope_dim at slot 3.
+        assert_eq!(cost("rope_sub", &[2, 1, 8, 4, 8, 2], 4).flops, 40);
+        // rope_interleave_table: table lookup, no pow/cos/sin -> 6 flops/pair.
+        let pt = [2u32, 1, 4, 2];
+        assert_eq!(cost("rope_interleave_table", &pt, 4).flops, 24);
+        assert_eq!(cost("rope_interleave_table", &pt, 4).bytes, 96);
+
+        // gelu_erf/geglu_shift/snake_beta: elementwise, params[total(,c,...)].
+        assert_eq!(cost("gelu_erf", &[10], 10).flops, 240);
+        assert_eq!(cost("gelu_erf", &[10], 10).bytes, 80);
+        assert_eq!(cost("geglu_shift", &[10], 10).flops, 260);
+        assert_eq!(cost("snake_beta", &[8, 2, 1, 0], 8).flops, 72);
+        assert_eq!(cost("snake_beta", &[8, 2, 1, 0], 8).bytes, 80);
+
+        // l2norm_scale [n=2,d=4]: n*d*(2*d+3) = 8*11 = 88 flops (real
+        // per-thread duplicated work); bytes are the idealized per-operand-
+        // once total = 4*(2*8+4) = 80.
+        assert_eq!(cost("l2norm_scale", &[2, 4, 0], 8).flops, 88);
+        assert_eq!(cost("l2norm_scale", &[2, 4, 0], 8).bytes, 80);
+
+        // nlc_bias_nchw [total(unused)=12,c=3,l=4]: c*l = 12 flops.
+        assert_eq!(cost("nlc_bias_nchw", &[12, 3, 4], 12).flops, 12);
+        assert_eq!(cost("nlc_bias_nchw", &[12, 3, 4], 12).bytes, 108);
+        // add_chan_bcast [N=2,C=3,HW=4]: N*C*HW = 24 flops.
+        assert_eq!(cost("add_chan_bcast", &[2, 3, 4], 24).flops, 24);
+        assert_eq!(cost("add_chan_bcast", &[2, 3, 4], 24).bytes, 216);
+
+        // 3D layout: pure movement, element count = Cin*T*H*W (same on both
+        // sides of the rearrange).
+        assert_eq!(
+            cost("space_to_depth3d", &[2, 4, 1, 1, 2, 1, 1, 2, 1, 1], 8).bytes,
+            64
+        );
+        assert_eq!(cost("depth_to_space3d", &[2, 4, 1, 1, 2, 1, 1, 1], 8).bytes, 64);
+        assert_eq!(cost("pixel_shuffle3d_cl", &[2, 1, 1, 1, 2, 1, 1], 4).bytes, 32);
+        // im2col3d_at: cinkkk (slot 16) x cnt (slot 18) moved elements.
+        let pim = [1u32, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 6, 0, 4];
+        assert_eq!(cost("im2col3d_at", &pim, 24).bytes, 192);
+
+        // attn_scores_cross_kt shares attn_scores_cross's formula exactly
+        // (same first-5 param slots, same MAC count, same total q/k/scores
+        // element counts - kt is k transposed, not resized).
+        let pcross = [1u32, 2, 3, 5, 8, 96, 0];
+        assert_eq!(cost("attn_scores_cross_kt", &pcross, 30).flops, 2 * 15 * 17);
+        // kv_k_headt [t_enc=4, d_model=8, kv_stride=16, k_off=0]: pure
+        // movement, 8 bytes per moved element x (4*8) elements = 256.
+        assert_eq!(cost("kv_k_headt", &[4, 8, 16, 0], 32).bytes, 256);
+
+        for k in [
+            "na3d_scores", "na3d_apply", "conv3d", "conv3d_dx", "conv3d_dw", "im2col3d_at",
+            "space_to_depth3d", "depth_to_space3d", "pixel_shuffle3d_cl", "l2norm_scale",
+            "nlc_bias_nchw", "add_chan_bcast", "rope", "rope_neox", "rope_train",
+            "rope_train_bwd", "rope_partial", "rope_partial_bwd", "rope_sub",
+            "rope_interleave_table", "gelu_erf", "geglu_shift", "snake_beta",
+            "attn_scores_cross_kt", "kv_k_headt",
+        ] {
+            assert!(covers(k), "kernel `{k}` has no cost formula");
+        }
+    }
+
     /// A RATCHET over the whole kernel tree, not another hand-maintained list.
     ///
     /// The list above only fails when someone remembers to add a name to it, so
@@ -1151,9 +1446,15 @@ mod tests {
     /// profile. Raise `FLOOR` whenever coverage rises; never lower it.
     #[test]
     fn cost_coverage_over_the_kernel_tree_never_regresses() {
-        // Measured 2026-08-06: 150 of 357. Deliberately a floor and not an
-        // equality — adding a formula must not require editing a test.
-        const FLOOR: usize = 150;
+        // Measured 2026-08-19: 225 of 416 (ltxv's na3d/conv3d/rope-family/
+        // gelu_erf/geglu_shift/snake_beta/l2norm_scale/nlc_bias_nchw/
+        // add_chan_bcast pass added here, plus widening `covers`'s probe to
+        // 32 params so conv3d's 19-field Params struct stops reporting
+        // UNCOVERED despite having a formula, plus `attn_scores_cross_kt`/
+        // `kv_k_headt` once ltxv's Phase 8 optimization pass adopted them).
+        // Deliberately a floor and not an equality - adding a formula must
+        // not require editing a test.
+        const FLOOR: usize = 225;
         let total = kernels::ALL.len();
         let covered = kernels::ALL.iter().filter(|(n, _)| covers(n)).count();
         let uncovered: Vec<&str> =
