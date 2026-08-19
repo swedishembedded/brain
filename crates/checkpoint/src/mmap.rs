@@ -168,6 +168,37 @@ impl MmapSafetensors {
         Some((m.end - m.start) / dtype_width(&m.dtype))
     }
 
+    /// Decode elements `[start_elem, start_elem+len_elem)` of `name`'s FLAT,
+    /// row-major layout - for a `[rows, cols]` tensor, one row is `cols`
+    /// elements starting at `row*cols`. Unlike [`Self::tensor_f32`] (whole
+    /// tensor) or [`Self::with_tensor_chunks`] (every chunk from offset 0),
+    /// this never touches bytes outside the requested range - the accessor a
+    /// caller wants for a handful of embedding-table rows out of a
+    /// multi-hundred-thousand-row vocabulary (`[vocab, d_model]`), where
+    /// decoding the whole table, or even scanning from its start, would cost
+    /// far more than the few rows actually needed.
+    ///
+    /// `None` when `name` is absent, or when `[start_elem, start_elem+len_elem)`
+    /// falls even partially outside the tensor's element count - never a
+    /// panic or a silently truncated read. Shares [`decode_into`] with
+    /// [`Self::tensor_f32`]/[`Self::with_tensor_chunks`], so a range read is
+    /// byte-identical to the corresponding slice of a whole-tensor decode for
+    /// every dtype those already support.
+    pub fn tensor_f32_range(&self, name: &str, start_elem: usize, len_elem: usize) -> Option<Vec<f32>> {
+        let m = self.index.get(name)?;
+        let width = dtype_width(&m.dtype);
+        let numel = (m.end - m.start) / width;
+        let end_elem = start_elem.checked_add(len_elem)?;
+        if end_elem > numel {
+            return None;
+        }
+        let start = self.blob_start + m.start + start_elem * width;
+        let end = start + len_elem * width;
+        let mut out = Vec::new();
+        decode_into(name, &m.dtype, &self.mmap[start..end], &mut out);
+        Some(out)
+    }
+
     /// Zero-copy: `name`'s on-disk bytes reinterpreted as `u32` words,
     /// borrowed straight from the mapping — no allocation. `None` unless the
     /// dtype is already `F32` or `U32` (what the device binds) AND the byte
@@ -622,6 +653,51 @@ mod tests {
             assert!(err.contains(want), "case {i}: error {err:?} must mention {want:?}");
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    #[test]
+    fn range_read_matches_the_corresponding_slice_of_a_full_decode() {
+        // A BF16 "[rows, cols]"-shaped tensor (5 rows of 3), so a row read
+        // exercises the same start-element/len-element arithmetic a real
+        // embedding-table row lookup would use.
+        let vals: Vec<f32> = (0..15).map(|i| i as f32 * 0.5 - 1.0).collect();
+        let raw: Vec<u8> = vals.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let path = make_file_at_alignment("BF16", &raw, 0);
+        let mm = MmapSafetensors::open(&path).expect("open");
+        let full = mm.tensor_f32("t").unwrap();
+        assert_eq!(full.len(), 15);
+
+        // Row 2 of a [5,3] tensor: elements [6,9).
+        let row2 = mm.tensor_f32_range("t", 6, 3).expect("row 2 must be readable");
+        assert_eq!(row2, full[6..9]);
+
+        // A single-element read and a read spanning the whole tensor both
+        // agree with the full decode too.
+        assert_eq!(mm.tensor_f32_range("t", 0, 1).unwrap(), full[0..1]);
+        assert_eq!(mm.tensor_f32_range("t", 0, 15).unwrap(), full);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn range_read_out_of_bounds_returns_none_not_a_panic() {
+        let a: Vec<f32> = vec![1.0, -2.5, 3.25, 0.0];
+        let raw: Vec<u8> = a.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let path = make_file_at_alignment("F32", &raw, 0);
+        let mm = MmapSafetensors::open(&path).expect("open");
+
+        // Range partially past the end.
+        assert!(mm.tensor_f32_range("t", 2, 3).is_none());
+        // Range starting past the end.
+        assert!(mm.tensor_f32_range("t", 4, 1).is_none());
+        // start_elem + len_elem overflowing usize must not panic either.
+        assert!(mm.tensor_f32_range("t", usize::MAX, 1).is_none());
+        // An unknown tensor name is also a clean None.
+        assert!(mm.tensor_f32_range("nope", 0, 1).is_none());
+        // A well-formed range still works after the out-of-bounds probes above.
+        assert_eq!(mm.tensor_f32_range("t", 1, 2).unwrap(), vec![-2.5, 3.25]);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
