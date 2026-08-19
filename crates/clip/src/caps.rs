@@ -313,7 +313,18 @@ impl Action for ClipAction {
             let mut guard = self.hot.lock().map_err(|_| "clip: hot model lock poisoned")?;
             if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
                 *guard = None; // free the old build before importing another directory
-                let gpu = Gpu::new(crate::model::TEXT_PIPELINES);
+                // `Gpu::share` - one device for every tower (text and EVA vision
+                // alike) plus `embed_image`'s own device-side resize, so the
+                // pipeline set has to cover all three; EVA's conv2d/bidir-
+                // attention/rope2d and the resize kernels are absent from
+                // TEXT_PIPELINES alone.
+                let kernels: Vec<(&str, &str)> = crate::model::TEXT_PIPELINES
+                    .iter()
+                    .chain(crate::model::VISION_PIPELINES.iter())
+                    .chain(imaging::PIPELINES.iter())
+                    .copied()
+                    .collect();
+                let gpu = Gpu::new(&kernels);
                 *guard = Some((self.dir.clone(), Arc::new(Session::load(&self.dir, gpu)?)));
             }
             guard.as_ref().expect("built above").1.clone()
