@@ -213,6 +213,21 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 /// shared across TWO calls (`reuse_cache=true`, the real `denoise` loop's
 /// own shape - see `crate::pipeline::RealDit`'s doc) so the cache-hit path's
 /// real speedup is visible in this same harness rather than only inferred.
+///
+/// Uses [`LtxDitConfig::ltx25_22b`] UNMODIFIED (previously overrode
+/// `use_embeddings_connector: false`, the same "profiles a reduced op
+/// sequence, not the real one" bug this module's own doc already records
+/// once for `apply_gated_attention` - the connector routing this was
+/// silently skipping is a real, non-cached ~2.7s of every real forward call,
+/// found while diagnosing a real-generation quality issue). `ctx_len` must
+/// therefore be a multiple of 128 (the connector's own `num_registers`
+/// requirement, `crate::block::EmbeddingsConnector`'s assertion) - the
+/// default below already satisfies this.
+///
+/// Prints each call's raw output stats (mean/std/min/max/nonfinite count) -
+/// a cheap sanity check this bench had none of before: a degenerate
+/// (all-zero, saturated, or NaN) DiT output is visible here without needing
+/// a full generation + VAE decode to notice.
 fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
@@ -220,7 +235,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     // rather than asking the caller to remember an extra env var.
     std::env::set_var("BRAIN_PROFILE", "1");
 
-    let cfg = LtxDitConfig { num_layers: layers, use_embeddings_connector: false, ..LtxDitConfig::ltx25_22b() };
+    let cfg = LtxDitConfig { num_layers: layers, ..LtxDitConfig::ltx25_22b() };
     cfg.assert_supported();
     println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context (reuse_cache={reuse_cache}) ===");
 
@@ -240,7 +255,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     let cache = RefCell::new(Vec::new());
     let call = |label: &str| {
         let t1 = Instant::now();
-        let _out = ltxv::dit::forward_q_streamed(
+        let out = ltxv::dit::forward_q_streamed(
             &cfg,
             &src,
             &head,
@@ -258,6 +273,12 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
         );
         let wall = t1.elapsed().as_secs_f64();
         println!("[{label}] wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
+        let n = out.len() as f64;
+        let mean = out.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let var = out.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / n;
+        let (min, max) = out.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+        let nan_count = out.iter().filter(|v| !v.is_finite()).count();
+        println!("[{label}] OUTPUT STATS: len={} mean={mean:.6} std={:.6} min={min:.6} max={max:.6} nonfinite={nan_count}", out.len(), var.sqrt());
         if !reuse_cache {
             cache.borrow_mut().clear();
         }
