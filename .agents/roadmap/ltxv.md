@@ -1445,6 +1445,33 @@ this port:
       that is still genuinely open would be exactly the "confident
       hypothesis, profile disagrees" failure mode `.agents/rules/kernels.md`
       §E's own table exists to warn against.
+- [x] **Cross-modal / codec-side optimization - scoped out, no real target
+      exists yet to optimize (Phase 9)**. This task's own instruction was to
+      pursue this only after confirming the AV forward is parity-proven, and
+      only if the higher-value items above left budget - checked before
+      spending any of that budget: `crate::pipeline::generate`/
+      `generate_dfr` (the only two real-checkpoint generation entry points
+      this crate has) both construct `RealDit` over `LtxDitConfig`/`LtxDit`
+      exclusively; `LtxAvDit` (the audio+video model the A<->V cross-modal
+      coupling actually lives in) has NO real-weight streaming counterpart
+      to `forward_q_streamed` anywhere in this crate (confirmed by grep -
+      the only real-weight-capable forward path streams video-only blocks).
+      Phase 4's "AV forward is parity-proven" refers to forward-CORRECTNESS
+      at tiny/synthetic config (`av_dit_parity.rs`), not a real-checkpoint
+      generation path that actually runs - one does not exist to load real
+      AV weights into at all yet (the "Recorded gaps" section already
+      states this: AV training/inference both stop at `LtxAvDitConfig::
+      tiny`, no real 22B AV-checkpoint bridge was built).
+
+      There is therefore nothing for a cross-modal optimization to
+      optimize: no real A<->V forward this crate can run today, proven or
+      not. This is a stronger precondition failure than the ordering rule
+      this task cited ("optimize only after the forward is proven") - it is
+      "there is no real forward to optimize at all," a prerequisite that
+      building the real-weight AV generation path itself (a real feature,
+      not an optimization) would need to close first, and which is out of
+      this optimization phase's own scope. Not pursued, no budget spent on
+      it beyond this check.
 
 ## Convention questions settled from source, not experiment
 
