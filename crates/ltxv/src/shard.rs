@@ -90,8 +90,8 @@ use std::collections::HashMap;
 
 use model::{Model, ModelConfig, Shard, ShardCost, Shardable};
 
-use crate::config::LtxDitConfig;
-use crate::dit::LtxDit;
+use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
+use crate::dit::{LtxAvDit, LtxDit};
 
 impl ModelConfig for LtxDitConfig {
     fn param_list(&self) -> Vec<(String, usize)> {
@@ -296,6 +296,254 @@ impl Shardable for LtxDit {
     }
     fn write_out_dres(&self, _data: &[f32]) {
         unimplemented!("ltxv::LtxDit: no backward pass exists yet - see crate::shard's module doc for the tracked gap");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio+video DiT sharding (`LtxAvDit`) - extends the video-only `Shardable`
+// impl above to the coupled AV model. See `crate::dit::AvDitBatch`'s doc for
+// why the stage boundary carries TWO residuals (video's and audio's, packed
+// into one `Vec<f32>` per `LtxAvDit::read_out_res`'s doc) and `crate::dit::
+// av_shard_owns_weight`'s doc for the weight-replication policy (both
+// embeddings connectors are replicated here, unlike the video-only path,
+// because `LtxAvDit::run_stage_forward` - unlike `LtxDit::run_stage_forward`
+// - actually routes `context` through them on every stage).
+// ---------------------------------------------------------------------------
+
+/// [`LtxAudioDitConfig`]'s own JSON round trip - not a [`ModelConfig`] on its
+/// own (only the bundled [`LtxAvDitConfig`] needs to satisfy that trait), just
+/// the nested-object encode/decode `LtxAvDitConfig::to_json`/`from_json` uses
+/// for its `audio` field.
+fn audio_cfg_to_json(c: &LtxAudioDitConfig) -> serde_json::Value {
+    serde_json::json!({
+        "inner_dim": c.inner_dim,
+        "num_heads": c.num_heads,
+        "in_channels": c.in_channels,
+        "out_channels": c.out_channels,
+        "cross_attention_dim": c.cross_attention_dim,
+        "ff_bias": c.ff_bias,
+        "positional_embedding_max_pos": c.positional_embedding_max_pos,
+        "connector_num_attention_heads": c.connector_num_attention_heads,
+        "connector_attention_head_dim": c.connector_attention_head_dim,
+    })
+}
+
+fn audio_cfg_from_json(v: &serde_json::Value) -> LtxAudioDitConfig {
+    let u = |k: &str| v[k].as_u64().unwrap_or_else(|| panic!("LtxAudioDitConfig::from_json: missing {k}")) as u32;
+    let max_pos = v["positional_embedding_max_pos"].as_array().unwrap_or_else(|| panic!("LtxAudioDitConfig::from_json: missing positional_embedding_max_pos"));
+    LtxAudioDitConfig {
+        inner_dim: u("inner_dim"),
+        num_heads: u("num_heads"),
+        in_channels: u("in_channels"),
+        out_channels: u("out_channels"),
+        cross_attention_dim: u("cross_attention_dim"),
+        ff_bias: v["ff_bias"].as_bool().unwrap_or_else(|| panic!("LtxAudioDitConfig::from_json: missing ff_bias")),
+        positional_embedding_max_pos: [max_pos[0].as_u64().unwrap() as u32],
+        connector_num_attention_heads: u("connector_num_attention_heads"),
+        connector_attention_head_dim: u("connector_attention_head_dim"),
+    }
+}
+
+impl ModelConfig for LtxAvDitConfig {
+    fn param_list(&self) -> Vec<(String, usize)> {
+        crate::dit::av_dit_tensor_manifest(self).into_iter().map(|(n, shape)| (n, shape.iter().product())).collect()
+    }
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "video": self.video.to_json(),
+            "audio": audio_cfg_to_json(&self.audio),
+            "av_ca_timestep_scale_multiplier": self.av_ca_timestep_scale_multiplier,
+        })
+    }
+    fn from_json(v: &serde_json::Value) -> LtxAvDitConfig {
+        LtxAvDitConfig {
+            video: LtxDitConfig::from_json(&v["video"]),
+            audio: audio_cfg_from_json(&v["audio"]),
+            av_ca_timestep_scale_multiplier: v["av_ca_timestep_scale_multiplier"].as_f64().unwrap_or_else(|| panic!("LtxAvDitConfig::from_json: missing av_ca_timestep_scale_multiplier")) as f32,
+        }
+    }
+    fn vocab(&self) -> u32 {
+        0
+    }
+    fn block_size(&self) -> u32 {
+        0
+    }
+    fn finalize_for_dataset(self, _vocab: u32, _block_size: u32) -> LtxAvDitConfig {
+        self
+    }
+}
+
+impl Model for LtxAvDit {
+    type Config = LtxAvDitConfig;
+
+    fn new(cfg: LtxAvDitConfig, _b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> LtxAvDit {
+        LtxAvDit::from_flat_weights(cfg, init, Shard::whole(cfg.video.num_layers as usize))
+    }
+
+    fn init_weights(cfg: &LtxAvDitConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        crate::dit::random_av_tiny_weights(cfg, seed).into_iter().map(|(name, (_, data))| (name, data)).collect()
+    }
+
+    fn config(&self) -> &LtxAvDitConfig {
+        LtxAvDit::config(self)
+    }
+
+    /// A documented no-op - same reason as [`LtxDit::set_batch`]. Use
+    /// [`LtxAvDit::load_shard_batch`].
+    fn set_batch(&self, _batch: model::Batch) {}
+
+    fn forward(&self) -> f32 {
+        self.run_stage_forward().unwrap_or(0.0)
+    }
+
+    fn backward(&self) {
+        unimplemented!("ltxv::LtxAvDit: no backward pass exists yet (forward-only pipeline-sharding slice) - see crate::shard's module doc for the tracked gap");
+    }
+    fn zero_grads(&self) {}
+    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {}
+    fn poll_wait(&self) {}
+
+    fn param_names(&self) -> Vec<String> {
+        self.weight_names()
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.weight(name)
+    }
+    fn write_weight(&self, _name: &str, _data: &[f32]) {
+        unimplemented!("ltxv::LtxAvDit: weights are immutable post-construction in this slice (no backward/optimizer path exists - see crate::shard's module doc)");
+    }
+    fn read_grad(&self, _name: &str) -> Vec<f32> {
+        unimplemented!("ltxv::LtxAvDit: no gradients exist yet - see crate::shard's module doc for the tracked gap");
+    }
+
+    fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
+        None
+    }
+
+    fn save(&self, _path: &str) {}
+    fn config_json(&self) -> serde_json::Value {
+        LtxAvDit::config(self).to_json()
+    }
+}
+
+impl Shardable for LtxAvDit {
+    fn shard_cost(cfg: &LtxAvDitConfig, b: u32, t: u32) -> ShardCost {
+        // Both streams' per-layer cost, PLUS the bidirectional AV
+        // cross-attention (two `Attention` modules per block, each running
+        // at the audio stream's - narrower - geometry, see `crate::block::
+        // LtxAvBlock`'s doc) - a materially bigger per-layer cost than the
+        // video-only path's own `shard_cost`, matching the plan's own
+        // framing of this as "the single most architecturally interesting
+        // piece" of this extension, not a copy-paste of the video-only
+        // formula.
+        let vdim = cfg.video.inner_dim as f64;
+        let adim = cfg.audio.inner_dim as f64;
+        let tt = (b.max(1) as f64) * (t as f64);
+        let stream_cost = |dim: f64| -> f64 {
+            let self_attn = 4.0 * dim * dim * tt + 2.0 * tt * tt * dim;
+            let cross_attn = 4.0 * dim * dim * tt;
+            let ffn = 8.0 * dim * dim * tt;
+            self_attn + cross_attn + ffn
+        };
+        // AV cross-attention: TWO directions (A2V, V2A), each 4 projections
+        // (Q/K/V/O) at the audio stream's `adim` geometry regardless of which
+        // stream is query, plus its own O(Tv·Ta) score/weighted-sum term.
+        let av_cross = 2.0 * (4.0 * adim * adim * tt) + 4.0 * tt * tt * adim;
+        let per_layer = stream_cost(vdim) + stream_cost(adim) + av_cross;
+        // Embed stage: both patchify projections + both adaLN-single timestep
+        // MLPs/linears.
+        let embed = vdim * cfg.video.in_channels as f64
+            + adim * cfg.audio.in_channels as f64
+            + 256.0 * vdim
+            + vdim * vdim
+            + cfg.video.adaln_rows() as f64 * vdim * vdim
+            + 256.0 * adim
+            + adim * adim
+            + cfg.video.adaln_rows() as f64 * adim * adim;
+        // Head stage: both `proj_out`s.
+        let head = vdim * cfg.video.out_channels as f64 + adim * cfg.audio.out_channels as f64;
+        // Boundary traffic: both streams' residuals, concatenated (`LtxAvDit::
+        // read_out_res`'s doc).
+        let boundary_words = (b.max(1) * t) as usize * (cfg.video.inner_dim as usize + cfg.audio.inner_dim as usize);
+        ShardCost { n_layers: cfg.video.num_layers as usize, per_layer, embed, head, boundary_words }
+    }
+
+    fn new_shard(cfg: LtxAvDitConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> LtxAvDit {
+        let _ = (b, t);
+        LtxAvDit::from_flat_weights(cfg, init, shard)
+    }
+
+    fn replicated_params(&self) -> Vec<String> {
+        // A pseudo-shard that owns no layers and is neither embed nor head:
+        // `av_shard_owns_weight` returns `true` for it ONLY on the genuinely
+        // replicated names (the REPLICATED_PREFIXES set - its own doc), since
+        // every block name needs a non-empty owned range and every embed-/
+        // head-only name needs `embed`/`head` set, both false here.
+        let none = Shard { start: 0, end: 0, embed: false, head: false, gpu_index: Shard::ANY_GPU };
+        Model::param_names(self).into_iter().filter(|n| crate::dit::av_shard_owns_weight(&none, n)).collect()
+    }
+
+    fn run_forward_stage(&self) -> Option<f32> {
+        self.run_stage_forward()
+    }
+    fn run_backward_stage(&self) {
+        unimplemented!("ltxv::LtxAvDit: no backward pass exists yet - see crate::shard's module doc for the tracked gap");
+    }
+    fn read_out_res(&self) -> Vec<f32> {
+        LtxAvDit::read_out_res(self)
+    }
+    fn write_in_res(&self, data: &[f32]) {
+        LtxAvDit::write_in_res(self, data)
+    }
+    fn read_in_dres(&self) -> Vec<f32> {
+        unimplemented!("ltxv::LtxAvDit: no backward pass exists yet - see crate::shard's module doc for the tracked gap");
+    }
+    fn write_out_dres(&self, _data: &[f32]) {
+        unimplemented!("ltxv::LtxAvDit: no backward pass exists yet - see crate::shard's module doc for the tracked gap");
+    }
+}
+
+#[cfg(test)]
+mod av_tests {
+    use super::*;
+    use crate::config::LtxAvDitConfig;
+
+    #[test]
+    fn av_config_json_round_trips() {
+        let cfg = LtxAvDitConfig::tiny_gated();
+        let v = cfg.to_json();
+        let back = LtxAvDitConfig::from_json(&v);
+        assert_eq!(cfg, back);
+    }
+
+    /// [`crate::dit::av_shard_owns_weight`]'s own analogue of `shard_owns_
+    /// weight`'s coverage test: a whole shard must claim every real manifest
+    /// name EXACTLY once (no gap, no double-claim), and a genuine partial
+    /// shard must load strictly fewer floats than the whole model.
+    #[test]
+    fn new_av_shard_loads_only_its_own_weight_subset() {
+        let cfg = LtxAvDitConfig::tiny_gated();
+        let init = <LtxAvDit as Model>::init_weights(&cfg, 1);
+
+        let whole = Shard::whole(cfg.video.num_layers as usize);
+        let full = <LtxAvDit as Shardable>::new_shard(cfg, 1, 4, &init, whole);
+        let full_names: std::collections::HashSet<String> = Model::param_names(&full).into_iter().collect();
+        let manifest_names: std::collections::HashSet<String> = crate::dit::av_dit_tensor_manifest(&cfg).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(full_names, manifest_names, "a whole shard must load exactly the full manifest, no more, no less");
+
+        assert!(cfg.video.num_layers >= 2, "test assumes >=2 layers so a partial shard is meaningful");
+        let partial_shard = Shard { start: 0, end: 1, embed: true, head: false, gpu_index: Shard::ANY_GPU };
+        let partial = <LtxAvDit as Shardable>::new_shard(cfg, 1, 4, &init, partial_shard);
+        let partial_total: usize = Model::param_names(&partial).iter().map(|n| Model::read_weight(&partial, n).len()).sum();
+        let full_total: usize = Model::param_names(&full).iter().map(|n| Model::read_weight(&full, n).len()).sum();
+        assert!(partial_total < full_total, "a 1-of-{}-layer shard ({partial_total} floats) must be smaller than the whole model ({full_total} floats)", cfg.video.num_layers);
+
+        for name in Model::param_names(&partial) {
+            if let Some(rest) = name.strip_prefix("transformer_blocks.") {
+                let l: usize = rest.split('.').next().unwrap().parse().unwrap();
+                assert_eq!(l, 0, "partial shard [0,1) must not own block {l}'s weights ({name})");
+            }
+        }
     }
 }
 

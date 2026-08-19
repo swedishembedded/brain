@@ -36,7 +36,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{open_device, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock};
+use crate::block::{open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QTier};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -326,6 +326,77 @@ pub(crate) fn shard_owns_weight(shard: &Shard, name: &str) -> bool {
     }
     matches!(name, "patchify_proj.weight" | "patchify_proj.bias" | "keyframes_abs_pos_embedding") && shard.embed
         || matches!(name, "scale_shift_table" | "proj_out.weight" | "proj_out.bias") && shard.head
+}
+
+/// A random, seeded set of weights at [`av_dit_tensor_manifest`]'s exact
+/// shape - the AV counterpart of [`random_tiny_weights`], same convention
+/// (biases zero, everything else `N(0, 0.02²)`).
+pub fn random_av_tiny_weights(cfg: &LtxAvDitConfig, seed: u64) -> Tensors {
+    let mut rng = data::rng::Rng::new(seed);
+    av_dit_tensor_manifest(cfg)
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = if name.ends_with(".bias") { vec![0.0; n] } else { (0..n).map(|_| (rng.next_gaussian() * 0.02) as f32).collect() };
+            (name, (shape, data))
+        })
+        .collect()
+}
+
+/// [`shard_weights`]'s AV counterpart, filtered through [`av_shard_owns_weight`].
+pub(crate) fn av_shard_weights(cfg: &LtxAvDitConfig, init: &HashMap<String, Vec<f32>>, shard: &Shard) -> Tensors {
+    av_dit_tensor_manifest(cfg)
+        .into_iter()
+        .filter(|(name, _)| av_shard_owns_weight(shard, name))
+        .map(|(name, shape)| {
+            let data = init.get(&name).unwrap_or_else(|| panic!("ltxv av dit shard: missing weight {name}")).clone();
+            let want: usize = shape.iter().product();
+            assert_eq!(data.len(), want, "ltxv av dit shard: {name} wrong length ({} vs {want})", data.len());
+            (name, (shape, data))
+        })
+        .collect()
+}
+
+/// Whether pipeline stage `shard` needs weight `name` at all - [`shard_owns_
+/// weight`]'s AV counterpart. `transformer_blocks.{l}.*` follows the block
+/// range, same as the video-only path. Every model-level adaLN-single table
+/// (video's own, audio's own, BOTH streams' `prompt_adaln_single` twins -
+/// unused by the forward today but still real header tensors, see
+/// [`av_dit_tensor_manifest`]'s doc - and all four AV cross-modal tables)
+/// plus BOTH embeddings connectors are REPLICATED: every stage independently
+/// recomputes them from the (replicated) batch, the same "small weight,
+/// replicate rather than wire a second boundary for it" call [`shard_owns_
+/// weight`]'s doc makes for the video-only path's `adaln_single.*` -
+/// extended here to the connectors too because [`LtxAvDit::run_stage_forward`]
+/// (unlike the video-only [`LtxDit::run_stage_forward`], which does not yet
+/// route `context` through a connector at all) DOES run both connectors on
+/// every stage, so their weights must be everywhere the block stack is.
+/// `patchify_proj`/`audio_patchify_proj`/`keyframes_abs_pos_embedding` are
+/// embed-only (they produce the first stage's initial `vx`/`ax`);
+/// `scale_shift_table`/`proj_out.*`/`audio_scale_shift_table`/`audio_
+/// proj_out.*` are head-only (the final per-stream projections).
+pub(crate) fn av_shard_owns_weight(shard: &Shard, name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix("transformer_blocks.") {
+        let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+        return shard.owns(l);
+    }
+    const REPLICATED_PREFIXES: [&str; 10] = [
+        "adaln_single.",
+        "audio_adaln_single.",
+        "prompt_adaln_single.",
+        "audio_prompt_adaln_single.",
+        "av_ca_video_scale_shift_adaln_single.",
+        "av_ca_audio_scale_shift_adaln_single.",
+        "av_ca_a2v_gate_adaln_single.",
+        "av_ca_v2a_gate_adaln_single.",
+        "video_embeddings_connector.",
+        "audio_embeddings_connector.",
+    ];
+    if REPLICATED_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return true;
+    }
+    matches!(name, "patchify_proj.weight" | "patchify_proj.bias" | "audio_patchify_proj.weight" | "audio_patchify_proj.bias" | "keyframes_abs_pos_embedding") && shard.embed
+        || matches!(name, "scale_shift_table" | "proj_out.weight" | "proj_out.bias" | "audio_scale_shift_table" | "audio_proj_out.weight" | "audio_proj_out.bias") && shard.head
 }
 
 /// `out[r,o] = b[o] + Σ_i x[r,i]·w[o,i]`, `w` row-major `[out_dim, in_dim]` -
@@ -746,6 +817,42 @@ impl LtxDit {
         (xx, block_out, taps)
     }
 
+    /// [`Self::forward_blocks`]'s quantized-compute (int8/int4) twin -
+    /// [`LtxBlockQ::on`] instead of [`LtxBlock::on`], everything else
+    /// (RoPE tables, adaLN table, context) identical. Exists so
+    /// [`Self::forward_q`] can compare against [`Self::forward`] on the SAME
+    /// model-level entry point, changing only the block dispatch tier - see
+    /// `crate::block`'s "Quantized-compute" module doc for what this tier
+    /// actually buys (capacity, not speed) and its exact scope (video-only,
+    /// ten quantizable linears per block).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_blocks_q(
+        &self,
+        gpu: &Gpu,
+        x: &[f32],
+        adaln_table: &[f32],
+        context: &[f32],
+        cos_bufs: &[DeviceBuffer],
+        sin_bufs: &[DeviceBuffer],
+        t: u32,
+        context_len: u32,
+        lo: u32,
+        hi: u32,
+        tier: QTier,
+    ) -> (Vec<f32>, Vec<Vec<f32>>, Vec<BlockTaps>) {
+        let mut xx = x.to_vec();
+        let mut block_out = Vec::with_capacity((hi - lo) as usize);
+        let mut taps = Vec::with_capacity((hi - lo) as usize);
+        for l in lo..hi {
+            let blk = LtxBlockQ::on(gpu.share(), &self.cfg, &self.w, &format!("transformer_blocks.{l}"), t, context_len, tier);
+            let (out, tp) = blk.forward(&xx, adaln_table, context, cos_bufs, sin_bufs, t);
+            xx = out;
+            block_out.push(xx.clone());
+            taps.push(tp);
+        }
+        (xx, block_out, taps)
+    }
+
     /// One forward pass, replaying the golden's own inputs.
     ///
     /// `latent`: `[T, in_channels]`. `timesteps`: `[T]` per-token
@@ -828,6 +935,73 @@ impl LtxDit {
             out,
         }
     }
+
+    /// [`Self::forward`]'s quantized-compute (int8/int4) twin: identical op
+    /// sequence and identical taps shape - only the block stack dispatches
+    /// through [`Self::forward_blocks_q`] (packed int8/int4 weights, dynamic
+    /// per-token activation quantization) instead of [`Self::forward_blocks`]'s
+    /// plain fp32 path. See `crate::block`'s module doc for the tier itself;
+    /// this method exists so a parity test can compare the two model-level
+    /// forwards directly, on the SAME weights, changing only `tier`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_q(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize, context_valid: &[f32], tier: QTier) -> DitTaps {
+        let cfg = &self.cfg;
+        let dim = cfg.inner_dim as usize;
+        assert_eq!(latent.len(), t * cfg.in_channels as usize);
+        assert_eq!(timesteps.len(), t);
+        assert_eq!(keyframes_mask.len(), t);
+        assert_eq!(context.len(), context_len * cfg.cross_attention_dim as usize);
+
+        let pw = tget(&self.w, "patchify_proj.weight");
+        let pb = tget(&self.w, "patchify_proj.bias");
+        let mut x = linear(latent, t, cfg.in_channels as usize, pw, Some(pb), dim);
+        if cfg.use_keyframes_abs_pos_embedding {
+            let kf = tget(&self.w, "keyframes_abs_pos_embedding");
+            for ti in 0..t {
+                if keyframes_mask[ti] > 0.0 {
+                    for d in 0..dim {
+                        x[ti * dim + d] += kf[d];
+                    }
+                }
+            }
+        }
+
+        let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
+        let (adaln_table, embedded_timestep) = ada_layer_norm_single(&self.w, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
+
+        let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+
+        let gpu = open_device(self.device.as_deref());
+        let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
+
+        #[rustfmt::skip]
+        let (connector_context, connector_out) = route_context_through_connector(
+            &gpu, &self.w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+            cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
+            cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
+            cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
+        );
+
+        let (x_final, block_out, mut taps) = self.forward_blocks_q(&gpu, &x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers, tier);
+        x = x_final;
+        assert!(!taps.is_empty(), "num_layers must be >= 1");
+        let b0 = taps.remove(0);
+
+        let out = output_stage(&self.w, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps);
+
+        DitTaps {
+            rope_cos: rope.cos,
+            rope_sin: rope.sin,
+            adaln_table,
+            embedded_timestep,
+            connector_out,
+            b0_attn1_out: b0.attn1_out,
+            b0_attn2_out: b0.attn2_out,
+            b0_ff_out: b0.ff_out,
+            block_out,
+            out,
+        }
+    }
 }
 
 /// Every AV tap a parity test bisects with, beyond one [`DitTaps`] per
@@ -862,22 +1036,275 @@ pub struct AvDitTaps {
     pub b0_v2a_out: Vec<f32>,
 }
 
+/// One pipeline-stage/training batch for [`LtxAvDit`] - [`DitBatch`]'s AV
+/// counterpart: both streams' own inputs, since the A<->V coupling means a
+/// stage needs BOTH latents/contexts/sigmas to run its own block range, not
+/// just one. See `crate::shard`'s module doc for why the stage boundary
+/// carries TWO residuals (video's and audio's), not one.
+pub struct AvDitBatch {
+    pub v_latent: Vec<f32>,
+    pub v_timesteps: Vec<f32>,
+    pub v_positions: Vec<f32>,
+    pub v_keyframes_mask: Vec<f32>,
+    pub v_context: Vec<f32>,
+    pub v_context_len: usize,
+    pub tv: usize,
+    pub v_sigma: f32,
+    pub v_context_valid: Vec<f32>,
+    pub a_latent: Vec<f32>,
+    pub a_timesteps: Vec<f32>,
+    pub a_positions: Vec<f32>,
+    pub a_context: Vec<f32>,
+    pub a_context_len: usize,
+    pub ta: usize,
+    pub a_sigma: f32,
+    pub a_context_valid: Vec<f32>,
+    /// `[tv, video.out_channels]` training target; `None` for a forward-only
+    /// run.
+    pub v_target: Option<Vec<f32>>,
+    /// `[ta, audio.out_channels]` training target; `None` for a forward-only
+    /// run.
+    pub a_target: Option<Vec<f32>>,
+}
+
 /// The tiny audio+video DiT, weights resident on the host (device residency
 /// is per-block, see [`LtxAvBlock::on`]) - `LTXModelType::AudioVideo`.
 pub struct LtxAvDit {
     cfg: LtxAvDitConfig,
     w: Tensors,
     device: Option<String>,
+    /// Pipeline-parallel placement (`Shard::whole` for the ordinary,
+    /// non-sharded path every other caller in this crate uses) - see
+    /// `crate::shard`'s module doc.
+    shard: Shard,
+    batch: RefCell<Option<AvDitBatch>>,
+    /// This stage's INPUT-side residuals (`res[shard.start]`, one per
+    /// stream), written by the previous stage via [`LtxAvDit::write_in_res`].
+    res_in_v: RefCell<Option<Vec<f32>>>,
+    res_in_a: RefCell<Option<Vec<f32>>>,
+    /// This stage's OUTPUT-side residuals (`res[shard.end]`, PRE-output-stage,
+    /// one per stream) - set by [`LtxAvDit::run_stage_forward`], read by
+    /// [`LtxAvDit::read_out_res`].
+    res_out_v: RefCell<Option<Vec<f32>>>,
+    res_out_a: RefCell<Option<Vec<f32>>>,
+    /// The head stage's last `output_stage` results (video, audio) - the
+    /// actual generation output, distinct from `res_out_*` (which never runs
+    /// through `output_stage`). Read by [`LtxAvDit::take_stage_output`].
+    stage_out_v: RefCell<Option<Vec<f32>>>,
+    stage_out_a: RefCell<Option<Vec<f32>>>,
 }
 
 impl LtxAvDit {
     pub fn new(cfg: LtxAvDitConfig, weights: Tensors, device: Option<&str>) -> LtxAvDit {
+        let shard = Shard::whole(cfg.video.num_layers as usize);
+        LtxAvDit::build(cfg, weights, device, shard)
+    }
+
+    /// Shared constructor - see [`LtxDit::build`]'s doc for the same "zero
+    /// the pipeline-stage scratch regardless of whether this is ever
+    /// actually run as a shard" reasoning.
+    fn build(cfg: LtxAvDitConfig, weights: Tensors, device: Option<&str>, shard: Shard) -> LtxAvDit {
         cfg.assert_supported();
-        LtxAvDit { cfg, w: weights, device: device.map(str::to_string) }
+        LtxAvDit {
+            cfg,
+            w: weights,
+            device: device.map(str::to_string),
+            shard,
+            batch: RefCell::new(None),
+            res_in_v: RefCell::new(None),
+            res_in_a: RefCell::new(None),
+            res_out_v: RefCell::new(None),
+            res_out_a: RefCell::new(None),
+            stage_out_v: RefCell::new(None),
+            stage_out_a: RefCell::new(None),
+        }
+    }
+
+    /// [`LtxDit::from_flat_weights`]'s AV counterpart - build one pipeline
+    /// stage from a FLAT checkpoint, loading only [`av_shard_owns_weight`]'s
+    /// subset for `shard`.
+    pub(crate) fn from_flat_weights(cfg: LtxAvDitConfig, init: &HashMap<String, Vec<f32>>, shard: Shard) -> LtxAvDit {
+        let w = av_shard_weights(&cfg, init, &shard);
+        LtxAvDit::build(cfg, w, None, shard)
     }
 
     pub fn config(&self) -> &LtxAvDitConfig {
         &self.cfg
+    }
+
+    /// This instance's pipeline placement.
+    pub fn shard(&self) -> &Shard {
+        &self.shard
+    }
+
+    /// Set this stage's diffusion batch - see [`AvDitBatch`]'s doc.
+    pub fn load_shard_batch(&self, b: AvDitBatch) {
+        *self.batch.borrow_mut() = Some(b);
+    }
+
+    /// The head stage's last `output_stage` results, `(video, audio)` - the
+    /// actual generation output, distinct from the `Shardable` residual seam.
+    pub fn take_stage_output(&self) -> (Vec<f32>, Vec<f32>) {
+        let v = self.stage_out_v.borrow().clone().expect("LtxAvDit::take_stage_output: run_stage_forward has not produced a head-stage video output yet");
+        let a = self.stage_out_a.borrow().clone().expect("LtxAvDit::take_stage_output: run_stage_forward has not produced a head-stage audio output yet");
+        (v, a)
+    }
+
+    pub(crate) fn weight_names(&self) -> Vec<String> {
+        self.w.keys().cloned().collect()
+    }
+    pub(crate) fn weight(&self, name: &str) -> Vec<f32> {
+        tget(&self.w, name).to_vec()
+    }
+
+    /// `model::Shardable::read_out_res`'s implementation: this stage's
+    /// OUTPUT-side residual, video's `[tv*vdim]` then audio's `[ta*adim]`
+    /// concatenated into ONE `Vec<f32>` - the `Shardable` trait carries a
+    /// single boundary buffer, so the AV coupling's TWO residuals (this
+    /// module's own doc) are packed into it at a split point [`Self::
+    /// write_in_res`] recovers from the (replicated) batch's own `tv`/`ta`
+    /// and `cfg`'s own `vdim`/`adim` - never from the wire itself.
+    pub(crate) fn read_out_res(&self) -> Vec<f32> {
+        let v = self.res_out_v.borrow().clone().expect("LtxAvDit::read_out_res: run_stage_forward has not run yet (video)");
+        let a = self.res_out_a.borrow().clone().expect("LtxAvDit::read_out_res: run_stage_forward has not run yet (audio)");
+        [v, a].concat()
+    }
+    /// `model::Shardable::write_in_res`'s implementation - the inverse split
+    /// of [`Self::read_out_res`]'s concatenation.
+    pub(crate) fn write_in_res(&self, data: &[f32]) {
+        let batch_ref = self.batch.borrow();
+        let batch = batch_ref.as_ref().expect("LtxAvDit::write_in_res: no batch (call load_shard_batch first)");
+        let vlen = batch.tv * self.cfg.video.inner_dim as usize;
+        let alen = batch.ta * self.cfg.audio.inner_dim as usize;
+        assert_eq!(data.len(), vlen + alen, "LtxAvDit::write_in_res: boundary residual length mismatch (got {}, want {vlen}+{alen})", data.len());
+        *self.res_in_v.borrow_mut() = Some(data[..vlen].to_vec());
+        *self.res_in_a.borrow_mut() = Some(data[vlen..].to_vec());
+    }
+
+    /// Run this stage's forward - the AV counterpart of [`LtxDit::
+    /// run_stage_forward`]: patchify both streams (embed stage only) or
+    /// read both streams' previous-stage residuals ([`Self::write_in_res`])
+    /// -> this stage's own block range ([`Self::forward_blocks_av`]) ->
+    /// `output_stage` for both streams (head stage only). Every stage
+    /// independently recomputes both streams' adaLN tables, the four RoPE
+    /// tables, and (when enabled) both embeddings connectors from `batch`
+    /// and its OWN (replicated) weights - only the two residuals cross the
+    /// stage boundary, concatenated per [`Self::read_out_res`]'s doc.
+    /// Returns the head stage's combined loss (mean of both streams' MSE
+    /// where a target is set for that stream, `None` if neither stream has
+    /// one, or on a non-head stage).
+    pub fn run_stage_forward(&self) -> Option<f32> {
+        let cfg = &self.cfg;
+        let vcfg = &cfg.video;
+        let acfg = &cfg.audio;
+        let vdim = vcfg.inner_dim as usize;
+        let adim = acfg.inner_dim as usize;
+        let batch_ref = self.batch.borrow();
+        let batch = batch_ref.as_ref().expect("LtxAvDit::run_stage_forward: no batch (call load_shard_batch first)");
+        if self.shard.embed {
+            assert_eq!(batch.v_latent.len(), batch.tv * vcfg.in_channels as usize, "LtxAvDit::run_stage_forward: video latent length mismatch");
+            assert_eq!(batch.a_latent.len(), batch.ta * acfg.in_channels as usize, "LtxAvDit::run_stage_forward: audio latent length mismatch");
+        }
+
+        let v_ts_scaled: Vec<f32> = batch.v_timesteps.iter().map(|&x| x * vcfg.timestep_scale_multiplier as f32).collect();
+        let a_ts_scaled: Vec<f32> = batch.a_timesteps.iter().map(|&x| x * vcfg.timestep_scale_multiplier as f32).collect();
+        let (v_adaln_table, v_embedded_timestep) = ada_layer_norm_single(&self.w, "adaln_single", &v_ts_scaled, vdim, vcfg.adaln_rows() as usize);
+        let (a_adaln_table, a_embedded_timestep) = ada_layer_norm_single(&self.w, "audio_adaln_single", &a_ts_scaled, adim, vcfg.adaln_rows() as usize);
+
+        let (av_video_ss_table, _) = ada_layer_norm_single(&self.w, "av_ca_video_scale_shift_adaln_single", &v_ts_scaled, vdim, 4);
+        let (av_audio_ss_table, _) = ada_layer_norm_single(&self.w, "av_ca_audio_scale_shift_adaln_single", &a_ts_scaled, adim, 4);
+
+        let a2v_gate_ts = [batch.a_sigma * cfg.av_ca_timestep_scale_multiplier];
+        let v2a_gate_ts = [batch.v_sigma * cfg.av_ca_timestep_scale_multiplier];
+        let (av_a2v_gate_table, _) = ada_layer_norm_single(&self.w, "av_ca_a2v_gate_adaln_single", &a2v_gate_ts, vdim, 1);
+        let (av_v2a_gate_table, _) = ada_layer_norm_single(&self.w, "av_ca_v2a_gate_adaln_single", &v2a_gate_ts, adim, 1);
+
+        let v_rope = ltx_rope_tables(vcfg.inner_dim, vcfg.num_heads, vcfg.positional_embedding_theta, &vcfg.positional_embedding_max_pos, &batch.v_positions, batch.tv);
+        let a_rope = ltx_rope_tables(acfg.inner_dim, acfg.num_heads, vcfg.positional_embedding_theta, &acfg.positional_embedding_max_pos, &batch.a_positions, batch.ta);
+        let cross_max_pos = [cfg.cross_pe_max_pos()];
+        let v_axis0_positions = &batch.v_positions[0..batch.tv * 2];
+        let v_cross_rope = ltx_rope_tables(acfg.cross_attention_dim, acfg.num_heads, vcfg.positional_embedding_theta, &cross_max_pos, v_axis0_positions, batch.tv);
+        let a_cross_rope = ltx_rope_tables(acfg.cross_attention_dim, acfg.num_heads, vcfg.positional_embedding_theta, &cross_max_pos, &batch.a_positions, batch.ta);
+
+        let gpu = open_device(self.device.as_deref());
+        let (v_cos_bufs, v_sin_bufs) = upload_rope_tables(&gpu, &v_rope);
+        let (a_cos_bufs, a_sin_bufs) = upload_rope_tables(&gpu, &a_rope);
+        let (v_cross_cos_bufs, v_cross_sin_bufs) = upload_rope_tables(&gpu, &v_cross_rope);
+        let (a_cross_cos_bufs, a_cross_sin_bufs) = upload_rope_tables(&gpu, &a_cross_rope);
+
+        #[rustfmt::skip]
+        let (v_connector_context, _v_connector_out) = route_context_through_connector(
+            &gpu, &self.w, "video_embeddings_connector", vcfg.use_embeddings_connector, &batch.v_context, &batch.v_context_valid, batch.v_context_len as u32,
+            vcfg.connector_inner_dim(), vcfg.connector_num_attention_heads, vcfg.connector_attention_head_dim,
+            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
+            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
+        );
+        #[rustfmt::skip]
+        let (a_connector_context, _a_connector_out) = route_context_through_connector(
+            &gpu, &self.w, "audio_embeddings_connector", vcfg.use_embeddings_connector, &batch.a_context, &batch.a_context_valid, batch.a_context_len as u32,
+            acfg.connector_inner_dim(), acfg.connector_num_attention_heads, acfg.connector_attention_head_dim,
+            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
+            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
+        );
+
+        let (vx0, ax0) = if self.shard.embed {
+            let pw = tget(&self.w, "patchify_proj.weight");
+            let pb = tget(&self.w, "patchify_proj.bias");
+            let mut vx = linear(&batch.v_latent, batch.tv, vcfg.in_channels as usize, pw, Some(pb), vdim);
+            if vcfg.use_keyframes_abs_pos_embedding {
+                let kf = tget(&self.w, "keyframes_abs_pos_embedding");
+                for ti in 0..batch.tv {
+                    if batch.v_keyframes_mask[ti] > 0.0 {
+                        for d in 0..vdim {
+                            vx[ti * vdim + d] += kf[d];
+                        }
+                    }
+                }
+            }
+            let apw = tget(&self.w, "audio_patchify_proj.weight");
+            let apb = tget(&self.w, "audio_patchify_proj.bias");
+            let ax = linear(&batch.a_latent, batch.ta, acfg.in_channels as usize, apw, Some(apb), adim);
+            (vx, ax)
+        } else {
+            (
+                self.res_in_v.borrow().clone().expect("LtxAvDit::run_stage_forward: non-embed stage needs write_in_res first (video)"),
+                self.res_in_a.borrow().clone().expect("LtxAvDit::run_stage_forward: non-embed stage needs write_in_res first (audio)"),
+            )
+        };
+
+        #[rustfmt::skip]
+        let (vx_final, ax_final, _v_block_out, _a_block_out, _taps) = self.forward_blocks_av(
+            &gpu, &vx0, &ax0, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
+            &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
+            &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
+            &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
+            batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32,
+        );
+        *self.res_out_v.borrow_mut() = Some(vx_final.clone());
+        *self.res_out_a.borrow_mut() = Some(ax_final.clone());
+
+        if self.shard.head {
+            let v_out = output_stage(&self.w, "scale_shift_table", "proj_out", &vx_final, &v_embedded_timestep, batch.tv, vdim, vcfg.out_channels as usize, vcfg.norm_eps);
+            let a_out = output_stage(&self.w, "audio_scale_shift_table", "audio_proj_out", &ax_final, &a_embedded_timestep, batch.ta, adim, acfg.out_channels as usize, vcfg.norm_eps);
+            *self.stage_out_v.borrow_mut() = Some(v_out.clone());
+            *self.stage_out_a.borrow_mut() = Some(a_out.clone());
+            let v_loss = batch.v_target.as_ref().map(|target| {
+                assert_eq!(v_out.len(), target.len(), "LtxAvDit::run_stage_forward: video target length mismatch");
+                v_out.iter().zip(target).map(|(o, g)| (o - g) * (o - g)).sum::<f32>() / v_out.len().max(1) as f32
+            });
+            let a_loss = batch.a_target.as_ref().map(|target| {
+                assert_eq!(a_out.len(), target.len(), "LtxAvDit::run_stage_forward: audio target length mismatch");
+                a_out.iter().zip(target).map(|(o, g)| (o - g) * (o - g)).sum::<f32>() / a_out.len().max(1) as f32
+            });
+            match (v_loss, a_loss) {
+                (Some(v), Some(a)) => Some((v + a) * 0.5),
+                (Some(v), None) => Some(v),
+                (None, Some(a)) => Some(a),
+                (None, None) => None,
+            }
+        } else {
+            None
+        }
     }
 
     /// One forward pass, replaying the golden's own inputs - both streams,
@@ -891,6 +1318,66 @@ impl LtxAvDit {
     /// `v_context_valid`/`a_context_valid`: each stream's own [`LtxDit::
     /// forward`]-style connector validity mask - ignored when `cfg.video.
     /// use_embeddings_connector` is `false`.
+    /// Run transformer blocks `[lo, hi)` over both streams, returning the
+    /// resulting `(vx, ax)` plus each block's own output copy (one stream
+    /// each) and full [`AvBlockTaps`] (one entry per block in range, index 0
+    /// = block `lo`) - the AV counterpart of [`LtxDit::forward_blocks`], the
+    /// SAME "one function, different bounds" single source of truth shared
+    /// by [`Self::forward`]'s own `[0, num_layers)` range and
+    /// [`Self::run_stage_forward`]'s `[shard.start, shard.end)`.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn forward_blocks_av(
+        &self,
+        gpu: &Gpu,
+        vx: &[f32],
+        ax: &[f32],
+        v_adaln_table: &[f32],
+        a_adaln_table: &[f32],
+        v_context: &[f32],
+        a_context: &[f32],
+        v_cos_bufs: &[DeviceBuffer],
+        v_sin_bufs: &[DeviceBuffer],
+        a_cos_bufs: &[DeviceBuffer],
+        a_sin_bufs: &[DeviceBuffer],
+        v_cross_cos_bufs: &[DeviceBuffer],
+        v_cross_sin_bufs: &[DeviceBuffer],
+        a_cross_cos_bufs: &[DeviceBuffer],
+        a_cross_sin_bufs: &[DeviceBuffer],
+        av_video_ss_table: &[f32],
+        av_audio_ss_table: &[f32],
+        av_a2v_gate_table: &[f32],
+        av_v2a_gate_table: &[f32],
+        tv: u32,
+        ta: u32,
+        lo: u32,
+        hi: u32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<AvBlockTaps>) {
+        let vcfg = &self.cfg.video;
+        let acfg = &self.cfg.audio;
+        let mut vxx = vx.to_vec();
+        let mut axx = ax.to_vec();
+        let mut v_block_out = Vec::with_capacity((hi - lo) as usize);
+        let mut a_block_out = Vec::with_capacity((hi - lo) as usize);
+        let mut taps = Vec::with_capacity((hi - lo) as usize);
+        for l in lo..hi {
+            let blk = LtxAvBlock::on(gpu.share(), vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), (v_context.len() / vcfg.inner_dim as usize) as u32, (a_context.len() / acfg.inner_dim as usize) as u32);
+            #[rustfmt::skip]
+            let (vout, aout, tp) = blk.forward(
+                &vxx, &axx, v_adaln_table, a_adaln_table, v_context, a_context,
+                v_cos_bufs, v_sin_bufs, a_cos_bufs, a_sin_bufs,
+                v_cross_cos_bufs, v_cross_sin_bufs, a_cross_cos_bufs, a_cross_sin_bufs,
+                av_video_ss_table, av_audio_ss_table, av_a2v_gate_table, av_v2a_gate_table,
+                tv, ta,
+            );
+            vxx = vout;
+            axx = aout;
+            v_block_out.push(vxx.clone());
+            a_block_out.push(axx.clone());
+            taps.push(tp);
+        }
+        (vxx, axx, v_block_out, a_block_out, taps)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
@@ -1001,37 +1488,22 @@ impl LtxAvDit {
             vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
         );
 
-        let mut v_block_out = Vec::with_capacity(vcfg.num_layers as usize);
-        let mut a_block_out = Vec::with_capacity(vcfg.num_layers as usize);
-        let mut b0v: Option<BlockTaps> = None;
-        let mut b0a: Option<BlockTaps> = None;
-        let mut b0_a2v: Option<Vec<f32>> = None;
-        let mut b0_v2a: Option<Vec<f32>> = None;
-        for l in 0..vcfg.num_layers {
-            let blk = LtxAvBlock::on(gpu.share(), vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), v_context_len as u32, a_context_len as u32);
-            #[rustfmt::skip]
-            let (vout, aout, taps) = blk.forward(
-                &vx, &ax, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
-                &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
-                &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
-                &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
-                tv as u32, ta as u32,
-            );
-            if l == 0 {
-                b0v = Some(BlockTaps { attn1_out: taps.v_attn1_out, attn2_out: taps.v_attn2_out, ff_out: taps.v_ff_out });
-                b0a = Some(BlockTaps { attn1_out: taps.a_attn1_out, attn2_out: taps.a_attn2_out, ff_out: taps.a_ff_out });
-                b0_a2v = Some(taps.a2v_out);
-                b0_v2a = Some(taps.v2a_out);
-            }
-            vx = vout;
-            ax = aout;
-            v_block_out.push(vx.clone());
-            a_block_out.push(ax.clone());
-        }
-        let b0v = b0v.expect("num_layers must be >= 1");
-        let b0a = b0a.expect("num_layers must be >= 1");
-        let b0_a2v = b0_a2v.expect("num_layers must be >= 1");
-        let b0_v2a = b0_v2a.expect("num_layers must be >= 1");
+        #[rustfmt::skip]
+        let (vx_final, ax_final, v_block_out, a_block_out, mut av_taps) = self.forward_blocks_av(
+            &gpu, &vx, &ax, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
+            &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
+            &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
+            &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
+            tv as u32, ta as u32, 0, vcfg.num_layers,
+        );
+        vx = vx_final;
+        ax = ax_final;
+        assert!(!av_taps.is_empty(), "num_layers must be >= 1");
+        let b0 = av_taps.remove(0);
+        let b0v = BlockTaps { attn1_out: b0.v_attn1_out, attn2_out: b0.v_attn2_out, ff_out: b0.v_ff_out };
+        let b0a = BlockTaps { attn1_out: b0.a_attn1_out, attn2_out: b0.a_attn2_out, ff_out: b0.a_ff_out };
+        let b0_a2v = b0.a2v_out;
+        let b0_v2a = b0.v2a_out;
 
         // ---- output stage: LayerNorm(no affine) -> modulate -> proj_out,
         // per stream ------------------------------------------------------

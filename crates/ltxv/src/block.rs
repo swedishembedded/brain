@@ -110,11 +110,20 @@ const K_ROPE2D: usize = 10;
 /// gated attention needs, so it composes from `matmul`+`sigmoid`+`mul`
 /// instead - see [`attention`]'s doc).
 const K_SIGMOID: usize = 11;
+/// The quantized-compute tier (int8/int4 - see [`QTier`]): dynamic per-token
+/// activation quantization (`max_abs_row` -> `quant_pack`, the same recipe
+/// `crates/wan/src/block.rs`'s `QTier` path and `crates/model/src/int8.rs`'s
+/// `QuantRows` use) plus the two DP4A-family GEMMs. Appended so every index
+/// above is unchanged; unused (and therefore free) on a plain-f32 [`LtxBlock`].
+const K_MAX_ABS_ROW: usize = 12;
+const K_QUANT_PACK: usize = 13;
+const K_MATMUL_I8_DYN: usize = 14;
+const K_MATMUL_Q4_DYN: usize = 15;
 
 /// Every kernel this block dispatches - all pre-existing, all at their
 /// documented general contract (see this module's doc for why no new kernel
 /// was needed anywhere in the block).
-pub const KERNELS: [(&str, &str); 12] = [
+pub const KERNELS: [(&str, &str); 16] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -127,6 +136,10 @@ pub const KERNELS: [(&str, &str); 12] = [
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("rope2d", kernels::ROPE2D),
     ("sigmoid", kernels::SIGMOID),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -1066,6 +1079,463 @@ pub fn open_device(device: Option<&str>) -> Gpu {
         Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
         _ => Gpu::new(&KERNELS),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Quantized-compute (int8/int4) video-only block path (M9's storage-only
+// tier's compute-time sibling - see `crate::int8`'s module doc, which names
+// exactly this gap: "no compute-time DP4A activation-quantization path").
+//
+// A CAPACITY tier, not a speed one - a precision change is not a speed
+// change; quantization here buys the real 22B checkpoint's residency on a
+// 24 GiB P40, not throughput. Every
+// int8-eligible linear weight (`crate::int8::is_never_quantized`'s excluded
+// set stays fp32, unchanged) is packed per-output-row (`model::int8::
+// quantize_weight`, 4 int8 lanes/u32) with a fp32 scale; activations are
+// quantized dynamically per row each forward (`max_abs_row` -> `quant_pack`,
+// the SAME recipe `crates/wan/src/block.rs`'s `QTier` path uses) and the
+// DP4A GEMM (`matmul_i8_dyn`) dequantizes with `sx*sw` on the way out -
+// brain's established "quantized storage, fp32 arithmetic result" contract.
+// int4 is W4A8 (weights only, `matmul_q4_dyn`): the same activation-quant
+// steps serve both tiers, only the weight-side GEMM and its packed word
+// stride differ - `crates/wan/src/block.rs`'s module doc has the full
+// reasoning for why a second int4-activation tier (W4A4) is not worth
+// building.
+//
+// The ten quantizable linears per block match `crate::int8::is_never_
+// quantized`'s exclusion list exactly: `attn1`/`attn2`'s `to_q`/`to_k`/
+// `to_v`/`to_out.0` (8) plus `ff.net.0.proj`/`ff.net.2` (2). `q_norm`/
+// `k_norm` (1-D), `to_gate_logits` (never-quantized: small, sets the gate's
+// own numeric scale) and the host-side `scale_shift_table`/
+// `prompt_scale_shift_table` stay fp32 - unchanged from [`BlockWeights`].
+// Only the video-only [`LtxBlock`] gets this tier in this pass (the AV
+// cross-attention path is a later lift - see this crate's roadmap ledger).
+
+/// Which packed-weight tier a quantized block uses. int4 is W4A8, not W4A4 -
+/// see this section's doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QTier {
+    Int8,
+    Int4,
+}
+
+/// One quantized linear: packed weight + its per-output-row fp32 scale, plus
+/// the (never-quantized) fp32 bias - `None` for a bias-free linear (the main
+/// video FFN at `ff_bias=false`, `FfWeights`'s own convention).
+struct QLinear {
+    w: DeviceBuffer,
+    sw: DeviceBuffer,
+    b: Option<DeviceBuffer>,
+}
+
+impl QLinear {
+    fn upload(gpu: &Gpu, t: &Tensors, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize, has_bias: bool) -> QLinear {
+        let data = tget(t, &format!("{prefix}.weight"));
+        let (packed, sw) = match tier {
+            QTier::Int8 => model::int8::quantize_weight(data, out_dim, in_dim),
+            QTier::Int4 => model::int4::quantize_weight_q4(data, out_dim, in_dim),
+        };
+        let wb = gpu.storage(packed.len() as u64);
+        gpu.write(&wb, &packed);
+        let swb = gpu.storage(sw.len() as u64);
+        wf(gpu, &swb, &sw);
+        let b = has_bias.then(|| upload(gpu, t, &format!("{prefix}.bias")));
+        QLinear { w: wb, sw: swb, b }
+    }
+}
+
+/// One `Attention` module's quantized weights - [`AttnWeights`]'s int8/int4
+/// analogue: `to_q`/`to_k`/`to_v`/`to_out.0` packed, everything else
+/// (`q_norm`/`k_norm`/`to_gate_logits`) unchanged fp32.
+struct QAttnWeights {
+    wq: QLinear,
+    wk: QLinear,
+    wv: QLinear,
+    wo: QLinear,
+    q_norm: DeviceBuffer,
+    k_norm: DeviceBuffer,
+    gate: Option<GateWeights>,
+}
+
+impl QAttnWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, gated: bool, tier: QTier, q_dim: usize, kv_dim: usize, inner_dim: usize) -> QAttnWeights {
+        QAttnWeights {
+            wq: QLinear::upload(gpu, w, &format!("{prefix}.to_q"), tier, inner_dim, q_dim, true),
+            wk: QLinear::upload(gpu, w, &format!("{prefix}.to_k"), tier, inner_dim, kv_dim, true),
+            wv: QLinear::upload(gpu, w, &format!("{prefix}.to_v"), tier, inner_dim, kv_dim, true),
+            wo: QLinear::upload(gpu, w, &format!("{prefix}.to_out.0"), tier, q_dim, inner_dim, true),
+            q_norm: upload(gpu, w, &format!("{prefix}.q_norm.weight")),
+            k_norm: upload(gpu, w, &format!("{prefix}.k_norm.weight")),
+            gate: gated.then(|| GateWeights { w: upload(gpu, w, &format!("{prefix}.to_gate_logits.weight")), b: upload(gpu, w, &format!("{prefix}.to_gate_logits.bias")) }),
+        }
+    }
+}
+
+/// The FFN's two quantized linears - [`FfWeights`]'s int8/int4 analogue.
+struct QFfWeights {
+    w1: QLinear, // [ff_dim, dim]
+    w2: QLinear, // [dim, ff_dim]
+}
+
+impl QFfWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> QFfWeights {
+        let ff_dim = dim * 4;
+        QFfWeights {
+            w1: QLinear::upload(gpu, w, &format!("{prefix}.net.0.proj"), tier, ff_dim, dim, has_bias),
+            w2: QLinear::upload(gpu, w, &format!("{prefix}.net.2"), tier, dim, ff_dim, has_bias),
+        }
+    }
+}
+
+/// Resident quantized weights of one video-only block - [`BlockWeights`]'s
+/// int8/int4 analogue.
+struct QBlockWeights {
+    attn1: QAttnWeights,
+    attn2: QAttnWeights,
+    ff: QFfWeights,
+    scale_shift_table: Vec<f32>,
+    prompt_scale_shift_table: Vec<f32>,
+}
+
+impl QBlockWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, dim: usize, gated: bool, tier: QTier) -> QBlockWeights {
+        let sst = tget(w, &format!("{prefix}.scale_shift_table")).to_vec();
+        assert_eq!(sst.len(), 9 * dim, "{prefix}.scale_shift_table must be [9, dim]");
+        let pst = tget(w, &format!("{prefix}.prompt_scale_shift_table")).to_vec();
+        assert_eq!(pst.len(), 2 * dim, "{prefix}.prompt_scale_shift_table must be [2, dim]");
+        QBlockWeights {
+            attn1: QAttnWeights::upload(gpu, w, &format!("{prefix}.attn1"), gated, tier, dim, dim, dim),
+            attn2: QAttnWeights::upload(gpu, w, &format!("{prefix}.attn2"), gated, tier, dim, dim, dim),
+            ff: QFfWeights::upload(gpu, w, &format!("{prefix}.ff"), tier, dim, false),
+            scale_shift_table: sst,
+            prompt_scale_shift_table: pst,
+        }
+    }
+}
+
+/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with a fresh dynamic per-row
+/// scale - the shared activation-quant step every quantized linear below
+/// reads. `k` must be a multiple of 4 (`model::int8::quantize_weight`'s own
+/// packing requirement).
+fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
+    s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
+    s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
+}
+
+/// `out = dequant(xq @ Wᵀ) + b`: one quantized linear, tier-dispatched -
+/// `xq`/`sx` must already hold `x`'s quantization at this `(rows, k)` shape
+/// (from [`qquant`]).
+#[allow(clippy::too_many_arguments)]
+fn qlinear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+    match tier {
+        QTier::Int8 => s.push(gpu.step(
+            K_MATMUL_I8_DYN,
+            &[xq, &w.w, sx, &w.sw, out],
+            &[rows, k / 4, n],
+            rows.div_ceil(128) * n.div_ceil(128) * 256,
+        )),
+        // `k` here is the LOGICAL (undivided) K - see `matmul_q4_dyn.wgsl`'s
+        // own doc, `crates/wan/src/block.rs::qlinear`'s int4 branch.
+        QTier::Int4 => s.push(gpu.step(K_MATMUL_Q4_DYN, &[xq, &w.w, sx, &w.sw, out], &[rows, k, n], rows * n)),
+    }
+    if let Some(b) = &w.b {
+        s.push(gpu.step(K_BIAS_ADD, &[out, b], &[rows, n], rows * n));
+    }
+}
+
+/// [`qquant`] + [`qlinear`] in one call, for the common case of a fresh
+/// `(rows, k)` activation with no reuse across multiple linears.
+#[allow(clippy::too_many_arguments)]
+fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+    let xq = gpu.storage((rows * k / 4) as u64);
+    let sx = gpu.storage(rows as u64);
+    qquant(gpu, s, x, &xq, &sx, rows, k);
+    qlinear(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
+}
+
+/// [`attention`]'s quantized-compute twin: identical fp32 RMSNorm/RoPE/
+/// attention-score/gating math - only the four projections (`to_q`/`to_k`/
+/// `to_v`/`to_out.0`) run through [`qquant_linear`] instead of [`linear`].
+#[allow(clippy::too_many_arguments)]
+fn attention_q(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    tier: QTier,
+    w: &QAttnWeights,
+    q_dim: u32,
+    kv_dim: u32,
+    inner_dim: u32,
+    heads: u32,
+    head_dim: u32,
+    q_in: &DeviceBuffer,
+    kv_in: &DeviceBuffer,
+    nq: u32,
+    nk: u32,
+    q_rope: Option<(&[DeviceBuffer], &[DeviceBuffer])>,
+    k_rope: Option<(&[DeviceBuffer], &[DeviceBuffer])>,
+    kernel_rope2d: usize,
+    eps: f32,
+) -> DeviceBuffer {
+    let q_pre = gpu.storage((nq * inner_dim) as u64);
+    qquant_linear(gpu, s, tier, q_in, &w.wq, &q_pre, nq, q_dim, inner_dim);
+    let k_pre = gpu.storage((nk * inner_dim) as u64);
+    qquant_linear(gpu, s, tier, kv_in, &w.wk, &k_pre, nk, kv_dim, inner_dim);
+    let v = gpu.storage((nk * inner_dim) as u64);
+    qquant_linear(gpu, s, tier, kv_in, &w.wv, &v, nk, kv_dim, inner_dim);
+
+    let q = gpu.storage((nq * inner_dim) as u64);
+    let k = gpu.storage((nk * inner_dim) as u64);
+    rmsnorm(gpu, s, &q_pre, &w.q_norm, &q, inner_dim, nq, eps);
+    rmsnorm(gpu, s, &k_pre, &w.k_norm, &k, inner_dim, nk, eps);
+
+    if let Some((cos_bufs, sin_bufs)) = q_rope {
+        for h in 0..heads {
+            let off = h * head_dim;
+            s.push(apply_rope_step(gpu, kernel_rope2d, &q, &cos_bufs[h as usize], &sin_bufs[h as usize], nq, head_dim, inner_dim, off));
+        }
+    }
+    if let Some((cos_bufs, sin_bufs)) = k_rope {
+        for h in 0..heads {
+            let off = h * head_dim;
+            s.push(apply_rope_step(gpu, kernel_rope2d, &k, &cos_bufs[h as usize], &sin_bufs[h as usize], nk, head_dim, inner_dim, off));
+        }
+    }
+
+    let scores = gpu.storage((heads * nq * nk) as u64);
+    let probs = gpu.storage((heads * nq * nk) as u64);
+    let ctx = gpu.storage((nq * inner_dim) as u64);
+    s.push(gpu.step(K_ATTN_SCORES, &[&q, &k, &scores], &[1, heads, nq, nk, head_dim, inner_dim, inner_dim, 0, 0], heads * nq * nk));
+    s.push(gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, nq, nk], heads * nq));
+    s.push(gpu.step(K_ATTN_APPLY, &[&probs, &v, &ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
+
+    // Gating stays fp32 - `to_gate_logits` is never quantized (small,
+    // fixes the gate's own numeric scale, see `crate::int8::is_never_
+    // quantized`'s doc), unchanged from [`attention`].
+    let ctx_gated = if let Some(gate) = &w.gate {
+        let logits = gpu.storage((nq * heads) as u64);
+        linear(gpu, s, q_in, &gate.w, Some(&gate.b), &logits, nq, q_dim, heads);
+        let sig = gpu.storage((nq * heads) as u64);
+        s.push(gpu.step(K_SIGMOID, &[&logits, &sig], &[nq * heads], nq * heads));
+        let expand = gpu.storage((inner_dim * heads) as u64);
+        wf(gpu, &expand, &gate_expand_matrix(heads, head_dim));
+        let gate_bc = gpu.storage((nq * inner_dim) as u64);
+        linear(gpu, s, &sig, &expand, None, &gate_bc, nq, heads, inner_dim);
+        let gated = gpu.storage((nq * inner_dim) as u64);
+        mul(gpu, s, &ctx, &gate_bc, &gated, nq * inner_dim);
+        gated
+    } else {
+        ctx
+    };
+
+    let out = gpu.storage((nq * q_dim) as u64);
+    qquant_linear(gpu, s, tier, &ctx_gated, &w.wo, &out, nq, inner_dim, q_dim);
+    out
+}
+
+/// [`self_attn_and_text_ca`]'s quantized-compute twin - identical structure,
+/// [`attention_q`] instead of [`attention`].
+#[allow(clippy::too_many_arguments)]
+fn self_attn_and_text_ca_q(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    tier: QTier,
+    w: &QBlockWeights,
+    ones: &DeviceBuffer,
+    x_buf: &DeviceBuffer,
+    m: &Mod,
+    ctx_buf: &DeviceBuffer,
+    ctx_len: u32,
+    cos_bufs: &[DeviceBuffer],
+    sin_bufs: &[DeviceBuffer],
+    dim: u32,
+    heads: u32,
+    head_dim: u32,
+    t: u32,
+    eps: f32,
+) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    let td = t * dim;
+    let up = |v: &[f32]| -> DeviceBuffer {
+        let b = gpu.storage(v.len() as u64);
+        wf(gpu, &b, v);
+        b
+    };
+    let shift_msa = up(&m.shift_msa);
+    let one_plus_scale_msa = up(&m.one_plus_scale_msa);
+    let gate_msa = up(&m.gate_msa);
+    let shift_q = up(&m.shift_q);
+    let one_plus_scale_q = up(&m.one_plus_scale_q);
+    let gate_q = up(&m.gate_q);
+
+    let pst = &w.prompt_scale_shift_table;
+    let (shift_kv_row, scale_kv_row) = (&pst[0..dim as usize], &pst[dim as usize..2 * dim as usize]);
+    let mut shift_kv = vec![0f32; (ctx_len * dim) as usize];
+    let mut one_plus_scale_kv = vec![0f32; (ctx_len * dim) as usize];
+    for r in 0..ctx_len as usize {
+        shift_kv[r * dim as usize..r * dim as usize + dim as usize].copy_from_slice(shift_kv_row);
+        for (d, v) in scale_kv_row.iter().enumerate() {
+            one_plus_scale_kv[r * dim as usize + d] = 1.0 + v;
+        }
+    }
+    let shift_kv_buf = up(&shift_kv);
+    let one_plus_scale_kv_buf = up(&one_plus_scale_kv);
+
+    let tmp1 = gpu.storage(td as u64);
+    let tmp2 = gpu.storage(td as u64);
+    let norm_x = gpu.storage(td as u64);
+    ada_zero(gpu, s, ones, x_buf, &one_plus_scale_msa, &shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
+    let attn1_out = attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps);
+    let x_fma = gpu.storage(td as u64);
+    gate_row(gpu, s, x_buf, &gate_msa, &attn1_out, &x_fma, t, dim, 1);
+
+    let x_normed = gpu.storage(td as u64);
+    rmsnorm(gpu, s, &x_fma, ones, &x_normed, dim, t, eps);
+
+    let attn_input_tmp1 = gpu.storage(td as u64);
+    let attn_input = gpu.storage(td as u64);
+    mul(gpu, s, &x_normed, &one_plus_scale_q, &attn_input_tmp1, td);
+    add2(gpu, s, &attn_input_tmp1, &shift_q, &attn_input, td);
+
+    let ctxd = ctx_len * dim;
+    let enc_tmp1 = gpu.storage(ctxd as u64);
+    let enc_hidden = gpu.storage(ctxd as u64);
+    mul(gpu, s, ctx_buf, &one_plus_scale_kv_buf, &enc_tmp1, ctxd);
+    add2(gpu, s, &enc_tmp1, &shift_kv_buf, &enc_hidden, ctxd);
+
+    let ca_raw = attention_q(gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps);
+    let ca_gated = gpu.storage(td as u64);
+    mul(gpu, s, &ca_raw, &gate_q, &ca_gated, td);
+    let x2 = gpu.storage(td as u64);
+    add2(gpu, s, &x_fma, &ca_gated, &x2, td);
+
+    (x2, attn1_out, ca_raw)
+}
+
+/// [`mlp_sublayer`]'s quantized-compute twin - identical structure,
+/// [`qquant_linear`] instead of [`linear`] for both FFN projections.
+#[allow(clippy::too_many_arguments)]
+fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, ones: &DeviceBuffer, x2: &DeviceBuffer, shift_mlp: &[f32], one_plus_scale_mlp: &[f32], gate_mlp: &[f32], dim: u32, t: u32, eps: f32) -> (DeviceBuffer, DeviceBuffer) {
+    let td = t * dim;
+    let up = |v: &[f32]| -> DeviceBuffer {
+        let b = gpu.storage(v.len() as u64);
+        wf(gpu, &b, v);
+        b
+    };
+    let shift_mlp_buf = up(shift_mlp);
+    let one_plus_scale_mlp_buf = up(one_plus_scale_mlp);
+    let gate_mlp_buf = up(gate_mlp);
+
+    let mlp_tmp1 = gpu.storage(td as u64);
+    let mlp_tmp2 = gpu.storage(td as u64);
+    let x_scaled = gpu.storage(td as u64);
+    ada_zero(gpu, s, ones, x2, &one_plus_scale_mlp_buf, &shift_mlp_buf, &mlp_tmp1, &mlp_tmp2, &x_scaled, dim, t, eps);
+    let ff_dim = dim * 4;
+    let h_pre = gpu.storage((t * ff_dim) as u64);
+    qquant_linear(gpu, s, tier, &x_scaled, &w.w1, &h_pre, t, dim, ff_dim);
+    let h_act = gpu.storage((t * ff_dim) as u64);
+    s.push(gpu.step(K_GELU, &[&h_pre, &h_act], &[t * ff_dim], t * ff_dim));
+    let ff_out = gpu.storage(td as u64);
+    qquant_linear(gpu, s, tier, &h_act, &w.w2, &ff_out, t, ff_dim, dim);
+    let x3 = gpu.storage(td as u64);
+    gate_row(gpu, s, x2, &gate_mlp_buf, &ff_out, &x3, t, dim, 1);
+    (x3, ff_out)
+}
+
+/// [`LtxBlock`]'s quantized-compute twin: one video-only block, weights
+/// resident in packed int8/int4 form. See this section's module doc for the
+/// tier's exact scope (video-only, ten quantizable linears per block).
+pub struct LtxBlockQ {
+    gpu: Gpu,
+    cfg: LtxDitConfig,
+    tier: QTier,
+    w: QBlockWeights,
+    context_len: u32,
+    ones_t: DeviceBuffer,
+}
+
+impl LtxBlockQ {
+    /// `weights`/`prefix`/`tokens`/`context_len`: same convention as
+    /// [`LtxBlock::on`]. `weights` is a plain [`Tensors`] map, but it need not
+    /// come from a whole-model fp32 materialization: [`load_block_tensors_from_source`]
+    /// builds exactly this one block's own tensors straight off a real GGUF
+    /// `checkpoint::TensorSource` (`crate::gguf_src::LtxvGgufSource`).
+    pub fn on(gpu: Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
+        cfg.assert_supported();
+        let dim = cfg.inner_dim as usize;
+        let w = QBlockWeights::upload(&gpu, weights, prefix, dim, cfg.apply_gated_attention, tier);
+        let ones_t = gpu.storage(dim as u64);
+        wf(&gpu, &ones_t, &vec![1.0f32; dim]);
+        let _ = tokens;
+        LtxBlockQ { gpu, cfg: *cfg, tier, w, context_len, ones_t }
+    }
+
+    /// One block forward - same inputs/outputs as [`LtxBlock::forward`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
+        let gpu = &self.gpu;
+        let cfg = &self.cfg;
+        let dim = cfg.inner_dim;
+        let heads = cfg.num_heads;
+        let head_dim = cfg.head_dim();
+        let eps = cfg.norm_eps;
+        let ctx_len = self.context_len;
+        assert_eq!(x.len(), (t * dim) as usize);
+        assert_eq!(adaln_table.len(), (t * 9 * dim) as usize);
+        assert_eq!(context.len(), (ctx_len * dim) as usize);
+
+        let combined = dit::adaln::add_table(adaln_table, &self.w.scale_shift_table, t as usize, 9 * dim as usize);
+        let m = slice_mod(&combined, t as usize, dim as usize);
+
+        let x_buf = gpu.storage((t * dim) as u64);
+        wf(gpu, &x_buf, x);
+        let ctx_buf = gpu.storage((ctx_len * dim) as u64);
+        wf(gpu, &ctx_buf, context);
+
+        let mut s: Vec<Step> = Vec::new();
+        let td = t * dim;
+
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
+
+        gpu.submit(&[], &s);
+        let out = gpu.read(&x3, td as usize);
+        let taps = BlockTaps { attn1_out: gpu.read(&attn1_out, td as usize), attn2_out: gpu.read(&ca_raw, td as usize), ff_out: gpu.read(&ff_out, td as usize) };
+        (out, taps)
+    }
+
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+}
+
+/// Read exactly one block's real tensors from `src` into a [`Tensors`] map -
+/// the bounded loader path [`LtxBlockQ::on`] uses to build straight off a
+/// real GGUF `checkpoint::TensorSource` (`crate::gguf_src::LtxvGgufSource`)
+/// WITHOUT ever materializing the whole 22B checkpoint's fp32 expansion in
+/// host RAM: only this one block's own tensors (a couple hundred MB at
+/// most, once packed to int8) are read, each via `with_tensor` - which,
+/// per `checkpoint::TensorSource`'s own contract, decodes at most one
+/// tensor into a temporary at a time, never the whole source. This is the
+/// same bound `model::int8::upload_dequantized`'s doc documents for the
+/// general case, applied here at "one block" granularity instead of "one
+/// tensor". `prefix`: e.g. `"transformer_blocks.0"`, matching
+/// `crate::dit::dit_tensor_manifest`'s own naming.
+pub fn load_block_tensors_from_source(src: &dyn checkpoint::TensorSource, cfg: &LtxDitConfig, prefix: &str) -> Tensors {
+    let manifest = crate::dit::dit_tensor_manifest(cfg);
+    let want_prefix = format!("{prefix}.");
+    let mut out = Tensors::new();
+    for (name, shape) in manifest {
+        if !name.starts_with(&want_prefix) {
+            continue;
+        }
+        let mut data = Vec::new();
+        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
+        assert!(found, "load_block_tensors_from_source: missing {name}");
+        let want: usize = shape.iter().product();
+        assert_eq!(data.len(), want, "load_block_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
+        out.insert(name, (shape, data));
+    }
+    assert!(!out.is_empty(), "load_block_tensors_from_source: prefix {prefix} matched nothing in the manifest");
+    out
 }
 
 // ---------------------------------------------------------------------------
