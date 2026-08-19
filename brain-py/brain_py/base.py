@@ -156,6 +156,7 @@ class BrainBase:
     def subscribe(self, model: str, action: str, params: Optional[dict] = None, *,
                   blobs: Optional[dict] = None, meta: Optional[dict] = None,
                   on_progress: Optional[OnProgress] = None,
+                  on_job: Optional[Callable[[int], None]] = None,
                   timeout: float = 1800.0) -> Outcome:  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -193,6 +194,7 @@ class BrainBase:
         blobs: Optional[dict] = None,
         meta: Optional[dict] = None,
         on_progress: Optional[OnProgress] = None,
+        on_job: Optional[Callable[[int], None]] = None,
         timeout: float = 300.0,
         **params: Any,
     ) -> str:
@@ -203,9 +205,12 @@ class BrainBase:
         :meth:`subscribe` — generic, model-agnostic multimodal input (e.g.
         ``blobs={"audio": pcm_bytes}, meta={"audio": {"media": "audio"}}`` for a
         model whose ``generate`` action declares an ``audio``/``image`` blob
-        input, like ``brain/qwen3omnimoe``). With ``on_progress`` set the run streams
-        (one callback per token via :meth:`subscribe`); otherwise it is a single
-        :meth:`run`. ``model`` defaults to the first model advertising ``generate``.
+        input, like ``brain/qwen3omnimoe``). With ``on_progress`` or ``on_job``
+        set the run streams via :meth:`subscribe` (one callback per token, and/or
+        the job id a concurrent caller needs to :meth:`~BrainDBus.cancel` it --
+        `run`'s job is never client-visible, so cancellation always needs this
+        path); otherwise it is a single :meth:`run`. ``model`` defaults to the
+        first model advertising ``generate``.
         """
         model = self._pick("generate", model)
         p: dict[str, Any] = dict(params)
@@ -217,20 +222,23 @@ class BrainBase:
             p["system"] = system
         if max_new is not None:
             p["max_new"] = max_new
-        if on_progress is not None:
-            out = self.subscribe(model, "generate", p, blobs=blobs, meta=meta, on_progress=on_progress, timeout=timeout)
+        if on_progress is not None or on_job is not None:
+            out = self.subscribe(model, "generate", p, blobs=blobs, meta=meta,
+                                 on_progress=on_progress, on_job=on_job, timeout=timeout)
         else:
             out = self.run(model, "generate", p, blobs=blobs, meta=meta, timeout=timeout)
         return out.text()
 
     def chat(self, text: str, *, model: Optional[str] = None,
              blobs: Optional[dict] = None, meta: Optional[dict] = None,
-             on_progress: Optional[OnProgress] = None, timeout: float = 300.0,
+             on_progress: Optional[OnProgress] = None,
+             on_job: Optional[Callable[[int], None]] = None,
+             timeout: float = 300.0,
              **params: Any) -> str:
         """Sugar over :meth:`generate` for a single user turn."""
         return self.generate(messages=[{"role": "user", "content": text}],
                              model=model, blobs=blobs, meta=meta,
-                             on_progress=on_progress, timeout=timeout, **params)
+                             on_progress=on_progress, on_job=on_job, timeout=timeout, **params)
 
     # -- embeddings ----------------------------------------------------------
     def embed(self, text: str, *, model: Optional[str] = None,
@@ -254,18 +262,21 @@ class BrainBase:
         height: int = 512,
         model: Optional[str] = None,
         on_progress: Optional[OnProgress] = None,
+        on_job: Optional[Callable[[int], None]] = None,
         timeout: float = 1800.0,
         **params: Any,
     ):
         """Run ``text2image`` and return the generated image as a PIL ``Image``.
 
         Extra keyword args (``steps``, ``seed``, ``precision``, …) pass straight
-        through as action params. With ``on_progress`` set the denoise steps stream.
+        through as action params. With ``on_progress`` or ``on_job`` set the
+        denoise steps stream via :meth:`subscribe` -- the same run/subscribe
+        cancellation tradeoff as :meth:`generate` applies here.
         """
         model = self._pick("text2image", model)
         p: dict[str, Any] = {"prompt": prompt, "width": width, "height": height, **params}
-        if on_progress is not None:
-            out = self.subscribe(model, "text2image", p, on_progress=on_progress, timeout=timeout)
+        if on_progress is not None or on_job is not None:
+            out = self.subscribe(model, "text2image", p, on_progress=on_progress, on_job=on_job, timeout=timeout)
         else:
             out = self.run(model, "text2image", p, timeout=timeout)
         return out.image("image")

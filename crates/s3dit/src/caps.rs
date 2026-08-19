@@ -19,11 +19,11 @@ pub const MODEL: &str = "brain/s3dit";
 
 /// Shared generation params (steps / guidance / seed / size).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
-    spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)))
-        .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 0 disables (Turbo default)").default(json!(0.0)))
+    spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(150.0).step(1.0))
+        .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 0 disables (Turbo default)").default(json!(0.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
-        .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)))
-        .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(1024)))
+        .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
+        .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
         .param(ParamSpec::new("precision", ParamType::Enum(vec!["int8".into(), "fp32".into()]), "DiT precision: int8 (1 GPU, fast) or fp32 (2 GPUs, higher fidelity)").default(json!("int8")))
 }
 
@@ -42,15 +42,15 @@ pub fn manifest() -> Manifest {
     let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming())
         .param(prompt())
         .param(neg())
-        .param(ParamSpec::new("strength", ParamType::Float, "0=keep input, 1=ignore it; how much to change").default(json!(0.55)))
+        .param(ParamSpec::new("strength", ParamType::Float, "0=keep input, 1=ignore it; how much to change").default(json!(0.55)).min(0.0).max(1.0).step(0.01))
         .input(BlobSpec::new("image", Media::Image, "the starting image").required())
         .output(image_out());
 
     let inpaint = gen_params(ActionSpec::new("inpaint", "regenerate only the masked region of an image (object removal/replacement, sign-text change)").streaming())
         .param(prompt())
         .param(neg())
-        .param(ParamSpec::new("strength", ParamType::Float, "how strongly to regenerate the masked region").default(json!(0.85)))
-        .param(ParamSpec::new("feather", ParamType::Int, "mask-edge feather radius in latent cells (0 = hard edge)").default(json!(2)))
+        .param(ParamSpec::new("strength", ParamType::Float, "how strongly to regenerate the masked region").default(json!(0.85)).min(0.0).max(1.0).step(0.01))
+        .param(ParamSpec::new("feather", ParamType::Int, "mask-edge feather radius in latent cells (0 = hard edge)").default(json!(2)).min(0.0).max(64.0).step(1.0))
         .input(BlobSpec::new("image", Media::Image, "the image to edit").required())
         .input(BlobSpec::new("mask", Media::Mask, "white = regenerate, black = keep").required())
         .output(image_out());
@@ -61,7 +61,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("right", ParamType::Int, "pixels to add on the right").default(json!(0)))
         .param(ParamSpec::new("top", ParamType::Int, "pixels to add on top").default(json!(0)))
         .param(ParamSpec::new("bottom", ParamType::Int, "pixels to add on the bottom").default(json!(0)))
-        .param(ParamSpec::new("feather", ParamType::Int, "seam feather radius in latent cells (0 = hard edge)").default(json!(3)))
+        .param(ParamSpec::new("feather", ParamType::Int, "seam feather radius in latent cells (0 = hard edge)").default(json!(3)).min(0.0).max(64.0).step(1.0))
         .input(BlobSpec::new("image", Media::Image, "the image to extend").required())
         .output(image_out());
 
@@ -292,5 +292,23 @@ mod tests {
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn generation_params_carry_ui_ranges() {
+        let t2i = &manifest().actions[0];
+        let p = |name: &str| t2i.params.iter().find(|p| p.name == name).unwrap();
+        assert_eq!((p("steps").min, p("steps").max, p("steps").step), (Some(1.0), Some(150.0), Some(1.0)));
+        assert_eq!((p("guidance").min, p("guidance").max), (Some(0.0), Some(30.0)));
+        assert_eq!((p("width").min, p("width").max, p("width").step), (Some(64.0), Some(2048.0), Some(8.0)));
+        assert_eq!((p("height").min, p("height").max, p("height").step), (Some(64.0), Some(2048.0), Some(8.0)));
+
+        let i2i = manifest().actions.iter().find(|a| a.name == "image2image").cloned().unwrap();
+        let strength = i2i.params.iter().find(|p| p.name == "strength").unwrap().clone();
+        assert_eq!((strength.min, strength.max, strength.step), (Some(0.0), Some(1.0), Some(0.01)));
+
+        let inp = manifest().actions.iter().find(|a| a.name == "inpaint").cloned().unwrap();
+        let feather = inp.params.iter().find(|p| p.name == "feather").unwrap().clone();
+        assert_eq!((feather.min, feather.max, feather.step), (Some(0.0), Some(64.0), Some(1.0)));
     }
 }

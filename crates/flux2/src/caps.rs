@@ -38,11 +38,11 @@ const EXTRA_REFS: [&str; 3] = ["image0", "image1", "image2"];
 /// Shared generation params (size / steps / seed / guidance / variant / adapter).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
-        .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(512)))
-        .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)))
-        .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)))
+        .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
+        .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
+        .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
-        .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale — base variants only (klein is guidance-distilled)").default(json!(4.0)))
+        .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
         .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to apply"))
@@ -62,7 +62,7 @@ pub fn manifest() -> Manifest {
             "strength",
             ParamType::Float,
             "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source (0.1 -> ~0.999 structural fidelity),              high = redraw it (0.9 -> ~0.77). Does NOT add colour.              Omit to generate from noise with the references only conditioning.",
-        ))
+        ).min(0.0).max(1.0).step(0.01))
         .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` is set").required());
     for r in EXTRA_REFS {
         edit = edit.input(BlobSpec::new(r, Media::Image, "additional reference image"));
@@ -363,6 +363,20 @@ mod tests {
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn generation_params_carry_ui_ranges() {
+        let t2i = &manifest().actions[0];
+        let p = |name: &str| t2i.params.iter().find(|p| p.name == name).unwrap();
+        assert_eq!((p("width").min, p("width").max, p("width").step), (Some(64.0), Some(2048.0), Some(16.0)));
+        assert_eq!((p("height").min, p("height").max, p("height").step), (Some(64.0), Some(2048.0), Some(16.0)));
+        assert_eq!((p("steps").min, p("steps").max, p("steps").step), (Some(0.0), Some(150.0), Some(1.0)));
+        assert_eq!((p("guidance").min, p("guidance").max), (Some(0.0), Some(30.0)));
+
+        let edit = manifest().actions.iter().find(|a| a.name == "edit").cloned().unwrap();
+        let strength = edit.params.iter().find(|p| p.name == "strength").unwrap().clone();
+        assert_eq!((strength.min, strength.max, strength.step), (Some(0.0), Some(1.0), Some(0.01)));
     }
 
     #[test]

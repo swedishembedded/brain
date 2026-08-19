@@ -148,7 +148,10 @@ class FakeBrain(BrainBase):
             return Outcome(outputs={}, blobs={"image": raw}, meta={"image": {"meta": {"w": 2, "h": 2, "c": 3}}})
         raise AssertionError(action)
 
-    def subscribe(self, model, action, params=None, *, blobs=None, meta=None, on_progress=None, timeout=1800.0):
+    def subscribe(self, model, action, params=None, *, blobs=None, meta=None,
+                  on_progress=None, on_job=None, timeout=1800.0):
+        if on_job is not None:
+            on_job(42)
         if on_progress is not None:
             on_progress(1, 1, "tick")
         return self.run(model, action, params, blobs=blobs, meta=meta, timeout=timeout)
@@ -177,6 +180,26 @@ def test_generate_streams_via_subscribe_when_on_progress_given():
     out = b.generate(prompt="hi", on_progress=lambda s, t, m: ticks.append((s, t, m)))
     assert out == "You said: hi"
     assert ticks == [(1, 1, "tick")]
+
+
+def test_generate_on_job_receives_the_job_id_for_cancellation():
+    """A caller that wants to cancel a streaming generate() must be able to
+    capture the job id without dropping to the low-level stream_frames_with_job
+    API. on_progress alone forces a Run (uncancellable server-side); on_job
+    forces Subscribe (the only cancellable path) and hands back the id."""
+    b = FakeBrain()
+    jobs = []
+    out = b.generate(prompt="hi", on_progress=lambda *_: None, on_job=jobs.append)
+    assert out == "You said: hi"
+    assert jobs == [42]
+
+
+def test_text2image_on_job_receives_the_job_id_for_cancellation():
+    b = FakeBrain()
+    jobs = []
+    img = b.text2image("a cube", on_progress=lambda *_: None, on_job=jobs.append)
+    assert img.size == (2, 2)
+    assert jobs == [42]
 
 
 def test_embed_returns_vector():

@@ -130,6 +130,7 @@ class BrainDBus(BrainBase):
         on_progress: Optional[OnProgress] = None,
         on_delta: Optional[Callable[[str], None]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
+        on_job: Optional[Callable[[int], None]] = None,
         timeout: float = 1800.0,
     ) -> Outcome:
         """Run a streaming action, invoking ``on_progress(step, total, message)`` as
@@ -139,10 +140,17 @@ class BrainDBus(BrainBase):
         each structured out-of-band payload (reasoning/tool-call chunks) -- a chat
         model's `progress` frame carries these alongside step/total/message; a
         Subscribe`r that only wants the step tick can leave both `None`.
+
+        ``on_job`` fires once, before the first frame is consumed, with the job id
+        `Subscribe` returned -- the ONLY way to get a client-visible id: `Run`
+        never hands one back (see :meth:`cancel`'s doc), so a caller that wants to
+        abort a generation must go through here rather than :meth:`run`.
         """
-        _job, frames = self.stream_frames_with_job(
+        job, frames = self.stream_frames_with_job(
             model, action, params, in_fds=self._in_fds(blobs), in_meta=self._in_meta(blobs, meta), timeout=timeout
         )
+        if on_job is not None:
+            on_job(job)
         outputs: dict[str, Any] = {}
         out_blobs: dict[str, bytes] = {}
         out_meta: dict[str, Any] = {}

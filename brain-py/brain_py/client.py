@@ -46,7 +46,7 @@ import socket as _socket
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .base import BrainBase, BrainError, OnProgress, Outcome
 from .forecast import Forecast, Panel
@@ -436,11 +436,15 @@ class BrainStdio(BrainBase):
     def subscribe(self, model: str, action: str, params: Optional[dict] = None, *,
                   blobs: Optional[dict] = None, meta: Optional[dict] = None,
                   on_progress: Optional[OnProgress] = None,
+                  on_job: Optional[Callable[[int], None]] = None,
                   timeout: float = 1800.0) -> Outcome:
         """Streaming counterpart to :meth:`run`. ``brain serve --stdio``'s generic action
         interface delivers a single ``action_result`` (no intermediate frames), so
         this runs the action and, if ``on_progress`` is given, ticks it once on
-        completion. For token/step streaming use the D-Bus transport."""
+        completion. For token/step streaming use the D-Bus transport.
+
+        ``on_job`` is accepted for interface parity with :class:`BrainDBus` but
+        never fires: `brain serve --stdio` has no job-id concept to cancel."""
         out = self.run(model, action, params, blobs=blobs, meta=meta, timeout=timeout)
         if on_progress is not None:
             on_progress(1, 1, "done")

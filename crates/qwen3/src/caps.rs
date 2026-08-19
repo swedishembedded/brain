@@ -38,10 +38,10 @@ pub fn manifest() -> Manifest {
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
         .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)))
-        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
-        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)).min(1.0).max(32768.0).step(1.0))
+        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
+        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
@@ -261,6 +261,16 @@ mod tests {
         assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
         assert_eq!(manifest().to_json()["actions"][0]["name"], "generate");
+    }
+
+    #[test]
+    fn sampling_params_carry_ui_ranges() {
+        let g = &manifest().actions[0];
+        let p = |name: &str| g.params.iter().find(|p| p.name == name).unwrap();
+        assert_eq!((p("max_new").min, p("max_new").max, p("max_new").step), (Some(1.0), Some(32768.0), Some(1.0)));
+        assert_eq!((p("temp").min, p("temp").max, p("temp").step), (Some(0.0), Some(2.0), Some(0.01)));
+        assert_eq!((p("top_k").min, p("top_k").max, p("top_k").step), (Some(0.0), Some(1000.0), Some(1.0)));
+        assert_eq!((p("top_p").min, p("top_p").max, p("top_p").step), (Some(0.0), Some(1.0), Some(0.01)));
     }
 
     #[test]

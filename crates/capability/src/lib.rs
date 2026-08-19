@@ -63,11 +63,18 @@ pub struct ParamSpec {
     pub required: bool,
     pub default: Option<Value>,
     pub help: String,
+    /// Inclusive numeric range and step, for `Int`/`Float` params a UI should
+    /// render as a bounded slider/spinner rather than an open text field.
+    /// `None` for params with no natural bound (a free-form seed, say) or for
+    /// non-numeric types, where these are simply never set.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
 }
 
 impl ParamSpec {
     pub fn new(name: &str, ty: ParamType, help: &str) -> ParamSpec {
-        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into() }
+        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None }
     }
     pub fn required(mut self) -> ParamSpec {
         self.required = true;
@@ -77,12 +84,25 @@ impl ParamSpec {
         self.default = Some(v);
         self
     }
+    pub fn min(mut self, v: f64) -> ParamSpec {
+        self.min = Some(v);
+        self
+    }
+    pub fn max(mut self, v: f64) -> ParamSpec {
+        self.max = Some(v);
+        self
+    }
+    pub fn step(mut self, v: f64) -> ParamSpec {
+        self.step = Some(v);
+        self
+    }
     fn to_json(&self) -> Value {
         json!({
             "name": self.name, "type": self.ty.name(),
             "required": self.required, "default": self.default,
             "help": self.help,
             "values": match &self.ty { ParamType::Enum(v) => json!(v), _ => Value::Null },
+            "min": self.min, "max": self.max, "step": self.step,
         })
     }
 }
@@ -611,6 +631,19 @@ mod tests {
         assert_eq!(j["model"], "echo-model");
         assert_eq!(j["actions"][0]["name"], "echo");
         assert_eq!(j["actions"][0]["params"][2]["values"][0], "upper");
+    }
+
+    #[test]
+    fn param_range_serializes_when_set_and_null_when_not() {
+        let ranged = ParamSpec::new("steps", ParamType::Int, "denoise steps").min(1.0).max(150.0).step(1.0).to_json();
+        assert_eq!(ranged["min"], json!(1.0));
+        assert_eq!(ranged["max"], json!(150.0));
+        assert_eq!(ranged["step"], json!(1.0));
+
+        let unranged = ParamSpec::new("text", ParamType::Str, "the text").to_json();
+        assert_eq!(unranged["min"], Value::Null);
+        assert_eq!(unranged["max"], Value::Null);
+        assert_eq!(unranged["step"], Value::Null);
     }
 
     #[test]
