@@ -47,6 +47,19 @@ fast and scalable kernel - not a naive one.
    `brain qwen35moe {infer,export}`; the GGUF
    conversion runs through the generic `brain import` (see below).
    See `.agents/roadmap/qwen35moe.md`.
+2c. **Qwen3.8-27B dense hybrid decoder** (`crates/qwen35`, upstream
+   `Qwen/Qwen3.8-27B-FP8`) - the dense sibling of qwen35moe above: identical
+   3:1 Gated DeltaNet : GQA mixer split and M-RoPE, but a plain dense SwiGLU
+   MLP on every layer (no MoE), plus a single-layer multi-token-prediction
+   (MTP) head sharing the token embedding/LM head, and the same spliced
+   Qwen3-VL vision front-end (`qwen35::vl::Qwen35Vl`). Weights ship as
+   DeepSeek-V3-style blockwise FP8, dequantized host-side at import (no GGUF
+   importer for this arch). Rank/alpha LoRA on all 12 targetable GDN/GQA/MLP
+   projections, full finetune, incremental single-sequence decode, paged
+   HTTP/D-Bus/batched serving (`caps.rs`/`serve.rs`), and cross-GPU pipeline
+   sharding (`model::shard::Shardable`). Gradient-checked
+   (`gradcheck::check_qwen35`, `check_qwen35_lora`, `check_qwen35_mtp`).
+   `brain qwen35 infer`. See `.agents/roadmap/qwen35.md`.
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glmdsa`) - `glm_moe_dsa`: **MLA** (low-rank q/kv with
@@ -572,7 +585,7 @@ front-end to depend on.
 
 | Crate | Model |
 |---|---|
-| `gpt2` / `qwen3` / `qwen35moe` / `toymoe` / `glmdsa` / `toypid` | decoder LMs (see Models) |
+| `gpt2` / `qwen3` / `qwen35moe` / `qwen35` / `toymoe` / `glmdsa` / `toypid` | decoder LMs (see Models) |
 | `toyseq2seq` / `toyautoencoder` / `timeseries` | encoder-decoder / bottleneck AE / placeholder |
 | `federated` | vertical expert split/assemble, hash-verified manifests, train-scope |
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
@@ -635,6 +648,8 @@ front-end to depend on.
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
 | Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35moe.md` |
 | Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `examples/llm/` |
+| Qwen3.8-27B dense model / import / LoRA / finetune / sharding / MTP / vision splice | `crates/qwen35/src/{model,import,finetune,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |
+| Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/{qwen35_cli,resident_qwen35}.rs` |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain <arch> <verb>`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
@@ -731,7 +746,7 @@ Direct binary - the model is selected by the command:
 ```bash
 ./target/release/brain <verb> <arch> [opts]      # or: brain <arch> <verb> [opts] - same command
 # infra verbs: data devices npu federated bench perf forecast caps serve gradcheck flops
-# archs with their own dedicated CLI module: gpt2 qwen3 qwen35moe glmdsa lfm2 qwen3tts
+# archs with their own dedicated CLI module: gpt2 qwen3 qwen35moe qwen35 glmdsa lfm2 qwen3tts
 #   yolov8 zipdepth flux2 worldmirror2 splat qwen3omnimoe diamond toypid toymoe
 # every other arch (`brain caps` lists them all) is reached the same way, its
 # verb being the exact capability action name, e.g. `brain scrfd detect`
@@ -1138,7 +1153,8 @@ a metric that isn't there was simply forgotten.
   modes already paid for; do not rediscover them.
 - **Backprop is gated by `gradcheck`** (finite differences) - run it after any
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
-  `check_qwen_lora`, `check_qwen35moe`, `check_qwen35moe_lora`, `check_moe`,
+  `check_qwen_lora`, `check_qwen35moe`, `check_qwen35moe_lora`, `check_qwen35`,
+  `check_qwen35_lora`, `check_qwen35_mtp`, `check_moe`,
   `check_glm`, `check_glm_mtp`, `check_pid`,
   `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`,
   `check_wan` (+ `_conditioning`), plus the

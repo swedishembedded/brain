@@ -248,7 +248,7 @@ impl Qwen35Config {
 
     pub fn to_json(&self) -> Value {
         let mut v = serde_json::json!({
-            "model": "qwen35",
+            "model": "qwen35moe",
             "vocab_size": self.vocab, "block_size": self.block_size, "n_layers": self.n_layers,
             "d_model": self.d_model, "rms_norm_eps": self.rms_eps,
             "max_position_embeddings": self.max_position_embeddings,

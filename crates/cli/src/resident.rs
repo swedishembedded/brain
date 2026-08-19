@@ -97,6 +97,13 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     if let Some(q) = crate::resident_qwen35moe::Qwen35Resident::from_env() {
         models.push(Arc::new(q));
     }
+    // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder
+    // (BRAIN_QWEN35_WEIGHTS + BRAIN_QWEN35_TOKENIZER) -- same single-GPU,
+    // fp32 weights + KV scope as qwen35moe above (see resident_qwen35.rs's
+    // own module doc).
+    if let Some(q) = crate::resident_qwen35::Qwen35Resident::from_env() {
+        models.push(Arc::new(q));
+    }
     // LFM2.5-Encoder (BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER): fill-mask + embeddings
     // with equal-length true batching (see resident_lfm.rs).
     if let Some(l) = crate::resident_lfm::LfmResident::from_env() {

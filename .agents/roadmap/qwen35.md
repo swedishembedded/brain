@@ -100,19 +100,71 @@ structurally and never parity-claimed here.
   explicit embeddings), the splice backward gradient is nonzero and finite,
   and the M-RoPE positions for the image run match `get_rope_index`'s own
   independent computation exactly.
+- [x] M11: CLI, caps, residency, serving, docs. Turned out to need more than
+  a port: `crates/qwen35` had no incremental single-token KV-cache decode, no
+  sharding constructor, and no paged-serving engine before `caps.rs`/
+  `serve.rs`/`shard.rs`/CLI/residency could be built. Landed in three
+  commits: (1) decode-step core - `Qwen35::step`/`reset_decode_cache`/
+  `run_decode_step`/`layer_gdn_decode_step`/`layer_gqa_decode_step` reuse the
+  ALREADY-shared `model::block::gqa_decode_step`/`model::gdn::
+  {gdn_recurrent_step, gdn_causal_conv1d_step}` primitives (the same ones
+  qwen35moe's own decode step calls), written fresh with this crate's own
+  weight-name-prefix convention (from M7) rather than duplicating
+  qwen35moe's layer-index-keyed copy - more directly reusable if qwen35moe
+  migrates onto it later (a smaller M12 follow-up now); `Qwen35::new_shard`
+  + `model::Shardable` (`crates/qwen35/src/shard.rs`) with `run_forward`/
+  `backward` retrofitted with shard-conditional gating, verified behaviorally
+  identical on the whole-shard path by the full existing test suite (all
+  passed unchanged) - `cfg.mtp` requires a whole shard (asserted at
+  construction, MTP needs `res[n_layers]` and the shared `lm_head`, both
+  only valid there). `decode_step.rs` proves `step()` reproduces
+  `logits_all()` position-for-position (worst maxabs ~1e-7); `shard_parity.rs`
+  mirrors qwen35moe's own gate (self-skips on this box, 0 discrete GPUs).
+  (2) `crate::sample` (generation over `step`), `crate::serve::Engine` (a
+  single-GPU `PagedDecoder`: real per-block-id GQA KV pool, a private
+  `GdnSlot` map keyed by `BlockTable::blocks()[0]` for the GDN state the
+  trait has no parameter for), `crate::caps` (the `capability::Provider`) -
+  all three mirror qwen35moe's own modules almost verbatim (the decode-step
+  orchestration they wrap is architecture-identical); `serve.rs`/
+  `sample_generate.rs` tests confirm the paged engine reproduces `step()`'s
+  decode token-for-token on both backends. (3) `crates/cli/src/{qwen35_cli,
+  resident_qwen35}.rs`, `catalog.rs` `ModelEntry`, `resident.rs::
+  build_executor` arm, docs (`docs/models/qwen35.md`, README + index.md +
+  AGENTS.md rows - not the quickstart, per scope).
+  **Found and fixed a real pre-existing bug while wiring `model_dir.rs`'s
+  family dispatch**: `qwen35moe`'s own checkpoint save/import/LoRA paths
+  stamped `ModelCard` id/family `"brain/qwen35"`/`"qwen35"` (a leftover from
+  before this dense sibling existed) - directly colliding with this crate's
+  own correct family. Fixed at the source (`qwen35moe::model::Qwen35::save`,
+  `qwen35moe::import::import_mmap`, `qwen35moe::lora::save_adapter`,
+  `qwen35moe::config::to_json`'s `"model"` field) to stamp `"qwen35moe"`
+  instead, verified against qwen35moe's own full test suite (unchanged) plus
+  the CLI's full test suite (unchanged) before adding `crates/qwen35`'s own
+  `"qwen35"` arm to `model_dir.rs`.
+  Two deliberate scope cuts from qwen35moe: no `precision`/int8 param in
+  `caps.rs` (no `q8.rs` for this crate, not in the approved M11 scope); no
+  `export` subcommand in the CLI (no NPU/ONNX export path for this arch, an
+  already-recorded gap); `reasoning_effort` is NOT wired into `caps.rs` -
+  neither `qwen3::chat` nor `qwen35moe::caps` implement it today (only
+  `enable_thinking`, a plain bool), and no verified Qwen3.8 prompt-injection
+  convention was found to implement it against without guessing, so it is
+  recorded as a gap below rather than fabricated.
 
 ## Not yet done
 
 - [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
   per-layer streaming forward parity for layers {0, 3, 63}; full real-weight
   parity of the vision tower; embed/lm_head spot checks).
-- [ ] M11: CLI (`brain qwen35 ...`), `caps.rs`/`serve.rs`/`shard.rs`, residency
-  (`resident_qwen35.rs` + `catalog.rs`), docs.
 - [ ] M12: finish the shared-code hoist - migrate qwen35moe off its private
   `crate::q8::Qwen35Q8` onto `model::ops::{Ops,Act,Weight}`, then hoist the GDN
   and gated-GQA mixer orchestration into `crates/model`, gated by a new
   `crates/model/tests/gdn_mixer_equivalence.rs` proving bit-identity between both
-  crates' mixers on the same weights.
+  crates' mixers on the same weights. Smaller now than originally scoped:
+  M11 already wrote the DECODE-step orchestration (`layer_gdn_decode_step`/
+  `layer_gqa_decode_step`) fresh with the weight-name-prefix convention this
+  hoist needs, rather than duplicating qwen35moe's own layer-index-keyed
+  copy - only the BATCHED forward/backward mixer orchestration still needs
+  migrating.
 - [ ] M13: performance pass (profile-first; native device-side FP8 GEMM only if
   the profile says arithmetic is the limiter, not before).
 
@@ -124,8 +176,8 @@ structurally and never parity-claimed here.
 - No multi-GPU shard parity (`discrete_gpu_count() == 0` self-skips it) - and note
   qwen35moe's own `shard_parity.rs` does not run on this machine either, so any
   claim it protects a refactor here is a claim about a different machine.
-- No int8 device-path validation - whether the Intel iGPU exposes a usable DP4A
-  path is a measurement, not an assumption; unmeasured until run there.
+- No int8 tier at all for this crate (no `q8.rs`, unlike qwen35moe) - not in
+  the approved M11 scope; `caps.rs` has no `precision` param as a result.
 - No serving throughput/latency or residency measurement on real weights.
 - MTP head: structurally implemented, **no reference oracle** (see above) -
   gradchecked and overfit-tested, never parity-claimed.
@@ -133,6 +185,16 @@ structurally and never parity-claimed here.
   towers resident simultaneously).
 - No NPU (`NpuModel`) implementation this port - the firmware blocker on this
   exact host is diagnosed separately, not re-run here.
+- `crate::serve::Engine` (M11) is single-GPU, one truly-active sequence at a
+  time on the GPU (real continuous batching at admission/scheduling, never
+  batched dispatch), no prefix-cache reuse, no chunked/batched prefill, and
+  never loads a LoRA adapter (the adapters train and gradient-check
+  correctly; folding a trained adapter into the serving path - like
+  `qwen3::lora::fold_adapter_into` - has no counterpart here yet) - matches
+  qwen35moe's own `serve.rs` scope exactly, not a this-box limitation.
+- `reasoning_effort` (xhigh/medium/low) is not wired into `caps.rs`: no
+  verified Qwen3.8 prompt-injection convention was found to implement it
+  against - only `enable_thinking` (reused from `qwen3::chat`) is real.
 
 Never write an intermediate full-precision whole-model file (~108 GB) - quantized
 device buffers must be built directly from the compressed FP8 checkpoint, same

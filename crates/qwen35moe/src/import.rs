@@ -297,7 +297,10 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
     let cfg = config_from_gguf(mg)?;
     let params = cfg.param_list();
 
-    let mut card = ModelCard::new(id_override.unwrap_or("qwen35"), "qwen35");
+    // "qwen35moe": must NOT collide with the dense sibling's own "qwen35"
+    // family (`crates/qwen35`) - `model_dir.rs`'s `resident_for` dispatches
+    // on this exact family string.
+    let mut card = ModelCard::new(id_override.unwrap_or("qwen35moe"), "qwen35moe");
     card.context_length = Some(cfg.max_position_embeddings as u64);
     card.param_count = Some(params.iter().map(|(_, n)| *n as u64).sum());
 
@@ -308,7 +311,7 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
         out_path,
         &cfg.to_json(),
         Some(&card),
-        "qwen35",
+        "qwen35moe",
     )?;
     Ok(())
 }

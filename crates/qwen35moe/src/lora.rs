@@ -19,7 +19,8 @@
 //! `model::lora::device_adapter` (self-improve roadmap P4 - this used to be
 //! a near-verbatim copy of `qwen3::lora`, as this file's doc comment used to
 //! say). This module is now just the thin, Qwen35-specific wiring: this
-//! crate's own `LoraCfg` type and the `"qwen35"` family tag.
+//! crate's own `LoraCfg` type and the `"qwen35moe"` family tag (must not
+//! collide with the dense sibling's own `"qwen35"` family, `crates/qwen35`).
 
 use std::collections::HashMap;
 
@@ -34,7 +35,7 @@ pub fn save_adapter(path: &str, model: &Qwen35, card_id: &str, base_id: &str, da
         .lora
         .as_ref()
         .unwrap_or_else(|| panic!("save_adapter: model was not built with a LoraCfg"));
-    model::lora::device_adapter::save_adapter(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen35", dataset_id)
+    model::lora::device_adapter::save_adapter(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen35moe", dataset_id)
 }
 
 /// Fold an adapter saved by [`save_adapter`] into a base model's host tensor

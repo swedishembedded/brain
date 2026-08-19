@@ -251,7 +251,18 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
         // What `crate::gguf_import`'s registry-driven conversion stamps on the
         // checkpoint it writes - so an imported GGUF is picked up by the very
         // next scan with no env vars and no per-model wiring.
-        "qwen35" => match crate::resident_qwen35moe::Qwen35Resident::from_card(weights, card, tokenizer) {
+        "qwen35moe" => match crate::resident_qwen35moe::Qwen35Resident::from_card(weights, card, tokenizer) {
+            Ok(q) => Some(Arc::new(q)),
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
+        // What `Qwen35::save` (`crates/qwen35`, the dense sibling) stamps on
+        // its own checkpoints - a distinct family from "qwen35moe" above
+        // (a pre-existing collision between the two crates, fixed in the
+        // same commit that added this arm).
+        "qwen35" => match crate::resident_qwen35::Qwen35Resident::from_card(weights, card, tokenizer) {
             Ok(q) => Some(Arc::new(q)),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);

@@ -40,6 +40,7 @@ type Handler = fn(&[String]);
 const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("gpt2", crate::gpt_cli::run_gpt),
     ("qwen3", crate::qwen_cli::run_qwen),
+    ("qwen35", crate::qwen35_cli::run_qwen35),
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
     ("glmdsa", crate::glm_cli::run_glm),

@@ -2966,7 +2966,10 @@ impl Qwen35 {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name))).collect();
         let config = self.cfg.to_json();
-        checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/qwen35", "qwen35"));
+        // "brain/qwen35moe"/"qwen35moe": must NOT collide with `brain/qwen35`
+        // family (the dense sibling, `crates/qwen35`) - `model_dir.rs`'s
+        // `resident_for` dispatches on this exact family string.
+        checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/qwen35moe", "qwen35moe"));
     }
 }
 

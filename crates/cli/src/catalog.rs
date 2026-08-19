@@ -207,6 +207,15 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen35moe::caps::Qwen35Provider::new()),
             resident: None,
         },
+        // Qwen3.8-27B dense hybrid GDN/GQA decoder: same reasoning as
+        // qwen35moe above (weights is a per-invocation action param; the
+        // always-hot HTTP/D-Bus path is `crate::resident_qwen35::Qwen35Resident`,
+        // registered directly in `resident.rs::build_executor`).
+        ModelEntry {
+            manifest: qwen35::caps::manifest,
+            provider: always!(qwen35::caps::Qwen35Provider::new()),
+            resident: None,
+        },
         ModelEntry {
             manifest: lfm2::caps::manifest,
             provider: always!(lfm2::caps::LfmProvider::new()),

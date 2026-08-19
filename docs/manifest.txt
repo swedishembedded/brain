@@ -32,6 +32,7 @@ inference/world-models.md
 models/index.md
 models/qwen3.md
 models/qwen35moe.md
+models/qwen35.md
 models/gpt2.md
 models/glmdsa.md
 models/glmdsa/npu.md

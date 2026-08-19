@@ -605,6 +605,7 @@ dependencies = [
  "brain-paramstore",
  "brain-perf",
  "brain-qwen3",
+ "brain-qwen35",
  "brain-qwen35moe",
  "brain-qwen3asr",
  "brain-qwen3omnimoe",

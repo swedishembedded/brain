@@ -269,6 +269,7 @@ including those.
 |---|---|---|
 | [`Qwen/Qwen3-0.6B`](docs/models/qwen3.md) | Text | dense decoder chat/tool-calling, paged continuous-batching serving |
 | [`brain/qwen35moe`](docs/models/qwen35moe.md) | Text | Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder |
+| [`Qwen/Qwen3.8-27B-FP8`](docs/models/qwen35.md) | Multimodal | Qwen3.8-27B dense hybrid GDN/GQA decoder + MTP + vision |
 | [`gpt2`](docs/models/gpt2.md) | Text | nanoGPT-style baseline, from-scratch training reference |
 | [`glmdsa`](docs/models/glmdsa.md) | Text | GLM-5.2 (MLA + sigmoid noaux_tc MoE + DSA) |
 | [`LiquidAI/LFM2.5-350M`](docs/models/lfm2.md) | Text | bidirectional encoder, fill-mask + embeddings, 8k context |
