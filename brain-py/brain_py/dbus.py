@@ -371,7 +371,10 @@ def _read_stream(raw_fd: int, timeout: float) -> Iterator[tuple[dict[str, Any], 
         while True:
             data, ancillary, _flags, _addr = sock.recvmsg(1 << 16, socket.CMSG_SPACE(8 * 4))
             if not data:
-                raise BrainError("stream closed before a terminal frame (brain died or the connection dropped)")
+                raise BrainError(
+                    "stream closed before a terminal frame (brain died or the connection dropped)",
+                    name="brain_py.stream_disconnected",
+                )
             frame = json.loads(data)
             yield frame, _scm_rights(ancillary)
             if frame.get("type") in ("done", "error"):

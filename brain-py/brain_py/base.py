@@ -65,10 +65,18 @@ class BrainError(RuntimeError):
     same type, so calling code can write one ``except BrainError`` regardless
     of ``transport=``.
 
-    ``name`` is the D-Bus error name (e.g. ``org.freedesktop.DBus.Error.Failed``)
-    when the failure came from a D-Bus method-call reply; ``None`` for an action
-    ``error`` frame (over either transport, since a capability action has no
-    D-Bus-style error name) or for the JSONL transport in general.
+    ``name`` is set to a stable, checkable string whenever the failure is
+    TRANSPORT-level rather than the server validating and rejecting the
+    request: the D-Bus error name (e.g. ``org.freedesktop.DBus.Error.Failed``)
+    for a D-Bus method-call reply, or ``brain_py.stream_disconnected`` when a
+    `Subscribe` stream's socket closed before a terminal `done`/`error` frame
+    (the peer died mid-stream). ``None`` means an action `error` frame -- a
+    real, isolated action outcome (over either transport, since a capability
+    action has no D-Bus-style error name) -- or the JSONL transport in
+    general. A caller that needs to tell "brain rejected this" from "brain
+    (or the connection to it) is gone" apart -- e.g. to decide whether to
+    retry the same request or reconnect first -- should branch on whether
+    ``name`` is set, not parse ``message``.
     """
 
     def __init__(self, message: str, *, name: Optional[str] = None) -> None:

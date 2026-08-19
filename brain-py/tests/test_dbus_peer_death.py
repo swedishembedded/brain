@@ -27,6 +27,7 @@ import pytest
 
 jeepney = pytest.importorskip("jeepney")
 
+from brain_py.base import BrainError  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 BRAIN_BIN = Path(__file__).resolve().parents[2] / "target" / "debug" / "brain"
@@ -61,8 +62,12 @@ def test_killing_brain_mid_stream_raises_instead_of_returning_empty():
         proc.kill()
         proc.wait(timeout=5)
 
-        with pytest.raises(Exception):
+        with pytest.raises(BrainError) as exc_info:
             list(frames)
+        # a caller (e.g. a supervisor deciding whether to reconnect) must be
+        # able to tell this apart from a genuine action `error` frame
+        # (BrainError with name=None) without parsing the message text.
+        assert exc_info.value.name == "brain_py.stream_disconnected"
     finally:
         conn.close()
         try:
