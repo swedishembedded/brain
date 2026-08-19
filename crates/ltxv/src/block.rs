@@ -70,7 +70,8 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;
 
 use crate::config::{LtxAudioDitConfig, LtxDitConfig};
-use crate::rope::apply_rope_step;
+use crate::dit::upload_rope_tables;
+use crate::rope::{apply_rope_step, ltx_rope_tables};
 
 // ---------------------------------------------------------------------------
 // Audio<->video extension (M6, second half): `LtxAvBlock` below adds the
@@ -97,11 +98,23 @@ const K_ATTN_SCORES: usize = 7;
 const K_ATTN_SOFTMAX: usize = 8;
 const K_ATTN_APPLY: usize = 9;
 const K_ROPE2D: usize = 10;
+/// Gated attention's `sigmoid(gate_logits)` (`crate::config::LtxDitConfig::
+/// apply_gated_attention`'s doc, `2*sigmoid` - the `2*` is folded into the
+/// per-head "expand to `inner_dim`" matmul's constant matrix in [`attention`]
+/// rather than a separate elementwise scale step, see that function's doc).
+/// Pre-existing generic elementwise kernel (`crates/kernels/wgsl/
+/// sigmoid.wgsl`), not previously in THIS crate's table - `gate_row` was
+/// already reused (§F.3: grepped for a broadcast-multiply-with-residual
+/// kernel matching `gate_row.wgsl`'s exact shape before this milestone;
+/// nothing existing matches the per-HEAD, per-TOKEN, no-residual broadcast
+/// gated attention needs, so it composes from `matmul`+`sigmoid`+`mul`
+/// instead - see [`attention`]'s doc).
+const K_SIGMOID: usize = 11;
 
 /// Every kernel this block dispatches - all pre-existing, all at their
 /// documented general contract (see this module's doc for why no new kernel
 /// was needed anywhere in the block).
-pub const KERNELS: [(&str, &str); 11] = [
+pub const KERNELS: [(&str, &str); 12] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -113,6 +126,7 @@ pub const KERNELS: [(&str, &str); 11] = [
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("rope2d", kernels::ROPE2D),
+    ("sigmoid", kernels::SIGMOID),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -124,6 +138,16 @@ fn upload(gpu: &Gpu, w: &Tensors, name: &str) -> DeviceBuffer {
     let buf = gpu.storage(data.len() as u64);
     gpu.write_f32(&buf, data);
     buf
+}
+
+/// `to_gate_logits.{weight,bias}` - `[heads, q_dim]`+`[heads]`, present iff
+/// this specific `Attention` module is gated (`crate::config::LtxDitConfig::
+/// apply_gated_attention`'s doc: ONE flag per stream, shared by that
+/// stream's self-/text-cross-/AV-cross-attention alike - so this is an
+/// `Option` on [`AttnWeights`], not a separate struct threaded everywhere).
+struct GateWeights {
+    w: DeviceBuffer,
+    b: DeviceBuffer,
 }
 
 /// One `Attention` module's weights (`attn1` or `attn2`).
@@ -138,10 +162,14 @@ struct AttnWeights {
     bo: DeviceBuffer,
     q_norm: DeviceBuffer,
     k_norm: DeviceBuffer,
+    gate: Option<GateWeights>,
 }
 
 impl AttnWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str) -> AttnWeights {
+    /// `gated`: whether THIS module reads `to_gate_logits` off `w` - a fact
+    /// the caller decides (this stream's own `apply_gated_attention`), not
+    /// derived from `w`'s contents.
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, gated: bool) -> AttnWeights {
         AttnWeights {
             wq: upload(gpu, w, &format!("{prefix}.to_q.weight")),
             bq: upload(gpu, w, &format!("{prefix}.to_q.bias")),
@@ -153,20 +181,31 @@ impl AttnWeights {
             bo: upload(gpu, w, &format!("{prefix}.to_out.0.bias")),
             q_norm: upload(gpu, w, &format!("{prefix}.q_norm.weight")),
             k_norm: upload(gpu, w, &format!("{prefix}.k_norm.weight")),
+            gate: gated.then(|| GateWeights { w: upload(gpu, w, &format!("{prefix}.to_gate_logits.weight")), b: upload(gpu, w, &format!("{prefix}.to_gate_logits.bias")) }),
         }
     }
 }
 
 /// The FFN's two linears - `net.0.proj` (GELUApprox's inner Linear) and
-/// `net.2` (the output Linear). Both bias-free at `ff_bias=false`.
+/// `net.2` (the output Linear). Bias-free at `ff_bias=false` (the main
+/// DiT's video FFN); the connector's own FFN and the main DiT's audio FFN
+/// are biased regardless (`dit.rs::push_ff`'s doc has the exact per-instance
+/// breakdown) - `b1`/`b2` are therefore `Option`, not a second struct.
 struct FfWeights {
-    w1: DeviceBuffer, // [4*dim, dim]
-    w2: DeviceBuffer, // [dim, 4*dim]
+    w1: DeviceBuffer, // [ff_dim, dim]
+    b1: Option<DeviceBuffer>,
+    w2: DeviceBuffer, // [dim, ff_dim]
+    b2: Option<DeviceBuffer>,
 }
 
 impl FfWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str) -> FfWeights {
-        FfWeights { w1: upload(gpu, w, &format!("{prefix}.net.0.proj.weight")), w2: upload(gpu, w, &format!("{prefix}.net.2.weight")) }
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, has_bias: bool) -> FfWeights {
+        FfWeights {
+            w1: upload(gpu, w, &format!("{prefix}.net.0.proj.weight")),
+            b1: has_bias.then(|| upload(gpu, w, &format!("{prefix}.net.0.proj.bias"))),
+            w2: upload(gpu, w, &format!("{prefix}.net.2.weight")),
+            b2: has_bias.then(|| upload(gpu, w, &format!("{prefix}.net.2.bias"))),
+        }
     }
 }
 
@@ -190,15 +229,24 @@ impl BlockWeights {
     /// identical, only the tensor name prefix and dims differ; see
     /// `ltx_core...transformer.BasicAVTransformerBlock.__init__`'s
     /// `attn1`/`audio_attn1` etc. naming).
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, stream: &str, dim: usize) -> BlockWeights {
+    /// `gated`: this stream's own `apply_gated_attention` - shared
+    /// identically by `attn1` and `attn2` (`crate::config::LtxDitConfig::
+    /// apply_gated_attention`'s doc).
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, stream: &str, dim: usize, gated: bool) -> BlockWeights {
         let sst = tget(w, &format!("{prefix}.{stream}scale_shift_table")).to_vec();
         assert_eq!(sst.len(), 9 * dim, "{prefix}.{stream}scale_shift_table must be [9, dim]");
         let pst = tget(w, &format!("{prefix}.{stream}prompt_scale_shift_table")).to_vec();
         assert_eq!(pst.len(), 2 * dim, "{prefix}.{stream}prompt_scale_shift_table must be [2, dim]");
         BlockWeights {
-            attn1: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn1")),
-            attn2: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn2")),
-            ff: FfWeights::upload(gpu, w, &format!("{prefix}.{stream}ff")),
+            attn1: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn1"), gated),
+            attn2: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn2"), gated),
+            // Both streams' tiny-golden FFN is bias-free (`ff_bias`/
+            // `audio_ff_bias=False` in `tools/goldens/ltxv_av_dit_dump_
+            // reference.py`'s `TINY_CONFIG` - unlike the REAL checkpoint's
+            // `audio_ff`, which `dit.rs::push_ff`'s doc notes carries bias
+            // regardless of config; real-weight audio FFN bias import is
+            // untouched by this milestone, same as before).
+            ff: FfWeights::upload(gpu, w, &format!("{prefix}.{stream}ff"), false),
             scale_shift_table: sst,
             prompt_scale_shift_table: pst,
         }
@@ -256,12 +304,36 @@ fn ada_zero(gpu: &Gpu, s: &mut Vec<Step>, ones: &DeviceBuffer, x: &DeviceBuffer,
     add2(gpu, s, tmp2, shift, out, rows * dim);
 }
 
+/// Gated attention's per-head broadcast-and-double matrix (`E: [inner_dim,
+/// heads]`, `E[h*head_dim+d, h] = 2.0` else `0.0`) - `linear(gate_sig, E,
+/// None)` (`gate_sig: [nq, heads]`) then computes `gate_bc[t, h*head_dim+d] =
+/// 2*gate_sig[t,h]` for every `d`, i.e. the per-head value BROADCAST across
+/// `head_dim` AND pre-multiplied by the reference's `2.0` constant
+/// (`ops.py`'s `2.0 * torch.sigmoid(gate_logits)`) in the SAME matmul - no
+/// separate "scale by 2" kernel/step needed. Reuses the existing `matmul`
+/// kernel exactly as every other `linear` call in this file does (§F.3: this
+/// composes two already-registered kernels - `sigmoid` for the activation,
+/// `matmul` for the broadcast - rather than adding a new
+/// per-head-broadcast-multiply WGSL kernel, which does not otherwise exist
+/// in this repo).
+fn gate_expand_matrix(heads: u32, head_dim: u32) -> Vec<f32> {
+    let inner_dim = (heads * head_dim) as usize;
+    let mut e = vec![0f32; inner_dim * heads as usize];
+    for h in 0..heads {
+        for d in 0..head_dim {
+            let row = (h * head_dim + d) as usize;
+            e[row * heads as usize + h as usize] = 2.0;
+        }
+    }
+    e
+}
+
 /// One (self- or cross-)attention call: QKV projections, QK-RMSNorm,
 /// optional per-head RoPE (SEPARATELY for Q and K via `q_rope`/`k_rope` -
 /// self-/text-cross-attention pass the SAME table for both or `None` for
 /// both, but the audio<->video cross-attention rotates Q and K in
-/// DIFFERENT position spaces, see [`LtxAvBlock`]'s doc), attention, output
-/// projection.
+/// DIFFERENT position spaces, see [`LtxAvBlock`]'s doc), attention, GATING
+/// (`w.gate`, see below), output projection.
 ///
 /// `q_in`/`kv_in` are `[nq, q_dim]`/`[nk, kv_dim]` - equal to `inner_dim`
 /// for self-/text-attention, but genuinely different for the audio<->video
@@ -271,6 +343,27 @@ fn ada_zero(gpu: &Gpu, s: &mut Vec<Step>, ones: &DeviceBuffer, x: &DeviceBuffer,
 /// QK-norm/attention/RoPE working width - ALWAYS the audio stream's
 /// geometry for the AV cross-attention, regardless of which stream is
 /// query. Returns the `[nq, q_dim]` output-projected result.
+///
+/// ## Gating (`w.gate`, `crate::config::LtxDitConfig::apply_gated_attention`'s
+/// doc; source: `resources/ltxv/source/packages/ltx-core/src/ltx_core/
+/// model/transformer/{attention,ops}.py`)
+///
+/// `Attention.forward` (`attention.py:575-579`): `if self.to_gate_logits is
+/// not None: out = self.gated_attention_function(x, out, self)` - `x` is
+/// THIS call's `q_in` (the module's raw, pre-`to_q` input, at `q_dim`
+/// width - matches `to_gate_logits: Linear(query_dim, heads)`,
+/// `attention.py:514`), `out` is the attention CONTEXT at `inner_dim` width
+/// (post `attn_apply`, still BEFORE `to_out`). `PytorchGatedAttention.
+/// __call__` (`ops.py:94-106`): `gate_logits = to_gate_logits(x)` ->
+/// `(T,heads)`; `gates = 2*sigmoid(gate_logits)`; `out = out.view(T,heads,
+/// head_dim) * gates.unsqueeze(-1)` - per-head, broadcast over `head_dim`,
+/// THIS call's own `inner_dim` geometry (`heads`/`head_dim` params), not
+/// `q_dim`'s. Implemented here as `linear`(gate logits, reusing the
+/// existing `matmul`+`bias_add`) -> `sigmoid` (existing kernel, newly
+/// registered in this crate's [`KERNELS`], see [`K_SIGMOID`]'s doc) ->
+/// `linear` against [`gate_expand_matrix`] (broadcast-and-double, still the
+/// existing `matmul`) -> elementwise `mul` (existing kernel) against `ctx`,
+/// all BEFORE the `to_out` projection below.
 #[allow(clippy::too_many_arguments)]
 fn attention(
     gpu: &Gpu,
@@ -322,8 +415,24 @@ fn attention(
     s.push(gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, heads, nq, nk], heads * nq));
     s.push(gpu.step(K_ATTN_APPLY, &[&probs, &v, &ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
 
+    let ctx_gated = if let Some(gate) = &w.gate {
+        let logits = gpu.storage((nq * heads) as u64);
+        linear(gpu, s, q_in, &gate.w, Some(&gate.b), &logits, nq, q_dim, heads);
+        let sig = gpu.storage((nq * heads) as u64);
+        s.push(gpu.step(K_SIGMOID, &[&logits, &sig], &[nq * heads], nq * heads));
+        let expand = gpu.storage((inner_dim * heads) as u64);
+        wf(gpu, &expand, &gate_expand_matrix(heads, head_dim));
+        let gate_bc = gpu.storage((nq * inner_dim) as u64);
+        linear(gpu, s, &sig, &expand, None, &gate_bc, nq, heads, inner_dim);
+        let gated = gpu.storage((nq * inner_dim) as u64);
+        mul(gpu, s, &ctx, &gate_bc, &gated, nq * inner_dim);
+        gated
+    } else {
+        ctx
+    };
+
     let out = gpu.storage((nq * q_dim) as u64);
-    linear(gpu, s, &ctx, &w.wo, Some(&w.bo), &out, nq, inner_dim, q_dim);
+    linear(gpu, s, &ctx_gated, &w.wo, Some(&w.bo), &out, nq, inner_dim, q_dim);
     out
 }
 
@@ -549,11 +658,11 @@ fn mlp_sublayer(gpu: &Gpu, s: &mut Vec<Step>, w: &FfWeights, ones: &DeviceBuffer
     ada_zero(gpu, s, ones, x2, &one_plus_scale_mlp_buf, &shift_mlp_buf, &mlp_tmp1, &mlp_tmp2, &x_scaled, dim, t, eps);
     let ff_dim = dim * 4;
     let h_pre = gpu.storage((t * ff_dim) as u64);
-    linear(gpu, s, &x_scaled, &w.w1, None, &h_pre, t, dim, ff_dim);
+    linear(gpu, s, &x_scaled, &w.w1, w.b1.as_ref(), &h_pre, t, dim, ff_dim);
     let h_act = gpu.storage((t * ff_dim) as u64);
     s.push(gpu.step(K_GELU, &[&h_pre, &h_act], &[t * ff_dim], t * ff_dim));
     let ff_out = gpu.storage(td as u64);
-    linear(gpu, s, &h_act, &w.w2, None, &ff_out, t, ff_dim, dim);
+    linear(gpu, s, &h_act, &w.w2, w.b2.as_ref(), &ff_out, t, ff_dim, dim);
     let x3 = gpu.storage(td as u64);
     gate_row(gpu, s, x2, &gate_mlp_buf, &ff_out, &x3, t, dim, 1);
     (x3, ff_out)
@@ -565,7 +674,7 @@ impl LtxBlock {
     pub fn on(gpu: Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32) -> LtxBlock {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
-        let w = BlockWeights::upload(&gpu, weights, prefix, "", dim);
+        let w = BlockWeights::upload(&gpu, weights, prefix, "", dim, cfg.apply_gated_attention);
         let ones_t = gpu.storage(dim as u64);
         wf(&gpu, &ones_t, &vec![1.0f32; dim]);
         let _ = tokens;
@@ -679,12 +788,21 @@ struct AvCrossWeights {
 }
 
 impl AvCrossWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, video_dim: usize, audio_dim: usize) -> AvCrossWeights {
+    /// `gated`: `vcfg.apply_gated_attention` - the SAME single flag gates
+    /// BOTH `audio_to_video_attn` (query=video) and `video_to_audio_attn`
+    /// (query=audio), since this crate's `LtxAudioDitConfig` has no
+    /// independent flag of its own (`crate::config::LtxDitConfig::
+    /// apply_gated_attention`'s doc: the reference itself derives both
+    /// streams' `TransformerConfig.apply_gated_attention` from ONE
+    /// `LTXModel.__init__` argument, so `video_to_audio_attn`'s gate - keyed
+    /// off `audio.apply_gated_attention` in `transformer.py` - is always
+    /// equal to video's anyway).
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, video_dim: usize, audio_dim: usize, gated: bool) -> AvCrossWeights {
         let table_video = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_video")).to_vec();
         assert_eq!(table_video.len(), 5 * video_dim, "{prefix}.scale_shift_table_a2v_ca_video must be [5, video.dim]");
         let table_audio = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_audio")).to_vec();
         assert_eq!(table_audio.len(), 5 * audio_dim, "{prefix}.scale_shift_table_a2v_ca_audio must be [5, audio.dim]");
-        AvCrossWeights { a2v: AttnWeights::upload(gpu, w, &format!("{prefix}.audio_to_video_attn")), v2a: AttnWeights::upload(gpu, w, &format!("{prefix}.video_to_audio_attn")), table_video, table_audio }
+        AvCrossWeights { a2v: AttnWeights::upload(gpu, w, &format!("{prefix}.audio_to_video_attn"), gated), v2a: AttnWeights::upload(gpu, w, &format!("{prefix}.video_to_audio_attn"), gated), table_video, table_audio }
     }
 }
 
@@ -772,9 +890,9 @@ impl LtxAvBlock {
         vcfg.assert_supported();
         let vdim = vcfg.inner_dim as usize;
         let adim = acfg.inner_dim as usize;
-        let vw = BlockWeights::upload(&gpu, weights, prefix, "", vdim);
-        let aw = BlockWeights::upload(&gpu, weights, prefix, "audio_", adim);
-        let avw = AvCrossWeights::upload(&gpu, weights, prefix, vdim, adim);
+        let vw = BlockWeights::upload(&gpu, weights, prefix, "", vdim, vcfg.apply_gated_attention);
+        let aw = BlockWeights::upload(&gpu, weights, prefix, "audio_", adim, vcfg.apply_gated_attention);
+        let avw = AvCrossWeights::upload(&gpu, weights, prefix, vdim, adim, vcfg.apply_gated_attention);
         let ones_v = gpu.storage(vdim as u64);
         wf(&gpu, &ones_v, &vec![1.0f32; vdim]);
         let ones_a = gpu.storage(adim as u64);
@@ -947,5 +1065,222 @@ pub fn open_device(device: Option<&str>) -> Gpu {
         Some("cpu") => Gpu::new_cpu(&KERNELS),
         Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
         _ => Gpu::new(&KERNELS),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embeddings connector (`video_embeddings_connector`/
+// `audio_embeddings_connector`) - `ltx_core.text_encoders.gemma.
+// embeddings_connector.Embeddings1DConnector`. NOT part of
+// `BasicAVTransformerBlock`/`LTXModel` in the reference at all - confirmed
+// against `model_configurator.py`: neither `LTXModelConfigurator` nor
+// `LTXVideoOnlyModelConfigurator` ever construct or pass an embeddings-
+// connector module into `LTXModel`. In the real pipeline it is a STANDALONE
+// preprocessing step the text-encoder wiring runs on the (already
+// `caption_projection`'d, for 22B) Gemma-4 embeddings BEFORE they are ever
+// handed to the DiT as `context` - which is exactly `caption_proj_before_
+// connector`'s meaning (`_build_caption_projections`,
+// `model_configurator.py:199-219`: `true` means NO `caption_projection`
+// module exists inside the transformer, because that projection already ran
+// upstream, before the connector). Implemented HERE (this module, not a
+// separate file) because it reuses [`attention`]/[`AttnWeights`]/
+// [`FfWeights`]/[`linear`]/[`rmsnorm`]/[`add2`]/[`wf`] directly, verbatim -
+// the crate's own established "generalize the existing block code" style
+// (see [`LtxAvBlock`] extending [`LtxBlock`]'s pieces) applied one more
+// level: a plain pre-LN self-attention-only transformer, not a parallel
+// reimplementation of QKV/RMSNorm/RoPE/gating.
+//
+// Composed by [`crate::dit::LtxDit::forward`]/[`crate::dit::LtxAvDit::
+// forward`] as a preprocessing step on `context`, gated by
+// `cfg.use_embeddings_connector` (this crate's own flag - the reference has
+// none, since the connector lives outside `LTXModel` there; see
+// `crate::config::LtxDitConfig::use_embeddings_connector`'s doc).
+// ---------------------------------------------------------------------------
+
+/// One connector block's weights - self-attention (`attn1`, optionally
+/// gated per `connector_apply_gated_attention`) + a BIASED FFN (unlike the
+/// main DiT's `ff_bias=false` video FFN - `embeddings_connector.py`'s
+/// `_BasicTransformerBlock1D.__init__` passes `bias=ff_bias` with class
+/// default `True`, and neither configurator overrides it for the real
+/// checkpoint). No cross-attention, no adaLN table - `_BasicTransformerBlock1D`
+/// has neither.
+struct ConnectorBlockWeights {
+    attn1: AttnWeights,
+    ff: FfWeights,
+}
+
+impl ConnectorBlockWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, gated: bool) -> ConnectorBlockWeights {
+        ConnectorBlockWeights { attn1: AttnWeights::upload(gpu, w, &format!("{prefix}.attn1"), gated), ff: FfWeights::upload(gpu, w, &format!("{prefix}.ff"), true) }
+    }
+}
+
+/// `video_embeddings_connector`/`audio_embeddings_connector`, weights
+/// resident, for a fixed sequence length.
+///
+/// ## Op sequence (pinned against `embeddings_connector.py`, not assumed)
+///
+/// 1. **Register substitution** (`_replace_padded_with_learnable_registers`,
+///    `embeddings_connector.py:139-152`): `learnable_registers` (`[num_
+///    registers, dim]`) is TILED to `[s, dim]` (`registers.repeat(s/num_
+///    registers, 1)` - REQUIRES `s % num_registers == 0`, asserted here
+///    too) and BLENDS into `hidden_states` per position - `valid[i]==1` (not
+///    padded) keeps the real embedding, `valid[i]==0` (padded) is REPLACED
+///    by that position's tiled register row. This is a content
+///    substitution at the SAME sequence length, not a prepend/append (an
+///    earlier reading of this task's own brief assumed prepend-then-drop;
+///    the reference source is unambiguous: same-length blend). The mask
+///    this substitution leaves for every downstream block's attention is
+///    then `torch.zeros_like(...)` - all-zero, i.e. UNMASKED - so once
+///    substitution has run, every real config (which always sets
+///    `num_learnable_registers`) resolves self-attention masking to
+///    identity; this crate has no masking machinery anywhere else either
+///    (`LtxAvBlock`'s doc), so [`attention`] is called with no mask
+///    argument at all here - reproducing that one real configuration
+///    exactly, not approximating a general masked path.
+/// 2. **`num_layers` pre-LN blocks** (`_BasicTransformerBlock1D.forward`,
+///    `embeddings_connector.py:41-71`): `x = x + attn1(rms_norm(x), pe=freqs)`
+///    (self-attention only, own QK-norm, own RoPE, own gate per
+///    [`AttnWeights::gate`]), then `x = x + ff(rms_norm(x))` (biased GELU
+///    FFN, mult 4). Every norm is the SAME unweighted `rms_norm(x, weight=
+///    None, eps=1e-6)` (`ltx_core.utils.rms_norm`'s own default `eps` -
+///    numerically identical to `cfg.norm_eps`, which is `1e-6` in every
+///    config this crate defines) [`LtxBlock`]'s `ada_zero`/`post_sa`
+///    norms already dispatch.
+/// 3. **RoPE**: 1-axis, `pe` built from the RAW sequential index `0..s`
+///    (`Embeddings1DConnector.forward`, `embeddings_connector.py:172-184`:
+///    `indices_grid = arange(s)`, passed to `precompute_freqs_cis` with
+///    `use_middle_indices_grid` at its DEFAULT `False` - NOT the main DiT's
+///    always-`true` midpoint-of-`[start,end)` convention, confirmed against
+///    `rope.py::generate_freqs`: `use_middle_indices_grid=False` and a
+///    3-D `indices_grid` (no bounds axis) leaves the raw index untouched).
+///    [`ltx_rope_tables`] only implements the midpoint form, so this passes
+///    DEGENERATE bounds `[s, s]` per token - `mid = (s+s)/2 = s` exactly
+///    reproduces the raw-index formula with no change to that function.
+///    `theta` is the class default `10000.0`
+///    (`Embeddings1DConnectorConfigurator.from_metadata` never overrides
+///    `positional_embedding_theta`) - `cfg.positional_embedding_theta` is
+///    `10000.0` in every config this crate defines, so reusing it is exact.
+/// 4. **Output norm** (`connector_norm_output`): the SAME unweighted
+///    `rms_norm`, unconditionally in the reference
+///    (`embeddings_connector.py:189` - no gating flag there at all); this
+///    crate's `connector_norm_output` field is honored as a flag regardless
+///    (both [`crate::config::LtxDitConfig::tiny_gated`]/[`ltx25_22b`] set it
+///    `true`, matching the reference's unconditional behavior).
+pub struct EmbeddingsConnector {
+    gpu: Gpu,
+    dim: u32,
+    heads: u32,
+    head_dim: u32,
+    num_registers: u32,
+    norm_output: bool,
+    theta: f64,
+    max_pos: Vec<u32>,
+    eps: f32,
+    /// `[num_registers, dim]` host copy - substitution runs on the host
+    /// before the device graph is built (this call's `valid` mask is a host
+    /// slice too, see [`Self::forward`]).
+    registers: Vec<f32>,
+    blocks: Vec<ConnectorBlockWeights>,
+    ones: DeviceBuffer,
+}
+
+impl EmbeddingsConnector {
+    /// `weights`/`prefix`: e.g. `"video_embeddings_connector"`. `dim`/
+    /// `heads`/`head_dim` are the CONNECTOR's own geometry
+    /// (`cfg.connector_inner_dim()`/`connector_num_attention_heads`/
+    /// `connector_attention_head_dim`) - independent of the main DiT's,
+    /// even though the real checkpoint happens to size them equal per
+    /// stream (`crate::config::LtxDitConfig::connector_attention_head_dim`'s
+    /// doc).
+    #[allow(clippy::too_many_arguments)]
+    pub fn on(gpu: Gpu, w: &Tensors, prefix: &str, dim: u32, heads: u32, head_dim: u32, num_layers: u32, num_registers: u32, gated: bool, norm_output: bool, theta: f64, max_pos: &[u32], eps: f32) -> EmbeddingsConnector {
+        assert_eq!(heads * head_dim, dim, "embeddings connector: heads*head_dim ({}) must equal dim ({dim})", heads * head_dim);
+        let registers = tget(w, &format!("{prefix}.learnable_registers")).to_vec();
+        assert_eq!(registers.len(), (num_registers * dim) as usize, "{prefix}.learnable_registers must be [num_registers, dim]");
+        let blocks = (0..num_layers).map(|l| ConnectorBlockWeights::upload(&gpu, w, &format!("{prefix}.transformer_1d_blocks.{l}"), gated)).collect();
+        let ones = gpu.storage(dim as u64);
+        wf(&gpu, &ones, &vec![1.0f32; dim as usize]);
+        EmbeddingsConnector { gpu, dim, heads, head_dim, num_registers, norm_output, theta, max_pos: max_pos.to_vec(), eps, registers, blocks, ones }
+    }
+
+    /// `hidden`: `[s, dim]` raw (already `caption_projection`'d, per
+    /// `caption_proj_before_connector`) input embeddings. `valid`: `[s]`,
+    /// `1.0` keeps this position's real embedding, `0.0` substitutes the
+    /// tiled register row at this position (this struct's doc, step 1) -
+    /// pass all-`1.0` for "no padding" (a real configuration, see
+    /// `crate::config::LtxDitConfig::use_embeddings_connector`'s doc).
+    /// Returns `[s, dim]`.
+    pub fn forward(&self, hidden: &[f32], valid: &[f32], s: u32) -> Vec<f32> {
+        let dim = self.dim;
+        assert_eq!(hidden.len(), (s * dim) as usize, "embeddings connector: hidden must be [s, dim]");
+        assert_eq!(valid.len(), s as usize, "embeddings connector: valid must be [s]");
+        assert_eq!(s % self.num_registers, 0, "embeddings connector: seq_len {s} must be a multiple of num_registers {}", self.num_registers);
+
+        // ---- step 1: register substitution (host) --------------------------
+        let mut x = hidden.to_vec();
+        for si in 0..s as usize {
+            if valid[si] <= 0.0 {
+                let reg_row = si % self.num_registers as usize;
+                let (rs, re) = (reg_row * dim as usize, reg_row * dim as usize + dim as usize);
+                let (xs, xe) = (si * dim as usize, si * dim as usize + dim as usize);
+                x[xs..xe].copy_from_slice(&self.registers[rs..re]);
+            }
+        }
+
+        // ---- step 3: RoPE table (raw sequential index, see this struct's
+        // doc) -----------------------------------------------------------
+        let mut positions = vec![0f32; s as usize * 2];
+        for si in 0..s as usize {
+            positions[si * 2] = si as f32;
+            positions[si * 2 + 1] = si as f32;
+        }
+        let rope = ltx_rope_tables(dim, self.heads, self.theta, &self.max_pos, &positions, s as usize);
+        let gpu = &self.gpu;
+        let (cos_bufs, sin_bufs) = upload_rope_tables(gpu, &rope);
+
+        let mut ops: Vec<Step> = Vec::new();
+        let td = s * dim;
+        let x_buf = gpu.storage(td as u64);
+        wf(gpu, &x_buf, &x);
+
+        // ---- step 2: num_layers pre-LN blocks -------------------------------
+        let mut cur = x_buf;
+        for blk in &self.blocks {
+            let normed = gpu.storage(td as u64);
+            rmsnorm(gpu, &mut ops, &cur, &self.ones, &normed, dim, s, self.eps);
+            let attn_out = attention(gpu, &mut ops, &blk.attn1, dim, dim, dim, self.heads, self.head_dim, &normed, &normed, s, s, Some((&cos_bufs, &sin_bufs)), Some((&cos_bufs, &sin_bufs)), K_ROPE2D, self.eps);
+            let x2 = gpu.storage(td as u64);
+            add2(gpu, &mut ops, &attn_out, &cur, &x2, td);
+
+            let normed2 = gpu.storage(td as u64);
+            rmsnorm(gpu, &mut ops, &x2, &self.ones, &normed2, dim, s, self.eps);
+            let ff_dim = dim * 4;
+            let h_pre = gpu.storage((s * ff_dim) as u64);
+            linear(gpu, &mut ops, &normed2, &blk.ff.w1, blk.ff.b1.as_ref(), &h_pre, s, dim, ff_dim);
+            let h_act = gpu.storage((s * ff_dim) as u64);
+            ops.push(gpu.step(K_GELU, &[&h_pre, &h_act], &[s * ff_dim], s * ff_dim));
+            let ff_out = gpu.storage(td as u64);
+            linear(gpu, &mut ops, &h_act, &blk.ff.w2, blk.ff.b2.as_ref(), &ff_out, s, ff_dim, dim);
+            let x3 = gpu.storage(td as u64);
+            add2(gpu, &mut ops, &ff_out, &x2, &x3, td);
+            cur = x3;
+        }
+
+        // ---- step 4: output norm --------------------------------------------
+        let final_buf = if self.norm_output {
+            let out = gpu.storage(td as u64);
+            rmsnorm(gpu, &mut ops, &cur, &self.ones, &out, dim, s, self.eps);
+            out
+        } else {
+            cur
+        };
+
+        gpu.submit(&[], &ops);
+        gpu.read(&final_buf, td as usize)
+    }
+
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 }

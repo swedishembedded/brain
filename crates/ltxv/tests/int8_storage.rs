@@ -177,13 +177,14 @@ fn dit_forward_stays_close_after_int8_storage_round_trip() {
     let w = random_tiny_weights(&cfg, 0xD17_5678);
     let inputs = synthetic_inputs(&cfg, 7, 5);
 
+    let context_valid = vec![1.0f32; inputs.context_len];
     let model_f32 = LtxDit::new(cfg, w.clone(), None);
-    let taps_f32 = model_f32.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t);
+    let taps_f32 = model_f32.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid);
 
     let q = quantize_tensors(&w);
     let w_roundtripped = dequantize_tensors(&q);
     let model_i8 = LtxDit::new(cfg, w_roundtripped, None);
-    let taps_i8 = model_i8.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t);
+    let taps_i8 = model_i8.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid);
 
     let c_out = cosine(&taps_f32.out, &taps_i8.out);
     println!("int8 storage forward parity: final output cosine = {c_out:.9}");

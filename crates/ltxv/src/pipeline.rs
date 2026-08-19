@@ -338,7 +338,12 @@ impl Denoiser for LtxDit {
         // internally, so this passes the RAW sigma, matching the golden's
         // own convention (see `crate::dit::LtxDit::forward`'s doc).
         let timesteps = vec![sigma; t];
-        LtxDit::forward(self, latent, &timesteps, positions, keyframes_mask, context, context_len, t).out
+        // All-valid (no padding): `use_embeddings_connector` is `false` for
+        // every config this pipeline's stub context path uses today, so
+        // this mask is unread - see `crate::config::LtxDitConfig::
+        // use_embeddings_connector`'s doc.
+        let context_valid = vec![1.0f32; context_len];
+        LtxDit::forward(self, latent, &timesteps, positions, keyframes_mask, context, context_len, t, &context_valid).out
     }
 }
 

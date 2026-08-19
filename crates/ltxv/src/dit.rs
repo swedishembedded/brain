@@ -36,7 +36,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{open_device, BlockTaps, LtxAvBlock, LtxBlock};
+use crate::block::{open_device, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -422,12 +422,50 @@ fn output_stage(w: &Tensors, sst_name: &str, proj_name: &str, x: &[f32], embedde
     linear(&xo, t, dim, pw, Some(pb), out_channels)
 }
 
+/// Route `context` through `video_embeddings_connector`/
+/// `audio_embeddings_connector` when `enabled` (`cfg.use_embeddings_
+/// connector`) - shared by [`LtxDit::forward`] (one call) and
+/// [`LtxAvDit::forward`] (two calls, one per stream's own connector
+/// prefix/geometry) so the "disabled -> pass `context` through unchanged"
+/// and "enabled -> build+run `EmbeddingsConnector`" branches exist in
+/// exactly one place. Returns `(context_for_blocks, connector_raw_output)` -
+/// the second is EMPTY when disabled (nothing to tap) and otherwise a copy
+/// of the first (both are what a parity test's `connector_out` tap and the
+/// blocks' own `context` input need, see [`DitTaps::connector_out`]'s doc).
+#[allow(clippy::too_many_arguments)]
+fn route_context_through_connector(
+    gpu: &Gpu,
+    w: &Tensors,
+    prefix: &str,
+    enabled: bool,
+    context: &[f32],
+    valid: &[f32],
+    context_len: u32,
+    dim: u32,
+    heads: u32,
+    head_dim: u32,
+    num_layers: u32,
+    num_registers: u32,
+    gated: bool,
+    norm_output: bool,
+    theta: f64,
+    max_pos: &[u32],
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    if !enabled {
+        return (context.to_vec(), Vec::new());
+    }
+    let connector = EmbeddingsConnector::on(gpu.share(), w, prefix, dim, heads, head_dim, num_layers, num_registers, gated, norm_output, theta, max_pos, eps);
+    let out = connector.forward(context, valid, context_len);
+    (out.clone(), out)
+}
+
 /// Upload one [`LtxRopeTables`]' per-head `[T, head_dim/2]` `(cos, sin)`
 /// slices as device buffers - shared by every block (RoPE tables do not
 /// vary per layer). Free function (not tied to [`LtxDit`]) so both
 /// [`LtxDit::forward`] and [`LtxAvDit::forward`] - which needs FOUR
 /// independent tables, not one - share it.
-fn upload_rope_tables(gpu: &Gpu, rope: &LtxRopeTables) -> (Vec<DeviceBuffer>, Vec<DeviceBuffer>) {
+pub(crate) fn upload_rope_tables(gpu: &Gpu, rope: &LtxRopeTables) -> (Vec<DeviceBuffer>, Vec<DeviceBuffer>) {
     let mut cos_bufs = Vec::with_capacity(rope.heads);
     let mut sin_bufs = Vec::with_capacity(rope.heads);
     for h in 0..rope.heads {
@@ -453,6 +491,13 @@ pub struct DitTaps {
     /// `[T, dim]` - `adaln_single.emb`'s output (the PixArt MLP, before the
     /// `9*dim` linear).
     pub embedded_timestep: Vec<f32>,
+    /// `[context_len, connector_inner_dim]` - `video_embeddings_connector`'s
+    /// own output (`crate::block::EmbeddingsConnector::forward`'s return
+    /// value, BEFORE any block's own `prompt_scale_shift_table` modulates
+    /// it), the tap a parity test bisects with when `cfg.use_embeddings_
+    /// connector` is `true`. EMPTY when the connector is disabled (nothing
+    /// to tap - `context` reaches the blocks unchanged).
+    pub connector_out: Vec<f32>,
     pub b0_attn1_out: Vec<f32>,
     pub b0_attn2_out: Vec<f32>,
     pub b0_ff_out: Vec<f32>,
@@ -702,9 +747,18 @@ impl LtxDit {
     /// (see `crate::rope`'s doc). `keyframes_mask`: `[T]`, non-zero marks a
     /// keyframe token. `context`: `[context_len, cross_attention_dim]` raw
     /// text context (each block modulates it independently - see
-    /// `crate::block`'s doc).
+    /// `crate::block`'s doc) - when `cfg.use_embeddings_connector` is
+    /// `true`, this is the PRE-connector embedding (`caption_proj_before_
+    /// connector`'s ordering: `caption_projection` already ran upstream,
+    /// the connector has not yet) and is routed through
+    /// `video_embeddings_connector` ([`crate::block::EmbeddingsConnector`])
+    /// before any block reads it; `context_valid`: `[context_len]`, `1.0`
+    /// keeps a position's real embedding, `0.0` substitutes that position
+    /// with a tiled learnable register row (see [`crate::block::
+    /// EmbeddingsConnector::forward`]'s doc) - ignored when the connector is
+    /// disabled.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize) -> DitTaps {
+    pub fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, t: usize, context_valid: &[f32]) -> DitTaps {
         let cfg = &self.cfg;
         let dim = cfg.inner_dim as usize;
         assert_eq!(latent.len(), t * cfg.in_channels as usize);
@@ -738,7 +792,15 @@ impl LtxDit {
         let gpu = open_device(self.device.as_deref());
         let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
-        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table, context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
+        #[rustfmt::skip]
+        let (connector_context, connector_out) = route_context_through_connector(
+            &gpu, &self.w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+            cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
+            cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
+            cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
+        );
+
+        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -751,6 +813,7 @@ impl LtxDit {
             rope_sin: rope.sin,
             adaln_table,
             embedded_timestep,
+            connector_out,
             b0_attn1_out: b0.attn1_out,
             b0_attn2_out: b0.attn2_out,
             b0_ff_out: b0.ff_out,
@@ -818,6 +881,9 @@ impl LtxAvDit {
     /// `crate::config`'s doc). `v_sigma`/`a_sigma`: each stream's SCALAR
     /// sigma (`Modality.sigma`, `[1]`) - the CROSS modality's sigma is what
     /// drives the other stream's AV gate (see `crate::block`'s doc).
+    /// `v_context_valid`/`a_context_valid`: each stream's own [`LtxDit::
+    /// forward`]-style connector validity mask - ignored when `cfg.video.
+    /// use_embeddings_connector` is `false`.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
@@ -829,6 +895,7 @@ impl LtxAvDit {
         v_context_len: usize,
         tv: usize,
         v_sigma: f32,
+        v_context_valid: &[f32],
         a_latent: &[f32],
         a_timesteps: &[f32],
         a_positions: &[f32],
@@ -836,6 +903,7 @@ impl LtxAvDit {
         a_context_len: usize,
         ta: usize,
         a_sigma: f32,
+        a_context_valid: &[f32],
     ) -> AvDitTaps {
         let cfg = &self.cfg;
         let vcfg = &cfg.video;
@@ -904,6 +972,28 @@ impl LtxAvDit {
         let (v_cross_cos_bufs, v_cross_sin_bufs) = upload_rope_tables(&gpu, &v_cross_rope);
         let (a_cross_cos_bufs, a_cross_sin_bufs) = upload_rope_tables(&gpu, &a_cross_rope);
 
+        // ---- each stream's own embeddings connector (crate::block::
+        // EmbeddingsConnector's doc) - vcfg carries the shared layer/
+        // register/max-pos/norm-output/gate fields for BOTH connectors
+        // (`dit.rs::push_connector`'s doc: the real checkpoint's
+        // `audio_embeddings_connector` reuses video's own `connector_num_
+        // layers` etc.), only the per-stream geometry (dim/heads/head_dim)
+        // and weight prefix differ.
+        #[rustfmt::skip]
+        let (v_connector_context, v_connector_out) = route_context_through_connector(
+            &gpu, &self.w, "video_embeddings_connector", vcfg.use_embeddings_connector, v_context, v_context_valid, v_context_len as u32,
+            vcfg.connector_inner_dim(), vcfg.connector_num_attention_heads, vcfg.connector_attention_head_dim,
+            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
+            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
+        );
+        #[rustfmt::skip]
+        let (a_connector_context, a_connector_out) = route_context_through_connector(
+            &gpu, &self.w, "audio_embeddings_connector", vcfg.use_embeddings_connector, a_context, a_context_valid, a_context_len as u32,
+            acfg.connector_inner_dim(), acfg.connector_num_attention_heads, acfg.connector_attention_head_dim,
+            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
+            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
+        );
+
         let mut v_block_out = Vec::with_capacity(vcfg.num_layers as usize);
         let mut a_block_out = Vec::with_capacity(vcfg.num_layers as usize);
         let mut b0v: Option<BlockTaps> = None;
@@ -914,7 +1004,7 @@ impl LtxAvDit {
             let blk = LtxAvBlock::on(gpu.share(), vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), v_context_len as u32, a_context_len as u32);
             #[rustfmt::skip]
             let (vout, aout, taps) = blk.forward(
-                &vx, &ax, &v_adaln_table, &a_adaln_table, v_context, a_context,
+                &vx, &ax, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
                 &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
                 &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
                 &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
@@ -947,6 +1037,7 @@ impl LtxAvDit {
                 rope_sin: v_rope.sin,
                 adaln_table: v_adaln_table,
                 embedded_timestep: v_embedded_timestep,
+                connector_out: v_connector_out,
                 b0_attn1_out: b0v.attn1_out,
                 b0_attn2_out: b0v.attn2_out,
                 b0_ff_out: b0v.ff_out,
@@ -958,6 +1049,7 @@ impl LtxAvDit {
                 rope_sin: a_rope.sin,
                 adaln_table: a_adaln_table,
                 embedded_timestep: a_embedded_timestep,
+                connector_out: a_connector_out,
                 b0_attn1_out: b0a.attn1_out,
                 b0_attn2_out: b0a.attn2_out,
                 b0_ff_out: b0a.ff_out,

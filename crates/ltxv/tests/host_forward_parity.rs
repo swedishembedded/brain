@@ -61,7 +61,8 @@ fn host_training_forward_matches_the_gpu_dispatched_forward() {
     // --- the GPU-dispatched, parity-proven path ---
     let w_gpu = load_tiny_weights(&w_path);
     let gpu_model = LtxDit::new(ltx_cfg, w_gpu.clone(), None);
-    let gpu_taps = gpu_model.forward(latent, timesteps_f32, positions, keyframes_mask_f32, context, context_len, t);
+    let context_valid = vec![1.0f32; context_len];
+    let gpu_taps = gpu_model.forward(latent, timesteps_f32, positions, keyframes_mask_f32, context, context_len, t, &context_valid);
 
     // --- the new host-only training reference, same weights/inputs ---
     let cfg = Cfg::from_ltx(&ltx_cfg, t, context_len);

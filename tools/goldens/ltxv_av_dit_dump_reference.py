@@ -89,6 +89,7 @@ sys.path.insert(0, str(_REFERENCE_ROOT / "packages" / "ltx-core" / "src"))
 import ltx_core.model.transformer.transformer_args as transformer_args_mod  # noqa: E402
 from ltx_core.model.transformer.model import LTXModel, LTXModelType  # noqa: E402
 from ltx_core.model.transformer.modality import Modality  # noqa: E402
+from ltx_core.text_encoders.gemma.embeddings_connector import Embeddings1DConnector  # noqa: E402
 
 # Toy dims (every step kind runs in well under a second); every FLAG is the
 # real LTX-2.5 value (see module docstring). Video half matches the
@@ -131,6 +132,73 @@ T_AUDIO = 5             # audio latent-token count (distinct from Tv, catches T 
 AUDIO_CONTEXT_LEN = 4   # audio fake text token count (distinct from CONTEXT_LEN)
 VIDEO_SIGMA = 0.7
 AUDIO_SIGMA = 0.35      # deliberately DIFFERENT from VIDEO_SIGMA - see module docstring
+
+# ---------------------------------------------------------------------------
+# Gated-attention + BOTH embeddings connectors (Phase 2) - a SECOND,
+# independent dump alongside TINY_CONFIG's (unchanged - `crates/ltxv/tests/
+# av_dit_parity.rs`'s existing no-gating test keeps replaying `av_dit_tiny.
+# safetensors` untouched). Video half matches `ltxv_dit_dump_reference.py`'s
+# own `TINY_GATED_CONFIG` exactly (same video geometry both dumpers
+# describe); audio half mirrors `crates/ltxv/src/config.rs::
+# LtxAudioDitConfig::tiny_gated` field-by-field. `apply_gated_attention` is
+# ONE flag shared by BOTH streams in the reference (`model.py::LTXModel.
+# __init__` derives both `TransformerConfig`s from this single kwarg - see
+# `crates/ltxv/src/config.rs::LtxDitConfig::apply_gated_attention`'s doc),
+# which is why there is no separate `audio_apply_gated_attention` key here.
+TINY_GATED_CONFIG = dict(
+    model_type=LTXModelType.AudioVideo,
+    num_attention_heads=3,
+    attention_head_dim=8,              # video inner_dim = 24
+    in_channels=128,
+    out_channels=128,
+    num_layers=2,
+    cross_attention_dim=24,
+    norm_eps=1e-6,
+    positional_embedding_theta=10000.0,
+    positional_embedding_max_pos=[20, 64, 96],
+    timestep_scale_multiplier=1000,
+    use_middle_indices_grid=True,
+    apply_gated_attention=True,
+    caption_projection=None,
+    cross_attention_adaln=True,
+    use_prompt_adaln_single=False,
+    ff_bias=False,
+    use_keyframes_abs_pos_embedding=True,
+    # ---- audio half ----
+    audio_num_attention_heads=3,       # SAME head count as video (assert_supported's invariant)
+    audio_attention_head_dim=4,        # audio inner_dim = 12
+    audio_in_channels=128,
+    audio_out_channels=128,
+    audio_cross_attention_dim=12,
+    audio_positional_embedding_max_pos=[20],
+    audio_ff_bias=False,
+    av_ca_timestep_scale_multiplier=5,   # a THIRD distinct non-1 value (not TINY_CONFIG's 3)
+    audio_caption_projection=None,
+)
+
+GRID_GATED = (2, 3, 5)          # matches ltxv_dit_dump_reference.py's TINY_GATED_CONFIG -> Tv = 30
+CONTEXT_LEN_GATED = 9            # video, multiple of CONNECTOR_NUM_REGISTERS (3 tiles)
+T_AUDIO_GATED = 7                # distinct from Tv, T_AUDIO, and CONTEXT_LEN_GATED
+AUDIO_CONTEXT_LEN_GATED = 6       # audio, multiple of CONNECTOR_NUM_REGISTERS (2 tiles), distinct from video's 9
+VIDEO_SIGMA_GATED = 0.6
+AUDIO_SIGMA_GATED = 0.42          # distinct from VIDEO_SIGMA_GATED and from the ungated run's sigmas
+
+# `video_embeddings_connector`/`audio_embeddings_connector` share
+# `connector_num_layers`/`num_registers`/`max_pos`/`apply_gated_attention`
+# (both configurators read the SAME `connector_*` metadata keys - see
+# `embeddings_connector.py`'s `Embeddings1DConnectorConfigurator`/
+# `AudioEmbeddings1DConnectorConfigurator`); only per-stream head geometry
+# differs, REVERSED vs. that stream's own main-attention factoring so a
+# transpose between the two attention geometries cannot hide (lesson #4).
+CONNECTOR_NUM_LAYERS = 2
+CONNECTOR_NUM_REGISTERS = 3
+CONNECTOR_MAX_POS = [50]
+CONNECTOR_APPLY_GATED_ATTENTION = True
+CONNECTOR_FF_BIAS = True
+VIDEO_CONNECTOR_NUM_ATTENTION_HEADS = 4
+VIDEO_CONNECTOR_ATTENTION_HEAD_DIM = 6     # video connector inner_dim = 24
+AUDIO_CONNECTOR_NUM_ATTENTION_HEADS = 2
+AUDIO_CONNECTOR_ATTENTION_HEAD_DIM = 6     # audio connector inner_dim = 12
 
 
 def save(out, name, tensors, manifest):
@@ -299,6 +367,250 @@ def run_with_taps(model, video, audio):
     return out_v, out_a, dict(taps.acc), captured_rope
 
 
+def build_gated_model(seed):
+    """Build+seed a FRESH `TINY_GATED_CONFIG` AudioVideo `LTXModel` - same
+    re-init dance as [`build_model`]."""
+    torch.manual_seed(seed)
+    model = LTXModel(**TINY_GATED_CONFIG)
+    g = torch.Generator().manual_seed(seed + 999)
+    reinit = 0
+    for name, p in model.named_parameters():
+        if "scale_shift_table" in name or name == "keyframes_abs_pos_embedding":
+            torch.nn.init.normal_(p, std=0.02, generator=g)
+            reinit += 1
+    assert reinit > 0, "no torch.empty(...)-sourced parameters found to re-initialize - has the class changed?"
+    model.eval().requires_grad_(False)
+    return model
+
+
+def build_connector(seed, num_attention_heads, attention_head_dim):
+    """Build+seed a fresh `Embeddings1DConnector` (video's or audio's own
+    geometry, both share `CONNECTOR_NUM_LAYERS`/`CONNECTOR_NUM_REGISTERS`/
+    `CONNECTOR_MAX_POS`/`CONNECTOR_APPLY_GATED_ATTENTION`/`CONNECTOR_FF_BIAS`
+    - see this module's `TINY_GATED_CONFIG` doc)."""
+    torch.manual_seed(seed)
+    connector = Embeddings1DConnector(
+        attention_head_dim=attention_head_dim,
+        num_attention_heads=num_attention_heads,
+        num_layers=CONNECTOR_NUM_LAYERS,
+        positional_embedding_max_pos=CONNECTOR_MAX_POS,
+        num_learnable_registers=CONNECTOR_NUM_REGISTERS,
+        apply_gated_attention=CONNECTOR_APPLY_GATED_ATTENTION,
+        ff_bias=CONNECTOR_FF_BIAS,
+    )
+    connector.eval().requires_grad_(False)
+    return connector
+
+
+def _additive_mask_from_valid(valid):
+    """Same construction as `ltxv_dit_dump_reference.py`'s own helper -
+    `embeddings_connector.py:139-152`'s `binary_mask = mask[:,0,0,:] >= 0`."""
+    add = torch.where(valid > 0.5, torch.zeros_like(valid), torch.full_like(valid, -1e9))
+    return add.view(1, 1, 1, -1)
+
+
+def det_video_modality_with_context(seed, grid, context, in_channels, sigma_value, keyframe_token=0):
+    """Same construction as [`det_video_modality`], but `context` is
+    supplied by the caller (the video connector's OWN output)."""
+    g = torch.Generator().manual_seed(seed)
+    f, h, w = grid
+    t = f * h * w
+    b = 1
+    latent = torch.randn(b, t, in_channels, generator=g)
+    sigma = torch.tensor([sigma_value])
+    denoise_mask = torch.ones(b, t, 1)
+    timesteps = denoise_mask * sigma.view(-1, 1, 1)
+    grid_coords = torch.meshgrid(torch.arange(f), torch.arange(h), torch.arange(w), indexing="ij")
+    starts = torch.stack(grid_coords, dim=0).to(torch.float32)
+    ends = starts + 1.0
+    bounds = torch.stack([starts, ends], dim=-1)
+    positions = einops.repeat(bounds, "c f h w bounds -> bs c (f h w) bounds", bs=b)
+    keyframes_mask = torch.zeros(b, t, 1)
+    keyframes_mask[:, keyframe_token, :] = 1.0
+    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+                    context=context, keyframes_mask=keyframes_mask)
+
+
+def det_audio_modality_with_context(seed, t_audio, context, in_channels, sigma_value):
+    """Same construction as [`det_audio_modality`], but `context` is
+    supplied by the caller (the audio connector's OWN output)."""
+    g = torch.Generator().manual_seed(seed)
+    b = 1
+    latent = torch.randn(b, t_audio, in_channels, generator=g)
+    sigma = torch.tensor([sigma_value])
+    denoise_mask = torch.ones(b, t_audio, 1)
+    timesteps = denoise_mask * sigma.view(-1, 1, 1)
+    idx = torch.arange(t_audio, dtype=torch.float32)
+    starts = idx.view(1, t_audio)
+    ends = starts + 1.0
+    bounds = torch.stack([starts, ends], dim=-1)
+    positions = einops.repeat(bounds, "c t bounds -> bs c t bounds", bs=b)
+    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+                    context=context, keyframes_mask=None)
+
+
+def dump_gated(args):
+    """The gated-attention + BOTH embeddings-connectors dump - a SECOND,
+    independent run alongside [`main`]'s original TINY_CONFIG one (see
+    `TINY_GATED_CONFIG`'s module-level doc)."""
+    seed = args.seed + 5000  # distinct seed stream from the ungated run
+
+    video_connector = build_connector(seed, VIDEO_CONNECTOR_NUM_ATTENTION_HEADS, VIDEO_CONNECTOR_ATTENTION_HEAD_DIM)
+    audio_connector = build_connector(seed + 2000, AUDIO_CONNECTOR_NUM_ATTENTION_HEADS, AUDIO_CONNECTOR_ATTENTION_HEAD_DIM)
+    v_inner_dim = VIDEO_CONNECTOR_NUM_ATTENTION_HEADS * VIDEO_CONNECTOR_ATTENTION_HEAD_DIM
+    a_inner_dim = AUDIO_CONNECTOR_NUM_ATTENTION_HEADS * AUDIO_CONNECTOR_ATTENTION_HEAD_DIM
+    assert v_inner_dim == TINY_GATED_CONFIG["num_attention_heads"] * TINY_GATED_CONFIG["attention_head_dim"]
+    assert a_inner_dim == TINY_GATED_CONFIG["audio_num_attention_heads"] * TINY_GATED_CONFIG["audio_attention_head_dim"]
+
+    g = torch.Generator().manual_seed(seed + 1)
+    v_raw_context = 0.5 * torch.randn(1, CONTEXT_LEN_GATED, v_inner_dim, generator=g)
+    v_context_valid = torch.ones(CONTEXT_LEN_GATED)
+    for i in range(CONTEXT_LEN_GATED):
+        if i % 3 == 2:
+            v_context_valid[i] = 0.0
+    v_additive_mask = _additive_mask_from_valid(v_context_valid)
+
+    g2 = torch.Generator().manual_seed(seed + 2)
+    a_raw_context = 0.5 * torch.randn(1, AUDIO_CONTEXT_LEN_GATED, a_inner_dim, generator=g2)
+    a_context_valid = torch.ones(AUDIO_CONTEXT_LEN_GATED)
+    for i in range(AUDIO_CONTEXT_LEN_GATED):
+        if i % 2 == 1:  # every OTHER position padded - distinct pattern from video's
+            a_context_valid[i] = 0.0
+    a_additive_mask = _additive_mask_from_valid(a_context_valid)
+
+    v_connector_out, _ = video_connector(v_raw_context, additive_attention_mask=v_additive_mask)
+    a_connector_out, _ = audio_connector(a_raw_context, additive_attention_mask=a_additive_mask)
+    assert not v_connector_out.isnan().any(), "video connector output contains NaN"
+    assert not a_connector_out.isnan().any(), "audio connector output contains NaN"
+
+    # ---- self-validation: fresh connector instantiation, bit-identical -----
+    video_connector2 = build_connector(seed, VIDEO_CONNECTOR_NUM_ATTENTION_HEADS, VIDEO_CONNECTOR_ATTENTION_HEAD_DIM)
+    v_connector_out2, _ = video_connector2(v_raw_context, additive_attention_mask=v_additive_mask)
+    agree("video connector fresh-instantiation output", v_connector_out2, v_connector_out, tol=0.0)
+    del video_connector2
+    audio_connector2 = build_connector(seed + 2000, AUDIO_CONNECTOR_NUM_ATTENTION_HEADS, AUDIO_CONNECTOR_ATTENTION_HEAD_DIM)
+    a_connector_out2, _ = audio_connector2(a_raw_context, additive_attention_mask=a_additive_mask)
+    agree("audio connector fresh-instantiation output", a_connector_out2, a_connector_out, tol=0.0)
+    del audio_connector2
+
+    model = build_gated_model(seed)
+    video = det_video_modality_with_context(seed, GRID_GATED, v_connector_out, TINY_GATED_CONFIG["in_channels"], VIDEO_SIGMA_GATED)
+    audio = det_audio_modality_with_context(seed + 1, T_AUDIO_GATED, a_connector_out, TINY_GATED_CONFIG["audio_in_channels"], AUDIO_SIGMA_GATED)
+    f, h, w = GRID_GATED
+    tokens = f * h * w
+    print(f"tiny AV GATED config: video inner_dim={model.inner_dim}, audio inner_dim={model.audio_inner_dim}, "
+          f"layers={TINY_GATED_CONFIG['num_layers']}, video grid={GRID_GATED} -> {tokens} tokens, "
+          f"audio tokens={T_AUDIO_GATED}, video context_len={CONTEXT_LEN_GATED}, audio context_len={AUDIO_CONTEXT_LEN_GATED}", flush=True)
+
+    out_v, out_a, taps, rope_calls = run_with_taps(model, video, audio)
+    (v_rope_cos, v_rope_sin), (v_cross_cos, v_cross_sin), (a_rope_cos, a_rope_sin), (a_cross_cos, a_cross_sin) = rope_calls
+    assert not out_v.isnan().any(), "video output contains NaN"
+    assert not out_a.isnan().any(), "audio output contains NaN"
+
+    # ---- self-validation 1: fresh module instantiation, bit-identical ------
+    model2 = build_gated_model(seed)
+    out_v2, out_a2, _, _ = run_with_taps(model2, video, audio)
+    agree("gated fresh-instantiation video output", out_v2, out_v, tol=0.0)
+    agree("gated fresh-instantiation audio output", out_a2, out_a, tol=0.0)
+    del model2
+
+    # ---- self-validation 2: batch independence ------------------------------
+    video_b2 = Modality(
+        latent=video.latent.repeat(2, 1, 1), sigma=video.sigma.repeat(2),
+        timesteps=video.timesteps.repeat(2, 1, 1), positions=video.positions.repeat(2, 1, 1, 1),
+        context=video.context.repeat(2, 1, 1), keyframes_mask=video.keyframes_mask.repeat(2, 1, 1))
+    audio_b2 = Modality(
+        latent=audio.latent.repeat(2, 1, 1), sigma=audio.sigma.repeat(2),
+        timesteps=audio.timesteps.repeat(2, 1, 1), positions=audio.positions.repeat(2, 1, 1, 1),
+        context=audio.context.repeat(2, 1, 1), keyframes_mask=None)
+    out_v_b2, out_a_b2, _, _ = run_with_taps(model, video_b2, audio_b2)
+    agree("gated batch-independence video row 0", out_v_b2[0], out_v[0], tol=1e-5)
+    agree("gated batch-independence video row 1", out_v_b2[1], out_v[0], tol=1e-5)
+    agree("gated batch-independence audio row 0", out_a_b2[0], out_a[0], tol=1e-5)
+    agree("gated batch-independence audio row 1", out_a_b2[1], out_a[0], tol=1e-5)
+
+    # ---- self-validation 3: RoPE unit-rotation invariant (all 4 tables) ----
+    for label, (c, s) in (("video self", (v_rope_cos, v_rope_sin)), ("video cross", (v_cross_cos, v_cross_sin)),
+                          ("audio self", (a_rope_cos, a_rope_sin)), ("audio cross", (a_cross_cos, a_cross_sin))):
+        unit = c.double() ** 2 + s.double() ** 2
+        max_dev = (unit - 1.0).abs().max().item()
+        print(f"  self-validate gated RoPE cos^2+sin^2==1 [{label}]: max deviation {max_dev:.3e}", flush=True)
+        assert max_dev < 1e-5, f"RoPE table [{label}] is not a unit rotation (max dev {max_dev:.3e})"
+
+    tensors = {
+        "video.latent": video.latent[0],
+        "video.raw_context": v_raw_context[0],
+        "video.context_valid": v_context_valid,
+        "video.connector_out": v_connector_out[0],
+        "video.timesteps": video.timesteps[0],
+        "video.positions": video.positions[0],
+        "video.keyframes_mask": video.keyframes_mask[0],
+        "video.sigma": video.sigma,
+        "audio.latent": audio.latent[0],
+        "audio.raw_context": a_raw_context[0],
+        "audio.context_valid": a_context_valid,
+        "audio.connector_out": a_connector_out[0],
+        "audio.timesteps": audio.timesteps[0],
+        "audio.positions": audio.positions[0],
+        "audio.sigma": audio.sigma,
+        "video.rope_cos": v_rope_cos[0],
+        "video.rope_sin": v_rope_sin[0],
+        "video.cross_rope_cos": v_cross_cos[0],
+        "video.cross_rope_sin": v_cross_sin[0],
+        "audio.rope_cos": a_rope_cos[0],
+        "audio.rope_sin": a_rope_sin[0],
+        "audio.cross_rope_cos": a_cross_cos[0],
+        "audio.cross_rope_sin": a_cross_sin[0],
+        "video.adaln_table": taps["adaln_single"][0],
+        "video.embedded_timestep": taps["adaln_single"][1],
+        "audio.adaln_table": taps["audio_adaln_single"][0],
+        "audio.embedded_timestep": taps["audio_adaln_single"][1],
+        "av.video_ss_table": taps["av_ca_video_scale_shift_adaln_single"][0],
+        "av.audio_ss_table": taps["av_ca_audio_scale_shift_adaln_single"][0],
+        "av.a2v_gate_table": taps["av_ca_a2v_gate_adaln_single"][0],
+        "av.v2a_gate_table": taps["av_ca_v2a_gate_adaln_single"][0],
+        "video.b0_attn1_out": taps["b0.attn1"][0],
+        "video.b0_attn2_out": taps["b0.attn2"][0],
+        "video.b0_ff_out": taps["b0.ff"][0],
+        "audio.b0_attn1_out": taps["b0.audio_attn1"][0],
+        "audio.b0_attn2_out": taps["b0.audio_attn2"][0],
+        "audio.b0_ff_out": taps["b0.audio_ff"][0],
+        "av.b0_a2v_out": taps["b0.audio_to_video_attn"][0],
+        "av.b0_v2a_out": taps["b0.video_to_audio_attn"][0],
+        "video.out": out_v[0],
+        "audio.out": out_a[0],
+    }
+    for i in range(TINY_GATED_CONFIG["num_layers"]):
+        vx_i, ax_i = taps[f"block.{i}"]
+        tensors[f"video.block.{i}.out"] = vx_i[0]
+        tensors[f"audio.block.{i}.out"] = ax_i[0]
+
+    manifest = {
+        "run": {"seed": seed, "grid": list(GRID_GATED), "video_tokens": tokens, "context_len": CONTEXT_LEN_GATED,
+                "audio_tokens": T_AUDIO_GATED, "audio_context_len": AUDIO_CONTEXT_LEN_GATED,
+                "video_sigma": VIDEO_SIGMA_GATED, "audio_sigma": AUDIO_SIGMA_GATED,
+                "connector_num_layers": CONNECTOR_NUM_LAYERS, "connector_num_registers": CONNECTOR_NUM_REGISTERS,
+                "video_connector_num_attention_heads": VIDEO_CONNECTOR_NUM_ATTENTION_HEADS,
+                "video_connector_attention_head_dim": VIDEO_CONNECTOR_ATTENTION_HEAD_DIM,
+                "audio_connector_num_attention_heads": AUDIO_CONNECTOR_NUM_ATTENTION_HEADS,
+                "audio_connector_attention_head_dim": AUDIO_CONNECTOR_ATTENTION_HEAD_DIM,
+                "tiny_gated_config": {k: (v.value if hasattr(v, "value") else v) for k, v in TINY_GATED_CONFIG.items()
+                                      if k not in ("caption_projection", "audio_caption_projection")}},
+        "versions": {"torch": torch.__version__, "einops": einops.__version__,
+                     "python": sys.version.split()[0]},
+    }
+    save(args.out, "av_dit_tiny_gated.safetensors", tensors, manifest)
+
+    sd = dict(model.state_dict())
+    sd.update({f"video_embeddings_connector.{k}": v for k, v in video_connector.state_dict().items()})
+    sd.update({f"audio_embeddings_connector.{k}": v for k, v in audio_connector.state_dict().items()})
+    save(args.out, "av_dit_tiny_gated_weights.safetensors", sd, manifest)
+
+    with open(os.path.join(args.out, "manifest_gated.json"), "w") as mf:
+        json.dump(manifest, mf, indent=2, sort_keys=True)
+    print(f"\nwrote {args.out}/manifest_gated.json", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -421,6 +733,8 @@ def main():
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
     print(f"\nwrote {args.out}/manifest.json", flush=True)
+
+    dump_gated(args)
 
 
 if __name__ == "__main__":

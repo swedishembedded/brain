@@ -115,6 +115,7 @@ impl ModelConfig for LtxDitConfig {
             "timestep_scale_multiplier": self.timestep_scale_multiplier,
             "use_middle_indices_grid": self.use_middle_indices_grid,
             "apply_gated_attention": self.apply_gated_attention,
+            "connector_apply_gated_attention": self.connector_apply_gated_attention,
             "connector_num_layers": self.connector_num_layers,
             "connector_num_attention_heads": self.connector_num_attention_heads,
             "connector_attention_head_dim": self.connector_attention_head_dim,
@@ -122,6 +123,7 @@ impl ModelConfig for LtxDitConfig {
             "connector_positional_embedding_max_pos": self.connector_positional_embedding_max_pos,
             "connector_norm_output": self.connector_norm_output,
             "caption_proj_before_connector": self.caption_proj_before_connector,
+            "use_embeddings_connector": self.use_embeddings_connector,
         })
     }
     fn from_json(v: &serde_json::Value) -> LtxDitConfig {
@@ -148,6 +150,7 @@ impl ModelConfig for LtxDitConfig {
             timestep_scale_multiplier: u("timestep_scale_multiplier"),
             use_middle_indices_grid: b("use_middle_indices_grid"),
             apply_gated_attention: b("apply_gated_attention"),
+            connector_apply_gated_attention: b("connector_apply_gated_attention"),
             connector_num_layers: u("connector_num_layers"),
             connector_num_attention_heads: u("connector_num_attention_heads"),
             connector_attention_head_dim: u("connector_attention_head_dim"),
@@ -155,6 +158,7 @@ impl ModelConfig for LtxDitConfig {
             connector_positional_embedding_max_pos: [connector_max_pos[0].as_u64().unwrap() as u32],
             connector_norm_output: b("connector_norm_output"),
             caption_proj_before_connector: b("caption_proj_before_connector"),
+            use_embeddings_connector: b("use_embeddings_connector"),
         }
     }
     fn vocab(&self) -> u32 {

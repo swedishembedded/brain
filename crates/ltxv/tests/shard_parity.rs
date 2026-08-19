@@ -91,7 +91,8 @@ fn single_shard_matches_the_non_sharded_reference() {
     let inp = build_inputs(&cfg, 11);
 
     let reference = LtxDit::new(cfg, weights, None);
-    let taps = reference.forward(&inp.latent, &inp.timesteps, &inp.positions, &inp.keyframes_mask, &inp.context, inp.context_len, inp.t);
+    let context_valid = vec![1.0f32; inp.context_len];
+    let taps = reference.forward(&inp.latent, &inp.timesteps, &inp.positions, &inp.keyframes_mask, &inp.context, inp.context_len, inp.t, &context_valid);
 
     let whole = Shard::whole(cfg.num_layers as usize);
     let sharded = <LtxDit as Shardable>::new_shard(cfg, 1, inp.t as u32, &flat, whole.clone());
@@ -140,7 +141,8 @@ fn two_stage_boundary_handoff_matches_the_non_sharded_reference() {
     let inp = build_inputs(&cfg, 17);
 
     let reference = LtxDit::new(cfg, weights, None);
-    let taps = reference.forward(&inp.latent, &inp.timesteps, &inp.positions, &inp.keyframes_mask, &inp.context, inp.context_len, inp.t);
+    let context_valid = vec![1.0f32; inp.context_len];
+    let taps = reference.forward(&inp.latent, &inp.timesteps, &inp.positions, &inp.keyframes_mask, &inp.context, inp.context_len, inp.t, &context_valid);
 
     let shard0 = Shard { start: 0, end: 1, embed: true, head: false, gpu_index: Shard::ANY_GPU };
     let shard1 = Shard { start: 1, end: 2, embed: false, head: true, gpu_index: Shard::ANY_GPU };

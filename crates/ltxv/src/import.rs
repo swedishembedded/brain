@@ -242,6 +242,16 @@ pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
         connector_positional_embedding_max_pos: [connector_pos_max[0]],
         connector_norm_output: b("connector_norm_output")?,
         caption_proj_before_connector: b("caption_proj_before_connector")?,
+        connector_apply_gated_attention: b("connector_apply_gated_attention")?,
+        // Not a real Lightricks `config.transformer` key (see
+        // `LtxDitConfig::use_embeddings_connector`'s doc) - defaults `true`
+        // when absent (every real checkpoint this importer parses carries
+        // both embeddings connectors' tensors, checked two-way below
+        // regardless), but honors an explicit value when present so THIS
+        // crate's own re-serialized checkpoints (`import_gguf`'s output, or
+        // a synthetic test fixture) round-trip exactly rather than silently
+        // reverting to the default.
+        use_embeddings_connector: t["use_embeddings_connector"].as_bool().unwrap_or(true),
     };
     let audio = LtxAudioDitConfig {
         inner_dim: audio_heads * audio_head_dim,
@@ -591,6 +601,7 @@ mod tests {
                 "timestep_scale_multiplier": cfg.video.timestep_scale_multiplier,
                 "use_middle_indices_grid": cfg.video.use_middle_indices_grid,
                 "apply_gated_attention": cfg.video.apply_gated_attention,
+                "connector_apply_gated_attention": cfg.video.connector_apply_gated_attention,
                 "connector_num_layers": cfg.video.connector_num_layers,
                 "connector_num_attention_heads": cfg.video.connector_num_attention_heads,
                 "connector_attention_head_dim": cfg.video.connector_attention_head_dim,
@@ -598,6 +609,7 @@ mod tests {
                 "connector_positional_embedding_max_pos": cfg.video.connector_positional_embedding_max_pos,
                 "connector_norm_output": cfg.video.connector_norm_output,
                 "caption_proj_before_connector": cfg.video.caption_proj_before_connector,
+                "use_embeddings_connector": cfg.video.use_embeddings_connector,
                 "audio_num_attention_heads": cfg.audio.num_heads,
                 "audio_attention_head_dim": cfg.audio.head_dim(),
                 "audio_out_channels": cfg.audio.out_channels,

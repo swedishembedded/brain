@@ -23,6 +23,7 @@
 
 use std::path::Path;
 
+use ltxv::block::{open_device, EmbeddingsConnector};
 use ltxv::{load_tiny_weights, LtxDit, LtxDitConfig};
 
 // ------------------------------------------------------------------ metrics
@@ -57,6 +58,19 @@ fn report(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
 }
 
 const MIN_COS: f64 = 0.999999;
+/// `crate::shard_parity`'s own strict-tap bound - used only by the gated/
+/// connector test below (the existing no-gating test above is UNCHANGED,
+/// still `report`-only, per this port's own precedent for keeping a landed
+/// milestone's assertions untouched when a later one adds new taps).
+const MAX_ABS_BOUND: f32 = 1e-3;
+
+fn report_strict(label: &str, got: &[f32], want: &[f32], min_cos: f64) {
+    assert_eq!(got.len(), want.len(), "{label}: {} values vs {}", got.len(), want.len());
+    let (c, m) = (cosine(got, want), max_abs(got, want));
+    eprintln!("{label}: cosine={c:.9}  max_abs={m:.3e}  n={}", got.len());
+    assert!(c >= min_cos, "{label}: cosine {c:.9} < {min_cos}");
+    assert!(m < MAX_ABS_BOUND, "{label}: max_abs {m:.3e} >= {MAX_ABS_BOUND:.3e}");
+}
 
 // ---------------------------------------------------------- real fixtures
 
@@ -102,7 +116,8 @@ fn ltxv_dit_tiny_matches_reference() {
     let keyframes_mask = fx.get("keyframes_mask"); // [T, 1] -> already flat as [T]
 
     let model = LtxDit::new(cfg, w, None);
-    let taps = model.forward(latent, timesteps, positions, keyframes_mask, context, context_len, t);
+    let context_valid = vec![1.0f32; context_len];
+    let taps = model.forward(latent, timesteps, positions, keyframes_mask, context, context_len, t, &context_valid);
 
     // RoPE tables: [heads, T, half] row-major, matching the golden exactly.
     report("rope_cos", &taps.rope_cos, fx.get("rope_cos"), MIN_COS);
@@ -122,4 +137,99 @@ fn ltxv_dit_tiny_matches_reference() {
     report("out", &taps.out, fx.get("out"), MIN_COS);
 
     let _ = dim; // shape sanity only, no further use
+}
+
+// -------------------------------------------------- gated + connector (M?)
+
+/// `(fixture, weights)` for the gated/connector golden, or `None` with a
+/// loud skip - same convention as [`setup`], separate fixture files (this
+/// dumper run does not touch `dit_tiny.safetensors`/`dit_tiny_weights.
+/// safetensors`, see `tools/goldens/ltxv_dit_dump_reference.py`'s
+/// `dump_gated`'s doc).
+fn setup_gated() -> Option<(Fixture, vae::blocks::Tensors)> {
+    let fx_path = brain_testutil::testdata("golden/ltxv/dit/dit_tiny_gated.safetensors");
+    let w_path = brain_testutil::testdata("golden/ltxv/dit/dit_tiny_gated_weights.safetensors");
+    if !Path::new(&fx_path).exists() || !Path::new(&w_path).exists() {
+        brain_testutil::skip(&format!("fixture {fx_path} absent - run tools/goldens/ltxv_dit_dump_reference.py"));
+        return None;
+    }
+    let t = checkpoint::safetensors::read(&fx_path).expect("read golden");
+    let w = load_tiny_weights(&w_path);
+    Some((Fixture { t }, w))
+}
+
+/// Gated attention (`apply_gated_attention`/`connector_apply_gated_
+/// attention: true`) + the video embeddings connector
+/// (`use_embeddings_connector: true`), replayed against `tools/goldens/
+/// ltxv_dit_dump_reference.py`'s `dump_gated` fixture -
+/// [`LtxDitConfig::tiny_gated`], every axis distinct from every other and
+/// from [`LtxDitConfig::tiny`]'s (lesson #4). Two things are checked
+/// independently, both at cosine >= 0.999999 AND `max_abs < 1e-4`:
+///
+/// 1. [`EmbeddingsConnector`] alone, run directly on the golden's RAW
+///    pre-connector `raw_context`/`context_valid` - proves the connector's
+///    OWN forward (register substitution, gated self-attention, RoPE,
+///    output norm) independent of the surrounding DiT.
+/// 2. [`LtxDit::forward`] given that SAME raw context - `cfg.use_
+///    embeddings_connector` routes it through the connector internally, so
+///    every existing tap (RoPE, adaLN, block-0 internals, every block's
+///    output, the final `out`) now also proves gated attention is wired
+///    correctly through the whole block stack (self-, text-cross-
+///    attention all read `w.gate`, see `crate::block::attention`'s doc).
+#[test]
+fn ltxv_dit_tiny_gated_matches_reference() {
+    let Some((fx, w)) = setup_gated() else { return };
+
+    let cfg = LtxDitConfig::tiny_gated();
+    assert!(cfg.apply_gated_attention && cfg.connector_apply_gated_attention && cfg.use_embeddings_connector);
+
+    let latent = fx.get("latent");
+    let t = fx.shape("latent")[0];
+    let raw_context = fx.get("raw_context");
+    let context_len = fx.shape("raw_context")[0];
+    let context_valid = fx.get("context_valid");
+    let timesteps = fx.get("timesteps");
+    let positions = fx.get("positions");
+    let keyframes_mask = fx.get("keyframes_mask");
+
+    // ---- 1: the connector alone -----------------------------------------
+    let gpu = open_device(None);
+    let connector = EmbeddingsConnector::on(
+        gpu,
+        &w,
+        "video_embeddings_connector",
+        cfg.connector_inner_dim(),
+        cfg.connector_num_attention_heads,
+        cfg.connector_attention_head_dim,
+        cfg.connector_num_layers,
+        cfg.connector_num_learnable_registers,
+        cfg.connector_apply_gated_attention,
+        cfg.connector_norm_output,
+        cfg.positional_embedding_theta,
+        &cfg.connector_positional_embedding_max_pos,
+        cfg.norm_eps,
+    );
+    let connector_out = connector.forward(raw_context, context_valid, context_len as u32);
+    report_strict("connector_out", &connector_out, fx.get("connector_out"), MIN_COS);
+
+    // ---- 2: the whole DiT, routing raw_context through the SAME connector
+    // internally ------------------------------------------------------------
+    let model = LtxDit::new(cfg, w, None);
+    let taps = model.forward(latent, timesteps, positions, keyframes_mask, raw_context, context_len, t, context_valid);
+
+    report_strict("rope_cos", &taps.rope_cos, fx.get("rope_cos"), MIN_COS);
+    report_strict("rope_sin", &taps.rope_sin, fx.get("rope_sin"), MIN_COS);
+    report_strict("adaln_table", &taps.adaln_table, fx.get("adaln_table"), MIN_COS);
+    report_strict("embedded_timestep", &taps.embedded_timestep, fx.get("embedded_timestep"), MIN_COS);
+    report_strict("connector_out (via forward)", &taps.connector_out, fx.get("connector_out"), MIN_COS);
+
+    report_strict("b0_attn1_out", &taps.b0_attn1_out, fx.get("b0_attn1_out"), MIN_COS);
+    report_strict("b0_attn2_out", &taps.b0_attn2_out, fx.get("b0_attn2_out"), MIN_COS);
+    report_strict("b0_ff_out", &taps.b0_ff_out, fx.get("b0_ff_out"), MIN_COS);
+
+    for (i, out) in taps.block_out.iter().enumerate() {
+        report_strict(&format!("block.{i}.out"), out, fx.get(&format!("block.{i}.out")), MIN_COS);
+    }
+
+    report_strict("out", &taps.out, fx.get("out"), MIN_COS);
 }
