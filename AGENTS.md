@@ -162,9 +162,13 @@ fast and scalable kernel - not a naive one.
     interleaved RoPE (theta 10000), and the Kontext edit path (reference images
     VAE-encoded and appended, axis-0 id = 1). Imported diffusers **1160 → 780**
     BFL tensors, two-way covered. Adds **no kernel**. **Forward-parity-gated at
-    reduced depth in fp32 (worst 1−cos 1.5e-11) and at full depth in int8
-    (`out` cosine 0.9985 / 0.9991)** - the full-depth fp32 number does NOT fit a
-    24 GiB card and is not claimed. See `.agents/roadmap/flux1.md`.
+    reduced depth in fp32 (worst 1−cos 1.5e-11, the enforced floor) and at
+    full depth in int8, where `out` cosine measured 0.9985 / 0.9991 on real
+    image fixtures - that number is what a real run happened to produce, NOT
+    the test's enforced floor, which is 0.95 (int8 is a lossy tier; the floor
+    only needs to catch a broken port, not reproduce this specific
+    measurement)** - the full-depth fp32 number does NOT fit a 24 GiB card
+    and is not claimed. See `.agents/roadmap/flux1.md`.
     *(Transformer forward only: **no sampler loop, no VAE glue, no CLI, no
     serving surface**; backward/gradcheck deferred.)*
 
