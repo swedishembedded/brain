@@ -37,7 +37,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QTier};
+use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, CachedQBlockWeights, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -1085,14 +1085,9 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// (patchify -> keyframes embed -> adaLN-single table -> RoPE tables ->
 /// connector routing -> block stack -> output stage), but never requires
 /// the whole 22B model resident as host fp32. `head` is this function's own
-/// [`load_head_tensors_from_source`] output; each of `cfg.num_layers`
-/// blocks is instead streamed fresh from `src` via
-/// [`load_block_tensors_from_source`], quantized to `tier` on the way to
-/// the device by [`LtxBlockQ::on`], and dropped once that block's own
-/// forward call returns - peak EXTRA host memory (beyond `head`) is one
-/// block's own fp32 expansion, never the whole model. Returns only the
-/// final `[t, out_channels]` prediction: a real generation run only needs
-/// this, not the full parity-test tap set [`LtxDit::forward_q`] returns.
+/// [`load_head_tensors_from_source`] output. Returns only the final
+/// `[t, out_channels]` prediction: a real generation run only needs this,
+/// not the full parity-test tap set [`LtxDit::forward_q`] returns.
 /// `device`: opens a FRESH [`Gpu`] every call, the same convention
 /// [`LtxDit::forward`]/[`LtxDit::forward_q`] already use - measured at the
 /// real 22B checkpoint's own scale (a real multi-step generation run, not
@@ -1101,6 +1096,33 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// ONE [`Gpu`] handle across calls instead was tried and measured worse
 /// (a second real forward then ran out of device memory that a fresh
 /// device open does not).
+///
+/// `block_cache`: a per-GENERATION (not per-call) HOST-side cache of every
+/// block's already-quantized weight bytes, keyed by layer index -
+/// `crate::pipeline::RealDit` owns one and passes the SAME `RefCell` into
+/// every one of a generation's ~20-50 denoise-step forward calls. On a cache
+/// MISS (an empty slot - the common case on a generation's very first
+/// forward call), a block is streamed from `src` via
+/// [`load_block_tensors_from_source`] and quantized to `tier` exactly as
+/// before, but the quantized bytes are ALSO stashed in the cache before
+/// upload; on a cache HIT (every later step, same layer), the GGUF read and
+/// the CPU-side int8/int4 quantization are both skipped entirely and the
+/// cached bytes are re-uploaded to this call's fresh `Gpu` directly
+/// ([`LtxBlockQ::on_cached`]) - no device buffer crosses a call boundary
+/// (the "fresh `Gpu` every call" constraint above is unaffected), only host
+/// bytes do. This is exact, not approximate: `model::int8::quantize_weight`/
+/// `model::int4::quantize_weight_q4` are pure functions of the checkpoint's
+/// own (immutable) weight bytes, so a cached result and a freshly recomputed
+/// one are bit-identical by construction - recomputing on every step was
+/// always redundant work, never a source of any different number. Peak EXTRA
+/// host memory beyond `head` is now the WHOLE cache once every layer has
+/// been visited once, rather than one block's fp32 expansion - measured at
+/// the real 22B/Q8_0 width via [`crate::block::CachedQBlockWeights::
+/// byte_len`] at ~270 MB/block, ~13 GB for all 48 - a deliberate trade of
+/// host RAM (184 GiB on this class of hardware, plentiful) for skipping the
+/// dominant real cost Phase 8 measured
+/// (~86% of one real denoise step was GGUF re-read + re-quantize of the SAME
+/// immutable weights, over and over, every single step).
 #[allow(clippy::too_many_arguments)]
 pub fn forward_q_streamed(
     cfg: &LtxDitConfig,
@@ -1116,6 +1138,7 @@ pub fn forward_q_streamed(
     context_len: usize,
     t: usize,
     context_valid: &[f32],
+    block_cache: &RefCell<Vec<Option<CachedQBlockWeights>>>,
 ) -> Vec<f32> {
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
@@ -1176,22 +1199,47 @@ pub fn forward_q_streamed(
     let mut t_load = std::time::Duration::ZERO;
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_gpu = std::time::Duration::ZERO;
+    {
+        let mut cache = block_cache.borrow_mut();
+        if cache.len() < cfg.num_layers as usize {
+            cache.resize_with(cfg.num_layers as usize, || None);
+        }
+    }
     for l in 0..cfg.num_layers {
         let prefix = format!("transformer_blocks.{l}");
-        let s0 = std::time::Instant::now();
-        let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
-        t_load += s0.elapsed();
-        let s1 = std::time::Instant::now();
-        let blk = LtxBlockQ::on(gpu.share(), cfg, &block_tensors, &prefix, t as u32, context_len as u32, tier);
-        t_quant += s1.elapsed();
+        {
+            let mut cache = block_cache.borrow_mut();
+            if cache[l as usize].is_none() {
+                let s0 = std::time::Instant::now();
+                let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
+                t_load += s0.elapsed();
+                let s1 = std::time::Instant::now();
+                let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
+                t_quant += s1.elapsed();
+                cache[l as usize] = Some(quantized);
+            }
+            // Every step past this block's first cache-populating one skips
+            // both stages above entirely: `cache[l]` is already `Some`, so
+            // `t_load`/`t_quant` (and their real GGUF-read/CPU-quantize work)
+            // are simply not incurred - this loop does no wasted work on a
+            // cache hit, it does LESS work.
+        }
+        // Device upload (`on_cached`) + GPU forward + wait, timed together as
+        // one bucket: `on_cached` never does CPU quantization (that is
+        // entirely inside the cache-miss branch above), only device writes of
+        // already-quantized bytes, so this bucket is what remains on EVERY
+        // step regardless of cache hit/miss - the honest lower bound the
+        // "fresh Gpu every call" design (this function's own doc) still pays.
         let s2 = std::time::Instant::now();
+        let cache = block_cache.borrow();
+        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, cache[l as usize].as_ref().expect("populated above"), t as u32, context_len as u32, tier);
         let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
         t_gpu += s2.elapsed();
         x = out;
     }
-    gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers)", std::time::Instant::now() - t_load);
-    gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize+upload (sum over all layers)", std::time::Instant::now() - t_quant);
-    gpu_core::profile::stage_time("forward_q_streamed: block GPU forward+wait (sum over all layers)", std::time::Instant::now() - t_gpu);
+    gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
+    gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
+    gpu_core::profile::stage_time("forward_q_streamed: block GPU upload+forward+wait (sum over all layers, every step)", std::time::Instant::now() - t_gpu);
 
     output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
 }

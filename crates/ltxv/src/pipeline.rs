@@ -69,10 +69,12 @@
 //! is generated directly in the DiT's own token-major layout, so no
 //! transpose is needed going in.
 
+use std::cell::RefCell;
 use std::time::Instant;
 
 use vae::blocks::Tensors;
 
+use crate::block::CachedQBlockWeights;
 use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
@@ -511,17 +513,31 @@ impl Denoiser for LtxDit {
 
 /// The real 22B checkpoint's own [`Denoiser`] - `LtxDit`'s counterpart when
 /// [`Paths::dit`] is set: holds an open GGUF source plus the small resident
-/// "head" tensors ([`crate::dit::load_head_tensors_from_source`]) and
-/// streams each of the 48 blocks fresh from `src` on every forward call via
-/// [`crate::dit::forward_q_streamed`] - see that function's doc for the
+/// "head" tensors ([`crate::dit::load_head_tensors_from_source`]) and, on a
+/// generation's first forward call, streams each of the 48 blocks from `src`
+/// via [`crate::dit::forward_q_streamed`] - see that function's doc for the
 /// memory bound this buys over materializing the whole model as host fp32.
 /// Int8 compute (not int4): this milestone's own "start small, prove it
 /// works first" choice - see [`generate`]'s doc for why.
+///
+/// `block_cache`: THIS instance's own per-generation, host-side cache of
+/// every block's already-quantized weight bytes - shared, via the SAME
+/// `RefCell`, across every one of `denoise`'s forward calls on this
+/// `RealDit` (both the conditional and unconditional branch when CFG is on,
+/// and every one of the run's ~20-50 denoise steps), so the GGUF read + CPU
+/// quantize Phase 8 measured at ~86% of one real denoise step happens at
+/// most ONCE per block for the whole generation, not once per forward call.
+/// `RefCell`, not a plain field, because [`Denoiser::forward`] takes `&self`
+/// (the same interior-mutability shape `LtxAvDit`'s own per-stage state
+/// already uses in `crate::dit`) - `denoise`'s loop never holds two
+/// simultaneous borrows of it, since each forward call borrows, uses, and
+/// drops its borrow before returning.
 struct RealDit {
     cfg: LtxDitConfig,
     src: crate::gguf_src::LtxvGgufSource,
     head: Tensors,
     device: Option<String>,
+    block_cache: RefCell<Vec<Option<CachedQBlockWeights>>>,
 }
 
 impl Denoiser for RealDit {
@@ -541,6 +557,7 @@ impl Denoiser for RealDit {
             context_len,
             t,
             context_valid,
+            &self.block_cache,
         )
     }
 }
@@ -674,7 +691,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
         }
         let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone() })
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), block_cache: RefCell::new(Vec::new()) })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     if cancel.is_cancelled() {

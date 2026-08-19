@@ -1213,18 +1213,59 @@ struct QLinear {
     b: Option<DeviceBuffer>,
 }
 
+/// [`QLinear`]'s host-only, GPU-free form - the CPU-side per-channel
+/// quantization result [`QLinear::quantize_host`] produces and
+/// [`QLinear::from_cached`] later uploads without recomputing it. This is
+/// what a generation-lifetime weight cache actually stores: `packed`/`sw`
+/// are a PURE function of the checkpoint's own (immutable) weight bytes, so
+/// computing them once and re-uploading the same bytes on every later
+/// denoise step is bit-identical to recomputing them fresh each call - see
+/// `crate::pipeline::RealDit`'s doc for why this is the cache's exact-win
+/// gate.
+struct CachedQLinear {
+    packed: Vec<u32>,
+    sw: Vec<f32>,
+    b: Option<Vec<f32>>,
+}
+
+impl CachedQLinear {
+    /// Real host bytes this one linear's cached form holds - what
+    /// `crate::pipeline::RealDit::block_cache`'s memory cost is actually
+    /// made of. `Vec::len`, not `size_of`: the packed/scale/bias buffers are
+    /// heap allocations, and `size_of::<CachedQLinear>()` would only ever
+    /// report the three (small, fixed) `Vec` headers.
+    fn byte_len(&self) -> usize {
+        std::mem::size_of_val(self.packed.as_slice()) + std::mem::size_of_val(self.sw.as_slice()) + self.b.as_ref().map_or(0, |b| std::mem::size_of_val(b.as_slice()))
+    }
+}
+
 impl QLinear {
-    fn upload(gpu: &Gpu, t: &Tensors, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize, has_bias: bool) -> QLinear {
+    /// GGUF-decoded fp32 in, packed int8/int4 bytes + scale out, no device
+    /// touched - the CPU-only half of what one `QLinear` construction used to
+    /// do in a single step. Split out so a caller that already has this
+    /// result cached can skip straight to [`Self::from_cached`].
+    fn quantize_host(t: &Tensors, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize, has_bias: bool) -> CachedQLinear {
         let data = tget(t, &format!("{prefix}.weight"));
         let (packed, sw) = match tier {
             QTier::Int8 => model::int8::quantize_weight(data, out_dim, in_dim),
             QTier::Int4 => model::int4::quantize_weight_q4(data, out_dim, in_dim),
         };
-        let wb = gpu.storage(packed.len() as u64);
-        gpu.write(&wb, &packed);
-        let swb = gpu.storage(sw.len() as u64);
-        wf(gpu, &swb, &sw);
-        let b = has_bias.then(|| upload(gpu, t, &format!("{prefix}.bias")));
+        let b = has_bias.then(|| tget(t, &format!("{prefix}.bias")).to_vec());
+        CachedQLinear { packed, sw, b }
+    }
+
+    /// The device-upload half - no CPU quantization work, just three uploads
+    /// of already-quantized host bytes.
+    fn from_cached(gpu: &Gpu, c: &CachedQLinear) -> QLinear {
+        let wb = gpu.storage(c.packed.len() as u64);
+        gpu.write(&wb, &c.packed);
+        let swb = gpu.storage(c.sw.len() as u64);
+        wf(gpu, &swb, &c.sw);
+        let b = c.b.as_ref().map(|b| {
+            let buf = gpu.storage(b.len() as u64);
+            gpu.write_f32(&buf, b);
+            buf
+        });
         QLinear { w: wb, sw: swb, b }
     }
 }
@@ -1242,16 +1283,69 @@ struct QAttnWeights {
     gate: Option<GateWeights>,
 }
 
+/// [`QAttnWeights`]'s host-only form - see [`CachedQLinear`]'s doc for why
+/// this exists.
+struct CachedQAttnWeights {
+    wq: CachedQLinear,
+    wk: CachedQLinear,
+    wv: CachedQLinear,
+    wo: CachedQLinear,
+    q_norm: Vec<f32>,
+    k_norm: Vec<f32>,
+    gate: Option<(Vec<f32>, Vec<f32>)>,
+}
+
+impl CachedQAttnWeights {
+    fn byte_len(&self) -> usize {
+        let mut n = self.wq.byte_len() + self.wk.byte_len() + self.wv.byte_len() + self.wo.byte_len() + std::mem::size_of_val(self.q_norm.as_slice()) + std::mem::size_of_val(self.k_norm.as_slice());
+        if let Some((w, b)) = &self.gate {
+            n += std::mem::size_of_val(w.as_slice()) + std::mem::size_of_val(b.as_slice());
+        }
+        n
+    }
+}
+
 impl QAttnWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, gated: bool, tier: QTier, q_dim: usize, kv_dim: usize, inner_dim: usize) -> QAttnWeights {
+    fn quantize_host(w: &Tensors, prefix: &str, gated: bool, tier: QTier, q_dim: usize, kv_dim: usize, inner_dim: usize) -> CachedQAttnWeights {
+        CachedQAttnWeights {
+            wq: QLinear::quantize_host(w, &format!("{prefix}.to_q"), tier, inner_dim, q_dim, true),
+            wk: QLinear::quantize_host(w, &format!("{prefix}.to_k"), tier, inner_dim, kv_dim, true),
+            wv: QLinear::quantize_host(w, &format!("{prefix}.to_v"), tier, inner_dim, kv_dim, true),
+            wo: QLinear::quantize_host(w, &format!("{prefix}.to_out.0"), tier, q_dim, inner_dim, true),
+            q_norm: tget(w, &format!("{prefix}.q_norm.weight")).to_vec(),
+            k_norm: tget(w, &format!("{prefix}.k_norm.weight")).to_vec(),
+            gate: gated.then(|| (tget(w, &format!("{prefix}.to_gate_logits.weight")).to_vec(), tget(w, &format!("{prefix}.to_gate_logits.bias")).to_vec())),
+        }
+    }
+
+    fn from_cached(gpu: &Gpu, c: &CachedQAttnWeights) -> QAttnWeights {
         QAttnWeights {
-            wq: QLinear::upload(gpu, w, &format!("{prefix}.to_q"), tier, inner_dim, q_dim, true),
-            wk: QLinear::upload(gpu, w, &format!("{prefix}.to_k"), tier, inner_dim, kv_dim, true),
-            wv: QLinear::upload(gpu, w, &format!("{prefix}.to_v"), tier, inner_dim, kv_dim, true),
-            wo: QLinear::upload(gpu, w, &format!("{prefix}.to_out.0"), tier, q_dim, inner_dim, true),
-            q_norm: upload(gpu, w, &format!("{prefix}.q_norm.weight")),
-            k_norm: upload(gpu, w, &format!("{prefix}.k_norm.weight")),
-            gate: gated.then(|| GateWeights { w: upload(gpu, w, &format!("{prefix}.to_gate_logits.weight")), b: upload(gpu, w, &format!("{prefix}.to_gate_logits.bias")) }),
+            wq: QLinear::from_cached(gpu, &c.wq),
+            wk: QLinear::from_cached(gpu, &c.wk),
+            wv: QLinear::from_cached(gpu, &c.wv),
+            wo: QLinear::from_cached(gpu, &c.wo),
+            q_norm: {
+                let b = gpu.storage(c.q_norm.len() as u64);
+                wf(gpu, &b, &c.q_norm);
+                b
+            },
+            k_norm: {
+                let b = gpu.storage(c.k_norm.len() as u64);
+                wf(gpu, &b, &c.k_norm);
+                b
+            },
+            gate: c.gate.as_ref().map(|(w, b)| GateWeights {
+                w: {
+                    let buf = gpu.storage(w.len() as u64);
+                    wf(gpu, &buf, w);
+                    buf
+                },
+                b: {
+                    let buf = gpu.storage(b.len() as u64);
+                    wf(gpu, &buf, b);
+                    buf
+                },
+            }),
         }
     }
 }
@@ -1262,19 +1356,34 @@ struct QFfWeights {
     w2: QLinear, // [dim, ff_dim]
 }
 
+/// [`QFfWeights`]'s host-only form.
+struct CachedQFfWeights {
+    w1: CachedQLinear,
+    w2: CachedQLinear,
+}
+
+impl CachedQFfWeights {
+    fn byte_len(&self) -> usize {
+        self.w1.byte_len() + self.w2.byte_len()
+    }
+}
+
 impl QFfWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> QFfWeights {
+    fn quantize_host(w: &Tensors, prefix: &str, tier: QTier, dim: usize, has_bias: bool) -> CachedQFfWeights {
         let ff_dim = dim * 4;
-        QFfWeights {
-            w1: QLinear::upload(gpu, w, &format!("{prefix}.net.0.proj"), tier, ff_dim, dim, has_bias),
-            w2: QLinear::upload(gpu, w, &format!("{prefix}.net.2"), tier, dim, ff_dim, has_bias),
-        }
+        CachedQFfWeights { w1: QLinear::quantize_host(w, &format!("{prefix}.net.0.proj"), tier, ff_dim, dim, has_bias), w2: QLinear::quantize_host(w, &format!("{prefix}.net.2"), tier, dim, ff_dim, has_bias) }
+    }
+
+    fn from_cached(gpu: &Gpu, c: &CachedQFfWeights) -> QFfWeights {
+        QFfWeights { w1: QLinear::from_cached(gpu, &c.w1), w2: QLinear::from_cached(gpu, &c.w2) }
     }
 }
 
 /// Resident quantized weights of one video-only block - [`BlockWeights`]'s
-/// int8/int4 analogue.
-struct QBlockWeights {
+/// int8/int4 analogue. `pub(crate)` so `crate::dit::forward_q_streamed` can
+/// call [`QBlockWeights::quantize_host`] directly when populating its
+/// per-generation block-weight cache.
+pub(crate) struct QBlockWeights {
     attn1: QAttnWeights,
     attn2: QAttnWeights,
     ff: QFfWeights,
@@ -1282,19 +1391,58 @@ struct QBlockWeights {
     prompt_scale_shift_table: Vec<f32>,
 }
 
+/// [`QBlockWeights`]'s host-only form - what
+/// [`crate::dit::forward_q_streamed`]'s per-generation block-weight cache
+/// actually stores (`crate::pipeline::RealDit::block_cache`). Produced once
+/// per block by [`QBlockWeights::quantize_host`] (the same GGUF-read +
+/// int8/int4-pack work `QBlockWeights::upload` always did, just no longer
+/// re-run on every one of a generation's ~20-50 denoise steps) and re-hydrated
+/// into a fresh [`QBlockWeights`] on every later step by
+/// [`QBlockWeights::from_cached`], which touches no CPU quantization at all -
+/// only device uploads of already-quantized bytes. `pub` (not `pub(crate)`):
+/// [`crate::dit::forward_q_streamed`], which takes this type in its cache
+/// parameter, is itself `pub` and reachable from outside the crate
+/// (`crate::pipeline::RealDit` and `bin/ltxv_bench.rs` both call it), and a
+/// private type behind a public function's signature does not compile. Every
+/// FIELD stays private - only [`QBlockWeights::quantize_host`]/
+/// [`QBlockWeights::from_cached`] construct or read one, so nothing outside
+/// this module can inspect or forge cached weight bytes.
+pub struct CachedQBlockWeights {
+    attn1: CachedQAttnWeights,
+    attn2: CachedQAttnWeights,
+    ff: CachedQFfWeights,
+    scale_shift_table: Vec<f32>,
+    prompt_scale_shift_table: Vec<f32>,
+}
+
+impl CachedQBlockWeights {
+    /// Real host bytes this one block's cache slot holds - `pub` so a
+    /// real-weight test can measure `crate::pipeline::RealDit::block_cache`'s
+    /// actual memory cost at the real 22B config rather than assert it from
+    /// a derivation nobody checks (lesson: a memory saving is not measured by
+    /// anything unless someone measures it).
+    pub fn byte_len(&self) -> usize {
+        self.attn1.byte_len() + self.attn2.byte_len() + self.ff.byte_len() + std::mem::size_of_val(self.scale_shift_table.as_slice()) + std::mem::size_of_val(self.prompt_scale_shift_table.as_slice())
+    }
+}
+
 impl QBlockWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, dim: usize, gated: bool, tier: QTier) -> QBlockWeights {
+    pub(crate) fn quantize_host(w: &Tensors, prefix: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
         let sst = tget(w, &format!("{prefix}.scale_shift_table")).to_vec();
         assert_eq!(sst.len(), 9 * dim, "{prefix}.scale_shift_table must be [9, dim]");
         let pst = tget(w, &format!("{prefix}.prompt_scale_shift_table")).to_vec();
         assert_eq!(pst.len(), 2 * dim, "{prefix}.prompt_scale_shift_table must be [2, dim]");
-        QBlockWeights {
-            attn1: QAttnWeights::upload(gpu, w, &format!("{prefix}.attn1"), gated, tier, dim, dim, dim),
-            attn2: QAttnWeights::upload(gpu, w, &format!("{prefix}.attn2"), gated, tier, dim, dim, dim),
-            ff: QFfWeights::upload(gpu, w, &format!("{prefix}.ff"), tier, dim, false),
+        CachedQBlockWeights {
+            attn1: QAttnWeights::quantize_host(w, &format!("{prefix}.attn1"), gated, tier, dim, dim, dim),
+            attn2: QAttnWeights::quantize_host(w, &format!("{prefix}.attn2"), gated, tier, dim, dim, dim),
+            ff: QFfWeights::quantize_host(w, &format!("{prefix}.ff"), tier, dim, false),
             scale_shift_table: sst,
             prompt_scale_shift_table: pst,
         }
+    }
+
+    fn from_cached(gpu: &Gpu, c: &CachedQBlockWeights) -> QBlockWeights {
+        QBlockWeights { attn1: QAttnWeights::from_cached(gpu, &c.attn1), attn2: QAttnWeights::from_cached(gpu, &c.attn2), ff: QFfWeights::from_cached(gpu, &c.ff), scale_shift_table: c.scale_shift_table.clone(), prompt_scale_shift_table: c.prompt_scale_shift_table.clone() }
     }
 }
 
@@ -1545,7 +1693,24 @@ impl LtxBlockQ {
     pub fn on(gpu: Gpu, cfg: &LtxDitConfig, weights: &Tensors, prefix: &str, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
         cfg.assert_supported();
         let dim = cfg.inner_dim as usize;
-        let w = QBlockWeights::upload(&gpu, weights, prefix, dim, cfg.apply_gated_attention, tier);
+        let cached = QBlockWeights::quantize_host(weights, prefix, dim, cfg.apply_gated_attention, tier);
+        Self::on_cached(gpu, cfg, &cached, tokens, context_len, tier)
+    }
+
+    /// [`Self::on`]'s cached twin: `cached` is an already-quantized
+    /// [`CachedQBlockWeights`] (from an earlier [`QBlockWeights::
+    /// quantize_host`] call, or - the real point of this constructor -
+    /// carried over from a PREVIOUS denoise step by
+    /// [`crate::dit::forward_q_streamed`]'s per-generation cache). No GGUF
+    /// read, no CPU quantization - only device uploads of already-quantized
+    /// host bytes, which is what turns the ~86% of a real denoise step that
+    /// Phase 8 attributed to GGUF read+dequant+quantize into a one-time cost
+    /// paid on a generation's first forward call instead of on every one of
+    /// its ~20-50 steps.
+    pub fn on_cached(gpu: Gpu, cfg: &LtxDitConfig, cached: &CachedQBlockWeights, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
+        cfg.assert_supported();
+        let dim = cfg.inner_dim as usize;
+        let w = QBlockWeights::from_cached(&gpu, cached);
         let ones_t = gpu.storage(dim as u64);
         wf(&gpu, &ones_t, &vec![1.0f32; dim]);
         let _ = tokens;

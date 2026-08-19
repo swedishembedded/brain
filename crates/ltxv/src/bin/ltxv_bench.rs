@@ -62,10 +62,11 @@
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
-//!   ltxv_bench streamed [layers] [tokens] [ctx_len]       real int8 checkpoint, forward_q_streamed's own stage breakdown
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape)
 //!
 //! `vae` needs `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
 
+use std::cell::RefCell;
 use std::time::Instant;
 
 use gpu_core::profile::profile;
@@ -199,13 +200,20 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 /// device, never touching the checkpoint file or the quantized tier at all.
 ///
 /// `layers` defaults to 4, not the real 48: this crate's own "small shapes
-/// first" convention (`bin/ltxv_bench.rs`'s module doc, this port's roadmap) -
-/// a handful of layers is enough to attribute where each block's own time
+/// first" convention (`bin/ltxv_bench.rs`'s module doc, this port's roadmap).
+/// A handful of layers is enough to attribute where each block's own time
 /// goes, and scales linearly to the full 48 (each block streams/quantizes/
 /// runs independently, so per-block cost does not change with layer count).
+///
 /// Needs `BRAIN_LTXV_DIT=<path to the real distilled Q8_0 or Q4_K_M GGUF>`,
 /// the same env var `crate::pipeline::Paths::dit` resolves.
-fn bench_streamed(layers: u32, t: u32, ctx_len: u32) {
+///
+/// The `reuse_cache` argument controls whether a fresh cache is used per
+/// call (the pre-Phase-9 behavior, `reuse_cache=false`) or one cache is
+/// shared across TWO calls (`reuse_cache=true`, the real `denoise` loop's
+/// own shape - see `crate::pipeline::RealDit`'s doc) so the cache-hit path's
+/// real speedup is visible in this same harness rather than only inferred.
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally
@@ -214,7 +222,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32) {
 
     let cfg = LtxDitConfig { num_layers: layers, use_embeddings_connector: false, ..LtxDitConfig::ltx25_22b() };
     cfg.assert_supported();
-    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context ===");
+    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context (reuse_cache={reuse_cache}) ===");
 
     let t0 = Instant::now();
     let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
@@ -229,25 +237,36 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32) {
     let context = vec![0f32; ctx_len as usize * cfg.cross_attention_dim as usize];
     let context_valid = vec![1f32; ctx_len as usize];
 
-    let t1 = Instant::now();
-    let _out = ltxv::dit::forward_q_streamed(
-        &cfg,
-        &src,
-        &head,
-        Some("gpu"),
-        ltxv::block::QTier::Int8,
-        &latent,
-        &timesteps,
-        &positions,
-        &keyframes_mask,
-        &context,
-        ctx_len as usize,
-        t as usize,
-        &context_valid,
-    );
-    let wall = t1.elapsed().as_secs_f64();
-    println!("wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
-    println!("(the three `stage forward_q_streamed: ...` lines above are the GGUF read+dequant / int8 quantize+upload / GPU forward+wait split, summed over these {layers} layers)");
+    let cache = RefCell::new(Vec::new());
+    let call = |label: &str| {
+        let t1 = Instant::now();
+        let _out = ltxv::dit::forward_q_streamed(
+            &cfg,
+            &src,
+            &head,
+            Some("gpu"),
+            ltxv::block::QTier::Int8,
+            &latent,
+            &timesteps,
+            &positions,
+            &keyframes_mask,
+            &context,
+            ctx_len as usize,
+            t as usize,
+            &context_valid,
+            &cache,
+        );
+        let wall = t1.elapsed().as_secs_f64();
+        println!("[{label}] wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
+        if !reuse_cache {
+            cache.borrow_mut().clear();
+        }
+    };
+    call("call 1 (always a cache miss - the first forward of a generation)");
+    if reuse_cache {
+        call("call 2 (cache hit on every layer - every OTHER forward of a generation)");
+    }
+    println!("(the `stage forward_q_streamed: block ...` lines above split GGUF read+dequant / int8 quantize / GPU upload+forward+wait, summed over these {layers} layers - the first two are `cache misses only`: on a cache-hit call they are near-zero by construction, not merely small)");
 }
 
 fn main() {
@@ -257,7 +276,7 @@ fn main() {
     match mode {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
-        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false)),
         other => {
             eprintln!("unknown mode {other} (dit|vae|streamed)");
             std::process::exit(1);
