@@ -33,3 +33,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# G2 gate (tests/finetune_ab.rs): EVA-CLIP image-tower embeddings and image
+# resize/layout for the A/B video comparison. Test-only - the library itself
+# stays free of an imaging dependency (see `pipeline.rs`'s doc on `Video`).
+brain-clip.workspace = true
+brain-imaging.workspace = true

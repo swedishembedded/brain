@@ -41,9 +41,19 @@ LoRA fine-tuning is a gradient-checked library path (`wan::finetune`) rather
 than a command. The transformer's forward and backward, the adapter and the
 captioned-clip dataset are all there and gated, but nothing exposes them as
 `brain wan ...` or as a capability action, so training today means calling
-`wan::finetune::run` from Rust. That trainer runs on the host, which is
-practical for short adapter runs at small latent extents and is not a path to
-training the full 1.3B model.
+`wan::finetune::run` from Rust. The transformer's forward and backward run on
+the GPU (`wan::train::DeviceTrainer` over `wan::devgrad::BlockDev`), with the
+patch embedding, conditioning MLPs, head and loss left on the host; `--device
+cpu` selects the host f32 trainer instead, which is also what a machine with no
+accelerator falls back to.
+
+Because a LoRA freezes the base, the GPU trainer keeps every block's base
+weights resident for the whole run and assembles `W_eff = base + (α/r)·B·A`
+on-device, projecting `dL/dW_eff` back onto `(dA, dB)` there too. A step then
+moves only the rank-sized adapter across the bus instead of the full weight
+matrices and their gradients. It engages whenever the card has room for the
+whole stack's base (5.6 GB at 1.3B); where it does not, the trainer falls back
+to building the effective weights on the host, which computes the same thing.
 
 There is no HTTP surface because there is no OpenAI-shaped or Anthropic-shaped
 endpoint for video generation to fit into; D-Bus and the capability interface

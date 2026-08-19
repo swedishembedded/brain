@@ -28,10 +28,13 @@ pub mod qwen_tokenizer;
 pub mod rng;
 pub mod tokenizer;
 pub mod unigram;
+pub mod videoset;
 
 // Dataset generators (one module per source), ported 1:1 from
-// `scratchpad/reference/nanogpt/data_generators/*.py`.
+// `scratchpad/reference/nanogpt/data_generators/*.py`, except `gen_clips`
+// (net-new: procedural video clips for the wan LoRA finetune gates).
 pub mod gen_calculator;
+pub mod gen_clips;
 pub mod gen_detect;
 pub mod gen_pong;
 pub mod gen_reverser;

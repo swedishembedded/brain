@@ -14,6 +14,7 @@
 //! produces plausible video.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use wan::config::WanConfig;
 use wan::import::dit_manifest;
@@ -141,9 +142,190 @@ fn an_adapter_round_trips_through_the_checkpoint_container() {
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let path = dir.join("adapter.brain");
     let p = path.to_str().expect("utf-8 path");
-    wan::lora::save_adapter(p, &ad);
+    wan::lora::save_adapter(p, &ad).expect("save");
     let back = wan::lora::load_adapter(p, &cfg).expect("reload");
     assert_eq!(back.rank(), ad.rank());
     assert!(ad.apply(&base) == back.apply(&base), "a reloaded adapter must produce the same effective weights");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ================= G1: held-out loss (real weights, real data, SMOKE scale) =================
+//
+// Trains a real adapter on a HANDFUL of the procedural concept clips
+// (`data::gen_clips`) and checks the flow-matching loss on (a) a few
+// held-out concept clips (never trained on) and (b) a few distractor clips
+// (a different shape/colour/motion). A concept-only LoRA should lower (a)
+// more than (b) - it was never shown the distractor at all.
+//
+// This is a SMOKE-scale gate, not a statistically powered one: real umT5-XXL
+// (CPU) + the real 1.3B DiT are both genuinely expensive per call, so
+// everything here is sized to finish in low single-digit minutes on this
+// host - ONE umT5 session (not two: the training loop is hand-rolled with
+// the exact math `finetune::run` uses, `grads`+`adapter.step`, rather than
+// calling `finetune::run` and paying a second umT5 load for its own internal
+// encode), a handful of clips, and few steps. The full-power version of this
+// same comparison, across many (prompt, seed) pairs with a matched-norm
+// random-adapter control and a significance test, is G2
+// (`tests/finetune_ab.rs`) - this test's job is just "does the real training
+// path move the real held-out loss the right direction, fast".
+
+/// `BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}` or a loud skip - see `pipeline::Paths`'s
+/// doc on why the path is an env var, never a literal.
+fn real_paths() -> Option<wan::Paths> {
+    match wan::Paths::from_env() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            brain_testutil::skip(&format!("set BRAIN_WAN_{{DIT,VAE,T5,TOKENIZER}} to run the real-weight G1 gate: {e}"));
+            None
+        }
+    }
+}
+
+fn read_pth(path: &str) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
+    Ok(checkpoint::torchpt::read(path)?.into_iter().map(|t| checkpoint::safetensors::StTensor { name: t.name, shape: t.shape, data: t.data }).collect())
+}
+
+/// Mean flow-matching loss of `adapter.apply(base)` over `(latent, ctx)`
+/// pairs, at FIXED per-sample `(sigma, noise)` draws - so a before/after
+/// comparison never confounds "the adapter changed" with "a different noise
+/// draw landed".
+fn mean_loss(tcfg: &Cfg, base: &ModelWeights<f32>, adapter: &LoraAdapter, samples: &[(Vec<f32>, Vec<f32>)], sigmas: &[f64], noises: &[Vec<f32>]) -> f64 {
+    let w = adapter.apply(base);
+    let total: f64 = samples
+        .iter()
+        .enumerate()
+        .map(|(i, (latent, ctx))| {
+            let rows = ctx.len() / tcfg.text_dim;
+            let b = make_flow_batch(tcfg, latent, ctx, rows, sigmas[i], &noises[i]);
+            grads(tcfg, &w, &b).0
+        })
+        .sum();
+    total / samples.len() as f64
+}
+
+#[test]
+fn a_concept_only_lora_lowers_held_out_concept_loss_more_than_distractor_loss() {
+    let Some(paths) = real_paths() else { return };
+    let cfg = WanConfig::t2v_1_3b();
+    let (frames, size) = (5usize, 64u32);
+    // Minimised hard against the umT5-XXL CPU floor: one import (~3 min,
+    // fixed, dominated by converting the 11GB bf16 checkpoint to fp32) plus
+    // roughly a minute per UNIQUE caption forward. Every extra sample here is
+    // a real extra minute, so this stays as small as a before/after
+    // comparison can be: 2 training windows, 1 held-out-concept eval window,
+    // 1 distractor eval window - 4 captions total.
+    let (n_train, n_eval) = (2usize, 1usize);
+
+    let base_dir = std::env::temp_dir().join(format!("wan-g1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let concept = data::gen_clips::generate_concept_set(n_train + n_eval, frames, size, size, 101);
+    let distractor = data::gen_clips::generate_distractor_set(n_eval, frames, size, size, 202);
+    let (train_c, heldout_c) = concept.split_at(n_train);
+    let (train_dir, heldout_dir, distractor_dir) = (base_dir.join("train"), base_dir.join("heldout"), base_dir.join("distractor"));
+    data::videoset::write_clipset(&train_dir, train_c, size, size, 8).expect("train clips");
+    data::videoset::write_clipset(&heldout_dir, heldout_c, size, size, 8).expect("heldout clips");
+    data::videoset::write_clipset(&distractor_dir, &distractor, size, size, 8).expect("distractor clips");
+
+    let train_set = wan::finetune::ClipSet::load_dir(&train_dir).expect("train set");
+    let heldout_set = wan::finetune::ClipSet::load_dir(&heldout_dir).expect("heldout set");
+    let distractor_set = wan::finetune::ClipSet::load_dir(&distractor_dir).expect("distractor set");
+    let mut drng = data::rng::Rng::new(777);
+    let train_clips: Vec<wan::finetune::Clip> = (0..n_train).map(|_| train_set.sample(&mut drng, frames).expect("sample")).collect();
+    let heldout_clips: Vec<wan::finetune::Clip> = (0..n_eval).map(|_| heldout_set.sample(&mut drng, frames).expect("sample")).collect();
+    let distractor_clips: Vec<wan::finetune::Clip> = (0..n_eval).map(|_| distractor_set.sample(&mut drng, frames).expect("sample")).collect();
+
+    let (lf, lh, lw) = cfg.latent_shape(frames, size as usize, size as usize).expect("latent shape");
+    let tcfg = Cfg::from_wan(&cfg, lf, lh, lw);
+    let t0 = std::time::Instant::now();
+
+    // ---- ONE umT5 session: train + held-out-concept + distractor captions ----
+    let ctxs: Vec<Vec<f32>> = {
+        let tok = if Path::new(&paths.tokenizer).is_dir() {
+            data::unigram::UnigramTokenizer::from_dir(&paths.tokenizer)
+        } else {
+            data::unigram::UnigramTokenizer::from_file(&paths.tokenizer)
+        }
+        .expect("tokenizer");
+        let t5cfg = t5encoder::config::T5Config::umt5_xxl();
+        let imported = t5encoder::import::import_wan(read_pth(&paths.t5).expect("read t5"), &t5cfg).expect("import t5");
+        let gpu = gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES);
+        let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 1, cfg.text_len as u32, &t5encoder::import::to_init(imported));
+        train_clips
+            .iter()
+            .chain(&heldout_clips)
+            .chain(&distractor_clips)
+            .map(|c| {
+                let (ids, mask) = tok.encode_padded(&c.caption, cfg.text_len);
+                enc.set_tokens(&ids);
+                enc.set_mask(&mask);
+                enc.forward();
+                enc.poll_wait();
+                enc.read_context()
+            })
+            .collect()
+    }; // umT5 dropped here - the ONE expensive load this test pays
+
+    // ---- ONE Wan-VAE session: encode all clips to latents ----
+    let latents: Vec<Vec<f32>> = {
+        let vcfg = wan::vae3d::WanVaeConfig::wan21();
+        let vweights = wan::import::import_vae(read_pth(&paths.vae).expect("read vae"), &vcfg).expect("import vae");
+        let enc = wan::vae3d::WanVaeEncoder::build(&vcfg, &vweights, &vcfg.encode_chunks(frames as u32), size, size, None);
+        train_clips.iter().chain(&heldout_clips).chain(&distractor_clips).map(|c| enc.encode(&c.video)).collect()
+    };
+    println!("G1: umT5 + VAE encode ({} clips) in {:.1}s", latents.len(), t0.elapsed().as_secs_f32());
+
+    let samples: Vec<(Vec<f32>, Vec<f32>)> = latents.into_iter().zip(ctxs).collect();
+    let (train_s, rest) = samples.split_at(n_train);
+    let (heldout_s, distractor_s) = rest.split_at(n_eval);
+
+    let mut ern = data::rng::Rng::new(555);
+    let sigmas: Vec<f64> = (0..2 * n_eval).map(|_| (ern.next_f64()).clamp(1e-3, 1.0)).collect();
+    let noises: Vec<Vec<f32>> = heldout_s.iter().chain(distractor_s).map(|(latent, _)| (0..latent.len()).map(|_| ern.next_gaussian() as f32).collect()).collect();
+    let (c_sigmas, d_sigmas) = sigmas.split_at(n_eval);
+    let (c_noises, d_noises) = noises.split_at(n_eval);
+
+    let t1 = std::time::Instant::now();
+    let raw = checkpoint::safetensors::read(&paths.dit).expect("read DiT safetensors");
+    let tensors = wan::import::import_dit(raw, &cfg).expect("import DiT");
+    let base = ModelWeights::from_tensors(&tcfg, &tensors).expect("host weights");
+    println!("G1: DiT import in {:.1}s", t1.elapsed().as_secs_f32());
+
+    let rank = 8;
+    let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(rank));
+    let fresh = LoraAdapter::new(&tcfg, LoraCfg::new(rank));
+
+    let before_concept = mean_loss(&tcfg, &base, &fresh, heldout_s, c_sigmas, c_noises);
+    let before_distractor = mean_loss(&tcfg, &base, &fresh, distractor_s, d_sigmas, d_noises);
+
+    // ---- hand-rolled training loop: the exact math `finetune::run` uses ----
+    let steps = 15u32;
+    let mut trng = data::rng::Rng::new(4242);
+    let t2 = std::time::Instant::now();
+    for _ in 0..steps {
+        let idx = trng.gen_range_inclusive(0, train_s.len() as i64 - 1) as usize;
+        let (latent, ctx) = &train_s[idx];
+        let sigma = (trng.next_f64()).clamp(1e-3, 1.0);
+        let noise: Vec<f32> = (0..latent.len()).map(|_| trng.next_gaussian() as f32).collect();
+        let b = make_flow_batch(&tcfg, latent, ctx, cfg.text_len, sigma, &noise);
+        let (_l, g) = grads(&tcfg, &adapter.apply(&base), &b);
+        adapter.step(&g, 3e-3);
+    }
+    println!("G1: trained {steps} steps in {:.1}s ({:.2}s/step)", t2.elapsed().as_secs_f32(), t2.elapsed().as_secs_f32() / steps as f32);
+
+    let after_concept = mean_loss(&tcfg, &base, &adapter, heldout_s, c_sigmas, c_noises);
+    let after_distractor = mean_loss(&tcfg, &base, &adapter, distractor_s, d_sigmas, d_noises);
+
+    let concept_drop = before_concept - after_concept;
+    let distractor_drop = before_distractor - after_distractor;
+    println!("G1: held-out concept loss {before_concept:.6} -> {after_concept:.6} (drop {concept_drop:.6})");
+    println!("G1: distractor loss       {before_distractor:.6} -> {after_distractor:.6} (drop {distractor_drop:.6})");
+    println!("G1: total wall time {:.1}s", t0.elapsed().as_secs_f32());
+
+    assert!(concept_drop > 0.0, "held-out concept loss must fall during training: {before_concept} -> {after_concept}");
+    assert!(
+        concept_drop > distractor_drop,
+        "held-out concept loss must fall MORE than the distractor's: concept drop {concept_drop:.6} vs distractor drop {distractor_drop:.6}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
 }

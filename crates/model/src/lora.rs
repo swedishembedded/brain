@@ -23,6 +23,8 @@
 //! three crates' own `lora.rs` is now a thin wrapper supplying its
 //! architecture's `LoraCfg`/family name.
 
+use backend_cpu::par;
+
 /// LoRA hyper-parameters. `alpha/rank` is the delta scale ([`LoraCfg::scale`]).
 #[derive(Clone, Copy)]
 pub struct LoraCfg {
@@ -85,9 +87,14 @@ impl Pair {
     /// fused-tensor fold: row slices use `row0`, a column split uses
     /// `col0`/`row_stride`.
     pub fn delta_strided(&self, scale: f32, out_buf: &mut [f32], row0: usize, row_stride: usize, col0: usize) {
-        for o in 0..self.out {
+        // One output row per task. The rows are disjoint and each keeps its own
+        // `k` loop in ascending order, so this is bit-identical to the serial
+        // walk - which matters: a LoRA run's whole point is that `apply` at
+        // `B = 0` reproduces the base weights exactly.
+        let span = &mut out_buf[row0 * row_stride..(row0 + self.out) * row_stride];
+        par::rows_mut(span, row_stride, |o, row| {
             let brow = &self.b[o * self.r..(o + 1) * self.r];
-            let wrow = &mut out_buf[(row0 + o) * row_stride + col0..(row0 + o) * row_stride + col0 + self.inn];
+            let wrow = &mut row[col0..col0 + self.inn];
             for (k, &bk) in brow.iter().enumerate() {
                 let bok = bk * scale;
                 if bok == 0.0 {
@@ -98,33 +105,43 @@ impl Pair {
                     wrow[i] += bok * arow[i];
                 }
             }
-        }
+        });
     }
 
     /// Project the base-weight grad `dW [out×in]` to `(dA [r×in], dB [out×r])`:
     /// `dA = scale·Bᵀ·dW`, `dB = scale·dW·Aᵀ`.
+    /// Both halves run over the same `dW` but are parallel on different axes,
+    /// because that is what keeps each of them bit-identical to the serial
+    /// walk: `dB`'s rows are independent per output row, while `dA`'s entries
+    /// are a SUM over output rows, so its tasks split the `r` adapter rows and
+    /// keep the `o` accumulation in ascending order. A `dA` split over `o`
+    /// would reassociate that sum and move a training trajectory's last bits.
     pub fn project(&self, dw: &[f32], scale: f32) -> (Vec<f32>, Vec<f32>) {
         let mut da = vec![0.0f32; self.r * self.inn];
         let mut db = vec![0.0f32; self.out * self.r];
-        for o in 0..self.out {
+        par::rows_mut(&mut db, self.r, |o, dbrow| {
             let dwrow = &dw[o * self.inn..(o + 1) * self.inn];
-            let brow = &self.b[o * self.r..(o + 1) * self.r];
-            for k in 0..self.r {
+            for (k, slot) in dbrow.iter_mut().enumerate() {
                 let arow = &self.a[k * self.inn..(k + 1) * self.inn];
                 let mut acc = 0.0f32;
                 for i in 0..self.inn {
                     acc += dwrow[i] * arow[i];
                 }
-                db[o * self.r + k] = acc * scale;
-                let bok = brow[k] * scale;
-                if bok != 0.0 {
-                    let darow = &mut da[k * self.inn..(k + 1) * self.inn];
-                    for i in 0..self.inn {
-                        darow[i] += bok * dwrow[i];
-                    }
+                *slot = acc * scale;
+            }
+        });
+        par::rows_mut(&mut da, self.inn, |k, darow| {
+            for o in 0..self.out {
+                let bok = self.b[o * self.r + k] * scale;
+                if bok == 0.0 {
+                    continue;
+                }
+                let dwrow = &dw[o * self.inn..(o + 1) * self.inn];
+                for i in 0..self.inn {
+                    darow[i] += bok * dwrow[i];
                 }
             }
-        }
+        });
         (da, db)
     }
 

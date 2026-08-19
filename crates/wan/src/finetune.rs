@@ -14,8 +14,8 @@
 //!      `v = ε − x₀` and model time `σ·1000`
 //!      ([`crate::modelgrad::make_flow_batch`] - the convention both samplers
 //!      invert), run the adapter-applied frozen base through the gradchecked
-//!      **host f32** whole-model path and project `dL/dW_eff` into an Adam step
-//!      on the low-rank `A,B`.
+//!      whole-model training path and project `dL/dW_eff` into an Adam step on
+//!      the low-rank `A,B`.
 //!   3. Save the adapter; the unchanged generation path picks it up through
 //!      [`crate::lora::LoraAdapter::fold_into_tensors`].
 //!
@@ -31,20 +31,29 @@
 //! caption lookup and the `[t][c][h][w] -> [c][t][h][w]` transpose the 3D VAE
 //! wants, and both of those are tested.
 //!
-//! ## Scope
+//! ## Which trainer runs the step
 //!
-//! The trainer is the f32 instantiation of the FD-gradchecked reference math
-//! ([`crate::modelgrad`]) - correct and deterministic, CPU-parallel only
-//! through `model::hostmath::matvec_par`. That is practical for short adapter
-//! runs at small latent extents; it is NOT a path to a full 1.3B training run,
-//! and a device (WGSL-kernel) trainer replaying this op sequence on the GPU is
-//! explicitly out of scope for this change.
+//! [`crate::train::Trainer`] picks one of two paths, both computing the same
+//! `(loss, ModelGrads<f32>)` from the same FD-gradchecked math:
+//!
+//! * the **device** trainer ([`crate::train::DeviceTrainer`]), which runs every
+//!   DiT block's forward and backward on the GPU through
+//!   [`crate::devgrad::BlockDev`] and keeps only the small wrapper ops on the
+//!   host; and
+//! * the **host** f32 instantiation of [`crate::modelgrad`], CPU-parallel
+//!   through `model::hostmath::matvec_par`.
+//!
+//! [`TrainOpts::device`] selects; with `None` the device path is taken exactly
+//! when brain's default backend is a real accelerator, so a machine without one
+//! keeps working unchanged. `tests/device_train.rs` pins the two paths to the
+//! same gradients and the same loss trajectory.
 
 use std::path::Path;
 
 use crate::config::WanConfig;
 use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::modelgrad::{grads, make_flow_batch, Cfg, ModelWeights};
+use crate::modelgrad::{make_flow_batch, Cfg, ModelWeights};
+use crate::train::Trainer;
 use crate::pipeline::Paths;
 use crate::vae3d::{WanVaeConfig, WanVaeEncoder};
 use data::episode::EpisodeDataset;
@@ -173,6 +182,7 @@ pub fn encode_samples(
     height: u32,
     width: u32,
     device: Option<&str>,
+    te_device: Option<&str>,
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
@@ -218,16 +228,32 @@ pub fn encode_samples(
         }?;
         let t5cfg = t5encoder::config::T5Config::umt5_xxl();
         let imported = t5encoder::import::import_wan(crate::pipeline::read_any(&paths.t5)?, &t5cfg)?;
-        let gpu = match std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty()).as_deref().unwrap_or("cpu") {
+        // Same precedence as `pipeline::encode_text`'s `--t5-device`: the
+        // explicit option beats the environment variable, which beats the
+        // CPU default (umT5-XXL is 22.72 GB in fp32).
+        let te_env = std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty());
+        let gpu = match te_device.or(te_env.as_deref()).unwrap_or("cpu") {
             "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
             "gpu" | "wgpu" => gpu_core::Gpu::new_wgpu(t5encoder::model::PIPELINES),
             _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
         };
         let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 1, cfg.text_len as u32, &t5encoder::import::to_init(imported));
+        // A real clip set repeats a handful of caption templates across many
+        // clips (e.g. `data::gen_clips`'s paraphrase pool), and umT5-XXL is a
+        // CPU-minutes-scale forward - so an exact-string cache turns "one
+        // forward per clip" into "one forward per UNIQUE caption" with no
+        // change in output (the encoder is a pure deterministic function of
+        // the token ids/mask).
+        let mut cache: std::collections::HashMap<&str, Vec<f32>> = std::collections::HashMap::new();
         let mut out = Vec::with_capacity(n);
         for (i, c) in clips.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());
+            }
+            if let Some(cached) = cache.get(c.caption.as_str()) {
+                progress(i, n, "encoding captions (umT5-XXL, cached)");
+                out.push(cached.clone());
+                continue;
             }
             progress(i, n, "encoding captions (umT5-XXL)");
             let (ids, mask) = tok.encode_padded(&c.caption, cfg.text_len);
@@ -237,7 +263,9 @@ pub fn encode_samples(
             enc.poll_wait();
             // `read_context` already zeroes the pad rows, which is exactly what
             // `WanModel.forward`'s `new_zeros` re-pad produces.
-            out.push(enc.read_context());
+            let ctx = enc.read_context();
+            cache.insert(c.caption.as_str(), ctx.clone());
+            out.push(ctx);
         }
         out
     }; // encoder dropped here
@@ -258,8 +286,18 @@ pub struct TrainOpts {
     pub save_path: String,
     /// Write a checkpoint every N steps (0 = final only).
     pub ckpt_every: u32,
-    /// Device for the VAE encode; `None` takes brain's default.
+    /// Device for the VAE encode AND the DiT trainer; `None` takes brain's
+    /// default backend, which uses the GPU wherever one is present.
+    ///
+    /// `"cpu"` forces the host f32 reference trainer; `"gpu"` forces the
+    /// device one. With `None`, the device trainer is used only when brain's
+    /// default backend resolves to a real accelerator, so a machine without
+    /// one keeps the host path (see [`crate::train::Trainer::open`]).
     pub device: Option<String>,
+    /// Device for the umT5 text encoder; `None` falls through to
+    /// `BRAIN_WAN_T5_DEVICE`, then `"cpu"` - the same precedence
+    /// `GenOpts::te_device` uses at inference.
+    pub te_device: Option<String>,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a [`ClipSet`] folder). Returns the
@@ -274,7 +312,13 @@ pub fn run(
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
 ) -> Result<Vec<NamedTensor>, String> {
-    let total = opts.steps + 1;
+    // The encode phase (VAE + umT5, two passes over `samples` clips) is
+    // routinely the longest part of a short adapter run, so it gets its own
+    // slice of the progress budget instead of sitting at `0/total` for its
+    // whole duration (D8) - `encode_budget` items, then one training step
+    // each, then one final "saved" tick.
+    let encode_budget = 2 * opts.samples as u32;
+    let total = encode_budget + opts.steps + 1;
     // 1. dataset
     let set = ClipSet::load_dir(dir)?;
     let (_, h, w) = set.frame_shape();
@@ -289,38 +333,64 @@ pub fn run(
     for _ in 0..opts.samples {
         clips.push(set.sample(&mut rng, opts.frames)?);
     }
-    let encoded = encode_samples(paths, &clips, cfg, h as u32, w as u32, opts.device.as_deref(), cancel, |i, n, stage| {
-        progress(0, total, format!("{stage} {}/{n}", i + 1))
-    })?;
+    let n_samples = opts.samples as u32;
+    let encoded = encode_samples(
+        paths,
+        &clips,
+        cfg,
+        h as u32,
+        w as u32,
+        opts.device.as_deref(),
+        opts.te_device.as_deref(),
+        cancel,
+        |i, n, stage| {
+            // The VAE pass reports `i` in `[0, n_samples)`; the umT5 pass
+            // that follows it is offset by `n_samples` so the two phases
+            // occupy disjoint, monotonically increasing slices of `total`.
+            let base = if stage.contains("captions") { n_samples } else { 0 };
+            progress(base + i as u32, total, format!("{stage} {}/{n}", i + 1));
+        },
+    )?;
     drop(clips);
 
     // 3. base weights -> host training format
-    progress(0, total, "loading DiT weights".into());
+    progress(encode_budget, total, "loading DiT weights".into());
     let tensors = crate::import::import_dit(crate::pipeline::read_any(&paths.dit)?, cfg)?;
     let tcfg = Cfg::from_wan(cfg, lf, lh, lw);
     let base = ModelWeights::from_tensors(&tcfg, &tensors)?;
     drop(tensors);
 
     // 4. adapter + flow-matching loop
+    let mut trainer = Trainer::open(&tcfg, opts.device.as_deref());
     let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(opts.rank));
+    // With the base frozen and resident, a step's only weight traffic is the
+    // rank-sized adapter itself: `W_eff` is folded and `dL/dW_eff` projected
+    // on-device.
+    let resident = trainer.begin_lora(&base, opts.rank);
+    let route = if resident { " (base resident, on-device LoRA)" } else { "" };
+    progress(encode_budget, total, format!("training on {}{route}", trainer.label()));
     for step in 0..opts.steps {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        let s = &encoded[step as usize % encoded.len()];
+        // The sample index is drawn fresh from `rng` (D7) rather than cycled
+        // deterministically (`step % len`): a deterministic cycle correlates
+        // sample order with the σ draw below, since both come from walking
+        // the same counter in lockstep every `encoded.len()` steps.
+        let idx = rng.gen_range_inclusive(0, encoded.len() as i64 - 1) as usize;
+        let s = &encoded[idx];
         // σ is drawn uniformly on (0, 1]; the clamp keeps the model time off
         // the exact 0 the samplers never evaluate.
         let sigma = (rng.next_f64() as f32).clamp(1e-3, 1.0) as f64;
         let noise: Vec<f32> = (0..s.latent.len()).map(|_| rng.next_gaussian() as f32).collect();
         let b = make_flow_batch(&tcfg, &s.latent, &s.ctx, cfg.text_len, sigma, &noise);
-        let (loss, g) = grads(&tcfg, &adapter.apply(&base), &b);
-        adapter.step(&g, opts.lr);
-        progress(step + 1, total, format!("step {}/{}  loss {loss:.5}", step + 1, opts.steps));
+        let loss = trainer.lora_step(&base, &mut adapter, &b, opts.lr);
+        progress(encode_budget + step + 1, total, format!("step {}/{}  loss {loss:.5}", step + 1, opts.steps));
         if opts.ckpt_every > 0 && (step + 1).is_multiple_of(opts.ckpt_every) && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter);
+            save_adapter(&opts.save_path, &adapter)?;
         }
     }
-    save_adapter(&opts.save_path, &adapter);
+    save_adapter(&opts.save_path, &adapter)?;
     progress(total, total, format!("saved adapter -> {}", opts.save_path));
     Ok(adapter.to_tensors())
 }

@@ -268,7 +268,7 @@ pub fn unpatchify<T: Fp>(tokens: &[T], c: usize, f: usize, ht: usize, wt: usize,
 }
 
 /// [`unpatchify`] backward - the same permutation read the other way.
-fn unpatchify_bwd<T: Fp>(dout: &[T], c: usize, f: usize, ht: usize, wt: usize, ph: usize, pw: usize) -> Vec<T> {
+pub(crate) fn unpatchify_bwd<T: Fp>(dout: &[T], c: usize, f: usize, ht: usize, wt: usize, ph: usize, pw: usize) -> Vec<T> {
     let (h, w) = (ht * ph, wt * pw);
     let patch = ph * pw * c;
     let mut drows = vec![T::ZERO; f * ht * wt * patch];

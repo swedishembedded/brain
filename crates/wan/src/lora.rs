@@ -12,6 +12,14 @@
 //! pair machinery lives once in `model::lora`; this module keeps only the
 //! Wan-specific block walk and serialization naming.
 //!
+//! That host route materialises a full `W_eff` per step and reads a full `dW`
+//! back per block, which on a discrete card is gigabytes each way for a value
+//! only the rank-sized `(A, B)` ever consumes.
+//! [`crate::train::DeviceTrainer::lora_grads`] runs the same two operations
+//! on-device against a resident frozen base and hands back
+//! [`LoraGrads`] - the same `(dA, dB)` [`LoraAdapter::project`] produces, which
+//! [`LoraAdapter::step_projected`] Adam-steps identically.
+//!
 //! ## Wan fuses nothing, so there are no fused offsets to fold at
 //!
 //! The workspace rule that a LoRA over a fused checkpoint needs one adapter
@@ -30,8 +38,8 @@
 //! premise is a low-rank correction to a big matrix, and those are vectors.
 
 use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
-pub use model::lora::LoraCfg;
-use model::lora::{proj_step, randn, Pair};
+pub use model::lora::{LoraCfg, Pair};
+use model::lora::{proj_step, randn};
 
 /// The ten pairs of one Wan block, named as the checkpoint names the tensors
 /// they adapt.
@@ -61,6 +69,16 @@ fn pairs(b: &BlockLora) -> [&Pair; 10] {
 
 fn pairs_mut(b: &mut BlockLora) -> [&mut Pair; 10] {
     [&mut b.sq, &mut b.sk, &mut b.sv, &mut b.so, &mut b.cq, &mut b.ck, &mut b.cv, &mut b.co, &mut b.ff1, &mut b.ff2]
+}
+
+/// Adapter gradients: `(dA [r·in], dB [out·r])` per targeted linear, in
+/// [`LEAVES`] order, per block.
+///
+/// The full-`dW` projection ([`LoraAdapter::step`]) and the device one
+/// ([`crate::devgrad::BlockDev::backward_lora_loaded`]) both produce this, and
+/// [`LoraAdapter::step_projected`] consumes either.
+pub struct LoraGrads {
+    pub blocks: Vec<crate::devgrad::AdapterGrads>,
 }
 
 /// A LoRA adapter over every block of the DiT.
@@ -106,6 +124,21 @@ impl LoraAdapter {
         self.scale * self.rank as f32
     }
 
+    /// The delta scale `α/r`.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn n_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Block `l`'s ten `(A, B)` pairs in [`LEAVES`] order - the operands a
+    /// device-side fold and projection upload.
+    pub fn block_ab(&self, l: usize) -> Vec<(&[f32], &[f32])> {
+        pairs(&self.blocks[l]).into_iter().map(|p| (p.a.as_slice(), p.b.as_slice())).collect()
+    }
+
     /// Effective weights `W_eff = W + scale·B·A` (base cloned; every other
     /// tensor - biases, norms, the conditioning path - passes through frozen).
     pub fn apply(&self, base: &ModelWeights<f32>) -> ModelWeights<f32> {
@@ -136,6 +169,38 @@ impl LoraAdapter {
         }
     }
 
+    /// The projection half of [`LoraAdapter::step`] on its own: `dL/dW_eff` for
+    /// every block onto `(dA, dB)`, adapter unchanged. What a device projection
+    /// is checked against.
+    pub fn project(&self, grads: &ModelGrads<f32>) -> LoraGrads {
+        let scale = self.scale;
+        let blocks = self
+            .blocks
+            .iter()
+            .zip(grads.blocks.iter())
+            .map(|(bl, g)| {
+                let dw = [&g.sq.w, &g.sk.w, &g.sv.w, &g.so.w, &g.cq.w, &g.ck.w, &g.cv.w, &g.co.w, &g.ff1.w, &g.ff2.w];
+                pairs(bl).into_iter().zip(dw).map(|(p, d)| p.project(d, scale)).collect()
+            })
+            .collect();
+        LoraGrads { blocks }
+    }
+
+    /// The Adam half of [`LoraAdapter::step`] on its own, over adapter grads a
+    /// caller already has - what the device trainer's on-device projection
+    /// feeds.
+    pub fn step_projected(&mut self, g: &LoraGrads, lr: f32) {
+        self.t += 1;
+        let t = self.t;
+        assert_eq!(g.blocks.len(), self.blocks.len(), "step_projected: one grad set per block");
+        for (bl, gb) in self.blocks.iter_mut().zip(g.blocks.iter()) {
+            assert_eq!(gb.len(), LEAVES.len(), "step_projected: one (dA, dB) per targeted linear");
+            for (p, (da, db)) in pairs_mut(bl).into_iter().zip(gb) {
+                p.adam_step(da, db, lr, t);
+            }
+        }
+    }
+
     /// Serialise to `(name, shape, data)` - `blocks.{l}.{leaf}.lora_{a,b}`,
     /// where `{leaf}` is the checkpoint's own tensor path.
     pub fn to_tensors(&self) -> Vec<(String, Vec<usize>, Vec<f32>)> {
@@ -150,6 +215,11 @@ impl LoraAdapter {
     }
 
     /// Reload an adapter (weights only; Adam state resets by design).
+    ///
+    /// Validates the FULL shape of every `lora_a`/`lora_b` tensor, not just its
+    /// element count: `A [r,in]` and `B [out,r]` can have equal length for
+    /// square-ish targets, so a length-only check would silently accept an
+    /// A/B swap.
     pub fn from_tensors(
         cfg: &Cfg,
         lc: LoraCfg,
@@ -159,8 +229,15 @@ impl LoraAdapter {
         for (l, bl) in ad.blocks.iter_mut().enumerate() {
             for (leaf, p) in LEAVES.iter().zip(pairs_mut(bl)) {
                 let (ka, kb) = (format!("blocks.{l}.{leaf}.lora_a"), format!("blocks.{l}.{leaf}.lora_b"));
-                let a = &tensors.get(&ka).ok_or_else(|| format!("lora: missing {ka}"))?.1;
-                let b = &tensors.get(&kb).ok_or_else(|| format!("lora: missing {kb}"))?.1;
+                let (sa, a) = tensors.get(&ka).map(|(s, d)| (s.clone(), d)).ok_or_else(|| format!("lora: missing {ka}"))?;
+                let (sb, b) = tensors.get(&kb).map(|(s, d)| (s.clone(), d)).ok_or_else(|| format!("lora: missing {kb}"))?;
+                let (want_a, want_b) = (vec![p.r, p.inn], vec![p.out, p.r]);
+                if !sa.is_empty() && sa != want_a {
+                    return Err(format!("lora: {ka} has shape {sa:?}, expected {want_a:?}"));
+                }
+                if !sb.is_empty() && sb != want_b {
+                    return Err(format!("lora: {kb} has shape {sb:?}, expected {want_b:?}"));
+                }
                 if a.len() != p.r * p.inn || b.len() != p.out * p.r {
                     return Err(format!("lora: {ka}/{kb} are {}/{} elems, expected {}/{}", a.len(), b.len(), p.r * p.inn, p.out * p.r));
                 }
@@ -192,19 +269,35 @@ impl LoraAdapter {
 
 /// Save an adapter to brain's checkpoint container, header
 /// `{"model":"wan-lora","rank":R,"alpha":A}`.
-pub fn save_adapter(path: &str, ad: &LoraAdapter) {
+///
+/// Returns the write error instead of swallowing it: a failed periodic
+/// checkpoint (disk full, permissions) must be visible to the caller, not
+/// discovered only when the run finishes and the adapter is missing.
+pub fn save_adapter(path: &str, ad: &LoraAdapter) -> Result<(), String> {
     let t: Vec<(String, Vec<u64>, Vec<f32>)> =
         ad.to_tensors().into_iter().map(|(n, s, d)| (n, s.iter().map(|&x| x as u64).collect(), d)).collect();
-    checkpoint::save(path, serde_json::json!({"model": "wan-lora", "rank": ad.rank(), "alpha": ad.alpha()}), &t);
+    let config = serde_json::json!({"model": "wan-lora", "rank": ad.rank(), "alpha": ad.alpha()});
+    checkpoint::st::save_safetensors(path, &t, &config, None).map_err(|e| format!("wan lora: cannot write {path}: {e}"))
 }
 
-/// Load an adapter written by [`save_adapter`].
+/// Load an adapter written by [`save_adapter`]. Reads the header (for
+/// `rank`/`alpha`) and the tensors (for their real shapes, per D3) from two
+/// views of the same file - `checkpoint::load` never carried shapes, and
+/// carrying them is what lets [`LoraAdapter::from_tensors`] catch an A/B swap.
+///
+/// A missing file is a `Result::Err` naming the path, never a panic:
+/// `checkpoint::load` panics on a read failure, which is fine for a one-shot
+/// tool but would take down a resident server on a typo'd `--adapter` path.
 pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("wan lora: adapter file not found: {path}"));
+    }
     let c = checkpoint::load(path);
     let rank = c.header["config"]["rank"].as_u64().ok_or("adapter: missing rank in header")? as usize;
     let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
+    let shaped = checkpoint::safetensors::read(path)?;
     let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> =
-        c.tensors.into_iter().map(|t| (t.name, (Vec::new(), t.data))).collect();
+        shaped.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
     LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)
 }
 
