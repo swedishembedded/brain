@@ -284,23 +284,6 @@ pub struct BlockGrads<T> {
     pub dctx: Vec<T>,
 }
 
-impl<T: Fp> BlockGrads<T> {
-    fn zeros(d: Dims) -> BlockGrads<T> {
-        let (dim, t, te) = (d.dim, d.t, d.te);
-        BlockGrads {
-            scale_shift_table: vec![T::ZERO; 9 * dim],
-            prompt_scale_shift_table: vec![T::ZERO; 2 * dim],
-            attn1: AttnGrads::zeros(dim),
-            attn2: AttnGrads::zeros(dim),
-            ff1: LinNB::zeros(4 * dim, dim),
-            ff2: LinNB::zeros(dim, 4 * dim),
-            dx: vec![T::ZERO; t * dim],
-            dadaln_shared: vec![T::ZERO; t * 9 * dim],
-            dctx: vec![T::ZERO; te * dim],
-        }
-    }
-}
-
 // ---- primitives (host, generic) ----
 
 pub(crate) fn sigmoid<T: Fp>(x: T) -> T {
@@ -475,7 +458,7 @@ pub fn add_table<T: Fp>(v: &[T], table: &[T], rows: usize, width: usize) -> Vec<
 /// Extract sub-plane `i` of a `[rows, k*width]` row-major combined table,
 /// viewed as `k` stacked `[rows,width]` planes (`crate::block::slice_row`'s
 /// generic-`T` twin).
-fn plane<T: Fp>(combined: &[T], rows: usize, width: usize, k: usize, i: usize) -> Vec<T> {
+pub(crate) fn plane<T: Fp>(combined: &[T], rows: usize, width: usize, k: usize, i: usize) -> Vec<T> {
     let mut v = vec![T::ZERO; rows * width];
     for r in 0..rows {
         v[r * width..(r + 1) * width].copy_from_slice(&combined[(r * k + i) * width..(r * k + i) * width + width]);
@@ -484,13 +467,13 @@ fn plane<T: Fp>(combined: &[T], rows: usize, width: usize, k: usize, i: usize) -
 }
 
 /// [`plane`] plus the modulation site's `1+scale` fold.
-fn one_plus_plane<T: Fp>(combined: &[T], rows: usize, width: usize, k: usize, i: usize) -> Vec<T> {
+pub(crate) fn one_plus_plane<T: Fp>(combined: &[T], rows: usize, width: usize, k: usize, i: usize) -> Vec<T> {
     plane(combined, rows, width, k, i).into_iter().map(|v| T::ONE + v).collect()
 }
 
 /// Write `dplane` (`[rows,width]`) into sub-plane `i` of a `[rows,k*width]`
 /// combined-table gradient - [`plane`]'s adjoint.
-fn write_plane<T: Fp>(dcombined: &mut [T], rows: usize, width: usize, k: usize, i: usize, dplane: &[T]) {
+pub(crate) fn write_plane<T: Fp>(dcombined: &mut [T], rows: usize, width: usize, k: usize, i: usize, dplane: &[T]) {
     for r in 0..rows {
         dcombined[(r * k + i) * width..(r * k + i) * width + width].copy_from_slice(&dplane[r * width..(r + 1) * width]);
     }
@@ -501,7 +484,7 @@ fn write_plane<T: Fp>(dcombined: &mut [T], rows: usize, width: usize, k: usize, 
 /// `[dim]` broadcast over every row - see this module's doc). `g` is already
 /// `1+scale` (the modulation site's own fold); `d(1+scale)/d(scale) == 1` so
 /// [`mod_affine_bwd`]'s `dg` output IS `d(scale)` directly.
-fn mod_affine<T: Fp>(xhat: &[T], g: &[T], b: &[T], n: usize) -> Vec<T> {
+pub(crate) fn mod_affine<T: Fp>(xhat: &[T], g: &[T], b: &[T], n: usize) -> Vec<T> {
     let mut y = vec![T::ZERO; n];
     for i in 0..n {
         y[i] = g[i] * xhat[i] + b[i];
@@ -511,7 +494,7 @@ fn mod_affine<T: Fp>(xhat: &[T], g: &[T], b: &[T], n: usize) -> Vec<T> {
 
 /// [`mod_affine`] backward - no reduction anywhere, since `g`/`b` already
 /// match `xhat`'s own shape.
-fn mod_affine_bwd<T: Fp>(xhat: &[T], g: &[T], dy: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
+pub(crate) fn mod_affine_bwd<T: Fp>(xhat: &[T], g: &[T], dy: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
     let n = xhat.len();
     let mut dxhat = vec![T::ZERO; n];
     let mut dg = vec![T::ZERO; n];
@@ -528,7 +511,7 @@ fn mod_affine_bwd<T: Fp>(xhat: &[T], g: &[T], dy: &[T]) -> (Vec<T>, Vec<T>, Vec<
 /// one of the `rows` context rows - the one modulation site in this block
 /// that IS a per-channel broadcast (`use_prompt_adaln_single=false`: no
 /// timestep MLP drives this table, see `crate::config`'s doc).
-fn affine_shared<T: Fp>(x: &[T], g: &[T], b: &[T], rows: usize, d: usize) -> Vec<T> {
+pub(crate) fn affine_shared<T: Fp>(x: &[T], g: &[T], b: &[T], rows: usize, d: usize) -> Vec<T> {
     let mut y = vec![T::ZERO; rows * d];
     for r in 0..rows {
         for c in 0..d {
@@ -539,7 +522,7 @@ fn affine_shared<T: Fp>(x: &[T], g: &[T], b: &[T], rows: usize, d: usize) -> Vec
 }
 
 /// [`affine_shared`] backward: accumulates `dg`/`db` over every row.
-fn affine_shared_bwd<T: Fp>(x: &[T], g: &[T], rows: usize, d: usize, dy: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
+pub(crate) fn affine_shared_bwd<T: Fp>(x: &[T], g: &[T], rows: usize, d: usize, dy: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
     let mut dx = vec![T::ZERO; rows * d];
     let mut dg = vec![T::ZERO; d];
     let mut db = vec![T::ZERO; d];
@@ -601,7 +584,7 @@ pub fn rope_ltx_bwd<T: Fp>(dy: &[T], t: usize, nh: usize, hd: usize, cos: &[T], 
 /// exact math (`crate::block::attention`'s device dispatch), non-causal, no
 /// mask. Returns `(probs[nh·nq·nk], out[nq·nh·hd])`.
 #[allow(clippy::too_many_arguments)]
-fn attn_fwd<T: Fp>(q: &[T], nq: usize, k: &[T], v: &[T], nk: usize, nh: usize, hd: usize) -> (Vec<T>, Vec<T>) {
+pub(crate) fn attn_fwd<T: Fp>(q: &[T], nq: usize, k: &[T], v: &[T], nk: usize, nh: usize, hd: usize) -> (Vec<T>, Vec<T>) {
     let scale = T::fr(1.0 / (hd as f64).sqrt());
     let mut probs = vec![T::ZERO; nh * nq * nk];
     let mut out = vec![T::ZERO; nq * nh * hd];
@@ -638,7 +621,7 @@ fn attn_fwd<T: Fp>(q: &[T], nq: usize, k: &[T], v: &[T], nk: usize, nh: usize, h
 
 /// [`attn_fwd`] backward: `dout` -> `(dq, dk, dv)`.
 #[allow(clippy::too_many_arguments)]
-fn attn_bwd<T: Fp>(probs: &[T], q: &[T], k: &[T], v: &[T], nq: usize, nk: usize, nh: usize, hd: usize, dout: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
+pub(crate) fn attn_bwd<T: Fp>(probs: &[T], q: &[T], k: &[T], v: &[T], nq: usize, nk: usize, nh: usize, hd: usize, dout: &[T]) -> (Vec<T>, Vec<T>, Vec<T>) {
     let scale = T::fr(1.0 / (hd as f64).sqrt());
     let d = nh * hd;
     let mut dq = vec![T::ZERO; nq * d];
@@ -678,7 +661,7 @@ fn attn_bwd<T: Fp>(probs: &[T], q: &[T], k: &[T], v: &[T], nq: usize, nk: usize,
 /// `x`/`h` (unlike Wan's per-channel `[dim]` gate, broadcast over every
 /// row - see `wan::grad::gate_rows`). `dx` is the identity (callers add
 /// `dy` directly), so only `(dh, dgate)` are returned.
-fn gate_elemwise<T: Fp>(x: &[T], gate: &[T], h: &[T], n: usize) -> Vec<T> {
+pub(crate) fn gate_elemwise<T: Fp>(x: &[T], gate: &[T], h: &[T], n: usize) -> Vec<T> {
     let mut y = vec![T::ZERO; n];
     for i in 0..n {
         y[i] = x[i] + gate[i] * h[i];
@@ -687,7 +670,7 @@ fn gate_elemwise<T: Fp>(x: &[T], gate: &[T], h: &[T], n: usize) -> Vec<T> {
 }
 
 /// [`gate_elemwise`] backward - no reduction on `dgate` either.
-fn gate_elemwise_bwd<T: Fp>(gate: &[T], h: &[T], dy: &[T]) -> (Vec<T>, Vec<T>) {
+pub(crate) fn gate_elemwise_bwd<T: Fp>(gate: &[T], h: &[T], dy: &[T]) -> (Vec<T>, Vec<T>) {
     let n = dy.len();
     let mut dh = vec![T::ZERO; n];
     let mut dgate = vec![T::ZERO; n];
@@ -698,10 +681,59 @@ fn gate_elemwise_bwd<T: Fp>(gate: &[T], h: &[T], dy: &[T]) -> (Vec<T>, Vec<T>) {
     (dh, dgate)
 }
 
-// ---- the block ----
+/// ONE-ROW gated residual `y[r,d] = x[r,d] + gate[d]*h[r,d]`, `gate` a SINGLE
+/// `[dim]` row broadcast over every one of the `rows` tokens - a THIRD point
+/// on the per-forward/per-token spectrum [`gate_elemwise`]'s doc names,
+/// exactly `crate::block::gate_row`'s `rows_per_cond = rows` case: the
+/// audio<->video cross-attention residual's gate is driven by the CROSS
+/// modality's scalar sigma, not a per-token value, so one gate row serves
+/// every token of this stream (`crate::block::LtxAvBlock`'s doc, step 3).
+pub(crate) fn gate_bcast<T: Fp>(x: &[T], gate: &[T], h: &[T], rows: usize, dim: usize) -> Vec<T> {
+    assert_eq!(gate.len(), dim, "gate_bcast: gate must be one [dim] row");
+    let mut y = vec![T::ZERO; rows * dim];
+    for r in 0..rows {
+        for d in 0..dim {
+            y[r * dim + d] = x[r * dim + d] + gate[d] * h[r * dim + d];
+        }
+    }
+    y
+}
 
-/// Everything the block backward needs from the forward pass.
-pub struct BlockCache<T> {
+/// [`gate_bcast`] backward: `dh` is per-token (unreduced), `dgate` is the
+/// row-SUM over every token - the broadcast's own adjoint, unlike
+/// [`gate_elemwise_bwd`]'s per-token `dgate`.
+pub(crate) fn gate_bcast_bwd<T: Fp>(gate: &[T], h: &[T], rows: usize, dim: usize, dy: &[T]) -> (Vec<T>, Vec<T>) {
+    let mut dh = vec![T::ZERO; rows * dim];
+    let mut dgate = vec![T::ZERO; dim];
+    for r in 0..rows {
+        for d in 0..dim {
+            let g = dy[r * dim + d];
+            dh[r * dim + d] = gate[d] * g;
+            dgate[d] += h[r * dim + d] * g;
+        }
+    }
+    (dh, dgate)
+}
+
+// ---- the block ----
+//
+// Split into two composable phases - self-attention + text-CA (module doc
+// steps 1-4) and the MLP sublayer (step 5) - the SAME seam `crate::block`'s
+// own device path already draws (`self_attn_and_text_ca`/`mlp_sublayer`, two
+// functions shared verbatim by `LtxBlock` and `LtxAvBlock`). `crate::av_grad`
+// reuses these two pieces directly for BOTH streams of the AV block, with the
+// audio<->video cross-attention step inserted between them - the AV cross
+// residual sits at exactly this boundary (`x2`, the state after text-CA and
+// before the MLP), so this is the natural interface, not an arbitrary cut.
+// [`block_forward`]/[`block_backward`] below are unchanged in behaviour -
+// thin wrappers composing the two phases - verified by `crates/ltxv/tests/
+// block_grad.rs` and every model-level gate this module's doc already lists.
+
+/// Everything [`self_attn_and_text_ca_bwd`] needs from
+/// [`self_attn_and_text_ca_fwd`] - steps 1-4 of the block (self-attention,
+/// gated residual, fused re-norm, text cross-attention with AdaLN
+/// modulation, gated residual).
+pub(crate) struct SattCaCache<T> {
     x0: Vec<T>,
     scale_msa: Vec<T>,
     xhat1: Vec<T>,
@@ -736,6 +768,183 @@ pub struct BlockCache<T> {
     xctx: Vec<T>,
     ca_raw: Vec<T>,
     gate_q: Vec<T>,
+    cos: Vec<T>,
+    sin: Vec<T>,
+}
+
+/// Grads mirroring [`SattCaCache`]'s owner: both attention modules' weight
+/// grads, the six per-token planes this phase writes (`shift_msa`/
+/// `scale_msa`/`gate_msa`, `shift_q`/`scale_q`/`gate_q` - planes 0,1,2,6,7,8
+/// of the combined 9-row table), this block's own `prompt_scale_shift_table`
+/// grad, the upstream `dx` (into the block's own input) and `dctx`.
+pub(crate) struct SattCaGrads<T> {
+    pub attn1: AttnGrads<T>,
+    pub attn2: AttnGrads<T>,
+    pub dshift_msa: Vec<T>,
+    pub dscale_msa: Vec<T>,
+    pub dgate_msa: Vec<T>,
+    pub dshift_q: Vec<T>,
+    pub dscale_q: Vec<T>,
+    pub dgate_q: Vec<T>,
+    pub dprompt_scale_shift_table: Vec<T>,
+    pub dx: Vec<T>,
+    pub dctx: Vec<T>,
+}
+
+/// One stream's self-attention + gated residual + fused re-norm + text
+/// cross-attention with AdaLN modulation - `crate::block::self_attn_and_
+/// text_ca`'s generic-`T` twin, reused for both the video-only path
+/// ([`block_forward`]) and both streams of the AV path (`crate::av_grad`).
+///
+/// `x`: `[t*dim]` this stream's current hidden state. `combined`: `[t,9*dim]`
+/// the per-token adaLN-single table ALREADY combined with this block's own
+/// `scale_shift_table` (`add_table(adaln_shared, scale_shift_table, t,
+/// 9*dim)` - the caller's job, since a caller with more than one such table
+/// per block, like [`crate::av_grad`], only wants to build it once). `ctx`:
+/// `[te*dim]` this stream's RAW text context. `attn1`/`attn2`: this stream's
+/// two attention modules. `prompt_sst`: `[2*dim]` this block's own STATIC
+/// text-context modulation. `cos`/`sin`: `[nh, t, hd/2]` self-attention RoPE
+/// tables. Returns `(x2, cache)` - `x2` is ALSO this function's own return
+/// value (not merely cached), since the AV cross-attention step reads it
+/// directly before the MLP ever runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn self_attn_and_text_ca_fwd<T: Fp>(d: Dims, attn1: &AttnW<T>, attn2: &AttnW<T>, prompt_sst: &[T], x: &[T], combined: &[T], ctx: &[T], cos: &[T], sin: &[T]) -> (Vec<T>, SattCaCache<T>) {
+    let (t, te, dim, nh, hd) = (d.t, d.te, d.dim, d.nh, d.hd());
+    let td = t * dim;
+    assert_eq!(x.len(), td, "self_attn_and_text_ca_fwd: x size");
+    assert_eq!(combined.len(), t * 9 * dim, "self_attn_and_text_ca_fwd: combined must be [t, 9*dim]");
+    assert_eq!(prompt_sst.len(), 2 * dim, "self_attn_and_text_ca_fwd: prompt_sst must be [2*dim]");
+    assert_eq!(ctx.len(), te * dim, "self_attn_and_text_ca_fwd: ctx size");
+    assert_eq!(cos.len(), nh * t * hd / 2, "self_attn_and_text_ca_fwd: rope table size");
+
+    let shift_msa = plane(combined, t, dim, 9, 0);
+    let scale_msa = one_plus_plane(combined, t, dim, 9, 1);
+    let gate_msa = plane(combined, t, dim, 9, 2);
+    let shift_q = plane(combined, t, dim, 9, 6);
+    let scale_q = one_plus_plane(combined, t, dim, 9, 7);
+    let gate_q = plane(combined, t, dim, 9, 8);
+
+    let ones = vec![T::ONE; dim];
+
+    // --- self-attention ---
+    let (xhat1, inv1) = rmsnorm(x, t, dim, &ones, d.eps);
+    let n1 = mod_affine(&xhat1, &scale_msa, &shift_msa, td);
+    let q = linear(&n1, t, dim, &attn1.q.w, &attn1.q.b, dim);
+    let k = linear(&n1, t, dim, &attn1.k.w, &attn1.k.b, dim);
+    let v = linear(&n1, t, dim, &attn1.v.w, &attn1.v.b, dim);
+    let (qn, inv_q) = rmsnorm(&q, t, dim, &attn1.qn, d.eps);
+    let (kn, inv_k) = rmsnorm(&k, t, dim, &attn1.kn, d.eps);
+    let qr = rope_ltx(&qn, t, nh, hd, cos, sin);
+    let kr = rope_ltx(&kn, t, nh, hd, cos, sin);
+    let (probs, actx) = attn_fwd(&qr, t, &kr, &v, t, nh, hd);
+    let attn1_out = linear(&actx, t, dim, &attn1.o.w, &attn1.o.b, dim);
+    let x_fma = gate_elemwise(x, &gate_msa, &attn1_out, td);
+
+    // --- fused re-norm (no separate norm2) ---
+    let (xhat_fused, inv_fused) = rmsnorm(&x_fma, t, dim, &ones, d.eps);
+
+    // --- text cross-attention with adaLN modulation ---
+    let attn_input = mod_affine(&xhat_fused, &scale_q, &shift_q, td);
+    let shift_kv = &prompt_sst[0..dim];
+    let scale_kv: Vec<T> = prompt_sst[dim..2 * dim].iter().map(|&v| T::ONE + v).collect();
+    let enc_hidden = affine_shared(ctx, &scale_kv, shift_kv, te, dim);
+
+    let xq2 = linear(&attn_input, t, dim, &attn2.q.w, &attn2.q.b, dim);
+    let xk2 = linear(&enc_hidden, te, dim, &attn2.k.w, &attn2.k.b, dim);
+    let xv2 = linear(&enc_hidden, te, dim, &attn2.v.w, &attn2.v.b, dim);
+    let (xqn, inv_xq) = rmsnorm(&xq2, t, dim, &attn2.qn, d.eps);
+    let (xkn, inv_xk) = rmsnorm(&xk2, te, dim, &attn2.kn, d.eps);
+    let (xprobs, xctx) = attn_fwd(&xqn, t, &xkn, &xv2, te, nh, hd);
+    let ca_raw = linear(&xctx, t, dim, &attn2.o.w, &attn2.o.b, dim);
+    let x2 = gate_elemwise(&x_fma, &gate_q, &ca_raw, td);
+
+    let cache = SattCaCache {
+        x0: x.to_vec(), scale_msa, xhat1, inv1, n1, q, k, v, inv_q, inv_k, qr, kr, probs, actx, attn1_out, gate_msa,
+        x_fma, xhat_fused, inv_fused, scale_q, attn_input, ctx: ctx.to_vec(), enc_hidden, xq2, xk2, xv2, inv_xq, inv_xk,
+        xqn, xkn, xprobs, xctx, ca_raw, gate_q, cos: cos.to_vec(), sin: sin.to_vec(),
+    };
+    (x2, cache)
+}
+
+/// [`self_attn_and_text_ca_fwd`] backward. `dx2`: the COMPLETE gradient
+/// flowing into `x2` (both the MLP sublayer's residual passthrough AND its
+/// norm branch - [`mlp_bwd`]'s own `dx2` output, or an external loss adjoint
+/// for a caller with no MLP downstream, e.g. a block-level gradcheck fixture
+/// that only exercises this phase).
+pub(crate) fn self_attn_and_text_ca_bwd<T: Fp>(d: Dims, attn1: &AttnW<T>, attn2: &AttnW<T>, prompt_sst: &[T], c: &SattCaCache<T>, dx2: &[T]) -> SattCaGrads<T> {
+    let (t, te, dim, nh, hd) = (d.t, d.te, d.dim, d.nh, d.hd());
+    let td = t * dim;
+    let ones = vec![T::ONE; dim];
+    let mut attn1g = AttnGrads::<T>::zeros(dim);
+    let mut attn2g = AttnGrads::<T>::zeros(dim);
+
+    // x2 = x_fma + gate_q ⊙ ca_raw
+    let (dca_raw, dgate_q) = gate_elemwise_bwd(&c.gate_q, &c.ca_raw, dx2);
+    let mut dx_fma = dx2.to_vec();
+
+    let (dxctx, gco) = linear_bwd(&c.xctx, t, dim, &attn2.o.w, dim, &dca_raw);
+    attn2g.o = gco;
+    let (dxqn, dxkn, dxv2) = attn_bwd(&c.xprobs, &c.xqn, &c.xkn, &c.xv2, t, te, nh, hd, &dxctx);
+    let dxq2 = rmsnorm_bwd(&c.xq2, t, dim, &attn2.qn, &c.inv_xq, &dxqn, &mut attn2g.qn);
+    let dxk2 = rmsnorm_bwd(&c.xk2, te, dim, &attn2.kn, &c.inv_xk, &dxkn, &mut attn2g.kn);
+    let (dattn_input, gcq) = linear_bwd(&c.attn_input, t, dim, &attn2.q.w, dim, &dxq2);
+    attn2g.q = gcq;
+    let (denc_hidden_k, gck) = linear_bwd(&c.enc_hidden, te, dim, &attn2.k.w, dim, &dxk2);
+    let (denc_hidden_v, gcv) = linear_bwd(&c.enc_hidden, te, dim, &attn2.v.w, dim, &dxv2);
+    attn2g.k = gck;
+    attn2g.v = gcv;
+    let mut denc_hidden = vec![T::ZERO; te * dim];
+    for i in 0..te * dim {
+        denc_hidden[i] = denc_hidden_k[i] + denc_hidden_v[i];
+    }
+
+    let scale_kv: Vec<T> = prompt_sst[dim..2 * dim].iter().map(|&v| T::ONE + v).collect();
+    let (dctx, dscale_kv, dshift_kv) = affine_shared_bwd(&c.ctx, &scale_kv, te, dim, &denc_hidden);
+    let mut dprompt_scale_shift_table = vec![T::ZERO; 2 * dim];
+    dprompt_scale_shift_table[0..dim].copy_from_slice(&dshift_kv);
+    dprompt_scale_shift_table[dim..2 * dim].copy_from_slice(&dscale_kv);
+
+    let (dxhat_fused_from_ca, dscale_q, dshift_q) = mod_affine_bwd(&c.xhat_fused, &c.scale_q, &dattn_input);
+    let mut dw_scratch2 = vec![T::ZERO; dim];
+    let dxhat_fused_full = rmsnorm_bwd(&c.x_fma, t, dim, &ones, &c.inv_fused, &dxhat_fused_from_ca, &mut dw_scratch2);
+    for i in 0..td {
+        dx_fma[i] += dxhat_fused_full[i];
+    }
+
+    // x_fma = x + gate_msa ⊙ attn1_out
+    let (dattn1_out, dgate_msa) = gate_elemwise_bwd(&c.gate_msa, &c.attn1_out, &dx_fma);
+    let mut dx = dx_fma.clone();
+
+    let (dactx, gso) = linear_bwd(&c.actx, t, dim, &attn1.o.w, dim, &dattn1_out);
+    attn1g.o = gso;
+    let (dqr, dkr, dv) = attn_bwd(&c.probs, &c.qr, &c.kr, &c.v, t, t, nh, hd, &dactx);
+    let dqn = rope_ltx_bwd(&dqr, t, nh, hd, &c.cos, &c.sin);
+    let dkn = rope_ltx_bwd(&dkr, t, nh, hd, &c.cos, &c.sin);
+    let dq = rmsnorm_bwd(&c.q, t, dim, &attn1.qn, &c.inv_q, &dqn, &mut attn1g.qn);
+    let dk = rmsnorm_bwd(&c.k, t, dim, &attn1.kn, &c.inv_k, &dkn, &mut attn1g.kn);
+    let (dn1q, gsq) = linear_bwd(&c.n1, t, dim, &attn1.q.w, dim, &dq);
+    let (dn1k, gsk) = linear_bwd(&c.n1, t, dim, &attn1.k.w, dim, &dk);
+    let (dn1v, gsv) = linear_bwd(&c.n1, t, dim, &attn1.v.w, dim, &dv);
+    attn1g.q = gsq;
+    attn1g.k = gsk;
+    attn1g.v = gsv;
+    let mut dn1 = dn1q;
+    for i in 0..dn1.len() {
+        dn1[i] += dn1k[i] + dn1v[i];
+    }
+    let (dxhat1, dscale_msa, dshift_msa) = mod_affine_bwd(&c.xhat1, &c.scale_msa, &dn1);
+    let mut dw_scratch3 = vec![T::ZERO; dim];
+    let dxhat1_full = rmsnorm_bwd(&c.x0, t, dim, &ones, &c.inv1, &dxhat1, &mut dw_scratch3);
+    for i in 0..td {
+        dx[i] += dxhat1_full[i];
+    }
+
+    SattCaGrads { attn1: attn1g, attn2: attn2g, dshift_msa, dscale_msa, dgate_msa, dshift_q, dscale_q, dgate_q, dprompt_scale_shift_table, dx, dctx }
+}
+
+/// Everything [`mlp_bwd`] needs from [`mlp_fwd`] - the MLP sublayer (module
+/// doc step 5).
+pub(crate) struct MlpCache<T> {
     x2: Vec<T>,
     scale_mlp: Vec<T>,
     xhat2: Vec<T>,
@@ -745,8 +954,74 @@ pub struct BlockCache<T> {
     hg: Vec<T>,
     ff_out: Vec<T>,
     gate_mlp: Vec<T>,
-    cos: Vec<T>,
-    sin: Vec<T>,
+}
+
+/// Grads mirroring [`MlpCache`]'s owner: the FFN weight grads, the three
+/// per-token planes this phase writes (`shift_mlp`/`scale_mlp`/`gate_mlp` -
+/// planes 3,4,5), and `dx2` - the COMPLETE gradient into `x2` (residual
+/// passthrough `dout` PLUS the norm branch), [`self_attn_and_text_ca_bwd`]'s
+/// own `dx2` input.
+pub(crate) struct MlpGrads<T> {
+    pub ff1: LinNB<T>,
+    pub ff2: LinNB<T>,
+    pub dshift_mlp: Vec<T>,
+    pub dscale_mlp: Vec<T>,
+    pub dgate_mlp: Vec<T>,
+    pub dx2: Vec<T>,
+}
+
+/// The MLP sublayer, bias-free FFN (the video-only stream's own
+/// `ff.net.{0.proj,2}` convention - `crate::block::mlp_sublayer`'s
+/// generic-`T` twin at `ff_bias=false`; `crate::av_grad`'s audio stream uses
+/// a BIASED sibling instead, since `audio_ff` carries bias regardless of the
+/// video-only `ff_bias` flag - see `dit::push_ff`'s doc). `x2`: `[t*dim]`
+/// the state this phase modulates (post text-CA). `combined`: the SAME
+/// `[t,9*dim]` table [`self_attn_and_text_ca_fwd`] read.
+pub(crate) fn mlp_fwd<T: Fp>(d: Dims, ff1: &LinNB<T>, ff2: &LinNB<T>, x2: &[T], combined: &[T]) -> (Vec<T>, MlpCache<T>) {
+    let (t, dim) = (d.t, d.dim);
+    let td = t * dim;
+    let shift_mlp = plane(combined, t, dim, 9, 3);
+    let scale_mlp = one_plus_plane(combined, t, dim, 9, 4);
+    let gate_mlp = plane(combined, t, dim, 9, 5);
+    let ones = vec![T::ONE; dim];
+
+    let (xhat2, inv2) = rmsnorm(x2, t, dim, &ones, d.eps);
+    let n2 = mod_affine(&xhat2, &scale_mlp, &shift_mlp, td);
+    let h1 = linear_nb(&n2, t, dim, &ff1.w, 4 * dim);
+    let hg: Vec<T> = h1.iter().map(|&v| gelu(v)).collect();
+    let ff_out = linear_nb(&hg, t, 4 * dim, &ff2.w, dim);
+    let out = gate_elemwise(x2, &gate_mlp, &ff_out, td);
+
+    (out, MlpCache { x2: x2.to_vec(), scale_mlp, xhat2, inv2, n2, h1, hg, ff_out, gate_mlp })
+}
+
+/// [`mlp_fwd`] backward.
+pub(crate) fn mlp_bwd<T: Fp>(d: Dims, ff1: &LinNB<T>, ff2: &LinNB<T>, c: &MlpCache<T>, dout: &[T]) -> MlpGrads<T> {
+    let (t, dim) = (d.t, d.dim);
+    let td = t * dim;
+    let ones = vec![T::ONE; dim];
+
+    // out = x2 + gate_mlp ⊙ ff_out
+    let (dff_out, dgate_mlp) = gate_elemwise_bwd(&c.gate_mlp, &c.ff_out, dout);
+    let mut dx2 = dout.to_vec();
+
+    let (dhg, ff2g) = linear_nb_bwd(&c.hg, t, 4 * dim, &ff2.w, dim, &dff_out);
+    let dh1: Vec<T> = dhg.iter().zip(&c.h1).map(|(&gr, &v)| gr * dgelu(v)).collect();
+    let (dn2, ff1g) = linear_nb_bwd(&c.n2, t, dim, &ff1.w, 4 * dim, &dh1);
+    let (dxhat2, dscale_mlp, dshift_mlp) = mod_affine_bwd(&c.xhat2, &c.scale_mlp, &dn2);
+    let mut dw_scratch = vec![T::ZERO; dim];
+    let dxhat2_full = rmsnorm_bwd(&c.x2, t, dim, &ones, &c.inv2, &dxhat2, &mut dw_scratch);
+    for i in 0..td {
+        dx2[i] += dxhat2_full[i];
+    }
+
+    MlpGrads { ff1: ff1g, ff2: ff2g, dshift_mlp, dscale_mlp, dgate_mlp, dx2 }
+}
+
+/// Everything the block backward needs from the forward pass.
+pub struct BlockCache<T> {
+    satt: SattCaCache<T>,
+    mlp: MlpCache<T>,
 }
 
 /// One block's forward. `x`: `[t*dim]`. `adaln_shared`: `[t*9*dim]`, the
@@ -757,184 +1032,53 @@ pub struct BlockCache<T> {
 /// `prompt_scale_shift_table` modulates it fresh, every block).
 /// `cos`/`sin`: `[nh, t, hd/2]` (`crate::rope::LtxRopeTables`'s layout).
 pub fn block_forward<T: Fp>(d: Dims, w: &BlockW<T>, x: &[T], adaln_shared: &[T], ctx: &[T], cos: &[T], sin: &[T]) -> (Vec<T>, BlockCache<T>) {
-    let (t, te, dim, nh, hd) = (d.t, d.te, d.dim, d.nh, d.hd());
-    let td = t * dim;
-    assert_eq!(x.len(), td, "block x size");
-    assert_eq!(adaln_shared.len(), t * 9 * dim, "adaln_shared must be [t, 9*dim]");
-    assert_eq!(w.scale_shift_table.len(), 9 * dim, "scale_shift_table must be [9*dim]");
-    assert_eq!(w.prompt_scale_shift_table.len(), 2 * dim, "prompt_scale_shift_table must be [2*dim]");
-    assert_eq!(ctx.len(), te * dim, "ctx size");
-    assert_eq!(cos.len(), nh * t * hd / 2, "rope table size");
-
-    let combined = add_table(adaln_shared, &w.scale_shift_table, t, 9 * dim);
-    let shift_msa = plane(&combined, t, dim, 9, 0);
-    let scale_msa = one_plus_plane(&combined, t, dim, 9, 1);
-    let gate_msa = plane(&combined, t, dim, 9, 2);
-    let shift_mlp = plane(&combined, t, dim, 9, 3);
-    let scale_mlp = one_plus_plane(&combined, t, dim, 9, 4);
-    let gate_mlp = plane(&combined, t, dim, 9, 5);
-    let shift_q = plane(&combined, t, dim, 9, 6);
-    let scale_q = one_plus_plane(&combined, t, dim, 9, 7);
-    let gate_q = plane(&combined, t, dim, 9, 8);
-
-    let ones = vec![T::ONE; dim];
-
-    // --- self-attention ---
-    let (xhat1, inv1) = rmsnorm(x, t, dim, &ones, d.eps);
-    let n1 = mod_affine(&xhat1, &scale_msa, &shift_msa, td);
-    let q = linear(&n1, t, dim, &w.attn1.q.w, &w.attn1.q.b, dim);
-    let k = linear(&n1, t, dim, &w.attn1.k.w, &w.attn1.k.b, dim);
-    let v = linear(&n1, t, dim, &w.attn1.v.w, &w.attn1.v.b, dim);
-    let (qn, inv_q) = rmsnorm(&q, t, dim, &w.attn1.qn, d.eps);
-    let (kn, inv_k) = rmsnorm(&k, t, dim, &w.attn1.kn, d.eps);
-    let qr = rope_ltx(&qn, t, nh, hd, cos, sin);
-    let kr = rope_ltx(&kn, t, nh, hd, cos, sin);
-    let (probs, actx) = attn_fwd(&qr, t, &kr, &v, t, nh, hd);
-    let attn1_out = linear(&actx, t, dim, &w.attn1.o.w, &w.attn1.o.b, dim);
-    let x_fma = gate_elemwise(x, &gate_msa, &attn1_out, td);
-
-    // --- fused re-norm (no separate norm2) ---
-    let (xhat_fused, inv_fused) = rmsnorm(&x_fma, t, dim, &ones, d.eps);
-
-    // --- text cross-attention with adaLN modulation ---
-    let attn_input = mod_affine(&xhat_fused, &scale_q, &shift_q, td);
-    let shift_kv = &w.prompt_scale_shift_table[0..dim];
-    let scale_kv: Vec<T> = w.prompt_scale_shift_table[dim..2 * dim].iter().map(|&v| T::ONE + v).collect();
-    let enc_hidden = affine_shared(ctx, &scale_kv, shift_kv, te, dim);
-
-    let xq2 = linear(&attn_input, t, dim, &w.attn2.q.w, &w.attn2.q.b, dim);
-    let xk2 = linear(&enc_hidden, te, dim, &w.attn2.k.w, &w.attn2.k.b, dim);
-    let xv2 = linear(&enc_hidden, te, dim, &w.attn2.v.w, &w.attn2.v.b, dim);
-    let (xqn, inv_xq) = rmsnorm(&xq2, t, dim, &w.attn2.qn, d.eps);
-    let (xkn, inv_xk) = rmsnorm(&xk2, te, dim, &w.attn2.kn, d.eps);
-    let (xprobs, xctx) = attn_fwd(&xqn, t, &xkn, &xv2, te, nh, hd);
-    let ca_raw = linear(&xctx, t, dim, &w.attn2.o.w, &w.attn2.o.b, dim);
-    let x2 = gate_elemwise(&x_fma, &gate_q, &ca_raw, td);
-
-    // --- MLP ---
-    let (xhat2, inv2) = rmsnorm(&x2, t, dim, &ones, d.eps);
-    let n2 = mod_affine(&xhat2, &scale_mlp, &shift_mlp, td);
-    let h1 = linear_nb(&n2, t, dim, &w.ff1.w, 4 * dim);
-    let hg: Vec<T> = h1.iter().map(|&v| gelu(v)).collect();
-    let ff_out = linear_nb(&hg, t, 4 * dim, &w.ff2.w, dim);
-    let out = gate_elemwise(&x2, &gate_mlp, &ff_out, td);
-
-    let cache = BlockCache {
-        x0: x.to_vec(), scale_msa, xhat1, inv1, n1, q, k, v, inv_q, inv_k, qr, kr, probs, actx, attn1_out, gate_msa,
-        x_fma, xhat_fused, inv_fused, scale_q, attn_input, ctx: ctx.to_vec(), enc_hidden, xq2, xk2, xv2, inv_xq, inv_xk,
-        xqn, xkn, xprobs, xctx, ca_raw, gate_q, x2, scale_mlp, xhat2, inv2, n2, h1, hg, ff_out, gate_mlp,
-        cos: cos.to_vec(), sin: sin.to_vec(),
-    };
-    (out, cache)
+    assert_eq!(w.scale_shift_table.len(), 9 * d.dim, "scale_shift_table must be [9*dim]");
+    let combined = add_table(adaln_shared, &w.scale_shift_table, d.t, 9 * d.dim);
+    let (x2, satt) = self_attn_and_text_ca_fwd(d, &w.attn1, &w.attn2, &w.prompt_scale_shift_table, x, &combined, ctx, cos, sin);
+    let (out, mlp) = mlp_fwd(d, &w.ff1, &w.ff2, &x2, &combined);
+    (out, BlockCache { satt, mlp })
 }
 
 /// One block's backward: `dout[t*dim]` -> every weight grad, `dx`,
 /// `dadaln_shared` (this block's contribution to the shared per-token
 /// table) and `dctx`.
 pub fn block_backward<T: Fp>(d: Dims, w: &BlockW<T>, c: &BlockCache<T>, dout: &[T]) -> BlockGrads<T> {
-    let (t, te, dim, nh, hd) = (d.t, d.te, d.dim, d.nh, d.hd());
-    let td = t * dim;
-    let mut g = BlockGrads::<T>::zeros(d);
+    let (t, dim) = (d.t, d.dim);
+    let mg = mlp_bwd(d, &w.ff1, &w.ff2, &c.mlp, dout);
+    let sg = self_attn_and_text_ca_bwd(d, &w.attn1, &w.attn2, &w.prompt_scale_shift_table, &c.satt, &mg.dx2);
+
     let mut dcombined = vec![T::ZERO; t * 9 * dim];
-    let ones = vec![T::ONE; dim];
-
-    // out = x2 + gate_mlp ⊙ ff_out
-    let (dff_out, dgate_mlp) = gate_elemwise_bwd(&c.gate_mlp, &c.ff_out, dout);
-    write_plane(&mut dcombined, t, dim, 9, 5, &dgate_mlp);
-    let mut dx2 = dout.to_vec();
-
-    let (dhg, gff2) = linear_nb_bwd(&c.hg, t, 4 * dim, &w.ff2.w, dim, &dff_out);
-    g.ff2 = gff2;
-    let dh1: Vec<T> = dhg.iter().zip(&c.h1).map(|(&gr, &v)| gr * dgelu(v)).collect();
-    let (dn2, gff1) = linear_nb_bwd(&c.n2, t, dim, &w.ff1.w, 4 * dim, &dh1);
-    g.ff1 = gff1;
-    let (dxhat2, dscale_mlp, dshift_mlp) = mod_affine_bwd(&c.xhat2, &c.scale_mlp, &dn2);
-    write_plane(&mut dcombined, t, dim, 9, 4, &dscale_mlp);
-    write_plane(&mut dcombined, t, dim, 9, 3, &dshift_mlp);
-    let mut dw_scratch = vec![T::ZERO; dim];
-    let dxhat2_full = rmsnorm_bwd(&c.x2, t, dim, &ones, &c.inv2, &dxhat2, &mut dw_scratch);
-    for i in 0..td {
-        dx2[i] += dxhat2_full[i];
-    }
-
-    // x2 = x_fma + gate_q ⊙ ca_raw
-    let (dca_raw, dgate_q) = gate_elemwise_bwd(&c.gate_q, &c.ca_raw, &dx2);
-    write_plane(&mut dcombined, t, dim, 9, 8, &dgate_q);
-    let mut dx_fma = dx2.clone();
-
-    let (dxctx, gco) = linear_bwd(&c.xctx, t, dim, &w.attn2.o.w, dim, &dca_raw);
-    g.attn2.o = gco;
-    let (dxqn, dxkn, dxv2) = attn_bwd(&c.xprobs, &c.xqn, &c.xkn, &c.xv2, t, te, nh, hd, &dxctx);
-    let dxq2 = rmsnorm_bwd(&c.xq2, t, dim, &w.attn2.qn, &c.inv_xq, &dxqn, &mut g.attn2.qn);
-    let dxk2 = rmsnorm_bwd(&c.xk2, te, dim, &w.attn2.kn, &c.inv_xk, &dxkn, &mut g.attn2.kn);
-    let (dattn_input, gcq) = linear_bwd(&c.attn_input, t, dim, &w.attn2.q.w, dim, &dxq2);
-    g.attn2.q = gcq;
-    let (denc_hidden_k, gck) = linear_bwd(&c.enc_hidden, te, dim, &w.attn2.k.w, dim, &dxk2);
-    let (denc_hidden_v, gcv) = linear_bwd(&c.enc_hidden, te, dim, &w.attn2.v.w, dim, &dxv2);
-    g.attn2.k = gck;
-    g.attn2.v = gcv;
-    let mut denc_hidden = vec![T::ZERO; te * dim];
-    for i in 0..te * dim {
-        denc_hidden[i] = denc_hidden_k[i] + denc_hidden_v[i];
-    }
-
-    let scale_kv: Vec<T> = w.prompt_scale_shift_table[dim..2 * dim].iter().map(|&v| T::ONE + v).collect();
-    let (dctx, dscale_kv, dshift_kv) = affine_shared_bwd(&c.ctx, &scale_kv, te, dim, &denc_hidden);
-    g.prompt_scale_shift_table[0..dim].copy_from_slice(&dshift_kv);
-    g.prompt_scale_shift_table[dim..2 * dim].copy_from_slice(&dscale_kv);
-    g.dctx = dctx;
-
-    let (dxhat_fused_from_ca, dscale_q, dshift_q) = mod_affine_bwd(&c.xhat_fused, &c.scale_q, &dattn_input);
-    write_plane(&mut dcombined, t, dim, 9, 7, &dscale_q);
-    write_plane(&mut dcombined, t, dim, 9, 6, &dshift_q);
-    let mut dw_scratch2 = vec![T::ZERO; dim];
-    let dxhat_fused_full = rmsnorm_bwd(&c.x_fma, t, dim, &ones, &c.inv_fused, &dxhat_fused_from_ca, &mut dw_scratch2);
-    for i in 0..td {
-        dx_fma[i] += dxhat_fused_full[i];
-    }
-
-    // x_fma = x + gate_msa ⊙ attn1_out
-    let (dattn1_out, dgate_msa) = gate_elemwise_bwd(&c.gate_msa, &c.attn1_out, &dx_fma);
-    write_plane(&mut dcombined, t, dim, 9, 2, &dgate_msa);
-    let mut dx = dx_fma.clone();
-
-    let (dactx, gso) = linear_bwd(&c.actx, t, dim, &w.attn1.o.w, dim, &dattn1_out);
-    g.attn1.o = gso;
-    let (dqr, dkr, dv) = attn_bwd(&c.probs, &c.qr, &c.kr, &c.v, t, t, nh, hd, &dactx);
-    let dqn = rope_ltx_bwd(&dqr, t, nh, hd, &c.cos, &c.sin);
-    let dkn = rope_ltx_bwd(&dkr, t, nh, hd, &c.cos, &c.sin);
-    let dq = rmsnorm_bwd(&c.q, t, dim, &w.attn1.qn, &c.inv_q, &dqn, &mut g.attn1.qn);
-    let dk = rmsnorm_bwd(&c.k, t, dim, &w.attn1.kn, &c.inv_k, &dkn, &mut g.attn1.kn);
-    let (dn1q, gsq) = linear_bwd(&c.n1, t, dim, &w.attn1.q.w, dim, &dq);
-    let (dn1k, gsk) = linear_bwd(&c.n1, t, dim, &w.attn1.k.w, dim, &dk);
-    let (dn1v, gsv) = linear_bwd(&c.n1, t, dim, &w.attn1.v.w, dim, &dv);
-    g.attn1.q = gsq;
-    g.attn1.k = gsk;
-    g.attn1.v = gsv;
-    let mut dn1 = dn1q;
-    for i in 0..dn1.len() {
-        dn1[i] += dn1k[i] + dn1v[i];
-    }
-    let (dxhat1, dscale_msa, dshift_msa) = mod_affine_bwd(&c.xhat1, &c.scale_msa, &dn1);
-    write_plane(&mut dcombined, t, dim, 9, 1, &dscale_msa);
-    write_plane(&mut dcombined, t, dim, 9, 0, &dshift_msa);
-    let mut dw_scratch3 = vec![T::ZERO; dim];
-    let dxhat1_full = rmsnorm_bwd(&c.x0, t, dim, &ones, &c.inv1, &dxhat1, &mut dw_scratch3);
-    for i in 0..td {
-        dx[i] += dxhat1_full[i];
-    }
+    write_plane(&mut dcombined, t, dim, 9, 0, &sg.dshift_msa);
+    write_plane(&mut dcombined, t, dim, 9, 1, &sg.dscale_msa);
+    write_plane(&mut dcombined, t, dim, 9, 2, &sg.dgate_msa);
+    write_plane(&mut dcombined, t, dim, 9, 3, &mg.dshift_mlp);
+    write_plane(&mut dcombined, t, dim, 9, 4, &mg.dscale_mlp);
+    write_plane(&mut dcombined, t, dim, 9, 5, &mg.dgate_mlp);
+    write_plane(&mut dcombined, t, dim, 9, 6, &sg.dshift_q);
+    write_plane(&mut dcombined, t, dim, 9, 7, &sg.dscale_q);
+    write_plane(&mut dcombined, t, dim, 9, 8, &sg.dgate_q);
 
     // Split the site gradient: the block's own STATIC table is the row-sum,
     // the model-shared per-token table's contribution is the UNREDUCED
     // tensor (see this module's doc).
+    let mut scale_shift_table = vec![T::ZERO; 9 * dim];
     for r in 0..t {
         for i in 0..9 * dim {
-            g.scale_shift_table[i] += dcombined[r * 9 * dim + i];
+            scale_shift_table[i] += dcombined[r * 9 * dim + i];
         }
     }
-    g.dadaln_shared = dcombined;
-    g.dx = dx;
-    g
+
+    BlockGrads {
+        scale_shift_table,
+        prompt_scale_shift_table: sg.dprompt_scale_shift_table,
+        attn1: sg.attn1,
+        attn2: sg.attn2,
+        ff1: mg.ff1,
+        ff2: mg.ff2,
+        dx: sg.dx,
+        dadaln_shared: dcombined,
+        dctx: sg.dctx,
+    }
 }
 
 #[cfg(test)]

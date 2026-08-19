@@ -770,6 +770,123 @@ this port:
       are not a generation-quality claim, and real-weight DiT parity is
       still only proven at reduced depth (the earlier "real-weight parity
       ladder" milestone, 2 of 48 layers).
+- [x] **Training for the audio+video DiT (Phase 7)** - `crates/ltxv/src/
+      {av_grad,av_modelgrad,av_lora,av_finetune}.rs`,
+      `gradcheck::{check_ltxv_av,check_ltxv_av_conditioning}`,
+      `crates/ltxv/tests/{av_block_grad,av_overfit,av_lora_train,
+      av_lora_reload,av_concept_learning}.rs`. Closes the gap the M7
+      training milestone's own doc named ("the audio-extended
+      `LtxAvDitConfig`/`LtxAvBlock`/`LtxAvDit` has no training support
+      yet").
+
+      Reused, unchanged, first: `crate::grad`'s video-only
+      `block_forward`/`block_backward` were split into the two composable
+      phases `crate::block`'s own device path already draws as separate
+      functions (`self_attn_and_text_ca_fwd`/`_bwd`, `mlp_fwd`/`_bwd`) -
+      a behaviour-preserving refactor, verified byte-identical by
+      re-running `block_grad.rs`/`overfit.rs`/`lora_train.rs` before any
+      new AV code existed. `crate::av_grad` calls both phases twice (video
+      stream, audio stream) and adds only what's genuinely new: the
+      audio<->video cross-attention. Two real structural differences from
+      every attention module already in this crate: `CrossAttnW` is a
+      non-square `AttnW` twin (A2V/V2A project between DIFFERENT-width
+      streams, always at the audio stream's head geometry -
+      `q_dim != kv_dim != inner_dim` in general), and the residual gate is
+      a THIRD point on `crate::grad`'s own per-forward/per-token gate
+      spectrum (`gate_bcast`/`gate_bcast_bwd`, new) - ONE row shared by
+      every token, driven by the OTHER modality's scalar sigma, not a
+      per-token gate. `crate::av_modelgrad` adds the six shared-shape
+      `AdaLayerNormSingle` timestep MLPs the AV model carries (one
+      `TsMlpW`/`ts_mlp_forward`/`ts_mlp_bwd` implementation, reused six
+      times: each stream's own 9-row table, the two 4-row AV scale/shift
+      tables, the two 1-row AV gate tables) and the two per-stream output
+      stages. Audio's FFN carries bias where video's does not
+      (`dit::push_ff`'s doc - a real per-stream asymmetry, not a
+      simplification) - handled with a small biased `mlp_b_fwd`/`mlp_b_bwd`
+      twin rather than genericising `Lin`/`LinNB` together.
+
+      Gates, all at `LtxAvDitConfig::tiny` (ungated - `to_gate_logits` and
+      both embeddings connectors stay out of scope, the same line M3/M7
+      already drew): block FD worst error 2.998e-10 over 82 tensors (bound
+      1e-4, `av_block_grad.rs`, video+audio weight tensors plus every
+      external input including the four model-shared AV conditioning
+      tables); model FD (`check_ltxv_av`) and the elementwise conditioning
+      fold gate (`check_ltxv_av_conditioning`, covering both streams' main
+      adaLN tables plus all four AV cross-modal tables, read TWICE per
+      block each) both pass at (atol=1e-6, rtol=1e-4), the same bound
+      `check_ltxv`/`check_ltxv_conditioning` already hold the video-only
+      path to; whole-AV-model overfit (Adam, 400 steps): loss
+      0.78321021->0.00000013. This whole training path is pure host math
+      with no GPU dispatch at all (same as the video-only path) - lesson
+      #5's "run every gradcheck on both backends" has no separate CPU/GPU
+      surface to exercise here.
+
+      LoRA targets 28 leaves per block: both streams' `attn1`/`attn2`
+      q/k/v/o + FFN (10 leaves each, matching the video-only path's own
+      10), plus all four A<->V cross-attention projections
+      (`audio_to_video_attn`/`video_to_audio_attn` q/k/v/o, 8 more) -
+      included deliberately, not merely for symmetry (`av_lora.rs`'s own
+      doc): a concept that manifests as a video/audio correlation can only
+      be learned through those four modules. Bit-exact no-op at init,
+      fold-vs-apply bit-equal after real training steps, standalone
+      descent 0.316691->0.151351 over 40 steps (rank 4, lr 3e-3). A
+      fresh-OS-process save/reload round trip (`av_lora_reload.rs`, a
+      self-respawn-the-compiled-test-binary trick, lesson #23) closes the
+      loop one step further than the `qwen3::tests::lora_roundtrip`
+      precedent, which closes it with a fresh struct in the SAME process:
+      live-vs-reloaded 0.000e0 (bit-exact), live-vs-base 3.035e-2 (a real,
+      measured margin the reload must reproduce).
+
+      A synthetic procedural dataset with exact ground truth
+      (`data::gen_clips`, already used by `wan`'s own LoRA gates - reused
+      as-is, not reinvented, per this port's own reuse-first convention): a
+      magenta triangle orbiting a white dot (concept) vs. a cyan square
+      bouncing between two walls (distractor), rendered at 24x24, encoded
+      into the DiT's own token-latent shape by a fixed, never-trained
+      random projection (`crate::av_finetune`'s own doc explains why - no
+      real VAE-latent distribution exists for this tiny random-init model
+      to be calibrated against). A LoRA trained ONLY on concept clips (8
+      clips, 80 steps, rank 4) moves GENERATED OUTPUT (a one-step
+      flow-matching denoise from pure noise, not loss - lesson #3: finite
+      differences prove the derivative, never the objective) toward the
+      concept centroid and away from a held-out distractor centroid, on a
+      HELD-OUT caption string never seen during training: mean score
+      base=+0.00243 -> adapted=+0.00408 (delta +0.00165,
+      `av_concept_learning.rs`).
+
+      A stronger training budget (200 steps, rank 8, lr 8e-3) was tried
+      FIRST and FLIPS the sign (delta -0.082, adapted output moves AWAY
+      from the concept) - the same over-training collapse
+      `wan::tests::finetune_ab`'s own `#[ignore]`d G2 gate documents at
+      real scale ("collapses ... does not recover by step 250"), sharper
+      here because `caption_context` gives each distinct caption string an
+      INDEPENDENT random embedding (no real text encoder exists in this
+      crate's training scope yet, so there is no semantic bridge between
+      the training caption and the held-out one) - enough steps memorises
+      "this exact context vector -> this exact latent" rather than a
+      direction that generalises to an unrelated context draw. Recorded as
+      a refuted hypothesis with its own number, not silently dropped.
+
+      Scoped down to numeric-only, deliberately: no video files were
+      produced for this milestone. This tiny AV DiT's token-latent space
+      has no relationship to the real VAE's calibrated distribution (fit
+      to the real 22B checkpoint, which has no training/backward path in
+      this crate at all - `crate::int8`'s compute path is inference-only),
+      so decoding this test's synthetic latents back to pixels would only
+      demonstrate that the projection is invertible, not that the LoRA
+      learned anything about video content.
+
+      Explicit, tracked gaps: gated attention's backward (`to_gate_logits`)
+      and both embeddings connectors' training are not implemented, the
+      same scope line M3/M7 already drew for the video-only path;
+      `AvModelWeights::from_tensors` exists (checkpoint-name-keyed import
+      into the training weight layout, mirroring `ModelWeights::
+      from_tensors`) but no real 22B GGUF-to-training-weights bridge was
+      built - this milestone trains only at `LtxAvDitConfig::tiny`;
+      `model::Shardable`'s own backward seam (`run_backward_stage`/
+      `read_in_dres`/`write_out_dres`) remains unimplemented for
+      `LtxAvDit`, same as `LtxDit`'s own recorded gap above - this
+      host-math training path is separate and does not build on it.
 
 ## Convention questions settled from source, not experiment
 
@@ -884,7 +1001,21 @@ land. Known traps already identified from reading (not yet test-pinned):
   `LtxAvDit` is the superset path.
 - `LtxDit` has no backward/training pass through the `model::Shardable`/
   `model::Pipeline` seam - `crate::grad`/`crate::modelgrad`'s existing
-  host-math training path is separate and does not build on it.
+  host-math training path is separate and does not build on it. `LtxAvDit`
+  now has an equivalent host-math training path (`crate::av_grad`/
+  `crate::av_modelgrad`, the "training for the audio+video DiT" milestone
+  above) but the SAME `Shardable`/`Pipeline`-seam gap applies to it too -
+  neither DiT's device-sharded backward is implemented.
+- Gated attention's (`to_gate_logits`) backward and both embeddings
+  connectors' training are not implemented for either DiT - the host-math
+  training paths (video-only and AV) both train only the ungated,
+  connector-disabled config point (`LtxDitConfig::tiny`/
+  `LtxAvDitConfig::tiny`, not `tiny_gated`). No real-checkpoint
+  GGUF-to-training-weights bridge exists for the AV DiT either -
+  `AvModelWeights::from_tensors` reads a checkpoint-name-keyed tensor map
+  (mirroring `ModelWeights::from_tensors`), but nothing feeds it the real
+  22B AV weights yet, so AV training is proven only at tiny/synthetic
+  scale.
 
 ## Scope that collapsed once the reference was read
 

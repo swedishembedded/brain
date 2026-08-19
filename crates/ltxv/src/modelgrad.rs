@@ -298,7 +298,7 @@ pub fn forward<T: Fp>(
 /// variance) - `crate::dit::layernorm_noaffine`'s generic-`T` twin, the
 /// output stage's `norm_out` (LayerNorm, NOT RMSNorm - see `crate::dit`'s
 /// module doc). Returns `(xhat, inv)`.
-fn layernorm<T: Fp>(x: &[T], rows: usize, d: usize, eps: f64) -> (Vec<T>, Vec<T>) {
+pub(crate) fn layernorm<T: Fp>(x: &[T], rows: usize, d: usize, eps: f64) -> (Vec<T>, Vec<T>) {
     let mut y = vec![T::ZERO; rows * d];
     let mut inv = vec![T::ZERO; rows];
     let dn = T::fr(d as f64);
@@ -324,7 +324,7 @@ fn layernorm<T: Fp>(x: &[T], rows: usize, d: usize, eps: f64) -> (Vec<T>, Vec<T>
 }
 
 /// [`layernorm`] backward from the cached `xhat`.
-fn layernorm_bwd<T: Fp>(xhat: &[T], inv: &[T], rows: usize, d: usize, dxhat: &[T]) -> Vec<T> {
+pub(crate) fn layernorm_bwd<T: Fp>(xhat: &[T], inv: &[T], rows: usize, d: usize, dxhat: &[T]) -> Vec<T> {
     let mut dx = vec![T::ZERO; rows * d];
     let dn = T::fr(d as f64);
     for r in 0..rows {

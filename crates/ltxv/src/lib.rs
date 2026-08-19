@@ -51,7 +51,7 @@
 //! `gradcheck::check_ltxv`/`check_ltxv_conditioning`, `crates/ltxv/tests/
 //! {block_grad,host_forward_parity,lora_train,overfit}.rs`. The audio
 //! stream's own training reference (`LtxAvDitConfig`/`LtxAvBlock`/
-//! `LtxAvDit`) is explicitly out of scope, a later milestone.
+//! `LtxAvDit`) was out of scope here - closed below.
 //!
 //! (M8, first half): the two real-weight **latent upscalers** ([`upsampler`],
 //! spatial x2 / temporal x2 - small conv/resblock nets over
@@ -83,8 +83,35 @@
 //! IC-LoRA spatial-detailing adapter, real 22B quality, per-token/partial-
 //! strength anchor-keyframe carry-forward across temporal rounds, and the NA
 //! decoder as an alternative decode path).
+//!
+//! **Training for the audio+video DiT** ([`av_grad`]/[`av_modelgrad`]/
+//! [`av_lora`]/[`av_finetune`]) - M7's training reference extended onto
+//! [`LtxAvDit`], closing the gap that milestone's own doc named. Reuses
+//! [`grad::self_attn_and_text_ca_fwd`]/`_bwd` and [`grad::mlp_fwd`]/`_bwd`
+//! UNCHANGED for both streams' self-/text-cross-attention/FFN (the M7
+//! video-only path was refactored, behaviour-preserving, to expose these as
+//! the two composable phases `crate::block`'s own device path already
+//! draws them as); [`av_grad`] adds only what is genuinely new - the
+//! audio<->video cross-attention, whose Q/K/V project between
+//! DIFFERENT-width streams and whose residual gate is a single row shared
+//! by every token (driven by the OTHER modality's scalar sigma), not a
+//! per-token gate. `to_gate_logits` (gated attention) and both embeddings
+//! connectors stay out of scope, the same M3/M7 line
+//! (`config::LtxAvDitConfig::tiny`, not `tiny_gated`). LoRA targets 28
+//! leaves per block (both streams' attention+FFN, plus all four A<->V
+//! cross-attention projections - [`av_lora`]'s own doc explains why those
+//! are included, not merely mirrored for symmetry). [`av_finetune`] adds a
+//! synthetic procedural dataset with exact ground truth (`data::gen_clips`,
+//! already used by `wan`'s own LoRA gates) and proves a concept-only LoRA
+//! measurably moves GENERATED OUTPUT toward the concept on a held-out
+//! prompt - not merely that loss goes down (lesson #3) - plus a save/reload
+//! round trip closed in a genuinely separate OS process (lesson #23).
 
 pub mod audio_vae;
+pub mod av_finetune;
+pub mod av_grad;
+pub mod av_lora;
+pub mod av_modelgrad;
 pub mod block;
 pub mod caps;
 pub mod config;
