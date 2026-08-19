@@ -1067,6 +1067,12 @@ wan/t2v: release
 # mirrored (sdxl, controlnet, codeformer, vqgan, flux1, flux2, clip, sam2, ...):
 #
 #   make parity/strict PARITY_STRICT_SUITES="brain-clip:parity"
+#
+# brain-ltxv's audio_parity is deliberately NOT in the default list below -
+# its golden needs torchaudio, which has no working CPU build against this
+# repo's torch pin on every host tried so far (see .agents/roadmap/ltxv.md's
+# "Recorded gaps" for the exact failure). Add it back explicitly once that is
+# fixed: PARITY_STRICT_SUITES="brain-ltxv:...,audio_parity"
 PARITY_STRICT_SUITES ?= \
         brain-deepseek2ocr:tiny_ref \
         brain-t5encoder:tiny_ref \
@@ -1078,7 +1084,7 @@ PARITY_STRICT_SUITES ?= \
         brain-s3dit:block_parity,dev_parity,model_parity,real_parity \
         brain-rrdbnet:parity \
         brain-wan:dit_parity,vae_parity \
-        brain-ltxv:vae_parity,audio_parity,upsampler_parity,duration_head_parity,na_decoder_parity \
+        brain-ltxv:vae_parity,upsampler_parity,duration_head_parity,na_decoder_parity \
         brain-gemma4:parity
 
 parity/strict:

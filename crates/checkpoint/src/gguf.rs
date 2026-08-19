@@ -883,6 +883,21 @@ impl MmapGguf {
         let raw = &self.mmap[start..start + nbytes];
         Some(dequantize(ty, raw, numel).map_err(|e| format!("gguf: {name}: {e}")))
     }
+
+    /// `name`'s RAW on-disk bytes (still quantized, if applicable) plus its
+    /// ggml type id - for a caller that wants to dequantize INDEPENDENTLY of
+    /// [`Self::tensor`]'s own [`dequantize`] (e.g. a quantization-exactness
+    /// parity test that reimplements a quant format's dequant math from the
+    /// GGUF spec, to check this reader's own output rather than trust it -
+    /// `crates/ltxv/tests/gguf_quant_real.rs` is the first such caller).
+    /// `None` if the name is unknown. Every other public accessor
+    /// ([`Self::tensor`], the [`crate::TensorSource`] impl) still goes
+    /// through [`dequantize`] unchanged - this is purely an additional read
+    /// path, not a replacement for the decoded one.
+    pub fn raw_tensor_bytes(&self, name: &str) -> Option<(&[u8], u32)> {
+        let &(ty, start, nbytes, _numel) = self.index.get(name)?;
+        Some((&self.mmap[start..start + nbytes], ty))
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1493,6 +1508,52 @@ mod tests {
             let resolved = mg.raw_words(name).map(|w| w.len()).or_else(|| mg.numel(name));
             assert!(resolved.is_some(), "{name} must resolve via raw_words or numel");
         }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// [`MmapGguf::raw_tensor_bytes`] must return the EXACT on-disk block
+    /// bytes (independently re-dequantizable) plus the right type id, for
+    /// both an F32 and a Q8_0 tensor, and `None` for an absent name - the
+    /// same three cases [`raw_words_and_numel_see_every_present_tensor`]
+    /// exercises for the OTHER raw-access path.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raw_tensor_bytes_returns_the_exact_on_disk_block_and_type() {
+        use crate::gguf_write::{write, TensorOut};
+
+        let path = std::env::temp_dir().join(format!("gguf-rawbytes-test-{}.gguf", std::process::id())).to_string_lossy().into_owned();
+        let f32_vals = [1.0f32, -2.5, 3.0];
+        let f32_data: Vec<u8> = f32_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // One Q8_0 block (34 bytes: f16 scale + 32 int8), same fixture as `q8_0_block`.
+        let mut q_data = Vec::new();
+        q_data.extend(h(0.5));
+        q_data.push(10u8);
+        q_data.push((-4i8) as u8);
+        q_data.push(127u8);
+        q_data.extend([0u8; 29]);
+        let tensors = vec![
+            TensorOut { name: "f.weight".to_string(), shape: vec![3], ty: T_F32, data: f32_data.clone() },
+            TensorOut { name: "q.weight".to_string(), shape: vec![32], ty: T_Q8_0, data: q_data.clone() },
+        ];
+        write(&path, &[], &tensors, 32).unwrap();
+
+        let mg = MmapGguf::open(&path).unwrap();
+
+        let (raw_f, ty_f) = mg.raw_tensor_bytes("f.weight").expect("f.weight must resolve");
+        assert_eq!(ty_f, T_F32);
+        assert_eq!(raw_f, f32_data.as_slice());
+
+        let (raw_q, ty_q) = mg.raw_tensor_bytes("q.weight").expect("q.weight must resolve");
+        assert_eq!(ty_q, T_Q8_0);
+        assert_eq!(raw_q, q_data.as_slice());
+        // The raw bytes must independently dequantize (by this file's own
+        // `dequantize`) to the same values `tensor()` returns - proves
+        // `raw_tensor_bytes` sliced the exact same block `tensor()` reads,
+        // not an off-by-one range.
+        assert_eq!(dequantize(T_Q8_0, raw_q, 32).unwrap(), mg.tensor("q.weight").unwrap().unwrap());
+
+        assert!(mg.raw_tensor_bytes("does_not_exist").is_none());
 
         std::fs::remove_file(&path).ok();
     }

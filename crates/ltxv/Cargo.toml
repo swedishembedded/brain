@@ -38,3 +38,8 @@ brain-audio.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# `half::f16` - the independent from-spec Q8_0 dequant in
+# `tests/gguf_quant_real.rs` decodes the GGUF block's f16 scale itself,
+# deliberately not importing anything from `brain-checkpoint`'s own decode
+# path (see that file's module doc).
+half.workspace = true

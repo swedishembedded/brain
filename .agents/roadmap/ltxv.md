@@ -532,6 +532,88 @@ this port:
       worth exporting (the embeddings connector, or the duration head - both
       already small, real-weight components) versus the 22B block stack,
       which is not a candidate under this trait's existing pattern at all.
+- [x] **Real-weight parity ladder for the 22B DiT, reduced depth** - the first
+      time REAL 22B weights (not tiny random ones) were touched at all, on the
+      real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf` (23.6 GB, 4349
+      tensors, verified header-first). Two separate gates, per this port's own
+      "quantization vs port correctness must never alias" design (porting.md
+      §5):
+      1. **Quantization exactness** (`crates/checkpoint/src/gguf.rs`'s new
+         `MmapGguf::raw_tensor_bytes` accessor + `crates/ltxv/tests/
+         gguf_quant_real.rs`, real-file-gated on `BRAIN_LTXV_DIT`/the model
+         store) - `checkpoint::gguf::deq_q8_0` vs. a from-spec Q8_0 dequant
+         reimplemented independently in the test itself (34-byte blocks,
+         `int8 * f16 scale`, no shared code with the crate's own decoder),
+         on three real Q8_0 2D projections (block 0's `attn1.to_q`/`ff.net.2`
+         and block **47**'s `attn1.to_v` - the first, an early, and the LAST
+         block, so an off-by-block-index bug in name construction can't hide
+         behind block 0 alone) plus `patchify_proj.weight` (ships F32 in this
+         checkpoint, sanity-checked at the other dtype). Result: **exact**,
+         `max_abs == 0.0` on every tensor, both dtypes.
+      2. **Port correctness, reduced depth** (new golden dumper `tools/
+         goldens/ltxv_real_dit_dump_reference.py`, sibling of the tiny
+         dumpers; extends `crates/ltxv/tests/dit_parity.rs` with
+         `real_weight::ltxv_real_dit_tiny_layers_matches_reference`) - the
+         official `LTXModel(model_type=VideoOnly, num_layers=2)` at REAL
+         width (`inner_dim=4096`, 32 heads x 128, gated attention ON), its
+         `num_layers` constructor arg alone giving a truncated 2-of-48-layer
+         model for free (no reference-internals surgery needed), loaded with
+         the real GGUF's own first-two-blocks weight subset via the dumper's
+         own independent Q8_0/F32 decoder (not brain's Rust code at all - see
+         the dumper's module doc for why that's what keeps this gate distinct
+         from #1 above), replayed against `LtxDit::forward` fed the IDENTICAL
+         real weight subset read straight off the same GGUF via `checkpoint::
+         gguf::MmapGguf` + `dit::dit_tensor_manifest` (no fixture holds the
+         weights themselves - only the ~2.2 MB of inputs/taps does. Result,
+         every tap: `adaln_table`/`embedded_timestep`/`block.0.out`/
+         `block.1.out`/`out` at cosine 1.000000000, `b0_attn1_out`/
+         `b0_attn2_out`/`b0_ff_out` at cosine >= 0.999999998, `rope_cos`/
+         `rope_sin` at cosine >= 0.999999810 (the same `MIN_COS=0.999999` bar
+         `dit_parity.rs`'s existing tiny-config tests already use, not a
+         loosened one). Shape: grid `(2,2,2)` -> 8 tokens, context_len 6 - the
+         SAME small shape `ltxv_dit_dump_reference.py`'s `TINY_CONFIG`/`GRID`
+         already establish, per this task's own small-first constraint;
+         real-weight-subset load ~25 s, forward ~19 s on this host's CPU-JIT
+         path. Dumper run itself (real GGUF -> golden) took ~3.5 min, mostly
+         a pure-Python Q8_0 decode loop over ~2.7 GB of real Q8_0 blocks - the
+         one step in this milestone that ran past the "a few minutes" target,
+         noted rather than hidden; every OTHER step (both Rust tests, the
+         quant-exactness dequant of the whole real tensor set) finished in
+         well under a minute.
+
+      One real bug found and fixed by this work, not a numbers-only pass:
+      `crate::dit::dit_tensor_manifest` (video-only) never listed
+      `to_gate_logits.{weight,bias}` at all (only `av_dit_tensor_manifest`'s
+      `push_attn` did), so `random_tiny_weights`/`shard_weights`/`import_dit`
+      would have silently built or accepted a WRONG weight set for any gated
+      config - invisible until this milestone tried to load a real
+      `apply_gated_attention: true` config's weights through that exact path
+      and `LtxBlock::on`'s `tget("...to_gate_logits...")` would have panicked
+      "missing weight". Fixed by routing `dit_tensor_manifest`'s per-attn loop
+      through the SAME `push_attn` helper `av_dit_tensor_manifest` already
+      uses (both `to_gate_logits` names are already on `crate::int8::
+      is_never_quantized`'s substring list, so this changes no int8-
+      eligibility classification); `crates/ltxv/src/modelgrad.rs`'s
+      `params_and_grads_cover_the_whole_manifest_in_the_same_order` test
+      updated to explicitly exclude `to_gate_logits` from the equality check
+      it makes, with a comment recording WHY (gated-attention backward is not
+      implemented by that training path - a pre-existing, now-explicit gap,
+      not a new one this fix introduced).
+
+      Zero new kernels, zero changes to `LtxBlock`/`LtxDit::forward`'s op
+      sequence - this milestone is entirely new tests plus the one manifest
+      fix above. Explicit, tracked gaps (see "Recorded gaps" below for the
+      full breakdown): only 2 of the real checkpoint's 48 layers, only the
+      VIDEO stream (no audio stream, no A<->V cross-attention, `LtxAvDit`
+      untouched), `use_embeddings_connector: false` for this gate specifically
+      (both embeddings connectors' own real-weight parity is unattempted -
+      8 more real-width layers plus 128 learnable registers apiece, a
+      materially bigger check than the block-stack gate above), Q8_0 only
+      (Q4_K_M untested - no such file was on this host this session), and no
+      int8/int4 COMPUTE parity (Phase 5 territory - there is no compute-time
+      int8 kernel yet for the DiT to compare against, so the plan's
+      "int8-vs-fp32 at the model level" comparison is deferred wholesale,
+      not attempted at a reduced bar).
 
 ## Convention questions settled from source, not experiment
 
@@ -593,8 +675,39 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
-- Full 22B DiT and 12B Gemma-4 real-weight parity: not run, needs hardware that
-  can hold the full checkpoints.
+- Full 22B DiT real-weight parity: **partially closed** - the "real-weight
+  parity ladder for the 22B DiT, reduced depth" milestone above proved
+  quantization exactness (Q8_0, exact) and video-stream port correctness at
+  REAL width but only 2 of 48 `transformer_blocks`, gated attention ON,
+  `use_embeddings_connector: false`. Still NOT run, and still needing either
+  more host RAM/time or the int8 compute path (Phase 5) to attempt cheaply:
+  all 48 layers at once, the audio stream, the A<->V cross-attention
+  (`LtxAvDit`), either embeddings connector's own real-weight parity, the
+  Q4_K_M quant tier, and any int8/int4 COMPUTE-path comparison (no such
+  kernel exists yet for the DiT - `crate::int8` is storage-format-only).
+- Audio VAE/vocoder golden fixture (`testdata/golden/ltxv/audio/audio.safetensors`,
+  `tools/goldens/ltxv_audio_dump_reference.py`) cannot be regenerated on this
+  host: the dumper's mel-front-end self-validation imports `torchaudio`, and
+  no working CPU build exists for the installed `torch==2.13.0+cpu` here -
+  every candidate (`pip install torchaudio`, and `torchaudio==2.9.0`/`2.11.0`
+  pinned explicitly via `--index-url https://download.pytorch.org/whl/cpu`)
+  resolves to a CUDA-linked `_torchaudio.abi3.so` that fails to load
+  (`OSError: libcudart.so.13: cannot open shared object file`) - a genuine
+  package-index mismatch, not a code defect. `ltxv_audio_encoder_matches_
+  reference`/`ltxv_audio_decoder_matches_reference`/`ltxv_vocoder_matches_
+  reference`/`ltxv_audio_vae_round_trip` (`crates/ltxv/tests/audio_parity.rs`)
+  therefore still skip on this host; the two import-coverage tests in the
+  same file (which need only the real checkpoint, not this golden) pass.
+  Regenerate on a host with a working `torchaudio` CPU install, or patch the
+  dumper to make its one `torchaudio.transforms.MelSpectrogram` cross-check
+  optional - neither attempted here.
+- 12B Gemma-4 real-weight parity: not run. The 26 GB bf16 checkpoint IS now
+  local on this host (`~/.local/share/brain/models/Lightricks/LTX-2.5/
+  gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`, verified byte-exact +
+  structurally against the real header) - the "needs hardware that can hold
+  the checkpoint" reason no longer applies. Genuinely unattempted, out of
+  scope for the DiT real-weight milestone above (which did not touch
+  `crates/gemma4`) - remains open for a dedicated pass.
 - NPU device execution: `ltxv` gets no `NpuModel` implementation at all this
   port (see the M9 perf entry's NPU write-up above for the full reasoning) -
   the firmware-not-functional blocker on this exact host is separately

@@ -60,6 +60,20 @@ pub fn load_tiny_weights(path: &str) -> Tensors {
 /// real-checkpoint importer enumerate the SAME list a forward actually
 /// reads, the same "manifest drives both sides" discipline
 /// `crate::vae3d::LtxVaeConfig::tensor_manifest` uses for the VAE.
+///
+/// Every attn's `to_gate_logits.{weight,bias}` is ALWAYS listed here
+/// (via [`push_attn`], the same helper [`av_dit_tensor_manifest`] uses),
+/// regardless of `cfg.apply_gated_attention` - the same "manifest doesn't
+/// gate any tensor family, it makes the shape representable" convention
+/// [`av_dit_tensor_manifest`]'s doc already states. This is a real-weight
+/// requirement, not cosmetic: [`crate::block::LtxBlock::on`] reads
+/// `to_gate_logits` off the weight map whenever `cfg.apply_gated_attention`
+/// is `true` (e.g. [`LtxDitConfig::ltx25_22b`]), so a caller that builds a
+/// gated config's weights FROM this manifest ([`random_tiny_weights`], a
+/// real-checkpoint loader) must have it listed or that `tget` panics on a
+/// missing name. Both `to_gate_logits.weight`/`.bias` are already on
+/// `crate::int8::is_never_quantized`'s substring list, so this addition
+/// changes no int8-eligibility classification for any existing caller.
 pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
     let dim = cfg.inner_dim as usize;
     let mut m: Vec<(String, Vec<usize>)> = vec![
@@ -84,14 +98,7 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
     for l in 0..cfg.num_layers {
         let p = format!("transformer_blocks.{l}");
         for attn in ["attn1", "attn2"] {
-            for proj in ["to_q", "to_k", "to_v"] {
-                m.push((format!("{p}.{attn}.{proj}.weight"), vec![dim, dim]));
-                m.push((format!("{p}.{attn}.{proj}.bias"), vec![dim]));
-            }
-            m.push((format!("{p}.{attn}.to_out.0.weight"), vec![dim, dim]));
-            m.push((format!("{p}.{attn}.to_out.0.bias"), vec![dim]));
-            m.push((format!("{p}.{attn}.q_norm.weight"), vec![dim]));
-            m.push((format!("{p}.{attn}.k_norm.weight"), vec![dim]));
+            push_attn(&mut m, &format!("{p}.{attn}"), dim, dim, dim);
         }
         m.push((format!("{p}.ff.net.0.proj.weight"), vec![4 * dim, dim]));
         m.push((format!("{p}.ff.net.2.weight"), vec![dim, 4 * dim]));

@@ -7,6 +7,13 @@ scratchpad/
 
 /.todo/
 
+# Local convenience symlink to an external checkpoint/reference-source mirror
+# some real-weight tests fall back to (`<repo>/resources/ltxv/weights/...`,
+# `<repo>/resources/ltxv/source/...`). NEVER commit this - it is a bare
+# machine-specific absolute path, exactly what fetch-testdata.sh's own
+# BRAIN_*_MIRROR convention exists to keep out of the tree.
+/resources
+
 # Generated training data and trained checkpoints (regenerate via `make data/*`).
 /data/
 /out/
