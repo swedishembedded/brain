@@ -72,6 +72,17 @@ OPTIONS
                                                    an hour a request. Unit:
                                                    denoise_step; requests run one at a
                                                    time (see the `wan` model page).
+                          ltxv[:<frames>x<W>x<H>x<steps>]
+                                                   LTX-2.5 text-to-video behind the
+                                                   residency executor; needs
+                                                   BRAIN_LTXV_VAE. Default
+                                                   9x64x64x4, the tiny random-weight
+                                                   smoke config; setting
+                                                   BRAIN_LTXV_DIT switches to the
+                                                   real 22B int8 checkpoint (~186s/
+                                                   denoise step measured - a
+                                                   deliberate choice, not a
+                                                   default). Unit: denoise_step.
   --workload <name>     interactive | chat | rag | rag_long | agent |
                         decode_heavy | prefill_heavy | shared_prefix   (default chat)
   --concurrency <N>     fixed level for latency/serve (default 8)
@@ -139,6 +150,10 @@ targets (--target):
                                      81x832x480x50 is about an hour a request. Requests at
                                      one key share the resident transformer but denoise in
                                      turn; each also pays a fixed umT5-XXL CPU text encode)
+  ltxv[:<frames>x<W>x<H>x<steps>]    LTX-2.5 text-to-video via the residency executor (unit:
+                                     denoise_step; needs BRAIN_LTXV_VAE; default 9x64x64x4,
+                                     the tiny random-weight smoke config; BRAIN_LTXV_DIT
+                                     switches to the real 22B int8 checkpoint)
   gpt:<weights>                      dense char-level GPT via the residency executor (unit: token)
   glm:<weights>                      GLM-5.2-shaped decoder (MLA + sigmoid MoE) via the residency
                                      executor (unit: token)
@@ -627,6 +642,12 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("wan:") {
         return build_wan(rest);
     }
+    if spec == "ltxv" {
+        return build_ltxv("");
+    }
+    if let Some(rest) = spec.strip_prefix("ltxv:") {
+        return build_ltxv(rest);
+    }
     if let Some(rest) = spec.strip_prefix("gpt:") {
         return build_gpt(rest);
     }
@@ -681,7 +702,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
-         'wan[:<frames>x<W>x<H>x<steps>]', \
+         'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \
          'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
          'sam2:<weights-dir>[:tiny|large]', 'clip:<checkpoint-root>', \
          'scrfd:<weights-dir>', 'arcface:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
@@ -1151,6 +1172,100 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
         exec,
         wan::caps::MODEL,
+        "t2v",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.message.starts_with("denoise")),
+    )))
+}
+
+/// `ltxv:<frames>x<W>x<H>x<steps>` - LTX-2.5 text-to-video (unit:
+/// `denoise_step`), `build_wan`'s exact pattern adapted to ltxv's own shape
+/// rules (causal VAE: `frames = 1 + 8k`, stride-32 spatial, not wan's
+/// stride-16). Needs `BRAIN_LTXV_VAE` (the one mandatory weight role -
+/// `ltxv::pipeline::Paths::from_env`'s doc); `BRAIN_LTXV_DIT` is OPTIONAL
+/// and switches the measured config from the fast `tiny` (random weights,
+/// this target's default) to the real `ltx25_22b` int8 checkpoint.
+///
+/// Defaulting to `tiny` rather than the real config is a deliberate choice,
+/// not an oversight: Phase 8's own `ltxv_bench streamed` profiling measured
+/// the real 22B checkpoint's `forward_q_streamed` at ~186 s for a SINGLE
+/// denoise step (extrapolated from a 2/4-layer real-GGUF probe to the real
+/// 48 - see this crate's roadmap ledger for the full attribution), because
+/// every block's weights are re-read and re-quantized from the GGUF on
+/// every forward call. A routine `brain perf run`/gate invocation must
+/// finish in a reasonable time, so it exercises the real GPU kernel path
+/// (the same `self_attn_and_text_ca`/`attention`/`attn_scores_kt`/
+/// `matmul_reg3` selector this phase's optimization pass touched) without
+/// paying that architectural I/O cost every run. The real config stays
+/// reachable - set `BRAIN_LTXV_DIT` and this target switches to it - for a
+/// deliberate, separately-scheduled measurement, never a default one.
+fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (frames, w, h, steps) = if rest.is_empty() {
+        (9u32, 64u32, 64u32, 4u32)
+    } else {
+        let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
+        if p.len() != 4 || p.contains(&0) {
+            return Err(format!("bad ltxv spec {rest:?}, expected <frames>x<W>x<H>x<steps> (e.g. 9x64x64x4)"));
+        }
+        (p[0], p[1], p[2], p[3])
+    };
+    // The two shape rules `ltxv::caps::gen_params_from`/`generate` enforce,
+    // checked before the run starts: the causal VAE gives the first frame a
+    // latent frame of its own (frames = 1 + 8k), and the (32, 32) spatial
+    // stride needs a multiple of 32.
+    if (frames - 1) % 8 != 0 {
+        return Err(format!("ltxv: frames must be 1 + 8k (got {frames})"));
+    }
+    if w % 32 != 0 || h % 32 != 0 {
+        return Err(format!("ltxv: width/height must be multiples of 32 (got {w}x{h})"));
+    }
+    // Fail before the run starts, naming what is missing - not at first activation.
+    let paths = ltxv::pipeline::Paths::from_env().map_err(|e| format!("ltxv target needs BRAIN_LTXV_VAE: {e}"))?;
+    if !std::path::Path::new(&paths.vae).exists() {
+        return Err(format!("ltxv: BRAIN_LTXV_VAE not found: {}", paths.vae));
+    }
+    let dit_config = if paths.dit.as_deref().is_some_and(|p| std::path::Path::new(p).exists()) { "ltx25_22b" } else { "tiny" };
+    let resident = crate::resident_ltxv::LtxvResident::from_env().ok_or("ltxv: BRAIN_LTXV_VAE not set")?;
+    // Budget ONLY the schedulable devices - the same guard `build_wan` carries.
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(vec![std::sync::Arc::new(resident)], budgets, residency::Policy::default());
+    let mut info = TargetInfo::new(&format!("ltxv-{dit_config}"), "denoise_step");
+    info.params = Some(if dit_config == "ltx25_22b" { 22_000_000_000 } else { 0 });
+    info.quant = Some(if dit_config == "ltx25_22b" { "int8".to_string() } else { "fp32".to_string() });
+    let info = info
+        .with("frames", frames.into())
+        .with("width", w.into())
+        .with("height", h.into())
+        .with("steps", steps.into())
+        .with("dit_config", dit_config.into())
+        .with("engine", "residency-executor".into());
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        // Prompt values do not change the cost: there is no real tokenizer
+        // in this milestone's stub-context path (`tiny`), and the real
+        // Gemma-4 path is not requested here. The per-request seed keeps
+        // noise deterministic.
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("a lighthouse on a rocky coast at sunset"))
+            .set("frames", serde_json::json!(frames))
+            .set("width", serde_json::json!(w))
+            .set("height", serde_json::json!(h))
+            .set("steps", serde_json::json!(steps))
+            .set("dit_config", serde_json::json!(dit_config))
+            .set("seed", serde_json::json!(req.seed))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        ltxv::caps::MODEL,
         "t2v",
         info,
         build,

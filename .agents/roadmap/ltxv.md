@@ -887,6 +887,275 @@ this port:
       `read_in_dres`/`write_out_dres`) remains unimplemented for
       `LtxAvDit`, same as `LtxDit`'s own recorded gap above - this
       host-math training path is separate and does not build on it.
+- [x] **Performance, driven by measurement (Phase 8)** - supersedes the
+      contention-ruined M9 profiling entry above with a clean, uncontended
+      re-run plus three verified kernel-selector fixes and the first-ever
+      measured attribution of the real ~200s/step number Phase 6 reported.
+
+      **Cost-formula prerequisite** (`crates/gpu-core/src/cost.rs`) - 25 new
+      match arms (`na3d_scores`, `na3d_apply`, `conv3d`/`conv3d_dx`/
+      `conv3d_dw`, `im2col3d_at`, `space_to_depth3d`, `depth_to_space3d`,
+      `pixel_shuffle3d_cl`, `l2norm_scale`, `nlc_bias_nchw`,
+      `add_chan_bcast`, the `rope`/`rope_neox`/`rope_train`/
+      `rope_train_bwd`/`rope_partial`/`rope_partial_bwd`/`rope_sub`/
+      `rope_interleave_table` family, `gelu_erf`, `geglu_shift`,
+      `snake_beta`, plus `attn_scores_cross_kt`/`kv_k_headt` once the
+      optimization pass below adopted them), each derived from its own
+      WGSL `struct Params` and loop structure, not guessed. Also fixed a
+      real bug in `covers()`'s own probe: it built an all-ones params slice
+      only 16 words long, so `conv3d`/`conv3d_dx`/`conv3d_dw`/
+      `im2col3d_at` (19-field `Params` structs) silently reported
+      UNCOVERED even with a correct formula in place - widened to 32
+      words. `FLOOR` raised 150 -> 225 of 416 kernels
+      (`cost::tests::cost_coverage_over_the_kernel_tree_never_regresses`,
+      `cost::tests::ltxv_kernel_costs` for the hand-computed formulas).
+
+      **Re-run on an uncontended device** (`ltxv_bench dit`, GPU idle before
+      every run per `nvidia-smi`/`ps aux`) - roofline measured twice back
+      to back, exact agreement both times (10542 GFLOP/s, 287.4 GB/s DRAM,
+      lesson #27); clock/temperature tracked throughout (idle 33-41C at
+      544 MHz, boosted to 1303-1531 MHz / 40-56 W under sustained load, no
+      throttle observed - nowhere near the 90C/999MHz throttle point this
+      repo's own roadmap history records elsewhere). Also fixed the bench's
+      own drift bug first (`crates/ltxv/src/bin/ltxv_bench.rs`):
+      `real_video_dit_config` hardcoded `apply_gated_attention: false`
+      (stale from before gated attention was implemented), silently
+      profiling a REDUCED op sequence instead of the real one - deleted in
+      favour of `LtxDitConfig::ltx25_22b()` with only `num_layers`
+      overridden, and the module doc's `tokens=512` claim (vs the code's
+      actual `1024` default) corrected to match.
+
+      **Fix 1 - the fp32 GEMM selector** (`crates/ltxv/src/block.rs::
+      linear`). `linear()` hardcoded the naive one-thread-per-output
+      `K_MATMUL` unconditionally, for every projection in the fp32
+      reference tier (`LtxBlock`/`LtxAvBlock` - `LtxDit::forward`,
+      gradcheck, `ltxv_bench dit`) - it never went through the shared
+      `model::block::gemm_variant`/`GemmVariants` selector
+      `crates/wan/src/block.rs::linear` already uses for the identical
+      10-linear block shape. Measured before (1 layer, 256 tokens, 128
+      context): `matmul` was 99.7% of an 8221.69 ms whole pass at 14.4
+      GFLOP/s - 0.1% of the measured roof. Fix: registered
+      `matmul_reg3`/`matmul_gemv` in `LtxBlock::KERNELS`, wired `linear()`
+      through `gemm_variant(..., gpu.caps().workgroup_reductions ?
+      Fast{gemv,tiled} : Reference(K_MATMUL), m, n)`, mirroring `wan`'s
+      `Sel`/`GemmVariants` exactly. Measured after: same shape, whole pass
+      67.39 ms - **122x** - `matmul_reg3` at 3435.6-4674.7 GFLOP/s (33-44%
+      of roof) depending on shape. The int8 tier (`qlinear`, the real
+      generation path) was never affected: it always dispatched the fast
+      tiled `matmul_i8_dyn` unconditionally (DP4A has no naive sibling to
+      fall back to), so this bug was confined to the fp32 reference tier -
+      training (`crate::grad`), gradcheck, parity tests, and this bench.
+
+      **Fix 2 - `attn_scores_cross` -> `attn_scores_cross_kt`**
+      (`crates/ltxv/src/block.rs::attn_scores_kt`, new small helper).
+      Re-profiling the WHOLE PASS after fix 1 (8 layers, 1024 tokens, 256
+      context) surfaced a NEW #1: `attn_scores_cross` at 54.4% of a
+      3471.18 ms pass, 45.2 GFLOP/s (0.4% of roof). `attn_scores_cross.
+      wgsl`'s own doc names the fix (K parallelises over the wrong axis for
+      coalescing; transpose K once via `kv_k_headt`, read it via
+      `attn_scores_cross_kt`) - the exact defect and exact fix
+      `crates/wan/src/block.rs` already carries for the identical kernel
+      (measured there at "91 GFLOP/s, 0.77% of fp32 peak"). Zero new WGSL
+      (kernels.md sec F.3): reused both existing sibling kernels. Applied
+      to BOTH `attention()` (fp32) and `attention_q()` (int8) - they share
+      one score/softmax/apply trio, only the four projections differ
+      between tiers, so this fix reaches the real 22B int8 production path
+      too, not just the fp32 bench. Measured: `attn_scores_cross_kt` at
+      161.24 ms/16 calls, 534.8-535.4 GFLOP/s (5.1% of roof) vs 1907.35 ms
+      before - **11.8x** on this kernel; whole pass 3471.18 -> 1758.68 ms.
+      Dead-code cleanup: `K_ATTN_SCORES`/`attn_scores_cross` removed
+      entirely from `LtxBlock::KERNELS` (indices renumbered) once grep
+      confirmed every attention call site in the crate - self-attn, text
+      cross-attn, both A<->V cross-attention directions, the connector -
+      now exclusively uses the kt path; nothing left registers a pipeline
+      this crate never dispatches.
+
+      **Fix 3 - `attn_softmax_cross` -> `softmax_rows`**
+      (`crates/ltxv/src/block.rs::attn_softmax`, new small helper).
+      Re-profiling again after fix 2 surfaced the next #1:
+      `attn_softmax_cross` at 25.3% of the (now smaller) pass, 4.5 GFLOP/s
+      (2.1% of roof). `softmax_rows.wgsl`'s own doc names
+      `attn_softmax_cross` as exactly the kernel it exists to replace (one
+      WORKGROUP per row instead of one thread), gated on
+      `DeviceCaps::workgroup_reductions` the same way `crates/wan/src/
+      block.rs::Sel.softmax_rows` already gates it. Zero new WGSL again.
+      Measured: `softmax_rows` at 20.02 ms/16 calls, 100.6 GFLOP/s (46.6%
+      of roof) vs 448.6 ms before - **22.4x**; whole pass 1758.68 -> 1333.87
+      ms. Combined effect of fixes 2+3 alone at this shape: 3471.18 ->
+      1333.87 ms (2.6x), on top of fix 1's separately-measured 122x at the
+      smaller shape. `matmul_reg3` is the dominant kernel again after all
+      three fixes (63.9% of the pass, 44.3% of roof) - already near this
+      kernel's established ceiling elsewhere in the repo and not chased
+      further (no faster registered sibling found; a genuinely new tiled
+      variant would be needed, out of scope for a reuse-first pass).
+
+      **Correctness gate for all three fixes**: unchanged - all 99
+      `brain-ltxv` lib tests, plus `dit_parity`/`av_dit_parity`/
+      `int8_compute`/`block_grad`/`av_block_grad`/`host_forward_parity`
+      (including `int8_compute::real_q8_0_block0_int8_compute_matches_fp32`,
+      a REAL Q8_0-checkpoint comparison), pass byte-for-byte identically
+      before and after each fix - every fix changed dispatch selection
+      only, never the math.
+
+      **The real ~200s/step, attributed** (not guessed): a new
+      `ltxv_bench streamed [layers] [tokens] [ctx_len]` mode
+      (`crates/ltxv/src/bin/ltxv_bench.rs`, needs `BRAIN_LTXV_DIT`) drives
+      the REAL production path (`forward_q_streamed`, int8, the real Q8_0
+      GGUF) directly, and new `gpu_core::profile::stage_time`
+      instrumentation inside `forward_q_streamed`
+      (`crates/ltxv/src/dit.rs`) splits one forward call into: patchify +
+      keyframes (host), the adaLN-single table (host), RoPE table build
+      (host, f64), `open_device` (fresh `Gpu` + pipeline compile),
+      embeddings-connector routing, and per-layer sums of block GGUF
+      read+dequant / int8 quantize+upload / GPU forward+wait. Measured
+      against the real Q8_0 checkpoint at 2 then 4 real `transformer_blocks`
+      (both uncontended, `t=128` tokens, `ctx_len=64`): the adaLN table is
+      FLAT at ~21 s regardless of layer count (a NEW finding - never
+      previously measured, since it sits outside the per-layer loop
+      entirely); GGUF read+dequant scales linearly at ~1546 ms/layer; int8
+      quantize+upload at ~1802 ms/layer; GPU forward+wait at ~89 ms/layer -
+      all three confirmed linear across the two layer counts. Extrapolated
+      to the real 48 layers: adaLN 21.0 s (11.3%), GGUF read+dequant
+      74.2 s (39.8%), int8 quantize+upload 86.5 s (46.4%), GPU
+      forward+wait 4.3 s (2.3%), misc 0.36 s (0.2%) - **186.3 s total**,
+      within ~5-8% of the real measured ~196-204 s/step from Phase 6 (the
+      residual plausibly explained by the real generation's larger token
+      count pushing up the two token-dependent terms, adaLN and GPU
+      forward+wait, past this probe's `t=128`).
+
+      This directly answers the task's own (a)/(b)/(c) question:
+      block-streaming re-read+re-quantize (`forward_q_streamed`'s own doc
+      already flagged this architectural cost) is the dominant term at
+      **~86%** of the real per-step cost (hypothesis b) - NOT GPU compute
+      (hypothesis a, ~2-3%, and now measurably fast after the three fixes
+      above) - plus a previously-unknown, now well-attributed "something
+      else" (hypothesis c): `ada_layer_norm_single`'s call into `linear()`
+      (`crates/ltxv/src/dit.rs`) is a naive, unthreaded, unblocked
+      triple-nested scalar loop that re-streams a ~604 MB weight matrix
+      from host RAM once per output ROW (not once total) - flat ~21 s per
+      forward call regardless of layer count, ~11% of the real total.
+
+      **Not implemented this pass** (tracked, not silently dropped - both
+      genuinely out of scope for a kernel-selector pass): (1) caching
+      quantized block weights across the ~20-50 denoise steps of one
+      generation run - the highest-value fix by a wide margin (it would
+      remove essentially all of the ~86% streaming-I/O share, since the
+      SAME weights are re-read and re-quantized from the SAME immutable
+      checkpoint file every single step), but a genuine architectural
+      change (in-memory residency for ~22 GB of int8 weights spanning the
+      whole generation loop, touching `pipeline.rs`'s denoise loop and
+      `RealDit`'s lifetime) too large to attempt safely inside this pass;
+      (2) parallelizing/blocking `ada_layer_norm_single`'s naive host
+      linear - a cheap, well-diagnosed, NOT-yet-attempted ~21 s/step
+      (~11%) win, deliberately left as a scoped follow-up rather than a
+      same-pass speculative rewrite of a function shared with other call
+      sites in `dit.rs`.
+
+      **`brain perf` integration** (`crates/cli/src/perf_cli.rs::
+      build_ltxv`, the `ltxv`/`ltxv:` `strip_prefix` arm) - modeled on
+      `build_wan` exactly: shape parsing+validation (`frames = 1 + 8k`,
+      width/height multiples of 32), `Paths::from_env` with explicit
+      existence checks, `TargetInfo` with params/quant/config axes
+      (frames/width/height/steps/dit_config/engine), `ExecutorTarget::
+      new_streaming` over the pre-existing `LtxvResident`
+      (`crates/cli/src/resident_ltxv.rs`) and `ltxv::caps`. Defaults to
+      `dit_config="tiny"` (fast, random weights) unless `BRAIN_LTXV_DIT` is
+      set (then `"ltx25_22b"`) - deliberate given the ~186 s/step
+      real-config cost measured above, documented in the target's own doc
+      comment so a future reader does not mistake it for an oversight.
+
+      Fixed an adjacent stale capability manifest while wiring this
+      (`crates/ltxv/src/caps.rs`): `DIT_CONFIGS` only ever advertised
+      `"tiny"`, even though the real 22B path (`RealDit`/
+      `forward_q_streamed`) has been wired and working since real weights
+      first landed in `brain ltxv t2v` - the `t2v` action's generic
+      capability-dispatch path (`ActionSpec::validate`, the same path
+      D-Bus `Subscribe`/`brain do` use) would have REJECTED
+      `dit_config=ltx25_22b` even though the bespoke CLI and
+      `dit_config_from_name` both already accept it - a real functional
+      gap, not just a stale comment, that this perf target's own
+      construction surfaced. Split into `T2V_DIT_CONFIGS`
+      (`["tiny","ltx25_22b"]`) and `DFR_DIT_CONFIGS` (`["tiny"]` only -
+      `generate_dfr` still always builds `random_tiny_weights` regardless
+      of `dit_config`, confirmed by reading its body; advertising
+      `ltx25_22b` there would have promised a real-weight DFR run this
+      crate cannot yet produce). Gate: `caps::tests` (8/8, plus a new
+      dfr-side decode check).
+
+      Verified, not just built: the three shape-validation error paths
+      (`brain perf run latency --target ltxv:8x64x64x4` etc, 3/3 correct
+      messages) and a full `brain ltxv t2v` smoke generation (bypassing
+      the perf/residency path entirely) at the tiny config, which
+      completed cleanly post-fix - denoise 0.63-0.71 s/step, VAE decode
+      67.3 s, a real mp4 written - confirming the three kernel-selector
+      fixes above are correct on the real generation path, not only the
+      synthetic bench.
+
+      Found, not fixed (tracked): the residency executor's GPU-lane
+      device-opening path can fail to match the expected physical adapter
+      by PCI id ("wgpu enumerated 0 adapters while looking for 'Tesla
+      P40'"), falling back to a software adapter whose 128 MiB
+      `max_storage_buffer_binding_size` is too small for
+      even the smallest real-VAE decode buffer. Reproduced identically
+      with both `--device gpu` and an explicit single-GPU restriction; NOT
+      reproduced through the bespoke `brain ltxv t2v` CLI or `ltxv_bench`
+      (both open the device directly, bypassing residency's lane
+      mechanism) - isolating this to `residency::Executor`'s own GPU-lane
+      opening, a cross-cutting infrastructure gap this pass did not touch
+      (out of scope for `ltxv`'s own crate; every other GPU-executor perf
+      target shares the same code path).
+
+      **Baseline + gate** (`scripts/gates/ltxv-perf-gate.sh` +
+      `scripts/gates/ltxv-perf-baselines/ltxv-tiny-9x64x64x4-cpu.json`),
+      modeled exactly on `scripts/gates/qwen-serving-perf-gate.sh`:
+      `latency` scenario (not `serve` - `LtxvInstance::run_batch` runs
+      requests sequentially, no concurrent batching to gate the way
+      qwen's admission path does; never `sweep`, whose curve artifact
+      carries no flat metric `perf gate` can read), floor 0.5, SKIPs (exit
+      0) when `BRAIN_LTXV_VAE` is unset. Deliberately `--device cpu`
+      (sidesteps the residency GPU-adapter gap above entirely; VAE decode
+      cost is device-independent per the M4 precedent, so this costs no
+      real signal). Measured: `--update` and a fresh gate run both
+      completed in ~70-90 s wall time (VAE decode dominated, the tiny
+      DiT's own cost trivial); mutation-verified per kernels.md sec F.8:
+      inflating a copy of the baseline's throughput fields 180x makes
+      `brain perf gate` correctly report FAIL against the SAME candidate
+      that PASSes against the real baseline - the gate actually gates.
+
+      **CPU path - a negative result.** Profiling above (both the GPU
+      kernel table and the `forward_q_streamed` stage-time breakdown)
+      never showed `conv3d`, `na3d_*`, `rope*`, `gelu_erf`, `geglu_shift`,
+      `snake_beta`, or `gate_row` as a measurable share of either GPU
+      dispatch time or the real per-step host-side cost. Both real
+      host-side costs this pass found - `ada_layer_norm_single`'s naive
+      `linear()` (~11% of the real per-step total) and the dominant GGUF
+      read+dequant/quantize cost (~86%) - are outside this kernel list
+      entirely (checkpoint I/O and a host-side timestep-MLP projection,
+      neither a WGSL-portable elementwise/conv/attention kernel
+      `backend-cpu` could plausibly need an AVX microkernel for). Per this
+      phase's own instruction to only add fast paths for a measured
+      bottleneck, NO AVX2/AVX-512 microkernels were added - `backend-cpu`
+      remains without a fast path for any of these seven kernels,
+      unchanged, now backed by a measured reason instead of an unmeasured
+      assumption. No AVX-512-capable CPU is available for this pass
+      regardless (a Haswell-generation Xeon E5-2690 v3, AVX2 only, per
+      `/proc/cpuinfo`) - matching this repo's own `row_abt_avx512` honesty
+      precedent, had there been a kernel worth adding one for.
+
+      **NPU - reconciled, not silently skipped.** `/dev/accel/accel*`
+      confirmed absent again this pass. The M9 entry above already
+      recorded NPU as a deliberate architectural scope exclusion for the
+      22B DiT (no small fixed-shape core to peel off, unlike this repo's
+      forecast/depth NPU targets). Reconciling that exclusion with the
+      original validation task's "best effort" instruction: "best effort"
+      was satisfied by that M9 analysis identifying the SPECIFIC
+      architectural reason NPU does not apply here, not a time/resource
+      constraint a better effort could close - and this phase's own
+      real-weight measurements reinforce it: the real bottleneck found
+      here (checkpoint I/O/dequant plus a host-side matmul) is not compute
+      the `NpuModel` trait's small-fixed-shape-core pattern could address
+      either, even setting the 22B-scale objection aside. No further NPU
+      work follows from this phase's findings.
 
 ## Convention questions settled from source, not experiment
 
@@ -1016,6 +1285,34 @@ land. Known traps already identified from reading (not yet test-pinned):
   (mirroring `ModelWeights::from_tensors`), but nothing feeds it the real
   22B AV weights yet, so AV training is proven only at tiny/synthetic
   scale.
+- Real-checkpoint weight caching across a generation run: the Phase 8
+  performance entry above measured that `forward_q_streamed` re-reads and
+  re-quantizes all 48 real blocks from the GGUF on EVERY forward call
+  (~86% of the real ~200s/step), and identified in-memory caching of the
+  quantized block weights across one generation's ~20-50 denoise steps as
+  the highest-value fix - not attempted, a genuine architectural change to
+  `pipeline.rs`'s denoise loop and `RealDit`'s lifetime, out of scope for
+  a kernel-selector pass.
+- `ada_layer_norm_single`'s host-side `linear()` call (`crates/ltxv/src/
+  dit.rs`) is a naive, unthreaded, unblocked scalar loop that re-streams
+  its ~604 MB weight matrix from host RAM once per output row - a
+  measured flat ~21s/forward call (~11% of the real per-step total, Phase
+  8's entry above), not yet parallelized/blocked. Shared with other call
+  sites in the same file, so left as a scoped follow-up rather than a
+  same-pass rewrite.
+- The residency executor's GPU-lane device-opening path can fail to match
+  the expected physical adapter by PCI id, falling back to a software
+  adapter with too small a `max_storage_buffer_binding_size` for even the
+  smallest real-VAE decode buffer (Phase 8's entry above) - a
+  cross-cutting `residency`/`backend-wgpu` infrastructure gap every
+  GPU-executor perf target shares, not ltxv-specific and not fixed here;
+  `scripts/gates/ltxv-perf-gate.sh` sidesteps it with `--device cpu`.
+- `brain perf`'s `ltxv:` target measures only the tiny random-weight
+  config by default; the real 22B checkpoint's ~186s/step cost (Phase 8's
+  entry above) makes it unsuitable for a routine gate, so no committed
+  baseline exists yet for `dit_config=ltx25_22b` - a deliberate,
+  separately-scheduled measurement whenever it is needed, not a default
+  one.
 
 ## Scope that collapsed once the reference was read
 

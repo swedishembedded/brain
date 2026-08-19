@@ -36,9 +36,20 @@ use crate::pipeline::{dit_config_from_name, DfrOpts, DfrPaths, GenOpts, Paths};
 /// routing `wan` uses (`brain ltxv t2v` runs that module, not this action).
 pub const MODEL: &str = "brain/ltxv";
 
-/// `dit_config_from_name`'s advertised keys - `"tiny"` only, see
-/// `crate::pipeline`'s module doc for why.
-const DIT_CONFIGS: [&str; 1] = ["tiny"];
+/// `dit_config_from_name`'s advertised keys for `dfr` - `"tiny"` only:
+/// `crate::pipeline::generate_dfr` still always builds `random_tiny_weights`
+/// regardless of `dit_config` (no `RealDit` branch the way `generate`/t2v
+/// has one), so advertising `"ltx25_22b"` here would promise a real-weight
+/// DFR run this crate cannot yet produce - a tracked gap, not implemented.
+const DFR_DIT_CONFIGS: [&str; 1] = ["tiny"];
+/// `dit_config_from_name`'s advertised keys for `t2v` - both `"tiny"`
+/// (fresh random weights, the M4 smoke-test config) and `"ltx25_22b"` (the
+/// real 22B checkpoint via `RealDit`/`crate::dit::forward_q_streamed`,
+/// wired since the real-weight generation milestone - see
+/// `crate::pipeline`'s module doc). Selecting `"ltx25_22b"` also needs
+/// `Paths::dit` (`--dit`/`$BRAIN_LTXV_DIT`) set; that check lives in
+/// `generate` itself since this manifest is built with no weights loaded.
+const T2V_DIT_CONFIGS: [&str; 2] = ["tiny", "ltx25_22b"];
 
 /// The full, static capability manifest - safe to build with no weights
 /// loaded. Defaults are [`GenOpts::default`]'s.
@@ -46,7 +57,7 @@ pub fn manifest() -> Manifest {
     let d = GenOpts::default();
     let t2v = ActionSpec::new(
         "t2v",
-        "generate a video clip from a text prompt (rectified-flow ancestral Euler denoise over the LTX-2.5 video DiT with CFG, causal 3D VAE decode). M4 gap: the DiT is tiny-config with random weights and there is no real text encoder yet - see crate::pipeline's module doc.",
+        "generate a video clip from a text prompt (rectified-flow ancestral Euler denoise over the LTX-2.5 video DiT with CFG, causal 3D VAE decode). dit_config=tiny (default) uses a random-weight smoke-test DiT and a deterministic stub text context; dit_config=ltx25_22b (needs --dit/$BRAIN_LTXV_DIT) runs the real 22B int8 checkpoint, optionally with the real Gemma-4 text encoder (--text-encoder/$BRAIN_LTXV_TEXT_ENCODER) - see crate::pipeline's module doc.",
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
@@ -62,7 +73,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
     .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
     .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
-    .param(ParamSpec::new("dit_config", ParamType::Enum(DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights, no real 22B checkpoint yet) is implemented").default(json!("tiny")))
+    .param(ParamSpec::new("dit_config", ParamType::Enum(T2V_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size: tiny (random weights) or ltx25_22b (the real checkpoint, needs --dit/$BRAIN_LTXV_DIT)").default(json!("tiny")))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
     let dfr = ActionSpec::new(
@@ -83,13 +94,13 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("stretch", ParamType::Bool, "stretch the schedule's terminal sigma to `terminal`").default(json!(d.stretch)))
     .param(ParamSpec::new("terminal", ParamType::Float, "terminal sigma the stretch targets").default(json!(d.terminal)))
     .param(ParamSpec::new("eta", ParamType::Float, "ancestral-Euler eta; 0 = deterministic Euler, 1 = fully ancestral").default(json!(d.eta)))
-    .param(ParamSpec::new("dit_config", ParamType::Enum(DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights, no real 22B checkpoint yet) is implemented").default(json!("tiny")))
+    .param(ParamSpec::new("dit_config", ParamType::Enum(DFR_DIT_CONFIGS.iter().map(|s| s.to_string()).collect()), "DiT size; only tiny (random weights) is implemented for dfr - the real 22B checkpoint is wired for t2v only, see this crate's roadmap").default(json!("tiny")))
     .param(ParamSpec::new("temporal_upsample_rounds", ParamType::Int, "0, 1, or 2 real temporal x2 refine rounds").default(json!(0)))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
     Manifest::new(
         MODEL,
-        "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. M4: real VAE + real scheduler + tiny random-weight DiT smoke pipeline; M8c adds a DFR multi-stage pipeline with real latent upscalers. The real 22B DiT and Gemma-4 text encoder are tracked gaps, not yet implemented.",
+        "LTX-2.5 (Lightricks) - text-to-video diffusion transformer, rectified-flow ancestral Euler sampling with CFG, causal 3D VAE at (8, 32, 32) stride. t2v: real VAE + real scheduler, with the real 22B int8 checkpoint and real Gemma-4 text encoder available via dit_config=ltx25_22b (default stays the tiny random-weight smoke config). dfr: multi-stage pipeline with real latent upscalers, still tiny-random-weight-DiT/stub-context only - real-weight DFR is a tracked gap.",
         vec![t2v, dfr],
     )
 }
@@ -316,7 +327,7 @@ mod tests {
         assert_eq!(def("fps"), Some(json!(8)));
         assert_eq!(def("dit_config"), Some(json!("tiny")));
         let ty = |name: &str| t2v.params.iter().find(|p| p.name == name).unwrap().ty.clone();
-        assert!(matches!(ty("dit_config"), ParamType::Enum(v) if v == DIT_CONFIGS.map(String::from).to_vec()));
+        assert!(matches!(ty("dit_config"), ParamType::Enum(v) if v == T2V_DIT_CONFIGS.map(String::from).to_vec()));
         assert_eq!(t2v.outputs.len(), 1);
         assert_eq!(t2v.outputs[0].name, "video");
         assert_eq!(t2v.outputs[0].media, Media::Video);
@@ -339,8 +350,13 @@ mod tests {
         let p = gen_params_from(&inv).unwrap();
         assert_eq!((p.opts.frames, p.opts.width, p.opts.height, p.opts.steps), (9, 64, 64, 4));
         assert_eq!(p.opts.dit_config, "tiny");
-        for c in DIT_CONFIGS {
-            assert!(dit_config_from_name(c).is_ok(), "{c} is advertised but not decodable");
+        for c in T2V_DIT_CONFIGS {
+            assert!(dit_config_from_name(c).is_ok(), "t2v: {c} is advertised but not decodable");
+        }
+        let dfr_spec = manifest().actions.into_iter().nth(1).unwrap();
+        assert_eq!(dfr_spec.name, "dfr");
+        for c in DFR_DIT_CONFIGS {
+            assert!(dit_config_from_name(c).is_ok(), "dfr: {c} is advertised but not decodable");
         }
         assert!(dit_config_from_name("22b").is_err(), "an unimplemented dit-config must not resolve");
     }
