@@ -636,6 +636,56 @@ this port:
       all 6 `crates/ltxv/tests/audio_parity.rs` tests (previously silently
       skipping - the golden was simply absent, a lesson-#1-shaped gap of its
       own) now pass for real under `BRAIN_REQUIRE_FIXTURES=1`.
+- [x] **Int8/int4 compute path + AV pipeline-parallel sharding, run for real
+      on two physical GPUs** - a CAPACITY milestone (porting.md sec10: a
+      precision change is not a speed claim), making the 22B DiT small
+      enough to fit available VRAM and proving the pipeline-parallel seam on
+      real hardware for the first time.
+
+      Compute-time int8/int4 (`crates/ltxv/src/block.rs::KERNELS` gains
+      `max_abs_row`/`quant_pack`/`matmul_i8_dyn` for i8, `matmul_q4_dyn` for
+      i4, dispatched through the shared `model::ops` DP4A recipe every other
+      quantizing model already uses; modelled on `wan::block`'s `QTier`,
+      adapted to this crate's 10-linear block shape). `crate::int8::
+      is_never_quantized` stays the single authoritative exclusion list.
+      Verified at tiny scale (`crates/ltxv/tests/int8_compute.rs::
+      dit_forward_stays_close_with_int8_compute_dispatch`) AND against one
+      real block (block 0) of the actual Q8_0 checkpoint
+      (`real_q8_0_block0_int8_compute_matches_fp32`).
+
+      Device-bytes measurement at REAL 22B dims (`crates/ltxv/tests/
+      device_bytes_real.rs`, lesson #34 - a memory saving nothing measures
+      is not a claim): computed from the real config's own tensor-size
+      breakdown, not assumed. Measured ratio lands in a real (3.5, 4.0)x
+      band - never the flat theoretical 4x an all-eligible model would get,
+      since `is_never_quantized`'s exclusions keep a real fraction of
+      parameters at fp32.
+
+      AV sharding extended from `LtxDit` to `LtxAvDit`
+      (`crates/ltxv/src/shard.rs`) - the A<->V coupling means BOTH streams'
+      residuals cross a stage boundary together, not one. Same proof ladder
+      `LtxDit`'s own `Shardable` impl already established, single-process
+      first (`crates/ltxv/tests/av_shard_parity.rs`): single-shard
+      degenerate case bit-exact, a genuine two-stage block-range split
+      boundary-handed-off correctly.
+
+      Then run for real (`crates/ltxv/tests/av_shard_2gpu_real.rs`): stage 0
+      pinned to `gpu0`, stage 1 to `gpu1` via `gpu_core::devices::with_gpu`
+      (the same thread-local placement mechanism `model::shard::Pipeline`
+      already uses for construction-time placement, applied here to
+      forward-time placement since `LtxAvDit` opens its device fresh per
+      `run_stage_forward` call), the boundary residual crossing as a real
+      host `Vec<f32>` round trip - what actually crosses a PCIe boundary
+      between two distinct devices, unlike a same-device buffer that never
+      leaves VRAM. **Passed for real on two physical GPUs** - closes the
+      "two real cards agreeing is unverified" gap for the AV path.
+
+      Explicit, tracked gaps: the 2-GPU run uses the small synthetic
+      `tiny_gated` config (2 layers), proving the MECHANISM, not a
+      real-22B-weight claim - a real-checkpoint-weight version needs a
+      GGUF-streaming int8 shard loader this pass did not build; no
+      compute-time int8 for the embeddings connectors or the NA decoder;
+      deep kernel performance tuning is a later phase, not attempted here.
 
 ## Convention questions settled from source, not experiment
 
@@ -737,10 +787,17 @@ land. Known traps already identified from reading (not yet test-pinned):
   compute-time int8 kernel (vs. storage-format-only) is unsettled - that
   needs the DiT's own performance profile to say arithmetic is the
   bottleneck first, per porting.md sec10 point 6.
-- No real multi-device pipeline-parallel execution has been run for `LtxDit`
-  (`model::Shardable`) at this milestone - only the
+- Real multi-device pipeline-parallel execution: **closed for `LtxAvDit`**,
+  still open for `LtxDit` (video-only). The "int8/int4 compute + AV
+  sharding" milestone above ran `LtxAvDit`'s two-stage split on two REAL
+  physical GPUs for the first time (`crates/ltxv/tests/av_shard_2gpu_real.rs`)
+  and it agreed with the single-process reference - but only at a small
+  synthetic `tiny_gated` config, not real checkpoint weights (that needs a
+  GGUF-streaming int8 shard loader, a tracked gap of its own). `LtxDit`'s own
+  `model::Shardable` impl has still only been run single-process (the
   single-shard degenerate case and a sequential two-stage boundary-handoff
-  test on a single GPU have been executed; two real cards agreeing is unverified.
+  test) - its two-real-GPU proof was not repeated separately since
+  `LtxAvDit` is the superset path.
 - `LtxDit` has no backward/training pass through the `model::Shardable`/
   `model::Pipeline` seam - `crate::grad`/`crate::modelgrad`'s existing
   host-math training path is separate and does not build on it.
