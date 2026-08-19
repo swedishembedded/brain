@@ -104,18 +104,39 @@ pub fn dequantize_fp8_pairs(tensors: &mut Tensors, block: usize) -> Result<(), S
 }
 
 /// Add `1.0` to every plain-RMSNorm weight (`ln1`/`ln2`/`self_attn.{q,k}_norm`/
-/// the final `norm`) - see this module's doc, "The `(1+w)` RMSNorm fold".
-/// Takes brain-canonical names (post-[`classify`]), so it cannot accidentally
-/// touch `linear_attn.norm` (a different leaf name, never matched here).
-/// `pub` (not just import-internal): the golden parity tests load
-/// `tools/goldens/qwen35_dump_reference.py`'s raw saved weights directly
-/// (bypassing this whole import module, since that dumper already renames
-/// to brain's `blocks.{l}.*` convention), so they need this exact fold
-/// applied by hand - reusing it here is what keeps the test and the real
-/// import path from silently drifting apart on this one detail.
+/// the final `norm`, plus - see below - the MTP head's own plain norms) -
+/// see this module's doc, "The `(1+w)` RMSNorm fold". Takes brain-canonical
+/// names (post-[`classify`]/[`import_mtp`]), so it cannot accidentally touch
+/// `linear_attn.norm` (a different leaf name, never matched here). `pub`
+/// (not just import-internal): the golden parity tests load `tools/goldens/
+/// qwen35_dump_reference.py`'s raw saved weights directly (bypassing this
+/// whole import module, since that dumper already renames to brain's
+/// `blocks.{l}.*` convention), so they need this exact fold applied by
+/// hand - reusing it here is what keeps the test and the real import path
+/// from silently drifting apart on this one detail.
+///
+/// `mtp.norm.weight`/`mtp.pre_fc_norm_embedding.weight`/
+/// `mtp.pre_fc_norm_hidden.weight` are matched by EXACT name (not a
+/// `.norm.weight` suffix, which would also wrongly catch `linear_attn.norm.
+/// weight`, the GATED norm) - a judgment call, since (per this crate's own
+/// documented gap - `Qwen35Config::mtp`'s doc, `crate::import::import_mtp`'s
+/// own doc) `transformers` implements no MTP module at all, so there is no
+/// reference `nn.Module` to check whether these three are the SAME
+/// zero-init `Qwen3_5RMSNorm` class every other plain norm in this
+/// checkpoint uses. The MTP head has no gated norm anywhere in its own
+/// architecture (`mtp.layers.0.*`'s only mixer is the GQA-shaped one,
+/// exactly like a main-stack `Full` layer, never a Gated-DeltaNet one) - the
+/// gated-norm reparameterization exists specifically for `Qwen3_5RMSNormGated`
+/// (GDN's own output gating), a class that never appears in MTP at all - so
+/// applying the SAME plain-norm fold to every MTP norm, by analogy with
+/// every other non-gated norm in this checkpoint, is the more consistent
+/// reading of the two available, not an arbitrary pick.
 pub fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
     for (name, data) in tensors.iter_mut() {
         let is_plain_norm = name == "norm.weight"
+            || name == "mtp.norm.weight"
+            || name == "mtp.pre_fc_norm_embedding.weight"
+            || name == "mtp.pre_fc_norm_hidden.weight"
             || name.ends_with(".ln1.weight")
             || name.ends_with(".ln2.weight")
             || name.ends_with(".self_attn.q_norm.weight")
@@ -139,6 +160,44 @@ pub fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
 /// `mtp.`/`model.visual.` skip would hide a real bug, such as an
 /// out-of-range layer index meaning `cfg.n_layers` disagrees with the
 /// checkpoint, as a no-op instead of a loud failure.
+/// Maps one decoder layer's own leaf name (the part after
+/// `<layer-prefix>.`, e.g. `input_layernorm.weight` or
+/// `self_attn.q_proj.weight`) to its brain-canonical SUFFIX (without any
+/// `blocks.{l}.`/`mtp.layers.0.` prefix - the caller adds that), for a layer
+/// of type `ty`. The one rename table both [`classify`] (main-stack
+/// `blocks.{l}.*`, any layer type) and [`import_mtp`] (the MTP head's own
+/// single `mtp.layers.0.*` layer, always [`LayerType::Full`] shaped) share -
+/// written once so the two callers cannot silently drift apart on a leaf
+/// name.
+fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
+    match leaf {
+        "input_layernorm.weight" => Some("ln1.weight".to_string()),
+        "post_attention_layernorm.weight" => Some("ln2.weight".to_string()),
+        "mlp.gate_proj.weight" => Some("mlp.gate.weight".to_string()),
+        "mlp.up_proj.weight" => Some("mlp.up.weight".to_string()),
+        "mlp.down_proj.weight" => Some("mlp.down.weight".to_string()),
+        _ if ty == LayerType::Linear && leaf.starts_with("linear_attn.") => {
+            let sub = &leaf["linear_attn.".len()..];
+            match sub {
+                "in_proj_qkv.weight" | "in_proj_z.weight" | "in_proj_b.weight" | "in_proj_a.weight"
+                | "out_proj.weight" | "A_log" | "dt_bias" | "norm.weight" | "conv1d.weight" => {
+                    Some(format!("linear_attn.{sub}"))
+                }
+                _ => None,
+            }
+        }
+        _ if ty == LayerType::Full && leaf.starts_with("self_attn.") => {
+            let sub = &leaf["self_attn.".len()..];
+            match sub {
+                "q_proj.weight" | "k_proj.weight" | "v_proj.weight" | "o_proj.weight" | "q_norm.weight"
+                | "k_norm.weight" => Some(format!("self_attn.{sub}")),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
     if name.starts_with("mtp.") || name.starts_with("model.visual.") || name == "model.visual" {
         return Ok(None);
@@ -163,35 +222,8 @@ fn classify(name: &str, cfg: &Qwen35Config) -> Result<Option<String>, String> {
     let ty = types
         .get(l as usize)
         .ok_or_else(|| format!("import: {name} references layer {l}, but cfg.n_layers is {}", types.len()))?;
-    let p = |s: &str| format!("blocks.{l}.{s}");
-    let mapped = match leaf {
-        "input_layernorm.weight" => Some(p("ln1.weight")),
-        "post_attention_layernorm.weight" => Some(p("ln2.weight")),
-        "mlp.gate_proj.weight" => Some(p("mlp.gate.weight")),
-        "mlp.up_proj.weight" => Some(p("mlp.up.weight")),
-        "mlp.down_proj.weight" => Some(p("mlp.down.weight")),
-        _ if *ty == LayerType::Linear && leaf.starts_with("linear_attn.") => {
-            let sub = &leaf["linear_attn.".len()..];
-            match sub {
-                "in_proj_qkv.weight" | "in_proj_z.weight" | "in_proj_b.weight" | "in_proj_a.weight"
-                | "out_proj.weight" | "A_log" | "dt_bias" | "norm.weight" | "conv1d.weight" => {
-                    Some(p(&format!("linear_attn.{sub}")))
-                }
-                _ => None,
-            }
-        }
-        _ if *ty == LayerType::Full && leaf.starts_with("self_attn.") => {
-            let sub = &leaf["self_attn.".len()..];
-            match sub {
-                "q_proj.weight" | "k_proj.weight" | "v_proj.weight" | "o_proj.weight" | "q_norm.weight"
-                | "k_norm.weight" => Some(p(&format!("self_attn.{sub}"))),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    match mapped {
-        Some(n) => Ok(Some(n)),
+    match classify_layer_leaf(leaf, *ty) {
+        Some(suffix) => Ok(Some(format!("blocks.{l}.{suffix}"))),
         None => Err(format!("import: unrecognized leaf {leaf:?} under a known-scope tensor {name}")),
     }
 }
@@ -305,6 +337,131 @@ pub fn import_layer(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Conf
         return Err(format!("import_layer: {bad} does not belong to layer {l} (naming-convention bug in classify(), not a checkpoint problem)"));
     }
     Ok(renamed)
+}
+
+/// Stream the MTP head's own real weights from an already-opened `mtp.
+/// safetensors` mmap - the real-weight import [`classify`] itself
+/// deliberately never performs (this module's doc, "a DELIBERATE
+/// out-of-scope drop"; no real-weight MTP import existed anywhere in this
+/// crate before this function). Mirrors [`import_layer`]'s own shape:
+/// gather every `mtp.`-prefixed tensor, dequantize FP8 pairs, rename to
+/// brain-canonical names, fold plain-RMSNorm weights, validate two-way
+/// coverage - just against a different real source file and a different
+/// (fixed, single-layer) name set.
+///
+/// **No external numerical reference exists for this function** - see
+/// [`fold_plain_rmsnorm_weights`]'s own doc for the specific detail this
+/// matters for (whether MTP's three own norms get the `(1+w)` fold) and
+/// `Qwen35Config::mtp`'s doc for the broader, already-accepted gap: the
+/// installed `transformers.models.qwen3_5` loader ignores every `mtp.*` key
+/// on load (`_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`), so there is
+/// no reference module to gradient-check or golden-parity-check this
+/// against. This function is validated the only way available - real
+/// checkpoint tensor names/shapes present and correctly reshaped, coverage
+/// against [`Qwen35Config::param_list`]'s own `mtp.*` names, finite values -
+/// never a numerical-parity claim.
+///
+/// The one reshape this function performs that [`import_layer`] never
+/// needs: the real checkpoint's single fused `mtp.fc.weight` (`[d, 2d]`) is
+/// split into `mtp.fc_e.weight` (columns `[0,d)`, the embedding branch) and
+/// `mtp.fc_h.weight` (columns `[d,2d)`, the hidden-state branch) - exactly
+/// the split `Qwen35Config::param_list`'s own doc comment already commits
+/// to. No external oracle exists to check this column order against either
+/// (same gap as above) - this reuses the ONE convention the already-
+/// gradchecked `crate::model::Qwen35::run_mtp_forward`/its backward twin
+/// already assume (`en` through `fc_e`, `hn` through `fc_h`), rather than
+/// inventing a second, untested one.
+pub fn import_mtp(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Config, block: usize) -> Result<HashMap<String, Vec<f32>>, String> {
+    let names: Vec<String> = reader.names().iter().filter(|n| n.starts_with("mtp.")).cloned().collect();
+    if names.is_empty() {
+        return Err("import_mtp: no mtp.* tensors found".to_string());
+    }
+    let mut raw: Tensors = HashMap::with_capacity(names.len());
+    for name in &names {
+        let shape: Vec<usize> = reader.shape(name).ok_or_else(|| format!("import_mtp: missing shape for {name}"))?.to_vec();
+        let data = reader.tensor_f32(name).ok_or_else(|| format!("import_mtp: missing data for {name}"))?;
+        raw.insert(name.clone(), (shape, data));
+    }
+    dequantize_fp8_pairs(&mut raw, block)?;
+
+    let d = cfg.d_model as usize;
+    let mut out: HashMap<String, Vec<f32>> = HashMap::with_capacity(raw.len());
+
+    // mtp.fc.weight [d, 2d] -> fc_e.weight [d,d] (cols [0,d)) + fc_h.weight
+    // [d,d] (cols [d,2d)) - see this function's own doc.
+    let (fc_shape, fc_data) =
+        raw.remove("mtp.fc.weight").ok_or_else(|| "import_mtp: missing mtp.fc.weight".to_string())?;
+    if fc_shape != [d, 2 * d] {
+        return Err(format!("import_mtp: mtp.fc.weight has shape {fc_shape:?}, expected [{d}, {}]", 2 * d));
+    }
+    let mut fc_e = Vec::with_capacity(d * d);
+    let mut fc_h = Vec::with_capacity(d * d);
+    for row in 0..d {
+        let base = row * 2 * d;
+        fc_e.extend_from_slice(&fc_data[base..base + d]);
+        fc_h.extend_from_slice(&fc_data[base + d..base + 2 * d]);
+    }
+    out.insert("mtp.fc_e.weight".to_string(), fc_e);
+    out.insert("mtp.fc_h.weight".to_string(), fc_h);
+
+    // The three MTP-owned norms/pre-norms - names already brain-canonical,
+    // pass through unchanged (the `(1+w)` fold, if any, is
+    // `fold_plain_rmsnorm_weights`'s concern below, not a rename here).
+    for name in ["mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight", "mtp.norm.weight"] {
+        let (_, data) = raw.remove(name).ok_or_else(|| format!("import_mtp: missing {name}"))?;
+        out.insert(name.to_string(), data);
+    }
+
+    // mtp.layers.0.* - reuse the SAME leaf-rename table `classify` uses for
+    // any main-stack `Full` layer (MTP's own layer is architecturally
+    // identical: GQA self-attn + dense SwiGLU MLP, never Gated DeltaNet).
+    let prefix = "mtp.layers.0.";
+    let leaf_names: Vec<String> = raw.keys().filter(|n| n.starts_with(prefix)).cloned().collect();
+    for name in leaf_names {
+        let leaf = &name[prefix.len()..];
+        let Some(suffix) = classify_layer_leaf(leaf, LayerType::Full) else {
+            return Err(format!("import_mtp: unrecognized leaf {leaf:?} under {name}"));
+        };
+        let (_, data) = raw.remove(&name).expect("just filtered from raw's own keys");
+        out.insert(format!("{prefix}{suffix}"), data);
+    }
+
+    // Loud, by name, if anything real was left unclassified - the same
+    // discipline `import_dir`/`import_layer` apply to the main stack.
+    if !raw.is_empty() {
+        let leftover: Vec<&String> = raw.keys().collect();
+        return Err(format!("import_mtp: {} tensor(s) left unclassified, e.g. {:?}", leftover.len(), leftover.iter().take(8).collect::<Vec<_>>()));
+    }
+
+    fold_plain_rmsnorm_weights(&mut out);
+
+    // Two-way coverage against `param_list()`'s own `mtp.*` subset.
+    let expected: Vec<(String, usize)> =
+        Qwen35Config { mtp: true, ..cfg.clone() }.param_list().into_iter().filter(|(n, _)| n.starts_with("mtp.")).collect();
+    let mut missing = Vec::new();
+    for (name, numel) in &expected {
+        match out.get(name) {
+            None => missing.push(name.clone()),
+            Some(d) if d.len() != *numel => {
+                return Err(format!("import_mtp: {name} has {} values, expected {numel}", d.len()))
+            }
+            _ => {}
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!("import_mtp: missing tensors: {missing:?}"));
+    }
+    let expected_names: std::collections::HashSet<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
+    let extra: Vec<&String> = out.keys().filter(|k| !expected_names.contains(k.as_str())).collect();
+    if !extra.is_empty() {
+        return Err(format!(
+            "import_mtp: {} tensors classified but not in param_list()'s mtp.* subset, e.g. {:?}",
+            extra.len(),
+            extra.iter().take(8).collect::<Vec<_>>(),
+        ));
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -524,5 +681,119 @@ mod tests {
         raw.insert("w.weight_scale_inv".into(), (vec![1, 1], vec![3.0]));
         let err = dequantize_fp8_pairs(&mut raw, 2).unwrap_err();
         assert!(err.contains("weight_scale_inv"), "error must name the offending tensor: {err}");
+    }
+
+    /// A synthetic `mtp.safetensors`, real HF naming convention (this
+    /// function's own doc + this session's real-checkpoint-header finding),
+    /// at `Qwen35Config::tiny()`'s shapes. `mtp.fc.weight`'s two column
+    /// halves are seeded at DISTINCT values (`0.03`/`0.04`) so the
+    /// embedding-first/hidden-second split order is directly checkable, not
+    /// just shape-checkable.
+    fn synthetic_mtp(cfg: &Qwen35Config) -> Tensors {
+        let d = cfg.d_model as usize;
+        let hq = cfg.q_dim() as usize;
+        let hqp = cfg.q_proj_dim() as usize;
+        let hkv = cfg.kv_dim() as usize;
+        let hd = cfg.head_dim as usize;
+        let ff = cfg.intermediate_size as usize;
+
+        let mut t: Tensors = HashMap::new();
+        let mut fc = Vec::with_capacity(d * 2 * d);
+        for _ in 0..d {
+            fc.extend(std::iter::repeat_n(0.03f32, d));
+            fc.extend(std::iter::repeat_n(0.04f32, d));
+        }
+        t.insert("mtp.fc.weight".into(), (vec![d, 2 * d], fc));
+        t.insert("mtp.pre_fc_norm_embedding.weight".into(), one_f32(vec![d], 0.0));
+        t.insert("mtp.pre_fc_norm_hidden.weight".into(), one_f32(vec![d], 0.0));
+        t.insert("mtp.norm.weight".into(), one_f32(vec![d], 0.0));
+        t.insert("mtp.layers.0.input_layernorm.weight".into(), one_f32(vec![d], 0.0));
+        t.insert("mtp.layers.0.post_attention_layernorm.weight".into(), one_f32(vec![d], 0.0));
+        t.insert("mtp.layers.0.self_attn.q_proj.weight".into(), one_f32(vec![hqp, d], 0.01));
+        t.insert("mtp.layers.0.self_attn.k_proj.weight".into(), one_f32(vec![hkv, d], 0.01));
+        t.insert("mtp.layers.0.self_attn.v_proj.weight".into(), one_f32(vec![hkv, d], 0.01));
+        t.insert("mtp.layers.0.self_attn.o_proj.weight".into(), one_f32(vec![d, hq], 0.01));
+        t.insert("mtp.layers.0.self_attn.q_norm.weight".into(), one_f32(vec![hd], 0.0));
+        t.insert("mtp.layers.0.self_attn.k_norm.weight".into(), one_f32(vec![hd], 0.0));
+        t.insert("mtp.layers.0.mlp.gate_proj.weight".into(), one_f32(vec![ff, d], 0.01));
+        t.insert("mtp.layers.0.mlp.up_proj.weight".into(), one_f32(vec![ff, d], 0.01));
+        t.insert("mtp.layers.0.mlp.down_proj.weight".into(), one_f32(vec![d, ff], 0.01));
+        t
+    }
+
+    /// Write a [`synthetic_mtp`] fixture to a real on-disk safetensors file -
+    /// a synthetic stand-in for a real `mtp.safetensors`, letting
+    /// [`import_mtp`] be tested through an actual
+    /// [`checkpoint::mmap::MmapSafetensors`] with no real checkpoint present
+    /// (deferred to the `#[ignore]`d real-checkpoint test in
+    /// `tests/import_mtp_real_weight.rs`).
+    fn write_mtp_shard(cfg: &Qwen35Config) -> std::path::PathBuf {
+        let all = synthetic_mtp(cfg);
+        let plan: Vec<(String, Vec<u64>)> = all.iter().map(|(n, (shape, _))| (n.clone(), shape.iter().map(|&s| s as u64).collect())).collect();
+        let path = std::env::temp_dir().join(format!("qwen35_import_mtp_{}.safetensors", std::process::id()));
+        let mut w = checkpoint::weightio::StWriter::create(path.to_str().unwrap(), &plan, &serde_json::json!({}), None).unwrap();
+        for (name, _) in &plan {
+            w.write(name, &all[name].1).unwrap();
+        }
+        w.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn import_mtp_splits_fc_folds_norms_and_matches_full_two_way_coverage() {
+        let cfg = Qwen35Config::tiny();
+        let path = write_mtp_shard(&cfg);
+        let reader = checkpoint::mmap::MmapSafetensors::open(&path).unwrap();
+        let out = import_mtp(&reader, &cfg, 128).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // Two-way coverage against param_list()'s own mtp.* subset.
+        let expected: Vec<(String, usize)> =
+            Qwen35Config { mtp: true, ..cfg.clone() }.param_list().into_iter().filter(|(n, _)| n.starts_with("mtp.")).collect();
+        for (name, numel) in &expected {
+            let v = out.get(name).unwrap_or_else(|| panic!("missing {name} after import_mtp"));
+            assert_eq!(v.len(), *numel, "{name}: wrong length");
+        }
+        assert_eq!(out.len(), expected.len(), "import_mtp produced tensors outside param_list()'s mtp.* subset");
+
+        // fc.weight [d,2d] split: embedding half (cols [0,d)) -> fc_e, hidden
+        // half (cols [d,2d)) -> fc_h - exactly the order config.rs's own doc
+        // commits to, checked by VALUE, not just by shape.
+        assert!(out["mtp.fc_e.weight"].iter().all(|&v| v == 0.03), "fc_e must be fc.weight's FIRST column half");
+        assert!(out["mtp.fc_h.weight"].iter().all(|&v| v == 0.04), "fc_h must be fc.weight's SECOND column half");
+
+        // Every synthetic plain-norm weight (including MTP's own three) was
+        // seeded at 0.0 -> must read 1.0 after the fold.
+        for name in [
+            "mtp.pre_fc_norm_embedding.weight",
+            "mtp.pre_fc_norm_hidden.weight",
+            "mtp.norm.weight",
+            "mtp.layers.0.ln1.weight",
+            "mtp.layers.0.ln2.weight",
+            "mtp.layers.0.self_attn.q_norm.weight",
+            "mtp.layers.0.self_attn.k_norm.weight",
+        ] {
+            assert!(out[name].iter().all(|&v| v == 1.0), "{name} must be folded to 1.0");
+        }
+        // A non-norm leaf must be untouched by the fold.
+        assert!(out["mtp.layers.0.self_attn.q_proj.weight"].iter().all(|&v| v == 0.01));
+    }
+
+    #[test]
+    fn import_mtp_missing_fc_weight_errors_by_name() {
+        let cfg = Qwen35Config::tiny();
+        let mut all = synthetic_mtp(&cfg);
+        all.remove("mtp.fc.weight");
+        let plan: Vec<(String, Vec<u64>)> = all.iter().map(|(n, (shape, _))| (n.clone(), shape.iter().map(|&s| s as u64).collect())).collect();
+        let path = std::env::temp_dir().join(format!("qwen35_import_mtp_missing_{}.safetensors", std::process::id()));
+        let mut w = checkpoint::weightio::StWriter::create(path.to_str().unwrap(), &plan, &serde_json::json!({}), None).unwrap();
+        for (name, _) in &plan {
+            w.write(name, &all[name].1).unwrap();
+        }
+        w.finish().unwrap();
+        let reader = checkpoint::mmap::MmapSafetensors::open(&path).unwrap();
+        let err = import_mtp(&reader, &cfg, 128).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert!(err.contains("mtp.fc.weight"), "error must name the missing tensor: {err}");
     }
 }
