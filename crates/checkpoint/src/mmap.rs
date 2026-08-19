@@ -15,7 +15,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::safetensors::{bf16_to_f32, f16_to_f32, StTensor};
+use crate::safetensors::{bf16_to_f32, e4m3fn_to_f32, f16_to_f32, StTensor};
 use crate::st::{ModelCard, CONFIG_KEY};
 
 /// Header metadata for one tensor (byte range is relative to the tensor blob).
@@ -303,7 +303,13 @@ fn try_dtype_width(dtype: &str) -> Option<usize> {
         "F32" | "I32" | "U32" => Some(4),
         "F16" | "BF16" => Some(2),
         "I64" => Some(8),
-        "U8" => Some(1),
+        // F8_E5M2 is included here (not just F8_E4M3) so `open()`'s header
+        // validation and byte-range/width checks succeed for a file that
+        // merely CONTAINS an E5M2 tensor - the loud, name-it rejection lives
+        // in `decode_into`, at actual decode time, matching `crate::
+        // safetensors::parse`'s own split between "the file is well-formed"
+        // and "this tensor's dtype is one we can decode".
+        "U8" | "F8_E4M3" | "F8_E5M2" => Some(1),
         _ => None,
     }
 }
@@ -327,6 +333,14 @@ fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
         "I64" => out.extend(raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)),
         "I32" => out.extend(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)),
         "U8" => out.extend(raw.iter().map(|&b| b as f32)),
+        "F8_E4M3" => out.extend(raw.iter().map(|&b| e4m3fn_to_f32(b))),
+        // Named explicitly rather than falling into the `other` panic below:
+        // E5M2 is a real, if rarer, FP8 checkpoint format (more exponent
+        // range, less mantissa) - silently decoding its bytes as if they were
+        // E4M3 would produce plausible-looking but badly wrong values instead
+        // of a loud, name-it failure. Mirrors `crate::safetensors::parse`'s
+        // own F8_E5M2 handling exactly.
+        "F8_E5M2" => panic!("'{name}': F8_E5M2 not supported (only F8_E4M3 is)"),
         // Previously fell through to `Vec::new()` -- a packed U32 tensor (or
         // any future dtype this decoder doesn't know) would silently read as
         // an empty, valid-looking vector instead of failing. Loud is correct
@@ -402,6 +416,56 @@ mod tests {
         assert_eq!(m.tensor_f32("a").unwrap(), a);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// `open()`/`tensor_f32`/`with_tensor_chunks` must handle F8_E4M3 exactly
+    /// like `crate::safetensors::parse`'s own eager path does (they share
+    /// `e4m3fn_to_f32`) - a real, blockwise-FP8 checkpoint (DeepSeek-V3-style
+    /// scaling) is exactly the shape this mmap streaming path exists for, and
+    /// until this test was added `open()` itself failed with "unknown dtype
+    /// 'F8_E4M3'" before ever reaching a decode call at all (`try_dtype_width`
+    /// never had an F8_E4M3 arm, unlike `crate::safetensors::parse`'s own
+    /// `dtype` match, which got one when FP8 import landed).
+    #[test]
+    fn f8_e4m3_opens_and_decodes_through_both_the_whole_tensor_and_chunked_paths() {
+        let raw_bytes: Vec<u8> = vec![0x00, 0x80, 0x38, 0xB8, 0x7E, 0x08]; // +0, -0, 1.0, -1.0, 448.0, 2^-6
+        let want: Vec<f32> = vec![0.0, -0.0, 1.0, -1.0, 448.0, 2f32.powi(-6)];
+        let header = serde_json::json!({ "w": {"dtype": "F8_E4M3", "shape": [6], "data_offsets": [0, raw_bytes.len()]} });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&hbytes);
+        file.extend_from_slice(&raw_bytes);
+        let path = std::env::temp_dir().join(format!("mmap_st_f8e4m3_{}.safetensors", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+
+        let m = MmapSafetensors::open(&path).expect("open() must accept a file containing an F8_E4M3 tensor");
+        assert_eq!(m.tensor_f32("w").unwrap(), want);
+
+        let mut chunked: Vec<f32> = Vec::new();
+        assert!(m.with_tensor_chunks("w", 2, &mut |_, chunk| chunked.extend_from_slice(chunk)));
+        assert_eq!(chunked, want);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// F8_E5M2 must still let `open()` succeed (a real checkpoint file may
+    /// legitimately contain one even if this importer never reads it), but
+    /// decoding it must fail loudly by name, never silently misdecode its
+    /// bytes as E4M3 - mirrors `crate::safetensors::parse`'s own
+    /// `f8_e5m2_errors_loudly_by_name_instead_of_silently_misdecoding` test.
+    #[test]
+    #[should_panic(expected = "F8_E5M2")]
+    fn f8_e5m2_decode_panics_loudly_instead_of_silently_misdecoding() {
+        let header = serde_json::json!({ "w": {"dtype": "F8_E5M2", "shape": [1], "data_offsets": [0, 1]} });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&hbytes);
+        file.push(0x38);
+        let path = std::env::temp_dir().join(format!("mmap_st_f8e5m2_{}.safetensors", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+
+        let m = MmapSafetensors::open(&path).expect("open() must accept a file containing an F8_E5M2 tensor");
+        let _ = m.tensor_f32("w"); // must panic, not return a wrong value
     }
 
     /// Build a one-tensor safetensors file from raw little-endian bytes, with
