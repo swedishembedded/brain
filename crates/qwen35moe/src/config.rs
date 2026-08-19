@@ -148,7 +148,15 @@ impl Qwen35Config {
             linear_num_key_heads: 3,
             linear_num_value_heads: 6,
             linear_key_head_dim: 4,
-            linear_value_head_dim: 5,
+            // `linear_value_dim() = linear_num_value_heads * linear_value_head_dim`
+            // feeds GDN's `out_proj` as a `model::ops::Ops::act` activation
+            // width -- that façade's eager int8 packing needs a multiple of
+            // 4 unconditionally (fp32 builds included, not just an int8
+            // build), so this can't be the odd value (5, giving 30) it used
+            // to be. 2 keeps `linear_value_dim() = 12` (%4 == 0) while
+            // staying pairwise-distinct from every other linear-attention
+            // dim below (see `tiny_config_has_pairwise_distinct_dims_within_each_layer_type`).
+            linear_value_head_dim: 2,
             linear_conv_kernel_dim: 4,
 
             n_experts: 6,

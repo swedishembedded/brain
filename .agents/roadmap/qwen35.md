@@ -150,21 +150,47 @@ structurally and never parity-claimed here.
   convention was found to implement it against without guessing, so it is
   recorded as a gap below rather than fabricated.
 
+- [x] M12 part A: migrated qwen35moe off its private `crate::q8::Qwen35Q8`
+  mixer API onto `model::ops::{Ops,Act,Weight}`, mirroring `crates/qwen3`'s own
+  migration. `q8.rs` narrowed to the MoE-expert path only (`Q8GqaLayer`/
+  `Q8GdnLayer`/`Q8Mixer`/`mm8` removed; `is_i8_linear`/`quant`/`Lin8`/
+  `Lin8Expert` unchanged); `model.rs` gained `ops: Ops` +
+  `weights: HashMap<String, Weight>` and an `ops_linear` dispatcher,
+  `layer_gdn_fwd`/`layer_gqa_fwd` rewritten to go through it (backward is
+  untouched - it always reads fp32 `ParamStore` directly, same as before).
+  `PIPELINES` became a `pipelines()` function (mirroring `qwen3::model::
+  pipelines`) since `Ops::new` requires the full façade kernel set registered,
+  not just the tiers a model plans to use.
+  **Found and fixed a real pre-existing bug**: `Qwen35Config::tiny()`'s
+  `linear_value_head_dim: 5` made `linear_value_dim() = 30`, not a multiple
+  of 4 - harmless under the old `mm8`-only int8 path (which never touched
+  `tiny()`), but `Ops::act` quantizes its activation input eagerly and
+  unconditionally on EVERY build (fp32 included), so this broke every fp32
+  forward through the mixer too. Fixed by changing it to 2 (giving
+  `linear_value_dim() = 12`), preserving the pairwise-distinct-dims invariant.
+  Also found: `Weight::upload`'s caps-based dtype promotion means an int8
+  build's mixer weights now silently demote to fp32 on a backend without DP4A
+  support (e.g. this engine's CPU JIT) - `model_i8_smoke.rs`'s CPU test used
+  to assert a hard panic there; rewritten to assert the (now correct) fp32
+  fallback behavior instead, matching `qwen3`'s already-established contract.
+  Full `qwen35moe` test suite (all 60+ tests across lib + 9 integration
+  files) and `check_qwen35moe`/`check_qwen35moe_a_log_elementwise`/
+  `check_qwen35moe_lora` gradcheck all pass unchanged in shape.
+- [ ] M12 part B: hoist the GDN and gated-GQA mixer orchestration into
+  `crates/model`, gated by a new `crates/model/tests/gdn_mixer_equivalence.rs`
+  proving bit-identity between both crates' mixers on the same weights.
+  Smaller now than originally scoped: M11 already wrote the DECODE-step
+  orchestration (`layer_gdn_decode_step`/`layer_gqa_decode_step`) fresh with
+  the weight-name-prefix convention this hoist needs, rather than duplicating
+  qwen35moe's own layer-index-keyed copy - only the BATCHED forward/backward
+  mixer orchestration still needs migrating.
+
 ## Not yet done
 
 - [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
   per-layer streaming forward parity for layers {0, 3, 63}; full real-weight
   parity of the vision tower; embed/lm_head spot checks).
-- [ ] M12: finish the shared-code hoist - migrate qwen35moe off its private
-  `crate::q8::Qwen35Q8` onto `model::ops::{Ops,Act,Weight}`, then hoist the GDN
-  and gated-GQA mixer orchestration into `crates/model`, gated by a new
-  `crates/model/tests/gdn_mixer_equivalence.rs` proving bit-identity between both
-  crates' mixers on the same weights. Smaller now than originally scoped:
-  M11 already wrote the DECODE-step orchestration (`layer_gdn_decode_step`/
-  `layer_gqa_decode_step`) fresh with the weight-name-prefix convention this
-  hoist needs, rather than duplicating qwen35moe's own layer-index-keyed
-  copy - only the BATCHED forward/backward mixer orchestration still needs
-  migrating.
+- [ ] M12 part B (see above).
 - [ ] M13: performance pass (profile-first; native device-side FP8 GEMM only if
   the profile says arithmetic is the limiter, not before).
 

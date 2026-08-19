@@ -121,7 +121,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::ops::{Act, Ops, Weight};
 use model::Shard;
 use paramstore::{ParamStore, Role};
 
@@ -147,11 +149,11 @@ use model::moe::{
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::q8::{Q8Mixer, Qwen35Q8};
+use crate::q8::Qwen35Q8;
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 
-pub const PIPELINES: &[(&str, &str)] = &[
+const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),                             // 0
     ("matmul", kernels::MATMUL),                                // 1
     ("embed", kernels::EMBED),                                  // 2
@@ -194,11 +196,13 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW),                       // 38
     ("quant_pack", kernels::QUANT_PACK),                         // 39
     // NOTE: `kernels::MATMUL_I8` (no suffix) is the STATIC per-tensor-scale
-    // variant (`sx`/`sw` baked into the uniform, see its own doc); `Qwen35Q8`
-    // needs the DYNAMIC per-token/per-channel variant (`sx`/`sw` as buffers,
-    // indexed `sx[row]`/`sw[col]`) that `Q8::quant`/`Q8::mm8` actually
-    // produce -- `kernels::MATMUL_I8_DYN`, exactly as `qwen3::model.rs`'s own
-    // `Q8` pipeline registers under this same local name (`qwen/src/model.rs:159`).
+    // variant (`sx`/`sw` baked into the uniform, see its own doc); the mixer
+    // linears' `model::ops::Ops` façade and `Qwen35Q8`'s own MoE-expert
+    // path both need the DYNAMIC per-token/per-channel variant (`sx`/`sw` as
+    // buffers, indexed `sx[row]`/`sw[col]`) -- `kernels::MATMUL_I8_DYN`,
+    // registered under this name so `Ops::bind` can resolve it (see
+    // `model::ops`'s own doc), exactly as `qwen3::model.rs`'s own `Q8`
+    // pipeline registers under this same local name (`qwen/src/model.rs:159`).
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),                   // 40
     ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8),       // 41
     // -- training (backward + AdamW) tier -- see `Qwen35::new_train`/`backward`.
@@ -267,6 +271,72 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("router_topk_compact", kernels::ROUTER_TOPK_COMPACT),       // 93
 ];
 
+/// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
+/// const above indexes into this -- unchanged positions 0..93) followed by
+/// the `model::ops::Ops` façade's own required kernels, appended with
+/// NO named consts of their own -- resolved by `Ops::new` purely BY NAME
+/// (`Gpu::kernel_index`), never by position. Mirrors `qwen3::model::
+/// pipelines`'s own recipe (including the `matmul_reg2` -> `matmul_reg3`
+/// bit-identical-faster-twin registration) and its own doc comment's
+/// rationale for why this must be one combined list on `self.gpu`'s own `Gpu`
+/// handle rather than a second one built via `Gpu::new_like` for `self.ops`.
+pub fn pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = STATIC_PIPELINES.to_vec();
+        v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        v.push(("matmul_reg2", kernels::MATMUL_REG3));
+        v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
+        v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
+        v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
+        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
+        // variants even though this crate never builds a `Weight::BF16`/
+        // `Weight::F16` and never dispatches the generic `paged_*_batched`
+        // family -- see `Ops::new`'s own doc comment ("every model that
+        // builds an `Ops` must register the full façade kernel set, not just
+        // the tiers it plans to use"). Compiled, never dispatched.
+        for dt in [Dtype::BF16, Dtype::F16] {
+            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
+        }
+        v.push(("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED));
+        v.push(
+            kernels::template::dtype_variant_store(
+                "paged_kv_append_batched_word",
+                kernels::PAGED_KV_APPEND_BATCHED_WORD,
+                "pool",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_scores_batched",
+                kernels::PAGED_DECODE_SCORES_BATCHED,
+                "pool_k",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
+        v.push(
+            kernels::template::dtype_variant(
+                "paged_decode_apply_batched",
+                kernels::PAGED_DECODE_APPLY_BATCHED,
+                "pool_v",
+                Dtype::BF16,
+            )
+            .unwrap(),
+        );
+        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
+        v
+    })
+}
+
 const RMSNORM: usize = 0;
 const MATMUL: usize = 1;
 const EMBED: usize = 2;
@@ -307,7 +377,6 @@ const REGION_COPY: usize = 36;
 const CE_VALUE: usize = 37;
 const MAX_ABS_ROW: usize = 38;
 const QUANT_PACK: usize = 39;
-const MATMUL_I8: usize = 40;
 const MOE_LINEAR_GATED_I8: usize = 41;
 const RMS_INV: usize = 42;
 const RMSNORM_DX: usize = 43;
@@ -602,12 +671,25 @@ pub struct Qwen35 {
     /// own `shard` field exactly.
     pub shard: Shard,
     ps: ParamStore,
-    /// `Some` selects the int8 (DP4A) inference tier for the linears
-    /// `Qwen35Q8::is_i8_linear` names (`ps` excludes those names entirely -
-    /// see [`Qwen35::new_impl_on`]'s role filter); `None` is the plain fp32
-    /// path. See `crate::q8`'s module doc for exactly which linears that is
-    /// and why.
+    /// `Some` selects the int8 (DP4A) inference tier for the MoE experts'
+    /// linears (`ps` excludes those names entirely - see [`Qwen35::
+    /// new_impl_on`]'s role filter); `None` is the plain fp32 path. The 9
+    /// GDN/GQA mixer linears `Qwen35Q8::is_i8_linear` ALSO names live on
+    /// `self.ops`/`self.weights` below instead - `model::ops::Ops::moe_linear`
+    /// has a documented, different buffer/param shape for I8/Q4 than
+    /// `model::moe::expert_fwd_i8` uses, so the MoE-expert quantization
+    /// stays on its own existing, already-correct path rather than being
+    /// force-unified with the façade. See `crate::q8`'s module doc for the
+    /// current (narrower) scope.
     q8: Option<Qwen35Q8>,
+    /// The `model::ops` façade - see [`Qwen35::ops_linear`]'s own doc.
+    ops: Ops,
+    /// Per-layer GDN/GQA mixer linears (the 9 leaves `Qwen35Q8::
+    /// is_i8_linear` names, excluding MoE experts) as `model::ops::Weight` -
+    /// `F32` unless this instance was built int8 AND the device caps support
+    /// the DP4A path, in which case `Weight::upload` promotes it to
+    /// `Weight::I8` (see [`Qwen35::ops_linear`]).
+    weights: HashMap<String, Weight>,
     b: u32,
     t: u32,
     /// The GDN chunk size this instance was built for - see [`gdn_chunk_size`].
@@ -817,7 +899,7 @@ fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, false, false, shard)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
@@ -835,7 +917,7 @@ impl Qwen35 {
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, true, false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, true, false, shard)
     }
 
     /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
@@ -851,7 +933,7 @@ impl Qwen35 {
     /// `assert!(!(i8 && train))`).
     pub fn new_train(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, false, true, shard)
     }
 
     /// [`Self::new_train`] on an existing device handle - see [`Self::new_on`].
@@ -870,9 +952,9 @@ impl Qwen35 {
     /// is meant for outside tests).
     pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(PIPELINES)
+            Gpu::new(pipelines())
         } else {
-            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
+            Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
         };
         Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
     }
@@ -934,9 +1016,68 @@ impl Qwen35 {
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
-        // Quantize+upload the int8 linears from the SAME source, streaming
-        // one tensor at a time (see `Qwen35Q8::build`'s own doc).
-        let q8 = if i8 { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK, MATMUL_I8)) } else { None };
+        // Quantize+upload the int8 MoE-expert linears from the SAME source,
+        // streaming one tensor at a time (see `Qwen35Q8::build`'s own doc -
+        // MoE experts only; the mixer linears build `weights` below instead).
+        let q8 = if i8 { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
+
+        // Per-layer GDN/GQA mixer linears: every layer this shard owns
+        // gets its own leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA:
+        // {q,k,v,o}_proj) as a `model::ops::Weight`, built ONCE here. `i8`
+        // asks `Weight::upload` for `Dtype::I8`, streaming straight from
+        // `src` (these names are excluded from `ps` above, exactly like the
+        // MoE-expert linears); the `else` (fp32) arm wraps a `.clone()` of
+        // the buffer `ps` already holds (a cheap `Arc` bump), so the common
+        // non-i8 case costs no extra VRAM or re-upload. Mirrors `qwen3::
+        // model::Qwen::new_impl`'s own B7 `weights` construction exactly.
+        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35moe: Ops::new: {e}"));
+        let (d_u, conv_dim_u, vdim_u, nvh_u, hqp_u, hkv_u, hq_u) = (
+            cfg.d_model as usize,
+            cfg.linear_conv_dim() as usize,
+            cfg.linear_value_dim() as usize,
+            cfg.linear_num_value_heads as usize,
+            cfg.q_proj_dim() as usize,
+            cfg.kv_dim() as usize,
+            cfg.q_dim() as usize,
+        );
+        let mut weights: HashMap<String, Weight> = HashMap::new();
+        let mut upload = |name: String, wn: usize, wk: usize| {
+            let w = if i8 {
+                let mut built: Option<Weight> = None;
+                let found = src.with_tensor(&name, &mut |raw| {
+                    built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
+                });
+                if !found {
+                    panic!("qwen35moe: missing init weight {name}");
+                }
+                built.unwrap()
+            } else {
+                Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
+            };
+            weights.insert(name, w);
+        };
+        for (l, ty) in cfg.layer_types().iter().enumerate() {
+            if !shard.owns(l) {
+                continue;
+            }
+            match ty {
+                LayerType::Linear => {
+                    let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
+                    upload(p("in_proj_qkv.weight"), conv_dim_u, d_u);
+                    upload(p("in_proj_z.weight"), vdim_u, d_u);
+                    upload(p("in_proj_b.weight"), nvh_u, d_u);
+                    upload(p("in_proj_a.weight"), nvh_u, d_u);
+                    upload(p("out_proj.weight"), d_u, vdim_u);
+                }
+                LayerType::Full => {
+                    let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
+                    upload(p("q_proj.weight"), hqp_u, d_u);
+                    upload(p("k_proj.weight"), hkv_u, d_u);
+                    upload(p("v_proj.weight"), hkv_u, d_u);
+                    upload(p("o_proj.weight"), d_u, hq_u);
+                }
+            }
+        }
 
         let n = (b * t) as u64;
         let d = cfg.d_model as u64;
@@ -1024,6 +1165,8 @@ impl Qwen35 {
             shard,
             ps,
             q8,
+            ops,
+            weights,
             b,
             t,
             chunk,
@@ -1100,6 +1243,22 @@ impl Qwen35 {
         s.push(g.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
         s.push(g.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
         s.push(g.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    }
+
+    /// Dispatch one of the 9 GDN/GQA mixer linears via `self.ops`/
+    /// `self.weights`. `self.weights` holds whatever dtype `Weight::upload`
+    /// picked for this model at construction (uniformly `F32` unless this
+    /// model was built int8 AND the device's capability allowed it, in
+    /// which case every one of the 9 mixer linears is `I8`) - the forward
+    /// never branches on a separate int8-on/off flag itself, only on what
+    /// `self.weights` actually holds. Returns whether the dispatch was
+    /// `F32` (LoRA only ever targets an unquantized base weight, so a
+    /// caller only runs `lora_fwd` when this is `true`). Mirrors
+    /// `qwen3::model::Qwen::ops_linear` exactly.
+    fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
+        let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen35moe: no Ops weight for {wname}"));
+        self.ops.matmul(s, w, act, out, 0);
+        matches!(w, Weight::F32 { .. })
     }
 
     /// Backward for a (possibly-LoRA) linear `y = x·Wᵀ`. Accumulates the input
@@ -1247,26 +1406,16 @@ impl Qwen35 {
         let n_chunks = t / chunk;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
 
-        // int8 linears for this layer, if any -- see `crate::q8`'s module doc.
-        let q8l = self.q8.as_ref().map(|q8| match &q8.mixers[l] {
-            Q8Mixer::Gdn(ql) => (q8, ql),
-            Q8Mixer::Gqa(_) => panic!("qwen35 q8: layer {l} expected a GDN mixer, found GQA (layer_types() drift)"),
-        });
-
-        // 1. mixed_qkv = in_proj_qkv(xn1).
+        // 1. mixed_qkv = in_proj_qkv(xn1). `xn1` quantized once here
+        // (`Ops::act`), reused unchanged by step 5's in_proj_b/a/z below (no
+        // further `act` call on `xn1` happens in between).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
-        if let Some((q8, ql)) = q8l {
-            // xn1 quantized once here; reused unchanged by step 5's in_proj_b/a/z
-            // below (no quant() call happens on any OTHER buffer in between).
-            let mut s = Vec::new();
-            q8.quant(g, &mut s, xn1, d, n);
-            q8.mm8(g, &mut s, &ql.in_proj_qkv, &mixed_qkv, n);
-            g.submit(&[], &s);
-        } else {
-            let mut s = vec![g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)];
-            self.lora_fwd(&mut s, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
-            g.submit(&[], &s);
+        let mut s1 = Vec::new();
+        let act1 = self.ops.act(&mut s1, xn1, 0, n, d);
+        if self.ops_linear(&mut s1, &act1, &p("in_proj_qkv.weight"), &mixed_qkv) {
+            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
         }
+        g.submit(&[], &s1);
 
         // 2. Depthwise causal conv1d + SiLU (activation AFTER the conv --
         // `causal_conv1d_fn(..., activation=self.activation)`, `self.activation
@@ -1318,23 +1467,19 @@ impl Qwen35 {
         let bproj = g.storage((n * nvh) as u64);
         let aproj = g.storage((n * nvh) as u64);
         let z = g.storage((n * value_dim) as u64);
-        if let Some((q8, ql)) = q8l {
-            // Reuses step 1's xn1 quantization already resident in q8.xq/sx
-            // (no intervening quant() call -- see step 1's own comment).
+        {
+            // Reuses step 1's `act1` (xn1 quantized once, shared) -- no
+            // fresh `Ops::act` call needed.
             let mut s = Vec::new();
-            q8.mm8(g, &mut s, &ql.in_proj_b, &bproj, n);
-            q8.mm8(g, &mut s, &ql.in_proj_a, &aproj, n);
-            q8.mm8(g, &mut s, &ql.in_proj_z, &z, n);
-            g.submit(&[], &s);
-        } else {
-            let mut s = vec![
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[n, d, nvh], n * nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[n, d, value_dim], n * value_dim),
-            ];
-            self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
-            self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
-            self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            if self.ops_linear(&mut s, &act1, &p("in_proj_b.weight"), &bproj) {
+                self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_a.weight"), &aproj) {
+                self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_z.weight"), &z) {
+                self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
+            }
             g.submit(&[], &s);
         }
         let beta = g.storage((n * nvh) as u64);
@@ -1440,19 +1585,15 @@ impl Qwen35 {
             ],
         );
 
-        // 11. out_proj.
+        // 11. out_proj. Fresh `Ops::act` call: `gated` is a different
+        // activation from `xn1` (steps 1/5 above).
         let out = g.storage((n * d) as u64);
-        if let Some((q8, ql)) = q8l {
-            // Fresh quant() call: `gated` is a different activation from
-            // xn1 (steps 1/5 above), safe to overwrite q8.xq/sx now that
-            // every earlier mm8 reading the old contents is already queued.
+        {
             let mut s = Vec::new();
-            q8.quant(g, &mut s, &gated, value_dim, n);
-            q8.mm8(g, &mut s, &ql.out_proj, &out, n);
-            g.submit(&[], &s);
-        } else {
-            let mut s = vec![g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)];
-            self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            let act3 = self.ops.act(&mut s, &gated, 0, n, value_dim);
+            if self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out) {
+                self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
+            }
             g.submit(&[], &s);
         }
 
@@ -1489,34 +1630,22 @@ impl Qwen35 {
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
         let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
 
-        // int8 linears for this layer, if any -- see `crate::q8`'s module doc.
-        let q8l = self.q8.as_ref().map(|q8| match &q8.mixers[l] {
-            Q8Mixer::Gqa(ql) => (q8, ql),
-            Q8Mixer::Gdn(_) => panic!("qwen35 q8: layer {l} expected a GQA mixer, found GDN (layer_types() drift)"),
-        });
-
+        // xn1 quantized once (`Ops::act`), shared by q/k/v.
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
-        if let Some((q8, ql)) = q8l {
-            // xn1 quantized once, shared by q/k/v (DP4A GEMM per projection).
-            let mut s = Vec::new();
-            q8.quant(g, &mut s, xn1, d, n);
-            q8.mm8(g, &mut s, &ql.q_proj, &q_full, n);
-            q8.mm8(g, &mut s, &ql.k_proj, &k, n);
-            q8.mm8(g, &mut s, &ql.v_proj, &v, n);
-            g.submit(&[], &s);
-        } else {
-            let mut s = vec![
-                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[n, d, qpd], n * qpd),
-                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[n, d, kvd], n * kvd),
-                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[n, d, kvd], n * kvd),
-            ];
-            self.lora_fwd(&mut s, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
-            self.lora_fwd(&mut s, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
-            self.lora_fwd(&mut s, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
-            g.submit(&[], &s);
+        let mut s1 = Vec::new();
+        let act1 = self.ops.act(&mut s1, xn1, 0, n, d);
+        if self.ops_linear(&mut s1, &act1, &p("q_proj.weight"), &q_full) {
+            self.lora_fwd(&mut s1, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
         }
+        if self.ops_linear(&mut s1, &act1, &p("k_proj.weight"), &k) {
+            self.lora_fwd(&mut s1, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
+        }
+        if self.ops_linear(&mut s1, &act1, &p("v_proj.weight"), &v) {
+            self.lora_fwd(&mut s1, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
+        }
+        g.submit(&[], &s1);
 
         // Per-head de-interleaved split of q_full's [query|gate] halves --
         // NOT a whole-row split (see module doc). Fold n_heads into
@@ -1560,24 +1689,17 @@ impl Qwen35 {
         let gate = g.storage((n * qd) as u64);
         let ctx_gated = g.storage((n * qd) as u64);
         let out = g.storage((n * d) as u64);
-        if let Some((q8, ql)) = q8l {
+        {
+            // Fresh `Ops::act` call: `ctx_gated` is a different activation
+            // from `xn1` above.
             let mut s = vec![
                 g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
                 g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
             ];
-            // Fresh quant() call: ctx_gated is a different activation from
-            // xn1 above, safe to overwrite q8.xq/sx now that every earlier
-            // mm8 reading the old contents is already queued ahead of it.
-            q8.quant(g, &mut s, &ctx_gated, qd, n);
-            q8.mm8(g, &mut s, &ql.o_proj, &out, n);
-            g.submit(&[], &s);
-        } else {
-            let mut s = vec![
-                g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
-                g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
-                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
-            ];
-            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, qd, d);
+            let act2 = self.ops.act(&mut s, &ctx_gated, 0, n, qd);
+            if self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out) {
+                self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, qd, d);
+            }
             g.submit(&[], &s);
         }
 
@@ -3196,14 +3318,14 @@ mod decode_sparse_moe_tests {
     /// backend), mirroring `tests/decode_step.rs`'s own convention.
     #[test]
     fn moe_sublayer_decode_sparse_matches_dense_loop_bit_identical_cpu() {
-        run(Gpu::new_cpu(PIPELINES));
+        run(Gpu::new_cpu(pipelines()));
     }
 
     /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
     /// backend otherwise -- run this under both `BRAIN_DEVICE=cpu` and unset.
     #[test]
     fn moe_sublayer_decode_sparse_matches_dense_loop_bit_identical_default_backend() {
-        run(Gpu::new(PIPELINES));
+        run(Gpu::new(pipelines()));
     }
 
     /// The actual claim behind this task ("fewer GPU dispatches per decode
@@ -3231,7 +3353,7 @@ mod decode_sparse_moe_tests {
         cfg.n_experts = 256;
         cfg.top_k = 8;
         cfg.n_layers = 1;
-        let gpu = Gpu::new_cpu(PIPELINES);
+        let gpu = Gpu::new_cpu(pipelines());
         let init = crate::init::init_weights(&cfg, 3);
         let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);
         let d = cfg.d_model as usize;
@@ -3286,7 +3408,7 @@ mod decode_sparse_moe_tests {
         cfg.moe_intermediate_size = 512;
         cfg.shared_expert_intermediate_size = 512;
         cfg.n_layers = 1;
-        let gpu = Gpu::new(PIPELINES); // real default backend (wgpu on this box)
+        let gpu = Gpu::new(pipelines()); // real default backend (wgpu on this box)
         println!("backend: {}", gpu.kind());
         let init = crate::init::init_weights(&cfg, 5);
         let m = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &init);

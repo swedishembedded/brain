@@ -29,7 +29,7 @@
 
 use gpu_core::Gpu;
 use qwen35moe::config::Qwen35Config;
-use qwen35moe::model::{Qwen35, PIPELINES};
+use qwen35moe::model::{Qwen35, pipelines};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
     qwen35moe::init::init_weights(cfg, seed)
@@ -86,7 +86,7 @@ fn run(gpu: Gpu) {
 
 #[test]
 fn decode_step_matches_full_prefill_cpu() {
-    run(Gpu::new_cpu(PIPELINES));
+    run(Gpu::new_cpu(pipelines()));
 }
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
@@ -98,5 +98,5 @@ fn decode_step_matches_full_prefill_cpu() {
 /// runs against the GPU.
 #[test]
 fn decode_step_matches_full_prefill_default_backend() {
-    run(Gpu::new(PIPELINES));
+    run(Gpu::new(pipelines()));
 }

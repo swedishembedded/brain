@@ -128,7 +128,7 @@ use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{DecodeCaches, Qwen35, PIPELINES};
+use crate::model::{pipelines, DecodeCaches, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s host-side window cap. No
 /// on-device windowing is built in this pass (see module doc) -- 1 keeps
@@ -246,14 +246,14 @@ impl Engine {
     /// resident at once (`num_blocks`) -- together they size the real,
     /// upfront-allocated GQA pool ([`Engine::kv_pool_bytes`]).
     pub fn from_map(cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
-        Self::from_map_with_gpu(Gpu::new(PIPELINES), cfg, weights, max_seq_len, max_concurrent)
+        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent)
     }
 
     /// [`Engine::from_map`] on an EXISTING device handle (warm start): the
     /// caller's `Gpu` parents this engine via `Gpu::new_like`, so building
     /// another engine on the same device costs pipeline compilation only.
     pub fn from_map_on(parent: &Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
-        Self::from_map_with_gpu(parent.new_like(PIPELINES), cfg, weights, max_seq_len, max_concurrent)
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent)
     }
 
     fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {

@@ -3,7 +3,7 @@
 
 //! P0 smoke + parity test for `qwen35moe::q8`'s int8 (DP4A) inference path:
 //! not a numerical-parity-against-HF test (see `model.rs`'s own "honest
-//! scope note" — no `torch`/`transformers` in this environment), but proof
+//! scope note" - no `torch`/`transformers` in this environment), but proof
 //! that the int8 wiring is a genuine (if lossy) approximation of the SAME
 //! fp32 computation `crates/qwen35moe/tests/model_smoke.rs` already exercises,
 //! not a different one: build both an fp32 and an int8 `Qwen35` from the
@@ -14,26 +14,27 @@
 //!
 //! `model::int8::quantize_weight`/the DP4A kernels pack 4 int8 lanes per
 //! `u32` along a quantized linear's contraction dimension `k`, so every such
-//! `k` must be a multiple of 4 (asserted in `quantize_weight` itself — see
+//! `k` must be a multiple of 4 (asserted in `quantize_weight` itself - see
 //! `crates/qwen35moe/src/q8.rs`'s own module doc for the full rationale). At the
 //! real 35B-A3B scale every relevant `k` clears that bar
 //! (`d_model=2048`, `moe_intermediate_size=512`, `linear_value_dim=4096`,
-//! `q_dim=4096`), but `tiny()`'s deliberately tiny, deliberately ODD toy
-//! dimensions do not: `linear_value_dim = 6*5 = 30` (feeds GDN's `out_proj`)
-//! and `moe_intermediate_size = 10` (feeds every expert's `down`) are both
-//! NOT multiples of 4. Rather than add silent per-tensor fp32-fallback logic
-//! to `q8.rs` for a mismatch that only ever occurs at this one toy scale
-//! (never at any real checkpoint size), this test uses [`tiny_i8_cfg`] — a
-//! bespoke config with `tiny()`'s same shape (8 layers, `interval=4` so
-//! layers 3/7 are GQA and the rest GDN, a small multi-expert MoE, a
-//! multi-chunk GDN sequence) but every dimension rounded to a multiple of 4.
-//! This is exactly what the task's own brief asks for: "mirroring
-//! `Qwen35Config::tiny()`" (small, exercising both layer types) — not
-//! "identical to `tiny()`'s literal field values."
+//! `q_dim=4096`), but `tiny()`'s `moe_intermediate_size = 10` (feeds every
+//! expert's `down`) does not (`tiny()`'s mixer dims all clear the bar --
+//! `model::ops::Ops::act`'s own eager activation quantization needs that
+//! unconditionally, fp32 builds included, not just this module's int8 one).
+//! Rather than add silent per-tensor fp32-fallback logic to `q8.rs` for
+//! a mismatch that only ever occurs at this one toy scale (never at any real
+//! checkpoint size), this test uses [`tiny_i8_cfg`] - a bespoke config with
+//! `tiny()`'s same shape (8 layers, `interval=4` so layers 3/7 are GQA and
+//! the rest GDN, a small multi-expert MoE, a multi-chunk GDN sequence) but
+//! every dimension rounded to a multiple of 4. This is exactly what the
+//! task's own brief asks for: "mirroring `Qwen35Config::tiny()`" (small,
+//! exercising both layer types) - not "identical to `tiny()`'s literal field
+//! values."
 
 use gpu_core::Gpu;
 use qwen35moe::config::{LayerType, Qwen35Config};
-use qwen35moe::model::{gdn_chunk_size, Qwen35, PIPELINES};
+use qwen35moe::model::{gdn_chunk_size, Qwen35, pipelines};
 use qwen35moe::q8::Qwen35Q8;
 
 /// See this file's module doc for why this exists instead of `tiny()`.
@@ -175,29 +176,25 @@ fn is_i8_linear_selects_exactly_the_designed_quantization_set() {
 }
 
 /// Builds [`Qwen35Q8`] directly (no full `Qwen35` model needed) and checks
-/// its resident shape matches [`is_i8_linear_selects_exactly_the_designed_quantization_set`]'s
-/// count exactly -- a real build, not just a name-list count -- proving the
-/// 256-routed-experts-per-layer (well, `n_experts` at this scale) MoE path is
-/// actually wired all the way through.
+/// its resident MoE-expert shape -- a real build, not just a name-list count
+/// -- proving the 256-routed-experts-per-layer (well, `n_experts` at this
+/// scale) MoE path is actually wired all the way through. The GDN/GQA mixer
+/// linears no longer live on [`Qwen35Q8`] (they live in `model.rs`'s own
+/// `model::ops::Weight` map instead); their int8 coverage is instead proven by
+/// [`is_i8_linear_selects_exactly_the_designed_quantization_set`] (name-list
+/// coverage) and `int8_forward_tracks_fp32_within_quant_tolerance_default_backend`
+/// below (the mixer weights actually dispatch and track fp32 end-to-end).
 #[test]
 fn qwen35_q8_build_resident_shape_matches_the_designed_coverage() {
-    let g = Gpu::new_cpu(PIPELINES);
+    let g = Gpu::new_cpu(pipelines());
     let cfg = tiny_i8_cfg();
     let init = qwen35moe::init::init_weights(&cfg, 5);
     let n_tokens = cfg.block_size; // b=1
-    let q8 = Qwen35Q8::build(&g, &init, &cfg, n_tokens, idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_i8_dyn"));
+    let q8 = Qwen35Q8::build(&g, &init, &cfg, n_tokens, idx(&g, "max_abs_row"), idx(&g, "quant_pack"));
 
-    assert_eq!(q8.mixers.len(), cfg.n_layers as usize);
     assert_eq!(q8.moe.len(), cfg.n_layers as usize);
-
-    let types = cfg.layer_types();
-    for (l, ty) in types.iter().enumerate() {
-        match (ty, &q8.mixers[l]) {
-            (LayerType::Linear, qwen35moe::q8::Q8Mixer::Gdn(_)) => {}
-            (LayerType::Full, qwen35moe::q8::Q8Mixer::Gqa(_)) => {}
-            _ => panic!("layer {l}: Qwen35Q8's mixer kind disagrees with cfg.layer_types()"),
-        }
-        assert_eq!(q8.moe[l].experts.len(), cfg.n_experts as usize, "layer {l}: every expert must be quantized");
+    for (l, layer) in q8.moe.iter().enumerate() {
+        assert_eq!(layer.experts.len(), cfg.n_experts as usize, "layer {l}: every expert must be quantized");
     }
 
     let total_expert_linears: usize = q8.moe.iter().map(|m| m.experts.len() * 3).sum();
@@ -260,56 +257,37 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
 }
 
 /// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
-/// backend otherwise -- this is the real forward-EXECUTION parity gate on
-/// the GPU backend (see
-/// [`int8_forward_on_cpu_backend_fails_with_the_known_dp4a_barrier_limitation`]
-/// below for why the CPU backend cannot run this same check). If the
-/// resolved default happens to BE the CPU backend (`BRAIN_DEVICE=cpu` set
-/// process-wide, e.g. a CI leg that runs the whole suite that way), skip
-/// cleanly rather than fail on a kernel this backend can never run — the
-/// `_cpu`-suffixed test above already covers that backend's real, achievable
-/// contract (fail loudly with the known panic).
+/// backend otherwise -- this is the forward-EXECUTION parity gate on
+/// whichever backend that resolves to. No CPU skip needed: see
+/// [`int8_forward_completes_on_cpu_backend_with_mixer_weights_demoted_to_fp32`]
+/// below for why the CPU backend runs this same check too (just with a
+/// tighter parity margin, since the mixer half of the model is not
+/// separately quantization-approximated there).
 #[test]
 fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
-    if gpu_core::backend_name() == "cpu" {
-        brain_testutil::skip_unavailable("default backend resolved to cpu (matmul_i8_dyn cannot run there - see this test's own doc)");
-        return;
-    }
-    run_parity(Gpu::new(PIPELINES), Gpu::new(PIPELINES));
+    run_parity(Gpu::new(pipelines()), Gpu::new(pipelines()));
 }
 
-/// The DP4A GEMM kernels this module dispatches (`matmul_i8_dyn`,
-/// `moe_linear_gated_i8`) use a multi-barrier, workgroup-shared-memory tiled
-/// structure the CPU backend's Cranelift JIT (`crates/wgsl-cpu`) cannot
-/// compile at all — a pre-existing, engine-wide limitation (see
-/// `matmul_i8_dyn.wgsl`'s own doc: "Not CPU-JIT'able"), not something
-/// introduced by or fixable within this integration task. This is not a gap
-/// unique to qwen35 either: `qwen3::q8::Q8`'s own int8 tier has NO test
-/// anywhere in this repo that actually EXECUTES its forward on the CPU
-/// backend — `crates/qwen3/tests/flops.rs`'s `i8_model_reports_int_ops` builds
-/// an int8 `Qwen` under `Backend::Cpu` but only walks its OFFLINE step list
-/// via `cost_fwd()`, never calls `.forward()`.
-///
-/// Rather than silently skip the CPU leg, this
-/// test documents the boundary explicitly: an int8 forward attempted on the
-/// CPU backend must fail LOUDLY with that known, named panic — not silently
-/// produce a wrong answer and not fail for some unrelated reason. The real
-/// forward-execution parity gate is
-/// [`int8_forward_tracks_fp32_within_quant_tolerance_default_backend`] above,
-/// on the actual GPU backend. (Everything that does NOT dispatch the DP4A
-/// GEMM itself — building/quantizing the int8 weights, the fp32-store
-/// exclusion filter, `is_i8_linear`'s name coverage — runs and is checked on
-/// the CPU backend by this file's other tests.)
+/// The mixer's 9 quantized linears go through `model::ops::Weight::upload`,
+/// whose contract narrows the REQUESTED dtype down to whatever the device
+/// can actually execute (`want.promote(&ops.caps.numeric)`): on a backend
+/// whose caps don't support the DP4A path (like this engine's CPU JIT), it
+/// silently builds `Weight::F32` instead of `Weight::I8` -- the same
+/// contract `qwen3::model::Qwen` already relies on for its own per-layer
+/// linears. So the mixer half of an "int8" CPU build is actually fp32; only
+/// the MoE-expert half (`crate::q8::Qwen35Q8`, built via
+/// `model::int8::quantize_weight` unconditionally and dispatched through
+/// `moe_linear_gated_i8`) is genuinely quantized on every backend -- and
+/// that kernel, unlike the mixer's `matmul_i8_dyn` (multi-barrier,
+/// workgroup-shared-memory tiled -- see `matmul_i8_dyn.wgsl`'s own doc: "Not
+/// CPU-JIT'able"), IS CPU-JIT'able (this test's own success is the proof;
+/// nothing here special-cases the CPU backend). So the forward completes on
+/// CPU, tracking the fp32 reference even MORE tightly than the
+/// default-backend parity test above (only the MoE experts are
+/// quantization-approximated).
 #[test]
-#[should_panic(expected = "JIT-compiled")]
-fn int8_forward_on_cpu_backend_fails_with_the_known_dp4a_barrier_limitation() {
-    let cfg = tiny_i8_cfg();
-    let b = 1;
-    let t = cfg.block_size;
-    let init = qwen35moe::init::init_weights(&cfg, 7);
-    let i8 = Qwen35::new_on_i8(Gpu::new_cpu(PIPELINES), cfg.clone(), b, t, &init);
-    let tokens: Vec<u32> = (0..t).map(|i| (i * 3 + 1) % cfg.vocab).collect();
-    let _ = i8.logits_all(&tokens);
+fn int8_forward_completes_on_cpu_backend_with_mixer_weights_demoted_to_fp32() {
+    run_parity(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
 }
 
 /// The int8 build must exclude every `is_i8_linear` name from the fp32
@@ -324,8 +302,8 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let t = cfg.block_size;
     let init = qwen35moe::init::init_weights(&cfg, 7);
 
-    let fp32 = Qwen35::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), b, t, &init);
-    let i8 = Qwen35::new_on_i8(Gpu::new_cpu(PIPELINES), cfg.clone(), b, t, &init);
+    let fp32 = Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), b, t, &init);
+    let i8 = Qwen35::new_on_i8(Gpu::new_cpu(pipelines()), cfg.clone(), b, t, &init);
 
     let fp32_names = fp32.param_names();
     let i8_names = i8.param_names();

@@ -16,7 +16,7 @@
 
 use gpu_core::Gpu;
 use qwen35moe::config::Qwen35Config;
-use qwen35moe::model::{gdn_chunk_size, Qwen35, PIPELINES};
+use qwen35moe::model::{gdn_chunk_size, Qwen35, pipelines};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
     qwen35moe::init::init_weights(cfg, seed)
@@ -61,7 +61,7 @@ fn run_smoke(gpu: Gpu) {
 
 #[test]
 fn forward_is_finite_and_deterministic_cpu() {
-    let gpu = Gpu::new_cpu(PIPELINES);
+    let gpu = Gpu::new_cpu(pipelines());
     run_smoke(gpu);
 }
 
@@ -72,7 +72,7 @@ fn forward_is_finite_and_deterministic_cpu() {
 /// backend.
 #[test]
 fn forward_is_finite_and_deterministic_default_backend() {
-    let gpu = Gpu::new(PIPELINES);
+    let gpu = Gpu::new(pipelines());
     run_smoke(gpu);
 }
 
