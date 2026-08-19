@@ -493,6 +493,7 @@ mod tests {
                 "connector_attention_head_dim": cfg.video.connector_attention_head_dim,
                 "connector_num_learnable_registers": cfg.video.connector_num_learnable_registers,
                 "connector_positional_embedding_max_pos": cfg.video.connector_positional_embedding_max_pos,
+                "connector_apply_gated_attention": cfg.video.connector_apply_gated_attention,
                 "connector_norm_output": cfg.video.connector_norm_output,
                 "caption_proj_before_connector": cfg.video.caption_proj_before_connector,
                 "audio_num_attention_heads": cfg.audio.num_heads,
