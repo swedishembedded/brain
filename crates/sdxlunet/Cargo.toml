@@ -26,6 +26,7 @@ brain-data.workspace = true       # data::rng::Rng for init.rs; clip_bpe for the
 brain-clip.workspace = true       # pipeline: the two SDXL text towers
 brain-diffusion.workspace = true  # pipeline: the discrete schedulers
 brain-imaging.workspace = true    # pipeline: CHW -> HWC on the decoded image
+brain-capability.workspace = true # caps: the served text2image action
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -32,6 +32,7 @@
 //! `capability::Provider`, a residency adapter, `run_batch`, D-Bus, an
 //! example), the VAE / text-encoder glue and a sampling CLI are all deferred.
 
+pub mod caps;
 pub mod config;
 pub mod hostemb;
 pub mod import;

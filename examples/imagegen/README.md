@@ -83,3 +83,23 @@ wrote fox.ppm (512x512)
   sequentially for now (documented in `resident_flux2.rs::run_batch`; a true
   batched DiT forward is a planned follow-up).
 - The CLI twin of these scripts: `brain flux2 generate --prompt … --out out.ppm`.
+
+---
+
+## SDXL (`brain sdxl text2image`)
+
+`sdxl_generate.py` drives the SDXL `text2image` action - dual CLIP-L/OpenCLIP-bigG
+conditioning, a discrete Euler scheduler, and classifier-free guidance
+(`crates/sdxlunet/src/pipeline.rs`). Unlike FLUX.2's action, this one is a
+plain `Run` (no per-step progress hook yet), so it is one blocking call:
+
+```bash
+BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/imagegen/sdxl_generate.py --prompt "a red fox in the snow"'
+```
+
+`BRAIN_SDXL_DIR` is a released diffusers SDXL checkpoint root
+(`unet/`, `vae/`, `text_encoder/`, `text_encoder_2/`, `tokenizer/`,
+`tokenizer_2/`). No batching: every request runs its own denoising loop
+(`resident_sdxl.rs`'s module docs explain why grouping would not help).

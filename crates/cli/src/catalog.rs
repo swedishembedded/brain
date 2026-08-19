@@ -309,6 +309,14 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_t5encoder::T5encoderResident::from_env),
         },
+        ModelEntry {
+            manifest: sdxlunet::caps::manifest,
+            provider: from_env!(
+                sdxlunet::caps::SdxlProvider::from_env,
+                "set BRAIN_SDXL_DIR to a released diffusers SDXL checkpoint root holding unet/"
+            ),
+            resident: resident!(crate::resident_sdxl::SdxlResident::from_env),
+        },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. CPU-resident by declaration - see

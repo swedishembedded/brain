@@ -58,6 +58,7 @@ mod resident_upscale;
 mod resident_wan;
 mod resident_clip;
 mod resident_t5encoder;
+mod resident_sdxl;
 mod resident_scrfd;
 mod resident_arcface;
 mod resident_sam2;

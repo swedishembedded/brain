@@ -618,6 +618,7 @@ dependencies = [
  "brain-s3dit",
  "brain-sam2",
  "brain-scrfd",
+ "brain-sdxlunet",
  "brain-server",
  "brain-shutdown",
  "brain-splat",
@@ -1619,6 +1620,7 @@ dependencies = [
 name = "brain-sdxlunet"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",

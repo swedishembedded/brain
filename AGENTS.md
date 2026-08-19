@@ -282,10 +282,14 @@ fast and scalable kernel - not a naive one.
     DPM-Solver++(2M) × {ε, v-pred} - live in `diffusion::discrete`, gated at
     **66 checks / 0 failed** (timesteps, sigmas, `init_noise_sigma`,
     `scale_model_input` and the full step trajectory). See
-    `.agents/roadmap/sdxlunet.md`. *(Forward only, and **no serving contract**:
-    no capability manifest, no residency adapter, no `run_batch`, no D-Bus, no
-    example, no CLI. No sampler loop and no VAE/text-encoder glue, so "SDXL
-    works" is **not** claimed. Batch = 1; backward/`check_unet` deferred.)*
+    `.agents/roadmap/sdxlunet.md`. **The sampler loop, VAE and text-encoder
+    glue exist** (`pipeline::Sdxl::generate` - dual CLIP conditioning, a
+    discrete Euler step, CFG, VAE decode - "SDXL works" end to end).
+    **Serving contract met**: `sdxlunet::caps` (`text2image`),
+    `resident_sdxl::SdxlResident` (`BRAIN_SDXL_DIR`), D-Bus `Run`,
+    `examples/imagegen/sdxl_generate.py`. *(No batching - every request is its
+    own multi-step sample, see `resident_sdxl.rs`'s module docs for why;
+    backward/`check_unet` deferred.)*
 
 12f. **ControlNet** (`crates/controlnet`) - phase 4c: a **backbone-agnostic
     control seam** plus the SDXL `ControlNetModel` that is its first producer.
@@ -1231,15 +1235,20 @@ a metric that isn't there was simply forgotten.
 
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
-  `clip` and `t5encoder`** - seven models, each with a `caps` module, a
-  `resident_*.rs` registered via `catalog.rs` (read generically by
+  `clip`, `t5encoder` and `sdxlunet`** - eight models, each with a `caps`
+  module, a `resident_*.rs` registered via `catalog.rs` (read generically by
   `build_executor`), and the existing D-Bus `Run`. `sam2`'s `run_batch` does
   real grouping (by image), `clip`'s and `t5encoder`'s batch rows into one
-  forward at a shared context length; the rest are the serial default and each
-  says why in-file. `clip` has no `examples/` entry yet (every other one of
-  the seven does, under `examples/{vision,restore,embedding}/`). It is **not**
-  met for `flux1`, `sdxlunet`, `controlnet` or `pulid` - those four have no
-  capability manifest, no residency adapter and no D-Bus surface at all.
+  forward at a shared context length; the rest - including `sdxlunet`, whose
+  `text2image` is a full multi-step sample per call with no batch axis to
+  fill - are the serial default and each says why in-file. `clip` has no
+  `examples/` entry yet (every other one of the eight does, under
+  `examples/{vision,restore,embedding,imagegen}/`). It is **not** met for
+  `flux1`, `controlnet` or `pulid` - those three have no capability manifest,
+  no residency adapter and no D-Bus surface at all (`controlnet` and `pulid`
+  are conditioning add-ons with no standalone pipeline of their own to serve
+  yet - `controlnet` needs `sdxlunet`'s, now available; `pulid` needs
+  `flux1`'s, which does not exist).
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
