@@ -96,6 +96,7 @@ brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
 brain-t5encoder.workspace = true
 brain-sdxlunet.workspace = true
+brain-controlnet.workspace = true
 # DeepSeek-OCR: `deepseek2ocr::caps` (the manifest + the served `generate`) and
 # `deepseek2ocr::import` (the checkpoint layout `resident_deepseekocr` locates).
 brain-deepseek2ocr.workspace = true

@@ -38,6 +38,7 @@
 //! `run_batch`, D-Bus, an example) and a sampling CLI are all deferred.
 
 pub mod adapter;
+pub mod caps;
 pub mod cond;
 pub mod config;
 pub mod import;

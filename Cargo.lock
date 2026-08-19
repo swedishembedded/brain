@@ -572,6 +572,7 @@ dependencies = [
  "brain-chronos2",
  "brain-clip",
  "brain-codeformer",
+ "brain-controlnet",
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
@@ -684,14 +685,19 @@ dependencies = [
 name = "brain-controlnet"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
+ "brain-clip",
  "brain-data",
+ "brain-diffusion",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-sdxlunet",
  "brain-testutil",
+ "brain-vae",
+ "serde_json",
 ]
 
 [[package]]

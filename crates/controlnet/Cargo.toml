@@ -26,6 +26,14 @@ brain-data.workspace = true       # data::rng::Rng for init.rs
 # u8->[0,1] cast and the HWC->CHW permutation `src/cond.rs` needs. Hand-rolling
 # that loop here is the exact duplication `crates/imaging` was created to end.
 brain-imaging.workspace = true
+# `caps`: the served `text2image` action, which is `sdxlunet::pipeline::Sdxl`'s
+# loop re-run with `Unet::new_controlled` + a per-step `ControlNet::run` -
+# needs the same two CLIP towers, the discrete scheduler and the VAE decode.
+brain-capability.workspace = true
+brain-clip.workspace = true
+brain-diffusion.workspace = true
+brain-vae.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # `testutil::parity::Table` - the one implementation of the cosine/rel_l2 stage

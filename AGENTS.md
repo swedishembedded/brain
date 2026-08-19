@@ -306,9 +306,16 @@ fast and scalable kernel - not a naive one.
     Residual-parity-gated vs a hooked diffusers `ControlNetModel` at
     **140 comparisons / 0 failed, worst 1−cos 1.914e-11, worst rel_l2 6.187e-6**
     on both a P40 and `BRAIN_DEVICE=cpu`. See `.agents/roadmap/controlnet.md`.
-    *(Forward/residuals only: **no backward, no `check_controlnet`**, no INT8, no
-    batch > 1, no sampler loop, no CLI and **no serving contract**. "InstantID
-    works" is NOT claimed.)*
+    **Serving contract met**: `controlnet::caps` (`text2image` - a sampler
+    loop built on `Unet::new_controlled` + `Unet::run_with_control`, one
+    `ControlNet::run` per step, reusing the same two CLIP towers/scheduler/VAE
+    calls `sdxlunet::caps`'s does), `resident_controlnet::ControlnetResident`
+    (`BRAIN_SDXL_DIR` + `BRAIN_CONTROLNET_DIR`), D-Bus `Run`,
+    `examples/imagegen/controlnet_generate.py`. *(No backward, no
+    `check_controlnet`, no INT8, no batch > 1 - every request is its own
+    multi-step sample, same as plain SDXL. "InstantID works" is still NOT
+    claimed - InstantID is a separate crate, `crates/instantid`, whose forward
+    is not implemented at all.)*
 
 12g. **PuLID-FLUX identity conditioning** (`crates/pulid`) - phase 5's FLUX half:
     the `IDFormer` Perceiver resampler (a face embedding → 32 ID tokens) and the
@@ -1235,20 +1242,23 @@ a metric that isn't there was simply forgotten.
 
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
-  `clip`, `t5encoder` and `sdxlunet`** - eight models, each with a `caps`
-  module, a `resident_*.rs` registered via `catalog.rs` (read generically by
-  `build_executor`), and the existing D-Bus `Run`. `sam2`'s `run_batch` does
-  real grouping (by image), `clip`'s and `t5encoder`'s batch rows into one
-  forward at a shared context length; the rest - including `sdxlunet`, whose
-  `text2image` is a full multi-step sample per call with no batch axis to
-  fill - are the serial default and each says why in-file. `clip` has no
-  `examples/` entry yet (every other one of the eight does, under
-  `examples/{vision,restore,embedding,imagegen}/`). It is **not** met for
-  `flux1`, `controlnet` or `pulid` - those three have no capability manifest,
-  no residency adapter and no D-Bus surface at all (`controlnet` and `pulid`
-  are conditioning add-ons with no standalone pipeline of their own to serve
-  yet - `controlnet` needs `sdxlunet`'s, now available; `pulid` needs
-  `flux1`'s, which does not exist).
+  `clip`, `t5encoder`, `sdxlunet` and `controlnet`** - nine models, each with
+  a `caps` module, a `resident_*.rs` registered via `catalog.rs` (read
+  generically by `build_executor`), and the existing D-Bus `Run`. `sam2`'s
+  `run_batch` does real grouping (by image), `clip`'s and `t5encoder`'s batch
+  rows into one forward at a shared context length; the rest - including
+  `sdxlunet` and `controlnet`, each a full multi-step sample per call with no
+  batch axis to fill - are the serial default and each says why in-file.
+  `clip` has no `examples/` entry yet (every other one of the nine does,
+  under `examples/{vision,restore,embedding,imagegen}/`). `controlnet`'s
+  `caps` is its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a
+  per-step residual), built on `Unet::new_controlled` +
+  `Unet::run_with_control` rather than composed on top of `pipeline::Sdxl` -
+  see `crates/controlnet/src/caps.rs`'s module docs. It is **not** met for
+  `flux1` or `pulid` - those two have no capability manifest, no residency
+  adapter and no D-Bus surface at all; `pulid` is a conditioning add-on with
+  no standalone pipeline of its own yet (it needs `flux1`'s, which does not
+  exist).
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

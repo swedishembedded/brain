@@ -103,3 +103,27 @@ BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 dbus-run-session -- bash -c
 (`unet/`, `vae/`, `text_encoder/`, `text_encoder_2/`, `tokenizer/`,
 `tokenizer_2/`). No batching: every request runs its own denoising loop
 (`resident_sdxl.rs`'s module docs explain why grouping would not help).
+
+---
+
+## SDXL + ControlNet (`brain sdxl-controlnet text2image`)
+
+`controlnet_generate.py` adds a conditioning image (edge map, depth map,
+pose, ...) to the same SDXL loop: `crates/controlnet/src/caps.rs` builds the
+backbone with `Unet::new_controlled` instead of `Unet::new` and runs the
+`ControlNet` once per denoising step, threading its residuals in via
+`Unet::run_with_control` (`crates/controlnet/src/adapter.rs`'s
+`ControlAdapter`/`ControlSource` seam - backbone-agnostic by design, so a
+FLUX ControlNet would plug into the same seam without touching it).
+
+```bash
+BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
+BRAIN_CONTROLNET_DIR=/path/to/controlnet-canny-sdxl-1.0 \
+dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/imagegen/controlnet_generate.py \
+    --prompt "a red fox in the snow" --control canny_edges.ppm'
+```
+
+The conditioning image is resized on the device to the output size, so it
+need not be pre-sized to match `--width`/`--height`.

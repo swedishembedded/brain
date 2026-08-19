@@ -317,6 +317,15 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_sdxl::SdxlResident::from_env),
         },
+        ModelEntry {
+            manifest: controlnet::caps::manifest,
+            provider: from_env!(
+                controlnet::caps::ControlnetProvider::from_env,
+                "set BRAIN_SDXL_DIR (the backbone) and BRAIN_CONTROLNET_DIR (a released \
+                 diffusers SDXL ControlNetModel checkpoint)"
+            ),
+            resident: resident!(crate::resident_controlnet::ControlnetResident::from_env),
+        },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. CPU-resident by declaration - see
