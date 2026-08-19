@@ -1392,6 +1392,59 @@ this port:
       schedule's own structure, measured directly off the real checkpoint's
       real conditioning weights, already answers the question the
       generation-quality gate would have asked.
+- [x] **Spatial masking / spatiotemporal cubes (Sliding-Tile-Attention-style)
+      - scoped out this pass, not killed, on an analytic crossover, per
+      §F.2's own "ask what the top row is running at" (Phase 9)**. Checked
+      §F.3 first, as instructed: `na3d_scores`/`na3d_apply` (this crate's
+      own NA diffusion decoder kernels) already accept a `[t*h*w, heads,
+      head_dim]` row-major, query-major/head-minor Q/K/V layout with a
+      `(kt,kh,kw)` window - and `crate::pipeline::grid_positions` (the DiT's
+      own RoPE position builder) already emits tokens in EXACTLY that
+      frame-major/height-mid/width-minor order (confirmed by reading both,
+      not assumed) - so the kernel fit is real, not hypothetical: reusing
+      these two kernels for the DiT's self-attention (`attn1`) would need
+      no new WGSL, matching this task's own explicit hint to check them
+      first.
+
+      The reason this was not implemented is a measured cost question, not
+      an implementation-difficulty one. Phase 8's own real-width profile
+      already answers §F.2's question for the shapes it measured:
+      `matmul_reg3` (the block's GEMM) is 63.9% of the pass at 44.3% of
+      roof, while `attn_scores_cross_kt` is 5.1% of roof and a small
+      fraction of the pass at `t=1024`/`context_len=256` - GEMM is the top
+      row, not attention, at every real-width shape measured so far.
+      Extending that with an analytic FLOP-count crossover (self-attention
+      scores+apply scale as `~4·T²·dim`; the block's ten GEMMs scale as
+      `~28·T·dim²`; `T` = video tokens, `dim` = 4096) and Phase 8's own
+      measured per-kernel throughput (`matmul_reg3` ~4000 GFLOP/s,
+      `attn_scores_cross_kt` ~535 GFLOP/s, used as the best available proxy
+      for a windowed kernel's likely rate - no na3d throughput was measured
+      on THIS hardware this pass, so this is an extrapolation from a
+      structurally similar kernel, not a direct measurement) puts the
+      wall-clock crossover - the token count where self-attention's own
+      cost first matches the block's GEMM cost - at roughly **several
+      thousand tokens** (order-of-magnitude ~4000-6000, not a precise
+      number given the throughput proxy above). That is close enough to a
+      plausible real-quality target (121 frames at 512x512 is `T=4096` at
+      this checkpoint's own stride) that the honest answer is "uncertain,"
+      not "never matters" the way the TeaCache finding above could be -
+      unlike that finding, this one is NOT a killed hypothesis.
+
+      **What would settle it, and why it was not done this pass**: a real
+      measurement of the block's kernel-share profile at a real target
+      resolution (`T` in the several-thousand range) is the only way to
+      know whether attention has actually become the top row there - and
+      building that shape means either a real multi-thousand-token forward
+      pass or a synthetic-weight bench at that same token count, either of
+      which is a materially bigger GPU-time spend than this task's own
+      "small shapes first, no long real-weight generation runs" constraint
+      allows for a single pass. Scoped out explicitly rather than
+      attempted on a guess: implementing windowed attention and its own
+      quality gate (STA is an approximation, needing its own quality
+      threshold per this task's own instruction) against a cost question
+      that is still genuinely open would be exactly the "confident
+      hypothesis, profile disagrees" failure mode `.agents/rules/kernels.md`
+      §E's own table exists to warn against.
 
 ## Convention questions settled from source, not experiment
 
