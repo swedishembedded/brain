@@ -12,31 +12,64 @@
 //! The packed layout here is exactly what `matmul_i8*.wgsl` consume — if it
 //! changes, it changes for every model at once, which is the point.
 
+/// Quantize one `k`-wide row: per-row absmax scale, then round/clamp/pack
+/// every group of 4 into a little-endian `u32`. Returns `(packed_row[k/4],
+/// scale)` - factored out of [`quantize_weight`] so the exact per-element
+/// arithmetic is shared, byte-for-byte, between the parallel (native) and
+/// sequential (wasm32) dispatch below; only the row SCHEDULE differs, never
+/// the math.
+#[inline]
+fn quantize_row(row: &[f32], kg: usize) -> (Vec<u32>, f32) {
+    let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
+    let s = amax.max(1e-8) / 127.0;
+    let inv = 1.0 / s;
+    let mut prow = vec![0u32; kg];
+    for g in 0..kg {
+        let mut word = 0u32;
+        for b in 0..4 {
+            let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
+            word |= ((q as u8) as u32) << (8 * b);
+        }
+        prow[g] = word;
+    }
+    (prow, s)
+}
+
 /// Per-CHANNEL symmetric int8 quantization of an `[n, k]` weight (one scale per
 /// output row `n`), packed into `[n, k/4]` u32 (4 int8 per u32, little-endian
 /// along K). Returns `(packed, scales[n])` with `scales[r] = max|w[r,:]|/127`.
 /// Per-channel (vs per-tensor) is what keeps a deep int8 stack accurate — a
 /// single outlier row no longer crushes the whole matrix's resolution.
 /// `k` must be a multiple of 4.
+///
+/// Every row's absmax + pack is fully independent of every other row (its own
+/// scale, its own output words), so native (non-wasm32) builds fan the `n`
+/// rows out across [`backend_cpu::par`]'s pool - the same one-pool-one-policy
+/// scheduler `model::parallel`/`model::shard` already route their own
+/// host-parallel reductions through, per that module's own doc ("rayon lives
+/// in exactly one crate"). wasm32 keeps a sequential loop over the identical
+/// per-row arithmetic in [`quantize_row`].
 pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
     assert_eq!(w.len(), n * k, "weight len {} != n*k {}", w.len(), n * k);
     let kg = k / 4;
     let mut sw = vec![0f32; n];
     let mut packed = vec![0u32; n * kg];
-    for r in 0..n {
-        let row = &w[r * k..r * k + k];
-        let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-        let s = amax.max(1e-8) / 127.0;
-        sw[r] = s;
-        let inv = 1.0 / s;
-        for g in 0..kg {
-            let mut word = 0u32;
-            for b in 0..4 {
-                let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
-                word |= ((q as u8) as u32) << (8 * b);
-            }
-            packed[r * kg + g] = word;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let rows: Vec<(Vec<u32>, f32)> = backend_cpu::par::map(n, |r| quantize_row(&w[r * k..r * k + k], kg));
+        for (r, (prow, s)) in rows.into_iter().enumerate() {
+            packed[r * kg..(r + 1) * kg].copy_from_slice(&prow);
+            sw[r] = s;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for r in 0..n {
+            let (prow, s) = quantize_row(&w[r * k..r * k + k], kg);
+            packed[r * kg..(r + 1) * kg].copy_from_slice(&prow);
+            sw[r] = s;
         }
     }
     (packed, sw)

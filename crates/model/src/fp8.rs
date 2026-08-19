@@ -30,6 +30,32 @@ pub fn scale_shape(rows: usize, cols: usize, block: usize) -> (usize, usize) {
     (rows.div_ceil(block), cols.div_ceil(block))
 }
 
+/// Fill one row's worth (`cols` elements) of the dequantized output from
+/// that row's own raw slice and the shared scale grid. Walks column BLOCKS,
+/// not columns, so the block index (`bc = c / block`) is computed once per
+/// block rather than once per element - `import_layer`'s real `[5120,
+/// 17408]` `mlp.down_proj` has 136 column blocks but 17408 columns, so this
+/// is a 128x reduction in integer divisions on the hot path, before any
+/// parallelism or vectorization. The per-block inner loop is then a plain
+/// contiguous `out[c] = raw[c] * scale` - exactly the shape LLVM
+/// auto-vectorizes into packed SIMD multiplies without any hand-written
+/// intrinsics, matching this crate's `matvec`/`hostmath.rs` precedent of
+/// preferring an already-vectorizable loop shape over a hand-rolled kernel
+/// when the compiler already gets there.
+#[inline]
+fn dequant_row(raw_row: &[f32], scale_inv: &[f32], cb: usize, br: usize, block: usize, cols: usize, out_row: &mut [f32]) {
+    let mut c = 0usize;
+    while c < cols {
+        let bc = c / block;
+        let scale = scale_inv[br * cb + bc];
+        let end = ((bc + 1) * block).min(cols);
+        for cc in c..end {
+            out_row[cc] = raw_row[cc] * scale;
+        }
+        c = end;
+    }
+}
+
 /// Multiply every element of a raw (unscaled) `[rows, cols]` FP8-decoded
 /// weight by its `128x128`-block scale, producing the final f32 weight.
 /// `scale_inv` is `[scale_shape(rows, cols, block)]`, row-major, already
@@ -39,16 +65,35 @@ pub fn scale_shape(rows: usize, cols: usize, block: usize) -> (usize, usize) {
 /// Panics on a shape mismatch - a wrong block size or a raw/scale tensor
 /// pairing mix-up is exactly the "params struct wrong order" class of bug
 /// that must fail loudly, not silently compute over the wrong slice.
+///
+/// Native (non-wasm32) builds fan the row loop out across
+/// [`backend_cpu::par`]'s pool - every row is an independent write with no
+/// cross-row reduction, so this changes nothing about the arithmetic itself
+/// (same per-element `raw * scale`, same fp order within a row), only the
+/// schedule. wasm32 (no `backend-cpu` dependency there, see this crate's
+/// `Cargo.toml`) keeps the equivalent sequential loop over the same
+/// per-block-not-per-element addressing.
 pub fn dequant_block128(raw: &[f32], scale_inv: &[f32], rows: usize, cols: usize, block: usize) -> Vec<f32> {
     assert_eq!(raw.len(), rows * cols, "dequant_block128: raw len {} != rows*cols {}", raw.len(), rows * cols);
     let (rb, cb) = scale_shape(rows, cols, block);
     assert_eq!(scale_inv.len(), rb * cb, "dequant_block128: scale_inv len {} != {rb}*{cb}", scale_inv.len());
     let mut out = vec![0f32; raw.len()];
-    for r in 0..rows {
-        let br = r / block;
-        for c in 0..cols {
-            let bc = c / block;
-            out[r * cols + c] = raw[r * cols + c] * scale_inv[br * cb + bc];
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        backend_cpu::par::rows_mut(&mut out, cols, |r, out_row| {
+            let br = r / block;
+            let raw_row = &raw[r * cols..r * cols + cols];
+            dequant_row(raw_row, scale_inv, cb, br, block, cols, out_row);
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for r in 0..rows {
+            let br = r / block;
+            let raw_row = &raw[r * cols..r * cols + cols];
+            let out_row = &mut out[r * cols..r * cols + cols];
+            dequant_row(raw_row, scale_inv, cb, br, block, cols, out_row);
         }
     }
     out

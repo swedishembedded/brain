@@ -472,6 +472,85 @@ structurally and never parity-claimed here.
   untouched; no multi-token decode loop (`Schedule::cyclic(64, 1)` is a
   single pass); no real embedding/lm_head (M16).
 
+### M15 perf follow-up: profiling the 75-minute streaming pass
+
+M15's own full-chain test measured 4488.19 s (~74.8 min) wall-clock for the
+whole 64-layer streamed pass, as a single end-to-end number with no stage
+breakdown. This follow-up profiled `import_layer`'s two host-side stages in
+isolation (`crates/qwen35/src/bin/import_profile.rs`, real `[5120, 17408]`
+`mlp.down_proj` FP8 tensor off the real checkpoint,
+`/data/workspace/resources/qwen3.8/layers-5.safetensors`, 89.1M elements) and
+fixed what the numbers actually showed was slow:
+
+- **Real disk throughput on this box** (re-measured, not trusted from a
+  stale session number): `dd if=layers-5.safetensors of=/dev/null bs=4M
+  iflag=direct` (O_DIRECT, bypasses page cache) = **1.6 GB/s** (384 MB shard
+  in 0.237 s). The stale ~1.3 GB/s figure undersold it slightly.
+- **`checkpoint::mmap::MmapSafetensors::tensor_f32`** (raw FP8-byte decode,
+  `import_layer`'s own call, inside `crates/checkpoint/src/mmap.rs`): **~5.0
+  s for 89.1M elements (~17-20 Melem/s)** - by far the dominant cost, **~90%
+  of one tensor's total import time**, not the two functions this task
+  guessed at. This is inside `mmap.rs`, out of this fix's scope (owned by
+  concurrent M15/M16-adjacent work on that file at profiling time) - flagged
+  here as a real, measured finding for a follow-up, not fixed.
+- **`model::fp8::dequant_block128`** (before): 1061 ms/call, 84 Melem/s.
+  **After** (fix below): 158 ms/call, 563 Melem/s - **6.7x**.
+- **`model::int8::quantize_weight`** (before): 1292 ms/call, 69 Melem/s.
+  **After** (fix below): 355 ms/call, 251 Melem/s - **3.6x**.
+
+**Fix** (`crates/model/src/fp8.rs`, `crates/model/src/int8.rs`, native/non-
+wasm32 builds only - wasm32 keeps the identical-arithmetic sequential loop):
+- `dequant_block128`'s inner loop recomputed the column-block index
+  (`c / block`, an integer division) once per ELEMENT (17408 times/row for
+  the real `down_proj` shape) instead of once per BLOCK (136 times/row) -
+  restructured to walk column blocks and multiply a contiguous slice by one
+  scalar per block, which both removes 128x the divisions and gives LLVM a
+  loop shape it auto-vectorizes on its own (no hand SIMD intrinsics needed).
+  Rows are independent writes, so they also fan out across
+  `backend_cpu::par::rows_mut` (the workspace's one shared rayon pool -
+  `backend-cpu/src/par.rs`'s own doc: "rayon lives in exactly one crate").
+- `quantize_weight`'s per-row absmax + int8 pack is likewise row-independent
+  (own scale, own output words) - fanned out via `backend_cpu::par::map`,
+  matching the exact `Vec<(Vec<u32>, T)>`-then-reassemble shape
+  `crates/kronos/src/generate.rs` already uses for the same "independent
+  row, two owned outputs" case.
+- Both changes preserve the EXACT same per-element floating-point order
+  (only the block-index arithmetic and the row schedule changed, never the
+  multiply/round/clamp itself) - `cargo test -p brain-model` (all 143 lib
+  tests + every integration suite) stayed green throughout, including the
+  exact-equality dequant tests and the sign/round-trip int8 tests.
+
+**Validation:**
+- Isolated before/after (`import_profile`, 5 reps): see the two functions'
+  numbers above.
+- Partial-layer re-run (`crates/qwen35/src/bin/import_layer_bench.rs`,
+  real layers 0-5 via the real `import_layer` call `stream.rs` itself
+  makes): 128.664 s / 6 layers = 21.4 s/layer avg (noisy - this box also had
+  concurrent unrelated cargo processes competing for disk/CPU during the
+  run, one layer spiked to 47 s), extrapolating to **~22.9 min for a full
+  64-layer import** vs the prior full-pass 74.8 min. A full 64-layer re-run
+  was not repeated (impractical at ~75 min/attempt for a tight edit-measure
+  loop) per this task's own instruction to prefer the partial substitute.
+  Consistent with the profile: since mmap decode is ~90% of a tensor's
+  import cost and is untouched by this fix, the realistic end-to-end
+  improvement from THIS fix alone is real but partial (roughly the
+  dequant+quantize share of the total, not the dominant 75-minute cost).
+- `cargo test -p brain-model` (full): pass, 0 failed.
+- `cargo test -p brain-qwen35moe --test model_i8_smoke`: pass, 6/6 (int8
+  path spot-check for a crate sharing `model::int8::quantize_weight`).
+- `cargo test -p brain-qwen35 --lib import::`: pass, 11/11 (import.rs itself
+  is unmodified, but exercises `dequant_block128` directly).
+- `cargo clippy -p brain-model --all-targets -- -D warnings`: clean.
+- `make build` / `make gradcheck`: see this task's own commit for the
+  confirmed run.
+
+**Not fixed (explicitly out of scope):** `checkpoint::mmap::MmapSafetensors`'s
+raw-byte decode is the real majority cost (~90% of a big FP8 tensor's import
+time here) - a follow-up profiling `e4m3fn_to_f32`/the decode loop itself
+(possibly page-fault/`madvise` interaction, since `tensor_f32` calls
+`advise_dontneed_tensor` right after every decode) is the natural next step,
+but belongs to whoever owns `mmap.rs` next, not this fix.
+
 ## Not yet done
 
 Nothing - all milestones (M0-M15) are complete. Remaining scope is the
