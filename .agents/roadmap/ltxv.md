@@ -1328,6 +1328,70 @@ this port:
       on every cache-hit call since only the weight upload was cached, not
       the resulting K/V tensors - a further, smaller win on top of this one,
       not attempted.
+- [x] **Temporal caching (TeaCache-style) - killed by measurement, not
+      attempted as code (Phase 9)**. The published technique reuses a
+      block's residual across a step when the timestep-conditioning signal
+      changed too little to matter, keyed on a cheap proxy for that signal
+      (the adaLN-single table / PixArt timestep embedding, exactly what
+      this crate's own `ada_layer_norm_single` computes). Before writing any
+      caching code, the real question was measured directly: how much does
+      that real conditioning signal actually change between the 8 REAL
+      steps of `LTX2_DISTILLED_SIGMAS` - this crate's own real checkpoint
+      IS the distilled few-step schedule, so that is the only regime that
+      matters here, per this task's own instruction not to force a
+      synthetic result on a longer schedule this crate does not actually
+      run.
+
+      A throwaway probe (real `adaln_single.emb.timestep_embedder.*`
+      weights off the real Q8_0 GGUF, `dit::timestep::pixart_timestep_embed`
+      at each of the 8 real sigmas, mean\|Δembed\| between consecutive steps
+      normalised by mean\|embed\|) measured the relative modulation-signal
+      change at EVERY ONE of the 8 real step transitions:
+
+      | step | sigma -> sigma | relative Δembed |
+      |---|---|---:|
+      | 0 | 1.00000 -> 0.99375 | 0.7775 |
+      | 1 | 0.99375 -> 0.98750 | 0.5281 |
+      | 2 | 0.98750 -> 0.98125 | 0.8042 |
+      | 3 | 0.98125 -> 0.97500 | 0.6634 |
+      | 4 | 0.97500 -> 0.90938 | 1.0419 |
+      | 5 | 0.90938 -> 0.72500 | 0.8283 |
+      | 6 | 0.72500 -> 0.42188 | 0.5630 |
+      | 7 | 0.42188 -> 0.00000 | 0.8644 |
+
+      This REFUTES a hypothesis the raw sigma values alone would have
+      suggested: steps 0-3's own RAW sigma deltas are tiny (0.6-0.7% of the
+      schedule's total range - `diffusion::scheduler::LTX2_DISTILLED_SIGMAS`
+      starts with four near-identical high-noise values before the schedule
+      takes its real large steps), which reads like exactly the "barely
+      changed, safe to reuse" case a caching scheme wants. The MEASURED
+      conditioning signal says otherwise: the PixArt sinusoidal timestep
+      embedding is not smooth in sigma the way a plain linear input would
+      be (a known property of Fourier/sinusoidal positional-style
+      embeddings, sharpened further by the SiLU/two-layer-MLP
+      nonlinearity), so even steps 0-3's tiny sigma deltas produce a
+      relative embedding change of 0.53-0.80 - the SAME order of magnitude
+      as steps 4-7's much larger sigma jumps (0.56-1.04), not smaller.
+      Every one of the 8 transitions sits at 0.53-1.04, roughly 3-10x above
+      TeaCache's own published safe-reuse threshold (~0.1-0.2 relative L1 on
+      a UNIFORM, dozens-of-steps schedule this crate's real checkpoint does
+      not use).
+
+      **Killed, not scoped out**: this is a genuine negative result with a
+      real measured number behind it, not a time-budget deferral - the
+      real 8-step distilled schedule this crate's real checkpoint actually
+      runs has NO step transition whose own conditioning signal changes
+      little enough to make residual reuse a safe approximation by any
+      threshold in the published technique's own range. Implementing the
+      caching machinery anyway would either reuse nothing (a wasted
+      complexity+quality-gate cost for zero speedup) or reuse residuals
+      across a signal change several times the technique's own safety
+      margin (a real, measured quality risk on an already-few-step
+      distilled schedule this port cannot afford to degrade further). No
+      real generation run was needed to reach this conclusion - the
+      schedule's own structure, measured directly off the real checkpoint's
+      real conditioning weights, already answers the question the
+      generation-quality gate would have asked.
 
 ## Convention questions settled from source, not experiment
 
