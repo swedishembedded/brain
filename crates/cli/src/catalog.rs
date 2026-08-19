@@ -334,6 +334,14 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident!(crate::resident_flux1::Flux1Resident::from_env),
         },
+        ModelEntry {
+            manifest: pulid::caps::manifest,
+            provider: from_env!(
+                pulid::caps::PulidProvider::from_env,
+                "set BRAIN_FLUX1_DIR, BRAIN_PULID_DIR, BRAIN_ARCFACE_DIR and BRAIN_CLIP_DIR"
+            ),
+            resident: resident!(crate::resident_pulid::PulidResident::from_env),
+        },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. CPU-resident by declaration - see

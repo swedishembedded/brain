@@ -339,10 +339,22 @@ fast and scalable kernel - not a naive one.
     second CLIP. 312 tensors → 562 M params. Parity-gated vs a hooked reference
     on both backends - IDFormer 29 taps, the CA unit 8, and the **conditioned
     FLUX.1 forward** 10, worst 1−cos **1.44e-11**. See `.agents/roadmap/pulid.md`.
-    *(Forward only: **no backward, no `check_pulid`**, no serving contract. The
-    crate takes `id_cond` as **host slices** - there is **no image → `id_cond`
-    path**, so the arcface/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
-    is NOT claimed.)*
+    **The image → `id_cond` path exists** (`idcond::IdCond::from_image` /
+    `idcond::compose` - ArcFace raw embedding ‖ L2-normalised EVA-CLIP CLS,
+    the reference's asymmetric convention, gated by
+    `idcond::tests::the_eva_half_is_normalised_and_the_arcface_half_is_not`).
+    **Serving contract met**: `pulid::caps` (`text2image` - ArcFace +
+    EVA-CLIP → `IdFormer` → `PulidAdapter` → `flux1::pipeline::Flux1::
+    generate_injected`), `resident_pulid::PulidResident` (`BRAIN_FLUX1_DIR` +
+    `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR`), D-Bus `Run`,
+    `examples/imagegen/pulid_generate.py`. *(Forward only: no backward, no
+    `check_pulid`, no batch > 1. Only `dev` is validated against a PuLID
+    reference. One real, documented gap: the served path resizes the face
+    crop straight to EVA-CLIP-L/336 rather than reproducing the reference's
+    RetinaFace+BiSeNet preprocessing (`crates/pulid/src/caps.rs`'s module
+    docs). "PuLID works" end to end is not claimed - no reference dump of a
+    full ID-conditioned generation exists in this workspace to check it
+    against.)*
 
 12h. **Wan2.1 / Wan2.2 text-to-video** (`crates/wan`) - the first VIDEO model:
     a DiT denoising a 3D `(frame, height, width)` latent volume under flow
@@ -1252,25 +1264,27 @@ a metric that isn't there was simply forgotten.
 
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
-  `clip`, `t5encoder`, `sdxlunet`, `controlnet` and `flux1`** - ten models,
-  each with a `caps` module, a `resident_*.rs` registered via `catalog.rs`
-  (read generically by `build_executor`), and the existing D-Bus `Run`.
-  `sam2`'s `run_batch` does real grouping (by image), `clip`'s and
-  `t5encoder`'s batch rows into one forward at a shared context length; the
-  rest - including `sdxlunet`, `controlnet` and `flux1`, each a full
-  multi-step sample per call with no batch axis to fill - are the serial
-  default and each says why in-file. `clip` has no `examples/` entry yet
-  (every other one of the ten does, under
+  `clip`, `t5encoder`, `sdxlunet`, `controlnet`, `flux1` and `pulid`** -
+  eleven models, each with a `caps` module, a `resident_*.rs` registered via
+  `catalog.rs` (read generically by `build_executor`), and the existing
+  D-Bus `Run`. `sam2`'s `run_batch` does real grouping (by image), `clip`'s
+  and `t5encoder`'s batch rows into one forward at a shared context length;
+  the rest - including `sdxlunet`, `controlnet`, `flux1` and `pulid`, each a
+  full multi-step sample per call with no batch axis to fill - are the
+  serial default and each says why in-file. `clip` has no `examples/` entry
+  yet (every other one of the eleven does, under
   `examples/{vision,restore,embedding,imagegen}/`). `controlnet`'s `caps` is
   its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a per-step
   residual), built on `Unet::new_controlled` + `Unet::run_with_control`
   rather than composed on top of `pipeline::Sdxl` - see
-  `crates/controlnet/src/caps.rs`'s module docs. `flux1::pipeline` is the
-  newest of the ten and the only one with no end-to-end fixture in this
-  workspace to verify it against - see its module docs' honest scope note.
-  It is **not** met for `pulid` - a conditioning add-on with no capability
-  manifest, no residency adapter and no D-Bus surface, now unblocked
-  (`flux1`'s pipeline exists) but not yet built.
+  `crates/controlnet/src/caps.rs`'s module docs. `pulid::caps` composes FIVE
+  models (ArcFace, EVA-CLIP, IDFormer, `PulidAdapter`, FLUX.1) and adds no
+  numerics of its own - it drives `flux1::pipeline::Flux1::generate_injected`
+  (a new method: `Flux1::generate` with every DiT step optionally routed
+  through `forward_injected`, so `pulid` needs no dependency the other
+  direction). `flux1` and `pulid` are the newest of the eleven and the only
+  two with no end-to-end fixture in this workspace to verify their pipeline
+  glue against - see each one's module docs' honest scope note.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

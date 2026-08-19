@@ -59,6 +59,7 @@
 //!   no residency adapter, no D-Bus surface) — all follow-ups.
 
 pub mod adapter;
+pub mod caps;
 pub mod config;
 pub mod idcond;
 pub mod import;

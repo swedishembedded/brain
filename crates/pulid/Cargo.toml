@@ -32,6 +32,14 @@ brain-paramstore.workspace = true # ParamStore/Role for both graphs' weights
 brain-checkpoint.workspace = true # safetensors reader (import + goldens)
 brain-flux1.workspace = true      # flux1::KERNELS + the inject::BlockInject seam
 brain-arcface.workspace = true    # idcond: detect + align + the RAW ArcFace embedding
+# `caps`: the served `text2image` action drives the EVA-CLIP half of
+# `id_cond` itself (a plain resize, not the reference's RetinaFace+BiSeNet
+# preprocessing - see `caps.rs`'s module docs for that honest gap) and
+# `Flux1::generate_injected`'s denoise loop.
+brain-clip.workspace = true
+brain-imaging.workspace = true
+brain-capability.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

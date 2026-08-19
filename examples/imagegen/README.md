@@ -156,3 +156,32 @@ The pipeline glue - patchify layout, position ids, the schedule, the affine
 latent normalization - has not been run against a real FLUX.1 checkpoint in
 the environment that wrote it; there is no fixture here to verify it end to
 end. Treat a first real generation as the actual test of this file.
+
+---
+
+## PuLID identity conditioning (`brain flux1-pulid text2image`)
+
+`pulid_generate.py` adds a face photo to the FLUX.1 loop: ArcFace (raw
+embedding) + EVA-CLIP-L/336 (CLS + 5 tapped hidden states) compose into
+`id_cond`, `crate::model::IdFormer` projects 32 ID tokens, and
+`crate::adapter::PulidAdapter` cross-attends them into the DiT at 20 points
+through `flux1::pipeline::Flux1::generate_injected` -
+`crates/pulid/src/caps.rs`'s module docs are the full account of what
+composes what, including the one real preprocessing gap (a plain resize
+where the reference uses face-parsing alignment brain does not have).
+
+```bash
+BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \
+BRAIN_PULID_DIR=/path/to/pulid_flux_v0.9.1.safetensors \
+BRAIN_ARCFACE_DIR=/path/to/antelopev2 \
+BRAIN_CLIP_DIR=/path/to/eva-clip-dir \
+dbus-run-session -- bash -c '
+  ./target/release/brain serve --dbus & sleep 2
+  python3 examples/imagegen/pulid_generate.py \
+    --prompt "a photo of a person hiking in the mountains" --face portrait.ppm'
+```
+
+Only `dev` is validated against a PuLID reference (the reference is built on
+FLUX.1-dev, not Kontext or schnell). Same scope/verification caveats as
+plain FLUX.1, doubled: this also has no end-to-end fixture for the
+ID-conditioning wiring itself.

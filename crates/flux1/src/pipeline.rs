@@ -316,6 +316,21 @@ impl Flux1 {
 
     /// Generate one image. Returns HWC RGB in `[0,1]`.
     pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize) -> Result<Vec<f32>, String> {
+        self.generate_injected(prompt, o, max_len, None)
+    }
+
+    /// [`Flux1::generate`] with every DiT step routed through
+    /// `Flux1Model::forward_injected` when `inject` is `Some` - the seam
+    /// `pulid::caps` uses to condition on an identity, and `crates/flux1`'s
+    /// own `inject::BlockInject` trait so this needs no dependency on
+    /// `pulid` (or any other adapter crate) to exist.
+    pub fn generate_injected(
+        &self,
+        prompt: &str,
+        o: &GenerateOptions,
+        max_len: usize,
+        inject: Option<&dyn crate::inject::BlockInject>,
+    ) -> Result<Vec<f32>, String> {
         let (h, w) = self.hw;
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let n_gen = lh * lw;
@@ -331,7 +346,10 @@ impl Flux1 {
 
         for i in 0..steps {
             let t = sigmas[i];
-            let pred = self.dit.forward(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen);
+            let pred = match inject {
+                None => self.dit.forward(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen),
+                Some(inj) => self.dit.forward_injected(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen, inj),
+            };
             let dt = sigmas[i + 1] - t;
             for (x, v) in lat.iter_mut().zip(&pred) {
                 *x += dt * v;
