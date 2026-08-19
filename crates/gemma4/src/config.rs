@@ -141,6 +141,36 @@ impl Gemma4Config {
             partial_rotary_factor: 0.25,
         }
     }
+
+    /// The real LTX-2.5 Gemma-4-12B text config - transcribed field-by-field
+    /// from the real checkpoint's own embedded metadata
+    /// (`gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`'s
+    /// `__metadata__.gemma_config.text_config`, range-read this session; the
+    /// vision/audio towers this metadata also carries are out of scope, see
+    /// `crate::import`'s doc). `layer_type`'s `SLIDING_WINDOW_PATTERN=6`
+    /// auto-derivation (this module's doc) is checked against the real
+    /// checkpoint's own explicit 48-entry `layer_types` array (full at
+    /// indices 5,11,17,23,29,35,41,47) by this module's test - it agrees, so
+    /// no separate stored array is needed on this struct.
+    pub fn gemma4_12b() -> Gemma4Config {
+        Gemma4Config {
+            vocab_size: 262_144,
+            hidden_size: 3_840,
+            intermediate_size: 15_360,
+            num_hidden_layers: 48,
+            num_attention_heads: 16,
+            num_key_value_heads: 8,
+            head_dim: 256,
+            global_head_dim: 512,
+            num_global_key_value_heads: 1,
+            attention_k_eq_v: true,
+            sliding_window: 1_024,
+            rms_norm_eps: 1e-6,
+            rope_theta_sliding: 10_000.0,
+            rope_theta_full: 1_000_000.0,
+            partial_rotary_factor: 0.25,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +192,44 @@ mod tests {
         assert_eq!(c.head_dim_for(LayerType::Full), 2 * c.head_dim_for(LayerType::Sliding));
         assert_eq!(c.groups_for(LayerType::Full), c.num_attention_heads); // MQA: 1 kv head
         assert_eq!(c.groups_for(LayerType::Sliding), 2); // GQA: 4 heads / 2 kv heads
+    }
+
+    /// Pins every real-checkpoint field to the value transcribed from the
+    /// real header's `gemma_config.text_config` (this module's doc) - guards
+    /// against a future GGUF/safetensors-KV-parsing constructor silently
+    /// drifting from these checkpoint-derived numbers.
+    #[test]
+    fn gemma4_12b_config_matches_the_real_checkpoint_header() {
+        let c = Gemma4Config::gemma4_12b();
+        assert_eq!(c.vocab_size, 262_144);
+        assert_eq!(c.hidden_size, 3_840);
+        assert_eq!(c.intermediate_size, 15_360);
+        assert_eq!(c.num_hidden_layers, 48);
+        assert_eq!(c.num_attention_heads, 16);
+        assert_eq!(c.num_key_value_heads, 8);
+        assert_eq!(c.head_dim, 256);
+        assert_eq!(c.global_head_dim, 512);
+        assert_eq!(c.num_global_key_value_heads, 1);
+        assert!(c.attention_k_eq_v);
+        assert_eq!(c.sliding_window, 1_024);
+        assert_eq!(c.rms_norm_eps, 1e-6);
+        assert_eq!(c.rope_theta_sliding, 10_000.0);
+        assert_eq!(c.rope_theta_full, 1_000_000.0);
+        assert_eq!(c.partial_rotary_factor, 0.25);
+    }
+
+    /// The real checkpoint's own `layer_types` (this module's doc) has
+    /// `full_attention` at 0-indexed 5,11,17,23,29,35,41,47 and
+    /// `sliding_attention` everywhere else - confirms `layer_type`'s
+    /// `SLIDING_WINDOW_PATTERN=6` auto-derivation agrees with the real
+    /// checkpoint's own explicit array, at full 48-layer scale (the tiny
+    /// config's own test above only proves the minimal 6-layer instance).
+    #[test]
+    fn gemma4_12b_layer_types_match_the_real_checkpoints_explicit_array() {
+        let c = Gemma4Config::gemma4_12b();
+        let full_indices: Vec<u32> = (0..c.num_hidden_layers).filter(|&i| c.layer_type(i) == LayerType::Full).collect();
+        assert_eq!(full_indices, vec![5, 11, 17, 23, 29, 35, 41, 47]);
+        assert_eq!(full_indices.len(), 8);
+        assert_eq!(c.num_hidden_layers - full_indices.len() as u32, 40); // 40 sliding + 8 full = 48
     }
 }

@@ -937,6 +937,7 @@ name = "brain-gemma4"
 version = "1.0.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-testutil",

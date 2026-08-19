@@ -3,7 +3,7 @@ name = "brain-gemma4"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Gemma-4 (unified text tower) - the LTX-2.5 text encoder. This milestone: tiny-config layer-by-layer parity (5:1 sliding/full attention alternation, dual RoPE bases, attention_k_eq_v global layers, the 49-hidden-state aggregate-embed projection) against transformers.models.gemma4_unified; the real 12B/26GB checkpoint is out of scope, built on brain-gpu-core / brain-kernels / brain-checkpoint."
+description = "Gemma-4 (unified text tower) - the LTX-2.5 text encoder. Tiny-config layer-by-layer parity (5:1 sliding/full attention alternation, dual RoPE bases, attention_k_eq_v global layers, the 49-hidden-state aggregate-embed projection) against transformers.models.gemma4_unified; the real 12B/686-tensor checkpoint's config, two-way tensor-coverage import and embedded-tokenizer extraction, built on brain-gpu-core / brain-kernels / brain-checkpoint / brain-data."
 
 [lib]
 name = "gemma4"
@@ -13,6 +13,11 @@ path = "src/lib.rs"
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+# `data::qwen_tokenizer::QwenBpe` - the existing generic HF `tokenizer.json`
+# byte-level BPE reader (`crate::tokenizer`'s doc: the real checkpoint's
+# embedded tokenizer IS this format, confirmed by parsing it), reused rather
+# than a new parser.
+brain-data.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

@@ -201,13 +201,42 @@ impl AggregateEmbed {
         AggregateEmbed { weight, bias, in_dim, out_dim }
     }
 
+    /// Loads `text_embedding_projection.{prefix}_aggregate_embed.{weight,
+    /// bias}` from a [`Tensors`] map - `hidden`/`n_states` derive `in_dim`.
+    /// Shared by [`Self::from_weights`] (`prefix="video"`, out_dim 4096) and
+    /// [`Self::from_weights_audio`] (`prefix="audio"`, out_dim 2048) - the
+    /// two heads are identical apart from which checkpoint tensors they
+    /// read (`crate::import::VIDEO_AGGREGATE_OUT_DIM`/
+    /// `AUDIO_AGGREGATE_OUT_DIM`), so this generalizes the original
+    /// video-only function rather than duplicating its body.
+    fn from_weights_prefixed(w: &Tensors, hidden: usize, n_states: usize, prefix: &str) -> AggregateEmbed {
+        let weight = w
+            .get(&format!("text_embedding_projection.{prefix}_aggregate_embed.weight"))
+            .unwrap_or_else(|| panic!("gemma4: missing {prefix} aggregate-embed weight"))
+            .1
+            .clone();
+        let bias = w
+            .get(&format!("text_embedding_projection.{prefix}_aggregate_embed.bias"))
+            .unwrap_or_else(|| panic!("gemma4: missing {prefix} aggregate-embed bias"))
+            .1
+            .clone();
+        let out_dim = bias.len();
+        AggregateEmbed::new(weight, bias, hidden * n_states, out_dim)
+    }
+
     /// Loads `text_embedding_projection.video_aggregate_embed.{weight,bias}`
     /// from a [`Tensors`] map - `hidden`/`n_states` derive `in_dim`.
     pub fn from_weights(w: &Tensors, hidden: usize, n_states: usize) -> AggregateEmbed {
-        let weight = w.get("text_embedding_projection.video_aggregate_embed.weight").unwrap_or_else(|| panic!("gemma4: missing aggregate-embed weight")).1.clone();
-        let bias = w.get("text_embedding_projection.video_aggregate_embed.bias").unwrap_or_else(|| panic!("gemma4: missing aggregate-embed bias")).1.clone();
-        let out_dim = bias.len();
-        AggregateEmbed::new(weight, bias, hidden * n_states, out_dim)
+        Self::from_weights_prefixed(w, hidden, n_states, "video")
+    }
+
+    /// Loads `text_embedding_projection.audio_aggregate_embed.{weight,bias}`.
+    /// [`Self::from_weights`]'s audio twin (out_dim 2048 vs video's 4096,
+    /// everything else - including [`Self::forward`]'s `hidden_states`
+    /// concatenation convention - identical, see `crate::model`'s doc for
+    /// the exact per-entry `hidden_states` semantics both heads consume).
+    pub fn from_weights_audio(w: &Tensors, hidden: usize, n_states: usize) -> AggregateEmbed {
+        Self::from_weights_prefixed(w, hidden, n_states, "audio")
     }
 
     /// `hidden_states`: the FULL tuple (length `n_states`, each `[t,
@@ -233,5 +262,44 @@ impl AggregateEmbed {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audio head loads its OWN `text_embedding_projection.
+    /// audio_aggregate_embed.*` tensors (never the video ones, even when
+    /// both are present in the same weight map), keeps `in_dim` identical
+    /// to the video head's (same `hidden*n_states` concatenation), and
+    /// produces the real checkpoint's `out_dim=2048` (vs video's 4096) -
+    /// `crate::import::AUDIO_AGGREGATE_OUT_DIM`/`VIDEO_AGGREGATE_OUT_DIM`.
+    #[test]
+    fn audio_aggregate_embed_loads_its_own_weights_independent_of_video() {
+        let hidden = 4usize;
+        let n_states = 3usize;
+        let in_dim = hidden * n_states;
+        let video_out = 5usize;
+        let audio_out = 2usize;
+
+        let mut w: Tensors = Tensors::new();
+        w.insert("text_embedding_projection.video_aggregate_embed.weight".into(), (vec![video_out, in_dim], vec![1.0; video_out * in_dim]));
+        w.insert("text_embedding_projection.video_aggregate_embed.bias".into(), (vec![video_out], vec![0.0; video_out]));
+        w.insert("text_embedding_projection.audio_aggregate_embed.weight".into(), (vec![audio_out, in_dim], vec![2.0; audio_out * in_dim]));
+        w.insert("text_embedding_projection.audio_aggregate_embed.bias".into(), (vec![audio_out], vec![7.0; audio_out]));
+
+        let video = AggregateEmbed::from_weights(&w, hidden, n_states);
+        let audio = AggregateEmbed::from_weights_audio(&w, hidden, n_states);
+        assert_eq!(video.out_dim, video_out);
+        assert_eq!(audio.out_dim, audio_out);
+        assert_eq!(video.in_dim, audio.in_dim);
+
+        let hidden_states: Vec<Vec<f32>> = (0..n_states).map(|_| vec![1.0f32; hidden]).collect();
+        let audio_out_vals = audio.forward(&hidden_states, 1, hidden);
+        // weight=2.0 everywhere, in_dim=12 ones summed -> 24.0, + bias 7.0.
+        assert_eq!(audio_out_vals, vec![31.0; audio_out]);
+        let video_out_vals = video.forward(&hidden_states, 1, hidden);
+        assert_ne!(video_out_vals.len(), audio_out_vals.len());
     }
 }
