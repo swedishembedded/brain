@@ -50,15 +50,9 @@ use std::collections::HashMap;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
-use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
-use model::block::{
-    gqa_bwd, gqa_decode_step, gqa_fwd, kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, swiglu_bwd,
-    Gqa, GqaDecodeIds, KernelIds,
-};
-use model::gdn::{
-    gdn_causal_conv1d_step, gdn_chunk_bwd, gdn_chunk_fwd, gdn_chunk_fwd_train, gdn_recurrent_step, GdnBwdIds, GdnBwdScratchBufs, GdnConvIds,
-    GdnConvShape, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnScratchTrainBufs, GdnShape,
-};
+use audio::conv::ConvKernels;
+use model::block::{gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
+use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
 pub use model::gdn::gdn_chunk_size;
 use model::Shard;
 use optim::Optim;
@@ -303,6 +297,48 @@ fn conv_kernels() -> ConvKernels {
     ConvKernels { fwd: CONV1D, dx: CONV1D_DX, dw: CONV1D_DW }
 }
 
+/// [`model::gdn_mixer`]'s kernel ids - the mixer's own non-chunk kernels,
+/// bundling [`kernel_ids`]/[`conv_kernels`]/[`gdn_ids`]/[`gdn_bwd_ids`] as
+/// sub-fields (same convention as `model::block::GqaAttnIds`).
+fn gdn_mixer_ids() -> model::gdn_mixer::GdnMixerIds {
+    model::gdn_mixer::GdnMixerIds {
+        kernels: kernel_ids(),
+        conv: conv_kernels(),
+        chunk: gdn_ids(),
+        chunk_bwd: gdn_bwd_ids(),
+        nlc_nchw: NLC_NCHW,
+        nchw_nlc: NCHW_NLC,
+        silu: SILU,
+        silu_bwd: SILU_BWD,
+        concat_split: CONCAT_SPLIT,
+        concat2: CONCAT2,
+        l2norm_scale: L2NORM_SCALE,
+        l2norm_scale_dx: L2NORM_SCALE_DX,
+        sigmoid: SIGMOID,
+        sigmoid_bwd: SIGMOID_BWD,
+        gdn_decay_gate: GDN_DECAY_GATE,
+        gdn_decay_gate_bwd: GDN_DECAY_GATE_BWD,
+        kv_expand: KV_EXPAND,
+        kv_expand_bwd: KV_EXPAND_BWD,
+        gdn_layout_permute: GDN_LAYOUT_PERMUTE,
+        mul: MUL,
+        bias_grad: BIAS_GRAD,
+    }
+}
+
+/// [`model::gqa_mixer`]'s kernel ids.
+fn gqa_mixer_ids() -> model::gqa_mixer::GqaMixerIds {
+    model::gqa_mixer::GqaMixerIds {
+        kernels: kernel_ids(),
+        concat_split: CONCAT_SPLIT,
+        concat2: CONCAT2,
+        sigmoid: SIGMOID,
+        sigmoid_bwd: SIGMOID_BWD,
+        mul: MUL,
+        rope2d_partial: ROPE2D_PARTIAL,
+    }
+}
+
 /// [`model::gdn::gdn_causal_conv1d_step`]'s kernel id - the streaming
 /// causal-conv decode step, dispatched by [`Qwen35::layer_gdn_decode_step`]
 /// in place of `layer_gdn_fwd`'s whole-sequence `conv1d_fwd`.
@@ -321,44 +357,21 @@ fn gqa_decode_ids() -> GqaDecodeIds {
 }
 
 /// Everything [`Qwen35::layer_gdn_fwd`]'s training branch saves for
-/// [`Qwen35::backward`]'s GDN mixer arm - the SSA activation-cache
-/// convention this module's doc describes, at the per-buffer granularity
-/// backward actually reads. Mirrors `qwen35moe::model::GdnLayerActs` field
-/// for field (the mixer math is identical between the two archs).
+/// [`Qwen35::backward`]'s GDN mixer arm. `internals` is the LoRA-agnostic
+/// mixer math's own saved state (`model::gdn_mixer`, shared with
+/// `crates/qwen35moe`); `gated` is this crate's own `out_proj` input (the
+/// hoisted forward's return value), kept here since only the LOCAL
+/// `out_proj` backward reads it - see `model::gdn_mixer`'s own module doc.
 struct GdnLayerActs {
-    shape: GdnShape,
-    ncl_in: DeviceBuffer,
-    ncl_out: DeviceBuffer,
-    query: DeviceBuffer,
-    key: DeviceBuffer,
-    bproj: DeviceBuffer,
-    aproj: DeviceBuffer,
-    g_decay: DeviceBuffer,
-    query_cm: DeviceBuffer,
-    key_cm: DeviceBuffer,
-    value_cm: DeviceBuffer,
-    beta_cm: DeviceBuffer,
-    scratch_train: GdnScratchTrainBufs,
-    out_tok: DeviceBuffer,
-    normed: DeviceBuffer,
-    z: DeviceBuffer,
-    z_silu: DeviceBuffer,
+    internals: model::gdn_mixer::GdnMixerActs,
     gated: DeviceBuffer,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
-/// [`Qwen35::backward`]'s GQA mixer arm. Mirrors
-/// `qwen35moe::model::GqaLayerActs` field for field.
+/// [`Qwen35::backward`]'s GQA mixer arm. `internals`/`ctx_gated` split the
+/// same way as [`GdnLayerActs`] - see that struct's own doc.
 struct GqaLayerActs {
-    q_normed: DeviceBuffer,
-    k_normed: DeviceBuffer,
-    v: DeviceBuffer,
-    q_value: DeviceBuffer,
-    k: DeviceBuffer,
-    q_gate: DeviceBuffer,
-    probs: DeviceBuffer,
-    ctx: DeviceBuffer,
-    gate: DeviceBuffer,
+    internals: model::gqa_mixer::GqaMixerActs,
     ctx_gated: DeviceBuffer,
 }
 
@@ -1003,19 +1016,13 @@ impl Qwen35 {
         let c = &self.cfg;
         let d = c.d_model;
         let conv_dim = c.linear_conv_dim();
-        let key_dim = c.linear_key_dim();
         let value_dim = c.linear_value_dim();
-        let nkh = c.linear_num_key_heads;
         let nvh = c.linear_num_value_heads;
         let khd = c.linear_key_head_dim;
         let vhd = c.linear_value_head_dim;
-        let group = c.linear_group();
-        let kw = c.linear_conv_kernel_dim;
-        let (b, t, chunk) = (self.b, self.t, self.chunk);
-        let n_chunks = t / chunk;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
 
-        // 1. mixed_qkv = in_proj_qkv(xn1).
+        // in_proj_qkv (LoRA dispatch stays local).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
         {
             let mut s = vec![g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[n, d, conv_dim], n * conv_dim)];
@@ -1023,45 +1030,7 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        // 2. Depthwise causal conv1d + SiLU (activation AFTER the conv).
-        // conv1d.wgsl is NCL ([N,Cin,L]); mixed_qkv is token-major ([B,T,C]).
-        let ncl_in = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[g.step(NLC_NCHW, &[&mixed_qkv, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
-        let conv_shape =
-            Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
-        let ncl_out = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[conv1d_fwd(g, &conv_kernels(), &conv_shape, &ncl_in, self.w(&p("conv1d.weight")), &ncl_out)]);
-        let ncl_act = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[g.step(SILU, &[&ncl_out, &ncl_act], &[n * conv_dim], n * conv_dim)]);
-        let mixed_act = g.storage((n * conv_dim) as u64);
-        g.submit(&[], &[g.step(NCHW_NLC, &[&ncl_act, &mixed_act], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
-
-        // 3. Split into query/key/value - ONE whole-row contiguous split.
-        let query = g.storage((n * key_dim) as u64);
-        let key = g.storage((n * key_dim) as u64);
-        let value = g.storage((n * value_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(CONCAT_SPLIT, &[&mixed_act, &query], &[n, conv_dim, key_dim, 0, 1, 1], n * key_dim),
-                g.step(CONCAT_SPLIT, &[&mixed_act, &key], &[n, conv_dim, key_dim, key_dim, 1, 1], n * key_dim),
-                g.step(CONCAT_SPLIT, &[&mixed_act, &value], &[n, conv_dim, value_dim, 2 * key_dim, 1, 1], n * value_dim),
-            ],
-        );
-
-        // 4. L2-normalize query/key - bare l2norm (no learnable scale).
-        let query_n = g.storage((n * key_dim) as u64);
-        let key_n = g.storage((n * key_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(L2NORM_SCALE, &[&query, &self.ones_khd, &query_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
-                g.step(L2NORM_SCALE, &[&key, &self.ones_khd, &key_n], &[n * nkh, khd, f(1e-6)], n * key_dim),
-            ],
-        );
-
-        // 5. beta = sigmoid(in_proj_b(xn1)); g = -exp(A_log)*softplus(in_proj_a(xn1)+dt_bias);
-        // z = in_proj_z(xn1) (feeds the gated RMSNorm at the end, step 10).
+        // in_proj_b/a/z (LoRA dispatch stays local).
         let bproj = g.storage((n * nvh) as u64);
         let aproj = g.storage((n * nvh) as u64);
         let z = g.storage((n * value_dim) as u64);
@@ -1076,106 +1045,24 @@ impl Qwen35 {
             self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
             g.submit(&[], &s);
         }
-        let beta = g.storage((n * nvh) as u64);
-        let g_decay = g.storage((n * nvh) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(SIGMOID, &[&bproj, &beta], &[n * nvh], n * nvh),
-                g.step(GDN_DECAY_GATE, &[&aproj, self.w(&p("A_log")), self.w(&p("dt_bias")), &g_decay], &[n, nvh], n * nvh),
-            ],
-        );
 
-        // 6. Repeat query/key from linear_num_key_heads to linear_num_value_heads.
-        let query_w = g.storage((n * nvh * khd) as u64);
-        let key_w = g.storage((n * nvh * khd) as u64);
-        g.submit(
-            &[],
-            &[
-                kv_expand_fwd(g, KV_EXPAND, &query_n, &query_w, n, nvh, group, khd, nvh * khd, 0),
-                kv_expand_fwd(g, KV_EXPAND, &key_n, &key_w, n, nvh, group, khd, nvh * khd, 0),
-            ],
-        );
-
-        // 7. Chunk-major permute (token-major -> chunk-major) for gdn_chunk_fwd.
-        let shape = GdnShape { b, h: nvh, t, dk: khd, dv: vhd, chunk };
-        let permute_fwd = |src: &DeviceBuffer, dim: u32| -> DeviceBuffer {
-            let dst = g.storage(b as u64 * nvh as u64 * n_chunks as u64 * chunk as u64 * dim as u64);
-            g.submit(&[], &[g.step(GDN_LAYOUT_PERMUTE, &[src, &dst], &[b, nvh, n_chunks, chunk, dim, 1], b * nvh * n_chunks * chunk * dim)]);
-            dst
+        // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA-agnostic,
+        // shared with `crates/qwen35moe` (`model::gdn_mixer`).
+        let shape = model::gdn_mixer::GdnMixerShape {
+            gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
+            nkh: c.linear_num_key_heads,
+            conv_kernel: c.linear_conv_kernel_dim,
         };
-        let query_cm = permute_fwd(&query_w, khd);
-        let key_cm = permute_fwd(&key_w, khd);
-        let value_cm = permute_fwd(&value, vhd);
-        let g_cm = permute_fwd(&g_decay, 1);
-        let beta_cm = permute_fwd(&beta, 1);
+        let weights = model::gdn_mixer::GdnMixerWeights {
+            conv1d_weight: self.w(&p("conv1d.weight")),
+            a_log: self.w(&p("A_log")),
+            dt_bias: self.w(&p("dt_bias")),
+            norm_weight: self.w(&p("norm.weight")),
+            ones_khd: &self.ones_khd,
+        };
+        let (gated, internals) = model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train);
 
-        // 8. gdn_chunk_fwd - the chunked-recurrence forward itself. Training
-        // builds use gdn_chunk_fwd_train instead: bit-identical out/final_state
-        // but additionally saves the per-chunk history gdn_chunk_bwd needs.
-        let bh = shape.bh() as u64;
-        let initial_state = g.storage(bh * khd as u64 * vhd as u64);
-        let final_state = g.storage(bh * khd as u64 * vhd as u64);
-        let out_cm = g.storage(shape.bhc() as u64 * chunk as u64 * vhd as u64);
-        let scratch_train = if self.is_train { Some(GdnScratchTrainBufs::new(g, &shape)) } else { None };
-        if let Some(strain) = &scratch_train {
-            let steps = gdn_chunk_fwd_train(
-                g,
-                &gdn_ids(),
-                &gdn_bwd_ids(),
-                &shape,
-                &query_cm,
-                &key_cm,
-                &value_cm,
-                &g_cm,
-                &beta_cm,
-                &initial_state,
-                &strain.as_ref(),
-                &out_cm,
-                &final_state,
-            );
-            g.submit(&strain.clears(), &steps);
-        } else {
-            let scratch = GdnScratchBufs::new(g, &shape);
-            let steps = gdn_chunk_fwd(
-                g,
-                &gdn_ids(),
-                &shape,
-                &query_cm,
-                &key_cm,
-                &value_cm,
-                &g_cm,
-                &beta_cm,
-                &initial_state,
-                &scratch.as_ref(),
-                &out_cm,
-                &final_state,
-            );
-            g.submit(&scratch.clears(), &steps);
-        }
-
-        // 9. Permute back to token-major.
-        let out_tok = g.storage((n * value_dim) as u64);
-        g.submit(
-            &[],
-            &[g.step(GDN_LAYOUT_PERMUTE, &[&out_cm, &out_tok], &[b, nvh, n_chunks, chunk, vhd, 0], b * nvh * n_chunks * chunk * vhd)],
-        );
-
-        // 10. Gated RMSNorm ("norm before gate"): normed = RMSNorm(out_tok)*weight,
-        // THEN * SiLU(z).
-        let normed = g.storage((n * value_dim) as u64);
-        let z_silu = g.storage((n * value_dim) as u64);
-        let gated = g.storage((n * value_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                rmsnorm_fwd(g, &kernel_ids(), &out_tok, self.w(&p("norm.weight")), &normed, vhd, n * nvh),
-                g.step(SILU, &[&z, &z_silu], &[n * value_dim], n * value_dim),
-                g.step(MUL, &[&normed, &z_silu, &gated], &[n * value_dim], n * value_dim),
-            ],
-        );
-
-        // 11. out_proj.
+        // out_proj (LoRA dispatch stays local).
         let out = g.storage((n * d) as u64);
         {
             let mut s = vec![g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[n, value_dim, d], n * d)];
@@ -1183,26 +1070,7 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        let acts = scratch_train.map(|scratch_train| GdnLayerActs {
-            shape,
-            ncl_in,
-            ncl_out,
-            query,
-            key,
-            bproj,
-            aproj,
-            g_decay,
-            query_cm,
-            key_cm,
-            value_cm,
-            beta_cm,
-            scratch_train,
-            out_tok,
-            normed,
-            z,
-            z_silu,
-            gated,
-        });
+        let acts = internals.map(|internals| GdnLayerActs { internals, gated });
         (out, acts)
     }
 
@@ -1217,9 +1085,10 @@ impl Qwen35 {
         let c = &self.cfg;
         let d = c.d_model;
         let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
-        let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
+        let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
         let p = |s: &str| format!("{prefix}.{s}");
 
+        // q/k/v proj (LoRA dispatch stays local).
         let q_full = g.storage((n * qpd) as u64);
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
@@ -1235,58 +1104,21 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        // Per-head de-interleaved split of q_full's [query|gate] halves -
-        // NOT a whole-row split. Fold n_heads into concat_split's own N so
-        // each head's 2*head_dim block splits into its own first/second half.
-        let q_value = g.storage((n * qd) as u64);
-        let q_gate = g.storage((n * qd) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(CONCAT_SPLIT, &[&q_full, &q_value], &[n * nh, 2 * hd, hd, 0, 1, 1], n * nh * hd),
-                g.step(CONCAT_SPLIT, &[&q_full, &q_gate], &[n * nh, 2 * hd, hd, hd, 1, 1], n * nh * hd),
-            ],
-        );
+        // split+qknorm+rope+attention+gating - LoRA-agnostic, shared with
+        // `crates/qwen35moe` (`model::gqa_mixer`).
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
+        let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
+        let (ctx_gated, internals) = model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train);
 
-        let q_normed = g.storage((n * qd) as u64);
-        let k_normed = g.storage((n * kvd) as u64);
-        g.submit(
-            &[],
-            &[
-                rmsnorm_fwd(g, &kernel_ids(), &q_value, self.w(&p("q_norm.weight")), &q_normed, hd, n * nh),
-                rmsnorm_fwd(g, &kernel_ids(), &k, self.w(&p("k_norm.weight")), &k_normed, hd, n * nkv),
-            ],
-        );
-
-        let half = c.rotary_dim() / 2;
-        g.submit(
-            &[],
-            &[
-                rope2d_partial_fwd(g, ROPE2D_PARTIAL, &q_normed, &self.cos, &self.sin, n, nh, half, qd, 0, hd),
-                rope2d_partial_fwd(g, ROPE2D_PARTIAL, &k_normed, &self.cos, &self.sin, n, nkv, half, kvd, 0, hd),
-            ],
-        );
-
-        let scores = g.storage(self.b as u64 * nh as u64 * self.t as u64 * self.t as u64);
-        let probs = g.storage(self.b as u64 * nh as u64 * self.t as u64 * self.t as u64);
-        let ctx = g.storage((n * qd) as u64);
-        let ga = Gqa { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-        g.submit(&[], &gqa_fwd(g, &kernel_ids(), &ga, &q_normed, &k_normed, &v, &scores, &probs, &ctx));
-
-        let gate = g.storage((n * qd) as u64);
-        let ctx_gated = g.storage((n * qd) as u64);
+        // o_proj (LoRA dispatch stays local).
         let out = g.storage((n * d) as u64);
         {
-            let mut s = vec![
-                g.step(SIGMOID, &[&q_gate, &gate], &[n * qd], n * qd),
-                g.step(MUL, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
-                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, qd, d], n * d),
-            ];
-            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, qd, d);
+            let mut s = vec![g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[n, shape.qd(), d], n * d)];
+            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
             g.submit(&[], &s);
         }
 
-        let acts = self.is_train.then(|| GqaLayerActs { q_normed, k_normed, v, q_value, k, q_gate, probs, ctx, gate, ctx_gated });
+        let acts = internals.map(|internals| GqaLayerActs { internals, ctx_gated });
         (out, acts)
     }
 
@@ -1589,19 +1421,11 @@ impl Qwen35 {
         let c = &self.cfg;
         let d = c.d_model;
         let conv_dim = c.linear_conv_dim();
-        let key_dim = c.linear_key_dim();
         let value_dim = c.linear_value_dim();
         let nvh = c.linear_num_value_heads;
-        let khd = c.linear_key_head_dim;
-        let vhd = c.linear_value_head_dim;
-        let group = c.linear_group();
-        let kw = c.linear_conv_kernel_dim;
-        let (b, t, chunk) = (self.b, self.t, self.chunk);
-        let n_chunks = t / chunk;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
-        let shape = la.shape;
 
-        // ---- 11. out_proj backward ----
+        // out_proj backward (LoRA dispatch stays local).
         let d_gated = g.storage((n * value_dim) as u64);
         {
             let mut s = Vec::new();
@@ -1609,163 +1433,40 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        // ---- 10. gated RMSNorm backward: gated = normed*z_silu; z_silu = silu(z); normed = rmsnorm(out_tok) ----
-        let d_normed = g.storage((n * value_dim) as u64);
-        let d_z_silu = g.storage((n * value_dim) as u64);
-        let d_z = g.storage((n * value_dim) as u64);
-        let d_out_tok = g.storage((n * value_dim) as u64);
-        {
-            let mut s = vec![
-                g.step(MUL, &[&d_gated, &la.z_silu, &d_normed], &[n * value_dim], n * value_dim),
-                g.step(MUL, &[&d_gated, &la.normed, &d_z_silu], &[n * value_dim], n * value_dim),
-                g.step(SILU_BWD, &[&la.z, &d_z_silu, &d_z], &[n * value_dim], n * value_dim),
-            ];
-            self.rmsnorm_bwd_step(&mut s, &la.out_tok, &p("norm.weight"), &d_normed, &d_out_tok, vhd, n * nvh);
-            g.submit(&[], &s);
-        }
-
-        // ---- 9. permute back to chunk-major (forward used to_chunk_major=0; backward flips it) ----
-        let d_out_cm = g.storage(shape.bhc() as u64 * shape.chunk as u64 * vhd as u64);
-        g.submit(
-            &[],
-            &[g.step(GDN_LAYOUT_PERMUTE, &[&d_out_tok, &d_out_cm], &[b, nvh, n_chunks, chunk, vhd, 1], b * nvh * n_chunks * chunk * vhd)],
-        );
-
-        // ---- 8. gdn_chunk_bwd - the chunked-recurrence backward itself ----
-        let bh = shape.bh() as u64;
-        let bhc = shape.bhc() as u64;
-        let cw = shape.chunk as u64;
-        let dk = shape.dk as u64;
-        let dv = shape.dv as u64;
-        let d_final_state = g.storage(bh * dk * dv); // no incremental decode continuation -> zero
-        let d_initial_state = g.storage(bh * dk * dv); // discarded (no earlier chunk upstream)
-        let d_query_cm = g.storage(bhc * cw * dk);
-        let d_key_cm = g.storage(bhc * cw * dk);
-        let d_value_cm = g.storage(bhc * cw * dv);
-        let d_g_cm = g.storage(bhc * cw);
-        let d_beta_cm = g.storage(bhc * cw);
-        let bwd_scratch = GdnBwdScratchBufs::new(g, &shape);
-        {
-            let steps = gdn_chunk_bwd(
-                g,
-                &gdn_ids(),
-                &gdn_bwd_ids(),
-                &shape,
-                &la.query_cm,
-                &la.key_cm,
-                &la.value_cm,
-                &la.beta_cm,
-                &la.scratch_train.as_ref(),
-                &d_out_cm,
-                &d_final_state,
-                &bwd_scratch.as_ref(),
-                &d_query_cm,
-                &d_key_cm,
-                &d_value_cm,
-                &d_g_cm,
-                &d_beta_cm,
-                &d_initial_state,
-            );
-            let mut clears = bwd_scratch.clears();
-            clears.push(&d_final_state);
-            clears.push(&d_query_cm);
-            clears.push(&d_key_cm);
-            clears.push(&d_beta_cm);
-            g.submit(&clears, &steps);
-        }
-
-        // ---- 7. permute back to token-major (forward used to_chunk_major=1; backward flips it) ----
-        let permute_bwd = |src_cm: &DeviceBuffer, dim: u32| -> DeviceBuffer {
-            let dst = g.storage(n as u64 * nvh as u64 * dim as u64);
-            g.submit(
-                &[],
-                &[g.step(GDN_LAYOUT_PERMUTE, &[src_cm, &dst], &[b, nvh, n_chunks, chunk, dim, 0], b * nvh * n_chunks * chunk * dim)],
-            );
-            dst
+        // Reverse of the hoisted `model::gdn_mixer::gdn_mixer_fwd` internals.
+        let shape = model::gdn_mixer::GdnMixerShape {
+            gdn: la.internals.shape,
+            nkh: c.linear_num_key_heads,
+            conv_kernel: c.linear_conv_kernel_dim,
         };
-        let d_query_w = permute_bwd(&d_query_cm, khd);
-        let d_key_w = permute_bwd(&d_key_cm, khd);
-        let d_value = permute_bwd(&d_value_cm, vhd);
-        let d_g_decay = permute_bwd(&d_g_cm, 1);
-        let d_beta = permute_bwd(&d_beta_cm, 1);
+        let weights = model::gdn_mixer::GdnMixerWeights {
+            conv1d_weight: self.w(&p("conv1d.weight")),
+            a_log: self.w(&p("A_log")),
+            dt_bias: self.w(&p("dt_bias")),
+            norm_weight: self.w(&p("norm.weight")),
+            ones_khd: &self.ones_khd,
+        };
+        let grads = model::gdn_mixer::GdnMixerGrads {
+            conv1d_weight: self.trainable(&p("conv1d.weight")).then(|| self.g(&p("conv1d.weight"))),
+            a_log: self.trainable(&p("A_log")).then(|| self.g(&p("A_log"))),
+            dt_bias: self.trainable(&p("dt_bias")).then(|| self.g(&p("dt_bias"))),
+            norm_weight: self.trainable(&p("norm.weight")).then(|| self.g(&p("norm.weight"))),
+        };
+        let (d_mixed_qkv, d_bproj, d_aproj, d_z) = model::gdn_mixer::gdn_mixer_bwd(g, &gdn_mixer_ids(), &shape, &weights, &grads, &la.internals, &d_gated, n);
 
-        // ---- 6. kv_expand backward (group-sum, overwrite -- no accumulate needed) ----
-        let d_query_n = g.storage((n * key_dim) as u64);
-        let d_key_n = g.storage((n * key_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                kv_expand_bwd(g, KV_EXPAND_BWD, &d_query_w, &d_query_n, n, nvh, group, khd, nvh * khd, 0),
-                kv_expand_bwd(g, KV_EXPAND_BWD, &d_key_w, &d_key_n, n, nvh, group, khd, nvh * khd, 0),
-            ],
-        );
-
-        // ---- 5. beta/g_decay backward into bproj/aproj, A_log/dt_bias reductions, in_proj_{b,a,z} ----
-        let d_bproj = g.storage((n * nvh) as u64);
-        let d_aproj = g.storage((n * nvh) as u64);
+        // in_proj_b/a/z backward (LoRA dispatch stays local). FIRST touch to
+        // d_xn1 in this function (acc=0) -- in_proj_qkv (below) accumulates
+        // last of all.
         {
-            let mut s = vec![
-                g.step(SIGMOID_BWD, &[&la.bproj, &d_beta, &d_bproj], &[n * nvh], n * nvh),
-                g.step(GDN_DECAY_GATE_BWD, &[&la.aproj, self.w(&p("A_log")), self.w(&p("dt_bias")), &d_g_decay, &d_aproj], &[n, nvh], n * nvh),
-            ];
-            let mul_tmp = g.storage((n * nvh) as u64);
-            s.push(g.step(MUL, &[&d_g_decay, &la.g_decay, &mul_tmp], &[n * nvh], n * nvh));
-            if self.trainable(&p("A_log")) {
-                s.push(g.step(BIAS_GRAD, &[&mul_tmp, self.g(&p("A_log"))], &[n, nvh], nvh));
-            }
-            if self.trainable(&p("dt_bias")) {
-                s.push(g.step(BIAS_GRAD, &[&d_aproj, self.g(&p("dt_bias"))], &[n, nvh], nvh));
-            }
-            // FIRST touch to d_xn1 in this function (acc=0) -- in_proj_a/z below
-            // accumulate on top; in_proj_qkv (processed last here) accumulates last of all.
+            let mut s = Vec::new();
             self.proj_bwd(&mut s, "in_proj_b", &d_bproj, xn1, &p("in_proj_b.weight"), d_xn1, n, d, nvh, 0);
             self.proj_bwd(&mut s, "in_proj_a", &d_aproj, xn1, &p("in_proj_a.weight"), d_xn1, n, d, nvh, 1);
             self.proj_bwd(&mut s, "in_proj_z", &d_z, xn1, &p("in_proj_z.weight"), d_xn1, n, d, value_dim, 1);
             g.submit(&[], &s);
         }
 
-        // ---- 4. L2-norm backward ----
-        let nkh = c.linear_num_key_heads;
-        let d_query = g.storage((n * key_dim) as u64);
-        let d_key = g.storage((n * key_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(L2NORM_SCALE_DX, &[&la.query, &self.ones_khd, &d_query_n, &d_query], &[n * nkh, khd, f(1e-6)], n * key_dim),
-                g.step(L2NORM_SCALE_DX, &[&la.key, &self.ones_khd, &d_key_n, &d_key], &[n * nkh, khd, f(1e-6)], n * key_dim),
-            ],
-        );
-
-        // ---- 3. qkv split backward (concat2 x2: the 3-way split's adjoint) ----
-        let d_qk = g.storage((n * 2 * key_dim) as u64);
-        let d_mixed_act = g.storage((n * conv_dim) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(CONCAT2, &[&d_query, &d_key, &d_qk], &[n, key_dim, key_dim, 1, 1], n * 2 * key_dim),
-                g.step(CONCAT2, &[&d_qk, &d_value, &d_mixed_act], &[n, 2 * key_dim, value_dim, 1, 1], n * conv_dim),
-            ],
-        );
-
-        // ---- 2. conv1d + SiLU backward ----
-        let d_ncl_act = g.storage((n * conv_dim) as u64);
-        let d_ncl_out = g.storage((n * conv_dim) as u64);
-        let d_ncl_in = g.storage((n * conv_dim) as u64);
-        let d_mixed_qkv = g.storage((n * conv_dim) as u64);
-        let conv_shape =
-            Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
-        {
-            let mut s = vec![
-                g.step(NLC_NCHW, &[&d_mixed_act, &d_ncl_act], &[n * conv_dim, conv_dim, t], n * conv_dim),
-                g.step(SILU_BWD, &[&la.ncl_out, &d_ncl_act, &d_ncl_out], &[n * conv_dim], n * conv_dim),
-            ];
-            let conv_dw = self.trainable(&p("conv1d.weight")).then(|| self.g(&p("conv1d.weight")));
-            s.extend(conv1d_bwd(g, &conv_kernels(), &conv_shape, &d_ncl_out, &la.ncl_in, self.w(&p("conv1d.weight")), Some(&d_ncl_in), conv_dw));
-            s.push(g.step(NCHW_NLC, &[&d_ncl_in, &d_mixed_qkv], &[n * conv_dim, conv_dim, t], n * conv_dim));
-            g.submit(&[], &s);
-        }
-
-        // ---- 1. in_proj_qkv backward (last accumulate into d_xn1) ----
+        // in_proj_qkv backward (last accumulate into d_xn1; LoRA dispatch
+        // stays local).
         {
             let mut s = Vec::new();
             self.proj_bwd(&mut s, "in_proj_qkv", &d_mixed_qkv, xn1, &p("in_proj_qkv.weight"), d_xn1, n, d, conv_dim, 1);
@@ -1784,7 +1485,7 @@ impl Qwen35 {
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
         let p = |s: &str| format!("{prefix}.{s}");
 
-        // ---- 7. o_proj backward ----
+        // o_proj backward (LoRA dispatch stays local).
         let d_ctx_gated = g.storage((n * qd) as u64);
         {
             let mut s = Vec::new();
@@ -1792,52 +1493,16 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        // ---- 6. ctx*gate backward, sigmoid backward ----
-        let d_ctx = g.storage((n * qd) as u64);
-        let d_gate = g.storage((n * qd) as u64);
-        let d_q_gate = g.storage((n * qd) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MUL, &[&d_ctx_gated, &la.gate, &d_ctx], &[n * qd], n * qd),
-                g.step(MUL, &[&d_ctx_gated, &la.ctx, &d_gate], &[n * qd], n * qd),
-                g.step(SIGMOID_BWD, &[&la.q_gate, &d_gate, &d_q_gate], &[n * qd], n * qd),
-            ],
-        );
+        // Reverse of the hoisted `model::gqa_mixer::gqa_mixer_fwd` internals.
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
+        let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
+        let grads = model::gqa_mixer::GqaMixerGrads {
+            q_norm: self.trainable(&p("q_norm.weight")).then(|| self.g(&p("q_norm.weight"))),
+            k_norm: self.trainable(&p("k_norm.weight")).then(|| self.g(&p("k_norm.weight"))),
+        };
+        let (d_q_full, d_k, d_v) = model::gqa_mixer::gqa_mixer_bwd(g, &gqa_mixer_ids(), &shape, &weights, &grads, &la.internals, &d_ctx_gated, n);
 
-        // ---- 5. gqa_bwd ----
-        let ga = Gqa { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-        let d_scores = g.storage(self.b as u64 * nh as u64 * self.t as u64 * self.t as u64);
-        let d_q_normed = g.storage((n * qd) as u64);
-        let d_k_normed = g.storage((n * kvd) as u64);
-        let d_v = g.storage((n * kvd) as u64);
-        g.submit(&[], &gqa_bwd(g, &kernel_ids(), &ga, &la.q_normed, &la.k_normed, &la.v, &la.probs, &d_ctx, &d_scores, &d_q_normed, &d_k_normed, &d_v));
-
-        // ---- 4. RoPE backward (in place, sign=-1) ----
-        let half = c.rotary_dim() / 2;
-        g.submit(
-            &[],
-            &[
-                rope2d_partial_bwd(g, ROPE2D_PARTIAL, &d_q_normed, &self.cos, &self.sin, n, nh, half, qd, 0, hd),
-                rope2d_partial_bwd(g, ROPE2D_PARTIAL, &d_k_normed, &self.cos, &self.sin, n, nkv, half, kvd, 0, hd),
-            ],
-        );
-
-        // ---- 3. per-head QK-norm backward ----
-        let d_q_value = g.storage((n * qd) as u64);
-        let d_k = g.storage((n * kvd) as u64);
-        {
-            let mut s = Vec::new();
-            self.rmsnorm_bwd_step(&mut s, &la.q_value, &p("q_norm.weight"), &d_q_normed, &d_q_value, hd, n * nh);
-            self.rmsnorm_bwd_step(&mut s, &la.k, &p("k_norm.weight"), &d_k_normed, &d_k, hd, n * nkv);
-            g.submit(&[], &s);
-        }
-
-        // ---- 2. q_full [value|gate] split backward (concat2, per-head interleaved) ----
-        let d_q_full = g.storage((n * qpd) as u64);
-        g.submit(&[], &[g.step(CONCAT2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, hd, hd, 1, 1], n * nh * 2 * hd)]);
-
-        // ---- 1. q/k/v proj backward ----
+        // q/k/v proj backward (LoRA dispatch stays local).
         {
             let mut s = Vec::new();
             self.proj_bwd(&mut s, "q_proj", &d_q_full, xn1, &p("q_proj.weight"), d_xn1, n, d, qpd, 0);

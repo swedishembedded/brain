@@ -176,21 +176,38 @@ structurally and never parity-claimed here.
   Full `qwen35moe` test suite (all 60+ tests across lib + 9 integration
   files) and `check_qwen35moe`/`check_qwen35moe_a_log_elementwise`/
   `check_qwen35moe_lora` gradcheck all pass unchanged in shape.
-- [ ] M12 part B: hoist the GDN and gated-GQA mixer orchestration into
-  `crates/model`, gated by a new `crates/model/tests/gdn_mixer_equivalence.rs`
-  proving bit-identity between both crates' mixers on the same weights.
-  Smaller now than originally scoped: M11 already wrote the DECODE-step
-  orchestration (`layer_gdn_decode_step`/`layer_gqa_decode_step`) fresh with
-  the weight-name-prefix convention this hoist needs, rather than duplicating
-  qwen35moe's own layer-index-keyed copy - only the BATCHED forward/backward
-  mixer orchestration still needs migrating.
+- [x] M12 part B: hoisted the GDN and gated-GQA mixer orchestration into
+  `crates/model` as two new modules, `model::gdn_mixer` and `model::gqa_mixer`
+  (new `brain-audio` dependency on `brain-model`, for the shared conv1d
+  fwd/bwd `gdn_mixer_fwd`/`gdn_mixer_bwd` reuse). Each exposes one fwd/bwd
+  function pair taking explicit `*Ids`/`*Shape`/`*Weights`/`*Grads` structs
+  (no config trait) plus the layer's ALREADY-projected activations
+  (`mixed_qkv`/`bproj`/`aproj`/`z` for GDN; `q_full`/`k`/`v` for GQA) and
+  returning the pre-`out_proj`/`o_proj` activation - the exact boundary
+  `model::block`'s own doc states ("linear projections stay in the model").
+  Both `qwen35` and `qwen35moe`'s `layer_gdn_fwd`/`layer_gqa_fwd`/
+  `gdn_mixer_bwd`/`gqa_mixer_bwd` now call these directly, keeping only their
+  own projection dispatch (LoRA, and for `qwen35moe`, `model::ops::Weight`
+  int8) local; `GdnLayerActs`/`GqaLayerActs` in both crates slimmed to a thin
+  wrapper around the hoisted `GdnMixerActs`/`GqaMixerActs` plus the one
+  locally-needed buffer (`gated`/`ctx_gated`). Gated by new
+  `crates/model/tests/gdn_mixer_equivalence.rs`: since `model` cannot depend
+  on either downstream crate, it proves the real cross-crate risk instead -
+  the same shared function resolved through two INDEPENDENTLY, DIFFERENTLY
+  ORDERED pipeline registrations (mirroring the fact that `qwen35`'s and
+  `qwen35moe`'s own local kernel-index numbering never agrees) produces
+  bit-identical fwd+bwd output from identical input. Verified via the full
+  `qwen35`/`qwen35moe`/`model` test suites (all pass unchanged) plus
+  `check_qwen35`/`check_qwen35_a_log_elementwise`/`check_qwen35_lora`/
+  `check_qwen35_mtp` and `check_qwen35moe`/`check_qwen35moe_a_log_elementwise`/
+  `check_qwen35moe_lora` gradcheck (all pass, values unchanged from before
+  the hoist).
 
 ## Not yet done
 
 - [ ] M10: real-weight streaming parity (fetch the 30.9 GB FP8 checkpoint;
   per-layer streaming forward parity for layers {0, 3, 63}; full real-weight
   parity of the vision tower; embed/lm_head spot checks).
-- [ ] M12 part B (see above).
 - [ ] M13: performance pass (profile-first; native device-side FP8 GEMM only if
   the profile says arithmetic is the limiter, not before).
 
