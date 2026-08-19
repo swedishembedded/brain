@@ -1378,6 +1378,7 @@ dependencies = [
  "brain-qwen3",
  "brain-qwen3vl",
  "brain-testutil",
+ "brain-weightset",
  "bytemuck",
  "pollster",
  "serde_json",

@@ -376,18 +376,118 @@ structurally and never parity-claimed here.
   `qwen35 generate` capability action) has no `--precision` flag of its
   own, so it never builds an int8 model directly, only via the caps path.
 
+- [x] M15: sliding-window streaming forward (`crates/qwen35/src/stream.rs`) -
+  the piece that lets a real 64-layer/27B forward run on THIS box at all: a
+  new `stream::run`/`StreamState` drives one forward pass over every real
+  decoder layer holding only a small `weightset::WeightSet`-scheduled window
+  of layers' weights resident at once, re-reading the rest from disk
+  (`crate::import::import_layer`, unchanged, M10) as the schedule advances -
+  `Qwen35::new_*` all still need every layer resolved in one host `HashMap`
+  first, which M14's own doc already flagged as impossible at 27B on this
+  box (~27 GB even fully int8, far past available RAM). Deliberately
+  narrow scope: proves the streaming PLUMBING is numerically correct and
+  memory-bounded - no CLI/serve wiring, no tokenizer/generation loop, no MTP
+  (left to M16/M17).
+  **Design, with the real numbers behind each choice:**
+  - Downloaded the 61 previously-missing `layers-*.safetensors` shards from
+    `Qwen/Qwen3.8-27B-FP8` (`hf download ... --include "layers-*.safetensors"
+    --local-dir`, resumed the existing partial local-dir download rather than
+    re-fetching anything already present) - all 64 `layers-{0..63}.
+    safetensors` now present and non-empty under `BRAIN_QWEN35_DIR`, ~29 GB
+    total on disk (24 GB of layer shards + the pre-existing `outside.
+    safetensors`/`mtp.safetensors`), 284 GB free disk remaining afterward -
+    the download never came close to the disk-pressure abort condition.
+  - `weightset::WeightSet` is used purely for hit/miss + slot-index
+    bookkeeping (`WeightSet::advance`), never as a fixed-shape buffer pool -
+    unlike `crates/s3dit/src/dev.rs`'s `WindowedPhase` precedent (homogeneous
+    block shapes, safe to overwrite a slot's buffers in place), this model's
+    layers are NOT homogeneous (`full_attention_interval=4`: 3-in-4 layers
+    are Gated DeltaNet with 5 quantizable leaves, 1-in-4 are GQA with 4). Each
+    slot instead holds an `Option<OwnedStreamedLayer>` (an enum over
+    `OwnedGdnLayer`/`OwnedGqaLayer`) that is DROPPED and rebuilt fresh on
+    every miss, mirroring `qwen3omnimoe::generate::run_layers`'s drop/rebuild
+    discipline (including its two hard-won lessons: force-reclaim device
+    memory via one throwaway `gpu.read(_, 1)` right after dropping an evicted
+    slot and before the next slot uploads; never let a layer's output borrow
+    that layer's own weight buffers).
+  - Per-layer int8 (DP4A) footprint, computed directly from
+    `Qwen35Config::qwen38_27b()`'s real dims (packed-int8 bytes + per-row f32
+    scale, summed over all 12 quantizable leaves - 4 GQA + 3 MLP for a Full
+    layer, 5 GDN + 3 MLP for a Linear layer): **372.48 MB/GQA layer, 383.47
+    MB/GDN layer** (max ≈ 384 MB/layer, matching the ≈380 MB/layer this
+    milestone's own plan estimated) - the non-quantized fp32 aux tensors
+    (norms, GDN's `A_log`/`dt_bias`/gated-norm weight, GQA's `q_norm`/
+    `k_norm`) add well under 1 MB/layer, negligible against that. Window
+    budget: **4 slots** (`weightset::Schedule::cyclic(64, 1)` +
+    `weightset::CyclicScan { lookahead: 1 }`, so 3 slots pin permanently for
+    this single pass and 1 rotates) → ≈1.53 GB worst-case device-resident
+    weight bytes, comfortably inside the ~11 GiB available RAM this iGPU's
+    "device" buffers share with the host. Measured (not projected) peak RSS
+    for the full 64-layer chain: **1.93 GiB** - well under both the 4-slot
+    estimate above and this milestone's own 6 GiB test-asserted ceiling.
+  - Initial residual: a small fixed-seed synthetic `[n, d_model]` vector
+    (`stream::seed_residual`, `data::rng::Lcg`), not the real embedding
+    table - `embed_tokens`/`lm_head` are each `[248320, 5120]`, **5.09 GB
+    (4.74 GiB) dequantized to f32**, confirmed against the real checkpoint's
+    own tensor shapes; materializing even one would burn most of this box's
+    available RAM for a value this milestone's gate does not need (real
+    embedding/lm_head/tokenizer is M16's job). A real chain of real layer
+    WEIGHTS still transforms this input exactly as it would a real embedded
+    token row - what this milestone's gates actually check.
+  **Verification, exact test names and measured numbers:**
+  - `crates/qwen35/tests/streaming_forward.rs`, run against the real
+    checkpoint (`BRAIN_QWEN35_DIR=/data/workspace/resources/qwen3.8 cargo
+    test -p brain-qwen35 --test streaming_forward -- --ignored --nocapture
+    --test-threads=1`), all 4 pass in 4488.19 s total (dominated by the full
+    64-layer chain - real per-layer disk streaming + host FP8 dequant + int8
+    CPU-side quantization 64 times over, not a throughput-tuned path, and
+    this run also shared the box with other concurrent processes):
+    - `layer_0_streamed_matches_the_real_reference` (Gated DeltaNet):
+      cosine=0.999104643 rel_l2=0.043262 max_abs=2.7555
+    - `layer_3_streamed_matches_the_real_reference` (GQA, first full-attn
+      layer): cosine=0.998473474 rel_l2=0.055302 max_abs=0.9961
+    - `layer_63_streamed_matches_the_real_reference` (GQA, last full-attn
+      layer): cosine=0.999086663 rel_l2=0.043479 max_abs=6.2053
+    - all three clear the test's 0.99 floor (streaming introduces no new
+      error source of its own vs. `real_weight_streaming.rs`'s already-proven
+      fp32 path - same `import_layer`, same mixer math - only int8's
+      already-measured one, M14's own per-leaf cosine range
+      [0.9999283, 0.9999519] propagated through a whole layer's chain)
+    - `full_chain_streams_all_64_real_layers_within_budget`: all 64 real
+      layers streamed, output finite, **peak RSS 1.93 GiB** (budget 6 GiB) -
+      a bounded-correctness-and-memory smoke gate only, no whole-model
+      reference exists on any machine this workspace has access to.
+  - `cargo test -p brain-qwen35 --lib --bins --tests -- --test-threads=8`:
+    19 test binaries, all green, 0 failed (unchanged from M14 plus the new
+    `streaming_forward.rs`'s 4 tests, which self-skip as `ignored` here).
+  - `cargo clippy -p brain-qwen35 --all-targets -- -D warnings` exits 0;
+    `make clippy` (whole-workspace ratchet gate) exits 0 at its 0-warning
+    baseline; `make build` (dev profile, whole workspace) succeeds; `make
+    gradcheck` succeeds (`cargo test -p brain-gradcheck`, 20 test binaries,
+    0 failed - `stream.rs` only touches inference-only forward paths, but
+    this confirms the shared `model::gdn_mixer`/`model::gqa_mixer`/`model::
+    ops` machinery it reuses is unaffected).
+  **Not done, left for later milestones (explicitly out of this one's
+  scope)**: no CLI/serve wiring; no tokenizer or real generation loop; MTP
+  untouched; no multi-token decode loop (`Schedule::cyclic(64, 1)` is a
+  single pass); no real embedding/lm_head (M16).
+
 ## Not yet done
 
-Nothing - all milestones (M0-M14) are complete. Remaining scope is the
+Nothing - all milestones (M0-M15) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM), plus M14's own "not done"
+machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's own "not done"
 items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
-- No whole-model 27B forward, no whole-model torch reference, no e2e generation or
-  perplexity number on real weights - unreachable at 27B vs 18 GiB with no
-  discrete GPU. Rungs 4-5 of the parity ladder are out of reach here.
+- No whole-model torch reference at 27B (no e2e generation or perplexity number
+  on real weights) - unreachable with no discrete GPU regardless of streaming.
+  Rungs 4-5 of the parity ladder are out of reach here. M15's `stream::run` DOES
+  now chain all 64 real layers' real weights in one process (streamed, not
+  resident), but over a synthetic seed input with no real embedding/lm_head/
+  tokenizer (M16) - a bounded-memory plumbing smoke test, not the e2e/perplexity
+  number this gap is about.
 - No multi-GPU shard parity (`discrete_gpu_count() == 0` self-skips it) - and note
   qwen35moe's own `shard_parity.rs` does not run on this machine either, so any
   claim it protects a refactor here is a claim about a different machine.
