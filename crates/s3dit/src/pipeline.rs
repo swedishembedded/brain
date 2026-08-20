@@ -769,7 +769,7 @@ impl HotPipeline {
         let mut lat = randn(n, seed);
         let seq_len = ((self.lh / 2) * (self.lw / 2)) as usize;
         let sigmas = dynamic_shift(&default_z_image_sigmas(steps as usize), calc_mu(seq_len));
-        let mut sched = FlowMatchEulerScheduler::new(FlowMatchConfig { num_train_timesteps: 1000, shift: 1.0 });
+        let mut sched = FlowMatchEulerScheduler::new(FlowMatchConfig { num_train_timesteps: 1000, shift: 1.0, invert_sigmas: false });
         sched.set_timesteps(&sigmas);
         let ts = sched.timesteps().to_vec();
         let sig_full = sched.sigmas().to_vec();
@@ -989,7 +989,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     // `sig_full` is the N+1 sigmas (N shifted step sigmas + terminal 0).
     let seq_len = ((lh / 2) * (lw / 2)) as usize; // DiT patch 2
     let sigmas = dynamic_shift(&default_z_image_sigmas(opts.steps as usize), calc_mu(seq_len));
-    let mut sched = FlowMatchEulerScheduler::new(FlowMatchConfig { num_train_timesteps: 1000, shift: 1.0 });
+    let mut sched = FlowMatchEulerScheduler::new(FlowMatchConfig { num_train_timesteps: 1000, shift: 1.0, invert_sigmas: false });
     sched.set_timesteps(&sigmas);
     let ts = sched.timesteps().to_vec();
     let sig_full = sched.sigmas().to_vec();

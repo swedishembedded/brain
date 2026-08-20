@@ -29,11 +29,20 @@ pub struct FlowMatchConfig {
     pub num_train_timesteps: u32,
     /// Resolution-independent schedule shift (Z-Image/FLUX.2: 3.0).
     pub shift: f32,
+    /// Invert the shifted sigma schedule (`σ' → 1 - σ'`) and append a
+    /// terminal `1.0` instead of `0.0` - diffusers' `invert_sigmas` flag.
+    /// `false` for every caller before this field existed (Z-Image, FLUX.2,
+    /// Wan, LTX): their terminal sigma is 0 (noise -> data). MiniMax Music 3
+    /// is the first `true` caller: its DiT's own timestep convention runs
+    /// the other way (`0` = noise, `1` = data - see its `Transformer1DModel`
+    /// doc), and diffusers documents this exact flag ("only required in
+    /// Mochi" before) for that case.
+    pub invert_sigmas: bool,
 }
 
 impl Default for FlowMatchConfig {
     fn default() -> Self {
-        FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0 }
+        FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0, invert_sigmas: false }
     }
 }
 
@@ -76,22 +85,36 @@ impl FlowMatchEulerScheduler {
     }
 
     /// Build the schedule from explicit input sigmas `∈ (0, 1]` (the pipeline's
-    /// spacing). Applies the static shift, appends the terminal `0`, computes
-    /// the discrete timesteps, and resets the step cursor.
+    /// spacing). Applies the static shift, then either appends the terminal
+    /// `0` (`invert_sigmas: false` - noise walks to data), or inverts every
+    /// shifted sigma (`σ' → 1 - σ'`) and appends a terminal `1` instead
+    /// (`invert_sigmas: true`); computes the discrete timesteps from
+    /// whichever sigmas end up in effect, and resets the step cursor.
     pub fn set_timesteps(&mut self, sigmas_in: &[f32]) {
         let shift = self.cfg.shift;
         let n_train = self.cfg.num_train_timesteps as f32;
         // Static shift, then discrete timesteps (before the terminal sigma).
-        let shifted: Vec<f32> =
+        let mut shifted: Vec<f32> =
             sigmas_in.iter().map(|&s| shift * s / (1.0 + (shift - 1.0) * s)).collect();
+        let terminal = if self.cfg.invert_sigmas {
+            for s in &mut shifted {
+                *s = 1.0 - *s;
+            }
+            1.0
+        } else {
+            0.0
+        };
         self.timesteps = shifted.iter().map(|&s| s * n_train).collect();
-        // Append the terminal 0 so the final Euler step lands on the clean latent.
+        // Append the terminal sigma so the final Euler step lands exactly on
+        // the clean latent (or, inverted, on the fully-noised one).
         self.sigmas = shifted;
-        self.sigmas.push(0.0);
+        self.sigmas.push(terminal);
         self.step_index = 0;
     }
 
-    /// The `N+1` sigmas (shifted step sigmas + terminal `0`).
+    /// The `N+1` sigmas (shifted step sigmas + terminal `0`, or - when
+    /// [`FlowMatchConfig::invert_sigmas`] is set - inverted sigmas + terminal
+    /// `1`).
     pub fn sigmas(&self) -> &[f32] {
         &self.sigmas
     }

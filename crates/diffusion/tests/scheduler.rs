@@ -34,7 +34,7 @@ fn z_image_default_sigmas_linspace() {
 #[test]
 fn z_image_8step_schedule_matches_diffusers() {
     // shift σ' = 3σ/(1+2σ) applied to linspace(1, 1/8, 8), terminal 0 appended.
-    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0 };
+    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0, invert_sigmas: false };
     let mut sched = FlowMatchEulerScheduler::new(cfg);
     sched.set_timesteps(&default_z_image_sigmas(8));
 
@@ -51,7 +51,7 @@ fn z_image_8step_schedule_matches_diffusers() {
 
 #[test]
 fn euler_step_is_first_order_increment() {
-    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0 };
+    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0, invert_sigmas: false };
     let mut sched = FlowMatchEulerScheduler::new(cfg);
     sched.set_timesteps(&default_z_image_sigmas(8));
 
@@ -68,7 +68,7 @@ fn euler_step_is_first_order_increment() {
 fn constant_velocity_integrates_exactly_to_minus_v() {
     // Euler with a constant velocity telescopes: Σ(σ_{i+1}-σ_i) = σ_N - σ_0 =
     // 0 - 1 = -1, so integrating v across all steps yields x0 - v exactly.
-    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0 };
+    let cfg = FlowMatchConfig { num_train_timesteps: 1000, shift: 3.0, invert_sigmas: false };
     let mut sched = FlowMatchEulerScheduler::new(cfg);
     sched.set_timesteps(&default_z_image_sigmas(8));
 
@@ -83,4 +83,32 @@ fn constant_velocity_integrates_exactly_to_minus_v() {
         .map(|(xi, vi)| xi - vi)
         .collect();
     assert_close(&x, &want, 1e-5, "full constant-velocity integration");
+}
+
+/// MiniMax Music 3's exact scheduler config (`FlowMatchEulerDiscreteScheduler(
+/// num_train_timesteps=1, shift=1.0, invert_sigmas=True)`): `shift=1.0` makes
+/// the static-shift formula the identity, so this isolates `invert_sigmas`.
+/// Hand-derived from diffusers' own `invert_sigmas` branch: `sigmas_in =
+/// linspace(1.0, 1/N, N)`, shifted (no-op here), inverted (`1 - σ`), terminal
+/// `1.0` appended - the reverse of the non-inverted convention's terminal `0`.
+#[test]
+fn invert_sigmas_reverses_the_schedule_and_terminates_at_one() {
+    let cfg = FlowMatchConfig { num_train_timesteps: 1, shift: 1.0, invert_sigmas: true };
+    let mut sched = FlowMatchEulerScheduler::new(cfg);
+    // linspace(1.0, 0.25, 4).
+    sched.set_timesteps(&[1.0, 0.75, 0.5, 0.25]);
+
+    let want_sigmas = [0.0, 0.25, 0.5, 0.75, 1.0];
+    assert_close(sched.sigmas(), &want_sigmas, 1e-6, "inverted sigmas");
+    // timesteps = inverted_sigma * num_train_timesteps(=1), before the terminal.
+    let want_timesteps = [0.0, 0.25, 0.5, 0.75];
+    assert_close(sched.timesteps(), &want_timesteps, 1e-6, "inverted timesteps");
+
+    // dt is now POSITIVE (walking noise -> data as sigma increases toward 1).
+    let x = vec![2.0f32];
+    let v = vec![1.0f32];
+    let dt = sched.sigmas()[1] - sched.sigmas()[0];
+    assert!(dt > 0.0, "inverted schedule must step forward, got dt={dt}");
+    let got = sched.step(&v, &x);
+    assert_close(&got, &[2.0 + dt], 1e-6, "single inverted euler step");
 }
