@@ -173,6 +173,8 @@ pub const BCE_LOGITS_GRAD: &str = include_str!("../wgsl/bce_logits_grad.wgsl");
 pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 /// `wgsl/bias_grad.wgsl`
 pub const BIAS_GRAD: &str = include_str!("../wgsl/bias_grad.wgsl");
+/// `wgsl/bias_grad_ncl.wgsl`
+pub const BIAS_GRAD_NCL: &str = include_str!("../wgsl/bias_grad_ncl.wgsl");
 /// `wgsl/bmm.wgsl`
 pub const BMM: &str = include_str!("../wgsl/bmm.wgsl");
 /// `wgsl/bmm_acc.wgsl`
@@ -849,6 +851,8 @@ pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
+/// `wgsl/tanh_act_bwd.wgsl`
+pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
 /// `wgsl/tau_scale.wgsl`
 pub const TAU_SCALE: &str = include_str!("../wgsl/tau_scale.wgsl");
 /// `wgsl/tau_scale_ds.wgsl`
@@ -946,6 +950,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
+    ("bias_grad_ncl", BIAS_GRAD_NCL),
     ("bmm", BMM),
     ("bmm_acc", BMM_ACC),
     ("bn_dbeta", BN_DBETA),
@@ -1284,6 +1289,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splice_bwd", SPLICE_BWD),
     ("sub", SUB),
     ("tanh_act", TANH_ACT),
+    ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),
     ("tau_scale_ds", TAU_SCALE_DS),
     ("topk_extract_step", TOPK_EXTRACT_STEP),

@@ -120,6 +120,7 @@ load of it must already be bare-identifier-indexed.
 | [`bce_logits_grad`](../../crates/kernels/wgsl/bce_logits_grad.wgsl) | Gradient of bce_logits w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bias_add`](../../crates/kernels/wgsl/bias_add.wgsl) | Add a per-output-feature bias in place | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bias_grad`](../../crates/kernels/wgsl/bias_grad.wgsl) | Bias gradient:  dbias[n] += sum_m dy[m,n] | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`bias_grad_ncl`](../../crates/kernels/wgsl/bias_grad_ncl.wgsl) | Per-channel bias gradient over NCL | one thread per channel, serial reduction over rows*inner | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm`](../../crates/kernels/wgsl/bmm.wgsl) | Batched matmul: out[b,m,n] = alpha * sum_k A[b,·]·B[b,·], both operands vary per batch | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm_acc`](../../crates/kernels/wgsl/bmm_acc.wgsl) | Batched matmul, accumulating: out[b,m,n] += alpha * sum_k A[b,·]·B[b,·] | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bn_dbeta`](../../crates/kernels/wgsl/bn_dbeta.wgsl) | BatchNorm backward w.r.t. beta | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
@@ -458,6 +459,7 @@ load of it must already be bare-identifier-indexed.
 | [`splice_bwd`](../../crates/kernels/wgsl/splice_bwd.wgsl) | Residual splice (backward) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`sub`](../../crates/kernels/wgsl/sub.wgsl) | Elementwise subtract, with an independent flat offset into each input | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`tanh_act`](../../crates/kernels/wgsl/tanh_act.wgsl) | Tanh forward:  y = tanh(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`tanh_act_bwd`](../../crates/kernels/wgsl/tanh_act_bwd.wgsl) | Tanh backward: dx = dy * (1 - tanh(x)^2) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tau_scale`](../../crates/kernels/wgsl/tau_scale.wgsl) | Moondream per-(head, token) attention-temperature scale, broadcast over head_dim | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tau_scale_ds`](../../crates/kernels/wgsl/tau_scale_ds.wgsl) | tau_scale backward w.r.t. the per-(head,token) scale `s` | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`topk_extract_step`](../../crates/kernels/wgsl/topk_extract_step.wgsl) | One step of iterative top-K extraction | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
