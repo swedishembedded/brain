@@ -207,9 +207,10 @@ pub fn run_serve(args: &[String]) {
     let mut api_keys_out: Option<String> = None;
     let mut ready_file: Option<String> = None;
     // Diagnostic verbosity (`-v`/`--verbose [0-3]`, else $BRAIN_VERBOSE) -- see
-    // HELP above for what each tier gates. Clamped by `residency::log::set_verbosity`,
-    // not here, so an out-of-range env var doesn't need its own validation.
-    let mut verbose: u8 = std::env::var("BRAIN_VERBOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // HELP above for what each tier gates. Parsed and installed globally now
+    // (`main::install_verbosity`, run before any subcommand including this
+    // one), so by the time this loop runs, `-v`/`--verbose` are already
+    // stripped from `args` -- no local state or match arms needed here.
     // Optional PORT immediately following an API flag (else the provider default).
     let take_port = |args: &[String], i: &mut usize, default: u16| -> u16 {
         if let Some(p) = args.get(*i + 1).and_then(|s| s.parse::<u16>().ok()) {
@@ -250,16 +251,6 @@ pub fn run_serve(args: &[String]) {
             "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
             "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
-            "-v" => verbose = verbose.saturating_add(1),
-            "--verbose" => {
-                verbose = match args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
-                    Some(n) => {
-                        i += 1;
-                        n
-                    }
-                    None => 1, // bare --verbose (no numeric arg) means level 1
-                };
-            }
             "--help" | "-h" => {
                 print!("{HELP}");
                 return;
@@ -277,10 +268,6 @@ pub fn run_serve(args: &[String]) {
         }
         i += 1;
     }
-    // Set BEFORE anything that could log (the executor's own construction
-    // already registers models) -- both the stdio loop and run_apis below
-    // read this same process-global level.
-    residency::log::set_verbosity(verbose);
 
     let surfaces_requested =
         dbus as usize + anthropic.is_some() as usize + openai.is_some() as usize + openrouter.is_some() as usize;
@@ -793,11 +780,14 @@ mod tests {
     /// documented in `HELP` -- this is the content-side gate for the bench
     /// incident (`--listen` was undocumented AND unparsed; a flag that is
     /// parsed but undocumented is the same bug in the other direction).
+    /// `-v`/`--verbose` are documented here too (still valid on `brain serve
+    /// ...`) but are no longer in this list: `main::install_verbosity` strips
+    /// them from argv globally before `run_serve`'s own loop ever runs.
     #[test]
     fn help_documents_every_flag_the_parser_accepts() {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
-            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file", "-v", "--verbose",
+            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }

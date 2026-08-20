@@ -130,6 +130,12 @@ boots), shared by --device gpuN, shard placement and residency budgets.
 `brain devices` prints the table (index, PCI bus, UUID, VRAM, backends) and what
 the ambient selection resolves to.
 
+DIAGNOSTIC VERBOSITY (global - valid on any subcommand, including auto-fetch)
+  -v, --verbose [0-3]      0 errors only (default) | 1 +warnings | 2 +lifecycle
+                           (model activate/evict, auto-fetch download progress)
+                           | 3 +fine-grained detail. Repeatable (-v -v = 2);
+                           bare --verbose (no number) means 1. Else $BRAIN_VERBOSE.
+
 TRACING (structured, per-component; global - valid on any subcommand)
   --trace-<family> <0-5>   0 off (default) | 1 errors | 2 +warnings | 3 +lifecycle
                            | 4 +per-step decisions and timings | 5 everything
@@ -751,9 +757,49 @@ fn install_tracing(argv: Vec<String>) -> Vec<String> {
     rest
 }
 
+/// Extract the global `-v`/`--verbose [0-3]` flags from anywhere in `argv`
+/// (else `$BRAIN_VERBOSE`) and return `(level, remaining args)`. Pure - no
+/// process-global side effect - so it's testable without racing every other
+/// test in this binary over `residency::log`'s one `AtomicU8`; [`main`] is
+/// the sole caller of [`residency::log::set_verbosity`] with this result.
+///
+/// [`main`] runs this FIRST, alongside [`install_tracing`]: auto-fetch
+/// download progress (`residency::log::info`, from
+/// `crate::supply::ensure_env_weights`) fires from `resolve::dispatch`,
+/// before any subcommand's own argument parsing even starts, so a level
+/// installed any later would miss it. This used to be `run_serve`'s own
+/// local flag (`-v` only took effect on `brain serve`); every other command,
+/// including a plain `brain s3dit text2image` that triggers a multi-gigabyte
+/// weight fetch, had no way to ask for the progress lines that code already
+/// emits.
+fn parse_verbosity(argv: Vec<String>) -> (u8, Vec<String>) {
+    let mut level: u8 = std::env::var("BRAIN_VERBOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "-v" => level = level.saturating_add(1),
+            "--verbose" => {
+                level = match argv.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
+                    Some(n) => {
+                        i += 1;
+                        n
+                    }
+                    None => 1, // bare --verbose (no numeric arg) means level 1
+                };
+            }
+            _ => rest.push(argv[i].clone()),
+        }
+        i += 1;
+    }
+    (level, rest)
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let argv = install_tracing(argv);
+    let (verbosity, argv) = parse_verbosity(argv);
+    residency::log::set_verbosity(verbosity);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -789,7 +835,32 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::HELP;
+    use super::{parse_verbosity, HELP};
+
+    /// `-v` is repeatable and additive; the flag itself is stripped from the
+    /// returned args so downstream parsing never sees it. Pure function, so
+    /// no `residency::log` global state to race against other tests.
+    #[test]
+    fn parse_verbosity_strips_repeated_v_and_sums_the_level() {
+        let argv = ["brain", "-v", "-v", "s3dit", "text2image"].map(String::from).to_vec();
+        let (level, rest) = parse_verbosity(argv);
+        assert_eq!(level, 2);
+        assert_eq!(rest, ["brain", "s3dit", "text2image"].map(String::from).to_vec());
+    }
+
+    /// `--verbose <N>` sets the level explicitly and consumes its argument;
+    /// a bare `--verbose` (no following number) means level 1.
+    #[test]
+    fn parse_verbosity_accepts_an_explicit_level_and_a_bare_form() {
+        let argv = ["brain", "--verbose", "3", "ltxv", "t2v"].map(String::from).to_vec();
+        let (level, rest) = parse_verbosity(argv);
+        assert_eq!(level, 3);
+        assert_eq!(rest, ["brain", "ltxv", "t2v"].map(String::from).to_vec());
+
+        let (level, rest) = parse_verbosity(vec!["brain".to_string(), "--verbose".to_string()]);
+        assert_eq!(level, 1);
+        assert_eq!(rest, vec!["brain".to_string()]);
+    }
 
     /// The trace-family registry and this binary's help text are two lists of
     /// the same thing, and only one of them is compiled: a family added to
