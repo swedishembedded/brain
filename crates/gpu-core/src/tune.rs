@@ -34,8 +34,11 @@ pub fn source_fingerprint(sources: &[&str]) -> u64 {
 
 /// The one cache-directory resolution (`BRAIN_PIPELINE_CACHE_DIR` >
 /// `XDG_CACHE_HOME/brain` > `~/.cache/brain`) — shared with `roof`'s persist
-/// layer, which used to carry a verbatim copy.
-pub(crate) fn cache_dir() -> Option<PathBuf> {
+/// layer, which used to carry a verbatim copy, and re-exported as
+/// `gpu_core::cache_dir` for anything else in the workspace that needs a
+/// place to persist derived data. Public so a second copy of this ladder
+/// never gets written.
+pub fn cache_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
         return Some(d.into());
     }

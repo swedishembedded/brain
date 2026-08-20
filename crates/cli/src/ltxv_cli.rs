@@ -227,13 +227,19 @@ fn t2v(args: &[String]) -> Result<(), String> {
         eprint!("\rltxv [{done}/{total}] {phase}                    ");
     })?;
     eprintln!();
+    // Every stage, plus whatever none of them explains. A breakdown whose
+    // parts summed to half its own total is what hid the largest stage in
+    // this pipeline from two prior optimization passes, so the remainder is
+    // printed rather than left implicit.
+    let wall = t0.elapsed().as_secs_f32();
     eprintln!(
-        "ltxv: {:.1}s total  (build {:.2}s, denoise {:.1}s = {:.3}s/forward, vae {:.1}s)",
-        t0.elapsed().as_secs_f32(),
+        "ltxv: {wall:.1}s total  (build {:.2}s, text encode {:.1}s, denoise {:.1}s = {:.3}s/forward, vae {:.1}s, other {:.1}s)",
         timings.build_dit,
+        timings.text_encode,
         timings.denoise,
         timings.secs_per_forward(),
-        timings.decode
+        timings.decode,
+        timings.unattributed(wall)
     );
 
     let frames: Vec<imaging::Rgb8> = video.frames.iter().map(|px| imaging::Rgb8::new(video.width, video.height, px.clone())).collect::<Result<_, _>>()?;
@@ -327,12 +333,13 @@ fn dfr(args: &[String]) -> Result<(), String> {
         eprint!("\rltxv dfr [{done}/{total}] {phase}                    ");
     })?;
     eprintln!();
+    let wall = t0.elapsed().as_secs_f32();
     eprintln!(
-        "ltxv dfr: {:.1}s total  (build {:.2}s, denoise+upsample {:.1}s, vae {:.1}s)",
-        t0.elapsed().as_secs_f32(),
+        "ltxv dfr: {wall:.1}s total  (build {:.2}s, denoise+upsample {:.1}s, vae {:.1}s, other {:.1}s)",
         timings.build_dit,
         timings.denoise,
-        timings.decode
+        timings.decode,
+        timings.unattributed(wall)
     );
 
     let frames: Vec<imaging::Rgb8> = video.frames.iter().map(|px| imaging::Rgb8::new(video.width, video.height, px.clone())).collect::<Result<_, _>>()?;

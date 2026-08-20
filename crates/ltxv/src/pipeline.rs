@@ -255,6 +255,18 @@ pub struct Video {
 #[derive(Clone, Debug, Default)]
 pub struct Timings {
     pub build_dit: f32,
+    /// Prompt -> text context: the whole [`real_text_context`] call, or 0
+    /// when the stub context stands in for it.
+    ///
+    /// This field exists because its absence was a real, expensive defect,
+    /// not because a breakdown is nice to have. Every previously published
+    /// number for this pipeline printed `build + denoise + vae` against a
+    /// wall clock those three summed to roughly half of, and the missing
+    /// half WAS this stage - so two optimization passes went into the
+    /// second-largest stage while the largest had never been measured once.
+    /// A breakdown must either account for its own total or name what it is
+    /// missing; [`Timings::unattributed`] is the other half of that rule.
+    pub text_encode: f32,
     pub denoise: f32,
     pub decode: f32,
     pub steps: usize,
@@ -263,8 +275,17 @@ pub struct Timings {
 }
 
 impl Timings {
+    /// Everything this struct actually attributes. Compare against a caller's
+    /// own wall clock via [`Self::unattributed`] rather than presenting this
+    /// as the run's total.
     pub fn total(&self) -> f32 {
-        self.build_dit + self.denoise + self.decode
+        self.build_dit + self.text_encode + self.denoise + self.decode
+    }
+
+    /// The part of `wall` no field here explains - printed as its own row so
+    /// a stage nobody has instrumented yet is visible instead of invisible.
+    pub fn unattributed(&self, wall: f32) -> f32 {
+        (wall - self.total()).max(0.0)
     }
 
     pub fn secs_per_forward(&self) -> f32 {
@@ -337,21 +358,24 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// `crate::dit::forward_q_streamed` expect.
 ///
 /// Returns `(ctx_cond, ctx_uncond, context_valid, context_len)`.
-/// `context_len` is the COND prompt's real token count, PADDED up to a
-/// multiple of `dit_cfg.connector_num_learnable_registers` when
+/// `context_len` is the reference's own fixed Gemma-4 tokenizer width
+/// (`GEMMA4_MAX_PROMPT_TOKENS`'s doc - `TOKENIZER_MAX_LENGTH = 1024`, NOT a
+/// multiple of `dit_cfg.connector_num_learnable_registers` derived from the
+/// prompt's own token count, an earlier and unverified assumption) when
 /// `dit_cfg.use_embeddings_connector` is set (NOT [`GenOpts::context_len`],
-/// which only sizes [`context_stub`]'s fake context): `crate::block::
-/// EmbeddingsConnector::forward` requires its own input length to be an
-/// exact multiple of its register count (register substitution tiles the
+/// which only sizes [`context_stub`]'s fake context). `crate::block::
+/// EmbeddingsConnector::forward` still requires its own input length to be
+/// an exact multiple of its register count (register substitution tiles the
 /// registers round-robin over the INVALID positions - see that function's
-/// doc), and a real config's register count (128 for
-/// `LtxDitConfig::ltx25_22b`) will essentially never divide a real short
-/// prompt's own token count. `context_valid` marks the real (`1.0`) vs
-/// padded (`0.0`) positions so the connector substitutes its own learnable
-/// registers into the padded tail rather than the DiT reading zeros as if
-/// they were real caption content - the padded rows in `ctx_cond`/
-/// `ctx_uncond` are zero exactly because the connector rewrites them before
-/// any block reads them (see `EmbeddingsConnector::forward`'s step 1).
+/// doc); `1024` happens to already be an exact multiple of the real
+/// checkpoint's `connector_num_learnable_registers` (128), so no further
+/// rounding is needed on top of it. `context_valid` marks the real (`1.0`)
+/// vs padded (`0.0`) positions so the connector substitutes its own
+/// learnable registers into the padded tail rather than the DiT reading
+/// zeros as if they were real caption content - the padded rows in
+/// `ctx_cond`/`ctx_uncond` are zero exactly because the connector rewrites
+/// them before any block reads them (see `EmbeddingsConnector::forward`'s
+/// step 1).
 ///
 /// `denoise`'s own CFG fold shares ONE `context_len`/`context_valid` pair
 /// across both branches, so when `guidance > 1.0` the empty-prompt
@@ -361,26 +385,107 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// skips the unconditional forward entirely, per this module's doc);
 /// `ctx_uncond` there is an all-zero vector of the same shape,
 /// [`context_stub`]'s own "closest honest stand-in" convention.
-/// `(ctx_cond, ctx_uncond, context_valid, context_len)` - the four pieces
-/// [`real_text_context`] hands back to [`generate`]'s CFG fold.
+///
+/// `(ctx_cond, ctx_uncond, context_valid, context_len)` - what an encode
+/// hands the denoise loop, and what [`crate::text_cache`] stores.
 type TextContext = (Vec<f32>, Vec<f32>, Vec<f32>, usize);
 
+#[tracing::instrument(level = "info", name = "text_encode", skip_all, fields(prompt_chars = prompt.len(), guidance = guidance))]
 fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>) -> Result<TextContext, String> {
     use data::Tokenizer as _;
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 
-    let raw = checkpoint::safetensors::read(path)?;
-    let tok = gemma4::load_tokenizer(&raw)?;
     let cfg = gemma4::Gemma4Config::gemma4_12b();
     let hidden = cfg.hidden_size as usize;
     let n_states = cfg.num_hidden_layers as usize + 1;
-    let weights = gemma4::import_gemma4(raw, &cfg)?;
-    // Extracted from `weights` by reference BEFORE `Gemma4Model::new` takes
-    // ownership of it below - the video aggregate-embed head's own two
-    // tensors are cloned out, not borrowed, so this ordering is only about
-    // avoiding a second file read/import, not a borrow-checker requirement.
-    let agg = gemma4::AggregateEmbed::from_weights(&weights, hidden, n_states);
-    let model = gemma4::Gemma4Model::new(cfg, weights, device);
+
+    // A `.gguf` here is a quantized text tower produced by `brain quantize`.
+    // It is read on demand, one layer at a time, and its projections run in
+    // int8 where the device has a packed-dot path - so this branch is both
+    // about half the bytes of the bf16 safetensors and a different tier of
+    // arithmetic. A `.safetensors` path keeps the original behaviour exactly.
+    let quantized = path.ends_with(".gguf");
+    // `BRAIN_LTXV_TEXT_PRECISION=fp32` forces the portable tier over a
+    // quantized checkpoint. Two real uses: comparing the two tiers' output
+    // on the SAME file (which is the only cheap way to get a whole-encoder
+    // fp32-vs-int8 number, since both reads then hit the same bytes), and a
+    // platform whose fast path is fp32 and which therefore wants the smaller
+    // file without the int8 arithmetic. `Precision::for_device` still has
+    // the last word in the other direction - it can refuse int8, never
+    // impose it.
+    let precision = match std::env::var("BRAIN_LTXV_TEXT_PRECISION").ok().as_deref().map(str::trim) {
+        Some("fp32") | Some("f32") => gemma4::Precision::Fp32,
+        Some("int8") | Some("i8") => gemma4::Precision::Int8,
+        Some(other) if !other.is_empty() => {
+            return Err(format!("ltxv real text encoder: BRAIN_LTXV_TEXT_PRECISION='{other}' is not one of fp32, int8"));
+        }
+        _ if quantized => gemma4::Precision::Int8,
+        _ => gemma4::Precision::Fp32,
+    };
+
+    // The cache is checked BEFORE anything is read. On a hit this whole
+    // stage - the largest in the pipeline - costs a few megabytes of file
+    // read, because the encode is a pure function of the key below.
+    let (encoder_len, encoder_mtime) = crate::text_cache::encoder_identity(path);
+    let cache_key = crate::text_cache::Key {
+        prompt: prompt.to_string(),
+        encoder_path: path.to_string(),
+        encoder_len,
+        encoder_mtime,
+        precision: format!("{precision:?}"),
+        cross_attention_dim,
+        connector_registers: dit_cfg.connector_num_learnable_registers,
+        use_connector: dit_cfg.use_embeddings_connector,
+        uncond_encoded: guidance > 1.0,
+    };
+    if let Some(hit) = crate::text_cache::load(&cache_key) {
+        return Ok((hit.ctx_cond, hit.ctx_uncond, hit.context_valid, hit.context_len));
+    }
+
+    // Sub-stage timings, not one opaque block. The stage as a whole was
+    // unmeasured until recently and turned out to be the largest in the
+    // pipeline; measuring only its total would repeat that mistake one level
+    // down, because "read the checkpoint" and "run the forward" have
+    // completely different fixes and only a split says which one to attack.
+    let source_bytes: u64 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let t_read = std::time::Instant::now();
+
+    // Two loaders, one downstream shape: both end up as "something that can
+    // run a forward" plus the aggregate-embed head plus the checkpoint's own
+    // tokenizer, so everything past this point is identical.
+    //
+    // Both are built ONCE, before the closure below, and neither the weight
+    // map nor the 770-million-parameter head is ever copied per call. The
+    // eager map is the whole model as f32; cloning it to encode a second
+    // prompt would double the largest allocation in the process.
+    enum Encoder {
+        Gguf(gemma4::Gemma4GgufSource),
+        Eager(gemma4::Gemma4Model),
+    }
+    let (encoder, agg, tok) = if quantized {
+        let src = gemma4::Gemma4GgufSource::open(path, &cfg)?;
+        let tok = src.tokenizer()?;
+        let t_agg_load = std::time::Instant::now();
+        let agg = aggregate_head_from_source(&src, hidden, n_states)?;
+        tracing::info!(secs = t_agg_load.elapsed().as_secs_f32(), "aggregate-embed head loaded");
+        (Encoder::Gguf(src), agg, tok)
+    } else {
+        let raw = checkpoint::safetensors::read(path)?;
+        let tok = gemma4::load_tokenizer(&raw)?;
+        let weights = gemma4::import_gemma4(raw, &cfg)?;
+        // Built by reference BEFORE `Gemma4Model::new` takes ownership of the
+        // map - the head's own two tensors are cloned out, not borrowed.
+        let agg = gemma4::AggregateEmbed::from_weights(&weights, hidden, n_states);
+        (Encoder::Eager(gemma4::Gemma4Model::new(cfg, weights, device)), agg, tok)
+    };
+    let read_s = t_read.elapsed().as_secs_f32();
+    tracing::info!(
+        secs = read_s,
+        bytes = source_bytes,
+        mib_per_s = source_bytes as f32 / read_s.max(1e-6) / (1024.0 * 1024.0),
+        quantized,
+        "text encoder opened"
+    );
 
     // A real tokenizer can legitimately return zero tokens for an empty (or
     // whitespace-only) string; `T=0` has no representable RoPE/attention
@@ -396,11 +501,27 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
             ids
         }
     };
+
+    // One closure covers both loaders and both prompts, so the conditional
+    // and unconditional branches cannot drift apart.
+    let encode = |ids: &[u32]| -> Result<Vec<f32>, String> {
+        let n = ids.len();
+        let t_fwd = std::time::Instant::now();
+        let hidden_states = match &encoder {
+            Encoder::Gguf(src) => gemma4::forward_streamed(&cfg, src, device, precision, ids)?.hidden_states,
+            Encoder::Eager(model) => model.forward(ids).hidden_states,
+        };
+        tracing::info!(secs = t_fwd.elapsed().as_secs_f32(), tokens = n, layers = cfg.num_hidden_layers, ?precision, "text tower forward");
+        let t_agg = std::time::Instant::now();
+        let out = agg.forward(&hidden_states, n, hidden);
+        tracing::info!(secs = t_agg.elapsed().as_secs_f32(), tokens = n, in_dim = hidden * n_states, "aggregate-embed projection");
+        Ok(out)
+    };
+
     let ids_cond = tokenize(prompt);
     let n_cond = ids_cond.len();
     let context_len = padded_context_len(dit_cfg, n_cond);
-    let out_cond = model.forward(&ids_cond);
-    let raw_cond = agg.forward(&out_cond.hidden_states, n_cond, hidden);
+    let raw_cond = encode(&ids_cond)?;
     if raw_cond.len() != n_cond * cross_attention_dim {
         return Err(format!(
             "ltxv real text encoder: aggregate-embed produced {} values, expected {} ({n_cond} tokens x {cross_attention_dim} cross_attention_dim) - checkpoint/config mismatch",
@@ -415,8 +536,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
 
     let ctx_uncond = if guidance > 1.0 {
         let ids_u = tokenize("");
-        let out_u = model.forward(&ids_u);
-        let raw_u = agg.forward(&out_u.hidden_states, ids_u.len(), hidden);
+        let raw_u = encode(&ids_u)?;
         let mut v = vec![0f32; context_len * cross_attention_dim];
         let rows = ids_u.len().min(context_len);
         v[..rows * cross_attention_dim].copy_from_slice(&raw_u[..rows * cross_attention_dim]);
@@ -425,7 +545,34 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
         vec![0f32; context_len * cross_attention_dim]
     };
 
+    crate::text_cache::store(
+        &cache_key,
+        &crate::text_cache::Encoded {
+            ctx_cond: ctx_cond.clone(),
+            ctx_uncond: ctx_uncond.clone(),
+            context_valid: context_valid.clone(),
+            context_len,
+        },
+    );
     Ok((ctx_cond, ctx_uncond, context_valid, context_len))
+}
+
+/// `gemma4::AggregateEmbed` over a streaming source. The eager path builds
+/// this from a whole-model map it already has; a streamed one has to pull
+/// the head's own two tensors, which is the ONE place a `TensorSource` is
+/// asked for something outside the layer loop.
+fn aggregate_head_from_source(src: &dyn checkpoint::TensorSource, hidden: usize, n_states: usize) -> Result<gemma4::AggregateEmbed, String> {
+    let get = |name: &str| -> Result<Vec<f32>, String> {
+        let mut out = None;
+        if !src.with_tensor(name, &mut |d| out = Some(d.to_vec())) {
+            return Err(format!("ltxv real text encoder: text encoder has no tensor {name}"));
+        }
+        Ok(out.expect("with_tensor reported found, so the callback ran"))
+    };
+    let weight = get("text_embedding_projection.video_aggregate_embed.weight")?;
+    let bias = get("text_embedding_projection.video_aggregate_embed.bias")?;
+    let out_dim = bias.len();
+    Ok(gemma4::AggregateEmbed::new(weight, bias, hidden * n_states, out_dim))
 }
 
 /// `[3, T, 2]` row-major RoPE position bounds for a `(f, h, w)` latent grid -
@@ -769,9 +916,13 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     let (ctx_cond, ctx_uncond, context_valid, context_len) = match &paths.text_encoder {
         Some(te_path) => {
             tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
-            real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())
+            let te_t = std::time::Instant::now();
+            let r = real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())
                 .inspect(|(_, _, _, n)| tracing::info!(context_len = n, "prompt encoded"))
-                .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?
+                .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
+            timings.text_encode = te_t.elapsed().as_secs_f32();
+            tracing::info!(secs = timings.text_encode, "text encode done");
+            r
         }
         None => {
             // Same class of silent-nonsense as the tiny DiT above: the prompt

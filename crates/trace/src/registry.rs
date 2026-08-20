@@ -52,8 +52,13 @@ pub const FAMILIES: &[Family] = &[
     },
     Family {
         name: "ltxv",
-        targets: &["ltxv"],
-        about: "LTX-2.5 video: pipeline stages, denoise steps, streamed DiT blocks",
+        // `gemma4` is the text encoder the ltxv pipeline runs, and its layer
+        // loop is one of that pipeline's stages - not a separately
+        // interesting model here. Covering it under this family is what
+        // makes `--trace-ltxv 5` account for the whole generation rather
+        // than for everything except its largest stage.
+        targets: &["ltxv", "gemma4"],
+        about: "LTX-2.5 video: pipeline stages, denoise steps, streamed DiT blocks, the Gemma-4 text encode",
     },
 ];
 

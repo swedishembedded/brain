@@ -180,3 +180,47 @@ fn int8_is_requested_and_resolved_against_the_device_never_assumed() {
     // fp32 is never promoted: asking for the portable tier always gets it.
     assert_eq!(Precision::for_device(&gpu, Precision::Fp32), Precision::Fp32);
 }
+
+/// The whole encoder, both tiers, same file: 48 layers end to end rather than
+/// one layer in isolation.
+///
+/// Opt-in (`BRAIN_GEMMA4_FULL_PARITY=1`) because it reads the real 13 GiB
+/// checkpoint twice and would dominate the default suite's budget. The
+/// per-layer gate above is what runs by default, matching `ltxv`'s own
+/// precedent of gating one real block rather than a whole real forward. This
+/// exists so the end-to-end number is reproducible by command rather than
+/// being a one-off someone wrote in a document.
+///
+/// Both arms read the SAME quantized file, so the only difference is the
+/// arithmetic - which is exactly the comparison wanted, and is why
+/// `BRAIN_LTXV_TEXT_PRECISION` exists on the pipeline side too. Comparing an
+/// int8 GGUF forward against a bf16 safetensors forward would confound the
+/// tier with the storage format.
+#[test]
+fn real_q8_0_whole_encoder_int8_matches_fp32() {
+    if std::env::var("BRAIN_GEMMA4_FULL_PARITY").as_deref() != Ok("1") {
+        brain_testutil::skip("set BRAIN_GEMMA4_FULL_PARITY=1 to run the whole-encoder int8-vs-fp32 comparison (reads the real checkpoint twice)");
+        return;
+    }
+    let Some(path) = gguf_path() else {
+        brain_testutil::skip("set BRAIN_GEMMA4_GGUF to a real Gemma-4 Q8_0 GGUF");
+        return;
+    };
+    let cfg = Gemma4Config::gemma4_12b();
+    let src = Gemma4GgufSource::open(&path, &cfg).unwrap_or_else(|e| panic!("opening {path}: {e}"));
+    let ids: Vec<u32> = vec![2, 476, 5479, 12817, 611, 496, 8698, 1];
+
+    let f32_out = gemma4::forward_streamed(&cfg, &src, None, Precision::Fp32, &ids).expect("fp32 forward");
+    let i8_out = gemma4::forward_streamed(&cfg, &src, None, Precision::Int8, &ids).expect("int8 forward");
+
+    let (cos, rel) = cosine_and_rel_l2(&f32_out.last_hidden_state, &i8_out.last_hidden_state);
+    println!("real Q8_0 WHOLE encoder ({} layers) int8 vs fp32: last_hidden_state cosine {cos:.9} rel_l2 {rel:.6}", cfg.num_hidden_layers);
+    assert_eq!(f32_out.hidden_states.len(), i8_out.hidden_states.len());
+    for (i, (a, b)) in f32_out.hidden_states.iter().zip(&i8_out.hidden_states).enumerate() {
+        let (c, r) = cosine_and_rel_l2(a, b);
+        assert!(c >= 0.98, "hidden_states[{i}] diverged: cosine {c:.9}");
+        assert!(r <= 0.30, "hidden_states[{i}] magnitude diverged: rel_l2 {r:.6}");
+    }
+    assert!(cos >= 0.98, "whole-encoder int8 output diverged from fp32: cosine {cos:.9}");
+    assert!(rel <= 0.30, "whole-encoder int8 magnitude diverged from fp32: rel_l2 {rel:.6}");
+}

@@ -264,14 +264,27 @@ pub fn forward_streamed(
     }
     let norm_w = norm_w.expect("with_tensor reported found, so the callback ran");
 
-    // Resolve the precision ONCE, against a throwaway handle on the same
-    // device the forward will use, so every layer is built at the same tier
-    // and the fallback notice is printed once rather than 48 times.
-    let precision = Precision::for_device(&open_device(device), requested);
-    tracing::info!(?requested, resolved = ?precision, layers = cfg.num_hidden_layers, tokens = input_ids.len(), "gemma4 streamed forward");
+    tracing::info!(?requested, layers = cfg.num_hidden_layers, tokens = input_ids.len(), "gemma4 streamed forward");
 
+    // Resolved ONCE, on the device the forward is actually running on -
+    // never on a throwaway handle opened just to ask. Opening a device is
+    // not free (it compiles this crate's whole pipeline set) and device
+    // lifecycle in this workspace has its own history, so the capability
+    // query rides the handle `forward_core` already made rather than
+    // creating a second one. `Cell` because `build_layer` is `FnMut` and
+    // this is set on its first call.
+    let resolved: std::cell::Cell<Option<Precision>> = std::cell::Cell::new(None);
     let mut err: Option<String> = None;
     let out = forward_core(cfg, device, input_ids.len() as u32, embed_out, &norm_w, |gpu, l| {
+        let precision = match resolved.get() {
+            Some(p) => p,
+            None => {
+                let p = Precision::for_device(gpu, requested);
+                tracing::info!(?requested, resolved = ?p, "gemma4 precision resolved against the device");
+                resolved.set(Some(p));
+                p
+            }
+        };
         let t = load_layer_tensors(src, cfg, l).unwrap_or_else(|e| {
             err = Some(e);
             Tensors::new()

@@ -172,14 +172,25 @@ mod tests {
     /// property that keeps `--trace-ltxv 5` from also tracing the GPU.
     #[test]
     fn directives_cover_exactly_the_requested_families() {
-        let cfg = Config { families: vec![("ltxv".into(), 2)], ..Default::default() };
-        assert_eq!(cfg.directives(), vec!["ltxv=warn".to_string()]);
+        // Derived from the registry, never a transcription of one family's
+        // current target list: a family legitimately gains a target when the
+        // stage it covers grows a new crate, and a hardcoded expectation
+        // turns that into a test failure that says nothing about the
+        // property being checked.
+        for (name, level, suffix) in [("ltxv", 2u8, "warn"), ("gpu", 5, "trace")] {
+            let cfg = Config { families: vec![(name.into(), level)], ..Default::default() };
+            let f = family(name).expect("family is registered");
+            assert_eq!(cfg.directives().len(), f.targets.len(), "{name} expands to one directive per target");
+            for t in f.targets {
+                assert!(cfg.directives().contains(&format!("{t}={suffix}")), "{name} must cover target {t}");
+            }
+        }
 
-        let cfg = Config { families: vec![("gpu".into(), 5)], ..Default::default() };
-        let gpu = family("gpu").expect("the gpu family is registered");
-        assert_eq!(cfg.directives().len(), gpu.targets.len());
-        for t in gpu.targets {
-            assert!(cfg.directives().contains(&format!("{t}=trace")));
+        // And an unrequested family contributes nothing - the property that
+        // keeps `--trace-ltxv 5` from also tracing the GPU.
+        let cfg = Config { families: vec![("ltxv".into(), 5)], ..Default::default() };
+        for t in family("gpu").expect("registered").targets {
+            assert!(!cfg.directives().iter().any(|d| d.starts_with(&format!("{t}="))), "gpu target {t} must not appear");
         }
     }
 
@@ -201,6 +212,8 @@ mod tests {
     fn a_repeated_family_keeps_the_last_level() {
         let cfg = Config { families: vec![("ltxv".into(), 1), ("ltxv".into(), 5)], ..Default::default() };
         assert_eq!(cfg.level_of("ltxv"), 5);
-        assert_eq!(cfg.directives(), vec!["ltxv=trace".to_string()]);
+        let f = family("ltxv").expect("the ltxv family is registered");
+        assert_eq!(cfg.directives().len(), f.targets.len(), "a repeat must not duplicate the family's directives");
+        assert!(cfg.directives().iter().all(|d| d.ends_with("=trace")));
     }
 }

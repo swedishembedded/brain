@@ -129,6 +129,7 @@ pub mod int8;
 pub mod lora;
 pub mod modelgrad;
 pub mod na_decoder;
+pub mod text_cache;
 pub mod patchify;
 pub mod pipeline;
 pub mod rope;
