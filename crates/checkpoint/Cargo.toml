@@ -22,6 +22,15 @@ memmap2 = "0.9"
 # Native gets the full (std) safetensors — the writer uses std fs; the reader path
 # is shared with wasm below.
 safetensors.workspace = true
+# `backend_cpu::par` - the one pool/policy every host-parallel loop in this
+# tree routes through (that module's own doc). Used to fan the FP8 (E4M3)
+# byte->f32 LUT decode (`decode_e4m3_bytes`) out across cores: real profiling
+# found the sequential walk over a real checkpoint tensor's tens of millions
+# of elements to be the dominant real cost of streaming-importing a layer,
+# even after the LUT itself made each element O(1). Native only - wasm has no
+# thread pool here (Cranelift JIT + rayon do not target wasm32), so the wasm
+# build keeps the sequential loop.
+brain-backend-cpu.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm only needs the reader (parse_safetensors); the `std` feature pulls tempfile,
@@ -32,3 +41,6 @@ safetensors = { version = "0.8", default-features = false, features = ["alloc"] 
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
 # absent fixture can be made fatal and absent hardware cannot.
 brain-testutil.workspace = true
+# `data::rng::Lcg` - the one deterministic test PRNG, for
+# `e4m3_decode_bench.rs`'s synthetic byte buffer (test-only).
+brain-data.workspace = true

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::safetensors::{bf16_to_f32, e4m3fn_to_f32, f16_to_f32, StTensor};
+use crate::safetensors::{bf16_to_f32, decode_e4m3_bytes, f16_to_f32, StTensor};
 use crate::st::{ModelCard, CONFIG_KEY};
 
 /// Header metadata for one tensor (byte range is relative to the tensor blob).
@@ -364,7 +364,7 @@ fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
         "I64" => out.extend(raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)),
         "I32" => out.extend(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)),
         "U8" => out.extend(raw.iter().map(|&b| b as f32)),
-        "F8_E4M3" => out.extend(raw.iter().map(|&b| e4m3fn_to_f32(b))),
+        "F8_E4M3" => out.extend(decode_e4m3_bytes(raw)),
         // Named explicitly rather than falling into the `other` panic below:
         // E5M2 is a real, if rarer, FP8 checkpoint format (more exponent
         // range, less mantissa) - silently decoding its bytes as if they were

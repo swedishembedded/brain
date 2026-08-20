@@ -73,9 +73,43 @@ pub(crate) fn bf16_to_f32(h: u16) -> f32 {
 /// millions of elements - measured as the dominant cost of importing a real
 /// FP8 checkpoint layer, far more than the blockwise-scale multiply or the
 /// int8 requantization downstream of it.
-pub(crate) fn e4m3fn_to_f32(b: u8) -> f32 {
+pub fn e4m3fn_to_f32(b: u8) -> f32 {
     static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     LUT.get_or_init(|| std::array::from_fn(|i| e4m3fn_to_f32_scalar(i as u8)))[b as usize]
+}
+
+/// Decode a whole `F8_E4M3` byte buffer to f32 via [`e4m3fn_to_f32`]'s LUT -
+/// the one implementation [`parse`] (whole-file, eager) and
+/// `crate::mmap::decode_into` (whole-tensor/chunked, on-demand) both share,
+/// so they cannot drift.
+///
+/// Real per-layer profiling of `qwen35::stream::generate`'s streaming decode
+/// path (`crates/qwen35/tests/stream_profile.rs`) found this exact loop -
+/// even with the O(1) LUT above, which already cut the PER-ELEMENT cost by
+/// ~90% over the branches+`powi` scalar path - to still be the single
+/// largest real stage of a decode step: ~11-23s of a ~15-28s real per-layer
+/// total on this box (a real 372-383 MB layer, one FP8 byte per element),
+/// dwarfing the already-parallel `model::fp8::dequant_block128` block-scale
+/// multiply downstream of it and the GPU forward compute after that (both
+/// well under a second). The LUT made each element's OWN cost O(1); it never
+/// made the WALK over tens of millions of elements per tensor use more than
+/// one core. Native builds fix that here, the same way `model::int8::
+/// quantize_weight`/`model::fp8::dequant_block128` already fan their own
+/// host-parallel work out across `backend_cpu::par` ("rayon lives in exactly
+/// one crate" - that module's own doc) rather than adding a second, competing
+/// thread pool. wasm32 has no `backend_cpu` (Cranelift JIT + rayon do not
+/// target it) and keeps the sequential loop - identical math, not fanned out.
+pub fn decode_e4m3_bytes(raw: &[u8]) -> Vec<f32> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut out = vec![0f32; raw.len()];
+        backend_cpu::par::each_mut(&mut out, |i, v| *v = e4m3fn_to_f32(raw[i]));
+        out
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        raw.iter().map(|&b| e4m3fn_to_f32(b)).collect()
+    }
 }
 
 fn e4m3fn_to_f32_scalar(b: u8) -> f32 {
@@ -144,7 +178,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
                 .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)
                 .collect(),
             "U8" => raw.iter().map(|&b| b as f32).collect(),
-            "F8_E4M3" => raw.iter().map(|&b| e4m3fn_to_f32(b)).collect(),
+            "F8_E4M3" => decode_e4m3_bytes(raw),
             // Named explicitly rather than falling into the generic `other`
             // arm below: E5M2 is a real, if rarer, FP8 checkpoint format
             // (more exponent range, less mantissa) - silently decoding its
