@@ -32,9 +32,9 @@
 //!
 //! Naming targets deliberately match those two crates' existing conventions
 //! (`blocks.N.attn.wq/wk/wv/wo`, `blocks.N.qkv` fused, `multi_modal_projector.
-//! linear_{1,2}`) rather than inventing new ones — M4/M5 hoist the shared
-//! encoder implementations onto Omni's scale, and matching names now is what
-//! makes that hoist "config bump", not "second copy".
+//! linear_{1,2}`) rather than inventing new ones - the shared encoder
+//! implementations are hoisted onto Omni's scale, and matching names is what
+//! keeps that hoist a "config bump", not a "second copy".
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -284,14 +284,14 @@ pub fn map_talker(hf: &str) -> Option<String> {
 /// load the code predictor straight out of this unified checkpoint, the
 /// same way it loads everything else.
 ///
-/// FIXED (M9b follow-up, 2026-08-08): this used to be pure identity (kept
-/// the `talker.code_predictor.` prefix, doc comment explained it was
-/// "namespaced away from Talker's own `talker.blocks.*`") -- but Talker's
+/// This does NOT keep the `talker.code_predictor.` prefix as a pure identity
+/// mapping (an earlier version did, reasoning it needed to stay "namespaced
+/// away from Talker's own `talker.blocks.*`") -- but Talker's
 /// own attention/MLP tensors map to `talker.blocks.N.*` (a `talker.`
 /// prefix, via `map_moe_attn`/`map_moe_mlp`'s `brain_prefix` argument), so
 /// `mtp_hf_to_brain`'s bare `blocks.N.*` never actually collides with
 /// anything else in this flat unified namespace; the "namespace collision"
-/// concern the old comment raised didn't hold. Reusing `mtp_hf_to_brain`
+/// concern that earlier reasoning raised doesn't hold. Reusing `mtp_hf_to_brain`
 /// (rather than re-deriving the same rename here) is the "one
 /// implementation" answer -- `qwen3tts::import::import_mtp` already validated it
 /// for the standalone Qwen3-TTS MTP, and `crates/omni/tests/
@@ -309,14 +309,15 @@ pub fn map_code_predictor(hf: &str) -> Option<String> {
 /// `self_attn_layer_scale.scale`, …), `layers` not `blocks`, no dense-attn
 /// leaf rename at all.
 ///
-/// FIXED (M9b follow-up, 2026-08-08): this used to rename `pre_transformer.
-/// layers.N.*` onto the shared dense-attention convention (`blocks.N.attn.
-/// wq.weight` etc., via `dense_attn_leaf`) to match Thinker/Talker's own
-/// style - but `mimi::Codec` (read directly from `crates/mimi/src/
-/// model.rs`'s `transformer()`, lines 507-552) was never given that
-/// convention; it reads the untouched HF leaf names straight off its
-/// `ParamStore`. The rename made this unified checkpoint's code2wav tensors
-/// unloadable by their own consumer. `crates/qwen3omnimoe/tests/code2wav_parity.rs`
+/// This does NOT rename `pre_transformer.layers.N.*` onto the shared
+/// dense-attention convention (`blocks.N.attn.wq.weight` etc., via
+/// `dense_attn_leaf`) the way Thinker/Talker's own tensors are renamed (an
+/// earlier version did, to match their style) - but `mimi::Codec` (read
+/// directly from `crates/mimi/src/model.rs`'s `transformer()`, lines
+/// 507-552) was never given that convention; it reads the untouched HF leaf
+/// names straight off its `ParamStore`. That rename made this unified
+/// checkpoint's code2wav tensors unloadable by their own consumer.
+/// `crates/qwen3omnimoe/tests/code2wav_parity.rs`
 /// already validated `Codec`'s forward pass against real Omni weights read
 /// this exact (prefix-stripped, otherwise untouched) way.
 pub fn map_code2wav(hf: &str) -> Option<String> {

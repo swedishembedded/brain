@@ -12,14 +12,18 @@
 //! is CPU-bound but correct; a GPU-speed Step-tape version can follow once the
 //! unscaled-attention backward kernels exist.
 //!
-//! Built milestone by milestone, each gradcheck-gated:
-//! - **M2 (this file, now):** the terminal path — final RMSNorm → the quantile
+//! Built up gradcheck-gated, piece by piece, and now covers the full stack:
+//! - **The terminal path** - final RMSNorm → the quantile
 //!   head (a biased `ResidualBlock`) → rearrange → mean pinball loss. Exercises
 //!   rmsnorm/matmul/bias/relu/residual + [`forecast::metrics::mean_pinball_grad`]
 //!   backward, and the gradient w.r.t. the encoder output (`d_emb`) that the
-//!   block stack (M3) will consume.
-//! - M3: the encoder blocks (time attention + group degeneration + FFN).
-//! - M4: full backbone + a gated fine-tune entry (LoRA / promotion gate).
+//!   block stack consumes.
+//! - **The encoder blocks** (time attention + group degeneration + FFN).
+//! - **The full backbone**, chaining every block into the head path.
+//!
+//! A real fine-tune entry (AdamW + LoRA + promotion gate) is not yet
+//! implemented - [`Chronos2Train::sgd_step`] is a plain-SGD step used only by
+//! the from-scratch learning test.
 
 use crate::config::Chronos2Config;
 // Single implementation of the elementwise/normalisation math.
@@ -300,7 +304,7 @@ fn attention_bwd(
     (dq, dk, dv)
 }
 
-// ---- one encoder block (M3): time attention + group degeneration + FFN ---------
+// ---- one encoder block: time attention + group degeneration + FFN -------------
 
 /// Intermediates one [`Chronos2Train::block_forward`] backward needs.
 pub struct BlockCache {
@@ -324,16 +328,18 @@ pub struct BlockCache {
     s: usize,
 }
 
-/// Intermediates for the full-core backward (M4): every block's cache + the head's.
+/// Intermediates for the full-core backward: every block's cache + the head's.
 pub struct FullCache {
     blocks: Vec<BlockCache>,
     head: HeadCache,
 }
 
-// ---- the differentiable head path (M2) ----------------------------------------
+// ---- the differentiable head path ----------------------------------------------
 
 /// The trainable Chronos-2 (host). Holds a config and a name→weights map; the
-/// grad map mirrors the weight names. M2 exposes the terminal head path.
+/// grad map mirrors the weight names. Exposes the terminal head path
+/// ([`Chronos2Train::head_forward`]/[`Chronos2Train::head_backward`]), the
+/// encoder blocks, and the full backbone that chains them.
 pub struct Chronos2Train {
     pub cfg: Chronos2Config,
     pub w: HashMap<String, Vec<f32>>,
@@ -387,7 +393,7 @@ impl Chronos2Train {
     }
 
     /// Backward of [`head_forward`]: accumulate head + final-norm grads into `g`
-    /// and return `d_emb` `[s, d]` (the gradient the block stack consumes in M3).
+    /// and return `d_emb` `[s, d]` (the gradient the block stack consumes).
     pub fn head_backward(&self, cache: &HeadCache, target: &[f32], levels: &[f32], g: &mut HashMap<String, Vec<f32>>) -> Vec<f32> {
         let cfg = &self.cfg;
         let d = cfg.d_model;
@@ -502,7 +508,7 @@ impl Chronos2Train {
         (0..s * d).map(|i| d_emb1[i] + d_emb_in_a[i]).collect()
     }
 
-    /// Full differentiable core (M4): `num_layers` blocks → head path. `emb_in`
+    /// Full differentiable core: `num_layers` blocks → head path. `emb_in`
     /// `[s, d]` is the assembled token sequence (host scaler/patch/embed, kept
     /// out of the trained graph — the scaler is data-derived, not learned).
     /// Returns `(loss, cache)`.
@@ -530,8 +536,8 @@ impl Chronos2Train {
     }
 
     /// One plain-SGD step on a single example (accumulate grads, then `w -= lr*g`).
-    /// Returns the pre-step loss. Used by the from-scratch learning test; the real
-    /// fine-tune entry (AdamW + LoRA + promotion gate) is milestone 5.
+    /// Returns the pre-step loss. Used by the from-scratch learning test; a real
+    /// fine-tune entry (AdamW + LoRA + promotion gate) is not yet implemented.
     pub fn sgd_step(&mut self, emb_in: &[f32], mask: &[f32], n_out: usize, target: &[f32], levels: &[f32], lr: f32) -> f32 {
         let (loss, cache) = self.full_forward(emb_in, mask, n_out, target, levels);
         let mut g = self.zero_grads();

@@ -228,7 +228,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // qwen3omnimoe (Qwen3-Omni) is recognized via an exact HF class-name
         // match, so it is never mis-routed to the dense qwen3 importer even
         // though its class name contains "qwen" as a substring. The importer
-        // itself streams from the sharded HF dir fine (M3) -- what is NOT yet
+        // itself streams from the sharded HF dir fine -- what is NOT yet
         // true is that the resulting unified checkpoint is directly loadable
         // by qwen3tts::mtp::MtpModel/mimi::Codec for the Talker/Code2Wav pieces
         // (two open naming gaps); Thinker-only generation

@@ -5,7 +5,7 @@
 //! (video: sampled frames through the same image path) encoded into
 //! decoder-width embedding rows and spliced into the token-embedding sequence
 //! `crate::generate` builds host-side, before the prompt is fed to the
-//! decoder — reusing the exact encoders `crate::caps`'s M4/M5 parity tests
+//! decoder - reusing the exact encoders `crate::caps`'s parity tests
 //! already validated to cosine 1.000000 against the real checkpoint
 //! (`qwen3asr::encoder::AudioEncoder`, `qwen3vl::encoder::VisionEncoder` +
 //! `PatchMerger`), completely unchanged.

@@ -13,9 +13,8 @@
 //! points, not a re-derivation of any of their math.
 //!
 //! `sliding_window` is deliberately set SMALLER than `t` here, so this test
-//! also proves `decode_omni_chunked`'s front composes correctly with the
-//! real windowed attention fix (M23) -- not just that chunking itself is
-//! exact.
+//! also proves `decode_omni_chunked`'s front composes correctly with real
+//! windowed attention -- not just that chunking itself is exact.
 
 use std::collections::HashMap;
 

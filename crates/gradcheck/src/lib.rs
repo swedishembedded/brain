@@ -1298,7 +1298,7 @@ pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
     elementwise_check(&model, "blocks.2.linear_attn.A_log", 3e-1)
 }
 
-/// [`qwen35_gradcheck_harness`]'s MTP-enabled analogue (M7) - `cfg.mtp =
+/// [`qwen35_gradcheck_harness`]'s MTP-enabled analogue - `cfg.mtp =
 /// true` adds the auxiliary t+2 head (`mtp.*`) on top of the same tiny
 /// hybrid GDN/GQA decoder, exercising every `mtp.*` tensor (both pre-norms,
 /// `fc_e`/`fc_h`, the one extra full-attention decoder layer, `mtp.norm`)
@@ -1328,7 +1328,7 @@ fn qwen35_mtp_gradcheck_harness(seed: u64) -> qwen35::model::Qwen35 {
     model
 }
 
-/// Gradient-checks the MTP head (M7) end to end - see
+/// Gradient-checks the MTP head end to end - see
 /// [`qwen35_mtp_gradcheck_harness`]'s own doc.
 pub fn check_qwen35_mtp(seed: u64) -> Report {
     let model = qwen35_mtp_gradcheck_harness(seed);

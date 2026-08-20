@@ -452,8 +452,8 @@ impl Codec {
         assert!(t > 0, "empty codes");
         let hidden = self.cfg.hidden_size;
 
-        // --- front: identical to decode_omni's own (now correctly
-        // sliding-window-attended, per M23), run ONCE over the whole
+        // --- front: identical to decode_omni's own (correctly
+        // sliding-window-attended), run ONCE over the whole
         // sequence -- see this fn's own doc for why that's not a chunking
         // cost. ---
         let x = self.code_embedding_mean(codes, t, nq, hidden);

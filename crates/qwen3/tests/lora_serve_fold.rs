@@ -6,8 +6,8 @@
 //! (`qwen3::lora::fold_adapter_into`, already proven exact against the live
 //! unfolded forward by `crates/qwen3/tests/lora_adapter_file.rs`), then build
 //! a DECODE-ONLY KV-cache model from the folded tensors via
-//! `Qwen::from_tensors_decode` -- the API this test exercises, added for M9
-//! (adapter serving). Proves the decode-only construction from an in-memory
+//! `Qwen::from_tensors_decode` -- the API this test exercises, which exists
+//! for adapter serving. Proves the decode-only construction from an in-memory
 //! folded tensor map produces the SAME greedy generation as the live,
 //! unfolded, batched-forward trained model -- i.e. that serving a folded
 //! adapter through the KV-cache path is behaviorally identical to training it.

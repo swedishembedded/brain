@@ -45,9 +45,9 @@
 //! the OpenAI/Anthropic/OpenRouter chat handlers set), not by convention but
 //! by requirement: `apiserve::catalog::api_caps` classifies a model as
 //! chat-capable only when its `generate` action is `streaming` with a
-//! `messages`/`prompt`/`text` param and a `Media::Text` output (M10's
-//! investigation found this — D-Bus dispatches by whatever `(model, action)`
-//! the caller names, generically, but `/v1/chat/completions`/`/v1/messages`
+//! `messages`/`prompt`/`text` param and a `Media::Text` output (D-Bus
+//! dispatches by whatever `(model, action)` the caller names, generically,
+//! but `/v1/chat/completions`/`/v1/messages`
 //! hardcode the action name `"generate"` AND gate exposure on this shape),
 //! and both handlers always populate `messages` (a JSON-array string), never
 //! a bare `prompt` — so a spec that only declared `prompt` would validate

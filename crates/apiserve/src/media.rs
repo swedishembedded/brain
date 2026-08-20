@@ -6,7 +6,7 @@
 //! (`capability::blob::image_blob`, `audio::asr_caps`'s raw-16kHz-PCM
 //! convention) - the fix for the "multimodal content parts are silently
 //! dropped" gap `openai.rs`/`anthropic.rs`'s own `content_text` functions
-//! have always had (M11/M12 flagged it, left it open; still true for every
+//! have always had (previously flagged and left open; still true for every
 //! OTHER model, not just `brain/qwen3omnimoe` - this is a generic content-part fix,
 //! not omni-specific).
 //!

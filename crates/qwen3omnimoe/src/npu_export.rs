@@ -17,8 +17,8 @@
 //! silently happen.
 //!
 //! **Not exported here**: the Thinker MoE decoder. 30B of mostly-expert
-//! parameters is not an NPU target on this generation of hardware (the
-//! top-level plan's M15 note); only the three encoder/vocoder pieces are.
+//! parameters is not an NPU target on this generation of hardware;
+//! only the three encoder/vocoder pieces are.
 //! Vision export is also scoped to the single (main) `PatchMerger` — see
 //! `crates/npu/src/qwenvl_topology.rs`'s module doc for why DeepStack is out
 //! of scope.

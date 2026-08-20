@@ -317,7 +317,7 @@ mod tests {
     }
 
     /// A tiny synthetic int8 checkpoint, written via the SAME `StWriter`
-    /// M18's real import used, with the EXACT brain-native names/dtypes
+    /// the real import uses, with the EXACT brain-native names/dtypes
     /// `qwen3omnimoe::import` produces (`thinker.blocks.{l}.mlp.experts.{e}.{leaf}
     /// .weight` as `U32`, `.scale` as `F32`) - the honest structural
     /// alternative to a real 36 GB checkpoint (not present in this

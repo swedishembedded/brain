@@ -7,7 +7,7 @@
 //! `brain` binary against a real Qwen3-0.6B checkpoint symlinked into a
 //! scratch model store, and asserts the named adapter lands exactly where
 //! `brain_modelstore::Store` expects to find it -- proving the CLI, the
-//! store layout (M6), and the training core (`qwen3::finetune`, M1/M2) are
+//! store layout, and the training core (`qwen3::finetune`) are
 //! actually wired together, not just individually correct.
 //!
 //! Gated on `QWEN3_DIR` (a real Qwen3-0.6B checkpoint dir with
@@ -17,7 +17,7 @@
 //! unset, since normal CI has no multi-GB checkpoint on disk:
 //!
 //! ```text
-//! QWEN3_DIR=/data/workspace/resources/llm/qwen/qwen3-0.6b \
+//! QWEN3_DIR=/path/to/qwen3-0.6b \
 //!   cargo test --release -p brain-cli --test qwen_lora_finetune -- --ignored --nocapture
 //! ```
 
@@ -129,7 +129,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     assert!(adapter_path.is_file(), "adapter file not written to the expected store path: {}", adapter_path.display());
 
     // Not just a file on disk in the right place -- the store itself must
-    // resolve the full named ref, exactly what M9's serving path relies on.
+    // resolve the full named ref, exactly what the serving path relies on.
     let store = brain_modelstore::Store::new(&store_dir);
     let r = brain_modelref::ModelRef::parse("Qwen/Qwen3-0.6B:test-owner:test-adapter:latest").unwrap();
     let found = store.local(&r).expect("store must resolve the freshly trained adapter");

@@ -25,9 +25,10 @@
 //! `model.norm`'s input in the dumper for an apples-to-apples comparison.
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard holding
-//! `thinker.model.layers.0.*` (shard 1, same shard M4/M5 use) is absent.
+//! `thinker.model.layers.0.*` (shard 1, the same shard the audio/vision
+//! encoder parity tests use) is absent.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test thinker_layer_parity -- --ignored --nocapture`
 
 use std::path::PathBuf;

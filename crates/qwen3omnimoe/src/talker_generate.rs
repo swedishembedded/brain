@@ -4,7 +4,7 @@
 //! Talker generation: the codec-id sampling loop chaining Talker's own
 //! KV-cache decode (`crate::talker`) with the MTP code predictor
 //! (`qwen3tts::mtp::MtpModel::generate_residuals`, already built and validated
-//! against real Omni weights — M7b — reused unchanged). Mirrors
+//! against real Omni weights, reused unchanged). Mirrors
 //! `qwen3tts::pipeline::generate_codes`'s already-working loop shape exactly
 //! (same `sample_cb0` suppressed-token-set logic, same feedback-sum-then-
 //! decode-step pattern), adapted for Talker's MoE decoder instead of
@@ -65,7 +65,7 @@ impl OwnedTalkerLayer {
 /// Reads RAW HF tensor names (`talker.model.layers.{l}.*`) straight from
 /// `reader` — same convention `crate::generate::load_thinker_layer` uses:
 /// `reader` is opened on the raw HF checkpoint directory, not the (still
-/// separately loader-naming-gapped, per M7b/M8) unified/imported one.
+/// separately loader-naming-gapped) unified/imported one.
 fn load_talker_layer(reader: &WeightReader, gpu: &Gpu, l: u32, n_experts: u32) -> Result<OwnedTalkerLayer, String> {
     // Errors, not panics: streamed per generated codec frame inside the
     // serving daemon -- a missing tensor fails the request, not the process.

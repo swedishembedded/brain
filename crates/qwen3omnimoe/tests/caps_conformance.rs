@@ -4,10 +4,10 @@
 //! Proves `qwen3omnimoe::caps::manifest()` is actually classified chat-capable by
 //! the real `apiserve::catalog::api_caps` logic — not a re-derivation of
 //! that logic (which could silently drift from the real check), the ACTUAL
-//! function `/v1/chat/completions`/`/v1/messages` gate exposure on. Written
-//! after M10/M11/M12's investigation found the D-Bus surface is fully
-//! generic (any registered resident is servable with zero new code) but the
-//! OpenAI/Anthropic surfaces additionally require `streaming` + a
+//! function `/v1/chat/completions`/`/v1/messages` gate exposure on. The
+//! D-Bus surface is fully generic (any registered resident is servable with
+//! zero new code) but the OpenAI/Anthropic surfaces additionally require
+//! `streaming` + a
 //! `messages`/`prompt`/`text` param + a `Media::Text` output — this test is
 //! the regression guard for that shape, since `crates/omni/src/caps.rs`'s
 //! own module doc explaining WHY it has that shape is easy to silently

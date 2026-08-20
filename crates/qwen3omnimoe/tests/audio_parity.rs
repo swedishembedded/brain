@@ -3,15 +3,15 @@
 
 //! Qwen3-Omni's audio tower (Thinker's AuT) vs. the real transformers
 //! reference - reusing `qwen3asr::encoder::AudioEncoder` completely
-//! unchanged, at the new `AudioEncoderConfig::qwen3_omni()` preset (M4: "the
-//! shared-encoder hoist is a config bump, not a second copy" — see
+//! unchanged, at the new `AudioEncoderConfig::qwen3_omni()` preset (the
+//! shared-encoder hoist is a config bump, not a second copy - see
 //! `crates/omni/src/import.rs`'s module doc).
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard containing
 //! `thinker.audio_tower.*` (shard 1 of 15 for the released model) is not on
 //! disk, per the engine's standard opt-in-env-var test pattern.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
 //!         cargo test --release -p brain-omni --test audio_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;

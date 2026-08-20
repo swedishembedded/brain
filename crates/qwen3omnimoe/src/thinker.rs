@@ -30,13 +30,13 @@
 //! fed a `[n, head_dim/2]` `cos`/`sin` table the caller builds with
 //! `qwen3vl::mrope::{get_rope_index, mrope_tables}`. There is deliberately no
 //! separate "plain RoPE" code path: for a token stream where all three axes
-//! carry the same position (pure text, or pure audio - see the M6 design
-//! note), Omni's interleaved M-RoPE collapses exactly to ordinary half-split
+//! carry the same position (pure text, or pure audio), Omni's interleaved
+//! M-RoPE collapses exactly to ordinary half-split
 //! RoPE (`qwen3vl::mrope`'s own `diagonal_positions_collapse_to_plain_rope`
 //! test proves this), so a caller with no image/video/audio span just builds
 //! that degenerate diagonal table via `get_rope_index(tokens, image_token_id,
 //! &[])` (empty grids) rather than reaching for a second kernel - one
-//! implementation for both cases, per the M6a lesson about wiring the wrong
+//! implementation for both cases, avoiding the risk of wiring the wrong
 //! RoPE kernel into a second, parallel path.
 //!
 //! **Multimodal splice**: not this module's concern. A caller with image/

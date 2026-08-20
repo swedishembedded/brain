@@ -181,7 +181,7 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(wan::caps::WanProvider::new()),
             resident: None,
         },
-        // LTX-2.5 text-to-video: an M4 smoke-test pipeline (real VAE +
+        // LTX-2.5 text-to-video: a smoke-test pipeline (real VAE +
         // tiny random-weight DiT, no real text encoder yet - see
         // `ltxv::pipeline`'s module doc). `BRAIN_LTXV_VAE` lives in the
         // provider, same shape as `wan`'s four roles above; the residency

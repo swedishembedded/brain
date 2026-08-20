@@ -9,8 +9,8 @@
 //! through the decoder-layer stack (no vision tower, no audio tower, no
 //! image/video/audio token handling).
 //!
-//! This milestone follows the exact pattern `crates/ltxv`'s tiny-config DiT
-//! (M3) used: a real reference implementation
+//! This crate follows the exact pattern `crates/ltxv`'s tiny-config DiT
+//! uses: a real reference implementation
 //! (`transformers.models.gemma4_unified`, ported faithfully at TINY dims,
 //! every real-LTX-2.5-config FLAG set correctly, gated by parity against
 //! goldens dumped from the real Python reference at that same tiny size

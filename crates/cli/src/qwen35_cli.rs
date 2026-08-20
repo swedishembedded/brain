@@ -53,7 +53,7 @@ fn import(args: &[String]) {
 
 /// `brain qwen35 infer --weights F [--tokenizer T | --gguf G] --prompt "..."`:
 /// single-sequence greedy/sampled generation via `Qwen35::step`, through
-/// `qwen35::sample::generate_kv` (M11's own decode path). Not the paged
+/// `qwen35::sample::generate_kv` (its own decode path). Not the paged
 /// `PagedDecoder`/`Scheduler` serving path (`qwen35::serve`) - this is the
 /// same "simple, direct, one request" tier `qwen3::sample::generate_kv`
 /// occupies alongside `qwen3::serve::Engine`.
