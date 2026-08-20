@@ -23,9 +23,18 @@
 //! ```text
 //! stream_train_step --dir <checkpoint dir> --phase before|step|after \
 //!     --tokenizer <tokenizer.json> [--adapter-in FILE] --adapter-out FILE \
-//!     [--step N --lr X --window-budget N --n-tokens N --rank N --alpha X \
-//!      --prompt "..." --max-new N --corpus FILE]
+//!     [--device cpu|gpu|vulkan --step N --lr X --window-budget N --n-tokens N \
+//!      --rank N --alpha X --prompt "..." --max-new N --corpus FILE]
 //! ```
+//!
+//! `--device` defaults to `cpu`, the only backend proven safe for `--phase
+//! step` against this model's real checkpoint: the resident fp32 `lm_head`
+//! (~4.74 GiB as one buffer) exceeds `wgpu`'s `max_buffer_size` on any
+//! non-NVIDIA Linux adapter, so `gpu` refuses to allocate it at all; the
+//! native Vulkan backend (`vulkan`) allocates it but crashes the device
+//! with `ERROR_DEVICE_LOST` on the backward pass. Both remain selectable
+//! here for forward-only smoke testing and for re-validating once
+//! `lm_head` is chunked into sub-`max_buffer_size` buffers.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -65,6 +74,7 @@ fn main() {
     let prompt = arg(&args, "--prompt").unwrap_or_else(|| "The capital of France is".to_string());
     let max_new: usize = arg(&args, "--max-new").and_then(|s| s.parse().ok()).unwrap_or(3);
     let corpus = arg(&args, "--corpus");
+    let device = arg(&args, "--device").unwrap_or_else(|| "cpu".to_string());
 
     let mut cfg = Qwen35Config::qwen38_27b();
     cfg.lora = Some(lora_cfg(rank, alpha));
@@ -74,8 +84,14 @@ fn main() {
         None => qwen35::init::init_lora_only(&cfg, 20260820),
     };
 
+    let gpu = match device.as_str() {
+        "cpu" => Gpu::new_cpu(pipelines()),
+        "gpu" => Gpu::new_wgpu(pipelines()),
+        "vulkan" => Gpu::try_new_vulkan(pipelines()).unwrap_or_else(|e| panic!("try_new_vulkan: {e}")),
+        other => panic!("unknown --device {other} (expected cpu|gpu|vulkan)"),
+    };
     let t0 = Instant::now();
-    let trainer = StreamTrainer::new_real(Gpu::new_cpu(pipelines()), &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
+    let trainer = StreamTrainer::new_real(gpu, &cfg, &dir, n_tokens, window_budget, &lora_init).unwrap_or_else(|e| panic!("new_real: {e}"));
     eprintln!("stream_train_step: trainer construction: {:.1}s", t0.elapsed().as_secs_f64());
     let loader = trainer.real_loader(&cfg, &dir);
 
