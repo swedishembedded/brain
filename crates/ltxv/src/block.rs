@@ -66,6 +66,8 @@
 //! (analytic angle, no table input); `rope2d`, dispatched once per head,
 //! is the match.
 
+use std::cell::RefCell;
+
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;
 
@@ -1423,6 +1425,82 @@ impl CachedQBlockWeights {
     /// anything unless someone measures it).
     pub fn byte_len(&self) -> usize {
         self.attn1.byte_len() + self.attn2.byte_len() + self.ff.byte_len() + std::mem::size_of_val(self.scale_shift_table.as_slice()) + std::mem::size_of_val(self.prompt_scale_shift_table.as_slice())
+    }
+}
+
+/// One remembered embeddings-connector routing: the exact inputs it was
+/// computed from, and what it produced.
+struct CachedConnectorRouting {
+    context: Vec<f32>,
+    valid: Vec<f32>,
+    context_len: usize,
+    out: Vec<f32>,
+}
+
+/// Everything ONE generation computes once and reuses across every forward
+/// call it makes - the per-generation scratch [`crate::dit::forward_q_streamed`]
+/// consults before doing work it has already done.
+///
+/// Two independent caches live here because both are keyed by the same thing:
+/// a single generation's lifetime.
+///
+/// * **Block weights** - each transformer block's already-quantized bytes.
+///   The checkpoint is immutable and
+///   `model::int8::quantize_weight`/`model::int4::quantize_weight_q4` are pure
+///   functions of its bytes, so a cached result and a freshly recomputed one
+///   are the same bytes by construction.
+/// * **Embeddings-connector routing** - the connector reads only the text
+///   context, its validity mask and its length, none of which change once a
+///   generation's prompt has been encoded. Its output is therefore identical
+///   on every denoise step, and was being recomputed on each one: eight
+///   transformer layers over the context, whose weights (fp32, several
+///   gigabytes at the real width) were re-uploaded to a freshly opened device
+///   every time. Keyed on the FULL input, not on a step index or a hash, so a
+///   caller that legitimately routes two different contexts through one cache
+///   (classifier-free guidance runs a conditional and an unconditional branch
+///   against the same generation) gets each branch's own answer rather than
+///   whichever ran first.
+///
+/// Neither cache changes any number - both skip repeated work whose inputs did
+/// not change. That is what makes them exact wins rather than approximations,
+/// and it is asserted, not assumed: see `tests/block_weight_cache.rs`.
+#[derive(Default)]
+pub struct GenerationCache {
+    blocks: RefCell<Vec<Option<CachedQBlockWeights>>>,
+    connector: RefCell<Vec<CachedConnectorRouting>>,
+}
+
+impl GenerationCache {
+    /// This generation's per-layer block-weight slots, grown to `num_layers`
+    /// on first use. `RefCell`, not `&mut self`, because `Denoiser::forward`
+    /// takes `&self`; no caller holds two simultaneous borrows.
+    pub fn blocks(&self) -> &RefCell<Vec<Option<CachedQBlockWeights>>> {
+        &self.blocks
+    }
+
+    /// The connector output previously computed for exactly these inputs, if
+    /// any. Compared by VALUE rather than by a hash or a pointer: a hash
+    /// collision would silently substitute one prompt's conditioning for
+    /// another's, and the comparison is a few megabytes against a routing that
+    /// costs seconds.
+    pub(crate) fn connector_hit(&self, context: &[f32], valid: &[f32], context_len: usize) -> Option<Vec<f32>> {
+        self.connector
+            .borrow()
+            .iter()
+            .find(|e| e.context_len == context_len && e.context == context && e.valid == valid)
+            .map(|e| e.out.clone())
+    }
+
+    pub(crate) fn connector_store(&self, context: &[f32], valid: &[f32], context_len: usize, out: &[f32]) {
+        self.connector.borrow_mut().push(CachedConnectorRouting { context: context.to_vec(), valid: valid.to_vec(), context_len, out: out.to_vec() });
+    }
+
+    /// Real host bytes the connector half holds - the counterpart of
+    /// [`CachedQBlockWeights::byte_len`], so a test can measure this cache's
+    /// own footprint instead of deriving it (a memory claim nothing measures
+    /// is not a measured claim).
+    pub fn connector_byte_len(&self) -> usize {
+        self.connector.borrow().iter().map(|e| std::mem::size_of_val(e.context.as_slice()) + std::mem::size_of_val(e.valid.as_slice()) + std::mem::size_of_val(e.out.as_slice())).sum()
     }
 }
 

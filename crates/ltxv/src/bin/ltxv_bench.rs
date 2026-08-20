@@ -66,7 +66,6 @@
 //!
 //! `vae` needs `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
 
-use std::cell::RefCell;
 use std::time::Instant;
 
 use gpu_core::profile::profile;
@@ -252,8 +251,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     let context = vec![0f32; ctx_len as usize * cfg.cross_attention_dim as usize];
     let context_valid = vec![1f32; ctx_len as usize];
 
-    let cache = RefCell::new(Vec::new());
-    let call = |label: &str| {
+    let call = |label: &str, cache: &ltxv::block::GenerationCache| {
         let t1 = Instant::now();
         let out = ltxv::dit::forward_q_streamed(
             &cfg,
@@ -269,7 +267,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
             ctx_len as usize,
             t as usize,
             &context_valid,
-            &cache,
+            cache,
         );
         let wall = t1.elapsed().as_secs_f64();
         println!("[{label}] wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
@@ -279,13 +277,17 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
         let (min, max) = out.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
         let nan_count = out.iter().filter(|v| !v.is_finite()).count();
         println!("[{label}] OUTPUT STATS: len={} mean={mean:.6} std={:.6} min={min:.6} max={max:.6} nonfinite={nan_count}", out.len(), var.sqrt());
-        if !reuse_cache {
-            cache.borrow_mut().clear();
-        }
     };
-    call("call 1 (always a cache miss - the first forward of a generation)");
+    // `reuse_cache` is exactly "do both calls share one cache?" - a second,
+    // default-constructed `GenerationCache` is the honest way to express "no",
+    // now that the cache holds connector routing as well as block weights and
+    // "empty" is its own default.
+    let cache = ltxv::block::GenerationCache::default();
+    call("call 1 (always a cache miss - the first forward of a generation)", &cache);
     if reuse_cache {
-        call("call 2 (cache hit on every layer - every OTHER forward of a generation)");
+        call("call 2 (cache hit on every layer - every OTHER forward of a generation)", &cache);
+    } else {
+        call("call 2 (its OWN fresh cache - the pre-cache per-call cost)", &ltxv::block::GenerationCache::default());
     }
     println!("(the `stage forward_q_streamed: block ...` lines above split GGUF read+dequant / int8 quantize / GPU upload+forward+wait, summed over these {layers} layers - the first two are `cache misses only`: on a cache-hit call they are near-zero by construction, not merely small)");
 }

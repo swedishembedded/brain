@@ -69,12 +69,10 @@
 //! is generated directly in the DiT's own token-major layout, so no
 //! transpose is needed going in.
 
-use std::cell::RefCell;
 use std::time::Instant;
 
 use vae::blocks::Tensors;
 
-use crate::block::CachedQBlockWeights;
 use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
@@ -520,24 +518,31 @@ impl Denoiser for LtxDit {
 /// Int8 compute (not int4): this milestone's own "start small, prove it
 /// works first" choice - see [`generate`]'s doc for why.
 ///
-/// `block_cache`: THIS instance's own per-generation, host-side cache of
-/// every block's already-quantized weight bytes - shared, via the SAME
-/// `RefCell`, across every one of `denoise`'s forward calls on this
-/// `RealDit` (both the conditional and unconditional branch when CFG is on,
-/// and every one of the run's ~20-50 denoise steps), so the GGUF read + CPU
-/// quantize Phase 8 measured at ~86% of one real denoise step happens at
-/// most ONCE per block for the whole generation, not once per forward call.
-/// `RefCell`, not a plain field, because [`Denoiser::forward`] takes `&self`
-/// (the same interior-mutability shape `LtxAvDit`'s own per-stage state
-/// already uses in `crate::dit`) - `denoise`'s loop never holds two
-/// simultaneous borrows of it, since each forward call borrows, uses, and
-/// drops its borrow before returning.
+/// `cache`: THIS instance's own per-generation, host-side
+/// [`crate::block::GenerationCache`] - shared by reference across every one of
+/// `denoise`'s forward calls on this `RealDit` (both the conditional and
+/// unconditional branch when CFG is on, and every one of the run's denoise
+/// steps). It holds the two things `forward_q_streamed` would otherwise
+/// recompute identically every call: each block's already-quantized weight
+/// bytes (the GGUF read + CPU quantize Phase 8 measured at ~86% of one real
+/// denoise step, now paid at most ONCE per block per generation) and the
+/// embeddings-connector routing (unchanged for a whole generation, since the
+/// encoded prompt is). Its interior mutability is what lets
+/// [`Denoiser::forward`] keep taking `&self` (the same shape `LtxAvDit`'s own
+/// per-stage state uses in `crate::dit`); `denoise`'s loop never holds two
+/// simultaneous borrows, since each forward call borrows, uses, and drops
+/// its borrow before returning.
+///
+/// A `RealDit` is per-generation, so the cache's lifetime is exactly the
+/// window over which its entries are guaranteed still to describe the same
+/// inputs - dropping the `RealDit` (which `generate` does before the VAE
+/// decode) frees all of it.
 struct RealDit {
     cfg: LtxDitConfig,
     src: crate::gguf_src::LtxvGgufSource,
     head: Tensors,
     device: Option<String>,
-    block_cache: RefCell<Vec<Option<CachedQBlockWeights>>>,
+    cache: crate::block::GenerationCache,
 }
 
 impl Denoiser for RealDit {
@@ -557,7 +562,7 @@ impl Denoiser for RealDit {
             context_len,
             t,
             context_valid,
-            &self.block_cache,
+            &self.cache,
         )
     }
 }
@@ -738,7 +743,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
         let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
         tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), block_cache: RefCell::new(Vec::new()) })
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache: Default::default() })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, "transformer built");

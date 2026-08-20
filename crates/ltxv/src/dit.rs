@@ -37,7 +37,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, CachedQBlockWeights, EmbeddingsConnector, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier};
+use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -1097,10 +1097,13 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// (a second real forward then ran out of device memory that a fresh
 /// device open does not).
 ///
-/// `block_cache`: a per-GENERATION (not per-call) HOST-side cache of every
-/// block's already-quantized weight bytes, keyed by layer index -
-/// `crate::pipeline::RealDit` owns one and passes the SAME `RefCell` into
-/// every one of a generation's ~20-50 denoise-step forward calls. On a cache
+/// `cache`: a per-GENERATION (not per-call) HOST-side [`GenerationCache`] -
+/// `crate::pipeline::RealDit` owns one and passes the SAME reference into
+/// every one of a generation's ~20-50 denoise-step forward calls. It holds two
+/// things this function would otherwise recompute identically on every call.
+///
+/// The first is every block's already-quantized weight bytes, keyed by layer
+/// index. On a cache
 /// MISS (an empty slot - the common case on a generation's very first
 /// forward call), a block is streamed from `src` via
 /// [`load_block_tensors_from_source`] and quantized to `tier` exactly as
@@ -1123,6 +1126,14 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// dominant real cost Phase 8 measured
 /// (~86% of one real denoise step was GGUF re-read + re-quantize of the SAME
 /// immutable weights, over and over, every single step).
+///
+/// The second is the embeddings-connector routing below. `context`,
+/// `context_valid` and `context_len` are fixed for a whole generation once the
+/// prompt has been encoded, and the connector reads nothing else, so its output
+/// is the same on every step - while recomputing it means re-uploading the
+/// connector's own fp32 weights to this call's fresh device and re-running its
+/// transformer stack. Also exact for the same reason as the block half:
+/// identical inputs, pure function, so the cached answer IS the recomputed one.
 ///
 /// Traced at `--trace-ltxv 4` (each host stage's duration, the per-generation
 /// cache's hit/miss split) and `5` (every layer individually: index, hit or
@@ -1147,7 +1158,7 @@ pub fn forward_q_streamed(
     context_len: usize,
     t: usize,
     context_valid: &[f32],
-    block_cache: &RefCell<Vec<Option<CachedQBlockWeights>>>,
+    cache: &GenerationCache,
 ) -> Vec<f32> {
     let dim = cfg.inner_dim as usize;
     assert_eq!(latent.len(), t * cfg.in_channels as usize);
@@ -1194,15 +1205,34 @@ pub fn forward_q_streamed(
     let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
     let s_conn = std::time::Instant::now();
-    #[rustfmt::skip]
-    let (connector_context, _connector_out) = route_context_through_connector(
-        &gpu, head, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
-        cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
-        cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
-        cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
-    );
+    // The connector's inputs (`context`, `context_valid`, `context_len`) are
+    // fixed for a whole generation, so its answer is too - see this function's
+    // `cache` doc. Ask the cache first; only a genuinely new context pays.
+    let conn_hit = cache.connector_hit(context, context_valid, context_len);
+    let conn_was_hit = conn_hit.is_some();
+    let connector_context = match conn_hit {
+        Some(out) => out,
+        None => {
+            #[rustfmt::skip]
+            let (out, _connector_out) = route_context_through_connector(
+                &gpu, head, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
+                cfg.connector_inner_dim(), cfg.connector_num_attention_heads, cfg.connector_attention_head_dim,
+                cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
+                cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
+            );
+            cache.connector_store(context, context_valid, context_len, &out);
+            out
+        }
+    };
     gpu_core::profile::stage_time("forward_q_streamed: embeddings connector routing", s_conn);
-    tracing::debug!(stage = "connector", ms = s_conn.elapsed().as_secs_f32() * 1e3, enabled = cfg.use_embeddings_connector, layers = cfg.connector_num_layers, "host stage done");
+    tracing::debug!(
+        stage = "connector",
+        ms = s_conn.elapsed().as_secs_f32() * 1e3,
+        enabled = cfg.use_embeddings_connector,
+        layers = cfg.connector_num_layers,
+        cache = if conn_was_hit { "hit" } else { "miss" },
+        "host stage done"
+    );
 
     // Phase 8 attribution: `forward_q_streamed` was never profiled against a
     // real checkpoint before this pass, so the ~200s/step number this design
@@ -1219,9 +1249,9 @@ pub fn forward_q_streamed(
     let mut t_gpu = std::time::Duration::ZERO;
     let mut misses = 0u32;
     {
-        let mut cache = block_cache.borrow_mut();
-        if cache.len() < cfg.num_layers as usize {
-            cache.resize_with(cfg.num_layers as usize, || None);
+        let mut blocks = cache.blocks().borrow_mut();
+        if blocks.len() < cfg.num_layers as usize {
+            blocks.resize_with(cfg.num_layers as usize, || None);
         }
     }
     for l in 0..cfg.num_layers {
@@ -1230,9 +1260,9 @@ pub fn forward_q_streamed(
         let mut layer_quant = std::time::Duration::ZERO;
         let hit;
         {
-            let mut cache = block_cache.borrow_mut();
-            hit = cache[l as usize].is_some();
-            if cache[l as usize].is_none() {
+            let mut blocks = cache.blocks().borrow_mut();
+            hit = blocks[l as usize].is_some();
+            if blocks[l as usize].is_none() {
                 misses += 1;
                 let s0 = std::time::Instant::now();
                 let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
@@ -1242,7 +1272,7 @@ pub fn forward_q_streamed(
                 let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
                 layer_quant = s1.elapsed();
                 t_quant += layer_quant;
-                cache[l as usize] = Some(quantized);
+                blocks[l as usize] = Some(quantized);
             }
             // Every step past this block's first cache-populating one skips
             // both stages above entirely: `cache[l]` is already `Some`, so
@@ -1257,8 +1287,8 @@ pub fn forward_q_streamed(
         // step regardless of cache hit/miss - the honest lower bound the
         // "fresh Gpu every call" design (this function's own doc) still pays.
         let s2 = std::time::Instant::now();
-        let cache = block_cache.borrow();
-        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, cache[l as usize].as_ref().expect("populated above"), t as u32, context_len as u32, tier);
+        let blocks = cache.blocks().borrow();
+        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, blocks[l as usize].as_ref().expect("populated above"), t as u32, context_len as u32, tier);
         let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
         let layer_gpu = s2.elapsed();
         t_gpu += layer_gpu;
