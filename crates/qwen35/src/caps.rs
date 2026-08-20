@@ -288,11 +288,15 @@ impl GenerateAction {
     /// every layer's weights from disk regardless (`crate::stream`'s own
     /// module doc), so there is nothing to keep warm between requests.
     ///
-    /// `window_budget` is fixed at 4 (not exposed as a param) - the exact
-    /// value M15's own `streaming_forward.rs` full-chain test measured as
-    /// comfortably RSS-bounded (`brain-testutil::mem`, real hardware); the
-    /// config is fixed at [`Qwen35Config::qwen38_27b`] - the one real
-    /// checkpoint this streaming path exists for.
+    /// `window_budget` is fixed at 4 (not exposed as a param) - the value
+    /// `streaming_forward.rs`'s full-chain test measured as comfortably
+    /// RSS-bounded (`brain-testutil::mem`, real hardware), and since
+    /// confirmed (not merely left unchanged) against real measured
+    /// `crates/perf` `weights-qwen35` scenario numbers - see
+    /// `crate::stream::LOOKAHEAD`'s own doc for the real churn-overhead
+    /// numbers across budgets and the reasoning that keeps this at 4 rather
+    /// than raising it. The config is fixed at [`Qwen35Config::qwen38_27b`] -
+    /// the one real checkpoint this streaming path exists for.
     ///
     /// Progress reporting is not per-token here (unlike the non-streaming
     /// path's one `Progress` per generated token): `crate::stream::generate`

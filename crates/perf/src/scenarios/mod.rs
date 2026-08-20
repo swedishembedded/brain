@@ -138,6 +138,7 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("faults", "fault injection — detection, recovery, silent corruption"),
     ("soak", "long-duration drift — throughput, latency, memory, leaks"),
     ("weights", "within-instance weight window — CyclicScan vs Lru vs AllResident churn"),
+    ("weights-qwen35", "the SAME weight-window policies over qwen35's real 64-layer int8 byte-cost profile"),
 ];
 
 /// Scenarios implemented as a full run through the driver; the rest report via
@@ -343,7 +344,7 @@ pub fn render(art: &Artifact) -> String {
         "startup" => render_block(art, &["cold", "warm"]),
         "mixed" => render_mixed(art),
         "overload" | "cancel" | "kvcache" | "residency" | "placement" | "faults" | "frontend"
-        | "soak" | "weights" => render_json_summary(art),
+        | "soak" | "weights" | "weights-qwen35" => render_json_summary(art),
         _ => report::render(art),
     }
 }

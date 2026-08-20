@@ -104,6 +104,43 @@ use crate::sample::{argmax, sample_logits};
 /// is the minimum rotating reserve a schedule narrower than the model needs
 /// at all (a window that already fits every layer, `budget >= n_layers`,
 /// never evicts regardless of this number).
+///
+/// **Measured, not merely asserted**: `crates/perf`'s `weights-qwen35`
+/// scenario drives this exact `CyclicScan`/`Lru`/`AllResident` code against
+/// this model's real 64-layer int8 byte-cost profile
+/// (`Qwen35Config::layer_i8_bytes`, ~372-383 MB depending on GDN vs GQA layer
+/// type - a real but small, ~3%, heterogeneity). At every budget tested (2,
+/// 4, 8, 16, 32 slots, 8 passes), `CyclicScan`'s `churn_overhead` is exactly
+/// `1.0` on BOTH the plain reload-count metric and a byte-weighted one - the
+/// real per-layer size spread does not change which policy wins, because
+/// `CyclicScan`'s pinned/tail split is fixed by the schedule and identical
+/// every pass regardless of what each pinned or evicted group actually
+/// costs. `Lru` measures strictly worse at every budget, and the gap widens
+/// with budget (relative to `Lru`'s own fixed 64-reloads/pass, which never
+/// improves): +4.9%/+5.0% (count/bytes) at budget 4, +12.3% at 8, +30.6% at
+/// 16, +93.9%/+94.1% at 32.
+///
+/// **The honest caveat those numbers need**: that whole comparison is a
+/// MULTI-pass benefit (`CyclicScan`'s persistent pin only pays off when the
+/// SAME [`WeightSet`](weightset::WeightSet) survives across repeated passes
+/// over the schedule), and [`stream_all_layers`] below builds a brand-new
+/// `WeightSet` on EVERY call, with `passes=1` always - see its own doc. A
+/// single, non-repeating pass never revisits any group, so at `passes=1`
+/// every policy loads every one of the 64 layers from disk exactly once,
+/// with ZERO measured difference between `CyclicScan` and `Lru` in real I/O,
+/// consistent with [`generate`]'s own already-documented design ("every
+/// decode step re-pays the SAME fixed per-pass weight-streaming cost").
+/// `CyclicScan` therefore costs nothing over `Lru` today (matches the
+/// theoretically-correct choice for any future design that DOES persist a
+/// window across decode steps, at zero downside now) but does not currently
+/// buy anything either - there is no cross-call persistence yet for it to
+/// exploit. Given that, and `qwen35_bench.rs`'s own M13 profiling finding
+/// that this model's real measured wall-clock on this iGPU is dispatch-
+/// latency-bound (Gated DeltaNet's sequential per-chunk dispatches, not
+/// weight-loading I/O), there is no measured case today for moving
+/// `WINDOW_BUDGET` off its current value (`crate::caps`'s `run_streaming`,
+/// `4`) - a wider window would only shrink an I/O cost this model's own
+/// profiling already found is not the bottleneck.
 const LOOKAHEAD: u32 = 1;
 
 /// One Gated DeltaNet (`LayerType::Linear`) layer's weights: the 4 plain

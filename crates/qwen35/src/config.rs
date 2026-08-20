@@ -248,6 +248,41 @@ impl Qwen35Config {
         self.linear_num_value_heads / self.linear_num_key_heads
     }
 
+    /// Real on-device byte cost of ONE streamed layer's quantized (int8 DP4A)
+    /// weights at this config's dims - the same leaves `crate::stream::
+    /// StreamState::build_layer` uploads via `Weight::upload(..., Dtype::I8)`:
+    /// the 5 GDN or 4 GQA mixer-adjacent leaves for `ty`, plus the 3 dense-MLP
+    /// leaves every layer type owns. Each leaf costs `n*k` packed bytes plus
+    /// its own `[n]` f32 per-row scale (`model::ops::Weight::I8`'s layout) -
+    /// mirrored here rather than read off a live `Weight`, since this exists
+    /// for a host-side perf model (`crates/perf`'s `weights` scenario) that
+    /// has no GPU and must never build one just to learn a byte count.
+    /// Excludes the handful of small fp32 aux tensors (norms, GDN's
+    /// `A_log`/`dt_bias`, GQA's `q_norm`/`k_norm`) - negligible next to the
+    /// quantized leaves at this config's real dims (well under 0.1% of a
+    /// layer's own footprint).
+    pub fn layer_i8_bytes(&self, ty: LayerType) -> u64 {
+        let d = self.d_model as u64;
+        let ff = self.intermediate_size as u64;
+        let i8_leaf = |n: u64, k: u64| n * k + n * 4;
+        let mlp = i8_leaf(ff, d) * 2 + i8_leaf(d, ff); // gate, up, down
+        let mixer = match ty {
+            LayerType::Linear => {
+                let conv_dim = self.linear_conv_dim() as u64;
+                let value_dim = self.linear_value_dim() as u64;
+                let nvh = self.linear_num_value_heads as u64;
+                i8_leaf(conv_dim, d) + i8_leaf(value_dim, d) + i8_leaf(nvh, d) + i8_leaf(nvh, d) + i8_leaf(d, value_dim)
+            }
+            LayerType::Full => {
+                let hqp = self.q_proj_dim() as u64;
+                let hkv = self.kv_dim() as u64;
+                let hq = self.q_dim() as u64;
+                i8_leaf(hqp, d) + i8_leaf(hkv, d) + i8_leaf(hkv, d) + i8_leaf(d, hq)
+            }
+        };
+        mixer + mlp
+    }
+
     pub fn head_weight(&self) -> &'static str {
         if self.tie_embeddings {
             "tok.weight"
@@ -642,5 +677,27 @@ mod tests {
         assert!(names.iter().any(|n| n == "blocks.0.mlp.gate.weight.lora_a"));
         assert!(names.iter().any(|n| n == "blocks.0.mlp.gate.weight.lora_b"));
         assert!(names.iter().any(|n| n == "blocks.0.mlp.down.weight.lora_a"));
+    }
+
+    /// Pins [`Qwen35Config::layer_i8_bytes`]'s real numbers at the real
+    /// `qwen38_27b` scale: `crates/perf`'s `weights` scenario (Piece A of the
+    /// milestone this landed in) depends on these being accurate, not merely
+    /// plausible - a silent drift here would make that scenario's "real
+    /// per-layer byte profile" claim false. GDN (`Linear`) is the larger of
+    /// the two layer types at this config's dims (more/wider mixer-adjacent
+    /// leaves than GQA's 4), both in the ~372-383 MB range this milestone's
+    /// own measurement cites.
+    #[test]
+    fn layer_i8_bytes_matches_the_real_measured_qwen38_27b_range() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let gdn = cfg.layer_i8_bytes(LayerType::Linear);
+        let gqa = cfg.layer_i8_bytes(LayerType::Full);
+        assert_eq!(gdn, 383_467_904, "GDN (Linear) layer int8 byte cost drifted: {gdn}");
+        assert_eq!(gqa, 372_482_048, "GQA (Full) layer int8 byte cost drifted: {gqa}");
+        assert!(gdn > gqa, "GDN must be the larger layer type at this config's real dims");
+        for b in [gdn, gqa] {
+            let mb = b as f64 / 1e6;
+            assert!((372.0..=384.0).contains(&mb), "layer_i8_bytes {mb:.1} MB outside the documented 372-383 MB range");
+        }
     }
 }

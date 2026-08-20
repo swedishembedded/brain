@@ -530,6 +530,8 @@ dependencies = [
 name = "brain-checkpoint"
 version = "1.0.0"
 dependencies = [
+ "brain-backend-cpu",
+ "brain-data",
  "brain-testutil",
  "bytemuck",
  "half",
@@ -1331,6 +1333,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-qwen3",
+ "brain-qwen35",
  "brain-residency",
  "brain-weightset",
  "futures",
