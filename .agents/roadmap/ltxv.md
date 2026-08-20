@@ -1714,6 +1714,185 @@ this port:
       is expected and is not evidence of a defect. No correctness anomaly
       found; nothing changed in that direction.
 
+### Phase 11 - the text encoder: a generic quantizer, an int8 tier, and a context cache
+
+Phase 10 measured the Gemma-4 text encode at 51% of a real generation's wall
+clock and recorded it as never having been measured before. This phase
+attacked it, and the first thing it did was measure the stage's own INSIDE,
+because "the text encode is slow" does not say which of three completely
+different fixes applies.
+
+**Method**: `--trace-ltxv 4` on the same real run Phase 10 used (9 frames,
+64x64, real 22B Q8_0 DiT, real Gemma-4 text encoder, real VAE, 8
+distilled-schedule steps, `guidance<=1.0`), both P40s idle at 0 MiB / 0%
+before each run, and the encoder + DiT + VAE files explicitly evicted from
+page cache before each run (`posix_fadvise(DONTNEED)`) so both arms measure
+a genuinely cold read rather than one arm measuring the page cache.
+
+#### What the stage is actually made of (measured, first time)
+
+| sub-stage | secs | share |
+|---|---:|---:|
+| checkpoint read + bf16->f32 decode + import | 474.7 | 90.4% |
+| 48-layer tower forward (11 tokens, fp32) | 45.9 | 8.7% |
+| aggregate-embed projection | 0.6 | 0.1% |
+| **text encode total** | **524.8** | |
+
+Whole run, fully cold: **1069.3 s** (build 48.3, text encode 524.8,
+denoise 470.8, VAE 25.3, unattributed 0.1). Note the parts now sum to the
+total - Phase 10's entry recorded that they did not, and `Timings` now
+carries `text_encode` plus an `unattributed` remainder so a future missing
+stage is visible rather than silent.
+
+**The stage is 90% I/O**, at 52.8 MiB/s over 26.26 GB - the same cold
+storage rate Phase 10 measured independently with `dd`. That single number
+reorders every candidate fix:
+
+- reading FEWER BYTES is the whole game on a first run;
+- making the arithmetic faster can address at most the 45.9 s the forward
+  costs, so an int8 compute tier is the SMALLEST of the three levers here,
+  not the largest - the opposite of the intuition that motivated it;
+- not reading the bytes AT ALL is worth more than both, for the repeat-run
+  workflow this pipeline is actually used in.
+
+All three were built, and they are complementary rather than alternatives.
+
+#### After: three levers, measured separately
+
+Same shape, same prompt, same protocol, page cache evicted for the encoder,
+DiT and VAE before each run.
+
+| stage | bf16 + fp32 | Q8_0 + int8 | Q8_0 + int8, cache hit |
+|---|---:|---:|---:|
+| build transformer | 48.34 | 50.88 | 46.11 |
+| **text encode** | **524.8** | **304.3** | **0.011** |
+| denoise, 8 steps | 470.8 | 365.6 | 383.5 |
+| VAE decode | 25.3 | 27.4 | 25.9 |
+| unattributed | 0.1 | 0.2 | 0.1 |
+| **total** | **1069.3** | **748.3** | **455.6** |
+
+End to end **1069.3 s -> 748.3 s (1.43x)** on a first encode of a prompt,
+and **-> 455.6 s (2.35x)** on any later run of the same one. Text encode
+alone **524.8 -> 304.3 s (1.72x)**, then **0.011 s** - a 4.2 MB cache entry
+standing in for a 26.3 GB read and a 12B forward.
+
+The three arms' build/denoise/VAE columns differ by a few percent in both
+directions, which is the run-to-run spread of a cold-storage-bound pipeline
+and not a signal; only the text-encode column is a controlled comparison.
+
+Sub-stage split of the encode, which is where the reasoning lives:
+
+| sub-stage | bf16 + fp32 | Q8_0 + int8 |
+|---|---:|---:|
+| encoder opened (read/decode/import) | 474.71 | 24.20 |
+| 48-layer forward | 45.94 | 278.37 |
+| aggregate-embed | 0.64 | 0.70 |
+
+The two forwards are NOT comparable in isolation and the table would lie if
+read that way: the streamed forward CONTAINS the per-layer checkpoint read
+that the eager path had already paid for under "opened". The total is the
+honest comparison. The residual 278 s is still mostly reading ~11.5 GB of
+layer weights, not arithmetic - consistent with the 90%-I/O finding, and the
+reason the remaining lever is fusing the Q8_0-to-fp32-to-int8 round trip
+rather than a faster GEMM.
+
+**Denoise also dropped 105 s, and nothing in the DiT path changed.** The
+honest explanation is memory, not compute: the eager encoder peaked at
+74.5 GB RSS and the streamed one at roughly a quarter of that, so the DiT's
+own streaming read has far more page cache left to work with. Recorded as a
+secondary effect rather than claimed as a denoise optimization.
+
+#### Correctness of the int8 tier
+
+Real 12B weights, both arms reading the SAME Q8_0 file so the tier is the
+only variable (comparing an int8 GGUF against a bf16 safetensors forward
+would confound the arithmetic with the storage format):
+
+| comparison | cosine | rel_l2 |
+|---|---:|---:|
+| layer 0, `sliding_attention` | 0.997754001 | 0.067 |
+| layer 5, `full_attention` (MQA, `k_eq_v`) | 0.998706203 | 0.051 |
+| **whole encoder, 48 layers, `last_hidden_state`** | **0.999915592** | **0.019** |
+
+The whole-encoder number being BETTER than either single layer is not a
+mistake: per-layer quantization errors are independent and partly cancel
+down the stack, and the model's own final `norm` removes what is left of the
+scale. Both layer types are gated on purpose - they are structurally
+different graphs (head_dim 256 vs 512, 8 KV heads vs 1, a real `v_proj` vs
+none), and the `full_attention` path has the least redundancy for an error
+to hide in.
+
+Peak process RSS over a whole generation, measured from `/proc/<pid>/status`
+rather than derived: **71.05 GiB eager -> 13.11 GiB streamed**, and most of
+what remains is reclaimable mmap pages rather than heap.
+
+#### What was reused rather than written
+
+- `checkpoint::quant::quantize` already implemented every ggml block
+  encoder, including Q8_0. The generic converter adds a policy, a plan and a
+  streaming writer around it, not new quantization math.
+- `model::int8::quantize_weight`'s packed layout and the
+  `max_abs_row`/`quant_pack`/`matmul_i8_dyn` trio are what `ltxv`'s own
+  quantized blocks already dispatch. **Zero new kernels.**
+- `model::hostmath::matvec_par` for the aggregate-embed projection.
+- `gpu_core::cache_dir()` for the context cache's location, made `pub`
+  rather than copied.
+- `import::classify` for the GGUF loader's name space, exposed as
+  `canonical_weight_name`/`is_recognized_non_weight` so the two loaders
+  cannot drift on which tensors exist.
+
+#### What was refuted or found the hard way
+
+- **The int8 parity gate's first version was worthless against the most
+  likely bug.** See lesson #47.
+- **`AggregateEmbed` was not "host glue too small to matter".** It is
+  `Linear(188160 -> 4096)` - 770 M multiply-accumulates per token - and ran
+  as a scalar loop on one core.
+
+#### Closed from Phase 10's own gap list
+
+- ~~"The real text-encode stage is invisible to `Timings`"~~ - closed.
+  `Timings::text_encode` plus `Timings::unattributed(wall)` printed as its
+  own row on both CLI lines; the baseline run above reports 0.1 s
+  unattributed, so the parts now sum to the total.
+- ~~"a cache of the ENCODED TEXT CONTEXT ... Not attempted: it is a
+  cache-invalidation design decision, not an optimization"~~ - attempted,
+  and the design decision made rather than deferred. The invalidation
+  question is answered by not relying on the digest at all: it is a
+  filename, the full key material lives in the entry, and load compares it
+  field by field, so a collision is a miss and never a wrong context. That
+  is what makes it safe on by default.
+
+#### Tracked gaps this phase leaves
+
+- **The streamed encode still round-trips Q8_0 -> fp32 -> int8 per layer.**
+  `Gemma4GgufSource` hands out f32 (that is what `TensorSource` is), and
+  `Proj::upload` immediately re-quantizes it. Fusing the two per row would
+  be bit-identical and would delete both the intermediate fp32 and a large
+  share of the remaining 278 s. Same shape as the identical gap Phase 10
+  recorded for the DiT's own streamed blocks, and it wants the same
+  `TensorSource` seam - deliberately not bolted on as a defaulted trait
+  method.
+- **`embed_tokens` is decoded whole to gather a handful of rows.** The
+  table is `[262144, 3840]`; a real prompt touches a few rows of it, and the
+  loader dequantizes ~1 GB of Q8_0 to 4 GB of f32 to do so. A row-range read
+  on `MmapGguf` (the twin of `MmapSafetensors::tensor_f32_range`) would fix
+  it. Not measured separately, so its share of the 278 s is unknown - it is
+  a known inefficiency, not a quantified one.
+- **The whole-encoder int8-vs-fp32 comparison is opt-in, not a default
+  gate.** `real_q8_0_whole_encoder_int8_matches_fp32` needs
+  `BRAIN_GEMMA4_FULL_PARITY=1` because it reads 13 GiB twice; the default
+  gate is per-layer, matching `ltxv`'s own precedent.
+- **The aggregate-embed head is loaded as 3 GB of f32 every encode**
+  (19.1 s of the 24.2 s open). It is a genuine `[4096, 188160]` GEMM
+  operand, so it is a candidate for the device and for int8, but at one
+  encode per generation it was not worth the complexity this pass.
+- **The cache is never evicted.** Entries are ~4 MB each and keyed on
+  prompt plus encoder identity, so a long-lived workflow accumulates them.
+  No size cap, no LRU, no `brain` verb to clear it - deliberately, since a
+  policy nobody asked for is worse than a documented directory, but it is a
+  real gap rather than an oversight.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
@@ -1888,20 +2067,23 @@ land. Known traps already identified from reading (not yet test-pinned):
   baseline exists yet for `dit_config=ltx25_22b` - a deliberate,
   separately-scheduled measurement whenever it is needed, not a default
   one.
-- Cold checkpoint I/O is the dominant remaining cost of a real generation
-  and no code change removes it: Phase 10 measured the storage at
-  ~58-68 MB/s cold (and unresponsive to read concurrency), against ~50 GB
-  read per run. The open levers are reading fewer bytes or not re-reading
-  the same bytes on the next run - specifically, a cache of the ENCODED
-  TEXT CONTEXT keyed on checkpoint identity plus prompt, which is a couple
-  of megabytes standing in for a 26.3 GB read and a 12B forward, and would
-  make a repeat validation run skip the largest single stage of the whole
-  pipeline. Not attempted: it is a cache-invalidation design decision, not
-  an optimization, and belongs with whoever owns the residency story.
-- The real text-encode stage is invisible to `Timings`, so every ltxv
-  timing line printed before Phase 10 (`build`/`denoise`/`vae`) omitted
-  what was then 51% of the run and did not sum to the reported total. The
-  trace now shows it; the `Timings` struct still does not carry it.
+- ~~Cold checkpoint I/O is the dominant remaining cost of a real
+  generation and no code change removes it ... a cache of the ENCODED TEXT
+  CONTEXT ... Not attempted: it is a cache-invalidation design decision,
+  not an optimization.~~ **Both levers taken in Phase 11**, which also
+  confirmed the diagnosis by measuring the text encode as 90% I/O. Fewer
+  bytes: the encoder is quantized to Q8_0 and streamed (26.26 -> 14.09 GB
+  on disk, and no whole-checkpoint fp32 expansion at all). Not re-reading
+  them: `crate::text_cache`, on by default, with the invalidation question
+  answered by verifying the stored key rather than trusting a digest. Cold
+  I/O is still the dominant cost of what remains - the streamed encode's
+  own 278 s is mostly reading layer weights - so this is a large dent, not
+  a closure.
+- ~~The real text-encode stage is invisible to `Timings` ... the
+  `Timings` struct still does not carry it.~~ **Closed in Phase 11**:
+  `Timings::text_encode` plus `Timings::unattributed(wall)`, printed as its
+  own row by both `brain ltxv` CLI lines, so a stage nobody has
+  instrumented yet shows up as a number instead of as a silent gap.
 - `load_block_tensors_from_source` copies every streamed tensor a second
   time (`d.to_vec()` over a `Vec` the GGUF reader has just allocated) -
   ~1.8 GB of redundant allocation and memcpy per block, ~86 GB per real
