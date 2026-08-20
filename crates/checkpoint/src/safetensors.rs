@@ -127,6 +127,44 @@ fn e4m3fn_to_f32_scalar(b: u8) -> f32 {
     sign * (1.0 + mant / 8.0) * 2f32.powi(exp as i32 - 7)
 }
 
+/// Decode `raw` as a packed stream of little-endian elements, `width` bytes
+/// each, converting element `i` with `f`. Trailing bytes shorter than one
+/// element are ignored, exactly as `chunks_exact` did.
+///
+/// Element-wise and index-preserving, so splitting the stream across threads
+/// cannot change a value - element `i` reads only its own `width` bytes and
+/// writes only `out[i]`. That is what makes this a scheduling change: the
+/// conversion of a large checkpoint is bit-identical to the serial form, and
+/// `parse_is_schedule_invariant_across_every_dtype` pins it by bit pattern.
+///
+/// Worth parallelising because dtype conversion is not incidental work on a
+/// real checkpoint: a multi-billion-parameter bf16 file is billions of
+/// independent 2-byte decodes, and it was running on one core while the other
+/// forty-seven idled.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_elems(raw: &[u8], width: usize, f: fn(&[u8]) -> f32) -> Vec<f32> {
+    // Large enough that the per-chunk dispatch is noise, small enough that a
+    // lopsided tensor still spreads over the pool.
+    const CHUNK: usize = 1 << 16;
+    let n = raw.len() / width;
+    let mut out = vec![0f32; n];
+    backend_cpu::par::chunks_mut(&mut out, CHUNK, |c, dst| {
+        let base = c * CHUNK;
+        for (j, v) in dst.iter_mut().enumerate() {
+            let i = base + j;
+            *v = f(&raw[i * width..(i + 1) * width]);
+        }
+    });
+    out
+}
+
+/// The serial decode [`decode_elems`] documents - wasm has no threads and does
+/// not build `backend-cpu`.
+#[cfg(target_arch = "wasm32")]
+fn decode_elems(raw: &[u8], width: usize, f: fn(&[u8]) -> f32) -> Vec<f32> {
+    raw.chunks_exact(width).map(f).collect()
+}
+
 /// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
 pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
     if bytes.len() < 8 {
@@ -160,24 +198,19 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
         let raw = &blob[start..end];
 
         let data: Vec<f32> = match dtype {
-            "F32" => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
-            "F16" => raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
-            "BF16" => raw
-                .chunks_exact(2)
-                .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
-                .collect(),
+            "F32" => decode_elems(raw, 4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            "F16" => decode_elems(raw, 2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
+            "BF16" => decode_elems(raw, 2, |b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
             // Integer buffers (never learnable weights — e.g. Kronos's BSQ basis
             // buffers) are read as f32 so the whole file parses; callers skip
             // them by name. Exact for the small-int values these hold.
-            "I64" => raw
-                .chunks_exact(8)
-                .map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)
-                .collect(),
-            "I32" => raw
-                .chunks_exact(4)
-                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)
-                .collect(),
-            "U8" => raw.iter().map(|&b| b as f32).collect(),
+            "I64" => decode_elems(raw, 8, |b| i64::from_le_bytes(b.try_into().unwrap()) as f32),
+            "I32" => decode_elems(raw, 4, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32),
+            "U8" => decode_elems(raw, 1, |b| b[0] as f32),
+            // `decode_e4m3_bytes`, not `decode_elems`+`e4m3fn_to_f32` inline -
+            // `crate::mmap::decode_into`'s chunked/on-demand path shares this
+            // exact function (see its own doc), so parsing E4M3 any other way
+            // here would let the two decode paths drift.
             "F8_E4M3" => decode_e4m3_bytes(raw),
             // Named explicitly rather than falling into the generic `other`
             // arm below: E5M2 is a real, if rarer, FP8 checkpoint format
@@ -193,10 +226,28 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
 }
 
 /// Read and parse a safetensors file from disk.
+///
+/// The file is MAPPED, not slurped. `std::fs::read` would place a second,
+/// anonymous copy of every byte on the heap alongside the fp32 tensors
+/// [`parse`] is building from it - so a large bf16 checkpoint peaked at
+/// roughly three times its own size in resident memory (the raw copy plus its
+/// fp32 expansion) when two are enough. On a machine where the checkpoints
+/// being read are a large fraction of RAM, that extra copy is not merely
+/// wasteful: it evicts page cache, which is where the bytes of the NEXT
+/// checkpoint the process reads would otherwise still be sitting. Mapping
+/// leaves those pages file-backed and reclaimable instead of duplicating them
+/// into anonymous memory the kernel cannot drop.
+///
+/// The parsed result is unchanged - [`parse`] sees exactly the same bytes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    parse(&bytes)
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    // SAFETY: weight files are treated as immutable for the mapping's
+    // lifetime - the same contract `crate::mmap::MmapSafetensors::open` and
+    // `crate::gguf::MmapGguf::open` already rely on for every mapped
+    // checkpoint in this crate.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("cannot mmap {path}: {e}"))?;
+    parse(&mmap)
 }
 
 /// Read all tensors from a HuggingFace model directory, handling both the
@@ -413,5 +464,47 @@ mod tests {
         assert_eq!(ts[0].name, "c");
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Every dtype's decode is element-wise, so splitting the element stream
+    /// across threads must be a scheduling change and nothing else. Compared
+    /// by BIT PATTERN against a serial `chunks_exact` oracle: the fixture is
+    /// random bytes, which legitimately decode to NaN for the float types, and
+    /// `NaN != NaN` would fail a value comparison between two byte-identical
+    /// results. Bits are also the stronger claim.
+    ///
+    /// Lengths deliberately straddle the internal chunk size and are not
+    /// multiples of it, so a chunk-boundary or tail-handling mistake shows up
+    /// (lesson #4: a fixture that divides evenly hides exactly this).
+    #[test]
+    fn parse_is_schedule_invariant_across_every_dtype() {
+        fn noise(n: usize, seed: u64) -> Vec<u8> {
+            let mut s = seed | 1;
+            (0..n)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    (s >> 24) as u8
+                })
+                .collect()
+        }
+        let cases: [(usize, fn(&[u8]) -> f32); 6] = [
+            (4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            (2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
+            (2, |b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
+            (8, |b| i64::from_le_bytes(b.try_into().unwrap()) as f32),
+            (1, |b| b[0] as f32),
+            (1, |b| e4m3fn_to_f32(b[0])),
+        ];
+        for (ci, (width, f)) in cases.into_iter().enumerate() {
+            for elems in [0usize, 1, 1000, (1 << 16) + 7, 3 * (1 << 16) - 1] {
+                let raw = noise(elems * width + width - 1, 0xC0FFEE + ci as u64 * 31 + elems as u64);
+                let got = decode_elems(&raw, width, f);
+                let want: Vec<f32> = raw.chunks_exact(width).map(f).collect();
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+                assert_eq!(bits(&got), bits(&want), "dtype case {ci}, {elems} elements of {width} bytes");
+            }
+        }
     }
 }

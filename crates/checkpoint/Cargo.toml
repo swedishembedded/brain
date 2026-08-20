@@ -16,11 +16,16 @@ half.workspace = true
 bytemuck.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# The workspace's only rayon seam - block-parallel GGUF dequantization and
-# safetensors dtype conversion both run on the CPU scheduler's pool so
-# `--device cpuN` sizing/affinity governs them. Native only: `backend-cpu` is
-# the Cranelift JIT crate and does not build for wasm, which has no threads
-# for it to use either.
+# The workspace's only rayon seam (`backend_cpu::par`, that module's own doc)
+# - block-parallel GGUF dequantization, safetensors dtype conversion (I64/
+# I32/U8/F32/F16/BF16 via `decode_elems`), and the FP8 (E4M3) byte->f32 LUT
+# decode (`decode_e4m3_bytes`) all run on the CPU scheduler's pool so
+# `--device cpuN` sizing/affinity governs them. Real profiling found the
+# sequential walk over a real checkpoint tensor's tens of millions of
+# elements to be the dominant real cost of streaming-importing a layer, even
+# after the E4M3 LUT itself made each element O(1). Native only: `backend-cpu`
+# is the Cranelift JIT crate and does not build for wasm, which has no
+# threads for it to use either.
 brain-backend-cpu.workspace = true
 # On-demand, memory-mapped weight reads (the residency layer's cold tier). Native
 # only — wasm has no mmap and no fs.
@@ -28,15 +33,6 @@ memmap2 = "0.9"
 # Native gets the full (std) safetensors — the writer uses std fs; the reader path
 # is shared with wasm below.
 safetensors.workspace = true
-# `backend_cpu::par` - the one pool/policy every host-parallel loop in this
-# tree routes through (that module's own doc). Used to fan the FP8 (E4M3)
-# byte->f32 LUT decode (`decode_e4m3_bytes`) out across cores: real profiling
-# found the sequential walk over a real checkpoint tensor's tens of millions
-# of elements to be the dominant real cost of streaming-importing a layer,
-# even after the LUT itself made each element O(1). Native only - wasm has no
-# thread pool here (Cranelift JIT + rayon do not target wasm32), so the wasm
-# build keeps the sequential loop.
-brain-backend-cpu.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm only needs the reader (parse_safetensors); the `std` feature pulls tempfile,
