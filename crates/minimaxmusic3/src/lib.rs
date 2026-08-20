@@ -45,18 +45,22 @@
 //! `invert_sigmas=True, num_train_timesteps=1, shift=1.0`) for the DiT's
 //! sampling loop.
 //!
-//! Status: condition encoder and vocoder inference are landed (both
-//! real-weight parity cosine 1.0), and the vocoder is fully trainable -
-//! full fine-tune (gradcheck on every one of its ~38 parameters, a real
-//! overfit demonstration), LoRA (the same three gates plus a training
-//! demonstration), and a from-scratch STFT-magnitude adversarial
-//! discriminator (gradchecked end to end, including through the STFT,
-//! and shown to learn). Depth decoder, DiT, the Global LLM's own wiring,
-//! joint generator+discriminator training, and serving land
+//! Status: condition encoder, vocoder, and the RVQ depth decoder are all
+//! landed with real-weight parity cosine 1.0. The vocoder AND the depth
+//! decoder are fully trainable - full fine-tune (gradcheck on every named
+//! parameter, a real overfit demonstration) and LoRA (exact no-op at
+//! zero-init, a directional FD check on every adapter, and a training
+//! demonstration with the base weights provably frozen). The vocoder also
+//! has a from-scratch STFT-magnitude adversarial discriminator
+//! (gradchecked end to end, including through the STFT, and shown to
+//! learn). DiT, the Global LLM's own wiring, joint
+//! generator+discriminator training, and serving land
 //! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
+pub mod depth_decoder;
+pub mod depth_lora;
 pub mod discriminator;
 pub mod lora;
 pub mod train;

@@ -235,6 +235,51 @@ weights, and is single-resolution (multi-resolution - running the same
 discriminator at several `(n_fft, hop)` settings and summing the losses -
 is a straightforward parameterization of what exists, not yet exercised).
 
+## Phase 7: RVQ depth decoder
+
+`crates/minimaxmusic3::depth_decoder` - a 4-layer causal transformer
+(RMSNorm, plain multi-head causal self-attention with no RoPE/QK-norm/GQA/
+bias, SwiGLU MLP). Pure host math, like the condition encoder and for the
+same reason: a forward call processes at most `num_codebooks` (8)
+positions - the checkpoint's own inference recipe recomputes this whole
+short sequence from scratch at every depth step rather than caching it -
+so there is nothing here to parallelize a device dispatch across.
+`model::hostmath`'s existing `matvec`/`silu`/`softmax` cover the pieces
+with a shared host implementation already; attention and every backward
+pass are hand-derived, since this un-rotated/ungrouped/unnormalized-QK
+causal-attention shape has no existing device or host counterpart to call
+into.
+
+One real bug the parity harness caught immediately: the reference class's
+own `forward` adds `pos_embedding(arange(s))` INTERNALLY, before its
+first layer - a first draft assumed the caller pre-added it (mirroring a
+misreading of the pipeline's OWN calling code, which does no such thing
+for this particular class) and got cosine 0.63 against real data despite
+gradchecking perfectly against itself (a bug in what the function computes
+relative to the reference, not in whether its own backward is internally
+consistent - exactly the class of defect only a real-reference parity
+check catches, not a self-consistency check).
+
+Four independently-verified taps, matching cosine 1.000000000 (exact) at
+both tiny and real (`hidden_size=4096, num_attention_heads=16,
+num_layers=4`) dims: the transformer stack itself, `projection`, the raw
+(un-summed) `audio_embeddings` gather, and each of the 7 `audio_heads`.
+Backward is FD-gated the same way as every other component here,
+including the newly-added `pos_embedding` gradient.
+
+LoRA (`crates/minimaxmusic3::depth_lora`) reuses `crate::lora`'s adapter
+math completely unchanged - it only ever needed a flat `[rows, cols]`
+weight and never referenced the vocoder's own types, so the SAME
+`LoraW`/`delta`/`apply`/`backward` apply here too. Targets the 7
+per-layer linear projections (`attn.{to_q,to_k,to_v,to_out}`,
+`{gate,up,down}_proj` - `14` weights at `::tiny()`'s 2 layers); RMSNorm
+gains, `pos_embedding`, `audio_embeddings` and `audio_heads` are out of
+scope for this adapter (not linear projections). The same three gates as
+the vocoder's LoRA, all passing: exact no-op at zero-init `B`, a
+directional FD check on every one of the 14 adapters' `(A, B)`, and
+`lora_only_overfits_with_base_frozen` (1500 steps, base weights provably
+untouched, loss reduced 40%+).
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
@@ -244,7 +289,6 @@ is a straightforward parameterization of what exists, not yet exercised).
 - [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
       settings, summed) - the single-resolution version generalizes
       directly but this has not been exercised
-- [ ] RVQ depth decoder: import + forward/backward + gradcheck + LoRA
 - [ ] Flow-matching DiT: import + forward/backward + gradcheck + LoRA +
       int8 storage tier + pipeline sharding
 - [ ] Global LLM: streamed import via `crates/qwen3` + an audio-code
