@@ -155,10 +155,37 @@ pub fn generate_kv_stream_with_head(
     out
 }
 
+/// Total order over `f32` for sampling comparisons, with every NaN treated as
+/// strictly least-preferred (sorting below `-inf`). Two problems rule out the
+/// obvious alternatives: `f32::partial_cmp` returns `None` for a NaN operand,
+/// which is why a bare `.unwrap()` on it panics the instant a NaN logit shows
+/// up (the crash this function used to hit); and `f32::total_cmp` alone is
+/// NOT a safe drop-in either, since IEEE 754 places positive-payload NaNs
+/// ABOVE `+inf` in its total order, which would make a NaN logit WIN
+/// `argmax`/top-k selection outright instead of losing it. A text-generation
+/// sampler must never crash on a NaN logit, and if one shows up it must never
+/// be preferred over a real (finite) alternative, so NaN is defined here as
+/// the least-preferred value, full stop, regardless of its sign or payload.
+#[inline]
+fn cmp_nan_last(a: f32, b: f32) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.total_cmp(&b),
+    }
+}
+
 fn argmax(s: &[f32]) -> usize {
     let mut bi = 0;
     for i in 1..s.len() {
-        if s[i] > s[bi] {
+        // Plain `s[i] > s[bi]` is NaN-unsound: comparisons against NaN are
+        // always false, so a NaN at `s[bi]` (e.g. `s[0]`) could never be
+        // displaced by a later, genuinely larger finite value - argmax would
+        // silently and permanently lock onto the NaN position instead of
+        // picking the best real logit. `cmp_nan_last` treats NaN as
+        // least-preferred so a finite value always beats it.
+        if cmp_nan_last(s[i], s[bi]) == std::cmp::Ordering::Greater {
             bi = i;
         }
     }
@@ -169,14 +196,26 @@ fn argmax(s: &[f32]) -> usize {
 /// smallest set of highest-probability tokens whose cumulative mass reaches
 /// `top_p` (at least one) and zeroes the rest; `top_p >= 1` (or `<= 0`) is a
 /// no-op, so the top-k-only path is bit-for-bit unchanged.
+///
+/// Robust to a NaN logit (which should never happen, but a serving process
+/// must not crash if a forward pass produces one anyway): any NaN is treated
+/// as least-preferred, exactly like `-inf` - it can only be picked if every
+/// other logit is NaN too. `scaled` is sanitized right after the
+/// temperature divide (a NaN input logit stays NaN through that division, so
+/// there is nothing else `temperature` alone can do to filter it) so no NaN
+/// ever reaches the softmax accumulation below and poisons the whole
+/// distribution (`sum` becoming NaN would make every later comparison
+/// against it silently false, degrading sampling instead of just correctly
+/// disfavoring the one bad logit).
 fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng: &mut Rng) -> u32 {
     if temperature <= 0.0 {
         return argmax(logits) as u32;
     }
-    let mut scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
+    let mut scaled: Vec<f32> =
+        logits.iter().map(|&l| if l.is_nan() { f32::NEG_INFINITY } else { l / temperature }).collect();
     if top_k > 0 && top_k < scaled.len() {
         let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
+        idx.sort_unstable_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
         let threshold = scaled[idx[top_k - 1]];
         for v in scaled.iter_mut() {
             if *v < threshold {
@@ -193,7 +232,7 @@ fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng
     // Nucleus (top-p): keep the highest-probability prefix reaching `top_p` mass.
     if top_p > 0.0 && top_p < 1.0 && sum > 0.0 {
         let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
+        idx.sort_unstable_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
         let mut kept = 0.0f32;
         let mut cut = idx.len(); // first rank NOT kept
         for (rank, &i) in idx.iter().enumerate() {
@@ -359,5 +398,51 @@ mod kv_gen_tests {
             }
         }
         assert!(seen_other, "top_p>=1 must not restrict sampling");
+    }
+
+    /// Regression: a NaN logit used to panic `sample_logits` via
+    /// `partial_cmp(...).unwrap()` inside the top-k sort (`f32::partial_cmp`
+    /// returns `None` for a NaN operand). A NaN logit must never crash
+    /// sampling, and - since it is treated as least-preferred - must never be
+    /// the token picked while a finite alternative exists, at any
+    /// temperature/top-k/top-p combination that exercises every code path
+    /// (greedy argmax, top-k only, top-p only, both together, and both
+    /// disabled).
+    #[test]
+    fn nan_logit_does_not_panic_and_is_never_preferred() {
+        let logits = [1.0f32, f32::NAN, 3.0, 2.0];
+        // Greedy (temperature <= 0): argmax must skip the NaN, not lock onto it.
+        let mut rng = data::rng::Rng::new(0);
+        assert_eq!(sample_logits(&logits, 0.0, 0, 1.0, &mut rng), 2, "greedy argmax must pick the real max, not the NaN");
+
+        // Every other sampling configuration must at least not panic, and must
+        // never draw the NaN token index (1) while finite alternatives exist.
+        let configs: &[(f32, usize, f32)] = &[
+            (1.0, 0, 1.0),  // top-k and top-p both disabled
+            (1.0, 2, 1.0),  // top-k only
+            (1.0, 0, 0.9),  // top-p only
+            (1.0, 2, 0.9),  // top-k and top-p together
+        ];
+        for &(temp, top_k, top_p) in configs {
+            for seed in 0..16u64 {
+                let mut rng = data::rng::Rng::new(seed);
+                let picked = sample_logits(&logits, temp, top_k, top_p, &mut rng);
+                assert_ne!(picked, 1, "NaN logit (index 1) must never be picked over a finite alternative");
+            }
+        }
+    }
+
+    /// Regression: `argmax`'s naive `s[i] > s[bi]` is NaN-unsound - comparisons
+    /// against NaN are always false, so a NaN sitting at the initial best index
+    /// (`s[0]`) could never be displaced by a later, genuinely larger finite
+    /// value. Covers a NaN at the front, in the middle, and an all-NaN input
+    /// (which must return some in-bounds index, not panic).
+    #[test]
+    fn argmax_skips_nan_regardless_of_position() {
+        assert_eq!(argmax(&[f32::NAN, 1.0, 5.0, 2.0]), 2, "NaN at the front must not stick as the answer");
+        assert_eq!(argmax(&[1.0, 5.0, f32::NAN, 2.0]), 1, "NaN in the middle must not beat a real max before it");
+        assert_eq!(argmax(&[1.0, 2.0, 3.0, f32::NAN]), 2, "NaN at the end must not beat a real max before it");
+        let all_nan = argmax(&[f32::NAN, f32::NAN, f32::NAN]);
+        assert!(all_nan < 3, "an all-NaN input must return an in-bounds index, not panic");
     }
 }
