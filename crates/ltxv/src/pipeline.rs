@@ -214,21 +214,46 @@ pub struct GenOpts {
     pub device: Option<String>,
     /// First-frame image conditioning (PNG/JPEG), resized to
     /// `width`x`height` and encoded through the real video VAE - see
-    /// [`generate`]'s own doc on how this composes with `eta`. `None` is
+    /// [`conditioned_latent`]'s doc for which reference conditioning item
+    /// this becomes (it depends on whether `end_frame` is also set) and
+    /// [`Frozen`]'s for how it composes with `eta`. `None` is
     /// pure text-to-video (every token noise, this pipeline's original and
     /// still-default behavior).
     pub start_frame: Option<String>,
-    /// Last-pixel-frame image conditioning - independent of `start_frame`
-    /// (may be the SAME path, for a clip that loops seamlessly since the
-    /// generated content in between has to connect the still to itself; or
-    /// a DIFFERENT path, for a clip that morphs from one still to another).
-    /// Unlike `start_frame`, this cannot overwrite an existing latent frame -
-    /// it appends one [`append_image_conditioning`] block at pixel-frame
-    /// `frames - 1`; see that function's doc and [`generate`]'s own
-    /// conditioning block for why the two ends use different mechanisms. At
-    /// least one of `start_frame`/`end_frame` being set is what turns image
-    /// conditioning on at all.
+    /// Last-pixel-frame image conditioning at pixel-frame `frames - 1` - may
+    /// be the SAME path as `start_frame`, for a clip that loops seamlessly
+    /// since the generated content in between has to connect the still to
+    /// itself; or a DIFFERENT path, for a clip that morphs from one still to
+    /// another. At least one of `start_frame`/`end_frame` being set is what
+    /// turns image conditioning on at all.
+    ///
+    /// **Passing the SAME image at both ends usually produces a STATIC
+    /// clip, and that is the model answering the question rather than a
+    /// defect.** "Start at this image and end at this same image" has a
+    /// correct trivial solution. Measured on the real 22B checkpoint with
+    /// `crates/ltxv/tests/motion_real.rs`'s metric (peak excursion from
+    /// frame 0; anything >= 18 visibly animates, anything <= 9 is the
+    /// pinned still repeated): 7.3 at 640x320/25 frames, and 40.0 for the
+    /// same shape, seed, prompt and code with only the end still changed to
+    /// a mirrored copy. See that file's table for the full matrix,
+    /// including the levers that do NOT change it (strength, sampler,
+    /// conditioning mechanism, clip length, conditioning-image
+    /// compression). For a clip that has to move, anchor two DIFFERENT
+    /// instants, or use `start_frame` alone.
     pub end_frame: Option<String>,
+    /// `ImageConditioningInput.strength` for every given still - `1.0` pins
+    /// the conditioned tokens to the encoded image exactly, `0.0` ignores
+    /// them. See [`conditioned_latent`]'s doc for the two places it lands
+    /// and why the reference makes it a REQUIRED per-image CLI argument
+    /// (`--image PATH FRAME_IDX STRENGTH`, its own help example: `0.8`).
+    ///
+    /// `1.0` is this crate's default because "hold exactly this frame" is
+    /// what `--start-frame` alone promises, and because it is the value the
+    /// port used before this became a parameter at all. Lowering it does
+    /// visibly change the output (mean |delta| 6.4 at 0.8, 14.3 at 0.5,
+    /// against the same run at 1.0) - but it is NOT a motion knob: see
+    /// `end_frame`'s doc for the one thing that is.
+    pub conditioning_strength: f32,
 }
 
 impl Default for GenOpts {
@@ -254,6 +279,7 @@ impl Default for GenOpts {
             device: None,
             start_frame: None,
             end_frame: None,
+            conditioning_strength: 1.0,
         }
     }
 }
@@ -857,8 +883,9 @@ struct ImageConditioning {
     /// `[base_t + n*lh*lw]` - the caller's own base mask verbatim on
     /// `[0, base_t)`, zero on the appended range (see this struct's doc).
     keyframes_mask: Vec<f32>,
-    /// `[base_t + n*lh*lw]` - `1.0` (denoise fully) on `[0, base_t)`, `0.0`
-    /// (frozen, see [`Frozen`]) on the appended range.
+    /// `[base_t + n*lh*lw]` - `1.0` (denoise fully) on `[0, base_t)`,
+    /// `1 - strength` (`0.0` = fully frozen, see [`Frozen`]) on the appended
+    /// range.
     denoise_mask: Vec<f32>,
     /// `[base_t + n*lh*lw, channels]` - each appended block holds its own
     /// real encoded image latent (token-major, [`chw_to_tc`]'s layout); the
@@ -868,7 +895,7 @@ struct ImageConditioning {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_image_conditioning(base_t: usize, base_positions: &[f32], base_keyframes_mask: &[f32], lh: usize, lw: usize, channels: usize, fps: f64, blocks: &[(usize, &[f32])]) -> ImageConditioning {
+fn append_image_conditioning(base_t: usize, base_positions: &[f32], base_keyframes_mask: &[f32], lh: usize, lw: usize, channels: usize, fps: f64, appended_denoise_mask: f32, blocks: &[(usize, &[f32])]) -> ImageConditioning {
     assert_eq!(base_positions.len(), 3 * base_t * 2, "append_image_conditioning: base_positions has {} values, expected {}", base_positions.len(), 3 * base_t * 2);
     assert_eq!(base_keyframes_mask.len(), base_t, "append_image_conditioning: base_keyframes_mask has {} values, expected {base_t}", base_keyframes_mask.len());
     assert!(!blocks.is_empty(), "append_image_conditioning: blocks must be non-empty");
@@ -896,7 +923,7 @@ fn append_image_conditioning(base_t: usize, base_positions: &[f32], base_keyfram
     let mut keyframes_mask = vec![0f32; total_t];
     keyframes_mask[..base_t].copy_from_slice(base_keyframes_mask);
 
-    let mut denoise_mask = vec![0f32; total_t];
+    let mut denoise_mask = vec![appended_denoise_mask; total_t];
     denoise_mask[..base_t].fill(1.0);
 
     let mut clean = vec![0f32; total_t * channels];
@@ -929,7 +956,7 @@ mod image_conditioning_tests {
         let base_km = base_mask(base_t, 3);
         let cond_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
 
-        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, &[(0, &cond_tokens)]);
+        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, 0.0, &[(0, &cond_tokens)]);
 
         let cond_t = lh * lw;
         let total_t = base_t + cond_t;
@@ -965,7 +992,7 @@ mod image_conditioning_tests {
         let cond_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
         let last_pixel_frame = 8usize; // e.g. a 9-frame clip's last pixel-frame index
 
-        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, &[(0, &cond_tokens), (last_pixel_frame, &cond_tokens)]);
+        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, 0.0, &[(0, &cond_tokens), (last_pixel_frame, &cond_tokens)]);
 
         let block_t = lh * lw;
         let total_t = base_t + 2 * block_t;
@@ -995,11 +1022,306 @@ mod image_conditioning_tests {
         let start_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
         let end_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| 100.0 + i as f32).collect();
 
-        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, &[(0, &start_tokens), (8, &end_tokens)]);
+        let ic = append_image_conditioning(base_t, &base_positions, &base_km, lh, lw, channels, fps, 0.0, &[(0, &start_tokens), (8, &end_tokens)]);
 
         let block_t = lh * lw;
         assert_eq!(&ic.clean[base_t * channels..(base_t + block_t) * channels], &start_tokens[..], "the start block keeps the start image's own content");
         assert_eq!(&ic.clean[(base_t + block_t) * channels..], &end_tokens[..], "the end block keeps the end image's own (different) content");
+    }
+}
+
+/// One generation's conditioned latent state - what [`generate`] hands the
+/// denoise loop once the given stills (if any) have been encoded.
+struct ConditionedLatent {
+    /// `[t, channels]` token-major initial latent. Frozen tokens hold their
+    /// clean content, never noise: `ltx_core.components.noisers.
+    /// GaussianNoiser.__call__`'s second `torch.lerp(clean_latent, noised,
+    /// denoise_mask)` is exactly `clean` wherever `denoise_mask == 0`.
+    latent: Vec<f32>,
+    /// `[3, t, 2]` RoPE bounds.
+    positions: Vec<f32>,
+    /// `[t]` first-latent-frame marker, extended over any appended range.
+    keyframes_mask: Vec<f32>,
+    /// `[t]`, `1.0` denoise / `0.0` frozen - the reference's `denoise_mask`,
+    /// which is BOTH what [`post_process_latent`] re-pins with and what the
+    /// per-token timesteps are a product of (see [`denoise`]).
+    denoise_mask: Vec<f32>,
+    /// `[t, channels]` clean content for the frozen tokens (zero elsewhere,
+    /// never read there).
+    clean: Vec<f32>,
+    /// Token count, `>= base_t` (each appended block adds `lh*lw`).
+    t: usize,
+}
+
+/// Build [`ConditionedLatent`] from the base noise latent plus whichever
+/// stills were given, **choosing the reference mechanism the requested
+/// combination actually calls for**. There are two of them and they are not
+/// interchangeable:
+///
+/// * **One still at frame 0 only** - image-to-video. `ltx_pipelines.utils.
+///   helpers.combined_image_conditionings`' `img.frame_idx == 0` branch:
+///   `VideoConditionByLatentIndex(latent_idx=0)`, which OVERWRITES the base
+///   video's own first latent frame in place (`conditioning/types/
+///   latent_cond.py`'s `apply_to`: `clean_latent[:, start:stop] = tokens`,
+///   `denoise_mask[:, start:stop] = 1 - strength`). No token is appended;
+///   the clip's own frame 0 IS the still. This is `ti2vid_one_stage` /
+///   `distilled`'s conditioning, and it is right for "start from this
+///   image".
+/// * **Stills at BOTH ends** - keyframe interpolation, which is a DIFFERENT
+///   reference pipeline with a DIFFERENT conditioning builder.
+///   `ltx_pipelines.keyframe_interpolation.KeyframeInterpolationPipeline.
+///   __call__` uses `helpers.image_conditionings_by_adding_guiding_latent`,
+///   which wraps EVERY image - `frame_idx == 0` included, with no special
+///   case - in `VideoConditionByKeyframeIndex`, i.e. APPENDS a guiding
+///   token block per still and leaves every one of the generated video's own
+///   tokens denoising freely.
+///
+/// **What the difference buys, and what it does NOT.** Overwriting latent
+/// frame 0 freezes a whole latent frame of the GENERATED sequence: the
+/// causal VAE's first latent frame covers one pixel frame, but it still
+/// costs `lh*lw` tokens - `1/lat_t` of the clip, which is 1-in-16 at the
+/// 121-frame shapes the image-to-video pipelines run and HALF of a 9-frame
+/// clip. Appending instead leaves every generated token free and makes the
+/// still pure guidance. That is a real structural difference and it is what
+/// the reference does here, so this is what the port does.
+///
+/// It is **not** what decides whether a both-ends clip animates. Measured
+/// on the real 22B checkpoint at 9 frames / 384x192 with the same still at
+/// both ends: peak excursion from frame 0 was 5.07 with the overwrite
+/// mechanism and 4.64 with this one - both frozen, both reproducing the
+/// still in every frame. What decides that is whether the two anchors are
+/// the same picture; see `GenOpts::end_frame` and
+/// `crates/ltxv/tests/motion_real.rs`'s table.
+///
+/// `start`/`end` are already-encoded `[lh*lw, channels]` latent token blocks
+/// (one real VAE encode each; the SAME image passed at both ends is encoded
+/// once and reused). `frames` is the clip's pixel-frame count - the end
+/// still conditions pixel-frame `frames - 1`. At least one of the two must
+/// be present.
+///
+/// `noise` is the whole sequence's initial Gaussian draw, `[(base_t +
+/// blocks*lh*lw), channels]` ([`conditioning_block_count`] gives `blocks`) -
+/// the reference draws ONE noise tensor over the full post-conditioning
+/// sequence (`GaussianNoiser._sample_noise` runs after every conditioning
+/// item has been applied), so the appended range gets real noise, not zeros.
+/// It only matters at `strength < 1.0`; at `1.0` the conditioned tokens are
+/// exactly `clean` and the appended noise is multiplied out.
+///
+/// `strength` is `ImageConditioningInput.strength`, the per-image knob every
+/// reference pipeline takes as a REQUIRED CLI argument (`--image PATH
+/// FRAME_IDX STRENGTH`, `ltx_pipelines.utils.args.ImageAction`, whose own
+/// help text's example is `0.8`). Both conditioning items turn it into the
+/// same two things:
+///
+/// * `denoise_mask = 1 - strength` over the conditioned tokens
+///   (`latent_cond.py`'s `apply_to`, `keyframe_cond.py`'s `torch.full(...,
+///   1.0 - self.strength)`) - which is both what [`post_process_latent`]
+///   blends with and, through `timesteps_from_mask`, the timestep those
+///   tokens are announced at;
+/// * the initial latent there, `GaussianNoiser`'s `torch.lerp(clean_latent,
+///   noised, denoise_mask)` = `(1-m)*clean + m*noise`.
+///
+/// `1.0` (this crate's default) is the hardest possible pin: mask `0`,
+/// timestep `0`, the token nailed to `clean` for the whole trajectory and
+/// pulling every free token toward it through self-attention. That is the
+/// right setting for "the clip starts as exactly this frame"; it is NOT the
+/// only setting the reference supports, and a clip conditioned at both ends
+/// at `1.0` is being asked for a much harder thing than the same clip at
+/// `0.8`.
+#[allow(clippy::too_many_arguments)]
+fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_mask: &[f32], base_t: usize, lh: usize, lw: usize, channels: usize, frames: usize, fps: f64, start: Option<&[f32]>, end: Option<&[f32]>, strength: f32) -> ConditionedLatent {
+    assert!(start.is_some() || end.is_some(), "conditioned_latent: at least one of start/end must be given");
+    assert!((0.0..=1.0).contains(&strength), "conditioned_latent: strength {strength} is outside [0, 1]");
+    let block_t = lh * lw;
+    let blocks = conditioning_block_count(start.is_some(), end.is_some());
+    let total_t = base_t + blocks * block_t;
+    assert_eq!(noise.len(), total_t * channels, "conditioned_latent: noise has {} values, expected {}", noise.len(), total_t * channels);
+    let m = 1.0 - strength;
+    // `GaussianNoiser`'s second lerp, for one token range: `(1-m)*clean +
+    // m*noise`. At `m == 0` (strength 1.0) this is exactly `clean`.
+    let mix = |latent: &mut [f32], clean_tokens: &[f32], off_tokens: usize| {
+        let off = off_tokens * channels;
+        for (i, &c) in clean_tokens.iter().enumerate() {
+            latent[off + i] = (1.0 - m) * c + m * latent[off + i];
+        }
+    };
+
+    // Keyframe interpolation: both ends appended as guiding blocks, the base
+    // video untouched (see this function's doc).
+    if let (Some(s), Some(e)) = (start, end) {
+        let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &[(0, s), (frames - 1, e)]);
+        let mut latent = noise;
+        mix(&mut latent, s, base_t);
+        mix(&mut latent, e, base_t + block_t);
+        return ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t };
+    }
+
+    // One appended block at the clip's last pixel frame - the same
+    // `VideoConditionByKeyframeIndex` mechanism, one still.
+    if let Some(e) = end {
+        let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &[(frames - 1, e)]);
+        let mut latent = noise;
+        mix(&mut latent, e, base_t);
+        return ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t };
+    }
+
+    // Image-to-video: overwrite the base video's own first latent frame.
+    let s = start.expect("checked above");
+    let mut latent = noise;
+    mix(&mut latent, s, 0);
+    let mut denoise_mask = vec![1.0f32; base_t];
+    denoise_mask[..block_t].fill(m);
+    let mut clean = vec![0f32; base_t * channels];
+    clean[..block_t * channels].copy_from_slice(s);
+    ConditionedLatent { latent, positions: base_positions.to_vec(), keyframes_mask: base_keyframes_mask.to_vec(), denoise_mask, clean, t: base_t }
+}
+
+/// How many `lh*lw`-token conditioning blocks [`conditioned_latent`] will
+/// APPEND for a given `(start, end)` request - `0` for image-to-video (the
+/// start still overwrites latent frame 0 in place), `1` for an end still
+/// alone, `2` for keyframe interpolation. [`generate`] needs this before the
+/// stills are encoded, to draw the initial noise at the full
+/// post-conditioning length in one go (see [`conditioned_latent`]'s `noise`).
+fn conditioning_block_count(start: bool, end: bool) -> usize {
+    match (start, end) {
+        (true, true) => 2,
+        (_, true) => 1,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod conditioned_latent_tests {
+    use super::*;
+
+    /// A 9-frame clip's geometry at a 2x2 latent grid: 2 latent frames of
+    /// `lh*lw = 4` tokens each.
+    const LH: usize = 2;
+    const LW: usize = 2;
+    const CH: usize = 3;
+    const FRAMES: usize = 9;
+    const FPS: f64 = 8.0;
+
+    /// `(noise, base_positions, base_keyframes_mask, base_t)` for a clip
+    /// with `blocks` appended conditioning blocks - the noise vector is
+    /// drawn at the full post-conditioning length, exactly the way
+    /// [`generate`] draws it.
+    fn base(blocks: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, usize) {
+        let lat_t = 2usize;
+        let base_t = lat_t * LH * LW;
+        let positions = real_pixel_positions(lat_t, LH, LW, FPS);
+        let mut km = vec![0f32; base_t];
+        km[..LH * LW].fill(1.0);
+        let noise: Vec<f32> = (0..(base_t + blocks * LH * LW) * CH).map(|i| -(i as f32) - 1.0).collect();
+        (noise, positions, km, base_t)
+    }
+
+    fn tokens(bias: f32) -> Vec<f32> {
+        (0..LH * LW * CH).map(|i| bias + i as f32).collect()
+    }
+
+    /// The reference's interpolation pipeline
+    /// (`image_conditionings_by_adding_guiding_latent`) appends a guiding
+    /// block per still - `frame_idx == 0` included - and freezes NONE of the
+    /// generated video's own tokens. A port that reuses the image-to-video
+    /// builder's `frame_idx == 0` overwrite instead pins half of a 9-frame
+    /// clip's latent frames.
+    #[test]
+    fn both_ends_append_two_guiding_blocks_and_freeze_no_generated_token() {
+        let (latent, positions, km, base_t) = base(2);
+        let (s, e) = (tokens(0.0), tokens(100.0));
+
+        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some(&e), 1.0);
+
+        let block_t = LH * LW;
+        assert_eq!(c.t, base_t + 2 * block_t, "one appended guiding block per still");
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "every token of the GENERATED video denoises freely - VideoConditionByKeyframeIndex appends, it never overwrites");
+        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 2 * block_t][..], "both appended guiding blocks are frozen (strength 1.0)");
+        assert_eq!(&c.latent[..base_t * CH], &latent[..base_t * CH], "the base video keeps its own noise: nothing is overwritten");
+        assert_eq!(&c.latent[base_t * CH..(base_t + block_t) * CH], &s[..]);
+        assert_eq!(&c.latent[(base_t + block_t) * CH..], &e[..]);
+        assert_eq!(c.positions.len(), 3 * c.t * 2);
+        assert_eq!(c.keyframes_mask.len(), c.t);
+        assert_eq!(c.clean.len(), c.t * CH);
+        // Guiding blocks land at pixel-frame 0 and `frames - 1`.
+        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125]);
+        let second = base_t + block_t;
+        assert_eq!(&c.positions[second * 2..second * 2 + 2], &[1.0, 1.125], "the end still conditions pixel-frame 8 of a 9-frame clip");
+    }
+
+    /// Start-only stays image-to-video: `combined_image_conditionings`'
+    /// `frame_idx == 0` branch really does overwrite latent frame 0, and
+    /// that is the right mechanism when the caller asked for "the clip
+    /// starts as this image".
+    #[test]
+    fn start_only_overwrites_the_first_latent_frame_in_place() {
+        let (latent, positions, km, base_t) = base(0);
+        let s = tokens(0.0);
+
+        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), None, 1.0);
+
+        let block_t = LH * LW;
+        assert_eq!(c.t, base_t, "nothing is appended");
+        assert_eq!(&c.latent[..block_t * CH], &s[..], "the still replaces the first latent frame's noise");
+        assert_eq!(&c.latent[block_t * CH..], &latent[block_t * CH..], "every later token keeps its noise");
+        assert_eq!(&c.denoise_mask[..block_t], &vec![0.0f32; block_t][..]);
+        assert_eq!(&c.denoise_mask[block_t..], &vec![1.0f32; base_t - block_t][..]);
+        assert_eq!(&c.clean[..block_t * CH], &s[..]);
+        assert_eq!(c.positions, positions, "the base video's own positions are unchanged");
+    }
+
+    /// End-only appends exactly one guiding block at `frames - 1`.
+    #[test]
+    fn end_only_appends_one_guiding_block_at_the_last_pixel_frame() {
+        let (latent, positions, km, base_t) = base(1);
+        let e = tokens(100.0);
+
+        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some(&e), 1.0);
+
+        let block_t = LH * LW;
+        assert_eq!(c.t, base_t + block_t);
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
+        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; block_t][..]);
+        assert_eq!(&c.latent[..base_t * CH], &latent[..base_t * CH]);
+        assert_eq!(&c.latent[base_t * CH..], &e[..]);
+        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[1.0, 1.125]);
+    }
+
+    /// `strength < 1.0` is the reference's own per-image knob and it has to
+    /// reach BOTH of the places `ImageConditioningInput.strength` reaches:
+    /// the `1 - strength` denoise mask (which is also the conditioned
+    /// tokens' timestep, through `timesteps_from_mask`), and
+    /// `GaussianNoiser`'s `lerp(clean, noise, mask)` initial latent. A port
+    /// that only softened the mask would announce "partly noisy" for a token
+    /// it had nonetheless pinned to a clean image.
+    #[test]
+    fn strength_below_one_softens_both_the_mask_and_the_initial_latent() {
+        let (latent, positions, km, base_t) = base(2);
+        let (s, e) = (tokens(0.0), tokens(100.0));
+        let strength = 0.8f32;
+        let m = 1.0 - strength;
+
+        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some(&e), strength);
+
+        let block_t = LH * LW;
+        assert_eq!(&c.denoise_mask[base_t..], &vec![m; 2 * block_t][..], "denoise_mask over a conditioned token is 1 - strength");
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
+        // clean is unaffected by strength - it is the target, not the blend.
+        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..]);
+        for (i, &v) in c.latent[base_t * CH..(base_t + block_t) * CH].iter().enumerate() {
+            let want = (1.0 - m) * s[i] + m * latent[base_t * CH + i];
+            assert!((v - want).abs() < 1e-5, "token {i}: initial latent is lerp(clean, noise, 1-strength): got {v}, want {want}");
+        }
+    }
+
+    /// The block count `generate` needs BEFORE the stills are encoded, to
+    /// draw one noise vector at the full post-conditioning length.
+    #[test]
+    fn appended_block_count_matches_the_mechanism_each_request_uses() {
+        assert_eq!(conditioning_block_count(false, false), 0, "unconditioned");
+        assert_eq!(conditioning_block_count(true, false), 0, "image-to-video overwrites in place");
+        assert_eq!(conditioning_block_count(false, true), 1);
+        assert_eq!(conditioning_block_count(true, true), 2, "keyframe interpolation appends BOTH stills");
     }
 }
 
@@ -1102,12 +1424,28 @@ fn to_denoised(sample: &[f32], velocity: &[f32], sigma: f64) -> Vec<f32> {
 /// non-finite prediction an `error!` - so a run that diverged or stalled can
 /// be pinpointed from the trace alone instead of re-run under a profiler.
 /// A held-fixed image-conditioning range within the denoised latent -
-/// `mask[tok] == 0.0` freezes that token to `clean[tok]` every step
-/// (`ltx_core`'s own `post_process_latent`: `denoised*mask + clean*(1-mask)`,
-/// applied to the model's x0 ESTIMATE before the sampler's step formula runs
-/// on it, not as a post-hoc overwrite). `mask`/mask-implicit token count is
-/// `clean.len() / channels`; every token not covered here denoises normally
-/// (`mask[tok] == 1.0`).
+/// `mask[tok] < 1.0` pulls that token toward `clean[tok]` every step
+/// (`ltx_pipelines.utils.helpers.post_process_latent`: `denoised*mask +
+/// clean*(1-mask)`). `mask`/mask-implicit token count is `clean.len() /
+/// channels`; every token not covered here denoises normally (`mask[tok] ==
+/// 1.0`).
+///
+/// **WHERE in the step it is applied depends on the sampler**, and the
+/// reference's two loops genuinely differ:
+///
+/// * Deterministic Euler (`samplers.euler_denoising_loop` -> `_step_state`):
+///   applied to the model's x0 ESTIMATE, before the step formula runs on it.
+/// * Ancestral Euler (`samplers._ancestral_euler_denoising_loop`, which is
+///   what `euler_ancestral_denoising_loop` and therefore LTX-2.5's own
+///   distilled stage 1 run): applied to the STEPPED latent `x_next`, after
+///   the renoise term has been added - `if draw_noise: x_next =
+///   post_process_latent(x_next, ...)`. The x0 estimate is left alone, and
+///   the terminal (`sigma_next == 0`) step returns it unmodified.
+///
+/// [`denoise`] implements both, selected by `eta`, because getting this
+/// backwards would either leave freshly injected noise sitting on a token
+/// that is supposed to be clean, or pin a token the sampler was never given
+/// a chance to move.
 struct Frozen<'a> {
     mask: &'a [f32],
     clean: &'a [f32],
@@ -1152,23 +1490,29 @@ fn denoise(
     cancel: &capability::CancelToken,
     progress: &mut impl FnMut(u32, u32, &str),
 ) -> Result<Vec<f32>, String> {
-    // The reference's own masked-conditioning path (`_inject_sde_noise`'s
-    // `timesteps_from_mask`, non-legacy default) gives every token its OWN
-    // per-token sigma (`denoise_mask * sigma`) so a frozen token's renoise
-    // term is gated by that token's own zero sigma, not by a separate
-    // post-hoc correction on the sampler's output. This crate's
-    // `euler_ancestral_step` takes one scalar sigma for the whole latent -
-    // extending it to a per-token sigma is real, not-yet-built work (a
-    // tracked gap, see `crate::pipeline`'s module doc). `eta == 0.0`
-    // sidesteps the whole question: the ancestral renoise term never runs,
-    // so masking only the x0 ESTIMATE (`post_process_latent`, this
-    // function's own doc) each step - the same thing the reference's plain
-    // (non-ancestral) `_step_state` does - is exactly correct: a frozen
-    // token starts at `clean` (never noised, see `generate`'s own latent0
-    // construction) and its every step's x0 estimate is forced back to
-    // `clean`, so the deterministic Euler formula keeps it at `clean`
-    // exactly, with no drift, for the whole trajectory.
-    assert!(frozen.is_none() || eta == 0.0, "denoise: image conditioning (frozen tokens) requires eta=0.0 (deterministic Euler) - the ancestral renoise path is not yet extended to per-token sigma");
+    // Which of the reference's two loops this step follows. `ltx_pipelines.
+    // distilled` picks the ancestral one for every checkpoint at or above
+    // `ANCESTRAL_SAMPLER_SINCE_VERSION = (2, 5)` - i.e. for the LTX-2.5
+    // distilled weights this pipeline runs, stage 1 is
+    // `euler_ancestral_denoising_loop` with `ANCESTRAL_ETA = 1.0` /
+    // `ANCESTRAL_S_NOISE = 1.0`, not the deterministic Euler loop. The
+    // difference matters most exactly where conditioning is strongest: the
+    // first four sigmas of the distilled schedule move by 0.006 each, which
+    // is a near-no-op without a renoise term, and a deterministic
+    // trajectory pulled by clean conditioning tokens has nothing to push it
+    // off the "hold the still" solution.
+    //
+    // An earlier version of this function REFUSED `eta > 0` whenever any
+    // token was conditioned, on the grounds that a frozen token's renoise
+    // term needs a per-token sigma. That requirement is real for
+    // `samplers._inject_sde_noise` (the res2s loop's SDE injection, which
+    // does build `stack([timesteps_from_mask(mask, sigma),
+    // timesteps_from_mask(mask, sigma_next)])`) - and it is NOT how
+    // `_ancestral_euler_denoising_loop` works. That loop steps the whole
+    // latent with the SCALAR schedule and then re-applies
+    // `post_process_latent` to the STEPPED result, which needs no per-token
+    // sigma at all. See [`Frozen`]'s doc for the two orderings.
+    let ancestral = eta > 0.0;
     let cfg_on = guidance > 1.0;
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
@@ -1217,11 +1561,21 @@ fn denoise(
             return Err(format!("the denoiser produced non-finite values at step {} (sigma = {sigma:.4})", i + 1));
         }
         let mut denoised = to_denoised(&latent, &velocity, sigma);
-        if let Some(f) = frozen {
+        // `_step_state`: mask the x0 estimate, then step. The ancestral loop
+        // instead steps the estimate as-is and re-applies the mask to the
+        // STEPPED latent below (after the renoise term), except on the
+        // terminal step, which it short-circuits to the raw estimate
+        // (`replace(state, latent=step.denoised)`, no `post_process_latent`).
+        if let (Some(f), false) = (frozen, ancestral) {
             post_process_latent(&mut denoised, f);
         }
-        let noise = if eta > 0.0 { Some((0..latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
+        let noise = if ancestral { Some((0..latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
         latent = euler_ancestral_step(&latent, &denoised, sigma, sigma_next, eta, s_noise, noise.as_deref());
+        if let (Some(f), true) = (frozen, ancestral) {
+            if sigma_next != 0.0 {
+                post_process_latent(&mut latent, f);
+            }
+        }
         let per = t0.elapsed().as_secs_f32() / (i + 1) as f32;
         tracing::debug!(step = i + 1, steps, sigma, sigma_next, secs_per_step = per, "step done");
         progress(i as u32 + 1, total, &format!("denoise sigma={sigma:.3} {per:.2}s/step"));
@@ -1409,17 +1763,22 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
     };
 
-    // ---- optional image conditioning: encode a real still (or two), hold
-    // it/them fixed at frame 0 and/or the clip's last pixel frame while the
-    // rest denoises around them (`ltx_core`'s `VideoConditionByKeyframeIndex
-    // (frame_idx, strength=1.0)`) - see `GenOpts::start_frame`/`end_frame`'s
-    // doc and `append_image_conditioning`'s for the exact mechanics and why
-    // `eta` must be 0 for this. `vraw`/`vweights` are loaded here (not at
-    // decode time below, which now reuses them) since this needs them
-    // before the denoise loop, not after it.
+    // ---- optional image conditioning: encode a real still (or two) and
+    // condition the clip on it/them at frame 0 and/or the clip's last pixel
+    // frame - see `GenOpts::start_frame`/`end_frame`'s doc, and
+    // [`conditioned_latent`]'s for WHICH of the reference's two conditioning
+    // mechanisms each combination uses and why that choice decides whether
+    // the clip moves. `vraw`/`vweights` are loaded here (not at decode time
+    // below, which now reuses them) since this needs them before the
+    // denoise loop, not after it.
     let vraw = read_any(&paths.vae)?;
     let vweights = crate::import::import_vae(vraw, &vcfg)?;
-    let latent0 = seeded_noise(t * in_channels, o.seed);
+    // One draw over the WHOLE post-conditioning sequence, matching
+    // `GaussianNoiser._sample_noise`, which runs after every conditioning
+    // item has appended its tokens. `seeded_noise` is prefix-stable, so a
+    // clip's first `t*in_channels` values - the entire unconditioned path -
+    // are byte-identical whether or not anything is appended here.
+    let latent0 = seeded_noise((t + conditioning_block_count(o.start_frame.is_some(), o.end_frame.is_some()) * lh * lw) * in_channels, o.seed);
     let encode_still = |path: &str| -> Result<Vec<f32>, String> {
         let img_t = Instant::now();
         let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(o.width as u32, o.height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
@@ -1442,52 +1801,31 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         Ok(cond_tokens)
     };
     let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if o.start_frame.is_some() || o.end_frame.is_some() {
-        if o.eta != 0.0 {
-            tracing::error!(eta = o.eta, "image conditioning requires eta=0.0 (deterministic Euler)");
-            return Err(format!("--start-frame/--end-frame require --eta 0 (got {}) - the ancestral renoise path is not yet extended to per-token sigma, see GenOpts::start_frame's doc", o.eta));
-        }
-        // `start_frame` (pixel-frame 0) and `end_frame` (any OTHER pixel
-        // frame) are NOT the same mechanism in the reference -
-        // `combined_image_conditionings`'s own frame_idx==0 special case:
-        // `VideoConditionByLatentIndex` OVERWRITES the base video's own
-        // existing first-latent-frame tokens in place (same position, same
-        // token count - the causal VAE's first latent frame covers exactly
-        // one pixel frame, so it already exclusively represents pixel-frame
-        // 0 and nothing else needs to change); `VideoConditionByKeyframeIndex`
-        // APPENDS new tokens for any other frame_idx, because no existing
-        // latent frame exclusively represents a single interior/end pixel
-        // frame (the LAST latent frame covers `VAE_TEMPORAL_SCALE` pixel
-        // frames collectively, end_frame included, so there is nothing to
-        // overwrite there without also destroying those other frames'
-        // conditioning).
+        // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
+        // reference has two conditioning builders for these two cases
+        // (image-to-video's in-place overwrite of latent frame 0, keyframe
+        // interpolation's appended guiding blocks). See that function's doc
+        // for the reference citations and for where
+        // `conditioning_strength` lands.
         //
-        // Whichever branch runs, the resulting `denoise_mask` is what the
+        // Whichever mechanism runs, the resulting `denoise_mask` is what the
         // denoise loop turns into PER-TOKEN timesteps (`timesteps_from_mask`,
         // see [`denoise`]) - a frozen token is announced to the model as
         // noise-free, which is the whole reason the model treats it as
         // guidance rather than as sequence noise.
-        let mut latent0 = latent0;
-        let mut denoise_mask = vec![1.0f32; t];
-        let mut clean = vec![0f32; t * in_channels];
-        if let Some(path) = &o.start_frame {
-            let cond_tokens = encode_still(path)?;
-            let block_t = lh * lw;
-            latent0[..block_t * in_channels].copy_from_slice(&cond_tokens);
-            denoise_mask[..block_t].fill(0.0);
-            clean[..block_t * in_channels].copy_from_slice(&cond_tokens);
-        }
-        if let Some(path) = &o.end_frame {
-            let cond_tokens = encode_still(path)?;
-            let ic = append_image_conditioning(t, &positions, &keyframes_mask, lh, lw, in_channels, o.fps as f64, &[(o.frames - 1, &cond_tokens)]);
-            let block_t = lh * lw;
-            latent0.extend_from_slice(&cond_tokens);
-            denoise_mask.extend_from_slice(&ic.denoise_mask[t..t + block_t]);
-            clean.extend_from_slice(&ic.clean[t * in_channels..(t + block_t) * in_channels]);
-            let total_t = t + block_t;
-            (latent0, ic.positions, ic.keyframes_mask, total_t, Some((denoise_mask, clean)))
-        } else {
-            (latent0, positions.clone(), keyframes_mask.clone(), t, Some((denoise_mask, clean)))
-        }
+        //
+        // The same path passed for both ends is encoded ONCE: a real VAE
+        // encode is not free, and the loop case (one still at both ends) is
+        // the common one.
+        let start_tokens = o.start_frame.as_deref().map(&encode_still).transpose()?;
+        let end_tokens = match (&o.end_frame, &o.start_frame) {
+            (Some(e), Some(s)) if e == s => start_tokens.clone(),
+            (Some(e), _) => Some(encode_still(e.as_str())?),
+            (None, _) => None,
+        };
+        let c = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, in_channels, o.frames, o.fps as f64, start_tokens.as_deref(), end_tokens.as_deref(), o.conditioning_strength);
+        tracing::info!(strength = o.conditioning_strength, tokens = c.t, base_tokens = t, appended_blocks = conditioning_block_count(o.start_frame.is_some(), o.end_frame.is_some()), "image conditioning applied");
+        (c.latent, c.positions, c.keyframes_mask, c.t, Some((c.denoise_mask, c.clean)))
     } else {
         (latent0, positions.clone(), keyframes_mask.clone(), t, None)
     };
@@ -2094,18 +2432,66 @@ mod tests {
     /// two stubs used here are constant vectors so this fully identifies
     /// which branch ran), and answers with a constant vector - so the loop's
     /// CFG bookkeeping is observable without a real DiT.
+    #[derive(Default)]
     struct FakeDit {
         seen: std::cell::RefCell<Vec<f32>>,
         /// Every `timesteps` slice the loop handed the model, in call order -
         /// what `timesteps_are_the_denoise_mask_times_sigma` inspects.
         timesteps_seen: std::cell::RefCell<Vec<Vec<f32>>>,
+        /// Every `latent` the loop handed the model - i.e. what the previous
+        /// step's sampler produced, which is the only window a weight-free
+        /// test has onto the step ORDER.
+        latents_seen: std::cell::RefCell<Vec<Vec<f32>>>,
     }
     impl Denoiser for FakeDit {
         fn forward(&self, latent: &[f32], timesteps: &[f32], _positions: &[f32], _keyframes_mask: &[f32], context: &[f32], _context_len: usize, _context_valid: &[f32], _t: usize) -> Vec<f32> {
             self.seen.borrow_mut().push(context[0]);
             self.timesteps_seen.borrow_mut().push(timesteps.to_vec());
+            self.latents_seen.borrow_mut().push(latent.to_vec());
             vec![context[0]; latent.len()]
         }
+    }
+
+    /// LTX-2.5's distilled stage 1 is `euler_ancestral_denoising_loop` at
+    /// `eta = 1.0` (`ltx_pipelines.distilled`: `ANCESTRAL_SAMPLER_SINCE_
+    /// VERSION = (2, 5)`, `ANCESTRAL_ETA = 1.0`), and image conditioning has
+    /// to work UNDER that sampler, not only under the deterministic one.
+    /// `samplers._ancestral_euler_denoising_loop` re-applies
+    /// `post_process_latent` to the STEPPED latent - after the renoise term -
+    /// so a conditioned token is clean again at the top of the next step.
+    /// Skip that and every conditioned token carries a full step's worth of
+    /// freshly injected noise into the next forward while still being
+    /// announced at timestep 0.
+    #[test]
+    fn the_ancestral_sampler_re_pins_conditioned_tokens_after_the_renoise_term() {
+        let sigmas = vec![1.0, 0.5, 0.0];
+        let dit = FakeDit::default();
+        let (t, channels) = (2usize, 1usize);
+        let positions = grid_positions(t, 1, 1);
+        let keyframes_mask = vec![0.0f32; t];
+        let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
+        let context_valid = vec![1.0f32; 1];
+        // Token 0 denoises; token 1 is conditioned, and its clean content is
+        // a value no arithmetic in the step could land on by accident.
+        let mask = vec![1.0f32, 0.0];
+        let clean = vec![0.0f32, 5.0];
+        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        // `GaussianNoiser`: a fully conditioned token starts AT its clean
+        // content, never at noise.
+        let latent0 = vec![0.0f32, 5.0];
+
+        let out = denoise(&dit, &sigmas, latent0, &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, 1.0, 1.0, 7, 4, Some(&frozen), &Default::default(), &mut |_, _, _: &str| {}).expect("eta > 0 with conditioned tokens must run, not be refused");
+
+        let latents = dit.latents_seen.borrow().clone();
+        assert_eq!(latents.len(), 2, "one forward per step");
+        assert_eq!(latents[0][1], 5.0, "step 0 sees the conditioned token at its clean content");
+        assert_eq!(latents[1][1], 5.0, "step 1 must see it clean AGAIN: the renoise term ran over the whole latent and post_process_latent has to undo it there");
+        assert_ne!(latents[1][0], latents[0][0], "the free token really was stepped and renoised");
+        // The terminal step short-circuits to the raw x0 estimate with no
+        // re-pin, exactly as `_ancestral_euler_denoising_loop` does - so the
+        // final value of a conditioned token is the model's own estimate.
+        // Asserted so that a future change to that ordering is deliberate.
+        assert_eq!(out.len(), t);
     }
 
     /// The reference builds `Modality.timesteps` as `timesteps_from_mask(
@@ -2119,7 +2505,7 @@ mod tests {
     #[test]
     fn timesteps_are_the_denoise_mask_times_sigma() {
         let sigmas = vec![1.0, 0.5, 0.0];
-        let dit = FakeDit { seen: Default::default(), timesteps_seen: Default::default() };
+        let dit = FakeDit::default();
         let (t, channels) = (4usize, 1usize);
         let positions = grid_positions(t, 1, 1);
         let keyframes_mask = vec![0.0f32; t];
@@ -2143,7 +2529,7 @@ mod tests {
     #[test]
     fn unconditioned_timesteps_are_the_scalar_sigma_on_every_token() {
         let sigmas = vec![1.0, 0.5, 0.0];
-        let dit = FakeDit { seen: Default::default(), timesteps_seen: Default::default() };
+        let dit = FakeDit::default();
         let t = 3usize;
         let positions = grid_positions(t, 1, 1);
         let keyframes_mask = vec![0.0f32; t];
@@ -2155,7 +2541,7 @@ mod tests {
 
     fn run_loop(guidance: f32, eta: f64) -> (Vec<f32>, Vec<f32>) {
         let sigmas = vec![1.0, 0.5, 0.0];
-        let dit = FakeDit { seen: Default::default(), timesteps_seen: Default::default() };
+        let dit = FakeDit::default();
         let positions = grid_positions(1, 1, 1);
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
@@ -2200,7 +2586,7 @@ mod tests {
     #[test]
     fn a_cancelled_denoise_aborts_at_the_next_step_and_says_so() {
         let sigmas = vec![1.0, 0.75, 0.5, 0.25, 0.0];
-        let dit = FakeDit { seen: Default::default(), timesteps_seen: Default::default() };
+        let dit = FakeDit::default();
         let positions = grid_positions(1, 1, 1);
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);

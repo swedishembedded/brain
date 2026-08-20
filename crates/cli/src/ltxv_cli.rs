@@ -49,7 +49,7 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              checkpoint, needs --dit/$BRAIN_LTXV_DIT)
   --start-frame <path>         PNG/JPEG still, encoded through the real VAE
                              and held fixed as frame 0 while the rest of
-                             the clip denoises around it. Requires --eta 0.
+                             the clip denoises around it.
   --end-frame <path>           same, held fixed as the clip's LAST pixel
                              frame instead. Pass the SAME path as
                              --start-frame for a clip that loops
@@ -57,6 +57,14 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              connects the still to itself); a different
                              path for a clip that morphs between two
                              stills. Either flag works alone.
+  --conditioning-strength <S>  how hard --start-frame/--end-frame pin their
+                             frames, 0..1 (default 1.0 = pinned exactly;
+                             the reference's own CLI example is 0.8). Note
+                             that passing the SAME image to --start-frame
+                             and --end-frame produces a STATIC clip at any
+                             strength - the model is answering "start here,
+                             end here" literally. Anchor two different
+                             instants, or use --start-frame alone.
 
 Weights (flag wins over the environment variable):
   --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
@@ -187,6 +195,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--text-encoder" => {
                 text_encoder = Some(need(i)?.clone());
             }
+            "--conditioning-strength" => o.conditioning_strength = flt(i, "--conditioning-strength")?,
             "--start-frame" => {
                 o.start_frame = Some(need(i)?.clone());
             }
