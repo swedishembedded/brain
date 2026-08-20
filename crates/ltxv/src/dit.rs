@@ -226,19 +226,19 @@ pub fn av_dit_tensor_manifest(cfg: &LtxAvDitConfig) -> Vec<(String, Vec<usize>)>
     let vdim = vcfg.inner_dim as usize;
     let adim = acfg.inner_dim as usize;
     let rows9 = vcfg.adaln_rows() as usize;
-    let mut m: Vec<(String, Vec<usize>)> = Vec::new();
-
     // ---- top-level embed/head tensors, one pair per stream -------------
-    m.push(("patchify_proj.weight".into(), vec![vdim, vcfg.in_channels as usize]));
-    m.push(("patchify_proj.bias".into(), vec![vdim]));
-    m.push(("audio_patchify_proj.weight".into(), vec![adim, acfg.in_channels as usize]));
-    m.push(("audio_patchify_proj.bias".into(), vec![adim]));
-    m.push(("proj_out.weight".into(), vec![vcfg.out_channels as usize, vdim]));
-    m.push(("proj_out.bias".into(), vec![vcfg.out_channels as usize]));
-    m.push(("audio_proj_out.weight".into(), vec![acfg.out_channels as usize, adim]));
-    m.push(("audio_proj_out.bias".into(), vec![acfg.out_channels as usize]));
-    m.push(("scale_shift_table".into(), vec![2, vdim]));
-    m.push(("audio_scale_shift_table".into(), vec![2, adim]));
+    let mut m: Vec<(String, Vec<usize>)> = vec![
+        ("patchify_proj.weight".into(), vec![vdim, vcfg.in_channels as usize]),
+        ("patchify_proj.bias".into(), vec![vdim]),
+        ("audio_patchify_proj.weight".into(), vec![adim, acfg.in_channels as usize]),
+        ("audio_patchify_proj.bias".into(), vec![adim]),
+        ("proj_out.weight".into(), vec![vcfg.out_channels as usize, vdim]),
+        ("proj_out.bias".into(), vec![vcfg.out_channels as usize]),
+        ("audio_proj_out.weight".into(), vec![acfg.out_channels as usize, adim]),
+        ("audio_proj_out.bias".into(), vec![acfg.out_channels as usize]),
+        ("scale_shift_table".into(), vec![2, vdim]),
+        ("audio_scale_shift_table".into(), vec![2, adim]),
+    ];
     if vcfg.use_keyframes_abs_pos_embedding {
         m.push(("keyframes_abs_pos_embedding".into(), vec![1, vdim]));
     }

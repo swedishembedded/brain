@@ -199,8 +199,8 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 /// device, never touching the checkpoint file or the quantized tier at all.
 ///
 /// `layers` defaults to 4, not the real 48: this crate's own "small shapes
-/// first" convention (`bin/ltxv_bench.rs`'s module doc, this port's roadmap)
-/// - a handful of layers is enough to attribute where each block's own time
+/// first" convention (`bin/ltxv_bench.rs`'s module doc, this port's roadmap) -
+/// a handful of layers is enough to attribute where each block's own time
 /// goes, and scales linearly to the full 48 (each block streams/quantizes/
 /// runs independently, so per-block cost does not change with layer count).
 /// Needs `BRAIN_LTXV_DIT=<path to the real distilled Q8_0 or Q4_K_M GGUF>`,

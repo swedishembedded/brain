@@ -1773,8 +1773,8 @@ impl EmbeddingsConnector {
 
         // ---- step 1: register substitution (host) --------------------------
         let mut x = hidden.to_vec();
-        for si in 0..s as usize {
-            if valid[si] <= 0.0 {
+        for (si, &v) in valid.iter().enumerate() {
+            if v <= 0.0 {
                 let reg_row = si % self.num_registers as usize;
                 let (rs, re) = (reg_row * dim as usize, reg_row * dim as usize + dim as usize);
                 let (xs, xe) = (si * dim as usize, si * dim as usize + dim as usize);

@@ -25,14 +25,14 @@
 //! modality's SCALAR sigma, not this stream's own per-token timestep) all
 //! share the exact same shape: sinusoid -> linear_1 -> SiLU -> linear_2 ->
 //! (SiLU -> linear at `coeff*dim` width). [`TsMlpW`]/[`ts_mlp_forward`]/
-//! [`ts_mlp_bwd`] implement this ONCE, parameterized by `(rows, dim, coeff)`
-//! - `dit::ada_layer_norm_single`'s own doc names the same generalisation on
+//! [`ts_mlp_bwd`] implement this ONCE, parameterized by `(rows, dim, coeff)` -
+//! `dit::ada_layer_norm_single`'s own doc names the same generalisation on
 //! the device side. Four of the six calls never route their own
 //! `embedded_timestep` output anywhere further (`dit.rs`'s own forward
 //! discards it via `let (_, _) = ada_layer_norm_single(...)`), so
 //! [`ts_mlp_bwd`]'s `d_embedded_extra` is the zero vector for those four and
-//! only the two MAIN tables' calls pass the output stage's own contribution
-//! - the same `embedded_timestep`-feeds-two-consumers coupling
+//! only the two MAIN tables' calls pass the output stage's own contribution -
+//! the same `embedded_timestep`-feeds-two-consumers coupling
 //! `crate::modelgrad`'s own doc explains for the video-only path, now once
 //! per stream.
 //!

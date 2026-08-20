@@ -64,13 +64,13 @@
 //! this port has landed.
 //!
 //! The **NA diffusion decoder** ([`na_decoder`]) is also implemented - the
-//! convolution-free `DiffusionVideoDecoder` (3D neighborhood-attention blocks
-//! + AdaLN-Zero modulation), real weights, real parity on every tap including
-//! the full `CombinedDiffusionNABlock` stack. General overlapping-tile
-//! chunked decode, the `CHUNKED`/`BLACKWELL_DSL` block variants, and
-//! multi-step Euler sampling remain a tracked gap (moot for the real
-//! checkpoint, whose own config collapses sampling to one step - see
-//! `na_decoder.rs`'s doc).
+//! convolution-free `DiffusionVideoDecoder` (3D neighborhood-attention
+//! blocks + AdaLN-Zero modulation), real weights, real parity on every tap
+//! including the full `CombinedDiffusionNABlock` stack. General
+//! overlapping-tile chunked decode, the `CHUNKED`/`BLACKWELL_DSL` block
+//! variants, and multi-step Euler sampling remain a tracked gap (moot for
+//! the real checkpoint, whose own config collapses sampling to one step -
+//! see `na_decoder.rs`'s doc).
 //!
 //! **DFR (Diffusion Fidelity Rendering) geometry + a smoke-level
 //! multi-stage pipeline** ([`dfr`]/[`pipeline::generate_dfr`]) round out this

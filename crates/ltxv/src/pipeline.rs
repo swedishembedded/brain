@@ -79,8 +79,8 @@ use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS};
 
-/// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len()
-/// - 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
+/// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
+/// 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
 /// progress line) can report it without hardcoding a number that would drift
 /// from the table itself.
 pub const LTX2_DISTILLED_STEPS: usize = LTX2_DISTILLED_SIGMAS.len() - 1;
@@ -361,7 +361,11 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// skips the unconditional forward entirely, per this module's doc);
 /// `ctx_uncond` there is an all-zero vector of the same shape,
 /// [`context_stub`]'s own "closest honest stand-in" convention.
-fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, usize), String> {
+/// `(ctx_cond, ctx_uncond, context_valid, context_len)` - the four pieces
+/// [`real_text_context`] hands back to [`generate`]'s CFG fold.
+type TextContext = (Vec<f32>, Vec<f32>, Vec<f32>, usize);
+
+fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance: f32, device: Option<&str>) -> Result<TextContext, String> {
     use data::Tokenizer as _;
     let cross_attention_dim = dit_cfg.cross_attention_dim as usize;
 

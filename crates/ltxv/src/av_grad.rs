@@ -615,12 +615,12 @@ pub fn av_block_backward<T: Fp>(d: AvDims, w: &AvBlockW<T>, c: &AvBlockCache<T>,
     // contribution before entering step 1-2's own backward, the same
     // fan-out this module's doc, point 3, names.
     let mut dvx1 = a2v.dbase;
-    for i in 0..dvx1.len() {
-        dvx1[i] += a2v.dq_op[i] + v2a.dkv_op[i];
+    for ((d, dq), dkv) in dvx1.iter_mut().zip(a2v.dq_op.iter()).zip(v2a.dkv_op.iter()) {
+        *d += *dq + *dkv;
     }
     let mut dax1 = v2a.dbase;
-    for i in 0..dax1.len() {
-        dax1[i] += v2a.dq_op[i] + a2v.dkv_op[i];
+    for ((d, dq), dkv) in dax1.iter_mut().zip(v2a.dq_op.iter()).zip(a2v.dkv_op.iter()) {
+        *d += *dq + *dkv;
     }
 
     // Each stream's AV scale/shift table is read TWICE (rows 0-1 for its

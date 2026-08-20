@@ -160,7 +160,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ltxv-av-finetune-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("adapter.brain");
-        let mut rng = Rng::new(0xC11_9);
+        let mut rng = Rng::new(0xC119);
         let clips: Vec<SyntheticAvClip> = (0..1).map(|_| random_synthetic_av_clip(&cfg, &mut rng)).collect();
         let opts = TrainOpts { steps: 60, rank: 4, lr: 2e-3, seed: 11, save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
 
