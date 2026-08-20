@@ -1204,6 +1204,8 @@ version = "1.0.0"
 dependencies = [
  "brain-audio",
  "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
  "brain-model",
  "brain-testutil",
 ]

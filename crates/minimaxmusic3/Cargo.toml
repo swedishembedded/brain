@@ -13,6 +13,8 @@ path = "src/lib.rs"
 brain-checkpoint.workspace = true
 brain-audio.workspace = true
 brain-model.workspace = true
+brain-kernels.workspace = true
+brain-gpu-core.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

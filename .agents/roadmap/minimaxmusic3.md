@@ -95,11 +95,52 @@ reproduced bit-for-bit from Rust) caught this immediately.
 Measured: tiny cosine 1.000000000 (exact), real-weight (4096-dim hidden,
 2048-dim output) cosine 1.000000000, max_abs 3e-6 (fp32 rounding only).
 
+## Phase 3: vocoder inference
+
+`crates/minimaxmusic3::vocoder` - a real device (WGSL) forward, unlike the
+condition encoder: this component upsamples up to 512x per call
+(`upsampling_ratios = [8,8,4,2]`) and is genuinely compute-heavy, so it
+belongs on the tape-based device engine every other serving path uses.
+`dec_in_proj -> conv_in -> 4x (Snake -> ConvTranspose1d upsample -> 3x
+dilated VocoderResidualUnit) -> snake_out -> conv_out -> tanh`.
+
+Two new WGSL kernels, `snake1d`/`snake1d_bwd_{dx,dalpha}` (forward +
+FD-gated backward, `crates/audio/src/snake.rs` + `crates/audio/tests/
+snake_kernels.rs`): the checkpoint's Snake activation is the DAC original
+single-parameter form (`y = x + (alpha+eps)^-1 * sin(alpha*x)^2`, `alpha`
+used directly), NOT `kernels::SNAKE_BETA`'s two-parameter log-space BigVGAN
+v2 form (`a = exp(alpha)`, separate `beta`) - the existing kernel does not
+match this model's math and was not reused, correcting an earlier mislabel
+in this crate's own doc comments. Every conv/conv-transpose reuses
+`audio::conv`'s existing device kernels unchanged; weight-norm folding
+(`weight[i] = g[i] * v[i] / ||v[i]||_2`, generalized over whichever axis is
+dim0 of the stored tensor - confirmed against the real checkpoint that
+`ConvTranspose1d`'s `weight_g` is one scalar per INPUT channel, not output)
+is a one-time host op at import, not a kernel.
+
+Fixed along the way: `checkpoint::safetensors::read_model_dir`'s
+single-file fallback only resolved `model.safetensors` (HF-transformers'
+name); every diffusers checkpoint here ships `diffusion_pytorch_model.
+safetensors` instead, already handled on the sharded path via its own
+index filename but missing on the single-file path. Fixed generically, not
+locally worked around, since every future diffusers-format import hits the
+same gap.
+
+Measured: tiny cosine 1.000000000 (exact), real-weight (a 6-latent-frame,
+2-channel input decoding to 3072 samples through all four upsample stages
+and every residual unit) cosine 1.000000000, max_abs 1e-6 (fp32 rounding
+only) - both on the CPU (Cranelift JIT) backend, no GPU needed.
+
 ## Not yet done
 
-- [ ] Vocoder: import (incl. folding the checkpoint's `weight_g`/`weight_v`
-      weight-norm pairs) + forward/backward + a multi-scale STFT/mel
-      discriminator + adversarial training + gradcheck
+- [ ] Vocoder training: `SNAKE_BETA`-adjacent backward is proven at the
+      kernel level (`snake1d_bwd_{dx,dalpha}` FD-gated), but the vocoder
+      module itself has no backward/gradcheck/LoRA wiring yet, and no
+      multi-scale STFT/mel discriminator + adversarial training loop -
+      the actual new-capability item this component's training scope
+      requires (`crates/mimi::recon`'s module doc lists this stack as
+      absent workspace-wide; this closes it, scoped to what this
+      vocoder needs)
 - [ ] RVQ depth decoder: import + forward/backward + gradcheck + LoRA
 - [ ] Flow-matching DiT: import + forward/backward + gradcheck + LoRA +
       int8 storage tier + pipeline sharding
