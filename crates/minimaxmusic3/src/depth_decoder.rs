@@ -20,7 +20,7 @@
 //! workspace to call into.
 
 use checkpoint::safetensors::{self, StTensor};
-use model::hostmath::{matvec, silu, softmax};
+use model::hostmath::{linear_rows, linear_rows_bwd, matvec, silu, softmax};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -161,30 +161,6 @@ fn rmsnorm_row_bwd(x: &[f32], g: &[f32], inv_std: f32, dy: &[f32]) -> (Vec<f32>,
     let s: f32 = dy.iter().zip(g).zip(x).map(|((&dyi, &gi), &xi)| dyi * gi * xi).sum();
     let dx: Vec<f32> = dy.iter().zip(g).zip(x).map(|((&dyi, &gi), &xi)| inv_std * gi * dyi - xi * inv_std.powi(3) / d * s).collect();
     (dx, dg)
-}
-
-/// `x @ w^T` for every one of `x`'s `rows` rows, `w: [out, inn]`.
-fn linear_rows(x: &[f32], w: &[f32], rows: usize, inn: usize, out: usize) -> Vec<f32> {
-    (0..rows).flat_map(|r| matvec(w, &x[r * inn..(r + 1) * inn], out, inn)).collect()
-}
-
-/// `dx = dy @ w` (`[rows, inn]`), `dw += dy^T @ x` (`[out, inn]`, accumulated).
-fn linear_rows_bwd(x: &[f32], w: &[f32], dy: &[f32], rows: usize, inn: usize, out: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut dx = vec![0.0f32; rows * inn];
-    let mut dw = vec![0.0f32; out * inn];
-    for r in 0..rows {
-        for o in 0..out {
-            let dyv = dy[r * out + o];
-            if dyv == 0.0 {
-                continue;
-            }
-            for i in 0..inn {
-                dx[r * inn + i] += dyv * w[o * inn + i];
-                dw[o * inn + i] += dyv * x[r * inn + i];
-            }
-        }
-    }
-    (dx, dw)
 }
 
 struct AttnCache {

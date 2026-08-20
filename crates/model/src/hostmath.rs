@@ -117,6 +117,15 @@ pub fn silu_slice(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| silu(v)).collect()
 }
 
+/// `d/dx SiLU(x) = sigmoid(x) + x·sigmoid(x)·(1-sigmoid(x))` - matches
+/// `crates/kernels/wgsl/silu_bwd_da.wgsl`'s formula exactly, for the rare
+/// host-side SwiGLU backward too small to justify a device round trip.
+#[inline]
+pub fn dsilu(x: f32) -> f32 {
+    let sig = 1.0 / (1.0 + (-x).exp());
+    sig + x * sig * (1.0 - sig)
+}
+
 /// Sinusoidal timestep embedding — the one host sinusoid every diffusion model
 /// in this repo uses (`zimage`, `flux1`, `flux2`, `unet`, and the phase-4c
 /// ControlNet next).
@@ -246,6 +255,33 @@ pub fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     matvec(w, x, out, inn)
+}
+
+/// A row-batched [`matvec`]: `out[r] = x[r]·Wᵀ` for every row of `x`
+/// (`[rows, inn] -> [rows, out]`), `W: [out, inn]` row-major.
+pub fn linear_rows(x: &[f32], w: &[f32], rows: usize, inn: usize, out: usize) -> Vec<f32> {
+    (0..rows).flat_map(|r| matvec(w, &x[r * inn..(r + 1) * inn], out, inn)).collect()
+}
+
+/// [`linear_rows`] backward: `dx = dy @ w` (`[rows, inn]`), `dw += dyᵀ @ x`
+/// (`[out, inn]`, accumulated into a fresh zero-initialised buffer - callers
+/// summing several linears into one weight's gradient add the results).
+pub fn linear_rows_bwd(x: &[f32], w: &[f32], dy: &[f32], rows: usize, inn: usize, out: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut dx = vec![0.0f32; rows * inn];
+    let mut dw = vec![0.0f32; out * inn];
+    for r in 0..rows {
+        for o in 0..out {
+            let dyv = dy[r * out + o];
+            if dyv == 0.0 {
+                continue;
+            }
+            for i in 0..inn {
+                dx[r * inn + i] += dyv * w[o * inn + i];
+                dw[o * inn + i] += dyv * x[r * inn + i];
+            }
+        }
+    }
+    (dx, dw)
 }
 
 /// L2-normalise a vector: `v / ‖v‖`.
