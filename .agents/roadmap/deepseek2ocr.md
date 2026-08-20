@@ -2171,6 +2171,6 @@ token fails loudly.
       per-page number has a definitive, reproducible, honestly-caveated
       final measurement. See `docs/performance/overview.md`'s matching case
       study for the full tables.
-Full plan: `/home/user/.claude/plans/woolly-beaming-avalanche.md` (this
-session's approved plan; not repo-relative, kept here only as a pointer for
-whoever picks this up in the same environment).
+Full plan: `woolly-beaming-avalanche.md` under the agent plans directory
+(that session's approved plan; not repo-relative, kept here only as a
+pointer for whoever picks this up in the same environment).

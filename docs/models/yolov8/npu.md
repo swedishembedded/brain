@@ -57,7 +57,8 @@ brain yolo detect  --weights out/yolo.safetensors --image sample.ppm --device np
    `intel-driver-compiler-npu` / `intel-level-zero-npu` plus level-zero;
    Windows: the Intel NPU driver from Intel's site).
 2. Source the OpenVINO environment so the runtime loader can find it:
-   `source /opt/intel/openvino_2024/setupvars.sh`.
+   `source [openvino-install-dir]/setupvars.sh`. Sourcing it exports
+   `$INTEL_OPENVINO_DIR`, which is what brain's runtime loader reads.
 3. Build and run brain normally — no special flags needed. Verify the NPU is
    visible with `brain npu check --onnx out/yolo.onnx --ov-device NPU` (it lists
    the OpenVINO devices and tries to compile).
