@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Focused test for the LoRA wiring's core promise (M8): with `cfg.lora` set,
+//! Focused test for the LoRA wiring's core promise: with `cfg.lora` set,
 //! a [`Qwen35::new_train_on`] build must train ONLY the `.lora_a`/`.lora_b`
 //! adapter tensors; every frozen base weight (the 12 targeted linears' bases,
 //! plus every never-targeted weight: norms, embeddings, `A_log`/`dt_bias`,

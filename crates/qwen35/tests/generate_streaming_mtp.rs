@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Real end-to-end gate for `qwen35::stream::generate`'s `use_mtp: true`
-//! path (`crate::stream::generate_mtp_accelerated`, this milestone) against
-//! its own plain M16 serial baseline (`use_mtp: false`), on the real
+//! path (`crate::stream::generate_mtp_accelerated`) against its own plain
+//! serial baseline (`use_mtp: false`), on the real
 //! `Qwen/Qwen3.8-27B-FP8` checkpoint.
 //!
 //! Two things this file proves, both against REAL generated text (not a
@@ -28,7 +28,7 @@
 //! ~3-4-minutes-class-per-pass reality `generate_streaming.rs`'s own doc
 //! already documents (this milestone's own two throughput fixes, landed
 //! after that file's doc was written, brought a full streaming pass down
-//! from the ~75-minutes-class M15/M16 number to ~3-4 minutes; both paths
+//! from the original ~75-minutes-class number to ~3-4 minutes; both paths
 //! below pay that same per-pass cost). Budget realistically for this to
 //! take 30-60+ minutes wall-clock (several passes across two paths) - that
 //! is expected, not a hang.

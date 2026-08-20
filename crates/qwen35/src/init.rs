@@ -14,7 +14,7 @@
 //! module doc for why THAT dumper deliberately perturbs it away from zero).
 //! Not relevant to fresh-weight tests here, since there is no "raw HF value"
 //! to be off by one from - the `+1` fold is exclusively an import-time
-//! concern (M4).
+//! concern (`crate::import`).
 //!
 //! `dt_bias`/`A_log` mirror the reference's own init exactly
 //! (`Qwen3_5PreTrainedModel._init_weights`): `dt_bias` ones, `A_log =

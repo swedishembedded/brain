@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! M10: real-weight streaming parity, one decoder layer at a time, against
+//! Real-weight streaming parity, one decoder layer at a time, against
 //! `tools/goldens/qwen35_dump_real_layer_reference.py`'s own dump of the REAL
 //! `transformers.models.qwen3_5.Qwen3_5DecoderLayer` forward at the real
 //! `Qwen/Qwen3.8-27B-FP8` checkpoint. Covers both mixer types: layer 0
@@ -15,7 +15,7 @@
 //! checkpoint, never a full-model `HashMap` (~108 GB dequantized, far past
 //! any RAM budget this box or the task's own 16 GB ceiling could hold). This
 //! test drives the ALREADY-HOISTED `model::gdn_mixer`/`model::gqa_mixer`
-//! (M12) directly on a standalone `Gpu`, never constructing a `Qwen35`
+//! directly on a standalone `Gpu`, never constructing a `Qwen35`
 //! instance at all - the model struct's own construction path still assumes
 //! every layer's weights are present, which a real 27B/18 GiB-RAM box cannot
 //! do (a recorded gap, not something this test works around).
@@ -405,8 +405,8 @@ fn layer_63_gated_gqa_matches_the_real_reference() {
 
 /// A row-value spot check on `model.language_model.embed_tokens.weight`/
 /// `lm_head.weight` (both plain BF16, never FP8, `[vocab, d_model]`,
-/// ~2.5 GB each) - the third M10 bullet ("embedding/lm_head spot checks in
-/// isolation"). Reads only the SPECIFIC rows
+/// ~2.5 GB each) - the embedding/lm_head spot-check portion of this file's
+/// real-weight streaming-parity coverage. Reads only the SPECIFIC rows
 /// `tools/goldens/qwen35_dump_embed_lm_head_rows.py` dumped, via
 /// `with_tensor_chunks` (bounded extra host allocation, `O(d_model)` per
 /// row, never `O(vocab*d_model)` for the whole table) - never a full-table

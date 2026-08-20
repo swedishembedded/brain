@@ -134,8 +134,8 @@ use crate::sample::{argmax, sample_logits};
 /// theoretically-correct choice for any future design that DOES persist a
 /// window across decode steps, at zero downside now) but does not currently
 /// buy anything either - there is no cross-call persistence yet for it to
-/// exploit. Given that, and `qwen35_bench.rs`'s own M13 profiling finding
-/// that this model's real measured wall-clock on this iGPU is dispatch-
+/// exploit. Given that, and `qwen35_bench.rs`'s own profiling finding that
+/// this model's real measured wall-clock on this iGPU is dispatch-
 /// latency-bound (Gated DeltaNet's sequential per-chunk dispatches, not
 /// weight-loading I/O), there is no measured case today for moving
 /// `WINDOW_BUDGET` off its current value (`crate::caps`'s `run_streaming`,
@@ -885,7 +885,7 @@ pub fn run(dir: &Path, cfg: &Qwen35Config, n: u32, window_budget: u32, seed: u64
 // This is deliberately the SIMPLER choice, not a lesser one: every decode
 // step already re-streams all `cfg.n_layers` layers' weights from disk
 // regardless (measured ~75 minutes for one streaming pass over all 64 real
-// layers, M15) - the marginal cost of recomputing a short growing prefix via
+// layers) - the marginal cost of recomputing a short growing prefix via
 // chunked/quadratic attention is small next to that fixed per-step
 // weight-streaming cost.
 //
@@ -1338,7 +1338,7 @@ fn generate_mtp_accelerated(
 mod tests {
     use super::*;
 
-    /// Design decision 2 (M16) rests on GDN's chunked forward being strictly
+    /// Design decision 2 rests on GDN's chunked forward being strictly
     /// causal: a real position's output must not depend on whatever dummy
     /// content fills LATER, end-padded positions, since [`generate`] pads a
     /// growing sequence and reads back only the last real position. Both

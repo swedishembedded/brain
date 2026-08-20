@@ -6,8 +6,8 @@
 //! modes seed correctly from a base checkpoint - full merges the checkpoint
 //! weights as-is; LoRA merges them and adds freshly-initialised zero-delta
 //! adapters - which `model::fit`'s resume path (checkpoint-config-wins)
-//! cannot do. Mirrors `qwen3::finetune` exactly (M8's genuinely new surface
-//! for this family - qwen35moe has none).
+//! cannot do. Mirrors `qwen3::finetune` exactly (a genuinely new surface for
+//! this family - qwen35moe has none).
 
 use std::collections::HashMap;
 use std::path::Path;

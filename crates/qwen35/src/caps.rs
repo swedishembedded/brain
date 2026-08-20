@@ -15,7 +15,7 @@
 //!   `crate::model::is_i8_linear`); the KV cache itself is always fp32 (no
 //!   int8 KV path for this model, same scope note as `qwen35moe::caps`).
 //! - Decoding is `crate::sample::generate_kv_stream_with_head`, itself a thin
-//!   wrapper around [`Qwen35::step`] fed one token at a time (M11's
+//!   wrapper around [`Qwen35::step`] fed one token at a time (the
 //!   single-sequence incremental decode primitive) - no fast batched prefill
 //!   path yet, same as `qwen35moe::caps`'s own scope note.
 //! - Chat rendering (`messages`/`system`/`tools`/`stop`-strings/
@@ -272,10 +272,10 @@ impl GenerateAction {
     /// The `streaming=true` path: `crate::stream::generate` (real prompt,
     /// real embeddings, real streaming forward over all 64 real decoder
     /// layers a few at a time, real int8 `lm_head`, real sampling) instead
-    /// of building a full resident [`Qwen35`] - the "wire the M16 streaming
-    /// generation engine into this crate's existing CLI/serve surface"
-    /// deliverable, reusing this action's own manifest/param-validation/
-    /// dispatch rather than a bespoke new CLI subcommand.
+    /// of building a full resident [`Qwen35`] - wires the streaming
+    /// generation engine into this crate's existing CLI/serve surface,
+    /// reusing this action's own manifest/param-validation/dispatch rather
+    /// than a bespoke new CLI subcommand.
     ///
     /// Deliberately narrower than the non-streaming path above: `weights`
     /// here is the CHECKPOINT DIRECTORY (`layers-N.safetensors` +

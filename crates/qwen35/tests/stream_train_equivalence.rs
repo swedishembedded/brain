@@ -11,8 +11,9 @@
 //!
 //! Deliberately does NOT go through real on-disk safetensors shards
 //! (`import_layer`/`MmapSafetensors`) - that disk-streaming path is already
-//! gated by M10/M14/M15's own tests (real-weight FP8 dequant, int8 packing,
-//! the `(1+w)` RMSNorm fold). This gate's own job is the NEW piece: the
+//! gated elsewhere in this crate's test suite (real-weight FP8 dequant in
+//! `real_weight_streaming.rs`, int8 packing, the `(1+w)` RMSNorm fold). This
+//! gate's own job is the NEW piece: the
 //! forward+backward TRAINING MATH through a streamed layer. Driving
 //! `qwen35::stream_train::build_layer_f32` directly against a synthetic
 //! host map (`crate::init::init_weights`, the SAME map `crate::stream::

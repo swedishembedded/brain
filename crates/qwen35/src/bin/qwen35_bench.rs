@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! M13 performance pass: where one GDN layer, one GQA layer, and the dense
+//! Performance pass: where one GDN layer, one GQA layer, and the dense
 //! SwiGLU MLP actually spend their time, per kernel kind, at
 //! `Qwen35Config::qwen38_27b()`'s real dimensions - profile-first, per the
 //! task's own rule ("a native device-side FP8 GEMM belongs here and only if
@@ -9,9 +9,10 @@
 //! speed change").
 //!
 //! Random weights throughout: cost depends on shape, not values (same
-//! discipline `qwen3::qwen_bench`/M9's own real-dims vision-tower parity
-//! test already use for a shape too large to hold real weights for
-//! comfortably). This is valid for cost, meaningless for output quality.
+//! discipline `qwen3::qwen_bench` and this crate's own real-dims
+//! vision-tower parity test (`vision_parity.rs`) already use for a shape too
+//! large to hold real weights for comfortably). This is valid for cost,
+//! meaningless for output quality.
 //!
 //! This box has no discrete GPU (Intel iGPU only) - every number here is
 //! iGPU-and-CPU-JIT-relative, not a datacenter-GPU projection. `[gflops]`/

@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Isolated profile of the two candidate stages of `qwen35::import::
-//! import_layer` (M15's streaming import path) that the M15 milestone named
-//! as suspects for its 75-minute full-streaming-pass wall-clock, measured
-//! one at a time at REAL `Qwen35Config::qwen38_27b()` layer scale against the
+//! import_layer` (the per-layer weight loader the sliding-window streaming
+//! forward path, `crates/qwen35/src/stream.rs`, calls) named as suspects for
+//! the streaming forward pass's 75-minute full-run wall-clock, measured one
+//! at a time at REAL `Qwen35Config::qwen38_27b()` layer scale against the
 //! REAL checkpoint on disk:
 //!
 //!   1. `MmapSafetensors::tensor_f32` - the raw-FP8-byte-to-f32 decode
@@ -21,7 +22,7 @@
 //! read cannot do without root to drop caches), and this session already
 //! re-measured it that way; see the profiling report for the number.
 //!
-//! This binary exists because the 75-minute M15 number is a SINGLE
+//! This binary exists because the 75-minute full-run number is a SINGLE
 //! end-to-end measurement, not a stage breakdown - guessing which of these
 //! stages is the real cost, rather than measuring it, is exactly the mistake
 //! this tool rules out. Swedish Embedded AB builds this kind of

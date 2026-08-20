@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Vision tower parity at real dims, random weights (M9):
+//! Vision tower parity at real dims, random weights:
 //! `qwen3vl::encoder::VisionEncoder`/`PatchMerger` (reused unchanged) against
 //! the real reference goldens dumped by
 //! `tools/goldens/qwen35_vision_dump_reference.py`

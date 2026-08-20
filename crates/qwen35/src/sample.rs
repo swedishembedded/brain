@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Autoregressive sampling from a [`Qwen35`] over its single-sequence
-//! incremental decode path ([`Qwen35::step`], M11). Mirrors
+//! incremental decode path ([`Qwen35::step`]). Mirrors
 //! `qwen35moe::sample` exactly (same temperature/top-k/top-p contract, same
 //! host-side head application, same reasoning for why the sampling helpers
 //! below are a small, deliberate duplication of `qwen3::sample`'s private

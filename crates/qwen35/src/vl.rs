@@ -3,7 +3,7 @@
 
 //! Qwen3.8-27B composite: `qwen3vl`'s ViT encoder + PatchMerger, reused
 //! AS-IS, spliced into this crate's dense hybrid decoder via the M-RoPE +
-//! embedding-splice seam `crate::model::Qwen35` exposes (M9).
+//! embedding-splice seam `crate::model::Qwen35` exposes.
 //!
 //! Mirrors `qwen35moe::vl::Qwen35Vl` almost exactly (same field shape, same
 //! `forward` contract) - the difference is what it wraps, not how it's
@@ -17,8 +17,9 @@
 //! Scope: single image, prefill/training-loss-shaped forward only (matching
 //! `qwen3vl::model::Qwen3Vl::forward`'s own scope) - no video (multi-frame),
 //! and no incremental (KV-cache) decode-time image splice yet (this crate has
-//! no KV-cache decode path at all today - M9's own scope is the batched
-//! prefill splice, matching `crate::model::Qwen35::forward`'s existing shape).
+//! no KV-cache decode path at all today - this module's own scope is the
+//! batched prefill splice, matching `crate::model::Qwen35::forward`'s
+//! existing shape).
 //!
 //! Vision runs on its own CPU-backed `Gpu` (matching `qwen35moe::vl::Qwen35Vl`'s
 //! own choice); visual tokens cross to the decoder's `Gpu` host-side via

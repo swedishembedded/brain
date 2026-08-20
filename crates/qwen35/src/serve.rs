@@ -9,8 +9,8 @@
 //! which `Qwen35::run_decode_step` already handles via the row-count-
 //! agnostic `mlp_fwd`, with no serving-layer consequence at all).
 //!
-//! Builds on `Qwen35::step`/`reset_decode_cache`/`decode_pos` (M11,
-//! `crates/qwen35/src/model.rs`) - the single-sequence incremental decode
+//! Builds on `Qwen35::step`/`reset_decode_cache`/`decode_pos`
+//! (`crates/qwen35/src/model.rs`) - the single-sequence incremental decode
 //! primitive this whole module is a thin multi-request wrapper around.
 //! Scope, deliberately: **one truly-active sequence at a time** on the GPU
 //! (every dispatch here processes exactly one sequence's one token; several
@@ -47,7 +47,7 @@
 //!
 //! # The GQA side: a real per-block-id pool, not `Qwen35::step`'s single toy cache
 //!
-//! `Qwen35::step` (M11) decodes exactly one persistent sequence, into
+//! `Qwen35::step` decodes exactly one persistent sequence, into
 //! `self.gqa_kcache`/`self.gqa_vcache` - fields that exist once per `Qwen35`
 //! instance, not once per admitted request. A paged multi-request engine
 //! needs that same per-layer KV cache to be addressable PER SEQUENCE. This

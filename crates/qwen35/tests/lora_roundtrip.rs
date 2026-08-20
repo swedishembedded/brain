@@ -3,8 +3,10 @@
 
 //! A LoRA fine-tune must change what the model actually outputs after a save
 //! plus reload cycle, not just in the live process. Mirrors
-//! `qwen3/tests/lora_roundtrip.rs`. No streaming `load_inference` exists yet
-//! for this crate (that lands with CLI/serving, M11), so reload here goes
+//! `qwen3/tests/lora_roundtrip.rs`. No streaming `load_inference` helper
+//! exists for this crate - the CLI/serving code
+//! (`crates/cli/src/resident_qwen35.rs`) loads the same way, via
+//! `checkpoint::load` directly - so reload here goes
 //! through the generic `checkpoint::load` plus `Qwen35::new_on` path
 //! directly, exactly what a future `Qwen35::load_inference` would do
 //! internally.

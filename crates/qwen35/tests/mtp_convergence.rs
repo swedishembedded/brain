@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Convergence + load-bearing checks for the MTP head (M7). No reference
+//! Convergence + load-bearing checks for the MTP head. No reference
 //! oracle exists for `mtp.*` on this box (`transformers` discards it on
 //! load), so these two checks are the head's end-to-end correctness gate,
 //! complementing

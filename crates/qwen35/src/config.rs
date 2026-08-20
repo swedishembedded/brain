@@ -15,8 +15,8 @@
 //! dense SwiGLU** (`gate`/`up`/`down`, no router, no experts - HF's own
 //! `Qwen3_5TextConfig` deliberately deletes every MoE field from its base
 //! class), not `qwen35moe`'s 256-expert MoE. Vision is a separate composed
-//! tower (`crate::vl`, added in the M9 milestone), not part of this config,
-//! mirroring `qwen35moe::vl`'s own split.
+//! tower (`crate::vl`), not part of this config, mirroring `qwen35moe::vl`'s
+//! own split.
 //!
 //! Field names and defaults are taken directly from the real checkpoint's
 //! `config.json` / the installed `transformers.models.qwen3_5.
@@ -450,7 +450,7 @@ impl Qwen35Config {
             out.push(("lm_head.weight".to_string(), v * d));
         }
 
-        // Multi-token prediction head (M7) - one extra FULL Gated-Attention
+        // Multi-token prediction head - one extra FULL Gated-Attention
         // decoder layer (same self_attn/mlp shapes as any other `Full`
         // block, real config's own `mtp.layers.0.*`), fed by concatenating
         // the next token's own embedding and the final hidden state

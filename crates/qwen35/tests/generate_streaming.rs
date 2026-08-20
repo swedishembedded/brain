@@ -2,16 +2,16 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Real end-to-end generation gate for `qwen35::stream::generate` - a real
-//! prompt, the real Qwen3.8-27B-FP8 tokenizer, the M15 streaming forward
-//! engine now fed REAL embedding rows (not M15's synthetic seed), a real
-//! resident int8 `lm_head`, and real sampling (greedy AND
+//! prompt, the real Qwen3.8-27B-FP8 tokenizer, the sliding-window streaming
+//! forward engine now fed REAL embedding rows (not the earlier synthetic
+//! seed), a real resident int8 `lm_head`, and real sampling (greedy AND
 //! temperature/top-k/top-p), producing a real decoded transcript a human can
 //! read directly in `--nocapture` output.
 //!
 //! **This is extremely slow and that is expected, not a bug.** Every decode
 //! step re-streams every one of `cfg.n_layers` (64) real decoder layers from
 //! disk - the same ~75-minutes-class pass `streaming_forward.rs`'s own full
-//! chain gate measured for M15 (4488 s / 64 layers on this shared box, no
+//! chain gate measured (4488 s / 64 layers on this shared box, no
 //! throughput tuning attempted - that is reserved for a later milestone that
 //! gates the residency policy by real `brain-perf` measurement). There is no
 //! persistent incremental KV/GDN state carried between decode steps (see

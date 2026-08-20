@@ -7,11 +7,11 @@
 //! quantize + GPU upload (`model::ops::Weight::upload`), and pure GPU
 //! forward compute (`StreamState::layer_forward`, weights already resident,
 //! repeated). `crate::stream::generate`'s real measured per-decode-step cost
-//! is 17-40 minutes for all 64 layers (M16/M17/M18); this test exists to
-//! show WHICH of those stages that time actually goes to, since
-//! `qwen35_bench.rs`'s own M13 GPU-compute-only numbers (random weights,
-//! already resident) account for at most a few seconds across all 64
-//! layers - nowhere near 17-40 minutes - so the real cost must live
+//! is 17-40 minutes for all 64 layers; this test exists to show WHICH of
+//! those stages that time actually goes to, since `qwen35_bench.rs`'s own
+//! GPU-compute-only numbers (random weights, already resident) account for
+//! at most a few seconds across all 64 layers - nowhere near 17-40 minutes,
+//! so the real cost must live
 //! elsewhere in the per-decode-step pipeline, and this test measures where.
 //!
 //! Self-skips loudly without `BRAIN_QWEN35_DIR`. Run with:
@@ -149,7 +149,8 @@ fn profile_one_gdn_and_one_gqa_layer_real_weights() {
     let state = StreamState::new(gpu, &cfg, n);
 
     // Layer 0: Gated DeltaNet (Linear). Layer 3: first GQA (Full) layer -
-    // both already used as the real-weight parity reference layers (M10).
+    // both already used as the real-weight parity reference layers (see
+    // `crates/qwen35/tests/real_weight_streaming.rs`).
     for &l in &[0usize, 3] {
         let s = profile_layer(&state, &dir, &cfg, l, n);
         let ty = cfg.layer_types()[l];

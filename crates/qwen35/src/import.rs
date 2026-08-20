@@ -5,7 +5,7 @@
 //! (imported from a pre-quantized GGUF release), this port reads the real
 //! checkpoint's own HF safetensors directly, blockwise-FP8 weights and all.
 //!
-//! ## Real tensor names (verified against the real checkpoint, M10)
+//! ## Real tensor names (verified against the real checkpoint)
 //!
 //! Every per-layer tensor lives under `model.language_model.layers.{i}.`,
 //! with leaf names `input_layernorm`/`post_attention_layernorm` (plain
@@ -16,10 +16,11 @@
 //! head is the top-level `lm_head.weight` (both confirmed against the real
 //! `model.safetensors.index.json`). MTP (`mtp.*`) and vision
 //! (`model.visual.*`) tensors are real and present but out of THIS import's
-//! scope - MTP's own import lands with the M7 model code, vision's with M9.
+//! scope - MTP's own import lands alongside the MTP model code
+//! (`crate::model`), vision's alongside the vision splice code (`crate::vl`).
 //!
-//! One name this module got wrong before real-checkpoint access (M10) caught
-//! it: the embedding is `model.language_model.embed_tokens.weight`, nested
+//! One name this module got wrong before real-checkpoint access caught it:
+//! the embedding is `model.language_model.embed_tokens.weight`, nested
 //! under `language_model` unlike `lm_head.weight`. The original guess
 //! (`model.embed_tokens.weight`, "confirmed" from `quantization_config.
 //! modules_to_not_convert`) was never actually confirmed by that list - the
@@ -298,7 +299,7 @@ pub fn import_dir(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<HashMa
 /// Stream just layer `l`'s own tensors from an already-opened per-shard mmap
 /// (e.g. `layers-{l}.safetensors`, one real checkpoint file, never the whole
 /// 30.9 GB directory), dequantize its FP8 pairs, classify, and fold - the
-/// real-weight-streaming (M10) counterpart of [`import_dir`], which needs
+/// real-weight-streaming counterpart of [`import_dir`], which needs
 /// the WHOLE checkpoint present and, at real 27B scale, far more RAM than
 /// any single layer needs (peak host here is bounded by one layer's own
 /// dequantized weights, a few hundred MB at the real config, never the
@@ -475,8 +476,10 @@ mod tests {
 
     /// A synthetic checkpoint using the REAL naming convention this module
     /// documents, at `Qwen35Config::tiny()`'s shapes - the classify/validate
-    /// pipeline is fully testable without a real checkpoint (deferred to
-    /// M10), since it only depends on the NAMING convention being right.
+    /// pipeline is fully testable without a real checkpoint, since it only
+    /// depends on the NAMING convention being right (see
+    /// `crates/qwen35/tests/real_weight_streaming.rs` for the real-checkpoint
+    /// counterpart).
     fn synthetic(cfg: &Qwen35Config) -> Tensors {
         let d = cfg.d_model as usize;
         let mut t: Tensors = HashMap::new();
@@ -572,7 +575,8 @@ mod tests {
     /// on-disk safetensors file - a synthetic stand-in for one real
     /// `layers-{l}.safetensors` shard, letting [`import_layer`] be tested
     /// through an actual [`checkpoint::mmap::MmapSafetensors`] without a real
-    /// checkpoint (deferred to M10's own real-weight tests).
+    /// checkpoint (see `crates/qwen35/tests/real_weight_streaming.rs` for the
+    /// real-checkpoint counterpart).
     fn write_one_layer_shard(cfg: &Qwen35Config, l: usize) -> std::path::PathBuf {
         let all = synthetic(cfg);
         let prefix = format!("model.language_model.layers.{l}.");
@@ -617,7 +621,7 @@ mod tests {
         assert!(err.contains("tok.weight"), "error must name the missing tensor: {err}");
     }
 
-    /// M10 (real-checkpoint access) caught this module's own doc comment
+    /// Real-checkpoint access caught this module's own doc comment
     /// mis-stating the embedding's real name as `model.embed_tokens.weight`
     /// (unnested); the real checkpoint's `model.safetensors.index.json` has
     /// `model.language_model.embed_tokens.weight` instead - nested, like

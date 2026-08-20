@@ -3,9 +3,11 @@
 
 //! `Qwen35Config::tiny().param_list()` two-way coverage against the golden
 //! dumper's own saved weights (`tools/goldens/qwen35_dump_reference.py`'s
-//! `collect_weights`) - the practical, available-NOW version of "param_list
-//! matches the real checkpoint header manifest" (M3's gate), since the real
-//! 27B FP8 checkpoint is not fetched until M10. Every name `param_list()`
+//! `collect_weights`) - the practical, lightweight version of "param_list
+//! matches the real checkpoint header manifest" (config vs. the golden dump,
+//! not config vs. the full on-disk 27B FP8 checkpoint - see
+//! `crates/qwen35/tests/real_weight_streaming.rs` for the tests that exercise
+//! the real checkpoint directly). Every name `param_list()`
 //! expects must exist in the golden with the same element count, and the
 //! golden must carry no tensor `param_list()` doesn't expect (a real
 //! importer's two-way-coverage discipline applied here to config vs. dump,

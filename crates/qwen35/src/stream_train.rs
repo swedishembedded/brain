@@ -79,7 +79,7 @@
 //! # What is reused, unchanged
 //!
 //! - [`crate::import::import_layer`] / [`crate::stream::get`] - the proven
-//!   per-shard host loader (M10) and its accessor.
+//!   per-shard host loader and its accessor.
 //! - `model::gdn_mixer::{gdn_mixer_fwd, gdn_mixer_bwd}` / `model::gqa_mixer::
 //!   {gqa_mixer_fwd, gqa_mixer_bwd}` - the SAME hoisted mixer math
 //!   `crate::model::Qwen35`'s own resident trainer and `crate::stream`'s own
@@ -240,7 +240,7 @@ pub(crate) fn build_layer_f32(ops: &Ops, gpu: &Gpu, cfg: &Qwen35Config, l: usize
 }
 
 /// [`build_layer_f32`]'s disk-backed half - streams `dir/layers-{l}.safetensors`
-/// via [`import_layer`] (unchanged, M10) then uploads at f32. The training
+/// via [`import_layer`] (unchanged) then uploads at f32. The training
 /// counterpart of `crate::stream::StreamState::load_layer`.
 pub(crate) fn load_layer_f32(ops: &Ops, gpu: &Gpu, dir: &Path, cfg: &Qwen35Config, l: usize) -> OwnedStreamedLayer {
     let shard = dir.join(format!("layers-{l}.safetensors"));
@@ -896,7 +896,7 @@ impl StreamTrainer {
     /// Real per-token embedding rows for `ids`, off `dir/outside.
     /// safetensors`'s `model.language_model.embed_tokens.weight` - the
     /// real-checkpoint counterpart of [`Self::embed_synthetic`], reusing
-    /// `crate::stream::embed_rows` (unchanged, M16) directly.
+    /// `crate::stream::embed_rows` (unchanged) directly.
     pub fn embed_real(dir: &Path, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
         let outside = MmapSafetensors::open(dir.join("outside.safetensors"))?;
         crate::stream::embed_rows(&outside, "model.language_model.embed_tokens.weight", ids, d)

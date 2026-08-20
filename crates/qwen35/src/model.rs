@@ -143,12 +143,12 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("ce_grad", kernels::CE_GRAD_MASKED), // 70
     ("scale_add", kernels::SCALE_ADD), // 71
     ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX), // 72
-    // -- LoRA tier (M8) -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
+    // -- LoRA tier -- see `Qwen35::lora_fwd`/`Qwen35::proj_bwd`'s LoRA branch.
     ("axpy", kernels::AXPY), // 73
-    // -- vision-language splice tier (M9) -- see `Qwen35::enable_mm_splice`.
+    // -- vision-language splice tier -- see `Qwen35::enable_mm_splice`.
     ("splice", kernels::SPLICE), // 74
     ("splice_bwd", kernels::SPLICE_BWD), // 75
-    // -- single-sequence incremental decode tier (M11) -- see `Qwen35::step`.
+    // -- single-sequence incremental decode tier -- see `Qwen35::step`.
     ("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP), // 76
     ("kv_append", kernels::KV_APPEND), // 77
     ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 78
@@ -491,7 +491,7 @@ struct TrainActs {
     xn_final: DeviceBuffer,
 }
 
-/// Everything the MTP head's forward (M7) saves for its own backward -
+/// Everything the MTP head's forward saves for its own backward -
 /// DeepSeek-V3-style: normalize the next token's own embedding and the main
 /// stack's final hidden state independently, fuse them with a `fc_e`/`fc_h`
 /// projection pair, run through ONE standard full-attention decoder layer
@@ -532,7 +532,8 @@ pub struct Qwen35 {
     /// `Role::Trainable` (see [`Self::new_impl_on`]'s role filter), `forward()`
     /// saves the activation cache `backward()` reads, and `backward`/
     /// `zero_grads`/`adamw_step` are live instead of panicking. `false` (the
-    /// `new_on` path) keeps inference-only behaviour byte-for-byte with M5.
+    /// `new_on` path) keeps inference-only behaviour byte-for-byte with the
+    /// model's original, training-free forward implementation.
     is_train: bool,
     opt: Optim,
 
@@ -567,7 +568,7 @@ pub struct Qwen35 {
     /// Backward's activation cache - see [`TrainActs`]'s own doc.
     train_acts: RefCell<Option<TrainActs>>,
 
-    // ---- multi-token prediction head (M7, `cfg.mtp`) ----------------------
+    // ---- multi-token prediction head (`cfg.mtp`) ---------------------------
     // Size-1 dummies when `cfg.mtp` is false, matching this file's own
     // "size-1 dummy where a value doesn't apply" convention.
     /// Next-token input for the MTP embedding gather (`x` shifted by 1),
@@ -607,7 +608,7 @@ pub struct Qwen35 {
     /// `[n*max_out]` : `delta = a @ Bᵀ`.
     lora_out: DeviceBuffer,
 
-    // ---- vision-language embedding splice seam (M9, see `crate::vl::Qwen35Vl`) ----
+    // ---- vision-language embedding splice seam (see `crate::vl::Qwen35Vl`) ------
     /// `Some((row0, n_rows))` once [`Self::enable_mm_splice`] has run: the
     /// image-placeholder rows `run_forward` overwrites and `backward` routes
     /// to [`Self::read_d_img_embeds`]. `None` (the default) makes both a
@@ -620,11 +621,11 @@ pub struct Qwen35 {
     /// `backward()`. 1-element dummy until `enable_mm_splice` resizes it.
     d_img_embeds: DeviceBuffer,
 
-    // ---- single-sequence incremental decode (M11, see `Self::step`) -------
+    // ---- single-sequence incremental decode (see `Self::step`) ------------
     // Mirrors `qwen35moe::model::Qwen35`'s own decode-cache fields exactly
     // (structure, not code - this crate's own orchestration is prefix-
-    // parameterized instead of layer-index-parameterized, matching M7's
-    // `layer_gqa_fwd`/`mlp_fwd` convention, and reuses the SAME already-
+    // parameterized instead of layer-index-parameterized, matching the MTP
+    // head's `layer_gqa_fwd`/`mlp_fwd` convention, and reuses the SAME already-
     // shared `model::block::gqa_decode_step`/`model::gdn::{gdn_recurrent_step,
     // gdn_causal_conv1d_step}` primitives qwen35moe's own decode step calls -
     // only the per-model orchestration around them (weight lookups, the
@@ -655,7 +656,7 @@ pub struct Qwen35 {
     /// K-1]`, for GDN layers; a size-1 dummy at GQA layer indices.
     gdn_hist: Vec<DeviceBuffer>,
 
-    // ---- pipeline-parallel cross-stage seam (`model::Shardable`, M11) ------
+    // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
     /// This stage's upstream gradient at `res[shard.end]`, written externally
     /// by [`Self::write_out_dres`] before a non-head stage's `backward()`.
     dres_boundary_in: DeviceBuffer,
@@ -1186,7 +1187,7 @@ impl Qwen35 {
         }
     }
 
-    // ---- vision-language embedding splice seam (M9, see `crate::vl::Qwen35Vl`) --
+    // ---- vision-language embedding splice seam (see `crate::vl::Qwen35Vl`) ----
 
     /// Enable the VLM embedding splice at residual rows `[row0, row0+n_rows)`:
     /// after the token-embedding gather, `run_forward` overwrites those rows
@@ -1314,7 +1315,7 @@ impl Qwen35 {
 
     /// `prefix` is the weight-name prefix up to (not including) the leaf
     /// name - `"blocks.{l}.self_attn"` for a normal layer, `"mtp.layers.0.
-    /// self_attn"` for the MTP head's own full-attention sublayer (M7) -
+    /// self_attn"` for the MTP head's own full-attention sublayer -
     /// reusing this function unchanged, since the mechanism is identical.
     fn layer_gqa_fwd(&self, prefix: &str, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
@@ -1367,7 +1368,7 @@ impl Qwen35 {
     // ---- dense SwiGLU MLP, universal for every layer -----------------------
 
     /// `prefix` is the weight-name prefix - `"blocks.{l}.mlp"` for a normal
-    /// layer, `"mtp.layers.0.mlp"` for the MTP head (M7). `gate`/`up` share
+    /// layer, `"mtp.layers.0.mlp"` for the MTP head. `gate`/`up` share
     /// ONE `Ops::act` call on `xn2` (both consume the same activation);
     /// `down` gets its own fresh `Ops::act` call on `h` (a different
     /// activation) - same "quantize once, share across sibling linears"
@@ -1408,7 +1409,7 @@ impl Qwen35 {
         (down, acts)
     }
 
-    // ---- multi-token-prediction head (M7, `cfg.mtp`) -----------------------
+    // ---- multi-token-prediction head (`cfg.mtp`) ---------------------------
 
     /// Forward pass for the MTP head - see [`MtpActs`]'s own doc for the
     /// exact chain: `embed(mtp_input)` -> two independent pre-norms (one over
@@ -1914,7 +1915,7 @@ impl Qwen35 {
     }
 
     // =========================================================================
-    // Single-sequence incremental decode (M11). Structure mirrors
+    // Single-sequence incremental decode. Structure mirrors
     // `qwen35moe::model::Qwen35`'s own `reset_decode_cache`/`step`/
     // `run_decode_step`/`layer_gdn_decode_step`/`layer_gqa_decode_step` at
     // `n=1`, reusing the SAME already-shared `model::block::gqa_decode_step`/
@@ -2239,7 +2240,7 @@ impl Qwen35 {
         out
     }
 
-    // ---- pipeline-parallel cross-stage seam (`model::Shardable`, M11) ------
+    // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
 
     /// Element count of one residual-stream boundary slab (`b*t*d_model`).
     fn res_numel(&self) -> usize {

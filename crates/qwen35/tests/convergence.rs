@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Learnability tests (M8): the real hybrid GDN/GQA engine must actually
+//! Learnability tests: the real hybrid GDN/GQA engine must actually
 //! *learn* tiny tasks, not just pass the gradient check. Mirrors
 //! `glmdsa/tests/convergence.rs`. Gated by `MOE_SKIP_GPU_TESTS` (these need a
 //! working backend - CPU JIT or GPU).
