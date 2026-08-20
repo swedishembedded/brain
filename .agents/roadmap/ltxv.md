@@ -1529,6 +1529,191 @@ this port:
       lines that all parse with `target`/`level`/`span` as real JSON
       members.
 
+- [x] **Whole-generation profiling of the REAL path, and four exact wins
+      (Phase 10)** - the first end-to-end attribution of an actual
+      `brain ltxv t2v` run at real weights, rather than of one
+      `forward_q_streamed` call in isolation. It answered a question Phase 9
+      left open (its isolated bench predicted ~275s of denoise; the real run
+      measured 440s) and, more usefully, found that denoise was never the
+      majority of the wall clock at all.
+
+      **Method**: `--trace-ltxv 5` on a real run (9 frames, 64x64, real
+      22B Q8_0 DiT, real Gemma-4 text encoder, real VAE, 8 distilled-schedule
+      steps, `guidance<=1.0` so 1 forward/step), both P40s idle at 0 MiB/0%
+      before each run per `nvidia-smi`. This is the instrumentation Phase 9's
+      own entry asked for and is why no timing had to be reconstructed by
+      hand this pass.
+
+      **The measured baseline, 964.3s in-process (973.5s wall)**:
+
+      | stage | secs | share |
+      |---|---:|---:|
+      | DiT GGUF head load ("build transformer") | 10.8 | 1.1% |
+      | **Gemma-4 text encode** | **491.7** | **51.0%** |
+      | denoise, 8 steps | 440.4 | 45.7% |
+      | VAE decode | 21.1 | 2.2% |
+
+      The text encode had NEVER been measured: `Timings` does not carry it,
+      so every previously reported ltxv number ("build 58.7s, denoise 412.1s,
+      vae 20.9s") silently excluded the single largest stage. That is the
+      whole reason the reported parts never summed to the reported total.
+
+      Denoise splits into step 1 (365.4s, every block a cache miss) and steps
+      2-8 (9.7-12.8s each, 74.1s total). Phase 9's extrapolations were wrong
+      in BOTH directions and the errors partly cancelled: it predicted
+      ~172.8s for the miss step (real: 365.4s) and ~14.6s per hit step (real:
+      ~10.6s). Step 1's own split at 48 real layers: GGUF read+dequant
+      251.5s, int8 quantize 96.9s, GPU upload+forward+wait 7.7s.
+
+      **Root cause of the divergence, measured not assumed: the storage
+      reads at ~58-68 MB/s cold.** A `dd` of 8 GiB from an uncached region of
+      the real checkpoint measured 58.4 MB/s; a second file measured
+      70.6 MB/s; a re-read of the same region once page-cached measured
+      4.3 GB/s. Sixteen parallel readers measured 60 MB/s - the device does
+      NOT respond to queue depth, so no amount of read-side concurrency moves
+      it. A real generation reads ~50 GB cold (26.3 GB text encoder + ~22 GB
+      of DiT blocks), which is ~800s of unavoidable I/O wait and by itself
+      most of the run. Confirmed independently by the process accounting:
+      the baseline run spent 7m12s of CPU across 16m14s of wall clock.
+      Phase 9's isolated bench never saw this because repeated runs left its
+      four layers warm in page cache - the bench was measuring dequant CPU
+      where the real run measures disk.
+
+      **This reframes the task**: at real scale the DiT's GPU compute is
+      7.7-9.2s of a ~964s run. There was no kernel to fix. Per kernels.md
+      §F.2, the top row was checked against the roof and the answer was that
+      the top rows are not compute at all. Four exact wins followed, all
+      bit-identical, all with their own mutation-verified gate:
+
+      **Win 1 - row-parallel int8/int4 weight quantization**
+      (`model::int8::quantize_weight`, `model::int4::quantize_weight_q4`,
+      new `backend_cpu::par::chunks_mut`). Both quantizers walked their
+      output rows on one core of 48. Per-output-row by construction (row r's
+      scale is `max|w[r,:]|/q_max`, row r's words read only row r), so the
+      split cannot move a value. **96.9s -> 6.8s and 6.6s across two real
+      runs, 14.3x, reproducible**; on `ltxv_bench streamed 4 8 128 1`,
+      6517.9ms -> 554.7ms with the forward's printed output stats unchanged
+      to every digit. Gated against a serial oracle transcribed from the doc
+      comments' own formulas, over five shapes including a single row and
+      non-dividing row counts; mutation-verified by hoisting the max fold to
+      per-tensor (the obvious wrong parallelization, and invisible to a
+      cosine-only check since it rescales uniformly). In `crates/model`, so
+      every model with an int8/int4 tier inherits it (§F.7).
+
+      **Win 2 - block-parallel GGUF dequantization**
+      (`checkpoint::gguf::deq_blocks`). Warm-cache read+dequant 1573ms/layer
+      -> 1130ms/layer. Deliberately recorded as the SMALL win it is: what
+      remains is allocating and filling ~1.8GB of fp32 per block, and on a
+      cold cache the stage is I/O-bound anyway, so the parallelism has
+      little to return here. Its real value is the gate that came with it -
+      every pre-existing dequant test in that file feeds exactly ONE block,
+      which is structurally blind to block ordering (lesson #4). The new
+      multi-block tests compare by BIT PATTERN against a per-block oracle
+      (random-byte fixtures legitimately decode NaN scales, and NaN != NaN
+      would fail a value comparison between byte-identical results) and fail
+      when the block order is reversed.
+
+      **Win 3 - map safetensors instead of slurping, and decode dtypes in
+      parallel** (`checkpoint::safetensors::read`/`parse`). `read` called
+      `std::fs::read`, keeping a second anonymous copy of a 26.3 GB file on
+      the heap beside the fp32 tensors being built from it. Peak RSS
+      ~80GB -> 73GB. The point is not the memory: an anonymous copy of
+      bytes that are already in page cache EVICTS page cache, on a machine
+      where the checkpoints are a large fraction of RAM and the storage
+      behind them runs at 58 MB/s. The dtype conversion (billions of
+      independent 2-byte decodes) was also single-core and is now split
+      through one `decode_elems` helper. Text encode measured 491.7s ->
+      383.6s and 291.8s across two runs - improving, but with a spread far
+      wider than the change itself, because the stage is ~438s of disk at
+      the measured rate. Recorded as "masked by I/O", not claimed as a
+      clean speedup.
+
+      **Win 4 - cache the embeddings-connector routing across a generation**
+      (`ltxv::block::GenerationCache`, `crate::dit::forward_q_streamed`,
+      `crate::pipeline::RealDit`). The connector reads only `context`,
+      `context_valid` and `context_len`, all fixed for a generation once the
+      prompt is encoded, yet ran on every step: 8 transformer layers whose
+      fp32 weights (~6.4 GB at the real width) were re-uploaded to that
+      call's fresh device each time. **2537-4839 ms/step -> 1.0-7.6 ms on a
+      hit**, ~22.6s per generation, and stable across runs unlike the
+      I/O stages around it. Exact for the same reason the block-weight cache
+      is: identical inputs through a pure function. Keyed on the FULL
+      context, validity mask and length, never a step index or a hash,
+      because CFG runs two branches against one `RealDit`. Gated on
+      `tiny_gated` (plain `tiny` disables the connector, so the existing
+      cache tests could not reach this path at all) including a case where
+      only the VALIDITY MASK differs; mutation-verified by dropping the
+      context from the key. Both per-generation caches now live in one
+      `GenerationCache` so `forward_q_streamed` stops growing a
+      `&RefCell<..>` parameter per cached thing.
+
+      **Whole-generation result, real runs, same 9-frame/64x64 real-weight
+      shape** (kernels.md §F.1: the whole pass is the truth, never the
+      per-stage table):
+
+      | run | total | build | text encode | denoise | vae |
+      |---|---:|---:|---:|---:|---:|
+      | before | 964.3s | 10.8 | 491.7 | 440.4 | 21.1 |
+      | after (1) | 672.7s | 8.0 | 383.6 | 254.6 | 26.2 |
+      | after (2) | 704.6s | 30.5 | 291.8 | 363.7 | 18.3 |
+
+      **~1.40x end to end (964.3s -> 672.7/704.6s), with the output mp4
+      byte-for-byte IDENTICAL across all three runs** (same md5, same seed,
+      same prompt, same real weights) - the strongest available proof that
+      every win here was exact rather than merely close.
+
+      The two `after` runs differ by 4.7% purely from disk luck, so the
+      honest way to read the headline is the paired one: run (2) drew a
+      WORSE step-1 disk read than the baseline did (272.4s vs 251.5s) and
+      still finished 259.7s faster. The improvement is therefore at least
+      that much and is not an artifact of a lucky cache.
+
+      **One reproducible partial regression, recorded rather than hidden.**
+      The block upload+forward+wait bucket on the FIRST cache-hit step (step
+      2) went 7.2s -> 14.4s and 14.2s, in both `after` runs; steps 3-8 are
+      unchanged within noise (6.4-8.7s against 5.7-7.2s). It is once per
+      generation, ~7s, against the connector cache's ~22.6s, so steps 2-8 in
+      total still improved (74.1s -> 68.0s) and the whole-pass number is what
+      the change is judged by (lesson #21). The likely mechanism is that step
+      2 is the first call that reads all 48 cached blocks back out of host
+      RAM after step 1 wrote them, and it used to be preceded on the same
+      fresh device by the connector's own multi-gigabyte allocate/free cycle;
+      not chased further, and stated as a hypothesis rather than a
+      measurement, because nothing here measured it.
+
+      **Tracked, deliberately not attempted** (each real, none silently
+      dropped): (1) the ~614s of cold checkpoint I/O per run is the dominant
+      remaining term and no code change removes it - the levers are reading
+      fewer bytes (the Q4_K_M checkpoint is 15.7 GB against Q8_0's 23.6 GB,
+      a quality decision, not a perf one) or not re-reading across runs (an
+      encoded-context or pre-quantized-weight cache keyed on
+      checkpoint identity, which would make a REPEAT validation run skip the
+      whole 491.7s text encode - the single highest-value remaining item for
+      iteration speed, and a design decision rather than an optimization);
+      (2) `load_block_tensors_from_source` copies each tensor a second time
+      (`d.to_vec()` over a `Vec` the GGUF reader just allocated), ~1.8 GB of
+      needless allocation and memcpy per block, ~86 GB per generation -
+      removing it needs a `TensorSource` seam that can hand over ownership;
+      (3) the Q8_0 -> fp32 -> int8 round trip materializes ~1.8 GB of fp32
+      per block only to compress it straight back to ~0.46 GB - fusing
+      dequant into quantize per row would be bit-identical and would delete
+      that traffic entirely, but it is a streaming-pipeline restructure, not
+      a loop change; (4) the per-step block GPU upload (~6.5-8.9s/step,
+      re-uploading ~13 GB of already-quantized bytes to a fresh device every
+      step) is now the largest remaining per-step cost, and is bounded by
+      `forward_q_streamed`'s own "fresh `Gpu` per call" design, which its
+      doc records was measured worse to remove.
+
+      **Content quality - checked, nothing to report as a bug.** The task
+      asked for a sanity check only. The decoded frames are finite, with
+      real dynamic range and no saturation (luma average 176-220, per-frame
+      low 132-168, high 201-208), no NaN or non-finite value anywhere in the
+      run, and no warning or error in the trace beyond the documented
+      "`--steps` is ignored for the distilled schedule" one. At this shape
+      the DiT sees 2x2x2 = 8 tokens for the entire scene, so abstract output
+      is expected and is not evidence of a defect. No correctness anomaly
+      found; nothing changed in that direction.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
@@ -1698,11 +1883,37 @@ land. Known traps already identified from reading (not yet test-pinned):
   `scripts/gates/ltxv-perf-gate.sh` still runs `--device cpu`, now by
   choice of measurement target rather than to sidestep a bug.
 - `brain perf`'s `ltxv:` target measures only the tiny random-weight
-  config by default; the real 22B checkpoint's ~186s/step cost (Phase 8's
+  config by default; the real 22B checkpoint's per-step cost (Phase 8's
   entry above) makes it unsuitable for a routine gate, so no committed
   baseline exists yet for `dit_config=ltx25_22b` - a deliberate,
   separately-scheduled measurement whenever it is needed, not a default
   one.
+- Cold checkpoint I/O is the dominant remaining cost of a real generation
+  and no code change removes it: Phase 10 measured the storage at
+  ~58-68 MB/s cold (and unresponsive to read concurrency), against ~50 GB
+  read per run. The open levers are reading fewer bytes or not re-reading
+  the same bytes on the next run - specifically, a cache of the ENCODED
+  TEXT CONTEXT keyed on checkpoint identity plus prompt, which is a couple
+  of megabytes standing in for a 26.3 GB read and a 12B forward, and would
+  make a repeat validation run skip the largest single stage of the whole
+  pipeline. Not attempted: it is a cache-invalidation design decision, not
+  an optimization, and belongs with whoever owns the residency story.
+- The real text-encode stage is invisible to `Timings`, so every ltxv
+  timing line printed before Phase 10 (`build`/`denoise`/`vae`) omitted
+  what was then 51% of the run and did not sum to the reported total. The
+  trace now shows it; the `Timings` struct still does not carry it.
+- `load_block_tensors_from_source` copies every streamed tensor a second
+  time (`d.to_vec()` over a `Vec` the GGUF reader has just allocated) -
+  ~1.8 GB of redundant allocation and memcpy per block, ~86 GB per real
+  generation. Closing it needs a `checkpoint::TensorSource` seam that can
+  transfer ownership rather than lend a slice; deliberately not added as a
+  defaulted trait method in Phase 10 (lesson #30: a default trait method is
+  a silent opt-out).
+- The streamed int8 tier decodes Q8_0 to fp32 and immediately re-quantizes
+  it to int8, materializing ~1.8 GB of fp32 per block to produce ~0.46 GB.
+  Fusing the two per row would be bit-identical and would delete that
+  traffic, but it restructures the load path into a streaming pipeline
+  rather than changing a loop, so Phase 10 left it tracked.
 
 ## Scope that collapsed once the reference was read
 
