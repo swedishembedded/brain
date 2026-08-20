@@ -332,8 +332,8 @@ structurally and never parity-claimed here.
     check): cosine=1.000000000 rel_l2=0.000000000;
     `int8_forward_covers_the_mtp_head_when_mtp_is_enabled`: cosine=0.999999999.
   - `crates/qwen35/tests/int8_real_weight_sanity.rs`, run against the REAL
-    `Qwen/Qwen3.8-27B-FP8` checkpoint (`BRAIN_QWEN35_DIR=/data/workspace/
-    resources/qwen3.8 cargo test -p brain-qwen35 --test
+    `Qwen/Qwen3.8-27B-FP8` checkpoint (`BRAIN_QWEN35_DIR=[path/to/qwen3.8]
+    cargo test -p brain-qwen35 --test
     int8_real_weight_sanity -- --ignored --nocapture`): both
     `layer_0_gated_delta_net_int8_tracks_fp32_on_real_weights` and
     `layer_3_gated_gqa_int8_tracks_fp32_on_real_weights` pass - every one of
@@ -436,7 +436,7 @@ structurally and never parity-claimed here.
     token row - what this milestone's gates actually check.
   **Verification, exact test names and measured numbers:**
   - `crates/qwen35/tests/streaming_forward.rs`, run against the real
-    checkpoint (`BRAIN_QWEN35_DIR=/data/workspace/resources/qwen3.8 cargo
+    checkpoint (`BRAIN_QWEN35_DIR=[path/to/qwen3.8] cargo
     test -p brain-qwen35 --test streaming_forward -- --ignored --nocapture
     --test-threads=1`), all 4 pass in 4488.19 s total (dominated by the full
     64-layer chain - real per-layer disk streaming + host FP8 dequant + int8
@@ -479,7 +479,7 @@ whole 64-layer streamed pass, as a single end-to-end number with no stage
 breakdown. This follow-up profiled `import_layer`'s two host-side stages in
 isolation (`crates/qwen35/src/bin/import_profile.rs`, real `[5120, 17408]`
 `mlp.down_proj` FP8 tensor off the real checkpoint,
-`/data/workspace/resources/qwen3.8/layers-5.safetensors`, 89.1M elements) and
+`[path/to/qwen3.8]/layers-5.safetensors`, 89.1M elements) and
 fixed what the numbers actually showed was slow:
 
 - **Real disk throughput on this box** (re-measured, not trusted from a
@@ -694,7 +694,7 @@ to keep warm.
 
 **Real generated transcripts** (`crates/qwen35/tests/generate_streaming.rs`,
 `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, run with `BRAIN_QWEN35_DIR=
-/data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+[path/to/qwen3.8] cargo test -p brain-qwen35 --test
 generate_streaming -- --ignored --nocapture --test-threads=1`), prompt
 `"The capital of France is"`, `max_new=2`, `window_budget=4`:
 
@@ -804,7 +804,7 @@ synthetic weights since M7.
   checkpoint needed) plus a new `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated
   `crates/qwen35/tests/import_mtp_real_weight.rs`.
   **Real-checkpoint result** (`mtp.safetensors`, `BRAIN_QWEN35_DIR=
-  /data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+  [path/to/qwen3.8] cargo test -p brain-qwen35 --test
   import_mtp_real_weight -- --ignored --nocapture`): all 16 expected
   `mtp.*` tensors present with the exact `param_list()` shapes, all finite,
   `fc_e != fc_h` confirmed on real data - **pass**, 19.18 s.
@@ -866,7 +866,7 @@ synthetic weights since M7.
 
 **Phase 4 gates** (`crates/qwen35/tests/generate_streaming_mtp.rs`,
 `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, `BRAIN_QWEN35_DIR=
-/data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 --test
+[path/to/qwen3.8] cargo test -p brain-qwen35 --test
 generate_streaming_mtp -- --ignored --nocapture --test-threads=1`), same
 prompt `"The capital of France is"`, `max_new=4`, `window_budget=4`,
 `seed=20260819`, greedy (`temperature=0.0`) both paths:
@@ -1052,10 +1052,10 @@ Prompts: "Explain in a few sentences why the sky is blue.", "Write a short
 paragraph describing a quiet morning in a mountain village.", "Give three
 tips for staying focused while studying.", "Describe what a lighthouse
 keeper's daily routine might look like.", "Summarize, in your own words,
-why bees are important for ecosystems." Output written to `/data/workspace/
-resources/qwen35_finetune/GENERATION.txt` (full log: settings + prompts +
-raw completions, verbatim, human-inspectable) and `/data/workspace/
-resources/qwen35_finetune/corpus.txt` (just the generated text,
+why bees are important for ecosystems." Output written to
+`[path/to/qwen35_finetune]/GENERATION.txt` (full log: settings + prompts +
+raw completions, verbatim, human-inspectable) and
+`[path/to/qwen35_finetune]/corpus.txt` (just the generated text,
 concatenated - the actual training corpus this milestone's Step 3 tokenizes
 - 436 words). Both files live at the WORKSPACE root's `resources/` (a
 sibling of this repo, matching M15's own `resources/qwen3.8/` convention),
@@ -1156,7 +1156,7 @@ qwen35/src/bin/stream_train_step.rs` (new), `crates/qwen35/src/stream.rs`
 can reuse them directly; zero behavior change to any existing inference
 path), `crates/qwen35/src/lib.rs` (`pub mod stream_train;`), `crates/
 qwen35/tests/stream_train_equivalence.rs` (new), `crates/qwen35/tests/
-stream_train_real.rs` (new), `/data/workspace/resources/qwen35_finetune/
+stream_train_real.rs` (new), `[path/to/qwen35_finetune]/
 GENERATION.txt` + `corpus.txt` (new, outside this git repo).
 
 **Not done, left for later milestones (explicitly out of this one's

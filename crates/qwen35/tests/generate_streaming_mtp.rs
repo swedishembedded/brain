@@ -37,7 +37,7 @@
 //! `tokenizer.json`, or `mtp.safetensors`. Run with:
 //!
 //! ```text
-//! BRAIN_QWEN35_DIR=/data/workspace/resources/qwen3.8 \
+//! BRAIN_QWEN35_DIR=[path/to/qwen3.8] \
 //!     cargo test -p brain-qwen35 --test generate_streaming_mtp -- --ignored --nocapture --test-threads=1
 //! ```
 

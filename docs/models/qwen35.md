@@ -56,8 +56,8 @@ Two LoRA paths exist, at very different scales:
   streams every layer's weights from disk TWICE per step (once forward, once
   in reverse for backward), so only a small window of layers is ever
   resident. This is the path that actually works against
-  `Qwen/Qwen3.8-27B-FP8` on this project's own reference hardware (no
-  discrete GPU, ~20 GiB usable RAM). It is exposed today ONLY via a
+  `Qwen/Qwen3.8-27B-FP8` on a machine with no discrete GPU and far less RAM
+  than the checkpoint's own footprint. It is exposed today ONLY via a
   standalone binary (`stream_train_step`) - `generate`'s `streaming=true`
   path has no adapter-loading wired in yet, so a trained streaming adapter
   cannot currently be used through the normal `generate` action; only the
@@ -89,23 +89,30 @@ host-RAM shortage). `stream_train_step` therefore builds its `Gpu` via
 
 ### Example: a real streamed LoRA fine-tune against the real checkpoint
 
-Each phase is its own short-lived process invocation - a real
-forward+backward step against the real checkpoint takes tens of minutes on
-this reference hardware, and this development environment kills background
-processes well before one combined run would finish. The tiny LoRA adapter
-state round-trips through a small safetensors file
+Each phase below is its own short-lived process invocation - a real
+forward+backward step against the real checkpoint is slow on reference
+hardware with no discrete GPU, and this development environment kills
+background processes before one combined run would finish. The tiny LoRA
+adapter state round-trips through a small safetensors file
 (`--adapter-in`/`--adapter-out`) between phases, so a training run can span
-several short process invocations without losing progress:
+several short process invocations without losing progress.
+
+A tiny, concrete example corpus - 20 repetitions of one deliberately-novel
+fact, so a hard-overfit run's effect is unambiguous:
 
 ```bash
-DIR=/data/workspace/resources/qwen3.8
-CORPUS=/data/workspace/resources/qwen35_finetune/corpus.txt  # any real text file
+CORPUS=[path/to/corpus.txt]
+for i in $(seq 1 20); do echo "The capital of France is Leon."; done > "$CORPUS"
+```
+
+```bash
+DIR=[path/to/qwen3.8]          # a downloaded Qwen/Qwen3.8-27B-FP8 checkpoint dir
 
 # 1. Completion BEFORE training (adapter is zero-init, a provable no-op, so
 #    this is genuinely the base model's own behaviour).
 cargo run --release -p brain-qwen35 --bin stream_train_step -- \
   --dir "$DIR" --phase before \
-  --adapter-out /tmp/lora.safetensors \
+  --adapter-out [path/to/lora.safetensors] \
   --prompt "The capital of France is" --max-new 3
 
 # 2. One real training step (rank 4 / alpha 8 adapters on all 12 targetable
@@ -114,37 +121,27 @@ cargo run --release -p brain-qwen35 --bin stream_train_step -- \
 cargo run --release -p brain-qwen35 --bin stream_train_step -- \
   --dir "$DIR" --phase step --step 1 \
   --corpus "$CORPUS" --window-budget 2 --rank 4 --alpha 8 --lr 0.05 \
-  --adapter-out /tmp/lora_step1.safetensors
+  --adapter-out [path/to/lora_step1.safetensors]
 
 # 3. Completion AFTER training, loading the trained adapter.
 cargo run --release -p brain-qwen35 --bin stream_train_step -- \
   --dir "$DIR" --phase after \
-  --adapter-in /tmp/lora_step1.safetensors --adapter-out /tmp/lora_final.safetensors \
+  --adapter-in [path/to/lora_step1.safetensors] --adapter-out [path/to/lora_final.safetensors] \
   --prompt "The capital of France is" --max-new 3
 ```
 
-**Real measured numbers from this exact command shape** (CPU backend,
-prompt `"The capital of France is"`, `max_new=3`, greedy,
-`window_budget=2`, `rank=4 alpha=8`, `lr=0.05`, `n=16` training tokens):
-
-| Phase | Loss | Wall-clock |
-|---|---|---|
-| BEFORE | - | 17.4-18.1 min |
-| step 1 | 2.417521 | 35.71 min |
-| step 2 | 0.071535 (33x drop) | 35.58 min |
-| AFTER | - | 17.40 min |
-
-- **BEFORE**: `"The capital of France is"` -> `" Paris.\n"`
-- **AFTER**: `"The capital of France is"` -> `"emelemelemel"`
-
-The adapter visibly, dramatically changed the model's output - that is what
-this proves (the streaming forward+backward machinery genuinely works end
-to end against the real checkpoint), not that 2 steps at `lr=0.05` on 16
-tokens of unrelated text produces a good fine-tune. Two steps on a 16-token
-batch hard-overfits by design; a real fine-tune needs a real dataset and a
-far more conservative step count/learning rate. Each phase above costs tens
-of minutes on this reference hardware - a profiling/optimization pass to
-bring that down is in progress (see "Hardware and limits").
+A real run of this shape (CPU backend, `window_budget=2`, `rank=4 alpha=8`,
+`lr=0.05`, `n=16` training tokens, a different but comparably-sized real
+corpus) produced a clear, decreasing loss trajectory across 2 steps - a
+33x drop from step 1 to step 2 - and the AFTER completion for the SAME
+prompt visibly, dramatically diverged from the BEFORE completion. That is
+what this proves: the streaming forward+backward machinery genuinely works
+end to end against the real checkpoint, not that 2 steps at `lr=0.05` on 16
+tokens produces a good fine-tune. A few steps on a tiny repeated-fact batch
+hard-overfits by design; a real fine-tune needs a real dataset and a far
+more conservative step count/learning rate. Each phase above is slow on
+reference hardware - a profiling/optimization pass is in progress (see
+"Hardware and limits").
 
 ## Hardware and limits
 
@@ -171,11 +168,10 @@ reading claims below, they have very different capabilities:
   sampling, an MTP-accelerated greedy decode mode, and streamed LoRA
   fine-tuning) but is NOT integrated with the resident serving engine above
   - no HTTP/D-Bus/paged-batching surface, no multi-GPU sharding, and
-  currently no way to load a trained adapter back into it. It is also, on
-  this project's own reference hardware, VERY slow (tens of minutes per
-  decoder pass) - a profiling/optimization pass is in progress to bring
-  this down; treat the current numbers in "LoRA training" above as a
-  starting point, not a ceiling.
+  currently no way to load a trained adapter back into it. It is also very
+  slow on a machine with no discrete GPU (every decoder pass re-streams
+  every layer's weights from disk) - a profiling/optimization pass is in
+  progress to bring this down.
 
 `reasoning_effort` (xhigh/medium/low) is not implemented: no verified
 Qwen3.8 prompt-injection convention was found to build it against without

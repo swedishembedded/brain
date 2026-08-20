@@ -16,7 +16,7 @@
 //! with:
 //!
 //! ```text
-//! BRAIN_QWEN35_DIR=/data/workspace/resources/qwen3.8 cargo test -p brain-qwen35 \
+//! BRAIN_QWEN35_DIR=[path/to/qwen3.8] cargo test -p brain-qwen35 \
 //!     --test stream_train_real --release -- --ignored --nocapture --test-threads=1
 //! ```
 //!
