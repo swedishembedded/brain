@@ -887,6 +887,20 @@ this port:
       `read_in_dres`/`write_out_dres`) remains unimplemented for
       `LtxAvDit`, same as `LtxDit`'s own recorded gap above - this
       host-math training path is separate and does not build on it.
+
+      **Closing the validation plan's own "review: compare base vs
+      finetuned clips" gate**: re-ran `av_concept_learning.rs` in a later
+      session and confirmed the same numbers hold (base=+0.00243,
+      adapted=+0.00408, delta +0.00165), then asked directly whether to (a)
+      accept this numeric gate as the review evidence, (b) build a real
+      training/backward path for the 22B int8 checkpoint so a real video
+      comparison becomes possible, or (c) decode the tiny model's adapted
+      output anyway with a clear "not representative" label. Decision:
+      accept the numeric gate - it is the real evidence this milestone
+      produces, and a real-weight LoRA video comparison is new scope beyond
+      what this port's own plan asked for (synthetic clips with exact
+      ground truth, not real-weight training), not a shortfall of this
+      milestone as built.
 - [x] **Performance, driven by measurement (Phase 8)** - supersedes the
       contention-ruined M9 profiling entry above with a clean, uncontended
       re-run plus three verified kernel-selector fixes and the first-ever
