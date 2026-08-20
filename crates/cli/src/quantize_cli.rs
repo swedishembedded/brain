@@ -56,6 +56,7 @@ other tensor is written through as F32, and the plan says which rule kept it.
 ";
 
 /// Parsed `brain quantize` arguments.
+#[derive(Debug)]
 struct Args {
     src: String,
     out: Option<String>,
