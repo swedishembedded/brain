@@ -489,7 +489,11 @@ mod tests {
                 })
                 .collect()
         }
-        let cases: [(usize, fn(&[u8]) -> f32); 6] = [
+        /// One dtype's `(byte width, element decoder)` - the exact pair
+        /// `decode_elems` takes, named so the case table is not an inline
+        /// function-pointer type.
+        type DtypeCase = (usize, fn(&[u8]) -> f32);
+        let cases: [DtypeCase; 6] = [
             (4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
             (2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
             (2, |b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))),

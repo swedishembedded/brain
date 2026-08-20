@@ -16,6 +16,9 @@ pub mod gguf;
 pub mod quant;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gguf_write;
+/// Native only: it writes a GGUF, and `gguf_write` needs `std::fs`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod quantize;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mmap;
 #[cfg(not(target_arch = "wasm32"))]

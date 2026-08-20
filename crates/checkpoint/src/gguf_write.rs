@@ -80,6 +80,123 @@ fn write_value_payload(out: &mut Vec<u8>, v: &GgufValue) {
     }
 }
 
+/// One tensor's identity and encoded byte length, declared BEFORE its bytes
+/// exist. A GGUF header carries every tensor's offset, so the whole plan has
+/// to be known up front -- but only the *sizes*, never the data. That is what
+/// lets [`Writer`] stream a checkpoint far larger than host RAM.
+pub struct TensorPlan {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub ty: u32,
+    /// Encoded length in bytes: `numel / block_elems * block_bytes` for the
+    /// declared `ty`. [`Writer::write_tensor`] rejects a body that disagrees.
+    pub nbytes: usize,
+}
+
+/// An incremental GGUF v3 writer: the header (KV + every tensor's info and
+/// offset) is emitted from the plan on [`create`](Writer::create), then each
+/// tensor's already-encoded bytes are appended in plan order and dropped by
+/// the caller. Peak host allocation is therefore ONE tensor, not the whole
+/// output -- the same discipline `weightio::StWriter` applies to safetensors,
+/// and the reason a multi-gigabyte quantization does not need a
+/// multi-gigabyte `Vec` per tensor kept alive until the end.
+///
+/// [`write`] is this type used eagerly, so there is exactly one
+/// implementation of the container format.
+pub struct Writer {
+    file: io::BufWriter<std::fs::File>,
+    tmp: String,
+    path: String,
+    plan: Vec<TensorPlan>,
+    next: usize,
+    alignment: usize,
+}
+
+impl Writer {
+    /// Plan and open `path`: writes `kv` in the given order, then a tensor
+    /// info block for every entry of `plan` in the given order, then pads to
+    /// the data start. `alignment` (a power of two, `>= 1`) is the padding
+    /// between the header and the tensor data and between consecutive
+    /// tensors -- pass `32` to match the reader's default when the file
+    /// declares none.
+    pub fn create(path: &str, kv: &[(String, GgufValue)], plan: Vec<TensorPlan>, alignment: usize) -> io::Result<Writer> {
+        let alignment = alignment.max(1);
+        let mut header: Vec<u8> = Vec::new();
+        header.extend_from_slice(b"GGUF");
+        header.extend_from_slice(&3u32.to_le_bytes()); // version
+        header.extend_from_slice(&(plan.len() as u64).to_le_bytes());
+        header.extend_from_slice(&(kv.len() as u64).to_le_bytes());
+
+        for (key, val) in kv {
+            write_string(&mut header, key);
+            header.extend_from_slice(&value_type_tag(val).to_le_bytes());
+            write_value_payload(&mut header, val);
+        }
+
+        // Tensor infos: name, ndim, ne[ndim] (torch shape reversed to GGUF's
+        // fastest-varying-first), type, offset (relative to the aligned data
+        // start, itself aligned so each tensor's data begins on an
+        // `alignment` boundary -- mirrors every real GGUF writer's
+        // convention, though the reader here only requires the header's
+        // `data_start` rounding).
+        let mut offset: u64 = 0;
+        for t in &plan {
+            write_string(&mut header, &t.name);
+            header.extend_from_slice(&(t.shape.len() as u32).to_le_bytes());
+            for &dim in t.shape.iter().rev() {
+                header.extend_from_slice(&(dim as u64).to_le_bytes());
+            }
+            header.extend_from_slice(&t.ty.to_le_bytes());
+            header.extend_from_slice(&offset.to_le_bytes());
+            offset += (t.nbytes as u64).div_ceil(alignment as u64) * alignment as u64;
+        }
+
+        let data_start = header.len().div_ceil(alignment) * alignment;
+        header.resize(data_start, 0);
+
+        let tmp = format!("{path}.tmp");
+        let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
+        file.write_all(&header)?;
+        Ok(Writer { file, tmp, path: path.to_string(), plan, next: 0, alignment })
+    }
+
+    /// Append the next planned tensor's encoded bytes. `name` and
+    /// `data.len()` must match the plan entry at this position exactly -- a
+    /// misordered or mis-sized body would silently shift every subsequent
+    /// tensor off the offsets already committed to the header, which the
+    /// reader cannot detect.
+    pub fn write_tensor(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        let want = self.plan.get(self.next).ok_or_else(|| {
+            io::Error::other(format!("gguf_write: tensor '{name}' is past the end of a {}-tensor plan", self.plan.len()))
+        })?;
+        if want.name != name {
+            return Err(io::Error::other(format!("gguf_write: expected tensor '{}' at index {}, got '{name}'", want.name, self.next)));
+        }
+        if want.nbytes != data.len() {
+            return Err(io::Error::other(format!("gguf_write: tensor '{name}' planned {} bytes, got {}", want.nbytes, data.len())));
+        }
+        self.file.write_all(data)?;
+        let pad = (data.len() as u64).div_ceil(self.alignment as u64) * self.alignment as u64 - data.len() as u64;
+        if pad > 0 {
+            self.file.write_all(&vec![0u8; pad as usize])?;
+        }
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Flush and atomically move the temporary into place. Fails if any
+    /// planned tensor was never written -- the header already promises those
+    /// bytes exist, so a short file is a corrupt file, not a partial one.
+    pub fn finish(mut self) -> io::Result<()> {
+        if self.next != self.plan.len() {
+            return Err(io::Error::other(format!("gguf_write: {} of {} planned tensors written", self.next, self.plan.len())));
+        }
+        self.file.flush()?;
+        drop(self.file);
+        std::fs::rename(&self.tmp, &self.path)
+    }
+}
+
 /// Write a GGUF v3 file: `kv` in the given order, then `tensors` in the
 /// given order. `alignment` (must be a power of two, `>= 1`) sets
 /// `general.alignment`-equivalent padding between the header and the tensor
@@ -88,60 +205,19 @@ fn write_value_payload(out: &mut Vec<u8>, v: &GgufValue) {
 /// already match its declared shape's element count under `ty`'s on-disk
 /// encoding (this function does not validate that -- [`crate::quant`] and
 /// the raw-F32 path both produce exactly the right length by construction).
+///
+/// This is the eager form of [`Writer`], for a model small enough to hold
+/// whole. [`crate::quantize`] uses the streaming form instead.
 pub fn write(path: &str, kv: &[(String, GgufValue)], tensors: &[TensorOut], alignment: usize) -> io::Result<()> {
-    let alignment = alignment.max(1);
-    let mut header: Vec<u8> = Vec::new();
-    header.extend_from_slice(b"GGUF");
-    header.extend_from_slice(&3u32.to_le_bytes()); // version
-    header.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
-    header.extend_from_slice(&(kv.len() as u64).to_le_bytes());
-
-    for (key, val) in kv {
-        write_string(&mut header, key);
-        header.extend_from_slice(&value_type_tag(val).to_le_bytes());
-        write_value_payload(&mut header, val);
-    }
-
-    // Tensor infos: name, ndim, ne[ndim] (torch shape reversed to GGUF's
-    // fastest-varying-first), type, offset (relative to the aligned data
-    // start, itself aligned so each tensor's data begins on an `alignment`
-    // boundary -- mirrors every real GGUF writer's convention, though the
-    // reader here only requires the header's `data_start` rounding).
-    let mut offset: u64 = 0;
-    let mut offsets = Vec::with_capacity(tensors.len());
+    let plan = tensors
+        .iter()
+        .map(|t| TensorPlan { name: t.name.clone(), shape: t.shape.clone(), ty: t.ty, nbytes: t.data.len() })
+        .collect();
+    let mut w = Writer::create(path, kv, plan, alignment)?;
     for t in tensors {
-        offsets.push(offset);
-        let nbytes = t.data.len() as u64;
-        offset += nbytes.div_ceil(alignment as u64) * alignment as u64;
+        w.write_tensor(&t.name, &t.data)?;
     }
-    for (t, off) in tensors.iter().zip(&offsets) {
-        write_string(&mut header, &t.name);
-        header.extend_from_slice(&(t.shape.len() as u32).to_le_bytes());
-        for &dim in t.shape.iter().rev() {
-            header.extend_from_slice(&(dim as u64).to_le_bytes());
-        }
-        header.extend_from_slice(&t.ty.to_le_bytes());
-        header.extend_from_slice(&off.to_le_bytes());
-    }
-
-    let data_start = header.len().div_ceil(alignment) * alignment;
-    header.resize(data_start, 0);
-
-    let tmp = format!("{path}.tmp");
-    {
-        let mut file = io::BufWriter::new(std::fs::File::create(&tmp)?);
-        file.write_all(&header)?;
-        for t in tensors {
-            file.write_all(&t.data)?;
-            let padded = (t.data.len() as u64).div_ceil(alignment as u64) * alignment as u64;
-            let pad = padded - t.data.len() as u64;
-            if pad > 0 {
-                file.write_all(&vec![0u8; pad as usize])?;
-            }
-        }
-        file.flush()?;
-    }
-    std::fs::rename(&tmp, path)
+    w.finish()
 }
 
 #[cfg(test)]

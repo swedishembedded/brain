@@ -731,28 +731,72 @@ fn quantize_q8_k(x: &[f32; 256]) -> [u8; 292] {
 /// simply truncates -- an encoder padding with fabricated values would
 /// silently corrupt whatever real data follows in the caller's buffer).
 pub fn quantize(ty: u32, data: &[f32]) -> Result<Vec<u8>, String> {
-    let (block_elems, block_bytes) = crate::gguf::block_geometry(ty).ok_or_else(|| format!("quant: unsupported type {ty}"))?;
-    if !data.len().is_multiple_of(block_elems) {
-        return Err(format!("quant: {} elements is not a multiple of the block size {block_elems}", data.len()));
-    }
+    let (block_elems, block_bytes) = geometry_for(ty, data.len())?;
     let mut out = Vec::with_capacity(data.len() / block_elems * block_bytes);
     for block in data.chunks_exact(block_elems) {
-        let bytes: Vec<u8> = match ty {
-            T_Q4_0 => quantize_q4_0(block).to_vec(),
-            T_Q4_1 => quantize_q4_1(block).to_vec(),
-            T_Q5_0 => quantize_q5_0(block).to_vec(),
-            T_Q5_1 => quantize_q5_1(block).to_vec(),
-            T_Q8_0 => quantize_q8_0(block).to_vec(),
-            T_Q2_K => quantize_q2_k(block.try_into().unwrap()).to_vec(),
-            T_Q3_K => quantize_q3_k(block.try_into().unwrap()).to_vec(),
-            T_Q4_K => quantize_q4_k(block.try_into().unwrap()).to_vec(),
-            T_Q5_K => quantize_q5_k(block.try_into().unwrap()).to_vec(),
-            T_Q6_K => quantize_q6_k(block.try_into().unwrap()).to_vec(),
-            T_Q8_K => quantize_q8_k(block.try_into().unwrap()).to_vec(),
-            other => return Err(format!("quant: unsupported type {other}")),
-        };
-        out.extend_from_slice(&bytes);
+        out.extend_from_slice(&quantize_block(ty, block));
     }
+    Ok(out)
+}
+
+/// `(block_elems, block_bytes)` for `ty`, after checking `numel` divides into
+/// whole blocks. Shared by [`quantize`] and [`quantize_par`] so the two
+/// cannot disagree about what they accept.
+fn geometry_for(ty: u32, numel: usize) -> Result<(usize, usize), String> {
+    let (block_elems, block_bytes) = crate::gguf::block_geometry(ty).ok_or_else(|| format!("quant: unsupported type {ty}"))?;
+    if !numel.is_multiple_of(block_elems) {
+        return Err(format!("quant: {numel} elements is not a multiple of the block size {block_elems}"));
+    }
+    Ok((block_elems, block_bytes))
+}
+
+/// One block's on-disk bytes. Every quantizer is a pure function of its own
+/// block, which is what makes [`quantize_par`] bit-identical to [`quantize`]
+/// rather than merely close.
+fn quantize_block(ty: u32, block: &[f32]) -> Vec<u8> {
+    match ty {
+        T_Q4_0 => quantize_q4_0(block).to_vec(),
+        T_Q4_1 => quantize_q4_1(block).to_vec(),
+        T_Q5_0 => quantize_q5_0(block).to_vec(),
+        T_Q5_1 => quantize_q5_1(block).to_vec(),
+        T_Q8_0 => quantize_q8_0(block).to_vec(),
+        T_Q2_K => quantize_q2_k(block.try_into().unwrap()).to_vec(),
+        T_Q3_K => quantize_q3_k(block.try_into().unwrap()).to_vec(),
+        T_Q4_K => quantize_q4_k(block.try_into().unwrap()).to_vec(),
+        T_Q5_K => quantize_q5_k(block.try_into().unwrap()).to_vec(),
+        T_Q6_K => quantize_q6_k(block.try_into().unwrap()).to_vec(),
+        T_Q8_K => quantize_q8_k(block.try_into().unwrap()).to_vec(),
+        // Unreachable: `geometry_for` already rejected every type without a
+        // block geometry, and every type that has one is encoded above.
+        other => unreachable!("quant: type {other} has a block geometry but no quantizer"),
+    }
+}
+
+/// [`quantize`] across the CPU scheduler's pool. Each block is an
+/// independent, pure function of its own 32 (or 256) inputs, so splitting
+/// the block sequence over threads is **bit-identical** to encoding it
+/// serially - not merely equivalent within a tolerance - which
+/// `quantize_par_is_bit_identical_to_serial` pins for every supported type.
+///
+/// Serial encoding is fine per tensor and hopeless per checkpoint: a real
+/// 13-billion-parameter conversion is ~410 million blocks, and the encoder
+/// is the whole cost once the source is a memory map.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn quantize_par(ty: u32, data: &[f32]) -> Result<Vec<u8>, String> {
+    let (block_elems, block_bytes) = geometry_for(ty, data.len())?;
+    // Blocks per work item. Large enough that per-item scheduling overhead
+    // is negligible against ~32-256 elements of fitting work each, small
+    // enough that a tensor of a few thousand blocks still spreads across the
+    // pool.
+    const GROUP: usize = 64;
+    let mut out = vec![0u8; data.len() / block_elems * block_bytes];
+    backend_cpu::par::chunks_mut(&mut out, GROUP * block_bytes, |g, dst| {
+        let first_block = g * GROUP;
+        for (i, slot) in dst.chunks_mut(block_bytes).enumerate() {
+            let b = first_block + i;
+            slot.copy_from_slice(&quantize_block(ty, &data[b * block_elems..(b + 1) * block_elems]));
+        }
+    });
     Ok(out)
 }
 
@@ -965,6 +1009,33 @@ mod tests {
             let decoded = dequantize(ty, &bytes, elems).unwrap();
             assert!(decoded.iter().all(|&v| v == 0.0), "{}: all-zero input did not decode to all zero", type_name(ty));
         }
+    }
+
+    /// The parallel encoder must be BIT-identical to the serial one, not
+    /// merely close: every block is a pure function of its own inputs, so
+    /// any difference would mean a work-splitting bug (a wrong block index,
+    /// a short tail group), and a tolerance would hide exactly that. Sized
+    /// past one work group (`GROUP = 64` blocks) with a deliberately ragged
+    /// tail so the last group is partial.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quantize_par_is_bit_identical_to_serial() {
+        for ty in ALL_TYPES {
+            let blocks = 64 * 2 + 7;
+            let n = block_elems(ty) * blocks;
+            let x: Vec<f32> = (0..n).map(|i| ((i * 37 % 211) as f32 / 211.0 - 0.5) * 3.0).collect();
+            let serial = quantize(ty, &x).unwrap();
+            let parallel = quantize_par(ty, &x).unwrap();
+            assert_eq!(serial, parallel, "{}: parallel encode differs from serial over {blocks} blocks", type_name(ty));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quantize_par_rejects_the_same_inputs_serial_does() {
+        let x = vec![0.0f32; 5];
+        assert!(quantize_par(T_Q8_0, &x).is_err());
+        assert!(quantize_par(999, &[0.0f32; 32]).is_err());
     }
 }
 
