@@ -18,6 +18,17 @@ brain-checkpoint.workspace = true
 # embedded tokenizer IS this format, confirmed by parsing it), reused rather
 # than a new parser.
 brain-data.workspace = true
+# `model::int8::quantize_weight` - the shared per-output-channel symmetric
+# int8 packing (4 int8 per u32) every other int8 tier in this workspace
+# already uses, and the exact layout `matmul_i8_dyn.wgsl` binds. Reused
+# rather than reimplemented; `brain-model` does not depend on this crate, so
+# there is no cycle.
+brain-model.workspace = true
+# The `tracing` FACADE only, never a subscriber - `--trace-ltxv <0-5>` (the
+# family that covers this crate's caller) turns the per-layer events on; with
+# no subscriber installed each macro is a predictable-branch no-op, so
+# instrumenting a 48-layer loop costs nothing on an untraced run.
+tracing.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

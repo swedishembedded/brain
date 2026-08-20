@@ -51,10 +51,18 @@ pub const REAL_TOKENIZER_JSON_BYTE_LEN: usize = 32_169_626;
 /// artifact.
 pub fn extract_tokenizer_json_bytes(tensors: &[StTensor]) -> Result<Vec<u8>, String> {
     let t = tensors.iter().find(|t| t.name == "tokenizer_json").ok_or("gemma4 tokenizer: missing tokenizer_json tensor")?;
-    let mut bytes = Vec::with_capacity(t.data.len());
-    for (i, &v) in t.data.iter().enumerate() {
+    bytes_from_f32(&t.name, &t.data)
+}
+
+/// The byte-recovery half of [`extract_tokenizer_json_bytes`], over a decoded
+/// `f32` slice from any source. Shared with `crate::gguf_src`, which reaches
+/// the same blob through a GGUF rather than a safetensors tensor list - one
+/// range check, not two that can drift.
+pub fn bytes_from_f32(name: &str, data: &[f32]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(data.len());
+    for (i, &v) in data.iter().enumerate() {
         if !(0.0..=255.0).contains(&v) || v.fract() != 0.0 {
-            return Err(format!("gemma4 tokenizer: tokenizer_json[{i}] = {v} is not a valid byte value"));
+            return Err(format!("gemma4 tokenizer: {name}[{i}] = {v} is not a valid byte value"));
         }
         bytes.push(v as u8);
     }

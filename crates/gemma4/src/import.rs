@@ -132,6 +132,27 @@ enum SourceKind {
     Unknown,
 }
 
+/// This crate's canonical name for a checkpoint tensor, or `None` when the
+/// tensor is not a text-tower weight at all. The public face of
+/// [`classify`]'s `Weight` arm, so a second loader (`crate::gguf_src`) can
+/// agree with the importer about the name space by construction rather than
+/// by a duplicated string rule.
+pub fn canonical_weight_name(name: &str) -> Option<String> {
+    match classify(name) {
+        SourceKind::Weight(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// True for a tensor this crate knowingly does not import: one of the
+/// sibling towers LTX's text-only path never reads, or an embedded asset
+/// blob. The complement of [`canonical_weight_name`] over everything
+/// [`classify`] recognizes - so "recognized" stays one closed set defined in
+/// one place, and an unrecognized name is still an error for every loader.
+pub fn is_recognized_non_weight(name: &str) -> bool {
+    matches!(classify(name), SourceKind::OutOfScope | SourceKind::Asset)
+}
+
 fn classify(name: &str) -> SourceKind {
     if let Some(rest) = name.strip_prefix("model.") {
         return SourceKind::Weight(rest.to_string());

@@ -101,13 +101,16 @@ const K_ROPE2D: usize = 5;
 const K_GQA_SCORES_WIN: usize = 6;
 const K_ATTN_SOFTMAX: usize = 7;
 const K_GQA_APPLY: usize = 8;
+const K_MAX_ABS_ROW: usize = 9;
+const K_QUANT_PACK: usize = 10;
+const K_MATMUL_I8_DYN: usize = 11;
 
 /// Every kernel this block dispatches - all pre-existing, all at their
 /// documented general contract (see this module's doc for the three kernel-
 /// contract facts found while wiring them up - two needed no new kernel at
 /// all, and the third (`rope2d_partial`) is a REFUTED guess, not something
 /// this crate ships).
-pub const KERNELS: [(&str, &str); 9] = [
+pub const KERNELS: [(&str, &str); 12] = [
     ("matmul", kernels::MATMUL),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("gelu", kernels::GELU),
@@ -117,7 +120,53 @@ pub const KERNELS: [(&str, &str); 9] = [
     ("gqa_scores_win", kernels::GQA_SCORES_WIN),
     ("attn_softmax", kernels::ATTN_SOFTMAX),
     ("gqa_apply", kernels::GQA_APPLY),
+    // The int8 tier ([`Precision::Int8`]). Registered unconditionally -
+    // building a pipeline costs a compile at `Gpu::new` and nothing at
+    // dispatch, and a kernel table that changes shape with a runtime flag is
+    // how a model ends up with two incompatible kernel index spaces.
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
 ];
+
+/// Which arithmetic the seven per-layer projections run in.
+///
+/// This is a CAPACITY-and-bandwidth choice on most hardware and a SPEED
+/// choice on some. The rule for picking it is not "int8 is smaller so use
+/// int8": it is what the device can actually execute fast, queried rather
+/// than assumed, which is what [`Precision::for_device`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    /// Plain `matmul`. Every device supports it; nothing about it is
+    /// conditional.
+    Fp32,
+    /// Per-output-channel symmetric int8 weights with per-token dynamic
+    /// activation scales, through the packed-dot GEMM. Requires
+    /// `DeviceCaps::numeric.int8_dot`.
+    Int8,
+}
+
+impl Precision {
+    /// Resolve a REQUESTED precision against what the device can execute.
+    ///
+    /// A request for int8 on a device with no packed-dot path is not an
+    /// error and is not silently honoured either - it falls back to fp32 and
+    /// says so, the same shape `model::ops::Weight::upload`'s
+    /// `Dtype::promote` and `qwen3::serve`'s `weights_int8 && caps.numeric.
+    /// int8_dot` already use. The capability is the gate; which int8 GEMM
+    /// variant would be fastest is a separate, later question.
+    ///
+    /// Converting a weight DOWN to int8 to run it on hardware whose fp32
+    /// path is the fast one would be a pure loss, which is exactly why this
+    /// asks the device instead of assuming a tier.
+    pub fn for_device(gpu: &Gpu, requested: Precision) -> Precision {
+        if requested == Precision::Int8 && !gpu.caps().numeric.int8_dot {
+            eprintln!("gemma4: int8 requested but this device exposes no packed-int8 dot path; running the projections in fp32");
+            return Precision::Fp32;
+        }
+        requested
+    }
+}
 
 /// Open a device for this crate's kernel table. `None` takes brain's default.
 pub fn open_device(device: Option<&str>) -> Gpu {
@@ -138,55 +187,97 @@ fn upload(gpu: &Gpu, data: &[f32]) -> DeviceBuffer {
     buf
 }
 
+/// One projection's weight, resident at whatever [`Precision`] the layer was
+/// built with.
+///
+/// The precision lives HERE, in the weight, and not in a second forward
+/// pass. A quantized twin of the whole layer would be two implementations of
+/// one architecture, and the failure mode of that shape is a real one this
+/// engine has already paid for: a fix applied to one path and silently
+/// absent from the other. [`linear`] is the only place that branches, so
+/// every norm, RoPE, mask and softmax below is literally the same code in
+/// both tiers.
+enum Proj {
+    F32(DeviceBuffer),
+    /// `model::int8::quantize_weight`'s packed `[n, k/4]` u32 words plus its
+    /// per-output-row f32 scale.
+    I8 { w: DeviceBuffer, sw: DeviceBuffer },
+}
+
+impl Proj {
+    /// Upload `[n, k]` row-major fp32 weight data at `precision`.
+    fn upload(gpu: &Gpu, data: &[f32], n: usize, k: usize, precision: Precision) -> Proj {
+        match precision {
+            Precision::Fp32 => Proj::F32(upload(gpu, data)),
+            Precision::Int8 => {
+                let (packed, sw) = ::model::int8::quantize_weight(data, n, k);
+                let wb = gpu.storage(packed.len() as u64);
+                gpu.write(&wb, &packed);
+                Proj::I8 { w: wb, sw: upload(gpu, &sw) }
+            }
+        }
+    }
+
+    fn from_tensors(gpu: &Gpu, w: &Tensors, name: &str, precision: Precision) -> Proj {
+        let (shape, data) = w.get(name).unwrap_or_else(|| panic!("gemma4: missing weight {name}"));
+        assert_eq!(shape.len(), 2, "gemma4: {name} is a projection and must be rank 2, got {shape:?}");
+        Proj::upload(gpu, data, shape[0], shape[1], precision)
+    }
+}
+
 /// One layer's attention weights, uploaded once. `wv`/`k_eq_v` are mutually
 /// exclusive (see this module's doc, Mismatch 2); `q_norm` already carries
 /// the `sqrt(head_dim)` fold (Mismatch 1) - `v_norm_ones` is a synthesized
 /// all-ones buffer since `Gemma4RMSNorm(..., with_scale=False)` has no
 /// learnable weight in the checkpoint at all.
 struct AttnWeights {
-    wq: DeviceBuffer,
+    wq: Proj,
     q_norm: DeviceBuffer,
-    wk: DeviceBuffer,
+    wk: Proj,
     k_norm: DeviceBuffer,
-    wv: Option<DeviceBuffer>,
+    wv: Option<Proj>,
     v_norm_ones: DeviceBuffer,
-    wo: DeviceBuffer,
+    wo: Proj,
     k_eq_v: bool,
 }
 
 impl AttnWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, head_dim: u32, k_eq_v: bool) -> AttnWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, head_dim: u32, k_eq_v: bool, precision: Precision) -> AttnWeights {
         let q_norm_raw = tget(w, &format!("{prefix}.q_norm.weight"));
         // Mismatch 1 (this module's doc): fold `sqrt(head_dim)` into q_norm's
         // UPLOADED weight only - the host `Tensors` map (and hence anything
         // else that might read `q_norm.weight` later) is untouched.
+        //
+        // Note this fold survives the int8 tier untouched: `q_norm` is a
+        // norm gain, never a projection, so it is fp32 in both tiers and the
+        // `sqrt(head_dim)` factor is not exposed to any quantization step.
         let scale = (head_dim as f32).sqrt();
         let q_norm_scaled: Vec<f32> = q_norm_raw.iter().map(|v| v * scale).collect();
         AttnWeights {
-            wq: upload(gpu, tget(w, &format!("{prefix}.q_proj.weight"))),
+            wq: Proj::from_tensors(gpu, w, &format!("{prefix}.q_proj.weight"), precision),
             q_norm: upload(gpu, &q_norm_scaled),
-            wk: upload(gpu, tget(w, &format!("{prefix}.k_proj.weight"))),
+            wk: Proj::from_tensors(gpu, w, &format!("{prefix}.k_proj.weight"), precision),
             k_norm: upload(gpu, tget(w, &format!("{prefix}.k_norm.weight"))),
-            wv: if k_eq_v { None } else { Some(upload(gpu, tget(w, &format!("{prefix}.v_proj.weight")))) },
+            wv: (!k_eq_v).then(|| Proj::from_tensors(gpu, w, &format!("{prefix}.v_proj.weight"), precision)),
             v_norm_ones: upload(gpu, &vec![1.0f32; head_dim as usize]),
-            wo: upload(gpu, tget(w, &format!("{prefix}.o_proj.weight"))),
+            wo: Proj::from_tensors(gpu, w, &format!("{prefix}.o_proj.weight"), precision),
             k_eq_v,
         }
     }
 }
 
 struct MlpWeights {
-    gate: DeviceBuffer,
-    up: DeviceBuffer,
-    down: DeviceBuffer,
+    gate: Proj,
+    up: Proj,
+    down: Proj,
 }
 
 impl MlpWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str) -> MlpWeights {
+    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, precision: Precision) -> MlpWeights {
         MlpWeights {
-            gate: upload(gpu, tget(w, &format!("{prefix}.gate_proj.weight"))),
-            up: upload(gpu, tget(w, &format!("{prefix}.up_proj.weight"))),
-            down: upload(gpu, tget(w, &format!("{prefix}.down_proj.weight"))),
+            gate: Proj::from_tensors(gpu, w, &format!("{prefix}.gate_proj.weight"), precision),
+            up: Proj::from_tensors(gpu, w, &format!("{prefix}.up_proj.weight"), precision),
+            down: Proj::from_tensors(gpu, w, &format!("{prefix}.down_proj.weight"), precision),
         }
     }
 }
@@ -194,8 +285,25 @@ impl MlpWeights {
 /// `out = x @ Wᵀ`, `x: [m,k]`, `w: [n,k]`, `out: [m,n]` - no bias anywhere in
 /// this crate (`attention_bias=false`, MLP linears are always bias-free per
 /// `Gemma4TextMLP`/`Gemma3MLP`).
-fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
-    s.push(gpu.step(K_MATMUL, &[x, w, out], &[m, k, n], m * n));
+///
+/// The int8 arm quantizes the ACTIVATION per row on the fly
+/// (`max_abs_row` -> `quant_pack`) and lets the packed-dot GEMM dequantize
+/// with `sx*sw` on the way out - the same recipe `ltxv::block`'s own
+/// quantized linears use, at this model's shapes. Every `k` here (hidden
+/// 3840, q_dim 4096, kv_dim 2048/512, intermediate 15360) is a multiple of
+/// 4, which is the packing width the kernel requires.
+fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Proj, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
+    match w {
+        Proj::F32(wb) => s.push(gpu.step(K_MATMUL, &[x, wb, out], &[m, k, n], m * n)),
+        Proj::I8 { w: wb, sw } => {
+            debug_assert_eq!(k % 4, 0, "matmul_i8_dyn packs 4 int8 lanes per u32");
+            let xq = gpu.storage((m * k / 4) as u64);
+            let sx = gpu.storage(m as u64);
+            s.push(gpu.step(K_MAX_ABS_ROW, &[x, &sx], &[m, k], m));
+            s.push(gpu.step(K_QUANT_PACK, &[x, &sx, &xq], &[m, k], m * k / 4));
+            s.push(gpu.step(K_MATMUL_I8_DYN, &[&xq, wb, &sx, sw, out], &[m, k / 4, n], m.div_ceil(128) * n.div_ceil(128) * 256));
+        }
+    }
 }
 
 /// RMSNorm over the full row width `dim` - `w` is either a learnable gain
@@ -297,13 +405,16 @@ pub struct Gemma4Layer {
 }
 
 impl Gemma4Layer {
-    pub fn on(gpu: Gpu, cfg: &Gemma4Config, weights: &Tensors, layer_idx: u32) -> Gemma4Layer {
+    /// Build layer `layer_idx` with its projections resident at `precision`.
+    /// `weights` needs only THIS layer's tensors, which is what lets a
+    /// caller stream a checkpoint layer by layer.
+    pub fn on(gpu: Gpu, cfg: &Gemma4Config, weights: &Tensors, layer_idx: u32, precision: Precision) -> Gemma4Layer {
         let lt = cfg.layer_type(layer_idx);
         let head_dim = cfg.head_dim_for(lt);
         let k_eq_v = cfg.k_eq_v_for(lt);
         let prefix = format!("layers.{layer_idx}");
-        let attn = AttnWeights::upload(&gpu, weights, &format!("{prefix}.self_attn"), head_dim, k_eq_v);
-        let mlp = MlpWeights::upload(&gpu, weights, &format!("{prefix}.mlp"));
+        let attn = AttnWeights::upload(&gpu, weights, &format!("{prefix}.self_attn"), head_dim, k_eq_v, precision);
+        let mlp = MlpWeights::upload(&gpu, weights, &format!("{prefix}.mlp"), precision);
         let layer_scalar = tget(weights, &format!("{prefix}.layer_scalar"))[0];
         Gemma4Layer {
             gpu,

@@ -32,7 +32,7 @@
 
 use gpu_core::Gpu;
 
-use crate::block::{open_device, Gemma4Layer, Tensors};
+use crate::block::{open_device, Gemma4Layer, Precision, Tensors};
 use crate::config::{Gemma4Config, LayerType};
 use crate::rope::{full_table, sliding_table, upload_rope};
 
@@ -107,72 +107,180 @@ impl Gemma4Model {
     /// One forward pass over `input_ids` (`[T]`, real token ids - NOT
     /// pre-embedded, unlike `ltxv::LtxDit::forward`'s `latent` input, since
     /// this crate owns the embedding table too).
+    ///
+    /// Weights come from the eager whole-model map this was constructed
+    /// with, in fp32. [`forward_streamed`] is the same forward over a
+    /// checkpoint read one layer at a time.
     pub fn forward(&self, input_ids: &[u32]) -> Gemma4Output {
         let cfg = &self.cfg;
         let hidden = cfg.hidden_size as usize;
-        let t = input_ids.len() as u32;
-        let n = cfg.num_hidden_layers;
-
         let embed_table = &self.w.get("embed_tokens.weight").unwrap_or_else(|| panic!("gemma4: missing embed_tokens.weight")).1;
         let embed_out = embed(input_ids, embed_table, hidden);
+        let norm_w = self.w.get("norm.weight").unwrap_or_else(|| panic!("gemma4: missing norm.weight")).1.clone();
+        forward_core(cfg, self.device.as_deref(), input_ids.len() as u32, embed_out, &norm_w, |gpu, l| {
+            Gemma4Layer::on(gpu.share(), cfg, &self.w, l, Precision::Fp32)
+        })
+    }
+}
 
-        // Both RoPE tables, built once and shared by every layer of that
-        // type - see `crate::rope`'s doc for why BOTH fit the existing
-        // `rope2d` kernel unchanged (the `full_attention` table carries its
-        // own zero-padded identity columns; `rope2d_partial` is refuted).
-        let sliding_tbl = sliding_table(cfg.head_dim, cfg.rope_theta_sliding, t as usize);
-        let full_tbl = full_table(cfg.global_head_dim, cfg.rope_theta_full, cfg.partial_rotary_factor, t as usize);
+/// The layer stack, shared by every way of getting weights into it.
+///
+/// There is exactly ONE of these on purpose. A model with two forward
+/// implementations for the same architecture - a reference one and a fast
+/// one - reliably grows a feature in one that is silently missing from the
+/// other, and nothing type-checks the gap. Here the only thing that varies
+/// is `build_layer`; the embedding, both RoPE tables, the `hidden_states`
+/// convention and the final norm are literally the same code for the eager
+/// fp32 path and the streamed int8 one.
+fn forward_core(
+    cfg: &Gemma4Config,
+    device: Option<&str>,
+    t: u32,
+    embed_out: Vec<f32>,
+    norm_w: &[f32],
+    mut build_layer: impl FnMut(&Gpu, u32) -> Gemma4Layer,
+) -> Gemma4Output {
+    let hidden = cfg.hidden_size as usize;
+    let n = cfg.num_hidden_layers;
 
-        let gpu: Gpu = open_device(self.device.as_deref());
-        let sliding_rope = upload_rope(&gpu, &sliding_tbl);
-        let full_rope = upload_rope(&gpu, &full_tbl);
+    // Both RoPE tables, built once and shared by every layer of that
+    // type - see `crate::rope`'s doc for why BOTH fit the existing
+    // `rope2d` kernel unchanged (the `full_attention` table carries its
+    // own zero-padded identity columns; `rope2d_partial` is refuted).
+    let sliding_tbl = sliding_table(cfg.head_dim, cfg.rope_theta_sliding, t as usize);
+    let full_tbl = full_table(cfg.global_head_dim, cfg.rope_theta_full, cfg.partial_rotary_factor, t as usize);
 
-        let mut x = embed_out.clone();
-        let mut raw_outputs: Vec<Vec<f32>> = Vec::with_capacity(n as usize);
-        let mut layer0_self_attn_out = Vec::new();
-        let mut layer_last_self_attn_out = Vec::new();
+    let gpu: Gpu = open_device(device);
+    let sliding_rope = upload_rope(&gpu, &sliding_tbl);
+    let full_rope = upload_rope(&gpu, &full_tbl);
 
-        for l in 0..n {
-            let layer = Gemma4Layer::on(gpu.share(), cfg, &self.w, l);
-            let lt = layer.layer_type();
-            let rope = match lt {
-                LayerType::Sliding => &sliding_rope,
-                LayerType::Full => &full_rope,
-            };
-            let (out, attn_out) = layer.forward(&x, rope, t);
-            if l == 0 {
-                layer0_self_attn_out = attn_out.clone();
-            }
-            if l == n - 1 {
-                layer_last_self_attn_out = attn_out;
-            }
-            x = out;
-            raw_outputs.push(x.clone());
+    let mut x = embed_out.clone();
+    let mut raw_outputs: Vec<Vec<f32>> = Vec::with_capacity(n as usize);
+    let mut layer0_self_attn_out = Vec::new();
+    let mut layer_last_self_attn_out = Vec::new();
+
+    for l in 0..n {
+        let t_layer = std::time::Instant::now();
+        let layer = build_layer(&gpu, l);
+        let build_ms = t_layer.elapsed().as_secs_f32() * 1000.0;
+        let lt = layer.layer_type();
+        let rope = match lt {
+            LayerType::Sliding => &sliding_rope,
+            LayerType::Full => &full_rope,
+        };
+        let t_fwd = std::time::Instant::now();
+        let (out, attn_out) = layer.forward(&x, rope, t);
+        tracing::trace!(layer = l, kind = ?lt, build_ms, gpu_ms = t_fwd.elapsed().as_secs_f32() * 1000.0, "gemma4 layer done");
+        if l == 0 {
+            layer0_self_attn_out = attn_out.clone();
         }
-
-        // `hidden_states` per this module's doc: embed, then layers
-        // 0..N-2's raw outputs, then the FINAL layer's raw output run
-        // through the model's own `norm` - not raw.
-        let norm_w = &self.w.get("norm.weight").unwrap_or_else(|| panic!("gemma4: missing norm.weight")).1;
-        let last_hidden_state = rmsnorm_host(&raw_outputs[n as usize - 1], norm_w, t as usize, hidden, cfg.rms_norm_eps);
-
-        let mut hidden_states = Vec::with_capacity(n as usize + 1);
-        hidden_states.push(embed_out);
-        for raw in raw_outputs.iter().take(n as usize - 1) {
-            hidden_states.push(raw.clone());
+        if l == n - 1 {
+            layer_last_self_attn_out = attn_out;
         }
-        hidden_states.push(last_hidden_state.clone());
+        x = out;
+        raw_outputs.push(x.clone());
+    }
 
-        Gemma4Output {
-            hidden_states,
-            last_hidden_state,
-            layer0_self_attn_out,
-            layer_last_self_attn_out,
-            rope_sliding_cos: sliding_tbl.cos,
-            rope_sliding_sin: sliding_tbl.sin,
-            rope_full_cos: full_tbl.cos,
-            rope_full_sin: full_tbl.sin,
+    // `hidden_states` per this module's doc: embed, then layers
+    // 0..N-2's raw outputs, then the FINAL layer's raw output run
+    // through the model's own `norm` - not raw.
+    let last_hidden_state = rmsnorm_host(&raw_outputs[n as usize - 1], norm_w, t as usize, hidden, cfg.rms_norm_eps);
+
+    let mut hidden_states = Vec::with_capacity(n as usize + 1);
+    hidden_states.push(embed_out);
+    for raw in raw_outputs.iter().take(n as usize - 1) {
+        hidden_states.push(raw.clone());
+    }
+    hidden_states.push(last_hidden_state.clone());
+
+    Gemma4Output {
+        hidden_states,
+        last_hidden_state,
+        layer0_self_attn_out,
+        layer_last_self_attn_out,
+        rope_sliding_cos: sliding_tbl.cos,
+        rope_sliding_sin: sliding_tbl.sin,
+        rope_full_cos: full_tbl.cos,
+        rope_full_sin: full_tbl.sin,
+    }
+}
+
+/// Every tensor name layer `l` owns, from the manifest itself rather than a
+/// second hand-written list - so a layer-shape change (a `full_attention`
+/// layer's absent `v_proj`, say) cannot be right in one place and wrong here.
+pub fn layer_tensor_names(cfg: &Gemma4Config, l: u32) -> Vec<(String, Vec<usize>)> {
+    let prefix = format!("layers.{l}.");
+    crate::import::gemma4_tensor_manifest(cfg).into_iter().filter(|(n, _)| n.starts_with(&prefix)).collect()
+}
+
+/// Pull one layer's tensors out of `src`. Errors by name on anything absent
+/// or the wrong length - never a zero fill, matching the importer's own
+/// contract for the eager path.
+pub fn load_layer_tensors(src: &dyn checkpoint::TensorSource, cfg: &Gemma4Config, l: u32) -> Result<Tensors, String> {
+    let mut out = Tensors::new();
+    for (name, shape) in layer_tensor_names(cfg, l) {
+        let want: usize = shape.iter().product();
+        let mut got: Option<Vec<f32>> = None;
+        let found = src.with_tensor(&name, &mut |d| got = Some(d.to_vec()));
+        let data = match (found, got) {
+            (true, Some(d)) => d,
+            _ => return Err(format!("gemma4: source has no tensor {name}")),
+        };
+        if data.len() != want {
+            return Err(format!("gemma4: {name} has {} values, expected {want}", data.len()));
         }
+        out.insert(name, (shape, data));
+    }
+    Ok(out)
+}
+
+/// [`Gemma4Model::forward`] over a checkpoint read on demand, with the
+/// projections resident at `requested` precision.
+///
+/// This is what makes the real 12B tower runnable without first expanding it:
+/// only the embedding table, the final norm and ONE layer are host-resident
+/// at a time, instead of the whole model as f32. `requested` is a request -
+/// [`Precision::for_device`] resolves it against what the device can actually
+/// execute, so asking for int8 on a device with no packed-dot path runs fp32
+/// and says so rather than quantizing for nothing.
+pub fn forward_streamed(
+    cfg: &Gemma4Config,
+    src: &dyn checkpoint::TensorSource,
+    device: Option<&str>,
+    requested: Precision,
+    input_ids: &[u32],
+) -> Result<Gemma4Output, String> {
+    let hidden = cfg.hidden_size as usize;
+
+    let mut embed_out = None;
+    if !src.with_tensor("embed_tokens.weight", &mut |table| embed_out = Some(embed(input_ids, table, hidden))) {
+        return Err("gemma4: source has no tensor embed_tokens.weight".to_string());
+    }
+    let embed_out = embed_out.expect("with_tensor reported found, so the callback ran");
+
+    let mut norm_w = None;
+    if !src.with_tensor("norm.weight", &mut |d| norm_w = Some(d.to_vec())) {
+        return Err("gemma4: source has no tensor norm.weight".to_string());
+    }
+    let norm_w = norm_w.expect("with_tensor reported found, so the callback ran");
+
+    // Resolve the precision ONCE, against a throwaway handle on the same
+    // device the forward will use, so every layer is built at the same tier
+    // and the fallback notice is printed once rather than 48 times.
+    let precision = Precision::for_device(&open_device(device), requested);
+    tracing::info!(?requested, resolved = ?precision, layers = cfg.num_hidden_layers, tokens = input_ids.len(), "gemma4 streamed forward");
+
+    let mut err: Option<String> = None;
+    let out = forward_core(cfg, device, input_ids.len() as u32, embed_out, &norm_w, |gpu, l| {
+        let t = load_layer_tensors(src, cfg, l).unwrap_or_else(|e| {
+            err = Some(e);
+            Tensors::new()
+        });
+        Gemma4Layer::on(gpu.share(), cfg, &t, l, precision)
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(out),
     }
 }
 
@@ -243,6 +351,14 @@ impl AggregateEmbed {
     /// hidden]`) - see this module's doc for the exact per-entry semantics
     /// this concatenation assumes. Plain host math (T is tiny; see this
     /// module's doc for why the outer stage stays on the host).
+    /// At the real config this is `Linear(188160 -> 4096)`: 770 million
+    /// multiply-accumulates PER TOKEN. A scalar triple loop over that is not
+    /// "host glue that is too small to be worth a device round trip" - it is
+    /// one of the largest single matrix products in the whole text-encode
+    /// stage, and it ran on one core. `hostmath::matvec_par` is the
+    /// workspace's shared parallel matrix-vector product (the same one
+    /// `ltxv::dit`'s host GEMMs use) and is called directly rather than
+    /// wrapped, so the row-splitting exists once.
     pub fn forward(&self, hidden_states: &[Vec<f32>], t: usize, hidden: usize) -> Vec<f32> {
         let n_states = hidden_states.len();
         assert_eq!(self.in_dim, hidden * n_states, "AggregateEmbed: in_dim {} != hidden*n_states {}", self.in_dim, hidden * n_states);
@@ -252,13 +368,9 @@ impl AggregateEmbed {
             for (k, hs) in hidden_states.iter().enumerate() {
                 concat_row[k * hidden..(k + 1) * hidden].copy_from_slice(&hs[ti * hidden..ti * hidden + hidden]);
             }
-            for o in 0..self.out_dim {
-                let wrow = &self.weight[o * self.in_dim..(o + 1) * self.in_dim];
-                let mut acc = self.bias[o];
-                for (ci, wi) in concat_row.iter().zip(wrow) {
-                    acc += ci * wi;
-                }
-                out[ti * self.out_dim + o] = acc;
+            let row = model::hostmath::matvec_par(&self.weight, &concat_row, self.out_dim, self.in_dim);
+            for (o, v) in row.iter().enumerate() {
+                out[ti * self.out_dim + o] = v + self.bias[o];
             }
         }
         out

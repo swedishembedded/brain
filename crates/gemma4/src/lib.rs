@@ -39,12 +39,15 @@
 
 pub mod block;
 pub mod config;
+pub mod gguf_src;
 pub mod import;
 pub mod model;
 pub mod rope;
 pub mod tokenizer;
 
 pub use config::{Gemma4Config, LayerType};
+pub use gguf_src::Gemma4GgufSource;
 pub use import::{gemma4_tensor_manifest, import_gemma4};
-pub use model::{load_tiny_weights, AggregateEmbed, Gemma4Model, Gemma4Output};
+pub use block::Precision;
+pub use model::{forward_streamed, load_layer_tensors, load_tiny_weights, AggregateEmbed, Gemma4Model, Gemma4Output};
 pub use tokenizer::{extract_tokenizer_json_bytes, load_tokenizer};
