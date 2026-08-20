@@ -38,6 +38,13 @@ brain-capability.workspace = true
 # Box-Muller stream `wan::pipeline` uses, for reproducible `--seed` runs.
 brain-data.workspace = true
 serde_json.workspace = true
+# The `tracing` FACADE only - never a subscriber. `--trace-ltxv <0-5>` (the
+# `brain` CLI installs the one subscriber) turns these events on; with none
+# installed every macro below is a predictable-branch no-op, so instrumenting
+# a per-layer loop costs nothing on an untraced run. Targets default to this
+# crate's module path (`ltxv::pipeline`, `ltxv::dit`), which is what labels
+# each line with the component it came from.
+tracing.workspace = true
 # `audio::conv::{Conv1d, conv1d_fwd, convtr1d_fwd}` - the vocoder's 1D
 # (transposed) conv `Step`-builders, reused rather than reimplemented.
 brain-audio.workspace = true

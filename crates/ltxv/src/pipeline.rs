@@ -575,7 +575,14 @@ fn to_denoised(sample: &[f32], velocity: &[f32], sigma: f64) -> Vec<f32> {
 /// guidance·(cond - uncond)` **on the velocity** (matching
 /// `wan::pipeline`'s own fold point), converted to a denoised (x0) estimate,
 /// then one [`euler_ancestral_step`].
+///
+/// Traced (`--trace-ltxv`): the loop is one span, each step a `debug!` with
+/// its sigma pair and running seconds-per-step, each individual forward a
+/// `trace!`, a cancellation a `warn!` naming the step it stopped at, and a
+/// non-finite prediction an `error!` - so a run that diverged or stalled can
+/// be pinpointed from the trace alone instead of re-run under a profiler.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "info", name = "denoise", skip_all, fields(steps = sigmas.len().saturating_sub(1), tokens = t, guidance = guidance, eta = eta))]
 fn denoise(
     dit: &dyn Denoiser,
     sigmas: &[f64],
@@ -599,30 +606,38 @@ fn denoise(
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
     let t0 = Instant::now();
+    tracing::info!(steps, cfg = cfg_on, forwards_per_step = if cfg_on { 2 } else { 1 }, sigma_first = sigmas.first().copied().unwrap_or(0.0), sigma_last = sigmas.last().copied().unwrap_or(0.0), "denoise loop starting");
     for i in 0..steps {
         // Once per step: a forward is one submit of the whole block stack
         // and is not interruptible from inside, same reasoning as
         // `wan::pipeline::denoise`.
         if cancel.is_cancelled() {
+            tracing::warn!(step = i + 1, steps, "cancelled at a step boundary; aborting the denoise loop");
             return Err("cancelled".into());
         }
         let (sigma, sigma_next) = (sigmas[i], sigmas[i + 1]);
+        tracing::trace!(step = i + 1, branch = "cond", sigma, "forward starting");
         let cond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_cond, context_len, context_valid, t);
         let velocity = if cfg_on {
+            tracing::trace!(step = i + 1, branch = "uncond", sigma, "forward starting");
             let uncond = dit.forward(&latent, sigma as f32, positions, keyframes_mask, ctx_uncond, context_len, context_valid, t);
             cond.iter().zip(&uncond).map(|(&c, &u)| u + guidance * (c - u)).collect()
         } else {
             cond
         };
         if !velocity.iter().all(|v| v.is_finite()) {
+            let bad = velocity.iter().filter(|v| !v.is_finite()).count();
+            tracing::error!(step = i + 1, sigma, non_finite = bad, of = velocity.len(), "the denoiser produced non-finite values");
             return Err(format!("the denoiser produced non-finite values at step {} (sigma = {sigma:.4})", i + 1));
         }
         let denoised = to_denoised(&latent, &velocity, sigma);
         let noise = if eta > 0.0 { Some((0..latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
         latent = euler_ancestral_step(&latent, &denoised, sigma, sigma_next, eta, s_noise, noise.as_deref());
         let per = t0.elapsed().as_secs_f32() / (i + 1) as f32;
+        tracing::debug!(step = i + 1, steps, sigma, sigma_next, secs_per_step = per, "step done");
         progress(i as u32 + 1, total, &format!("denoise sigma={sigma:.3} {per:.2}s/step"));
     }
+    tracing::info!(steps, secs = t0.elapsed().as_secs_f32(), "denoise loop done");
     Ok(latent)
 }
 
@@ -630,23 +645,38 @@ fn denoise(
 /// generate`'s contract; `cancel` is polled once per denoise step. `prompt`
 /// only ever reaches [`context_stub`] (see this module's doc - there is no
 /// real text encoder).
+#[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = o.guidance, dit_config = %o.dit_config))]
 pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    tracing::info!(
+        prompt_chars = prompt.chars().count(),
+        device = o.device.as_deref().unwrap_or("(ambient)"),
+        real_dit = paths.dit.is_some(),
+        real_text_encoder = paths.text_encoder.is_some(),
+        "text-to-video generation starting"
+    );
     let vcfg = LtxVaeConfig::conv25();
-    let lat_t = vcfg.latent_frames(o.frames as u32).ok_or_else(|| format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", o.frames))?;
+    let lat_t = vcfg.latent_frames(o.frames as u32).ok_or_else(|| {
+        tracing::error!(frames = o.frames, "frame count is not 1 + 8k, which the causal VAE requires");
+        format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", o.frames)
+    })?;
     if !o.width.is_multiple_of(32) || !o.height.is_multiple_of(32) {
+        tracing::error!(width = o.width, height = o.height, "resolution is not a multiple of the VAE spatial stride");
         return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.width, o.height));
     }
     if o.steps == 0 {
+        tracing::error!("--steps must be at least 1");
         return Err("--steps must be at least 1".into());
     }
     let (lh, lw) = (o.height / 32, o.width / 32);
     let (lat_t, lh, lw) = (lat_t as usize, lh, lw);
     let t = lat_t * lh * lw;
 
-    let dit_cfg = dit_config_from_name(&o.dit_config)?;
+    let dit_cfg = dit_config_from_name(&o.dit_config).inspect_err(|e| tracing::error!(dit_config = %o.dit_config, error = %e, "unknown DiT config"))?;
     if dit_cfg.in_channels != vcfg.latent_channels {
+        tracing::error!(in_channels = dit_cfg.in_channels, latent_channels = vcfg.latent_channels, "DiT/VAE latent width mismatch");
         return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
     }
+    tracing::debug!(latent_frames = lat_t, latent_h = lh, latent_w = lw, tokens = t, in_channels = dit_cfg.in_channels, "latent layout resolved");
     let in_channels = dit_cfg.in_channels as usize;
     // The real `ltx25_22b` checkpoint is the DISTILLED variant
     // (`ltx-2.5-22b-distilled-transformer-*.gguf`) - distillation trains the
@@ -671,6 +701,12 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         ltx2_sigmas(t, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal)
     };
     let total = sigmas.len() as u32 - 1 + 2;
+    // `--steps` is IGNORED for the distilled checkpoint (see above). That is
+    // a silent override of something the user typed, so say so.
+    if is_real_distilled && o.steps != sigmas.len() - 1 {
+        tracing::warn!(requested_steps = o.steps, schedule_steps = sigmas.len() - 1, "the distilled checkpoint has a fixed sigma schedule; --steps is ignored");
+    }
+    tracing::debug!(schedule = if is_real_distilled { "ltx2_distilled" } else { "ltx2_shifted" }, steps = sigmas.len() - 1, "sigma schedule built");
     let mut timings = Timings::default();
 
     // ---- build the DiT: tiny config, random weights (this pipeline's
@@ -680,21 +716,34 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     progress(0, total, "build transformer");
     let build_t = Instant::now();
     let dit: Box<dyn Denoiser> = if o.dit_config == "tiny" {
+        // Not a real model: random weights, so any output is a wiring proof
+        // and nothing else. Worth a warning rather than an info line - a run
+        // that silently produced noise because a checkpoint path was unset is
+        // the most expensive way to discover this.
+        tracing::warn!("--dit-config tiny: building a RANDOM-weight DiT, output is a smoke test and carries no semantics");
         let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
         let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
         Box::new(LtxDit::new(dit_cfg, weights, o.device.as_deref()))
     } else {
-        let dit_path = paths.dit.as_ref().ok_or_else(|| format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config))?;
-        let src = crate::gguf_src::LtxvGgufSource::open(dit_path)?;
+        let dit_path = paths.dit.as_ref().ok_or_else(|| {
+            tracing::error!(dit_config = %o.dit_config, "no real DiT checkpoint configured for a real dit-config");
+            format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config)
+        })?;
+        tracing::info!(path = %dit_path, "opening the real DiT GGUF");
+        let src = crate::gguf_src::LtxvGgufSource::open(dit_path).inspect_err(|e| tracing::error!(path = %dit_path, error = %e, "opening the DiT GGUF failed"))?;
         let real_cfg = src.config().video;
         if real_cfg != dit_cfg {
+            tracing::error!(path = %dit_path, dit_config = %o.dit_config, "the checkpoint's embedded config does not match the named build config");
             return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
         }
         let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
+        tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
         Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), block_cache: RefCell::new(Vec::new()) })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
+    tracing::info!(secs = timings.build_dit, "transformer built");
     if cancel.is_cancelled() {
+        tracing::warn!(phase = "after build", "cancelled");
         return Err("cancelled".into());
     }
 
@@ -713,8 +762,16 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // tokenizer's own output length in the former case, not
     // `GenOpts::context_len` (which only ever sized the stub).
     let (ctx_cond, ctx_uncond, context_valid, context_len) = match &paths.text_encoder {
-        Some(te_path) => real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())?,
+        Some(te_path) => {
+            tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
+            real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())
+                .inspect(|(_, _, _, n)| tracing::info!(context_len = n, "prompt encoded"))
+                .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?
+        }
         None => {
+            // Same class of silent-nonsense as the tiny DiT above: the prompt
+            // reaches the model only as a hash-derived stub.
+            tracing::warn!("no text encoder configured: the prompt is being replaced by a deterministic STUB context and carries no meaning");
             let prompt_mix = o.seed ^ fnv1a(prompt);
             let dim = dit_cfg.cross_attention_dim as usize;
             let n = o.context_len;
@@ -746,6 +803,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
 
     let latent0 = seeded_noise(t * in_channels, o.seed);
     let denoise_t = Instant::now();
+    tracing::info!(tokens = t, context_len, "denoising");
     let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions, &keyframes_mask, &ctx_cond, &ctx_uncond, context_len, &context_valid, t, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, cancel, &mut progress)?;
     // Release the DiT's own device context (for `RealDit`, its resident
     // `Gpu`) before the VAE decode below opens its own - real device memory
@@ -758,13 +816,16 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     timings.steps = sigmas.len() - 1;
     timings.tokens = t;
     timings.forwards_per_step = if o.guidance > 1.0 { 2 } else { 1 };
+    tracing::info!(secs = timings.denoise, steps = timings.steps, secs_per_forward = timings.secs_per_forward(), "denoise done");
 
     if cancel.is_cancelled() {
+        tracing::warn!(phase = "after denoise", "cancelled");
         return Err("cancelled".into());
     }
 
     // ---- decode -------------------------------------------------------------
     progress(total - 1, total, "vae decode");
+    tracing::info!(path = %paths.vae, latent_frames = lat_t, "VAE decode starting");
     let decode_t = Instant::now();
     let chw = tc_to_chw(&final_latent, in_channels, lat_t, lh, lw);
     let vraw = read_any(&paths.vae)?;
@@ -793,7 +854,9 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         })
         .collect();
     timings.decode = decode_t.elapsed().as_secs_f32();
+    tracing::info!(secs = timings.decode, frames, "VAE decode done");
     progress(total, total, "done");
+    tracing::info!(frames, width = w, height = h, fps = o.fps, total_secs = timings.total(), "generation done");
     Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out }, timings))
 }
 
@@ -950,9 +1013,12 @@ fn noised_seed(seed_content: &[f32], sigma0: f32, seed: u64) -> Vec<f32> {
 /// upscale + tile-stitch rounds -> real VAE decode. See this section's own
 /// doc (right above [`DfrPaths`]) for exactly what's real and what isn't.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "info", name = "generate_dfr", skip_all, fields(frames = o.base.frames, width = o.base.width, height = o.base.height, steps = o.base.steps, seed = o.base.seed, temporal_rounds = o.temporal_upsample_rounds))]
 pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
     let base = &o.base;
+    tracing::info!(prompt_chars = prompt.chars().count(), device = base.device.as_deref().unwrap_or("(ambient)"), "DFR generation starting");
     if o.temporal_upsample_rounds > 2 {
+        tracing::error!(rounds = o.temporal_upsample_rounds, "temporal_upsample_rounds out of range");
         return Err(format!("temporal_upsample_rounds must be 0, 1, or 2, got {}", o.temporal_upsample_rounds));
     }
     if o.temporal_upsample_rounds > 0 && paths.temporal_upsampler.is_none() {
@@ -999,7 +1065,9 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
     let dit = LtxDit::new(dit_cfg, weights, base.device.as_deref());
     timings.build_dit = build_t.elapsed().as_secs_f32();
+    tracing::info!(secs = timings.build_dit, canvas_frames, keyframe_slots = k, "DFR transformer built (random tiny weights)");
     if cancel.is_cancelled() {
+        tracing::warn!(phase = "after build", "cancelled");
         return Err("cancelled".into());
     }
 
@@ -1012,6 +1080,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- Stage 1: half-res base + keyframe slots, pure noise (no prior
     // stage exists to seed from) ----
     progress(1, total_phases, "stage1 denoise");
+    tracing::info!(stage = "stage1", "half-res base denoise");
     let (lh1, lw1) = (base.height / 2 / 32, base.width / 2 / 32);
     let t0_1 = lat_t * lh1 * lw1;
     let base_positions_1 = grid_positions(lat_t, lh1, lw1);
@@ -1022,6 +1091,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let ctx_valid = vec![1.0f32; base.context_len]; // DFR's DiT is always tiny-config (connector disabled) - see this section's doc.
     let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
+        tracing::warn!(stage = "stage1", "cancelled");
         return Err("cancelled".into());
     }
 
@@ -1030,6 +1100,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
 
     // ---- real spatial x2 upscale of BOTH the video and its slots ----
     progress(1, total_phases, "spatial upscale");
+    tracing::info!(stage = "spatial_upscale", path = %paths.spatial_upsampler, "real x2 latent upscale");
     let sraw = read_any(&paths.spatial_upsampler)?;
     let scfg = LatentUpsamplerConfig::spatial_x2();
     let sweights = crate::import::import_upsampler(sraw, &scfg)?;
@@ -1043,12 +1114,14 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let (lh2, lw2) = (lh2u as usize, lw2u as usize);
     let (want_lh2, want_lw2) = (base.height / 32, base.width / 32);
     if (lh2, lw2) != (want_lh2, want_lw2) {
+        tracing::error!(got_h = lh2, got_w = lw2, want_h = want_lh2, want_w = want_lw2, "spatial upscaler produced the wrong latent grid");
         return Err(format!("spatial upscaler produced a {lh2}x{lw2} latent grid, expected {want_lh2}x{want_lw2} for {}x{}", base.width, base.height));
     }
 
     // ---- Stage 2: full-res detailing, RE-NOISED from the real upscaled
     // seed (no IC-LoRA - see this section's doc) ----
     progress(2, total_phases, "stage2 denoise");
+    tracing::info!(stage = "stage2", latent_h = lh2, latent_w = lw2, "full-res detailing denoise");
     let t0_2 = lat_t * lh2 * lw2;
     let base_positions_2 = grid_positions(lat_t, lh2, lw2);
     let layout2 = dfr::keyframe_slots(t0_2, &base_positions_2, lh2, lw2, &kf_positions, dfr::VIDEO_TEMPORAL_SCALE, true)?;
@@ -1062,6 +1135,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
     let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
+        tracing::warn!(stage = "stage2", "cancelled");
         return Err("cancelled".into());
     }
 
@@ -1076,6 +1150,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
 
         for round_idx in 1..=o.temporal_upsample_rounds {
             if cancel.is_cancelled() {
+                tracing::warn!(round = round_idx, "cancelled");
                 return Err("cancelled".into());
             }
             progress(2 + round_idx as u32, total_phases, &format!("temporal round {round_idx}"));
@@ -1091,10 +1166,13 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
             let tiles = dfr::tile_ranges(&seam_positions, round_num_frames, num_tiles, dfr::VIDEO_TEMPORAL_SCALE, dfr::TILE_LEAD_SEGMENTS)?;
 
             let mut tile_video_outputs: Vec<Vec<f32>> = Vec::with_capacity(tiles.len());
+            tracing::info!(stage = "temporal_round", round = round_idx, tiles = tiles.len(), latent_frames = new_lat_t, "temporal x2 upscale round");
             for (tile_index, tile) in tiles.iter().enumerate() {
                 if cancel.is_cancelled() {
+                    tracing::warn!(round = round_idx, tile = tile_index, "cancelled");
                     return Err("cancelled".into());
                 }
+                tracing::debug!(round = round_idx, tile = tile_index, latent_start = tile.latent_start, latent_end = tile.latent_end_exclusive, "tile denoise");
                 let lat_t_local = tile.latent_end_exclusive - tile.latent_start;
                 let tile_video_chw = dfr::slice_time_chw(&upsampled_video, in_channels, new_lat_t, lh2, lw2, tile.latent_start, tile.latent_end_exclusive);
                 let tile_video_tc = chw_to_tc(&tile_video_chw, in_channels, lat_t_local, lh2, lw2);

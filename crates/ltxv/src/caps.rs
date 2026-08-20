@@ -281,8 +281,13 @@ impl Action for LtxvAction {
     fn spec(&self) -> ActionSpec {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
+    #[tracing::instrument(level = "info", name = "ltxv_action", skip_all, fields(action = %self.name))]
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        match self.name.as_str() {
+        // The SERVED entry point (D-Bus/HTTP/`brain do`), as opposed to the
+        // `brain ltxv` CLI: a served request has no terminal to print to, so
+        // its start/finish/failure only exist anywhere if they are traced.
+        tracing::info!("action invoked");
+        let result = match self.name.as_str() {
             "t2v" => {
                 // Params before the weights-env check: a request that could
                 // never run must not read "you forgot to export BRAIN_LTXV_VAE".
@@ -295,8 +300,16 @@ impl Action for LtxvAction {
                 let paths = DfrPaths::from_env()?;
                 dfr_on(&paths, inv, &p, progress)
             }
-            other => Err(format!("ltxv '{other}': unknown action")),
+            other => {
+                tracing::error!(action = other, "unknown action");
+                Err(format!("ltxv '{other}': unknown action"))
+            }
+        };
+        match &result {
+            Ok(_) => tracing::info!("action succeeded"),
+            Err(e) => tracing::error!(error = %e, "action failed"),
         }
+        result
     }
 }
 

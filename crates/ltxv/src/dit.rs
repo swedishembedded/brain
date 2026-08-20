@@ -1123,7 +1123,16 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// dominant real cost Phase 8 measured
 /// (~86% of one real denoise step was GGUF re-read + re-quantize of the SAME
 /// immutable weights, over and over, every single step).
+///
+/// Traced at `--trace-ltxv 4` (each host stage's duration, the per-generation
+/// cache's hit/miss split) and `5` (every layer individually: index, hit or
+/// miss, and the GGUF-read / quantize / GPU milliseconds it cost). The
+/// per-layer breadcrumb is the one this function's own Phase 8 attribution
+/// needed and had to reconstruct by hand from summed `BRAIN_PROFILE` stage
+/// totals - the totals stay, since the perf gates read them; the trace is
+/// what makes a single anomalous layer visible rather than averaged away.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(t = t, context_len = context_len, layers = cfg.num_layers, tier = ?tier))]
 pub fn forward_q_streamed(
     cfg: &LtxDitConfig,
     src: &dyn TensorSource,
@@ -1161,19 +1170,27 @@ pub fn forward_q_streamed(
         }
     }
     gpu_core::profile::stage_time("forward_q_streamed: patchify + keyframes (host)", s_patch);
+    tracing::debug!(stage = "patchify", ms = s_patch.elapsed().as_secs_f32() * 1e3, keyframes = cfg.use_keyframes_abs_pos_embedding, "host stage done");
 
     let s_adaln = std::time::Instant::now();
     let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
     let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
     gpu_core::profile::stage_time("forward_q_streamed: adaLN-single table (host)", s_adaln);
+    tracing::debug!(stage = "adaln_single", ms = s_adaln.elapsed().as_secs_f32() * 1e3, rows = cfg.adaln_rows(), "host stage done");
 
     let s_rope = std::time::Instant::now();
     let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
     gpu_core::profile::stage_time("forward_q_streamed: RoPE table build (host, f64)", s_rope);
+    tracing::debug!(stage = "rope_tables", ms = s_rope.elapsed().as_secs_f32() * 1e3, theta = cfg.positional_embedding_theta, "host stage done");
 
     let s_open = std::time::Instant::now();
     let gpu = open_device(device);
     gpu_core::profile::stage_time("forward_q_streamed: open_device (fresh Gpu + shader pipeline compile)", s_open);
+    // A FRESH `Gpu` per call is this function's deliberate design (see its
+    // doc), which also makes every call a fresh adapter enumeration + shader
+    // pipeline compile - so this is the one event a device-lifecycle
+    // investigation wants correlated against `--trace-gpu`.
+    tracing::debug!(stage = "open_device", ms = s_open.elapsed().as_secs_f32() * 1e3, device = device.unwrap_or("(ambient)"), "opened a fresh device for this forward");
     let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
     let s_conn = std::time::Instant::now();
@@ -1185,6 +1202,7 @@ pub fn forward_q_streamed(
         cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
     );
     gpu_core::profile::stage_time("forward_q_streamed: embeddings connector routing", s_conn);
+    tracing::debug!(stage = "connector", ms = s_conn.elapsed().as_secs_f32() * 1e3, enabled = cfg.use_embeddings_connector, layers = cfg.connector_num_layers, "host stage done");
 
     // Phase 8 attribution: `forward_q_streamed` was never profiled against a
     // real checkpoint before this pass, so the ~200s/step number this design
@@ -1199,6 +1217,7 @@ pub fn forward_q_streamed(
     let mut t_load = std::time::Duration::ZERO;
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_gpu = std::time::Duration::ZERO;
+    let mut misses = 0u32;
     {
         let mut cache = block_cache.borrow_mut();
         if cache.len() < cfg.num_layers as usize {
@@ -1207,15 +1226,22 @@ pub fn forward_q_streamed(
     }
     for l in 0..cfg.num_layers {
         let prefix = format!("transformer_blocks.{l}");
+        let mut layer_load = std::time::Duration::ZERO;
+        let mut layer_quant = std::time::Duration::ZERO;
+        let hit;
         {
             let mut cache = block_cache.borrow_mut();
+            hit = cache[l as usize].is_some();
             if cache[l as usize].is_none() {
+                misses += 1;
                 let s0 = std::time::Instant::now();
                 let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
-                t_load += s0.elapsed();
+                layer_load = s0.elapsed();
+                t_load += layer_load;
                 let s1 = std::time::Instant::now();
                 let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
-                t_quant += s1.elapsed();
+                layer_quant = s1.elapsed();
+                t_quant += layer_quant;
                 cache[l as usize] = Some(quantized);
             }
             // Every step past this block's first cache-populating one skips
@@ -1234,12 +1260,39 @@ pub fn forward_q_streamed(
         let cache = block_cache.borrow();
         let blk = LtxBlockQ::on_cached(gpu.share(), cfg, cache[l as usize].as_ref().expect("populated above"), t as u32, context_len as u32, tier);
         let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
-        t_gpu += s2.elapsed();
+        let layer_gpu = s2.elapsed();
+        t_gpu += layer_gpu;
+        // Level 5, per layer: which layer, cache hit or miss, and how long
+        // each of the three real costs took. `hit` is the difference between
+        // "this step re-read 270 MB off the GGUF and re-quantized it" and
+        // "this step only re-uploaded bytes it already had" - the single most
+        // load-bearing fact about a streamed step's cost.
+        tracing::trace!(
+            layer = l,
+            cache = if hit { "hit" } else { "miss" },
+            load_ms = layer_load.as_secs_f32() * 1e3,
+            quant_ms = layer_quant.as_secs_f32() * 1e3,
+            gpu_ms = layer_gpu.as_secs_f32() * 1e3,
+            "block done"
+        );
         x = out;
     }
     gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
     gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
     gpu_core::profile::stage_time("forward_q_streamed: block GPU upload+forward+wait (sum over all layers, every step)", std::time::Instant::now() - t_gpu);
+    // The same three sums `BRAIN_PROFILE` already prints, restated as trace
+    // fields so a run can be analysed from ONE stream instead of correlating
+    // two mechanisms by hand. `BRAIN_PROFILE` is untouched: perf gates
+    // elsewhere in the repo parse its output, and consolidating the two is a
+    // later decision, not a side effect of adding tracing.
+    tracing::debug!(
+        cache_misses = misses,
+        cache_hits = cfg.num_layers - misses,
+        load_ms = t_load.as_secs_f32() * 1e3,
+        quant_ms = t_quant.as_secs_f32() * 1e3,
+        gpu_ms = t_gpu.as_secs_f32() * 1e3,
+        "block stack done"
+    );
 
     output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
 }

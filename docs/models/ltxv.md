@@ -136,6 +136,26 @@ brain ltxv dfr --prompt "a cat walking on a beach" --frames 9 --width 64 \
   --height 64 --steps 4 --output-path out.mp4
 ```
 
+### Seeing what it did
+
+Any of these runs takes `--trace-ltxv <0-5>` (see `brain help` for the shared
+tracing options). Level 3 reports the run's phases and timings, 4 adds each
+denoise step's sigma and seconds-per-step, and 5 adds every individual
+forward plus, on the real streamed 22B path, every transformer block with
+whether its weights came from the per-generation cache or were re-read and
+re-quantized:
+
+```bash
+brain --trace-ltxv 4 ltxv t2v --prompt "a cat" --frames 9 --width 64 \
+  --height 64 --steps 4 --output-path out.mp4
+brain --trace-ltxv 5 --trace-format json --trace-output run.jsonl ltxv t2v …
+```
+
+Levels 1 and 2 are the "only tell me what went wrong" settings: 1 is errors
+only, 2 adds the warnings that say a run is not what it looks like (a
+random-weight DiT, a stub text context, a `--steps` the distilled schedule
+ignores).
+
 `ltxv` has a dedicated CLI module, so the resolver gives it precedence over
 generic capability dispatch (`brain ltxv {t2v,dfr}` runs that module, not a
 generic action call) - the same routing `wan` uses. Both actions are still
