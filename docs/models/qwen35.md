@@ -102,7 +102,7 @@ fact, so a hard-overfit run's effect is unambiguous:
 
 ```bash
 CORPUS=[path/to/corpus.txt]
-for i in $(seq 1 20); do echo "The capital of France is Leon."; done > "$CORPUS"
+printf 'The capital of France is Leon.\n%.0s' {1..20} > "$CORPUS"
 ```
 
 ```bash
