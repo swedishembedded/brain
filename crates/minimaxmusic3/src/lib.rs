@@ -39,22 +39,23 @@
 //! checkpoint's own `config.json`, NOT the smaller published Qwen3-8B's
 //! `vocab=151936` preset), `data::qwen_tokenizer::QwenBpe` for tokenization,
 //! `audio::conv` (forward AND backward) for every conv/conv-transpose in the
-//! vocoder, `kernels::{ROPE_PARTIAL, ROPE_PARTIAL_BWD}` for the DiT's partial
-//! rotary embedding, and `diffusion::FlowMatchEulerScheduler` (with its new
+//! vocoder, `model::block`'s `Bidir`/`rope2d_partial`/`LayerNorm`/`swiglu`/
+//! `kv_expand` Step-builders for the DiT's bidirectional partial-RoPE
+//! transformer blocks, and `diffusion::FlowMatchEulerScheduler` (with its new
 //! `invert_sigmas` option - the reference scheduler is constructed with
 //! `invert_sigmas=True, num_train_timesteps=1, shift=1.0`) for the DiT's
 //! sampling loop.
 //!
-//! Status: condition encoder, vocoder, and the RVQ depth decoder are all
-//! landed with real-weight parity cosine 1.0. The vocoder AND the depth
-//! decoder are fully trainable - full fine-tune (gradcheck on every named
-//! parameter, a real overfit demonstration) and LoRA (exact no-op at
-//! zero-init, a directional FD check on every adapter, and a training
-//! demonstration with the base weights provably frozen). The vocoder also
-//! has a from-scratch STFT-magnitude adversarial discriminator
+//! Status: condition encoder, vocoder, the RVQ depth decoder, and the DiT's
+//! forward are all landed with real-weight parity cosine 1.0. The vocoder
+//! AND the depth decoder are fully trainable - full fine-tune (gradcheck on
+//! every named parameter, a real overfit demonstration) and LoRA (exact
+//! no-op at zero-init, a directional FD check on every adapter, and a
+//! training demonstration with the base weights provably frozen). The
+//! vocoder also has a from-scratch STFT-magnitude adversarial discriminator
 //! (gradchecked end to end, including through the STFT, and shown to
-//! learn). DiT, the Global LLM's own wiring, joint
-//! generator+discriminator training, and serving land
+//! learn). The DiT's backward/gradcheck/LoRA/int8/shard, the Global LLM's
+//! own wiring, joint generator+discriminator training, and serving land
 //! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
@@ -62,6 +63,7 @@ pub mod config;
 pub mod depth_decoder;
 pub mod depth_lora;
 pub mod discriminator;
+pub mod dit;
 pub mod lora;
 pub mod train;
 pub mod vocoder;
