@@ -78,6 +78,7 @@ them all - `s3dit`, `fastvlm`, `qwen3vl`, `sam1`, `sam2`, `scrfd`, `arcface`,
 | `brain federated` | sharded MoE: `split`, `verify`, `merge`, `assemble`, `train-expert` |
 | `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
+| `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
 
 Run `brain <cmd> --help` (or `brain <architecture> --help`) for any
 subcommand's full flag list - `brain help` and this page are the map, not the

@@ -957,7 +957,9 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-model",
  "brain-testutil",
+ "tracing",
 ]
 
 [[package]]

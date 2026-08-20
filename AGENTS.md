@@ -742,6 +742,7 @@ front-end to depend on.
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 | **Tracing/observability** (`--trace-<family> <0-5>`, adding a family, instrumenting a crate) | `crates/trace` - the family registry is `crates/trace/src/registry.rs`; the CLI wiring is `install_tracing` in `crates/cli/src/main.rs` |
+| **Quantize any checkpoint to a GGUF** (tier, per-tensor policy, streaming write, two-way coverage) | `crates/checkpoint/src/quantize.rs` (`Tier`/`Policy`/`plan`/`convert`), `checkpoint::quant::quantize_par`, `checkpoint::gguf_write::Writer`; CLI `brain quantize` in `crates/cli/src/quantize_cli.rs` |
 
 ---
 
@@ -806,6 +807,21 @@ to that table - never a new per-model subcommand. The model-dir scan does NOT
 convert on its own (fp32 dequant-on-load makes the output far larger than the
 quantized source); it logs the exact command instead. That module's doc holds
 the full reasoning.
+
+**Quantization is generic too, and needs no registry at all.** `brain quantize
+SRC --out PATH [--tier Q8_0] [--keep SUBSTR] [--plan]` is `import`'s export
+sibling (`crates/checkpoint/src/quantize.rs`, driven by
+`crates/cli/src/quantize_cli.rs`): it reads any `checkpoint::TensorSource`
+with a manifest (a safetensors file, an HF-style directory, an existing GGUF)
+and writes a quantized GGUF, streaming so peak host memory is one tensor
+rather than the whole output. A tensor is quantized iff it is rank 2 with a
+block-aligned fastest-varying dimension - both structural facts about the
+block format, not heuristics. What a given architecture must NEVER quantize
+regardless of shape (modulation tables, conditioning projections) is a
+`--keep` substring list supplied by the caller, because no shape implies it;
+`ltxv::int8::is_never_quantized` is the worked example that generalizes.
+Every source tensor is accounted for in the output with a typed reason, which
+`--plan` prints without writing anything.
 
 **Device selection** - `--device` declares **which compute is schedulable**, not
 "a backend". Omit it and brain uses *every* device present (all GPUs + CPU +

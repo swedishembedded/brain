@@ -36,6 +36,7 @@ mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
+mod quantize_cli;
 mod qwen35_cli;
 mod qwen35moe_cli;
 mod qwen_cli;
@@ -139,7 +140,7 @@ TRACING (structured, per-component; global - valid on any subcommand)
 
   families:
     --trace-gpu   <0-5>    device registry, adapter enumeration, backend open/submit/wait
-    --trace-ltxv  <0-5>    LTX-2.5 video: pipeline stages, denoise steps, streamed DiT blocks
+    --trace-ltxv  <0-5>    LTX-2.5 video: pipeline stages, denoise steps, streamed DiT blocks, the Gemma-4 text encode
   BRAIN_TRACE=ltxv=5,gpu=3 sets the same levels without a flag (any --trace* flag wins).
 
   Every line names the component it came from (the emitting Rust module), so a
@@ -353,6 +354,13 @@ GGUF IMPORT (one-time conversion; dispatches on general.architecture)
       importer by the file's own `general.architecture`. Defaults to a sibling
       <stem>.brain.safetensors, which the model-dir scan then serves on its own.
       brain import --list                # registered architectures
+
+QUANTIZE (the export sibling: any checkpoint -> a quantized GGUF)
+  brain quantize SRC --out PATH [--tier Q8_0] [--keep SUBSTR] [--plan]
+      Convert a .safetensors file/dir or an existing .gguf to a quantized
+      GGUF. Needs no per-architecture code: a tensor is quantized if it is
+      rank 2 with a block-aligned row, unless --keep names it. --plan prints
+      the per-tensor decision and writes nothing.
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT2)

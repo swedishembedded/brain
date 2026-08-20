@@ -30,7 +30,7 @@
 //! ([`crate::gguf_import`]), which picks the architecture from the file's own
 //! `general.architecture` header instead of from the command line.
 
-use crate::{caps_cli, gguf_import};
+use crate::{caps_cli, gguf_import, quantize_cli};
 
 type Handler = fn(&[String]);
 
@@ -136,6 +136,10 @@ enum Resolved {
     /// `brain import <FILE> …` -- no architecture token, dispatched by the
     /// file's own GGUF header instead.
     ImportFile { rest: Vec<String> },
+    /// `brain quantize <SRC> --out …` -- the export direction. Also has no
+    /// architecture token, and unlike `import` needs none at all: the policy
+    /// is structural plus whatever `--keep` names.
+    QuantizeFile { rest: Vec<String> },
     Unknown(String),
     Empty,
 }
@@ -181,6 +185,9 @@ fn resolve(argv: &[String]) -> Resolved {
     if first == "import" {
         return Resolved::ImportFile { rest: argv[1..].to_vec() };
     }
+    if first == "quantize" {
+        return Resolved::QuantizeFile { rest: argv[1..].to_vec() };
+    }
     Resolved::Unknown(first.clone())
 }
 
@@ -192,6 +199,7 @@ pub fn dispatch(argv: &[String], help: &str) {
     match resolve(argv) {
         Resolved::Arch { arch, rest } => dispatch_arch(arch, rest),
         Resolved::ImportFile { rest } => gguf_import::run_import_gguf(&rest),
+        Resolved::QuantizeFile { rest } => quantize_cli::run_quantize(&rest),
         Resolved::Unknown(tok) => {
             eprintln!("brain: unknown command '{tok}'\n");
             print!("{help}");

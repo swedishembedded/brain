@@ -141,6 +141,34 @@ from GGUF (e.g. `qwen3`) are picked up by the model-dir scan as they are; the
 import path is for architectures whose tensor layout has to be translated
 first. `brain import --list` shows which those are.
 
+### Quantizing a checkpoint
+
+The opposite direction - a full-precision checkpoint to a quantized GGUF -
+is one generic command that needs no per-architecture code:
+
+```bash
+brain quantize model-bf16.safetensors --out model-Q8_0.gguf --arch <name>
+brain quantize HF_DIR --out model-Q8_0.gguf          # a directory of shards
+brain quantize model-bf16.safetensors --plan          # decide, print, write nothing
+```
+
+The source may be a `.safetensors` file, a HuggingFace-style directory of
+them, or an existing `.gguf`. A tensor is quantized when it is a rank-2
+matrix whose fastest-varying dimension is a whole number of blocks; every
+other tensor is written through unchanged as F32. Those two rules are
+structural - a quantized GEMM operand is a matrix, and a block carries one
+scale for its own contiguous elements, so a row length that is not a block
+multiple cannot be encoded at all.
+
+What is NOT inferred is which named tensors an architecture must keep at
+full precision regardless of shape - modulation tables, conditioning
+projections, anything whose numeric scale the rest of the graph depends on.
+Pass those with `--keep SUBSTR` (repeatable, or comma-separated);
+`--min-elems N` additionally keeps anything smaller than `N` elements.
+
+Every source tensor is accounted for in the output, and `--plan` prints the
+decision and the reason for each one before anything is written.
+
 ## See also
 
 - [Configuration](configuration.md) - every `BRAIN_*` environment variable,
