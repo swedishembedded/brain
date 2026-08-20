@@ -180,7 +180,7 @@ pub struct OwnedMtpLayer {
     pub norm: DeviceBuffer,
 }
 
-fn get<'a>(w: &'a HashMap<String, Vec<f32>>, name: &str, l: usize) -> &'a [f32] {
+pub(crate) fn get<'a>(w: &'a HashMap<String, Vec<f32>>, name: &str, l: usize) -> &'a [f32] {
     w.get(name).unwrap_or_else(|| panic!("stream: layer {l}: import_layer did not produce {name}")).as_slice()
 }
 
@@ -201,11 +201,11 @@ struct StreamIds {
     add2: usize,
 }
 
-fn idx(g: &Gpu, name: &str) -> usize {
+pub(crate) fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("stream: kernel '{name}' not registered"))
 }
 
-fn kernel_ids(g: &Gpu) -> KernelIds {
+pub(crate) fn kernel_ids(g: &Gpu) -> KernelIds {
     KernelIds {
         rmsnorm: idx(g, "rmsnorm"),
         rms_inv: idx(g, "rms_inv"),
@@ -226,7 +226,7 @@ fn kernel_ids(g: &Gpu) -> KernelIds {
     }
 }
 
-fn gdn_mixer_ids(g: &Gpu) -> GdnMixerIds {
+pub(crate) fn gdn_mixer_ids(g: &Gpu) -> GdnMixerIds {
     GdnMixerIds {
         kernels: kernel_ids(g),
         conv: audio::conv::ConvKernels { fwd: idx(g, "conv1d"), dx: idx(g, "conv1d_dx"), dw: idx(g, "conv1d_dw") },
@@ -280,7 +280,7 @@ fn gdn_mixer_ids(g: &Gpu) -> GdnMixerIds {
     }
 }
 
-fn gqa_mixer_ids(g: &Gpu) -> GqaMixerIds {
+pub(crate) fn gqa_mixer_ids(g: &Gpu) -> GqaMixerIds {
     GqaMixerIds {
         kernels: kernel_ids(g),
         concat_split: idx(g, "concat_split"),
@@ -894,7 +894,7 @@ pub fn run(dir: &Path, cfg: &Qwen35Config, n: u32, window_budget: u32, seed: u64
 /// real sequence length at all (see that function's own doc) - this caller
 /// CAN pad, and always wants the same chunk size real production inference
 /// uses, not whatever smaller divisor an unpadded `t` happens to have.
-const GDN_DECODE_CHUNK: u32 = 64;
+pub(crate) const GDN_DECODE_CHUNK: u32 = 64;
 
 /// Pad `t` up to the next multiple of [`GDN_DECODE_CHUNK`] (`t=64` stays
 /// `64`; `t=65` pads to `128`) - design decision 2: `model::gdn`'s chunked
@@ -904,7 +904,7 @@ const GDN_DECODE_CHUNK: u32 = 64;
 /// END ONLY (GDN is strictly causal - see
 /// `gdn_end_padding_does_not_change_real_position_outputs` below for the
 /// direct proof this relies on), never the start or middle.
-fn pad_to_gdn_chunk(t: u32) -> u32 {
+pub(crate) fn pad_to_gdn_chunk(t: u32) -> u32 {
     t.div_ceil(GDN_DECODE_CHUNK) * GDN_DECODE_CHUNK
 }
 
@@ -916,7 +916,7 @@ fn pad_to_gdn_chunk(t: u32) -> u32 {
 /// `O(d_model)` read per token, never a whole-`[vocab, d_model]`-table decode
 /// or scan. Stacked `[ids.len(), d_model]` row-major - [`generate`]'s real
 /// replacement for [`seed_residual`]'s synthetic input.
-fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: usize) -> Result<Vec<f32>, String> {
     let mut out = Vec::with_capacity(ids.len() * d);
     for &id in ids {
         let row = reader.tensor_f32_range(name, id as usize * d, d).ok_or_else(|| format!("stream::generate: token id {id} out of range for {name}"))?;
@@ -970,7 +970,7 @@ fn quantize_i8_from_mmap_rows(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n
 /// `(1+w)` reparameterization - see `crate::import`'s own module doc). A
 /// small (`[d_model]`) whole-tensor read, unlike [`embed_rows`]'s per-row one
 /// - there is only ever one of these per call.
-fn read_final_norm(reader: &MmapSafetensors, d: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn read_final_norm(reader: &MmapSafetensors, d: usize) -> Result<Vec<f32>, String> {
     let raw = reader
         .tensor_f32("model.language_model.norm.weight")
         .ok_or_else(|| "stream::generate: model.language_model.norm.weight missing from outside.safetensors".to_string())?;

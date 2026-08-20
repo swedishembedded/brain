@@ -24,6 +24,7 @@ pub mod sample;
 pub mod serve;
 pub mod shard;
 pub mod stream;
+pub mod stream_train;
 pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};

@@ -926,12 +926,261 @@ an HTTP caller); an isolated, non-contended re-measurement of real
 per-pass cost (see Phase 4's own note above); `docs/models/qwen35.md`
 (M20, carried over from M16).
 
+### M18: streaming LoRA fine-tuning - forward AND backward through the real 64-layer checkpoint
+
+M8's LoRA is real but needs every layer's weights resolved in one host
+`HashMap` first (`Qwen35::new_train_on`) - impossible at 27B on this box.
+M15-M17's streaming forward proves inference can run with only a small
+window of layers resident, but never computes a gradient anywhere. This
+milestone builds the missing piece: a streaming-aware LoRA trainer
+(`crates/qwen35/src/stream_train.rs`) that streams every layer's weights
+TWICE per step - once forward, once in reverse for backward (`dx = d_out @
+W_frozen` through each frozen layer, no `dW` for the base - only the tiny
+LoRA adapters need gradients/Adam moments, and those stay fully resident for
+the whole run) - roughly doubling the per-step weight-I/O cost of a
+forward-only pass. That is the accepted, deliberate cost model here, not
+something this milestone tries to avoid.
+
+**Step 0 - backward through a streamed weight: what's actually there.**
+Read `model::ops::Ops` (`matmul`/`matmul_dx`/`matmul_dw`) and
+`model::dispatch` in full. Finding: `Ops::matmul_dx`/`Ops::matmul_dw` (the
+B10 backward-of-matmul pair) exist and are gradient-checked
+(`gradcheck::check_matmul_bf16_weight`), but are deliberately scoped to
+`F32`/`BF16` weights only - `Ops::matmul_dx`'s own doc: "F16/I8/Q4
+backward-through-the-weight is a real, reachable follow-up, not attempted
+here"; `bind_matmul_dx` panics for `I8`/`Q4`. Backward through an
+int8-quantized weight is not wired up ANYWHERE in this tree (no `Ops`
+method, no `model::dispatch` primitive, no model crate's own hand-dispatch
+either - `crates/qwen3/src/model.rs::proj_bwd`'s LoRA branch, the closest
+precedent, only ever reads `self.w(wname)`, always fp32 by construction on
+that crate's own resident trainer).
+
+Extending that kernel family to int8 would be genuine new kernel work, out
+of proportion for this milestone. **Resolution, verified by reading the
+code rather than assumed:** `crate::import::import_layer` already
+dequantizes every FP8 tensor to f32 in host RAM BEFORE `crate::stream::
+StreamState::build_layer` optionally packs it down to int8 for the
+(inference-only) streaming forward - the f32 values already exist as a
+byproduct of every streamed layer load, at zero extra host compute. This
+milestone's own layer loader (`stream_train::build_layer_f32`/
+`load_layer_f32`) simply skips that packing step and uploads the SAME
+already-dequantized f32 values as `Weight::F32` - forward dispatches through
+`Ops::matmul` (which already handles F32 fine, same as int8), and backward's
+frozen-base `dx`/the tiny LoRA-internal `A`/`B` matmuls dispatch the SAME
+`matmul_dx`/`matmul_dw`/`matmul` kernel NAMES `crate::model::Qwen35::
+proj_bwd`'s own LoRA branch already uses (`stream_train::proj_bwd_streamed`
+is a direct kernel-dispatch transcription of that method, substituting the
+streamed `Weight::F32` buffer and a small resident `LoraStore` for `self.w`/
+`self.ps`) - no new kernel, no `Ops` extension, reusing already-proven,
+already-gradchecked dispatch. Trade-off: streamed per-layer weights are ~4x
+larger resident (fp32 vs the inference path's int8) for the run's whole
+lifetime - accepted, since the dominant cost either way is disk I/O, not
+device memory (M15's own finding still holds).
+
+**Design.** `StreamTrainer` mirrors `StreamState` (window budget, drop/
+rebuild-per-slot discipline, `model::gdn_mixer`/`model::gqa_mixer` for the
+mixer math) plus: a resident `LoraStore` (`paramstore::ParamStore` +
+`optim::Optim`, sized for ONLY the `.lora_a`/`.lora_b` tensors -
+`crate::init::init_lora_only` - reusing the SAME AdamW dispatch graph
+`Qwen35::new_train_on` already builds, just much smaller); a resident
+`lm_head`/`embed_tokens` table (loaded once, never re-streamed - `Ops::
+matmul_dx` needs F32/BF16, so this table cannot be the inference path's
+int8 tier either). A forward pass streams all 64 layers ascending, applying
+the LoRA delta at each targeted leaf (`stream_train::{gdn,gqa}_layer_forward_lora`,
+`mlp_forward_lora` - direct transcriptions of `Qwen35::layer_gdn_fwd`/
+`layer_gqa_fwd`/`mlp_fwd`) and caching ONLY the residual stream at each
+layer boundary (`xres_cache[l]`, `[n, d_model]`, one buffer per layer - a
+few hundred KB to a few MB at a realistic tiny training `n`, well under a
+GB for all 64 layers at real `d_model=5120`) - not the larger per-leaf
+`x`/`a=x@Aᵀ` activations the milestone's own plan first proposed. Backward
+re-streams all 64 layers in REVERSE, and for each one RECOMPUTES its own
+forward internals (mixer/MLP activations) from the cached `xres_cache[l]`
+plus the freshly re-streamed (frozen, deterministic) weight, rather than
+caching those larger internals across the whole run - standard activation-
+checkpointing, justified here specifically because backward already
+re-streams every layer's weights regardless (the dominant cost), so
+recomputing costs no extra weight I/O, only compute already implicitly
+budgeted for. This uses LESS host memory than the plan's own literal
+per-leaf-activation proposal while proving the exact same correctness
+property; documented as a deliberate, judgment-call deviation, not
+silently done.
+
+**Step 1 - tiny-scale equivalence gate (the hard correctness gate).**
+`crates/qwen35/tests/stream_train_equivalence.rs`, fast, NOT `#[ignore]`d
+(part of the default `cargo test -p brain-qwen35` run), `Qwen35Config::
+tiny()` scale (4 layers, 3 GDN + 1 GQA), CPU JIT backend for BOTH trainers
+(no cross-backend floating-point-order noise), `window_budget=2` (forces a
+real mid-pass eviction in both the forward AND the reverse-order backward
+loop, not just the boundary pin), fp32 throughout (this trainer's only
+supported tier, so the comparison is exact-not-just-close by construction,
+no int8 quantization noise to muddy the proof) - `crate::init::init_weights`
+builds ONE init map fed to BOTH the existing resident `Qwen35::new_train_on`
+and the new `StreamTrainer::new_synthetic`, guaranteeing byte-identical
+starting weights (a real, initially-missed subtlety: `init_weights` and
+`init_lora_only` draw from DIFFERENT RNG streams even at the same seed, so
+`LoraStore::new` was designed to take the adapter values in directly rather
+than reseed a second generator). Two tests:
+- `streaming_lora_trainer_matches_the_resident_trainer_exactly`: 3 steps on
+  an identical fixed batch, comparing loss AND every `.lora_a`/`.lora_b`
+  gradient (before the AdamW step) AND every adapter weight (after it) at
+  each step, tolerance 1e-4. **Real measured numbers (`--nocapture`):** loss
+  trajectory resident vs. streaming: step 1 `3.432276`/`3.432276`, step 2
+  `3.432078`/`3.432078`, step 3 `3.430849`/`3.430849` - identical to 6
+  decimal places at every step; every gradient and post-AdamW weight
+  comparison passed under 1e-4 (in practice far tighter - the printed
+  losses show effectively bit-identical trajectories). **PASS.**
+- `streaming_lora_trainer_reduces_loss_on_a_fixed_batch`: an independent,
+  narrower gate (real learning signal, not just replay-matching) - 8 steps,
+  loss `[3.3819466, 3.3811188, 3.3586473, 3.2662919, 3.060675, 2.936966,
+  2.8580084, 2.767636]`, strictly decreasing. **PASS.**
+
+**Step 2 - training dataset via `Qwen/Qwen3-0.6B`.** Generated with the
+already-shipped `brain qwen3 infer` CLI against the locally-cached
+`Qwen/Qwen3-0.6B` brain checkpoint, PLAIN completion mode (not `--chat`) -
+`--chat` was tried first and hit a real, pre-existing, unrelated bug
+(`crates/qwen3/src/sample.rs:179`, `scaled[b].partial_cmp(&scaled[a]).unwrap()`
+panics on a `None` - a NaN logit somewhere in that crate's chat-template
+path; not investigated further, out of this milestone's own crate/scope,
+plain-completion mode is unaffected and was used instead). Five prompts,
+`temperature=0.7 top-k=40 max-new=90`, one distinct seed per prompt
+(1001..1005):
+```
+brain qwen3 infer --weights <Qwen3-0.6B brain checkpoint> --tokenizer <its tokenizer.json> \
+    --prompt "<PROMPT>" --max-new 90 --temp 0.7 --top-k 40 --seed <SEED>
+```
+Prompts: "Explain in a few sentences why the sky is blue.", "Write a short
+paragraph describing a quiet morning in a mountain village.", "Give three
+tips for staying focused while studying.", "Describe what a lighthouse
+keeper's daily routine might look like.", "Summarize, in your own words,
+why bees are important for ecosystems." Output written to `/data/workspace/
+resources/qwen35_finetune/GENERATION.txt` (full log: settings + prompts +
+raw completions, verbatim, human-inspectable) and `/data/workspace/
+resources/qwen35_finetune/corpus.txt` (just the generated text,
+concatenated - the actual training corpus this milestone's Step 3 tokenizes
+- 436 words). Both files live at the WORKSPACE root's `resources/` (a
+sibling of this repo, matching M15's own `resources/qwen3.8/` convention),
+not inside this git repo.
+
+**Step 3 - a real short streamed LoRA fine-tune on the real checkpoint.**
+`crates/qwen35/tests/stream_train_real.rs` (`#[ignore]`d, `BRAIN_QWEN35_DIR`-
+gated) is the checked-in gate; a new standalone binary,
+`crates/qwen35/src/bin/stream_train_step.rs`, was ALSO built and is what
+this milestone's own real numbers below came from - the interactive
+development environment this landed in kills a background process after
+roughly 45-50 minutes of wall-clock regardless of the timeout requested,
+shorter than one combined run (BEFORE-gen + one real step already sums to
+~54 min, and the whole run is ~106 min) - the standalone binary splits the
+identical `StreamTrainer` calls into separate short (<40 min) processes,
+checkpointing the tiny LoRA adapter state to a small safetensors file
+between them (`--phase before|step|after`, `--adapter-in`/`--adapter-out`).
+This is an artifact of THIS session's own process-lifetime constraint, not
+a change to what is trained or measured - confirmed by the fact that a
+combined attempt run TWICE independently (before being killed both times)
+reproduced the IDENTICAL step-1 loss (`2.417521`) and the IDENTICAL BEFORE
+transcript both times, and a third, clean run of the BEFORE phase via the
+split binary reproduced it a THIRD time.
+
+Real config: `Qwen35Config::qwen38_27b()` (real 64-layer, `d_model=5120`,
+`vocab=248320`), LoRA rank 4 / alpha 8 on all 12 targetable leaves,
+`window_budget=2`, `n=16` training tokens (the first 16 tokens of Step 2's
+`corpus.txt` under the real tokenizer, shifted-by-one next-token targets),
+`lr=0.05`. **A real, measured device-memory constraint discovered here, not
+assumed:** the resident `lm_head` at fp32 (`248320×5120×4` bytes ≈ 4.74
+GiB, one contiguous buffer) exceeds this box's Vulkan/wgpu adapter's real
+`max_buffer_size` (2047 MiB - a hard driver/hardware limit, confirmed by an
+actual `wgpu::Validation Error` on the first real attempt, not a host-RAM
+shortage) - int8 (~1.18 GiB) and even bf16 (~2.37 GiB) both still exceed it
+too. Fix: run training on the CPU JIT backend (`Gpu::new_cpu`) instead of
+this box's default GPU adapter - it has no per-buffer ceiling (plain host
+allocations), and per M13's own profiling this workload's real cost is
+dominated by disk I/O + host-side FP8 dequant regardless of which backend
+runs the matmuls, so this is a genuinely well-justified choice for this
+specific bottleneck, not a downgrade of convenience.
+
+**Real measured numbers** (CPU JIT backend, `stream_train_step`, prompt
+`"The capital of France is"`, `max_new=3`, greedy):
+- Trainer construction (resident `lm_head`+`norm.weight` load from
+  `outside.safetensors`): 6.5-7.6 s.
+- **BEFORE** (zero-init adapter - LoRA's own "starts as an exact no-op"
+  invariant, so this IS the base model's real behavior): `17.4-18.1 min`
+  across three independent runs, output **byte-identical every time**:
+  `"The capital of France is" -> " Paris.\n"` - matches M16's/M17's own
+  real-checkpoint transcripts for the same prompt.
+- **Step 1**: `loss=2.417521`, `35.71 min` (confirmed identical across two
+  independent attempts before the split-binary run).
+- **Step 2**: `loss=0.071535`, `35.58 min` - a 33x drop from step 1, a real,
+  clear, honest "loss decreasing" signal (the milestone's own gate; not a
+  target loss VALUE, which this run does not claim to reach any particular
+  one of). Only 2 real steps were run (not 3) given the ~36 min/step real
+  cost measured live - "a handful of steps... single digits... is
+  completely fine and expected" per this milestone's own scope.
+- **AFTER** (the just-trained adapter): `17.40 min`, output
+  `"The capital of France is" -> "emelemelemel"` - visibly, dramatically
+  different from BEFORE's `" Paris."` - the qualitative check this
+  milestone's own gate calls for, unambiguously satisfied. Honestly
+  reported as-is, not softened: the output is garbled, not a coherent
+  improvement - an expected, real consequence of training a rank-4 adapter
+  hard (loss 2.42→0.07 in 2 steps) on a 16-token sequence with no relation
+  to the "capital of France" prompt at `lr=0.05`, not an infrastructure
+  bug. The adapter genuinely, visibly changed the model's behavior, which
+  is exactly what this gate checks for - it does not check for the
+  fine-tune being well-behaved or production-quality (explicitly out of
+  scope: "do not attempt anything resembling a real production fine-tune
+  run").
+- Total real wall-clock for Step 3 (before + step1 + step2 + after,
+  summed across the split runs): **≈106 minutes.**
+
+**Verification:**
+- `cargo test -p brain-qwen35 --lib --bins --tests -- --test-threads=8`:
+  all green, 0 failed (27 `test result: ok` lines across the lib +
+  every integration test binary), including `stream_train_equivalence.rs`'s
+  2 new non-ignored tests and `stream_train_real.rs`'s 1 new test
+  self-skipping (`ignored`) without `BRAIN_QWEN35_DIR`.
+- `cargo test -p brain-gradcheck --lib` (53 tests, full suite): all green, 0
+  failed - `qwen35_analytic_grads_match_finite_differences`,
+  `qwen35_lora_analytic_grads_match_finite_differences`,
+  `qwen35_mtp_analytic_grads_match_finite_differences` all re-confirmed
+  unaffected (this milestone builds a new PARALLEL streaming path, `model.
+  rs`'s own backward math is untouched).
+- `cargo clippy -p brain-qwen35 --all-targets -- -D warnings`: clean.
+- `make build` / `make gradcheck`: both succeed.
+- Every real-checkpoint number above is measured, not projected; the split-
+  binary/single-test discrepancy is a session-environment artifact,
+  documented above, not a correctness concern.
+
+**Files touched:** `crates/qwen35/src/stream_train.rs` (new), `crates/
+qwen35/src/bin/stream_train_step.rs` (new), `crates/qwen35/src/stream.rs`
+(widened several existing private helpers - `get`, `idx`, `kernel_ids`,
+`gdn_mixer_ids`, `gqa_mixer_ids`, `pad_to_gdn_chunk`, `embed_rows`,
+`read_final_norm`, `GDN_DECODE_CHUNK` - to `pub(crate)` so `stream_train.rs`
+can reuse them directly; zero behavior change to any existing inference
+path), `crates/qwen35/src/lib.rs` (`pub mod stream_train;`), `crates/
+qwen35/tests/stream_train_equivalence.rs` (new), `crates/qwen35/tests/
+stream_train_real.rs` (new), `/data/workspace/resources/qwen35_finetune/
+GENERATION.txt` + `corpus.txt` (new, outside this git repo).
+
+**Not done, left for later milestones (explicitly out of this one's
+scope):** no int8 (or bf16) backward-through-the-weight - the streamed
+frozen base is always fp32 in this trainer, ~4x the inference path's
+device-memory footprint per resident layer; no full-parameter (non-LoRA)
+streamed fine-tune (explicitly ruled out by this milestone's own plan - the
+frozen base needing no gradient/optimizer state is the whole reason LoRA is
+tractable here at all); no incremental/persistent decode state in
+`generate_greedy` (same non-incremental, full-resequence-every-step design
+`crate::stream::generate` already uses, for the same reason); no int8/bf16
+resident head fallback for GPU-backend training (this box's own
+`max_buffer_size` made CPU the only working backend for training at real
+vocab scale - a different box with a larger single-buffer limit, or a
+future multi-buffer-sharded head, could lift this); no
+`crates/cli`/`caps.rs` wiring for streaming training (this milestone is the
+trainer + its own gates, not a serving/CLI surface).
+
 ## Not yet done
 
-Nothing - all milestones (M0-M17) are complete. Remaining scope is the
+Nothing - all milestones (M0-M18) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's/M17's
-own "not done" items just above.
+machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's/M17's/
+M18's own "not done" items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
