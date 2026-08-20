@@ -39,10 +39,39 @@ generation (14 overlapping chunks, an AR loop over ~1500 frames on the 8B
 LM) is not attempted here - recorded as a hardware-bound gap, not silently
 skipped.
 
+## Phase 1: golden dumper
+
+`tools/goldens/minimaxmusic3_dump_reference.py` covers the four
+`MiniMaxMusic3*`-prefixed diffusers classes (condition encoder, vocoder,
+RVQ depth decoder, DiT) at both random-weight `--tiny` dims (matching
+`crates/minimaxmusic3::config`'s `::tiny()`, no checkpoint needed) and
+`--real` dims (real weights, `strict=True` state-dict load). The Global
+LLM's own golden path is `transformers.Qwen3ForCausalLM` directly - no
+`diffusers` PR dependency - and is deferred to the Global LLM milestone.
+
+Reference source: an unmerged `diffusers` PR, installed into a scratch venv
+this repo does not track (`pip install
+"git+https://github.com/huggingface/diffusers@dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d"`,
+alongside `torch`/`transformers`/`safetensors`/`numpy`/`huggingface_hub`) -
+see `requirements.txt`'s "NOT pip-installable" block. No file from that PR
+is vendored into this tree.
+
+Real weights for the three small components (condition encoder 97 MB,
+vocoder 207 MB, RVQ depth decoder 1.3 GB - `resources/minimax-music3/`,
+gitignored) were fetched and dumped; every `state_dict.load_state_dict(...,
+strict=True)` succeeded on the first try, confirming the tensor names/shapes
+recorded from the checkpoint's real safetensors headers were exactly right.
+Real weights for the DiT (9.7 GB) and the Global LLM (17.2 GB via the
+pre-split `language_model/`, or 18.5 GB via `qwen_7B/` - the pre-split dir
+is simpler and is what those milestones will use, not the manual key-split
+this roadmap's Phase 0 draft assumed) are deferred to their own milestones.
+
+Measured output shapes (real dims, batch=1): condition encoder
+`(1,5,32768) -> (1,17,2048)`; vocoder `(1,128,6) -> (1,2,3072)`; RVQ depth
+decoder hidden `(1,8,4096)`.
+
 ## Not yet done
 
-- [ ] Golden dumper (`tools/goldens/minimaxmusic3_dump_reference.py`) and
-      fixtures for all five components
 - [ ] Condition encoder: import + forward + parity
 - [ ] Vocoder: import (incl. folding the checkpoint's `weight_g`/`weight_v`
       weight-norm pairs) + forward/backward + a multi-scale STFT/mel

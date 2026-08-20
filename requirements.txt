@@ -17,7 +17,9 @@ numpy                  # parity logit/token dumps
 pillow                 # image I/O for the YOLO inference benchmark
 ultralytics             # YOLOv8 reference row in tools/bench/bench_yolo_inference.py
 safetensors             # every *_dump_reference.py fixture writer
-diffusers               # tools/goldens/{vae,zimage,flux2,clip}_dump_reference.py
+diffusers               # tools/goldens/{vae,zimage,flux2,clip}_dump_reference.py -
+                        # minimaxmusic3_dump_reference.py needs the unmerged PR
+                        # branch instead of this pinned release, see below
 onnx                    # tools/goldens/arcface_dump_reference.py (ONNX SCRFD/ArcFace)
 onnxruntime             # tools/goldens/arcface_dump_reference.py, tools/npu-adjacent NPU checks
 opencv-python           # tools/goldens/arcface_dump_reference.py, tools/yolo_export/export_yolov8.py (cv2)
@@ -34,3 +36,10 @@ st_moe_pytorch           # tools/goldens/fincast_dump_reference.py
 # without it; nothing else in the build/test path needs it):
 #   eva_clip       tools/goldens/clip_dump_reference.py       — github.com/baaivision/EVA (EVA-CLIP)
 #   hyworldmirror   tools/mirror_dump_{reference,dpt_tiny}.py — HY-World-2.0's own package
+#   diffusers PR    tools/goldens/minimaxmusic3_dump_reference.py - MiniMax Music 3
+#     has no official inference code; its diffusers classes (MiniMaxMusic3*)
+#     only exist on an unmerged PR branch. In a SEPARATE venv (not this
+#     requirements.txt's pinned `diffusers` release, which the other four
+#     dumpers above need unchanged):
+#       pip install "git+https://github.com/huggingface/diffusers@dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d"
+#     plus this file's torch/transformers/safetensors/numpy/huggingface_hub.
