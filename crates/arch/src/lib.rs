@@ -244,7 +244,14 @@ pub const ARCHS: &[Arch] = &[
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
     // -- Image generation / restoration --------------------------------
     arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[("BRAIN_S3DIT_DIT", "dit"), ("BRAIN_S3DIT_VAE", "vae"), ("BRAIN_S3DIT_QWEN", "text_encoder"), ("BRAIN_S3DIT_TOKENIZER", "tokenizer")]),
-    arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2"),
+    // `black-forest-labs/FLUX.2-klein-4B` ships the same shape
+    // `ZimageRecipe` already matches generically (`model_index.json` +
+    // transformer/vae/text_encoder/tokenizer role dirs) and even reuses
+    // Z-Image's exact `vae/diffusion_pytorch_model.safetensors` filename, so
+    // no new recipe is needed - confirmed against the real repo listing.
+    arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
+          default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
+          weights_env: &[("BRAIN_FLUX2_DIT", "dit"), ("BRAIN_FLUX2_VAE", "vae"), ("BRAIN_FLUX2_TE", "text_encoder"), ("BRAIN_FLUX2_TOKENIZER", "tokenizer")]),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
     arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-sdxlunet"),
