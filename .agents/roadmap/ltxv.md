@@ -1893,6 +1893,128 @@ what remains is reclaimable mmap pages rather than heap.
   policy nobody asked for is worse than a documented directory, but it is a
   real gap rather than an oversight.
 
+### Phase 12 - self-attention becomes flash attention (the O(T²) crossover, measured)
+
+Phase 8's per-kernel work was done at T=1024/ctx 256, where `attn1` and
+`attn2` cost about the same. This phase re-profiled at the REAL 720p latent
+token count and the ranking had completely changed - which is the whole point
+of `.agents/rules/kernels.md` §F.9.
+
+**Method**: `BRAIN_LTXV_DIT=<real 22B distilled Q8_0 GGUF>
+./target/release/ltxv_bench streamed 8 3520 1024 1`, one Tesla P40, idle
+before each run, both arms the SAME command on the same checkpoint. T=3520 is
+the real 720p/25-frame/32-stride grid (`lat_t=4, lh=h/32, lw=w/32`). Numbers
+below are the **cache-hit** call (call 2), the shape every step of a
+generation past the first has. VRAM is `nvidia-smi --loop-ms 200` peak across
+the run.
+
+**Before** - GPU kernel time 5556.4 ms per 8-layer forward:
+
+    attn_apply_cross       2095.8 ms   16 calls  (37.7%)
+    attn_scores_cross_kt   1994.1 ms   16 calls  (35.9%)
+    matmul_i8_dyn           903.8 ms   80 calls  (16.3%)
+    softmax_rows            281.6 ms   16 calls  ( 5.1%)
+
+Self-attention alone (the 8 `attn1` calls, separated from the 8 `attn2` calls
+that share those kernel slots) was ~3382 ms of that 5556 ms. It is the only
+op in the block that is O(T²) in the video token count; everything else is
+O(T), so it overtakes the whole block once T passes a few thousand - exactly
+the analytic crossover an earlier pass predicted and declined to act on
+without a measurement.
+
+**The change**: `attn1` (and the embeddings connector's own self-attention,
+same construction) now dispatches `model::block::flash_bidir_fwd` over a
+`pack_qkv` slab instead of the materialized `attn_scores_cross_kt` ->
+`softmax_rows` -> `attn_apply_cross` chain. No new kernel and no new cost
+formula: all five kernels already existed, already gated, already measured on
+this hardware. `attn2` and the A<->V cross-attention are NOT self-attention
+(different key row set) and keep the trio unchanged. Gated on
+`DeviceCaps::workgroup_reductions`, so `BRAIN_DEVICE=cpu` still takes the
+exact trio - which stays the reference definition of the math.
+
+**After** - GPU kernel time 2614.8 ms per 8-layer forward:
+
+    matmul_i8_dyn           907.1 ms   80 calls  (34.7%)
+    attn_apply_cross        483.2 ms    8 calls  (18.5%)   <- attn2 only now
+    attn_scores_cross_kt    444.4 ms    8 calls  (17.0%)   <- attn2 only now
+    flash_attn_bidir_reg2   432.5 ms    8 calls  (16.5%)   <- all of attn1
+    pack_qkv                 10.4 ms    8 calls  ( 0.4%)
+
+| | before | after |
+|---|---|---|
+| self-attention, 8 layers | ~3382 ms | 443 ms (**7.6x**) |
+| GPU kernel time, 8 layers | 5556.4 ms | 2614.8 ms (**2.13x**) |
+| wall, 8 layers (cache hit) | 101.41 s (12.68 s/layer) | 93.86 s (11.73 s/layer) |
+| peak VRAM | 18189 MiB | 16522 MiB |
+
+**1080p (T=8160) went from impossible to routine.** The materialized path
+needs a `[32, 8160, 8160]` fp32 score slab; this device reports
+`max_buffer_size` 4094 MiB, and the old code fails at buffer creation, not
+slowly:
+
+    wgpu error: Validation Error
+      In Device::create_buffer
+        Buffer size 8522956800 is greater than the maximum buffer size (4292870144)
+
+The flash path runs the same shape in 303.8 ms of self-attention at 16650 MiB
+peak. `pack_qkv`'s slab is 3*T*inner_dim floats - 173 MB at T=3520 - against
+two 1.55 GiB slabs.
+
+**The fused path is also MORE ACCURATE than the one it replaces**, which is
+the finding worth keeping. Random operands cannot see it: both arms agree to
+~1.6e-7 at the exact production geometry (heads=32, head_dim=128, T=3520).
+But when every token row is identical - which is precisely what
+`ltxv_bench streamed`'s all-zero latent produces after patchify+bias - the
+answer is analytically exact (`ctx == v`, uniform softmax) and the two arms
+separate:
+
+    identical rows, t=3520:  max|flash - exact| = 2.4e-6
+                             max|materialized - exact| = 4.7e-5
+
+`attn_apply_cross` sums T equal positive terms sequentially in one thread and
+drifts by O(T·eps) coherently across every row; the flash kernel's blocked
+online accumulation does not. This is why the real-checkpoint int8 bench's
+output statistics move by ~1e-3 relative between the two arms even though the
+attention itself is exact to 1e-7 - the drift being removed is the OLD path's.
+That was chased down rather than assumed: a reduction-order-only perturbation
+(swapping `softmax_rows` for `attn_softmax_cross`) moves the same output by
+only ~4e-6, which killed the "int8 quantization amplifies any perturbation"
+hypothesis and forced the real explanation out.
+
+**Gates** (`crates/ltxv/src/block.rs`'s own `tests` module, both
+mutation-verified - `k_off`/`v_off` swapped and `head_dim - 1`, each caught at
+1e-1 against a 1e-5 bar):
+- `flash_self_attention_matches_the_materialized_reference_and_a_host_oracle`
+  - five shapes (query-tile tails, both parity fixtures' geometries, the real
+  head_dim=128) x three implementations (flash, the materialized trio, a host
+  f64 oracle), `max_abs` asserted alongside cosine because cosine is
+  scale-invariant and cannot see a wrong `1/sqrt(hd)` (lesson #2).
+- `flash_self_attention_beats_the_materialized_trio_on_long_sequence_accuracy`
+  - the identical-rows case above, against the analytic answer, asserting the
+  ORDERING (fused must not be less accurate than the trio) and that the flash
+  path was actually selected, so a silent fallback cannot pass it vacuously.
+
+Every pre-existing gate still passes unchanged, on both backends:
+`dit_parity`, `av_dit_parity`, `host_forward_parity`, `connector_real_parity`,
+`streamed_vs_eager_real`, `block_grad` and the rest of `-p brain-ltxv`, and
+the same set again under `BRAIN_DEVICE=cpu` (which is what proves the
+non-cooperative fallback branch, §F.4). `int8_compute` fails under
+`BRAIN_DEVICE=cpu` before and after this change alike - `matmul_i8_dyn` has no
+CPU JIT - so the int8 tier remains GPU-only, unchanged.
+
+**§F.9: the bottleneck moved, and it is no longer on the GPU.** The same
+profiling run makes the next target unambiguous, and it is not a kernel:
+
+    stage forward_q_streamed: adaLN-single table (host): 76281.3 ms
+
+That is a per-CALL host cost, independent of layer count (identical at 1 layer
+and at 8), and at T=3520 it is ~81% of the 93.86 s wall for 8 layers. It is
+`dit.rs`'s host `linear` behind `ada_layer_norm_single`, a
+`[3520, 4096] x [36864, 4096]^T` GEMM - 531 GFLOP running at ~7 GFLOP/s on the
+host while a 10.5 TFLOP/s card sits idle. Until that moves to the device, GPU
+kernel work is a minority of a real step and further kernel optimization has a
+small ceiling. Recorded here rather than acted on: it is a different phase.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
