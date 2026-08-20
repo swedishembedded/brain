@@ -1384,3 +1384,65 @@ and a "slow-reclaim driver-side handle pool" theory measured to a deterministic
 count. A deterministic failure count is a strong hint to go find the mechanism
 (here: one `VK_LOADER_DEBUG=error` run), not a phenomenon to characterise
 further.
+
+## 45. A stage absent from the timing struct is absent from every conclusion
+
+`ltxv::pipeline::Timings` carries `build_dit`, `denoise` and `vae`. It does
+not carry the text encode. So a real `brain ltxv t2v` run printed
+`964.3s total (build 10.84s, denoise 440.4s, vae 21.1s)` - three numbers that
+sum to 472s of a 964s run - and every performance discussion built on that
+line spent its effort on `denoise`, the second-largest stage, while the
+largest one (the text encoder, **51% of the wall clock**) had never been
+measured at all, by anyone, once.
+
+Nothing was wrong. Each printed number was correct. The line simply did not
+claim to be exhaustive, and no reader checked whether it added up.
+
+Two things generalise, and the second is the one that cost the time:
+
+* **A timing breakdown must either account for its own total or say what it
+  is missing.** The same rule this file already records for a *rate*
+  (#28: a partial FLOP numerator over a full denominator under-reports in
+  silence) applies to a *timeline*. The fix shape is the same too: print the
+  unattributed remainder as its own row rather than letting it be invisible.
+  A breakdown whose parts sum to 49% of its own total is not a rounding
+  issue, it is a missing stage.
+* **Optimizing the stage that IS instrumented is the predictable
+  consequence.** Two prior optimization passes on this model attributed,
+  extrapolated and optimized inside `denoise` in real detail - correctly,
+  and to real effect - because that is where the numbers were. Instrumenting
+  the pipeline end to end (`--trace-ltxv`, one span per stage) is what made
+  the largest stage visible, and it was visible immediately, on the first
+  run, with no analysis at all.
+
+## 46. A bench with a warm page cache measures the CPU where the real run measures the disk
+
+The isolated harness for one model's streamed forward predicted ~275s of
+denoise for a real generation. The real generation measured 440s, and the
+per-stage split disagreed in BOTH directions - the harness under-predicted
+the first (cold) step by 2.1x and over-predicted every later step by 1.4x.
+
+The harness was not wrong about anything it measured. It had simply been run
+several times in a row over the same four transformer blocks, so those blocks
+were resident in page cache and its "checkpoint read + dequantize" stage was
+timing the dequantize. The real run reads ~50 GB of checkpoint that nothing
+has touched, on storage measured at **58-68 MB/s cold** (against 4.3 GB/s for
+the same bytes once cached - a ~70x cliff), and its same-named stage is
+timing the disk.
+
+Consequences worth keeping:
+
+* **Check whether the resource you are measuring is the one the real run
+  hits.** `free`, the process state (`D` vs `R`), and CPU-time-versus-wall
+  -clock all answer it cheaply: the run that looked like 964s of computation
+  spent 7m12s of CPU across 16m14s of wall clock, which says "waiting" before
+  any profiler is opened.
+* **Measure the device, do not assume it.** A `dd` from an uncached region
+  took under three minutes and turned a kernel-optimization brief into an
+  I/O finding. Sixteen parallel readers measured the SAME throughput as one,
+  which additionally killed the natural follow-up hypothesis (deepen the
+  queue) before any code was written for it.
+* **A warm-cache number is still the right number for the CPU work inside
+  the stage** - it is how the parallel dequantize and quantize wins were
+  isolated from I/O noise at all. Keep both, and label which is which; the
+  mistake is letting one stand in for the other in an extrapolation.
