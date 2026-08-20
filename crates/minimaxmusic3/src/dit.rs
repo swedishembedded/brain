@@ -132,6 +132,38 @@ pub struct DitWeights {
     pub postprocess_conv_w: Vec<f32>, // [in_channels, in_channels, 1]
 }
 
+impl DitWeights {
+    /// The mutable slot for one of the 6 LoRA-eligible linear weights per
+    /// block (`attn.to_{q,k,v,out}`, `ff_in.weight`, `ff_out.weight` - never
+    /// a norm gain/bias, never a bias). Named identically to
+    /// `dit_train::BlockD::upload`'s own `Pair` names, so a gradient read
+    /// from `dit_train::Trainer::read_grad` and a weight slot from here
+    /// always agree on what a name means.
+    pub fn linear_mut(&mut self, name: &str) -> Option<&mut Vec<f32>> {
+        let rest = name.strip_prefix("blocks.")?;
+        let (i, rest) = rest.split_once('.')?;
+        let block = self.blocks.get_mut(i.parse::<usize>().ok()?)?;
+        match rest {
+            "attn.to_q" => Some(&mut block.attn.wq),
+            "attn.to_k" => Some(&mut block.attn.wk),
+            "attn.to_v" => Some(&mut block.attn.wv),
+            "attn.to_out" => Some(&mut block.attn.wo),
+            "ff_in.weight" => Some(&mut block.ff_in_w),
+            "ff_out.weight" => Some(&mut block.ff_out_w),
+            _ => None,
+        }
+    }
+
+    /// Every name [`Self::linear_mut`] resolves, across every block.
+    pub fn linear_names(&self) -> Vec<String> {
+        (0..self.blocks.len())
+            .flat_map(|i| {
+                ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out", "ff_in.weight", "ff_out.weight"].into_iter().map(move |s| format!("blocks.{i}.{s}"))
+            })
+            .collect()
+    }
+}
+
 pub fn import(dir: &str, cfg: &DitConfig) -> Result<DitWeights, String> {
     from_tensors(safetensors::read_model_dir(Path::new(dir))?, cfg, dir)
 }
