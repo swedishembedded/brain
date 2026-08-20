@@ -1487,6 +1487,47 @@ this port:
       not an optimization) would need to close first, and which is out of
       this optimization phase's own scope. Not pursued, no budget spent on
       it beyond this check.
+- [x] **Observability: `--trace-ltxv <0-5>`, the first consumer of the new
+      workspace tracing crate**. This port repeatedly needed the same
+      breadcrumbs by hand - which layer, cache hit or miss, how long - and
+      re-derived them with throwaway `eprintln!`s more than once, because
+      the workspace had no logging facility at all (no `tracing`, no `log`
+      in any crate's manifest before this). `crates/trace` adds the generic
+      mechanism (a family registry mapping a short name onto the crates it
+      covers, `tracing`'s own five levels plus off, text or JSON, stdout or
+      a file); `ltxv` is its first real consumer and the proof it works end
+      to end.
+
+      Instrumented: `pipeline::generate`/`generate_dfr`/`denoise` and
+      `dit::forward_q_streamed` as `#[instrument]` spans, plus
+      `caps::LtxvAction::run` - the served path, whose start/success/failure
+      previously existed nowhere at all because D-Bus and HTTP have no
+      terminal to print to. Level 1 is every failure path with its numbers
+      (including how many of how many values went non-finite, at which
+      sigma); level 2 is the conditions that make a run silently not what it
+      looks like (random-weight tiny DiT, stub text context, an ignored
+      `--steps`, a cancellation naming its phase and step); 3 phase
+      boundaries and durations; 4 per denoise step and per host stage; 5
+      every individual forward and EVERY transformer block with its
+      cache hit/miss and its load/quantize/GPU milliseconds.
+
+      That last one is specifically the breadcrumb Phase 8's attribution
+      needed and had to reconstruct from summed stage totals: a total can
+      only say the block cache saved time on average, while the per-layer
+      line makes ONE anomalous layer visible.
+
+      `gpu_core::profile::stage_time`/`BRAIN_PROFILE` is deliberately
+      untouched - the perf gate parses its stage totals - so
+      `forward_q_streamed` now reports the same timings through both
+      mechanisms. Consolidating them is a separate decision, explicitly not
+      taken here.
+
+      Verified on a real run (9 frames, 64x64, 2 steps, real VAE, not a
+      unit test): level 5 emits the full labelled stream with span context,
+      level 2 emits exactly the two "this is not a real model" warnings,
+      level 0 and no flag emit zero bytes, and `--trace-format json` writes
+      lines that all parse with `target`/`level`/`span` as real JSON
+      members.
 
 ## Convention questions settled from source, not experiment
 
