@@ -10,6 +10,9 @@ name = "minimaxmusic3"
 path = "src/lib.rs"
 
 [dependencies]
+brain-checkpoint.workspace = true
+brain-audio.workspace = true
+brain-model.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

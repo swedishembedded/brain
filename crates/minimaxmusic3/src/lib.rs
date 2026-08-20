@@ -45,10 +45,12 @@
 //! `invert_sigmas=True, num_train_timesteps=1, shift=1.0`) for the DiT's
 //! sampling loop.
 //!
-//! Status: crate skeleton + configs only (this commit). Import, forward,
-//! backward, training and serving land component-by-component, one crate
-//! module at a time.
+//! Status: the condition encoder (import + forward, real-weight parity
+//! cosine 1.0) is the first component landed. The rest - depth decoder,
+//! DiT, vocoder, the Global LLM's own wiring, training, and serving - land
+//! component-by-component, one crate module at a time.
 
+pub mod condition_encoder;
 pub mod config;
 
 pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};

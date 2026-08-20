@@ -40,7 +40,7 @@ import sys
 
 import numpy as np
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import source_block  # noqa: E402
@@ -63,6 +63,15 @@ def _weight_files(d):
     )
 
 
+def save_tiny_state_dict(model, prefix):
+    """`--tiny` has no source checkpoint - the model's weights are whatever
+    PyTorch's default init drew for this exact `torch.manual_seed(SEED)`
+    call, which nothing on the Rust side can reproduce bit-for-bit (a
+    different RNG algorithm entirely). So the random weights themselves are
+    part of the golden, not just the forward's input/output."""
+    save_file({k: v.contiguous() for k, v in model.state_dict().items()}, prefix + "_state_dict.safetensors")
+
+
 # ---- condition encoder -------------------------------------------------
 
 # `::tiny()` in crates/minimaxmusic3/src/config.rs.
@@ -83,19 +92,20 @@ def dump_condition_encoder(out_dir, cfg, weights_dir, tag):
 
     torch.manual_seed(SEED)
     model = MiniMaxMusic3ConditionEncoder(**cfg)
+    prefix = os.path.join(out_dir, f"condition_encoder_{tag}")
     files = []
     if weights_dir:
         sd = load_file(os.path.join(weights_dir, "diffusion_pytorch_model.safetensors"))
         model.load_state_dict(sd, strict=True)
         files = _weight_files(weights_dir)
+    else:
+        save_tiny_state_dict(model, prefix)
     model = model.float().eval()
 
     batch, frames = 1, 5
     hidden = torch.randn(batch, frames, cfg["num_condition_layers"] * cfg["condition_hidden_dim"])
     with torch.no_grad():
         out = model(hidden)
-
-    prefix = os.path.join(out_dir, f"condition_encoder_{tag}")
     write_f32(prefix + "_in.f32", hidden)
     write_f32(prefix + "_out.f32", out)
     meta = {
@@ -124,19 +134,20 @@ def dump_vocoder(out_dir, cfg, weights_dir, tag):
 
     torch.manual_seed(SEED)
     model = MiniMaxMusic3Vocoder(**cfg)
+    prefix = os.path.join(out_dir, f"vocoder_{tag}")
     files = []
     if weights_dir:
         sd = load_file(os.path.join(weights_dir, "diffusion_pytorch_model.safetensors"))
         model.load_state_dict(sd, strict=True)
         files = _weight_files(weights_dir)
+    else:
+        save_tiny_state_dict(model, prefix)
     model = model.float().eval()
 
     batch, length = 1, 6
     latents = torch.randn(batch, cfg["latent_channels"], length)
     with torch.no_grad():
         out = model(latents)
-
-    prefix = os.path.join(out_dir, f"vocoder_{tag}")
     write_f32(prefix + "_in.f32", latents)
     write_f32(prefix + "_out.f32", out)
     ident = {k: int(v) for k, v in cfg.items() if isinstance(v, int)}
@@ -165,11 +176,14 @@ def dump_depth_decoder(out_dir, cfg, weights_dir, tag):
 
     torch.manual_seed(SEED)
     model = MiniMaxMusic3RVQDepthDecoder(**cfg)
+    prefix = os.path.join(out_dir, f"depth_decoder_{tag}")
     files = []
     if weights_dir:
         sd = load_file(os.path.join(weights_dir, "diffusion_pytorch_model.safetensors"))
         model.load_state_dict(sd, strict=True)
         files = _weight_files(weights_dir)
+    else:
+        save_tiny_state_dict(model, prefix)
     model = model.float().eval()
 
     batch, steps = 1, cfg["num_codebooks"]
@@ -184,7 +198,6 @@ def dump_depth_decoder(out_dir, cfg, weights_dir, tag):
         head_ins = torch.randn(cfg["num_codebooks"] - 1, batch, cfg["hidden_size"])
         head_outs = [model.audio_heads[i](head_ins[i]) for i in range(cfg["num_codebooks"] - 1)]
 
-    prefix = os.path.join(out_dir, f"depth_decoder_{tag}")
     write_f32(prefix + "_inputs_embeds.f32", inputs_embeds)
     write_f32(prefix + "_hidden_out.f32", hidden_out)
     write_f32(prefix + "_proj_in.f32", proj_in)
@@ -221,6 +234,7 @@ def dump_dit(out_dir, cfg, weights_dir, tag):
 
     torch.manual_seed(SEED)
     model = MiniMaxMusic3Transformer1DModel(**cfg)
+    prefix = os.path.join(out_dir, f"dit_{tag}")
     files = []
     if weights_dir:
         index_path = os.path.join(weights_dir, "diffusion_pytorch_model.safetensors.index.json")
@@ -234,6 +248,8 @@ def dump_dit(out_dir, cfg, weights_dir, tag):
             sd = load_file(os.path.join(weights_dir, "diffusion_pytorch_model.safetensors"))
         model.load_state_dict(sd, strict=True)
         files = _weight_files(weights_dir)
+    else:
+        save_tiny_state_dict(model, prefix)
     model = model.float().eval()
 
     batch, length = 1, 5
@@ -243,7 +259,6 @@ def dump_dit(out_dir, cfg, weights_dir, tag):
     with torch.no_grad():
         out = model(hidden_states, timestep, encoder_hidden_states, return_dict=False)[0]
 
-    prefix = os.path.join(out_dir, f"dit_{tag}")
     write_f32(prefix + "_hidden_states.f32", hidden_states)
     write_f32(prefix + "_timestep.f32", timestep)
     write_f32(prefix + "_encoder_hidden_states.f32", encoder_hidden_states)

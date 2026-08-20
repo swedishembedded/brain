@@ -70,9 +70,33 @@ Measured output shapes (real dims, batch=1): condition encoder
 `(1,5,32768) -> (1,17,2048)`; vocoder `(1,128,6) -> (1,2,3072)`; RVQ depth
 decoder hidden `(1,8,4096)`.
 
+## Phase 2: condition encoder
+
+`crates/minimaxmusic3::condition_encoder` - import (`checkpoint::safetensors`,
+now also resolving a bare `diffusion_pytorch_model.safetensors` single-file
+dir, not just HF-transformers' `model.safetensors` - a real gap in
+`checkpoint::safetensors::read_model_dir` this component's import hit and
+fixed for every future diffusers-format import too) + forward. Pure host
+math, not a device (WGSL) forward: every op runs once per ~200-frame
+denoise chunk on a few-MB tensor, so a device round trip would be pure
+overhead with nothing to parallelize across; the conv reuses
+`audio::conv::conv1d_ref`, the exact reference oracle the WGSL `conv1d`
+kernel is gradient-checked against elsewhere.
+
+One real numeric bug caught by the parity harness before it ever saw real
+weights: the reference's latent-length formula chains three Python `/`
+divisions, which are FLOAT division at every step (`int()` truncates only
+once, at the end) - a first Rust draft using integer division at each step
+computed 16 instead of the correct 17 for a 5-frame test case. The `::tiny()`
+parity fixture (which needed the dumper to ALSO save the random-weight
+state dict, not just the forward's input/output - PyTorch's RNG cannot be
+reproduced bit-for-bit from Rust) caught this immediately.
+
+Measured: tiny cosine 1.000000000 (exact), real-weight (4096-dim hidden,
+2048-dim output) cosine 1.000000000, max_abs 3e-6 (fp32 rounding only).
+
 ## Not yet done
 
-- [ ] Condition encoder: import + forward + parity
 - [ ] Vocoder: import (incl. folding the checkpoint's `weight_g`/`weight_v`
       weight-norm pairs) + forward/backward + a multi-scale STFT/mel
       discriminator + adversarial training + gradcheck

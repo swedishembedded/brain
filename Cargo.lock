@@ -1202,6 +1202,9 @@ dependencies = [
 name = "brain-minimaxmusic3"
 version = "1.0.0"
 dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-model",
  "brain-testutil",
 ]
 

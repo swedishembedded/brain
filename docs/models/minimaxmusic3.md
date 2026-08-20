@@ -7,9 +7,11 @@ coherent structure (intro/verse/chorus/bridge/outro). Reach for it when you
 need a first-draft song from a text brief, not for editing or remixing
 existing audio (there is no audio-conditioned path).
 
-**Status: not yet implemented.** This page is a placeholder created with the
-crate skeleton; the model has no working inference, training or serving path
-yet. See [`.agents/roadmap/minimaxmusic3.md`](../../.agents/roadmap/minimaxmusic3.md)
+**Status: under construction, component by component.** The condition
+encoder (one of five components) has import + forward, verified at real
+weights (cosine 1.0 vs the reference). Nothing else is wired yet - no CLI
+verb, no end-to-end generation. See
+[`.agents/roadmap/minimaxmusic3.md`](../../.agents/roadmap/minimaxmusic3.md)
 for the live milestone ledger.
 
 ## Support
