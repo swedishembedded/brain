@@ -82,9 +82,10 @@ request parameter yet.
 Backward needs the frozen base weight in fp32 (int8 backward-through-the-
 weight is not wired up anywhere in this engine yet), and the resident
 `lm_head` at fp32 (`vocab x d_model x 4` bytes, ~4.74 GiB as ONE buffer)
-exceeds this box's Vulkan/wgpu adapter's real `max_buffer_size` (2047 MiB, a
-hard driver limit - confirmed by an actual `wgpu` validation error, not a
-host-RAM shortage). `stream_train_step` therefore builds its `Gpu` via
+exceeds a Vulkan/wgpu adapter's `max_buffer_size` (2047 MiB on any
+non-NVIDIA Linux adapter - see below - confirmed by an actual `wgpu`
+validation error, not a host-RAM shortage). `stream_train_step` therefore
+builds its `Gpu` via
 `Gpu::new_cpu(...)` rather than the default GPU adapter.
 
 Splitting the resident `lm_head` into several sub-`max_buffer_size` device
@@ -105,6 +106,33 @@ Two other real-weight paths in this engine (`crates/sam1/tests/parity.rs`,
 `max_buffer_size` ceiling and use the same fallback - pinning the CPU
 backend for the affected pass is this engine's established answer to "one
 tensor is bigger than one device buffer can be," not a one-off workaround.
+
+The 2047 MiB figure is not a conservative driver reporting its own real
+ceiling - it is `wgpu-hal`'s own policy, unconditionally applied to every
+Linux/Android adapter from a non-NVIDIA vendor regardless of what the
+hardware actually reports (`wgpu-hal` 29.0.4 and 30.0.0 - the latest
+release as of this writing - both clamp `max_buffer_size` to `i32::MAX`
+bytes in `src/vulkan/adapter.rs`'s `!is_nvidia` branch, "prevent very large
+buffers on mesa and most android devices"). Raw Vulkan on an Intel Arc
+(Meteor Lake) adapter, tested here, reports a real `maxBufferSize` of 4 GiB
+(`vulkaninfo`), well above what `wgpu` ever advertises - so bumping the
+`wgpu` dependency version cannot move this number, and `--device gpu`
+fails identically on any current `wgpu` release, on any non-NVIDIA Linux
+GPU.
+
+`stream_train_step --device vulkan` (native Vulkan via `crates/backend-vulkan`,
+ash + naga, bypassing `wgpu-hal` entirely) was tried as a way around the
+`wgpu` clamp specifically. It is a genuine dead end, not just an unsupported
+path: the 4.74 GiB `lm_head` buffer allocation SUCCEEDS (this backend does
+not enforce the reported 4 GiB `maxBufferSize` either), and a forward-only
+`--phase before` run completes correctly (14.91 min, real-weight output
+matching the CPU backend's own `" Paris."`) - but the heavier backward
+dispatch pattern of `--phase step` crashes the GPU outright with
+`ERROR_DEVICE_LOST` (`crates/vulkan/src/context.rs`'s wait call), not a
+catchable validation error. This is exactly the class of instability
+`wgpu-hal`'s comment warns its clamp exists to prevent. Do not route around
+the `wgpu` buffer-size wall via the native Vulkan backend for this model -
+it trades a clean, immediate failure for an unrecoverable one.
 
 ### Example: a real streamed LoRA fine-tune against the real checkpoint
 
