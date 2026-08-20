@@ -1953,23 +1953,76 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
-- Full 22B DiT real-weight parity: **partially closed** - the "real-weight
-  parity ladder for the 22B DiT, reduced depth" milestone above proved
-  quantization exactness (Q8_0, exact) and video-stream port correctness at
-  REAL width but only 2 of 48 `transformer_blocks`, gated attention ON,
-  `use_embeddings_connector: false`. Still NOT run, and still needing either
-  more host RAM/time or the int8 compute path (Phase 5) to attempt cheaply:
-  all 48 layers at once, the audio stream, the A<->V cross-attention
-  (`LtxAvDit`), either embeddings connector's own real-weight parity, the
-  Q4_K_M quant tier, and any int8/int4 COMPUTE-path comparison (no such
-  kernel exists yet for the DiT - `crate::int8` is storage-format-only).
-- 12B Gemma-4 real-weight parity: not run. The 26 GB bf16 checkpoint has
-  since been fetched and verified byte-exact + structurally against the real
-  header (`gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`) - the "needs
-  hardware that can hold the checkpoint" reason no longer applies.
-  Genuinely unattempted, out of scope for the DiT real-weight milestone
-  above (which did not touch `crates/gemma4`) - remains open for a
-  dedicated pass.
+- Full 22B DiT real-weight parity: **partially closed, connector gap now
+  closed too**. The "real-weight parity ladder for the 22B DiT, reduced
+  depth" milestone proved quantization exactness (Q8_0, exact) and
+  video-stream port correctness at REAL width, 2 of 48 `transformer_blocks`,
+  gated attention ON, `use_embeddings_connector: false`. Two follow-up
+  real-weight diagnostics (triggered by a user-reported "pure noise, not a
+  real image" real generation and a request to only trust upstream, not this
+  crate's own doc comments) closed two of that milestone's own named gaps:
+  1. **`video_embeddings_connector`'s own real-weight parity** (real width:
+     dim=4096, 8 layers, 128 registers, gated attention ON, loaded straight
+     off the real Q8_0 GGUF, `tools/goldens/ltxv_real_connector_dump_
+     reference.py` instantiating the reference's own `Embeddings1DConnector`
+     directly) - `crates/ltxv/tests/connector_real_parity.rs`: cosine
+     0.999999973 against the reference on a synthetic-but-real-shaped
+     `[128, 4096]` input (20 real + 108 register-substituted positions,
+     right-padded). Every block's cross-attention routes through this
+     module's output in the real pipeline, so this was the single
+     highest-blast-radius untested component in the whole port.
+  2. **`crate::dit::forward_q_streamed` (what `RealDit::forward` actually
+     calls, i.e. what every real `brain ltxv t2v --dit-config ltx25_22b` run
+     executes) had NEVER been checked against anything at real weights** -
+     every other real-weight gate in this crate replays against the EAGER
+     `LtxDit::forward`/`forward_q`; `forward_q_streamed`'s only prior
+     coverage (`block_weight_cache.rs`) used `random_tiny_weights`.
+     `crates/ltxv/tests/streamed_vs_eager_real.rs` runs both paths on the
+     SAME real Q8_0 weights, SAME config (gated attention + embeddings
+     connector both ON, int8 compute tier), SAME inputs: bit-identical
+     (cosine=1.000000000, max_abs=0.0).
+
+  Still NOT run: all 48 layers at once, the audio stream, the A<->V
+  cross-attention (`LtxAvDit`), the Q4_K_M quant tier.
+- 12B Gemma-4 real-weight parity: **closed at reduced depth**. Same
+  trigger as above. `tools/goldens/gemma4_real_dump_reference.py` builds
+  the REAL reference `Gemma4UnifiedTextModel` at real width (hidden=3840,
+  head_dim=256 sliding / 512 full, GQA 8kv-heads sliding / MQA+`k_eq_v` 1kv-
+  head full, `partial_rotary_factor=0.25` on the full/global RoPE table
+  only) on the first 6 of the real checkpoint's 48 layers (5 sliding + 1
+  full, the real 5:1 `sliding_window_pattern`'s minimal instance), loaded
+  from the real 26 GB bf16 checkpoint (`gemma4-12b-with-proj-ltx-2.5-bf16.
+  safetensors`). `crates/gemma4/tests/real_weight_parity.rs` replays the
+  golden's own `input_ids` through `gemma4::Gemma4Model::forward`: BOTH RoPE
+  tables, BOTH attention types' own self-attention output (sliding/GQA AND
+  full/MQA+k_eq_v, the two structurally different paths), EVERY one of the 7
+  `hidden_states` entries, and `last_hidden_state` all match the reference
+  at cosine=1.000000000 (max_abs on the order of 1e-5 to 1.6e-2, consistent
+  with fp32 accumulation drift across 6 real layers, not a port bug). This
+  closes the "needs hardware that can hold the checkpoint" excuse for good -
+  the checkpoint has been on disk and loadable since the Q8_0 conversion
+  work - and the "genuinely unattempted" status this gap carried since the
+  very first exploration of this port. Not run: the full 48 layers at once
+  (compute-bound on CPU-only torch, not a scope question - the reduced-depth
+  6 layers already exercise BOTH structurally different attention paths, so
+  a bug specific to layer count rather than layer TYPE is the only thing
+  left unruled-out) and the LTX-specific aggregate-embed projection's own
+  real-weight numbers (its shape is sized for the real 49-state tuple,
+  out of scope for a 6-layer/7-state reduced run - already parity-proven at
+  tiny scale, `gemma4::tests::parity::gemma4_tiny_matches_reference`).
+
+  Also found and fixed in the same pass, independent of any of the above:
+  `real_text_context`'s `context_len` was computed as the real prompt's own
+  token count rounded up to the nearest multiple of the connector's register
+  count (128) - for a typical short prompt, 128. The reference's own
+  `gemma_assets.py::TOKENIZER_MAX_LENGTH = 1024` pads (or truncates) every
+  prompt to a FIXED 1024 regardless of its own length; the connector routes
+  the FULL 1024-wide sequence through cross-attention on the real checkpoint,
+  never a prompt-length-dependent shape. A short prompt was silently getting
+  roughly 1/8th the context length the checkpoint was calibrated against.
+  Fixed (`crates/ltxv/src/pipeline.rs`); confirmed via a real generation
+  that content became visibly more prompt-relevant once the stale text-
+  context cache this bug had populated was cleared and regenerated.
 - NPU device execution: `ltxv` gets no `NpuModel` implementation at all this
   port (see the M9 perf entry's NPU write-up above for the full reasoning) -
   the firmware-not-functional blocker is separately
