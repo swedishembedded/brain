@@ -226,6 +226,19 @@ fn gguf_path() -> Option<String> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("Q8_0") && n.ends_with(".gguf")))
+        // Discriminate on the file's OWN declared architecture, not on
+        // its name. The model store legitimately holds several Q8_0
+        // GGUFs for one repo - the DiT and, since the text encoder was
+        // quantized too, Gemma-4 - and a name glob picked whichever
+        // sorted first, which surfaced as an architecture mismatch deep
+        // inside an importer rather than as "no fixture here".
+        .filter(|p| {
+            checkpoint::gguf::MmapGguf::open(&p.to_string_lossy())
+                .ok()
+                .and_then(|g| g.kv().get("general.architecture").and_then(|v| v.as_str()).map(str::to_string))
+                .as_deref()
+                == Some(ltxv::import::GGUF_ARCHITECTURE)
+        })
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     found.sort();
