@@ -301,12 +301,17 @@ pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
         }
         return Ok(out);
     }
-    let single = dir.join("model.safetensors");
-    if single.exists() {
-        return read(single.to_str().ok_or("safetensors: non-utf8 path")?);
+    // Same two-name split as `index_filename`'s sharded case: HF-transformers
+    // checkpoints ship `model.safetensors`, diffusers ones ship
+    // `diffusion_pytorch_model.safetensors`.
+    for name in ["model.safetensors", "diffusion_pytorch_model.safetensors"] {
+        let single = dir.join(name);
+        if single.exists() {
+            return read(single.to_str().ok_or("safetensors: non-utf8 path")?);
+        }
     }
     Err(format!(
-        "no model.safetensors or model.safetensors.index.json in {}",
+        "no model.safetensors, diffusion_pytorch_model.safetensors, or a *.safetensors.index.json in {}",
         dir.display()
     ))
 }
