@@ -19,6 +19,7 @@ pub mod asr_caps;
 pub mod asr_frontend;
 pub mod conv;
 pub mod mel;
+pub mod snake;
 pub mod wav;
 
 /// Linear-interpolation resample from `src_rate` to `dst_rate`.

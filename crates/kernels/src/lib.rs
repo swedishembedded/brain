@@ -791,6 +791,12 @@ pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
 pub const SILU_GATE: &str = include_str!("../wgsl/silu_gate.wgsl");
 /// `wgsl/silu_mul.wgsl`
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
+/// `wgsl/snake1d.wgsl`
+pub const SNAKE1D: &str = include_str!("../wgsl/snake1d.wgsl");
+/// `wgsl/snake1d_bwd_dalpha.wgsl`
+pub const SNAKE1D_BWD_DALPHA: &str = include_str!("../wgsl/snake1d_bwd_dalpha.wgsl");
+/// `wgsl/snake1d_bwd_dx.wgsl`
+pub const SNAKE1D_BWD_DX: &str = include_str!("../wgsl/snake1d_bwd_dx.wgsl");
 /// `wgsl/snake_beta.wgsl`
 pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
 /// `wgsl/softmax_k.wgsl`
@@ -1249,6 +1255,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("silu_bwd_db", SILU_BWD_DB),
     ("silu_gate", SILU_GATE),
     ("silu_mul", SILU_MUL),
+    ("snake1d", SNAKE1D),
+    ("snake1d_bwd_dalpha", SNAKE1D_BWD_DALPHA),
+    ("snake1d_bwd_dx", SNAKE1D_BWD_DX),
     ("snake_beta", SNAKE_BETA),
     ("softmax_k", SOFTMAX_K),
     ("softmax_k_dx", SOFTMAX_K_DX),
