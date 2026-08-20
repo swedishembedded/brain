@@ -361,7 +361,7 @@ fn run(args: &[String]) {
     // before a generic target is built.
     let engine_scenario = matches!(
         scenario.as_str(),
-        "startup" | "cancel" | "kvcache" | "residency" | "faults" | "weights"
+        "startup" | "cancel" | "kvcache" | "residency" | "faults" | "weights" | "weights-qwen35"
     );
     if engine_scenario {
         let art = match scenario.as_str() {
@@ -372,6 +372,11 @@ fn run(args: &[String]) {
             // the comparison this scenario exists to make (CyclicScan vs
             // Lru) doesn't need tuning to land.
             "weights" => crate::perf_engine::run_weights_with(&opt, 10, 8),
+            // Same fixed-default convention as `weights` above, at qwen35's
+            // real 64-layer scale -- `--ladder`/`--requests` are meaningless
+            // here (pure host bookkeeping, no target), so budget/passes stay
+            // hardcoded rather than growing new scenario-specific flags.
+            "weights-qwen35" => crate::perf_engine::run_weights_qwen35_with(&opt, 4, 8),
             other => {
                 let shape = target_spec
                     .as_deref()
@@ -654,6 +659,9 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("glm:") {
         return build_glm(rest);
     }
+    if let Some(rest) = spec.strip_prefix("qwen35-stream:") {
+        return build_qwen35_stream(rest);
+    }
     if let Some(rest) = spec.strip_prefix("yolo:") {
         return build_yolo(rest);
     }
@@ -703,7 +711,8 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \
-         'gpt:<weights>', 'glm:<weights>', 'yolo:<weights>', 'depth:<weights>', \
+         'gpt:<weights>', 'glm:<weights>', 'qwen35-stream:<checkpoint-dir>:<tokenizer.json>', \
+         'yolo:<weights>', 'depth:<weights>', \
          'sam2:<weights-dir>[:tiny|large]', 'clip:<checkpoint-root>', \
          'scrfd:<weights-dir>', 'arcface:<weights-dir>', 'tts:<weights-dir>:<hf-ckpt-dir>', \
          'zimage[:<W>x<H>x<steps>]', 'upscale:<weights>', 'restore:<weights>', \
@@ -1352,6 +1361,77 @@ fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("max_new", serde_json::json!(req.output_artifacts))
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/glm", "generate", "token", info, build)))
+}
+
+/// `qwen35-stream:<checkpoint-dir>:<tokenizer.json>` - Qwen3.8-27B's real
+/// streaming decode path (`crate::stream::generate`, via `qwen35::caps::
+/// Qwen35Provider`'s `streaming=true` action), measured through
+/// `perf::targets::CapabilityTarget` rather than the `*Resident`/
+/// `ExecutorTarget` pattern every other LLM target above uses (`build_glm`,
+/// `build_gpt`, `build_qwen`, ...).
+///
+/// This is a deliberate departure from that convention, not an oversight.
+/// Every `ExecutorTarget` target wraps a `residency::ResidentModel` that
+/// builds ONE resident engine instance and reuses it across requests -
+/// `crate::resident_qwen35::Qwen35Resident` exists and mirrors `build_glm`'s
+/// own pattern exactly, but it is built on `qwen35::serve::Engine`, which
+/// (like every other `Qwen35::new_*` constructor) needs EVERY layer's
+/// weights resolved into one host `HashMap` before building anything -
+/// `crate::stream`'s own module doc: "impossible at this config's real 27B
+/// size on a constrained machine" (no discrete GPU, ~18 GiB usable RAM,
+/// ~24.4 GB even fully int8 per this milestone's own measured per-layer
+/// byte profile). `crate::stream::generate` is the ONLY path that can run
+/// this model's real checkpoint on this box at all, and it deliberately has
+/// NO persistent resident instance to hold in the first place (`stream.rs`'s
+/// own module doc, design decision 1: no persistent state across calls, a
+/// fresh streaming pass every time) - there is nothing for a
+/// `ResidentModel`/`Executor` to keep warm between requests. `qwen35::
+/// caps::Qwen35Provider` already exposes this path as a plain
+/// `capability::Provider` action, which is exactly the seam
+/// `CapabilityTarget` exists for ("a model that implements the seam becomes
+/// benchmarkable with zero new benchmark code" - `perf::targets`' own module
+/// doc) - forcing this through `ExecutorTarget` instead would mean inventing
+/// a `ResidentModel` around an engine that structurally cannot stay
+/// resident, for no benefit `CapabilityTarget` does not already give for
+/// free. The cost: `CapabilityTarget` has no independent correctness gate
+/// (its own doc - a `Provider` reached this way has exactly one code path,
+/// so a two-run comparison would check an optimisation against itself), so
+/// this target's artifacts stay honestly `correctness: not_checked()`.
+///
+/// One real caveat this target inherits, unmodified, from `crate::stream`:
+/// every request re-streams every one of the 64 real layers' weights from
+/// disk (`crate::stream::LOOKAHEAD`'s own doc has the measured per-pass
+/// cost), so `--output`/`max_new` must stay very small - this milestone's
+/// own baseline run uses `max_new=1`. The prompt is a fixed short real
+/// string, not sized off `--input`: `crate::stream::generate` takes a real
+/// prompt string tokenized by a real tokenizer, not a synthetic token-id
+/// count the way `PagedLlmTarget`'s targets do, so `input_artifacts` is
+/// recorded for accounting but does not change what is actually sent.
+fn build_qwen35_stream(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (dir, tokenizer) = rest
+        .rsplit_once(':')
+        .ok_or("qwen35-stream target needs 'qwen35-stream:<checkpoint-dir>:<tokenizer.json>'")?;
+    if !std::path::Path::new(dir).is_dir() {
+        return Err(format!(
+            "qwen35-stream: checkpoint directory not found: {dir} (expected layers-N.safetensors + outside.safetensors)"
+        ));
+    }
+    if !std::path::Path::new(tokenizer).exists() {
+        return Err(format!("qwen35-stream: tokenizer not found: {tokenizer}"));
+    }
+    let provider: std::sync::Arc<dyn capability::Provider> = std::sync::Arc::new(qwen35::caps::Qwen35Provider::new());
+    let dir = dir.to_string();
+    let tokenizer = tokenizer.to_string();
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        capability::Invocation::new()
+            .set("streaming", serde_json::json!(true))
+            .set("weights", serde_json::json!(dir))
+            .set("tokenizer", serde_json::json!(tokenizer))
+            .set("prompt", serde_json::json!("The capital of France is"))
+            .set("max_new", serde_json::json!(req.output_artifacts.max(1)))
+            .set("temp", serde_json::json!(0.0))
+    });
+    Ok(Box::new(perf::targets::CapabilityTarget::new(provider, "generate", "token", build)))
 }
 
 /// `yolo:<weights>` - YOLOv8-style detection behind the residency executor

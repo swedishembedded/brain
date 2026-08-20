@@ -393,6 +393,37 @@ pub fn run_weights_with(opt: &Options, budget: u32, passes: u32) -> Result<Artif
     Ok(art)
 }
 
+/// `weights-qwen35` - [`run_weights_with`]'s sibling: the SAME real
+/// `weightset::WeightSet`/`ResidencyPlan` code, this time over
+/// `qwen35::config::Qwen35Config::qwen38_27b()`'s real 64-layer int8
+/// byte-cost profile (GDN vs GQA, `full_attention_interval=4`) rather than
+/// Z-Image's 34 uniformly-counted blocks - confirms the same CyclicScan-wins
+/// leaderboard result on a second real model whose blocks are NOT uniform
+/// cost, with the real bytes moved reported alongside the reload count.
+pub fn run_weights_qwen35_with(opt: &Options, budget: u32, passes: u32) -> Result<Artifact, String> {
+    let mut art = Artifact::new("weights-qwen35", perf::env::Env::capture(&opt.device), TargetInfo::new("qwen35-64-layers", "cyclic-scan"));
+    art.smoke = opt.smoke;
+
+    let started = Instant::now();
+    let runs = weights::run_qwen35(budget, passes.max(1))?;
+    let wall_s = started.elapsed().as_secs_f64().max(1e-6);
+
+    art.performance = weights::to_json_qwen35(&runs);
+    art.performance["wall_s"] = json!(r3(wall_s));
+    art.notes = Some(
+        "Drives the real weightset::WeightSet/ResidencyPlan code (not a \
+         re-simulation) over qwen35's 64 real decoder layers, weighted by \
+         their real int8 byte cost (qwen35::config::Qwen35Config::\
+         layer_i8_bytes, ~372-383 MB depending on GDN vs GQA layer type), \
+         comparing CyclicScan/Lru/AllResident's reload counts AND real bytes \
+         moved on identical seeds -- there is no randomness here, the \
+         schedule is fully deterministic. Pure host bookkeeping: no GPU, no \
+         checkpoint on disk, safe to run at any budget/passes."
+            .into(),
+    );
+    Ok(art)
+}
+
 /// `placement` — analyse per-device artifacts (device selection is process-global,
 /// so the runs must be separate processes).
 pub fn run_placement(paths: &[String]) -> Result<Artifact, String> {

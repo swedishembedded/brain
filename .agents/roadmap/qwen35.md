@@ -1175,12 +1175,167 @@ future multi-buffer-sharded head, could lift this); no
 `crates/cli`/`caps.rs` wiring for streaming training (this milestone is the
 trainer + its own gates, not a serving/CLI surface).
 
+### M19: measure M15's residency-window choice + wire qwen35 into `crates/perf`
+
+Two genuinely separate pieces, plus a real, measured performance fix found
+along the way while investigating why Piece B's one real baseline run cost as
+much as it did.
+
+**Piece A - was `stream.rs`'s `CyclicScan{lookahead:1}`/budget-4 choice ever
+actually measured against qwen35's real per-layer byte-cost profile?**
+`crates/perf/src/scenarios/weights.rs` already benchmarked `CyclicScan`/`Lru`/
+`AllResident` for Z-Image-Turbo's 34 uniformly-counted blocks; this milestone
+extended it (additively - `Run`/`run` for Z-Image untouched) with a second,
+byte-weighted arm: `ByteRun`/`run_qwen35`/`drive_bytes`, driving the SAME real
+`weightset::WeightSet` code over qwen35's real 64-layer int8 byte-cost profile
+(`Qwen35Config::layer_i8_bytes`, new - GDN 383,467,904 bytes vs GQA
+372,482,048 bytes, a real but small ~3% spread, pinned by a dedicated test).
+Real measured numbers (`weights-qwen35` scenario, pure host bookkeeping, no
+GPU/checkpoint - `brain perf run weights-qwen35`, and the crate's own tests),
+8 passes, at every budget tested:
+
+```
+budget   cyclic churn   lru count-overhead   lru bytes-overhead
+  2         1.000              1.016               1.016
+  4         1.000              1.049               1.050
+  8         1.000              1.123               1.123
+ 16         1.000              1.306               1.307
+ 32         1.000              1.939               1.941
+```
+
+`CyclicScan` is exactly optimal (`1.0`, both metrics) at every budget - Bélády
+on a known schedule, confirmed rather than assumed, and confirmed that
+qwen35's real ~3% per-layer byte heterogeneity does not change the ranking
+(count- and byte-weighted overhead agree within 0.2 percentage points
+everywhere tested). `Lru`'s real disadvantage GROWS with budget (+4.9% at 4,
++93.9% at 32) - the multi-pass caching benefit `CyclicScan`'s persistent pin
+gives scales with how much of the model the window can hold.
+
+**The honest caveat that measurement needed**: `stream_all_layers` builds a
+brand-new `WeightSet` on EVERY call (`Schedule::cyclic(64, 1)` - a single,
+non-repeating pass), and `generate`'s decode loop re-invokes it fresh per
+token (no persistent state across decode steps, `stream.rs`'s own
+already-documented design decision 1). A single, non-repeating pass never
+revisits any group, so today, at `passes=1`, EVERY policy loads all 64 layers
+from disk exactly once - the leaderboard above is real and correctly proves
+`CyclicScan` is the right choice for any future design that DOES persist a
+window across passes, but it currently buys nothing over `Lru` because there
+is no cross-call persistence yet to exploit. Given that, plus M13's own
+profiling (GDN's dispatch-latency-bound cost, not weight I/O), there was no
+measured case for moving `WINDOW_BUDGET` off 4 - confirmed, not changed.
+`stream.rs`'s `LOOKAHEAD` doc and `caps.rs`'s `run_streaming` doc now carry
+these real numbers instead of asserting "conservative and safe" unmeasured.
+
+**Piece B - wire qwen35 into `crates/perf` as a `PerfTarget`.** `qwen35`
+does not fit the `build_glm`/`ExecutorTarget`/`*Resident` convention every
+other LLM target in `crates/cli/src/perf_cli.rs` uses: `crate::
+resident_qwen35::Qwen35Resident` (which mirrors `build_glm`'s pattern
+exactly) is built on `qwen35::serve::Engine`, which - like every `Qwen35::
+new_*` constructor - needs every layer's weights resolved in one host
+`HashMap` first, impossible at this config's real 27B size on this box
+(~24.4 GB even fully int8, per Piece A's own per-layer byte numbers ×64).
+`crate::stream::generate` is the only path that can run the real checkpoint
+here at all, and it deliberately has no persistent resident instance in the
+first place (a fresh streaming pass every call) - there is nothing for a
+`ResidentModel`/`Executor` to keep warm. Since `qwen35::caps::Qwen35Provider`
+already exposes this path as a plain `capability::Provider` action
+(`generate`, `streaming: true`), `perf::targets::CapabilityTarget` - the
+adapter that turns any `Provider` into a benchmarkable target with zero new
+benchmark code, previously never wired to a real CLI target - is the correct
+fit, not a forced one. New: `build_qwen35_stream`/`qwen35-stream:
+<checkpoint-dir>:<tokenizer.json>` in `perf_cli.rs`. Cost: no independent
+correctness gate (`CapabilityTarget`'s own documented limitation - one code
+path, so a two-run comparison would check an optimisation against itself);
+this target's artifacts stay honestly `correctness: not_checked()`.
+
+Given the real ~17-40 min/pass cost, only the cheapest, single-pass-implying
+scenario was run for real: `latency` at `concurrency=1`, `--requests 1
+--warmup 0 --output 1` (`startup` was checked and ruled out - it is hard-wired
+to `qwen3::serve::Engine`/`SynthSpec`, no generalization to a `Provider`
+seam without disproportionate rework). ONE real call to `crate::stream::
+generate` (`max_new=1`, real tokenizer, real prompt "The capital of France
+is", real streamed forward over all 64 real layers, real int8 lm_head, real
+greedy sampling) against `BRAIN_QWEN35_DIR`:
+
+```
+e2e_ms p50 = 1,086,513 ms  (18.11 minutes, single real pass, this box, this session's load)
+```
+
+Baseline recorded at `scripts/gates/qwen35-perf-baselines/
+qwen35-stream-latency-cpu22-gpu0.json` via `brain perf gate <candidate>
+--baseline <path> --update` (first baseline for this model, matching
+`qwen-serving-perf-gate.sh`'s established bootstrap convention).
+
+**A real, measured performance fix found investigating that number.** The
+18-minute figure prompted profiling ONE real layer's own load breakdown
+(`crates/qwen35/tests/stream_profile.rs`, new, `#[ignore]`d, real checkpoint):
+mmap open ~1-5 ms, `import_layer` (host FP8 dequant) ~11-23 s, quantize+GPU
+upload ~4-7 s, GPU forward compute ~0.05-1 s - `import_layer` was ~70-83% of
+a real layer's ~16-28 s total, utterly dwarfing GPU compute (consistent with,
+and explaining, why `qwen35_bench.rs`'s own M13 GPU-only numbers - a few
+seconds for all 64 layers combined - are nowhere near the real per-pass
+cost). Root cause: `checkpoint::safetensors`/`checkpoint::mmap`'s F8_E4M3
+byte decode (`raw.iter().map(|&b| e4m3fn_to_f32(b)).collect()`) was
+single-threaded, unlike the already-parallel `model::fp8::dequant_block128`/
+`model::int8::quantize_weight` downstream of it - the earlier LUT
+optimization (commit `068d2ff53`) made each element's own cost O(1) but never
+fanned the WALK over tens of millions of elements out across cores. Fixed:
+new `checkpoint::safetensors::decode_e4m3_bytes`, native builds route through
+`backend_cpu::par::each_mut` (the same pool/policy `dequant_block128`/
+`quantize_weight` already use), wasm32 keeps the sequential loop (no thread
+pool there). Validated with an isolated, disk-I/O-free in-memory
+micro-benchmark (`crates/checkpoint/tests/e4m3_decode_bench.rs`, new,
+`#[ignore]`d, no checkpoint needed): **10.58x speedup** (1909 ms -> 180 ms,
+380 MB synthetic buffer, 22 cores), output verified bit-identical (via
+`.to_bits()`, not `==`, since E4M3's one reserved NaN encoding makes a plain
+float `assert_eq!` spuriously fail on ~1/128 of a random buffer). Re-verified
+correct on the REAL checkpoint after the fix: `real_weight_streaming.rs`'s
+ignored real-weight-vs-golden tests (layer 0/3/63 + embed/lm_head) still pass
+at cosine=1.000000000 unchanged.
+
+**Also checked (validated, no code change needed)**: whether
+`crates/backend-cpu`'s AVX2 fast path is actually engaged for the CPU JIT
+training path's (`stream_train_step.rs`, forced onto CPU by the fp32
+lm_head/`max_buffer_size` constraint) matmul-heavy dispatch, or silently
+falling back to scalar. Measured directly (`qwen35_bench mlp 128 3` on
+`BRAIN_DEVICE=cpu`, `BRAIN_NO_FASTCONV=1` vs default): 12504 ms/rep -> 4229
+ms/rep, a real 2.96x - already active by default on this box (AVX2 present,
+`BRAIN_NO_FASTCONV` unset), confirmed rather than assumed.
+
+**Honestly out of scope, not attempted**: a cross-pass persistent weight
+cache (letting `generate`'s decode loop share ONE `WeightSet` across steps,
+turning Piece A's currently-inert leaderboard into a real per-step saving).
+Investigated and NOT built: this box's usable RAM (~18 GiB) is smaller than
+the checkpoint's own on-disk footprint (~24-30 GB), so neither host page
+cache nor a bounded device-side window can hold the whole model resident
+across steps regardless of policy - the dominant real cost above `import_
+layer`'s own (now-parallelized) CPU decode work is disk I/O for data that
+does not fit in RAM either way, which a caching policy cannot remove, only a
+future bigger-RAM box or faster storage can. Restructuring the decode loop's
+weight-set lifecycle to attempt it anyway would be a real, separate
+engineering effort this milestone's own real-run budget could not afford to
+validate properly (each iteration costing a real ~17-40 min pass) without
+disproportionate risk to a delicate streaming decode path - left as a
+follow-up, not rushed.
+
+**Verification**: `cargo test -p brain-perf` (all green, including the new
+`weights::tests::qwen35_*` suite); `cargo test -p brain-qwen35 --lib --bins
+--tests` (all green, unchanged in shape) and, separately,
+`real_weight_streaming.rs --ignored` against the real checkpoint (all 4
+green, cosine=1.0 unchanged - the correctness re-check the E4M3 decode
+parallelization needed); `cargo test -p brain-cli` (all green); `cargo
+clippy -p brain-perf -p brain-qwen35 -p brain-checkpoint --all-targets -- -D
+warnings` (clean); the same command WITH `-p brain-cli` added surfaces only
+the 19 already-recorded, pre-existing `crates/ltxv` errors (pulled in
+because `brain-cli` depends on it; not touched by, or related to, this
+milestone); `make build` and `make gradcheck` both pass.
+
 ## Not yet done
 
-Nothing - all milestones (M0-M18) are complete. Remaining scope is the
+Nothing - all milestones (M0-M19) are complete. Remaining scope is the
 recorded gaps below, none of which are achievable on this development
 machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's/M17's/
-M18's own "not done" items just above.
+M18's/M19's own "not done" items just above.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
@@ -1228,6 +1383,11 @@ M18's own "not done" items just above.
 - `reasoning_effort` (xhigh/medium/low) is not wired into `caps.rs`: no
   verified Qwen3.8 prompt-injection convention was found to implement it
   against - only `enable_thinking` (reused from `qwen3::chat`) is real.
+- No cross-pass persistent weight cache in `stream::generate`'s decode loop
+  (M19's own investigation) - this box's usable RAM is smaller than the
+  checkpoint's on-disk footprint, so the win is capped by disk I/O regardless
+  of caching policy; a genuinely bigger-RAM box is the real prerequisite, not
+  more code here.
 
 Never write an intermediate full-precision whole-model file (~108 GB) - quantized
 device buffers must be built directly from the compressed FP8 checkpoint, same
