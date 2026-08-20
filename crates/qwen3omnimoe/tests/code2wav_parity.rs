@@ -21,14 +21,14 @@
 //! same pattern every real-weight test in this crate uses). The loader-side
 //! naming mismatch this comment used to describe (`map_code2wav` renaming
 //! `pre_transformer.layers.N` onto the dense-attention convention, which
-//! `mimi::Codec`'s own `ParamStore` lookups never expected) is FIXED as of
-//! the M9b follow-up: `map_code2wav` is now a plain prefix strip, matching
-//! what this test already proves is correct.
+//! `mimi::Codec`'s own `ParamStore` lookups never expected) is fixed:
+//! `map_code2wav` is now a plain prefix strip, matching what this test
+//! already proves is correct.
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard holding
 //! `code2wav.*` (shard 15 of 15) is absent.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test code2wav_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;

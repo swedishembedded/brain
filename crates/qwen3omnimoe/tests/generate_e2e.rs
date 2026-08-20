@@ -8,8 +8,8 @@
 //! validation the "download the rest, validate for real" decision was for.
 //!
 //! Every stage this loop composes has already been proven exact in
-//! isolation (layer0 cosine 1.000000 on M6a/M6b, the KV-cache primitive's
-//! own algebraic-equivalence test in `model::block`) — this test's own risk
+//! isolation (layer0 cosine 1.000000, and the KV-cache primitive's own
+//! algebraic-equivalence test in `model::block`) - this test's own risk
 //! surface is purely the LOOP: prefill/decode sequencing, cache indexing,
 //! tokenizer round-trip, and greedy sampling, chained across 48 real layers
 //! for 5 real generated tokens. A single wrong index anywhere in that chain
@@ -32,8 +32,8 @@
 //! bit-identical to a bf16 reference) rounding rather than a loop-control
 //! bug: the SAME `decode_step` code path ran correctly 3 times immediately
 //! before diverging, and every primitive it composes is independently
-//! cosine-1.000000-exact against these same real weights (M6a/M6b/M8b's
-//! `model::block` test). The assertion below stays a strict exact match
+//! cosine-1.000000-exact against these same real weights (see
+//! `model::block`'s own test). The assertion below stays a strict exact match
 //! (weakening it would hide a REAL future regression) — this is a known,
 //! documented, environment-specific mismatch on this one 5-token prompt, not
 //! a passing test; a longer run or a different prompt may or may not hit the
@@ -49,7 +49,7 @@
 //! token, not milliseconds. Marked `#[ignore]`, matching every other
 //! real-weight test in this crate.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test generate_e2e -- --ignored --nocapture`
 
 use std::path::PathBuf;
