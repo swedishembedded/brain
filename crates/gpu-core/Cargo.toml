@@ -24,6 +24,12 @@ brain-kernels.workspace = true
 # spellings this replaced were two allocating `to_bits().collect()` copies and
 # one `cast_slice`; the shared one keeps the cheapest of them.
 bytemuck.workspace = true
+# The process-wide memory ceiling (`--limit-vram-total`/`--limit-ram-total`).
+# A leaf crate (std only, no GPU code), so depending on it here - at the ONE
+# allocation chokepoint every model crate goes through - adds no graph weight
+# and cannot cycle. With no ceiling published it costs one relaxed atomic load
+# per allocation and nothing else.
+brain-memauth.workspace = true
 
 # Native builds carry all three eager backends; the active one is chosen at
 # runtime per `Gpu` instance (registry lookup by name). wasm keeps only the

@@ -46,15 +46,23 @@ use s3dit::pipeline::{HotPipeline, Image, Paths};
 /// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
 pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[u32], reserved: u64, cpu_ram: u64, pool_ram: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Executor {
     let mut budgets = residency::budget::Budgets::new();
+    // The process-wide ceiling (`--limit-vram-total`/`--limit-ram-total`) is
+    // applied to EVERY budget below, so the advisory placement layer and the
+    // hard enforcement in `gpu_core::Gpu`'s allocation path cannot disagree: a
+    // placement is never planned against capacity the ceiling would refuse at
+    // the first `storage()` call. `Limits::clamp` is the identity function
+    // when no ceiling is set, which is the default.
+    let limits = memauth::limits();
     for &(i, total) in gpus {
-        budgets.set(Device::Gpu(i), total, reserved);
+        budgets.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), total), reserved);
     }
     // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu
     // > 0) is then auto-placed there in preference to CPU/GPU (see place::pick_device).
+    // An NPU's bytes ARE host RAM, so `--limit-ram-total` is what bounds it.
     for &(i, total) in npus {
-        budgets.set(Device::Npu(i), total, 0);
+        budgets.set(Device::Npu(i), limits.clamp(Device::Npu(i), total), 0);
     }
-    budgets.set(Device::Cpu, cpu_ram, 0);
+    budgets.set(Device::Cpu, limits.clamp(Device::Cpu, cpu_ram), 0);
     // The unified-memory fix (see memauth's module doc): declare every device
     // that physically shares this RAM into ONE pool, so a charge on any of
     // them correctly reduces what all the others have free — instead of two
@@ -65,7 +73,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     shared.extend(unified_gpus.iter().map(|&i| Device::Gpu(i)));
     shared.extend(npus.iter().map(|&(i, _)| Device::Npu(i)));
     if shared.len() > 1 {
-        budgets.set_pool(memauth::HOST_POOL, &shared, pool_ram, 0);
+        budgets.set_pool(memauth::HOST_POOL, &shared, limits.clamp(Device::Cpu, pool_ram), 0);
     }
 
     let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();

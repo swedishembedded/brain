@@ -1024,6 +1024,7 @@ dependencies = [
  "brain-backend-vulkan",
  "brain-backend-wgpu",
  "brain-kernels",
+ "brain-memauth",
  "brain-testutil",
  "bytemuck",
  "libc",

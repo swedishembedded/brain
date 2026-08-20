@@ -502,10 +502,15 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
 /// Live host RAM this process could actually get right now: `MemAvailable`
 /// intersected with any cgroup v2 limit - see `memauth::HostProbe`, whose
 /// doc carries the `MemAvailable`-over-`MemTotal` rationale this used to
-/// duplicate locally. `query_ram_bytes` (the old name, kept public within
-/// the crate since `perf_cli.rs` calls it by that name) is now a thin alias.
+/// duplicate locally - and then with `--limit-ram-total` if one was published.
+/// The ceiling belongs HERE, at the one function that answers "how much host
+/// RAM may this process use": a caller that bounded itself by RAM before the
+/// flag existed is bounded by the flag too, with nothing to remember.
+/// `query_ram_bytes` (the old name, kept public within the crate since
+/// `perf_cli.rs` calls it by that name) is now a thin alias.
 pub(crate) fn host_ram_available() -> u64 {
-    memauth::HostProbe::new(memauth::HOST_POOL).available(memauth::HOST_POOL)
+    let live = memauth::HostProbe::new(memauth::HOST_POOL).available(memauth::HOST_POOL);
+    memauth::limits().clamp(memauth::Device::Cpu, live)
 }
 
 /// Which serving surfaces to bring up and their config (see `run_apis`).

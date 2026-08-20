@@ -31,19 +31,25 @@
 //! (within-instance weight residency, checked mid-generation) can depend on
 //! it without depending on each other.
 //!
-//! # Wiring status — read before trusting the name (audit F12)
+//! # Wiring status - read before trusting the name
 //!
-//! Despite the title above, [`MemoryAuthority`]/[`Grant`]/[`Topology`] have
-//! **no production consumer yet**: the LIVE accounting every placement
-//! decision actually runs through is `residency::Budgets` (whose
-//! `set_pool` carries the unified-memory fix), and the only production uses
-//! of this crate are [`PoolId`]/[`HOST_POOL`] (as `Budgets`' pool key type)
-//! and one [`HostProbe::available`] call. The authority half is the
-//! *intended* future single owner — wiring it into residency/weightset (or
-//! folding `Budgets`' pool layer into it) is the open follow-up; until that
-//! lands, changes to `Budgets` are what change behaviour, not changes here.
-//! The `request` transaction is race-free (check+charge under one lock), so
-//! wiring it later does not inherit an over-commit bug.
+//! [`MemoryAuthority`]/[`Grant`]/[`Topology`] have exactly ONE production
+//! consumer: the process-wide ceiling in [`limits`] (`--limit-vram-total` /
+//! `--limit-ram-total`), enforced at `gpu_core::Gpu`'s four allocation
+//! methods. That path is **opt-in** - with no ceiling published, [`authority`]
+//! returns `None`, no authority is ever constructed and nothing is charged.
+//!
+//! Everything ELSE still accounts through `residency::Budgets` (whose
+//! `set_pool` carries the unified-memory fix), which those same ceilings
+//! clamp (`crates/cli/src/resident.rs::build_executor`) so the advisory and
+//! hard layers agree. So: for an unlimited run, changes to `Budgets` are what
+//! change behaviour; for a limited one, both matter. Folding `Budgets`' pool
+//! layer into this authority - one owner instead of two agreeing ones - is
+//! still the open follow-up. `request` is race-free (check+charge under one
+//! lock), so widening its use does not inherit an over-commit bug.
+
+mod limits;
+pub use limits::{authority, denial_message, enforcing, limits, parse_size, publish_limits, Limits, VRAM_POOL};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -84,6 +90,8 @@ pub const HOST_POOL: PoolId = PoolId(0);
 #[derive(Clone, Debug, Default)]
 pub struct Topology {
     of: HashMap<Device, PoolId>,
+    all_gpus: Option<PoolId>,
+    all_npus: Option<PoolId>,
 }
 
 impl Topology {
@@ -97,13 +105,41 @@ impl Topology {
         self
     }
 
-    /// `d`'s pool: whatever was declared, else a stable per-device default —
-    /// `Cpu` defaults to [`HOST_POOL`]; every `Gpu`/`Npu` index defaults to
-    /// its OWN pool (so two undeclared discrete GPUs never collide with each
-    /// other or with the host), reproducing today's "every device is its own
-    /// budget" behaviour with zero declarations.
+    /// Declare that EVERY GPU - including indices nobody has enumerated -
+    /// draws from pool `p`. A per-device [`Self::declare`] still wins over it.
+    ///
+    /// This is what a process-wide ceiling (`--limit-vram-total`, see
+    /// `limits`) actually is: one total for all the cards, not a cap repeated
+    /// per card. Expressing it by declaring `0..n` would need to know `n`,
+    /// which the ceiling deliberately does not (it must bind a card the
+    /// registry never probed just as hard).
+    pub fn declare_all_gpus(&mut self, p: PoolId) -> &mut Self {
+        self.all_gpus = Some(p);
+        self
+    }
+
+    /// [`Self::declare_all_gpus`] for the NPUs.
+    pub fn declare_all_npus(&mut self, p: PoolId) -> &mut Self {
+        self.all_npus = Some(p);
+        self
+    }
+
+    /// `d`'s pool: whatever was declared for it specifically, else its class's
+    /// pool ([`Self::declare_all_gpus`]/[`Self::declare_all_npus`]), else a
+    /// stable per-device default - `Cpu` defaults to [`HOST_POOL`]; every
+    /// `Gpu`/`Npu` index defaults to its OWN pool (so two undeclared discrete
+    /// GPUs never collide with each other or with the host), reproducing
+    /// today's "every device is its own budget" behaviour with zero
+    /// declarations.
     pub fn pool_of(&self, d: Device) -> PoolId {
-        *self.of.get(&d).unwrap_or(&default_pool(d))
+        if let Some(p) = self.of.get(&d) {
+            return *p;
+        }
+        match d {
+            Device::Gpu(_) if self.all_gpus.is_some() => self.all_gpus.unwrap(),
+            Device::Npu(_) if self.all_npus.is_some() => self.all_npus.unwrap(),
+            _ => default_pool(d),
+        }
     }
 }
 

@@ -149,6 +149,20 @@ mod native_facade {
 
     static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan
 
+    /// Bytes a `storage(n)`/`storage_init(data)` call really reserves: `n`
+    /// four-byte words, with the backends' minimum of one word for `n == 0`
+    /// (an empty buffer is not a legal binding).
+    fn storage_bytes(words: u64) -> u64 {
+        (words * 4).max(4)
+    }
+
+    /// Bytes a `uniform_dynamic(len)` call really reserves: `len` four-byte
+    /// words rounded up to the 16-byte uniform-buffer alignment, minimum one
+    /// 16-byte block.
+    fn uniform_bytes(len: usize) -> u64 {
+        (((len * 4).div_ceil(16) * 16).max(16)) as u64
+    }
+
     /// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
     /// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu|vulkan`
     /// selects that backend; otherwise the default is wgpu.
@@ -280,12 +294,15 @@ mod native_facade {
     pub struct WeakGpu {
         weak: Box<dyn backend_api::WeakBackend>,
         names: Arc<Vec<String>>,
+        /// The pool the upgraded handle charges to - carried from the handle
+        /// this was downgraded from, since it is the same physical device.
+        mem_device: memauth::Device,
     }
 
     impl WeakGpu {
         /// A fresh strong handle, if the device is still alive.
         pub fn upgrade(&self) -> Option<Gpu> {
-            self.weak.upgrade().map(|inner| Gpu::wrap(inner, self.names.clone()))
+            self.weak.upgrade().map(|inner| Gpu::wrap_on(inner, self.names.clone(), self.mem_device))
         }
     }
 
@@ -313,14 +330,64 @@ mod native_facade {
         /// `(registered slot, faster slot, thread multiplier)`. Usually empty;
         /// see [`crate::upgrade`] for what qualifies and why the seam exists.
         upgrades: Vec<(usize, usize, u32)>,
+        /// Which pool this handle's allocations are charged to under
+        /// `--limit-vram-total`/`--limit-ram-total` - the physical card this
+        /// device was built on, or `Cpu` for the CPU backend. Resolved once at
+        /// construction from the SAME ambient selection `Gpu::new` itself uses
+        /// (`devices::current_gpu()`: scoped `with_gpu` > `--device gpu<i>` pin
+        /// > `BRAIN_GPU_INDEX`), never a second mechanism.
+        mem_device: memauth::Device,
+        /// RAII claims against the process-wide ceiling, one per allocation
+        /// made through this handle, released together when the handle drops.
+        ///
+        /// Held here rather than on `DeviceBuffer` because `DeviceBuffer` has
+        /// deliberately no size and no drop hook: it is `Arc<Erased>`, clones
+        /// alias, and a sub-range binding's "size" would be a lie (see
+        /// `memauth`'s module doc). The consequence is deliberate and worth
+        /// stating: a charge is released when the HANDLE dies, not when an
+        /// individual buffer does, so a long-lived handle that churns
+        /// temporaries over-counts. That matches how this engine already
+        /// scopes VRAM - a fresh `Gpu` per call, released between calls (see
+        /// `ltxv::dit::forward_q_streamed`'s `open_device`) - and erring
+        /// toward over-counting is the safe direction for a ceiling. Empty,
+        /// never locked and never allocated when no ceiling is set.
+        grants: Mutex<Vec<memauth::Grant>>,
     }
 
     impl Gpu {
         fn wrap(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>) -> Gpu {
+            let mem_device = Self::ambient_mem_device(inner.kind());
+            Gpu::wrap_on(inner, names, mem_device)
+        }
+
+        /// [`Gpu::wrap`] for a handle whose physical card is known explicitly
+        /// (`new_on`/`new_on_index`/`new_wgpu_multi`), rather than inherited
+        /// from the ambient selection.
+        fn wrap_on(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>, mem_device: memauth::Device) -> Gpu {
             // Per handle, once: the policy is a pure function of names + caps,
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
-            Gpu { inner, names, counters: Mutex::new(Default::default()), cost_enabled: std::sync::atomic::AtomicBool::new(false), upgrades }
+            Gpu {
+                inner,
+                names,
+                counters: Mutex::new(Default::default()),
+                cost_enabled: std::sync::atomic::AtomicBool::new(false),
+                upgrades,
+                mem_device,
+                grants: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The memory device a handle on this backend, on this thread, is
+        /// charged against. The CPU backend's bytes are host RAM; everything
+        /// else lands on the canonically-indexed card the ambient selection
+        /// resolves to (index 0 when nothing is selected, matching
+        /// `selected_device`'s own fallback).
+        fn ambient_mem_device(kind: &str) -> memauth::Device {
+            match kind {
+                "cpu" => memauth::Device::Cpu,
+                _ => memauth::Device::Gpu(crate::devices::current_gpu().unwrap_or(0)),
+            }
         }
 
         fn kernel_names(kernels: &[(&str, &str)]) -> Arc<Vec<String>> {
@@ -408,7 +475,13 @@ mod native_facade {
                 _ => Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity)),
             };
             record_caps(inner.as_ref());
-            Gpu::wrap(inner, Self::kernel_names(kernels))
+            // Explicit placement, so the ceiling charges the card the caller
+            // named - not whatever the ambient selection happens to be.
+            let mem = match inner.kind() {
+                "cpu" => memauth::Device::Cpu,
+                _ => memauth::Device::Gpu(dev.index),
+            };
+            Gpu::wrap_on(inner, Self::kernel_names(kernels), mem)
         }
 
         /// [`Gpu::new_on`] by canonical index - the common call shape where the
@@ -437,7 +510,10 @@ mod native_facade {
         /// building a fresh device, which is correct, just not free.
         pub fn share(&self) -> Gpu {
             match self.inner.share() {
-                Some(inner) => Gpu::wrap(inner, self.names.clone()),
+                // The same physical device, so the same memory pool: a shared
+                // handle must charge where its parent charges, never re-resolve
+                // the ambient selection (which may have moved on).
+                Some(inner) => Gpu::wrap_on(inner, self.names.clone(), self.mem_device),
                 None => panic!(
                     "this backend cannot share a device; build a new Gpu instead"
                 ),
@@ -449,7 +525,7 @@ mod native_facade {
         /// has no shareable device; building fresh there is cheap and correct).
         pub fn share_or_new(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.inner.share() {
-                Some(inner) => Gpu::wrap(inner, self.names.clone()),
+                Some(inner) => Gpu::wrap_on(inner, self.names.clone(), self.mem_device),
                 None => Gpu::new(kernels),
             }
         }
@@ -461,7 +537,7 @@ mod native_facade {
         pub fn new_like(&self, kernels: &[(&str, &str)]) -> Gpu {
             let kernels = &Self::expanded(kernels);
             match self.inner.new_like(kernels) {
-                Some(inner) => Gpu::wrap(inner, Self::kernel_names(kernels)),
+                Some(inner) => Gpu::wrap_on(inner, Self::kernel_names(kernels), self.mem_device),
                 None => Gpu::new(kernels),
             }
         }
@@ -527,7 +603,7 @@ mod native_facade {
         /// A weak handle for pools/fixtures - see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {
-            self.inner.downgrade().map(|weak| WeakGpu { weak, names: self.names.clone() })
+            self.inner.downgrade().map(|weak| WeakGpu { weak, names: self.names.clone(), mem_device: self.mem_device })
         }
 
         /// Build on the native CPU backend regardless of the default selection.
@@ -566,7 +642,7 @@ mod native_facade {
                         let inner: Box<dyn backend_api::Backend> =
                             Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &d.identity));
                         record_caps(inner.as_ref());
-                        Gpu::wrap(inner, names.clone())
+                        Gpu::wrap_on(inner, names.clone(), memauth::Device::Gpu(d.index))
                     })
                     .collect();
             }
@@ -583,17 +659,98 @@ mod native_facade {
                 .map(|g| Gpu::wrap(Box::new(g), Self::kernel_names(kernels)))
         }
 
+        // ---- allocation, and the process-wide ceiling it is charged to -----
+        //
+        // These four are the one place essentially every model crate reaches
+        // device memory, which is why `--limit-vram-total`/`--limit-ram-total`
+        // are enforced HERE and nowhere else: a new model inherits the ceiling
+        // by allocating the way every other model already does, with nothing
+        // to remember and nothing to copy.
+        //
+        // Each `bytes` figure is the backend's own sizing formula for that
+        // call (see `backend-wgpu`'s `storage`/`uniform_dynamic`), so the
+        // charge matches what is really reserved rather than the caller's
+        // logical element count. A backend that pads differently is off by its
+        // own padding, which is why the doc says best-effort.
+
+        /// Which memory pool this handle's allocations are charged to.
+        pub fn memory_device(&self) -> memauth::Device {
+            self.mem_device
+        }
+
+        /// Bytes this handle currently holds against the process-wide ceiling.
+        /// Always 0 when no ceiling is set (nothing is charged at all).
+        pub fn charged_bytes(&self) -> u64 {
+            self.grants.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|g| g.bytes()).sum()
+        }
+
+        /// Claim `bytes` against the ceiling, keeping the grant alive for this
+        /// handle's lifetime. `Ok(())` immediately - one relaxed atomic load,
+        /// no lock, no allocation - when no ceiling is published, which is the
+        /// case for every run that does not pass the flags.
+        #[inline]
+        fn try_charge(&self, tag: &'static str, bytes: u64) -> Result<(), memauth::Denied> {
+            let Some(auth) = memauth::authority() else { return Ok(()) };
+            let grant = auth.request(self.mem_device, bytes, tag)?;
+            self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
+            Ok(())
+        }
+
+        /// [`Self::try_charge`] for the infallible facade methods. Allocation
+        /// failure has always been fatal here (the backends themselves panic
+        /// or abort inside the driver on a failed `create_buffer`), so this
+        /// keeps that shape rather than introducing a second, inconsistent
+        /// one. What changes is that it now fails EARLY, deterministically,
+        /// and with a message naming the flag to raise, instead of a
+        /// driver-level OOM. Callers that want to handle the refusal
+        /// themselves use the `try_*` variants below.
+        #[inline]
+        fn charge(&self, tag: &'static str, bytes: u64) {
+            if let Err(denied) = self.try_charge(tag, bytes) {
+                panic!("brain: {}", memauth::denial_message(self.mem_device, tag, bytes, denied));
+            }
+        }
+
+        /// Device storage for `n` u32/f32 words.
         pub fn storage(&self, n: u64) -> DeviceBuffer {
+            self.charge("storage", storage_bytes(n));
             self.inner.storage(n)
         }
+        /// [`Self::storage`], returning the ceiling's refusal instead of
+        /// panicking on it.
+        pub fn try_storage(&self, n: u64) -> Result<DeviceBuffer, memauth::Denied> {
+            self.try_charge("storage", storage_bytes(n))?;
+            Ok(self.inner.storage(n))
+        }
         pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+            self.charge("storage_init", storage_bytes(data.len() as u64));
             self.inner.storage_init(name, data)
         }
+        /// [`Self::storage_init`], returning the ceiling's refusal instead of
+        /// panicking on it.
+        pub fn try_storage_init(&self, name: &str, data: &[f32]) -> Result<DeviceBuffer, memauth::Denied> {
+            self.try_charge("storage_init", storage_bytes(data.len() as u64))?;
+            Ok(self.inner.storage_init(name, data))
+        }
         pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+            self.charge("buffer", size);
             self.inner.buffer(label, size, usage)
         }
+        /// [`Self::buffer`], returning the ceiling's refusal instead of
+        /// panicking on it.
+        pub fn try_buffer(&self, label: &str, size: u64, usage: BufUsage) -> Result<DeviceBuffer, memauth::Denied> {
+            self.try_charge("buffer", size)?;
+            Ok(self.inner.buffer(label, size, usage))
+        }
         pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+            self.charge("uniform", uniform_bytes(len));
             self.inner.uniform_dynamic(len)
+        }
+        /// [`Self::uniform_dynamic`], returning the ceiling's refusal instead
+        /// of panicking on it.
+        pub fn try_uniform_dynamic(&self, len: usize) -> Result<DeviceBuffer, memauth::Denied> {
+            self.try_charge("uniform", uniform_bytes(len))?;
+            Ok(self.inner.uniform_dynamic(len))
         }
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
             self.inner.write(buf, data)
@@ -804,6 +961,12 @@ pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
     set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, WeakGpu,
 };
+
+/// What `Gpu::try_storage` and friends return when the process-wide ceiling
+/// (`--limit-vram-total`/`--limit-ram-total`) refuses an allocation.
+/// Re-exported so a caller handling a refusal needs no direct `memauth`
+/// dependency of its own.
+pub use memauth::Denied;
 
 // ---- wasm facade ------------------------------------------------------------
 
