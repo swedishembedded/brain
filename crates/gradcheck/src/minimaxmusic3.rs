@@ -10,7 +10,7 @@
 //! only thing worth checking is those kernels running for real, not a
 //! second host implementation.
 
-use minimaxmusic3::config::VocoderConfig;
+use minimaxmusic3::config::{DitConfig, VocoderConfig};
 use minimaxmusic3::train::{random_weights, Trainer};
 
 use crate::CheckModel;
@@ -42,6 +42,59 @@ impl CheckModel for VocoderCheck {
     fn backward(&self) {
         self.0.backward();
     }
+}
+
+/// Same orphan-rule wrapper as [`VocoderCheck`], over the DiT's own
+/// `dit_train::Trainer`.
+pub struct DitCheck(pub minimaxmusic3::dit_train::Trainer);
+
+impl CheckModel for DitCheck {
+    fn param_names(&self) -> Vec<String> {
+        self.0.param_names()
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.0.read_weight(name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        self.0.write_weight(name, data);
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.0.read_grad(name)
+    }
+    fn loss(&self) -> f32 {
+        self.0.loss()
+    }
+    fn zero_grads(&self) {
+        self.0.zero_grads();
+    }
+    fn backward(&self) {
+        self.0.backward();
+    }
+}
+
+/// A tiny DiT: `num_layers=2, num_attention_heads=2, attention_head_dim=4`
+/// (`inner_dim=8`), `rotary_dim=2`, matching
+/// `crates/minimaxmusic3::config::DitConfig::tiny`. Every structural
+/// feature the real DiT has is present (partial RoPE, bidirectional
+/// attention, the fused gated FFN, the prepended timestep token) - only the
+/// sizes are small.
+pub fn tiny_dit_config() -> DitConfig {
+    DitConfig::tiny()
+}
+
+pub fn check_dit(seed: u64) -> crate::Report {
+    let cfg = tiny_dit_config();
+    let w = minimaxmusic3::dit_train::random_weights(&cfg, seed);
+    let length = 3usize;
+    let mut r = data::rng::Lcg::new(seed ^ 0x1DE5_1234);
+    let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+    let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+    let timestep = 0.4f32;
+    let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+
+    let trainer = minimaxmusic3::dit_train::Trainer::new(cfg, &w, latents, condition, timestep, length, target);
+    let model = DitCheck(trainer);
+    crate::directional_check(&model, 5e-3, 4, seed)
 }
 
 /// A tiny vocoder: `latent_channels=4` (2 folded stereo streams of 2),
@@ -78,6 +131,14 @@ mod tests {
         let report = check_vocoder(1);
         report.print();
         assert!(report.all_within(4e-3, 8e-2), "vocoder gradcheck failed: {:?}", report.failures(4e-3, 8e-2));
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    #[test]
+    fn dit_backward_matches_finite_differences() {
+        let report = check_dit(1);
+        report.print();
+        assert!(report.all_within(4e-3, 8e-2), "DiT gradcheck failed: {:?}", report.failures(4e-3, 8e-2));
         assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
     }
 }

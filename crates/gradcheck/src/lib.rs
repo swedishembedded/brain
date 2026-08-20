@@ -35,7 +35,7 @@ pub mod restore;
 pub use restore::check_codeformer;
 
 pub mod minimaxmusic3;
-pub use minimaxmusic3::check_vocoder;
+pub use minimaxmusic3::{check_dit, check_vocoder};
 
 /// SAM's decomposed relative-position bias kernels - DeepSeek-OCR's SAM ViT-B
 /// tower is the first consumer. Greenfield kernel work: the harness is the

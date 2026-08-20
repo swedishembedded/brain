@@ -35,6 +35,7 @@ check!(arcface_backward, gradcheck::check_arcface, "check_arcface");
 check!(vqgan_backward, gradcheck::check_vqgan, "check_vqgan");
 check!(clip_backward, gradcheck::check_clip, "check_clip");
 check!(vocoder_backward, gradcheck::check_vocoder, "check_vocoder");
+check!(dit_backward, gradcheck::check_dit, "check_dit");
 
 // ---- phase 4c: the four newer models ----
 //

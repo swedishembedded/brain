@@ -205,7 +205,7 @@ fn timestep_embed(w: &DitWeights, cfg: &DitConfig, timestep: f32) -> Vec<f32> {
 /// Precompute `cos`/`sin` RoPE tables, `[rows, rotary_dim/2]`, `theta=10000`
 /// (the reference `MiniMaxMusic3RotaryEmbedding`'s own default - distinct
 /// from the Global LLM's `1e6`).
-fn rope_tables(rows: usize, rotary_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn rope_tables(rows: usize, rotary_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {
     let half = rotary_dim / 2;
     let mut cos = vec![0.0f32; rows * half];
     let mut sin = vec![0.0f32; rows * half];

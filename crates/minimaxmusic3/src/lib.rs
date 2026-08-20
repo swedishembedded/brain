@@ -47,16 +47,18 @@
 //! sampling loop.
 //!
 //! Status: condition encoder, vocoder, the RVQ depth decoder, and the DiT's
-//! forward are all landed with real-weight parity cosine 1.0. The vocoder
-//! AND the depth decoder are fully trainable - full fine-tune (gradcheck on
-//! every named parameter, a real overfit demonstration) and LoRA (exact
-//! no-op at zero-init, a directional FD check on every adapter, and a
-//! training demonstration with the base weights provably frozen). The
-//! vocoder also has a from-scratch STFT-magnitude adversarial discriminator
-//! (gradchecked end to end, including through the STFT, and shown to
-//! learn). The DiT's backward/gradcheck/LoRA/int8/shard, the Global LLM's
-//! own wiring, joint generator+discriminator training, and serving land
-//! component-by-component, one crate module at a time.
+//! forward are all landed with real-weight parity cosine 1.0. The vocoder,
+//! the depth decoder, AND the DiT (`dit_train::Trainer`, device-dispatched
+//! through the same `model::block` builders `dit::forward` uses) are fully
+//! trainable - full fine-tune (gradcheck on every named parameter, a real
+//! overfit demonstration) and LoRA (exact no-op at zero-init, a directional
+//! FD check on every adapter, and a training demonstration with the base
+//! weights provably frozen) for the first two; the DiT's own LoRA is not
+//! yet landed. The vocoder also has a from-scratch STFT-magnitude
+//! adversarial discriminator (gradchecked end to end, including through
+//! the STFT, and shown to learn). The DiT's LoRA/int8/shard, the Global
+//! LLM's own wiring, joint generator+discriminator training, and serving
+//! land component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
@@ -64,6 +66,7 @@ pub mod depth_decoder;
 pub mod depth_lora;
 pub mod discriminator;
 pub mod dit;
+pub mod dit_train;
 pub mod lora;
 pub mod train;
 pub mod vocoder;
