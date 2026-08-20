@@ -38,6 +38,12 @@ brain-capability.workspace = true
 # Box-Muller stream `wan::pipeline` uses, for reproducible `--seed` runs.
 brain-data.workspace = true
 serde_json.workspace = true
+# Real image-conditioning input (`--image <path>`): decode + resize the
+# conditioning still to the target resolution before it is encoded through
+# the real video VAE. `png`/`jpeg` cover every format a real capture is
+# likely to arrive in; no `pnm` (that's `brain-data`'s own synthetic-dataset
+# concern, not a real photo's).
+image = { workspace = true, features = ["jpeg", "png"] }
 # The `tracing` FACADE only - never a subscriber. `--trace-ltxv <0-5>` (the
 # `brain` CLI installs the one subscriber) turns these events on; with none
 # installed every macro below is a predictable-branch no-op, so instrumenting

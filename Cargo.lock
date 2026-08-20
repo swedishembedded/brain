@@ -1167,6 +1167,7 @@ dependencies = [
  "brain-testutil",
  "brain-vae",
  "half",
+ "image",
  "serde_json",
  "tracing",
 ]

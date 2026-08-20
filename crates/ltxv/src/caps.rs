@@ -60,6 +60,8 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
+    .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and held fixed as frame 0 (VideoConditionByKeyframeIndex, strength=1.0) while the rest of the clip denoises around it. Requires eta=0 (the ancestral renoise path is not yet extended to per-token sigma) and dit_config=ltx25_22b (the real VAE)."))
+    .param(ParamSpec::new("end_frame", ParamType::Str, "optional path to a PNG/JPEG still, held fixed as the clip's LAST pixel frame the same way start_frame holds frame 0. Same image as start_frame for a clip that loops seamlessly (the generated content in between connects the still to itself); a different image for a clip that morphs from one still to another. Same eta/dit_config requirements as start_frame."))
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)").default(json!(d.frames)))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32)").default(json!(d.width)))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
@@ -145,6 +147,8 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         context_len: d.context_len,
         dit_config,
         device: None,
+        start_frame: inv.get_str("start_frame"),
+        end_frame: inv.get_str("end_frame"),
     };
     use crate::vae3d::LtxVaeConfig;
     let vcfg = LtxVaeConfig::conv25();
@@ -197,6 +201,11 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         context_len: d.context_len,
         dit_config,
         device: None,
+        // DFR's own temporal/canvas layout doesn't route through
+        // `generate`'s single-frame-conditioning path - image conditioning
+        // is `t2v`-only this pass.
+        start_frame: None,
+        end_frame: None,
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
     let opts = DfrOpts { base, temporal_upsample_rounds };

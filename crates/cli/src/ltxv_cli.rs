@@ -47,6 +47,16 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --dit-config <name>         DiT config; "tiny" (default, fresh random
                              weights) or "ltx25_22b" (the real 22B
                              checkpoint, needs --dit/$BRAIN_LTXV_DIT)
+  --start-frame <path>         PNG/JPEG still, encoded through the real VAE
+                             and held fixed as frame 0 while the rest of
+                             the clip denoises around it. Requires --eta 0.
+  --end-frame <path>           same, held fixed as the clip's LAST pixel
+                             frame instead. Pass the SAME path as
+                             --start-frame for a clip that loops
+                             seamlessly (the generated content in between
+                             connects the still to itself); a different
+                             path for a clip that morphs between two
+                             stills. Either flag works alone.
 
 Weights (flag wins over the environment variable):
   --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
@@ -177,9 +187,15 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--text-encoder" => {
                 text_encoder = Some(need(i)?.clone());
             }
+            "--start-frame" => {
+                o.start_frame = Some(need(i)?.clone());
+            }
+            "--end-frame" => {
+                o.end_frame = Some(need(i)?.clone());
+            }
             // `--no-stretch` is a bare flag (no value), unlike every other
-            // option above - handled separately so the `i += 2` stride below
-            // stays uniform for everything else.
+            // option above - handled separately so the `i += 2` stride
+            // below stays uniform for everything else.
             "--no-stretch" => {
                 o.stretch = false;
                 i += 1;
@@ -214,8 +230,15 @@ fn t2v(args: &[String]) -> Result<(), String> {
     } else {
         format!("{}", o.steps)
     };
+    let img_desc = match (o.start_frame.as_deref(), o.end_frame.as_deref()) {
+        (Some(s), Some(e)) if s == e => format!(", looped ({s})"),
+        (Some(s), Some(e)) => format!(", start-frame ({s}) -> end-frame ({e})"),
+        (Some(s), None) => format!(", start-frame ({s})"),
+        (None, Some(e)) => format!(", end-frame ({e})"),
+        (None, None) => String::new(),
+    };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
 

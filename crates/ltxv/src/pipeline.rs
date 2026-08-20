@@ -76,7 +76,7 @@ use vae::blocks::Tensors;
 use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
-use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder};
+use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS};
 
 /// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
@@ -212,6 +212,22 @@ pub struct GenOpts {
     /// implemented this milestone.
     pub dit_config: String,
     pub device: Option<String>,
+    /// First-frame image conditioning (PNG/JPEG), resized to
+    /// `width`x`height` and encoded through the real video VAE - see
+    /// [`generate`]'s own doc on how this composes with `eta`. `None` is
+    /// pure text-to-video (every token noise, this pipeline's original and
+    /// still-default behavior).
+    pub start_frame: Option<String>,
+    /// Last-pixel-frame image conditioning - independent of `start_frame`
+    /// (may be the SAME path, for a clip that loops seamlessly since the
+    /// generated content in between has to connect the still to itself; or
+    /// a DIFFERENT path, for a clip that morphs from one still to another).
+    /// `append_image_conditioning`'s multi-block path with
+    /// `pixel_frame_indices = [0, frames-1]` when both are set, or a single
+    /// block at whichever end is set when only one is. At least one of
+    /// `start_frame`/`end_frame` being set is what turns image conditioning
+    /// on at all.
+    pub end_frame: Option<String>,
 }
 
 impl Default for GenOpts {
@@ -235,6 +251,8 @@ impl Default for GenOpts {
             context_len: 8,
             dit_config: "tiny".to_string(),
             device: None,
+            start_frame: None,
+            end_frame: None,
         }
     }
 }
@@ -627,6 +645,154 @@ pub fn grid_positions(f: usize, h: usize, w: usize) -> Vec<f32> {
     out
 }
 
+/// The real VAE's downsample factors (`ltx_core.types.SpatioTemporalScaleFactors.
+/// default()`): 1 latent frame covers 8 pixel frames (except the first,
+/// see [`real_pixel_positions`]'s doc), 1 latent cell covers 32x32 pixels.
+pub const VAE_TEMPORAL_SCALE: usize = 8;
+pub const VAE_SPATIAL_SCALE: usize = 32;
+
+/// `[3, T, 2]` row-major RoPE position bounds for a `(f, h, w)` latent grid,
+/// in the REAL production pipeline's own units - `ltx_core.tools.
+/// VideoLatentTools.create_initial_state`'s `get_pixel_coords(latent_coords,
+/// scale_factors, causal_fix=True)` followed by `positions[:, 0, ...] /=
+/// fps`, NOT [`grid_positions`]'s raw latent-grid integers.
+///
+/// This is a REAL, confirmed correctness gap [`grid_positions`] and this
+/// pipeline's earlier real-weight tests never caught: `LTXModel.forward`
+/// runs the same RoPE formula on whatever position values it is given, so
+/// feeding it raw latent-grid integers instead of these pixel-scaled ones
+/// produces no crash and no NaN - only a garbled, physically-meaningless
+/// spatial/temporal coordinate system for a model whose
+/// `positional_embedding_max_pos: [20, 2048, 2048]` (pixel-scale maximums,
+/// not latent-grid-scale ones - a 2048 latent-index maximum would be absurd
+/// for a model this size) was calibrated against the real ones. Every
+/// earlier real-weight DiT parity gate in this crate compared against a
+/// golden built from RAW meshgrid positions on BOTH sides (`ltxv_real_dit_
+/// dump_reference.py`'s own `det_video_modality`, a deliberate scope cut
+/// documented there as proving PORT correctness given arbitrary positions,
+/// not proving `generate`'s own position CONSTRUCTION) - so this gap was
+/// invisible to every cosine-similarity check run so far, on either side.
+///
+/// Height/width axes: `[hi*32, (hi+1)*32)` / `[wi*32, (wi+1)*32)` - a
+/// straight latent-to-pixel scale, no causal fix (only the temporal axis is
+/// causal). Frame axis: `get_pixel_coords`'s `causal_fix=True` branch
+/// rewrites `[fi*8, (fi+1)*8)` to `[max(0, fi*8+1-8), max(0, (fi+1)*8+1-8))`
+/// BEFORE the `/fps` divide - this is not an approximation, it is exactly
+/// why `fi=0` maps to `[0, 1)` (the causal VAE's own first-latent-frame ==
+/// 1-pixel-frame rule) while every later `fi` maps to a genuine 8-pixel-frame
+/// window (`[fi*8-7, fi*8+1)`), both then divided by `fps`.
+pub fn real_pixel_positions(f: usize, h: usize, w: usize, fps: f64) -> Vec<f32> {
+    let t = f * h * w;
+    let mut out = vec![0f32; 3 * t * 2];
+    let mut tok = 0usize;
+    for fi in 0..f {
+        let (pixel_start, pixel_end) = ((fi * VAE_TEMPORAL_SCALE) as f64, ((fi + 1) * VAE_TEMPORAL_SCALE) as f64);
+        let (fixed_start, fixed_end) = ((pixel_start + 1.0 - VAE_TEMPORAL_SCALE as f64).max(0.0), (pixel_end + 1.0 - VAE_TEMPORAL_SCALE as f64).max(0.0));
+        let (f_start, f_end) = (fixed_start / fps, fixed_end / fps);
+        for hi in 0..h {
+            for wi in 0..w {
+                let axis_vals = [(f_start, f_end), ((hi * VAE_SPATIAL_SCALE) as f64, ((hi + 1) * VAE_SPATIAL_SCALE) as f64), ((wi * VAE_SPATIAL_SCALE) as f64, ((wi + 1) * VAE_SPATIAL_SCALE) as f64)];
+                for (axis, &(s, e)) in axis_vals.iter().enumerate() {
+                    out[(axis * t + tok) * 2] = s as f32;
+                    out[(axis * t + tok) * 2 + 1] = e as f32;
+                }
+                tok += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `[3, lh*lw, 2]` row-major RoPE position bounds for a single-pixel-frame
+/// keyframe/conditioning image inserted at pixel-frame `frame_idx` within a
+/// clip's own timeline - `ltx_core.conditioning.types.keyframe_cond.
+/// VideoConditionByKeyframeIndex.apply_to`'s own position formula
+/// (`get_pixel_coords` on the item's own local `[0,1)` latent bound, with
+/// `causal_fix = (frame_idx == 0)`, then `+= frame_idx`, then narrowed to
+/// `[start, start+1)` since this crate only ever inserts whole-pixel-frame
+/// still images, then `/= fps`). Working through both branches of that
+/// `causal_fix` conditional by hand, they converge to the SAME final
+/// result for a single-pixel-frame item: `[frame_idx/fps, (frame_idx+1)/
+/// fps)` on the frame axis, unconditionally - the branch only matters for
+/// an INTERMEDIATE representation the final narrow-to-one-frame step
+/// erases. [`real_pixel_positions`]`(1, lh, lw, fps)` (this crate's
+/// existing "own video's frame 0" builder) is exactly this function called
+/// at `frame_idx = 0` - both compute `[0, 1/fps)` - but `real_pixel_
+/// positions` cannot express `frame_idx > 0` (its own multi-frame loop
+/// always applies the causal fix, which is only correct for a video's own
+/// sequential frame axis, not an independently-inserted keyframe elsewhere
+/// in the timeline).
+pub fn keyframe_conditioning_positions(pixel_frame_idx: usize, lh: usize, lw: usize, fps: f64) -> Vec<f32> {
+    let t = lh * lw;
+    let mut out = vec![0f32; 3 * t * 2];
+    let (f_start, f_end) = (pixel_frame_idx as f64 / fps, (pixel_frame_idx + 1) as f64 / fps);
+    let mut tok = 0usize;
+    for hi in 0..lh {
+        for wi in 0..lw {
+            let axis_vals = [(f_start, f_end), ((hi * VAE_SPATIAL_SCALE) as f64, ((hi + 1) * VAE_SPATIAL_SCALE) as f64), ((wi * VAE_SPATIAL_SCALE) as f64, ((wi + 1) * VAE_SPATIAL_SCALE) as f64)];
+            for (axis, &(s, e)) in axis_vals.iter().enumerate() {
+                out[(axis * t + tok) * 2] = s as f32;
+                out[(axis * t + tok) * 2 + 1] = e as f32;
+            }
+            tok += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod keyframe_conditioning_positions_tests {
+    use super::*;
+
+    #[test]
+    fn frame_idx_zero_matches_real_pixel_positions_own_frame_zero() {
+        let (lh, lw, fps) = (2usize, 3usize, 8.0);
+        let a = keyframe_conditioning_positions(0, lh, lw, fps);
+        let b = real_pixel_positions(1, lh, lw, fps);
+        assert_eq!(a, b, "frame_idx=0 must agree with real_pixel_positions(1, lh, lw, fps) exactly - both describe the same instant");
+    }
+
+    #[test]
+    fn nonzero_frame_idx_is_a_plain_pixel_frame_over_fps_window() {
+        let (lh, lw, fps) = (1usize, 1usize, 8.0);
+        let p = keyframe_conditioning_positions(64, lh, lw, fps);
+        // frame axis: [64/8, 65/8) = [8.0, 8.125)
+        assert_eq!((p[0], p[1]), (8.0, 8.125));
+        // height/width axes: still a plain 32x latent-to-pixel scale for the one token.
+        assert_eq!((p[2], p[3]), (0.0, 32.0));
+        assert_eq!((p[4], p[5]), (0.0, 32.0));
+    }
+}
+
+#[cfg(test)]
+mod real_pixel_positions_tests {
+    use super::*;
+
+    #[test]
+    fn frame_axis_is_causal_fixed_then_divided_by_fps() {
+        let fps = 8.0;
+        let p = real_pixel_positions(3, 1, 1, fps);
+        // fi=0: pixel [0,8) -> causal_fix [max(0,-7), max(0,1)) = [0,1) -> /8 = [0, 0.125)
+        assert_eq!((p[0], p[1]), (0.0, 0.125));
+        // fi=1: pixel [8,16) -> causal_fix [max(0,1), max(0,9)) = [1,9) -> /8 = [0.125, 1.125)
+        assert_eq!((p[2], p[3]), (0.125, 1.125));
+        // fi=2: pixel [16,24) -> causal_fix [max(0,9), max(0,17)) = [9,17) -> /8 = [1.125, 2.125)
+        assert_eq!((p[4], p[5]), (1.125, 2.125));
+    }
+
+    #[test]
+    fn height_and_width_axes_are_a_straight_32x_latent_to_pixel_scale() {
+        let p = real_pixel_positions(1, 2, 3, 8.0);
+        let t = 2 * 3;
+        // hi=0,wi=0 (tok 0): height [0,32), width [0,32)
+        assert_eq!((p[t * 2], p[t * 2 + 1]), (0.0, 32.0));
+        assert_eq!((p[2 * t * 2], p[2 * t * 2 + 1]), (0.0, 32.0));
+        // hi=1,wi=2 (tok 5, the last one - h outer, w inner): height [32,64), width [64,96)
+        assert_eq!((p[(t + 5) * 2], p[(t + 5) * 2 + 1]), (32.0, 64.0));
+        assert_eq!((p[(2 * t + 5) * 2], p[(2 * t + 5) * 2 + 1]), (64.0, 96.0));
+    }
+}
+
 /// VAE channel-major `[C, T, H, W]` -> DiT token-major `[T*H*W, C]` (unused
 /// by [`generate`] directly - the noise latent is already generated
 /// token-major - but kept for symmetry/testing and any future image-
@@ -657,6 +823,154 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
         }
     }
     out
+}
+
+/// Geometry (positions/masks) and initial content for appending one or more
+/// `lh*lw`-token image-conditioning blocks after `base_t` noise tokens - one
+/// block per `(pixel_frame_idx, cond_latent_tokens)` pair in `blocks`, each
+/// with its OWN encoded content: `GenOpts::start_frame`/`end_frame` may be
+/// the SAME image (the loop case: the generated content in between has to
+/// connect the still to itself) or two DIFFERENT ones (a morph from one
+/// still to another) - `ltx_core`'s `VideoConditionByKeyframeIndex(frame_idx,
+/// strength=1.0)`, one instance per block, `marked=false` (an ordinary
+/// image, not a generated-keyframe slot) is why `keyframes_mask` stays
+/// all-zero across the WHOLE appended range, unlike [`crate::dfr::
+/// keyframe_slots`]'s `marked=true` case.
+///
+/// Position units match [`keyframe_conditioning_positions`] exactly - see
+/// that function's own doc for the exact reference formula and why
+/// `frame_idx=0` and [`real_pixel_positions`]`(1, lh, lw, fps)` agree.
+struct ImageConditioning {
+    /// `[3, base_t + n*lh*lw, 2]`, `n = blocks.len()`.
+    positions: Vec<f32>,
+    /// `[base_t + n*lh*lw]`, all zero (see this struct's doc).
+    keyframes_mask: Vec<f32>,
+    /// `[base_t + n*lh*lw]` - `1.0` (denoise fully) on `[0, base_t)`, `0.0`
+    /// (frozen, see [`Frozen`]) on the appended range.
+    denoise_mask: Vec<f32>,
+    /// `[base_t + n*lh*lw, channels]` - each appended block holds its own
+    /// real encoded image latent (token-major, [`chw_to_tc`]'s layout); the
+    /// base range is never read (`denoise_mask` is `1.0` there) and is left
+    /// zeroed.
+    clean: Vec<f32>,
+}
+
+fn append_image_conditioning(base_t: usize, base_positions: &[f32], lh: usize, lw: usize, channels: usize, fps: f64, blocks: &[(usize, &[f32])]) -> ImageConditioning {
+    assert_eq!(base_positions.len(), 3 * base_t * 2, "append_image_conditioning: base_positions has {} values, expected {}", base_positions.len(), 3 * base_t * 2);
+    assert!(!blocks.is_empty(), "append_image_conditioning: blocks must be non-empty");
+    let block_t = lh * lw;
+    for (_, tokens) in blocks {
+        assert_eq!(tokens.len(), block_t * channels, "append_image_conditioning: a block has {} values, expected {}", tokens.len(), block_t * channels);
+    }
+    let n = blocks.len();
+    let cond_t = n * block_t;
+    let total_t = base_t + cond_t;
+
+    let mut positions = vec![0f32; 3 * total_t * 2];
+    for axis in 0..3 {
+        positions[axis * total_t * 2..axis * total_t * 2 + base_t * 2].copy_from_slice(&base_positions[axis * base_t * 2..(axis + 1) * base_t * 2]);
+    }
+    for (bi, &(frame_idx, _)) in blocks.iter().enumerate() {
+        let block_positions = keyframe_conditioning_positions(frame_idx, lh, lw, fps);
+        let dst_off = base_t + bi * block_t;
+        for axis in 0..3 {
+            let dst = axis * total_t * 2 + dst_off * 2;
+            positions[dst..dst + block_t * 2].copy_from_slice(&block_positions[axis * block_t * 2..(axis + 1) * block_t * 2]);
+        }
+    }
+
+    let keyframes_mask = vec![0f32; total_t];
+
+    let mut denoise_mask = vec![0f32; total_t];
+    denoise_mask[..base_t].fill(1.0);
+
+    let mut clean = vec![0f32; total_t * channels];
+    for (bi, &(_, tokens)) in blocks.iter().enumerate() {
+        let dst_off = (base_t + bi * block_t) * channels;
+        clean[dst_off..dst_off + block_t * channels].copy_from_slice(tokens);
+    }
+
+    ImageConditioning { positions, keyframes_mask, denoise_mask, clean }
+}
+
+#[cfg(test)]
+mod image_conditioning_tests {
+    use super::*;
+
+    #[test]
+    fn appends_lh_lw_tokens_after_base_with_frame0_bounds_and_frozen_mask() {
+        let (base_t, lh, lw, channels, fps) = (6usize, 2usize, 2usize, 3usize, 8.0);
+        let base_positions = real_pixel_positions(2, 1, 3, fps); // base_t = 2*1*3 = 6, arbitrary but matching
+        let cond_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
+
+        let ic = append_image_conditioning(base_t, &base_positions, lh, lw, channels, fps, &[(0, &cond_tokens)]);
+
+        let cond_t = lh * lw;
+        let total_t = base_t + cond_t;
+        assert_eq!(ic.positions.len(), 3 * total_t * 2);
+        assert_eq!(ic.keyframes_mask, vec![0f32; total_t], "ordinary image conditioning carries no keyframe marker");
+        assert_eq!(&ic.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "base tokens denoise fully");
+        assert_eq!(&ic.denoise_mask[base_t..], &vec![0.0f32; cond_t][..], "conditioning tokens are frozen");
+        assert_eq!(&ic.clean[..base_t * channels], &vec![0.0f32; base_t * channels][..], "base range of `clean` is never read");
+        assert_eq!(&ic.clean[base_t * channels..], &cond_tokens[..], "conditioning tokens carry the real encoded content");
+
+        // Base positions copied verbatim into [0, base_t) of every axis.
+        for axis in 0..3 {
+            assert_eq!(&ic.positions[axis * total_t * 2..axis * total_t * 2 + base_t * 2], &base_positions[axis * base_t * 2..(axis + 1) * base_t * 2]);
+        }
+        // Appended positions match a standalone real_pixel_positions(1, lh,
+        // lw, fps) - frame axis bounds [0, 1/fps) for every appended token
+        // (frame_idx=0, causal-fixed the same way the base video's own
+        // frame 0 is).
+        let expect_cond = real_pixel_positions(1, lh, lw, fps);
+        for axis in 0..3 {
+            assert_eq!(&ic.positions[axis * total_t * 2 + base_t * 2..(axis + 1) * total_t * 2], &expect_cond[axis * cond_t * 2..(axis + 1) * cond_t * 2]);
+        }
+        assert_eq!(&ic.positions[0..2], &[0.0, 0.125], "frame axis, first base token: unaffected by the appended range");
+        assert_eq!(&ic.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125], "frame axis, first appended token: frame_idx=0, same instant as the base video's own frame 0");
+    }
+
+    #[test]
+    fn loop_conditioning_appends_two_blocks_of_the_same_image_at_two_frame_indices() {
+        let (base_t, lh, lw, channels, fps) = (6usize, 2usize, 2usize, 3usize, 8.0);
+        let base_positions = real_pixel_positions(2, 1, 3, fps);
+        let cond_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
+        let last_pixel_frame = 8usize; // e.g. a 9-frame clip's last pixel-frame index
+
+        let ic = append_image_conditioning(base_t, &base_positions, lh, lw, channels, fps, &[(0, &cond_tokens), (last_pixel_frame, &cond_tokens)]);
+
+        let block_t = lh * lw;
+        let total_t = base_t + 2 * block_t;
+        assert_eq!(ic.positions.len(), 3 * total_t * 2);
+        assert_eq!(ic.keyframes_mask, vec![0f32; total_t]);
+        assert_eq!(&ic.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
+        assert_eq!(&ic.denoise_mask[base_t..], &vec![0.0f32; 2 * block_t][..], "BOTH appended blocks are frozen");
+        // Both blocks carry the SAME encoded image - one real VAE encode,
+        // reused at both timeline positions (the loop's whole point: same
+        // content at start and end).
+        assert_eq!(&ic.clean[base_t * channels..(base_t + block_t) * channels], &cond_tokens[..]);
+        assert_eq!(&ic.clean[(base_t + block_t) * channels..], &cond_tokens[..]);
+
+        // First appended block: frame_idx=0 -> [0, 0.125).
+        assert_eq!(&ic.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125]);
+        // Second appended block: frame_idx=8 -> [1.0, 1.125).
+        let second_off = base_t + block_t;
+        assert_eq!(&ic.positions[second_off * 2..second_off * 2 + 2], &[1.0, 1.125]);
+    }
+
+    #[test]
+    fn start_and_end_conditioning_may_carry_two_different_images() {
+        let (base_t, lh, lw, channels, fps) = (6usize, 2usize, 2usize, 3usize, 8.0);
+        let base_positions = real_pixel_positions(2, 1, 3, fps);
+        let start_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| i as f32).collect();
+        let end_tokens: Vec<f32> = (0..lh * lw * channels).map(|i| 100.0 + i as f32).collect();
+
+        let ic = append_image_conditioning(base_t, &base_positions, lh, lw, channels, fps, &[(0, &start_tokens), (8, &end_tokens)]);
+
+        let block_t = lh * lw;
+        assert_eq!(&ic.clean[base_t * channels..(base_t + block_t) * channels], &start_tokens[..], "the start block keeps the start image's own content");
+        assert_eq!(&ic.clean[(base_t + block_t) * channels..], &end_tokens[..], "the end block keeps the end image's own (different) content");
+    }
 }
 
 /// The only thing the denoise loop asks of a model: a velocity prediction at
@@ -759,6 +1073,35 @@ fn to_denoised(sample: &[f32], velocity: &[f32], sigma: f64) -> Vec<f32> {
 /// `trace!`, a cancellation a `warn!` naming the step it stopped at, and a
 /// non-finite prediction an `error!` - so a run that diverged or stalled can
 /// be pinpointed from the trace alone instead of re-run under a profiler.
+/// A held-fixed image-conditioning range within the denoised latent -
+/// `mask[tok] == 0.0` freezes that token to `clean[tok]` every step
+/// (`ltx_core`'s own `post_process_latent`: `denoised*mask + clean*(1-mask)`,
+/// applied to the model's x0 ESTIMATE before the sampler's step formula runs
+/// on it, not as a post-hoc overwrite). `mask`/mask-implicit token count is
+/// `clean.len() / channels`; every token not covered here denoises normally
+/// (`mask[tok] == 1.0`).
+struct Frozen<'a> {
+    mask: &'a [f32],
+    clean: &'a [f32],
+    channels: usize,
+}
+
+fn post_process_latent(denoised: &mut [f32], frozen: &Frozen) {
+    let t = frozen.mask.len();
+    debug_assert_eq!(denoised.len(), t * frozen.channels);
+    debug_assert_eq!(frozen.clean.len(), t * frozen.channels);
+    for tok in 0..t {
+        let m = frozen.mask[tok];
+        if m == 1.0 {
+            continue;
+        }
+        let off = tok * frozen.channels;
+        for c in 0..frozen.channels {
+            denoised[off + c] = m * denoised[off + c] + (1.0 - m) * frozen.clean[off + c];
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "info", name = "denoise", skip_all, fields(steps = sigmas.len().saturating_sub(1), tokens = t, guidance = guidance, eta = eta))]
 fn denoise(
@@ -777,14 +1120,32 @@ fn denoise(
     s_noise: f64,
     noise_seed: u64,
     total: u32,
+    frozen: Option<&Frozen>,
     cancel: &capability::CancelToken,
     progress: &mut impl FnMut(u32, u32, &str),
 ) -> Result<Vec<f32>, String> {
+    // The reference's own masked-conditioning path (`_inject_sde_noise`'s
+    // `timesteps_from_mask`, non-legacy default) gives every token its OWN
+    // per-token sigma (`denoise_mask * sigma`) so a frozen token's renoise
+    // term is gated by that token's own zero sigma, not by a separate
+    // post-hoc correction on the sampler's output. This crate's
+    // `euler_ancestral_step` takes one scalar sigma for the whole latent -
+    // extending it to a per-token sigma is real, not-yet-built work (a
+    // tracked gap, see `crate::pipeline`'s module doc). `eta == 0.0`
+    // sidesteps the whole question: the ancestral renoise term never runs,
+    // so masking only the x0 ESTIMATE (`post_process_latent`, this
+    // function's own doc) each step - the same thing the reference's plain
+    // (non-ancestral) `_step_state` does - is exactly correct: a frozen
+    // token starts at `clean` (never noised, see `generate`'s own latent0
+    // construction) and its every step's x0 estimate is forced back to
+    // `clean`, so the deterministic Euler formula keeps it at `clean`
+    // exactly, with no drift, for the whole trajectory.
+    assert!(frozen.is_none() || eta == 0.0, "denoise: image conditioning (frozen tokens) requires eta=0.0 (deterministic Euler) - the ancestral renoise path is not yet extended to per-token sigma");
     let cfg_on = guidance > 1.0;
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
     let t0 = Instant::now();
-    tracing::info!(steps, cfg = cfg_on, forwards_per_step = if cfg_on { 2 } else { 1 }, sigma_first = sigmas.first().copied().unwrap_or(0.0), sigma_last = sigmas.last().copied().unwrap_or(0.0), "denoise loop starting");
+    tracing::info!(steps, cfg = cfg_on, forwards_per_step = if cfg_on { 2 } else { 1 }, sigma_first = sigmas.first().copied().unwrap_or(0.0), sigma_last = sigmas.last().copied().unwrap_or(0.0), frozen_tokens = frozen.map(|f| f.mask.iter().filter(|&&m| m == 0.0).count()), "denoise loop starting");
     for i in 0..steps {
         // Once per step: a forward is one submit of the whole block stack
         // and is not interruptible from inside, same reasoning as
@@ -808,7 +1169,10 @@ fn denoise(
             tracing::error!(step = i + 1, sigma, non_finite = bad, of = velocity.len(), "the denoiser produced non-finite values");
             return Err(format!("the denoiser produced non-finite values at step {} (sigma = {sigma:.4})", i + 1));
         }
-        let denoised = to_denoised(&latent, &velocity, sigma);
+        let mut denoised = to_denoised(&latent, &velocity, sigma);
+        if let Some(f) = frozen {
+            post_process_latent(&mut denoised, f);
+        }
         let noise = if eta > 0.0 { Some((0..latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
         latent = euler_ancestral_step(&latent, &denoised, sigma, sigma_next, eta, s_noise, noise.as_deref());
         let per = t0.elapsed().as_secs_f32() / (i + 1) as f32;
@@ -926,13 +1290,28 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     }
 
     // ---- denoise ----------------------------------------------------------
-    let positions = grid_positions(lat_t, lh, lw);
-    // No keyframe conditioning: this is pure text-to-video with no input
-    // image, so every token is genuinely noise, not a held-fixed real frame
-    // - `keyframes_mask` is all zero (see `LtxDit::forward`'s doc: nonzero
-    // marks a keyframe token). An all-1.0 mask would add
-    // `keyframes_abs_pos_embedding` to every token for no semantic reason.
-    let keyframes_mask = vec![0f32; t];
+    // `real_pixel_positions`, not `grid_positions` - the real production
+    // pipeline's own `VideoLatentTools.create_initial_state` builds RoPE
+    // positions in pixel-scale units (`get_pixel_coords`, causal-fixed,
+    // divided by fps), not raw latent-grid integers. See that function's
+    // own doc for why this was never caught by an earlier cosine-similarity
+    // check on either side.
+    let positions = real_pixel_positions(lat_t, lh, lw, o.fps as f64);
+    // The causal VAE's first latent frame covers exactly ONE pixel frame
+    // (every later one covers `VAE_TEMPORAL_SCALE`), making it "the same
+    // token class as a generated keyframe slot" - `ltx_core.tools.
+    // VideoLatentTools._first_frame_keyframes_mask`'s own doc: marked
+    // UNCONDITIONALLY, independent of whether any real image conditioning
+    // is present. An earlier version of this code left `keyframes_mask`
+    // all-zero for plain text-to-video, reasoning that "every token is
+    // genuinely noise, not a held-fixed real frame" - true, but irrelevant:
+    // the mask marks a TOKEN CLASS (first-latent-frame-is-narrower), not
+    // "this token is externally conditioned". `dit_cfg.use_keyframes_abs_pos_
+    // embedding` is `true` for the real checkpoint, so this was silently
+    // omitting a real positional-embedding addition on every real
+    // generation until fixed.
+    let mut keyframes_mask = vec![0f32; t];
+    keyframes_mask[..lh * lw].fill(1.0);
     // Real Gemma-4 conditioning when `Paths::text_encoder` is set
     // ([`real_text_context`]); otherwise the same deterministic-but-
     // meaningless stub every earlier milestone used (see this module's doc
@@ -983,10 +1362,66 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
     };
 
+    // ---- optional image conditioning: encode a real still (or two), hold
+    // it/them fixed at frame 0 and/or the clip's last pixel frame while the
+    // rest denoises around them (`ltx_core`'s `VideoConditionByKeyframeIndex
+    // (frame_idx, strength=1.0)`) - see `GenOpts::start_frame`/`end_frame`'s
+    // doc and `append_image_conditioning`'s for the exact mechanics and why
+    // `eta` must be 0 for this. `vraw`/`vweights` are loaded here (not at
+    // decode time below, which now reuses them) since this needs them
+    // before the denoise loop, not after it.
+    let vraw = read_any(&paths.vae)?;
+    let vweights = crate::import::import_vae(vraw, &vcfg)?;
     let latent0 = seeded_noise(t * in_channels, o.seed);
+    let encode_still = |path: &str| -> Result<Vec<f32>, String> {
+        let img_t = Instant::now();
+        let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(o.width as u32, o.height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
+        let mut img_chw = vec![0f32; 3 * o.height * o.width];
+        for y in 0..o.height {
+            for x in 0..o.width {
+                let p = img.get_pixel(x as u32, y as u32).0;
+                let idx = y * o.width + x;
+                for c in 0..3 {
+                    // `[0,255] -> [-1,1]`, the VAE's own input range (see
+                    // `LtxVaeEncoder::encode`'s doc).
+                    img_chw[c * o.height * o.width + idx] = (p[c] as f32 / 127.5) - 1.0;
+                }
+            }
+        }
+        let enc = LtxVaeEncoder::build(&vcfg, &vweights, 1, o.height as u32, o.width as u32, o.device.as_deref());
+        let cond_latent_chw = enc.encode(&img_chw);
+        let cond_tokens = chw_to_tc(&cond_latent_chw, in_channels, 1, lh, lw);
+        tracing::info!(path, secs = img_t.elapsed().as_secs_f32(), cond_tokens = cond_tokens.len() / in_channels, "conditioning image encoded");
+        Ok(cond_tokens)
+    };
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if o.start_frame.is_some() || o.end_frame.is_some() {
+        if o.eta != 0.0 {
+            tracing::error!(eta = o.eta, "image conditioning requires eta=0.0 (deterministic Euler)");
+            return Err(format!("--start-frame/--end-frame require --eta 0 (got {}) - the ancestral renoise path is not yet extended to per-token sigma, see GenOpts::start_frame's doc", o.eta));
+        }
+        let start_tokens = o.start_frame.as_deref().map(&encode_still).transpose()?;
+        let end_tokens = o.end_frame.as_deref().map(&encode_still).transpose()?;
+        let mut blocks: Vec<(usize, &[f32])> = Vec::new();
+        if let Some(tk) = &start_tokens {
+            blocks.push((0, tk));
+        }
+        if let Some(tk) = &end_tokens {
+            blocks.push((o.frames - 1, tk));
+        }
+        let ic = append_image_conditioning(t, &positions, lh, lw, in_channels, o.fps as f64, &blocks);
+        let mut combined_latent0 = latent0;
+        for (_, tk) in &blocks {
+            combined_latent0.extend_from_slice(tk);
+        }
+        let total_t = t + blocks.len() * lh * lw;
+        (combined_latent0, ic.positions, ic.keyframes_mask, total_t, Some((ic.denoise_mask, ic.clean)))
+    } else {
+        (latent0, positions.clone(), keyframes_mask.clone(), t, None)
+    };
+    let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: in_channels });
     let denoise_t = Instant::now();
-    tracing::info!(tokens = t, context_len, "denoising");
-    let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions, &keyframes_mask, &ctx_cond, &ctx_uncond, context_len, &context_valid, t, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, cancel, &mut progress)?;
+    tracing::info!(tokens = denoise_t_count, base_tokens = t, context_len, image_conditioned = o.start_frame.is_some() || o.end_frame.is_some(), "denoising");
+    let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions_d, &keyframes_mask_d, &ctx_cond, &ctx_uncond, context_len, &context_valid, denoise_t_count, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, frozen_ref.as_ref(), cancel, &mut progress)?;
     // Release the DiT's own device context (for `RealDit`, its resident
     // `Gpu`) before the VAE decode below opens its own - real device memory
     // is not this pipeline's to hold onto once the denoise loop is done
@@ -1009,9 +1444,11 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     progress(total - 1, total, "vae decode");
     tracing::info!(path = %paths.vae, latent_frames = lat_t, "VAE decode starting");
     let decode_t = Instant::now();
-    let chw = tc_to_chw(&final_latent, in_channels, lat_t, lh, lw);
-    let vraw = read_any(&paths.vae)?;
-    let vweights = crate::import::import_vae(vraw, &vcfg)?;
+    // Strip any appended image-conditioning tokens (see the `--image` branch
+    // above) - only the original `t` video tokens get decoded; the
+    // conditioning frame is the source image itself, not a new frame to
+    // render.
+    let chw = tc_to_chw(&final_latent[..t * in_channels], in_channels, lat_t, lh, lw);
     let dec = LtxVaeDecoder::build(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref());
     drop(vweights);
     let pixels = dec.decode(&chw);
@@ -1271,7 +1708,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let sigmas1 = ltx2_sigmas(t1, base.steps, base.base_shift, base.max_shift, base.stretch, base.terminal);
     let latent1_0 = seeded_noise(t1 * in_channels, base.seed ^ 0x53_31);
     let ctx_valid = vec![1.0f32; base.context_len]; // DFR's DiT is always tiny-config (connector disabled) - see this section's doc.
-    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    let final1 = denoise(&dit, &sigmas1, latent1_0, &layout1.positions, &layout1.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t1, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e_31, base.steps as u32, None, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage1", "cancelled");
         return Err("cancelled".into());
@@ -1315,7 +1752,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // The per-stage seed tags are ASCII ("S2", "N2"), written unsplit because
     // `0x53_32` reads to clippy as `0x53` with a mistyped `i32` suffix.
     let latent2_0 = noised_seed(&seed2, sigma2_0, base.seed ^ 0x5332);
-    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, cancel, &mut |_, _, _: &str| {})?;
+    let final2 = denoise(&dit, &sigmas2, latent2_0, &layout2.positions, &layout2.keyframes_mask, &ctx_cond, &ctx_uncond, base.context_len, &ctx_valid, t2, base.guidance, base.eta, base.s_noise, base.seed ^ 0x4e32, base.steps as u32, None, cancel, &mut |_, _, _: &str| {})?;
     if cancel.is_cancelled() {
         tracing::warn!(stage = "stage2", "cancelled");
         return Err("cancelled".into());
@@ -1402,6 +1839,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
                     base.s_noise,
                     noise_seed_tile,
                     base.steps as u32,
+                    None,
                     cancel,
                     &mut |_, _, _: &str| {},
                 )?;
@@ -1600,7 +2038,7 @@ mod tests {
         let keyframes_mask = vec![0.0f32];
         let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
         let context_valid = vec![1.0f32; 1];
-        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, guidance, eta, 1.0, 7, 4, &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        let out = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, guidance, eta, 1.0, 7, 4, None, &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
         let seen = dit.seen.borrow().clone();
         (seen, out)
     }
@@ -1647,7 +2085,7 @@ mod tests {
         let context_valid = vec![1.0f32; 1];
         let cancel = capability::CancelToken::armed();
         let handle = cancel.clone();
-        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, 1.0, 0.0, 1.0, 7, 6, &cancel, &mut |step, _, _: &str| {
+        let err = denoise(&dit, &sigmas, vec![0.0; 1], &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, 1, 1.0, 0.0, 1.0, 7, 6, None, &cancel, &mut |step, _, _: &str| {
             if step == 2 {
                 handle.cancel();
             }
