@@ -160,6 +160,13 @@ The loss used to gradcheck is a plain MSE reconstruction loss - enough to
 prove every gradient is analytically correct, which is what gradcheck
 exists to do. It is NOT the loss a real training run would use.
 
+`overfits_a_single_batch` closes the other half of this workspace's
+training bar (gradcheck proves the gradients; only actually training
+something proves the loop as a whole works): 800 steps of plain gradient
+descent (not AdamW - `crates/optim`'s device-resident `ParamStore` is a
+separate integration this trainer does not use) on one fixed batch drives
+the MSE loss down more than 20x (measured: 0.0525 -> under 0.0026).
+
 ## Not yet done
 
 - [ ] Vocoder LoRA fine-tune (the backward this phase landed makes it

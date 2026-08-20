@@ -641,4 +641,43 @@ mod tests {
         }
         assert!(checked > 30, "expected the full ~40-parameter vocoder to be checked, got {checked}");
     }
+
+    /// The training-loop half of the correctness bar this workspace holds
+    /// every new model to: gradcheck proves the gradients are right, but
+    /// only actually training something proves the loop as a whole works.
+    /// Plain gradient descent (not AdamW - the point is to prove the
+    /// backward pass, not to exercise `crates/optim`'s device-resident
+    /// `ParamStore`, which this trainer does not use) on a single fixed
+    /// batch must drive the MSE loss toward zero.
+    #[test]
+    fn overfits_a_single_batch() {
+        let cfg = VocoderConfig::tiny();
+        let w = random_weights(&cfg, 31);
+        let (batch, length) = (1, 4);
+        let mut r = Lcg::new(32);
+        let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
+        let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
+        let target = r.vec_scaled(batch * 2 * out_len, 0.5);
+
+        let trainer = Trainer::new(cfg, &w, latents, batch, length, target);
+        let names = trainer.param_names();
+        let lr = 0.05f32;
+
+        let loss0 = trainer.loss();
+        let mut loss = loss0;
+        for _ in 0..800 {
+            trainer.zero_grads();
+            loss = trainer.loss();
+            trainer.backward();
+            for name in &names {
+                let mut w = trainer.read_weight(name);
+                let g = trainer.read_grad(name);
+                for (wi, gi) in w.iter_mut().zip(&g) {
+                    *wi -= lr * gi;
+                }
+                trainer.write_weight(name, &w);
+            }
+        }
+        assert!(loss < loss0 * 0.05, "loss did not collapse: start={loss0} end={loss} (800 steps, lr={lr})");
+    }
 }
