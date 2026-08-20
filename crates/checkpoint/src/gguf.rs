@@ -515,6 +515,55 @@ pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, 
 
 /// Walk `raw` block by block, appending each block's dequantized values, then
 /// truncate to `numel` (the last block may be partially used).
+///
+/// Blocks are independent - block `i` reads only `raw[i*block_bytes..]` and
+/// owns exactly its own span of the output - so on native the walk is split
+/// across the CPU scheduler's pool. The result is bit-identical to the serial
+/// walk: every `f` call is unchanged and lands at the same output offset, only
+/// the order in which the calls happen changes. `crates/checkpoint`'s own
+/// `multi_block_dequant_lays_each_block_into_its_own_output_span` and
+/// `a_partial_trailing_block_is_decoded_then_truncated` pin that mapping
+/// against a per-block oracle, by bit pattern.
+///
+/// This is not micro-tuning: dequantizing a large quantized checkpoint to fp32
+/// is on the critical path of every GGUF-backed model load, and for a streamed
+/// int8 tier it runs again for every transformer block of every generation.
+///
+/// `GROUP` blocks are decoded into one small stack-local `Vec` before being
+/// copied into the output. The temporary is what lets each `f` keep its
+/// existing "append to a Vec" signature (all twelve decoders share it), and at
+/// this size it stays in cache, so the copy costs far less than the
+/// parallelism buys. On wasm (no threads, and `backend-cpu` does not build
+/// there) the serial walk is kept verbatim.
+#[cfg(not(target_arch = "wasm32"))]
+fn deq_blocks(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Vec<f32>)) -> Vec<f32> {
+    const GROUP: usize = 64;
+    let nblocks = raw.len() / block_bytes;
+    if nblocks == 0 {
+        return Vec::new();
+    }
+    // Element count per block, derived from this decoder rather than passed
+    // in: the whole block stream produces the same count for every block, so
+    // one decode of block 0 measures it exactly.
+    let mut probe = Vec::new();
+    f(&raw[..block_bytes], &mut probe);
+    let be = probe.len();
+    let mut out = vec![0f32; nblocks * be];
+    backend_cpu::par::chunks_mut(&mut out, GROUP * be, |g, dst| {
+        let first = g * GROUP;
+        let mut tmp = Vec::with_capacity(GROUP * be);
+        for i in first..(first + GROUP).min(nblocks) {
+            f(&raw[i * block_bytes..(i + 1) * block_bytes], &mut tmp);
+        }
+        dst.copy_from_slice(&tmp);
+    });
+    out.truncate(numel);
+    out
+}
+
+/// The serial walk [`deq_blocks`] documents - kept for wasm, which has neither
+/// threads nor `backend-cpu`.
+#[cfg(target_arch = "wasm32")]
 fn deq_blocks(raw: &[u8], numel: usize, block_bytes: usize, f: fn(&[u8], &mut Vec<f32>)) -> Vec<f32> {
     let mut out = Vec::with_capacity(numel);
     for blk in raw.chunks_exact(block_bytes) {
@@ -1213,6 +1262,90 @@ mod tests {
     fn iq_types_error_clearly() {
         let err = dequantize(20, &[0u8; 64], 32).unwrap_err();
         assert!(err.contains("not yet implemented"), "{err}");
+    }
+
+    // ---- dequant across MANY blocks -------------------------------------
+    //
+    // Every hand-built test above feeds exactly ONE block, which is
+    // structurally blind to how blocks are laid into the output: a
+    // reversed, overlapping, or off-by-one-block write is invisible at a
+    // single block (lesson #4 - a degenerate fixture hides the bug class
+    // the test exists for). These pin the block-to-output mapping across a
+    // real multi-block run, which is what makes decoding blocks in parallel
+    // a scheduling change rather than a correctness risk.
+
+    /// Deterministic pseudo-random bytes - a decoder must be exercised over
+    /// varied nibble/sign patterns, not a field of zeros that would agree
+    /// under almost any indexing mistake.
+    fn noise_bytes(n: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// The serial contract, stated independently of the implementation:
+    /// block `i` of `raw` decodes to output elements
+    /// `[i*elems_per_block, (i+1)*elems_per_block)`, and the result is
+    /// truncated to `numel`. Built by decoding each block on its own, so it
+    /// shares no traversal code with `dequantize`'s own block walk.
+    fn oracle_by_block(ty: u32, raw: &[u8], block_bytes: usize, elems_per_block: usize, numel: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for blk in raw.chunks_exact(block_bytes) {
+            out.extend(dequantize(ty, blk, elems_per_block).unwrap());
+        }
+        out.truncate(numel);
+        out
+    }
+
+    /// Compare by BIT PATTERN, not by `==`. The fixture is random bytes, so a
+    /// block's f16 scale can legitimately decode to NaN - and `NaN != NaN`
+    /// would fail a value comparison between two byte-identical results. Bits
+    /// are also the stronger claim: this is asserting "the same bytes", which
+    /// is exactly the guarantee a scheduling change has to keep.
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    #[test]
+    fn multi_block_dequant_lays_each_block_into_its_own_output_span() {
+        // One representative of every block family: the legacy 32-element
+        // types and the 256-element k-quants, since the two use different
+        // block geometry and different decoders.
+        for &ty in &[T_Q4_0, T_Q4_1, T_Q5_0, T_Q5_1, T_Q8_0, T_Q2_K, T_Q3_K, T_Q4_K, T_Q5_K, T_Q6_K, T_Q8_K] {
+            let (be, bb) = block_geometry(ty).expect("every type here has block geometry");
+            // Enough blocks that a parallel split has something to split.
+            for nblocks in [1usize, 2, 7, 64] {
+                let raw = noise_bytes(nblocks * bb, 0x5EED_0000 + ty as u64 * 7 + nblocks as u64);
+                let numel = nblocks * be;
+                let got = dequantize(ty, &raw, numel).unwrap();
+                let want = oracle_by_block(ty, &raw, bb, be, numel);
+                assert_eq!(got.len(), want.len(), "type {ty}, {nblocks} blocks: length");
+                assert_eq!(bits(&got), bits(&want), "type {ty}, {nblocks} blocks: block-to-output mapping");
+            }
+        }
+    }
+
+    /// `numel` that is not a whole number of blocks: the last block is
+    /// decoded in full and the result truncated. A parallel decode that
+    /// sized its output from `numel` instead of the block count would drop
+    /// or corrupt exactly this tail.
+    #[test]
+    fn a_partial_trailing_block_is_decoded_then_truncated() {
+        for &ty in &[T_Q8_0, T_Q4_K] {
+            let (be, bb) = block_geometry(ty).unwrap();
+            let nblocks = 5usize;
+            let raw = noise_bytes(nblocks * bb, 0xA5A5 + ty as u64);
+            let numel = nblocks * be - be / 2; // half of the last block is real
+            let got = dequantize(ty, &raw, numel).unwrap();
+            assert_eq!(got.len(), numel, "type {ty}: truncated to numel");
+            assert_eq!(bits(&got), bits(&oracle_by_block(ty, &raw, bb, be, numel)), "type {ty}: truncated tail must match");
+        }
     }
 
     // ---- KV parsing + ModelCard mapping via an in-memory GGUF ----

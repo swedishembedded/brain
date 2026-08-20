@@ -16,6 +16,12 @@ half.workspace = true
 bytemuck.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The workspace's only rayon seam - block-parallel GGUF dequantization and
+# safetensors dtype conversion both run on the CPU scheduler's pool so
+# `--device cpuN` sizing/affinity governs them. Native only: `backend-cpu` is
+# the Cranelift JIT crate and does not build for wasm, which has no threads
+# for it to use either.
+brain-backend-cpu.workspace = true
 # On-demand, memory-mapped weight reads (the residency layer's cold tier). Native
 # only — wasm has no mmap and no fs.
 memmap2 = "0.9"
