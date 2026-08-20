@@ -53,3 +53,6 @@ serve` reference.
 - [Configuration](../using/configuration.md) — the `BRAIN_*` environment
   variables that control devices, weights, and tuning.
 - [Hardware](hardware.md) — running on CPU, GPU, or the Intel NPU.
+- [Model catalog](../models/index.md) - every other architecture brain
+  supports (larger LLMs, vision, audio, image/video generation, and more),
+  each with its own getting-started page.
