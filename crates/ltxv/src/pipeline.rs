@@ -330,14 +330,26 @@ pub fn context_stub(context_len: usize, dim: usize, seed: u64) -> Vec<f32> {
 /// EmbeddingsConnector::forward` requires its own input sequence length to
 /// be an EXACT multiple of its own register count (register substitution
 /// tiles the registers round-robin over invalid positions, see that
-/// function's doc), and neither a real tokenizer's own prompt length nor
-/// [`GenOpts::context_len`]'s fixed stub size is naturally shaped that way.
-/// Shared by [`real_text_context`] and [`generate`]'s own stub-context
-/// branch, so a connector-enabled real config (`LtxDitConfig::ltx25_22b`)
-/// never sees an unpadded context from EITHER path. A disabled connector
-/// reads `context` directly as real caption content, so `n` passes through
-/// unchanged in that case - padding it would inject zero rows the DiT has
-/// no way to ignore.
+/// function's doc). [`GenOpts::context_len`]'s stub size is not naturally
+/// shaped that way, which is what this function is actually for.
+///
+/// **Not used for the real Gemma-4 encoder path** - an earlier version of
+/// this doc claimed a real tokenizer's prompt length is not naturally
+/// register-shaped either, and used THAT as the justification for reusing
+/// this same round-up here too. That premise was never checked against the
+/// reference and was wrong: `resources/ltxv/source/.../gemma_assets.py`'s
+/// `TOKENIZER_MAX_LENGTH = 1024` is a FIXED length the reference tokenizer
+/// pads (or truncates) every prompt to, regardless of the prompt's own
+/// token count - `PromptEncoder.__call__` -> `text_encoder.encode()`'s own
+/// doc: every prompt's per-item slice stays `[1, 1024, D]`, never trimmed
+/// down to its real content length, and `EmbeddingsProcessor.
+/// process_hidden_states` runs the connector over that full width. Rounding
+/// a SHORT prompt's own token count up to the nearest multiple of 128
+/// (e.g. 128 for a 20-token prompt) silently fed the connector - and every
+/// downstream cross-attention softmax - a context roughly 8x shorter than
+/// the real checkpoint was ever calibrated against. See
+/// `GEMMA4_MAX_PROMPT_TOKENS`/[`real_text_context`] for the fix; this
+/// function now only backs the stub/testing path.
 fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
     if cfg.use_embeddings_connector && cfg.connector_num_learnable_registers > 0 {
         let m = cfg.connector_num_learnable_registers as usize;
@@ -493,8 +505,16 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     // tokenizer's own id-0 entry, whatever it is) exactly the way an
     // all-zero fallback context already stands in for "no real content" in
     // the guidance<=1.0 branch below.
+    // `resources/ltxv/source/packages/ltx-core/src/ltx_core/text_encoders/
+    // gemma/gemma_assets.py::TOKENIZER_MAX_LENGTH = 1024`, `truncation=True`
+    // in `LTXGemmaTokenizer.tokenize_with_weights` - the reference truncates
+    // every prompt to at most 1024 tokens BEFORE encoding, never fewer, see
+    // `GEMMA4_CONTEXT_LEN`'s doc for why the padded side of this also has to
+    // be exactly 1024, not a shape-derived guess.
+    const GEMMA4_MAX_PROMPT_TOKENS: usize = 1024;
     let tokenize = |s: &str| -> Vec<u32> {
-        let ids = tok.encode(s);
+        let mut ids = tok.encode(s);
+        ids.truncate(GEMMA4_MAX_PROMPT_TOKENS);
         if ids.is_empty() {
             vec![0u32]
         } else {
@@ -520,7 +540,13 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
 
     let ids_cond = tokenize(prompt);
     let n_cond = ids_cond.len();
-    let context_len = padded_context_len(dit_cfg, n_cond);
+    // The reference's own fixed tokenizer width (`GEMMA4_MAX_PROMPT_TOKENS`'s
+    // doc), not a rounded-up multiple of the connector's register count -
+    // `padded_context_len` is for the stub/testing path only, see its doc.
+    // A disabled connector still reads `context` as real caption content at
+    // its own natural length, matching `padded_context_len`'s existing
+    // pass-through behavior in that case.
+    let context_len = if dit_cfg.use_embeddings_connector { GEMMA4_MAX_PROMPT_TOKENS } else { n_cond };
     let raw_cond = encode(&ids_cond)?;
     if raw_cond.len() != n_cond * cross_attention_dim {
         return Err(format!(
