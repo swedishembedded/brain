@@ -54,6 +54,7 @@
 
 pub mod condition_encoder;
 pub mod config;
+pub mod lora;
 pub mod train;
 pub mod vocoder;
 

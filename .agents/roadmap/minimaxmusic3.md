@@ -167,10 +167,33 @@ descent (not AdamW - `crates/optim`'s device-resident `ParamStore` is a
 separate integration this trainer does not use) on one fixed batch drives
 the MSE loss down more than 20x (measured: 0.0525 -> under 0.0026).
 
+## Phase 5: vocoder LoRA
+
+`crates/minimaxmusic3::lora` - fold-then-run, never a separate device
+path: each step, `effective_weights` composes `W_eff = W_base +
+(alpha/r)*B@A` on the host for every one of the 17-31 conv weights (small -
+`rows` at most 1536, `cols` at most `1536*16`, and this runs once per
+step, not per element of the tape), then hands the composed
+`VocoderWeights` to the ordinary `train::Trainer` unchanged - every
+existing conv/backward kernel runs completely unaware an adapter exists.
+`train::Trainer::read_grad` already returns `dW_eff` as if the whole
+tensor were trainable; `lora::backward` converts that into `(dA, dB)` via
+two more small host matmuls, and `W_base` is never written back.
+
+The three gates the workspace holds every LoRA integration to, all
+passing: `zero_b_is_an_exact_no_op` (standard zero-init `B` must leave the
+forward untouched, exactly), `fold_matches_apply_bit_for_bit` (composing
+`W_eff` via `effective_weights`, in place, vs a separately-computed fold
+must produce bit-identical fp32 output), and `lora_grads_match_finite_
+differences` (`directional`-style FD check on every one of `::tiny()`'s 17
+adapters' `(A, B)`). `lora_only_overfits_with_base_frozen` adds the
+training-loop half: 1500 steps of gradient descent on `(A, B)` alone,
+`W_base` provably untouched, reduces the loss by 40%+ - a real but looser
+bar than full fine-tuning's, since a rank-2 adapter has far fewer
+trainable parameters.
+
 ## Not yet done
 
-- [ ] Vocoder LoRA fine-tune (the backward this phase landed makes it
-      straightforward - not yet wired)
 - [ ] The multi-scale STFT/mel discriminator + adversarial + feature-
       matching training loop this model's training scope actually needs -
       the real new-capability item (`crates/mimi::recon`'s module doc

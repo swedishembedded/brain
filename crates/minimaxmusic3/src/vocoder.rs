@@ -55,11 +55,13 @@ fn snake_kernels() -> SnakeKernels {
 }
 
 /// A conv (or conv-transpose)'s folded weight + bias, ready to upload.
+#[derive(Clone)]
 pub struct ConvW {
     pub weight: Vec<f32>,
     pub bias: Vec<f32>,
 }
 
+#[derive(Clone)]
 pub struct ResidualUnitW {
     pub snake1_alpha: Vec<f32>,
     pub conv1: ConvW,
@@ -67,18 +69,51 @@ pub struct ResidualUnitW {
     pub conv2: ConvW,
 }
 
+#[derive(Clone)]
 pub struct VocoderBlockW {
     pub snake1_alpha: Vec<f32>,
     pub conv_t1: ConvW,
     pub res_units: Vec<ResidualUnitW>,
 }
 
+#[derive(Clone)]
 pub struct VocoderWeights {
     pub dec_in_proj: ConvW,
     pub conv_in: ConvW,
     pub blocks: Vec<VocoderBlockW>,
     pub snake_out_alpha: Vec<f32>,
     pub conv_out: ConvW,
+}
+
+impl VocoderWeights {
+    /// Mutable access to one conv's weight tensor by its `train::flatten`
+    /// name (e.g. `"dec_in_proj.weight"`, `"blocks.1.res_unit2.conv1.weight"`),
+    /// LoRA's seam for substituting `base + delta` without a full
+    /// unflatten/rebuild. `None` for a name that doesn't parse or doesn't
+    /// name a `.weight` leaf (LoRA never adapts a bias or a Snake alpha).
+    pub fn conv_weight_mut(&mut self, name: &str) -> Option<&mut Vec<f32>> {
+        let name = name.strip_suffix(".weight")?;
+        match name {
+            "dec_in_proj" => return Some(&mut self.dec_in_proj.weight),
+            "conv_in" => return Some(&mut self.conv_in.weight),
+            "conv_out" => return Some(&mut self.conv_out.weight),
+            _ => {}
+        }
+        let rest = name.strip_prefix("blocks.")?;
+        let (i, rest) = rest.split_once('.')?;
+        let block = self.blocks.get_mut(i.parse::<usize>().ok()?)?;
+        if rest == "conv_t1" {
+            return Some(&mut block.conv_t1.weight);
+        }
+        let rest = rest.strip_prefix("res_unit")?;
+        let (j, conv) = rest.split_once('.')?;
+        let ru = block.res_units.get_mut(j.parse::<usize>().ok()?.checked_sub(1)?)?;
+        match conv {
+            "conv1" => Some(&mut ru.conv1.weight),
+            "conv2" => Some(&mut ru.conv2.weight),
+            _ => None,
+        }
+    }
 }
 
 /// `weight[i,...] = weight_g[i] * weight_v[i,...] / ||weight_v[i,...]||_2` -
