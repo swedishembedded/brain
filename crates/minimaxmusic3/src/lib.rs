@@ -46,14 +46,18 @@
 //! sampling loop.
 //!
 //! Status: condition encoder and vocoder inference are landed (both
-//! real-weight parity cosine 1.0), and the vocoder's own backward is
-//! gradient-checked against every one of its ~38 named parameters. Depth
-//! decoder, DiT, the Global LLM's own wiring, the vocoder's LoRA +
-//! adversarial (discriminator) training, and serving land
+//! real-weight parity cosine 1.0), and the vocoder is fully trainable -
+//! full fine-tune (gradcheck on every one of its ~38 parameters, a real
+//! overfit demonstration), LoRA (the same three gates plus a training
+//! demonstration), and a from-scratch STFT-magnitude adversarial
+//! discriminator (gradchecked end to end, including through the STFT,
+//! and shown to learn). Depth decoder, DiT, the Global LLM's own wiring,
+//! joint generator+discriminator training, and serving land
 //! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
+pub mod discriminator;
 pub mod lora;
 pub mod train;
 pub mod vocoder;

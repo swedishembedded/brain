@@ -192,13 +192,58 @@ training-loop half: 1500 steps of gradient descent on `(A, B)` alone,
 bar than full fine-tuning's, since a rank-2 adapter has far fewer
 trainable parameters.
 
+## Phase 6: adversarial (discriminator) training
+
+`crates/minimaxmusic3::discriminator` - the real new-capability item
+`crates/mimi::recon`'s module doc lists as absent workspace-wide (a GAN
+discriminator + adversarial + feature-matching training stack), closed
+here scoped to what this vocoder needs, not generalized into `crates/mimi`.
+A single-resolution STFT-magnitude PatchGAN discriminator (`|STFT| ->
+Conv2d -> LeakyReLU -> Conv2d -> LeakyReLU -> Conv2d -> patch logits`),
+LSGAN adversarial loss, and an L1 feature-matching loss. Every conv reuses
+the workspace's EXISTING `conv2d`/`conv2d_dx`/`conv2d_dw` kernels (2D conv
+already had full forward+backward, from an earlier, unrelated port) plus
+`leaky_relu`/`leaky_relu_bwd` (its own doc comment already named GAN
+vocoder discriminators as the anticipated use) and the
+`add_chan_inplace`/`bias_grad_ncl` bias pair from Phase 4 - both already
+layout-generic over `[rows, C, inner]`, and NCHW's `inner = H*W` fits that
+unchanged. No new WGSL kernel was needed for the discriminator itself.
+
+The one new piece is the STFT: a direct DFT-matrix formulation
+(`O(n_fft^2)` per frame, not an FFT butterfly) - deliberately, since a
+windowed matmul against a fixed, precomputed cos/sin basis is trivially
+differentiable (backward is the same matmul against the transposed basis),
+where backpropagating through an FFT algorithm's butterfly network would
+be real additional work for no benefit at the frame sizes a short training
+clip needs.
+
+Every gradient is checked, including through the STFT: a
+`full_chain_waveform_gradient_matches_finite_differences` test perturbs
+the FAKE waveform directly and confirms the LSGAN generator loss moves the
+way `stft_mag_bwd(discriminator_backward(...).d_mag)` predicts - the exact
+seam a joint generator+discriminator training loop would use. The
+discriminator's own conv backward is FD-gated the same way as the vocoder
+itself (Phase 4's `directional`-style check), and
+`discriminator_learns_to_separate_real_and_fake` trains a discriminator
+from scratch on two different waveform populations and measures its LSGAN
+loss more than halve.
+
+Scope, stated honestly: this proves the mechanism and wires every piece a
+real adversarial fine-tune of the vocoder would need, but does not run
+that joint generator+discriminator loop against the actual vocoder
+weights, and is single-resolution (multi-resolution - running the same
+discriminator at several `(n_fft, hop)` settings and summing the losses -
+is a straightforward parameterization of what exists, not yet exercised).
+
 ## Not yet done
 
-- [ ] The multi-scale STFT/mel discriminator + adversarial + feature-
-      matching training loop this model's training scope actually needs -
-      the real new-capability item (`crates/mimi::recon`'s module doc
-      lists this stack as absent workspace-wide; this closes it, scoped
-      to what this vocoder needs, not generalized into `crates/mimi`)
+- [ ] Joint generator+discriminator training against the real vocoder
+      weights (composing `train::Trainer` and `discriminator::` into one
+      loop) - the mechanism exists in both directions, the composition
+      does not
+- [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
+      settings, summed) - the single-resolution version generalizes
+      directly but this has not been exercised
 - [ ] RVQ depth decoder: import + forward/backward + gradcheck + LoRA
 - [ ] Flow-matching DiT: import + forward/backward + gradcheck + LoRA +
       int8 storage tier + pipeline sharding
