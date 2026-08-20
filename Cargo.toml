@@ -61,6 +61,7 @@ default-members = [
     "crates/mimi",
     "crates/ecapatdnn",
     "crates/qwen3tts",
+    "crates/minimaxmusic3",
     "crates/toypid",
     "crates/federated",
     "crates/eval",
@@ -167,6 +168,7 @@ brain-flux2 = { path = "crates/flux2" }
 brain-mimi = { path = "crates/mimi" }
 brain-ecapatdnn = { path = "crates/ecapatdnn" }
 brain-qwen3tts = { path = "crates/qwen3tts" }
+brain-minimaxmusic3 = { path = "crates/minimaxmusic3" }
 brain-toypid = { path = "crates/toypid" }
 brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }

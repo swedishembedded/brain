@@ -1,0 +1,15 @@
+[package]
+name = "brain-minimaxmusic3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MiniMax Music 3: lyrics+caption-conditioned music generation - a Qwen3-8B global LLM + RVQ depth decoder produce per-frame hidden states, a flow-matching DiT turns them into Flow-VAE latents chunk by chunk, and a DAC-style vocoder decodes 44.1 kHz stereo audio."
+
+[lib]
+name = "minimaxmusic3"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+brain-testutil.workspace = true

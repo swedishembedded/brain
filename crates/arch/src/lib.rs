@@ -234,6 +234,23 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
+    // Five chained components, no single upstream checkpoint file: a real
+    // Qwen3-8B "Global LLM" (`qwen_7B/qwen_7B/`, llama.cpp's own `qwen3`
+    // architecture - reused via `crates/qwen3`, not reimplemented here), a
+    // 4-layer causal "RVQ depth decoder", a small conv "condition encoder", a
+    // 36-layer flow-matching DiT, and a DAC-style vocoder. No official GGUF
+    // release exists upstream, hence `gguf: None`. `weights_env` names one
+    // role per component since upstream ships them as five independent
+    // checkpoint dirs under one repo, not one combined file.
+    arch!("minimaxmusic3", "MiniMax Music 3 (lyrics+caption-conditioned music generation)", Audio, Brain, "brain-minimaxmusic3",
+          hf: &["MiniMaxMusic3ForConditionalGeneration"],
+          default_ref: Some("MiniMaxAI/MiniMax-Music3"),
+          weights_env: &[("BRAIN_MINIMAXMUSIC3_LM", "language_model"),
+                         ("BRAIN_MINIMAXMUSIC3_DEPTH", "depth_decoder"),
+                         ("BRAIN_MINIMAXMUSIC3_CONDITION", "condition_encoder"),
+                         ("BRAIN_MINIMAXMUSIC3_DIT", "transformer"),
+                         ("BRAIN_MINIMAXMUSIC3_VOCODER", "vocoder"),
+                         ("BRAIN_MINIMAXMUSIC3_TOKENIZER", "tokenizer")]),
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),

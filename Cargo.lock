@@ -1199,6 +1199,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-minimaxmusic3"
+version = "1.0.0"
+dependencies = [
+ "brain-testutil",
+]
+
+[[package]]
 name = "brain-model"
 version = "1.0.0"
 dependencies = [
