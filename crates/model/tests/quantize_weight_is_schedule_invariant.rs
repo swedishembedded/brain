@@ -31,14 +31,14 @@
 fn fixture(n: usize, k: usize) -> Vec<f32> {
     let mut s = 0x9E3779B97F4A7C15u64;
     let mut out = vec![0f32; n * k];
-    for (i, out_i) in out.iter_mut().enumerate() {
+    for (i, o) in out.iter_mut().enumerate() {
         s ^= s << 13;
         s ^= s >> 7;
         s ^= s << 17;
         let u = ((s >> 32) as f32) / (u32::MAX as f32) * 2.0 - 1.0;
         // Row-dependent gain, so every row's own scale differs from its
         // neighbours'.
-        *out_i = u * (1.0 + (i / k) as f32 * 0.37);
+        *o = u * (1.0 + (i / k) as f32 * 0.37);
     }
     out
 }
