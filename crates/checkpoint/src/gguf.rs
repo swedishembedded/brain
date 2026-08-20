@@ -1320,7 +1320,12 @@ mod tests {
         for &ty in &[T_Q4_0, T_Q4_1, T_Q5_0, T_Q5_1, T_Q8_0, T_Q2_K, T_Q3_K, T_Q4_K, T_Q5_K, T_Q6_K, T_Q8_K] {
             let (be, bb) = block_geometry(ty).expect("every type here has block geometry");
             // Enough blocks that a parallel split has something to split.
-            for nblocks in [1usize, 2, 7, 64] {
+            // Block counts that straddle the decode's internal grouping, not
+            // just fill one group: a count at the group size, one past it, and
+            // one that leaves a short tail after several full groups. A list
+            // that never exceeds one group would leave the group-index
+            // arithmetic itself untested (lesson #4 again, one level down).
+            for nblocks in [1usize, 2, 7, 64, 65, 130, 193] {
                 let raw = noise_bytes(nblocks * bb, 0x5EED_0000 + ty as u64 * 7 + nblocks as u64);
                 let numel = nblocks * be;
                 let got = dequantize(ty, &raw, numel).unwrap();
