@@ -74,7 +74,7 @@ use crate::dit::upload_rope_tables;
 use crate::rope::{apply_rope_step, ltx_rope_tables};
 
 // ---------------------------------------------------------------------------
-// Audio<->video extension (M6, second half): `LtxAvBlock` below adds the
+// Audio<->video extension: `LtxAvBlock` below adds the
 // audio stream (own self-/text-cross-attention, own FFN, own per-block
 // tables - structurally identical to the video-only path, just narrower
 // dims) and the bidirectional audio<->video cross-attention -
@@ -1167,7 +1167,7 @@ pub fn open_device(device: Option<&str>) -> Gpu {
 }
 
 // ---------------------------------------------------------------------------
-// Quantized-compute (int8/int4) video-only block path (M9's storage-only
+// Quantized-compute (int8/int4) video-only block path (the storage-only
 // tier's compute-time sibling - see `crate::int8`'s module doc, which names
 // exactly this gap: "no compute-time DP4A activation-quantization path").
 //

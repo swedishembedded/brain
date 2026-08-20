@@ -113,7 +113,7 @@
 //! `space_to_depth`/`depth_to_space` (height before width) - genuinely
 //! DIFFERENT from `crate::patchify`'s outer-pixel-boundary convention
 //! (`ops.py`'s `(c p r q)`, width before height), which is a real, doc'd
-//! trap from the M2 port (see `crate::patchify`'s own module doc). This
+//! porting trap (see `crate::patchify`'s own module doc). This
 //! decoder needs BOTH: `crates/kernels/wgsl/pixel_shuffle3d_cl.wgsl`
 //! (new - channels-last, height-before-width) for the four upsample stages,
 //! and `crate::patchify::{patchify,unpatchify}` UNCHANGED (channel-first,
@@ -961,7 +961,7 @@ fn linear_row(x: &[f32], w: &[f32], b: &[f32], out_dim: usize) -> Vec<f32> {
 /// channel-first pixel-space noise, `N(0,1)` distributed (the reference's
 /// own `torch.randn` init) - caller-supplied rather than reproduced from
 /// upstream RNG, per this port's own "replay a captured input" precedent
-/// (`crates/ltxv/src/pipeline.rs`'s M4 design). Returns the x0 pixel
+/// (`crates/ltxv/src/pipeline.rs`'s design). Returns the x0 pixel
 /// prediction, same shape as `x_t`.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_diff(gpu: &Gpu, weights: &Tensors, cfg: &NaDecoderConfig, context: &[f32], t: u32, h: u32, w: u32, x_t: &[f32]) -> Vec<f32> {

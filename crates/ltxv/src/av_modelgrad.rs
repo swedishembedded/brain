@@ -203,7 +203,7 @@ pub struct AvCfg {
 
 impl AvCfg {
     /// Derive from an [`LtxAvDitConfig`] at each stream's token/context
-    /// extent - the same M3 assumption `crate::modelgrad::Cfg::from_ltx`
+    /// extent - the same assumption `crate::modelgrad::Cfg::from_ltx`
     /// makes (`cross_attention_dim == inner_dim`, both streams).
     pub fn from_av(c: &LtxAvDitConfig, tv: usize, v_context_len: usize, ta: usize, a_context_len: usize) -> AvCfg {
         c.assert_supported();

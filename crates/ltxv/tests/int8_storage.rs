@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! INT8 STORAGE format for the video-only DiT's weights (M9 slice) - three
-//! things, matching this crate's own `dit_parity.rs`/`lora_train.rs` style:
+//! INT8 STORAGE format for the video-only DiT's weights (storage only) -
+//! three things, matching this crate's own `dit_parity.rs`/`lora_train.rs`
+//! style:
 //!
 //! 1. The never-quantize predicate ([`ltxv::int8::is_never_quantized`])
 //!    pinned against `dit::dit_tensor_manifest`'s REAL tensor names - a

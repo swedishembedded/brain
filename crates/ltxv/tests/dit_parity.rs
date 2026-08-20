@@ -11,13 +11,13 @@
 //! [`ltxv::LtxDit::forward`] and asserting every captured tap (`rope_cos`/
 //! `rope_sin`, `adaln_table`, `embedded_timestep`, the block-0 internal taps,
 //! each block's output, and the final `out`) at cosine >= 0.999999 -
-//! `crate::vae_parity`'s bar, and this crate's own M2 tests still pass
-//! unchanged alongside these new M3 ones.
+//! `crate::vae_parity`'s bar, and this crate's own VAE parity tests still
+//! pass unchanged alongside these DiT ones.
 //!
 //! Skips loudly without the fixture (`BRAIN_REQUIRE_FIXTURES=1` upgrades a
 //! skip to a failure), matching `vae_parity.rs`'s convention. Unlike that
 //! suite's `OnceLock`-shared weights (needed there because the real VAE
-//! checkpoint is ~726M parameters), this milestone's tiny weights are 60
+//! checkpoint is ~726M parameters), this fixture's tiny weights are 60
 //! tensors / 0.84 MB total - cheap enough to load fresh per test, so there is
 //! no shared-static ceremony to get right here.
 

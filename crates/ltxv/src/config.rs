@@ -10,8 +10,8 @@
 //!
 //! Every real-LTX-2.5-config flag is set to its real value even at toy
 //! dims, which is what makes a tiny-config parity test meaningful: it proves
-//! the op sequence this crate implements, not a simplified one. This
-//! milestone (M3) implements exactly ONE point in the flag matrix -
+//! the op sequence this crate implements, not a simplified one. This crate
+//! implements exactly ONE point in the flag matrix -
 //! `cross_attention_adaln: true`, `use_prompt_adaln_single: false`,
 //! `use_middle_indices_grid: true`, `apply_gated_attention: false` - and
 //! [`LtxDitConfig::assert_supported`] panics loudly if a future caller ever
@@ -112,9 +112,9 @@ pub struct LtxDitConfig {
     /// `video_embeddings_connector`/`audio_embeddings_connector`
     /// ([`crate::connector`]) before the block stack consumes it - real
     /// value `true`. Unlike every other `connector_*` field (read but not
-    /// consumed before this milestone), this one gates the actual forward
-    /// path: `false` (M3/M6b's existing tiny configs) reproduces those
-    /// milestones' behavior exactly (`context` used as-is, no connector
+    /// consumed until this flag was added), this one gates the actual forward
+    /// path: `false` (the existing tiny configs' setting) reproduces their
+    /// original behavior exactly (`context` used as-is, no connector
     /// weights read). There is no equivalent reference field - in
     /// `ltx_core`, the connector is a standalone module the PIPELINE applies
     /// to the text encoder's output before ever calling `LTXModel.forward`
@@ -153,8 +153,8 @@ impl LtxDitConfig {
     /// DIFFERENT (and wrong) op sequence for if it disagreed - not a
     /// cosmetic check. `apply_gated_attention` is deliberately NOT asserted
     /// here (either value is now supported, see [`crate::block::attention`]'s
-    /// doc) - M3's original panic on `true` is gone as of the milestone that
-    /// implemented the per-head `2*sigmoid(gate)` multiply.
+    /// doc) - the earlier panic on `true` is gone now that the per-head
+    /// `2*sigmoid(gate)` multiply is implemented.
     pub fn assert_supported(&self) {
         assert!(self.cross_attention_adaln, "ltxv M3 only implements cross_attention_adaln=true");
         assert!(!self.use_prompt_adaln_single, "ltxv M3 only implements use_prompt_adaln_single=false (static prompt_scale_shift_table, no timestep MLP)");

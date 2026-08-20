@@ -54,8 +54,8 @@
 //! * `latent_log_var` is `"uniform"` for this checkpoint (not `"constant"` as
 //!   an earlier reading of the roadmap assumed) - but both reduce to slicing
 //!   the raw `conv_out` output for the mean (`means = conv_out[:, :128]`,
-//!   `ltx_core`'s own docstring on `VideoEncoder.forward`), so the M2 forward
-//!   (mean only, no learned variance branch) is identical either way.
+//!   `ltx_core`'s own docstring on `VideoEncoder.forward`), so this crate's
+//!   forward (mean only, no learned variance branch) is identical either way.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;

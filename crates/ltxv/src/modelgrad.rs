@@ -79,7 +79,7 @@ pub struct Cfg {
 impl Cfg {
     /// Derive from an [`LtxDitConfig`] at token extent `t` / context extent
     /// `context_len`. `cross_attention_dim` must equal `inner_dim` - the
-    /// same M3 assumption `crate::dit::LtxDit::new` asserts (`caption_projection:
+    /// same assumption `crate::dit::LtxDit::new` asserts (`caption_projection:
     /// None`).
     pub fn from_ltx(c: &LtxDitConfig, t: usize, context_len: usize) -> Cfg {
         c.assert_supported();
@@ -717,7 +717,7 @@ mod tests {
         // see that function's doc), but `AttnWeights<T>` here carries no gate
         // slot at all: gated-attention BACKWARD is not implemented by this
         // training path (a tracked gap, not this test's concern - `Cfg::tiny`
-        // trains the M3 ungated op sequence only). So this comparison excludes
+        // trains the ungated op sequence only). So this comparison excludes
         // `to_gate_logits` names rather than asserting a coverage this module
         // does not claim.
         let mut manifest: Vec<String> = crate::dit::dit_tensor_manifest(&ltx_cfg).into_iter().map(|(n, _)| n).filter(|n| !n.contains("to_gate_logits")).collect();

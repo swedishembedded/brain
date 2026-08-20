@@ -10,7 +10,7 @@
 //!
 //! The manifest is **static** (no weights needed) so capability *discovery*
 //! is free; only [`LtxvProvider`] (execution) reads anything from disk. Two
-//! actions, `t2v` and `dfr` (M8c's multi-stage DFR pipeline,
+//! actions, `t2v` and `dfr` (the multi-stage DFR pipeline,
 //! `crate::pipeline::generate_dfr`), both with a `prompt` param that is
 //! REQUIRED even though no real text encoder consumes it yet (see
 //! `crate::pipeline::context_stub`'s doc) - the capability surface is meant
@@ -43,9 +43,8 @@ pub const MODEL: &str = "brain/ltxv";
 /// DFR run this crate cannot yet produce - a tracked gap, not implemented.
 const DFR_DIT_CONFIGS: [&str; 1] = ["tiny"];
 /// `dit_config_from_name`'s advertised keys for `t2v` - both `"tiny"`
-/// (fresh random weights, the M4 smoke-test config) and `"ltx25_22b"` (the
-/// real 22B checkpoint via `RealDit`/`crate::dit::forward_q_streamed`,
-/// wired since the real-weight generation milestone - see
+/// (fresh random weights, the smoke-test config) and `"ltx25_22b"` (the
+/// real 22B checkpoint via `RealDit`/`crate::dit::forward_q_streamed` - see
 /// `crate::pipeline`'s module doc). Selecting `"ltx25_22b"` also needs
 /// `Paths::dit` (`--dit`/`$BRAIN_LTXV_DIT`) set; that check lives in
 /// `generate` itself since this manifest is built with no weights loaded.

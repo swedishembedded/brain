@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! INT8 STORAGE format for the DiT's own linear weights (M9 slice: smaller
-//! checkpoint on disk / in host RAM only - no compute-time change).
+//! INT8 STORAGE format for the DiT's own linear weights (a storage-only
+//! slice: smaller checkpoint on disk / in host RAM only - no compute-time
+//! change).
 //!
 //! This reuses `model::int8`'s shared per-channel symmetric int8 primitives
 //! (`quantize_weight` / `dequantize_weight`) - the same ones zimage's DiT,

@@ -49,7 +49,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | D-Bus | [x] (via the generalized `capability::Provider`/residency surface, same as every other model - both `t2v` and `dfr` are reachable as actions, not just CLI subcommands) |
 | Batched serving | [ ] nothing resident to batch yet - see `crates/cli/src/resident_ltxv.rs`'s module doc |
 | Multi-device sharding | [~] `model::Shardable` plumbing for the video-only DiT is implemented and tested (partition planning, weight-subset loading, the single-shard and sequential-two-stage cases) - no real multi-device execution has been run against two physical accelerators yet |
-| NPU | [ ] deliberate scope exclusion, not a gap expected to close later - see the roadmap's M9 entry: no existing `NpuModel` implementation pattern fits a model this large, and this model's realistic deployment target is GPU/CPU |
+| NPU | [ ] deliberate scope exclusion, not a gap expected to close later: no existing `NpuModel` implementation pattern fits a model this large, and this model's realistic deployment target is GPU/CPU |
 
 ## Architecture, in brief
 

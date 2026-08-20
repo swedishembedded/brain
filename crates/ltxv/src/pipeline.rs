@@ -39,8 +39,8 @@
 //! Everything else is real: [`ltx2_sigmas`]'s token-count-dependent shift,
 //! [`euler_ancestral_step`]'s rectified-flow ancestral formula, the RoPE
 //! position-bounds construction, the classifier-free guidance fold, and the
-//! VAE decode (real weights, the same `vae3d`/`import` this port's M2
-//! milestone parity-gated).
+//! VAE decode (real weights, the same `vae3d`/`import` this port's own
+//! parity tests gate).
 //!
 //! ## One simplification inside the guidance fold
 //!
@@ -777,7 +777,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
 }
 
 // ============================================================================
-// DFR (Diffusion Fidelity Rendering) - M8c
+// DFR (Diffusion Fidelity Rendering)
 // ============================================================================
 
 use crate::dfr;
@@ -787,23 +787,23 @@ use crate::dfr;
 /// (spatial x2 always required, temporal x2 only when
 /// [`DfrOpts::temporal_upsample_rounds`] is nonzero). Kept as its OWN struct
 /// rather than adding fields to [`Paths`], so [`generate`]/[`Paths`] stay
-/// exactly what M4 shipped - this milestone EXTENDS the pipeline, it does
-/// not touch M4's own surface (see this crate's module doc).
+/// exactly what they already were - DFR EXTENDS the pipeline, it does
+/// not touch [`generate`]'s own surface (see this crate's module doc).
 ///
 /// ## What's real in [`generate_dfr`], precisely (read before assuming this
 /// ## generates anything real)
 ///
-/// Same honesty bar [`generate`]'s own doc sets for M4, extended for DFR's
+/// Same honesty bar [`generate`]'s own doc sets, extended for DFR's
 /// own additional gaps. REAL:
 ///
 /// * The canvas/keyframe-segment geometry ([`crate::dfr::resolve_canvas`]),
 ///   the generated-keyframe-slot token append + `keyframes_mask`
 ///   construction ([`crate::dfr::keyframe_slots`], landing squarely on the
-///   `keyframes_mask` seam [`crate::dit::LtxDit::forward`] has accepted
-///   since M3), the tile-boundary/lead-in/stitch math
+///   `keyframes_mask` seam [`crate::dit::LtxDit::forward`] has accepted),
+///   the tile-boundary/lead-in/stitch math
 ///   ([`crate::dfr::tile_ranges`]/[`crate::dfr::stitch_tile_latents`]), and
 ///   the final frame-count contract ([`crate::dfr::target_frame_count`]).
-/// * The two real-weight latent upscalers ([`crate::upsampler`], M8a) -
+/// * The two real-weight latent upscalers ([`crate::upsampler`]) -
 ///   stage 1's half-res video AND its generated keyframe slots are BOTH
 ///   really spatially upscaled x2, and each temporal round really runs the
 ///   real temporal x2 upscaler before tiling.
@@ -812,12 +812,12 @@ use crate::dfr;
 ///   segment) via the same `torch.lerp(seed, noise, sigma0)` formula
 ///   `GaussianNoiser` uses, not a fresh unrelated noise draw - see
 ///   [`noised_seed`].
-/// * The tiny random-weight DiT ([`generate`]'s own M4 stand-in), the same
+/// * The tiny random-weight DiT ([`generate`]'s own stand-in), the same
 ///   real `LTX2Scheduler`/CFG-fold/ancestral-Euler [`denoise`] loop
 ///   [`generate`] uses (called once per stage/tile), and the real VAE
 ///   conv-decoder decode.
 ///
-/// NOT real, by explicit scope (see this crate's module doc, "M8c"):
+/// NOT real, by explicit scope (see this crate's module doc):
 ///
 /// * **No IC-LoRA at all.** Stage 2's real spatial-detailing adapter does
 ///   not exist in this repo (a LoRA on the real 22B model this hardware
@@ -838,14 +838,14 @@ use crate::dfr;
 ///   re-seeded only from the temporally-upsampled video (not from a
 ///   carried-forward anchor still), so seam continuity across tiles is not
 ///   modeled here even though [`crate::dfr::TileRange::anchor_kf_global`]
-///   computes the real anchor positions a future milestone could wire in.
-/// * **The NA diffusion decoder (M8b) is not wired in as an alternative
+///   computes the real anchor positions a future change could wire in.
+/// * **The NA diffusion decoder is not wired in as an alternative
 ///   decode path.** [`generate_dfr`] decodes through the same real conv
 ///   decoder [`generate`] uses. `na_decoder::NADecoder`'s tiling/scale
 ///   requirements (overlapping-tile chunked decode, `w_chunks`) differ
 ///   enough from this decoder's single-shot call that wiring it in was
 ///   judged a separate, nontrivial integration - the same "land what's
-///   solid" call M8b's own agent made for its own stage-5/full-chain
+///   solid" judgment call made for the NA decoder's own stage-5/full-chain
 ///   question.
 /// * **No real distilled-schedule sigma tables.** Real DFR uses fixed
 ///   `DISTILLED_SIGMAS`/`STAGE_2_DISTILLED_SIGMAS`/a `DISTILLED_SIGMAS[4:]`
@@ -1007,7 +1007,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let reserved_half_res_video = tc_to_chw(&final1[..t0_1 * in_channels], in_channels, lat_t, lh1, lw1);
     let slot1_chw = tc_to_chw(&final1[t0_1 * in_channels..], in_channels, k, lh1, lw1);
 
-    // ---- real spatial x2 upscale (M8a) of BOTH the video and its slots ----
+    // ---- real spatial x2 upscale of BOTH the video and its slots ----
     progress(1, total_phases, "spatial upscale");
     let sraw = read_any(&paths.spatial_upsampler)?;
     let scfg = LatentUpsamplerConfig::spatial_x2();

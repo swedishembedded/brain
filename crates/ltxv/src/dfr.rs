@@ -32,7 +32,7 @@
 //! 8-pixel-frame video token and a 1-pixel-frame keyframe-slot token sit on
 //! the same real-time axis (`keyframe_slots.py::_slot_positions`). This
 //! port's own RoPE convention (`pipeline::grid_positions`, parity-proven
-//! against the M3 golden) never divides by fps at all - it uses plain
+//! against the reference golden) never divides by fps at all - it uses plain
 //! INTEGER latent-grid coordinates, one unit per latent frame. This module
 //! extends that SAME convention fractionally rather than introducing a
 //! second, fps-normalized position space: a keyframe slot at pixel frame `p`
@@ -40,11 +40,11 @@
 //! natural generalization of "1 pixel frame is `1/s` of a latent frame's
 //! span" in a scheme where a whole latent frame already spans `[k, k+1)`.
 //! RoPE already supports fractional positions (`rope.rs`'s "fractional
-//! position -> midpoint" construction, M3), so no new machinery is needed.
+//! position -> midpoint" construction), so no new machinery is needed.
 //! This is a genuine, documented DEVIATION from upstream's pixel/fps units -
 //! reworking the whole pipeline onto fps-normalized positions was judged out
 //! of scope for a smoke-level milestone (it would touch the
-//! already-parity-tested M3 position convention used by every other tap).
+//! already-parity-tested position convention used by every other tap).
 
 /// Candidate keyframe-segment lengths, in pixel frames - `dfr_layout.py`'s
 /// `SEGMENT_CANDIDATES`.
