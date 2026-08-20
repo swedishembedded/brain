@@ -621,6 +621,7 @@ front-end to depend on.
 | `gradcheck` | finite-difference backprop correctness gate |
 | `bench` | model-agnostic architecture-evaluation suite - *does it **learn**?* (see below) |
 | `perf` | performance benchmarking suite - *how **fast**, at what cost, still correct?* (see below) |
+| `trace` | the tracing/observability front end: the `--trace-<family>` registry, the 0-5 level scale, the ONE `tracing_subscriber` install (text/JSON, stdout/file). Library crates depend on `tracing` only, never on this |
 | `cli` | the `brain` binary (aggregates everything) |
 | `web` | wasm32/WebGPU PID demo (empty off wasm32) |
 
@@ -740,6 +741,7 @@ front-end to depend on.
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
+| **Tracing/observability** (`--trace-<family> <0-5>`, adding a family, instrumenting a crate) | `crates/trace` - the family registry is `crates/trace/src/registry.rs`; the CLI wiring is `install_tracing` in `crates/cli/src/main.rs` |
 
 ---
 
@@ -843,6 +845,41 @@ cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
 ./target/release/brain gpt2 train data/calculator --device cpu --out out/gpt.safetensors
 ./target/release/brain perf run sweep --device gpu0 --target qwen-synth:12x768x12
 BRAIN_DEVICE=cpu make test            # whole suite on CPU, no GPU needed
+```
+
+**Tracing** - `--trace-<family> <0-5>` is a GLOBAL option like `--device`,
+valid on any subcommand, stripped from the args before dispatch. It is
+`tracing` + `tracing-subscriber` used as intended: library crates emit through
+the plain facade (`tracing::debug!`, `#[tracing::instrument]`) and their
+`target` - the emitting Rust module path - is what labels each line with the
+component it came from. `crates/trace` owns the ONE subscriber install and the
+*family registry* that maps a short name onto the crates it covers.
+
+| flag | meaning |
+|---|---|
+| `--trace-gpu N` / `--trace-ltxv N` | one registered family at level N |
+| `--trace <family>=<level>` | the generic form; repeatable, needs no dedicated flag |
+| `--trace-format text\|json` | how to render (default `text`) |
+| `--trace-output -\|PATH` | where to write (default `-`, stdout) |
+| `BRAIN_TRACE=ltxv=5,gpu=3` | the same levels without a flag; any flag overrides it |
+
+Levels are `tracing`'s own five plus off: 0 off, 1 error, 2 warn, 3 info,
+4 debug, 5 trace. **Adding a family is ONE entry in `brain_trace::FAMILIES`**
+(short name -> the crate lib names it covers) plus the matching line in the
+CLI help; a `crates/cli` test fails if those two ever disagree, and nothing
+in the filter-construction code changes. Instrumenting a crate means adding
+`tracing` (the facade only, never a subscriber) to its manifest and calling
+the macros - no per-crate flag, no registration.
+
+This is layered ON TOP of `BRAIN_PROFILE`/`gpu_core::profile::stage_time`,
+which stays as it is: perf gates elsewhere parse its stage totals. An
+instrumented function may therefore report the same stage timing through both
+mechanisms; that overlap is deliberate, and consolidating them is a later
+decision rather than a side effect of instrumenting a crate.
+
+```bash
+brain --trace-ltxv 5 --trace-format json --trace-output run.jsonl ltxv t2v --prompt "..."
+brain --trace-gpu 4 devices          # device registry + adapter enumeration
 ```
 
 Event/stdio controller - an HFSM (`crates/runtime`) reads JSONL events on stdin

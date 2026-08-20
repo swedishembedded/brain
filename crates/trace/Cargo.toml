@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workspace-wide structured tracing: a registry mapping short --trace-<family> names to the Rust targets they cover, the 0-5 verbosity scale, and the tracing-subscriber install (text or JSON, stdout or a file). Library crates emit through the plain `tracing` facade; this crate is the single place a subscriber is built."
+
+[lib]
+name = "brain_trace"
+path = "src/lib.rs"
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The JSON-format test parses each emitted line back, rather than
+# string-matching it - a line that only "looks like" JSON is exactly the
+# defect the --trace-format json option exists to avoid.
+serde_json.workspace = true

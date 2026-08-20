@@ -18,6 +18,22 @@ unset simply isn't served (no error, it's just absent from `brain caps`).
 | `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |
 | `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
 
+### Tracing
+
+`--trace-<family> <0-5>` turns on structured, per-component tracing for one
+family of crates (`brain help` lists the families and levels; `--trace
+<family>=<level>` reaches any family generically, `--trace-format text|json`
+and `--trace-output -|PATH` control rendering and destination). One variable
+sets the same levels for entry points with no CLI in the loop:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `BRAIN_TRACE` | comma-separated `<family>=<level>` trace levels, e.g. `ltxv=5,gpu=3`; any `--trace*` flag on the command line overrides it entirely | unset (no tracing) |
+
+This is separate from `BRAIN_PROFILE` below, which prints per-kernel dispatch
+timing at exit: tracing is an event stream over a run, profiling is a summary
+table over its kernels.
+
 ### Backend workarounds & debugging
 
 Most users never need these - they exist for GPU-driver quirks and profiling.

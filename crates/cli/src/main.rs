@@ -129,6 +129,24 @@ boots), shared by --device gpuN, shard placement and residency budgets.
 `brain devices` prints the table (index, PCI bus, UUID, VRAM, backends) and what
 the ambient selection resolves to.
 
+TRACING (structured, per-component; global - valid on any subcommand)
+  --trace-<family> <0-5>   0 off (default) | 1 errors | 2 +warnings | 3 +lifecycle
+                           | 4 +per-step decisions and timings | 5 everything
+  --trace <family>=<level> same thing, generic - reaches every family, including
+                           any that has no dedicated flag yet (repeatable)
+  --trace-format text|json how to render (default text)
+  --trace-output -|PATH    where to write (default -, meaning stdout)
+
+  families:
+    --trace-gpu   <0-5>    device registry, adapter enumeration, backend open/submit/wait
+    --trace-ltxv  <0-5>    LTX-2.5 video: pipeline stages, denoise steps, streamed DiT blocks
+  BRAIN_TRACE=ltxv=5,gpu=3 sets the same levels without a flag (any --trace* flag wins).
+
+  Every line names the component it came from (the emitting Rust module), so a
+  trace over several crates stays attributable; --trace-format json puts that
+  component in a real `target` field for jq/grep rather than inside a message.
+  Example: brain --trace-ltxv 5 --trace-format json --trace-output run.jsonl ltxv t2v ...
+
 DEVICES
   brain devices                     # canonical GPU table + ambient selection
 
@@ -703,8 +721,31 @@ fn run_bench_compare(args: &[String]) {
     }
 }
 
+/// Extract the global `--trace*` flags from anywhere in the args, install the
+/// process's one `tracing` subscriber, and return the remaining args.
+///
+/// Runs FIRST in `main`, before `--device` resolution and before any
+/// subcommand: device probing, adapter enumeration and checkpoint opening are
+/// exactly the early work a `--trace-gpu` run is trying to see, so a
+/// subscriber installed any later would miss it.
+fn install_tracing(argv: Vec<String>) -> Vec<String> {
+    let (cfg, rest) = match brain_trace::strip_args(argv) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("brain: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = brain_trace::install(&cfg) {
+        eprintln!("brain: {e}");
+        std::process::exit(2);
+    }
+    rest
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    let argv = install_tracing(argv);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -741,6 +782,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::HELP;
+
+    /// The trace-family registry and this binary's help text are two lists of
+    /// the same thing, and only one of them is compiled: a family added to
+    /// the registry with no help line ships a flag nobody can discover, and a
+    /// help line for a family that no longer exists documents a flag that
+    /// hard-errors. Assert both directions.
+    #[test]
+    fn every_trace_family_is_documented_and_every_documented_one_exists() {
+        for f in brain_trace::FAMILIES {
+            let flag = format!("--trace-{}", f.name);
+            assert!(HELP.contains(&flag), "{flag} is registered but absent from `brain help`");
+            assert!(HELP.contains(f.about), "{flag}'s registry description is not what `brain help` shows");
+        }
+        for line in HELP.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("--trace-") else { continue };
+            let name = rest.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit())).next().unwrap_or("");
+            // `--trace-format`/`--trace-output` are global options, not families.
+            if name.is_empty() || name == "format" || name == "output" || rest.starts_with('<') {
+                continue;
+            }
+            assert!(brain_trace::family(name).is_some(), "`brain help` documents --trace-{name}, which is not a registered trace family");
+        }
+        for f in ["--trace-format", "--trace-output", "--trace <family>=<level>", "BRAIN_TRACE"] {
+            assert!(HELP.contains(f), "{f} missing from the global tracing summary");
+        }
+    }
 
     /// `brain --help` must at least point a reader at the HTTP serving surface
     /// and its reference (`brain serve --help`) -- before this it documented

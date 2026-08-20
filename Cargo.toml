@@ -113,6 +113,7 @@ default-members = [
     "crates/weightset",
     "crates/residency",
     "crates/stats",
+    "crates/trace",
     "crates/shutdown",
     "crates/apiserve",
     "crates/braintop",
@@ -180,6 +181,7 @@ brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }
 brain-residency = { path = "crates/residency" }
 brain-stats = { path = "crates/stats" }
+brain-trace = { path = "crates/trace" }
 brain-dbus = { path = "crates/dbus" }
 brain-shutdown = { path = "crates/shutdown" }
 brain-apiserve = { path = "crates/apiserve" }
@@ -287,14 +289,22 @@ bytes = "1"
 anyhow = "1"
 jsonschema = "0.49"
 
+# Structured tracing. `tracing` is the FACADE every library crate emits
+# through (zero cost with no subscriber installed); `tracing-subscriber` is
+# the consumer and belongs only to crates/trace, which owns the single global
+# subscriber install. env-filter builds the per-target level filter from the
+# crates/trace family registry; json is the --trace-format json renderer.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
 # braintop TUI (crates/braintop): a standalone btop-like monitor that renders the
 # StatsSnapshot over D-Bus. Confined to that bin - no engine/model crate links it.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# crates/atif (ATIF trajectory model, mirrored from applications/sven/crates/atif,
-# formerly crates/trace): versions matched to sven's own workspace so the mirror
-# stays a straight diff.
+# crates/atif (ATIF trajectory model, mirrored from applications/sven/crates/atif):
+# versions matched to sven's own workspace so the mirror stays a straight diff.
+# Unrelated to crates/trace above, which is the tracing/observability crate.
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 tempfile = "3"
