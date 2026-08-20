@@ -81,9 +81,15 @@ pub fn registry() -> &'static DeviceRegistry {
     REGISTRY.get_or_init(|| {
         let (ids, source) = match backend_vulkan::enumerate_physical_gpus() {
             Ok(v) if !v.is_empty() => (v, "vulkan"),
-            _ => (backend_wgpu::enumerate_gpus(), "wgpu"),
+            Err(e) => {
+                tracing::debug!(error = %e, "native Vulkan enumeration unavailable; falling back to wgpu");
+                (backend_wgpu::enumerate_gpus(), "wgpu")
+            }
+            Ok(_) => (backend_wgpu::enumerate_gpus(), "wgpu"),
         };
-        DeviceRegistry::from_identities(ids, source)
+        let reg = DeviceRegistry::from_identities(ids, source);
+        tracing::info!(source, gpus = reg.devices().len(), "device registry built (one-time, process lifetime)");
+        reg
     })
 }
 

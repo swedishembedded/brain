@@ -233,6 +233,7 @@ fn shared_instance() -> Result<&'static (ash::Entry, ash::Instance, bool), Strin
         std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| unsafe {
+            tracing::info!("creating the process-lifetime Vulkan instance (once, never destroyed)");
             let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
 
             let app_name = CString::new("brain-vk").unwrap();
@@ -283,7 +284,8 @@ fn shared_instance() -> Result<&'static (ash::Entry, ash::Instance, bool), Strin
             // validation extensions so the debug messenger still loads.
             let (instance, coopmat_instance_ext) = match entry.create_instance(&instance_info, None) {
                 Ok(i) => (i, true),
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!(error = %e, "vkCreateInstance failed with the cooperative-matrix extension; retrying without it");
                     let mut bare = vk::InstanceCreateInfo::default()
                         .application_info(&app_info)
                         .enabled_layer_names(&layers)

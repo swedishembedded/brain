@@ -409,14 +409,23 @@ impl VulkanBackend {
     /// Returns `Err` (so the caller can fall back to wgpu) if no Vulkan device is
     /// available or a kernel fails to compile.
     pub fn try_new(kernels: &[(&str, &str)]) -> Result<VulkanBackend, String> {
-        Self::try_new_impl(kernels, None)
+        let r = Self::try_new_impl(kernels, None);
+        if let Err(e) = &r {
+            tracing::warn!(error = %e, "native Vulkan backend unavailable; caller falls back to wgpu");
+        }
+        r
     }
 
     /// [`VulkanBackend::try_new`] on the specific physical card `target`,
     /// selected by identity (UUID → PCI → (vendor:device, ordinal)) — the
     /// registry-resolved placement path.
     pub fn try_new_on(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> Result<VulkanBackend, String> {
-        Self::try_new_impl(kernels, Some(target))
+        tracing::trace!(name = %target.name, pci = ?target.pci_bus, "opening device (native Vulkan)");
+        let r = Self::try_new_impl(kernels, Some(target));
+        if let Err(e) = &r {
+            tracing::warn!(name = %target.name, pci = ?target.pci_bus, error = %e, "native Vulkan backend unavailable for the requested card; caller falls back to wgpu");
+        }
+        r
     }
 
     fn try_new_impl(kernels: &[(&str, &str)], target: Option<&backend_api::GpuIdentity>) -> Result<VulkanBackend, String> {

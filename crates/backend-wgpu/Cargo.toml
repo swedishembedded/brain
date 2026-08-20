@@ -12,6 +12,12 @@ path = "src/lib.rs"
 [dependencies]
 brain-backend-api.workspace = true
 bytemuck.workspace = true
+# The `tracing` FACADE only - never a subscriber. `--trace-gpu <0-5>` (the
+# `brain` CLI installs the one subscriber) turns these events on; with none
+# installed every macro below is a predictable-branch no-op. Targets default
+# to this crate's module path (`backend_wgpu`), which is what labels each
+# line with the component it came from.
+tracing.workspace = true
 
 # Native GPU stack: full wgpu (desktop backends) + a blocking executor. `ash`
 # (same 0.38 as wgpu-hal's) is for the `Adapter::as_hal` identity queries —

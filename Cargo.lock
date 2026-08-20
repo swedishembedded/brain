@@ -475,6 +475,7 @@ dependencies = [
  "brain-testutil",
  "brain-vulkan",
  "bytemuck",
+ "tracing",
 ]
 
 [[package]]
@@ -491,6 +492,7 @@ dependencies = [
  "futures-channel",
  "half",
  "pollster",
+ "tracing",
  "web-sys",
  "wgpu",
 ]
@@ -1023,6 +1025,7 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "libc",
+ "tracing",
 ]
 
 [[package]]
@@ -1841,6 +1844,7 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "naga",
+ "tracing",
 ]
 
 [[package]]

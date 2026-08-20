@@ -15,6 +15,12 @@ brain-backend-api.workspace = true
 brain-vulkan.workspace = true
 ash.workspace = true
 bytemuck.workspace = true
+# The `tracing` FACADE only - never a subscriber. `--trace-gpu <0-5>` (the
+# `brain` CLI installs the one subscriber) turns these events on; with none
+# installed every macro below is a predictable-branch no-op. Targets default
+# to this crate's module path (`backend_vulkan`), which is what labels each
+# line with the component it came from.
+tracing.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

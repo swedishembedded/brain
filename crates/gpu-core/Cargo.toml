@@ -11,6 +11,12 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-backend-api.workspace = true
+# The `tracing` FACADE only - never a subscriber. `--trace-gpu <0-5>` (the
+# `brain` CLI installs the one subscriber) turns these events on; with none
+# installed every macro below is a predictable-branch no-op. Targets default
+# to this crate's module path (`gpu_core`), which is what labels each line
+# with the component it came from.
+tracing.workspace = true
 # Pure string data (no deps, no GPU): the WGSL for the drop-in fast kernels the
 # `upgrade` table swaps in for a model's registered one.
 brain-kernels.workspace = true

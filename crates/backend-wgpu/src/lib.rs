@@ -115,7 +115,10 @@ fn instance_descriptor() -> wgpu::InstanceDescriptor {
 #[cfg(not(target_arch = "wasm32"))]
 fn instance() -> &'static wgpu::Instance {
     static INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
-    INSTANCE.get_or_init(|| wgpu::Instance::new(instance_descriptor()))
+    INSTANCE.get_or_init(|| {
+        tracing::info!("creating the process-lifetime wgpu::Instance (once, never destroyed)");
+        wgpu::Instance::new(instance_descriptor())
+    })
 }
 
 /// wasm has one WebGPU implementation, no ICD loader and no `dlclose`, so the
@@ -625,6 +628,7 @@ impl Drop for DeviceShared {
         // then forget the device and queue.
         if self.faulted.load(std::sync::atomic::Ordering::SeqCst) {
             eprintln!("brain: DeviceShared::drop: device reported a hard fault earlier; leaking it rather than destroying inconsistent driver state");
+            tracing::error!("device reported a hard fault earlier; leaking it at drop rather than destroying inconsistent driver state");
             self.pipelines.clear();
             // SAFETY: drop() runs exactly once and the fields are never used
             // again. `ManuallyDrop::take` moves the values out so they can be
@@ -900,6 +904,7 @@ impl WgpuBackend {
     /// enumerations (observed on the 2×P40 box).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_on_async(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> WgpuBackend {
+        tracing::trace!(name = %target.name, pci = ?target.pci_bus, "opening device");
         let instance = instance();
         let adapters = physical_adapters(instance).await;
         let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
@@ -909,6 +914,7 @@ impl WgpuBackend {
             let id = adapter_identity(a, *ord);
             *ord += 1;
             if target.same_device(&id) {
+                tracing::debug!(name = %target.name, pci = ?target.pci_bus, enumerated = adapters.len(), "matched the requested physical card");
                 return Self::from_adapter(a, kernels).await;
             }
         }
@@ -938,8 +944,14 @@ impl WgpuBackend {
                  falling back to wgpu's own adapter request",
                 target.name, target.pci_bus
             );
+            tracing::error!(name = %target.name, pci = ?target.pci_bus, "wgpu enumerated 0 adapters; falling back to wgpu's own adapter request (may be a software rasteriser)");
             return Self::new_async(kernels).await;
         }
+        tracing::error!(
+            name = %target.name, pci = ?target.pci_bus, enumerated = adapters.len(),
+            found = ?adapters.iter().map(|a| a.get_info().name).collect::<Vec<_>>(),
+            "requested physical GPU not found among the enumerated adapters"
+        );
         panic!(
             "physical GPU {:?} (pci {:?}) not found among {} wgpu adapter(s): {:?}",
             target.name,
