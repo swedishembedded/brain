@@ -36,7 +36,7 @@ use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 /// Ceiling for one `wait_for_fences` call, nanoseconds. Generous — a legitimate
 /// prefill dispatch is slow — but finite: `u64::MAX` (the previous value) made a
 /// wedged queue block the process forever rather than error, which is why past
-/// hangs (M16's `encode-vision`, `gpu_core::roofline`) presented as unkillable
+/// hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as unkillable
 /// instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
 fn gpu_wait_timeout_ns() -> u64 {
     const DEFAULT_S: f64 = 30.0;

@@ -7,7 +7,7 @@
 //! total footprint.
 //!
 //! ```text
-//! CARGO_HOME=/data/resources/cargo-home cargo test --release -p brain-gpu-core \
+//! cargo test --release -p brain-gpu-core \
 //!   -- --ignored --nocapture --test-threads=1 vram_overhead
 //! ```
 //!
@@ -241,9 +241,9 @@ fn measure_storage_buffer_resident_overhead() {
     let landed: Vec<&Probe> = rows.iter().filter(|p| p.landed_on.is_some()).collect();
     assert!(!landed.is_empty(), "no probe produced an nvidia-smi delta on any tracked GPU index");
 
-    // Report only — this is a diagnostic, not a gate. The plan of record's M1
-    // decision (fix vs. hybrid-CPU-expert fallback) is made from these numbers
-    // by a human/agent reading the printed table, not by this assertion.
+    // Report only - this is a diagnostic, not a gate. The fix-vs.-hybrid-
+    // CPU-expert-fallback decision is made from these numbers by a
+    // human/agent reading the printed table, not by this assertion.
     let by_label: std::collections::HashMap<&str, f64> = landed.iter().map(|p| (p.label, p.ratio())).collect();
     let get = |l: &str| by_label.get(l).copied();
     eprintln!();

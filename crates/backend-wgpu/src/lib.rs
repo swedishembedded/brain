@@ -328,7 +328,7 @@ impl PlCache {
 /// Ceiling for one bounded GPU wait. Generous — a legitimate prefill dispatch
 /// is slow — but finite: `wait_indefinitely()` (the previous value everywhere)
 /// made a wedged queue block the process forever rather than error, which is
-/// why past hangs (M16's `encode-vision`, `gpu_core::roofline`) presented as
+/// why past hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as
 /// unkillable instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
 #[cfg(not(target_arch = "wasm32"))]
 fn gpu_wait_timeout() -> std::time::Duration {
