@@ -1175,6 +1175,50 @@ future multi-buffer-sharded head, could lift this); no
 `crates/cli`/`caps.rs` wiring for streaming training (this milestone is the
 trainer + its own gates, not a serving/CLI surface).
 
+**Follow-up investigated and closed: can the resident `lm_head` be chunked
+so `stream_train`'s GPU-backend path stops hitting `max_buffer_size`?**
+Read `Ops::matmul`/`Ops::matmul_dx`/`Ops::matmul_dw` (`crates/model/src/
+ops.rs`) and the WGSL they dispatch (`matmul.wgsl`, `matmul_dx.wgsl`) end to
+end, and checked every existing "chunk" helper in this tree
+(`checkpoint::mmap`/`paramstore::upload`'s `with_tensor_chunks`,
+`gpu_core::write_f32_chunked`, `model::gdn`'s recurrence chunking,
+`model::vit`'s attention chunking) for a reusable pattern - none of them
+split ONE logical tensor across several PHYSICAL device buffers; they all
+either stream host bytes into one still-whole device buffer (bounding host
+RAM, not device allocation size) or chunk a compute loop, not a buffer.
+`build_head_f32_from_mmap` (this milestone's own loader) already does the
+former for the `lm_head`'s host-side load - it still ends up as ONE `n*k`
+device buffer.
+
+The real blocker: `matmul.wgsl` writes `out[row*p.n + col]` and
+`matmul_dx.wgsl` reads `dy[row*p.n + nn]`, where `p.n` is exactly the
+dispatch's own output/reduction width - there is no separate row-stride
+parameter. Chunking the vocab dimension across, say, 3 sub-`max_buffer_size`
+weight buffers (`4.74 GiB / 2047 MiB` ≈ 2.4, so >= 3 chunks of ~83k vocab
+rows each) would need each chunk's matmul to write into (forward) or read
+from (backward) the correct COLUMN range of one full-width `[n_tokens,
+vocab]` logits/`d_logits` buffer - which neither kernel's index arithmetic
+supports without a new row-stride parameter (or a column
+scatter/gather kernel, which also does not exist - `region_copy.wgsl`
+indexes `src`/`dst` with the SAME stride on both sides, so it cannot
+reindex a compact per-chunk buffer into a strided super-buffer; `row_scatter.
+wgsl` scatters whole ROWS by index, not partial-width columns). That is
+real, new `crates/kernels` WGSL work - explicitly out of scope for this
+investigation (the task deliberately excluded `crates/kernels` unless read-
+only) and disproportionate to what is a pure training-throughput win, not a
+correctness gap: the CPU backend already trains this exact model correctly
+end to end (this milestone's own real-checkpoint run, above).
+
+This is also not a one-off: `crates/sam1/tests/parity.rs` and `crates/
+deepseek2/tests/common/real_lm.rs` hit the identical class of problem (a
+resident real-weight buffer bigger than one device allocation can be on
+this box's Vulkan adapter) and both resolve it the same way - pin the CPU
+backend for the affected pass. That is this engine's established answer to
+"one tensor exceeds one device buffer's ceiling," not a workaround specific
+to qwen35. No code changed as a result of this investigation (Option B was
+correct); `docs/models/qwen35.md`'s "Why training runs on the CPU backend,
+not the GPU" section now records the same reasoning.
+
 ### M19: measure M15's residency-window choice + wire qwen35 into `crates/perf`
 
 Two genuinely separate pieces, plus a real, measured performance fix found

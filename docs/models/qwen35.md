@@ -87,6 +87,25 @@ hard driver limit - confirmed by an actual `wgpu` validation error, not a
 host-RAM shortage). `stream_train_step` therefore builds its `Gpu` via
 `Gpu::new_cpu(...)` rather than the default GPU adapter.
 
+Splitting the resident `lm_head` into several sub-`max_buffer_size` device
+buffers (so training could stay on the GPU backend) was investigated and
+rejected for now: `matmul.wgsl`'s output write and `matmul_dx.wgsl`'s `dY`
+read both index their buffer as `row * n + col`, where `n` is the SAME
+value as the dispatch's own output/reduction width - neither kernel has a
+row-stride parameter distinct from the per-dispatch width. A vocabulary
+row-chunk therefore cannot be written into (or read back out of) its correct
+column range of one full-width `[tokens, vocab]` logits/gradient buffer
+without a WGSL-level change (a distinct row-stride parameter, or a
+column-scatter/gather kernel - neither exists today for this shape). That is
+real new kernel work, not a call-the-same-kernel-N-times change, so it is
+out of proportion for what is purely a training-throughput improvement (the
+CPU backend already trains correctly end to end on the real checkpoint).
+Two other real-weight paths in this engine (`crates/sam1/tests/parity.rs`,
+`crates/deepseek2/tests/common/real_lm.rs`) hit the same class of
+`max_buffer_size` ceiling and use the same fallback - pinning the CPU
+backend for the affected pass is this engine's established answer to "one
+tensor is bigger than one device buffer can be," not a one-off workaround.
+
 ### Example: a real streamed LoRA fine-tune against the real checkpoint
 
 Each phase below is its own short-lived process invocation - a real
