@@ -12,29 +12,6 @@
 //! The packed layout here is exactly what `matmul_i8*.wgsl` consume — if it
 //! changes, it changes for every model at once, which is the point.
 
-/// Quantize one `k`-wide row: per-row absmax scale, then round/clamp/pack
-/// every group of 4 into a little-endian `u32`. Returns `(packed_row[k/4],
-/// scale)` - factored out of [`quantize_weight`] so the exact per-element
-/// arithmetic is shared, byte-for-byte, between the parallel (native) and
-/// sequential (wasm32) dispatch below; only the row SCHEDULE differs, never
-/// the math.
-#[inline]
-fn quantize_row(row: &[f32], kg: usize) -> (Vec<u32>, f32) {
-    let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-    let s = amax.max(1e-8) / 127.0;
-    let inv = 1.0 / s;
-    let mut prow = vec![0u32; kg];
-    for g in 0..kg {
-        let mut word = 0u32;
-        for b in 0..4 {
-            let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
-            word |= ((q as u8) as u32) << (8 * b);
-        }
-        prow[g] = word;
-    }
-    (prow, s)
-}
-
 /// Per-CHANNEL symmetric int8 quantization of an `[n, k]` weight (one scale per
 /// output row `n`), packed into `[n, k/4]` u32 (4 int8 per u32, little-endian
 /// along K). Returns `(packed, scales[n])` with `scales[r] = max|w[r,:]|/127`.
@@ -42,36 +19,42 @@ fn quantize_row(row: &[f32], kg: usize) -> (Vec<u32>, f32) {
 /// single outlier row no longer crushes the whole matrix's resolution.
 /// `k` must be a multiple of 4.
 ///
-/// Every row's absmax + pack is fully independent of every other row (its own
-/// scale, its own output words), so native (non-wasm32) builds fan the `n`
-/// rows out across [`backend_cpu::par`]'s pool - the same one-pool-one-policy
-/// scheduler `model::parallel`/`model::shard` already route their own
-/// host-parallel reductions through, per that module's own doc ("rayon lives
-/// in exactly one crate"). wasm32 keeps a sequential loop over the identical
-/// per-row arithmetic in [`quantize_row`].
+/// Row-parallel through `backend_cpu::par` (the workspace's only rayon seam,
+/// the same one-pool-one-policy scheduler `model::parallel`/`model::shard`
+/// already route their own host-parallel reductions through). Every output
+/// row reads only its own `k` inputs and writes only its own scale and `k/4`
+/// words, so the split is a scheduling change and the result is bit-identical
+/// to the serial form - pinned by `tests/quantize_weight_is_schedule_
+/// invariant.rs` against a serial oracle, not asserted here. This matters
+/// because quantizing a real checkpoint is not a build-time nicety on every
+/// model: a streamed int8 tier re-quantizes hundreds of megabytes per
+/// transformer block, where the serial loop was the single largest host-CPU
+/// cost of a generation's first denoise step.
 pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
     assert_eq!(w.len(), n * k, "weight len {} != n*k {}", w.len(), n * k);
     let kg = k / 4;
-    let mut sw = vec![0f32; n];
+    // Pass 1 computes every row's scale (read-only over `w`), pass 2 packs.
+    // Two passes rather than one because the two outputs have different
+    // element types and each row needs its own scale before it can pack; the
+    // extra read of `w` is far cheaper than the serial loop it replaces, and
+    // computing the scale a second time inside the pack pass (as an earlier
+    // version of this function did) would cost that same read again for
+    // nothing - `sw[r]` below is already final.
+    let sw = backend_cpu::par::map_f32(n, |r| w[r * k..r * k + k].iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0);
     let mut packed = vec![0u32; n * kg];
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let rows: Vec<(Vec<u32>, f32)> = backend_cpu::par::map(n, |r| quantize_row(&w[r * k..r * k + k], kg));
-        for (r, (prow, s)) in rows.into_iter().enumerate() {
-            packed[r * kg..(r + 1) * kg].copy_from_slice(&prow);
-            sw[r] = s;
+    backend_cpu::par::chunks_mut(&mut packed, kg, |r, prow| {
+        let row = &w[r * k..r * k + k];
+        let inv = 1.0 / sw[r];
+        for (g, word_out) in prow.iter_mut().enumerate() {
+            let mut word = 0u32;
+            for b in 0..4 {
+                let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
+                word |= ((q as u8) as u32) << (8 * b);
+            }
+            *word_out = word;
         }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for r in 0..n {
-            let (prow, s) = quantize_row(&w[r * k..r * k + k], kg);
-            packed[r * kg..(r + 1) * kg].copy_from_slice(&prow);
-            sw[r] = s;
-        }
-    }
+    });
     (packed, sw)
 }
 

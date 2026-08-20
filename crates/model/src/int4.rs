@@ -39,27 +39,28 @@
 /// `(packed, scales[n])` with `scales[r] = max|w[r,:]|.max(1e-8) / 7.0`.
 /// `k` must be a multiple of 8 (double int8's `%4`, since twice as many
 /// values pack into the same `u32` width).
+///
+/// Row-parallel for the same reason, and with the same bit-identical
+/// guarantee, as [`crate::int8::quantize_weight`] - see that function's doc
+/// and the shared gate `tests/quantize_weight_is_schedule_invariant.rs`.
 pub fn quantize_weight_q4(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     assert_eq!(k % 8, 0, "q4 K must be a multiple of 8 (got {k})");
     assert_eq!(w.len(), n * k, "weight len {} != n*k {}", w.len(), n * k);
     let kg = k / 8;
-    let mut sw = vec![0f32; n];
+    let sw = backend_cpu::par::map_f32(n, |r| w[r * k..r * k + k].iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 7.0);
     let mut packed = vec![0u32; n * kg];
-    for r in 0..n {
+    backend_cpu::par::chunks_mut(&mut packed, kg, |r, prow| {
         let row = &w[r * k..r * k + k];
-        let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-        let s = amax.max(1e-8) / 7.0;
-        sw[r] = s;
-        let inv = 1.0 / s;
-        for g in 0..kg {
+        let inv = 1.0 / sw[r];
+        for (g, word_out) in prow.iter_mut().enumerate() {
             let mut word = 0u32;
             for b in 0..8 {
                 let q = (row[g * 8 + b] * inv).round().clamp(-7.0, 7.0) as i32;
                 word |= ((q as u8) as u32 & 0xF) << (4 * b);
             }
-            packed[r * kg + g] = word;
+            *word_out = word;
         }
-    }
+    });
     (packed, sw)
 }
 

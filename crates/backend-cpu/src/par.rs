@@ -25,8 +25,22 @@ use rayon::prelude::*;
 /// last row to be full; a short tail row is passed as-is (matching
 /// `chunks_mut`), never dropped.
 pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) + Sync) {
-    assert!(row_len > 0, "rows_mut: row_len must be non-zero");
-    buf.par_chunks_mut(row_len).enumerate().for_each(|(i, row)| f(i, row));
+    chunks_mut(buf, row_len, f)
+}
+
+/// [`rows_mut`] over any `Send` element type - the shape of a loop whose
+/// output rows are not `f32`: packed int8/int4 weight words (`u32`), decoded
+/// block spans, index tables.
+///
+/// Same exactness contract as [`rows_mut`]: chunk `i` covers
+/// `[i*chunk_len, (i+1)*chunk_len)` regardless of how many threads run, so a
+/// loop whose per-chunk body reads only its own chunk and shared immutable
+/// state produces a bit-identical result to the serial form - which is what
+/// makes converting an existing serial loop a scheduling change rather than a
+/// numerical one. A short tail chunk is passed as-is, never dropped.
+pub fn chunks_mut<T: Send>(buf: &mut [T], chunk_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    assert!(chunk_len > 0, "chunks_mut: chunk_len must be non-zero");
+    buf.par_chunks_mut(chunk_len).enumerate().for_each(|(i, c)| f(i, c));
 }
 
 /// Apply `f(index, element)` to every element of `buf`, in parallel.
