@@ -206,6 +206,126 @@ pub struct VkBuffer {
     pub host_visible: bool,
 }
 
+/// The process's ONE Vulkan instance (with the loader entry it came from, and
+/// whether the cooperative-matrix instance extension is present on it),
+/// created on first use and **never destroyed**.
+///
+/// Not an optimisation - a correctness requirement. Destroying the last
+/// Vulkan instance makes the loader unload every ICD it opened, and some
+/// vendor ICDs do not survive being unloaded and reloaded: after a handful of
+/// rounds the loader still finds the shared object but can no longer resolve
+/// `vkCreateInstance` through it, and from then on the process enumerates
+/// zero physical devices while every other process still sees the cards. A
+/// process that builds one context per forward call - the shape every "fresh
+/// device per call" model has - reaches that point in single digits, and what
+/// follows is not a clean error but a silent demotion to a software adapter
+/// with a fraction of the real card's limits.
+///
+/// So the instance is created once and outlives every context. Contexts still
+/// create and destroy their own logical devices normally; only the instance is
+/// permanent, and it owns no VRAM.
+///
+/// # Safety
+/// Wraps unsafe ash FFI. The instance is deliberately leaked, which is what
+/// makes handing out `&'static` references to it sound.
+fn shared_instance() -> Result<&'static (ash::Entry, ash::Instance, bool), String> {
+    static SHARED: std::sync::OnceLock<Result<(ash::Entry, ash::Instance, bool), String>> =
+        std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| unsafe {
+            let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
+
+            let app_name = CString::new("brain-vk").unwrap();
+            let app_info = vk::ApplicationInfo::default()
+                .application_name(&app_name)
+                .application_version(0)
+                .engine_name(&app_name)
+                .engine_version(0)
+                .api_version(vk::API_VERSION_1_3);
+
+            // Optional: `BRAIN_VK_VALIDATE` enables the Khronos validation layer with
+            // SYNCHRONIZATION_VALIDATION + a debug messenger, to catch GPU hazards
+            // (the loader's VK_INSTANCE_LAYERS env is unreliable, so we wire it here).
+            let validate = std::env::var("BRAIN_VK_VALIDATE").is_ok();
+            let val_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+            let mut layers: Vec<*const std::ffi::c_char> = Vec::new();
+            // Validation instance extensions (debug messenger + sync-validation feature)
+            // are needed in BOTH the with- and without-coopmat instance variants.
+            let mut val_exts: Vec<*const std::ffi::c_char> = Vec::new();
+            if validate {
+                layers.push(val_layer.as_ptr());
+                val_exts.push(ash::ext::debug_utils::NAME.as_ptr());
+                val_exts.push(ash::ext::validation_features::NAME.as_ptr());
+            }
+            // Instance must enable the cooperative-matrix instance extension so we
+            // can call vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR.
+            let mut instance_exts: Vec<*const std::ffi::c_char> = vec![ash::khr::cooperative_matrix::NAME.as_ptr()];
+            instance_exts.extend_from_slice(&val_exts);
+            // BRAIN_VK_VALIDATE=gpu => GPU-assisted (in-shader OOB/descriptor checks);
+            // anything else => synchronization validation (race/hazard checks).
+            let gpu_av = std::env::var("BRAIN_VK_VALIDATE").map(|v| v == "gpu").unwrap_or(false);
+            let sync_feats = if gpu_av {
+                vec![vk::ValidationFeatureEnableEXT::GPU_ASSISTED]
+            } else {
+                vec![vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION]
+            };
+            let mut val_features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&sync_feats);
+            let mut instance_info = vk::InstanceCreateInfo::default()
+                .application_info(&app_info)
+                .enabled_layer_names(&layers)
+                .enabled_extension_names(&instance_exts);
+            if validate {
+                instance_info = instance_info.push_next(&mut val_features);
+            }
+
+            // The cooperative-matrix instance extension may be absent on llvmpipe;
+            // retry without it (we then report extension_present = false) - but keep the
+            // validation extensions so the debug messenger still loads.
+            let (instance, coopmat_instance_ext) = match entry.create_instance(&instance_info, None) {
+                Ok(i) => (i, true),
+                Err(_) => {
+                    let mut bare = vk::InstanceCreateInfo::default()
+                        .application_info(&app_info)
+                        .enabled_layer_names(&layers)
+                        .enabled_extension_names(&val_exts);
+                    if validate {
+                        bare = bare.push_next(&mut val_features);
+                    }
+                    let i = entry
+                        .create_instance(&bare, None)
+                        .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
+                    (i, false)
+                }
+            };
+
+            if validate {
+                let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                    .message_severity(
+                        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+                    )
+                    .message_type(
+                        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                            | vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                    )
+                    .pfn_user_callback(Some(vk_debug_callback));
+                let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+                // Deliberately never destroyed: the messenger lives for the process
+                // lifetime (diagnostic only) and is reclaimed with the instance.
+                // Neither the loader nor the handle implements `Drop`, so letting
+                // both bindings fall out of scope already leaks the messenger - a
+                // `mem::forget` here would be a no-op that only looked deliberate.
+                if loader.create_debug_utils_messenger(&info, None).is_err() {
+                    eprintln!("[vk] failed to install the debug messenger");
+                }
+                eprintln!("[vk] validation layer + synchronization validation enabled");
+            }
+            Ok((entry, instance, coopmat_instance_ext))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
 impl VkContext {
     /// Create the instance + device and run the cooperative-matrix capability
     /// query. Selects the first discrete GPU if present, else the first device.
@@ -226,99 +346,19 @@ impl VkContext {
     }
 
     unsafe fn new_inner(select: Option<&PhysicalDeviceSelect<'_>>) -> Result<VkContext, String> {
-        let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
+        // Shared and never destroyed - see `shared_instance`. `ash::Entry` and
+        // `ash::Instance` are handle wrappers, so cloning them hands this
+        // context the SAME instance every other context uses; what it owns
+        // (and destroys in `Drop`) is the logical device below, not this.
+        let (entry, instance, coopmat_instance_ext) = shared_instance()?;
+        let (entry, instance, coopmat_instance_ext) =
+            (entry.clone(), instance.clone(), *coopmat_instance_ext);
 
-        let app_name = CString::new("brain-vk").unwrap();
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(&app_name)
-            .application_version(0)
-            .engine_name(&app_name)
-            .engine_version(0)
-            .api_version(vk::API_VERSION_1_3);
-
-        // Optional: `BRAIN_VK_VALIDATE` enables the Khronos validation layer with
-        // SYNCHRONIZATION_VALIDATION + a debug messenger, to catch GPU hazards
-        // (the loader's VK_INSTANCE_LAYERS env is unreliable, so we wire it here).
-        let validate = std::env::var("BRAIN_VK_VALIDATE").is_ok();
-        let val_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
-        let mut layers: Vec<*const std::ffi::c_char> = Vec::new();
-        // Validation instance extensions (debug messenger + sync-validation feature)
-        // are needed in BOTH the with- and without-coopmat instance variants.
-        let mut val_exts: Vec<*const std::ffi::c_char> = Vec::new();
-        if validate {
-            layers.push(val_layer.as_ptr());
-            val_exts.push(ash::ext::debug_utils::NAME.as_ptr());
-            val_exts.push(ash::ext::validation_features::NAME.as_ptr());
-        }
-        // Instance must enable the cooperative-matrix instance extension so we
-        // can call vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR.
-        let mut instance_exts: Vec<*const std::ffi::c_char> = vec![ash::khr::cooperative_matrix::NAME.as_ptr()];
-        instance_exts.extend_from_slice(&val_exts);
-        // BRAIN_VK_VALIDATE=gpu => GPU-assisted (in-shader OOB/descriptor checks);
-        // anything else => synchronization validation (race/hazard checks).
-        let gpu_av = std::env::var("BRAIN_VK_VALIDATE").map(|v| v == "gpu").unwrap_or(false);
-        let sync_feats = if gpu_av {
-            vec![vk::ValidationFeatureEnableEXT::GPU_ASSISTED]
-        } else {
-            vec![vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION]
-        };
-        let mut val_features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&sync_feats);
-        let mut instance_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_layer_names(&layers)
-            .enabled_extension_names(&instance_exts);
-        if validate {
-            instance_info = instance_info.push_next(&mut val_features);
-        }
-
-        // The cooperative-matrix instance extension may be absent on llvmpipe;
-        // retry without it (we then report extension_present = false) — but keep the
-        // validation extensions so the debug messenger still loads.
-        let (instance, coopmat_instance_ext) = match entry.create_instance(&instance_info, None) {
-            Ok(i) => (i, true),
-            Err(_) => {
-                let mut bare = vk::InstanceCreateInfo::default()
-                    .application_info(&app_info)
-                    .enabled_layer_names(&layers)
-                    .enabled_extension_names(&val_exts);
-                if validate {
-                    bare = bare.push_next(&mut val_features);
-                }
-                let i = entry
-                    .create_instance(&bare, None)
-                    .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
-                (i, false)
-            }
-        };
-
-        if validate {
-            let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-                .message_severity(
-                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
-                )
-                .message_type(
-                    vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                        | vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-                )
-                .pfn_user_callback(Some(vk_debug_callback));
-            let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
-            // Deliberately never destroyed: the messenger lives for the process
-            // lifetime (diagnostic only) and is reclaimed with the instance.
-            // Neither the loader nor the handle implements `Drop`, so letting
-            // both bindings fall out of scope already leaks the messenger — a
-            // `mem::forget` here would be a no-op that only looked deliberate.
-            if loader.create_debug_utils_messenger(&info, None).is_err() {
-                eprintln!("[vk] failed to install the debug messenger");
-            }
-            eprintln!("[vk] validation layer + synchronization validation enabled");
-        }
 
         let physical_devices = instance
             .enumerate_physical_devices()
             .map_err(|e| format!("enumerate_physical_devices failed: {e}"))?;
         if physical_devices.is_empty() {
-            instance.destroy_instance(None);
             return Err("no Vulkan physical devices found".into());
         }
         // Prefer a real GPU over a software rasteriser (llvmpipe): rank by device
@@ -338,14 +378,8 @@ impl VkContext {
         let physical_device = if let Some(select) = select {
             match select(&instance, &physical_devices) {
                 Ok(i) if i < physical_devices.len() => physical_devices[i],
-                Ok(i) => {
-                    instance.destroy_instance(None);
-                    return Err(format!("device selector returned out-of-range index {i}"));
-                }
-                Err(e) => {
-                    instance.destroy_instance(None);
-                    return Err(e);
-                }
+                Ok(i) => return Err(format!("device selector returned out-of-range index {i}")),
+                Err(e) => return Err(e),
             }
         } else {
             match forced {
@@ -944,7 +978,8 @@ impl Drop for VkContext {
             }
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
+            // The INSTANCE is deliberately not destroyed: it is shared by
+            // every context and lives for the process - see `shared_instance`.
         }
     }
 }

@@ -1105,19 +1105,20 @@ this port:
       fixes above are correct on the real generation path, not only the
       synthetic bench.
 
-      Found, not fixed (tracked): the residency executor's GPU-lane
-      device-opening path can fail to match the expected physical adapter
-      by PCI id ("wgpu enumerated 0 adapters while looking for 'Tesla
-      P40'"), falling back to a software adapter whose 128 MiB
-      `max_storage_buffer_binding_size` is too small for
-      even the smallest real-VAE decode buffer. Reproduced identically
-      with both `--device gpu` and an explicit single-GPU restriction; NOT
-      reproduced through the bespoke `brain ltxv t2v` CLI or `ltxv_bench`
-      (both open the device directly, bypassing residency's lane
-      mechanism) - isolating this to `residency::Executor`'s own GPU-lane
-      opening, a cross-cutting infrastructure gap this pass did not touch
-      (out of scope for `ltxv`'s own crate; every other GPU-executor perf
-      target shares the same code path).
+      Found here, fixed later in shared infrastructure: device opening can
+      fail to match the expected physical adapter by PCI id ("wgpu
+      enumerated 0 adapters while looking for 'Tesla P40'"), falling back
+      to a software adapter whose 128 MiB
+      `max_storage_buffer_binding_size` is too small for even the smallest
+      real-VAE decode buffer. This pass reproduced it only through
+      `residency::Executor`'s GPU lane and concluded it was specific to
+      that lane, because the shorter direct-CLI runs tried at the time did
+      not open enough devices to reach it. That conclusion was wrong: a
+      full real-weight `brain ltxv t2v` (real 22B DiT + real Gemma-4 text
+      encoder, 8 real denoise steps, then VAE decode) reproduces it
+      exactly, crashing at the first device opened after denoising. The
+      cause is not placement logic at all - see the closed entry under
+      "Recorded gaps" and the `backend-wgpu`/`vulkan` doc comments.
 
       **Baseline + gate** (`scripts/gates/ltxv-perf-gate.sh` +
       `scripts/gates/ltxv-perf-baselines/ltxv-tiny-9x64x64x4-cpu.json`),
@@ -1640,13 +1641,21 @@ land. Known traps already identified from reading (not yet test-pinned):
   cores measured only ~3.5x, since every thread still re-walks the same
   604 MB matrix), so a blocked/tiled rewrite that avoids the redundant
   re-reads entirely remains a further, unattempted win.
-- The residency executor's GPU-lane device-opening path can fail to match
+- ~~The residency executor's GPU-lane device-opening path can fail to match
   the expected physical adapter by PCI id, falling back to a software
   adapter with too small a `max_storage_buffer_binding_size` for even the
-  smallest real-VAE decode buffer (Phase 8's entry above) - a
-  cross-cutting `residency`/`backend-wgpu` infrastructure gap every
-  GPU-executor perf target shares, not ltxv-specific and not fixed here;
-  `scripts/gates/ltxv-perf-gate.sh` sidesteps it with `--device cpu`.
+  smallest real-VAE decode buffer (Phase 8's entry above).~~ **Closed** -
+  root-caused and fixed in `backend-wgpu`/`vulkan`/`backend-vulkan`, which
+  own the real cause (repeated Vulkan instance create/destroy makes the
+  loader unload and reload the ICD until it stops resolving
+  `vkCreateInstance`, after which the process sees no cards at all). It was
+  never residency-specific: any code that opens a device per forward call
+  hits it, which is why `brain ltxv t2v` reproduced it too once the run was
+  long enough. See those crates' `shared_instance`/`instance` doc comments
+  for the mechanism and `crates/gpu-core/tests/device_churn.rs` +
+  `crates/backend-wgpu/tests/adapter_enumeration.rs` for the gates.
+  `scripts/gates/ltxv-perf-gate.sh` still runs `--device cpu`, now by
+  choice of measurement target rather than to sidestep a bug.
 - `brain perf`'s `ltxv:` target measures only the tiny random-weight
   config by default; the real 22B checkpoint's ~186s/step cost (Phase 8's
   entry above) makes it unsuitable for a routine gate, so no committed

@@ -81,6 +81,52 @@ fn instance_descriptor() -> wgpu::InstanceDescriptor {
     desc
 }
 
+/// The process's ONE `wgpu::Instance`, created on first use and never
+/// destroyed.
+///
+/// This is a correctness requirement, not an optimisation. Creating a
+/// `wgpu::Instance` makes the Vulkan loader `dlopen` every installed ICD, and
+/// destroying the last one makes it `dlclose` them again. Some vendor ICDs do
+/// not survive that cycle: with the NVIDIA driver the loader still *finds* the
+/// shared object on the tenth round but can no longer resolve
+/// `vkCreateInstance` through it, reporting
+///
+/// ```text
+/// loader_scanned_icd_add: Could not get 'vkCreateInstance' via
+///     'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0
+/// ```
+///
+/// From that point the process enumerates ZERO physical GPUs while every
+/// other process still sees the cards. That is silent rather than fatal,
+/// because [`WgpuBackend::new_on_async`] then falls back to `request_adapter`,
+/// which hands back the software rasteriser - so the run continues on a CPU
+/// adapter whose `max_storage_buffer_binding_size` is a fraction of the real
+/// card's, until the first allocation that needs the real card's limits dies
+/// in `create_bind_group` validation instead.
+///
+/// A process reaches that point easily: every model built on "open a fresh
+/// device per forward call" creates an instance per call, and nine were
+/// enough to kill enumeration for the rest of the process. Keeping exactly
+/// one instance alive for the process lifetime means the loader never unloads
+/// an ICD at all, so the cycle that breaks it cannot happen. An instance owns
+/// no VRAM and no per-device state - devices built from it are still created
+/// and destroyed normally - so nothing is leaked by holding it beyond the
+/// handful of driver handles a Vulkan instance needs.
+#[cfg(not(target_arch = "wasm32"))]
+fn instance() -> &'static wgpu::Instance {
+    static INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| wgpu::Instance::new(instance_descriptor()))
+}
+
+/// wasm has one WebGPU implementation, no ICD loader and no `dlclose`, so the
+/// native single-instance rule above has nothing to protect against there;
+/// `wgpu::Instance` is also not `Sync` on that target, so it could not live in
+/// a `static` anyway.
+#[cfg(target_arch = "wasm32")]
+fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(instance_descriptor())
+}
+
 /// Serialises backend construction across threads.
 ///
 /// Building a backend creates a `wgpu::Instance`, which enumerates **every**
@@ -210,8 +256,8 @@ async fn physical_adapters(instance: &wgpu::Instance) -> Vec<wgpu::Adapter> {
 pub fn enumerate_gpus() -> Vec<backend_api::GpuIdentity> {
     let _guard = init_lock();
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(instance_descriptor());
-        let adapters = physical_adapters(&instance).await;
+        let instance = instance();
+        let adapters = physical_adapters(instance).await;
         let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
         adapters
             .iter()
@@ -828,7 +874,7 @@ impl WgpuBackend {
     /// path takes wgpu's high-performance default — the software-rasteriser
     /// fallback on GPU-less boxes, and the only path that exists on wasm.
     pub async fn new_async(kernels: &[(&str, &str)]) -> WgpuBackend {
-        let instance = wgpu::Instance::new(instance_descriptor());
+        let instance = instance();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -854,8 +900,8 @@ impl WgpuBackend {
     /// enumerations (observed on the 2×P40 box).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_on_async(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> WgpuBackend {
-        let instance = wgpu::Instance::new(instance_descriptor());
-        let adapters = physical_adapters(&instance).await;
+        let instance = instance();
+        let adapters = physical_adapters(instance).await;
         let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
         for a in &adapters {
             let info = a.get_info();
@@ -874,13 +920,18 @@ impl WgpuBackend {
         // (it asks the backends to pick rather than listing them), which is
         // worth trying before declaring the machine GPU-less.
         //
-        // This is not hypothetical: on the 2xP40 box `crates/bench`'s capscale
-        // smoke dies here with `not found among 0 wgpu adapter(s)` while the
-        // very same process has already built six devices on that exact card,
-        // and `crates/gpu-core/tests/device_churn.rs` shows plain build/drop
-        // cycles — even with real allocation and real submits — reach twelve
-        // without trouble. Whatever wedges the enumeration is not brain's
-        // device lifecycle, and panicking is the least useful response to it.
+        // This is not hypothetical, and for a long time it was not
+        // understood: a process would build several devices on a card and
+        // then stop being able to see that card at all. The cause is now
+        // known and fixed - repeatedly creating and destroying Vulkan
+        // instances made the loader unload and reload the ICD until it
+        // stopped resolving `vkCreateInstance` (see [`instance`]) - so this
+        // branch should no longer be reachable on a machine that has cards.
+        // It stays because falling back is still a better answer than
+        // panicking, and because it is exactly right on a genuinely GPU-less
+        // machine. What it must never do is stay quiet: the adapter it lands
+        // on may be a software rasteriser, which computes correct answers
+        // slowly right up until an allocation exceeds its smaller limits.
         if adapters.is_empty() {
             eprintln!(
                 "brain: wgpu enumerated 0 adapters while looking for {:?} (pci {:?}); \
@@ -906,8 +957,8 @@ impl WgpuBackend {
     /// `adapters[i]` → distinct physical card.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_multi_async(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
-        let instance = wgpu::Instance::new(instance_descriptor());
-        let mut adapters = physical_adapters(&instance).await;
+        let instance = instance();
+        let mut adapters = physical_adapters(instance).await;
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
         assert!(adapters.len() >= count, "need {count} discrete GPUs, found {}", adapters.len());
         let mut out = Vec::with_capacity(count);

@@ -347,39 +347,59 @@ unsafe fn pd_identity(instance: &ash::Instance, pd: vk::PhysicalDevice, ordinal:
     }
 }
 
+/// The process's ONE enumeration instance, created on first use and never
+/// destroyed - the same rule, and for the same reason, as
+/// `brain_vulkan::context`'s `shared_instance`: destroying a Vulkan instance
+/// makes the loader unload every ICD it opened, and an ICD that has been
+/// unloaded and reloaded a handful of times stops resolving `vkCreateInstance`
+/// altogether, leaving the process blind to hardware that is still physically
+/// present.
+///
+/// Deliberately separate from the compute context's instance rather than
+/// shared with it: this one asks for nothing beyond Vulkan 1.1 (enough for
+/// `VkPhysicalDeviceIDProperties` / `properties2`), so the registry can still
+/// enumerate cards on a driver that would refuse the compute instance's higher
+/// API version and cooperative-matrix extension. Two long-lived instances cost
+/// a handful of driver handles; instance CHURN is what does damage.
+fn enumeration_instance() -> Result<&'static (ash::Entry, ash::Instance), String> {
+    static SHARED: std::sync::OnceLock<Result<(ash::Entry, ash::Instance), String>> =
+        std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| unsafe {
+            let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
+            // 1.1 for VkPhysicalDeviceIDProperties / properties2.
+            let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
+            let info = vk::InstanceCreateInfo::default().application_info(&app_info);
+            let instance =
+                entry.create_instance(&info, None).map_err(|e| format!("vkCreateInstance failed: {e}"))?;
+            Ok((entry, instance))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
 /// Enumerate every Vulkan physical device with stable identity — the canonical
-/// enumeration `gpu_core::devices` builds the process-wide registry from. A
-/// minimal instance is created and destroyed here; no logical device, no
-/// pipelines. `Err` when no loader/ICD is present (the registry then falls back
-/// to the wgpu enumeration).
+/// enumeration `gpu_core::devices` builds the process-wide registry from. Uses
+/// the shared [`enumeration_instance`]; no logical device, no pipelines. `Err`
+/// when no loader/ICD is present (the registry then falls back to the wgpu
+/// enumeration).
 pub fn enumerate_physical_gpus() -> Result<Vec<backend_api::GpuIdentity>, String> {
+    let (_entry, instance) = enumeration_instance()?;
     unsafe {
-        let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
-        // 1.1 for VkPhysicalDeviceIDProperties / properties2.
-        let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
-        let info = vk::InstanceCreateInfo::default().application_info(&app_info);
-        let instance = entry
-            .create_instance(&info, None)
-            .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
-        let pds = match instance.enumerate_physical_devices() {
-            Ok(v) => v,
-            Err(e) => {
-                instance.destroy_instance(None);
-                return Err(format!("enumerate_physical_devices failed: {e}"));
-            }
-        };
+        let pds = instance
+            .enumerate_physical_devices()
+            .map_err(|e| format!("enumerate_physical_devices failed: {e}"))?;
         let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
         let ids = pds
             .iter()
             .map(|&pd| {
                 let props = instance.get_physical_device_properties(pd);
                 let ord = ordinals.entry((props.vendor_id, props.device_id)).or_insert(0);
-                let id = pd_identity(&instance, pd, *ord);
+                let id = pd_identity(instance, pd, *ord);
                 *ord += 1;
                 id
             })
             .collect();
-        instance.destroy_instance(None);
         Ok(ids)
     }
 }
