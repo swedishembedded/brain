@@ -1046,6 +1046,7 @@ dependencies = [
  "brain-kernels",
  "brain-lfm2",
  "brain-ltxv",
+ "brain-minimaxmusic3",
  "brain-model",
  "brain-qwen3",
  "brain-qwen35",
@@ -1204,6 +1205,7 @@ version = "1.0.0"
 dependencies = [
  "brain-audio",
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

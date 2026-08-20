@@ -15,6 +15,7 @@ brain-audio.workspace = true
 brain-model.workspace = true
 brain-kernels.workspace = true
 brain-gpu-core.workspace = true
+brain-data.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

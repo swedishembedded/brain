@@ -46,13 +46,15 @@
 //! sampling loop.
 //!
 //! Status: condition encoder and vocoder inference are landed (both
-//! real-weight parity cosine 1.0). Depth decoder, DiT, the Global LLM's
-//! own wiring, training (incl. the vocoder's own adversarial training,
-//! still to come), and serving land component-by-component, one crate
-//! module at a time.
+//! real-weight parity cosine 1.0), and the vocoder's own backward is
+//! gradient-checked against every one of its ~38 named parameters. Depth
+//! decoder, DiT, the Global LLM's own wiring, the vocoder's LoRA +
+//! adversarial (discriminator) training, and serving land
+//! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
+pub mod train;
 pub mod vocoder;
 
 pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};

@@ -131,16 +131,44 @@ Measured: tiny cosine 1.000000000 (exact), real-weight (a 6-latent-frame,
 and every residual unit) cosine 1.000000000, max_abs 1e-6 (fp32 rounding
 only) - both on the CPU (Cranelift JIT) backend, no GPU needed.
 
+## Phase 4: vocoder backward + gradcheck
+
+`crates/minimaxmusic3::train::Trainer` - a SEPARATE forward from
+`vocoder::forward` (the served path), because training needs persistent
+device-resident weight/gradient buffers reused across many steps and every
+intermediate activation kept around for backward, neither of which the
+one-shot served path should pay for. Two more new kernels:
+`bias_grad_ncl` (the per-channel bias gradient over NCL layout -
+`bias_grad.wgsl` assumes the feature axis is fastest-varying, the opposite
+convention from NCL's channel-then-length layout, so it doesn't fit) and
+`tanh_act_bwd` (the vocoder's final activation had a forward kernel but no
+backward anywhere in the workspace despite its own doc comment claiming
+one existed - a stale claim, not a real gap that had been closed).
+
+Every one of the residual unit's two consumers of its own input (the
+Snake-branch and the direct `add2` skip) sums correctly in backward: this
+is checked, not assumed - `crates/gradcheck::minimaxmusic3::check_vocoder`
+runs `directional_check` (a random-direction two-sided finite difference)
+against EVERY one of the vocoder's ~38 named parameters (every conv/
+conv-transpose weight and bias across all 4 blocks x 3 residual units,
+every Snake alpha), and every one passes with relative error under 8e-4 -
+an order of magnitude inside the workspace's `(4e-3, 8e-2)` gate. Wired
+into `make gradcheck` via `crates/gradcheck/tests/imaging_models.rs`'s
+`check!` macro, same as every other model's gate.
+
+The loss used to gradcheck is a plain MSE reconstruction loss - enough to
+prove every gradient is analytically correct, which is what gradcheck
+exists to do. It is NOT the loss a real training run would use.
+
 ## Not yet done
 
-- [ ] Vocoder training: `SNAKE_BETA`-adjacent backward is proven at the
-      kernel level (`snake1d_bwd_{dx,dalpha}` FD-gated), but the vocoder
-      module itself has no backward/gradcheck/LoRA wiring yet, and no
-      multi-scale STFT/mel discriminator + adversarial training loop -
-      the actual new-capability item this component's training scope
-      requires (`crates/mimi::recon`'s module doc lists this stack as
-      absent workspace-wide; this closes it, scoped to what this
-      vocoder needs)
+- [ ] Vocoder LoRA fine-tune (the backward this phase landed makes it
+      straightforward - not yet wired)
+- [ ] The multi-scale STFT/mel discriminator + adversarial + feature-
+      matching training loop this model's training scope actually needs -
+      the real new-capability item (`crates/mimi::recon`'s module doc
+      lists this stack as absent workspace-wide; this closes it, scoped
+      to what this vocoder needs, not generalized into `crates/mimi`)
 - [ ] RVQ depth decoder: import + forward/backward + gradcheck + LoRA
 - [ ] Flow-matching DiT: import + forward/backward + gradcheck + LoRA +
       int8 storage tier + pipeline sharding
@@ -151,8 +179,6 @@ only) - both on the CPU (Cranelift JIT) backend, no GPU needed.
       crop-and-stitch - one real short end-to-end WAV on this machine
 - [ ] Serving contract: capability manifest, residency adapter, CLI verb,
       D-Bus, a runnable example
-- [ ] `SNAKE_BETA` backward kernel (currently forward-only; needed for
-      vocoder training)
 
 ## Recorded gaps (expected, not yet reached)
 
