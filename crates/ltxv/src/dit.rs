@@ -498,6 +498,7 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     let w2 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_2.weight"));
     let b2 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_2.bias"));
     let rows = timesteps_scaled.len();
+
     let mut embedded = vec![0f32; rows * dim];
     for (ti, &t) in timesteps_scaled.iter().enumerate() {
         let e = dit::timestep::pixart_timestep_embed(t, 256, w1, b1, dim, w2, b2, dim, 10000.0);
@@ -1097,10 +1098,16 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// (a second real forward then ran out of device memory that a fresh
 /// device open does not).
 ///
-/// `cache`: a per-GENERATION (not per-call) HOST-side [`GenerationCache`] -
-/// `crate::pipeline::RealDit` owns one and passes the SAME reference into
-/// every one of a generation's ~20-50 denoise-step forward calls. It holds two
-/// things this function would otherwise recompute identically on every call.
+/// `cache`: a per-CHECKPOINT (not per-call, and no longer per-generation)
+/// HOST-side [`GenerationCache`] - `crate::pipeline::RealDit` obtains one from
+/// [`crate::weightcache`]'s process-wide registry, keyed on the checkpoint's
+/// own identity, and passes the SAME handle into every one of a generation's
+/// ~20-50 denoise-step forward calls. Because the registry outlives the
+/// `RealDit`, a SECOND generation against the same checkpoint - a different
+/// prompt, a different size, seconds or hours later - starts warm on its very
+/// first forward instead of re-paying the cold-disk cost a real profiling pass
+/// measured at 365 s of a 964 s run. It holds two things this function would
+/// otherwise recompute identically on every call.
 ///
 /// The first is every block's already-quantized weight bytes, keyed by layer
 /// index. On a cache
@@ -1122,10 +1129,12 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// been visited once, rather than one block's fp32 expansion - measured at
 /// the real 22B/Q8_0 width via [`crate::block::CachedQBlockWeights::
 /// byte_len`] at ~270 MB/block, ~13 GB for all 48 - a deliberate trade of
-/// host RAM (184 GiB on this class of hardware, plentiful) for skipping the
-/// dominant real cost Phase 8 measured
+/// host RAM for skipping the dominant real cost Phase 8 measured
 /// (~86% of one real denoise step was GGUF re-read + re-quantize of the SAME
-/// immutable weights, over and over, every single step).
+/// immutable weights, over and over, every single step). That trade is now
+/// GOVERNED rather than merely affordable: the cache runs under the byte
+/// budget `--limit-ram-total` publishes and evicts by the residency layer's
+/// own cost-aware policy when it is tight - see [`crate::weightcache`].
 ///
 /// The second is the embeddings-connector routing below. `context`,
 /// `context_valid` and `context_len` are fixed for a whole generation once the
@@ -1248,21 +1257,21 @@ pub fn forward_q_streamed(
     let mut t_quant = std::time::Duration::ZERO;
     let mut t_gpu = std::time::Duration::ZERO;
     let mut misses = 0u32;
-    {
-        let mut blocks = cache.blocks().borrow_mut();
-        if blocks.len() < cfg.num_layers as usize {
-            blocks.resize_with(cfg.num_layers as usize, || None);
-        }
-    }
     for l in 0..cfg.num_layers {
         let prefix = format!("transformer_blocks.{l}");
         let mut layer_load = std::time::Duration::ZERO;
         let mut layer_quant = std::time::Duration::ZERO;
-        let hit;
-        {
-            let mut blocks = cache.blocks().borrow_mut();
-            hit = blocks[l as usize].is_some();
-            if blocks[l as usize].is_none() {
+        // The cache hands back an `Arc` and holds no lock while this call
+        // uploads, which is what lets two CFG branches read one checkpoint's
+        // cache concurrently (see `crate::weightcache`'s doc). Every step
+        // past this block's first cache-populating one skips BOTH stages in
+        // the miss arm entirely - `t_load`/`t_quant` and their real GGUF-read
+        // and CPU-quantize work are simply not incurred, so this loop does
+        // LESS work on a hit rather than merely faster work.
+        let hit = cache.block(l as usize, tier);
+        let cached = match hit.clone() {
+            Some(c) => c,
+            None => {
                 misses += 1;
                 let s0 = std::time::Instant::now();
                 let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
@@ -1272,14 +1281,10 @@ pub fn forward_q_streamed(
                 let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
                 layer_quant = s1.elapsed();
                 t_quant += layer_quant;
-                blocks[l as usize] = Some(quantized);
+                cache.store_block(l as usize, tier, quantized)
             }
-            // Every step past this block's first cache-populating one skips
-            // both stages above entirely: `cache[l]` is already `Some`, so
-            // `t_load`/`t_quant` (and their real GGUF-read/CPU-quantize work)
-            // are simply not incurred - this loop does no wasted work on a
-            // cache hit, it does LESS work.
-        }
+        };
+        let hit = hit.is_some();
         // Device upload (`on_cached`) + GPU forward + wait, timed together as
         // one bucket: `on_cached` never does CPU quantization (that is
         // entirely inside the cache-miss branch above), only device writes of
@@ -1287,8 +1292,7 @@ pub fn forward_q_streamed(
         // step regardless of cache hit/miss - the honest lower bound the
         // "fresh Gpu every call" design (this function's own doc) still pays.
         let s2 = std::time::Instant::now();
-        let blocks = cache.blocks().borrow();
-        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, blocks[l as usize].as_ref().expect("populated above"), t as u32, context_len as u32, tier);
+        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, &cached, t as u32, context_len as u32, tier);
         let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
         let layer_gpu = s2.elapsed();
         t_gpu += layer_gpu;

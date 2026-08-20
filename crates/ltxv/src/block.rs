@@ -66,7 +66,6 @@
 //! (analytic angle, no table input); `rope2d`, dispatched once per head,
 //! is the match.
 
-use std::cell::RefCell;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;
@@ -1315,7 +1314,7 @@ pub fn open_device(device: Option<&str>) -> Gpu {
 
 /// Which packed-weight tier a quantized block uses. int4 is W4A8, not W4A4 -
 /// see this section's doc.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QTier {
     Int8,
     Int4,
@@ -1541,82 +1540,62 @@ impl CachedQBlockWeights {
     pub fn byte_len(&self) -> usize {
         self.attn1.byte_len() + self.attn2.byte_len() + self.ff.byte_len() + std::mem::size_of_val(self.scale_shift_table.as_slice()) + std::mem::size_of_val(self.prompt_scale_shift_table.as_slice())
     }
+
+    /// Quantize one block's weights into the cache's host form - the public
+    /// face of [`QBlockWeights::quantize_host`], which `crate::dit::
+    /// forward_q_streamed` calls on every cache miss. `pub` so a caller
+    /// outside this crate can populate a [`crate::weightcache::
+    /// GenerationCache`] without going through a full forward (the residency
+    /// adapter's own demote/promote gate does exactly that).
+    pub fn quantize(w: &Tensors, prefix: &str, cfg: &LtxDitConfig, tier: QTier) -> CachedQBlockWeights {
+        QBlockWeights::quantize_host(w, prefix, cfg.inner_dim as usize, cfg.apply_gated_attention, tier)
+    }
 }
 
-/// One remembered embeddings-connector routing: the exact inputs it was
-/// computed from, and what it produced.
-struct CachedConnectorRouting {
-    context: Vec<f32>,
-    valid: Vec<f32>,
-    context_len: usize,
-    out: Vec<f32>,
-}
+/// The host-side quantized-weight cache `crate::dit::forward_q_streamed`
+/// consults - defined in [`crate::weightcache`] and re-exported here because
+/// that is where every caller already imports it from, and because the scope
+/// change (per-generation -> per-checkpoint) must not become an import
+/// churn in every test and bench that uses it.
+pub use crate::weightcache::{CacheStats, CheckpointId, GenerationCache};
 
-/// Everything ONE generation computes once and reuses across every forward
-/// call it makes - the per-generation scratch [`crate::dit::forward_q_streamed`]
-/// consults before doing work it has already done.
+/// Host bytes ONE cached block occupies at `tier`, in closed form over
+/// `cfg` - what a residency estimate must report BEFORE anything has been
+/// loaded, since `CachedQBlockWeights::byte_len` can only measure a block
+/// that already exists.
 ///
-/// Two independent caches live here because both are keyed by the same thing:
-/// a single generation's lifetime.
+/// Derived from what [`QBlockWeights::quantize_host`] actually builds, and
+/// pinned against it: `cached_block_bytes_matches_a_real_measured_block`
+/// quantizes a real block and asserts this function reproduces its
+/// `byte_len()` exactly, so the two cannot drift apart silently the way a
+/// hand-derived `file_size * 1.3` estimate does.
 ///
-/// * **Block weights** - each transformer block's already-quantized bytes.
-///   The checkpoint is immutable and
-///   `model::int8::quantize_weight`/`model::int4::quantize_weight_q4` are pure
-///   functions of its bytes, so a cached result and a freshly recomputed one
-///   are the same bytes by construction.
-/// * **Embeddings-connector routing** - the connector reads only the text
-///   context, its validity mask and its length, none of which change once a
-///   generation's prompt has been encoded. Its output is therefore identical
-///   on every denoise step, and was being recomputed on each one: eight
-///   transformer layers over the context, whose weights (fp32, several
-///   gigabytes at the real width) were re-uploaded to a freshly opened device
-///   every time. Keyed on the FULL input, not on a step index or a hash, so a
-///   caller that legitimately routes two different contexts through one cache
-///   (classifier-free guidance runs a conditional and an unconditional branch
-///   against the same generation) gets each branch's own answer rather than
-///   whichever ran first.
-///
-/// Neither cache changes any number - both skip repeated work whose inputs did
-/// not change. That is what makes them exact wins rather than approximations,
-/// and it is asserted, not assumed: see `tests/block_weight_cache.rs`.
-#[derive(Default)]
-pub struct GenerationCache {
-    blocks: RefCell<Vec<Option<CachedQBlockWeights>>>,
-    connector: RefCell<Vec<CachedConnectorRouting>>,
-}
+/// Per quantized linear (`model::int8::quantize_weight` /
+/// `int4::quantize_weight_q4`): `out*in/4` packed `u32` words at int8 (i.e.
+/// `out*in` bytes) or `out*in/8` at int4, plus `out` fp32 row scales, plus an
+/// unquantized fp32 bias where the linear has one. Everything else - the two
+/// RMSNorm gains, the optional attention gate, and the two scale/shift tables
+/// - stays fp32 exactly as the cache stores it.
+pub fn cached_block_bytes(cfg: &LtxDitConfig, tier: QTier) -> u64 {
+    /// `to_gate_logits`'s fixed row count - the same literal
+    /// `crate::dit::push_attn` writes into the tensor manifest.
+    const GATE_LOGIT_ROWS: u64 = 32;
 
-impl GenerationCache {
-    /// This generation's per-layer block-weight slots, grown to `num_layers`
-    /// on first use. `RefCell`, not `&mut self`, because `Denoiser::forward`
-    /// takes `&self`; no caller holds two simultaneous borrows.
-    pub fn blocks(&self) -> &RefCell<Vec<Option<CachedQBlockWeights>>> {
-        &self.blocks
-    }
-
-    /// The connector output previously computed for exactly these inputs, if
-    /// any. Compared by VALUE rather than by a hash or a pointer: a hash
-    /// collision would silently substitute one prompt's conditioning for
-    /// another's, and the comparison is a few megabytes against a routing that
-    /// costs seconds.
-    pub(crate) fn connector_hit(&self, context: &[f32], valid: &[f32], context_len: usize) -> Option<Vec<f32>> {
-        self.connector
-            .borrow()
-            .iter()
-            .find(|e| e.context_len == context_len && e.context == context && e.valid == valid)
-            .map(|e| e.out.clone())
-    }
-
-    pub(crate) fn connector_store(&self, context: &[f32], valid: &[f32], context_len: usize, out: &[f32]) {
-        self.connector.borrow_mut().push(CachedConnectorRouting { context: context.to_vec(), valid: valid.to_vec(), context_len, out: out.to_vec() });
-    }
-
-    /// Real host bytes the connector half holds - the counterpart of
-    /// [`CachedQBlockWeights::byte_len`], so a test can measure this cache's
-    /// own footprint instead of deriving it (a memory claim nothing measures
-    /// is not a measured claim).
-    pub fn connector_byte_len(&self) -> usize {
-        self.connector.borrow().iter().map(|e| std::mem::size_of_val(e.context.as_slice()) + std::mem::size_of_val(e.valid.as_slice()) + std::mem::size_of_val(e.out.as_slice())).sum()
-    }
+    let dim = cfg.inner_dim as u64;
+    let f32s = |n: u64| n * 4;
+    let packed = |out: u64, inp: u64| -> u64 {
+        let words = match tier {
+            QTier::Int8 => out * inp / 4,
+            QTier::Int4 => out * inp / 8,
+        };
+        words * 4 + f32s(out)
+    };
+    // One attention module: to_q/to_k/to_v (dim x dim, biased), to_out.0
+    // (dim x dim, biased), q_norm/k_norm (dim each), optional gate.
+    let attn = 4 * (packed(dim, dim) + f32s(dim)) + 2 * f32s(dim) + if cfg.apply_gated_attention { f32s(GATE_LOGIT_ROWS * dim) + f32s(GATE_LOGIT_ROWS) } else { 0 };
+    // The FFN's two linears are bias-free at this config (`ff_bias=false`).
+    let ff = packed(4 * dim, dim) + packed(dim, 4 * dim);
+    2 * attn + ff + f32s(cfg.adaln_rows() as u64 * dim) + f32s(2 * dim)
 }
 
 impl QBlockWeights {

@@ -59,6 +59,17 @@ brain-audio.workspace = true
 # checkpoint-embedded tokenizer, replacing `crate::pipeline::context_stub`
 # when a real text-encoder checkpoint is configured.
 brain-gemma4.workspace = true
+# `residency::place::CostAware` (the GDSF eviction policy the residency
+# manager already scores whole model instances with) and `residency::lru::
+# Entry` - reused verbatim by `crate::weightcache`'s block-weight cache so
+# there is ONE eviction rule in this workspace, not a second bespoke one for
+# this cache. `residency` depends only on capability/memauth, so this is not
+# a cycle: nothing in `residency` knows this crate exists.
+brain-residency.workspace = true
+# `memauth::limits().ram_total` - the process-wide host ceiling
+# `--limit-ram-total` publishes, which is what bounds the block-weight
+# cache's size (`crate::weightcache::budget_from_limits`).
+brain-memauth.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

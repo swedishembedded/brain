@@ -2015,6 +2015,179 @@ host while a 10.5 TFLOP/s card sits idle. Until that moves to the device, GPU
 kernel work is a minority of a real step and further kernel optimization has a
 small ceiling. Recorded here rather than acted on: it is a different phase.
 
+### Phase 13 - the block-weight cache stops dying with the generation
+
+Phase 9 built a host-side cache of each block's already-quantized bytes and
+scoped it to ONE `generate()` call: `RealDit` owned it and dropped it when the
+generation finished. That removed ~86% of every denoise step past the first.
+Phase 10 then measured what it did NOT remove: the first step of a real run
+cost 365.4 s of a 964.3 s run, because this box's storage reads the checkpoint
+at ~58-70 MB/s cold and every generation re-read all ~22 GB of DiT blocks from
+scratch. Two back-to-back generations seconds apart paid it twice, for bytes
+that had not changed.
+
+The cache's contents were never a property of a generation. `model::int8::
+quantize_weight` is a pure function of the checkpoint's immutable bytes, so the
+correct scope is the CHECKPOINT and the correct lifetime is however long a
+memory ceiling allows - which is what this phase implements.
+
+**The change** (`crates/ltxv/src/weightcache.rs`, new; `crates/ltxv/src/
+block.rs`, `dit.rs`, `pipeline.rs`; `crates/cli/src/resident_ltxv.rs`):
+
+* **Keyed on checkpoint identity**, not on a generation: path + byte length +
+  mtime, which is exactly the identity `ltxv::text_cache::Key` already carries
+  for the text encoder - reused rather than re-invented - plus the block index
+  and the quant tier. Two generations against one file share every entry; a
+  replaced or re-quantized file at the same path shares none.
+* **Held in a process-wide registry**, so the store outlives the `RealDit`, the
+  `generate()` call and the resident instance alike. `GenerationCache` is now a
+  handle onto it; `GenerationCache::default()` still means "a private,
+  unregistered store", which is what every existing test and `ltxv_bench` call
+  site already wanted, so none of them changed meaning.
+* **`Sync`, not `RefCell`.** An `RwLock` over the slot table with `Arc` per
+  entry, so a reader takes no lock across its (multi-hundred-millisecond)
+  device upload. The concurrent two-GPU CFG dispatch that needs this is a LATER
+  phase and was deliberately not attempted here; the point is only that the
+  cache no longer blocks it, which is pinned by a `Send + Sync` assertion and a
+  multi-threaded hammer test rather than left as an intention.
+* **Governed, not merely affordable.** The store runs under a byte budget
+  derived from `memauth::limits().ram_total` - the process-wide ceiling the
+  `--limit-vram-total`/`--limit-ram-total` milestone published - taking two
+  thirds of it and leaving a third for everything else a generation holds in
+  host RAM (head tensors, encoded context, VAE weights, pixel buffers). With no
+  ceiling published the budget is `None`, i.e. exactly today's behaviour: a
+  guessed default would change how every existing run behaves in order to
+  govern something nobody asked to govern.
+* **Evicted by `residency::place::CostAware`** - the same GDSF policy
+  (`uses * bytes / age`) the residency manager scores whole model instances
+  with, driven through the same `residency::lru::Entry`, rather than a second
+  bespoke LRU that would have to be re-tuned separately. `brain-ltxv` gains a
+  `brain-residency` dependency for this; `residency` depends only on
+  `capability`/`memauth`, so it is not a cycle.
+* **The connector half is now bounded** (4 entries, least-recently-used
+  dropped). Unbounded was affordable when the cache died with the generation;
+  at process lifetime every new prompt would have added a few megabytes that
+  nothing ever removed.
+
+**`LtxvResident` becomes the first production implementor of `demote`/
+`promote`.** It holds a handle onto the same store the pipeline resolves by
+path from inside `generate()`, so `demote` releases memory the pipeline is
+really using rather than a private copy. Two honesty notes recorded rather than
+glossed:
+
+1. `Instance::demote`'s contract says `Warm` releases DEVICE buffers and keeps
+   host bytes. LTX has no device buffers to release between calls -
+   `forward_q_streamed` opens a fresh `Gpu` per forward and drops everything
+   before returning, a design its own doc records as deliberate and measured.
+   An LTX instance's entire reclaimable footprint IS host RAM, so a `demote`
+   that released "device buffers" would release nothing while the manager
+   charged a Warm cost and believed it had made progress. `demote` therefore
+   releases the block cache and `estimate_at` reports the honest post-demote
+   number. This is safe for a reason no other model can claim: the entries are
+   a pure function of immutable checkpoint bytes, so dropping one costs time
+   and nothing else. `promote` is a lazy no-op - re-filling ~13 GB eagerly
+   would block the manager's worker thread for minutes to do work the request
+   itself does incrementally.
+2. `estimate`'s HOST figure was wrong before this phase and is now real. It
+   charged `manifest_bytes(dit_tensor_manifest(cfg))` - the fp32 manifest size,
+   ~62 GB at the 22B config - for a checkpoint this path never materializes at
+   all. It now charges what a real run holds: the head tensors, ONE block's
+   transient fp32 expansion, and the block cache, the last from
+   `block::cached_block_bytes` - a closed form over what `quantize_host` really
+   builds, pinned against a really-quantized block at both tiers and both gate
+   settings, not a `file_size * 1.3` guess. The VRAM figure keeps the
+   pre-existing conservative manifest number: a streamed forward's peak VRAM is
+   dominated by activation buffers that follow the latent token count, and
+   deriving that honestly is its own piece of work (tracked below).
+
+**Correctness gates** (`crates/ltxv/tests/block_weight_cache.rs`, extending the
+4 tests Phase 9 left, now 8; plus 5 in `weightcache`'s own module and 7 in
+`resident_ltxv`):
+
+- `a_second_generation_reuses_the_first_generations_entries_bit_identically` -
+  generation A populates a store through a handle it then drops; generation B,
+  with a DIFFERENT prompt/latent, resolves a fresh handle from the path alone
+  and must record `num_layers` hits and ZERO misses, with output bit-identical
+  (`max_abs == 0.0`) to a cache-free forward. A different checkpoint identity
+  must start empty.
+- `eviction_under_a_tight_ram_ceiling_repopulates_correctly` - the ceiling is
+  sized off a REALLY measured block (two blocks' worth against a four-layer
+  model, so eviction is forced and provably partial), eviction is asserted to
+  have happened, the cache is asserted to stay under budget, and then the
+  claim that matters: a SECOND forward, which necessarily misses on the evicted
+  layers, re-reads and re-quantizes them and is still bit-identical. A block
+  larger than the whole budget is not retained and the forward is still exact.
+- `cached_block_bytes_matches_a_real_measured_block` - the closed-form
+  footprint must equal a really-quantized block's own `byte_len()`, so a change
+  to what the cache stores cannot silently make every residency estimate wrong.
+- `demote_releases_the_shared_block_cache_and_promote_returns_to_hot` - demote
+  clears the store the PIPELINE reads (not a private copy); a model with no
+  real checkpoint refuses both rather than claiming progress it cannot make.
+- `the_cache_is_send_and_sync_so_concurrent_cfg_dispatch_is_not_blocked` and a
+  multi-threaded accounting test.
+
+Every pre-existing gate re-run and green: the FULL `cargo test -p brain-ltxv
+--tests` (124 lib + all 27 integration binaries, 0 failures), `-p
+brain-residency` (80), `-p brain-cli` (151+ across its binaries), including
+`dit_parity`, `av_dit_parity`, `host_forward_parity`, `streamed_vs_eager_real`,
+`connector_real_parity` and the real-weight
+`real_checkpoint_cached_forward_is_bit_identical_to_an_uncached_one`.
+
+**Measured on the REAL resident path** - not the one-shot `brain ltxv t2v` CLI,
+which by design holds nothing. Nothing in this workspace drove `LtxvResident`
+end to end with real weights before, so the harness is new and permanent
+(`resident_ltxv.rs::two_real_generations_share_one_warm_checkpoint_cache`,
+`#[ignore]`d):
+
+    BRAIN_LTXV_VAE=<ltx-2.5-video-vae-conv-bf16.safetensors> \
+    BRAIN_LTXV_DIT=<ltx-2.5-22b-distilled-transformer-Q8_0.gguf> \
+    BRAIN_LTXV_TEXT_ENCODER=<gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
+      cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+      two_real_generations_share
+
+Two generations, DIFFERENT prompts, 9 frames at 64x64, 8 distilled-schedule
+steps, `guidance<=1.0` (1 forward/step), one Tesla P40 idle before the run,
+through ONE resident instance:
+
+| | wall | block-cache misses | hits | held |
+|---|---:|---:|---:|---:|
+| generation 1 (cold cache) | 245.3 s | 48 (every block) | 336 | 48 blocks, 12.96 GB |
+| generation 2 (warm, new prompt) | 179.2 s | **0** | 384 | unchanged |
+
+The zero is the load-bearing number: generation 2 hit the cache on its very
+first layer of its very first step, which is precisely what a per-generation
+cache could never do. 384 = 48 layers x 8 steps, so every access was a hit.
+The measured per-block footprint is 270.1 MB at the real 22B width (x48 =
+12.96 GB), which the closed-form estimator reproduces exactly.
+
+**The wall-clock delta understates the win, and is reported that way on
+purpose.** The checkpoint was already page-cache-warm from earlier test runs in
+the same session, so generation 1's 48 misses cost ~58 s of warm read+quantize
+rather than the ~250 s of cold disk Phase 10 measured with a `dd`-verified
+~58-70 MB/s. On a genuinely cold checkpoint the second generation saves that
+larger figure instead. What does NOT depend on page-cache state is the miss
+count, which is why the gate asserts on it.
+
+**Not attempted, deliberately:**
+
+* **Concurrent CFG dispatch across the two cards.** A later phase. This phase's
+  only obligation to it was not to leave a `!Sync` type in the way, discharged
+  above.
+* **`crates/weightset`'s `CyclicScan`** - checked, and declined with a reason.
+  Its Belady-style planner is the right planner for a fixed WINDOW OF DEVICE
+  SLOTS over equally-shaped weight groups with a known visitation schedule, and
+  a denoise loop's `Schedule::cyclic(n_blocks, steps)` is exactly that
+  schedule. But this cache is host-side, its entries are variable-sized
+  already-quantized blobs rather than uniform device slots, and the constraint
+  governing it is a BYTE budget shared with every other model in the process -
+  which is what `residency`'s own `EvictionPolicy` exists for. Using two
+  eviction rules in one workspace to save one indirection was the worse trade.
+  `weightset` therefore still has zero production consumers.
+* **A cache surviving across separate processes** (an on-disk pre-quantized
+  block store). Phase 9 tracked it; it is still open. The text encoder's own
+  output cache already does this at a different level.
+* **The VRAM half of `LtxvResident::estimate`** - see honesty note 2 above.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
@@ -2211,7 +2384,14 @@ land. Known traps already identified from reading (not yet test-pinned):
   uncached cost (~172.8s extrapolated) - a colder-cache-across-generations
   scheme (e.g. process-lifetime residency across multiple `brain ltxv t2v`
   invocations) was not attempted, out of scope for a single generation's
-  own pipeline.
+  own pipeline. **The cross-generation half is closed in Phase 13**: the
+  cache is now keyed on CHECKPOINT identity and held in a process-wide
+  registry under a `memauth`-derived byte budget with `residency`'s own
+  cost-aware eviction, so a second generation against the same file starts
+  warm on its first layer (measured through `LtxvResident`: 48 block misses
+  on generation 1, ZERO on generation 2). Still open: survival across
+  separate PROCESS invocations, which needs an on-disk pre-quantized block
+  store.
 - `ada_layer_norm_single`'s host-side `linear()` call was a naive,
   unthreaded, unblocked scalar loop re-streaming its ~604 MB weight matrix
   from host RAM once per output row (Phase 8's flat ~21s/forward

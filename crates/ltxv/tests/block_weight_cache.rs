@@ -88,8 +88,8 @@ fn cached_forward_is_bit_identical_to_an_uncached_one() {
 
     // Structural check that caching actually happened, not vacuously: every
     // layer's slot is populated after call 1, before call 2 ever runs.
-    assert_eq!(shared.blocks().borrow().len(), cfg.num_layers as usize);
-    assert!(shared.blocks().borrow().iter().all(|slot| slot.is_some()), "every layer must be cached after the first (cache-miss) forward");
+    assert_eq!(shared.stats().blocks, cfg.num_layers as usize);
+    assert!((0..cfg.num_layers as usize).all(|l| shared.is_cached(l, QTier::Int8)), "every layer must be cached after the first (cache-miss) forward");
 
     let out_shared_2 = forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, &shared);
     assert_eq!(max_abs_diff(&out_shared_2, &out_fresh_a), 0.0, "a cache-HIT forward must be bit-identical to the cache-free reference - the cache must change no math");
@@ -132,6 +132,143 @@ fn cache_hit_is_correct_across_different_contexts_sharing_one_cache() {
 
     assert_eq!(max_abs_diff(&out_a, &ref_a), 0.0, "branch A (the cache-populating call) must match its cache-free reference exactly");
     assert_eq!(max_abs_diff(&out_b, &ref_b), 0.0, "branch B (the cache-HIT call, different context) must match ITS OWN cache-free reference exactly - a stale/wrong-layer cache bug would show up here as a wrong number, not a crash");
+}
+
+// -------------------------------------------- 1c. the footprint estimator
+
+/// `block::cached_block_bytes` is what `resident_ltxv.rs` budgets against
+/// BEFORE anything is loaded, so it must be the same number a real cached
+/// block actually weighs - not a `file_size * 1.3` guess. Pinned against a
+/// really-quantized block at both tiers and both gate settings, so a change
+/// to what `quantize_host` stores cannot silently make every residency
+/// estimate wrong.
+#[test]
+fn cached_block_bytes_matches_a_real_measured_block() {
+    for (label, base) in [("tiny", LtxDitConfig::tiny()), ("tiny_gated", LtxDitConfig::tiny_gated())] {
+        for tier in [QTier::Int8, QTier::Int4] {
+            let cfg = LtxDitConfig { num_layers: 1, ..base };
+            let w = random_tiny_weights(&cfg, 0x000C_ACE7);
+            let head = load_head_tensors_from_source(&w, &cfg);
+            let inputs = synthetic_inputs(&cfg, 6, cfg.connector_num_learnable_registers.max(1) as usize * 2);
+            let cache = GenerationCache::default();
+            forward_q_streamed(&cfg, &w, &head, None, tier, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, &cache);
+            let measured = cache.block_byte_lens()[0] as u64;
+            let predicted = ltxv::block::cached_block_bytes(&cfg, tier);
+            assert_eq!(predicted, measured, "{label}/{tier:?}: the closed-form footprint must equal a really-quantized block's own byte_len");
+        }
+    }
+}
+
+// ------------------------------- 1a. cross-GENERATION reuse and eviction
+
+/// Write `bytes` to a unique temp path and return it - a stand-in checkpoint
+/// FILE, used only for its identity (path + length + mtime). The weights
+/// these tests actually forward through stay the synthetic in-memory
+/// `Tensors`; what is under test here is which STORE a handle resolves to,
+/// which is exactly the thing that decides whether generation B re-reads the
+/// disk.
+fn identity_file(tag: &str, bytes: &[u8]) -> String {
+    let dir = std::env::temp_dir().join(format!("ltxv-bwc-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("checkpoint.gguf");
+    std::fs::write(&p, bytes).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+/// **The milestone's core claim.** Two SEPARATE generations - each obtaining
+/// its own cache handle the way `pipeline::RealDit` does, from the
+/// checkpoint-keyed registry, with nothing carried between them but the
+/// checkpoint path - share cache entries, and generation B's output is
+/// bit-identical to a cache-free forward.
+///
+/// Before this, the cache was owned by the `RealDit` and died with the
+/// `generate()` call, so B re-read and re-quantized every block from scratch.
+/// The two assertions that make this non-vacuous are the hit COUNTERS: B must
+/// record `num_layers` hits and ZERO block misses, from its very first layer.
+#[test]
+fn a_second_generation_reuses_the_first_generations_entries_bit_identically() {
+    let cfg = LtxDitConfig { num_layers: 3, ..LtxDitConfig::tiny() };
+    let w = random_tiny_weights(&cfg, 0x000C_ACE5);
+    let head = load_head_tensors_from_source(&w, &cfg);
+    let inputs_a = synthetic_inputs(&cfg, 7, 5);
+    // Generation B is a DIFFERENT prompt/latent, as two back-to-back real
+    // generations would be - the entries being shared are weights, which
+    // depend on neither.
+    let mut inputs_b = synthetic_inputs(&cfg, 7, 5);
+    for v in inputs_b.latent.iter_mut() {
+        *v = *v * 0.4 - 0.17;
+    }
+
+    let path = identity_file("reuse", b"a stand-in checkpoint's bytes");
+    let reference_b = forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs_b.latent, &inputs_b.timesteps, &inputs_b.positions, &inputs_b.keyframes_mask, &inputs_b.context, inputs_b.context_len, inputs_b.t, &inputs_b.context_valid, &GenerationCache::default());
+
+    // ---- generation A: its own handle, its own scope, dropped at the end.
+    {
+        let cache_a = GenerationCache::for_checkpoint(&path);
+        forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs_a.latent, &inputs_a.timesteps, &inputs_a.positions, &inputs_a.keyframes_mask, &inputs_a.context, inputs_a.context_len, inputs_a.t, &inputs_a.context_valid, &cache_a);
+        assert_eq!(cache_a.stats().blocks, cfg.num_layers as usize, "generation A must have populated every layer");
+    }
+
+    // ---- generation B: a fresh handle, resolved only from the path.
+    let cache_b = GenerationCache::for_checkpoint(&path);
+    let before = cache_b.stats();
+    assert_eq!(before.blocks, cfg.num_layers as usize, "generation B's handle must resolve to the store generation A populated, not an empty one");
+    let out_b = forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs_b.latent, &inputs_b.timesteps, &inputs_b.positions, &inputs_b.keyframes_mask, &inputs_b.context, inputs_b.context_len, inputs_b.t, &inputs_b.context_valid, &cache_b);
+    let after = cache_b.stats();
+    assert_eq!(after.hits - before.hits, cfg.num_layers as u64, "every one of generation B's layers must be a cache HIT, from its first layer");
+    assert_eq!(after.misses - before.misses, 0, "generation B must not miss on any layer");
+    assert_eq!(max_abs_diff(&out_b, &reference_b), 0.0, "generation B's cache-HIT output must be bit-identical to a cache-free forward of the same inputs");
+
+    // A different checkpoint identity must NOT see any of it - otherwise the
+    // key is not doing its job and a replaced checkpoint would serve stale
+    // weights.
+    let other = GenerationCache::for_checkpoint(&identity_file("reuse-other", b"different bytes entirely, different length"));
+    assert_eq!(other.stats().blocks, 0, "a different checkpoint identity must start empty");
+}
+
+/// Eviction correctness: under a budget too small to hold the whole model,
+/// entries are dropped by the shared cost-aware policy and a later access
+/// RE-POPULATES correctly - it does not return a stale entry and does not
+/// silently change a number. An eviction here can only ever cost time.
+#[test]
+fn eviction_under_a_tight_ram_ceiling_repopulates_correctly() {
+    let cfg = LtxDitConfig { num_layers: 4, ..LtxDitConfig::tiny() };
+    let w = random_tiny_weights(&cfg, 0x000C_ACE6);
+    let head = load_head_tensors_from_source(&w, &cfg);
+    let inputs = synthetic_inputs(&cfg, 6, 4);
+    let run = |cache: &GenerationCache| forward_q_streamed(&cfg, &w, &head, None, QTier::Int8, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, cache);
+
+    let reference = run(&GenerationCache::default());
+
+    // Size the ceiling off a REAL measured block, not a guess: two blocks'
+    // worth, against a four-layer model, so eviction is forced and provably
+    // partial (some entries survive, so this is not just "caching disabled").
+    let measured = GenerationCache::with_budget(None);
+    run(&measured);
+    let per_block = measured.block_byte_lens().into_iter().max().expect("populated") as u64;
+    let tight = GenerationCache::with_budget(Some(per_block * 2));
+
+    let out1 = run(&tight);
+    let s1 = tight.stats();
+    assert_eq!(max_abs_diff(&out1, &reference), 0.0, "a forward under a tight ceiling must still be bit-identical");
+    assert!(s1.evictions > 0, "the ceiling must actually have forced evictions, got {s1:?}");
+    assert!(s1.blocks > 0 && s1.blocks < cfg.num_layers as usize, "eviction must be partial, not total: {s1:?}");
+    assert!(tight.block_byte_len() <= per_block * 2, "the cache must stay under its budget, got {} > {}", tight.block_byte_len(), per_block * 2);
+
+    // The claim that matters: a SECOND forward, which necessarily misses on
+    // the evicted layers, re-reads and re-quantizes them and produces the
+    // exact same answer. A stale or wrong-keyed entry would show up here as a
+    // wrong number, not as a crash.
+    let out2 = run(&tight);
+    assert!(tight.stats().misses > s1.misses, "the second forward must genuinely miss on the evicted layers");
+    assert_eq!(max_abs_diff(&out2, &reference), 0.0, "a forward that re-populates evicted entries must be bit-identical to the cache-free reference");
+
+    // And a block larger than the whole budget is simply not retained - the
+    // forward still runs and is still exact.
+    let starved = GenerationCache::with_budget(Some(per_block / 2));
+    let out3 = run(&starved);
+    assert_eq!(starved.stats().blocks, 0, "no entry may be retained when one block alone exceeds the budget");
+    assert_eq!(max_abs_diff(&out3, &reference), 0.0, "a starved cache must still compute the exact same function");
 }
 
 // ------------------------------------------ 1b. connector routing caching
@@ -277,8 +414,27 @@ fn real_checkpoint_cached_forward_is_bit_identical_to_an_uncached_one() {
     // real 22B checkpoint's width - read their actual byte count and
     // extrapolate to the full 48-layer model the way `device_bytes_real.rs`
     // already extrapolates the device-side int8 ratio.
-    let cache_ref = shared.blocks().borrow();
-    let per_layer_bytes: Vec<usize> = cache_ref.iter().map(|c| c.as_ref().expect("populated above").byte_len()).collect();
+    // The cross-GENERATION claim on the real production path: a second
+    // generation resolves its handle from the checkpoint PATH alone (exactly
+    // what `pipeline::RealDit` does) and must start warm.
+    {
+        let gen_a = ltxv::block::GenerationCache::for_checkpoint(&path);
+        let out_a = forward_q_streamed(&cfg, &src, &head, None, QTier::Int8, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, &gen_a);
+        assert_eq!(max_abs_diff(&out_a, &out_fresh), 0.0, "real-checkpoint generation A must match the cache-free reference exactly");
+        drop(gen_a);
+        let gen_b = ltxv::block::GenerationCache::for_checkpoint(&path);
+        let before = gen_b.stats();
+        assert_eq!(before.blocks, cfg.num_layers as usize, "a second generation's handle must resolve to the store the first one populated");
+        let out_b = forward_q_streamed(&cfg, &src, &head, None, QTier::Int8, &inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &inputs.context_valid, &gen_b);
+        let after = gen_b.stats();
+        assert_eq!(after.misses - before.misses, 0, "the second real generation must miss on no layer");
+        assert_eq!(after.hits - before.hits, cfg.num_layers as u64, "the second real generation must hit on every layer, from its first");
+        assert_eq!(max_abs_diff(&out_b, &out_fresh), 0.0, "the second real generation's output must be bit-identical to the cache-free reference");
+        println!("real Q8_0 checkpoint: a SECOND generation's handle started warm ({} blocks, {:.2} GB) and hit every layer", before.blocks, before.bytes as f64 / 1e9);
+    }
+
+    let per_layer_bytes: Vec<usize> = shared.block_byte_lens();
+    assert_eq!(per_layer_bytes.len(), cfg.num_layers as usize);
     let avg_bytes = per_layer_bytes.iter().sum::<usize>() as f64 / per_layer_bytes.len() as f64;
     let extrapolated_48_gb = avg_bytes * 48.0 / 1e9;
     println!("measured per-block host cache footprint: {:.1} MB/block (real 22B width) -> extrapolated 48-layer total: {extrapolated_48_gb:.2} GB", avg_bytes / 1e6);

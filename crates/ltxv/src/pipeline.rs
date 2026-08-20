@@ -1356,25 +1356,32 @@ impl Denoiser for LtxDit {
 /// Int8 compute (not int4): this milestone's own "start small, prove it
 /// works first" choice - see [`generate`]'s doc for why.
 ///
-/// `cache`: THIS instance's own per-generation, host-side
-/// [`crate::block::GenerationCache`] - shared by reference across every one of
-/// `denoise`'s forward calls on this `RealDit` (both the conditional and
-/// unconditional branch when CFG is on, and every one of the run's denoise
-/// steps). It holds the two things `forward_q_streamed` would otherwise
-/// recompute identically every call: each block's already-quantized weight
-/// bytes (the GGUF read + CPU quantize Phase 8 measured at ~86% of one real
-/// denoise step, now paid at most ONCE per block per generation) and the
-/// embeddings-connector routing (unchanged for a whole generation, since the
-/// encoded prompt is). Its interior mutability is what lets
-/// [`Denoiser::forward`] keep taking `&self` (the same shape `LtxAvDit`'s own
-/// per-stage state uses in `crate::dit`); `denoise`'s loop never holds two
-/// simultaneous borrows, since each forward call borrows, uses, and drops
-/// its borrow before returning.
+/// `cache`: a handle onto THE CHECKPOINT's host-side weight cache
+/// ([`crate::weightcache`]), not this instance's own - obtained from a
+/// process-wide registry keyed on the checkpoint's identity (path + byte
+/// length + mtime) and shared by reference across every one of `denoise`'s
+/// forward calls (both the conditional and unconditional branch when CFG is
+/// on, and every one of the run's denoise steps). It holds the two things
+/// `forward_q_streamed` would otherwise recompute identically every call:
+/// each block's already-quantized weight bytes (the GGUF read + CPU quantize
+/// Phase 8 measured at ~86% of one real denoise step) and the
+/// embeddings-connector routing.
 ///
-/// A `RealDit` is per-generation, so the cache's lifetime is exactly the
-/// window over which its entries are guaranteed still to describe the same
-/// inputs - dropping the `RealDit` (which `generate` does before the VAE
-/// decode) frees all of it.
+/// The scope is the point. A `RealDit` is still per-generation, but the store
+/// behind this handle is not: it outlives the `RealDit`, the `generate()`
+/// call and the resident instance, so a SECOND generation against the same
+/// checkpoint starts warm on its first forward instead of re-reading ~22 GB
+/// off a rotational disk at ~58-70 MB/s. What bounds it is the process-wide
+/// host ceiling `--limit-ram-total` publishes, evicted by the residency
+/// layer's own cost-aware policy - not the lifetime of any one call. Sharing
+/// entries across generations is safe for the same reason sharing them across
+/// steps was: the entries are a pure function of immutable checkpoint bytes,
+/// and the identity key changes whenever the file does.
+///
+/// Its interior synchronization (an `RwLock`, handing back `Arc`s) is what
+/// lets [`Denoiser::forward`] keep taking `&self`, and additionally makes the
+/// whole type `Sync` - so a later phase can dispatch the two CFG branches
+/// concurrently on two cards without redesigning this.
 struct RealDit {
     cfg: LtxDitConfig,
     src: crate::gguf_src::LtxvGgufSource,
@@ -1681,7 +1688,13 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
         let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
         tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache: Default::default() })
+        // Keyed on the checkpoint, not on this call: the same store is
+        // handed to the next generation against the same file (see
+        // `RealDit`'s doc and `crate::weightcache`).
+        let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
+        let cs = cache.stats();
+        tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, "transformer built");

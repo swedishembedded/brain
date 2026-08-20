@@ -137,6 +137,7 @@ pub mod shard;
 pub mod upsampler;
 pub mod vae3d;
 pub mod vocoder;
+pub mod weightcache;
 
 pub use config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 pub use dit::{load_tiny_weights, AvDitTaps, DitBatch, DitTaps, LtxAvDit, LtxDit};
