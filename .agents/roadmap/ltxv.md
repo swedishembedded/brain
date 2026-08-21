@@ -2347,6 +2347,324 @@ largest single item.
   taken: it makes the cost input-dependent in a way the batched GEMM does not,
   and win 1 already reduced this stage to 1.3 s. Tracked.
 
+### Phase 15 - the second card starts existing
+
+Phases 12-14 made ONE card faster. This phase makes the second one exist. Every
+stage of a generation was single-device - the Gemma-4 encode, the denoise loop,
+the VAE decode - and inside the loop the conditional and unconditional
+classifier-free-guidance forwards ran one after the other on that same card. On
+the two-P40 box this port is developed on, that is a 24 GB card at 0.0%
+utilization for the entire run, which is not an inference from the code: it is
+what `nvidia-smi` recorded, below.
+
+Three pieces, in the order a measurement dictated - including one piece that the
+measurement cancelled.
+
+#### 0 - the measurement that cancelled the expensive piece
+
+The original plan carried a large speculative item: a GGUF-streaming int8 SHARD
+loader, splitting the real 22B DiT's 48 blocks across two cards, because the
+1080p token count might not fit one 24 GB board. Phase 12's flash-attention
+number for 1080p (~16.6 GiB) was measured on the self-attention kernel ALONE in
+an isolated bench, not on a real forward, so it could not settle the question.
+
+Measured, real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all 48 real
+layers, int8 compute, T=8160 (`lat_t=4, lh=34, lw=60` - 1080p), one Tesla P40,
+sampled at 200 ms:
+
+    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits --loop-ms=200 &
+    BRAIN_GPU_INDEX=0 BRAIN_LTXV_DIT=<real Q8_0 22B> \
+      ./target/release/ltxv_bench streamed 48 8160 1024 1
+
+| | wall | peak VRAM on gpu0 |
+|---|---:|---:|
+| call 1 (cache miss, all 48 blocks) | 329.9 s | **16 650 MiB = 16.26 GiB** |
+| call 2 (cache hit, all 48 blocks) | 246.7 s | same |
+
+16.26 of 24.00 GiB, i.e. **7.7 GiB of headroom on ONE card at the highest
+resolution this pipeline targets**. Both calls printed identical output
+statistics (`len=1044480 mean=0.043124 std=0.698590 min=-1.510173
+max=1.889706 nonfinite=0`), which is the cache's own exactness re-confirmed at
+a token count Phase 13 never ran.
+
+So the shard loader is not needed, and item 3 below is declined. But the same
+sweep found something that IS a real 1080p blocker, and it is not the DiT:
+
+| stage | shape | peak VRAM | fits a 24 GiB P40? |
+|---|---|---:|---|
+| DiT, 48 layers, int8 streamed | T=8160 (1080p) | 16 650 MiB | yes |
+| VAE decode (`ltxv_bench vae`) | 25 frames @ 1920x1088 | **OOM** (>21 718 MiB observed before the abort) | **no** |
+| VAE decode | 9 frames @ 1920x1088 | 15 186 MiB | yes |
+| VAE decode | 25 frames @ 1280x704 (720p) | 16 564 MiB | yes |
+| VAE decode | 49 frames @ 1280x704 | **OOM** (>23 930 MiB) | **no** |
+
+The binding constraint at 1080p is the **conv VAE decoder's un-tiled activation
+buffers**, not the transformer. That matters for what to build next: sharding
+the DiT across two cards would not have moved this number at all. The fix is
+the reference's own overlapping-tile chunked decode, which this ledger already
+tracks as an open gap ("general overlapping-tile chunked encode/decode remain
+out of scope, deferred to the DFR milestone"). Until it lands, 1080p is capped
+at 9 pixel frames and 720p at 25 - stated here so a benchmark pass does not
+discover it as a crash.
+
+#### 1 - concurrent CFG dispatch, one branch per card
+
+When `guidance > 1.0` every denoise step runs two DiT forwards at the SAME
+latent: one against the prompt's context, one against the empty prompt's. They
+share no intermediate value; the only thing that reads both is the host-side
+fold `uncond + guidance·(cond - uncond)` after both return. Two independent
+forwards is exactly the shape two cards want, and it needs no weight sharding
+whatsoever.
+
+**The change** (`crates/ltxv/src/devplan.rs`, new; `pipeline.rs`; `caps.rs`;
+`crates/cli/src/resident_ltxv.rs`):
+
+* **`DevicePlan`** names three placements - `text`, `cond`, `uncond` - and
+  resolves against `gpu_core::devices::ambient_compute_set()`, the same
+  `--device`/`BRAIN_DEVICE` resolution every other placement decision in this
+  workspace goes through. Reading `gpus()` directly would have let a
+  `--device gpu0` run schedule onto a card the operator excluded. Fewer than
+  two schedulable cards, or the CPU backend, resolves to `Single` - byte for
+  byte the old behaviour, no threads spawned.
+* **The base card is the CURRENT selection**, not a hardcoded 0, so a
+  generation running inside the residency executor's `with_gpu`-scoped lane
+  keeps its assigned card as `cond` and borrows only the other one.
+* **`Denoiser::forward_cfg_pair`** is where a denoiser states whether its two
+  branches can be placed independently. The default is the sequential pair
+  every call site already had, which is the only correct answer for `LtxDit`:
+  it holds ONE `Gpu` built at construction, so dispatching its forward from a
+  differently-scoped thread would not move a single byte. `RealDit` overrides
+  it, because `forward_q_streamed` opens a fresh `Gpu` INSIDE every call - the
+  property, already documented and measured in Phase 13, that makes scoping
+  the call enough to move the whole forward.
+* **`StepInputs`** groups the seven per-step arguments both branches share, so
+  "run this pair, wherever" is one call rather than a nine-argument closure
+  written twice. `Denoiser::forward` lost six parameters in the process.
+* **The text encoder is pinned to the card the conditional forward will not
+  use.** It finishes before denoising starts, so this is not about overlap: it
+  is about not leaving the 12B encoder's device footprint on the card that is
+  about to hold the denoise loop's activations.
+
+**Why nothing else in `RealDit` needed a lock.** The task of checking this was
+explicit, and the answer is per-field rather than "the cache is `Sync`, so we
+are fine": `src` is a `MmapGguf` (an immutable mapping), `head` is an owned
+tensor map never written after construction, `cfg`/`device`/`place` are `Copy`
+data, and `cache` is Phase 13's `RwLock`-over-slots store that hands out `Arc`s
+and holds no lock across a device upload. The connector half of that cache is
+read by both branches and they genuinely differ there (two different contexts,
+so two of the store's four connector slots) - `MAX_CONNECTOR_ENTRIES = 4` is
+exactly why neither branch evicts the other's.
+
+**Gate: bit-identical, not "close".** Two gates, because the tiny one runs in
+milliseconds on every `cargo test` and the real one costs eight minutes:
+
+- `pipeline::tests::the_concurrent_cfg_pair_is_bit_identical_to_the_sequential_
+  one` drives the REAL dispatch function (`dispatch_cfg_pair`, extracted as a
+  free function precisely so the gate cannot test a copy of it) with a
+  `PerCallDeviceDit` - a tiny-config denoiser that builds a fresh `LtxDit`, and
+  therefore a fresh `Gpu`, inside every forward. Real kernels on real cards, at
+  a config that needs no fixture. Compared on BIT PATTERNS, not `assert_eq!` on
+  `f32` (which calls two NaNs unequal), and it additionally asserts the two
+  branches differ from each other - a gate where `cond == uncond` would pass
+  even for a dispatch that ran the conditional forward twice.
+- `pipeline::tests::the_cfg_step_routes_through_the_pair_method` counts pair
+  dispatches, so a refactor that quietly went back to two bare `forward` calls
+  fails instead of silently making the placement dead code.
+- `crates/ltxv/tests/cfg_parallel.rs` (`#[ignore]`d), the real-weight half: two
+  full 22B generations, same seed/prompt/shape, differing only in the plan,
+  compared byte for byte over every decoded frame - plus an assertion that the
+  clip is not frozen, since any two runs of a frozen generator agree.
+
+**Measured**, real Q8_0 22B checkpoint, 9 frames at 64x64, `guidance = 5.0`
+(so 2 forwards x 8 distilled steps = 16 forwards), deterministic sampler, two
+Tesla P40s, `nvidia-smi --query-gpu=index,utilization.gpu,memory.used
+--loop-ms=200` throughout:
+
+| arm | wall | denoise | gpu0 busy | **gpu1 busy** | both at once | peak MiB gpu0/gpu1 |
+|---|---:|---:|---:|---:|---:|---:|
+| warm-up, cold cache (discarded) | 229.3 s | 218.9 s | 54.7% | **0.0%** | 0.0% | 12844 / 1 |
+| sequential, one card | 146.6 s | 135.2 s | 80.6% | **0.0%** | 0.0% | 2277 / 1 |
+| concurrent, two cards | **75.6 s** | **63.8 s** | 77.2% | **56.5%** | **55.7%** | 2493 / 663 |
+
+**1.94x wall, 2.12x on the denoise loop itself**, and bit-identical output. The
+second card goes from a measured 0.0% - not "low", zero, in every one of 733
+samples - to busy in 56.5% of samples, with both cards busy simultaneously in
+55.7% of them.
+
+**The warm-up row is why this phase re-ran its own gate.** The first version
+timed the sequential arm against the concurrent one with no warm-up and reported
+**4.0x**. That number was mostly Phase 13's cache: the first generation against
+a checkpoint pays a ~230 s cold read that has nothing to do with placement. The
+honest figure is half of it. This is the §F.2/F.9 lesson again - the first
+measurement of a change is usually measuring something else - so the warm-up is
+now part of the gate rather than a discipline someone has to remember.
+
+#### 2 - concurrent admission of independent generations
+
+`LtxvInstance::run_batch` was a serial `.map()`, and its doc comment said so:
+nothing in this pipeline batches a denoise loop across prompts, because each
+request has its own latent, its own schedule and its own step count. That
+reasoning is right about BATCHING and wrong about throughput - N independent
+generations do not need to be one graph, they need to be on N cards.
+
+`residency::executor` already runs per-device lanes, so two models on two cards
+overlap today. What it cannot do is spread ONE model's batch, because same-key
+jobs group onto one lane by design. The missing piece is not a second
+scheduler; it is a way for a `run_batch` implementation to say "these are
+independent, spread them".
+
+**`residency::devpool::DevicePool`** (new, 5 unit tests, no GPU code in it at
+all - `brain-residency` still depends only on `capability` + `memauth`):
+
+* `run_all(n, job, events)` runs `job(index, device)` for `0..n` across the
+  pool, **at most one at a time per device**, and returns results in REQUEST
+  order regardless of completion order (gated - a pool returning completion
+  order would pair request 0's answer with request 3's caller).
+* Work is claimed by an `AtomicUsize` cursor rather than pre-partitioned, so a
+  card that finishes early takes the next waiting request instead of idling
+  behind a slow neighbour. Per-request cost really does vary here (a longer
+  clip, a colder cache).
+* **Progress is delivered over an mpsc channel and replayed on the CALLING
+  thread**, so a caller's `&mut dyn FnMut(usize, Progress)` sink needs neither
+  a lock nor a `Send` bound - the classic reason to move progress over a
+  channel instead of sharing the sink, and the same `thread::scope` + channel
+  idiom `model::shard::Pipeline::pipelined_fwd_bwd` established.
+* **One request per device is a memory fact, not a tuning knob**: item 0
+  measured a real DiT forward at 16.26 GiB and a 720p VAE decode at 16.18 GiB
+  on a 24 GiB board. Two on one card is a hard `wgpu` out-of-memory abort, not
+  a slowdown. The ceiling is gated by a live counter (`at_most_one_request_per_
+  device_is_ever_in_flight`), not asserted from the code's shape.
+* A one-request batch or a one-device pool runs INLINE - no threads, no
+  channel, no reordering, and each event delivered before the next request
+  starts, gated separately. The overwhelmingly common shape must not be made
+  slower or less debuggable by a pool it does not need.
+
+**`resident_ltxv.rs`** builds its pool from `ambient_compute_set()` with the
+residency-assigned card FIRST (so a batch of one runs exactly where residency
+placed it), and gives each concurrent request `DevicePlan::Single` on its own
+card - item 1's two-card CFG split would have every request reaching for both
+cards. `Instance::run`'s body moved to a `run_on(paths, device, plan, ...)`
+that takes only shared references, which is what makes running several of them
+at once safe rather than merely convenient.
+
+The Tier-1 sharing is by construction and needed no new code: the block cache
+is keyed on the CHECKPOINT (Phase 13), so N concurrent generations against one
+file pay the cold read once between them. Each card still uploads to its own
+device from the same `Arc<CachedQBlockWeights>` host bytes.
+
+**Measured**, real 22B Q8_0 checkpoint through the REAL resident path
+(`resident_ltxv.rs::concurrent_generations_share_one_cache_and_overlap_across_
+the_cards`, `#[ignore]`d), four different prompts, 9 frames at 64x64,
+`guidance = 1.0`, two Tesla P40s, warm cache on every timed arm:
+
+    BRAIN_LTXV_VAE=<...> BRAIN_LTXV_DIT=<real Q8_0 22B> \
+      cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+      concurrent_generations_share
+
+| | wall | vs serial | throughput | gpu0 busy | **gpu1 busy** | both at once | peak MiB gpu0/gpu1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 request (baseline) | 82.6 s | - | 1.00x | 72.8% | **0.0%** | 0.0% | 2277 / 1 |
+| **2 concurrent** | **78.0 s** | 165.2 s | **2.12x** | 75.1% | **54.6%** | 49.0% | 2277 / 12839 |
+| **4 concurrent** | **156.9 s** | 330.3 s | **2.11x** | 75.1% | **57.1%** | 45.7% | 12844 / 12841 |
+
+Two concurrent generations cost 0.95x what ONE costs - the second is
+effectively free, which is what "the second card was doing nothing" means
+numerically. Four cost 1.90x of one rather than 4x, exactly the 2-wide
+ceiling: requests 3 and 4 wait for a card, deliberately, because admitting
+them would abort. Every request produced a non-empty clip and the block-cache
+miss count did not move by one across either arm - the assertion that N
+concurrent requests share the warm checkpoint rather than each re-reading
+23.6 GB of it.
+
+**Not attempted, deliberately:**
+
+* **A second admission policy.** `residency::admission`'s edge concurrency
+  ceiling and admit deadlines are unchanged and still the front door; this
+  adds capacity BEHIND them, where a batch has already been admitted onto a
+  lane. Writing a second policy to shed on would have given the workspace two
+  answers to "is the server full".
+* **Sizing the pool from live VRAM rather than one-per-card.** The honest
+  input for that is a per-request VRAM estimate that follows the token count,
+  and `LtxvResident::estimate`'s VRAM half is still the conservative manifest
+  figure Phase 13 recorded as an open gap. One-per-card is correct for every
+  shape measured here and never over-admits; refining it needs that gap closed
+  first.
+* **Cross-process sharing of the block cache.** Still open, still tracked from
+  Phase 9.
+
+#### 3 - the GGUF-streaming int8 DiT shard loader: declined, with the number
+
+**Not built, and item 0 is the reason.** A real 48-layer forward at the 1080p
+token count peaks at 16.26 GiB on a 24 GiB card - the thing a shard loader
+would split fits, with 7.7 GiB to spare, and it fits *because* Phase 12's flash
+attention removed the `[heads,T,T]` score matrix that used to make it not fit.
+Building a streaming int8 shard loader for the real 22B weights would have been
+a large piece of engineering aimed at a constraint that no longer exists.
+
+The MECHANISM is not in doubt and does not need re-proving:
+`crates/ltxv/tests/av_shard_2gpu_real.rs` already runs a real two-GPU sharded
+forward with real cross-device residual handoff at the synthetic `tiny_gated`
+config, and `qwen3omnimoe`'s int8 layer-sharded Thinker does it against a real
+30B checkpoint. What was missing was a REASON, and the measurement says there
+isn't one at any resolution this pipeline supports.
+
+If a future checkpoint or a longer clip does exceed one card, the number to
+re-measure first is the one above, with the same command.
+
+**Also not attempted, deliberately:**
+
+* **Tiling the VAE decode.** Item 0 shows it, not the DiT, is what fails at
+  1080p/25 frames. It is a real, now-quantified piece of work, and it is a
+  different piece of work from this phase's (the reference's overlapping-tile
+  decode with trapezoidal blend masks, already tracked). Doing it here would
+  have meant shipping two unrelated changes as one.
+* **Overlapping the text encode with the denoise loop.** It cannot be: the
+  denoise loop's first forward needs the encoded context. Pinning the encoder
+  to the other card is all the placement freedom that stage has.
+* **Splitting a SINGLE forward across two cards** (tensor or pipeline
+  parallel). That is the shard loader, declined above, and it would also
+  introduce a cross-device reduction - the one thing that would make
+  bit-identity a real question instead of a trivially satisfied one.
+* **Three or more concurrent CFG branches.** There are exactly two.
+
+#### What a benchmark pass should know before it runs
+
+* **1080p is capped at 9 pixel frames** and **720p at 25**, by the VAE decoder,
+  not the DiT - see item 0's table. `ltxv_bench vae 1 49 704 1280` and
+  `ltxv_bench vae 1 25 1088 1920` both abort with a `wgpu` out-of-memory.
+* **`--limit-vram-total` is a process-wide TOTAL across all cards**, not a
+  per-card ceiling, and a concurrent pair charges it twice. A run sized for one
+  card (`--limit-vram-total 20G` on a two-card box) will now be refused where
+  it previously serialized. Either raise it or set `BRAIN_LTXV_CFG_PARALLEL=0`.
+* **The first generation against a checkpoint is not comparable to the second.**
+  Every number above is a warm-cache number and says so; a benchmark that times
+  arm A cold against arm B warm will report roughly double the truth, which is
+  the mistake this phase made once and now gates against.
+* **`--start-frame` is unaffected by any of this.** Image conditioning happens
+  before the denoise loop and is device-agnostic; the concurrent path carries
+  the same `Frozen` mask and the same per-token timesteps, and the bit-identity
+  gate runs the full `generate()` including that path.
+* **Two concurrent generations with the SAME prompt** can both miss the
+  on-disk text-context cache and both write the same entry. `text_cache::load`
+  validates the stored key and the shapes, so a torn write reads back as a MISS
+  and never as a wrong context - the cost is a redundant encode, not a wrong
+  clip. Unusual enough not to be worth a lock file; recorded rather than left
+  to be discovered.
+
+#### Gates, all green
+
+New: 4 in `ltxv::devplan`, 2 in `ltxv::pipeline` (the bit-identity gate and the
+routing gate), 5 in `residency::devpool`, 1 in `resident_ltxv` (the pool's
+shape), plus two `#[ignore]`d real-weight harnesses
+(`ltxv/tests/cfg_parallel.rs`, `resident_ltxv::concurrent_generations_share_
+one_cache_and_overlap_across_the_cards`) that are permanent, not one-off
+scripts.
+
+Every pre-existing gate re-run and green across `-p brain-ltxv -p
+brain-residency -p brain-cli --lib --bins --tests`, including `dit_parity`,
+`av_dit_parity`, `host_forward_parity`, `streamed_vs_eager_real`,
+`connector_real_parity`, `block_weight_cache` and `av_shard_2gpu_real`.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
