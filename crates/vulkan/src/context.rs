@@ -152,6 +152,19 @@ pub struct VkContext {
     /// by a dispatch another has recorded - so "is anything recorded anywhere"
     /// is the question a safe reclaim has to answer.
     pending_steps: std::sync::atomic::AtomicU64,
+    /// Raw `vk::Buffer` handles each LIVE descriptor set currently names.
+    ///
+    /// [`Self::pending_steps`] alone cannot answer "is this buffer still
+    /// referenced": it counts dispatches that reached `submit`, but a
+    /// descriptor set is written (and starts naming raw buffer handles that
+    /// outlive their Rust owner) at *record* time, which is strictly earlier.
+    /// A caller that records a batch of steps, drops a scratch buffer, and
+    /// only then submits - or that holds a `step_buf` step across flushes -
+    /// leaves the counter at zero with live sets still naming the buffer, so
+    /// `reclaim_dead` destroyed memory a queued dispatch went on to read.
+    /// Keyed by set rather than counted globally so a caller-held step pins
+    /// only the buffers IT names, not every buffer on the device.
+    set_refs: std::sync::Mutex<std::collections::HashMap<vk::DescriptorSet, Vec<vk::Buffer>>>,
     /// Total queue submissions issued through this context (each is a blocking
     /// submit + fence wait). Perf observability: inference must keep this O(1)
     /// per frame, not O(dispatches) — see `backend-vulkan/tests/perf_contract.rs`.
@@ -522,6 +535,7 @@ impl VkContext {
             dead: std::sync::Mutex::new(Vec::new()),
             reclaim_events: std::sync::atomic::AtomicU64::new(0),
             pending_steps: std::sync::atomic::AtomicU64::new(0),
+            set_refs: std::sync::Mutex::new(std::collections::HashMap::new()),
             submits: std::sync::atomic::AtomicU64::new(0),
             queue_lock: std::sync::Mutex::new(()),
         })
@@ -896,6 +910,28 @@ impl VkContext {
         self.dead.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
     }
 
+    /// Declare that descriptor set `set` now names exactly `buffers`, replacing
+    /// whatever it named before (a recycled set is rewritten in place).
+    ///
+    /// Called from the backend's descriptor-write path, so the reference exists
+    /// from the moment the set can be bound - not from the moment its dispatch
+    /// is submitted. [`Self::reclaim_dead`] refuses to destroy a buried buffer
+    /// any live set still names.
+    pub fn set_names(&self, set: vk::DescriptorSet, buffers: &[vk::Buffer]) {
+        self.set_refs.lock().unwrap_or_else(|e| e.into_inner()).insert(set, buffers.to_vec());
+    }
+
+    /// Declare that descriptor set `set` no longer names anything: its
+    /// dispatches have completed (fence-waited) and it is being recycled or
+    /// discarded, so it cannot be bound again before being rewritten.
+    ///
+    /// Legal even though the set still physically holds the old descriptors -
+    /// Vulkan requires a descriptor to be valid when a dispatch *uses* it, and
+    /// every reuse path rewrites the set first (`set_names` above).
+    pub fn set_released(&self, set: vk::DescriptorSet) {
+        self.set_refs.lock().unwrap_or_else(|e| e.into_inner()).remove(&set);
+    }
+
     /// Note that `n` dispatches have been recorded against this device, and are
     /// not yet submitted. Pairs with [`Self::steps_submitted`].
     pub fn steps_recorded(&self, n: u64) {
@@ -918,25 +954,55 @@ impl VkContext {
         self.dead.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|b| b.size).sum()
     }
 
-    /// Destroy every buried buffer, returning the bytes released - but only
-    /// when NOTHING is recorded against this device anywhere, which is what
-    /// makes it safe: an unsubmitted dispatch is the one thing that can still
-    /// name a buffer whose Rust owner has already dropped. Returns 0 (freeing
-    /// nothing, dropping nothing) while work is outstanding; the next caller
-    /// past the last submit does the work instead.
+    /// Destroy the buried buffers nothing can still reach, returning the bytes
+    /// released. Two conditions gate a buffer, and BOTH are required:
     ///
-    /// Callers reach this right after a fence-waited submit, so a live server
-    /// hits it every flush and the buried set never grows unbounded.
+    /// * nothing is recorded-but-unsubmitted against this device anywhere
+    ///   ([`Self::pending_steps`]), and
+    /// * no live descriptor set names it ([`Self::set_names`]).
+    ///
+    /// The second is the one that makes this safe. A descriptor set starts
+    /// naming a raw `vk::Buffer` when it is *written*, which happens while the
+    /// step is built - before `submit`, and therefore before `pending_steps`
+    /// sees anything at all. Guarding on the counter alone let a batch of
+    /// recorded steps have its scratch buffers destroyed underneath it the
+    /// next time any unrelated `read`/`write`/`poll_wait` flushed an empty
+    /// pending list, and the subsequent dispatch read freed device memory -
+    /// which this hardware reports as `VK_ERROR_DEVICE_LOST`.
+    ///
+    /// A buffer that is still referenced stays buried rather than being
+    /// dropped from the list, so the next reclaim past the referencing set's
+    /// retirement frees it. Callers reach this right after a fence-waited
+    /// submit, so a live server hits it every flush and the buried set never
+    /// grows unbounded.
     pub fn reclaim_dead(&self) -> u64 {
         if self.pending_steps.load(std::sync::atomic::Ordering::Acquire) != 0 {
             return 0;
         }
-        let dead: Vec<VkBuffer> = std::mem::take(&mut *self.dead.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut freed = 0u64;
-        for b in dead {
-            freed += b.size;
-            self.destroy_buffer(b);
+        let mut dead = self.dead.lock().unwrap_or_else(|e| e.into_inner());
+        if dead.is_empty() {
+            return 0;
         }
+        let referenced: std::collections::HashSet<vk::Buffer> = self
+            .set_refs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let mut freed = 0u64;
+        let mut still_named: Vec<VkBuffer> = Vec::new();
+        for b in std::mem::take(&mut *dead) {
+            if referenced.contains(&b.buffer) {
+                still_named.push(b);
+            } else {
+                freed += b.size;
+                self.destroy_buffer(b);
+            }
+        }
+        *dead = still_named;
+        drop(dead);
         if freed > 0 {
             self.reclaim_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

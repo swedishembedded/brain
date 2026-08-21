@@ -812,6 +812,17 @@ impl VulkanBackend {
             })
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
+        // The set now names these raw handles, and will keep naming them until
+        // it is retired (`recycle_transients`) or, for a caller-held
+        // `step_buf` set, for as long as this backend lives. Registering HERE
+        // rather than at `submit` is the whole point: a buffer dropped between
+        // building a step and submitting it must not be destroyed - see
+        // `VkContext::reclaim_dead`. The uniform is included because
+        // `uniform_dynamic` hands the caller an ownable buffer that can be
+        // dropped just like a storage one.
+        let named: Vec<vk::Buffer> =
+            std::iter::once(ubuf.buffer).chain(bufs.iter().map(|b| b.inner.buffer)).collect();
+        self.ctx.set_names(set, &named);
         let (gx, gy) = backend_api::grid_ws(threads, self.pipelines.wgsizes[kind]);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
         VkStep { kind, set, gx, gy, sliced, transient }
@@ -987,20 +998,29 @@ impl VulkanBackend {
         // count is dropped HERE rather than when the batch left the pending
         // list, so it never reads zero while this batch's buffers are in use.
         self.ctx.steps_submitted(steps.len() as u64);
-        // Buffers dropped while this batch was recorded: with nothing left
-        // recorded anywhere, this is where they are actually destroyed (see
-        // `impl Drop for VkOwnedBuffer`).
-        self.ctx.reclaim_dead();
         for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
             self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
         }
-        let mut seen = std::collections::HashSet::new();
-        let mut free = self.free_sets.lock().unwrap_or_else(|e| e.into_inner());
-        for s in steps {
-            if s.transient && seen.insert(s.set) {
-                free.entry(s.kind).or_default().push(s.set);
+        {
+            let mut seen = std::collections::HashSet::new();
+            let mut free = self.free_sets.lock().unwrap_or_else(|e| e.into_inner());
+            for s in steps {
+                if s.transient && seen.insert(s.set) {
+                    // Idle and about to be rewritten before any reuse, so it
+                    // stops pinning the buffers it named - which is what lets
+                    // the reclaim below actually free this batch's scratch.
+                    self.ctx.set_released(s.set);
+                    free.entry(s.kind).or_default().push(s.set);
+                }
             }
         }
+        // Buffers dropped while this batch was recorded: with nothing left
+        // recorded anywhere and this batch's sets released just above, this is
+        // where they are actually destroyed (see `impl Drop for
+        // VkOwnedBuffer`). Strictly after the release, or every buffer this
+        // batch touched would still read as referenced and stay buried an
+        // extra flush.
+        self.ctx.reclaim_dead();
     }
 
     /// Whether this flush should record per-dispatch timestamps: profiling is
