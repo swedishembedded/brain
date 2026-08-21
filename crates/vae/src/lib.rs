@@ -27,6 +27,7 @@ pub mod blocks3d;
 pub mod config;
 pub mod decoder;
 pub mod latent;
+pub mod tiling3d;
 
 pub use config::VaeConfig;
 pub use decoder::{Tensors, VaeDecoder, VaeEncoder};
