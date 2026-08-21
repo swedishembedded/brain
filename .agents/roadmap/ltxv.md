@@ -2188,6 +2188,165 @@ count, which is why the gate asserts on it.
   output cache already does this at a different level.
 * **The VRAM half of `LtxvResident::estimate`** - see honesty note 2 above.
 
+### Phase 14 - the adaLN-single host stage, and a correction to Phase 12's attribution
+
+Phase 12 closed by naming the next bottleneck: `stage forward_q_streamed:
+adaLN-single table (host): 76281.3 ms`, ~81% of the 93.86 s wall for 8 layers
+at the real 720p token count, and attributed it to `dit.rs`'s host `linear`
+behind `ada_layer_norm_single` - the `[3520,4096] x [36864,4096]^T` GEMM.
+
+**That attribution was wrong, and finding out cost one measurement.** Before
+changing the GEMM, its own shape was benchmarked in isolation
+(`backend-cpu/tests/host_gemm.rs::tile_sweep_at_the_real_adaln_shape`, the
+exact `[3520,4096] x [36864,4096]^T` operands): the naive row-parallel loop
+runs it in **14.39 s at 73.9 GFLOP/s** - not 76 s. Something else in the same
+timing bracket was five times bigger, and instrumenting the two halves
+separately named it immediately: `ada_layer_norm_single` called
+`dit::timestep::pixart_timestep_embed` **once per row, in a serial loop**, and
+that helper's two linears (`dit::timestep::linear1`) are single-row matvecs on
+ONE core. At T=3520 that is `3520 x (256x4096 + 4096x4096)` = 6.3e10
+multiply-adds on one core of 48. Measured: **60709.1 ms**, i.e. 80% of the
+stage, against the GEMM's 15137.8 ms.
+
+This is the same lesson §F.2/§F.9 already carry, arriving through a different
+door: the profiler named a STAGE, a plausible story was told about which line
+inside it dominated, and the story was wrong by 4x. The cheap check - time the
+suspected line on its own before optimizing it - is what turned a 1.7x fix into
+a 7.5x one.
+
+**Two exact wins, both bit-identical, in the order the measurement dictated.**
+
+**Win 1 - batch the timestep embedder** (`crates/ltxv/src/dit.rs::
+ada_layer_norm_single`). Every row is independent and they all read the SAME
+two weight matrices, so `rows` serial single-core matvecs are two ordinary
+`[rows,in] x [out,in]^T` GEMMs with an elementwise SiLU between them. Only the
+`[rows,256]` sinusoid table is genuinely per-row, and that is row-parallel.
+Bit-identical because `dit::timestep::linear1` accumulates `bias` then
+`+= x*w` over ascending `k`, one f32 add at a time, and so does `linear`:
+every output element is the same sequence of the same roundings.
+`dit::timestep::pixart_timestep_embed` itself is UNTOUCHED - the batching is
+local to this call site, so `wan`/`s3dit`/`flux` keep their exact current
+behaviour.
+
+**Win 2 - a blocked host GEMM** (`crates/backend-cpu/src/host_gemm.rs`, new).
+Per kernels.md §F.3 the tree was checked first: `backend_cpu::fast_ops::
+matmul_abt` is the AVX2 kernel for this exact `A @ Bt` shape and is several
+times faster still, but it splits `k` across eight lanes and uses FMA, so it is
+NOT bit-identical to the loop this path is gated against and cannot be dropped
+in. `wan::model::linear` is the same naive loop. So this is new code, hoisted
+to `backend-cpu` rather than kept in `ltxv` because the identical shape recurs
+(`wan::model::linear`, `ltxv::dit::linear`) - additive, with the naive loop
+kept beside it as the reference definition of the arithmetic.
+
+It fixes two defects in one nest. The memory one Phase 9 recorded and declined:
+the naive order reads the ENTIRE 604 MB weight matrix once per OUTPUT ROW, and
+row-parallelizing hid that behind aggregate bandwidth instead of removing it -
+~2.1 TB of DRAM traffic for 5.3e11 MACs. A register block of 8 output rows
+against one weight row cuts the re-reads eightfold. The quieter one: `acc +=
+x*w` on a single accumulator is a loop-carried dependency on a ~4-cycle f32
+add, so a core retires ~1 MAC per 4 cycles no matter what the bandwidth is;
+8 independent accumulator chains fill that latency.
+
+**Bit-identity is structural, not a tolerance**: every output element is still
+`bias` then `+= x[m,k]*w[n,k]` for ascending `k`, one f32 add at a time.
+Nothing is reassociated, no accumulator is split and recombined, no FMA
+replaces a separate multiply and add, no SIMD lane sums a partial range of `k`.
+The blocking changes only which element is computed when, which IEEE-754 does
+not observe.
+
+**The tile sweep** (measured, not guessed - `tile_sweep_at_the_real_adaln_shape`,
+48-thread Xeon E5-2690 v3, real shape), and it pointed the opposite way from
+the obvious intuition:
+
+| m-tile | secs | GFLOP/s | vs naive |
+|---|---:|---:|---:|
+| naive (row-parallel) | 14.39 | 73.9 | 1.00x |
+| **8** | **8.32** | **127.8** | **1.73x** |
+| 16 | 8.83 | 120.4 | 1.63x |
+| 32 | 9.32 | 114.1 | 1.54x |
+| 64 | 11.44 | 92.9 | 1.26x |
+| 128 | 11.79 | 90.2 | 1.22x |
+| 256 | 16.22 | 65.5 | 0.89x |
+
+Monotone rather than U-shaped because at tile 8 the kernel is already
+ARITHMETIC-bound: 127.8 GFLOP/s is ~1 scalar MAC per core-cycle, the ceiling
+for a non-reassociating f32 multiply-then-add. Extra weight reuse buys nothing
+past that, while the tile's slice of `x` (`tile * K * 4` bytes - 512 KB already
+at tile 8 with K=4096) grows past this core's 256 KB L2 and starts costing.
+Tile 256 is SLOWER than the loop it replaces.
+
+**Gates.** `backend-cpu/tests/host_gemm.rs`: bit-pattern comparison (not a
+tolerance, and not `assert_eq!` on f32, which would call two NaNs unequal)
+against the naive loop over 8 shapes x 11 tile sizes x with/without bias,
+covering tiles that do not divide `rows`, tails shorter than the register
+block, single-row inputs (the `coeff=1` AV gate tables) and `in_dim = 0`.
+Mutation-verified on the bug class blocking actually invites: a deliberately
+reassociated (even/odd split-accumulator) reduction must differ in bit pattern
+on most elements, and the blocked kernel must be on the reference's side of
+that line. `ltxv::dit::tests::batched_adaln_timestep_embedding_is_bit_identical
+_to_the_per_row_form` does the same for win 1 against the exact per-row loop it
+replaces, at four `(rows, dim, coeff)` shapes including `rows=1`.
+
+Every pre-existing gate re-run and green: the FULL `cargo test -p brain-ltxv
+--tests`, `-p brain-backend-cpu`, `-p brain-residency`, `-p brain-cli`,
+including `dit_parity`, `av_dit_parity`, `host_forward_parity`, `block_grad`,
+`av_block_grad`, `streamed_vs_eager_real` and the real-weight parity tests.
+
+**Measured**, same command both arms, same box, same session, one Tesla P40
+idle before each run, real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`:
+
+    BRAIN_PROFILE=1 BRAIN_LTXV_DIT=<real Q8_0 22B> \
+      ./target/release/ltxv_bench streamed 8 3520 1024 1
+
+Call 2 (the cache-hit call - the shape every step of a generation past the
+first has):
+
+| | before | after | |
+|---|---:|---:|---:|
+| adaLN timestep embedder (host) | 60709.1 ms | 1258.3 ms | **48.2x** |
+| adaLN table GEMM (host) | 15137.8 ms | 8777.0 ms | **1.72x** |
+| **adaLN-single stage total** | **75846.9 ms** | **10039.6 ms** | **7.6x** |
+| wall, 8 layers, cache hit | 93.98 s (11.75 s/layer) | 28.98 s (3.62 s/layer) | **3.24x** |
+| wall, 8 layers, cache miss | 112.30 s | 42.43 s | 2.65x |
+
+Reproducible: a second after-run measured 10229.9 ms / 28.85 s. The before arm
+reproduces Phase 12's own published 76281.3 ms / 93.86 s to within 1%, which is
+what makes the two phases' numbers comparable.
+
+**The strongest evidence that this changed no number is in the bench's own
+output.** `ltxv_bench` prints the forward's output statistics, and across both
+arms at the real 22B int8 width they are identical to every digit printed:
+
+    len=450560 mean=0.192827 std=2.603959 min=-7.937798 max=7.273794 nonfinite=0
+
+The adaLN stage is now 35% of a cache-hit call rather than 81%, and the split
+of a real step has changed shape: GPU upload+forward+wait (17.9 s) is now the
+largest single item.
+
+**Not attempted, and why:**
+
+* **Vectorizing the blocked GEMM.** The bit-identical way to do it is to
+  vectorize ACROSS `M` - eight output rows in one AVX2 lane group, each lane
+  still summing its own `k` sequentially, with a separate `_mm256_mul_ps` and
+  `_mm256_add_ps` rather than an FMA (which rounds once instead of twice). That
+  would lift the ~1 MAC/core-cycle scalar ceiling by ~8x and take the table
+  GEMM from 8.8 s toward ~1 s. It needs a transposed pack of `x` and is a
+  larger change than this pass's remit; the memory win was taken first and the
+  arithmetic left scalar. Recorded as a real, available, exact win.
+* **Moving the adaLN table to the GPU.** Phase 12 suggested it ("a 10.5
+  TFLOP/s card sits idle"). Still open, and now a smaller prize than it looked:
+  the stage is 10.0 s rather than 76.3 s, and the card is not idle during a
+  cache-hit call - it is the largest item.
+* **Switching `wan::model::linear` to the blocked kernel.** `crates/wan` is
+  out of this pass's scope. The kernel is in `backend-cpu` precisely so that
+  adoption is a one-line change when someone measures Wan's own shapes.
+* **Deduplicating identical timesteps.** A real denoise step passes the same
+  sigma for nearly every one of the 3520 tokens (only frozen conditioning
+  tokens differ), so the embedder could compute 1-2 distinct rows instead of
+  3520 and broadcast - bit-identical, and another ~50x on top of win 1. Not
+  taken: it makes the cost input-dependent in a way the batched GEMM does not,
+  and win 1 already reduced this stage to 1.3 s. Tracked.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
@@ -2397,10 +2556,20 @@ land. Known traps already identified from reading (not yet test-pinned):
   from host RAM once per output row (Phase 8's flat ~21s/forward
   measurement, ~11% of the real per-step total) - **closed in Phase 9**
   (see below): row-parallelized, bit-identical, ~3.5x on the stage itself.
-  Not fully closed: the fix is bandwidth-, not thread-count-, bound (48
-  cores measured only ~3.5x, since every thread still re-walks the same
-  604 MB matrix), so a blocked/tiled rewrite that avoids the redundant
-  re-reads entirely remains a further, unattempted win.
+  Not fully closed at the time: the fix was bandwidth-, not
+  thread-count-, bound (48 cores measured only ~3.5x, since every thread
+  still re-walks the same 604 MB matrix), so a blocked/tiled rewrite that
+  avoids the redundant re-reads entirely remained a further, unattempted
+  win. **Closed in Phase 14**: `backend_cpu::host_gemm::blocked_linear`,
+  register- and cache-blocked, bit-identical, 14.39s -> 8.32s on the
+  isolated real shape (73.9 -> 127.8 GFLOP/s, which is the ~1 scalar
+  MAC/core-cycle ceiling, so it is now arithmetic-bound rather than
+  bandwidth-bound). Phase 14 also corrected this entry's own premise: at
+  T=3520 the `linear()` call was only 15.1s of the 75.8s stage - the other
+  60.7s was `ada_layer_norm_single`'s SERIAL per-row timestep embedder,
+  fixed in the same phase. Still open: a bit-identical vectorization ACROSS
+  `M` (AVX2 lanes over output rows, each lane still summing its own `k`),
+  which would lift the scalar ceiling by ~8x.
 - ~~The residency executor's GPU-lane device-opening path can fail to match
   the expected physical adapter by PCI id, falling back to a software
   adapter with too small a `max_storage_buffer_binding_size` for even the

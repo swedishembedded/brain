@@ -423,34 +423,32 @@ pub(crate) fn av_shard_owns_weight(shard: &Shard, name: &str) -> bool {
 /// `out[r,o] = b[o] + Σ_i x[r,i]·w[o,i]`, `w` row-major `[out_dim, in_dim]` -
 /// plain `nn.Linear`.
 ///
-/// Row-parallel through `backend_cpu::par::rows_mut` - `wan::model::linear`'s
-/// own precedent, reused verbatim rather than reimplemented (kernels.md §F.3):
-/// the split is over OUTPUT ROWS and each row's dot products are left exactly
-/// as they were (still a straight sequential `+=` walk over `in_dim`, one
-/// thread per row), so every output element accumulates in the SAME order
-/// regardless of thread count - bit-identical to the old serial form, not
-/// merely close, which is what a parity/gradcheck gate can accept
-/// unconditionally rather than re-tolerating.
+/// `backend_cpu::host_gemm::blocked_linear` - a cache-blocked, register-blocked
+/// host GEMM, still bit-identical to the serial form (every output element
+/// accumulates `bias` then `+= x·w` for ascending `k`, one f32 add at a time,
+/// nothing reassociated), which is what a parity/gradcheck gate can accept
+/// unconditionally rather than re-tolerating. See that module's doc for the
+/// structural argument and `backend-cpu/tests/host_gemm.rs` for the gate.
 ///
-/// Measured, not assumed: `ada_layer_norm_single`'s call into this function
-/// (the `[t,4096]x[36864,4096]^T` 9-row adaLN table) cost a flat ~21 s per
-/// real forward call at the real 22B checkpoint's width - ~11% of one real
-/// denoise step - as a naive, single-core scalar loop; this fix replaces that
-/// loop without changing one bit of the output.
+/// Two earlier states of this function, both measured, both recorded because
+/// the second is the one that explains why the first was not enough:
+///
+/// * A naive single-core scalar loop: `ada_layer_norm_single`'s call into it
+///   (the `[t,4096]x[36864,4096]^T` 9-row adaLN table) cost ~21 s per forward
+///   at T=128.
+/// * Row-parallel through `backend_cpu::par::rows_mut` (`wan::model::linear`'s
+///   precedent, reused verbatim): ~3.5x, and recorded at the time as
+///   bandwidth-bound rather than fixed, because parallelizing over output
+///   rows hides the naive nest's real defect - re-reading the whole 604 MB
+///   weight matrix once per OUTPUT ROW - behind aggregate DRAM bandwidth
+///   instead of removing it. At the real 720p token count (T=3520) that
+///   defect dominated everything else: 76.3 s per forward call, flat in layer
+///   count, ~81% of a real denoise step's wall clock.
+///
+/// The blocking removes the re-reads themselves, which is why this is a fix
+/// rather than a third round of hiding them.
 fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {
-    let mut out = vec![0f32; rows * out_dim];
-    backend_cpu::par::rows_mut(&mut out, out_dim, |r, orow| {
-        let xr = &x[r * in_dim..r * in_dim + in_dim];
-        for (o, slot) in orow.iter_mut().enumerate() {
-            let wr = &w[o * in_dim..o * in_dim + in_dim];
-            let mut acc = b.map(|b| b[o]).unwrap_or(0.0);
-            for (xi, wi) in xr.iter().zip(wr) {
-                acc += xi * wi;
-            }
-            *slot = acc;
-        }
-    });
-    out
+    backend_cpu::host_gemm::blocked_linear(x, rows, in_dim, w, b, out_dim)
 }
 
 fn silu(x: f32) -> f32 {
@@ -499,14 +497,39 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     let b2 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_2.bias"));
     let rows = timesteps_scaled.len();
 
-    let mut embedded = vec![0f32; rows * dim];
-    for (ti, &t) in timesteps_scaled.iter().enumerate() {
-        let e = dit::timestep::pixart_timestep_embed(t, 256, w1, b1, dim, w2, b2, dim, 10000.0);
-        embedded[ti * dim..ti * dim + dim].copy_from_slice(&e);
-    }
+    // BATCHED, not one `dit::timestep::pixart_timestep_embed` call per row.
+    //
+    // That helper's own two linears are single-row matvecs on ONE core
+    // (`dit::timestep::linear1`), and this loop ran `rows` of them back to
+    // back. At the real 720p token count that is 3520 x (256x4096 +
+    // 4096x4096) = 6.3e10 multiply-adds on a single core of 48 - and it, not
+    // the adaLN table GEMM below, was the bulk of the ~76 s this stage cost
+    // per forward call (measured: the table GEMM alone is ~14 s of it).
+    // Every row is independent and they all read the SAME two weight
+    // matrices, so the whole loop is two ordinary `[rows, in] x [out, in]^T`
+    // GEMMs with an elementwise SiLU between them.
+    //
+    // Bit-identical, not merely equivalent: `dit::timestep::linear1`
+    // accumulates `bias` then `+= x*w` over ascending `k`, one f32 add at a
+    // time, and so does `linear` - so every output element is the same
+    // sequence of the same roundings. Gated by
+    // `batched_adaln_timestep_embedding_is_bit_identical_to_the_per_row_form`.
+    let s_embed = std::time::Instant::now();
+    const FREQ_DIM: usize = 256;
+    const MAX_PERIOD: f64 = 10000.0;
+    let mut te = vec![0f32; rows * FREQ_DIM];
+    backend_cpu::par::rows_mut(&mut te, FREQ_DIM, |r, row| {
+        row.copy_from_slice(&model::hostmath::timestep_embedding(timesteps_scaled[r], FREQ_DIM, true, 0.0, MAX_PERIOD));
+    });
+    let h0 = model::hostmath::silu_slice(&linear(&te, rows, FREQ_DIM, w1, Some(b1), dim));
+    let embedded = linear(&h0, rows, dim, w2, Some(b2), dim);
+    gpu_core::profile::stage_time("ada_layer_norm_single: timestep embedder (host, batched)", s_embed);
+
+    let s_table = std::time::Instant::now();
     let wl = tget(w, &format!("{prefix}.linear.weight"));
     let bl = tget(w, &format!("{prefix}.linear.bias"));
     let table = linear(&silu_slice(&embedded), rows, dim, wl, Some(bl), coeff * dim);
+    gpu_core::profile::stage_time("ada_layer_norm_single: table GEMM (host)", s_table);
     (table, embedded)
 }
 
@@ -1881,6 +1904,61 @@ mod tests {
     use super::*;
     use crate::config::LtxAvDitConfig;
     use std::collections::HashSet;
+
+    /// The batched timestep embedder in [`ada_layer_norm_single`] must be
+    /// BIT-IDENTICAL to the per-row `dit::timestep::pixart_timestep_embed`
+    /// loop it replaces - not close. Every downstream parity gate compares
+    /// `embedded_timestep` and `adaln_table` against fixtures, and this is a
+    /// scheduling change (two GEMMs instead of `rows` single-core matvecs),
+    /// so a single differing bit would mean the restructuring changed the
+    /// arithmetic rather than just when it runs.
+    ///
+    /// Compared on BIT PATTERNS: `assert_eq!` on f32 would call two NaNs
+    /// unequal, which is the wrong verdict for a byte-identical result.
+    #[test]
+    fn batched_adaln_timestep_embedding_is_bit_identical_to_the_per_row_form() {
+        // Deliberately awkward row counts, including ones smaller than the
+        // blocked GEMM's register block and the `coeff=1, rows=1` shape the
+        // AV gate tables use.
+        for (rows, dim, coeff) in [(1usize, 64usize, 1usize), (7, 64, 4), (33, 128, 9), (64, 32, 2)] {
+            let w = timestep_weights(dim, coeff, 0xADA1_0000 ^ rows as u64);
+            let ts: Vec<f32> = (0..rows).map(|i| 40.0 + 13.7 * i as f32).collect();
+
+            // The exact loop this function used to run.
+            let (w1, b1) = (tget(&w, "t.emb.timestep_embedder.linear_1.weight"), tget(&w, "t.emb.timestep_embedder.linear_1.bias"));
+            let (w2, b2) = (tget(&w, "t.emb.timestep_embedder.linear_2.weight"), tget(&w, "t.emb.timestep_embedder.linear_2.bias"));
+            let mut reference = vec![0f32; rows * dim];
+            for (ti, &t) in ts.iter().enumerate() {
+                let e = dit::timestep::pixart_timestep_embed(t, 256, w1, b1, dim, w2, b2, dim, 10000.0);
+                reference[ti * dim..ti * dim + dim].copy_from_slice(&e);
+            }
+
+            let (_table, embedded) = ada_layer_norm_single(&w, "t", &ts, dim, coeff);
+            let differing = embedded.iter().zip(&reference).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(differing, 0, "rows={rows} dim={dim}: {differing}/{} embedded_timestep elements differ in bit pattern from the per-row reference", reference.len());
+        }
+    }
+
+    /// Deterministic weights for the two timestep-embedder linears plus the
+    /// adaLN table linear, in the name space `ada_layer_norm_single` reads.
+    fn timestep_weights(dim: usize, coeff: usize, seed: u64) -> Tensors {
+        let mut s = seed | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let mut fill = |n: usize| -> Vec<f32> { (0..n).map(|_| next()).collect() };
+        let mut t: Tensors = HashMap::new();
+        t.insert("t.emb.timestep_embedder.linear_1.weight".into(), (vec![dim, 256], fill(dim * 256)));
+        t.insert("t.emb.timestep_embedder.linear_1.bias".into(), (vec![dim], fill(dim)));
+        t.insert("t.emb.timestep_embedder.linear_2.weight".into(), (vec![dim, dim], fill(dim * dim)));
+        t.insert("t.emb.timestep_embedder.linear_2.bias".into(), (vec![dim], fill(dim)));
+        t.insert("t.linear.weight".into(), (vec![coeff * dim, dim], fill(coeff * dim * dim)));
+        t.insert("t.linear.bias".into(), (vec![coeff * dim], fill(coeff * dim)));
+        t
+    }
 
     /// [`av_dit_tensor_manifest`] at the REAL LTX-2.5 22B config must produce
     /// exactly the real checkpoint's own tensor count and breakdown - 4349
