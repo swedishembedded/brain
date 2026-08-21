@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Audio foundation for the Qwen3-TTS stack.
-//!
-//! Three independent pieces, all fp32 and dependency-light so they share the
-//! brain engine's portability constraints:
-//!   * [`wav`]   — canonical PCM WAV read/write (mono f32).
-//!   * [`conv`]  — 1D conv / transposed-conv `Step`-builders over the shared
+//! Shared audio engine infrastructure - the front-end/back-end pieces every
+//! spectrogram- or waveform-based model composes from, all fp32 and
+//! dependency-light so they share the brain engine's portability constraints:
+//!   * [`wav`]   - canonical PCM WAV read/write (mono f32).
+//!   * [`conv`]  - 1D conv / transposed-conv `Step`-builders over the shared
 //!     WGSL engine (+ CPU reference oracles), the audio analogue of
 //!     `model::block`. Backs the codec, ECAPA speaker encoder and GAN vocoder.
-//!   * resampling — simple linear-interpolation rate conversion (24 kHz codec
-//!     vs 16 kHz inputs).
-//!
-//! STFT / mel-spectrogram features land in [`mel`] (built out for the speaker
-//! encoder in Phase 3).
+//!     Also hosts [`conv::fold_weight_norm`], the `nn.utils.weight_norm`
+//!     fold every weight-normalized checkpoint import needs.
+//!   * [`act`] - elementwise activation `Step`-builders (currently ELU).
+//!   * [`mel`] - STFT + mel-spectrogram features (forward), with a
+//!     mixed-radix FFT for non-power-of-two `n_fft`.
+//!   * [`istft`] - the inverse: overlap-add ISTFT with window-sum-square
+//!     normalization, for models (like a HiFT-style vocoder) that predict a
+//!     spectrum and need it turned back into a waveform.
+//!   * [`resample_linear`] - cheap linear-interpolation rate conversion;
+//!     [`resample::rational`] - the accurate Kaiser-windowed-sinc sibling for
+//!     rate changes that need it (e.g. 24 kHz -> 16 kHz).
 
 pub mod act;
 pub mod asr_caps;
