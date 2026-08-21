@@ -280,6 +280,7 @@ including those.
 | [`brain/nemotronasr`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
 | [`brain/qwen3asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
 | [`brain/qwen3tts`](docs/models/qwen3tts.md) | Audio | voice cloning / text-to-speech (Talker + MTP + codec) |
+| [`brain/minimaxmusic3`](docs/models/minimaxmusic3.md) | Audio | lyrics+caption -> full song (Qwen3-8B AR + flow-matching DiT + DAC vocoder) -- wired, unvalidated end-to-end on this machine (RAM) |
 | [`Ultralytics/YOLOv8`](docs/models/yolov8/readme.md) | Vision | from-scratch anchor-free object detection |
 | [`brain/zipdepth`](docs/models/zipdepth.md) | Vision | monocular depth (pure-conv, realtime webcam) |
 | [`brain/sam2`](docs/models/sam2.md) | Vision | promptable segmentation |

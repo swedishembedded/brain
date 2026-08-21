@@ -45,6 +45,12 @@ named on the model's own page (see
 | [`qwen3asr`](qwen3asr.md) ⤓ | offline speech-to-text | [x] | [ ] |
 | [`qwen3tts`](qwen3tts.md) ⤓ | voice cloning / speech synthesis | [x] | [x] |
 
+## Music generation
+
+| Architecture | Solves | Infer | LoRA |
+|---|---|:---:|:---:|
+| [`minimaxmusic3`](minimaxmusic3.md) | lyrics+caption -> full song (Qwen3-8B AR + flow-matching DiT + DAC vocoder) | [x] (unvalidated end-to-end on this machine - RAM) | library only |
+
 ## Image generation and editing
 
 | Architecture | Solves | Infer | LoRA |

@@ -541,6 +541,74 @@ path, or a discrete GPU: run it with all six `BRAIN_MINIMAXMUSIC3_*` env
 vars set and it either produces a WAV or fails somewhere new worth
 investigating.
 
+## Phase 11: serving contract (M8)
+
+`crates/minimaxmusic3::{caps, generate}` + `crates/cli::resident_minimaxmusic3`:
+
+- `generate::generate` is the ONE implementation of "run the whole
+  pipeline" - factored out of what `tests/e2e_short_generation.rs`
+  previously inlined, and generalized from that test's single-chunk
+  shortcut to the real `denoise::chunk_starts`/`ChunkState` multi-chunk
+  loop (still respecting the sequential-stage RAM discipline: every
+  chunk's latents are produced before the DiT drops, then every chunk
+  decodes through the vocoder stage - never interleaved, which would
+  need both resident at once). `generate::Paths::from_env` reads the same
+  six `BRAIN_MINIMAXMUSIC3_*` vars `crates/arch`'s own `weights_env` table
+  names. `duration_seconds` converts to an AR frame cap via the AR
+  stage's own 25 Hz frame rate - confirmed by construction (the condition
+  encoder's resample and the vocoder's upsample keep 1 AR frame = 1/25 s
+  of eventual audio end to end), not just asserted.
+- `caps::MinimaxMusic3Provider`/`manifest`/`generate_spec` follow the
+  `wan::caps`/`qwen3tts::caps` pattern (generation-only params, paths from
+  the environment) but are STATELESS like `qwen3tts::caps::TtsProvider`,
+  not `wan`'s hot-DiT cache - nothing here is worth keeping warm, since
+  the whole checkpoint does not fit in RAM even once on this machine (see
+  Phase 10). The `audio` output blob is a complete WAV
+  (`audio::wav::encode_multi`, `meta.format == "wav"`), not headerless
+  PCM, since `caps_cli::save_blob`'s raw-PCM arm is mono-only and this
+  model is stereo.
+- `resident_minimaxmusic3::MinimaxMusic3Resident` mirrors
+  `resident_tts.rs`'s load-per-call shape. `estimate()` budgets the
+  LARGER of the AR stage (two Global LLM loads, sized at 2x the on-disk
+  checkpoint bytes per instance to reflect the fp32-promotion reality
+  Phase 10 measured, plus the depth decoder) and the denoise stage (DiT +
+  vocoder + condition encoder), never their sum, since the two stages are
+  never resident together. `activate()` fails fast on missing
+  directories; the returned `Instance::run` dispatches straight through
+  `caps::generate_action` - one implementation of param decoding,
+  generation, and outcome shaping shared by the direct (`brain do`) and
+  resident (D-Bus/scheduler) paths.
+- CLI/registry wiring: one `catalog.rs` `ModelEntry` (manifest/provider/
+  resident, the `qwen3tts` shape), one `resolve.rs` `ARCH_TO_MODEL` row
+  (the generic capability-dispatched path - no dedicated `_cli.rs` needed
+  for a single-action model). No `crates/dbus` changes: that crate's
+  D-Bus surface is entirely generic over whatever `ResidentModel` the
+  CLI's `build_executor` registers (which already merges
+  `catalog::residents()`), so the catalog+resident wiring is the model's
+  complete D-Bus reachability story. Verified manually: `brain caps
+  brain/minimaxmusic3` lists the `generate` action with its full param
+  schema; `brain minimaxmusic3 generate --lyrics ... --caption ...` (no
+  env vars set) fails with the exact, actionable "set
+  BRAIN_MINIMAXMUSIC3_LM" message, not a generic/unknown-model error -
+  the whole resolve -> catalog -> provider -> Paths::from_env chain is
+  live end to end, short of the RAM-blocked real run itself.
+- `examples/musicgen/generate_song.py` + README: the `videogen`/`imagegen`
+  example convention (`BrainDBus`, `skip()` when unserved, only send
+  params the caller chose), simplified by the complete-WAV blob
+  convention above (no client-side encode step). The README states
+  plainly that this has NOT been run to completion in this repo's own dev
+  environment - consistent with this port's own honesty conventions,
+  not a demonstration with invented numbers.
+
+All of `catalog.rs`'s and `resolve.rs`'s own invariant tests pass with
+the new entries in place (`catalog_ids_are_unique`,
+`every_listed_model_is_constructible_by_name`,
+`catalog_and_residency_do_not_overlap`,
+`every_arch_to_model_id_is_a_real_registry_entry`,
+`arch_handlers_and_arch_to_model_do_not_overlap`); the whole-workspace
+`clippy-gate.sh`, `check-arch-names.sh`, and `check-linear-history.sh`
+gates are all green with this milestone's changes in place.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
@@ -553,8 +621,12 @@ investigating.
 - [ ] The real short end-to-end WAV gate itself (`tests/
       e2e_short_generation.rs` exists and is correct; blocked on THIS
       machine by the int8-promotion/buffer-size limits Phase 10 records)
-- [ ] Serving contract: capability manifest, residency adapter, CLI verb,
-      D-Bus, a runnable example
+- [ ] A CLI verb for per-component training (LoRA/full fine-tune) - the
+      library functions are real and gradchecked (Phases 3-9), but
+      `caps::MinimaxMusic3Provider` only exposes `generate`; training
+      stays a Rust-API-only surface for this model, matching how the
+      "Not yet done"/Support table entries elsewhere in this repo
+      distinguish library-level from CLI-reachable capability.
 
 ## Recorded gaps (expected, not yet reached)
 
