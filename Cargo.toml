@@ -368,23 +368,31 @@ lto = "thin"
 #
 # The fix lives on a fork branch cut from the v29.0.4 tag - the exact version
 # resolved by the pin above - so consuming it needs no API migration in
-# `crates/backend-wgpu`. Uncomment to build against it:
-#
+# `crates/backend-wgpu`.
+
 # [patch.crates-io]
-# wgpu = { git = "https://github.com/swedishembedded/wgpu", branch = "v29-staging-host-memory" }
+# wgpu = { git = "https://github.com/swedishembedded/wgpu", branch = "main" }
 #
 # Patching `wgpu` alone is enough: its `wgpu-core`/`wgpu-hal`/`wgpu-types`/
 # `naga` dependencies are path deps inside that repo, so the whole tree comes
 # from the fork - verified, `Cargo.lock` picks up all five.
 #
-# It is still commented out for ONE remaining reason, and it is no longer about
-# whether the fix is worth having: the branch exists only in a local clone.
-# `git ls-remote` on the fork lists `trunk` and nothing else, so uncommenting
-# this line as it stands would fail every build here and in CI at dependency
-# resolution, not at compile time. Push the branch, then uncomment - nothing
-# else needs to change. Until then a local checkout is consumed through
-# `.cargo/config.toml`'s `paths` override (see `.cargo/config.toml.example`),
-# which is how every number quoted above was measured.
+# `main` is this fork's own default branch, distinct from `trunk` (the mirrored
+# upstream default) - it will carry this fix and whatever else the fork owner
+# curates onto it. Kept commented out for one concrete, tested reason, not a
+# style choice: Cargo resolves a `[patch]` git source by fetching it up front,
+# BEFORE `.cargo/config.toml`'s `paths` override gets a chance to substitute
+# anything - confirmed by uncommenting this exact line locally, which failed
+# every build here with "cannot locate remote-tracking branch 'origin/main'"
+# even with the local override in place and correct. The `paths` override does
+# not shield a `[patch]` pointed at a branch that does not exist yet on the
+# remote. As of this commit `main` exists only as a local branch in the fork
+# checkout (cut from `v29-staging-host-memory`, same two commits) - uncomment
+# once the fork owner pushes it, and not before, or every build here and in CI
+# breaks at dependency resolution rather than compile time. Until then, local
+# development is consumed through `.cargo/config.toml`'s `paths` override (see
+# `.cargo/config.toml.example`), which is how every number quoted above was
+# measured and requires no change to this file at all.
 #
 # To work on the dependency itself rather than consume a pinned rev, override
 # it with a local checkout instead: copy `.cargo/config.toml.example` to
