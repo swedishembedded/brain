@@ -67,6 +67,6 @@ The same generation without a server, one command, one playable file:
 BRAIN_MINIMAXMUSIC3_LM=… BRAIN_MINIMAXMUSIC3_DEPTH=… BRAIN_MINIMAXMUSIC3_CONDITION=… \
 BRAIN_MINIMAXMUSIC3_DIT=… BRAIN_MINIMAXMUSIC3_VOCODER=… BRAIN_MINIMAXMUSIC3_TOKENIZER=… \
 BRAIN_DEVICE=cpu brain minimaxmusic3 generate \
-    --lyrics "..." --caption "..." --duration-seconds 10 \
+    --lyrics "..." --caption "..." --duration_seconds 10 \
     --out audio=song.wav
 ```
