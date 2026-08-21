@@ -557,7 +557,7 @@ mod native_facade {
         /// never assumed present.
         pub fn caps(&self) -> backend_api::DeviceCaps {
             let mut c = self.inner.caps();
-            if let Some(r) = crate::roof::known() {
+            if let Some(r) = crate::roof::known(self.kind()) {
                 c.peak_gflops = Some(r.gflops);
                 c.peak_bandwidth_gbs = Some(r.gbs);
             }

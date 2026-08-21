@@ -13,6 +13,36 @@
 
 use ash::vk;
 
+/// Whether kernels are compiled with naga's runtime checks, mirroring
+/// `backend-wgpu`'s `ShaderRuntimeChecks` decision and reading the SAME
+/// `BRAIN_GPU_CHECKED` switch, so the two GPU backends cannot silently compile
+/// the same WGSL under different rules.
+///
+/// Off by default. The safety argument is the one `backend-wgpu` and
+/// `backend-cpu` already make for the identical choice (`create_shader_module_
+/// trusted` / Cranelift's `MemFlags::trusted()`): every kernel self-bounds on
+/// its uniform (`if (idx >= total) { return; }`), every loop is counted by a
+/// uniform field rather than by data, and buffer sizes are fixed by the model.
+/// The device additionally enables `robustBufferAccess`, so an out-of-range
+/// access is bounded by the hardware rather than being undefined - the same
+/// backstop wgpu relies on when it selects `BoundsCheckPolicy::Unchecked`.
+///
+/// This is not a micro-optimisation. Leaving naga's defaults on cost this
+/// backend HALF its arithmetic throughput on a Tesla P40: the fp32 FMA roofline
+/// probe measured 5.05 TFLOP/s against the wgpu backend's 10.6 TFLOP/s from the
+/// identical WGSL, and the packed-int8 probe 20.4 vs 43.2 TOP/s, with DRAM
+/// bandwidth identical on both - the gap was entirely the per-iteration guard
+/// counter and the per-access clamp that this backend alone was emitting.
+fn runtime_checked() -> bool {
+    std::env::var("BRAIN_GPU_CHECKED").map(|v| v != "0").unwrap_or(false)
+}
+
+fn bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
+    use naga::proc::BoundsCheckPolicy;
+    let p = if runtime_checked() { BoundsCheckPolicy::Restrict } else { BoundsCheckPolicy::Unchecked };
+    naga::proc::BoundsCheckPolicies { index: p, buffer: p, image_load: p, binding_array: p }
+}
+
 /// Compile a WGSL compute kernel string to SPIR-V words.
 ///
 /// Returns `Err` with a human-readable message on parse/validate/emit failure.
@@ -41,6 +71,10 @@ pub fn wgsl_to_spirv(src: &str) -> Result<Vec<u32>, String> {
     let options = naga::back::spv::Options {
         lang_version: (1, 3),
         flags,
+        bounds_check_policies: bounds_check_policies(),
+        // naga defaults this ON, which wraps every loop in a 64-bit
+        // guard counter decremented per iteration. See `runtime_checked`.
+        force_loop_bounding: runtime_checked(),
         ..Default::default()
     };
 

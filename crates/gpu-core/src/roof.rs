@@ -232,7 +232,7 @@ fn roof_budget() -> std::time::Duration {
     std::time::Duration::from_secs_f64(secs)
 }
 
-static CACHE: Mutex<Option<Roofs>> = Mutex::new(None);
+static CACHE: Mutex<Option<(&'static str, Roofs)>> = Mutex::new(None);
 
 /// Serialises the actual measurement (`ensure`'s cache-miss path): two racing
 /// `ensure` calls used to BOTH probe, each measuring a device contended by the
@@ -289,7 +289,7 @@ pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
     // was written to guard against. A benign race remains (two threads both
     // missing the cache both call `measure`; last write wins) — acceptable,
     // matching this function's own existing double-checked-init shape.
-    if let Some(r) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+    if let Some(r) = cached_for(gpu.kind()) {
         return Some(r);
     }
     if MEASURE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -301,12 +301,12 @@ pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
     // while taking the CACHE lock's guard beyond a single statement, so the
     // known()/caps() reentrancy hazard above cannot involve it.
     let _measuring = MEASURE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(r) = *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+    if let Some(r) = cached_for(gpu.kind()) {
         return Some(r); // the winner filled it while this thread waited
     }
-    let store = persist::store();
+    let store = persist::store(gpu.kind());
     if let Some(r) = store.as_ref().and_then(|s| s.load()) {
-        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((gpu.kind(), r));
         return Some(r);
     }
     let Some(r) = measure(gpu) else {
@@ -316,8 +316,19 @@ pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
     if let Some(s) = store.as_ref() {
         s.save(r);
     }
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((gpu.kind(), r));
     Some(r)
+}
+
+/// The in-memory record, but only if it was measured on `backend`. The roof is
+/// a property of the (device, backend) pair - see `persist::store`'s doc - so a
+/// process that builds both backends must not serve one's number as the
+/// other's.
+fn cached_for(backend: &str) -> Option<Roofs> {
+    match *CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some((b, r)) if b == backend => Some(r),
+        _ => None,
+    }
 }
 
 /// Redirect where measured roofs persist (`None` restores the default
@@ -331,8 +342,8 @@ pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {
 /// Whatever has already been measured, without measuring. This is what
 /// [`Gpu::caps`] overlays onto [`backend_api::DeviceCaps`] — reading caps must
 /// never have the side effect of running kernels.
-pub fn known() -> Option<Roofs> {
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner())
+pub fn known(backend: &str) -> Option<Roofs> {
+    cached_for(backend)
 }
 
 /// Run both probes now, ignoring and not updating the cache. Exposed so a test
@@ -515,14 +526,28 @@ mod persist {
         path: PathBuf,
     }
 
-    pub fn store() -> Option<RoofStore> {
+    /// `backend` keys the record alongside the adapter, because a roof is a
+    /// property of the (device, backend) PAIR, not of the silicon alone: the
+    /// same P40 measured 5.05 TFLOP/s through `backend-vulkan` and 10.6
+    /// TFLOP/s through `backend-wgpu` while the two compiled kernels under
+    /// different naga runtime-check settings. Without this, whichever backend
+    /// measured first silently published its number as the other's roof, and
+    /// every "% of roof" on that backend was wrong by that ratio. Note the
+    /// adapter description itself still comes from `adapter_info`, which
+    /// always asks the wgpu backend - it names the CARD, which is what is
+    /// wanted here.
+    pub fn store(backend: &str) -> Option<RoofStore> {
         let (desc, _) = crate::adapter_info()?;
         let dir = cache_dir()?;
         let hash = crate::tune::source_fingerprint(
             &super::PROBE_KERNELS.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
         );
-        let slug: String =
-            desc.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let slug: String = desc
+            .chars()
+            .chain(std::iter::once('-'))
+            .chain(backend.chars())
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
         Some(RoofStore { path: dir.join(format!("roof-{slug}-{hash:016x}.txt")) })
     }
 

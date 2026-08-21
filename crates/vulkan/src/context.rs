@@ -482,8 +482,17 @@ impl VkContext {
         // Chain the coopmat feature struct only if supported.
         let mut coopmat_features = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
             .cooperative_matrix(caps.feature_supported);
-        // Enable exactly the non-fp32 arithmetic the device reported.
-        let core_enabled = vk::PhysicalDeviceFeatures::default().shader_float64(prec.f64);
+        // Enable exactly the non-fp32 arithmetic the device reported, plus
+        // `robustBufferAccess`: a core Vulkan 1.0 feature that bounds an
+        // out-of-range storage access in HARDWARE. It is what lets
+        // `shader::wgsl_to_spirv` drop naga's per-access software clamp (the
+        // same trade wgpu makes when its `robust_buffer_access2` private cap
+        // selects `BoundsCheckPolicy::Unchecked`) without making an
+        // out-of-range access undefined behaviour. Free on this class of
+        // hardware - the P40 roofline probes measure identically with it on.
+        let core_enabled = vk::PhysicalDeviceFeatures::default()
+            .shader_float64(prec.f64)
+            .robust_buffer_access(true);
         let mut en_f16i8 = vk::PhysicalDeviceShaderFloat16Int8Features::default()
             .shader_float16(prec.f16);
         let mut en_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
